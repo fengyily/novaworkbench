@@ -16,6 +16,8 @@ type Project struct {
 	AddedAt         time.Time  `json:"added_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
 	LastScannedAt   *time.Time `json:"last_scanned_at,omitempty"`
+	DeletedAt       *string    `json:"deleted_at,omitempty"`
+	DeletedDir      int        `json:"deleted_dir"`
 }
 
 type AddProjectRequest struct {

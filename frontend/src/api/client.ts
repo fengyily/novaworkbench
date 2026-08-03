@@ -58,6 +58,8 @@ export interface Project {
   added_at: string;
   updated_at: string;
   last_scanned_at?: string;
+  deleted_at?: string;
+  deleted_dir?: number;
 }
 
 export interface DashboardData {
@@ -74,8 +76,14 @@ export const projectsApi = {
   get: (id: string) => api.get<Project>(`/api/projects/${id}`),
   add: (local_path: string, remote_url?: string, init_git?: boolean) =>
     api.post<Project>('/api/projects', { local_path, remote_url: remote_url || '', init_git: init_git || false }),
-  remove: (id: string, purge?: boolean) =>
-    api.delete<{ status: string }>(`/api/projects/${id}?purge=${purge ? 'true' : 'false'}`),
+  // Soft-delete the project record. When delete_dir is true the local
+  // directory is physically removed too (reclaimable later via restore).
+  remove: (id: string, opts?: { delete_dir?: boolean }) =>
+    api.delete<{ id: string; dir_deleted: boolean }>(
+      `/api/projects/${id}?delete_dir=${opts?.delete_dir ? 'true' : 'false'}`,
+    ),
+  trash: () => api.get<Project[]>('/api/projects/trash'),
+  restore: (id: string) => api.post<Project>(`/api/projects/${id}/restore`, {}),
   updatePlatform: (id: string, platform_type: string, platform_token_id: string) =>
     api.patch<Project>(`/api/projects/${id}/platform`, { platform_type, platform_token_id }),
 };

@@ -202,6 +202,8 @@ func migrate(db *sql.DB) error {
 		`ALTER TABLE requirements ADD COLUMN coding_session_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE weekly_reports ADD COLUMN git_branch TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE weekly_reports ADD COLUMN git_author TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE projects ADD COLUMN deleted_at TEXT`,
+		`ALTER TABLE projects ADD COLUMN deleted_dir INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, stmt := range alterCols {
 		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
