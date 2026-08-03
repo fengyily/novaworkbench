@@ -38,6 +38,7 @@ func main() {
 	roleSvc := service.NewRoleService(database)
 	settingSvc := service.NewSettingService(database)
 	reportSvc := service.NewReportService(database)
+	jobLogSvc := service.NewJobLogService(database)
 
 	// Seed built-in roles on first run (idempotent).
 	if err := roleSvc.SeedDefaults(); err != nil {
@@ -59,10 +60,11 @@ func main() {
 	scannerH := handler.NewScannerHandler(scannerSvc)
 	reqH := handler.NewRequirementHandler(reqSvc, llmGateway)
 	sharedJobs := store.NewJobStore(50)
-	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc)
+	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc)
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, llmGateway, sharedJobs)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs)
+	mergeH := handler.NewMergeHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)
 	roleH := handler.NewRoleHandler(roleSvc)
 	settingH := handler.NewSettingHandler(settingSvc)
@@ -126,6 +128,11 @@ func main() {
 	mux.HandleFunc("GET /api/settings/claude", settingH.GetClaude)
 	mux.HandleFunc("PUT /api/settings/claude", settingH.UpdateClaude)
 
+	// Direct HTTP LLM channel (settings) — base URL + API key + model for
+	// lightweight tasks (requirement title distillation). Bypasses claude CLI.
+	mux.HandleFunc("GET /api/settings/llm", settingH.GetLLM)
+	mux.HandleFunc("PUT /api/settings/llm", settingH.UpdateLLM)
+
 	// File system browser
 	mux.HandleFunc("GET /api/fs/ls", fsH.ListDir)
 	mux.HandleFunc("GET /api/fs/validate", fsH.ValidatePath)
@@ -151,6 +158,15 @@ func main() {
 	mux.HandleFunc("GET /api/wizard/jobs/{id}/stream", wizardH.StreamJob)
 	mux.HandleFunc("POST /api/wizard/refine-doc", wizardH.RefineDoc)
 	mux.HandleFunc("POST /api/wizard/apply-doc", wizardH.ApplyDoc)
+
+	// Merge / PR step (post-coding 合入). Local merge + AI conflict
+	// resolution, or push + create-PR link. Jobs reuse the wizard job stream.
+	mux.HandleFunc("GET /api/requirements/{id}/merge/state", mergeH.State)
+	mux.HandleFunc("POST /api/requirements/{id}/merge/local", mergeH.LocalMerge)
+	mux.HandleFunc("POST /api/requirements/{id}/merge/abort", mergeH.Abort)
+	mux.HandleFunc("POST /api/requirements/{id}/merge/continue", mergeH.Continue)
+	mux.HandleFunc("POST /api/requirements/{id}/merge/resolve", mergeH.Resolve)
+	mux.HandleFunc("POST /api/requirements/{id}/merge/push", mergeH.Push)
 
 	// Memories
 	mux.HandleFunc("GET /api/memories", memoryH.List)

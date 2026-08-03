@@ -27,15 +27,17 @@ type WizardHandler struct {
 	llm        *llm.Gateway
 	jobs       *store.JobStore
 	roleSvc    *service.RoleService
+	jobLogSvc  *service.JobLogService
 }
 
-func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService) *WizardHandler {
+func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService) *WizardHandler {
 	return &WizardHandler{
 		projectSvc: projectSvc,
 		reqSvc:     reqSvc,
 		llm:        llmGateway,
 		jobs:       jobs,
 		roleSvc:    roleSvc,
+		jobLogSvc:  jobLogSvc,
 	}
 }
 
@@ -54,8 +56,9 @@ func (h *WizardHandler) roleConfig(key string) (systemPrompt, model string) {
 // docStageSession maps a refine/apply doc_type to the requirement's stored
 // session id for that stage and the role key whose persona it runs under.
 // Returns sid="" when the stage hasn't been run yet (caller surfaces a hint).
-//   design → design_session_id   / architect
-//   coding → coding_session_id   / developer
+//
+//	design → design_session_id   / architect
+//	coding → coding_session_id   / developer
 func docStageSession(req *model.Requirement, docType string) (sid, roleKey string) {
 	switch docType {
 	case "design":
@@ -407,6 +410,15 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	go func() {
+		defer func() {
+			// Persist the finished job's full log so a backend restart doesn't
+			// wipe the development record. All exit paths above call job.Finish,
+			// so by the time this defer runs the snapshot is terminal.
+			lines, status, exitCode := job.Snapshot()
+			if perr := h.jobLogSvc.Save(job.ID, req.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines); perr != nil {
+				log.Printf("[start-coding] failed to persist job log %s: %v", job.ID, perr)
+			}
+		}()
 		log.Printf("[start-coding] job %s started for %q in %s", job.ID, req.RequirementTitle, req.ProjectPath)
 
 		// Checkout the development branch before coding
@@ -651,11 +663,17 @@ func (h *WizardHandler) StreamJob(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ArchitectDesign is the architect-phase design generator. It runs Claude with
-// stream-json to produce a technical implementation plan from the (already
-// analyzed) requirement, streams progress via SSE, and on success persists the
-// design and marks the requirement as designing (in-progress). The "方案完成"
-// gate is a separate status transition driven by the user.
+// ArchitectDesign is the architect-phase design generator. It creates a
+// background JobStore job, persists its id on the requirement (so a page refresh
+// can reconnect to the running job and show "executing" instead of the start
+// button), and returns the job id immediately. Claude then runs in plan mode
+// (stream-json) in a goroutine, writing progress into the job. On success the
+// plan markdown is persisted to design_docs and the design_job_id is cleared;
+// the requirement stays status=designing until the user manually marks 方案完成.
+//
+// Subscribe to the live stream via GET /api/wizard/jobs/{job_id}/stream and
+// poll the snapshot via GET /api/wizard/jobs/{job_id} (same pattern as
+// start-coding).
 func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RequirementID string `json:"requirement_id"`
@@ -678,16 +696,6 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		projectPath = project.LocalPath
 	}
 
-	rc := http.NewResponseController(w)
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	rc.Flush()
-
-	sendStatus(w, rc, "phase", "📐 Claude 正在 plan 模式下探索代码并制定技术方案...")
-	rc.Flush()
-
 	// Session threading: the architect stage continues the SAME conversation
 	// thread as the analyst. On the first design pass we fork off the analyst
 	// session (--resume <analysis_sid> --fork-session) so the architect inherits
@@ -705,85 +713,110 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		fork = true
 	}
 	if sourceSID == "" {
-		sendStatus(w, rc, "error", "尚未找到需求分析会话，请先完成「需求分析」再生成技术方案。")
-		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
-		rc.Flush()
+		writeError(w, 400, "NO_SESSION", "尚未找到需求分析会话，请先完成「需求分析」再生成技术方案。")
 		return
 	}
 
+	// Create the job, persist its id so a refresh can reconnect, and return
+	// the job id immediately. The plan-mode claude run happens in a goroutine
+	// writing progress into the job store.
+	job := h.jobs.Create(id)
+	if perr := h.reqSvc.UpdateDesignJob(id, job.ID); perr != nil {
+		log.Printf("[architect-design] failed to persist design_job_id for %s: %v", id, perr)
+	}
+	writeJSON(w, 200, map[string]string{"job_id": job.ID})
+
 	// Plan-mode task prompt: the resumed conversation already carries the
 	// requirement and its analysis. We tell Claude to switch to the architect
-	// role and produce a technical implementation plan. In plan mode (--permission-mode
-	// plan) Claude reads the codebase with read-only tools, then writes the plan
-	// to ~/.claude/plans/<slug>.md via the plan-file Write (the only write plan
-	// mode allows). We capture that file's content from the Write tool_use event.
+	// role and produce a technical implementation plan. In plan mode
+	// (--permission-mode plan) Claude reads the codebase with read-only tools,
+	// then writes the plan to ~/.claude/plans/<slug>.md via the plan-file Write
+	// (the only write plan mode allows). We capture that file's content from the
+	// Write tool_use event.
 	prompt := "现在切换到「架构师」角色。基于我们刚才完成的需求分析对话，" +
 		"请阅读项目相关源文件核实技术细节，制定具体可执行的技术实现方案（plan）。" +
 		"方案应涵盖：整体实现思路、需要新增或修改的文件、具体实现步骤、数据模型/数据库变更、实现风险及应对。"
 
 	systemPrompt, model := h.roleConfig("architect")
-	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
-		Prompt:         prompt,
-		WorkDir:        projectPath,
-		SystemPrompt:   systemPrompt,
-		Model:          model,
-		SessionID:      sourceSID,
-		Resume:         true,
-		Fork:           fork,
-		PermissionMode: "plan",
-	})
-	out := runClaudeStream(w, rc, cmd, "architect-design")
 
-	if out.staleSession {
-		// The source conversation is gone. Clear whichever session id was stale
-		// so the user can redo the prior stage, and surface a recovery hint.
-		if fork {
-			_ = h.reqSvc.UpdateAnalysisSession(id, "")
-			sendStatus(w, rc, "error", "需求分析会话已过期。请重新进行「需求分析」后再生成技术方案。")
-		} else {
-			_ = h.reqSvc.UpdateDesignSession(id, "")
-			sendStatus(w, rc, "error", "技术方案会话已过期。请重新生成技术方案。")
+	go func() {
+		log.Printf("[architect-design] job %s started for %s (fork=%v)", job.ID, id, fork)
+		job.Append(store.LogLine{Type: "phase", Content: "📐 Claude 正在 plan 模式下探索代码并制定技术方案..."})
+
+		// context.Background(): the HTTP request has already returned, so we
+		// must not tie the claude subprocess's lifetime to r.Context() (which
+		// is cancelled the moment the handler returns).
+		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+			Prompt:         prompt,
+			WorkDir:        projectPath,
+			SystemPrompt:   systemPrompt,
+			Model:          model,
+			SessionID:      sourceSID,
+			Resume:         true,
+			Fork:           fork,
+			PermissionMode: "plan",
+		})
+		out := runClaudeStream(jobSink{job}, cmd, "architect-design")
+
+		if out.staleSession {
+			// The source conversation is gone. Clear whichever session id was
+			// stale so the user can redo the prior stage, surface a recovery
+			// hint, and clear the active job pointer.
+			if fork {
+				_ = h.reqSvc.UpdateAnalysisSession(id, "")
+				job.Append(store.LogLine{Type: "error", Content: "需求分析会话已过期。请重新进行「需求分析」后再生成技术方案。"})
+			} else {
+				_ = h.reqSvc.UpdateDesignSession(id, "")
+				job.Append(store.LogLine{Type: "error", Content: "技术方案会话已过期。请重新生成技术方案。"})
+			}
+			_ = h.reqSvc.UpdateDesignJob(id, "")
+			job.Finish(1, store.JobError)
+			return
 		}
-		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
-		rc.Flush()
-		return
-	}
 
-	// Persist the forked session id (only present on a fresh fork). On a plain
-	// resume re-run it equals the existing id, so skip the write.
-	if fork && out.sessionID != "" {
-		if perr := h.reqSvc.UpdateDesignSession(id, out.sessionID); perr != nil {
-			log.Printf("[architect-design] Failed to persist design session for %s: %v", id, perr)
+		// Persist the forked session id (only present on a fresh fork). On a
+		// plain resume re-run it equals the existing id, so skip the write.
+		if fork && out.sessionID != "" {
+			if perr := h.reqSvc.UpdateDesignSession(id, out.sessionID); perr != nil {
+				log.Printf("[architect-design] failed to persist design session for %s: %v", id, perr)
+			}
 		}
-	}
 
-	// In plan mode, the full plan markdown is captured from the Write tool_use
-	// event that lands in ~/.claude/plans/*.md (runClaudeStream stores it in
-	// out.planContent). Fall back to the result text if capture missed it (e.g.
-	// a proxy that doesn't emit tool_use blocks in the assistant event).
-	planMarkdown := out.planContent
-	if planMarkdown == "" {
-		planMarkdown = out.finalResult
-	}
-	if planMarkdown == "" {
-		errMsg := out.errMsg
-		if errMsg == "" {
-			errMsg = "Claude 未返回结果，请重试"
+		// In plan mode, the full plan markdown is captured from the Write
+		// tool_use event that lands in ~/.claude/plans/*.md (runClaudeStream
+		// stores it in out.planContent). Fall back to the result text if
+		// capture missed it (e.g. a proxy that doesn't emit tool_use blocks in
+		// the assistant event).
+		planMarkdown := out.planContent
+		if planMarkdown == "" {
+			planMarkdown = out.finalResult
 		}
-		sendStatus(w, rc, "error", errMsg)
-		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
-		rc.Flush()
-		return
-	}
+		if planMarkdown == "" {
+			errMsg := out.errMsg
+			if errMsg == "" {
+				errMsg = "Claude 未返回结果，请重试"
+			}
+			job.Append(store.LogLine{Type: "error", Content: errMsg})
+			_ = h.reqSvc.UpdateDesignJob(id, "")
+			job.Finish(1, store.JobError)
+			return
+		}
 
-	// Persist
-	if _, err := h.reqSvc.UpdateDesign(id, planMarkdown); err != nil {
-		log.Printf("[architect-design] Failed to save design for %s: %v", id, err)
-	}
+		// Persist the design (sets status=designing) and clear the active job
+		// pointer so a refresh shows the finished design instead of "executing".
+		if _, err := h.reqSvc.UpdateDesign(id, planMarkdown); err != nil {
+			log.Printf("[architect-design] failed to save design for %s: %v", id, err)
+			job.Append(store.LogLine{Type: "error", Content: "保存技术方案失败: " + err.Error()})
+			_ = h.reqSvc.UpdateDesignJob(id, "")
+			job.Finish(1, store.JobError)
+			return
+		}
+		_ = h.reqSvc.UpdateDesignJob(id, "")
 
-	doneData, _ := json.Marshal(map[string]string{"type": "done", "result": planMarkdown})
-	fmt.Fprintf(w, "data: %s\n\n", string(doneData))
-	rc.Flush()
+		job.Append(store.LogLine{Type: "done", Content: "✅ 技术方案已生成！"})
+		job.Finish(0, store.JobDone)
+		log.Printf("[architect-design] job %s finished for %s", job.ID, id)
+	}()
 }
 
 // GetJob returns the current state and full log of a background coding job.
@@ -795,7 +828,21 @@ func (h *WizardHandler) GetJob(w http.ResponseWriter, r *http.Request) {
 	}
 	job, ok := h.jobs.Get(id)
 	if !ok {
-		writeError(w, 404, "NOT_FOUND", "job not found")
+		// Backend may have restarted since the job ran — try the durable log
+		// store so the user can still review the development record.
+		status, exitCode, startedAt, finishedAt, lines, perr := h.jobLogSvc.Get(id)
+		if perr != nil {
+			writeError(w, 404, "NOT_FOUND", "job not found")
+			return
+		}
+		writeJSON(w, 200, map[string]interface{}{
+			"job_id":      id,
+			"status":      status,
+			"exit_code":   exitCode,
+			"log":         lines,
+			"started_at":  startedAt,
+			"finished_at": finishedAt,
+		})
 		return
 	}
 	logLines, status, exitCode := job.Snapshot()
@@ -910,7 +957,7 @@ type claudeStreamOutcome struct {
 	sessionID       string // session_id of this run, read from the system/init event. For a --fork-session run this is the NEW forked id.
 	staleSession    bool
 	errMsg          string
-	hadStreamEvents bool // true if any stream_event/content_block_delta arrived
+	hadStreamEvents bool   // true if any stream_event/content_block_delta arrived
 	planContent     string // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
 }
 
@@ -946,12 +993,41 @@ func isStaleSessionError(evt map[string]interface{}, stderr string) bool {
 	return false
 }
 
+// streamSink consumes one parsed claude stream-json event as a UI log line.
+// The SSE sink frames it as a "data: {...}\n\n" SSE event and flushes per line;
+// the job sink appends it to a JobStore job so background-job subscribers
+// receive it (and survive a page refresh via the job's replay buffer).
+type streamSink interface {
+	emit(line store.LogLine)
+}
+
+// sseSink writes log lines directly to an SSE response, flushed per event.
+type sseSink struct {
+	w  http.ResponseWriter
+	rc *http.ResponseController
+}
+
+func (s sseSink) emit(line store.LogLine) {
+	data, _ := json.Marshal(line)
+	fmt.Fprintf(s.w, "data: %s\n\n", string(data))
+	s.rc.Flush()
+}
+
+// jobSink appends log lines to a JobStore job, fanning them out to subscribers.
+type jobSink struct {
+	job *store.Job
+}
+
+func (s jobSink) emit(line store.LogLine) {
+	s.job.Append(line)
+}
+
 // runClaudeStream starts a claude stream-json cmd, parses its events, and
-// translates them to our SSE protocol (tool_call / message frames, flushed per
-// event). It does NOT emit terminal error/done frames — the caller owns those.
+// translates them to UI log lines via the sink (phase / tool_call / message
+// frames). It does NOT emit terminal error/done frames — the caller owns those.
 // On a non-success result it returns the error message (and flags a stale
 // --resume so the caller can recover). The caller must NOT have started cmd.
-func runClaudeStream(w http.ResponseWriter, rc *http.ResponseController, cmd *exec.Cmd, scope string) claudeStreamOutcome {
+func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string) claudeStreamOutcome {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return claudeStreamOutcome{errMsg: "启动 Claude 失败: " + err.Error()}
@@ -998,8 +1074,7 @@ func runClaudeStream(w http.ResponseWriter, rc *http.ResponseController, cmd *ex
 				if sid, ok := evt["session_id"].(string); ok && sid != "" {
 					out.sessionID = sid
 				}
-				sendStatus(w, rc, "phase", "🤖 Claude 已连接，正在思考…")
-				rc.Flush()
+				sink.emit(store.LogLine{Type: "phase", Content: "🤖 Claude 已连接，正在思考…"})
 			case "thinking_tokens":
 				// Third-party proxy models (e.g. zai-org/glm) don't stream text
 				// token-by-token; they batch everything into the final assistant event.
@@ -1010,8 +1085,7 @@ func runClaudeStream(w http.ResponseWriter, rc *http.ResponseController, cmd *ex
 					t := int(tokens)
 					if t-lastThinkingReport >= 50 {
 						lastThinkingReport = t
-						sendStatus(w, rc, "phase", fmt.Sprintf("🤔 模型思考中… (%d tokens)", t))
-						rc.Flush()
+						sink.emit(store.LogLine{Type: "phase", Content: fmt.Sprintf("🤔 模型思考中… (%d tokens)", t)})
 					}
 				}
 			}
@@ -1038,9 +1112,7 @@ func runClaudeStream(w http.ResponseWriter, rc *http.ResponseController, cmd *ex
 						continue
 					}
 					out.hadStreamEvents = true
-					jsonLine, _ := json.Marshal(map[string]string{"type": "message", "content": text})
-					fmt.Fprintf(w, "data: %s\n\n", string(jsonLine))
-					rc.Flush()
+					sink.emit(store.LogLine{Type: "message", Content: text})
 				case "input_json_delta":
 					// tool input being assembled — not surfaced to the client
 				}
@@ -1054,8 +1126,7 @@ func runClaudeStream(w http.ResponseWriter, rc *http.ResponseController, cmd *ex
 				if block["type"] == "tool_use" {
 					toolName, _ := block["name"].(string)
 					if toolName != "" {
-						sendStatus(w, rc, "tool_call", toolCallLabel(toolName, nil))
-						rc.Flush()
+						sink.emit(store.LogLine{Type: "tool_call", Content: toolCallLabel(toolName, nil)})
 					}
 				}
 			}
@@ -1090,8 +1161,7 @@ func runClaudeStream(w http.ResponseWriter, rc *http.ResponseController, cmd *ex
 					// Emit with full input context (content_block_start fired bare label already,
 					// but only if stream_event was delivered — safe to emit again, client dedupes by rendering order).
 					if !out.hadStreamEvents {
-						sendStatus(w, rc, "tool_call", toolCallLabel(toolName, input))
-						rc.Flush()
+						sink.emit(store.LogLine{Type: "tool_call", Content: toolCallLabel(toolName, input)})
 					}
 				case "text":
 					// Only emit if we never received stream_event deltas for this turn,
@@ -1099,9 +1169,7 @@ func runClaudeStream(w http.ResponseWriter, rc *http.ResponseController, cmd *ex
 					if !out.hadStreamEvents {
 						text, _ := b["text"].(string)
 						if text != "" {
-							jsonLine, _ := json.Marshal(map[string]string{"type": "message", "content": text})
-							fmt.Fprintf(w, "data: %s\n\n", string(jsonLine))
-							rc.Flush()
+							sink.emit(store.LogLine{Type: "message", Content: text})
 						}
 					}
 				}
@@ -1201,7 +1269,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 		Resume:          resume,
 		DisallowedTools: disallowed,
 	})
-	out := runClaudeStream(w, rc, cmd, "analyst-chat")
+	out := runClaudeStream(sseSink{w, rc}, cmd, "analyst-chat")
 
 	if out.staleSession && resume {
 		// Stale --resume: the session file is gone (typically a stale id left by
@@ -1221,7 +1289,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 			SessionID:       freshID,
 			DisallowedTools: analystFirstTurnDisallowedTools,
 		})
-		out = runClaudeStream(w, rc, cmd, "analyst-chat")
+		out = runClaudeStream(sseSink{w, rc}, cmd, "analyst-chat")
 		sessionID = freshID
 	}
 
@@ -1521,31 +1589,31 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		prompt = "基于我们的对话，将用户的调整意见整理为给 Claude Code CLI 的开发指令。" +
 			"输出纯文本的开发指令，清晰描述需要实现或调整的内容。不要输出 JSON，不要添加额外说明。"
 	default: // "design"
-			// Detect plan-format designs (plan mode produces markdown, not JSON).
-			// Use the DB-stored doc (the frontend's apply-doc call doesn't send
-			// current_doc). If it isn't valid JSON, it's plan markdown — ask Claude
-			// to output the updated plan as markdown instead of the JSON schema.
-			storedDoc := ""
-			if requirement != nil {
-				storedDoc = requirement.DesignDocs
-			}
-			isPlanMarkdown := !isLikelyJSON(storedDoc)
-			if isPlanMarkdown {
-				prompt = "基于我们的对话，将技术方案（plan）更新为最终版本。" +
-					"输出完整的 Markdown 技术方案，涵盖：整体实现思路、需要新增或修改的文件、" +
-					"具体实现步骤、数据模型/数据库变更、实现风险及应对。直接输出 Markdown，不要添加额外说明。"
-			} else {
-				prompt = "基于我们的对话，将技术方案更新为最终版本。" +
-					"输出 ONLY valid JSON，不要 markdown 代码块：\n" +
-					"{\n" +
-					"  \"overview\": \"方案概述\",\n" +
-					"  \"files\": [\"涉及文件路径\"],\n" +
-					"  \"steps\": [\"实现步骤\"],\n" +
-					"  \"model_changes\": \"数据模型变更，无则写'无'\",\n" +
-					"  \"risks\": [\"实现风险\"]\n" +
-					"}"
-			}
+		// Detect plan-format designs (plan mode produces markdown, not JSON).
+		// Use the DB-stored doc (the frontend's apply-doc call doesn't send
+		// current_doc). If it isn't valid JSON, it's plan markdown — ask Claude
+		// to output the updated plan as markdown instead of the JSON schema.
+		storedDoc := ""
+		if requirement != nil {
+			storedDoc = requirement.DesignDocs
 		}
+		isPlanMarkdown := !isLikelyJSON(storedDoc)
+		if isPlanMarkdown {
+			prompt = "基于我们的对话，将技术方案（plan）更新为最终版本。" +
+				"输出完整的 Markdown 技术方案，涵盖：整体实现思路、需要新增或修改的文件、" +
+				"具体实现步骤、数据模型/数据库变更、实现风险及应对。直接输出 Markdown，不要添加额外说明。"
+		} else {
+			prompt = "基于我们的对话，将技术方案更新为最终版本。" +
+				"输出 ONLY valid JSON，不要 markdown 代码块：\n" +
+				"{\n" +
+				"  \"overview\": \"方案概述\",\n" +
+				"  \"files\": [\"涉及文件路径\"],\n" +
+				"  \"steps\": [\"实现步骤\"],\n" +
+				"  \"model_changes\": \"数据模型变更，无则写'无'\",\n" +
+				"  \"risks\": [\"实现风险\"]\n" +
+				"}"
+		}
+	}
 
 	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
 		Prompt:       prompt,

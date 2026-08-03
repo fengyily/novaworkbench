@@ -185,6 +185,17 @@ func migrate(db *sql.DB) error {
 		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 	);
 	CREATE INDEX IF NOT EXISTS idx_weekly_reports_project ON weekly_reports(project_id);
+
+	CREATE TABLE IF NOT EXISTS job_logs (
+		job_id          TEXT PRIMARY KEY,
+		requirement_id  TEXT NOT NULL DEFAULT '',
+		status          TEXT NOT NULL DEFAULT '',
+		exit_code       INTEGER NOT NULL DEFAULT 0,
+		started_at      TEXT NOT NULL DEFAULT '',
+		finished_at     TEXT NOT NULL DEFAULT '',
+		log             TEXT NOT NULL DEFAULT '[]'
+	);
+	CREATE INDEX IF NOT EXISTS idx_job_logs_req ON job_logs(requirement_id);
 	`
 
 	_, err := db.Exec(schema)
@@ -199,6 +210,7 @@ func migrate(db *sql.DB) error {
 		`ALTER TABLE projects ADD COLUMN platform_token_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE requirements ADD COLUMN analysis_session_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE requirements ADD COLUMN design_session_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE requirements ADD COLUMN design_job_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE requirements ADD COLUMN coding_session_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE weekly_reports ADD COLUMN git_branch TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE weekly_reports ADD COLUMN git_author TEXT NOT NULL DEFAULT ''`,

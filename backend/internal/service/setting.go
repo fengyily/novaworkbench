@@ -13,6 +13,16 @@ const (
 	settingClaudeBaseURL   = "claude.anthropic_base_url"
 )
 
+// Setting keys for the direct HTTP LLM channel (OpenAI-compatible, e.g.
+// DeepSeek). Used ONLY for lightweight tasks like requirement title
+// distillation — not the claude CLI pipeline. base_url + api_key both must
+// be set for the channel to activate; model may be empty (provider default).
+const (
+	settingLLMBaseURL = "llm.base_url"
+	settingLLMAPIKey  = "llm.api_key"
+	settingLLMModel   = "llm.model"
+)
+
 type SettingService struct {
 	db *sql.DB
 }
@@ -94,6 +104,43 @@ func (s *SettingService) ClearClaudeAuthToken() error {
 // token + base URL at command-build time without importing service types.
 func (s *SettingService) ClaudeEnvVars() (authToken, baseURL string, err error) {
 	return s.ClaudeConfig()
+}
+
+// LLMConfig returns the direct HTTP LLM channel configuration (base URL, API
+// key, model) for title distillation. For internal use by the gateway — the
+// API key is secret.
+func (s *SettingService) LLMConfig() (baseURL, apiKey, model string, err error) {
+	if baseURL, err = s.Get(settingLLMBaseURL); err != nil {
+		return "", "", "", err
+	}
+	if apiKey, err = s.Get(settingLLMAPIKey); err != nil {
+		return "", "", "", err
+	}
+	if model, err = s.Get(settingLLMModel); err != nil {
+		return "", "", "", err
+	}
+	return baseURL, apiKey, model, nil
+}
+
+// SetLLMConfig upserts the base URL + API key + model. An empty api key means
+// "keep the existing secret" (so the UI can save base-URL/model-only edits
+// without knowing the key). Empty base URL / model clears those fields.
+func (s *SettingService) SetLLMConfig(baseURL, apiKey, model string) error {
+	if apiKey != "" {
+		if err := s.Set(settingLLMAPIKey, apiKey); err != nil {
+			return err
+		}
+	}
+	if err := s.Set(settingLLMBaseURL, baseURL); err != nil {
+		return err
+	}
+	return s.Set(settingLLMModel, model)
+}
+
+// ClearLLMAPIKey removes the stored API key, deactivating the direct HTTP LLM
+// channel (base URL + api key both must be set for it to activate).
+func (s *SettingService) ClearLLMAPIKey() error {
+	return s.Set(settingLLMAPIKey, "")
 }
 
 // MaskToken returns a redacted preview of a secret token for API responses.

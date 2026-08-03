@@ -16,6 +16,10 @@ import (
 // SettingService. nil means "use the process environment only".
 type EnvProvider interface {
 	ClaudeEnvVars() (authToken, baseURL string, err error)
+	// LLMConfig returns the direct HTTP LLM channel config (base URL, API key,
+	// model) used for lightweight tasks like title distillation. Called per
+	// request so runtime setting updates apply immediately.
+	LLMConfig() (baseURL, apiKey, model string, err error)
 }
 
 type Gateway struct {
@@ -248,25 +252,23 @@ func (g *Gateway) runClaudeText(prompt string, timeout time.Duration) (string, e
 }
 
 // GenerateTitle distills a concise requirement title from the requirement
-// content via a single-shot claude call. The caller should fall back to a
-// truncated version of the content if this errors (e.g. CLI not installed).
+// content via the direct HTTP LLM channel (OpenAI-compatible, e.g. DeepSeek).
+// This bypasses the claude CLI for speed — title distillation needs no tool
+// use. The channel activates only when both base_url and api_key are
+// configured; otherwise it returns an error and the caller falls back to a
+// truncated version of the content (no claude CLI fallback, by design).
 func (g *Gateway) GenerateTitle(content string) (string, error) {
-	prompt := fmt.Sprintf(`根据以下需求内容，提炼一个简洁的需求标题。
-要求：不超过20个汉字（或15个英文单词）；不要加标点符号、引号或换行；直接输出标题文本，不要任何额外说明或前缀。
-
-需求内容：
-%s`, content)
-
-	title, err := g.runClaudeText(prompt, 30*time.Second)
+	if g.envProvider == nil {
+		return "", fmt.Errorf("llm not configured: no env provider")
+	}
+	baseURL, apiKey, model, err := g.envProvider.LLMConfig()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("llm config unavailable: %w", err)
 	}
-	// Strip any surrounding quotes / whitespace the model may add despite instructions.
-	title = strings.Trim(title, "\"'` \n\r\t")
-	if title == "" {
-		return "", fmt.Errorf("empty title from llm")
+	if baseURL == "" || apiKey == "" {
+		return "", fmt.Errorf("llm not configured: base_url and api_key required")
 	}
-	return title, nil
+	return generateTitleViaHTTP(baseURL, apiKey, model, content)
 }
 
 func stripJSONFences(s string) string {

@@ -9,6 +9,7 @@ import Settings from './pages/Settings';
 import SettingsTokens from './pages/SettingsTokens';
 import SettingsRoles from './pages/SettingsRoles';
 import SettingsClaude from './pages/SettingsClaude';
+import SettingsLLM from './pages/SettingsLLM';
 import KnowledgePage from './pages/KnowledgePage';
 import RequirementDetail from './pages/RequirementDetail';
 import WizardPage from './pages/WizardPage';
@@ -32,6 +33,7 @@ export default function App() {
             <Route index element={<SettingsTokens />} />
             <Route path="roles" element={<SettingsRoles />} />
             <Route path="claude" element={<SettingsClaude />} />
+            <Route path="llm" element={<SettingsLLM />} />
           </Route>
         </Route>
       </Routes>

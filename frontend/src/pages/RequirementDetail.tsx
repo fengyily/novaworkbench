@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { requirementsApi, projectsApi, API_BASE, statusLabels, type Requirement, type Project } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, statusLabels, type Requirement, type Project, mergeApi, type MergeState } from '../api/client';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
 import CodingChat from '../components/CodingChat';
-import MarkdownViewer from '../components/MarkdownViewer';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import './RequirementDetail.css';
@@ -58,13 +57,32 @@ export default function RequirementDetail() {
   const [baseBranch, setBaseBranch] = useState('');
   const [availableBranches, setAvailableBranches] = useState<string[]>([]);
 
+  // Merge / PR step state (post-coding 合入).
+  // mergeState holds the git preview (dev/target branches, uncommitted, pr_url);
+  // mergeLines streams the merge/push/resolve job; conflictFiles / prLink are
+  // surfaced from job log lines of type "conflict" / "pr_link".
+  const [mergeState, setMergeState] = useState<MergeState | null>(null);
+  const [showMergeModal, setShowMergeModal] = useState(false);
+  const [mergeMode, setMergeMode] = useState<'local' | 'push'>('local');
+  const [mergeTarget, setMergeTarget] = useState('main');
+  const [mergeCommitMsg, setMergeCommitMsg] = useState('');
+  const [mergeDeleteBranch, setMergeDeleteBranch] = useState(false);
+  const [mergeLines, setMergeLines] = useState<{ type: string; content: string }[]>([]);
+  const [merging, setMerging] = useState(false);
+  const [conflictFiles, setConflictFiles] = useState<string[] | null>(null);
+  const [prLink, setPrLink] = useState('');
+  const mergeEsRef = useRef<EventSource | null>(null);
+
   // Streaming design state (architect phase)
   const [designLines, setDesignLines] = useState<{ type: string; content: string }[]>([]);
   const [designing, setDesigning] = useState(false);
   const designRef = useRef<HTMLDivElement>(null);
+  const designEsRef = useRef<EventSource | null>(null);
 
-  // Fullscreen Markdown viewer for design plan
-  const [showDesignFullscreen, setShowDesignFullscreen] = useState(false);
+  // Collapsible "思考过程" toggle for the architect design stream.
+  // While the design job is actively running the panel stays open; once it
+  // finishes the panel collapses and a toggle lets the user re-expand it.
+  const [showDesignProcess, setShowDesignProcess] = useState(false);
 
   // Edit modal state
   const [showEditModal, setShowEditModal] = useState(false);
@@ -112,7 +130,42 @@ export default function RequirementDetail() {
     }
   };
 
-  // ── Architect phase: stream design generation via SSE ─────────────────────
+  // ── Architect phase: async design generation via JobStore ─────────────────
+  // The architect-design endpoint creates a background job and returns its id
+  // immediately (same pattern as start-coding). We stream the job's log lines
+  // over SSE; on job_done we refresh so design_docs (now persisted server-side)
+  // renders. The active job id is persisted on the requirement as design_job_id,
+  // so a page refresh reconnects to the running job instead of re-launching it
+  // or re-showing the "开始制定技术方案" button.
+  const streamDesignJob = useCallback((jobId: string) => {
+    if (designEsRef.current) designEsRef.current.close();
+    const es = new EventSource(`${API_BASE}/api/wizard/jobs/${jobId}/stream`);
+    designEsRef.current = es;
+    setDesigning(true);
+
+    es.onmessage = (e) => {
+      try {
+        const evt = JSON.parse(e.data);
+        if (evt.type === 'job_done') {
+          es.close();
+          designEsRef.current = null;
+          setDesigning(false);
+          if (evt.status === 'done' || evt.exit_code === 0) {
+            // design_docs persisted server-side; refresh to render it.
+            refresh();
+          }
+          return;
+        }
+        setDesignLines(prev => [...prev, { type: evt.type, content: evt.content ?? '' }]);
+      } catch { /* skip malformed */ }
+    };
+    es.onerror = () => {
+      es.close();
+      designEsRef.current = null;
+      setDesigning(false);
+    };
+  }, [refresh]);
+
   const runArchitectDesign = async () => {
     if (!id) return;
     setDesigning(true);
@@ -124,42 +177,36 @@ export default function RequirementDetail() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requirement_id: id }),
       });
-
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error('No response body');
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split('\n\n');
-        buffer = parts.pop() ?? '';
-        for (const part of parts) {
-          const dataLine = part.startsWith('data: ') ? part.slice(6) : part;
-          if (!dataLine.trim()) continue;
-          try {
-            const evt = JSON.parse(dataLine);
-            if (evt.type === 'done') {
-              setDesigning(false);
-              await refresh();
-              return;
-            }
-            if (evt.type === 'error') {
-              setDesignLines(prev => [...prev, { type: 'error', content: '❌ ' + evt.content }]);
-            } else {
-              setDesignLines(prev => [...prev, { type: evt.type, content: evt.content ?? '' }]);
-            }
-          } catch { /* skip malformed */ }
-        }
-      }
+      const json = await res.json();
+      const jobId = json.data?.job_id;
+      if (!jobId) throw new Error(json.error?.message || '未获取到任务 ID');
+      streamDesignJob(jobId);
     } catch (err: any) {
-      setDesignLines(prev => [...prev, { type: 'error', content: '❌ ' + err.message }]);
-    } finally {
+      setDesignLines([{ type: 'error', content: '❌ ' + err.message }]);
       setDesigning(false);
     }
   };
+
+  // Reconnect to an in-flight design job when (re)entering the page — e.g.
+  // after a refresh. The requirement carries design_job_id (server truth); if
+  // the job is still running we resume its stream, otherwise (server restarted,
+  // job evicted from the in-memory ring buffer) we drop into the idle state so
+  // the start button shows again.
+  useEffect(() => {
+    if (!id || !req?.design_job_id) return;
+    const jobId = req.design_job_id;
+    fetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
+      .then(r => r.json())
+      .then(json => {
+        if (!json.success) { setDesigning(false); return; }
+        const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
+        if (log && log.length > 0) setDesignLines(log);
+        if (status === 'running') streamDesignJob(jobId);
+        else setDesigning(false);
+      })
+      .catch(() => setDesigning(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, req?.design_job_id]);
 
   useEffect(() => {
     if (designRef.current) designRef.current.scrollTop = designRef.current.scrollHeight;
@@ -299,6 +346,116 @@ export default function RequirementDetail() {
     doStartCoding(branchName, baseBranch);
   };
 
+  // ── Merge / PR step (post-coding 合入) ──────────────────────────────────────
+  // Loads the git preview (dev branch = current HEAD, target branch, uncommitted
+  // changes, pr_url). Called when entering the merge section and after each job
+  // completes so the UI reflects the real on-disk repo state (the merge job may
+  // have switched branches or left a mid-merge).
+  const refreshMergeState = useCallback(async () => {
+    if (!id) return;
+    try {
+      const st = await mergeApi.state(id);
+      setMergeState(st);
+    } catch { /* not a git repo or not ready → keep null */ }
+  }, [id]);
+
+  // streamMergeJob subscribes to a merge/push/resolve job. It collects log lines
+  // into mergeLines and, on job_done, inspects the accumulated lines: a "conflict"
+  // line drives the conflict panel, a "pr_link" line surfaces the create-PR link.
+  const streamMergeJob = useCallback((jobId: string) => {
+    if (mergeEsRef.current) mergeEsRef.current.close();
+    const es = new EventSource(`${API_BASE}/api/wizard/jobs/${jobId}/stream`);
+    mergeEsRef.current = es;
+    setMerging(true);
+    setConflictFiles(null);
+
+    let acc: { type: string; content: string }[] = [];
+    es.onmessage = (e) => {
+      try {
+        const evt = JSON.parse(e.data);
+        if (evt.type === 'job_done') {
+          es.close();
+          mergeEsRef.current = null;
+          setMerging(false);
+          const exitOk = evt.status === 'done' || evt.exit_code === 0;
+          // Resolve conflict / pr_link signals from the accumulated log.
+          const conflict = acc.find(l => l.type === 'conflict');
+          if (conflict) {
+            try {
+              // content looks like "...[\"a\",\"b\"]"; pull out the JSON array.
+              const m = conflict.content.match(/\[[\s\S]*\]/);
+              setConflictFiles(m ? JSON.parse(m[0]) : []);
+            } catch { setConflictFiles([]); }
+          }
+          const link = acc.find(l => l.type === 'pr_link');
+          if (link) setPrLink(link.content);
+          if (exitOk && !conflict) refreshMergeState();
+          return;
+        }
+        const line = { type: evt.type, content: evt.content ?? '' };
+        acc = [...acc, line];
+        setMergeLines(prev => [...prev, line]);
+      } catch { /* skip malformed */ }
+    };
+    es.onerror = () => {
+      es.close();
+      mergeEsRef.current = null;
+      setMerging(false);
+    };
+  }, [refreshMergeState]);
+
+  const openMergeModal = async (mode: 'local' | 'push') => {
+    if (!req || !id) return;
+    setMergeMode(mode);
+    setMergeLines([]);
+    setConflictFiles(null);
+    setPrLink('');
+    setMergeCommitMsg(req.title);
+    setMergeDeleteBranch(false);
+    setShowMergeModal(true);
+    await refreshMergeState();
+  };
+
+  const confirmMerge = async () => {
+    if (!req || !id) return;
+    setShowMergeModal(false);
+    setMerging(true);
+    setMergeLines([]);
+    setConflictFiles(null);
+    setPrLink('');
+    try {
+      const body = mergeMode === 'local'
+        ? { target_branch: mergeTarget, commit_message: mergeCommitMsg, delete_branch: mergeDeleteBranch }
+        : { commit_message: mergeCommitMsg };
+      const { job_id } = mergeMode === 'local'
+        ? await mergeApi.local(id, body as any)
+        : await mergeApi.push(id, body as any);
+      streamMergeJob(job_id);
+    } catch (err: any) {
+      setMergeLines([{ type: 'error', content: '❌ ' + err.message }]);
+      setMerging(false);
+    }
+  };
+
+  const doMergeAction = async (action: 'abort' | 'continue' | 'resolve') => {
+    if (!id) return;
+    setMergeLines([]);
+    setConflictFiles(null);
+    try {
+      if (action === 'abort') {
+        await mergeApi.abort(id);
+        await refreshMergeState();
+        setMerging(false);
+        return;
+      }
+      const { job_id } = action === 'continue' ? await mergeApi.cont(id) : await mergeApi.resolve(id);
+      streamMergeJob(job_id);
+    } catch (err: any) {
+      setMergeLines([{ type: 'error', content: '❌ ' + err.message }]);
+      setMerging(false);
+    }
+  };
+
   // Restore active coding job when returning to this page
   useEffect(() => {
     if (!id) return;
@@ -311,7 +468,13 @@ export default function RequirementDetail() {
     fetch(`${API_BASE}/api/wizard/jobs/${savedJobId}`)
       .then(r => r.json())
       .then(json => {
-        if (!json.success) return;
+        if (!json.success) {
+          // Job is neither in memory nor persisted (e.g. backend restarted
+          // mid-run before the log could be saved). Drop the stale pointer so
+          // we don't keep retrying a dead job.
+          localStorage.removeItem(`coding_job_${id}`);
+          return;
+        }
         const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
         if (!log || log.length === 0) return;
         setCodingLines(log);
@@ -322,12 +485,30 @@ export default function RequirementDetail() {
   }, [id]);
 
   useEffect(() => {
-    return () => { if (esRef.current) esRef.current.close(); };
+    return () => {
+      if (esRef.current) esRef.current.close();
+      if (designEsRef.current) designEsRef.current.close();
+      if (mergeEsRef.current) mergeEsRef.current.close();
+    };
   }, []);
 
   useEffect(() => {
     if (codingRef.current) codingRef.current.scrollTop = codingRef.current.scrollHeight;
   }, [codingLines]);
+
+  // Load merge state when entering the developer/done stage (the merge step
+  // only makes sense once coding has produced a dev branch to merge from).
+  useEffect(() => {
+    if (!id || !req) return;
+    if (req.status === 'developing' || req.status === 'done') refreshMergeState();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, req?.status, refreshMergeState]);
+
+  // Keep the modal's target-branch selector in sync with the loaded state.
+  useEffect(() => {
+    if (mergeState) setMergeTarget(mergeState.target_branch);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mergeState?.target_branch]);
 
   if (loading) return <div className="detail-loading">⏳ 加载中...</div>;
   if (!req) return <div className="detail-error">❌ 需求未找到</div>;
@@ -335,6 +516,11 @@ export default function RequirementDetail() {
   const design = parseDesign(req.design_docs);
   const hasDesign = !!(design.overview || (design.steps && design.steps.length > 0) || design.plan_markdown);
   const stage = stageFor(req.status);
+  // Design (architect) stream state. While the job runs the panel stays open;
+  // once finished it collapses behind the "思考过程" toggle.
+  const designProcessActive = designing || !!req.design_job_id;
+  const designPanelOpen = designProcessActive || showDesignProcess;
+  const showDesignToggle = designLines.length > 0 && !designProcessActive;
 
   const STEPS = [
     { key: 'analyst', label: '需求分析师', icon: '🔍', doneStatus: 'designing' },
@@ -376,6 +562,74 @@ export default function RequirementDetail() {
         </div>
       )}
 
+      {/* Merge / PR modal */}
+      {showMergeModal && mergeState && (
+        <div className="modal-overlay" onClick={() => !merging && setShowMergeModal(false)}>
+          <div className="modal-box merge-modal" onClick={e => e.stopPropagation()}>
+            <h3>{mergeMode === 'local' ? '🔀 本地合入' : '🌐 推送并发起 PR'}</h3>
+            {mergeMode === 'local' ? (
+              <>
+                <div className="modal-field">
+                  <label>目标分支（合入到哪）</label>
+                  <select className="input" value={mergeTarget} onChange={e => setMergeTarget(e.target.value)}>
+                    {availableBranches.length === 0 && <option value={mergeTarget}>{mergeTarget}</option>}
+                    {availableBranches.map(b => <option key={b} value={b}>{b}</option>)}
+                  </select>
+                </div>
+                <div className="modal-field">
+                  <label>开发分支</label>
+                  <input className="input" value={mergeState.dev_branch} disabled />
+                </div>
+                <div className="merge-hint">
+                  <span>领先目标 {mergeState.ahead} · 落后 {mergeState.behind}</span>
+                  <span>未提交文件 {mergeState.uncommitted_count}</span>
+                </div>
+                {mergeState.uncommitted_count > 0 && (
+                  <details className="merge-files">
+                    <summary>查看未提交文件</summary>
+                    <ul>{mergeState.uncommitted_files.map((f, i) => <li key={i}><code>{f}</code></li>)}</ul>
+                  </details>
+                )}
+                <div className="modal-field">
+                  <label>提交信息</label>
+                  <input className="input" value={mergeCommitMsg} onChange={e => setMergeCommitMsg(e.target.value)} />
+                </div>
+                <label className="merge-check">
+                  <input type="checkbox" checked={mergeDeleteBranch} onChange={e => setMergeDeleteBranch(e.target.checked)} />
+                  合并后删除开发分支
+                </label>
+                <div className="modal-actions">
+                  <button className="btn btn-primary" onClick={confirmMerge} disabled={!!busy}>🔀 确认合入</button>
+                  <button className="btn" onClick={() => setShowMergeModal(false)} disabled={!!busy}>取消</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="modal-field">
+                  <label>推送分支</label>
+                  <input className="input" value={mergeState.dev_branch} disabled />
+                </div>
+                <div className="merge-hint">
+                  <span>远程仓库</span>
+                  <code>{mergeState.remote_url || '（未配置）'}</code>
+                </div>
+                <div className="modal-field">
+                  <label>提交信息</label>
+                  <input className="input" value={mergeCommitMsg} onChange={e => setMergeCommitMsg(e.target.value)} />
+                </div>
+                {!mergeState.has_remote && (
+                  <p className="merge-warn">该项目未配置 origin 远程仓库，无法推送。</p>
+                )}
+                <div className="modal-actions">
+                  <button className="btn btn-primary" onClick={confirmMerge} disabled={!!busy || !mergeState.has_remote}>🌐 确认推送</button>
+                  <button className="btn" onClick={() => setShowMergeModal(false)} disabled={!!busy}>取消</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Edit modal */}
       {showEditModal && req && (
         <div className="modal-overlay" onClick={() => setShowEditModal(false)}>
@@ -412,15 +666,6 @@ export default function RequirementDetail() {
             </div>
           </div>
         </div>
-      )}
-
-      {/* Fullscreen Markdown viewer for design plan */}
-      {showDesignFullscreen && design.plan_markdown && (
-        <MarkdownViewer
-          title="📐 技术实现方案"
-          content={design.plan_markdown}
-          onClose={() => setShowDesignFullscreen(false)}
-        />
       )}
 
       {/* Header */}
@@ -495,23 +740,36 @@ export default function RequirementDetail() {
       {/* ── Architect stage ── */}
       {(stage === 'architect' || req.status === 'designed' || stage === 'developer' || stage === 'done') && (
         <div className="detail-section design-section">
-          <div className="section-header">
-            <h3>📐 架构师</h3>
-            {req.status === 'designing' && hasDesign && (
-              <button className="btn btn-sm" onClick={runArchitectDesign} disabled={designing}>🔄 重新生成</button>
-            )}
-          </div>
+          {/* Compact toolbar: the architect role is already shown in the
+              stepper, so this section leads with a content-oriented caption
+              and parks the stream toggle + regenerate action together. */}
+          {(showDesignToggle || (req.status === 'designing' && hasDesign)) && (
+            <div className="design-toolbar">
+              {showDesignToggle && (
+                <button
+                  className="btn btn-sm process-toggle"
+                  onClick={() => setShowDesignProcess(v => !v)}
+                  aria-expanded={designPanelOpen}
+                >
+                  {designPanelOpen ? '▼ 收起思考过程' : '▶ 思考过程'}
+                </button>
+              )}
+              {req.status === 'designing' && hasDesign && (
+                <button className="btn btn-sm" onClick={runArchitectDesign} disabled={designing}>🔄 重新生成</button>
+              )}
+            </div>
+          )}
 
-          {(designing || designLines.length > 0) && (
+          {designPanelOpen && (
             <div className="coding-panel" ref={designRef} style={{ marginBottom: 16 }}>
               {designLines.map((line, i) => (
                 <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
               ))}
-              {designing && <div className="coding-line coding-line-tool_call">⏳ Claude 正在 plan 模式下制定技术方案...</div>}
+              {designProcessActive && <div className="coding-line coding-line-tool_call">⏳ Claude 正在 plan 模式下制定技术方案...</div>}
             </div>
           )}
 
-          {req.status === 'designing' && !hasDesign && !designing && (
+          {req.status === 'designing' && !hasDesign && !designing && !req.design_job_id && (
             <div className="tab-empty">
               <p>需求分析已完成。架构师将在 <strong>plan 模式</strong>下探索项目代码，制定具体可执行的技术实现方案（Markdown）。</p>
               <button className="btn btn-primary" onClick={() => runArchitectDesign()} disabled={!!busy || designing}>
@@ -523,12 +781,7 @@ export default function RequirementDetail() {
           {hasDesign && (
             <>
               {design.plan_markdown ? (
-                <>
-                  <div className="analysis-summary"><ReactMarkdown remarkPlugins={[remarkGfm]}>{design.plan_markdown}</ReactMarkdown></div>
-              <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-                        <button className="btn" onClick={() => setShowDesignFullscreen(true)}>📐 全屏查看方案</button>
-                      </div>
-                </>
+                <div className="analysis-summary"><ReactMarkdown remarkPlugins={[remarkGfm]}>{design.plan_markdown}</ReactMarkdown></div>
               ) : (
                 <>
                   {design.overview && <div className="analysis-summary">{design.overview}</div>}
@@ -599,14 +852,62 @@ export default function RequirementDetail() {
             </div>
           )}
 
-          {req.status === 'developing' && !coding && codingLines.length > 0 && (
+          {req.status === 'developing' && !coding && (
             <>
+              {/* After a backend restart the in-memory job log is gone, but the
+                  developing status is persisted in the DB — still allow the user
+                  to mark done or re-run without a live coding log. */}
+              {codingLines.length === 0 && (
+                <p style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 8 }}>
+                  开发任务已完成（日志因服务重启已清空）。确认代码无误后可标记开发完成，或重新运行。
+                </p>
+              )}
               <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
                 <button className="btn btn-primary" onClick={() => transition('done', '开发完成')} disabled={!!busy}>
                   {busy === '开发完成' ? '⏳ ...' : '✅ 开发完成'}
                 </button>
                 <button className="btn" onClick={() => openBranchModal()}>🔄 重新运行</button>
               </div>
+
+              {/* ── Merge / PR step ── */}
+              <div className="merge-section">
+                <div className="merge-actions">
+                  <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}>🔀 本地合入</button>
+                  <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}>🌐 推送并发起 PR</button>
+                </div>
+
+                {mergeState?.mid_merge && (
+                  <div className="conflict-panel">
+                    <p className="conflict-title">⚠️ 仓库处于合并冲突状态</p>
+                    {conflictFiles && conflictFiles.length > 0 && (
+                      <ul className="conflict-file-list">
+                        {conflictFiles.map((f, i) => <li key={i} className="conflict-file"><code>{f}</code></li>)}
+                      </ul>
+                    )}
+                    <div className="conflict-actions">
+                      <button className="btn btn-primary" onClick={() => doMergeAction('resolve')} disabled={merging}>🤖 AI 解决冲突</button>
+                      <button className="btn" onClick={() => doMergeAction('continue')} disabled={merging}>✋ 已手动解决，继续</button>
+                      <button className="btn btn-danger" onClick={() => doMergeAction('abort')} disabled={merging}>↩️ 中止合并</button>
+                    </div>
+                  </div>
+                )}
+
+                {mergeLines.length > 0 && (
+                  <div className="coding-panel merge-panel">
+                    {mergeLines.map((line, i) => (
+                      <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
+                    ))}
+                    {merging && <div className="coding-line coding-line-tool_call">⏳ 执行中...</div>}
+                  </div>
+                )}
+
+                {prLink && !merging && (
+                  <a className="btn btn-primary pr-link-btn" href={prLink} target="_blank" rel="noreferrer">
+                    🌐 创建 PR
+                  </a>
+                )}
+              </div>
+
               <CodingChat
                 reqId={req.id}
                 projectPath={project?.local_path || ''}
@@ -617,7 +918,17 @@ export default function RequirementDetail() {
           )}
 
           {req.status === 'done' && (
-            <div className="tab-empty"><p>✅ 开发已完成。</p></div>
+            <div className="merge-section">
+              {prLink ? (
+                <a className="btn btn-primary pr-link-btn" href={prLink} target="_blank" rel="noreferrer">🌐 查看 / 创建 PR</a>
+              ) : (
+                <div className="tab-empty"><p>✅ 开发已完成。</p></div>
+              )}
+              <div className="merge-actions">
+                <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}>🔀 本地合入</button>
+                <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}>🌐 推送并发起 PR</button>
+              </div>
+            </div>
           )}
         </div>
       )}

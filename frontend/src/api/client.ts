@@ -164,7 +164,7 @@ export interface Requirement {
   status: string; priority: string; acceptance_criteria: string;
   design_docs: string; conversation_ids: string; assigned_to: string;
   sprint: string; created_by: string; analysis_session_id: string;
-  design_session_id: string; coding_session_id: string;
+  design_session_id: string; design_job_id: string; coding_session_id: string;
   created_at: string; updated_at: string;
   completed_at?: string;
 }
@@ -230,6 +230,38 @@ export const runnerApi = {
     api.get<RunJob>(`/api/wizard/jobs/${jobId}`),
 };
 
+// Merge / PR step (post-coding 合入). Local merge into a target branch with
+// AI-assisted conflict resolution, or push + create-PR link. Long work runs as
+// a JobStore job streamed via the shared /api/wizard/jobs/{id} endpoints.
+export interface MergeState {
+  is_git: boolean;
+  requirement_id?: string;
+  dev_branch: string;
+  target_branch: string;
+  uncommitted_count: number;
+  uncommitted_files: string[];
+  ahead: number;
+  behind: number;
+  has_remote: boolean;
+  remote_url: string;
+  platform: string;
+  pr_url: string;
+  mid_merge: boolean;
+  conflict_files: string[];
+}
+export const mergeApi = {
+  state: (reqId: string) => api.get<MergeState>(`/api/requirements/${reqId}/merge/state`),
+  local: (reqId: string, body: { target_branch?: string; commit_message?: string; delete_branch?: boolean }) =>
+    api.post<{ job_id: string }>(`/api/requirements/${reqId}/merge/local`, body),
+  abort: (reqId: string) => api.post<{ ok: boolean }>(`/api/requirements/${reqId}/merge/abort`, {}),
+  cont: (reqId: string) => api.post<{ job_id: string }>(`/api/requirements/${reqId}/merge/continue`, {}),
+  resolve: (reqId: string) => api.post<{ job_id: string }>(`/api/requirements/${reqId}/merge/resolve`, {}),
+  push: (reqId: string, body: { commit_message?: string }) =>
+    api.post<{ job_id: string }>(`/api/requirements/${reqId}/merge/push`, body),
+  jobStreamUrl: (jobId: string) => `${API_BASE}/api/wizard/jobs/${jobId}/stream`,
+  jobUrl: (jobId: string) => `${API_BASE}/api/wizard/jobs/${jobId}`,
+};
+
 // Pull Requests (from platform API)
 export interface PR {
   number: number;
@@ -292,6 +324,20 @@ export const claudeApi = {
   get: () => api.get<ClaudeConfig>('/api/settings/claude'),
   update: (data: { anthropic_auth_token?: string; anthropic_base_url: string; clear_token?: boolean }) =>
     api.put<ClaudeConfig>('/api/settings/claude', data),
+};
+
+// Direct HTTP LLM channel config (OpenAI-compatible, e.g. DeepSeek). Used for
+// lightweight tasks like requirement title distillation — bypasses claude CLI.
+export interface LLMConfig {
+  base_url: string;
+  api_key_set: boolean;
+  api_key_preview: string;
+  model: string;
+}
+export const llmApi = {
+  get: () => api.get<LLMConfig>('/api/settings/llm'),
+  update: (data: { base_url: string; api_key?: string; model: string; clear_api_key?: boolean }) =>
+    api.put<LLMConfig>('/api/settings/llm', data),
 };
 
 // Roles (per-role system prompt + model)

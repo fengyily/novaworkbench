@@ -10,6 +10,7 @@ export default function Settings() {
         <NavLink to="/settings" end className="settings-tab">平台 Token</NavLink>
         <NavLink to="/settings/roles" className="settings-tab">角色管理</NavLink>
         <NavLink to="/settings/claude" className="settings-tab">Claude 配置</NavLink>
+        <NavLink to="/settings/llm" className="settings-tab">直连 LLM</NavLink>
       </nav>
 
       <div className="settings-content">
