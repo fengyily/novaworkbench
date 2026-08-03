@@ -190,6 +190,138 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	rc.Flush()
 }
 
+// DeveloperChat runs one "追加调整" conversation turn against the DEVELOPER role
+// (not the analyst). It is the post-coding adjustment dialog: the user describes
+// a tweak to the already-implemented code, and the developer confirms
+// understanding and proposes an approach WITHOUT editing files — the actual
+// edits run in a subsequent start-coding re-run triggered by the frontend's
+// "确认，开始修改" button. Routing this to the developer (resuming the coding
+// session) keeps the adjustment a DEVELOPMENT change; the old wiring posted the
+// same panel to analyst-chat, which refined the requirement instead.
+//
+// Session threading mirrors StartCoding: resume coding_session_id (the 追加调整
+// panel only renders after a first coding pass, so it is normally set);
+// otherwise fork off the design/analysis session so the developer inherits the
+// requirement+design context. A stale --resume falls back to a fresh session.
+func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProjectPath      string `json:"project_path"`
+		RequirementID    string `json:"requirement_id"`
+		RequirementTitle string `json:"requirement_title"`
+		UserMessage      string `json:"user_message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("[developer-chat] JSON decode error: %v", err)
+		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+
+	rc := http.NewResponseController(w)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	rc.Flush()
+
+	log.Printf("[developer-chat] Starting for requirement: %s in %s", req.RequirementTitle, req.ProjectPath)
+
+	// Resolve the source conversation: prefer the coding session (the 追加调整
+	// panel only shows after a first coding pass, so this is normally set);
+	// otherwise fork off the design/analysis session so the developer still
+	// inherits the requirement+design context. Same resolution as StartCoding.
+	var requirement *model.Requirement
+	if req.RequirementID != "" {
+		if existing, err := h.reqSvc.Get(req.RequirementID); err == nil {
+			requirement = existing
+		}
+	}
+	sourceSID := ""
+	fork := false
+	if requirement != nil {
+		if requirement.CodingSessionID != "" {
+			sourceSID = requirement.CodingSessionID
+		} else if requirement.DesignSessionID != "" {
+			sourceSID = requirement.DesignSessionID
+			fork = true
+		} else if requirement.AnalysisSessionID != "" {
+			sourceSID = requirement.AnalysisSessionID
+			fork = true
+		}
+	}
+
+	sendStatus(w, rc, "phase", "🤖 开发者正在理解追加调整...")
+	rc.Flush()
+
+	systemPrompt, model := h.roleConfig("developer")
+
+	// The resumed coding conversation already carries the requirement, analysis,
+	// and design, so a resume turn only sends the framed adjustment message. The
+	// firstTurnPrompt (used on the no-session / stale-fallback path) folds in the
+	// title + design so the developer has context without a pre-read pass.
+	title := req.RequirementTitle
+	var designMarkdown string
+	if requirement != nil {
+		if title == "" {
+			title = requirement.Title
+		}
+		designMarkdown = requirement.DesignDocs
+	}
+	firstTurnPrompt := func() string {
+		var b strings.Builder
+		b.WriteString("现在以「开发者」角色处理用户的追加调整。请先阅读相关代码、确认你对调整意图的理解、给出实现思路与可能的影响；")
+		b.WriteString("**暂不要修改任何文件**——等用户在后续步骤确认后，再由开发任务执行修改。\n\n")
+		if title != "" {
+			b.WriteString(fmt.Sprintf("需求：%s\n\n", title))
+		}
+		if strings.TrimSpace(designMarkdown) != "" {
+			b.WriteString("技术方案：\n")
+			b.WriteString(designMarkdown)
+			b.WriteString("\n\n")
+		}
+		b.WriteString("追加调整：\n")
+		b.WriteString(req.UserMessage)
+		return b.String()
+	}
+	resumePrompt := fmt.Sprintf(
+		"以下是对已实现代码的追加调整。请以「开发者」角色先阅读相关代码、确认你对调整意图的理解、"+
+			"给出实现思路与可能的影响；**暂不要修改任何文件**——等用户确认后，再由开发任务执行修改。\n\n追加调整：\n%s",
+		req.UserMessage,
+	)
+
+	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, req.ProjectPath, systemPrompt, model, sourceSID, fork, w, rc)
+	if err != nil {
+		log.Printf("[developer-chat] turn failed: %v", err)
+		sendStatus(w, rc, "error", err.Error())
+		fmt.Fprintf(w, "data: {\"type\":\"done\"}\n\n")
+		rc.Flush()
+		return
+	}
+
+	// Persist any NEW session id (a fork off design/analysis, or a fresh
+	// stale-fallback session) as coding_session_id so later developer turns and
+	// the start-coding re-run resume the right conversation. A plain resume
+	// leaves the id unchanged, so we skip the write.
+	if req.RequirementID != "" && newSessionID != "" && newSessionID != sourceSID {
+		if perr := h.reqSvc.UpdateCodingSession(req.RequirementID, newSessionID); perr != nil {
+			log.Printf("[developer-chat] Failed to persist coding session for %s: %v", req.RequirementID, perr)
+		}
+	}
+
+	// Build a lightweight local-history string for the frontend's chat display.
+	// The authoritative conversation context lives in the resumed claude session,
+	// so this is just for client-side rendering.
+	var historyParts []string
+	if req.UserMessage != "" {
+		historyParts = append(historyParts, "User: "+req.UserMessage)
+	}
+	historyParts = append(historyParts, "AI: "+strings.TrimSpace(finalResult))
+	updatedHistory := strings.Join(historyParts, "\n")
+
+	doneData, _ := json.Marshal(map[string]string{"type": "done", "history": updatedHistory})
+	fmt.Fprintf(w, "data: %s\n\n", string(doneData))
+	rc.Flush()
+}
+
 // toolCallLabel returns a human-readable Chinese label for a tool call event.
 func toolCallLabel(toolName string, input map[string]interface{}) string {
 	switch toolName {
@@ -1298,6 +1430,77 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 			return "", sessionID, fmt.Errorf("%s", out.errMsg)
 		}
 		return "", sessionID, fmt.Errorf("Claude 未返回结果，请重试")
+	}
+	return out.finalResult, sessionID, nil
+}
+
+// developerChatDisallowedTools blocks file-mutation tools during a developer
+// "追加调整" chat turn so Claude discusses the adjustment (reads code, proposes
+// an approach) WITHOUT editing — the actual edits run in a later start-coding
+// job. Read/Glob/Grep/Bash stay available so the developer can ground its
+// understanding in the real code.
+var developerChatDisallowedTools = []string{"Write", "Edit"}
+
+// runDeveloperTurn runs one developer-chat turn with automatic stale-session
+// recovery, mirroring runAnalystTurn but for the developer role. firstTurnPrompt
+// is a lazy self-contained prompt (no pre-read — the developer reads files via
+// tools instead); resumePrompt is the framed user message. Write/Edit are
+// disallowed so the turn stays discussion-only. Returns the final result text
+// and the session id that actually landed on disk (a forked or fresh id differs
+// from the input; the caller persists it).
+func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, sessionID string, fork bool, w http.ResponseWriter, rc *http.ResponseController) (finalResult, newSessionID string, err error) {
+	resume := sessionID != ""
+	prompt := resumePrompt
+	if !resume {
+		prompt = firstTurnPrompt()
+	}
+	log.Printf("[developer-chat] Running claude stream-json (session=%s, resume=%v, fork=%v), prompt=%d bytes", sessionID, resume, fork, len(prompt))
+
+	cmd := h.llm.StreamCmd(ctx, llm.StreamOpts{
+		Prompt:          prompt,
+		WorkDir:         projectPath,
+		SystemPrompt:    systemPrompt,
+		Model:           model,
+		SessionID:       sessionID,
+		Resume:          resume,
+		Fork:            fork,
+		DisallowedTools: developerChatDisallowedTools,
+	})
+	out := runClaudeStream(sseSink{w, rc}, cmd, "developer-chat")
+
+	if out.staleSession && resume {
+		// Stale --resume: the target conversation no longer exists on disk.
+		// Recover by starting a fresh developer conversation with the
+		// self-contained first-turn prompt (no --resume, no --fork-session).
+		freshID := util.NewUUID()
+		log.Printf("[developer-chat] stale session %s — falling back to fresh session %s", sessionID, freshID)
+		sendStatus(w, rc, "phase", "🔄 检测到过期会话，正在重新开始...")
+		rc.Flush()
+		prompt = firstTurnPrompt()
+		cmd = h.llm.StreamCmd(ctx, llm.StreamOpts{
+			Prompt:          prompt,
+			WorkDir:         projectPath,
+			SystemPrompt:    systemPrompt,
+			Model:           model,
+			SessionID:       freshID,
+			DisallowedTools: developerChatDisallowedTools,
+		})
+		out = runClaudeStream(sseSink{w, rc}, cmd, "developer-chat")
+		sessionID = freshID
+	}
+
+	if out.finalResult == "" {
+		if out.errMsg != "" {
+			return "", sessionID, fmt.Errorf("%s", out.errMsg)
+		}
+		return "", sessionID, fmt.Errorf("Claude 未返回结果，请重试")
+	}
+	// For a forked run runClaudeStream captured the NEW session id from the
+	// system/init event; surface it so the caller persists it. For a plain
+	// resume it equals the input id; if init never fired it is empty, so keep
+	// the input id.
+	if out.sessionID != "" {
+		return out.finalResult, out.sessionID, nil
 	}
 	return out.finalResult, sessionID, nil
 }

@@ -287,3 +287,45 @@
   font-size: 13px;
   color: var(--color-error);
 }
+
+/* Recent requirements (overview tab, height-adaptive) */
+.recent-reqs-section {
+  /* Height follows the rendered row count, so a few requirements render a
+     short list (no big empty box). max-height caps it only when there are
+     many requirements, so the list never exceeds the viewport's remaining
+     space. overflow hidden is a safety net — visibleCount already clips the
+     rendered rows so it normally never kicks in. */
+  max-height: calc(100vh - 300px);
+  overflow: hidden;
+  padding: 12px 16px;
+}
+
+.recent-reqs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.recent-reqs-more,
+.recent-reqs-link {
+  background: none;
+  border: none;
+  color: var(--color-primary, #4f46e5);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.recent-reqs-more:hover,
+.recent-reqs-link:hover {
+  text-decoration: underline;
+}
+
+.recent-reqs-section .pr-list {
+  margin-bottom: 0;
+}
+
+.recent-reqs-section .pr-table tbody tr:last-child td {
+  border-bottom: none;
+}

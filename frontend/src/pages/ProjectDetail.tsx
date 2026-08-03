@@ -46,11 +46,16 @@ export default function ProjectDetail() {
   const [platformSaving, setPlatformSaving] = useState(false);
   const [platformSaved, setPlatformSaved] = useState(false);
 
-  // Requirements tab
+  // Requirements (shared by the requirements tab and the overview recent list)
   const [reqs, setReqs] = useState<Requirement[]>([]);
   const [reqsLoading, setReqsLoading] = useState(false);
   const [reqsError, setReqsError] = useState('');
+  const [reqsLoaded, setReqsLoaded] = useState(false);
   const [showCreateReq, setShowCreateReq] = useState(false);
+
+  // Overview: recent requirements (height-adaptive)
+  const [visibleCount, setVisibleCount] = useState(6);
+  const recentSectionRef = useRef<HTMLDivElement>(null);
 
   // Review tab
   const [prData, setPrData] = useState<PRListResponse | null>(null);
@@ -121,19 +126,42 @@ export default function ProjectDetail() {
       .finally(() => setPrsLoading(false));
   }, [tab, id]);
 
-  // Load requirements list on tab switch
+  // Load requirements for both the overview (recent) and the requirements tab.
+  // reqsLoaded prevents duplicate requests when switching between the two tabs.
   useEffect(() => {
-    if (tab !== 'requirements' || !id) return;
+    if ((tab !== 'overview' && tab !== 'requirements') || !id || reqsLoaded) return;
     let active = true;
     setReqsLoading(true);
     setReqsError('');
     requirementsApi.list({ project_id: id })
-      .then(data => { if (active) setReqs(data); })
+      .then(data => { if (active) { setReqs(data); setReqsLoaded(true); } })
       .catch(err => { if (active) setReqsError(err instanceof Error ? err.message : String(err)); })
       .finally(() => { if (active) setReqsLoading(false); });
     return () => { active = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, id]);
+  }, [tab, id, reqsLoaded]);
+
+  // Overview: adapt the visible row count to the viewport's remaining space
+  // below the section's top. Measuring the section's own height would
+  // self-shrink (height drives count, count drives height), so we use the
+  // space left below the section top instead. The section's CSS height follows
+  // the rendered row count, so few requirements → short list (no big empty
+  // box), many requirements → capped by visibleCount.
+  useEffect(() => {
+    if (tab !== 'overview') return;
+    const el = recentSectionRef.current;
+    if (!el) return;
+    const HEADER_H = 40, ROW_H = 44, BOTTOM_PAD = 16;
+    const compute = () => {
+      const top = el.getBoundingClientRect().top;
+      const availH = window.innerHeight - top - BOTTOM_PAD;
+      setVisibleCount(Math.max(2, Math.floor((availH - HEADER_H) / ROW_H)));
+    };
+    compute();
+    window.addEventListener('resize', compute);
+    return () => window.removeEventListener('resize', compute);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, reqsLoaded]);
 
   // ── Run tab handlers ───────────────────────────────────────────────────────
 
@@ -260,6 +288,25 @@ export default function ProjectDetail() {
 
   const isRunning = runStatus?.status === 'running';
 
+  // Shared table rows for the requirements list (used by both the overview
+  // "recent requirements" and the requirements tab — single source of truth).
+  const renderRequirementRows = (items: Requirement[]) => items.map(req => (
+    <tr
+      key={req.id}
+      style={{ cursor: 'pointer' }}
+      onClick={() => navigate(`/requirements/${req.id}`)}
+    >
+      <td style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{req.id}</td>
+      <td className="pr-title">{req.title}</td>
+      <td><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
+      <td><span className={`status-badge status-${req.status}`}>{statusLabels[req.status] ?? req.status}</span></td>
+      <td>{req.sprint ? <code className="pr-branch">{req.sprint}</code> : '—'}</td>
+      <td style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+        {req.updated_at ? new Date(req.updated_at).toLocaleDateString('zh-CN') : '—'}
+      </td>
+    </tr>
+  ));
+
   if (loading) return <div className="detail-loading">加载中...</div>;
   if (!project) return <div className="detail-loading">项目未找到</div>;
 
@@ -383,6 +430,40 @@ export default function ProjectDetail() {
               </p>
             )}
           </div>
+
+          {/* Recent requirements (height-adaptive) */}
+          <div className="detail-section recent-reqs-section" style={{ marginTop: 16 }} ref={recentSectionRef}>
+            <div className="recent-reqs-header">
+              <span style={{ fontWeight: 600, fontSize: 14 }}>最近需求</span>
+              <button className="recent-reqs-more" onClick={() => setTab('requirements')}>查看全部 →</button>
+            </div>
+
+            {reqsLoading && <div className="tab-empty">⏳ 加载中...</div>}
+            {!reqsLoading && reqs.length === 0 && (
+              <div className="tab-empty">
+                <p>该项目暂无需求，<button className="recent-reqs-link" onClick={() => { setTab('requirements'); setShowCreateReq(true); }}>去创建 →</button></p>
+              </div>
+            )}
+            {!reqsLoading && reqs.length > 0 && (
+              <div className="pr-list" style={{ marginBottom: 0 }}>
+                <table className="pr-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: 110 }}>ID</th>
+                      <th>标题</th>
+                      <th style={{ width: 90 }}>优先级</th>
+                      <th style={{ width: 130 }}>状态</th>
+                      <th style={{ width: 110 }}>Sprint</th>
+                      <th style={{ width: 110 }}>更新时间</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {renderRequirementRows(reqs.slice(0, Math.min(reqs.length, visibleCount)))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -438,29 +519,14 @@ export default function ProjectDetail() {
                   <tr>
                     <th style={{ width: 110 }}>ID</th>
                     <th>标题</th>
-                    <th style={{ width: 70 }}>优先级</th>
+                    <th style={{ width: 90 }}>优先级</th>
                     <th style={{ width: 130 }}>状态</th>
                     <th style={{ width: 110 }}>Sprint</th>
                     <th style={{ width: 110 }}>更新时间</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {reqs.map(req => (
-                    <tr
-                      key={req.id}
-                      style={{ cursor: 'pointer' }}
-                      onClick={() => navigate(`/requirements/${req.id}`)}
-                    >
-                      <td style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{req.id}</td>
-                      <td className="pr-title">{req.title}</td>
-                      <td><span style={{ fontSize: 12 }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
-                      <td><span className={`status-badge status-${req.status}`}>{statusLabels[req.status] ?? req.status}</span></td>
-                      <td>{req.sprint ? <code className="pr-branch">{req.sprint}</code> : '—'}</td>
-                      <td style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
-                        {req.updated_at ? new Date(req.updated_at).toLocaleDateString('zh-CN') : '—'}
-                      </td>
-                    </tr>
-                  ))}
+                  {renderRequirementRows(reqs)}
                 </tbody>
               </table>
             </div>

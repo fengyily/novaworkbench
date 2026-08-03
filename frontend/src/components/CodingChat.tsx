@@ -33,10 +33,13 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
   }, [messages, input]);
 
   // The authoritative conversation lives in the resumed claude session
-  // (analysis_session_id, keyed by requirement_id). We only send the new user
-  // message; no conversation_history is re-fed.
+  // (coding_session_id, keyed by requirement_id). We only send the new user
+  // message; no conversation_history is re-fed. This hits the DEVELOPER role
+  // (developer-chat), not the analyst — the 追加调整 panel adjusts the
+  // already-implemented code, so it must talk to the developer, not refine the
+  // requirement.
   const streamReply = useCallback(async (userMessage: string) => {
-    const res = await fetch(`${API_BASE}/api/wizard/analyst-chat`, {
+    const res = await fetch(`${API_BASE}/api/wizard/developer-chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
