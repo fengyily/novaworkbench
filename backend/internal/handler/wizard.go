@@ -1,0 +1,1891 @@
+package handler
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"github.com/novaworkbench/backend/internal/llm"
+	"github.com/novaworkbench/backend/internal/model"
+	"github.com/novaworkbench/backend/internal/service"
+	"github.com/novaworkbench/backend/internal/store"
+	"github.com/novaworkbench/backend/internal/util"
+)
+
+type WizardHandler struct {
+	projectSvc *service.ProjectService
+	reqSvc     *service.RequirementService
+	llm        *llm.Gateway
+	jobs       *store.JobStore
+	roleSvc    *service.RoleService
+}
+
+func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService) *WizardHandler {
+	return &WizardHandler{
+		projectSvc: projectSvc,
+		reqSvc:     reqSvc,
+		llm:        llmGateway,
+		jobs:       jobs,
+		roleSvc:    roleSvc,
+	}
+}
+
+// roleConfig loads a role's system prompt + model by key. On error it returns
+// empty strings (and logs) so a missing/broken role config never blocks the
+// wizard pipeline — it just falls back to the CLI defaults.
+func (h *WizardHandler) roleConfig(key string) (systemPrompt, model string) {
+	r, err := h.roleSvc.GetByKey(key)
+	if err != nil {
+		log.Printf("[wizard] role %q not found, using CLI defaults: %v", key, err)
+		return "", ""
+	}
+	return r.SystemPrompt, r.Model
+}
+
+// docStageSession maps a refine/apply doc_type to the requirement's stored
+// session id for that stage and the role key whose persona it runs under.
+// Returns sid="" when the stage hasn't been run yet (caller surfaces a hint).
+//   spec   → analysis_session_id / analyst
+//   design → design_session_id   / architect
+//   coding → coding_session_id   / developer
+func docStageSession(req *model.Requirement, docType string) (sid, roleKey string) {
+	switch docType {
+	case "spec":
+		return req.AnalysisSessionID, "analyst"
+	case "design":
+		return req.DesignSessionID, "architect"
+	case "coding":
+		return req.CodingSessionID, "developer"
+	}
+	return "", "analyst"
+}
+
+// AnalystComplete is the "需求完善完成" gate. It resumes the analyst conversation
+// session (--resume) and asks Claude to distill the discussion into a structured
+// requirement document (acceptance_criteria, technical_risks, related_modules,
+// summary). Progress streams via SSE; on success the result is persisted and the
+// requirement is marked analyzed.
+func (h *WizardHandler) AnalystComplete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProjectPath   string `json:"project_path"`
+		RequirementID string `json:"requirement_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON")
+		return
+	}
+
+	rc := http.NewResponseController(w)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	rc.Flush()
+
+	sendStatus(w, rc, "phase", "🤖 正在基于对话生成结构化需求文档...")
+	rc.Flush()
+
+	// Load the stored analyst session so Claude resumes the same conversation.
+	sessionID := ""
+	if req.RequirementID != "" {
+		if existing, err := h.reqSvc.Get(req.RequirementID); err == nil {
+			sessionID = existing.AnalysisSessionID
+		}
+	}
+
+	prompt := "基于我们刚才的深入分析对话，请先阅读项目相关文件（如需核实技术细节），" +
+		"然后输出 ONLY valid JSON，不要 markdown 代码块：\n" +
+		"{\n" +
+		"  \"acceptance_criteria\": [\"可测试的验收标准，包含具体文件路径、API端点、UI状态\"],\n" +
+		"  \"technical_risks\": [\"具体的技术风险，附带缓解建议，引用实际代码位置\"],\n" +
+		"  \"related_modules\": [\"需要修改的具体文件路径\"],\n" +
+		"  \"summary\": \"执行摘要（中文），然后是完整的实现清单：涉及文件、API设计、UI状态（加载/空/错误/成功/边界）、数据模型变更、新依赖、错误处理策略。实现者可以据此直接开工，无需追问。\"\n" +
+		"}"
+
+	systemPrompt, model := h.roleConfig("analyst")
+	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
+		Prompt:       prompt,
+		WorkDir:      req.ProjectPath,
+		SystemPrompt: systemPrompt,
+		Model:        model,
+		SessionID:    sessionID,
+		Resume:       true,
+	})
+	out := runClaudeStream(w, rc, cmd, "analyst-complete")
+
+	if out.staleSession {
+		// The analyst conversation is gone (stale session id left by an older
+		// build). We can't distill a doc from a conversation that no longer
+		// exists — clear the stale id so the next chat starts fresh, and ask the
+		// user to redo the analysis conversation.
+		if req.RequirementID != "" {
+			_ = h.reqSvc.UpdateAnalysisSession(req.RequirementID, "")
+		}
+		sendStatus(w, rc, "error", "分析对话会话已过期（未在磁盘找到）。请重新进行「深入分析」对话后再完善需求。")
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+	if out.finalResult == "" {
+		errMsg := out.errMsg
+		if errMsg == "" {
+			errMsg = "Claude 未返回结果，请重试"
+		}
+		sendStatus(w, rc, "error", errMsg)
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+
+	resultJSON := extractJSON(out.finalResult)
+
+	if req.RequirementID != "" {
+		if _, err := h.reqSvc.UpdateAnalysis(req.RequirementID, resultJSON); err != nil {
+			log.Printf("[analyst-complete] Failed to save analysis for %s: %v", req.RequirementID, err)
+			sendStatus(w, rc, "error", "保存失败: "+err.Error())
+			fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+			rc.Flush()
+			return
+		}
+	}
+
+	doneData, _ := json.Marshal(map[string]interface{}{
+		"type":    "done",
+		"success": true,
+		"result":  resultJSON,
+	})
+	fmt.Fprintf(w, "data: %s\n\n", string(doneData))
+	rc.Flush()
+}
+
+// AnalystAnalyze is the one-shot "重新分析" action. It mints a fresh claude
+// session and asks Claude to read the project code and produce the structured
+// requirement document directly (skipping the multi-turn chat). Progress streams
+// via SSE; on success the result is persisted and the requirement is marked
+// analyzed. The previous analysis_session_id is replaced by the new one.
+func (h *WizardHandler) AnalystAnalyze(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		RequirementID string `json:"requirement_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON")
+		return
+	}
+	id := body.RequirementID
+	if id == "" {
+		writeError(w, 400, "INVALID", "missing requirement id")
+		return
+	}
+	req, err := h.reqSvc.Get(id)
+	if err != nil {
+		writeError(w, 404, "NOT_FOUND", "requirement not found")
+		return
+	}
+	project, _ := h.projectSvc.Get(req.ProjectID)
+	projectPath := ""
+	if project != nil {
+		projectPath = project.LocalPath
+	}
+
+	rc := http.NewResponseController(w)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	rc.Flush()
+
+	sendStatus(w, rc, "phase", "🤖 Claude 正在读取项目代码，重新生成需求分析...")
+	rc.Flush()
+
+	// Mint a fresh session for this re-analysis pass. Only persist it after the
+	// turn succeeds, so a failed run doesn't leave an id with no on-disk session.
+	sessionID := util.NewUUID()
+
+	var promptBuf strings.Builder
+	if req.Description != "" {
+		promptBuf.WriteString(fmt.Sprintf("需求描述：%s\n\n", req.Description))
+	}
+	if req.AcceptanceCriteria != "" && req.AcceptanceCriteria != "[]" {
+		promptBuf.WriteString(fmt.Sprintf("上一版分析（可参考）：\n%s\n\n", req.AcceptanceCriteria))
+	}
+	promptBuf.WriteString("请先阅读项目相关文件（CLAUDE.md、相关源文件），然后输出 ONLY valid JSON，不要 markdown 代码块：\n" +
+		"{\n" +
+		"  \"acceptance_criteria\": [\"可测试的验收标准，包含具体文件路径、API端点、UI状态\"],\n" +
+		"  \"technical_risks\": [\"具体的技术风险，附带缓解建议，引用实际代码位置\"],\n" +
+		"  \"related_modules\": [\"需要修改的具体文件路径\"],\n" +
+		"  \"summary\": \"执行摘要（中文），然后是完整的实现清单：涉及文件、API设计、UI状态（加载/空/错误/成功/边界）、数据模型变更、新依赖、错误处理策略。实现者可以据此直接开工，无需追问。\"\n" +
+		"}")
+
+	systemPrompt, model := h.roleConfig("analyst")
+	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
+		Prompt:       promptBuf.String(),
+		WorkDir:      projectPath,
+		SystemPrompt: systemPrompt,
+		Model:        model,
+		SessionID:    sessionID,
+	})
+	out := runClaudeStream(w, rc, cmd, "analyst-analyze")
+
+	if out.finalResult == "" {
+		errMsg := out.errMsg
+		if errMsg == "" {
+			errMsg = "Claude 未返回结果，请重试"
+		}
+		sendStatus(w, rc, "error", errMsg)
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+
+	// The session now exists on disk — persist its id for potential later resume.
+	if err := h.reqSvc.UpdateAnalysisSession(id, sessionID); err != nil {
+		log.Printf("[analyst-analyze] Failed to persist session for %s: %v", id, err)
+	}
+
+	resultJSON := extractJSON(out.finalResult)
+	if _, err := h.reqSvc.UpdateAnalysis(id, resultJSON); err != nil {
+		log.Printf("[analyst-analyze] Failed to save analysis for %s: %v", id, err)
+		sendStatus(w, rc, "error", "保存失败: "+err.Error())
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+
+	doneData, _ := json.Marshal(map[string]interface{}{
+		"type":    "done",
+		"success": true,
+		"result":  resultJSON,
+	})
+	fmt.Fprintf(w, "data: %s\n\n", string(doneData))
+	rc.Flush()
+}
+
+// AnalystChat runs Claude CLI with stream-json output and full tool use permissions.
+// The requirement analyst reads project files autonomously and refines the requirement
+// through multi-turn conversation. Conversation context is held in a real claude CLI
+// session: the first turn mints a session id (--session-id, persisted on the
+// requirement) and subsequent turns resume it (--resume), so the user's appended
+// descriptions stay in the same conversation. Completion is decided manually by the
+// user via analyst-complete.
+func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProjectPath      string `json:"project_path"`
+		RequirementID    string `json:"requirement_id"`
+		RequirementTitle string `json:"requirement_title"`
+		CurrentAnalysis  string `json:"current_analysis"`
+		UserMessage      string `json:"user_message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("[analyst-chat] JSON decode error: %v", err)
+		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+
+	rc := http.NewResponseController(w)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	rc.Flush()
+
+	log.Printf("[analyst-chat] Starting for requirement: %s in %s", req.RequirementTitle, req.ProjectPath)
+
+	// Load the requirement (source of truth) once: we need its full Description
+	// (the title is just a short label and may be truncated by fallbackTitle when
+	// GenerateTitle fails) and its stored analyst session id. The request body's
+	// title/analysis are only fallbacks.
+	var requirement *model.Requirement
+	if req.RequirementID != "" {
+		if existing, err := h.reqSvc.Get(req.RequirementID); err == nil {
+			requirement = existing
+		}
+	}
+	storedSessionID := ""
+	if requirement != nil && requirement.AnalysisSessionID != "" {
+		storedSessionID = requirement.AnalysisSessionID
+	}
+	isFirstRound := storedSessionID == ""
+	sessionID := storedSessionID
+	if isFirstRound {
+		sessionID = util.NewUUID()
+	}
+
+	sendStatus(w, rc, "phase", "🤖 Claude 正在准备分析...")
+	rc.Flush()
+
+	// firstTurnPrompt builds the first-turn prompt lazily: it pre-reads a BOUNDED
+	// slice of the project (AI docs + a names-only structure tree) and streams
+	// each pre-read file as SSE progress, so the user sees live activity before
+	// Claude responds and Claude never blindly traverses a multi-GB tree. Only
+	// invoked for a first-turn run (the genuine first turn, or the stale-resume
+	// fallback); resume turns just send the new user message.
+	firstTurnPrompt := func() string {
+		sendStatus(w, rc, "phase", "📖 正在预读项目上下文（不遍历整个仓库）...")
+		rc.Flush()
+		title := req.RequirementTitle
+		desc := ""
+		analysis := req.CurrentAnalysis
+		if requirement != nil {
+			if title == "" {
+				title = requirement.Title
+			}
+			desc = requirement.Description
+			if analysis == "" || analysis == "[]" {
+				analysis = requirement.AcceptanceCriteria
+			}
+		}
+		docBlock, readFiles, treeSummary := collectProjectContext(req.ProjectPath, title)
+		for _, rf := range readFiles {
+			sendStatus(w, rc, "tool_call", "📖 预读: "+rf)
+			rc.Flush()
+		}
+		log.Printf("[analyst-chat] pre-read %d files, docBlock=%d bytes, tree=%d bytes, desc=%d bytes",
+			len(readFiles), len(docBlock), len(treeSummary), len(desc))
+		return buildAnalystFirstPrompt(title, desc, analysis, req.UserMessage, docBlock, treeSummary)
+	}
+	resumePrompt := req.UserMessage
+
+	systemPrompt, model := h.roleConfig("analyst")
+	finalResult, newSessionID, err := h.runAnalystTurn(r.Context(), firstTurnPrompt, resumePrompt, req.ProjectPath, systemPrompt, model, sessionID, !isFirstRound, w, rc)
+	if err != nil {
+		log.Printf("[analyst-chat] turn failed: %v", err)
+		sendStatus(w, rc, "error", err.Error())
+		fmt.Fprintf(w, "data: {\"type\":\"done\"}\n\n")
+		rc.Flush()
+		return
+	}
+
+	// Persist the session id that actually landed on disk. On the first turn we
+	// always persist (the freshly minted id). On a resume that fell back from a
+	// stale id, newSessionID is a fresh id that differs from what was stored —
+	// persist it so the next turn resumes the right conversation. A normal
+	// successful resume leaves newSessionID == storedSessionID, so we skip.
+	if req.RequirementID != "" && newSessionID != "" && newSessionID != storedSessionID {
+		if perr := h.reqSvc.UpdateAnalysisSession(req.RequirementID, newSessionID); perr != nil {
+			log.Printf("[analyst-chat] Failed to persist session for %s: %v", req.RequirementID, perr)
+		}
+	}
+
+	// Build a lightweight local-history string for the frontend's chat display.
+	// The authoritative conversation context lives in the resumed claude session,
+	// so this is just for client-side rendering.
+	var historyParts []string
+	if req.UserMessage != "" {
+		historyParts = append(historyParts, "User: "+req.UserMessage)
+	}
+	historyParts = append(historyParts, "AI: "+strings.TrimSpace(finalResult))
+	updatedHistory := strings.Join(historyParts, "\n")
+
+	doneData, _ := json.Marshal(map[string]string{"type": "done", "history": updatedHistory})
+	fmt.Fprintf(w, "data: %s\n\n", string(doneData))
+	rc.Flush()
+}
+
+// toolCallLabel returns a human-readable Chinese label for a tool call event.
+func toolCallLabel(toolName string, input map[string]interface{}) string {
+	switch toolName {
+	case "Read":
+		if path, ok := input["file_path"].(string); ok {
+			return "📖 读取文件: " + path
+		}
+	case "Bash":
+		if cmd, ok := input["command"].(string); ok {
+			short := cmd
+			if len(short) > 60 {
+				short = short[:60] + "..."
+			}
+			return "⚡ 执行命令: " + short
+		}
+	case "Glob":
+		if pattern, ok := input["pattern"].(string); ok {
+			return "🔍 搜索文件: " + pattern
+		}
+	case "Grep":
+		if pattern, ok := input["pattern"].(string); ok {
+			return "🔍 搜索内容: " + pattern
+		}
+	case "Write":
+		if path, ok := input["file_path"].(string); ok {
+			return "✏️ 写入文件: " + path
+		}
+	case "Edit":
+		if path, ok := input["file_path"].(string); ok {
+			return "✏️ 编辑文件: " + path
+		}
+	}
+	return "🔧 " + toolName
+}
+
+// collectProjectContext builds a BOUNDED context for the analyst first turn so
+// Claude doesn't have to blindly wander a large project tree (the opennhp
+// checkout is 3.4G / ~1000 files). The walk stats files but only reads a handful
+// of small text files. It returns:
+//   - docBlock: full content of AI-config docs (CLAUDE.md/AGENTS.md/.cursorrules/
+//     README*) plus keyword-matched source files, capped at ~40KB total.
+//   - readFiles: the relative paths whose content was injected (for SSE progress).
+//   - treeSummary: a names-only directory listing (depth- and count-capped) so
+//     Claude knows the layout without Glob'ing multi-GB of files.
+func collectProjectContext(projectPath, requirementTitle string) (docBlock string, readFiles []string, treeSummary string) {
+	const (
+		maxDocBytes    = 40 * 1024
+		maxTreeEntries = 240
+		maxTreeDepth   = 3
+	)
+
+	docCandidates := []string{"CLAUDE.md", "AGENTS.md", ".cursorrules", "README.md", "README"}
+
+	// Keywords from the title (lowercased) for source-file matching. Chinese
+	// titles rarely match English paths, so docs + tree carry most of the weight;
+	// keyword matching is a bonus when it hits.
+	titleLower := strings.ToLower(requirementTitle)
+	keywords := strings.FieldsFunc(titleLower, func(r rune) bool {
+		return r == ' ' || r == '-' || r == '_' || r == '/' || r == ',' || r == '：' || r == ':' || r == '、'
+	})
+	filtered := keywords[:0]
+	for _, kw := range keywords {
+		if len(kw) >= 3 {
+			filtered = append(filtered, kw)
+		}
+	}
+	keywords = filtered
+
+	skipExts := map[string]bool{
+		".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".ico": true, ".svg": true,
+		".woff": true, ".woff2": true, ".ttf": true, ".eot": true,
+		".zip": true, ".tar": true, ".gz": true, ".sum": true, ".lock": true,
+		".bin": true, ".exe": true, ".db": true, ".so": true, ".dll": true, ".dylib": true,
+		".mp4": true, ".mp3": true, ".pdf": true, ".dat": true, ".pdb": true,
+	}
+
+	type fileEntry struct {
+		path       string
+		relPath    string
+		isPriority bool
+	}
+	var toRead []fileEntry
+	seen := map[string]bool{}
+	var treePaths []string
+
+	_ = filepath.Walk(projectPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, _ := filepath.Rel(projectPath, path)
+		// Skip hidden / generated / dependency dirs entirely.
+		for _, part := range strings.Split(rel, string(filepath.Separator)) {
+			if part == "." {
+				continue
+			}
+			if strings.HasPrefix(part, ".") || part == "vendor" || part == "node_modules" ||
+				part == "dist" || part == "build" || part == "__pycache__" || part == "target" {
+				return nil
+			}
+		}
+
+		// Tree: collect names only (dirs and files), depth- and count-limited.
+		if len(treePaths) < maxTreeEntries {
+			depth := strings.Count(rel, string(filepath.Separator)) + 1
+			if depth <= maxTreeDepth {
+				if info.IsDir() {
+					treePaths = append(treePaths, rel+"/")
+				} else {
+					treePaths = append(treePaths, rel)
+				}
+			}
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		// Skip binary / large files from CONTENT injection (still listed in tree).
+		ext := strings.ToLower(filepath.Ext(info.Name()))
+		if skipExts[ext] || info.Size() > 200*1024 {
+			return nil
+		}
+
+		nameLower := strings.ToLower(info.Name())
+		relLower := strings.ToLower(rel)
+
+		for _, doc := range docCandidates {
+			// Only read AI-config / readme docs at the PROJECT ROOT. Nested
+			// README.md files (docker/, endpoints/.../etc) are noise — they
+			// bloat the prompt and push the model to read more. The tree still
+			// lists them by name, so the model knows they exist.
+			if nameLower == strings.ToLower(doc) && !strings.Contains(rel, string(filepath.Separator)) && !seen[rel] {
+				seen[rel] = true
+				toRead = append(toRead, fileEntry{path, rel, true})
+				return nil
+			}
+		}
+		for _, kw := range keywords {
+			if strings.Contains(relLower, kw) && !seen[rel] {
+				seen[rel] = true
+				toRead = append(toRead, fileEntry{path, rel, false})
+				return nil
+			}
+		}
+		return nil
+	})
+
+	// Doc + keyword content (priority first), capped.
+	var buf strings.Builder
+	total := 0
+	readOne := func(f fileEntry) {
+		data, rerr := os.ReadFile(f.path)
+		if rerr != nil {
+			return
+		}
+		content := string(data)
+		if total+len(content) > maxDocBytes {
+			content = content[:maxDocBytes-total]
+		}
+		buf.WriteString(fmt.Sprintf("### %s\n```\n%s\n```\n\n", f.relPath, content))
+		readFiles = append(readFiles, f.relPath)
+		total += len(content)
+	}
+	for _, f := range toRead {
+		if f.isPriority && total < maxDocBytes {
+			readOne(f)
+		}
+	}
+	for _, f := range toRead {
+		if !f.isPriority && total < maxDocBytes {
+			readOne(f)
+		}
+	}
+
+	tree := "## 项目结构（仅名称）\n"
+	if len(treePaths) == 0 {
+		tree += "(未能列出项目结构)"
+	} else {
+		tree += strings.Join(treePaths, "\n")
+		if len(treePaths) >= maxTreeEntries {
+			tree += "\n…（已截断；如需更多请直接读取具体路径）"
+		}
+	}
+
+	docBlock = buf.String()
+	treeSummary = tree
+	if docBlock == "" {
+		docBlock = "(未预读到关键文档，请基于下方结构概览，按需读取具体文件)"
+	}
+	return
+}
+
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+// StartCoding creates a background job and immediately returns its ID.
+// The claude CLI runs in a goroutine; progress is written to the job store.
+// Poll GET /api/wizard/jobs/{id} to read live log lines.
+func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProjectPath      string `json:"project_path"`
+		RequirementTitle string `json:"requirement_title"`
+		RequirementDesc  string `json:"requirement_desc"`
+		RequirementID    string `json:"requirement_id"`
+		BranchName       string `json:"branch_name"`
+		BaseBranch       string `json:"base_branch"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON")
+		return
+	}
+
+	job := h.jobs.Create(req.RequirementID)
+	writeJSON(w, 200, map[string]string{"job_id": job.ID})
+
+	go func() {
+		log.Printf("[start-coding] job %s started for %q in %s", job.ID, req.RequirementTitle, req.ProjectPath)
+
+		// Checkout the development branch before coding
+		if req.BranchName != "" {
+			baseBranch := req.BaseBranch
+			if baseBranch == "" {
+				baseBranch = "main"
+			}
+			gitCmd := exec.Command("git", "checkout", "-b", req.BranchName, baseBranch)
+			gitCmd.Dir = req.ProjectPath
+			out, err := gitCmd.CombinedOutput()
+			if err != nil {
+				// Branch may already exist, try switching to it
+				gitCmd2 := exec.Command("git", "checkout", req.BranchName)
+				gitCmd2.Dir = req.ProjectPath
+				out2, err2 := gitCmd2.CombinedOutput()
+				if err2 != nil {
+					job.Append(store.LogLine{Type: "error", Content: "❌ git checkout 失败: " + strings.TrimSpace(string(out2))})
+					job.Finish(1, store.JobError)
+					return
+				}
+				job.Append(store.LogLine{Type: "message", Content: "🌿 切换到已有分支: " + req.BranchName})
+			} else {
+				job.Append(store.LogLine{Type: "message", Content: "🌿 " + strings.TrimSpace(string(out))})
+			}
+		}
+
+		// Session threading: the developer stage continues the SAME conversation
+		// thread as analysis+design. On the first coding pass we fork off the
+		// design session (--resume <design_sid> --fork-session) so the developer
+		// inherits the full analysis+design discussion and swaps in the developer
+		// persona; the forked session gets a new id we read from the stream and
+		// persist as coding_session_id. On a re-run we --resume coding_session_id.
+		// We do NOT re-feed the requirement desc / design JSON — the resumed
+		// conversation already has them.
+		//
+		// Graceful fallback: the legacy /wizard quick-start page has no
+		// Requirement row (no requirement_id / session ids), so it can't join
+		// the session chain. When no source session exists we fall back to a
+		// fresh session and feed the full desc — i.e. the pre-chain behavior —
+		// so that path keeps working.
+		sourceSID := ""
+		fork := false
+		var reqRow *model.Requirement
+		if req.RequirementID != "" {
+			if r, err := h.reqSvc.Get(req.RequirementID); err == nil {
+				reqRow = r
+			}
+		}
+		if reqRow != nil {
+			if reqRow.CodingSessionID != "" {
+				sourceSID = reqRow.CodingSessionID
+			} else if reqRow.DesignSessionID != "" {
+				sourceSID = reqRow.DesignSessionID
+				fork = true
+			} else if reqRow.AnalysisSessionID != "" {
+				sourceSID = reqRow.AnalysisSessionID
+				fork = true
+			}
+		}
+
+		systemPrompt, model := h.roleConfig("developer")
+		var prompt string
+		if sourceSID == "" {
+			// Legacy fresh-session path: feed the full title+desc as before.
+			prompt = fmt.Sprintf("## %s\n\n%s", req.RequirementTitle, req.RequirementDesc)
+			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未关联需求会话，使用独立会话开始开发。"})
+		} else {
+			// The resumed conversation carries the requirement, analysis, and
+			// design. We only tell Claude to switch to the developer role and
+			// implement. A one-line pointer to the title helps orientation.
+			// When the user ran a pre-coding "追加调整" chat, its outcome is
+			// passed as RequirementDesc — fold it in as an explicit adjustment
+			// note so it reaches the developer (the coding session forks off the
+			// DESIGN conversation, which doesn't itself contain that chat).
+			prompt = fmt.Sprintf("现在切换到「开发者」角色。基于我们刚才的需求分析与技术方案，请实现该需求（%s）。", req.RequirementTitle)
+			if strings.TrimSpace(req.RequirementDesc) != "" {
+				prompt += "\n\n用户在开发前的追加调整说明：\n" + req.RequirementDesc
+			}
+		}
+		cmd := h.llm.GenerateCode(llm.StreamOpts{
+			Prompt:       prompt,
+			WorkDir:      req.ProjectPath,
+			SystemPrompt: systemPrompt,
+			Model:        model,
+			SessionID:    sourceSID,
+			Resume:       sourceSID != "",
+			Fork:         fork,
+		})
+
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			job.Append(store.LogLine{Type: "error", Content: "启动失败: " + err.Error()})
+			job.Finish(1, store.JobError)
+			return
+		}
+		cmd.Stderr = nil
+
+		if err := cmd.Start(); err != nil {
+			job.Append(store.LogLine{Type: "error", Content: "启动失败: " + err.Error()})
+			job.Finish(1, store.JobError)
+			return
+		}
+
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+		doneSent := false
+		var codingSessionID string
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				continue
+			}
+			var evt map[string]interface{}
+			if err := json.Unmarshal([]byte(line), &evt); err != nil {
+				continue
+			}
+			switch evt["type"] {
+			case "system":
+				// Capture the session_id of this run. For a --fork-session run this
+				// is the NEW forked id, which we persist below so later coding
+				// refine turns can --resume it.
+				if sid, ok := evt["session_id"].(string); ok && sid != "" {
+					codingSessionID = sid
+				}
+			case "assistant":
+				msg, _ := evt["message"].(map[string]interface{})
+				content, _ := msg["content"].([]interface{})
+				for _, block := range content {
+					b, _ := block.(map[string]interface{})
+					switch b["type"] {
+					case "tool_use":
+						toolName, _ := b["name"].(string)
+						input, _ := b["input"].(map[string]interface{})
+						job.Append(store.LogLine{Type: "tool_call", Content: toolCallLabel(toolName, input)})
+					case "text":
+						text, _ := b["text"].(string)
+						if text == "" {
+							continue
+						}
+						job.Append(store.LogLine{Type: "message", Content: text})
+					}
+				}
+			case "user":
+				// tool_result events — show truncated output so user sees what Claude read
+				msg, _ := evt["message"].(map[string]interface{})
+				content, _ := msg["content"].([]interface{})
+				for _, block := range content {
+					b, _ := block.(map[string]interface{})
+					if b["type"] == "tool_result" {
+						result := toolResultContent(b)
+						if result != "" {
+							job.Append(store.LogLine{Type: "tool_result", Content: "→ " + result})
+						}
+					}
+				}
+			case "result":
+				subtype, _ := evt["subtype"].(string)
+				if subtype == "success" {
+					// Persist the forked coding session id so later coding refine
+					// turns can --resume it (jobs are in-memory; the id must live
+					// in the DB to survive a restart).
+					if fork && codingSessionID != "" && req.RequirementID != "" {
+						if perr := h.reqSvc.UpdateCodingSession(req.RequirementID, codingSessionID); perr != nil {
+							log.Printf("[start-coding] Failed to persist coding session for %s: %v", req.RequirementID, perr)
+						}
+					}
+					job.Append(store.LogLine{Type: "done", Content: "✅ 开发完成！"})
+					job.Finish(0, store.JobDone)
+				} else {
+					errMsg, _ := evt["error"].(string)
+					if errMsg == "" {
+						errMsg = "Claude 执行出错"
+					}
+					job.Append(store.LogLine{Type: "error", Content: "❌ " + errMsg})
+					job.Finish(1, store.JobError)
+				}
+				doneSent = true
+			}
+		}
+
+		if err := cmd.Wait(); err != nil {
+			log.Printf("[start-coding] job %s claude exited: %v", job.ID, err)
+			if !doneSent {
+				job.Append(store.LogLine{Type: "error", Content: "❌ Claude 异常退出: " + err.Error()})
+				job.Finish(1, store.JobError)
+			}
+		} else if !doneSent {
+			job.Append(store.LogLine{Type: "done", Content: "✅ 开发完成！"})
+			job.Finish(0, store.JobDone)
+		}
+		log.Printf("[start-coding] job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
+	}()
+}
+
+// StreamJob streams a background job's log lines via SSE.
+// Replays all existing lines first, then pushes new ones until the job finishes or the client disconnects.
+func (h *WizardHandler) StreamJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, 400, "INVALID", "missing job id")
+		return
+	}
+	job, ok := h.jobs.Get(id)
+	if !ok {
+		writeError(w, 404, "NOT_FOUND", "job not found")
+		return
+	}
+
+	rc := http.NewResponseController(w)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	rc.Flush()
+
+	ch, _ := job.Subscribe()
+	defer job.Unsubscribe(ch)
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case line, open := <-ch:
+			if !open {
+				// Job finished — send final status event and close
+				_, status, exitCode := job.Snapshot()
+				doneData, _ := json.Marshal(map[string]interface{}{
+					"type":      "job_done",
+					"status":    string(status),
+					"exit_code": exitCode,
+				})
+				fmt.Fprintf(w, "data: %s\n\n", string(doneData))
+				rc.Flush()
+				return
+			}
+			data, _ := json.Marshal(line)
+			fmt.Fprintf(w, "data: %s\n\n", string(data))
+			rc.Flush()
+		}
+	}
+}
+
+// ArchitectDesign is the architect-phase design generator. It runs Claude with
+// stream-json to produce a technical implementation plan from the (already
+// analyzed) requirement, streams progress via SSE, and on success persists the
+// design and marks the requirement as designing (in-progress). The "方案完成"
+// gate is a separate status transition driven by the user.
+func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		RequirementID string `json:"requirement_id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	id := body.RequirementID
+	if id == "" {
+		writeError(w, 400, "INVALID", "missing requirement id")
+		return
+	}
+
+	req, err := h.reqSvc.Get(id)
+	if err != nil {
+		writeError(w, 404, "NOT_FOUND", "requirement not found")
+		return
+	}
+	project, _ := h.projectSvc.Get(req.ProjectID)
+	projectPath := ""
+	if project != nil {
+		projectPath = project.LocalPath
+	}
+
+	rc := http.NewResponseController(w)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	rc.Flush()
+
+	sendStatus(w, rc, "phase", "📐 Claude 正在 plan 模式下探索代码并制定技术方案...")
+	rc.Flush()
+
+	// Session threading: the architect stage continues the SAME conversation
+	// thread as the analyst. On the first design pass we fork off the analyst
+	// session (--resume <analysis_sid> --fork-session) so the architect inherits
+	// the full analysis discussion and swaps in the architect persona via
+	// --system-prompt; the forked session gets a new id we read back from the
+	// stream and persist as design_session_id. On a re-run (design_session_id
+	// already set) we just --resume it. We do NOT re-feed Description /
+	// AcceptanceCriteria — the resumed conversation already has them.
+	sourceSID := ""
+	fork := false
+	if req.DesignSessionID != "" {
+		sourceSID = req.DesignSessionID
+	} else if req.AnalysisSessionID != "" {
+		sourceSID = req.AnalysisSessionID
+		fork = true
+	}
+	if sourceSID == "" {
+		sendStatus(w, rc, "error", "尚未找到需求分析会话，请先完成「需求分析」再生成技术方案。")
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+
+	// Plan-mode task prompt: the resumed conversation already carries the
+	// requirement and its analysis. We tell Claude to switch to the architect
+	// role and produce a technical implementation plan. In plan mode (--permission-mode
+	// plan) Claude reads the codebase with read-only tools, then writes the plan
+	// to ~/.claude/plans/<slug>.md via the plan-file Write (the only write plan
+	// mode allows). We capture that file's content from the Write tool_use event.
+	prompt := "现在切换到「架构师」角色。基于我们刚才完成的需求分析对话，" +
+		"请阅读项目相关源文件核实技术细节，制定具体可执行的技术实现方案（plan）。" +
+		"方案应涵盖：整体实现思路、需要新增或修改的文件、具体实现步骤、数据模型/数据库变更、实现风险及应对。"
+
+	systemPrompt, model := h.roleConfig("architect")
+	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
+		Prompt:         prompt,
+		WorkDir:        projectPath,
+		SystemPrompt:   systemPrompt,
+		Model:          model,
+		SessionID:      sourceSID,
+		Resume:         true,
+		Fork:           fork,
+		PermissionMode: "plan",
+	})
+	out := runClaudeStream(w, rc, cmd, "architect-design")
+
+	if out.staleSession {
+		// The source conversation is gone. Clear whichever session id was stale
+		// so the user can redo the prior stage, and surface a recovery hint.
+		if fork {
+			_ = h.reqSvc.UpdateAnalysisSession(id, "")
+			sendStatus(w, rc, "error", "需求分析会话已过期。请重新进行「需求分析」后再生成技术方案。")
+		} else {
+			_ = h.reqSvc.UpdateDesignSession(id, "")
+			sendStatus(w, rc, "error", "技术方案会话已过期。请重新生成技术方案。")
+		}
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+
+	// Persist the forked session id (only present on a fresh fork). On a plain
+	// resume re-run it equals the existing id, so skip the write.
+	if fork && out.sessionID != "" {
+		if perr := h.reqSvc.UpdateDesignSession(id, out.sessionID); perr != nil {
+			log.Printf("[architect-design] Failed to persist design session for %s: %v", id, perr)
+		}
+	}
+
+	// In plan mode, the full plan markdown is captured from the Write tool_use
+	// event that lands in ~/.claude/plans/*.md (runClaudeStream stores it in
+	// out.planContent). Fall back to the result text if capture missed it (e.g.
+	// a proxy that doesn't emit tool_use blocks in the assistant event).
+	planMarkdown := out.planContent
+	if planMarkdown == "" {
+		planMarkdown = out.finalResult
+	}
+	if planMarkdown == "" {
+		errMsg := out.errMsg
+		if errMsg == "" {
+			errMsg = "Claude 未返回结果，请重试"
+		}
+		sendStatus(w, rc, "error", errMsg)
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+
+	// Persist
+	if _, err := h.reqSvc.UpdateDesign(id, planMarkdown); err != nil {
+		log.Printf("[architect-design] Failed to save design for %s: %v", id, err)
+	}
+
+	doneData, _ := json.Marshal(map[string]string{"type": "done", "result": planMarkdown})
+	fmt.Fprintf(w, "data: %s\n\n", string(doneData))
+	rc.Flush()
+}
+
+// GetJob returns the current state and full log of a background coding job.
+func (h *WizardHandler) GetJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, 400, "INVALID", "missing job id")
+		return
+	}
+	job, ok := h.jobs.Get(id)
+	if !ok {
+		writeError(w, 404, "NOT_FOUND", "job not found")
+		return
+	}
+	logLines, status, exitCode := job.Snapshot()
+	writeJSON(w, 200, map[string]interface{}{
+		"job_id":      job.ID,
+		"status":      status,
+		"exit_code":   exitCode,
+		"log":         logLines,
+		"started_at":  job.StartedAt,
+		"finished_at": job.FinishedAt,
+	})
+}
+
+// toolResultContent extracts and truncates the content of a tool_result block.
+func toolResultContent(b map[string]interface{}) string {
+	switch v := b["content"].(type) {
+	case string:
+		return truncateStr(v, 200)
+	case []interface{}:
+		var parts []string
+		for _, item := range v {
+			if m, ok := item.(map[string]interface{}); ok {
+				if text, ok := m["text"].(string); ok {
+					parts = append(parts, text)
+				}
+			}
+		}
+		return truncateStr(strings.Join(parts, " "), 200)
+	}
+	return ""
+}
+
+// extractJSON strips prose and code fences surrounding a JSON object.
+// It finds the first '{' and the matching closing '}', returning that substring.
+func extractJSON(s string) string {
+	s = strings.TrimSpace(s)
+	start := strings.Index(s, "{")
+	if start == -1 {
+		return s
+	}
+	depth := 0
+	inStr := false
+	escape := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if escape {
+			escape = false
+			continue
+		}
+		if c == '\\' && inStr {
+			escape = true
+			continue
+		}
+		if c == '"' {
+			inStr = !inStr
+			continue
+		}
+		if inStr {
+			continue
+		}
+		if c == '{' {
+			depth++
+		} else if c == '}' {
+			depth--
+			if depth == 0 {
+				return strings.TrimSpace(s[start : i+1])
+			}
+		}
+	}
+	return strings.TrimSpace(s[start:])
+}
+
+func sendStatus(w io.Writer, rc *http.ResponseController, typ string, content string) {
+	jsonLine, _ := json.Marshal(map[string]string{"type": typ, "content": content})
+	fmt.Fprintf(w, "data: %s\n\n", string(jsonLine))
+}
+
+// claudeResultError extracts a human-readable error message from a non-success
+// claude "result" event. The CLI surfaces auth/transport failures in the
+// "error", "api_error_status", or "result" fields; we also log the full event.
+func claudeResultError(scope string, evt map[string]interface{}) string {
+	msg := "Claude 执行出错"
+	if v, ok := evt["error"].(string); ok && v != "" {
+		msg = v
+	} else if v, ok := evt["result"].(string); ok && v != "" {
+		msg = v
+	} else if v, ok := evt["api_error_status"].(float64); ok && v != 0 {
+		msg = fmt.Sprintf("API error (HTTP %v)", v)
+	}
+	// An upstream proxy 400 (bad request / not found) usually means the
+	// configured base URL / token / model is wrong or the account is out of
+	// quota — point the user at the settings rather than blaming the model.
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "400") &&
+		(strings.Contains(lower, "bad request") || strings.Contains(lower, "not found")) {
+		msg += "\n（这是上游代理返回的 400，通常是 BASE_URL / Token / 模型 配置有误或额度耗尽，请在「设置」里检查 Claude 配置）"
+	}
+	if raw, err := json.Marshal(evt); err == nil {
+		log.Printf("[%s] claude result event: %s", scope, truncateStr(string(raw), 800))
+	}
+	return msg
+}
+
+// claudeStreamOutcome is the result of running one claude stream-json command to
+// completion. finalResult holds the "result" event text on success. On failure
+// errMsg is a human-readable message; staleSession is true when the failure was
+// specifically a --resume against a conversation that no longer exists on disk,
+// so the caller can transparently fall back to a fresh session instead of
+// surfacing a hard error.
+type claudeStreamOutcome struct {
+	finalResult     string
+	sessionID       string // session_id of this run, read from the system/init event. For a --fork-session run this is the NEW forked id.
+	staleSession    bool
+	errMsg          string
+	hadStreamEvents bool // true if any stream_event/content_block_delta arrived
+	planContent     string // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
+}
+
+// isStaleSessionError reports whether a non-success result event (optionally
+// combined with stderr) indicates the --resume target conversation doesn't exist
+// on disk. The claude CLI surfaces this as an "errors" array entry of the form
+// "No conversation found with session ID: <uuid>" (subtype error_during_execution).
+// evt may be nil, in which case only stderr is checked.
+func isStaleSessionError(evt map[string]interface{}, stderr string) bool {
+	contains := func(s string) bool { return strings.Contains(s, "No conversation found") }
+	if stderr != "" && contains(stderr) {
+		return true
+	}
+	if evt == nil {
+		return false
+	}
+	if s, ok := evt["error"].(string); ok && contains(s) {
+		return true
+	}
+	if s, ok := evt["result"].(string); ok && contains(s) {
+		return true
+	}
+	if s, ok := evt["message"].(string); ok && contains(s) {
+		return true
+	}
+	if errs, ok := evt["errors"].([]interface{}); ok {
+		for _, e := range errs {
+			if s, ok := e.(string); ok && contains(s) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// runClaudeStream starts a claude stream-json cmd, parses its events, and
+// translates them to our SSE protocol (tool_call / message frames, flushed per
+// event). It does NOT emit terminal error/done frames — the caller owns those.
+// On a non-success result it returns the error message (and flags a stale
+// --resume so the caller can recover). The caller must NOT have started cmd.
+func runClaudeStream(w http.ResponseWriter, rc *http.ResponseController, cmd *exec.Cmd, scope string) claudeStreamOutcome {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return claudeStreamOutcome{errMsg: "启动 Claude 失败: " + err.Error()}
+	}
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Start(); err != nil {
+		return claudeStreamOutcome{errMsg: "启动 Claude 失败: " + err.Error()}
+	}
+	logClaudeEnvConfig(scope, cmd)
+	logClaudeCmd(scope, cmd)
+
+	var out claudeStreamOutcome
+	// thinkingTokens tracks the last token count we reported so we can
+	// throttle thinking_tokens progress messages (every 50 tokens).
+	var lastThinkingReport int
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		var evt map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			// stream-json is one JSON object per line; a non-JSON line is usually
+			// a fatal error printed by the CLI. Surface it in the logs.
+			if strings.TrimSpace(line) != "" {
+				log.Printf("[%s] non-json stdout: %s", scope, truncateStr(line, 500))
+			}
+			continue
+		}
+		evtType, _ := evt["type"].(string)
+		switch evtType {
+		case "system":
+			sub, _ := evt["subtype"].(string)
+			switch sub {
+			case "init":
+				// The init event arrives as soon as Claude connects (a few seconds
+				// in). Some proxies buffer the whole model response and only deliver
+				// it at completion, so without this the client would see nothing for
+				// the entire wait. Surface it as a phase so the user knows Claude is
+				// connected and thinking.
+				if sid, ok := evt["session_id"].(string); ok && sid != "" {
+					out.sessionID = sid
+				}
+				sendStatus(w, rc, "phase", "🤖 Claude 已连接，正在思考…")
+				rc.Flush()
+			case "thinking_tokens":
+				// Third-party proxy models (e.g. zai-org/glm) don't stream text
+				// token-by-token; they batch everything into the final assistant event.
+				// But they DO stream thinking_tokens incrementally, giving us a
+				// heartbeat we can use to show progress. Report every 50 tokens so
+				// the user sees live activity instead of a frozen spinner.
+				if tokens, ok := evt["estimated_tokens"].(float64); ok {
+					t := int(tokens)
+					if t-lastThinkingReport >= 50 {
+						lastThinkingReport = t
+						sendStatus(w, rc, "phase", fmt.Sprintf("🤔 模型思考中… (%d tokens)", t))
+						rc.Flush()
+					}
+				}
+			}
+		case "stream_event":
+			// stream-json emits incremental content_block_delta events as Claude
+			// generates text token-by-token. Surfacing these gives the user
+			// real-time output instead of waiting for the batched "assistant" event.
+			inner, _ := evt["event"].(map[string]interface{})
+			if inner == nil {
+				continue
+			}
+			innerType, _ := inner["type"].(string)
+			switch innerType {
+			case "content_block_delta":
+				delta, _ := inner["delta"].(map[string]interface{})
+				if delta == nil {
+					continue
+				}
+				deltaType, _ := delta["type"].(string)
+				switch deltaType {
+				case "text_delta":
+					text, _ := delta["text"].(string)
+					if text == "" {
+						continue
+					}
+					out.hadStreamEvents = true
+					jsonLine, _ := json.Marshal(map[string]string{"type": "message", "content": text})
+					fmt.Fprintf(w, "data: %s\n\n", string(jsonLine))
+					rc.Flush()
+				case "input_json_delta":
+					// tool input being assembled — not surfaced to the client
+				}
+			case "content_block_start":
+				// A new tool_use block starting — surface the tool name immediately
+				// so the user sees "calling tool X" before the input is assembled.
+				block, _ := inner["content_block"].(map[string]interface{})
+				if block == nil {
+					continue
+				}
+				if block["type"] == "tool_use" {
+					toolName, _ := block["name"].(string)
+					if toolName != "" {
+						sendStatus(w, rc, "tool_call", toolCallLabel(toolName, nil))
+						rc.Flush()
+					}
+				}
+			}
+		case "assistant":
+			// The "assistant" event is a batched summary of the full turn. When the
+			// model supports streaming (stream_event/content_block_delta), text is
+			// already delivered incrementally and we skip it here. When the model
+			// does NOT emit stream_event (e.g. third-party proxy models), the
+			// assistant event carries the only copy of the text, so we emit it now.
+			// We track whether any stream_event text arrived to decide which path to take.
+			msg, _ := evt["message"].(map[string]interface{})
+			content, _ := msg["content"].([]interface{})
+			for _, block := range content {
+				b, _ := block.(map[string]interface{})
+				switch b["type"] {
+				case "tool_use":
+					toolName, _ := b["name"].(string)
+					input, _ := b["input"].(map[string]interface{})
+					// Capture the plan file content from a plan-mode Write to
+					// ~/.claude/plans/*.md. The assistant event carries the complete
+					// tool_use input (unlike stream_event input_json_delta which is
+					// fragmentary), so this is the authoritative source.
+					if toolName == "Write" && input != nil {
+						if fp, ok := input["file_path"].(string); ok {
+							if strings.Contains(filepath.ToSlash(fp), "/.claude/plans/") && strings.HasSuffix(fp, ".md") {
+								if c, ok := input["content"].(string); ok && c != "" {
+									out.planContent = c
+								}
+							}
+						}
+					}
+					// Emit with full input context (content_block_start fired bare label already,
+					// but only if stream_event was delivered — safe to emit again, client dedupes by rendering order).
+					if !out.hadStreamEvents {
+						sendStatus(w, rc, "tool_call", toolCallLabel(toolName, input))
+						rc.Flush()
+					}
+				case "text":
+					// Only emit if we never received stream_event deltas for this turn,
+					// i.e. the model batches everything into the assistant event.
+					if !out.hadStreamEvents {
+						text, _ := b["text"].(string)
+						if text != "" {
+							jsonLine, _ := json.Marshal(map[string]string{"type": "message", "content": text})
+							fmt.Fprintf(w, "data: %s\n\n", string(jsonLine))
+							rc.Flush()
+						}
+					}
+				}
+			}
+		case "result":
+			subtype, _ := evt["subtype"].(string)
+			// The CLI sometimes emits subtype:"success" even when the upstream
+			// proxy rejected the request — it carries api_error_status (a number),
+			// is_error:true, terminal_reason:"api_error", and a "result" of
+			// "API Error: 400 ...". Treat those as failures so the error surfaces
+			// via SSE instead of being returned as if it were the model's output.
+			apiErrStatus := 0.0
+			if v, ok := evt["api_error_status"].(float64); ok {
+				apiErrStatus = v
+			}
+			isErr, _ := evt["is_error"].(bool)
+			terminalReason, _ := evt["terminal_reason"].(string)
+			realSuccess := subtype == "success" && !isErr &&
+				terminalReason != "api_error" && apiErrStatus == 0
+			if realSuccess {
+				out.finalResult, _ = evt["result"].(string)
+			} else {
+				out.errMsg = claudeResultError(scope, evt)
+				if isStaleSessionError(evt, stderrBuf.String()) {
+					out.staleSession = true
+					log.Printf("[%s] stale --resume detected (session not on disk)", scope)
+				}
+			}
+		}
+	}
+
+	if err := cmd.Wait(); err != nil {
+		stderrTrim := strings.TrimSpace(stderrBuf.String())
+		log.Printf("[%s] claude exited: %v stderr=%s", scope, err, stderrTrim)
+		// A non-zero exit is only fatal if we never got a result; some error
+		// events still carry a usable result field.
+		if out.finalResult == "" && out.errMsg == "" {
+			msg := "Claude 异常退出: " + err.Error()
+			if stderrTrim != "" {
+				msg = "Claude 异常退出: " + stderrTrim
+			}
+			out.errMsg = msg
+		}
+	}
+	// Re-check staleness against stderr in case the CLI printed the error there
+	// instead of emitting a result event.
+	if !out.staleSession && isStaleSessionError(nil, stderrBuf.String()) {
+		out.staleSession = true
+	}
+	if out.staleSession && out.errMsg == "" {
+		out.errMsg = "分析对话会话已过期"
+	}
+	return out
+}
+
+// analystFirstTurnDisallowedTools blocks file/code tools on the analyst first
+// turn so Claude answers from the pre-read context without tool use. The
+// atlascloud proxy mangles multi-turn tool-use streaming ("Content block not
+// found"); the first turn already has the pre-read docs + tree, so it doesn't
+// need to read files. Resume turns keep all tools.
+var analystFirstTurnDisallowedTools = []string{"Read", "Glob", "Grep", "Bash", "Write", "Edit"}
+
+// runAnalystTurn runs one analyst-chat turn with automatic stale-session
+// recovery. firstTurnPrompt is a lazy builder for the first-turn prompt (it
+// pre-reads bounded project context and streams the pre-read files as SSE);
+// it is only invoked when doing a first-turn run — the genuine first turn, or
+// the stale-resume fallback — so resume turns don't pay the pre-read cost.
+// resumePrompt is just the new user message for a resumed turn. When resume==true
+// and the target conversation no longer exists on disk (Claude reports "No
+// conversation found"), it transparently falls back: mints a fresh session id and
+// re-runs as a first turn, so a stale id stuck in the DB never wedges the chat.
+// Returns the final result text and the session id that actually landed on disk
+// (which the caller persists).
+func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, sessionID string, resume bool, w http.ResponseWriter, rc *http.ResponseController) (finalResult, newSessionID string, err error) {
+	prompt := resumePrompt
+	if !resume {
+		prompt = firstTurnPrompt()
+	}
+	log.Printf("[analyst-chat] Running claude stream-json (session=%s, resume=%v), prompt=%d bytes", sessionID, resume, len(prompt))
+
+	// On a first-turn run (genuine first turn or stale-resume fallback), block
+	// file/code tools so Claude answers purely from the pre-read context. The
+	// atlascloud proxy mangles multi-turn tool-use streaming ("Content block not
+	// found"), and the first turn has the pre-read docs + tree so it doesn't
+	// need to read files. Resume turns keep tools (the user may ask Claude to
+	// verify specific code in follow-up).
+	var disallowed []string
+	if !resume {
+		disallowed = analystFirstTurnDisallowedTools
+	}
+	cmd := h.llm.StreamCmd(ctx, llm.StreamOpts{
+		Prompt:          prompt,
+		WorkDir:         projectPath,
+		SystemPrompt:    systemPrompt,
+		Model:           model,
+		SessionID:       sessionID,
+		Resume:          resume,
+		DisallowedTools: disallowed,
+	})
+	out := runClaudeStream(w, rc, cmd, "analyst-chat")
+
+	if out.staleSession && resume {
+		// Stale --resume: the session file is gone (typically a stale id left by
+		// an older build before the "persist after success" guard). Recover by
+		// starting a fresh conversation, folding the user's latest message into
+		// the first-turn prompt.
+		freshID := util.NewUUID()
+		log.Printf("[analyst-chat] stale session %s — falling back to fresh first turn %s", sessionID, freshID)
+		sendStatus(w, rc, "phase", "🔄 检测到过期会话，正在重新开始分析...")
+		rc.Flush()
+		prompt = firstTurnPrompt()
+		cmd = h.llm.StreamCmd(ctx, llm.StreamOpts{
+			Prompt:          prompt,
+			WorkDir:         projectPath,
+			SystemPrompt:    systemPrompt,
+			Model:           model,
+			SessionID:       freshID,
+			DisallowedTools: analystFirstTurnDisallowedTools,
+		})
+		out = runClaudeStream(w, rc, cmd, "analyst-chat")
+		sessionID = freshID
+	}
+
+	if out.finalResult == "" {
+		if out.errMsg != "" {
+			return "", sessionID, fmt.Errorf("%s", out.errMsg)
+		}
+		return "", sessionID, fmt.Errorf("Claude 未返回结果，请重试")
+	}
+	return out.finalResult, sessionID, nil
+}
+
+// buildAnalystFirstPrompt assembles the first-turn analyst prompt. description is
+// the FULL requirement text (the title is just a short label and may be
+// truncated, so the description is the authoritative intent). It also folds in
+// the current (rough) analysis, the user's message, and the bounded project
+// context pre-read by collectProjectContext (docBlock + a names-only structure
+// tree). It is reused both for the genuine first turn and for the stale-resume
+// fallback (where the prior conversation is lost, so we restart from this
+// scaffold). The instruction deliberately tells Claude NOT to blindly traverse
+// the whole project — it already has the layout and key docs.
+func buildAnalystFirstPrompt(title, description, currentAnalysis, userMessage, docBlock, treeSummary string) string {
+	var b strings.Builder
+	if description != "" {
+		b.WriteString(fmt.Sprintf("%s\n\n", description))
+	}
+	if currentAnalysis != "" && currentAnalysis != "[]" {
+		b.WriteString(fmt.Sprintf("当前初步分析：\n%s\n\n", currentAnalysis))
+	}
+	if userMessage != "" {
+		b.WriteString(fmt.Sprintf("用户消息：\n%s\n\n", userMessage))
+	}
+	if docBlock != "" {
+		b.WriteString("以下是已预读的项目关键文档与代码（无需重复读取这些文件）：\n")
+		b.WriteString(docBlock)
+		b.WriteString("\n")
+	}
+	if treeSummary != "" {
+		b.WriteString(treeSummary)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("请**仅基于以上预读上下文**完成工作。**禁止调用工具读取任何文件**——预读已提供关键文档与项目结构；" +
+		"若信息不足以判断某点，把该缺失点作为关键问题提给用户，让用户来回答，而不是自己去读文件。\n\n" +
+		"1. **分析现有代码**：基于预读内容指出与本需求直接相关的文件、函数、数据结构\n" +
+		"2. **识别实现路径**：需要新增或修改哪些部分，有哪些可复用\n" +
+		"3. **提出关键问题**：2-3 个你从预读信息中无法确定、必须由用户决策的问题（纯业务/产品决策）\n\n" +
+		"先给出你的分析与实现思路，再提问题。\n")
+	return b.String()
+}
+
+// logClaudeEnvConfig logs which auth-related env vars are present on the claude
+// subprocess (presence only — never values, so secrets stay out of the logs).
+// Use it to confirm the configured ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL are
+// applied and that a conflicting inherited ANTHROPIC_API_KEY has been stripped.
+func logClaudeEnvConfig(scope string, cmd *exec.Cmd) {
+	has := func(k string) bool {
+		for _, kv := range cmd.Env {
+			if key, _, _ := strings.Cut(kv, "="); key == k {
+				return true
+			}
+		}
+		return false
+	}
+	log.Printf("[%s] claude env present: ANTHROPIC_AUTH_TOKEN=%v ANTHROPIC_BASE_URL=%v ANTHROPIC_API_KEY=%v",
+		scope, has("ANTHROPIC_AUTH_TOKEN"), has("ANTHROPIC_BASE_URL"), has("ANTHROPIC_API_KEY"))
+}
+
+// logClaudeCmd logs the actual claude CLI invocation as a shell command that
+// can be copied and run directly in a terminal.
+func logClaudeCmd(scope string, cmd *exec.Cmd) {
+	parts := make([]string, 0, len(cmd.Args))
+	for _, a := range cmd.Args {
+		if len(a) > 200 {
+			a = a[:200] + fmt.Sprintf("…(%d bytes total)", len(a))
+		}
+		parts = append(parts, shellQuote(a))
+	}
+	shell := ""
+	if cmd.Dir != "" {
+		shell = "cd " + shellQuote(cmd.Dir) + " && "
+	}
+	shell += strings.Join(parts, " ")
+	log.Printf("[%s] claude cmd (copy-paste ready):\n%s", scope, shell)
+}
+
+// shellQuote wraps s in single quotes, escaping any single quotes inside.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func streamLines(r io.Reader, w io.Writer, rc *http.ResponseController, streamType string) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		jsonLine, _ := json.Marshal(map[string]string{
+			"type":    streamType,
+			"content": line,
+		})
+		fmt.Fprintf(w, "data: %s\n\n", string(jsonLine))
+		rc.Flush()
+	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("[wizard] stream error (%s): %v", streamType, err)
+	}
+}
+
+// RefineDoc streams a multi-turn conversation to refine either a requirement spec or a design doc.
+// doc_type: "spec" | "design"
+func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RequirementID       string `json:"requirement_id"`
+		ProjectPath         string `json:"project_path"`
+		DocType             string `json:"doc_type"` // "spec" | "design"
+		CurrentDoc          string `json:"current_doc"`
+		ConversationHistory string `json:"conversation_history"`
+		UserMessage         string `json:"user_message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+
+	rc := http.NewResponseController(w)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	rc.Flush()
+
+	docLabel := "需求文档"
+	if req.DocType == "design" {
+		docLabel = "技术方案"
+	} else if req.DocType == "coding" {
+		docLabel = "开发指令"
+	}
+
+	// Route to this stage's session: spec→analyst, design→architect,
+	// coding→developer. The session already holds the stage's conversation and
+	// the doc it generated, so we --resume it and append ONLY the user's new
+	// message — no ConversationHistory / CurrentDoc re-feeding (the resumed
+	// conversation IS the context).
+	var requirement *model.Requirement
+	if req.RequirementID != "" {
+		requirement, _ = h.reqSvc.Get(req.RequirementID)
+	}
+	sourceSID, roleKey := "", "analyst"
+	if requirement != nil {
+		sourceSID, roleKey = docStageSession(requirement, req.DocType)
+	}
+	if sourceSID == "" {
+		sendStatus(w, rc, "error", "尚未找到该阶段的会话，请先生成"+docLabel+"后再 refine。")
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+	systemPrompt, model := h.roleConfig(roleKey)
+
+	// The resumed conversation carries the doc + prior turns. Send only the
+	// user's latest message plus a steady instruction covering both mid-refine
+	// responses and the completion signal.
+	prompt := fmt.Sprintf("用户消息：\n%s\n\n", req.UserMessage) +
+		"请基于我们的对话上下文回应用户对「" + docLabel + "」的修改意见，给出具体修改建议。" +
+		"若用户确认修改已完成，在回复最后单独一行追加：[REFINE_COMPLETE]\n用中文。"
+
+	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
+		Prompt:       prompt,
+		WorkDir:      req.ProjectPath,
+		SystemPrompt: systemPrompt,
+		Model:        model,
+		SessionID:    sourceSID,
+		Resume:       true,
+	})
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		sendStatus(w, rc, "error", "启动 Claude 失败: "+err.Error())
+		return
+	}
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		sendStatus(w, rc, "error", "启动 Claude 失败: "+err.Error())
+		return
+	}
+
+	var finalResult string
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		var evt map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			continue
+		}
+		switch evt["type"] {
+		case "assistant":
+			msg, _ := evt["message"].(map[string]interface{})
+			content, _ := msg["content"].([]interface{})
+			for _, block := range content {
+				b, _ := block.(map[string]interface{})
+				switch b["type"] {
+				case "tool_use":
+					toolName, _ := b["name"].(string)
+					input, _ := b["input"].(map[string]interface{})
+					sendStatus(w, rc, "tool_call", toolCallLabel(toolName, input))
+					rc.Flush()
+				case "text":
+					text, _ := b["text"].(string)
+					if text == "" {
+						continue
+					}
+					jsonLine, _ := json.Marshal(map[string]string{"type": "message", "content": text})
+					fmt.Fprintf(w, "data: %s\n\n", string(jsonLine))
+					rc.Flush()
+				}
+			}
+		case "result":
+			if evt["subtype"] == "success" {
+				finalResult, _ = evt["result"].(string)
+			}
+		}
+	}
+
+	cmd.Wait()
+
+	// The authoritative conversation lives in the resumed claude session; this
+	// history string is only for client-side rendering of the latest exchange.
+	var historyParts []string
+	if req.UserMessage != "" {
+		historyParts = append(historyParts, "User: "+req.UserMessage)
+	}
+	if finalResult != "" {
+		historyParts = append(historyParts, "AI: "+strings.TrimSpace(finalResult))
+	}
+	updatedHistory := strings.Join(historyParts, "\n")
+
+	refineComplete := strings.Contains(finalResult, "[REFINE_COMPLETE]")
+
+	doneData, _ := json.Marshal(map[string]interface{}{
+		"type":            "done",
+		"history":         updatedHistory,
+		"refine_complete": refineComplete,
+	})
+	fmt.Fprintf(w, "data: %s\n\n", string(doneData))
+	rc.Flush()
+}
+
+// ApplyDoc lets Claude rewrite the stored doc field based on the conversation.
+// doc_type: "spec" updates acceptance_criteria; "design" updates design_docs.
+func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RequirementID       string `json:"requirement_id"`
+		ProjectPath         string `json:"project_path"`
+		DocType             string `json:"doc_type"`
+		CurrentDoc          string `json:"current_doc"`
+		ConversationHistory string `json:"conversation_history"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+
+	rc := http.NewResponseController(w)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	rc.Flush()
+
+	sendStatus(w, rc, "phase", "🤖 Claude 正在基于对话整合修改内容...")
+	rc.Flush()
+
+	// Route to this stage's session and resume it — the conversation carries the
+	// doc + refine discussion, so we only ask Claude to emit the final doc.
+	// No ConversationHistory / CurrentDoc re-feeding.
+	var requirement *model.Requirement
+	if req.RequirementID != "" {
+		requirement, _ = h.reqSvc.Get(req.RequirementID)
+	}
+	sourceSID, roleKey := "", "analyst"
+	if requirement != nil {
+		sourceSID, roleKey = docStageSession(requirement, req.DocType)
+	}
+	if sourceSID == "" {
+		sendStatus(w, rc, "error", "尚未找到该阶段的会话，请先生成对应文档后再 apply。")
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+	systemPrompt, model := h.roleConfig(roleKey)
+
+	var prompt string
+	switch req.DocType {
+	case "spec":
+		prompt = "基于我们的对话，将需求文档更新为最终版本。" +
+			"输出 ONLY valid JSON，不要 markdown 代码块：\n" +
+			"{\n" +
+			"  \"acceptance_criteria\": [\"完整的验收标准列表\"],\n" +
+			"  \"technical_risks\": [\"技术风险列表\"],\n" +
+			"  \"related_modules\": [\"相关模块路径\"],\n" +
+			"  \"summary\": \"需求概述\"\n" +
+			"}"
+	case "coding":
+		prompt = "基于我们的对话，将用户的调整意见整理为给 Claude Code CLI 的开发指令。" +
+			"输出纯文本的开发指令，清晰描述需要实现或调整的内容。不要输出 JSON，不要添加额外说明。"
+	default: // "design"
+			// Detect plan-format designs (plan mode produces markdown, not JSON).
+			// Use the DB-stored doc (the frontend's apply-doc call doesn't send
+			// current_doc). If it isn't valid JSON, it's plan markdown — ask Claude
+			// to output the updated plan as markdown instead of the JSON schema.
+			storedDoc := ""
+			if requirement != nil {
+				storedDoc = requirement.DesignDocs
+			}
+			isPlanMarkdown := !isLikelyJSON(storedDoc)
+			if isPlanMarkdown {
+				prompt = "基于我们的对话，将技术方案（plan）更新为最终版本。" +
+					"输出完整的 Markdown 技术方案，涵盖：整体实现思路、需要新增或修改的文件、" +
+					"具体实现步骤、数据模型/数据库变更、实现风险及应对。直接输出 Markdown，不要添加额外说明。"
+			} else {
+				prompt = "基于我们的对话，将技术方案更新为最终版本。" +
+					"输出 ONLY valid JSON，不要 markdown 代码块：\n" +
+					"{\n" +
+					"  \"overview\": \"方案概述\",\n" +
+					"  \"files\": [\"涉及文件路径\"],\n" +
+					"  \"steps\": [\"实现步骤\"],\n" +
+					"  \"model_changes\": \"数据模型变更，无则写'无'\",\n" +
+					"  \"risks\": [\"实现风险\"]\n" +
+					"}"
+			}
+		}
+
+	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
+		Prompt:       prompt,
+		WorkDir:      req.ProjectPath,
+		SystemPrompt: systemPrompt,
+		Model:        model,
+		SessionID:    sourceSID,
+		Resume:       true,
+	})
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		sendStatus(w, rc, "error", "启动 Claude 失败: "+err.Error())
+		return
+	}
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		sendStatus(w, rc, "error", "启动 Claude 失败: "+err.Error())
+		return
+	}
+
+	var finalResult string
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		var evt map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			continue
+		}
+		switch evt["type"] {
+		case "assistant":
+			msg, _ := evt["message"].(map[string]interface{})
+			content, _ := msg["content"].([]interface{})
+			for _, block := range content {
+				b, _ := block.(map[string]interface{})
+				switch b["type"] {
+				case "tool_use":
+					toolName, _ := b["name"].(string)
+					input, _ := b["input"].(map[string]interface{})
+					sendStatus(w, rc, "tool_call", toolCallLabel(toolName, input))
+					rc.Flush()
+				case "text":
+					text, _ := b["text"].(string)
+					if text == "" {
+						continue
+					}
+					jsonLine, _ := json.Marshal(map[string]string{"type": "message", "content": text})
+					fmt.Fprintf(w, "data: %s\n\n", string(jsonLine))
+					rc.Flush()
+				}
+			}
+		case "result":
+			if evt["subtype"] == "success" {
+				finalResult, _ = evt["result"].(string)
+			}
+		}
+	}
+
+	cmd.Wait()
+
+	if finalResult == "" {
+		sendStatus(w, rc, "error", "Claude 未返回结果，请重试")
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+
+	// For "coding" type: return plain text instruction, no DB write.
+	if req.DocType == "coding" {
+		doneData, _ := json.Marshal(map[string]interface{}{
+			"type":    "done",
+			"success": true,
+			"result":  strings.TrimSpace(finalResult),
+		})
+		fmt.Fprintf(w, "data: %s\n\n", string(doneData))
+		rc.Flush()
+		return
+	}
+
+	// For design docs in plan-markdown format, persist the raw markdown (not
+	// extractJSON, which would mangle markdown containing { } characters).
+	// Use the DB-stored doc to detect format (frontend's apply call doesn't
+	// send current_doc).
+	storedDesignDoc := ""
+	if requirement != nil {
+		storedDesignDoc = requirement.DesignDocs
+	}
+	var persistVal string
+	if req.DocType == "design" && !isLikelyJSON(storedDesignDoc) {
+		persistVal = strings.TrimSpace(finalResult)
+	} else {
+		persistVal = extractJSON(finalResult)
+	}
+
+	// Persist to DB
+	var saveErr error
+	if req.DocType == "spec" {
+		_, saveErr = h.reqSvc.UpdateAnalysis(req.RequirementID, persistVal)
+	} else {
+		_, saveErr = h.reqSvc.UpdateDesign(req.RequirementID, persistVal)
+	}
+	if saveErr != nil {
+		log.Printf("[apply-doc] save failed: %v", saveErr)
+		sendStatus(w, rc, "error", "保存失败: "+saveErr.Error())
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+
+	doneData, _ := json.Marshal(map[string]interface{}{
+		"type":    "done",
+		"success": true,
+		"result":  persistVal,
+	})
+	fmt.Fprintf(w, "data: %s\n\n", string(doneData))
+	rc.Flush()
+}
+
+// isLikelyJSON reports whether s looks like a JSON object (starts with '{' after
+// trimming whitespace). Used to distinguish plan-markdown design docs from the
+// legacy JSON design schema.
+func isLikelyJSON(s string) bool {
+	return strings.HasPrefix(strings.TrimSpace(s), "{")
+}

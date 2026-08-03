@@ -1,0 +1,97 @@
+.dashboard { width: 100%; }
+
+.page-title { font-size: 24px; font-weight: 700; margin-bottom: 24px; color: var(--color-text); }
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 32px;
+}
+
+.stat-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 20px;
+  text-align: center;
+}
+
+.stat-value { font-size: 32px; font-weight: 700; color: var(--color-primary); }
+.stat-label { font-size: 13px; color: var(--color-text-secondary); margin-top: 4px; }
+
+.projects-section {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 24px;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.section-header h2 { font-size: 16px; font-weight: 600; }
+
+.project-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.project-table th {
+  text-align: left;
+  padding: 8px 12px;
+  color: var(--color-text-secondary);
+  font-weight: 600;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.project-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.clickable-row { cursor: pointer; transition: background 0.1s; }
+.clickable-row:hover { background: var(--color-hover); }
+
+.project-name { font-weight: 600; color: var(--color-primary); }
+.path-cell { color: var(--color-text-secondary); font-size: 13px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.type-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  background: var(--color-active);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--color-primary);
+}
+
+.status-badge { font-size: 12px; }
+.status-active { color: var(--color-success); }
+.status-missing { color: var(--color-warning); }
+
+.quick-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 40px 0;
+  color: var(--color-text-secondary);
+}
+
+.empty-state p { margin-bottom: 16px; }
+
+.loading, .error-toast {
+  text-align: center;
+  padding: 60px 0;
+  font-size: 16px;
+}
+.error-toast { color: var(--color-error); }

@@ -1,0 +1,95 @@
+.settings-roles {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.settings-roles .section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.settings-roles .section-header code {
+  background: var(--color-border);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.role-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 20px;
+}
+
+.role-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 24px;
+  margin-bottom: 16px;
+}
+
+.role-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-text);
+  margin: 0 0 4px 0;
+}
+
+.role-desc {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  margin: 0 0 6px 0;
+  line-height: 1.5;
+}
+
+.role-key {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  font-family: monospace;
+}
+
+.role-model-field {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 240px;
+}
+
+.role-model-field label,
+.role-prompt-field label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.role-model-input {
+  width: 100%;
+}
+
+.role-prompt-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.role-prompt-input {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  resize: vertical;
+  min-height: 160px;
+}
+
+.role-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}

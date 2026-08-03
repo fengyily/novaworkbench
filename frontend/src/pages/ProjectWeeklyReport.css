@@ -1,0 +1,93 @@
+.weekly-report .weekly-period-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.weekly-period-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.weekly-report .weekly-date-input {
+  width: 150px;
+}
+
+.weekly-report .weekly-branch-select {
+  width: auto;
+  min-width: 160px;
+}
+
+.weekly-report .weekly-author-input {
+  width: 170px;
+}
+
+.weekly-diff-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--color-text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.weekly-diff-toggle input[type='checkbox'] {
+  accent-color: var(--color-primary);
+  cursor: pointer;
+}
+
+.weekly-preset-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.weekly-report .weekly-preset-select {
+  width: auto;
+  min-width: 280px;
+  height: 30px;
+  font-size: 12px;
+}
+
+.weekly-compact-tag {
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--color-primary);
+  border: 1px solid var(--color-primary);
+  opacity: 0.85;
+}
+
+.weekly-period-hint {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.weekly-report .weekly-rule-input {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.weekly-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.weekly-gen-error {
+  font-size: 12px;
+  color: var(--color-error);
+}
+
+.status-badge.status-error {
+  color: var(--color-error);
+}
