@@ -8,15 +8,13 @@ interface Props {
   projectPath: string;
   requirementTitle: string;
   currentAnalysis: string;
-  analyzing?: boolean;
-  onRefined: (newAnalysis: string) => void;
-  onComplete?: () => void;
+  onGenerateDesign: () => void;
   onReset?: () => void;
 }
 
 interface ChatMessage { role: string; content: string; isError?: boolean; }
 
-export default function DeepRefineChat({ reqId, projectPath, requirementTitle, currentAnalysis, analyzing, onRefined, onComplete, onReset }: Props) {
+export default function DeepRefineChat({ reqId, projectPath, requirementTitle, currentAnalysis, onGenerateDesign, onReset }: Props) {
   const [expanded, setExpanded] = useState(true);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -197,103 +195,6 @@ export default function DeepRefineChat({ reqId, projectPath, requirementTitle, c
     }
   };
 
-  // Finalize: stream the analyst-complete SSE, which resumes the same session
-  // and distills the conversation into a structured requirement document.
-  const finalizeAnalysis = useCallback(async () => {
-    setChatting(true);
-    setToolLog([]);
-
-    const streamingIdx = { current: -1 };
-    setMessages(prev => {
-      streamingIdx.current = prev.length;
-      return [...prev, { role: 'ai', content: '', isStreaming: true } as any];
-    });
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 min — proxy-backed turns can be slow
-
-    try {
-      const res = await fetch(`${API_BASE}/api/wizard/analyst-complete`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
-        body: JSON.stringify({
-          project_path: projectPath,
-          requirement_id: reqId,
-        }),
-      });
-
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error('No stream');
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let resultJSON = '';
-      let hadError = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split('\n\n');
-        buffer = parts.pop() ?? '';
-        for (const part of parts) {
-          const dataLine = part.startsWith('data: ') ? part.slice(6) : part;
-          if (!dataLine.trim()) continue;
-          try {
-            const evt = JSON.parse(dataLine);
-            if (evt.type === 'tool_call') setToolLog(prev => [...prev.slice(-19), evt.content]);
-            if (evt.type === 'message') {
-              setMessages(prev => {
-                const next = [...prev];
-                const idx = next.length - 1;
-                if (idx >= 0 && (next[idx] as any).isStreaming) {
-                  next[idx] = { role: 'ai', content: (next[idx].content || '') + evt.content + '\n' };
-                }
-                return next;
-              });
-            }
-            if (evt.type === 'error') hadError = evt.content;
-            if (evt.type === 'done') {
-              if (evt.result) resultJSON = evt.result;
-            }
-          } catch { /* skip malformed */ }
-        }
-      }
-
-      clearTimeout(timeoutId);
-      setToolLog([]);
-
-      if (resultJSON) {
-        onRefined(resultJSON);
-        setMessages(prev => {
-          const next = [...prev];
-          const idx = next.length - 1;
-          if (idx >= 0) next[idx] = { role: 'ai', content: '✅ 需求完善完成！已生成结构化需求文档，状态更新为「需求完成」。' };
-          return next;
-        });
-        if (onComplete) onComplete();
-      } else {
-        setMessages(prev => {
-          const next = [...prev];
-          const idx = next.length - 1;
-          if (idx >= 0) next[idx] = { role: 'ai', content: hadError ? ('❌ ' + hadError) : '⚠️ 保存完成，但返回结果为空。请重试。', isError: true };
-          return next;
-        });
-      }
-    } catch (err: any) {
-      clearTimeout(timeoutId);
-      setToolLog([]);
-      setMessages(prev => {
-        const next = [...prev];
-        const idx = next.length - 1;
-        if (idx >= 0) next[idx] = { role: 'ai', content: '❌ 保存失败: ' + err.message, isError: true };
-        return next;
-      });
-    } finally {
-      setChatting(false);
-    }
-  }, [projectPath, reqId, onRefined, onComplete]);
-
   const doSend = useCallback(async (msg: string) => {
     setChatting(true);
     setToolLog([]);
@@ -385,12 +286,6 @@ export default function DeepRefineChat({ reqId, projectPath, requirementTitle, c
     await doSend(msg);
   };
 
-  const handleFinalizeRefine = async () => {
-    setChatting(true);
-    await finalizeAnalysis();
-    setChatting(false);
-  };
-
   useEffect(() => {
     if (messages.length > 0) saveMessages(messages.filter(m => !m.isError));
   }, [messages, saveMessages]);
@@ -429,9 +324,6 @@ export default function DeepRefineChat({ reqId, projectPath, requirementTitle, c
       <div className="deep-refine-header">
         <div>
           <h3>🔍 深入分析 — 确认具体改动点</h3>
-          {analyzing && (
-            <div className="chat-analyze-indicator">⏳ 后台 AI 分析进行中，可继续对话...</div>
-          )}
         </div>
         <div style={{ display: 'flex', gap: 6 }}>
           {messages.length > 0 && !isWorking && (
@@ -500,8 +392,8 @@ export default function DeepRefineChat({ reqId, projectPath, requirementTitle, c
       </div>
 
       <div className="deep-refine-actions">
-        <button className="btn" onClick={handleFinalizeRefine} disabled={isWorking}>
-          ✅ 需求完善完成
+        <button className="btn btn-primary" onClick={onGenerateDesign} disabled={isWorking || messages.length === 0}>
+          📐 生成技术方案
         </button>
       </div>
     </div>

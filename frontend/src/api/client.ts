@@ -169,11 +169,10 @@ export interface Requirement {
   completed_at?: string;
 }
 
-export const requirementStatuses = ['draft', 'analyzing', 'analyzed', 'designing', 'designed', 'developing', 'done'] as const;
+export const requirementStatuses = ['draft', 'analyzing', 'designing', 'designed', 'developing', 'done'] as const;
 export const statusLabels: Record<string, string> = {
   draft: '📝 草稿',
   analyzing: '🔍 需求分析中',
-  analyzed: '✅ 需求完成',
   designing: '📐 方案设计中',
   designed: '✅ 方案完成',
   developing: '🚀 开发中',

@@ -168,11 +168,11 @@ func (s *ReportService) WeeklyRequirementStats(projectID string, since time.Time
 
 	var activeCount int
 	s.db.QueryRow(
-		"SELECT COUNT(*) FROM requirements WHERE project_id = ? AND status IN ('draft','analyzing','analyzed','designing','designed','developing')",
+		"SELECT COUNT(*) FROM requirements WHERE project_id = ? AND status IN ('draft','analyzing','designing','designed','developing')",
 		projectID).Scan(&activeCount)
 
 	statusLabel := map[string]string{
-		"draft": "草稿", "analyzing": "需求分析中", "analyzed": "需求完成",
+		"draft": "草稿", "analyzing": "需求分析中",
 		"designing": "方案设计中", "designed": "方案完成", "developing": "开发中", "done": "开发完成",
 	}
 	listLines := func(rows []reqRow) string {

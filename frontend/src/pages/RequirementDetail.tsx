@@ -9,13 +9,6 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import './RequirementDetail.css';
 
-interface AnalysisData {
-  acceptance_criteria?: string[];
-  technical_risks?: string[];
-  related_modules?: string[];
-  summary?: string;
-}
-
 interface DesignData {
   overview?: string;
   files?: string[];
@@ -25,8 +18,8 @@ interface DesignData {
   plan_markdown?: string; // plan-mode output (raw markdown, not the legacy JSON schema)
 }
 
-// Three-role stage-gate lifecycle. Each gate is completed by a manual action.
-// draft → analyzing → analyzed → designing → designed → developing → done
+// Two-role stage-gate lifecycle. Each gate is completed by a manual action.
+// draft → analyzing → designing → designed → developing → done
 type Stage = 'analyst' | 'architect' | 'developer' | 'done';
 
 function stageFor(status: string): Stage {
@@ -34,7 +27,6 @@ function stageFor(status: string): Stage {
     case 'draft':
     case 'analyzing':
       return 'analyst';
-    case 'analyzed':
     case 'designing':
       return 'architect';
     case 'designed':
@@ -71,13 +63,6 @@ export default function RequirementDetail() {
   const [designing, setDesigning] = useState(false);
   const designRef = useRef<HTMLDivElement>(null);
 
-  // Re-analysis streaming state (analyst phase — one-shot 重新分析)
-  const [analysisLines, setAnalysisLines] = useState<{ type: string; content: string }[]>([]);
-  const [reanalyzing, setReanalyzing] = useState(false);
-  const analysisStreamRef = useRef<HTMLDivElement>(null);
-
-  // Fullscreen Markdown viewer for analysis result
-  const [showAnalysisFullscreen, setShowAnalysisFullscreen] = useState(false);
   // Fullscreen Markdown viewer for design plan
   const [showDesignFullscreen, setShowDesignFullscreen] = useState(false);
 
@@ -109,9 +94,6 @@ export default function RequirementDetail() {
     setReq(updated);
   }, [id]);
 
-  const parseAnalysis = (raw: string): AnalysisData => {
-    try { return JSON.parse(raw); } catch { return {}; }
-  };
   const parseDesign = (raw: string): DesignData => {
     try { return JSON.parse(raw); } catch { return { plan_markdown: raw }; }
   };
@@ -183,56 +165,6 @@ export default function RequirementDetail() {
     if (designRef.current) designRef.current.scrollTop = designRef.current.scrollHeight;
   }, [designLines]);
 
-  // ── Analyst phase: one-shot re-analysis via SSE ────────────────────────────
-  const runReanalyze = async () => {
-    if (!id) return;
-    setReanalyzing(true);
-    setAnalysisLines([]);
-    try {
-      const res = await fetch(`${API_BASE}/api/wizard/analyst-analyze`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requirement_id: id }),
-      });
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error('No response body');
-      const decoder = new TextDecoder();
-      let buffer = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split('\n\n');
-        buffer = parts.pop() ?? '';
-        for (const part of parts) {
-          const dataLine = part.startsWith('data: ') ? part.slice(6) : part;
-          if (!dataLine.trim()) continue;
-          try {
-            const evt = JSON.parse(dataLine);
-            if (evt.type === 'done') {
-              setReanalyzing(false);
-              await refresh();
-              return;
-            }
-            if (evt.type === 'error') {
-              setAnalysisLines(prev => [...prev, { type: 'error', content: '❌ ' + evt.content }]);
-            } else {
-              setAnalysisLines(prev => [...prev, { type: evt.type, content: evt.content ?? '' }]);
-            }
-          } catch { /* skip malformed */ }
-        }
-      }
-    } catch (err: any) {
-      setAnalysisLines(prev => [...prev, { type: 'error', content: '❌ ' + err.message }]);
-    } finally {
-      setReanalyzing(false);
-    }
-  };
-
-  useEffect(() => {
-    if (analysisStreamRef.current) analysisStreamRef.current.scrollTop = analysisStreamRef.current.scrollHeight;
-  }, [analysisLines]);
-
   // ── Edit requirement (title/description/priority/sprint) ───────────────────
   const openEdit = () => {
     if (!req) return;
@@ -260,23 +192,6 @@ export default function RequirementDetail() {
     } finally {
       setBusy('');
     }
-  };
-
-  // Build a Markdown rendering of the analysis result for the fullscreen viewer.
-  const buildAnalysisMarkdown = () => {
-    if (!req) return '';
-    const parts: string[] = [`# ${req.title}`];
-    if (analysis.summary) parts.push(`## 执行摘要\n${analysis.summary}`);
-    if (analysis.acceptance_criteria?.length) {
-      parts.push(`## 验收标准\n${analysis.acceptance_criteria.map(c => `- ${c}`).join('\n')}`);
-    }
-    if (analysis.technical_risks?.length) {
-      parts.push(`## 技术风险\n${analysis.technical_risks.map(r => `- ${r}`).join('\n')}`);
-    }
-    if (analysis.related_modules?.length) {
-      parts.push(`## 关联模块\n${analysis.related_modules.map(m => `\`${m}\``).join(' · ')}`);
-    }
-    return parts.join('\n\n');
   };
 
   // ── Developer phase: job streaming ────────────────────────────────────────
@@ -318,19 +233,14 @@ export default function RequirementDetail() {
     setCodingLines([]);
 
     const design = parseDesign(req.design_docs);
-    const spec = parseAnalysis(req.acceptance_criteria);
-    const baseDesc = [
-      spec.summary ? `## 需求概述\n${spec.summary}` : '',
-      spec.acceptance_criteria?.length ? `## 验收标准\n${spec.acceptance_criteria.map(c => `- ${c}`).join('\n')}` : '',
-      design.plan_markdown
-        ? `## 技术方案\n${design.plan_markdown}`
-        : [
-            design.overview ? `## 技术方案\n${design.overview}` : '',
-            design.steps?.length ? `## 实现步骤\n${design.steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}` : '',
-            design.files?.length ? `## 涉及文件\n${design.files.map(f => `- ${f}`).join('\n')}` : '',
-            design.model_changes && design.model_changes !== '无' ? `## 数据模型变更\n${design.model_changes}` : '',
-          ].filter(Boolean).join('\n\n'),
-    ].filter(Boolean).join('\n\n') || req.description;
+    const baseDesc = (design.plan_markdown
+      ? `## 技术方案\n${design.plan_markdown}`
+      : [
+          design.overview ? `## 技术方案\n${design.overview}` : '',
+          design.steps?.length ? `## 实现步骤\n${design.steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}` : '',
+          design.files?.length ? `## 涉及文件\n${design.files.map(f => `- ${f}`).join('\n')}` : '',
+          design.model_changes && design.model_changes !== '无' ? `## 数据模型变更\n${design.model_changes}` : '',
+        ].filter(Boolean).join('\n\n')) || req.description;
 
     let desc = baseDesc;
     if (extraDescRef.current) {
@@ -422,14 +332,12 @@ export default function RequirementDetail() {
   if (loading) return <div className="detail-loading">⏳ 加载中...</div>;
   if (!req) return <div className="detail-error">❌ 需求未找到</div>;
 
-  const analysis = parseAnalysis(req.acceptance_criteria);
   const design = parseDesign(req.design_docs);
-  const hasSpec = !!(analysis.summary || (analysis.acceptance_criteria && analysis.acceptance_criteria.length > 0));
   const hasDesign = !!(design.overview || (design.steps && design.steps.length > 0) || design.plan_markdown);
   const stage = stageFor(req.status);
 
   const STEPS = [
-    { key: 'analyst', label: '需求分析师', icon: '🔍', doneStatus: 'analyzed' },
+    { key: 'analyst', label: '需求分析师', icon: '🔍', doneStatus: 'designing' },
     { key: 'architect', label: '架构师', icon: '📐', doneStatus: 'designed' },
     { key: 'developer', label: '开发者', icon: '🚀', doneStatus: 'done' },
   ] as const;
@@ -506,15 +414,6 @@ export default function RequirementDetail() {
         </div>
       )}
 
-      {/* Fullscreen Markdown viewer for analysis result */}
-      {showAnalysisFullscreen && (
-        <MarkdownViewer
-          title="🔍 需求分析结果"
-          content={buildAnalysisMarkdown()}
-          onClose={() => setShowAnalysisFullscreen(false)}
-        />
-      )}
-
       {/* Fullscreen Markdown viewer for design plan */}
       {showDesignFullscreen && design.plan_markdown && (
         <MarkdownViewer
@@ -566,96 +465,35 @@ export default function RequirementDetail() {
       {/* While analyzing, DeepRefineChat is itself the section (own card + header),
           so we render it standalone — no outer "需求分析师" card around it, which
           would otherwise create a card-in-card with two overlapping 🔍 headers. */}
+      {/* ── Analyst stage ── */}
+      {/* While analyzing, DeepRefineChat is itself the section (own card + header),
+          so we render it standalone — no outer "需求分析师" card around it, which
+          would otherwise create a card-in-card with two overlapping 🔍 headers. */}
       {req.status === 'analyzing' && (
         <DeepRefineChat
           reqId={req.id}
           projectPath={project?.local_path || ''}
           requirementTitle={req.title}
           currentAnalysis={req.acceptance_criteria}
-          analyzing={false}
-          onRefined={(newAnalysis) => setReq(prev => prev ? { ...prev, acceptance_criteria: newAnalysis } : prev)}
-          onComplete={refresh}
+          onGenerateDesign={() => transition('designing', '生成技术方案').then(() => runArchitectDesign())}
           onReset={() => setReq(prev => prev ? { ...prev, status: 'draft' } : prev)}
         />
       )}
 
-      {(stage === 'analyst' || req.status === 'analyzed') && req.status !== 'analyzing' && (
+      {req.status === 'draft' && (
         <div className="detail-section analysis-section">
           <div className="section-header"><h3>🔍 需求分析师</h3></div>
-
-          {req.status === 'draft' && (
-            <div className="tab-empty">
-              <p>需求已创建。由需求分析师结合项目情况完善需求。</p>
-              <button className="btn btn-primary" onClick={() => transition('analyzing', '开始分析')} disabled={!!busy}>
-                {busy === '开始分析' ? '⏳ ...' : '🤖 开始需求分析'}
-              </button>
-            </div>
-          )}
-
-          {req.status === 'analyzed' && (reanalyzing || analysisLines.length > 0) && (
-            <div className="coding-panel" ref={analysisStreamRef} style={{ marginBottom: 12 }}>
-              {analysisLines.map((line, i) => (
-                <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
-              ))}
-              {reanalyzing && <div className="coding-line coding-line-tool_call">⏳ Claude 正在重新生成需求分析...</div>}
-            </div>
-          )}
-
-          {req.status === 'analyzed' && hasSpec && (
-            <>
-              <div className="analysis-summary"><ReactMarkdown remarkPlugins={[remarkGfm]}>{analysis.summary || ''}</ReactMarkdown></div>
-
-              {analysis.acceptance_criteria && analysis.acceptance_criteria.length > 0 && (
-                <div className="analysis-block">
-                  <h4>✅ 验收标准</h4>
-                  <ul className="criteria-list">
-                    {analysis.acceptance_criteria.map((c, i) => (
-                      <li key={i} className="criteria-item"><input type="checkbox" id={`ac-${i}`} disabled /><label htmlFor={`ac-${i}`}>{c}</label></li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {analysis.technical_risks && analysis.technical_risks.length > 0 && (
-                <div className="analysis-block">
-                  <h4>⚠️ 技术风险</h4>
-                  <ul>{analysis.technical_risks.map((r, i) => <li key={i} className="risk-item">{r}</li>)}</ul>
-                </div>
-              )}
-              {analysis.related_modules && analysis.related_modules.length > 0 && (
-                <div className="analysis-block">
-                  <h4>📂 关联模块</h4>
-                  <div className="module-tags">{analysis.related_modules.map((m, i) => <code key={i}>{m}</code>)}</div>
-                </div>
-              )}
-              <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-                <button className="btn" onClick={() => setShowAnalysisFullscreen(true)}>🔍 全屏查看</button>
-                <button className="btn" onClick={runReanalyze} disabled={reanalyzing || !!busy}>
-                  {reanalyzing ? '⏳ 重新分析中...' : '🔄 重新分析'}
-                </button>
-              </div>
-              <DocRefineChat
-                reqId={req.id}
-                projectPath={project?.local_path || ''}
-                docType="spec"
-                currentDoc={req.acceptance_criteria}
-                onApplied={(newDoc) => setReq(prev => prev ? { ...prev, acceptance_criteria: newDoc } : prev)}
-              />
-            </>
-          )}
-
-          {req.status === 'analyzed' && !hasSpec && (
-            <div className="tab-empty">
-              <p>需求文档为空。</p>
-              <button className="btn btn-primary" onClick={runReanalyze} disabled={reanalyzing || !!busy}>
-                {reanalyzing ? '⏳ 重新分析中...' : '🔄 重新分析'}
-              </button>
-            </div>
-          )}
+          <div className="tab-empty">
+            <p>需求已创建。由需求分析师结合项目情况完善需求。</p>
+            <button className="btn btn-primary" onClick={() => transition('analyzing', '开始分析')} disabled={!!busy}>
+              {busy === '开始分析' ? '⏳ ...' : '🤖 开始需求分析'}
+            </button>
+          </div>
         </div>
       )}
 
       {/* ── Architect stage ── */}
-      {(stage === 'architect' || req.status === 'designed' || stage === 'developer' || stage === 'done') && hasSpec && (
+      {(stage === 'architect' || req.status === 'designed' || stage === 'developer' || stage === 'done') && (
         <div className="detail-section design-section">
           <div className="section-header">
             <h3>📐 架构师</h3>
@@ -673,11 +511,11 @@ export default function RequirementDetail() {
             </div>
           )}
 
-          {req.status === 'analyzed' && !hasDesign && !designing && (
+          {req.status === 'designing' && !hasDesign && !designing && (
             <div className="tab-empty">
-              <p>需求已完成。架构师将在 <strong>plan 模式</strong>下探索项目代码，制定具体可执行的技术实现方案（Markdown）。</p>
-              <button className="btn btn-primary" onClick={() => { transition('designing', '进入方案设计').then(() => runArchitectDesign()); }} disabled={!!busy || designing}>
-                {busy === '进入方案设计' ? '⏳ ...' : '📐 开始制定技术方案'}
+              <p>需求分析已完成。架构师将在 <strong>plan 模式</strong>下探索项目代码，制定具体可执行的技术实现方案（Markdown）。</p>
+              <button className="btn btn-primary" onClick={() => runArchitectDesign()} disabled={!!busy || designing}>
+                {busy === '生成技术方案' ? '⏳ ...' : '📐 开始制定技术方案'}
               </button>
             </div>
           )}

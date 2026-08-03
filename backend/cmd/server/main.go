@@ -145,8 +145,6 @@ func main() {
 	// Wizard (requirement refinement + coding via Claude CLI)
 	// Three-role stage-gate: analyst → architect → developer.
 	mux.HandleFunc("POST /api/wizard/analyst-chat", wizardH.AnalystChat)
-	mux.HandleFunc("POST /api/wizard/analyst-complete", wizardH.AnalystComplete)
-	mux.HandleFunc("POST /api/wizard/analyst-analyze", wizardH.AnalystAnalyze)
 	mux.HandleFunc("POST /api/wizard/architect-design", wizardH.ArchitectDesign)
 	mux.HandleFunc("POST /api/wizard/start-coding", wizardH.StartCoding)
 	mux.HandleFunc("GET /api/wizard/jobs/{id}", wizardH.GetJob)
