@@ -79,8 +79,10 @@ func main() {
 	// Projects
 	mux.HandleFunc("GET /api/projects", projectH.List)
 	mux.HandleFunc("POST /api/projects", projectH.Add)
+	mux.HandleFunc("GET /api/projects/trash", projectH.Trash)
 	mux.HandleFunc("GET /api/projects/{id}", projectH.Get)
 	mux.HandleFunc("DELETE /api/projects/{id}", projectH.Remove)
+	mux.HandleFunc("POST /api/projects/{id}/restore", projectH.Restore)
 	mux.HandleFunc("POST /api/projects/{id}/scan", scannerH.Scan)
 
 	// Run sessions (docker compose)

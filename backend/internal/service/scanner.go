@@ -3,6 +3,7 @@ package service
 import (
 	"database/sql"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -63,6 +64,10 @@ func (s *ScannerService) Scan(projectID string) (*ScanResult, error) {
 		return strings.Join(parts, ",")
 	}() + "}"
 	s.db.Exec("UPDATE projects SET claude_files = ?, last_scanned_at = ? WHERE id = ?", claudeFilesJSON, time.Now(), projectID)
+
+	// Backfill git remote URL / default branch if missing, so a soft-deleted
+	// project can be restored later via `git clone`. Failures are non-fatal.
+	s.backfillGitInfo(projectID, projectPath)
 
 	// Index CLAUDE.md content as knowledge
 	for _, f := range claudeFiles {
@@ -159,4 +164,32 @@ func detectProjectTypeFromPath(path string) string {
 		}
 	}
 	return "Unknown"
+}
+
+// backfillGitInfo records the project's origin remote URL and current branch
+// if either is missing in the DB, so the project can be re-cloned on restore.
+// Errors are ignored — this is a best-effort enhancement.
+func (s *ScannerService) backfillGitInfo(projectID, projectPath string) {
+	var remoteURL, branch string
+	s.db.QueryRow("SELECT remote_url, default_branch FROM projects WHERE id = ?", projectID).Scan(&remoteURL, &branch)
+
+	if remoteURL == "" {
+		if out, err := exec.Command("git", "-C", projectPath, "remote", "get-url", "origin").Output(); err == nil {
+			remoteURL = strings.TrimSpace(string(out))
+		}
+	}
+	if branch == "" {
+		if out, err := exec.Command("git", "-C", projectPath, "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
+			branch = strings.TrimSpace(string(out))
+		}
+	}
+
+	if remoteURL != "" || branch != "" {
+		s.db.Exec(`UPDATE projects SET
+			remote_url = COALESCE(NULLIF(remote_url, ''), ?),
+			default_branch = COALESCE(NULLIF(default_branch, ''), ?),
+			updated_at = ?
+			WHERE id = ?`,
+			remoteURL, branch, time.Now(), projectID)
+	}
 }

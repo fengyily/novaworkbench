@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/service"
@@ -55,13 +56,59 @@ func (h *ProjectHandler) Add(w http.ResponseWriter, r *http.Request) {
 
 func (h *ProjectHandler) Remove(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	purge := r.URL.Query().Get("purge") == "true"
+	q := r.URL.Query()
+	// delete_dir is the new param; purge is kept for backward compat.
+	deleteDir := q.Get("delete_dir") == "true" || q.Get("purge") == "true"
 
-	if err := h.svc.Remove(id, purge); err != nil {
-		writeError(w, http.StatusInternalServerError, "REMOVE_FAILED", err.Error())
+	if err := h.svc.Remove(id, deleteDir); err != nil {
+		msg := err.Error()
+		switch {
+		case strings.HasPrefix(msg, "PATH_OUT_OF_WORKSPACE"):
+			writeError(w, http.StatusBadRequest, "PATH_OUT_OF_WORKSPACE", msg)
+		case strings.HasPrefix(msg, "REMOVE_DIR_FAILED"):
+			writeError(w, http.StatusInternalServerError, "REMOVE_DIR_FAILED", msg)
+		default:
+			writeError(w, http.StatusInternalServerError, "REMOVE_FAILED", msg)
+		}
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"id": id, "dir_deleted": deleteDir})
+}
+
+// Trash lists soft-deleted projects.
+// GET /api/projects/trash
+func (h *ProjectHandler) Trash(w http.ResponseWriter, r *http.Request) {
+	projects, err := h.svc.ListTrash()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	if projects == nil {
+		projects = []model.Project{}
+	}
+	writeJSON(w, http.StatusOK, projects)
+}
+
+// Restore re-clones a soft-deleted project's directory and un-deletes it.
+// POST /api/projects/{id}/restore
+func (h *ProjectHandler) Restore(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	p, err := h.svc.Restore(id)
+	if err != nil {
+		msg := err.Error()
+		switch {
+		case strings.HasPrefix(msg, "NO_REMOTE"):
+			writeError(w, http.StatusBadRequest, "NO_REMOTE", msg)
+		case strings.HasPrefix(msg, "DIR_EXISTS"):
+			writeError(w, http.StatusConflict, "DIR_EXISTS", msg)
+		case strings.HasPrefix(msg, "RESTORE_FAILED"):
+			writeError(w, http.StatusInternalServerError, "RESTORE_FAILED", msg)
+		default:
+			writeError(w, http.StatusInternalServerError, "RESTORE_FAILED", msg)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
 }
 
 // UpdatePlatform binds a platform token to a project.
