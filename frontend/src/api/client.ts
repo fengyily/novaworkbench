@@ -164,7 +164,7 @@ export interface Requirement {
   status: string; priority: string; acceptance_criteria: string;
   design_docs: string; conversation_ids: string; assigned_to: string;
   sprint: string; created_by: string; analysis_session_id: string;
-  design_session_id: string; design_job_id: string; coding_session_id: string;
+  design_session_id: string; design_job_id: string; analysis_job_id: string; coding_session_id: string;
   created_at: string; updated_at: string;
   completed_at?: string;
 }

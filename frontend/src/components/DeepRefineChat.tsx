@@ -8,25 +8,38 @@ interface Props {
   projectPath: string;
   requirementTitle: string;
   currentAnalysis: string;
+  analysisJobId: string;
+  onTurnDone?: () => void; // refresh req (sync status / clear analysis_job_id) after a turn
   onGenerateDesign: () => void;
   onReset?: () => void;
 }
 
-interface ChatMessage { role: string; content: string; isError?: boolean; }
+interface ChatMessage { role: string; content: string; isError?: boolean; isStreaming?: boolean; }
 
-export default function DeepRefineChat({ reqId, projectPath, requirementTitle, currentAnalysis, onGenerateDesign, onReset }: Props) {
+export default function DeepRefineChat({
+  reqId, projectPath, requirementTitle, currentAnalysis, analysisJobId, onTurnDone, onGenerateDesign, onReset,
+}: Props) {
   const [expanded, setExpanded] = useState(true);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [chatting, setChatting] = useState(false);
-  const [loading, setLoading] = useState(false);
-  // toolLog: list of tool-call labels shown as a live activity feed
+  // toolLog: live activity feed (phase + tool-call labels)
   const [toolLog, setToolLog] = useState<string[]>([]);
-  const [retryMsg, setRetryMsg] = useState(''); // last user message that can be retried
+  const [retryMsg, setRetryMsg] = useState('');
   const chatRef = useRef<HTMLDivElement>(null);
-  // Guard against React StrictMode double-invoking the auto-start effect in dev,
-  // which would otherwise mint two session ids and resume a not-yet-persisted one.
-  const startedRef = useRef(false);
+  // Guard against auto-start firing twice (StrictMode / concurrent renders).
+  const bootedRef = useRef(false);
+
+  // Mirror of `messages` for use inside async callbacks (POST / stream) where
+  // the state closure would otherwise be stale.
+  const messagesRef = useRef<ChatMessage[]>([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  // Accumulated AI text for the turn currently being streamed. Rebuilt from the
+  // job's "message" log lines — on a page refresh the job replays its history,
+  // so this reconstructs the full turn output even mid-flight.
+  const aiTextRef = useRef('');
+  const esRef = useRef<EventSource | null>(null);
 
   const saveMessages = useCallback(async (msgs: ChatMessage[]) => {
     if (!reqId) return;
@@ -39,7 +52,7 @@ export default function DeepRefineChat({ reqId, projectPath, requirementTitle, c
     } catch { /* silent */ }
   }, [reqId]);
 
-  const loadMessages = useCallback(async () => {
+  const loadMessages = useCallback(async (): Promise<ChatMessage[] | null> => {
     if (!reqId) return null;
     try {
       const res = await fetch(`${API_BASE}/api/requirements/${reqId}/chat-history`);
@@ -54,258 +67,259 @@ export default function DeepRefineChat({ reqId, projectPath, requirementTitle, c
 
   const handleClear = async () => {
     if (!confirm('确定要清除对话记录吗？需求将回到草稿状态，可手动重新触发分析。')) return;
+    if (esRef.current) { esRef.current.close(); esRef.current = null; }
     setMessages([]);
     setRetryMsg('');
     setToolLog([]);
+    setChatting(false);
     await saveMessages([]);
-    try {
-      await requirementsApi.clearAnalysisSession(reqId);
-    } catch { /* silent */ }
-    try {
-      await requirementsApi.updateStatus(reqId, 'draft');
-    } catch { /* silent */ }
+    try { await requirementsApi.clearAnalysisSession(reqId); } catch { /* silent */ }
+    try { await requirementsApi.updateStatus(reqId, 'draft'); } catch { /* silent */ }
     onReset?.();
   };
 
-  // Core streaming function — used by both startChat and handleSend.
-  // The backend owns the conversation session (claude --session-id/--resume),
-  // so we no longer thread conversation_history; we only send the new user
-  // message. Returns { aiText, doneHistory } or throws on error.
-  const streamDeepRefine = useCallback(async (
-    userMessage: string,
-    signal: AbortSignal,
-    onToolCall: (label: string) => void,
-    onTextChunk: (line: string) => void,
-  ): Promise<{ aiText: string; doneHistory: string }> => {
-    const res = await fetch(`${API_BASE}/api/wizard/analyst-chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal,
-      body: JSON.stringify({
-        project_path: projectPath,
-        requirement_id: reqId,
-        requirement_title: requirementTitle,
-        current_analysis: currentAnalysis,
-        user_message: userMessage,
-      }),
-    });
-
-    const reader = res.body?.getReader();
-    if (!reader) throw new Error('No stream');
-
-    const decoder = new TextDecoder();
-    let aiText = '';
-    let doneHistory = '';
-    let sseBuffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      sseBuffer += decoder.decode(value, { stream: true });
-      // SSE frames are delimited by \n\n; process all complete frames
-      const parts = sseBuffer.split('\n\n');
-      sseBuffer = parts.pop() ?? '';
-      for (const part of parts) {
-        const dataLine = part.startsWith('data: ') ? part.slice(6) : part.replace(/^.*data: /s, '');
-        if (!dataLine.trim()) continue;
-        try {
-          const data = JSON.parse(dataLine);
-          if (data.type === 'tool_call') onToolCall(data.content);
-          if (data.type === 'message') {
-            aiText += data.content;
-            onTextChunk(data.content);
-          }
-          if (data.type === 'done' && data.history) doneHistory = data.history;
-        } catch { /* ignore malformed SSE */ }
-      }
-    }
-
-    return { aiText, doneHistory };
-  }, [projectPath, reqId, requirementTitle, currentAnalysis]);
-
-  const startChat = async () => {
-    if (startedRef.current) return; // dedupe StrictMode double-fire / concurrent starts
-    startedRef.current = true;
-    setExpanded(true);
-    if (messages.length > 0) return;
-
-    setLoading(true);
-    setToolLog([]);
-
-    const saved = await loadMessages();
-    if (saved) {
-      setMessages(saved);
-      setLoading(false);
-      return;
-    }
-
-    // The backend builds the full first-turn prompt itself (from the DB requirement
-    // record + pre-read project context). We just trigger the first turn with an
-    // empty user_message so the backend uses its own prompt without duplication.
-
-    // Add a streaming AI placeholder so the first-round text streams live
-    // (the backend emits message events as Claude types); without this the
-    // whole response would only render once at the end.
-    const streamingIdx = { current: -1 };
+  // Ensure the last message is a streaming AI placeholder; returns the index.
+  const ensureStreamingPlaceholder = useCallback((): number => {
+    let idx = -1;
     setMessages(prev => {
-      streamingIdx.current = prev.length;
-      return [...prev, { role: 'ai', content: '', isStreaming: true } as any];
-    });
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 min — first-turn project read via proxy can be long
-
-    try {
-      const { aiText } = await streamDeepRefine(
-        '',
-        controller.signal,
-        (label) => setToolLog(prev => [...prev.slice(-19), label]),
-        (line) => {
-          // Update the streaming placeholder in real time.
-          setMessages(prev => {
-            const next = [...prev];
-            const idx = next.length - 1;
-            if (idx >= 0 && (next[idx] as any).isStreaming) {
-              next[idx] = { role: 'ai', content: (next[idx].content || '') + line };
-            }
-            return next;
-          });
-        },
-      );
-      clearTimeout(timeoutId);
-      setToolLog([]);
-
-      setMessages(prev => {
-        const next = [...prev];
-        const idx = next.length - 1;
-        if (idx >= 0) next[idx] = { role: 'ai', content: aiText.trim() };
+      const next = [...prev];
+      const last = next[next.length - 1];
+      if (last && last.role === 'ai' && last.isStreaming) {
+        idx = next.length - 1;
         return next;
-      });
-    } catch (err: any) {
-      clearTimeout(timeoutId);
-      setToolLog([]);
-      const isTimeout = err.name === 'AbortError';
-      const errContent = isTimeout
-        ? '⏱ Claude 初始分析超时。点击重试按钮重新开始。'
-        : '❌ ' + err.message;
-      setMessages([{ role: 'ai', content: errContent, isError: true }]);
-      setRetryMsg('__init__'); // special marker for retry of startChat
-    } finally {
-      setLoading(false);
-    }
-  };
+      }
+      next.push({ role: 'ai', content: '', isStreaming: true });
+      idx = next.length - 1;
+      return next;
+    });
+    return idx;
+  }, []);
 
-  const doSend = useCallback(async (msg: string) => {
+  // Stream a JobStore job's log lines via SSE. The job replays its full history
+  // first, then pushes live lines until job_done — so this works both for a
+  // freshly-started turn and for reconnecting to an in-flight turn after a page
+  // refresh. AI text is accumulated from "message" lines into the streaming
+  // placeholder; on job_done the placeholder is finalized and persisted.
+  const streamAnalystJob = useCallback((jobId: string) => {
+    if (esRef.current) esRef.current.close();
+    ensureStreamingPlaceholder();
     setChatting(true);
     setToolLog([]);
-    setRetryMsg('');
+    aiTextRef.current = '';
 
-    // Add a live streaming message placeholder
-    const streamingIdx = { current: -1 };
-    setMessages(prev => {
-      streamingIdx.current = prev.length;
-      return [...prev, { role: 'ai', content: '', isStreaming: true } as any];
-    });
+    const es = new EventSource(`${API_BASE}/api/wizard/jobs/${jobId}/stream`);
+    esRef.current = es;
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 min — proxy-backed turns can be slow
-
-    try {
-      const { aiText } = await streamDeepRefine(
-        msg,
-        controller.signal,
-        (label) => setToolLog(prev => [...prev.slice(-19), label]),
-        (line) => {
-          // Update the streaming placeholder in real time
+    es.onmessage = (e) => {
+      try {
+        const evt = JSON.parse(e.data);
+        if (evt.type === 'job_done') {
+          es.close();
+          esRef.current = null;
+          setChatting(false);
+          setToolLog([]);
+          const finalText = aiTextRef.current.trim();
           setMessages(prev => {
             const next = [...prev];
             const idx = next.length - 1;
-            if (idx >= 0 && (next[idx] as any).isStreaming) {
-              next[idx] = { role: 'ai', content: (next[idx].content || '') + line };
+            if (idx >= 0 && next[idx]?.isStreaming) {
+              next[idx] = { role: 'ai', content: finalText || '(无回复)' };
+            }
+            const saved = next.filter(m => !m.isError && !m.isStreaming);
+            saveMessages(saved);
+            return next;
+          });
+          onTurnDone?.();
+          return;
+        }
+        if (evt.type === 'error') {
+          es.close();
+          esRef.current = null;
+          setChatting(false);
+          setToolLog([]);
+          setMessages(prev => {
+            const next = [...prev];
+            const idx = next.length - 1;
+            if (idx >= 0 && next[idx]?.isStreaming) {
+              next[idx] = { role: 'ai', content: '❌ ' + (evt.content || 'Claude 执行出错'), isError: true };
             }
             return next;
           });
-        },
-      );
-      clearTimeout(timeoutId);
-      setToolLog([]);
+          return;
+        }
+        if (evt.type === 'tool_call' || evt.type === 'phase') {
+          setToolLog(prev => [...prev.slice(-19), evt.content ?? '']);
+          return;
+        }
+        if (evt.type === 'message') {
+          aiTextRef.current += evt.content ?? '';
+          const snapshot = aiTextRef.current;
+          setMessages(prev => {
+            const next = [...prev];
+            const idx = next.length - 1;
+            if (idx >= 0 && next[idx]?.isStreaming) {
+              next[idx] = { role: 'ai', content: snapshot, isStreaming: true };
+            }
+            return next;
+          });
+        }
+      } catch { /* skip malformed SSE */ }
+    };
 
-      const raw = aiText.trim();
-      const cleanResponse = raw;
+    es.onerror = () => {
+      // EventSource auto-reconnects on transient drops; if the job is gone
+      // (backend restarted, ring evicted) the stream errors repeatedly. Poll
+      // the snapshot once; if it's gone, drop to idle so the user can retry.
+      es.close();
+      esRef.current = null;
+      fetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
+        .then(r => r.json())
+        .then(json => {
+          if (!json.success) {
+            // Job evicted (backend restart) — surface a recoverable error.
+            setChatting(false);
+            setToolLog([]);
+            setMessages(prev => {
+              const next = [...prev];
+              const idx = next.length - 1;
+              if (idx >= 0 && next[idx]?.isStreaming) {
+                next[idx] = { role: 'ai', content: '⚠️ 任务已丢失（服务可能重启）。点击重试重新开始。', isError: true };
+              }
+              return next;
+            });
+            return;
+          }
+          const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
+          if (status === 'running') {
+            // transient drop — re-arm the stream
+            streamAnalystJob(jobId);
+          } else {
+            // finished but we missed job_done — reconstruct from the snapshot.
+            aiTextRef.current = '';
+            for (const l of log || []) {
+              if (l.type === 'message') aiTextRef.current += l.content;
+            }
+            setChatting(false);
+            setToolLog([]);
+            const finalText = aiTextRef.current.trim();
+            setMessages(prev => {
+              const next = [...prev];
+              const idx = next.length - 1;
+              if (idx >= 0 && next[idx]?.isStreaming) {
+                next[idx] = { role: 'ai', content: finalText || '(无回复)' };
+              }
+              const saved = next.filter(m => !m.isError && !m.isStreaming);
+              saveMessages(saved);
+              return next;
+            });
+            onTurnDone?.();
+          }
+        })
+        .catch(() => { setChatting(false); });
+    };
+  }, [ensureStreamingPlaceholder, saveMessages, onTurnDone]);
 
-      // Replace streaming placeholder with final content
-      setMessages(prev => {
-        const next = [...prev];
-        const idx = next.length - 1;
-        if (idx >= 0) next[idx] = { role: 'ai', content: cleanResponse };
-        const saved = next.filter(m => !m.isError);
-        saveMessages(saved);
-        return next;
+  // Start a new analyst turn: POST to create the job, then stream it. The
+  // user message (+ a streaming placeholder) is persisted BEFORE the POST so a
+  // refresh mid-turn keeps the user's message in chat-history.
+  const runTurn = useCallback(async (userMessage: string) => {
+    const base = messagesRef.current.filter(m => !m.isError && !m.isStreaming);
+    const withUser: ChatMessage[] = userMessage
+      ? [...base, { role: 'user', content: userMessage }]
+      : base;
+    const withPlaceholder = [...withUser, { role: 'ai', content: '', isStreaming: true }];
+    setMessages(withPlaceholder);
+    messagesRef.current = withPlaceholder;
+    setRetryMsg(userMessage || '__init__');
+    setChatting(true);
+    setToolLog([]);
+    // Persist the user message before the turn starts so a refresh preserves it.
+    saveMessages(withUser);
+
+    try {
+      const res = await fetch(`${API_BASE}/api/wizard/analyst-chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_path: projectPath,
+          requirement_id: reqId,
+          requirement_title: requirementTitle,
+          current_analysis: currentAnalysis,
+          user_message: userMessage,
+        }),
       });
+      const json = await res.json();
+      const jobId = json.data?.job_id;
+      if (!jobId) throw new Error(json.error?.message || '未获取到任务 ID');
+      streamAnalystJob(jobId);
     } catch (err: any) {
-      clearTimeout(timeoutId);
+      setChatting(false);
       setToolLog([]);
-      const isTimeout = err.name === 'AbortError';
-      const errContent = isTimeout
-        ? '⏱ Claude 响应超时（3分钟），请点击重试。'
-        : '❌ ' + err.message;
-      // Replace placeholder with error
       setMessages(prev => {
         const next = [...prev];
         const idx = next.length - 1;
-        if (idx >= 0) next[idx] = { role: 'ai', content: errContent, isError: true };
+        if (idx >= 0 && next[idx]?.isStreaming) {
+          next[idx] = { role: 'ai', content: '❌ ' + err.message, isError: true };
+        }
         return next;
       });
-      setRetryMsg(msg); // allow retry
-    } finally {
-      setChatting(false);
     }
-  }, [streamDeepRefine, saveMessages]);
+  }, [projectPath, reqId, requirementTitle, currentAnalysis, saveMessages, streamAnalystJob]);
 
   const handleSend = async () => {
     if (!input.trim() || chatting) return;
     const msg = input.trim();
     setInput('');
-    setMessages(prev => [...prev, { role: 'user', content: msg }]);
-    await doSend(msg);
+    await runTurn(msg);
   };
 
   const handleRetry = async () => {
-    if (retryMsg === '__init__') {
-      // Retry the initial analysis — clear messages and restart
-      setMessages([]);
-      setRetryMsg('');
-      startedRef.current = false; // allow startChat to run again
-      await startChat();
-      return;
-    }
-    if (!retryMsg) return;
-    const msg = retryMsg;
-    // Remove the last error message before retrying
-    setMessages(prev => prev.filter((_, i) => i < prev.length - 1));
-    await doSend(msg);
+    if (chatting) return;
+    const msg = retryMsg === '__init__' ? '' : retryMsg;
+    // Drop the trailing error placeholder before retrying.
+    setMessages(prev => {
+      const next = [...prev];
+      const idx = next.length - 1;
+      if (idx >= 0 && next[idx]?.isError) next.pop();
+      return next;
+    });
+    setRetryMsg('');
+    await runTurn(msg);
   };
-
-  useEffect(() => {
-    if (messages.length > 0) saveMessages(messages.filter(m => !m.isError));
-  }, [messages, saveMessages]);
-
-  // Auto-start on mount
-  useEffect(() => {
-    startChat();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    const lastMsg = messages[messages.length - 1];
-    if (!lastMsg || lastMsg.role !== 'ai' || chatting || input || lastMsg.isError) return;
-    const template = buildReplyTemplate(lastMsg.content);
-    if (template) setInput(template);
-  }, [messages, chatting, input]);
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages, toolLog]);
+
+  // Boot: load saved chat; reconnect to an in-flight job if one is active
+  // (page refresh), otherwise auto-start the first turn when there's no
+  // prior history.
+  useEffect(() => {
+    if (bootedRef.current) return;
+    bootedRef.current = true;
+    (async () => {
+      const saved = await loadMessages();
+      if (saved && saved.length > 0) setMessages(saved);
+      if (analysisJobId) {
+        // Reconnect to the running turn — the job replays its history so the
+        // user sees the full in-flight output and continues receiving live
+        // events. The turn survives the refresh because it runs in a backend
+        // goroutine decoupled from this request.
+        streamAnalystJob(analysisJobId);
+      } else if (!saved || saved.length === 0) {
+        runTurn('');
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Reply-template helper: pre-fill the input with numbered question slots.
+  useEffect(() => {
+    const lastMsg = messages[messages.length - 1];
+    if (!lastMsg || lastMsg.role !== 'ai' || chatting || input || lastMsg.isError || lastMsg.isStreaming) return;
+    const template = buildReplyTemplate(lastMsg.content);
+    if (template) setInput(template);
+  }, [messages, chatting, input]);
 
   if (!expanded) {
     return (
@@ -317,7 +331,7 @@ export default function DeepRefineChat({ reqId, projectPath, requirementTitle, c
     );
   }
 
-  const isWorking = loading || chatting;
+  const isWorking = chatting;
 
   return (
     <div className="detail-section deep-refine-panel">
@@ -335,9 +349,9 @@ export default function DeepRefineChat({ reqId, projectPath, requirementTitle, c
 
       <div className="chat-panel" ref={chatRef}>
         {messages.map((msg, i) => (
-          <div key={i} className={`chat-msg ${msg.role}${(msg as any).isError ? ' error' : ''}`}>
+          <div key={i} className={`chat-msg ${msg.role}${msg.isError ? ' error' : ''}`}>
             <span className="chat-role">{msg.role === 'ai' ? '🤖 AI' : '👤 你'}</span>
-            {msg.role === 'ai' && !(msg as any).isError
+            {msg.role === 'ai' && !msg.isError
               ? <div className="chat-content chat-content-md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown></div>
               : <div className="chat-content" style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
             }
@@ -355,7 +369,7 @@ export default function DeepRefineChat({ reqId, projectPath, requirementTitle, c
           </div>
         )}
 
-        {/* Spinner when working but no tool calls yet */}
+        {/* Spinner when working but no activity yet */}
         {isWorking && toolLog.length === 0 && (
           <div className="chat-msg ai">
             <span className="chat-role">🤖 AI</span>

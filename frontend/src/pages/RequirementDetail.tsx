@@ -720,6 +720,8 @@ export default function RequirementDetail() {
           projectPath={project?.local_path || ''}
           requirementTitle={req.title}
           currentAnalysis={req.acceptance_criteria}
+          analysisJobId={req.analysis_job_id}
+          onTurnDone={refresh}
           onGenerateDesign={() => transition('designing', '生成技术方案').then(() => runArchitectDesign())}
           onReset={() => setReq(prev => prev ? { ...prev, status: 'draft' } : prev)}
         />

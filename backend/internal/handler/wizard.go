@@ -69,13 +69,19 @@ func docStageSession(req *model.Requirement, docType string) (sid, roleKey strin
 	return "", "analyst"
 }
 
-// AnalystChat runs Claude CLI with stream-json output and full tool use permissions.
-// The requirement analyst reads project files autonomously and refines the requirement
-// through multi-turn conversation. Conversation context is held in a real claude CLI
-// session: the first turn mints a session id (--session-id, persisted on the
-// requirement) and subsequent turns resume it (--resume), so the user's appended
-// descriptions stay in the same conversation. When the conversation has settled,
-// the user proceeds directly to architect-design (no separate finalization step).
+// AnalystChat starts one analyst-chat turn as a background JobStore job and
+// returns the job id immediately (same pattern as architect-design /
+// start-coding). Claude runs in a goroutine with context.Background(), so its
+// lifetime is decoupled from this HTTP request — a page refresh no longer kills
+// the in-flight turn. The active job id is persisted on the requirement
+// (analysis_job_id) so a refresh reconnects to the running job via
+// GET /api/wizard/jobs/{id}/stream (which replays history first) instead of
+// relaunching the turn. The job's log lines carry the analyst's message /
+// tool_call / phase events; on job_done the frontend finalizes the turn.
+//
+// Session threading: the first turn mints a session id (--session-id, persisted
+// on the requirement as analysis_session_id); subsequent turns resume it
+// (--resume). A stale --resume transparently falls back to a fresh first turn.
 func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ProjectPath      string `json:"project_path"`
@@ -89,105 +95,115 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
 		return
 	}
-
-	rc := http.NewResponseController(w)
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	rc.Flush()
-
-	log.Printf("[analyst-chat] Starting for requirement: %s in %s", req.RequirementTitle, req.ProjectPath)
-
-	// Load the requirement (source of truth) once: we need its full Description
-	// (the title is just a short label and may be truncated by fallbackTitle when
-	// GenerateTitle fails) and its stored analyst session id. The request body's
-	// title/analysis are only fallbacks.
-	var requirement *model.Requirement
-	if req.RequirementID != "" {
-		if existing, err := h.reqSvc.Get(req.RequirementID); err == nil {
-			requirement = existing
-		}
+	if req.RequirementID == "" {
+		writeError(w, 400, "INVALID", "missing requirement_id")
+		return
 	}
-	storedSessionID := ""
-	if requirement != nil && requirement.AnalysisSessionID != "" {
-		storedSessionID = requirement.AnalysisSessionID
+
+	requirement, err := h.reqSvc.Get(req.RequirementID)
+	if err != nil {
+		writeError(w, 404, "NOT_FOUND", "requirement not found")
+		return
 	}
+
+	// Resolve session threading from the DB (source of truth). The request
+	// body's title/analysis are only fallbacks for the prompt builder.
+	storedSessionID := requirement.AnalysisSessionID
 	isFirstRound := storedSessionID == ""
 	sessionID := storedSessionID
 	if isFirstRound {
 		sessionID = util.NewUUID()
 	}
-
-	sendStatus(w, rc, "phase", "🤖 Claude 正在准备分析...")
-	rc.Flush()
-
-	// firstTurnPrompt builds the first-turn prompt lazily: it pre-reads a BOUNDED
-	// slice of the project (AI docs + a names-only structure tree) and streams
-	// each pre-read file as SSE progress, so the user sees live activity before
-	// Claude responds and Claude never blindly traverses a multi-GB tree. Only
-	// invoked for a first-turn run (the genuine first turn, or the stale-resume
-	// fallback); resume turns just send the new user message.
-	firstTurnPrompt := func() string {
-		sendStatus(w, rc, "phase", "📖 正在预读项目上下文（不遍历整个仓库）...")
-		rc.Flush()
-		title := req.RequirementTitle
-		desc := ""
-		analysis := req.CurrentAnalysis
-		if requirement != nil {
-			if title == "" {
-				title = requirement.Title
-			}
-			desc = requirement.Description
-			if analysis == "" || analysis == "[]" {
-				analysis = requirement.AcceptanceCriteria
-			}
-		}
-		docBlock, readFiles, treeSummary := collectProjectContext(req.ProjectPath, title)
-		for _, rf := range readFiles {
-			sendStatus(w, rc, "tool_call", "📖 预读: "+rf)
-			rc.Flush()
-		}
-		log.Printf("[analyst-chat] pre-read %d files, docBlock=%d bytes, tree=%d bytes, desc=%d bytes",
-			len(readFiles), len(docBlock), len(treeSummary), len(desc))
-		return buildAnalystFirstPrompt(title, desc, analysis, req.UserMessage, docBlock, treeSummary)
-	}
 	resumePrompt := req.UserMessage
 
 	systemPrompt, model := h.roleConfig("analyst")
-	finalResult, newSessionID, err := h.runAnalystTurn(r.Context(), firstTurnPrompt, resumePrompt, req.ProjectPath, systemPrompt, model, sessionID, !isFirstRound, w, rc)
-	if err != nil {
-		log.Printf("[analyst-chat] turn failed: %v", err)
-		sendStatus(w, rc, "error", err.Error())
-		fmt.Fprintf(w, "data: {\"type\":\"done\"}\n\n")
-		rc.Flush()
-		return
-	}
 
-	// Persist the session id that actually landed on disk. On the first turn we
-	// always persist (the freshly minted id). On a resume that fell back from a
-	// stale id, newSessionID is a fresh id that differs from what was stored —
-	// persist it so the next turn resumes the right conversation. A normal
-	// successful resume leaves newSessionID == storedSessionID, so we skip.
-	if req.RequirementID != "" && newSessionID != "" && newSessionID != storedSessionID {
-		if perr := h.reqSvc.UpdateAnalysisSession(req.RequirementID, newSessionID); perr != nil {
-			log.Printf("[analyst-chat] Failed to persist session for %s: %v", req.RequirementID, perr)
+	// Create the job, persist its id so a refresh can reconnect, and return the
+	// job id immediately. The claude turn runs in a goroutine writing progress
+	// into the job store.
+	job := h.jobs.Create(req.RequirementID)
+	if perr := h.reqSvc.UpdateAnalysisJob(req.RequirementID, job.ID); perr != nil {
+		log.Printf("[analyst-chat] failed to persist analysis_job_id for %s: %v", req.RequirementID, perr)
+	}
+	writeJSON(w, 200, map[string]string{"job_id": job.ID})
+
+	projectPath := req.ProjectPath
+	if projectPath == "" {
+		if proj, perr := h.projectSvc.Get(requirement.ProjectID); perr == nil {
+			projectPath = proj.LocalPath
 		}
 	}
 
-	// Build a lightweight local-history string for the frontend's chat display.
-	// The authoritative conversation context lives in the resumed claude session,
-	// so this is just for client-side rendering.
-	var historyParts []string
-	if req.UserMessage != "" {
-		historyParts = append(historyParts, "User: "+req.UserMessage)
-	}
-	historyParts = append(historyParts, "AI: "+strings.TrimSpace(finalResult))
-	updatedHistory := strings.Join(historyParts, "\n")
+	go func() {
+		log.Printf("[analyst-chat] job %s started for %s (resume=%v)", job.ID, req.RequirementID, !isFirstRound)
+		defer func() {
+			// Clear the active-job pointer on every exit path so a refresh after
+			// the turn ends shows the idle chat (ready for the next message)
+			// instead of a stale "running" spinner.
+			_ = h.reqSvc.UpdateAnalysisJob(req.RequirementID, "")
+		}()
+		sink := jobSink{job}
+		job.Append(store.LogLine{Type: "phase", Content: "🤖 Claude 正在准备分析..."})
 
-	doneData, _ := json.Marshal(map[string]string{"type": "done", "history": updatedHistory})
-	fmt.Fprintf(w, "data: %s\n\n", string(doneData))
-	rc.Flush()
+		// firstTurnPrompt pre-reads a BOUNDED slice of the project (AI docs +
+		// a names-only structure tree) and emits each pre-read file as
+		// progress, so the user sees live activity before Claude responds.
+		// Only invoked for a first-turn run (genuine first turn, or the
+		// stale-resume fallback); resume turns just send the new user message.
+		title := req.RequirementTitle
+		desc := ""
+		analysis := req.CurrentAnalysis
+		if title == "" {
+			title = requirement.Title
+		}
+		desc = requirement.Description
+		if analysis == "" || analysis == "[]" {
+			analysis = requirement.AcceptanceCriteria
+		}
+		firstTurnPrompt := func() string {
+			sink.emit(store.LogLine{Type: "phase", Content: "📖 正在预读项目上下文（不遍历整个仓库）..."})
+			docBlock, readFiles, treeSummary := collectProjectContext(projectPath, title)
+			for _, rf := range readFiles {
+				sink.emit(store.LogLine{Type: "tool_call", Content: "📖 预读: " + rf})
+			}
+			log.Printf("[analyst-chat] pre-read %d files, docBlock=%d bytes, tree=%d bytes, desc=%d bytes",
+				len(readFiles), len(docBlock), len(treeSummary), len(desc))
+			return buildAnalystFirstPrompt(title, desc, analysis, req.UserMessage, docBlock, treeSummary)
+		}
+
+		// context.Background(): the HTTP request has already returned, so we
+		// must not tie the claude subprocess's lifetime to r.Context() (which
+		// is cancelled the moment the handler returns — that was the bug that
+		// killed the turn on page refresh).
+		finalResult, newSessionID, err := h.runAnalystTurn(context.Background(), firstTurnPrompt, resumePrompt, projectPath, systemPrompt, model, sessionID, !isFirstRound, sink)
+		if err != nil {
+			log.Printf("[analyst-chat] turn failed: %v", err)
+			job.Append(store.LogLine{Type: "error", Content: err.Error()})
+			job.Finish(1, store.JobError)
+			return
+		}
+
+		// Persist the session id that actually landed on disk. On the first
+		// turn we always persist (the freshly minted id). On a resume that
+		// fell back from a stale id, newSessionID is a fresh id that differs
+		// from what was stored — persist it so the next turn resumes the right
+		// conversation. A normal successful resume leaves newSessionID ==
+		// storedSessionID, so we skip the write.
+		if newSessionID != "" && newSessionID != storedSessionID {
+			if perr := h.reqSvc.UpdateAnalysisSession(req.RequirementID, newSessionID); perr != nil {
+				log.Printf("[analyst-chat] Failed to persist session for %s: %v", req.RequirementID, perr)
+			}
+		}
+
+		// The authoritative conversation context lives in the resumed claude
+		// session; the job's message lines already carry the assistant text,
+		// so the frontend reconstructs the turn from them. Emit a terminal
+		// result + done line for cosmetics / debugging.
+		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(finalResult)})
+		job.Append(store.LogLine{Type: "done", Content: "✅ 分析完成！"})
+		job.Finish(0, store.JobDone)
+		log.Printf("[analyst-chat] job %s finished for %s", job.ID, req.RequirementID)
+	}()
 }
 
 // DeveloperChat runs one "追加调整" conversation turn against the DEVELOPER role
@@ -1366,16 +1382,18 @@ var analystFirstTurnDisallowedTools = []string{"Read", "Glob", "Grep", "Bash", "
 
 // runAnalystTurn runs one analyst-chat turn with automatic stale-session
 // recovery. firstTurnPrompt is a lazy builder for the first-turn prompt (it
-// pre-reads bounded project context and streams the pre-read files as SSE);
+// pre-reads bounded project context and emits the pre-read files as progress);
 // it is only invoked when doing a first-turn run — the genuine first turn, or
 // the stale-resume fallback — so resume turns don't pay the pre-read cost.
 // resumePrompt is just the new user message for a resumed turn. When resume==true
 // and the target conversation no longer exists on disk (Claude reports "No
 // conversation found"), it transparently falls back: mints a fresh session id and
 // re-runs as a first turn, so a stale id stuck in the DB never wedges the chat.
-// Returns the final result text and the session id that actually landed on disk
-// (which the caller persists).
-func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, sessionID string, resume bool, w http.ResponseWriter, rc *http.ResponseController) (finalResult, newSessionID string, err error) {
+// sink receives the turn's log lines (phase / tool_call / message); in the
+// JobStore flow it is a jobSink so the lines survive a page refresh via the job's
+// replay buffer. Returns the final result text and the session id that actually
+// landed on disk (which the caller persists).
+func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, sessionID string, resume bool, sink streamSink) (finalResult, newSessionID string, err error) {
 	prompt := resumePrompt
 	if !resume {
 		prompt = firstTurnPrompt()
@@ -1401,7 +1419,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 		Resume:          resume,
 		DisallowedTools: disallowed,
 	})
-	out := runClaudeStream(sseSink{w, rc}, cmd, "analyst-chat")
+	out := runClaudeStream(sink, cmd, "analyst-chat")
 
 	if out.staleSession && resume {
 		// Stale --resume: the session file is gone (typically a stale id left by
@@ -1410,8 +1428,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 		// the first-turn prompt.
 		freshID := util.NewUUID()
 		log.Printf("[analyst-chat] stale session %s — falling back to fresh first turn %s", sessionID, freshID)
-		sendStatus(w, rc, "phase", "🔄 检测到过期会话，正在重新开始分析...")
-		rc.Flush()
+		sink.emit(store.LogLine{Type: "phase", Content: "🔄 检测到过期会话，正在重新开始分析..."})
 		prompt = firstTurnPrompt()
 		cmd = h.llm.StreamCmd(ctx, llm.StreamOpts{
 			Prompt:          prompt,
@@ -1421,7 +1438,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 			SessionID:       freshID,
 			DisallowedTools: analystFirstTurnDisallowedTools,
 		})
-		out = runClaudeStream(sseSink{w, rc}, cmd, "analyst-chat")
+		out = runClaudeStream(sink, cmd, "analyst-chat")
 		sessionID = freshID
 	}
 

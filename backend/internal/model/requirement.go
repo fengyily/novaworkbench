@@ -18,6 +18,7 @@ type Requirement struct {
 	AnalysisSessionID  string     `json:"analysis_session_id"`
 	DesignSessionID    string     `json:"design_session_id"`
 	DesignJobID        string     `json:"design_job_id"` // active architect-design JobStore job id; empty when no design job is running
+	AnalysisJobID      string     `json:"analysis_job_id"` // active analyst-chat JobStore job id; empty when no analyst turn is running
 	CodingSessionID    string     `json:"coding_session_id"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`

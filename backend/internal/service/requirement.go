@@ -59,7 +59,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	}
 
 	rows, err := s.db.Query(
-		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,coding_session_id,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY updated_at DESC",
+		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,coding_session_id,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY updated_at DESC",
 		args...)
 	if err != nil {
 		return nil, err
@@ -71,7 +71,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		var r model.Requirement
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo, &r.Sprint,
-			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.CodingSessionID, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
+			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.CodingSessionID, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, r)
@@ -85,10 +85,10 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	var r model.Requirement
 	err := s.db.QueryRow(
-		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,coding_session_id,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
+		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,coding_session_id,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo, &r.Sprint,
-			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.CodingSessionID, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
+			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.CodingSessionID, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("requirement not found")
 	}
@@ -179,6 +179,16 @@ func (s *RequirementService) UpdateDesignSession(id, sessionID string) error {
 // failure, or staleness) so the UI stops showing the "executing" state.
 func (s *RequirementService) UpdateDesignJob(id, jobID string) error {
 	_, err := s.db.Exec("UPDATE requirements SET design_job_id=?, updated_at=? WHERE id=?",
+		jobID, time.Now(), id)
+	return err
+}
+
+// UpdateAnalysisJob persists the active analyst-chat JobStore job id so a page
+// refresh can reconnect to the running turn. Pass "" to clear it (on success,
+// failure, or staleness) so the UI stops showing the "analyzing" spinner and
+// the next turn can start.
+func (s *RequirementService) UpdateAnalysisJob(id, jobID string) error {
+	_, err := s.db.Exec("UPDATE requirements SET analysis_job_id=?, updated_at=? WHERE id=?",
 		jobID, time.Now(), id)
 	return err
 }
