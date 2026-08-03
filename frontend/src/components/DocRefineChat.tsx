@@ -4,7 +4,7 @@ import { API_BASE } from '../api/client';
 interface Props {
   reqId: string;
   projectPath: string;
-  docType: 'spec' | 'design' | 'coding';
+  docType: 'design' | 'coding';
   currentDoc: string;
   onApplied: (newDoc: string) => void;
 }
@@ -15,7 +15,7 @@ interface ChatMessage {
   isError?: boolean;
 }
 
-const LABEL = { spec: '需求文档', design: '技术方案', coding: '开发指令' };
+const LABEL = { design: '技术方案', coding: '开发指令' };
 
 export default function DocRefineChat({ reqId, projectPath, docType, currentDoc, onApplied }: Props) {
   const [expanded, setExpanded] = useState(false);

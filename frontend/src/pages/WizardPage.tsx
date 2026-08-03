@@ -102,27 +102,11 @@ export default function WizardPage() {
     }
   };
 
-  // Finalize requirement
+  // Finalize requirement: proceed directly to coding, passing the conversation
+  // as the requirement description (no separate finalization step).
   const handleFinalize = async () => {
-    setChatting(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/wizard/analyst-complete`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_path: projectPath,
-          conversation_history: chatHistory,
-          user_message: '',
-        }),
-      });
-      const json = await res.json();
-      setFinalReq(json.data?.requirement || '');
-      setStep(3);
-    } catch (err: any) {
-      alert('生成需求失败: ' + err.message);
-    } finally {
-      setChatting(false);
-    }
+    setFinalReq(chatHistory);
+    setStep(3);
   };
 
   // Step 3: Start coding

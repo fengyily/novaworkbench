@@ -54,13 +54,10 @@ func (h *WizardHandler) roleConfig(key string) (systemPrompt, model string) {
 // docStageSession maps a refine/apply doc_type to the requirement's stored
 // session id for that stage and the role key whose persona it runs under.
 // Returns sid="" when the stage hasn't been run yet (caller surfaces a hint).
-//   spec   → analysis_session_id / analyst
 //   design → design_session_id   / architect
 //   coding → coding_session_id   / developer
 func docStageSession(req *model.Requirement, docType string) (sid, roleKey string) {
 	switch docType {
-	case "spec":
-		return req.AnalysisSessionID, "analyst"
 	case "design":
 		return req.DesignSessionID, "architect"
 	case "coding":
@@ -69,213 +66,13 @@ func docStageSession(req *model.Requirement, docType string) (sid, roleKey strin
 	return "", "analyst"
 }
 
-// AnalystComplete is the "需求完善完成" gate. It resumes the analyst conversation
-// session (--resume) and asks Claude to distill the discussion into a structured
-// requirement document (acceptance_criteria, technical_risks, related_modules,
-// summary). Progress streams via SSE; on success the result is persisted and the
-// requirement is marked analyzed.
-func (h *WizardHandler) AnalystComplete(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		ProjectPath   string `json:"project_path"`
-		RequirementID string `json:"requirement_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, 400, "INVALID", "Invalid JSON")
-		return
-	}
-
-	rc := http.NewResponseController(w)
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	rc.Flush()
-
-	sendStatus(w, rc, "phase", "🤖 正在基于对话生成结构化需求文档...")
-	rc.Flush()
-
-	// Load the stored analyst session so Claude resumes the same conversation.
-	sessionID := ""
-	if req.RequirementID != "" {
-		if existing, err := h.reqSvc.Get(req.RequirementID); err == nil {
-			sessionID = existing.AnalysisSessionID
-		}
-	}
-
-	prompt := "基于我们刚才的深入分析对话，请先阅读项目相关文件（如需核实技术细节），" +
-		"然后输出 ONLY valid JSON，不要 markdown 代码块：\n" +
-		"{\n" +
-		"  \"acceptance_criteria\": [\"可测试的验收标准，包含具体文件路径、API端点、UI状态\"],\n" +
-		"  \"technical_risks\": [\"具体的技术风险，附带缓解建议，引用实际代码位置\"],\n" +
-		"  \"related_modules\": [\"需要修改的具体文件路径\"],\n" +
-		"  \"summary\": \"执行摘要（中文），然后是完整的实现清单：涉及文件、API设计、UI状态（加载/空/错误/成功/边界）、数据模型变更、新依赖、错误处理策略。实现者可以据此直接开工，无需追问。\"\n" +
-		"}"
-
-	systemPrompt, model := h.roleConfig("analyst")
-	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
-		Prompt:       prompt,
-		WorkDir:      req.ProjectPath,
-		SystemPrompt: systemPrompt,
-		Model:        model,
-		SessionID:    sessionID,
-		Resume:       true,
-	})
-	out := runClaudeStream(w, rc, cmd, "analyst-complete")
-
-	if out.staleSession {
-		// The analyst conversation is gone (stale session id left by an older
-		// build). We can't distill a doc from a conversation that no longer
-		// exists — clear the stale id so the next chat starts fresh, and ask the
-		// user to redo the analysis conversation.
-		if req.RequirementID != "" {
-			_ = h.reqSvc.UpdateAnalysisSession(req.RequirementID, "")
-		}
-		sendStatus(w, rc, "error", "分析对话会话已过期（未在磁盘找到）。请重新进行「深入分析」对话后再完善需求。")
-		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
-		rc.Flush()
-		return
-	}
-	if out.finalResult == "" {
-		errMsg := out.errMsg
-		if errMsg == "" {
-			errMsg = "Claude 未返回结果，请重试"
-		}
-		sendStatus(w, rc, "error", errMsg)
-		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
-		rc.Flush()
-		return
-	}
-
-	resultJSON := extractJSON(out.finalResult)
-
-	if req.RequirementID != "" {
-		if _, err := h.reqSvc.UpdateAnalysis(req.RequirementID, resultJSON); err != nil {
-			log.Printf("[analyst-complete] Failed to save analysis for %s: %v", req.RequirementID, err)
-			sendStatus(w, rc, "error", "保存失败: "+err.Error())
-			fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
-			rc.Flush()
-			return
-		}
-	}
-
-	doneData, _ := json.Marshal(map[string]interface{}{
-		"type":    "done",
-		"success": true,
-		"result":  resultJSON,
-	})
-	fmt.Fprintf(w, "data: %s\n\n", string(doneData))
-	rc.Flush()
-}
-
-// AnalystAnalyze is the one-shot "重新分析" action. It mints a fresh claude
-// session and asks Claude to read the project code and produce the structured
-// requirement document directly (skipping the multi-turn chat). Progress streams
-// via SSE; on success the result is persisted and the requirement is marked
-// analyzed. The previous analysis_session_id is replaced by the new one.
-func (h *WizardHandler) AnalystAnalyze(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		RequirementID string `json:"requirement_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, 400, "INVALID", "Invalid JSON")
-		return
-	}
-	id := body.RequirementID
-	if id == "" {
-		writeError(w, 400, "INVALID", "missing requirement id")
-		return
-	}
-	req, err := h.reqSvc.Get(id)
-	if err != nil {
-		writeError(w, 404, "NOT_FOUND", "requirement not found")
-		return
-	}
-	project, _ := h.projectSvc.Get(req.ProjectID)
-	projectPath := ""
-	if project != nil {
-		projectPath = project.LocalPath
-	}
-
-	rc := http.NewResponseController(w)
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	rc.Flush()
-
-	sendStatus(w, rc, "phase", "🤖 Claude 正在读取项目代码，重新生成需求分析...")
-	rc.Flush()
-
-	// Mint a fresh session for this re-analysis pass. Only persist it after the
-	// turn succeeds, so a failed run doesn't leave an id with no on-disk session.
-	sessionID := util.NewUUID()
-
-	var promptBuf strings.Builder
-	if req.Description != "" {
-		promptBuf.WriteString(fmt.Sprintf("需求描述：%s\n\n", req.Description))
-	}
-	if req.AcceptanceCriteria != "" && req.AcceptanceCriteria != "[]" {
-		promptBuf.WriteString(fmt.Sprintf("上一版分析（可参考）：\n%s\n\n", req.AcceptanceCriteria))
-	}
-	promptBuf.WriteString("请先阅读项目相关文件（CLAUDE.md、相关源文件），然后输出 ONLY valid JSON，不要 markdown 代码块：\n" +
-		"{\n" +
-		"  \"acceptance_criteria\": [\"可测试的验收标准，包含具体文件路径、API端点、UI状态\"],\n" +
-		"  \"technical_risks\": [\"具体的技术风险，附带缓解建议，引用实际代码位置\"],\n" +
-		"  \"related_modules\": [\"需要修改的具体文件路径\"],\n" +
-		"  \"summary\": \"执行摘要（中文），然后是完整的实现清单：涉及文件、API设计、UI状态（加载/空/错误/成功/边界）、数据模型变更、新依赖、错误处理策略。实现者可以据此直接开工，无需追问。\"\n" +
-		"}")
-
-	systemPrompt, model := h.roleConfig("analyst")
-	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
-		Prompt:       promptBuf.String(),
-		WorkDir:      projectPath,
-		SystemPrompt: systemPrompt,
-		Model:        model,
-		SessionID:    sessionID,
-	})
-	out := runClaudeStream(w, rc, cmd, "analyst-analyze")
-
-	if out.finalResult == "" {
-		errMsg := out.errMsg
-		if errMsg == "" {
-			errMsg = "Claude 未返回结果，请重试"
-		}
-		sendStatus(w, rc, "error", errMsg)
-		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
-		rc.Flush()
-		return
-	}
-
-	// The session now exists on disk — persist its id for potential later resume.
-	if err := h.reqSvc.UpdateAnalysisSession(id, sessionID); err != nil {
-		log.Printf("[analyst-analyze] Failed to persist session for %s: %v", id, err)
-	}
-
-	resultJSON := extractJSON(out.finalResult)
-	if _, err := h.reqSvc.UpdateAnalysis(id, resultJSON); err != nil {
-		log.Printf("[analyst-analyze] Failed to save analysis for %s: %v", id, err)
-		sendStatus(w, rc, "error", "保存失败: "+err.Error())
-		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
-		rc.Flush()
-		return
-	}
-
-	doneData, _ := json.Marshal(map[string]interface{}{
-		"type":    "done",
-		"success": true,
-		"result":  resultJSON,
-	})
-	fmt.Fprintf(w, "data: %s\n\n", string(doneData))
-	rc.Flush()
-}
-
 // AnalystChat runs Claude CLI with stream-json output and full tool use permissions.
 // The requirement analyst reads project files autonomously and refines the requirement
 // through multi-turn conversation. Conversation context is held in a real claude CLI
 // session: the first turn mints a session id (--session-id, persisted on the
 // requirement) and subsequent turns resume it (--resume), so the user's appended
-// descriptions stay in the same conversation. Completion is decided manually by the
-// user via analyst-complete.
+// descriptions stay in the same conversation. When the conversation has settled,
+// the user proceeds directly to architect-design (no separate finalization step).
 func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ProjectPath      string `json:"project_path"`
@@ -1532,13 +1329,13 @@ func streamLines(r io.Reader, w io.Writer, rc *http.ResponseController, streamTy
 	}
 }
 
-// RefineDoc streams a multi-turn conversation to refine either a requirement spec or a design doc.
-// doc_type: "spec" | "design"
+// RefineDoc streams a multi-turn conversation to refine a design doc or a coding instruction.
+// doc_type: "design" | "coding"
 func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RequirementID       string `json:"requirement_id"`
 		ProjectPath         string `json:"project_path"`
-		DocType             string `json:"doc_type"` // "spec" | "design"
+		DocType             string `json:"doc_type"` // "design" | "coding"
 		CurrentDoc          string `json:"current_doc"`
 		ConversationHistory string `json:"conversation_history"`
 		UserMessage         string `json:"user_message"`
@@ -1555,17 +1352,15 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	rc.Flush()
 
-	docLabel := "需求文档"
-	if req.DocType == "design" {
-		docLabel = "技术方案"
-	} else if req.DocType == "coding" {
+	docLabel := "技术方案"
+	if req.DocType == "coding" {
 		docLabel = "开发指令"
 	}
 
-	// Route to this stage's session: spec→analyst, design→architect,
-	// coding→developer. The session already holds the stage's conversation and
-	// the doc it generated, so we --resume it and append ONLY the user's new
-	// message — no ConversationHistory / CurrentDoc re-feeding (the resumed
+	// Route to this stage's session: design→architect, coding→developer. The
+	// session already holds the stage's conversation and the doc it generated,
+	// so we --resume it and append ONLY the user's new message — no
+	// ConversationHistory / CurrentDoc re-feeding (the resumed
 	// conversation IS the context).
 	var requirement *model.Requirement
 	if req.RequirementID != "" {
@@ -1677,7 +1472,7 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 }
 
 // ApplyDoc lets Claude rewrite the stored doc field based on the conversation.
-// doc_type: "spec" updates acceptance_criteria; "design" updates design_docs.
+// doc_type: "design" updates design_docs; "coding" returns a plain-text dev instruction.
 func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RequirementID       string `json:"requirement_id"`
@@ -1722,15 +1517,6 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 
 	var prompt string
 	switch req.DocType {
-	case "spec":
-		prompt = "基于我们的对话，将需求文档更新为最终版本。" +
-			"输出 ONLY valid JSON，不要 markdown 代码块：\n" +
-			"{\n" +
-			"  \"acceptance_criteria\": [\"完整的验收标准列表\"],\n" +
-			"  \"technical_risks\": [\"技术风险列表\"],\n" +
-			"  \"related_modules\": [\"相关模块路径\"],\n" +
-			"  \"summary\": \"需求概述\"\n" +
-			"}"
 	case "coding":
 		prompt = "基于我们的对话，将用户的调整意见整理为给 Claude Code CLI 的开发指令。" +
 			"输出纯文本的开发指令，清晰描述需要实现或调整的内容。不要输出 JSON，不要添加额外说明。"
@@ -1860,12 +1646,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Persist to DB
-	var saveErr error
-	if req.DocType == "spec" {
-		_, saveErr = h.reqSvc.UpdateAnalysis(req.RequirementID, persistVal)
-	} else {
-		_, saveErr = h.reqSvc.UpdateDesign(req.RequirementID, persistVal)
-	}
+	_, saveErr := h.reqSvc.UpdateDesign(req.RequirementID, persistVal)
 	if saveErr != nil {
 		log.Printf("[apply-doc] save failed: %v", saveErr)
 		sendStatus(w, rc, "error", "保存失败: "+saveErr.Error())

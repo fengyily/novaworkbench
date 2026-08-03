@@ -17,14 +17,15 @@ func NewRequirementService(db *sql.DB) *RequirementService {
 	return &RequirementService{db: db}
 }
 
-// Valid status transitions — three-role stage-gate lifecycle:
-// draft → analyzing → analyzed → designing → designed → developing → done
+// Valid status transitions — two-role stage-gate lifecycle:
+// draft → analyzing → designing → designed → developing → done
 // (any state → archived). Each gate is completed by a manual user action.
+// The analyst chat happens during "analyzing"; proceeding to architect-design
+// transitions directly to "designing" (no separate "analyzed" finalization).
 var validTransitions = map[string][]string{
 	"draft":      {"analyzing", "archived"},
-	"analyzing":  {"analyzed", "draft", "archived"},
-	"analyzed":   {"analyzing", "designing", "archived"},
-	"designing":  {"designed", "analyzed", "archived"},
+	"analyzing":  {"designing", "draft", "archived"},
+	"designing":  {"designed", "analyzing", "archived"},
 	"designed":   {"developing", "archived"},
 	"developing": {"done", "designed", "archived"},
 	"done":       {"archived"},
@@ -40,7 +41,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	}
 	if status != "" {
 		if status == "active" {
-			where += " AND status IN ('draft','analyzing','analyzed','designing','designed','developing')"
+			where += " AND status IN ('draft','analyzing','designing','designed','developing')"
 		} else if status != "archived" {
 			where += " AND status = ?"
 			args = append(args, status)
@@ -150,16 +151,6 @@ func (s *RequirementService) UpdateStatus(id string, newStatus string) (*model.R
 	}
 
 	_, err = s.db.Exec("UPDATE requirements SET status=?, updated_at=?, completed_at=? WHERE id=?", newStatus, now, completedAt, id)
-	if err != nil {
-		return nil, err
-	}
-	return s.Get(id)
-}
-
-func (s *RequirementService) UpdateAnalysis(id string, analysisJSON string) (*model.Requirement, error) {
-	// Analyst completion gate: persist refined analysis and mark requirement complete.
-	_, err := s.db.Exec("UPDATE requirements SET acceptance_criteria=?, status='analyzed', updated_at=? WHERE id=?",
-		analysisJSON, time.Now(), id)
 	if err != nil {
 		return nil, err
 	}

@@ -211,5 +211,14 @@ func migrate(db *sql.DB) error {
 		}
 	}
 
+	// Data migration: the "analyzed" status was removed from the lifecycle (the
+	// analyst-complete finalization step was deleted). Map any存量 "analyzed" rows
+	// to "analyzing" — the new model treats the analyst chat as happening during
+	// "analyzing", and the user proceeds directly to architect-design. Idempotent:
+	// after the first run no rows match, so it's a no-op.
+	if _, err := db.Exec("UPDATE requirements SET status='analyzing' WHERE status='analyzed'"); err != nil {
+		return err
+	}
+
 	return nil
 }
