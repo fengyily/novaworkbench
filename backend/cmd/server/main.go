@@ -155,6 +155,7 @@ func main() {
 	mux.HandleFunc("POST /api/wizard/developer-chat", wizardH.DeveloperChat)
 	mux.HandleFunc("POST /api/wizard/architect-design", wizardH.ArchitectDesign)
 	mux.HandleFunc("POST /api/wizard/start-coding", wizardH.StartCoding)
+	mux.HandleFunc("POST /api/wizard/adjust-coding", wizardH.AdjustCoding)
 	mux.HandleFunc("GET /api/wizard/jobs/{id}", wizardH.GetJob)
 	mux.HandleFunc("GET /api/wizard/jobs/{id}/stream", wizardH.StreamJob)
 	mux.HandleFunc("POST /api/wizard/refine-doc", wizardH.RefineDoc)

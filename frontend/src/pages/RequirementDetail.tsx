@@ -3,7 +3,6 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { requirementsApi, projectsApi, API_BASE, statusLabels, type Requirement, type Project, mergeApi, type MergeState } from '../api/client';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
-import CodingChat from '../components/CodingChat';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import './RequirementDetail.css';
@@ -90,6 +89,12 @@ export default function RequirementDetail() {
   const [editDesc, setEditDesc] = useState('');
   const [editPriority, setEditPriority] = useState('medium');
   const [editSprint, setEditSprint] = useState('');
+
+  // 追加调整 input. Resume the prior coding session (--resume coding_session_id)
+  // with ONLY the user's follow-up as -p — the resumed conversation already
+  // carries the requirement/design/persona, so no system prompt or project
+  // context is re-injected. Output reuses codingLines/coding-panel for continuity.
+  const [adjustInput, setAdjustInput] = useState('');
 
   const handleDelete = async () => {
     if (!req) return;
@@ -242,7 +247,12 @@ export default function RequirementDetail() {
   };
 
   // ── Developer phase: job streaming ────────────────────────────────────────
-  const streamJob = useCallback((jobId: string) => {
+  // streamJob subscribes to a wizard job's SSE stream and appends events to
+  // codingLines (the shared coding-panel). keepDone=true is used by 追加调整
+  // rounds: on job_done it leaves the requirement status untouched (stays
+  // developing/done) and only refreshes, instead of flipping to developing and
+  // writing the localStorage "done" marker like the first coding pass.
+  const streamJob = useCallback((jobId: string, opts?: { keepDone?: boolean }) => {
     if (esRef.current) esRef.current.close();
     const es = new EventSource(`${API_BASE}/api/wizard/jobs/${jobId}/stream`);
     esRef.current = es;
@@ -255,7 +265,11 @@ export default function RequirementDetail() {
           es.close();
           esRef.current = null;
           setCoding(false);
-          if (id && (evt.status === 'done' || evt.exit_code === 0)) {
+          const ok = evt.status === 'done' || evt.exit_code === 0;
+          if (opts?.keepDone) {
+            // 追加调整: preserve current status, just refresh on success.
+            if (ok) refresh();
+          } else if (id && ok) {
             requirementsApi.updateStatus(id, 'developing').then(() => refresh());
             localStorage.setItem(`coding_job_${id}`, `done:${jobId}`);
           } else {
@@ -344,6 +358,37 @@ export default function RequirementDetail() {
   const confirmBranchAndStart = () => {
     setShowBranchModal(false);
     doStartCoding(branchName, baseBranch);
+  };
+
+  // ── 追加调整: resume the prior coding session, output appends to codingLines
+  // doAdjustCoding posts the follow-up message to adjust-coding (which resumes
+  // coding_session_id with ONLY the user's message as -p) and streams the job
+  // into the SAME codingLines panel as the first coding pass — no separate
+  // output area, so the adjustment reads as a continuation of the dev log.
+  const doAdjustCoding = async () => {
+    if (!req || !id) return;
+    const msg = adjustInput.trim();
+    if (!msg) return;
+    // Reuse coding state + coding-panel; do NOT clear codingLines (continuity).
+    setCoding(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/wizard/adjust-coding`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requirement_id: id,
+          message: msg,
+        }),
+      });
+      const json = await res.json();
+      const jobId = json.data?.job_id;
+      if (!jobId) throw new Error(json.error?.message || '未获取到任务 ID');
+      setAdjustInput('');
+      streamJob(jobId, { keepDone: true });
+    } catch (err: any) {
+      setCodingLines(prev => [...prev, { type: 'error', content: '❌ ' + err.message }]);
+      setCoding(false);
+    }
   };
 
   // ── Merge / PR step (post-coding 合入) ──────────────────────────────────────
@@ -523,9 +568,9 @@ export default function RequirementDetail() {
   const showDesignToggle = designLines.length > 0 && !designProcessActive;
 
   const STEPS = [
-    { key: 'analyst', label: '需求分析师', icon: '🔍', doneStatus: 'designing' },
-    { key: 'architect', label: '架构师', icon: '📐', doneStatus: 'designed' },
-    { key: 'developer', label: '开发者', icon: '🚀', doneStatus: 'done' },
+    { key: 'analyst', label: '需求分析', icon: '🔍', doneStatus: 'designing' },
+    { key: 'architect', label: '方案设计', icon: '📐', doneStatus: 'designed' },
+    { key: 'developer', label: '开发实现', icon: '🚀', doneStatus: 'done' },
   ] as const;
   const stageIndex = stage === 'done' ? 3 : STEPS.findIndex(s => s.key === stage);
 
@@ -708,11 +753,7 @@ export default function RequirementDetail() {
 
       {/* ── Analyst stage ── */}
       {/* While analyzing, DeepRefineChat is itself the section (own card + header),
-          so we render it standalone — no outer "需求分析师" card around it, which
-          would otherwise create a card-in-card with two overlapping 🔍 headers. */}
-      {/* ── Analyst stage ── */}
-      {/* While analyzing, DeepRefineChat is itself the section (own card + header),
-          so we render it standalone — no outer "需求分析师" card around it, which
+          so we render it standalone — no outer "需求分析" card around it, which
           would otherwise create a card-in-card with two overlapping 🔍 headers. */}
       {req.status === 'analyzing' && (
         <DeepRefineChat
@@ -729,9 +770,9 @@ export default function RequirementDetail() {
 
       {req.status === 'draft' && (
         <div className="detail-section analysis-section">
-          <div className="section-header"><h3>🔍 需求分析师</h3></div>
+          <div className="section-header"><h3>🔍 需求分析</h3></div>
           <div className="tab-empty">
-            <p>需求已创建。由需求分析师结合项目情况完善需求。</p>
+            <p>需求已创建。结合项目情况完善需求。</p>
             <button className="btn btn-primary" onClick={() => transition('analyzing', '开始分析')} disabled={!!busy}>
               {busy === '开始分析' ? '⏳ ...' : '🤖 开始需求分析'}
             </button>
@@ -773,7 +814,7 @@ export default function RequirementDetail() {
 
           {req.status === 'designing' && !hasDesign && !designing && !req.design_job_id && (
             <div className="tab-empty">
-              <p>需求分析已完成。架构师将在 <strong>plan 模式</strong>下探索项目代码，制定具体可执行的技术实现方案（Markdown）。</p>
+              <p>需求分析已完成。方案设计阶段将在 <strong>plan 模式</strong>下探索项目代码，制定具体可执行的技术实现方案（Markdown）。</p>
               <button className="btn btn-primary" onClick={() => runArchitectDesign()} disabled={!!busy || designing}>
                 {busy === '生成技术方案' ? '⏳ ...' : '📐 开始制定技术方案'}
               </button>
@@ -835,11 +876,11 @@ export default function RequirementDetail() {
       {/* ── Developer stage ── */}
       {(stage === 'developer' || stage === 'done') && hasDesign && (
         <div className="detail-section">
-          <div className="section-header"><h3>🚀 开发者</h3></div>
+          <div className="section-header"><h3>🚀 开发实现</h3></div>
 
           {req.status === 'designed' && codingLines.length === 0 && !coding && (
             <div className="tab-empty">
-              <p>方案已完成。开发者（Claude Code）将根据技术方案进行开发。</p>
+              <p>方案已完成。将根据技术方案进行开发实现。</p>
               <p style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>项目路径：<code>{project?.local_path}</code></p>
               <button className="btn btn-primary" onClick={() => openBranchModal()}>🚀 开始开发</button>
             </div>
@@ -851,6 +892,29 @@ export default function RequirementDetail() {
                 <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
               ))}
               {coding && <div className="coding-line coding-line-tool_call">⏳ Claude 正在工作...</div>}
+            </div>
+          )}
+
+          {/* ── 追加调整 ── 续接 coding session（--resume），仅携带本指令；
+              输出追加到上方 coding-panel，与首轮开发连贯。developing/done 均可。 */}
+          {req.coding_session_id && (req.status === 'developing' || req.status === 'done') && !coding && (
+            <div className="adjust-input-row" style={{ marginTop: 12 }}>
+              <textarea
+                className="input"
+                rows={2}
+                value={adjustInput}
+                onChange={e => setAdjustInput(e.target.value)}
+                placeholder="追加调整：描述需要修改的内容，Enter 发送（续接原开发会话，仅携带本指令）"
+                style={{ resize: 'vertical', width: '100%' }}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doAdjustCoding(); }
+                }}
+              />
+              <div style={{ marginTop: 8 }}>
+                <button className="btn btn-primary" onClick={doAdjustCoding} disabled={!adjustInput.trim()}>
+                  🚀 追加调整
+                </button>
+              </div>
             </div>
           )}
 
@@ -909,13 +973,6 @@ export default function RequirementDetail() {
                   </a>
                 )}
               </div>
-
-              <CodingChat
-                reqId={req.id}
-                projectPath={project?.local_path || ''}
-                requirementTitle={req.title}
-                onStartCoding={(d) => openBranchModal(d)}
-              />
             </>
           )}
 

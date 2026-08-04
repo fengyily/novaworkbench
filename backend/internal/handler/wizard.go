@@ -538,8 +538,11 @@ func truncateStr(s string, n int) string {
 }
 
 // StartCoding creates a background job and immediately returns its ID.
-// The claude CLI runs in a goroutine; progress is written to the job store.
-// Poll GET /api/wizard/jobs/{id} to read live log lines.
+// The claude CLI runs in a goroutine; progress is parsed by runClaudeStream
+// (stream_event increments + init phase + tool_call labels) and written to the
+// job store, so the coding panel shows live progress instead of a frozen blank
+// until the turn's batched assistant event. Subscribe via
+// GET /api/wizard/jobs/{id}/stream; snapshot via GET /api/wizard/jobs/{id}.
 func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ProjectPath      string `json:"project_path"`
@@ -657,109 +660,161 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			Fork:         fork,
 		})
 
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			job.Append(store.LogLine{Type: "error", Content: "启动失败: " + err.Error()})
+		// runClaudeStream owns the subprocess lifecycle (Start/Wait) and parses
+		// stream-json events into job log lines via jobSink — including the
+		// stream_event/content_block_delta increments the hand-written parser
+		// used here previously dropped, which made the coding panel look frozen
+		// until the turn's batched assistant event arrived. It also surfaces an
+		// immediate "🤖 Claude 已连接" phase on the system/init event and a
+		// tool_call label on content_block_start, giving live progress.
+		out := runClaudeStream(jobSink{job}, cmd, "start-coding")
+
+		// Persist the forked coding session id so later coding refine turns can
+		// --resume it (jobs are in-memory; the id must live in the DB to survive
+		// a restart). runClaudeStream captured it from the system/init event;
+		// for a forked run it is the NEW id, for a plain resume it equals the
+		// input (we only write on fork).
+		if fork && out.sessionID != "" && req.RequirementID != "" {
+			if perr := h.reqSvc.UpdateCodingSession(req.RequirementID, out.sessionID); perr != nil {
+				log.Printf("[start-coding] Failed to persist coding session for %s: %v", req.RequirementID, perr)
+			}
+		}
+
+		if out.staleSession {
+			job.Append(store.LogLine{Type: "error", Content: "❌ 源会话已失效，请重新发起对应阶段后再开发。"})
 			job.Finish(1, store.JobError)
 			return
 		}
-		cmd.Stderr = nil
-
-		if err := cmd.Start(); err != nil {
-			job.Append(store.LogLine{Type: "error", Content: "启动失败: " + err.Error()})
+		if out.errMsg != "" {
+			job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
 			job.Finish(1, store.JobError)
 			return
 		}
-
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
-		doneSent := false
-		var codingSessionID string
-
-		for scanner.Scan() {
-			line := scanner.Text()
-			if line == "" {
-				continue
-			}
-			var evt map[string]interface{}
-			if err := json.Unmarshal([]byte(line), &evt); err != nil {
-				continue
-			}
-			switch evt["type"] {
-			case "system":
-				// Capture the session_id of this run. For a --fork-session run this
-				// is the NEW forked id, which we persist below so later coding
-				// refine turns can --resume it.
-				if sid, ok := evt["session_id"].(string); ok && sid != "" {
-					codingSessionID = sid
-				}
-			case "assistant":
-				msg, _ := evt["message"].(map[string]interface{})
-				content, _ := msg["content"].([]interface{})
-				for _, block := range content {
-					b, _ := block.(map[string]interface{})
-					switch b["type"] {
-					case "tool_use":
-						toolName, _ := b["name"].(string)
-						input, _ := b["input"].(map[string]interface{})
-						job.Append(store.LogLine{Type: "tool_call", Content: toolCallLabel(toolName, input)})
-					case "text":
-						text, _ := b["text"].(string)
-						if text == "" {
-							continue
-						}
-						job.Append(store.LogLine{Type: "message", Content: text})
-					}
-				}
-			case "user":
-				// tool_result events — show truncated output so user sees what Claude read
-				msg, _ := evt["message"].(map[string]interface{})
-				content, _ := msg["content"].([]interface{})
-				for _, block := range content {
-					b, _ := block.(map[string]interface{})
-					if b["type"] == "tool_result" {
-						result := toolResultContent(b)
-						if result != "" {
-							job.Append(store.LogLine{Type: "tool_result", Content: "→ " + result})
-						}
-					}
-				}
-			case "result":
-				subtype, _ := evt["subtype"].(string)
-				if subtype == "success" {
-					// Persist the forked coding session id so later coding refine
-					// turns can --resume it (jobs are in-memory; the id must live
-					// in the DB to survive a restart).
-					if fork && codingSessionID != "" && req.RequirementID != "" {
-						if perr := h.reqSvc.UpdateCodingSession(req.RequirementID, codingSessionID); perr != nil {
-							log.Printf("[start-coding] Failed to persist coding session for %s: %v", req.RequirementID, perr)
-						}
-					}
-					job.Append(store.LogLine{Type: "done", Content: "✅ 开发完成！"})
-					job.Finish(0, store.JobDone)
-				} else {
-					errMsg, _ := evt["error"].(string)
-					if errMsg == "" {
-						errMsg = "Claude 执行出错"
-					}
-					job.Append(store.LogLine{Type: "error", Content: "❌ " + errMsg})
-					job.Finish(1, store.JobError)
-				}
-				doneSent = true
-			}
+		if out.finalResult == "" {
+			job.Append(store.LogLine{Type: "error", Content: "❌ Claude 未返回结果，请重试"})
+			job.Finish(1, store.JobError)
+			return
 		}
-
-		if err := cmd.Wait(); err != nil {
-			log.Printf("[start-coding] job %s claude exited: %v", job.ID, err)
-			if !doneSent {
-				job.Append(store.LogLine{Type: "error", Content: "❌ Claude 异常退出: " + err.Error()})
-				job.Finish(1, store.JobError)
-			}
-		} else if !doneSent {
-			job.Append(store.LogLine{Type: "done", Content: "✅ 开发完成！"})
-			job.Finish(0, store.JobDone)
-		}
+		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		job.Append(store.LogLine{Type: "done", Content: "✅ 开发完成！"})
+		job.Finish(0, store.JobDone)
 		log.Printf("[start-coding] job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
+	}()
+}
+
+// AdjustCoding starts a background JobStore job that resumes the prior coding
+// session (--resume coding_session_id) to apply a follow-up adjustment to
+// already-implemented code. Because the resumed session already carries the
+// requirement, analysis, design, and the developer persona, we send ONLY the
+// user's follow-up message as -p and inject NEITHER the role system prompt NOR
+// the readProjectContext project context — re-feeding them would be redundant
+// and could distort the resumed conversation. The developer role's current model
+// is still honored (--model) so the user's latest model setting applies.
+//
+// Only requirements with status in {"done","developing"} and a non-empty
+// coding_session_id may adjust (developing = first coding pass just finished;
+// done = user marked complete). The job_done handler does NOT change status and
+// does NOT update coding_session_id — every adjust round resumes the SAME
+// original coding session. Stale --resume (session file gone) surfaces a clear
+// error instead of silently starting a fresh session.
+//
+// POST /api/wizard/adjust-coding { requirement_id, message } -> { job_id }
+func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		RequirementID string `json:"requirement_id"`
+		Message       string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		log.Printf("[adjust-coding] JSON decode error: %v", err)
+		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(body.Message) == "" {
+		writeError(w, 400, "INVALID", "message 不能为空")
+		return
+	}
+
+	req, err := h.reqSvc.Get(body.RequirementID)
+	if err != nil {
+		writeError(w, 404, "NOT_FOUND", "requirement not found")
+		return
+	}
+	if req.Status != "done" && req.Status != "developing" {
+		writeError(w, 409, "INVALID_STATUS", "仅开发完成或开发中的需求可追加调整（当前状态: "+req.Status+"）")
+		return
+	}
+	if req.CodingSessionID == "" {
+		writeError(w, 409, "NO_SESSION", "无 coding session，无法 resume，请重新发起 coding")
+		return
+	}
+
+	proj, err := h.projectSvc.Get(req.ProjectID)
+	if err != nil {
+		writeError(w, 404, "NOT_FOUND", "project not found")
+		return
+	}
+
+	// Only the developer role's MODEL is honored (so the user's latest model
+	// setting applies to follow-up turns). The system prompt is deliberately
+	// omitted: the resumed coding session already carries the developer
+	// persona, and re-injecting --system-prompt would replace it.
+	_, model := h.roleConfig("developer")
+
+	job := h.jobs.Create(body.RequirementID)
+	writeJSON(w, 200, map[string]string{"job_id": job.ID})
+
+	go func() {
+		defer func() {
+			// Persist the finished job's full log so a backend restart doesn't
+			// wipe the adjustment record (same durability pattern as StartCoding).
+			lines, status, exitCode := job.Snapshot()
+			if perr := h.jobLogSvc.Save(job.ID, body.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines); perr != nil {
+				log.Printf("[adjust-coding] failed to persist job log %s: %v", job.ID, perr)
+			}
+		}()
+		log.Printf("[adjust-coding] job %s started for %s (resume %s)", job.ID, body.RequirementID, req.CodingSessionID)
+		job.Append(store.LogLine{Type: "phase", Content: "🤖 Claude 正在续接开发会话，处理追加调整..."})
+
+		// GenerateCode wraps StreamCmd with a long (>=30m) timeout — a real
+		// code edit can take minutes. SystemPrompt is left empty so the resumed
+		// session's persona is preserved; Prompt carries ONLY the user's
+		// follow-up message (no readProjectContext project context).
+		cmd := h.llm.GenerateCode(llm.StreamOpts{
+			Prompt:       body.Message,
+			WorkDir:      proj.LocalPath,
+			SystemPrompt: "", // resume 已携带 developer persona，不再注入
+			Model:        model,
+			SessionID:    req.CodingSessionID,
+			Resume:       true,
+			Fork:         false,
+		})
+		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding")
+
+		// Stale --resume: the coding session file is gone (~/.claude/ cleaned
+		// or too old). Surface a clear error rather than silently starting a
+		// fresh session — the user must re-run start-coding to mint a new one.
+		if out.staleSession {
+			job.Append(store.LogLine{Type: "error", Content: "❌ 原 coding 会话已失效（session 文件不存在），请重新发起 coding。"})
+			job.Finish(1, store.JobError)
+			return
+		}
+		if out.errMsg != "" {
+			job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+			job.Finish(1, store.JobError)
+			return
+		}
+		if out.finalResult == "" {
+			job.Append(store.LogLine{Type: "error", Content: "❌ Claude 未返回结果，请重试"})
+			job.Finish(1, store.JobError)
+			return
+		}
+		// job_done: keep status="done" (no UpdateStatus call) and do NOT update
+		// coding_session_id (no UpdateCodingSession call) — every later adjust
+		// round resumes the SAME original coding session.
+		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		job.Append(store.LogLine{Type: "done", Content: "✅ 追加调整完成！"})
+		job.Finish(0, store.JobDone)
+		log.Printf("[adjust-coding] job %s finished for %s", job.ID, body.RequirementID)
 	}()
 }
 
