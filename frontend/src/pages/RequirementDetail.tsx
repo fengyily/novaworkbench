@@ -898,19 +898,23 @@ export default function RequirementDetail() {
           {/* ── 追加调整 ── 续接 coding session（--resume），仅携带本指令；
               输出追加到上方 coding-panel，与首轮开发连贯。developing/done 均可。 */}
           {req.coding_session_id && (req.status === 'developing' || req.status === 'done') && !coding && (
-            <div className="adjust-input-row" style={{ marginTop: 12 }}>
+            <div className="adjust-composer">
+              <div className="adjust-composer-header">
+                <span className="ac-title">🔧 追加调整</span>
+                <span className="ac-tag">续接原开发会话 · 仅携带本指令</span>
+              </div>
               <textarea
-                className="input"
-                rows={2}
+                className="ac-textarea"
+                rows={3}
                 value={adjustInput}
                 onChange={e => setAdjustInput(e.target.value)}
-                placeholder="追加调整：描述需要修改的内容，Enter 发送（续接原开发会话，仅携带本指令）"
-                style={{ resize: 'vertical', width: '100%' }}
+                placeholder="描述需要追加修改的内容… Claude 将 --resume 原开发会话直接执行修改，不重读项目上下文"
                 onKeyDown={e => {
                   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doAdjustCoding(); }
                 }}
               />
-              <div style={{ marginTop: 8 }}>
+              <div className="adjust-composer-footer">
+                <span className="ac-hint">Enter 发送 · Shift+Enter 换行</span>
                 <button className="btn btn-primary" onClick={doAdjustCoding} disabled={!adjustInput.trim()}>
                   🚀 追加调整
                 </button>

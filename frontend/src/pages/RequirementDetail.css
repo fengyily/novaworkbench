@@ -524,3 +524,70 @@
   border: none;
 }
 .pr-link-btn:hover { filter: brightness(0.95); }
+
+/* ── 追加调整 composer ── A compact card around the follow-up input that
+   resumes the prior coding session. Surfaces the --resume behavior inline so
+   the user knows only their message is sent. */
+.adjust-composer {
+  margin-top: 12px;
+  padding: 12px 14px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.adjust-composer:focus-within {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
+}
+.adjust-composer-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.adjust-composer-header .ac-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+.adjust-composer-header .ac-tag {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-primary);
+  background: var(--color-active);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+.ac-textarea {
+  width: 100%;
+  min-height: 60px;
+  resize: vertical;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-text);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  box-sizing: border-box;
+}
+.ac-textarea:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  background: var(--color-surface);
+}
+.ac-textarea::placeholder { color: var(--color-text-muted); }
+.adjust-composer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ac-hint {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  line-height: 1.4;
+}
