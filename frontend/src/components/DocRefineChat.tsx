@@ -6,7 +6,13 @@ interface Props {
   projectPath: string;
   docType: 'design' | 'coding';
   currentDoc: string;
-  onApplied: (newDoc: string) => void;
+  // Active apply-doc JobStore job id (server truth, req.apply_job_id). When
+  // set on mount we reconnect to the running apply so a page refresh mid-apply
+  // resumes the stream instead of silently dropping it.
+  applyJobId?: string;
+  // Refresh the requirement after an apply completes (design_docs was
+  // persisted server-side; refresh renders it and clears apply_job_id).
+  onTurnDone?: () => void;
 }
 
 interface ChatMessage {
@@ -17,7 +23,7 @@ interface ChatMessage {
 
 const LABEL = { design: '技术方案', coding: '开发指令' };
 
-export default function DocRefineChat({ reqId, projectPath, docType, currentDoc, onApplied }: Props) {
+export default function DocRefineChat({ reqId, projectPath, docType, currentDoc, applyJobId, onTurnDone }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -26,13 +32,14 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   const [applying, setApplying] = useState(false);
   const [applyLines, setApplyLines] = useState<{ type: string; content: string }[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
+  const esRef = useRef<EventSource | null>(null);
   const label = LABEL[docType];
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages, applyLines]);
 
-  // Reset when doc changes externally (e.g. after apply)
+  // Reset when the doc changes externally (e.g. after an apply refresh).
   useEffect(() => {
     setMessages([]);
     setRefineComplete(false);
@@ -131,10 +138,79 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
     }
   };
 
-  const handleApply = async () => {
+  // Stream an apply-doc JobStore job: phase / tool_call / thinking progress →
+  // applyLines; on job_done, refresh the requirement (design_docs was persisted
+  // server-side). The job replays its full history first, so this works both for
+  // a freshly-started apply and for reconnecting to an in-flight apply after a
+  // page refresh (applyJobId prop). The apply runs on context.Background() in
+  // the backend, so it survives the refresh — this SSE is just a progress view.
+  const streamApplyJob = useCallback((jobId: string) => {
+    if (esRef.current) esRef.current.close();
     setApplying(true);
     setApplyLines([]);
+    const es = new EventSource(`${API_BASE}/api/wizard/jobs/${jobId}/stream`);
+    esRef.current = es;
 
+    es.onmessage = (e) => {
+      try {
+        const evt = JSON.parse(e.data);
+        if (evt.type === 'job_done') {
+          es.close();
+          esRef.current = null;
+          setApplying(false);
+          if (evt.status === 'done' || evt.exit_code === 0) {
+            setApplyLines(prev => [...prev, { type: 'phase', content: `✅ ${label}已更新！` }]);
+            // design_docs was persisted server-side; refresh renders it and
+            // clears apply_job_id (the doc-change reset effect tears down here).
+            onTurnDone?.();
+          } else {
+            setApplyLines(prev => [...prev, { type: 'error', content: '❌ 应用失败，请重试' }]);
+          }
+          return;
+        }
+        if (evt.type === 'error') {
+          setApplyLines(prev => [...prev, { type: 'error', content: '❌ ' + (evt.content ?? '') }]);
+          return;
+        }
+        // Surface phase / tool_call progress (incl. the thinking_tokens
+        // heartbeat). Skip "message" lines — the regenerated doc is large and
+        // lands in design_docs via the refresh, not in this thin progress panel.
+        if (evt.type === 'phase' || evt.type === 'tool_call') {
+          setApplyLines(prev => [...prev.slice(-49), { type: evt.type, content: evt.content ?? '' }]);
+        }
+      } catch { /* skip malformed SSE */ }
+    };
+
+    es.onerror = () => {
+      // EventSource auto-reconnects on transient drops; if the job is gone
+      // (backend restarted, ring evicted) the stream errors repeatedly. Poll
+      // the snapshot once; if it's gone, drop to idle so the user can retry.
+      es.close();
+      esRef.current = null;
+      fetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
+        .then(r => r.json())
+        .then(json => {
+          if (!json.success) {
+            setApplying(false);
+            setApplyLines(prev => [...prev, { type: 'error', content: '⚠️ 任务已丢失（服务可能重启）' }]);
+            return;
+          }
+          const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
+          const visible = (log || []).filter(l => l.type === 'phase' || l.type === 'tool_call' || l.type === 'error');
+          if (visible.length > 0) setApplyLines(visible);
+          if (status === 'running') {
+            streamApplyJob(jobId); // transient drop — re-arm the stream
+          } else {
+            setApplying(false);
+          }
+        })
+        .catch(() => { setApplying(false); });
+    };
+  }, [label, onTurnDone]);
+
+  const handleApply = async () => {
+    setApplyLines([]);
+    setApplying(true);
     try {
       const res = await fetch(`${API_BASE}/api/wizard/apply-doc`, {
         method: 'POST',
@@ -145,45 +221,44 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           doc_type: docType,
         }),
       });
-
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error('No stream');
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split('\n\n');
-        buffer = parts.pop() ?? '';
-        for (const part of parts) {
-          const dataLine = part.startsWith('data: ') ? part.slice(6) : part;
-          if (!dataLine.trim()) continue;
-          try {
-            const evt = JSON.parse(dataLine);
-            if (evt.type === 'done') {
-              if (evt.success && evt.result) {
-                onApplied(evt.result);
-                setMessages(prev => [...prev, { role: 'ai', content: `✅ ${label}已更新！` }]);
-                setRefineComplete(false);
-              }
-              return;
-            }
-            if (evt.type === 'error') {
-              setApplyLines(prev => [...prev, { type: 'error', content: '❌ ' + evt.content }]);
-            } else if (evt.type === 'tool_call' || evt.type === 'phase') {
-              setApplyLines(prev => [...prev, { type: evt.type, content: evt.content }]);
-            }
-          } catch { /* skip */ }
-        }
-      }
+      const json = await res.json();
+      const jobId = json.data?.job_id;
+      if (!jobId) throw new Error(json.error?.message || '未获取到任务 ID');
+      streamApplyJob(jobId);
     } catch (err: any) {
-      setApplyLines(prev => [...prev, { type: 'error', content: '❌ ' + err.message }]);
-    } finally {
       setApplying(false);
+      setApplyLines([{ type: 'error', content: '❌ ' + err.message }]);
     }
   };
+
+  // Boot: reconnect to an in-flight apply job (page refresh mid-apply). The
+  // requirement carries apply_job_id (server truth); if the job is still
+  // running we resume its stream, otherwise (server restarted, job evicted)
+  // we drop into the idle state so the apply button shows again.
+  useEffect(() => {
+    if (!applyJobId) return;
+    let cancelled = false;
+    fetch(`${API_BASE}/api/wizard/jobs/${applyJobId}`)
+      .then(r => r.json())
+      .then(json => {
+        if (cancelled || !json.success) return;
+        const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
+        const visible = (log || []).filter(l => l.type === 'phase' || l.type === 'tool_call' || l.type === 'error');
+        if (visible.length > 0) setApplyLines(visible);
+        if (status === 'running') {
+          setExpanded(true);
+          streamApplyJob(applyJobId);
+        } else {
+          setApplying(false);
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applyJobId]);
+
+  // Tear down the EventSource if the component unmounts mid-apply.
+  useEffect(() => () => { if (esRef.current) { esRef.current.close(); esRef.current = null; } }, []);
 
   const handleClear = () => {
     if (!confirm('清除对话记录？')) return;
@@ -237,11 +312,11 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
 
       {/* Apply progress */}
       {applyLines.length > 0 && (
-        <div className="coding-panel" style={{ margin: '8px 0', maxHeight: 120 }}>
+        <div className="coding-panel" style={{ margin: '8px 0', maxHeight: 160 }}>
           {applyLines.map((l, i) => (
             <div key={i} className={`coding-line coding-line-${l.type}`}>{l.content}</div>
           ))}
-          {applying && <div className="coding-line coding-line-tool_call">⏳ 正在更新{label}...</div>}
+          {applying && <div className="coding-line coding-line-tool_call">⏳ 正在更新{label}，预计需要几分钟…</div>}
         </div>
       )}
 

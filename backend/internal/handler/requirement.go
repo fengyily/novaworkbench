@@ -9,15 +9,17 @@ import (
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/service"
+	"github.com/novaworkbench/backend/internal/store"
 )
 
 type RequirementHandler struct {
-	svc *service.RequirementService
-	llm *llm.Gateway
+	svc  *service.RequirementService
+	llm  *llm.Gateway
+	jobs *store.JobStore
 }
 
-func NewRequirementHandler(svc *service.RequirementService, llmGateway *llm.Gateway) *RequirementHandler {
-	return &RequirementHandler{svc: svc, llm: llmGateway}
+func NewRequirementHandler(svc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore) *RequirementHandler {
+	return &RequirementHandler{svc: svc, llm: llmGateway, jobs: jobs}
 }
 
 func (h *RequirementHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -36,7 +38,46 @@ func (h *RequirementHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "NOT_FOUND", err.Error())
 		return
 	}
+	h.healStaleJobs(item)
 	writeJSON(w, 200, item)
+}
+
+// healStaleJobs clears job-id pointers on the requirement that reference jobs
+// which are no longer live (evicted from the in-memory ring buffer, or finished
+// — the goroutine normally clears these itself on every terminal path, but a
+// server restart / crash between the DB write of the id and the clearing call
+// leaves a stale pointer that wedges the frontend: the architect-design panel
+// gates its "⏳ …" spinner on !!req.design_job_id and hides the retry button
+// behind !req.design_job_id, so a stale id = a perpetual spinner with no way
+// out. Reconciling against the JobStore on every Get self-heals it: the next
+// page load / refresh drops the stale id and the UI recovers on its own.
+func (h *RequirementHandler) healStaleJobs(req *model.Requirement) {
+	if h.jobs == nil {
+		return
+	}
+	type pending struct {
+		val    string
+		clear  func(id, jobID string) error
+		field  *string
+	}
+	checks := []pending{
+		{req.DesignJobID, h.svc.UpdateDesignJob, &req.DesignJobID},
+		{req.AnalysisJobID, h.svc.UpdateAnalysisJob, &req.AnalysisJobID},
+		{req.ApplyJobID, h.svc.UpdateApplyJob, &req.ApplyJobID},
+	}
+	for _, c := range checks {
+		if c.val == "" {
+			continue
+		}
+		if h.jobs.Live(c.val) {
+			continue
+		}
+		if err := c.clear(req.ID, ""); err != nil {
+			log.Printf("[requirement] failed to clear stale job id %s for %s: %v", c.val, req.ID, err)
+			continue
+		}
+		*c.field = ""
+	}
 }
 
 func (h *RequirementHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -123,6 +164,29 @@ func (h *RequirementHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]string{"status": "deleted"})
+}
+
+// Archive turns a finished ("done") requirement into a project knowledge-base
+// entry (final requirement + design docs). Returns the created/updated
+// knowledge row. The requirement status moves to "archived".
+func (h *RequirementHandler) Archive(w http.ResponseWriter, r *http.Request) {
+	kb, err := h.svc.Archive(r.PathValue("id"))
+	if err != nil {
+		writeError(w, 400, "ARCHIVE_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, 200, kb)
+}
+
+// Unarchive reverses Archive: status returns to "done" and the knowledge entry
+// produced by archiving is removed.
+func (h *RequirementHandler) Unarchive(w http.ResponseWriter, r *http.Request) {
+	item, err := h.svc.Unarchive(r.PathValue("id"))
+	if err != nil {
+		writeError(w, 400, "UNARCHIVE_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, 200, item)
 }
 
 func (h *RequirementHandler) GetChatHistory(w http.ResponseWriter, r *http.Request) {

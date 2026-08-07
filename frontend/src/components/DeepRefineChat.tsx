@@ -332,6 +332,18 @@ export default function DeepRefineChat({
   }
 
   const isWorking = chatting;
+  // Block advancing to the architect stage when the last analyst turn ended in
+  // an error — advancing would fork an empty/failed analysis session and leave
+  // the requirement stuck in "designing" with no design and no way back. The
+  // user must retry (and succeed) before 生成技术方案 is allowed.
+  const lastIsError = messages.length > 0 && messages[messages.length - 1]?.isError === true;
+  // The streaming placeholder carries empty content until the first
+  // "message" event arrives. While it's empty, the standalone spinner
+  // block below represents the "starting" state — so we must not also
+  // render the empty placeholder (that would produce two "🤖 AI" rows).
+  const lastMsg = messages[messages.length - 1];
+  const placeholderEmpty = !!lastMsg?.isStreaming && !lastMsg?.content;
+  const showSpinner = isWorking && toolLog.length === 0 && placeholderEmpty;
 
   return (
     <div className="detail-section deep-refine-panel">
@@ -348,7 +360,12 @@ export default function DeepRefineChat({
       </div>
 
       <div className="chat-panel" ref={chatRef}>
-        {messages.map((msg, i) => (
+        {messages.map((msg, i) => {
+          // Skip the empty streaming placeholder — the spinner block below
+          // renders the "starting" indicator. Once content arrives this
+          // message renders normally and the spinner hides.
+          if (msg.isStreaming && !msg.content) return null;
+          return (
           <div key={i} className={`chat-msg ${msg.role}${msg.isError ? ' error' : ''}`}>
             <span className="chat-role">{msg.role === 'ai' ? '🤖 AI' : '👤 你'}</span>
             {msg.role === 'ai' && !msg.isError
@@ -356,7 +373,8 @@ export default function DeepRefineChat({
               : <div className="chat-content" style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
             }
           </div>
-        ))}
+          );
+        })}
 
         {/* Live tool-call activity feed */}
         {isWorking && toolLog.length > 0 && (
@@ -370,7 +388,7 @@ export default function DeepRefineChat({
         )}
 
         {/* Spinner when working but no activity yet */}
-        {isWorking && toolLog.length === 0 && (
+        {showSpinner && (
           <div className="chat-msg ai">
             <span className="chat-role">🤖 AI</span>
             <div className="chat-content">⏳ Claude 正在启动...</div>
@@ -406,9 +424,17 @@ export default function DeepRefineChat({
       </div>
 
       <div className="deep-refine-actions">
-        <button className="btn btn-primary" onClick={onGenerateDesign} disabled={isWorking || messages.length === 0}>
+        <button
+          className="btn btn-primary"
+          onClick={onGenerateDesign}
+          disabled={isWorking || messages.length === 0 || lastIsError}
+          title={lastIsError ? '当前分析回合已出错，请先重试成功后再生成技术方案' : undefined}
+        >
           📐 生成技术方案
         </button>
+        {lastIsError && !isWorking && (
+          <span style={{ color: '#B91C1C', fontSize: 12 }}>⚠️ 上一次分析出错，请先重试</span>
+        )}
       </div>
     </div>
   );

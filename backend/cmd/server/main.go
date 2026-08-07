@@ -58,8 +58,8 @@ func main() {
 	memoryH := handler.NewMemoryHandler(memorySvc)
 	knowledgeH := handler.NewKnowledgeHandler(knowledgeSvc)
 	scannerH := handler.NewScannerHandler(scannerSvc)
-	reqH := handler.NewRequirementHandler(reqSvc, llmGateway)
 	sharedJobs := store.NewJobStore(50)
+	reqH := handler.NewRequirementHandler(reqSvc, llmGateway, sharedJobs)
 	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc)
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, llmGateway, sharedJobs)
@@ -148,6 +148,8 @@ func main() {
 	mux.HandleFunc("GET /api/requirements/{id}/chat-history", reqH.GetChatHistory)
 	mux.HandleFunc("PUT /api/requirements/{id}/chat-history", reqH.SaveChatHistory)
 	mux.HandleFunc("DELETE /api/requirements/{id}/analysis-session", reqH.ClearAnalysisSession)
+	mux.HandleFunc("POST /api/requirements/{id}/archive", reqH.Archive)
+	mux.HandleFunc("POST /api/requirements/{id}/unarchive", reqH.Unarchive)
 
 	// Wizard (requirement refinement + coding via Claude CLI)
 	// Three-role stage-gate: analyst → architect → developer.

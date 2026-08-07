@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { requirementsApi, projectsApi, API_BASE, statusLabels, type Requirement, type Project, mergeApi, type MergeState } from '../api/client';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { exportDesignPdf } from '../utils/exportDesignPdf';
 import './RequirementDetail.css';
 
 interface DesignData {
@@ -32,9 +33,62 @@ function stageFor(status: string): Stage {
       return 'developer';
     case 'done':
       return 'done';
+    case 'archived':
+      // An archived requirement is conceptually "done"; render the done-stage
+      // layout plus an archive banner, instead of falling back to analyst.
+      return 'done';
     default:
       return 'analyst';
   }
+}
+
+// Renders JobStore log lines into a dark coding panel. Consecutive "message"
+// lines (Claude's assistant text, streamed token-by-token as separate LogLines)
+// are joined back into one markdown string and rendered via ReactMarkdown so
+// ```code blocks``` become real <pre> with a distinct background instead of
+// plain text that blends into the panel. Joining also avoids spurious
+// mid-line breaks: token deltas often split a single source line across two
+// LogLines, and rendering each in its own block div would wrap them apart.
+// tool_call / tool_result / phase / error / done lines render as before.
+function CodingLines({ lines }: { lines: { type: string; content: string }[] }) {
+  const nodes: ReactNode[] = [];
+  let i = 0;
+  let key = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    // "message" lines are streamed token-by-token; group consecutive ones and
+    // render through ReactMarkdown so code blocks/headings/lists become real
+    // elements instead of blending into plain text.
+    if (line.type === 'message') {
+      const group: string[] = [];
+      while (i < lines.length && lines[i].type === 'message') {
+        group.push(lines[i].content);
+        i++;
+      }
+      nodes.push(
+        <div key={key++} className="coding-line coding-line-message coding-message-md">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{group.join('')}</ReactMarkdown>
+        </div>
+      );
+    } else if (line.type === 'result') {
+      // The "result" line is the dev-complete summary emitted as a single
+      // LogLine (e.g. "全部完成。下面是实现总结。…" + Markdown). Render it
+      // through ReactMarkdown too — otherwise the summary's headings/code
+      // blocks/lists show as a garbled wall of plain text.
+      nodes.push(
+        <div key={key++} className="coding-line coding-line-message coding-message-md">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{line.content}</ReactMarkdown>
+        </div>
+      );
+      i++;
+    } else {
+      nodes.push(
+        <div key={key++} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
+      );
+      i++;
+    }
+  }
+  return <>{nodes}</>;
 }
 
 export default function RequirementDetail() {
@@ -75,6 +129,11 @@ export default function RequirementDetail() {
   // Streaming design state (architect phase)
   const [designLines, setDesignLines] = useState<{ type: string; content: string }[]>([]);
   const [designing, setDesigning] = useState(false);
+  // Set when the design job ended in an error status. The stream panel
+  // collapses on success (the design renders standalone), but on failure we
+  // keep it open so the red error line stays visible — otherwise the error
+  // hides behind the "思考过程" toggle and the user has no idea the run failed.
+  const [designError, setDesignError] = useState(false);
   const designRef = useRef<HTMLDivElement>(null);
   const designEsRef = useRef<EventSource | null>(null);
 
@@ -95,6 +154,65 @@ export default function RequirementDetail() {
   // carries the requirement/design/persona, so no system prompt or project
   // context is re-injected. Output reuses codingLines/coding-panel for continuity.
   const [adjustInput, setAdjustInput] = useState('');
+
+  // PDF export state for the technical design doc.
+  const [exporting, setExporting] = useState(false);
+
+  // Copy a ready-to-paste resume command to the clipboard. Instead of just the
+  // bare session id, we compose `cd "<project_path>" && claude --resume "<sid>"`
+  // so the user can paste it straight into a shell and land in the right CWD.
+  // Falls back to copying the sid alone when no project path is known.
+  const copySessionId = async (sid: string): Promise<void> => {
+    const path = project?.local_path;
+    const cmd = path
+      ? `cd "${path}" && claude --resume "${sid}"`
+      : `claude --resume "${sid}"`;
+    try {
+      await navigator.clipboard.writeText(cmd);
+    } catch {
+      // Clipboard API can be unavailable (non-secure context); fall back to a
+      // legacy execCommand copy off a transient textarea.
+      const ta = document.createElement('textarea');
+      ta.value = cmd;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch { /* noop */ }
+      ta.remove();
+    }
+  };
+
+  // Compose the design as a Markdown string for PDF export. plan_markdown is
+  // already raw Markdown; legacy JSON designs are reassembled into Markdown
+  // sections mirroring how doStartCoding builds the dev-instruction payload.
+  const designToMarkdown = (d: DesignData): string => {
+    if (d.plan_markdown) return d.plan_markdown;
+    const parts: string[] = [];
+    if (d.overview) parts.push(`## 概述\n${d.overview}`);
+    if (d.steps?.length) parts.push(`## 实现步骤\n${d.steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}`);
+    if (d.files?.length) parts.push(`## 涉及文件\n${d.files.map(f => `- ${f}`).join('\n')}`);
+    if (d.model_changes && d.model_changes !== '无') parts.push(`## 数据模型变更\n${d.model_changes}`);
+    if (d.risks?.length) parts.push(`## 实现风险\n${d.risks.map(r => `- ${r}`).join('\n')}`);
+    return parts.join('\n\n') || req?.description || '';
+  };
+
+  const handleExportPdf = async () => {
+    if (!req || !project) return;
+    setExporting(true);
+    try {
+      await exportDesignPdf({
+        title: req.title,
+        meta: `${project.name} · ${req.id}`,
+        markdown: designToMarkdown(parseDesign(req.design_docs)),
+        filename: req.title,
+      });
+    } catch (err: any) {
+      alert('导出 PDF 失败: ' + err.message);
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const handleDelete = async () => {
     if (!req) return;
@@ -135,6 +253,38 @@ export default function RequirementDetail() {
     }
   };
 
+  // Archive a finished requirement into the project knowledge base (final
+  // requirement + design docs become reusable AI context). Re-archiving the
+  // same requirement overwrites the previous knowledge entry.
+  const handleArchive = async () => {
+    if (!id) return;
+    setBusy('归档');
+    try {
+      await requirementsApi.archive(id);
+      await refresh();
+    } catch (err: any) {
+      alert('归档失败: ' + err.message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  // Reverse archive: status returns to "done" and the knowledge entry produced
+  // by archiving is removed from the project knowledge base.
+  const handleUnarchive = async () => {
+    if (!id) return;
+    if (!confirm('取消归档将同时移除该需求在知识库中的条目，确认继续？')) return;
+    setBusy('取消归档');
+    try {
+      await requirementsApi.unarchive(id);
+      await refresh();
+    } catch (err: any) {
+      alert('取消归档失败: ' + err.message);
+    } finally {
+      setBusy('');
+    }
+  };
+
   // ── Architect phase: async design generation via JobStore ─────────────────
   // The architect-design endpoint creates a background job and returns its id
   // immediately (same pattern as start-coding). We stream the job's log lines
@@ -147,6 +297,7 @@ export default function RequirementDetail() {
     const es = new EventSource(`${API_BASE}/api/wizard/jobs/${jobId}/stream`);
     designEsRef.current = es;
     setDesigning(true);
+    setDesignError(false);
 
     es.onmessage = (e) => {
       try {
@@ -155,10 +306,15 @@ export default function RequirementDetail() {
           es.close();
           designEsRef.current = null;
           setDesigning(false);
-          if (evt.status === 'done' || evt.exit_code === 0) {
-            // design_docs persisted server-side; refresh to render it.
-            refresh();
-          }
+          // Keep the stream panel open when the job errored so the red error
+          // line stays in view instead of collapsing behind the toggle.
+          const failed = evt.status === 'error' || (typeof evt.exit_code === 'number' && evt.exit_code !== 0);
+          setDesignError(failed);
+          // Always refresh: the backend clears design_job_id on every terminal
+          // path (success and error), so refreshing unblocks the UI even when
+          // the job ended in an error status (which a success-only refresh
+          // would skip, leaving the stale job id wedging the stage).
+          refresh();
           return;
         }
         setDesignLines(prev => [...prev, { type: evt.type, content: evt.content ?? '' }]);
@@ -167,14 +323,55 @@ export default function RequirementDetail() {
     es.onerror = () => {
       es.close();
       designEsRef.current = null;
-      setDesigning(false);
+      // The SSE link can drop before the final job_done frame lands (network
+      // blip, proxy timeout). Poll the snapshot; if the job has finished
+      // server-side, finalize + refresh; otherwise keep designing and let the
+      // reconnect effect (keyed on design_job_id) or a later poll reconcile.
+      pollDesignJob(jobId, 0);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refresh]);
+
+  // Reconcile a dropped design SSE link by polling the job snapshot. If the
+  // job is finished server-side, stop designing and refresh so design_docs /
+  // design_job_id reflect server truth. Bounded retries so a genuinely
+  // long-running job doesn't spin here forever — if still running after the
+  // retries, leave designing=true and let the user refresh manually.
+  const pollDesignJob = useCallback((jobId: string, attempt: number) => {
+    if (attempt > 12) { // ~2 min of retries (12 * 10s)
+      // Give up polling but sync with server truth: the job may have finished
+      // (and cleared design_job_id) since the last check. Without this refresh
+      // a stale req.design_job_id would keep designProcessActive true forever.
+      setDesigning(false);
+      refresh();
+      return;
+    }
+    setTimeout(() => {
+      fetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
+        .then(r => r.json())
+        .then(json => {
+          if (!json.success) { setDesigning(false); refresh(); return; }
+          const { status, exit_code } = json.data as { status: string; exit_code: number };
+          if (status === 'running') {
+            pollDesignJob(jobId, attempt + 1);
+          } else {
+            setDesigning(false);
+            setDesignError(status === 'error' || exit_code !== 0);
+            refresh();
+          }
+        })
+        .catch(() => {
+          setDesigning(false);
+        });
+    }, 10000);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refresh]);
 
   const runArchitectDesign = async () => {
     if (!id) return;
     setDesigning(true);
     setDesignLines([]);
+    setDesignError(false);
 
     try {
       const res = await fetch(`${API_BASE}/api/wizard/architect-design`, {
@@ -203,11 +400,11 @@ export default function RequirementDetail() {
     fetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
       .then(r => r.json())
       .then(json => {
-        if (!json.success) { setDesigning(false); return; }
-        const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
+        if (!json.success) { setDesigning(false); refresh(); return; }
+        const { status, exit_code, log } = json.data as { status: string; exit_code: number; log: { type: string; content: string }[] };
         if (log && log.length > 0) setDesignLines(log);
         if (status === 'running') streamDesignJob(jobId);
-        else setDesigning(false);
+        else { setDesigning(false); setDesignError(status === 'error' || exit_code !== 0); refresh(); }
       })
       .catch(() => setDesigning(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -564,8 +761,10 @@ export default function RequirementDetail() {
   // Design (architect) stream state. While the job runs the panel stays open;
   // once finished it collapses behind the "思考过程" toggle.
   const designProcessActive = designing || !!req.design_job_id;
-  const designPanelOpen = designProcessActive || showDesignProcess;
-  const showDesignToggle = designLines.length > 0 && !designProcessActive;
+  // Keep the panel open while the job runs OR when the last run errored, so
+  // the error line stays visible instead of collapsing behind the toggle.
+  const designPanelOpen = designProcessActive || designError || showDesignProcess;
+  const showDesignToggle = designLines.length > 0 && !designProcessActive && !designError;
 
   const STEPS = [
     { key: 'analyst', label: '需求分析', icon: '🔍', doneStatus: 'designing' },
@@ -751,6 +950,44 @@ export default function RequirementDetail() {
         })}
       </div>
 
+      {/* Claude session ids — per-stage, for local resume/inspection. */}
+      {(() => {
+        const rows = [
+          { stage: '需求分析', sid: req.analysis_session_id },
+          { stage: '方案设计', sid: req.design_session_id },
+          { stage: '开发实现', sid: req.coding_session_id },
+        ].filter(r => r.sid);
+        if (rows.length === 0) return null;
+        return (
+          <details className="session-panel">
+            <summary>
+              <span className="session-caret">▶</span>
+              🔧 Claude 会话（{rows.length}）
+            </summary>
+            <div className="session-body">
+              <p className="session-hint">
+                点击会话 ID 或「复制」按钮即可复制完整命令 <code>cd "&lt;项目路径&gt;" &amp;&amp; claude --resume "&lt;session_id&gt;"</code>，粘贴到终端即可在该项目目录中恢复对应阶段的会话。
+              </p>
+              {rows.map(r => (
+                <div className="session-row" key={r.stage}>
+                  <span className="session-stage">{r.stage}</span>
+                  <code
+                    className="session-id"
+                    title={r.sid}
+                    onClick={() => copySessionId(r.sid)}
+                  >
+                    {r.sid}
+                  </code>
+                  <button className="btn btn-sm session-copy" onClick={() => copySessionId(r.sid)}>
+                    📋 复制
+                  </button>
+                </div>
+              ))}
+            </div>
+          </details>
+        );
+      })()}
+
       {/* ── Analyst stage ── */}
       {/* While analyzing, DeepRefineChat is itself the section (own card + header),
           so we render it standalone — no outer "需求分析" card around it, which
@@ -786,7 +1023,7 @@ export default function RequirementDetail() {
           {/* Compact toolbar: the architect role is already shown in the
               stepper, so this section leads with a content-oriented caption
               and parks the stream toggle + regenerate action together. */}
-          {(showDesignToggle || (req.status === 'designing' && hasDesign)) && (
+          {(hasDesign || showDesignToggle) && (
             <div className="design-toolbar">
               {showDesignToggle && (
                 <button
@@ -800,14 +1037,23 @@ export default function RequirementDetail() {
               {req.status === 'designing' && hasDesign && (
                 <button className="btn btn-sm" onClick={runArchitectDesign} disabled={designing}>🔄 重新生成</button>
               )}
+              {hasDesign && (
+                <button
+                  className="btn btn-sm"
+                  onClick={handleExportPdf}
+                  disabled={exporting}
+                  style={{ marginLeft: 'auto' }}
+                  title="将技术方案导出为 PDF"
+                >
+                  {exporting ? '⏳ 导出中...' : '📄 导出 PDF'}
+                </button>
+              )}
             </div>
           )}
 
           {designPanelOpen && (
             <div className="coding-panel" ref={designRef} style={{ marginBottom: 16 }}>
-              {designLines.map((line, i) => (
-                <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
-              ))}
+              <CodingLines lines={designLines} />
               {designProcessActive && <div className="coding-line coding-line-tool_call">⏳ Claude 正在 plan 模式下制定技术方案...</div>}
             </div>
           )}
@@ -815,9 +1061,24 @@ export default function RequirementDetail() {
           {req.status === 'designing' && !hasDesign && !designing && !req.design_job_id && (
             <div className="tab-empty">
               <p>需求分析已完成。方案设计阶段将在 <strong>plan 模式</strong>下探索项目代码，制定具体可执行的技术实现方案（Markdown）。</p>
-              <button className="btn btn-primary" onClick={() => runArchitectDesign()} disabled={!!busy || designing}>
-                {busy === '生成技术方案' ? '⏳ ...' : '📐 开始制定技术方案'}
-              </button>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button className="btn btn-primary" onClick={() => runArchitectDesign()} disabled={!!busy || designing}>
+                  {busy === '生成技术方案' ? '⏳ ...' : '📐 开始制定技术方案'}
+                </button>
+                {/* Roll back to the analyst stage. The backend allows
+                    designing → analyzing; this is the recovery path when the
+                    user advanced with a failed/incomplete analysis (no
+                    analysis_session_id, so architect-design rejects with
+                    NO_SESSION) and is now stuck here with no design. */}
+                <button
+                  className="btn btn-sm"
+                  onClick={() => transition('analyzing', '返回重新分析')}
+                  disabled={!!busy}
+                  title="退回到需求分析阶段继续完善对话"
+                >
+                  ↩ 返回重新分析
+                </button>
+              </div>
             </div>
           )}
 
@@ -866,7 +1127,8 @@ export default function RequirementDetail() {
                 projectPath={project?.local_path || ''}
                 docType="design"
                 currentDoc={req.design_docs}
-                onApplied={(newDoc) => setReq(prev => prev ? { ...prev, design_docs: newDoc } : prev)}
+                applyJobId={req.apply_job_id}
+                onTurnDone={refresh}
               />
             </>
           )}
@@ -888,9 +1150,7 @@ export default function RequirementDetail() {
 
           {(codingLines.length > 0 || coding) && (
             <div className="coding-panel" ref={codingRef}>
-              {codingLines.map((line, i) => (
-                <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
-              ))}
+              <CodingLines lines={codingLines} />
               {coding && <div className="coding-line coding-line-tool_call">⏳ Claude 正在工作...</div>}
             </div>
           )}
@@ -964,9 +1224,7 @@ export default function RequirementDetail() {
 
                 {mergeLines.length > 0 && (
                   <div className="coding-panel merge-panel">
-                    {mergeLines.map((line, i) => (
-                      <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
-                    ))}
+                    <CodingLines lines={mergeLines} />
                     {merging && <div className="coding-line coding-line-tool_call">⏳ 执行中...</div>}
                   </div>
                 )}
@@ -990,6 +1248,24 @@ export default function RequirementDetail() {
               <div className="merge-actions">
                 <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}>🔀 本地合入</button>
                 <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}>🌐 推送并发起 PR</button>
+              </div>
+              <div className="merge-actions" style={{ marginTop: 8 }}>
+                <button className="btn btn-primary" onClick={handleArchive} disabled={!!busy}>
+                  {busy === '归档' ? '⏳ ...' : '📦 归档到知识库'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {req.status === 'archived' && (
+            <div className="merge-section">
+              <div className="tab-empty">
+                <p>📦 已归档至项目知识库（最终需求 + 技术方案）。</p>
+              </div>
+              <div className="merge-actions" style={{ marginTop: 8 }}>
+                <button className="btn" onClick={handleUnarchive} disabled={!!busy}>
+                  {busy === '取消归档' ? '⏳ ...' : '↩ 取消归档'}
+                </button>
               </div>
             </div>
           )}
