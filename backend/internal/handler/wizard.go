@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
@@ -595,6 +597,26 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			} else {
 				job.Append(store.LogLine{Type: "message", Content: "🌿 " + strings.TrimSpace(string(out))})
 			}
+
+			// Pull the latest changes before coding so the dev branch starts from
+			// the remote HEAD. A freshly created branch has no upstream, so the
+			// first attempt falls back to pulling the base branch from origin.
+			pullCmd := exec.Command("git", "pull", "--ff-only")
+			pullCmd.Dir = req.ProjectPath
+			pullOut, pullErr := pullCmd.CombinedOutput()
+			if pullErr != nil {
+				fallbackCmd := exec.Command("git", "pull", "--ff-only", "origin", baseBranch)
+				fallbackCmd.Dir = req.ProjectPath
+				fbOut, fbErr := fallbackCmd.CombinedOutput()
+				if fbErr != nil {
+					job.Append(store.LogLine{Type: "error", Content: "❌ git pull 失败: " + strings.TrimSpace(string(append(pullOut, fbOut...)))})
+					job.Finish(1, store.JobError)
+					return
+				}
+				job.Append(store.LogLine{Type: "message", Content: "⬇️ " + strings.TrimSpace(string(fbOut))})
+			} else {
+				job.Append(store.LogLine{Type: "message", Content: "⬇️ " + strings.TrimSpace(string(pullOut))})
+			}
 		}
 
 		// Session threading: the developer stage continues the SAME conversation
@@ -994,6 +1016,26 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		if planMarkdown == "" {
 			planMarkdown = out.finalResult
 		}
+		// The run ended with an error (upstream proxy 504, api_error result
+		// event, or non-zero exit). The Write tool_use that populates
+		// planContent fires BEFORE the model's final API call, so a 504 on that
+		// trailing call leaves planMarkdown non-empty while the run actually
+		// failed. Treating that as success appends a green ✅ and the user has
+		// no idea the run was interrupted (and the captured plan may be
+		// partial). Surface the error instead: save the captured plan as a
+		// fallback so the exploration work isn't lost, but mark the job errored
+		// so the UI shows the failure and the user can retry.
+		if out.errMsg != "" {
+			if planMarkdown != "" {
+				if _, err := h.reqSvc.UpdateDesign(id, planMarkdown); err != nil {
+					log.Printf("[architect-design] failed to save partial design for %s: %v", id, err)
+				}
+			}
+			_ = h.reqSvc.UpdateDesignJob(id, "")
+			job.Append(store.LogLine{Type: "error", Content: out.errMsg})
+			job.Finish(1, store.JobError)
+			return
+		}
 		if planMarkdown == "" {
 			errMsg := out.errMsg
 			if errMsg == "" {
@@ -1237,6 +1279,13 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string) claudeStreamO
 	}
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
+	// Put the claude subprocess in its own process group so we can kill the
+	// whole group (claude + any tool/MCP subprocesses it spawned). Some
+	// third-party proxies keep the upstream connection open after the model's
+	// final event: the CLI never exits on its own, holding stdout open so a
+	// plain scanner.Scan() blocks forever and the job never finishes. Killing
+	// the group on completion lets runClaudeStream return promptly.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return claudeStreamOutcome{errMsg: "启动 Claude 失败: " + err.Error()}
 	}
@@ -1247,10 +1296,60 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string) claudeStreamO
 	// thinkingTokens tracks the last token count we reported so we can
 	// throttle thinking_tokens progress messages (every 50 tokens).
 	var lastThinkingReport int
+	// gotResult is set when the terminal "result" event arrives; once set we
+	// stop reading and tear the process down — there is nothing useful after
+	// the result event, and waiting for stdout EOF can hang forever on proxies
+	// that don't close the stream.
+	gotResult := false
+	// Stall watchdog: armed after the first stdout line. If no new line
+	// arrives for stallTimeout (proxy went silent without emitting a result
+	// event), kill the group so the scan loop unblocks. Without this a proxy
+	// that drops the connection mid-stream would wedge the job permanently.
+	const stallTimeout = 3 * time.Minute
+	heartbeats := make(chan struct{}, 1)
+	watchdogDone := make(chan struct{})
+	go func() {
+		defer close(watchdogDone)
+		timer := time.NewTimer(stallTimeout)
+		if !timer.Stop() {
+			<-timer.C
+		}
+		var armed bool
+		for {
+			select {
+			case _, ok := <-heartbeats:
+				if !ok {
+					return
+				}
+				if !armed {
+					armed = true
+				}
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(stallTimeout)
+			case <-timer.C:
+				log.Printf("[%s] stream stalled %v with no new events; terminating", scope, stallTimeout)
+				killProcessGroup(cmd)
+				return
+			}
+		}
+	}()
+	beat := func() {
+		select {
+		case heartbeats <- struct{}{}:
+		default:
+		}
+	}
+
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
+		beat()
 		if line == "" {
 			continue
 		}
@@ -1401,8 +1500,20 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string) claudeStreamO
 					log.Printf("[%s] stale --resume detected (session not on disk)", scope)
 				}
 			}
+			gotResult = true
+		}
+		if gotResult {
+			break
 		}
 	}
+
+	// Stop the stall watchdog and tear the process group down. The CLI may
+	// still be alive (proxy held the connection open), and tool/MCP
+	// grandchildren may still hold the stdout pipe open; killing the group
+	// unblocks cmd.Wait() and lets us return what we captured.
+	close(heartbeats)
+	<-watchdogDone
+	killProcessGroup(cmd)
 
 	if err := cmd.Wait(); err != nil {
 		stderrTrim := strings.TrimSpace(stderrBuf.String())
@@ -1426,6 +1537,23 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string) claudeStreamO
 		out.errMsg = "分析对话会话已过期"
 	}
 	return out
+}
+
+// killProcessGroup sends SIGTERM to the claude subprocess's process group
+// (set up via Setpgid in runClaudeStream). It is idempotent and safe to call
+// after the process has already exited (errors are ignored). This reaps
+// tool/MCP grandchildren that may otherwise keep the stdout pipe open.
+func killProcessGroup(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	pgid, err := syscall.Getpgid(cmd.Process.Pid)
+	if err != nil {
+		// Fall back to signaling just the direct process.
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		return
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
 }
 
 // analystFirstTurnDisallowedTools blocks file/code tools on the analyst first
@@ -1814,66 +1942,73 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	rc.Flush()
 }
 
-// ApplyDoc lets Claude rewrite the stored doc field based on the conversation.
-// doc_type: "design" updates design_docs; "coding" returns a plain-text dev instruction.
+// ApplyDoc lets Claude rewrite the stored doc field based on the refine
+// conversation. It runs as a background JobStore job (same pattern as
+// analyst-chat / architect-design): the handler returns a job id immediately
+// and Claude runs in a goroutine on context.Background(), so the apply survives
+// a page refresh — the previous direct-SSE version tied Claude to r.Context()
+// and was killed the moment the browser reconnected, leaving design_docs
+// unchanged. The active job id is persisted on the requirement (apply_job_id)
+// so a refresh reconnects to the running job. On success the updated doc is
+// persisted server-side; the frontend refreshes on job_done to render it.
+//
+// Streaming progress comes from runClaudeStream, which surfaces the
+// system/thinking_tokens heartbeat and stream_event text deltas — the old
+// hand-parser only emitted the batched assistant text at the very end, so the
+// user saw no activity during the (often multi-minute) regeneration.
+//
+// doc_type: "design" updates design_docs; "coding" returns a plain-text dev
+// instruction (no DB write — the job's message lines carry it).
 func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		RequirementID       string `json:"requirement_id"`
-		ProjectPath         string `json:"project_path"`
-		DocType             string `json:"doc_type"`
-		CurrentDoc          string `json:"current_doc"`
-		ConversationHistory string `json:"conversation_history"`
+		RequirementID string `json:"requirement_id"`
+		ProjectPath   string `json:"project_path"`
+		DocType       string `json:"doc_type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
 		return
 	}
+	if req.RequirementID == "" {
+		writeError(w, 400, "INVALID", "missing requirement_id")
+		return
+	}
 
-	rc := http.NewResponseController(w)
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	rc.Flush()
-
-	sendStatus(w, rc, "phase", "🤖 Claude 正在基于对话整合修改内容...")
-	rc.Flush()
+	requirement, err := h.reqSvc.Get(req.RequirementID)
+	if err != nil {
+		writeError(w, 404, "NOT_FOUND", "requirement not found")
+		return
+	}
 
 	// Route to this stage's session and resume it — the conversation carries the
 	// doc + refine discussion, so we only ask Claude to emit the final doc.
-	// No ConversationHistory / CurrentDoc re-feeding.
-	var requirement *model.Requirement
-	if req.RequirementID != "" {
-		requirement, _ = h.reqSvc.Get(req.RequirementID)
-	}
-	sourceSID, roleKey := "", "analyst"
-	if requirement != nil {
-		sourceSID, roleKey = docStageSession(requirement, req.DocType)
+	sourceSID, roleKey := docStageSession(requirement, req.DocType)
+	docLabel := "技术方案"
+	if req.DocType == "coding" {
+		docLabel = "开发指令"
 	}
 	if sourceSID == "" {
-		sendStatus(w, rc, "error", "尚未找到该阶段的会话，请先生成对应文档后再 apply。")
-		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
-		rc.Flush()
+		writeError(w, 400, "NO_SESSION", "尚未找到该阶段的会话，请先生成"+docLabel+"后再 apply。")
 		return
 	}
-	systemPrompt, model := h.roleConfig(roleKey)
 
+	projectPath := req.ProjectPath
+	if projectPath == "" {
+		if proj, perr := h.projectSvc.Get(requirement.ProjectID); perr == nil {
+			projectPath = proj.LocalPath
+		}
+	}
+
+	// Build the prompt that asks Claude to emit the final doc. For design docs we
+	// detect plan-markdown vs legacy JSON from the DB-stored doc (the apply call
+	// doesn't send current_doc) and ask for the matching format.
 	var prompt string
 	switch req.DocType {
 	case "coding":
 		prompt = "基于我们的对话，将用户的调整意见整理为给 Claude Code CLI 的开发指令。" +
 			"输出纯文本的开发指令，清晰描述需要实现或调整的内容。不要输出 JSON，不要添加额外说明。"
 	default: // "design"
-		// Detect plan-format designs (plan mode produces markdown, not JSON).
-		// Use the DB-stored doc (the frontend's apply-doc call doesn't send
-		// current_doc). If it isn't valid JSON, it's plan markdown — ask Claude
-		// to output the updated plan as markdown instead of the JSON schema.
-		storedDoc := ""
-		if requirement != nil {
-			storedDoc = requirement.DesignDocs
-		}
-		isPlanMarkdown := !isLikelyJSON(storedDoc)
-		if isPlanMarkdown {
+		if !isLikelyJSON(requirement.DesignDocs) {
 			prompt = "基于我们的对话，将技术方案（plan）更新为最终版本。" +
 				"输出完整的 Markdown 技术方案，涵盖：整体实现思路、需要新增或修改的文件、" +
 				"具体实现步骤、数据模型/数据库变更、实现风险及应对。直接输出 Markdown，不要添加额外说明。"
@@ -1890,121 +2025,100 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
-		Prompt:       prompt,
-		WorkDir:      req.ProjectPath,
-		SystemPrompt: systemPrompt,
-		Model:        model,
-		SessionID:    sourceSID,
-		Resume:       true,
-	})
+	systemPrompt, model := h.roleConfig(roleKey)
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		sendStatus(w, rc, "error", "启动 Claude 失败: "+err.Error())
-		return
+	// Create the job, persist its id so a refresh can reconnect, and return the
+	// job id immediately. Claude runs in a goroutine writing progress into the
+	// job store.
+	job := h.jobs.Create(req.RequirementID)
+	if perr := h.reqSvc.UpdateApplyJob(req.RequirementID, job.ID); perr != nil {
+		log.Printf("[apply-doc] failed to persist apply_job_id for %s: %v", req.RequirementID, perr)
 	}
-	cmd.Stderr = nil
-	if err := cmd.Start(); err != nil {
-		sendStatus(w, rc, "error", "启动 Claude 失败: "+err.Error())
-		return
-	}
+	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
-	var finalResult string
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+	// Capture the format-relevant fields at launch time; the goroutine reads
+	// them off the pointer (they don't change during the apply).
+	storedDesignDocs := requirement.DesignDocs
+	docType := req.DocType
+	reqID := req.RequirementID
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		var evt map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &evt); err != nil {
-			continue
-		}
-		switch evt["type"] {
-		case "assistant":
-			msg, _ := evt["message"].(map[string]interface{})
-			content, _ := msg["content"].([]interface{})
-			for _, block := range content {
-				b, _ := block.(map[string]interface{})
-				switch b["type"] {
-				case "tool_use":
-					toolName, _ := b["name"].(string)
-					input, _ := b["input"].(map[string]interface{})
-					sendStatus(w, rc, "tool_call", toolCallLabel(toolName, input))
-					rc.Flush()
-				case "text":
-					text, _ := b["text"].(string)
-					if text == "" {
-						continue
-					}
-					jsonLine, _ := json.Marshal(map[string]string{"type": "message", "content": text})
-					fmt.Fprintf(w, "data: %s\n\n", string(jsonLine))
-					rc.Flush()
-				}
-			}
-		case "result":
-			if evt["subtype"] == "success" {
-				finalResult, _ = evt["result"].(string)
-			}
-		}
-	}
+	go func() {
+		log.Printf("[apply-doc] job %s started for %s (doc_type=%s)", job.ID, reqID, docType)
+		job.Append(store.LogLine{Type: "phase", Content: fmt.Sprintf("🤖 Claude 正在基于对话整合修改%s…（预计需要几分钟）", docLabel)})
 
-	cmd.Wait()
-
-	if finalResult == "" {
-		sendStatus(w, rc, "error", "Claude 未返回结果，请重试")
-		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
-		rc.Flush()
-		return
-	}
-
-	// For "coding" type: return plain text instruction, no DB write.
-	if req.DocType == "coding" {
-		doneData, _ := json.Marshal(map[string]interface{}{
-			"type":    "done",
-			"success": true,
-			"result":  strings.TrimSpace(finalResult),
+		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+			Prompt:       prompt,
+			WorkDir:      projectPath,
+			SystemPrompt: systemPrompt,
+			Model:        model,
+			SessionID:    sourceSID,
+			Resume:       true,
 		})
-		fmt.Fprintf(w, "data: %s\n\n", string(doneData))
-		rc.Flush()
-		return
-	}
+		out := runClaudeStream(jobSink{job}, cmd, "apply-doc")
 
-	// For design docs in plan-markdown format, persist the raw markdown (not
-	// extractJSON, which would mangle markdown containing { } characters).
-	// Use the DB-stored doc to detect format (frontend's apply call doesn't
-	// send current_doc).
-	storedDesignDoc := ""
-	if requirement != nil {
-		storedDesignDoc = requirement.DesignDocs
-	}
-	var persistVal string
-	if req.DocType == "design" && !isLikelyJSON(storedDesignDoc) {
-		persistVal = strings.TrimSpace(finalResult)
-	} else {
-		persistVal = extractJSON(finalResult)
-	}
+		if out.staleSession {
+			// The stage's conversation is gone. Clear its session id so the user
+			// can redo the stage, and surface a recovery hint.
+			if docType == "design" {
+				_ = h.reqSvc.UpdateDesignSession(reqID, "")
+			} else if docType == "coding" {
+				_ = h.reqSvc.UpdateCodingSession(reqID, "")
+			}
+			job.Append(store.LogLine{Type: "error", Content: docLabel + "会话已过期，请重新生成对应文档后再 apply。"})
+			_ = h.reqSvc.UpdateApplyJob(reqID, "")
+			job.Finish(1, store.JobError)
+			return
+		}
+		if out.finalResult == "" {
+			errMsg := out.errMsg
+			if errMsg == "" {
+				errMsg = "Claude 未返回结果，请重试"
+			}
+			job.Append(store.LogLine{Type: "error", Content: errMsg})
+			_ = h.reqSvc.UpdateApplyJob(reqID, "")
+			job.Finish(1, store.JobError)
+			return
+		}
 
-	// Persist to DB
-	_, saveErr := h.reqSvc.UpdateDesign(req.RequirementID, persistVal)
-	if saveErr != nil {
-		log.Printf("[apply-doc] save failed: %v", saveErr)
-		sendStatus(w, rc, "error", "保存失败: "+saveErr.Error())
-		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
-		rc.Flush()
-		return
-	}
+		finalText := strings.TrimSpace(out.finalResult)
 
-	doneData, _ := json.Marshal(map[string]interface{}{
-		"type":    "done",
-		"success": true,
-		"result":  persistVal,
-	})
-	fmt.Fprintf(w, "data: %s\n\n", string(doneData))
-	rc.Flush()
+		// For "coding" type: no DB write. The job's message lines already carry
+		// the dev instruction; emit a terminal result + done.
+		if docType == "coding" {
+			job.Append(store.LogLine{Type: "result", Content: finalText})
+			job.Append(store.LogLine{Type: "done", Content: "✅ " + docLabel + "已更新！"})
+			_ = h.reqSvc.UpdateApplyJob(reqID, "")
+			job.Finish(0, store.JobDone)
+			return
+		}
+
+		// For design docs in plan-markdown format, persist the raw markdown (not
+		// extractJSON, which would mangle markdown containing { } chars). Use the
+		// DB-stored doc to detect format (apply call doesn't send current_doc).
+		var persistVal string
+		if !isLikelyJSON(storedDesignDocs) {
+			persistVal = finalText
+		} else {
+			persistVal = extractJSON(out.finalResult)
+		}
+		if persistVal == "" {
+			job.Append(store.LogLine{Type: "error", Content: "未能从 Claude 输出中解析出有效内容，请重试。"})
+			_ = h.reqSvc.UpdateApplyJob(reqID, "")
+			job.Finish(1, store.JobError)
+			return
+		}
+		if _, saveErr := h.reqSvc.UpdateDesign(reqID, persistVal); saveErr != nil {
+			log.Printf("[apply-doc] save failed: %v", saveErr)
+			job.Append(store.LogLine{Type: "error", Content: "保存失败: " + saveErr.Error()})
+			_ = h.reqSvc.UpdateApplyJob(reqID, "")
+			job.Finish(1, store.JobError)
+			return
+		}
+		job.Append(store.LogLine{Type: "done", Content: "✅ " + docLabel + "已更新！"})
+		_ = h.reqSvc.UpdateApplyJob(reqID, "")
+		job.Finish(0, store.JobDone)
+		log.Printf("[apply-doc] job %s finished for %s", job.ID, reqID)
+	}()
 }
 
 // isLikelyJSON reports whether s looks like a JSON object (starts with '{' after

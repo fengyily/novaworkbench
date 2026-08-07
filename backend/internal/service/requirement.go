@@ -29,6 +29,9 @@ var validTransitions = map[string][]string{
 	"designed":   {"developing", "archived"},
 	"developing": {"done", "designed", "archived"},
 	"done":       {"archived"},
+	// archived is reversible: unarchive restores the requirement to "done" and
+	// removes the knowledge entry it produced when archived.
+	"archived": {"done"},
 }
 
 func (s *RequirementService) List(projectID string, status string, priority string, sprint string) ([]model.Requirement, error) {
@@ -59,7 +62,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	}
 
 	rows, err := s.db.Query(
-		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,coding_session_id,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY updated_at DESC",
+		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY updated_at DESC",
 		args...)
 	if err != nil {
 		return nil, err
@@ -71,7 +74,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		var r model.Requirement
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo, &r.Sprint,
-			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.CodingSessionID, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
+			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, r)
@@ -85,10 +88,10 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	var r model.Requirement
 	err := s.db.QueryRow(
-		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,coding_session_id,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
+		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo, &r.Sprint,
-			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.CodingSessionID, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
+			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("requirement not found")
 	}
@@ -193,6 +196,16 @@ func (s *RequirementService) UpdateAnalysisJob(id, jobID string) error {
 	return err
 }
 
+// UpdateApplyJob persists the active apply-doc JobStore job id so a page refresh
+// can reconnect to the running apply. Pass "" to clear it (on success, failure,
+// or staleness) so the UI stops showing the "applying" state and a refresh
+// doesn't try to reconnect to a finished job.
+func (s *RequirementService) UpdateApplyJob(id, jobID string) error {
+	_, err := s.db.Exec("UPDATE requirements SET apply_job_id=?, updated_at=? WHERE id=?",
+		jobID, time.Now(), id)
+	return err
+}
+
 // UpdateCodingSession persists the claude CLI session id for the developer
 // conversation (a fork off the design session). Subsequent coding turns resume it.
 func (s *RequirementService) UpdateCodingSession(id, sessionID string) error {
@@ -234,5 +247,101 @@ func (s *RequirementService) UpdateDesign(id, designJSON string) (*model.Require
 	if err != nil {
 		return nil, err
 	}
+	return s.Get(id)
+}
+
+// Archive turns a finished ("done") requirement into a knowledge-base entry so
+// its final requirement + design docs become reusable AI context. The
+// knowledge row is keyed by (source_ref=requirement id, source_type="requirement"),
+// so re-archiving the same requirement overwrites the previous entry (idempotent
+// upsert). The requirement status moves to "archived".
+func (s *RequirementService) Archive(id string) (*model.Knowledge, error) {
+	r, err := s.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if r.Status != "done" {
+		return nil, fmt.Errorf("only requirements with status 'done' can be archived (current: %s)", r.Status)
+	}
+
+	content := "# " + r.Title + "\n\n" + r.Description + "\n\n## 技术方案\n\n" + r.DesignDocs
+	now := time.Now()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("UPDATE requirements SET status='archived', updated_at=? WHERE id=?", now, id); err != nil {
+		return nil, err
+	}
+
+	var existingID string
+	_ = tx.QueryRow(
+		"SELECT id FROM knowledge WHERE project_id=? AND source_ref=? AND source_type='requirement'",
+		r.ProjectID, id).Scan(&existingID)
+
+	if existingID != "" {
+		if _, err := tx.Exec(
+			"UPDATE knowledge SET title=?, content=?, updated_at=? WHERE id=?",
+			r.Title, content, now, existingID); err != nil {
+			return nil, err
+		}
+	} else {
+		existingID = util.NewID("kb")
+		if _, err := tx.Exec(
+			"INSERT INTO knowledge (id, project_id, title, content, category, source_type, source_ref, is_reviewed, is_approved, created_at, updated_at) VALUES (?,?,?,?, 'requirement', 'requirement', ?, 1, 1, ?, ?)",
+			existingID, r.ProjectID, r.Title, content, id, now, now); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	var k model.Knowledge
+	err = s.db.QueryRow(
+		"SELECT id, project_id, title, content, category, source_type, source_ref, is_reviewed, is_approved, created_at, updated_at FROM knowledge WHERE id=?",
+		existingID).
+		Scan(&k.ID, &k.ProjectID, &k.Title, &k.Content, &k.Category, &k.SourceType, &k.SourceRef, &k.IsReviewed, &k.IsApproved, &k.CreatedAt, &k.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &k, nil
+}
+
+// Unarchive reverses Archive: the requirement status returns to "done" (with a
+// fresh completed_at) and the knowledge entry it produced is removed, so the
+// knowledge base stays in sync with the requirement's lifecycle.
+func (s *RequirementService) Unarchive(id string) (*model.Requirement, error) {
+	r, err := s.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if r.Status != "archived" {
+		return nil, fmt.Errorf("only archived requirements can be unarchived (current: %s)", r.Status)
+	}
+
+	now := time.Now()
+	completedAt := now
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("UPDATE requirements SET status='done', updated_at=?, completed_at=? WHERE id=?", now, completedAt, id); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec("DELETE FROM knowledge WHERE source_ref=? AND source_type='requirement'", id); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
 	return s.Get(id)
 }

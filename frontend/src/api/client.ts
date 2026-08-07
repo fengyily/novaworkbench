@@ -164,7 +164,7 @@ export interface Requirement {
   status: string; priority: string; acceptance_criteria: string;
   design_docs: string; conversation_ids: string; assigned_to: string;
   sprint: string; created_by: string; analysis_session_id: string;
-  design_session_id: string; design_job_id: string; analysis_job_id: string; coding_session_id: string;
+  design_session_id: string; design_job_id: string; analysis_job_id: string; apply_job_id: string; coding_session_id: string;
   created_at: string; updated_at: string;
   completed_at?: string;
 }
@@ -198,6 +198,13 @@ export const requirementsApi = {
   // instead of resuming a broken / over-long conversation.
   clearAnalysisSession: (id: string) =>
     api.delete<{ status: string }>(`/api/requirements/${id}/analysis-session`),
+  // Archive a finished ("done") requirement into the project knowledge base
+  // (final requirement + design docs). Returns the created/updated knowledge row.
+  archive: (id: string) =>
+    api.post<KnowledgeItem>(`/api/requirements/${id}/archive`, {}),
+  // Reverse archive: status returns to "done" and the knowledge entry is removed.
+  unarchive: (id: string) =>
+    api.post<Requirement>(`/api/requirements/${id}/unarchive`, {}),
 };
 
 export interface RunStatus {

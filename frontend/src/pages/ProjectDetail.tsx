@@ -1,15 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  projectsApi, runnerApi, reviewApi, platformApi, requirementsApi,
+  projectsApi, runnerApi, reviewApi, platformApi, requirementsApi, knowledgeApi,
   type Project, type RunStatus, type PR, type PRListResponse, type PlatformToken,
-  type Requirement, statusLabels,
+  type Requirement, type KnowledgeItem, statusLabels,
 } from '../api/client';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
 import './RequirementDetail.css';
 import './ProjectDetail.css';
+import './KnowledgePage.css';
 
-type Tab = 'overview' | 'run' | 'requirements' | 'review' | 'weekly';
+type Tab = 'overview' | 'knowledge' | 'run' | 'requirements' | 'review' | 'weekly';
 
 const priorityDots: Record<string, string> = {
   high: '🔴', medium: '🟡', low: '🟢',
@@ -124,6 +125,23 @@ export default function ProjectDetail() {
       .then(setPrData)
       .catch(err => setPrsError(err instanceof Error ? err.message : String(err)))
       .finally(() => setPrsLoading(false));
+  }, [tab, id]);
+
+  // Knowledge base for this project. Loaded on demand when the knowledge tab
+  // is opened; the tab groups entries by source_type (requirement / document /
+  // code / other).
+  const [knowledge, setKnowledge] = useState<KnowledgeItem[]>([]);
+  const [knowledgeLoading, setKnowledgeLoading] = useState(false);
+  useEffect(() => {
+    if (tab !== 'knowledge' || !id) return;
+    let active = true;
+    setKnowledgeLoading(true);
+    knowledgeApi.list({ project_id: id, limit: 200 })
+      .then(res => { if (active) setKnowledge(res.items ?? []); })
+      .catch(() => {})
+      .finally(() => { if (active) setKnowledgeLoading(false); });
+    return () => { active = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, id]);
 
   // Load requirements for both the overview (recent) and the requirements tab.
@@ -307,6 +325,31 @@ export default function ProjectDetail() {
     </tr>
   ));
 
+  // Render a group of knowledge entries under a labeled section. Reuses the
+  // kb-card styles from KnowledgePage.css.
+  const renderKnowledgeGroup = (label: string, items: KnowledgeItem[]) => {
+    if (!items.length) return null;
+    return (
+      <div className="detail-section" key={label}>
+        <h3 style={{ marginBottom: 12 }}>{label}（{items.length}）</h3>
+        {items.map(k => (
+          <div key={k.id} className="kb-card">
+            <div className="kb-card-header">
+              <span className={`kb-type-badge cat-${k.category}`}>{k.category || 'general'}</span>
+              <span className="kb-card-title">{k.title}</span>
+            </div>
+            <div className="kb-card-content">{k.content.substring(0, 300)}{k.content.length > 300 ? '…' : ''}</div>
+            <div className="kb-card-meta">
+              <span className="kb-source">来源: {k.source_type}</span>
+              {k.source_ref && <span className="kb-ref">{k.source_ref}</span>}
+              <span className="kb-date">{new Date(k.created_at).toLocaleDateString()}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
   if (loading) return <div className="detail-loading">加载中...</div>;
   if (!project) return <div className="detail-loading">项目未找到</div>;
 
@@ -322,6 +365,7 @@ export default function ProjectDetail() {
 
       <div className="detail-tabs">
         <button className={`tab-btn${tab === 'overview' ? ' active' : ''}`} onClick={() => setTab('overview')}>概览</button>
+        <button className={`tab-btn${tab === 'knowledge' ? ' active' : ''}`} onClick={() => setTab('knowledge')}>知识库</button>
         <button className={`tab-btn${tab === 'run' ? ' active' : ''}`} onClick={() => setTab('run')}>
           运行{isRunning ? ' ●' : ''}
         </button>
@@ -464,6 +508,24 @@ export default function ProjectDetail() {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* ── Knowledge base ── */}
+      {tab === 'knowledge' && (
+        <div className="tab-content">
+          {knowledgeLoading ? (
+            <div className="tab-empty"><p>加载中...</p></div>
+          ) : knowledge.length === 0 ? (
+            <div className="tab-empty"><p>暂无知识库数据。可先扫描项目或归档需求以沉淀知识。</p></div>
+          ) : (
+            <>
+              {renderKnowledgeGroup('需求归档', knowledge.filter(k => k.source_type === 'requirement'))}
+              {renderKnowledgeGroup('项目文档', knowledge.filter(k => k.source_type === 'document'))}
+              {renderKnowledgeGroup('项目结构', knowledge.filter(k => k.source_type === 'code'))}
+              {renderKnowledgeGroup('其他', knowledge.filter(k => !['requirement', 'document', 'code'].includes(k.source_type)))}
+            </>
+          )}
         </div>
       )}
 

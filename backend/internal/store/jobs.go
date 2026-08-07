@@ -142,3 +142,25 @@ func (s *JobStore) Get(id string) (*Job, bool) {
 	}
 	return nil, false
 }
+
+// Live reports whether the job with the given id is both present in the ring
+// buffer AND still running. A requirement can carry a job-id pointer
+// (design_job_id / analysis_job_id / apply_job_id) that outlives the in-memory
+// job: the server restarted, the ring buffer evicted it, or the goroutine
+// finished (and should have cleared the pointer but the process died first).
+// Callers use this to self-heal those stale pointers — a non-Live id means no
+// work is happening, so the UI must not show a spinner nor hide the retry
+// button behind it.
+func (s *JobStore) Live(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, j := range s.ring {
+		if j != nil && j.ID == id {
+			j.mu.RLock()
+			running := j.Status == JobRunning
+			j.mu.RUnlock()
+			return running
+		}
+	}
+	return false
+}
