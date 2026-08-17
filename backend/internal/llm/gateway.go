@@ -17,8 +17,9 @@ import (
 type EnvProvider interface {
 	ClaudeEnvVars() (authToken, baseURL string, err error)
 	// LLMConfig returns the direct HTTP LLM channel config (base URL, API key,
-	// model) used for lightweight tasks like title distillation. Called per
-	// request so runtime setting updates apply immediately.
+	// model) used for lightweight tasks like requirement formatting + title
+	// distillation. Called per request so runtime setting updates apply
+	// immediately.
 	LLMConfig() (baseURL, apiKey, model string, err error)
 }
 
@@ -251,24 +252,27 @@ func (g *Gateway) runClaudeText(prompt string, timeout time.Duration) (string, e
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-// GenerateTitle distills a concise requirement title from the requirement
-// content via the direct HTTP LLM channel (OpenAI-compatible, e.g. DeepSeek).
-// This bypasses the claude CLI for speed — title distillation needs no tool
-// use. The channel activates only when both base_url and api_key are
-// configured; otherwise it returns an error and the caller falls back to a
-// truncated version of the content (no claude CLI fallback, by design).
-func (g *Gateway) GenerateTitle(content string) (string, error) {
+// GenerateDescriptionAndTitle reorganizes the user's raw requirement content
+// into structured Markdown AND distills a concise title in a single LLM round,
+// via the direct HTTP LLM channel (OpenAI-compatible, e.g. DeepSeek). This
+// bypasses the claude CLI for speed — neither task needs tool use, and merging
+// them keeps the title and body consistent while transmitting the content once.
+// The channel activates only when both base_url and api_key are configured;
+// otherwise it returns an error and the caller falls back to the raw content
+// for Markdown and the first line for the title (no claude CLI fallback, by
+// design) so requirement creation never fails just because this is unavailable.
+func (g *Gateway) GenerateDescriptionAndTitle(content string) (markdown, title string, err error) {
 	if g.envProvider == nil {
-		return "", fmt.Errorf("llm not configured: no env provider")
+		return "", "", fmt.Errorf("llm not configured: no env provider")
 	}
 	baseURL, apiKey, model, err := g.envProvider.LLMConfig()
 	if err != nil {
-		return "", fmt.Errorf("llm config unavailable: %w", err)
+		return "", "", fmt.Errorf("llm config unavailable: %w", err)
 	}
 	if baseURL == "" || apiKey == "" {
-		return "", fmt.Errorf("llm not configured: base_url and api_key required")
+		return "", "", fmt.Errorf("llm not configured: base_url and api_key required")
 	}
-	return generateTitleViaHTTP(baseURL, apiKey, model, content)
+	return formatAndTitleViaHTTP(baseURL, apiKey, model, content)
 }
 
 func stripJSONFences(s string) string {

@@ -329,3 +329,166 @@
 .recent-reqs-section .pr-table tbody tr:last-child td {
   border-bottom: none;
 }
+
+/* Inline "新需求" create form (replaces the old modal). Expanded in-place
+   under the requirements tab — wider and taller than the modal, with a
+   larger textarea and a hint explaining the AI Markdown step. */
+.create-req-form {
+  margin: 12px 0 16px;
+  padding: 16px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+.create-req-form-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.create-req-form-header h3 { margin: 0; font-size: 16px; }
+.create-req-form .form-group { margin-bottom: 14px; }
+.create-req-form .form-group label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 5px;
+  color: var(--color-text-secondary);
+}
+.create-req-form .form-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 13px;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+.create-req-form .form-input:focus { outline: none; border-color: var(--color-primary); }
+.create-req-form textarea.form-input { font-family: inherit; resize: vertical; line-height: 1.6; }
+.create-req-form .form-row { display: flex; gap: 12px; }
+.create-req-form .form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.create-req-form .form-hint { display: block; margin-top: 5px; color: var(--color-text-muted); }
+
+/* Knowledge detail modal (Markdown rendering for archived requirements) */
+/* Line-clamped preview for knowledge cards: keeps every card the same height
+   and hides raw markdown noise behind a clean 3-line ellipsis. */
+.kb-clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+  word-break: break-word;
+}
+.kb-view-full {
+  background: none;
+  border: none;
+  color: var(--color-primary, #4f46e5);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+  margin-bottom: 8px;
+}
+.kb-view-full:hover { text-decoration: underline; }
+
+.kb-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.kb-modal {
+  background: var(--color-bg, #fff);
+  border-radius: 12px;
+  width: min(820px, 92vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+}
+.kb-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid var(--color-border, #e2e8f0);
+}
+.kb-modal-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: var(--color-text, #1e293b);
+}
+.kb-modal-close {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  cursor: pointer;
+  color: var(--color-text-secondary, #64748b);
+  line-height: 1;
+  padding: 0;
+}
+.kb-modal-close:hover { color: var(--color-text, #1e293b); }
+.kb-modal-body {
+  padding: 24px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+/* Markdown prose inside the knowledge modal — mirrors the .analysis-summary
+   styles from RequirementDetail.css so archived requirements render with the
+   same headings/code/table styling as the design docs. */
+.kb-markdown { font-size: 14px; line-height: 1.7; color: var(--color-text); }
+.kb-markdown > :first-child { margin-top: 0; }
+.kb-markdown > :last-child { margin-bottom: 0; }
+.kb-markdown p { margin: 6px 0; color: var(--color-text); }
+.kb-markdown ul, .kb-markdown ol { padding-left: 20px; margin: 6px 0; }
+.kb-markdown li { margin: 2px 0; }
+.kb-markdown strong { font-weight: 600; color: #0F172A; }
+.kb-markdown code {
+  background: var(--color-active);
+  color: var(--color-primary);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.kb-markdown h1, .kb-markdown h2, .kb-markdown h3, .kb-markdown h4 {
+  margin: 1.2em 0 0.5em;
+  font-weight: 600;
+  line-height: 1.3;
+  color: #0F172A;
+}
+.kb-markdown h1 { font-size: 20px; }
+.kb-markdown h2 { font-size: 17px; border-bottom: 1px solid var(--color-border); padding-bottom: 5px; }
+.kb-markdown h3 { font-size: 15px; }
+.kb-markdown h4 { font-size: 14px; }
+.kb-markdown pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 0.8em 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.kb-markdown pre code { background: transparent; padding: 0; color: inherit; font-size: 13px; }
+.kb-markdown blockquote {
+  border-left: 3px solid var(--color-primary);
+  margin: 0.8em 0;
+  padding: 4px 14px;
+  color: var(--color-text-secondary);
+  background: var(--color-active);
+  border-radius: 0 6px 6px 0;
+}
+.kb-markdown table { border-collapse: collapse; margin: 0.8em 0; width: 100%; }
+.kb-markdown th, .kb-markdown td { border: 1px solid var(--color-border); padding: 6px 10px; text-align: left; }
+.kb-markdown th { background: var(--color-hover); font-weight: 600; }
+.kb-markdown a { color: var(--color-primary); text-decoration: underline; text-underline-offset: 2px; }
+.kb-markdown hr { border: none; border-top: 1px solid var(--color-border); margin: 1.2em 0; }
