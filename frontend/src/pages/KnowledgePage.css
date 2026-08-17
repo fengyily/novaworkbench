@@ -53,6 +53,16 @@
 .kb-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .kb-card-title { font-weight: 600; font-size: 14px; }
 .kb-card-content { font-size: 13px; color: var(--color-text-secondary); margin-bottom: 8px; line-height: 1.6; white-space: pre-wrap; }
+/* Line-clamped preview: uniform card height, hides raw markdown noise. */
+.kb-card-content.kb-clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+  word-break: break-word;
+}
 .kb-card-meta { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--color-text-muted); }
 .kb-tags { display: flex; gap: 4px; }
 .kb-tag {

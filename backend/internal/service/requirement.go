@@ -22,8 +22,11 @@ func NewRequirementService(db *sql.DB) *RequirementService {
 // (any state → archived). Each gate is completed by a manual user action.
 // The analyst chat happens during "analyzing"; proceeding to architect-design
 // transitions directly to "designing" (no separate "analyzed" finalization).
+// "draft → designing" is the skip-analysis path: when a requirement has
+// skip_analysis=true the user goes straight to architect-design without an
+// analyst conversation.
 var validTransitions = map[string][]string{
-	"draft":      {"analyzing", "archived"},
+	"draft":      {"analyzing", "designing", "archived"},
 	"analyzing":  {"designing", "draft", "archived"},
 	"designing":  {"designed", "analyzing", "archived"},
 	"designed":   {"developing", "archived"},
@@ -62,7 +65,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	}
 
 	rows, err := s.db.Query(
-		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY updated_at DESC",
+		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY updated_at DESC",
 		args...)
 	if err != nil {
 		return nil, err
@@ -74,7 +77,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		var r model.Requirement
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo, &r.Sprint,
-			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
+			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, r)
@@ -88,10 +91,10 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	var r model.Requirement
 	err := s.db.QueryRow(
-		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
+		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo, &r.Sprint,
-			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
+			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("requirement not found")
 	}
@@ -106,11 +109,17 @@ func (s *RequirementService) Create(req model.CreateRequirementReq) (*model.Requ
 	if req.Priority == "" {
 		req.Priority = "medium"
 	}
+	// Default to skip-analysis (true) when the caller omits the field, so the
+	// "default skip" product decision holds even for clients that don't send it.
+	skipAnalysis := true
+	if req.SkipAnalysis != nil {
+		skipAnalysis = *req.SkipAnalysis
+	}
 	now := time.Now()
 
 	_, err := s.db.Exec(
-		"INSERT INTO requirements (id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,sprint,created_by,created_at,updated_at) VALUES (?,?,?,?,'draft',?,'[]','[]','[]',?,'user',?,?)",
-		id, req.ProjectID, req.Title, req.Description, req.Priority, req.Sprint, now, now)
+		"INSERT INTO requirements (id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,sprint,created_by,skip_analysis,created_at,updated_at) VALUES (?,?,?,?,'draft',?,'[]','[]','[]',?,'user',?,?,?)",
+		id, req.ProjectID, req.Title, req.Description, req.Priority, req.Sprint, skipAnalysis, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -119,9 +128,17 @@ func (s *RequirementService) Create(req model.CreateRequirementReq) (*model.Requ
 }
 
 func (s *RequirementService) Update(id string, req model.CreateRequirementReq) (*model.Requirement, error) {
+	// skip_analysis is a *bool: nil preserves the stored value (COALESCE keeps
+	// the existing column when the param is NULL), a non-nil pointer updates it.
+	// This lets the edit modal toggle the flag while other callers that only
+	// touch title/description/priority/sprint leave it untouched.
+	var skipArg interface{}
+	if req.SkipAnalysis != nil {
+		skipArg = *req.SkipAnalysis
+	}
 	_, err := s.db.Exec(
-		"UPDATE requirements SET title=?, description=?, priority=?, sprint=?, updated_at=? WHERE id=?",
-		req.Title, req.Description, req.Priority, req.Sprint, time.Now(), id)
+		"UPDATE requirements SET title=?, description=?, priority=?, sprint=?, skip_analysis=COALESCE(?,skip_analysis), updated_at=? WHERE id=?",
+		req.Title, req.Description, req.Priority, req.Sprint, skipArg, time.Now(), id)
 	if err != nil {
 		return nil, err
 	}

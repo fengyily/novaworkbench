@@ -1,11 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   projectsApi, runnerApi, reviewApi, platformApi, requirementsApi, knowledgeApi,
   type Project, type RunStatus, type PR, type PRListResponse, type PlatformToken,
   type Requirement, type KnowledgeItem, statusLabels,
 } from '../api/client';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
+import { stripMarkdownPreview } from '../utils/preview';
 import './RequirementDetail.css';
 import './ProjectDetail.css';
 import './KnowledgePage.css';
@@ -132,6 +135,8 @@ export default function ProjectDetail() {
   // code / other).
   const [knowledge, setKnowledge] = useState<KnowledgeItem[]>([]);
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
+  // Markdown detail modal for archived-requirement knowledge entries.
+  const [knowledgeModal, setKnowledgeModal] = useState<KnowledgeItem | null>(null);
   useEffect(() => {
     if (tab !== 'knowledge' || !id) return;
     let active = true;
@@ -326,7 +331,10 @@ export default function ProjectDetail() {
   ));
 
   // Render a group of knowledge entries under a labeled section. Reuses the
-  // kb-card styles from KnowledgePage.css.
+  // kb-card styles from KnowledgePage.css. The content preview is stripped of
+  // markdown noise (stripMarkdownPreview) and clamped to a fixed number of
+  // lines via CSS so cards stay uniform regardless of entry length; a
+  // "查看全文" button on every card opens the full Markdown-rendered modal.
   const renderKnowledgeGroup = (label: string, items: KnowledgeItem[]) => {
     if (!items.length) return null;
     return (
@@ -338,7 +346,8 @@ export default function ProjectDetail() {
               <span className={`kb-type-badge cat-${k.category}`}>{k.category || 'general'}</span>
               <span className="kb-card-title">{k.title}</span>
             </div>
-            <div className="kb-card-content">{k.content.substring(0, 300)}{k.content.length > 300 ? '…' : ''}</div>
+            <div className="kb-card-content kb-clamp">{stripMarkdownPreview(k.content)}</div>
+            <button className="kb-view-full" onClick={() => setKnowledgeModal(k)}>查看全文 →</button>
             <div className="kb-card-meta">
               <span className="kb-source">来源: {k.source_type}</span>
               {k.source_ref && <span className="kb-ref">{k.source_ref}</span>}
@@ -595,7 +604,7 @@ export default function ProjectDetail() {
           )}
 
           {showCreateReq && id && (
-            <CreateRequirementDialog
+            <CreateRequirementForm
               projectId={id}
               onClose={() => setShowCreateReq(false)}
               onCreated={async () => {
@@ -751,12 +760,32 @@ export default function ProjectDetail() {
           <ProjectWeeklyReport projectId={id} />
         </div>
       )}
+
+      {/* ── Knowledge detail modal (Markdown rendering) ── */}
+      {knowledgeModal && (
+        <div className="kb-modal-overlay" onClick={() => setKnowledgeModal(null)}>
+          <div className="kb-modal" onClick={e => e.stopPropagation()}>
+            <div className="kb-modal-header">
+              <h2>{knowledgeModal.title}</h2>
+              <button className="kb-modal-close" onClick={() => setKnowledgeModal(null)}>×</button>
+            </div>
+            <div className="kb-modal-body">
+              <div className="kb-markdown">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{knowledgeModal.content}</ReactMarkdown>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-// Inline "新需求" create dialog (moved from the old requirement kanban page).
-function CreateRequirementDialog({ projectId, onClose, onCreated }: {
+// Inline "新需求" create form — expanded in-place under the requirements tab
+// (replaces the old modal). After the user submits, the backend formats the
+// raw content into Markdown and distills a title via the LLM, so the button
+// label reflects that AI step.
+function CreateRequirementForm({ projectId, onClose, onCreated }: {
   projectId: string;
   onClose: () => void;
   onCreated: () => void;
@@ -764,13 +793,14 @@ function CreateRequirementDialog({ projectId, onClose, onCreated }: {
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState('medium');
   const [sprint, setSprint] = useState('');
+  const [skipAnalysis, setSkipAnalysis] = useState(true); // default: skip analyst chat, go straight to architect-design
   const [saving, setSaving] = useState(false);
 
   const handleSubmit = async () => {
     if (!description) return;
     setSaving(true);
     try {
-      await requirementsApi.create({ project_id: projectId, description, priority, sprint });
+      await requirementsApi.create({ project_id: projectId, description, priority, sprint, skip_analysis: skipAnalysis });
       onCreated();
     } catch (err: any) {
       alert(err.message);
@@ -780,35 +810,49 @@ function CreateRequirementDialog({ projectId, onClose, onCreated }: {
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
+    <div className="create-req-form">
+      <div className="create-req-form-header">
         <h3>新需求</h3>
-        <div className="form-group">
-          <label>需求内容 (必填)</label>
-          <textarea value={description} onChange={e => setDescription(e.target.value)} className="form-input" rows={5}
-            placeholder="描述你想要实现的功能。例如：报表支持导出为 Excel 格式，目前只支持 PDF，用户需要 Excel 导出以便在本地编辑..." autoFocus />
+        <button className="btn btn-secondary btn-sm" onClick={onClose} disabled={saving}>收起</button>
+      </div>
+      <div className="form-group">
+        <label>需求内容 (必填)</label>
+        <textarea value={description} onChange={e => setDescription(e.target.value)} className="form-input" rows={6}
+          placeholder="用自然语言描述你想要实现的功能。例如：报表支持导出为 Excel 格式，目前只支持 PDF，用户需要 Excel 导出以便在本地编辑；要能选择导出的列..." autoFocus />
+        <small className="form-hint">
+          提交后由 AI 整理为结构化 Markdown（背景 / 目标 / 功能要点 / 验收标准）并提炼标题，可在详情页继续编辑。
+        </small>
+      </div>
+      <div className="form-row">
+        <div className="form-group" style={{ flex: 1 }}>
+          <label>优先级</label>
+          <select value={priority} onChange={e => setPriority(e.target.value)} className="form-input">
+            <option value="high">🔴 High</option>
+            <option value="medium">🟡 Medium</option>
+            <option value="low">🟢 Low</option>
+          </select>
         </div>
-        <div className="form-row">
-          <div className="form-group" style={{ flex: 1 }}>
-            <label>优先级</label>
-            <select value={priority} onChange={e => setPriority(e.target.value)} className="form-input">
-              <option value="high">🔴 High</option>
-              <option value="medium">🟡 Medium</option>
-              <option value="low">🟢 Low</option>
-            </select>
-          </div>
-          <div className="form-group" style={{ flex: 1 }}>
-            <label>Sprint (可选)</label>
-            <input type="text" value={sprint} onChange={e => setSprint(e.target.value)} className="form-input"
-              placeholder="2026-W30" />
-          </div>
+        <div className="form-group" style={{ flex: 1 }}>
+          <label>Sprint (可选)</label>
+          <input type="text" value={sprint} onChange={e => setSprint(e.target.value)} className="form-input"
+            placeholder="2026-W30" />
         </div>
-        <div className="form-actions">
-          <button className="btn" onClick={onClose}>取消</button>
-          <button className="btn btn-primary" onClick={handleSubmit} disabled={saving || !description}>
-            {saving ? '创建中...（AI 正在提炼标题）' : '创建'}
-          </button>
-        </div>
+      </div>
+      <div className="form-group">
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
+          <input type="checkbox" checked={skipAnalysis} onChange={e => setSkipAnalysis(e.target.checked)}
+            style={{ width: 'auto' }} />
+          <span>跳过需求分析，直接进入方案设计</span>
+        </label>
+        <small style={{ display: 'block', marginTop: 4, color: 'var(--text-secondary, #64748B)' }}>
+          勾选后将跳过需求分析阶段，直接生成技术方案；创建后仍可在需求详情页切换。
+        </small>
+      </div>
+      <div className="form-actions">
+        <button className="btn" onClick={onClose} disabled={saving}>取消</button>
+        <button className="btn btn-primary" onClick={handleSubmit} disabled={saving || !description}>
+          {saving ? '创建中...（AI 整理中）' : '创建'}
+        </button>
       </div>
     </div>
   );

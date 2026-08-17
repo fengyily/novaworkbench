@@ -21,17 +21,19 @@ type Requirement struct {
 	AnalysisJobID      string     `json:"analysis_job_id"` // active analyst-chat JobStore job id; empty when no analyst turn is running
 	ApplyJobID         string     `json:"apply_job_id"`    // active apply-doc JobStore job id; empty when no apply is running
 	CodingSessionID    string     `json:"coding_session_id"`
+	SkipAnalysis       bool       `json:"skip_analysis"` // when true, architect-design runs a fresh session instead of forking the analyst session
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
 	CompletedAt        *time.Time `json:"completed_at,omitempty"`
 }
 
 type CreateRequirementReq struct {
-	ProjectID   string `json:"project_id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Priority    string `json:"priority"`
-	Sprint      string `json:"sprint"`
+	ProjectID    string `json:"project_id"`
+	Title        string `json:"title"`
+	Description  string `json:"description"`
+	Priority     string `json:"priority"`
+	Sprint       string `json:"sprint"`
+	SkipAnalysis *bool  `json:"skip_analysis"` // pointer: nil omits the field so Create defaults to true (skip) and Update preserves the existing value
 }
 
 type UpdateStatusReq struct {

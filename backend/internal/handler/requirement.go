@@ -94,11 +94,30 @@ func (h *RequirementHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// content via the LLM. Fall back to the first line of the content if the
 	// LLM is unavailable (e.g. claude CLI not installed) so creation never fails.
 	if req.Title == "" {
-		if title, err := h.llm.GenerateTitle(req.Description); err == nil {
-			req.Title = title
-		} else {
-			log.Printf("[requirement] GenerateTitle failed: %v — using fallback", err)
+		// Reorganize the raw, free-form content into structured Markdown AND
+		// distill a title in a single LLM round, so the title and body stay
+		// consistent and the content is transmitted once. Each half falls back
+		// independently on failure — creation must not fail just because the
+		// formatter is unavailable.
+		markdown, title, err := h.llm.GenerateDescriptionAndTitle(req.Description)
+		switch {
+		case err != nil:
+			log.Printf("[requirement] GenerateDescriptionAndTitle failed: %v — using raw content and fallback title", err)
 			req.Title = fallbackTitle(req.Description)
+		case markdown == "" || title == "":
+			// Shouldn't happen (the gateway returns an error in these cases),
+			// but guard against a partial result by filling the missing half.
+			if markdown != "" {
+				req.Description = markdown
+			}
+			if title != "" {
+				req.Title = title
+			} else {
+				req.Title = fallbackTitle(req.Description)
+			}
+		default:
+			req.Description = markdown
+			req.Title = title
 		}
 	}
 	item, err := h.svc.Create(req)

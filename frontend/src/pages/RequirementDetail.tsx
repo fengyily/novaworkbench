@@ -6,6 +6,7 @@ import DocRefineChat from '../components/DocRefineChat';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { exportDesignPdf } from '../utils/exportDesignPdf';
+import { appendLogLine, coalesceLogLines } from '../utils/logLines';
 import './RequirementDetail.css';
 
 interface DesignData {
@@ -148,6 +149,7 @@ export default function RequirementDetail() {
   const [editDesc, setEditDesc] = useState('');
   const [editPriority, setEditPriority] = useState('medium');
   const [editSprint, setEditSprint] = useState('');
+  const [editSkipAnalysis, setEditSkipAnalysis] = useState(true);
 
   // 追加调整 input. Resume the prior coding session (--resume coding_session_id)
   // with ONLY the user's follow-up as -p — the resumed conversation already
@@ -317,7 +319,9 @@ export default function RequirementDetail() {
           refresh();
           return;
         }
-        setDesignLines(prev => [...prev, { type: evt.type, content: evt.content ?? '' }]);
+        // Coalesce consecutive "模型思考中… (N tokens)" phase lines into one
+        // updatable row instead of stacking one per heartbeat.
+        setDesignLines(prev => appendLogLine(prev, { type: evt.type, content: evt.content ?? '' }));
       } catch { /* skip malformed */ }
     };
     es.onerror = () => {
@@ -402,7 +406,7 @@ export default function RequirementDetail() {
       .then(json => {
         if (!json.success) { setDesigning(false); refresh(); return; }
         const { status, exit_code, log } = json.data as { status: string; exit_code: number; log: { type: string; content: string }[] };
-        if (log && log.length > 0) setDesignLines(log);
+        if (log && log.length > 0) setDesignLines(coalesceLogLines(log));
         if (status === 'running') streamDesignJob(jobId);
         else { setDesigning(false); setDesignError(status === 'error' || exit_code !== 0); refresh(); }
       })
@@ -421,6 +425,7 @@ export default function RequirementDetail() {
     setEditDesc(req.description);
     setEditPriority(req.priority);
     setEditSprint(req.sprint);
+    setEditSkipAnalysis(req.skip_analysis);
     setShowEditModal(true);
   };
 
@@ -433,6 +438,7 @@ export default function RequirementDetail() {
         description: editDesc,
         priority: editPriority,
         sprint: editSprint,
+        skip_analysis: editSkipAnalysis,
       });
       setShowEditModal(false);
       await refresh();
@@ -474,7 +480,9 @@ export default function RequirementDetail() {
           }
           return;
         }
-        setCodingLines(prev => [...prev, { type: evt.type, content: evt.content ?? '' }]);
+        // Coalesce consecutive "模型思考中… (N tokens)" phase lines into one
+        // updatable row instead of stacking one per heartbeat.
+        setCodingLines(prev => appendLogLine(prev, { type: evt.type, content: evt.content ?? '' }));
       } catch { /* skip malformed */ }
     };
 
@@ -635,8 +643,10 @@ export default function RequirementDetail() {
           return;
         }
         const line = { type: evt.type, content: evt.content ?? '' };
-        acc = [...acc, line];
-        setMergeLines(prev => [...prev, line]);
+        // Coalesce consecutive "模型思考中… (N tokens)" phase lines into one
+        // updatable row instead of stacking one per heartbeat.
+        acc = appendLogLine(acc, line);
+        setMergeLines(prev => appendLogLine(prev, line));
       } catch { /* skip malformed */ }
     };
     es.onerror = () => {
@@ -719,7 +729,7 @@ export default function RequirementDetail() {
         }
         const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
         if (!log || log.length === 0) return;
-        setCodingLines(log);
+        setCodingLines(coalesceLogLines(log));
         if (status === 'running') streamJob(savedJobId);
       })
       .catch(() => {});
@@ -902,6 +912,19 @@ export default function RequirementDetail() {
                 <input className="input" value={editSprint} onChange={e => setEditSprint(e.target.value)} />
               </div>
             </div>
+            {/* skip_analysis toggle — only meaningful before architect-design runs */}
+            {req && (req.status === 'draft' || req.status === 'analyzing') && (
+              <div className="modal-field">
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none', fontWeight: 'normal' }}>
+                  <input type="checkbox" checked={editSkipAnalysis}
+                    onChange={e => setEditSkipAnalysis(e.target.checked)} style={{ width: 'auto' }} />
+                  跳过需求分析，直接进入方案设计
+                </label>
+                <small style={{ display: 'block', marginTop: 4, color: 'var(--text-secondary, #64748B)' }}>
+                  勾选后在详情页主操作变为「生成技术方案」；取消勾选则恢复「开始需求分析」入口。
+                </small>
+              </div>
+            )}
             <div className="modal-actions">
               <button className="btn btn-primary" onClick={saveEdit} disabled={!!busy}>
                 {busy === '保存' ? '⏳ 保存中...' : '💾 保存'}
@@ -932,7 +955,11 @@ export default function RequirementDetail() {
       </div>
 
       {req.description && (
-        <div className="detail-desc"><p>{req.description}</p></div>
+        <div className="detail-desc">
+          <div className="analysis-summary">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{req.description}</ReactMarkdown>
+          </div>
+        </div>
       )}
 
       {/* Stage stepper */}
@@ -1009,10 +1036,35 @@ export default function RequirementDetail() {
         <div className="detail-section analysis-section">
           <div className="section-header"><h3>🔍 需求分析</h3></div>
           <div className="tab-empty">
-            <p>需求已创建。结合项目情况完善需求。</p>
-            <button className="btn btn-primary" onClick={() => transition('analyzing', '开始分析')} disabled={!!busy}>
-              {busy === '开始分析' ? '⏳ ...' : '🤖 开始需求分析'}
-            </button>
+            {req.skip_analysis ? (
+              <>
+                <p>需求已创建（已跳过需求分析）。可直接进入方案设计，或先进行需求分析完善需求。</p>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {/* Primary: go straight to architect-design. status stays draft;
+                      the backend ArchitectDesign handler tolerates the missing
+                      analyst session when skip_analysis is set, and UpdateDesign
+                      then moves status to designing. We transition locally first
+                      so the UI flips to the architect stage immediately. */}
+                  <button className="btn btn-primary"
+                    onClick={() => transition('designing', '生成技术方案').then(() => runArchitectDesign())}
+                    disabled={!!busy}>
+                    {busy === '生成技术方案' ? '⏳ ...' : '📐 生成技术方案'}
+                  </button>
+                  <button className="btn btn-sm"
+                    onClick={() => transition('analyzing', '开始分析')} disabled={!!busy}
+                    title="先进行需求分析，完善需求后再生成方案">
+                    或先进行需求分析 →
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p>需求已创建。结合项目情况完善需求。</p>
+                <button className="btn btn-primary" onClick={() => transition('analyzing', '开始分析')} disabled={!!busy}>
+                  {busy === '开始分析' ? '⏳ ...' : '🤖 开始需求分析'}
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -1067,17 +1119,19 @@ export default function RequirementDetail() {
                 </button>
                 {/* Roll back to the analyst stage. The backend allows
                     designing → analyzing; this is the recovery path when the
-                    user advanced with a failed/incomplete analysis (no
-                    analysis_session_id, so architect-design rejects with
-                    NO_SESSION) and is now stuck here with no design. */}
-                <button
-                  className="btn btn-sm"
-                  onClick={() => transition('analyzing', '返回重新分析')}
-                  disabled={!!busy}
-                  title="退回到需求分析阶段继续完善对话"
-                >
-                  ↩ 返回重新分析
-                </button>
+                    user advanced with a failed/incomplete analysis.
+                    Hidden for skip-analysis requirements since there is no
+                    prior analysis session to return to. */}
+                {!req.skip_analysis && (
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => transition('analyzing', '返回重新分析')}
+                    disabled={!!busy}
+                    title="退回到需求分析阶段继续完善对话"
+                  >
+                    ↩ 返回重新分析
+                  </button>
+                )}
               </div>
             </div>
           )}

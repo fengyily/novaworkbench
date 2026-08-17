@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { memoriesApi, knowledgeApi, scannerApi, type Memory, type KnowledgeItem, type Project } from '../api/client';
 import { projectsApi } from '../api/client';
+import { stripMarkdownPreview } from '../utils/preview';
 import './KnowledgePage.css';
 
 type Tab = 'memories' | 'knowledge' | 'review';
@@ -174,7 +175,7 @@ export default function KnowledgePage() {
                   {!k.is_approved && <span className="kb-rejected">已驳回</span>}
                   <span className="kb-card-title">{k.title}</span>
                 </div>
-                <div className="kb-card-content">{k.content.substring(0, 200)}</div>
+                <div className="kb-card-content kb-clamp">{stripMarkdownPreview(k.content)}</div>
                 <div className="kb-card-meta">
                   <span className="kb-source">来源: {k.source_type}</span>
                   {k.source_ref && <span className="kb-ref">{k.source_ref}</span>}

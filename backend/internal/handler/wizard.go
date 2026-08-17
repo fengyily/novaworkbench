@@ -598,22 +598,26 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 				job.Append(store.LogLine{Type: "message", Content: "🌿 " + strings.TrimSpace(string(out))})
 			}
 
-			// Pull the latest changes before coding so the dev branch starts from
-			// the remote HEAD. A freshly created branch has no upstream, so the
-			// first attempt falls back to pulling the base branch from origin.
+			// Best-effort pull: try to update the dev branch from its upstream so
+			// coding starts from the remote HEAD. This must NOT abort the coding
+			// job — the repo may have no remote at all, or the branch may have no
+			// upstream tracking info, in which case there is simply nothing to
+			// pull and we proceed on the already-checked-out branch.
 			pullCmd := exec.Command("git", "pull", "--ff-only")
 			pullCmd.Dir = req.ProjectPath
 			pullOut, pullErr := pullCmd.CombinedOutput()
 			if pullErr != nil {
+				// No upstream on the current branch — retry against origin/<base>
+				// if a remote exists. Missing remote / diverged history just means
+				// "nothing to pull"; log it and keep going.
 				fallbackCmd := exec.Command("git", "pull", "--ff-only", "origin", baseBranch)
 				fallbackCmd.Dir = req.ProjectPath
 				fbOut, fbErr := fallbackCmd.CombinedOutput()
 				if fbErr != nil {
-					job.Append(store.LogLine{Type: "error", Content: "❌ git pull 失败: " + strings.TrimSpace(string(append(pullOut, fbOut...)))})
-					job.Finish(1, store.JobError)
-					return
+					job.Append(store.LogLine{Type: "message", Content: "ℹ️ 跳过 git pull（无远程跟踪或已分叉），继续在当前分支开发: " + strings.TrimSpace(string(append(pullOut, fbOut...)))})
+				} else {
+					job.Append(store.LogLine{Type: "message", Content: "⬇️ " + strings.TrimSpace(string(fbOut))})
 				}
-				job.Append(store.LogLine{Type: "message", Content: "⬇️ " + strings.TrimSpace(string(fbOut))})
 			} else {
 				job.Append(store.LogLine{Type: "message", Content: "⬇️ " + strings.TrimSpace(string(pullOut))})
 			}
@@ -937,7 +941,12 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		sourceSID = req.AnalysisSessionID
 		fork = true
 	}
-	if sourceSID == "" {
+	// Skip-analysis path: when skip_analysis is set and there is no analyst
+	// session to fork, run architect-design as a FRESH claude conversation
+	// (no --resume/--fork-session) seeded only with the requirement title/
+	// description + collectProjectContext. This bypasses the analyst stage.
+	skipAnalysis := req.SkipAnalysis
+	if sourceSID == "" && !skipAnalysis {
 		writeError(w, 400, "NO_SESSION", "尚未找到需求分析会话，请先完成「需求分析」再生成技术方案。")
 		return
 	}
@@ -951,21 +960,30 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	}
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
-	// Plan-mode task prompt: the resumed conversation already carries the
-	// requirement and its analysis. We tell Claude to switch to the architect
-	// role and produce a technical implementation plan. In plan mode
-	// (--permission-mode plan) Claude reads the codebase with read-only tools,
-	// then writes the plan to ~/.claude/plans/<slug>.md via the plan-file Write
-	// (the only write plan mode allows). We capture that file's content from the
-	// Write tool_use event.
+	// Plan-mode task prompt. When resuming/forking an existing conversation
+	// (analyst session present), the resumed thread already carries the
+	// requirement and its analysis — we just ask Claude to switch to the
+	// architect role and produce a plan. On the skip-analysis path (no
+	// session) we must seed the fresh conversation with the requirement plus
+	// pre-read project context, since there is no prior discussion to inherit.
 	prompt := "现在切换到「架构师」角色。基于我们刚才完成的需求分析对话，" +
 		"请阅读项目相关源文件核实技术细节，制定具体可执行的技术实现方案（plan）。" +
 		"方案应涵盖：整体实现思路、需要新增或修改的文件、具体实现步骤、数据模型/数据库变更、实现风险及应对。"
+	if skipAnalysis && sourceSID == "" {
+		docBlock, _, treeSummary := collectProjectContext(projectPath, req.Title)
+		prompt = "现在切换到「架构师」角色。请基于以下需求与项目信息，阅读相关源文件核实技术细节，" +
+			"制定具体可执行的技术实现方案（plan）。\n\n" +
+			"## 需求标题\n" + req.Title + "\n\n" +
+			"## 需求描述\n" + req.Description + "\n\n" +
+			"## 项目上下文\n" + docBlock + "\n" + treeSummary + "\n\n" +
+			"方案应涵盖：整体实现思路、需要新增或修改的文件、具体实现步骤、数据模型/数据库变更、实现风险及应对。" +
+			"请先复述你对需求的理解，再给出方案。"
+	}
 
 	systemPrompt, model := h.roleConfig("architect")
 
 	go func() {
-		log.Printf("[architect-design] job %s started for %s (fork=%v)", job.ID, id, fork)
+		log.Printf("[architect-design] job %s started for %s (fork=%v skip=%v)", job.ID, id, fork, skipAnalysis && sourceSID == "")
 		job.Append(store.LogLine{Type: "phase", Content: "📐 Claude 正在 plan 模式下探索代码并制定技术方案..."})
 
 		// context.Background(): the HTTP request has already returned, so we
@@ -977,7 +995,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 			SystemPrompt:   systemPrompt,
 			Model:          model,
 			SessionID:      sourceSID,
-			Resume:         true,
+			Resume:         sourceSID != "",
 			Fork:           fork,
 			PermissionMode: "plan",
 		})
@@ -986,8 +1004,12 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		if out.staleSession {
 			// The source conversation is gone. Clear whichever session id was
 			// stale so the user can redo the prior stage, surface a recovery
-			// hint, and clear the active job pointer.
-			if fork {
+			// hint, and clear the active job pointer. On the skip-analysis path
+			// there is no source session to be stale, so this branch is a
+			// no-op guard; we still surface a generic recovery hint.
+			if sourceSID == "" {
+				job.Append(store.LogLine{Type: "error", Content: "会话异常，请重试生成技术方案。"})
+			} else if fork {
 				_ = h.reqSvc.UpdateAnalysisSession(id, "")
 				job.Append(store.LogLine{Type: "error", Content: "需求分析会话已过期。请重新进行「需求分析」后再生成技术方案。"})
 			} else {
@@ -1000,7 +1022,10 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		}
 
 		// Persist the forked session id (only present on a fresh fork). On a
-		// plain resume re-run it equals the existing id, so skip the write.
+		// plain resume re-run it equals the existing id, so skip the write. The
+		// skip-analysis path has no fork; a fresh session's id is read back
+		// from the stream but we don't persist it as design_session_id because
+		// there was no prior analysis thread to continue.
 		if fork && out.sessionID != "" {
 			if perr := h.reqSvc.UpdateDesignSession(id, out.sessionID); perr != nil {
 				log.Printf("[architect-design] failed to persist design session for %s: %v", id, perr)

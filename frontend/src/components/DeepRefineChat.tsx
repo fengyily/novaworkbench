@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { API_BASE, requirementsApi } from '../api/client';
+import { appendLogLine, type LogLine } from '../utils/logLines';
 
 interface Props {
   reqId: string;
@@ -24,7 +25,7 @@ export default function DeepRefineChat({
   const [input, setInput] = useState('');
   const [chatting, setChatting] = useState(false);
   // toolLog: live activity feed (phase + tool-call labels)
-  const [toolLog, setToolLog] = useState<string[]>([]);
+  const [toolLog, setToolLog] = useState<LogLine[]>([]);
   const [retryMsg, setRetryMsg] = useState('');
   const chatRef = useRef<HTMLDivElement>(null);
   // Guard against auto-start firing twice (StrictMode / concurrent renders).
@@ -148,7 +149,9 @@ export default function DeepRefineChat({
           return;
         }
         if (evt.type === 'tool_call' || evt.type === 'phase') {
-          setToolLog(prev => [...prev.slice(-19), evt.content ?? '']);
+          // Coalesce consecutive "模型思考中… (N tokens)" phase lines into a
+          // single updatable row instead of stacking one per heartbeat.
+          setToolLog(prev => appendLogLine(prev.slice(-19), { type: evt.type, content: evt.content ?? '' }));
           return;
         }
         if (evt.type === 'message') {
@@ -381,7 +384,7 @@ export default function DeepRefineChat({
           <div className="tool-log">
             {toolLog.map((entry, i) => (
               <div key={i} className={`tool-log-entry${i === toolLog.length - 1 ? ' active' : ''}`}>
-                {entry}
+                {entry.content}
               </div>
             ))}
           </div>

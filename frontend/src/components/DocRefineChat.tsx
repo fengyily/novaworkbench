@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { API_BASE } from '../api/client';
+import { appendLogLine, coalesceLogLines } from '../utils/logLines';
 
 interface Props {
   reqId: string;
@@ -175,8 +176,10 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         // Surface phase / tool_call progress (incl. the thinking_tokens
         // heartbeat). Skip "message" lines — the regenerated doc is large and
         // lands in design_docs via the refresh, not in this thin progress panel.
+        // Coalesce consecutive thinking-tokens phase lines into one updatable
+        // row instead of stacking one per heartbeat.
         if (evt.type === 'phase' || evt.type === 'tool_call') {
-          setApplyLines(prev => [...prev.slice(-49), { type: evt.type, content: evt.content ?? '' }]);
+          setApplyLines(prev => appendLogLine(prev.slice(-49), { type: evt.type, content: evt.content ?? '' }));
         }
       } catch { /* skip malformed SSE */ }
     };
@@ -196,7 +199,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
             return;
           }
           const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
-          const visible = (log || []).filter(l => l.type === 'phase' || l.type === 'tool_call' || l.type === 'error');
+          const visible = coalesceLogLines((log || []).filter(l => l.type === 'phase' || l.type === 'tool_call' || l.type === 'error'));
           if (visible.length > 0) setApplyLines(visible);
           if (status === 'running') {
             streamApplyJob(jobId); // transient drop — re-arm the stream
@@ -243,7 +246,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
       .then(json => {
         if (cancelled || !json.success) return;
         const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
-        const visible = (log || []).filter(l => l.type === 'phase' || l.type === 'tool_call' || l.type === 'error');
+        const visible = coalesceLogLines((log || []).filter(l => l.type === 'phase' || l.type === 'tool_call' || l.type === 'error'));
         if (visible.length > 0) setApplyLines(visible);
         if (status === 'running') {
           setExpanded(true);

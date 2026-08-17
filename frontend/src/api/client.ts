@@ -165,6 +165,7 @@ export interface Requirement {
   design_docs: string; conversation_ids: string; assigned_to: string;
   sprint: string; created_by: string; analysis_session_id: string;
   design_session_id: string; design_job_id: string; analysis_job_id: string; apply_job_id: string; coding_session_id: string;
+  skip_analysis: boolean;
   created_at: string; updated_at: string;
   completed_at?: string;
 }
@@ -186,10 +187,10 @@ export const requirementsApi = {
     Object.entries(params || {}).forEach(([k, v]) => { if (v) q.set(k, String(v)); });
     return api.get<Requirement[]>(`/api/requirements?${q.toString()}`);
   },
-  create: (data: { project_id: string; description: string; priority?: string; sprint?: string }) =>
+  create: (data: { project_id: string; description: string; priority?: string; sprint?: string; skip_analysis?: boolean }) =>
     api.post<Requirement>('/api/requirements', data),
   get: (id: string) => api.get<Requirement>(`/api/requirements/${id}`),
-  update: (id: string, data: { title: string; description: string; priority: string; sprint: string }) =>
+  update: (id: string, data: { title: string; description: string; priority: string; sprint: string; skip_analysis?: boolean }) =>
     api.put<Requirement>(`/api/requirements/${id}`, data),
   updateStatus: (id: string, status: string) =>
     api.patch<Requirement>(`/api/requirements/${id}/status`, { status }),
