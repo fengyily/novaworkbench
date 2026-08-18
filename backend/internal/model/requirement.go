@@ -22,6 +22,8 @@ type Requirement struct {
 	ApplyJobID         string     `json:"apply_job_id"`    // active apply-doc JobStore job id; empty when no apply is running
 	CodingSessionID    string     `json:"coding_session_id"`
 	SkipAnalysis       bool       `json:"skip_analysis"` // when true, architect-design runs a fresh session instead of forking the analyst session
+	BranchName         string     `json:"branch_name"`  // dev branch checked out in the worktree; empty = legacy in-place checkout
+	WorktreePath       string     `json:"worktree_path"` // absolute path of the isolated git worktree; empty = no worktree (legacy)
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
 	CompletedAt        *time.Time `json:"completed_at,omitempty"`

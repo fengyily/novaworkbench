@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -574,19 +575,47 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		}()
 		log.Printf("[start-coding] job %s started for %q in %s", job.ID, req.RequirementTitle, req.ProjectPath)
 
-		// Checkout the development branch before coding
-		if req.BranchName != "" {
-			baseBranch := req.BaseBranch
-			if baseBranch == "" {
-				baseBranch = "main"
+		// Resolve the working directory for coding. When a branch is requested
+		// AND the project is a git repo with a requirement id to key on, develop
+		// in an isolated git worktree per requirement so parallel requirements
+		// don't stomp each other's checkout or edit the same files. The legacy
+		// path (no branch, non-git project, or no requirement_id) falls back to
+		// coding directly in the project directory as before.
+		workDir := req.ProjectPath
+		branchDir := req.ProjectPath // where git checkout/pull run
+		useWorktree := false
+		baseBranch := req.BaseBranch
+		if baseBranch == "" {
+			baseBranch = "main"
+		}
+		if req.BranchName != "" && req.RequirementID != "" {
+			wtPath, wtErr := EnsureWorktree(req.ProjectPath, req.RequirementID, req.BranchName, baseBranch)
+			switch {
+			case wtErr == nil && wtPath != "":
+				workDir = wtPath
+				branchDir = wtPath
+				useWorktree = true
+				job.Append(store.LogLine{Type: "message", Content: "🌿 已创建/复用隔离 worktree: " + wtPath})
+			case errors.Is(wtErr, ErrNotAGitRepo):
+				// Fall through to the legacy in-place checkout below.
+				job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，在项目目录直接开发"})
+			default:
+				job.Append(store.LogLine{Type: "error", Content: "❌ 创建 worktree 失败: " + wtErr.Error()})
+				job.Finish(1, store.JobError)
+				return
 			}
+		}
+
+		// Checkout the development branch before coding. Skipped for worktrees
+		// — `git worktree add` already checked the branch out in the worktree.
+		if req.BranchName != "" && !useWorktree {
 			gitCmd := exec.Command("git", "checkout", "-b", req.BranchName, baseBranch)
-			gitCmd.Dir = req.ProjectPath
+			gitCmd.Dir = branchDir
 			out, err := gitCmd.CombinedOutput()
 			if err != nil {
 				// Branch may already exist, try switching to it
 				gitCmd2 := exec.Command("git", "checkout", req.BranchName)
-				gitCmd2.Dir = req.ProjectPath
+				gitCmd2.Dir = branchDir
 				out2, err2 := gitCmd2.CombinedOutput()
 				if err2 != nil {
 					job.Append(store.LogLine{Type: "error", Content: "❌ git checkout 失败: " + strings.TrimSpace(string(out2))})
@@ -597,21 +626,23 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			} else {
 				job.Append(store.LogLine{Type: "message", Content: "🌿 " + strings.TrimSpace(string(out))})
 			}
+		}
 
-			// Best-effort pull: try to update the dev branch from its upstream so
-			// coding starts from the remote HEAD. This must NOT abort the coding
-			// job — the repo may have no remote at all, or the branch may have no
-			// upstream tracking info, in which case there is simply nothing to
-			// pull and we proceed on the already-checked-out branch.
+		// Best-effort pull: try to update the dev branch from its upstream so
+		// coding starts from the remote HEAD. This must NOT abort the coding
+		// job — the repo may have no remote at all, or the branch may have no
+		// upstream tracking info, in which case there is simply nothing to
+		// pull and we proceed on the already-checked-out branch.
+		if req.BranchName != "" {
 			pullCmd := exec.Command("git", "pull", "--ff-only")
-			pullCmd.Dir = req.ProjectPath
+			pullCmd.Dir = branchDir
 			pullOut, pullErr := pullCmd.CombinedOutput()
 			if pullErr != nil {
 				// No upstream on the current branch — retry against origin/<base>
 				// if a remote exists. Missing remote / diverged history just means
 				// "nothing to pull"; log it and keep going.
 				fallbackCmd := exec.Command("git", "pull", "--ff-only", "origin", baseBranch)
-				fallbackCmd.Dir = req.ProjectPath
+				fallbackCmd.Dir = branchDir
 				fbOut, fbErr := fallbackCmd.CombinedOutput()
 				if fbErr != nil {
 					job.Append(store.LogLine{Type: "message", Content: "ℹ️ 跳过 git pull（无远程跟踪或已分叉），继续在当前分支开发: " + strings.TrimSpace(string(append(pullOut, fbOut...)))})
@@ -620,6 +651,15 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 				}
 			} else {
 				job.Append(store.LogLine{Type: "message", Content: "⬇️ " + strings.TrimSpace(string(pullOut))})
+			}
+		}
+
+		// Persist the worktree location + branch so adjust-coding and the merge
+		// step can find the isolated working tree (jobs are in-memory; the path
+		// must live in the DB to survive a restart).
+		if useWorktree && req.RequirementID != "" {
+			if perr := h.reqSvc.UpdateWorktree(req.RequirementID, req.BranchName, workDir); perr != nil {
+				log.Printf("[start-coding] failed to persist worktree for %s: %v", req.RequirementID, perr)
 			}
 		}
 
@@ -678,7 +718,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		}
 		cmd := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:       prompt,
-			WorkDir:      req.ProjectPath,
+			WorkDir:      workDir,
 			SystemPrompt: systemPrompt,
 			Model:        model,
 			SessionID:    sourceSID,
@@ -805,9 +845,20 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		// code edit can take minutes. SystemPrompt is left empty so the resumed
 		// session's persona is preserved; Prompt carries ONLY the user's
 		// follow-up message (no readProjectContext project context).
+		//
+		// WorkDir: prefer the requirement's isolated worktree (so follow-up
+		// edits land in the same worktree as the first coding pass, keeping
+		// parallel requirements isolated); fall back to the project checkout
+		// for legacy requirements without a worktree.
+		workDir := proj.LocalPath
+		if req.WorktreePath != "" {
+			if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
+				workDir = req.WorktreePath
+			}
+		}
 		cmd := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:       body.Message,
-			WorkDir:      proj.LocalPath,
+			WorkDir:      workDir,
 			SystemPrompt: "", // resume 已携带 developer persona，不再注入
 			Model:        model,
 			SessionID:    req.CodingSessionID,

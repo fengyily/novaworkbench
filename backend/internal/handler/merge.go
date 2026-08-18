@@ -9,11 +9,13 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 
 	"github.com/novaworkbench/backend/internal/llm"
+	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 )
@@ -61,24 +63,25 @@ func (h *MergeHandler) roleConfig() (systemPrompt, model string) {
 }
 
 // loadReqProject resolves the requirement + its project (LocalPath /
-// DefaultBranch / PlatformType). Shared by every endpoint.
-func (h *MergeHandler) loadReqProject(w http.ResponseWriter, r *http.Request) (reqID, projectPath, defaultBranch, platformType string, ok bool) {
-	reqID = r.PathValue("id")
+// DefaultBranch / PlatformType). Shared by every endpoint. Returns the
+// requirement row too — its BranchName/WorktreePath drive worktree isolation.
+func (h *MergeHandler) loadReqProject(w http.ResponseWriter, r *http.Request) (reqRow *model.Requirement, projectPath, defaultBranch, platformType string, ok bool) {
+	reqID := r.PathValue("id")
 	reqRow, err := h.reqSvc.Get(reqID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "REQ_NOT_FOUND", "需求不存在")
-		return "", "", "", "", false
+		return nil, "", "", "", false
 	}
 	project, err := h.projectSvc.Get(reqRow.ProjectID)
 	if err != nil || project.LocalPath == "" {
 		writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", "项目路径不存在")
-		return "", "", "", "", false
+		return nil, "", "", "", false
 	}
 	db := project.DefaultBranch
 	if db == "" {
 		db = "main"
 	}
-	return reqID, project.LocalPath, db, project.PlatformType, true
+	return reqRow, project.LocalPath, db, project.PlatformType, true
 }
 
 // ── git helpers (all run with git -C <dir>) ────────────────────────────────
@@ -103,6 +106,23 @@ func currentBranch(dir string) string {
 		return ""
 	}
 	return out
+}
+
+// devBranchAndDir resolves the dev branch name and the directory where it is
+// checked out for a requirement. For an isolated-worktree requirement whose
+// worktree still exists this is the stored branch name + worktree path; in any
+// other case (legacy requirement, or a worktree that was removed out-of-band)
+// it falls back to the main checkout's current branch + the project directory.
+func devBranchAndDir(reqRow *model.Requirement, projectPath string) (dev, dir string) {
+	dir = projectPath
+	dev = currentBranch(projectPath)
+	if reqRow.WorktreePath != "" {
+		if _, err := os.Stat(reqRow.WorktreePath); err == nil {
+			dir = reqRow.WorktreePath
+			dev = reqRow.BranchName
+		}
+	}
+	return dev, dir
 }
 
 // uncommittedFiles returns the porcelain status entries (one per changed file,
@@ -270,7 +290,7 @@ func buildPRURL(platform, webBase, owner, repo, base, head string) string {
 // preview PR URL.
 // GET /api/requirements/{id}/merge/state
 func (h *MergeHandler) State(w http.ResponseWriter, r *http.Request) {
-	reqID, dir, defaultBranch, platformType, ok := h.loadReqProject(w, r)
+	reqRow, dir, defaultBranch, platformType, ok := h.loadReqProject(w, r)
 	if !ok {
 		return
 	}
@@ -278,12 +298,14 @@ func (h *MergeHandler) State(w http.ResponseWriter, r *http.Request) {
 	// Not a git repo → tell the frontend merge is unavailable.
 	if _, err := gitRun(dir, "rev-parse", "--is-inside-work-tree"); err != nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"is_git": false, "requirement_id": reqID,
+			"is_git": false, "requirement_id": reqRow.ID,
 		})
 		return
 	}
 
-	dev := currentBranch(dir)
+	// dev branch + the directory where it's checked out (the worktree when the
+	// requirement has one; the main checkout otherwise).
+	dev, devDir := devBranchAndDir(reqRow, dir)
 	target := defaultBranch
 	hasRemote := false
 	remote := remoteURL(dir)
@@ -291,16 +313,18 @@ func (h *MergeHandler) State(w http.ResponseWriter, r *http.Request) {
 		hasRemote = true
 	}
 	pf, webBase, owner, repo := parseRemote(remote, platformType)
-	uncommitted := uncommittedFiles(dir)
+	uncommitted := uncommittedFiles(devDir)
 	ahead, behind := 0, 0
 	if dev != "" && target != "" && dev != "HEAD" {
+		// ahead/behind is computed from the shared .git, so the main checkout
+		// (dir) works regardless of which worktree has dev checked out.
 		ahead, behind = aheadBehind(dir, target, dev)
 	}
 	prURL := buildPRURL(pf, webBase, owner, repo, target, dev)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"is_git":           true,
-		"requirement_id":   reqID,
+		"requirement_id":   reqRow.ID,
 		"dev_branch":       dev,
 		"target_branch":    target,
 		"uncommitted_count": len(uncommitted),
@@ -313,6 +337,7 @@ func (h *MergeHandler) State(w http.ResponseWriter, r *http.Request) {
 		"pr_url":           prURL,
 		"mid_merge":        midMerge(dir),
 		"conflict_files":   conflictedFiles(dir),
+		"worktree_path":    reqRow.WorktreePath,
 	})
 }
 
@@ -322,7 +347,7 @@ func (h *MergeHandler) State(w http.ResponseWriter, r *http.Request) {
 // abort/resolve/continue endpoints to pick up.
 // POST /api/requirements/{id}/merge/local
 func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
-	reqID, dir, defaultBranch, _, ok := h.loadReqProject(w, r)
+	reqRow, dir, defaultBranch, _, ok := h.loadReqProject(w, r)
 	if !ok {
 		return
 	}
@@ -333,7 +358,7 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	dev := currentBranch(dir)
+	dev, devDir := devBranchAndDir(reqRow, dir)
 	if dev == "" || dev == "HEAD" {
 		writeError(w, http.StatusBadRequest, "NO_BRANCH", "当前处于 detached HEAD，无法合并")
 		return
@@ -343,18 +368,24 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 		target = defaultBranch
 	}
 	commitMsg := body.CommitMessage
+	// Worktree isolation: when the dev branch lives in its own worktree, the
+	// merge into target must happen in the main checkout (a branch can only be
+	// checked out in one worktree). We commit inside the worktree, then check
+	// out target in the main dir to merge.
+	usingWorktree := reqRow.WorktreePath != "" && devDir != dir
 
-	job := h.jobs.Create(reqID)
+	job := h.jobs.Create(reqRow.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
 
 	go func() {
-		log.Printf("[merge/local] job %s req %s: %s → %s", job.ID, reqID, dev, target)
+		log.Printf("[merge/local] job %s req %s: %s → %s", job.ID, reqRow.ID, dev, target)
 
-		// 1. Commit pending dev-branch changes first.
+		// 1. Commit pending dev-branch changes first (in the worktree / checkout
+		//    where dev is actually checked out).
 		if commitMsg == "" {
 			commitMsg = dev
 		}
-		if committed, err := commitAll(dir, commitMsg); err != nil {
+		if committed, err := commitAll(devDir, commitMsg); err != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ 提交失败: " + err.Error()})
 			job.Finish(1, store.JobError)
 			return
@@ -364,8 +395,26 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 工作区干净，无需提交"})
 		}
 
-		// 2. Checkout target.
-		if out, err := gitRun(dir, "checkout", target); err != nil {
+		// 2. For a worktree-isolated dev branch, the main checkout must host
+		//    the merge of dev → target. Refuse if the main tree is dirty — we
+		//    can't safely switch it to target. Guide the user to push+PR.
+		if usingWorktree {
+			if dirty := uncommittedFiles(dir); len(dirty) > 0 {
+				filesJSON, _ := json.Marshal(dirty)
+				job.Append(store.LogLine{Type: "error", Content: "❌ 主工作区有未提交改动，无法切换到目标分支进行合入: " + string(filesJSON)})
+				job.Append(store.LogLine{Type: "error", Content: "请先提交/暂存主工作区改动，或改用「推送并发起 PR」路径。"})
+				job.Finish(1, store.JobError)
+				return
+			}
+		}
+
+		// 3. Checkout target (in the main checkout when using a worktree, else
+		//    in the same dir dev was committed).
+		mergeDir := dir
+		if !usingWorktree {
+			mergeDir = devDir
+		}
+		if out, err := gitRun(mergeDir, "checkout", target); err != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ 切换目标分支失败: " + out + " " + err.Error()})
 			job.Finish(1, store.JobError)
 			return
@@ -373,8 +422,8 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 			job.Append(store.LogLine{Type: "message", Content: "🌿 切换到 " + target})
 		}
 
-		// 3. Merge dev. Use --no-edit so a merge commit (if any) doesn't open an editor.
-		mergeOut, mergeErr := gitRun(dir, "merge", "--no-edit", dev)
+		// 4. Merge dev. Use --no-edit so a merge commit (if any) doesn't open an editor.
+		mergeOut, mergeErr := gitRun(mergeDir, "merge", "--no-edit", dev)
 		for _, line := range strings.Split(mergeOut, "\n") {
 			if line = strings.TrimSpace(line); line != "" {
 				job.Append(store.LogLine{Type: "message", Content: line})
@@ -383,10 +432,22 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 		if mergeErr == nil {
 			// Optional: delete the dev branch now that it's merged.
 			if body.DeleteBranch {
+				// Worktree holds the dev branch's checkout — remove it first
+				// (best-effort; a dirty worktree is left for the cleanup entry).
+				if usingWorktree {
+					if rerr := RemoveWorktree(dir, reqRow.WorktreePath, false); rerr != nil {
+						job.Append(store.LogLine{Type: "message", Content: "ℹ️ 移除 worktree 失败（可能含未跟踪文件），请用「清理开发环境」处理: " + rerr.Error()})
+					} else {
+						job.Append(store.LogLine{Type: "message", Content: "🗑️ 已移除 worktree"})
+					}
+				}
 				if out, err := gitRun(dir, "branch", "-d", dev); err != nil {
 					job.Append(store.LogLine{Type: "message", Content: "ℹ️ 删除分支失败（可忽略）: " + out})
 				} else {
 					job.Append(store.LogLine{Type: "message", Content: "🗑️ 已删除分支: " + dev})
+				}
+				if perr := h.reqSvc.UpdateWorktree(reqRow.ID, "", ""); perr != nil {
+					log.Printf("[merge/local] clear worktree fields for %s: %v", reqRow.ID, perr)
 				}
 			}
 			job.Append(store.LogLine{Type: "done", Content: "✅ 已合并 " + dev + " → " + target})
@@ -433,7 +494,7 @@ func (h *MergeHandler) Abort(w http.ResponseWriter, r *http.Request) {
 // stage everything and create the merge commit, then finish the job.
 // POST /api/requirements/{id}/merge/continue
 func (h *MergeHandler) Continue(w http.ResponseWriter, r *http.Request) {
-	reqID, dir, _, _, ok := h.loadReqProject(w, r)
+	reqRow, dir, _, _, ok := h.loadReqProject(w, r)
 	if !ok {
 		return
 	}
@@ -441,7 +502,7 @@ func (h *MergeHandler) Continue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "NO_MERGE", "当前没有进行中的合并")
 		return
 	}
-	job := h.jobs.Create(reqID)
+	job := h.jobs.Create(reqRow.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
 
 	go func() {
@@ -472,7 +533,7 @@ func (h *MergeHandler) Continue(w http.ResponseWriter, r *http.Request) {
 // calls / messages into the job via runClaudeStream.
 // POST /api/requirements/{id}/merge/resolve
 func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
-	reqID, dir, _, _, ok := h.loadReqProject(w, r)
+	reqRow, dir, _, _, ok := h.loadReqProject(w, r)
 	if !ok {
 		return
 	}
@@ -486,7 +547,7 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job := h.jobs.Create(reqID)
+	job := h.jobs.Create(reqRow.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
 
 	systemPrompt, model := h.roleConfig()
@@ -531,7 +592,7 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 // the remote.
 // POST /api/requirements/{id}/merge/push
 func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
-	reqID, dir, _, platformType, ok := h.loadReqProject(w, r)
+	reqRow, dir, _, platformType, ok := h.loadReqProject(w, r)
 	if !ok {
 		return
 	}
@@ -540,7 +601,9 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	dev := currentBranch(dir)
+	// dev branch + the worktree/checkout where it lives. commit + push run
+	// there so the push carries the dev-branch work, not the main checkout.
+	dev, devDir := devBranchAndDir(reqRow, dir)
 	if dev == "" || dev == "HEAD" {
 		writeError(w, http.StatusBadRequest, "NO_BRANCH", "当前处于 detached HEAD，无法推送")
 		return
@@ -551,17 +614,17 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job := h.jobs.Create(reqID)
+	job := h.jobs.Create(reqRow.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
 
 	go func() {
-		log.Printf("[merge/push] job %s req %s: branch=%s", job.ID, reqID, dev)
+		log.Printf("[merge/push] job %s req %s: branch=%s", job.ID, reqRow.ID, dev)
 
 		commitMsg := body.CommitMessage
 		if commitMsg == "" {
 			commitMsg = dev
 		}
-		if committed, err := commitAll(dir, commitMsg); err != nil {
+		if committed, err := commitAll(devDir, commitMsg); err != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ 提交失败: " + err.Error()})
 			job.Finish(1, store.JobError)
 			return
@@ -571,7 +634,7 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 
 		// Stream git push output line-by-line (merge stdout+stderr).
 		job.Append(store.LogLine{Type: "phase", Content: "🌐 正在推送 " + dev + " 到 origin..."})
-		cmd := exec.Command("git", "-C", dir, "push", "-u", "origin", dev)
+		cmd := exec.Command("git", "-C", devDir, "push", "-u", "origin", dev)
 		pr, pw := io.Pipe()
 		cmd.Stdout = pw
 		cmd.Stderr = pw
@@ -604,7 +667,7 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 		// know the project default here without re-reading; use the project's
 		// stored default via a fresh lookup is overkill — use "main" fallback is
 		// wrong for non-main projects. Re-read project default branch instead.)
-		_, _, defaultBranch, _ := h.loadReqProjectNoWrite(reqID)
+		_, _, defaultBranch, _ := h.loadReqProjectNoWrite(reqRow.ID)
 		pf, webBase, owner, repo := parseRemote(remote, platformType)
 		prURL := buildPRURL(pf, webBase, owner, repo, defaultBranch, dev)
 		if prURL != "" {
@@ -632,4 +695,60 @@ func (h *MergeHandler) loadReqProjectNoWrite(reqID string) (projectPath, default
 		db = "main"
 	}
 	return project.LocalPath, db, project.PlatformType, true
+}
+
+// Cleanup removes the requirement's isolated worktree (and prunes git's
+// worktree metadata) plus its dev branch, so finished/abandoned requirements
+// don't leave stray directories on disk. Refuses a dirty worktree unless
+// force=true. Idempotent: a requirement without a worktree returns ok.
+// POST /api/requirements/{id}/worktree/cleanup {force?:bool}
+func (h *MergeHandler) Cleanup(w http.ResponseWriter, r *http.Request) {
+	reqRow, dir, _, _, ok := h.loadReqProject(w, r)
+	if !ok {
+		return
+	}
+	if reqRow.WorktreePath == "" {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "message": "无 worktree 需要清理"})
+		return
+	}
+	var body struct {
+		Force bool `json:"force"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	wtPath := reqRow.WorktreePath
+	// The worktree directory still exists → remove it via git. A dirty worktree
+	// is refused unless force is set, so an in-progress dev tree isn't dropped
+	// accidentally.
+	if _, statErr := os.Stat(wtPath); statErr == nil {
+		if !body.Force {
+			if dirty := uncommittedFiles(wtPath); len(dirty) > 0 {
+				filesJSON, _ := json.Marshal(dirty)
+				writeError(w, http.StatusConflict, "WORKTREE_DIRTY",
+					"worktree 存在未提交改动，请先提交或勾选 force 强制清理: "+string(filesJSON))
+				return
+			}
+		}
+		if err := RemoveWorktree(dir, wtPath, body.Force); err != nil {
+			writeError(w, http.StatusInternalServerError, "WORKTREE_REMOVE_FAILED",
+				"移除 worktree 失败: "+err.Error())
+			return
+		}
+	}
+	// Prune stale worktree metadata whether or not the dir existed, then clear
+	// the DB fields so later stages fall back to the shared checkout.
+	_, _ = gitRun(dir, "worktree", "prune")
+
+	if reqRow.BranchName != "" {
+		// Best-effort branch delete; non-fatal if it fails (not merged, or
+		// still checked out somewhere — the user can drop it manually).
+		if _, err := gitRun(dir, "branch", "-D", reqRow.BranchName); err != nil {
+			log.Printf("[worktree-cleanup] branch -D %s failed (ok): %v", reqRow.BranchName, err)
+		}
+	}
+	if perr := h.reqSvc.UpdateWorktree(reqRow.ID, "", ""); perr != nil {
+		log.Printf("[worktree-cleanup] clear DB fields for %s: %v", reqRow.ID, perr)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
 }

@@ -708,6 +708,40 @@ export default function RequirementDetail() {
     }
   };
 
+  // cleanWorktree drops the requirement's isolated dev worktree + branch so
+  // finished/abandoned parallel dev dirs don't accumulate on disk. A dirty
+  // worktree is refused unless the user confirms a force cleanup.
+  const cleanWorktree = async () => {
+    if (!id || !mergeState?.worktree_path) return;
+    if (!window.confirm('将删除该需求的隔离 worktree 目录与开发分支，确认清理？')) return;
+    const run = async (force: boolean) => {
+      setBusy('清理');
+      try {
+        await mergeApi.cleanup(id, { force });
+        await refreshMergeState();
+        await refresh();
+      } finally {
+        setBusy('');
+      }
+    };
+    try {
+      await run(false);
+    } catch (err: any) {
+      const msg = err?.message || '';
+      if (msg.includes('WORKTREE_DIRTY')) {
+        if (window.confirm('worktree 存在未提交改动，是否强制清理（将丢失这些改动）？')) {
+          try {
+            await run(true);
+          } catch (e: any) {
+            setMergeLines([{ type: 'error', content: '❌ ' + e.message }]);
+          }
+        }
+      } else {
+        setMergeLines([{ type: 'error', content: '❌ ' + msg }]);
+      }
+    }
+  };
+
   // Restore active coding job when returning to this page
   useEffect(() => {
     if (!id) return;
@@ -1198,6 +1232,9 @@ export default function RequirementDetail() {
             <div className="tab-empty">
               <p>方案已完成。将根据技术方案进行开发实现。</p>
               <p style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>项目路径：<code>{project?.local_path}</code></p>
+              <p style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                将在独立 git worktree 中隔离开发（<code>{project?.local_path}.worktrees/{req.id}</code>），多需求并行互不干扰。
+              </p>
               <button className="btn btn-primary" onClick={() => openBranchModal()}>🚀 开始开发</button>
             </div>
           )}
@@ -1260,6 +1297,14 @@ export default function RequirementDetail() {
                   <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}>🌐 推送并发起 PR</button>
                 </div>
 
+                {mergeState?.worktree_path && (
+                  <div className="merge-hint" style={{ marginTop: 8, alignItems: 'center' }}>
+                    <span>隔离开发目录</span>
+                    <code style={{ fontSize: 12 }}>{mergeState.worktree_path}</code>
+                    <button className="btn btn-sm" onClick={cleanWorktree} disabled={merging || !!busy}>🧹 清理开发环境</button>
+                  </div>
+                )}
+
                 {mergeState?.mid_merge && (
                   <div className="conflict-panel">
                     <p className="conflict-title">⚠️ 仓库处于合并冲突状态</p>
@@ -1303,6 +1348,13 @@ export default function RequirementDetail() {
                 <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}>🔀 本地合入</button>
                 <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}>🌐 推送并发起 PR</button>
               </div>
+              {mergeState?.worktree_path && (
+                <div className="merge-hint" style={{ marginTop: 8, alignItems: 'center' }}>
+                  <span>隔离开发目录</span>
+                  <code style={{ fontSize: 12 }}>{mergeState.worktree_path}</code>
+                  <button className="btn btn-sm" onClick={cleanWorktree} disabled={merging || !!busy}>🧹 清理开发环境</button>
+                </div>
+              )}
               <div className="merge-actions" style={{ marginTop: 8 }}>
                 <button className="btn btn-primary" onClick={handleArchive} disabled={!!busy}>
                   {busy === '归档' ? '⏳ ...' : '📦 归档到知识库'}

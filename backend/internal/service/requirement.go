@@ -67,7 +67,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	}
 
 	rows, err := s.db.Query(
-		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY updated_at DESC",
+		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,branch_name,worktree_path,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY updated_at DESC",
 		args...)
 	if err != nil {
 		return nil, err
@@ -79,7 +79,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		var r model.Requirement
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo, &r.Sprint,
-			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
+			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.BranchName, &r.WorktreePath, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, r)
@@ -93,10 +93,10 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	var r model.Requirement
 	err := s.db.QueryRow(
-		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
+		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,branch_name,worktree_path,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo, &r.Sprint,
-			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
+			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.BranchName, &r.WorktreePath, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("requirement not found")
 	}
@@ -230,6 +230,16 @@ func (s *RequirementService) UpdateApplyJob(id, jobID string) error {
 func (s *RequirementService) UpdateCodingSession(id, sessionID string) error {
 	_, err := s.db.Exec("UPDATE requirements SET coding_session_id=?, updated_at=? WHERE id=?",
 		sessionID, time.Now(), id)
+	return err
+}
+
+// UpdateWorktree persists the dev branch name and the absolute path of the
+// isolated git worktree created for parallel development. Pass "" for both to
+// clear (after a merge/cleanup) so later stages fall back to the shared project
+// checkout instead of a stale worktree path.
+func (s *RequirementService) UpdateWorktree(id, branch, path string) error {
+	_, err := s.db.Exec("UPDATE requirements SET branch_name=?, worktree_path=?, updated_at=? WHERE id=?",
+		branch, path, time.Now(), id)
 	return err
 }
 
