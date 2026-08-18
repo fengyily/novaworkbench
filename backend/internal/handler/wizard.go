@@ -56,6 +56,37 @@ func (h *WizardHandler) roleConfig(key string) (systemPrompt, model string) {
 	return r.SystemPrompt, r.Model
 }
 
+// resolveWorkDir returns the directory the current claude stage should run in:
+// the requirement's isolated git worktree when it exists (or can be created),
+// else the project checkout. Anchoring the WHOLE pipeline (analysis → design →
+// coding) to the same worktree means the forked/resumed conversation never
+// carries absolute paths back to the shared project checkout — without this the
+// coding stage inherits the analyst/architect's original-dir absolute paths and
+// edits the original files instead of the worktree. Non-git projects and empty
+// paths fall back to the project checkout (legacy behavior).
+func (h *WizardHandler) resolveWorkDir(req *model.Requirement, projectPath, defaultBranch string) string {
+	if req == nil || projectPath == "" {
+		return projectPath
+	}
+	if req.WorktreePath != "" {
+		if _, err := os.Stat(req.WorktreePath); err == nil {
+			return req.WorktreePath
+		}
+	}
+	if defaultBranch == "" {
+		defaultBranch = "main"
+	}
+	branch := "feat/" + req.ID
+	wtPath, err := EnsureWorktree(projectPath, req.ID, branch, defaultBranch)
+	if err != nil || wtPath == "" {
+		return projectPath // non-git repo / worktree add failed → legacy in-place
+	}
+	if perr := h.reqSvc.UpdateWorktree(req.ID, branch, wtPath); perr != nil {
+		log.Printf("[wizard] persist worktree for %s: %v", req.ID, perr)
+	}
+	return wtPath
+}
+
 // docStageSession maps a refine/apply doc_type to the requirement's stored
 // session id for that stage and the role key whose persona it runs under.
 // Returns sid="" when the stage hasn't been run yet (caller surfaces a hint).
@@ -131,10 +162,12 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	projectPath := req.ProjectPath
-	if projectPath == "" {
-		if proj, perr := h.projectSvc.Get(requirement.ProjectID); perr == nil {
+	defaultBranch := ""
+	if proj, perr := h.projectSvc.Get(requirement.ProjectID); perr == nil {
+		if projectPath == "" {
 			projectPath = proj.LocalPath
 		}
+		defaultBranch = proj.DefaultBranch
 	}
 
 	go func() {
@@ -147,6 +180,11 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		}()
 		sink := jobSink{job}
 		job.Append(store.LogLine{Type: "phase", Content: "🤖 Claude 正在准备分析..."})
+
+		// Anchor the analyst stage to the isolated worktree (created here if
+		// missing) so the whole session chain — analysis → design → coding — is
+		// rooted in the worktree and never leaks original-dir absolute paths.
+		workDir := h.resolveWorkDir(requirement, projectPath, defaultBranch)
 
 		// firstTurnPrompt pre-reads a BOUNDED slice of the project (AI docs +
 		// a names-only structure tree) and emits each pre-read file as
@@ -165,7 +203,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		}
 		firstTurnPrompt := func() string {
 			sink.emit(store.LogLine{Type: "phase", Content: "📖 正在预读项目上下文（不遍历整个仓库）..."})
-			docBlock, readFiles, treeSummary := collectProjectContext(projectPath, title)
+			docBlock, readFiles, treeSummary := collectProjectContext(workDir, title)
 			for _, rf := range readFiles {
 				sink.emit(store.LogLine{Type: "tool_call", Content: "📖 预读: " + rf})
 			}
@@ -178,7 +216,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		// must not tie the claude subprocess's lifetime to r.Context() (which
 		// is cancelled the moment the handler returns — that was the bug that
 		// killed the turn on page refresh).
-		finalResult, newSessionID, err := h.runAnalystTurn(context.Background(), firstTurnPrompt, resumePrompt, projectPath, systemPrompt, model, sessionID, !isFirstRound, sink)
+		finalResult, newSessionID, err := h.runAnalystTurn(context.Background(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, sessionID, !isFirstRound, sink)
 		if err != nil {
 			log.Printf("[analyst-chat] turn failed: %v", err)
 			job.Append(store.LogLine{Type: "error", Content: err.Error()})
@@ -271,6 +309,20 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 	sendStatus(w, rc, "phase", "🤖 开发者正在理解追加调整...")
 	rc.Flush()
 
+	// Anchor to the worktree so the resumed coding session's conversation stays
+	// rooted in the isolated dir (this chat is read-only, but keeps cwd consistent).
+	projectPath := req.ProjectPath
+	defaultBranch := ""
+	if requirement != nil {
+		if proj, perr := h.projectSvc.Get(requirement.ProjectID); perr == nil {
+			if projectPath == "" {
+				projectPath = proj.LocalPath
+			}
+			defaultBranch = proj.DefaultBranch
+		}
+	}
+	workDir := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+
 	systemPrompt, model := h.roleConfig("developer")
 
 	// The resumed coding conversation already carries the requirement, analysis,
@@ -307,7 +359,7 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		req.UserMessage,
 	)
 
-	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, req.ProjectPath, systemPrompt, model, sourceSID, fork, w, rc)
+	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, sourceSID, fork, w, rc)
 	if err != nil {
 		log.Printf("[developer-chat] turn failed: %v", err)
 		sendStatus(w, rc, "error", err.Error())
@@ -972,8 +1024,10 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	}
 	project, _ := h.projectSvc.Get(req.ProjectID)
 	projectPath := ""
+	defaultBranch := ""
 	if project != nil {
 		projectPath = project.LocalPath
+		defaultBranch = project.DefaultBranch
 	}
 
 	// Session threading: the architect stage continues the SAME conversation
@@ -1011,6 +1065,12 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	}
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
+	// Anchor the architect stage to the isolated worktree (created here if the
+	// analyst stage was skipped) so the plan and its session are rooted in the
+	// worktree — otherwise the coding stage forks this session and follows the
+	// original-dir absolute paths back to the shared checkout.
+	workDir := h.resolveWorkDir(req, projectPath, defaultBranch)
+
 	// Plan-mode task prompt. When resuming/forking an existing conversation
 	// (analyst session present), the resumed thread already carries the
 	// requirement and its analysis — we just ask Claude to switch to the
@@ -1021,7 +1081,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		"请阅读项目相关源文件核实技术细节，制定具体可执行的技术实现方案（plan）。" +
 		"方案应涵盖：整体实现思路、需要新增或修改的文件、具体实现步骤、数据模型/数据库变更、实现风险及应对。"
 	if skipAnalysis && sourceSID == "" {
-		docBlock, _, treeSummary := collectProjectContext(projectPath, req.Title)
+		docBlock, _, treeSummary := collectProjectContext(workDir, req.Title)
 		prompt = "现在切换到「架构师」角色。请基于以下需求与项目信息，阅读相关源文件核实技术细节，" +
 			"制定具体可执行的技术实现方案（plan）。\n\n" +
 			"## 需求标题\n" + req.Title + "\n\n" +
@@ -1042,7 +1102,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		// is cancelled the moment the handler returns).
 		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
 			Prompt:         prompt,
-			WorkDir:        projectPath,
+			WorkDir:        workDir,
 			SystemPrompt:   systemPrompt,
 			Model:          model,
 			SessionID:      sourceSID,
@@ -1939,6 +1999,20 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	}
 	systemPrompt, model := h.roleConfig(roleKey)
 
+	// Anchor the refine to the same worktree as the stage it resumes, so the
+	// conversation never carries original-dir absolute paths.
+	projectPath := req.ProjectPath
+	defaultBranch := ""
+	if requirement != nil {
+		if proj, perr := h.projectSvc.Get(requirement.ProjectID); perr == nil {
+			if projectPath == "" {
+				projectPath = proj.LocalPath
+			}
+			defaultBranch = proj.DefaultBranch
+		}
+	}
+	workDir := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+
 	// The resumed conversation carries the doc + prior turns. Send only the
 	// user's latest message plus a steady instruction covering both mid-refine
 	// responses and the completion signal. On the fresh-session fallback there
@@ -1962,7 +2036,7 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 
 	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
 		Prompt:       prompt,
-		WorkDir:      req.ProjectPath,
+		WorkDir:      workDir,
 		SystemPrompt: systemPrompt,
 		Model:        model,
 		SessionID:    sourceSID,
@@ -2081,11 +2155,14 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 	}
 
 	projectPath := req.ProjectPath
-	if projectPath == "" {
-		if proj, perr := h.projectSvc.Get(requirement.ProjectID); perr == nil {
+	defaultBranch := ""
+	if proj, perr := h.projectSvc.Get(requirement.ProjectID); perr == nil {
+		if projectPath == "" {
 			projectPath = proj.LocalPath
 		}
+		defaultBranch = proj.DefaultBranch
 	}
+	workDir := h.resolveWorkDir(requirement, projectPath, defaultBranch)
 
 	// Build the prompt that asks Claude to emit the final doc. For design docs we
 	// detect plan-markdown vs legacy JSON from the DB-stored doc (the apply call
@@ -2136,7 +2213,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 
 		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
 			Prompt:       prompt,
-			WorkDir:      projectPath,
+			WorkDir:      workDir,
 			SystemPrompt: systemPrompt,
 			Model:        model,
 			SessionID:    sourceSID,
