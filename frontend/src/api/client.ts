@@ -197,7 +197,7 @@ export const statusLabels: Record<string, string> = {
   draft: '📝 草稿',
   analyzing: '🔍 需求分析中',
   designing: '📐 方案设计中',
-  designed: '✅ 方案完成',
+  designed: '📐 方案完成',
   developing: '🚀 开发中',
   done: '✅ 开发完成',
   archived: '📦 已归档',

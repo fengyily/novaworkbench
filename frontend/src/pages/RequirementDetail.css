@@ -16,11 +16,13 @@
   background: var(--color-active);
   color: var(--color-primary);
 }
-.status-tag.status-draft { background: #f1f5f9; color: #64748b; }
-.status-tag.status-analysis { background: #fef3c7; color: #d97706; }
-.status-tag.status-ready { background: #dbeafe; color: #2563eb; }
-.status-tag.status-in_progress { background: #ede9fe; color: #7c3aed; }
-.status-tag.status-done { background: #d1fae5; color: #059669; }
+.status-tag.status-draft      { background: #f1f5f9; color: #475569; }
+.status-tag.status-analyzing  { background: #fef3c7; color: #b45309; }
+.status-tag.status-designing  { background: #ede9fe; color: #6d28d9; }
+.status-tag.status-designed   { background: #dbeafe; color: #1d4ed8; }
+.status-tag.status-developing { background: #cffafe; color: #0e7490; }
+.status-tag.status-done       { background: #d1fae5; color: #047857; }
+.status-tag.status-archived   { background: #f1f5f9; color: #64748b; }
 
 .priority-tag {
   padding: 3px 10px;

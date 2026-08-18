@@ -84,10 +84,6 @@
   color: var(--color-primary);
 }
 
-.status-badge { font-size: 12px; }
-.status-active { color: var(--color-success); }
-.status-missing { color: var(--color-warning); }
-
 .quick-actions {
   display: flex;
   gap: 12px;
