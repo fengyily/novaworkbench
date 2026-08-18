@@ -8,7 +8,7 @@ import (
 )
 
 type LogLine struct {
-	Type    string `json:"type"`    // "tool_call" | "tool_result" | "message" | "error" | "done"
+	Type    string `json:"type"` // "tool_call" | "tool_result" | "message" | "error" | "done"
 	Content string `json:"content"`
 }
 
@@ -28,8 +28,21 @@ type Job struct {
 	FinishedAt    time.Time `json:"finished_at"`
 	ExitCode      int       `json:"exit_code"`
 	Log           []LogLine `json:"log"`
-	mu            sync.RWMutex
-	subs          []chan LogLine
+	// Model is the effective model the claude CLI ran with (display value —
+	// may be the "默认模型" literal). Set by the handler that owns the job so
+	// GetJob + the job_done SSE frame can surface it without a DB round-trip
+	// while the job is still in the in-memory ring buffer.
+	Model string `json:"model"`
+	mu    sync.RWMutex
+	subs  []chan LogLine
+}
+
+// SetModel records the effective model on the job so subscribers + snapshots
+// can surface it. Safe to call once, before the job finishes.
+func (j *Job) SetModel(model string) {
+	j.mu.Lock()
+	j.Model = model
+	j.mu.Unlock()
 }
 
 func (j *Job) Append(line LogLine) {

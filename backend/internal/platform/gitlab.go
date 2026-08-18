@@ -124,3 +124,36 @@ func (c *gitlabClient) SubmitComment(ctx context.Context, repoURL string, prNumb
 	}
 	return nil
 }
+
+func (c *gitlabClient) CreatePR(ctx context.Context, repoURL string, base, head, title, body string) (*PR, error) {
+	project, err := c.parseProjectPath(repoURL)
+	if err != nil {
+		return nil, err
+	}
+
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/merge_requests", c.baseURL, project)
+	payload, _ := json.Marshal(map[string]string{
+		"title":         title,
+		"source_branch": head,
+		"target_branch": base,
+		"description":   body,
+	})
+	resp, err := c.do(ctx, http.MethodPost, apiURL, string(payload))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("GitLab API error: %s%s", resp.Status, readErrBody(resp))
+	}
+
+	var raw struct {
+		IID    int    `json:"iid"`
+		WebURL string `json:"web_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	return &PR{Number: raw.IID, HTMLURL: raw.WebURL}, nil
+}

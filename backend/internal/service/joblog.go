@@ -21,32 +21,37 @@ func NewJobLogService(db *db.DB) *JobLogService {
 
 // Save upserts a finished job's full log snapshot. startedAt/finishedAt are
 // passed in by the caller (the Job's timestamps) — this func must not call
-// time.Now() itself, to stay consistent with the in-memory Job state.
-func (s *JobLogService) Save(jobID, reqID, status string, exitCode int, startedAt, finishedAt time.Time, lines []store.LogLine) error {
+// time.Now() itself, to stay consistent with the in-memory Job state. model is
+// the effective model the claude CLI ran with (used by the review job to
+// surface "本次 review 使用模型" in the UI); pass "" when not applicable.
+func (s *JobLogService) Save(jobID, reqID, status string, exitCode int, startedAt, finishedAt time.Time, lines []store.LogLine, model string) error {
 	blob, err := json.Marshal(lines)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`INSERT INTO job_logs (job_id, requirement_id, status, exit_code, started_at, finished_at, log)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`+
+	_, err = s.db.Exec(`INSERT INTO job_logs (job_id, requirement_id, status, exit_code, started_at, finished_at, log, model)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`+
 		s.db.OnConflict("job_id", `
 			requirement_id = excluded.requirement_id,
 			status = excluded.status,
 			exit_code = excluded.exit_code,
 			started_at = excluded.started_at,
 			finished_at = excluded.finished_at,
-			log = excluded.log`),
-		jobID, reqID, status, exitCode, startedAt.Format(time.RFC3339), finishedAt.Format(time.RFC3339), string(blob))
+			log = excluded.log,
+			model = excluded.model`),
+		jobID, reqID, status, exitCode, startedAt.Format(time.RFC3339), finishedAt.Format(time.RFC3339), string(blob), model)
 	return err
 }
 
 // Get loads a persisted job snapshot. Returns sql.ErrNoRows when the job was
 // never persisted (e.g. the backend restarted mid-run before the goroutine
-// could finish); the handler turns that into a 404.
-func (s *JobLogService) Get(jobID string) (status string, exitCode int, startedAt, finishedAt string, lines []store.LogLine, err error) {
+// could finish); the handler turns that into a 404. model is the effective
+// model recorded at save time (empty when the job predates this column or was
+// never given one).
+func (s *JobLogService) Get(jobID string) (status string, exitCode int, startedAt, finishedAt, model string, lines []store.LogLine, err error) {
 	var logBlob string
-	err = s.db.QueryRow(`SELECT status, exit_code, started_at, finished_at, log FROM job_logs WHERE job_id = ?`, jobID).
-		Scan(&status, &exitCode, &startedAt, &finishedAt, &logBlob)
+	err = s.db.QueryRow(`SELECT status, exit_code, started_at, finished_at, model, log FROM job_logs WHERE job_id = ?`, jobID).
+		Scan(&status, &exitCode, &startedAt, &finishedAt, &model, &logBlob)
 	if err != nil {
 		return
 	}

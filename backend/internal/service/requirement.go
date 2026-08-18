@@ -67,7 +67,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	}
 
 	rows, err := s.db.Query(
-		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,branch_name,worktree_path,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY updated_at DESC",
+		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY updated_at DESC",
 		args...)
 	if err != nil {
 		return nil, err
@@ -79,7 +79,9 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		var r model.Requirement
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo, &r.Sprint,
-			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.BranchName, &r.WorktreePath, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
+			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.BranchName, &r.WorktreePath,
+			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
+			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, r)
@@ -93,10 +95,12 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	var r model.Requirement
 	err := s.db.QueryRow(
-		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,branch_name,worktree_path,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
+		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo, &r.Sprint,
-			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.BranchName, &r.WorktreePath, &r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
+			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.BranchName, &r.WorktreePath,
+			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
+			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("requirement not found")
 	}
@@ -241,6 +245,37 @@ func (s *RequirementService) UpdateWorktree(id, branch, path string) error {
 	_, err := s.db.Exec("UPDATE requirements SET branch_name=?, worktree_path=?, updated_at=? WHERE id=?",
 		branch, path, time.Now(), id)
 	return err
+}
+
+// UpdateStageModel persists the effective model used for a stage on the
+// success path only (callers skip the write when the run failed, so a failed
+// run never clobbers the last good record). Each stage maps to its own column.
+// The updated_at bump makes the next GET reflect the new value immediately.
+func (s *RequirementService) UpdateStageModel(id, column, model string) error {
+	_, err := s.db.Exec("UPDATE requirements SET "+s.db.Ident(column)+"=?, updated_at=? WHERE id=?",
+		model, time.Now(), id)
+	return err
+}
+
+// UpdateAnalystModel / UpdateArchitectModel / UpdateDeveloperModel /
+// UpdateReviewerModel are thin wrappers over UpdateStageModel so callers don't
+// hand-build column names. Reviewer is currently unused (review is a
+// project-level job persisted on job_logs.model) but kept for symmetry / future
+// per-requirement review binding.
+func (s *RequirementService) UpdateAnalystModel(id, model string) error {
+	return s.UpdateStageModel(id, "analyst_model", model)
+}
+
+func (s *RequirementService) UpdateArchitectModel(id, model string) error {
+	return s.UpdateStageModel(id, "architect_model", model)
+}
+
+func (s *RequirementService) UpdateDeveloperModel(id, model string) error {
+	return s.UpdateStageModel(id, "developer_model", model)
+}
+
+func (s *RequirementService) UpdateReviewerModel(id, model string) error {
+	return s.UpdateStageModel(id, "reviewer_model", model)
 }
 
 func (s *RequirementService) Delete(id string) error {

@@ -31,9 +31,10 @@ type WizardHandler struct {
 	jobs       *store.JobStore
 	roleSvc    *service.RoleService
 	jobLogSvc  *service.JobLogService
+	claudeCfg  *service.ClaudeConfigService
 }
 
-func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService) *WizardHandler {
+func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService) *WizardHandler {
 	return &WizardHandler{
 		projectSvc: projectSvc,
 		reqSvc:     reqSvc,
@@ -41,19 +42,73 @@ func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.Requir
 		jobs:       jobs,
 		roleSvc:    roleSvc,
 		jobLogSvc:  jobLogSvc,
+		claudeCfg:  claudeCfg,
 	}
 }
 
-// roleConfig loads a role's system prompt + model by key. On error it returns
-// empty strings (and logs) so a missing/broken role config never blocks the
-// wizard pipeline — it just falls back to the CLI defaults.
+// DefaultModelLabel is the display + persistence literal used when neither the
+// role nor the active claude config specifies a model. It is NOT a real model
+// id: cliModelArg translates it to "" (no --model flag) so the CLI falls back
+// to its internal default, while the persisted/displayed value still tells the
+// user "no specific model was selected for this stage".
+const DefaultModelLabel = "默认模型"
+
+// effectiveModelFromValues resolves the effective model from its two sources:
+// the role's explicit per-role override (roleModel) and the active claude
+// config's default model (configDefaultModel). Precedence: role override >
+// config default > "默认模型" literal. Returns a value suitable for BOTH the
+// --model CLI flag (via cliModelArg) and DB persistence — they stay in sync so
+// the displayed model is always the one we asked the CLI to use.
+func effectiveModelFromValues(roleModel, configDefaultModel string) string {
+	if roleModel != "" {
+		return roleModel
+	}
+	if configDefaultModel != "" {
+		return configDefaultModel
+	}
+	return DefaultModelLabel
+}
+
+// cliModelArg converts an effective model to the --model CLI argument value.
+// The "默认模型" sentinel becomes "" (no --model flag → CLI internal default);
+// any other value is passed through verbatim. Call this at every StreamOpts.Model
+// site so the CLI never receives the display literal as a model id.
+func cliModelArg(effModel string) string {
+	if effModel == DefaultModelLabel {
+		return ""
+	}
+	return effModel
+}
+
+// roleConfig loads a role's system prompt + effective model by key. The
+// returned model is the EFFECTIVE model (role override, else active config
+// default, else the "默认模型" literal) — pass it through cliModelArg before
+// handing it to StreamOpts.Model so the sentinel never reaches the CLI. On
+// error it returns empty system prompt + the resolved default model (and logs)
+// so a missing/broken role config never blocks the wizard pipeline.
 func (h *WizardHandler) roleConfig(key string) (systemPrompt, model string) {
 	r, err := h.roleSvc.GetByKey(key)
 	if err != nil {
 		log.Printf("[wizard] role %q not found, using CLI defaults: %v", key, err)
-		return "", ""
+		return "", h.effectiveModel("")
 	}
-	return r.SystemPrompt, r.Model
+	return r.SystemPrompt, h.effectiveModel(r.Model)
+}
+
+// effectiveModel resolves the model that will actually be dispatched to the
+// claude CLI for a role. roleModel is the role's explicit override (pass the
+// already-loaded role.Model to avoid a second DB hit, or "" to look it up by
+// key — though roleConfig always loads the role first, so callers normally
+// pass r.Model directly). Falls back to the active claude config's default
+// model, then to the "默认模型" literal. See effectiveModelFromValues.
+func (h *WizardHandler) effectiveModel(roleModel string) string {
+	configDefault := ""
+	if h.claudeCfg != nil {
+		if _, dm, err := h.claudeCfg.ActiveModels(); err == nil {
+			configDefault = dm
+		}
+	}
+	return effectiveModelFromValues(roleModel, configDefault)
 }
 
 // resolveWorkDir returns the directory the current claude stage should run in:
@@ -156,6 +211,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	// job id immediately. The claude turn runs in a goroutine writing progress
 	// into the job store.
 	job := h.jobs.Create(req.RequirementID)
+	job.SetModel(model)
 	if perr := h.reqSvc.UpdateAnalysisJob(req.RequirementID, job.ID); perr != nil {
 		log.Printf("[analyst-chat] failed to persist analysis_job_id for %s: %v", req.RequirementID, perr)
 	}
@@ -242,6 +298,12 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		// result + done line for cosmetics / debugging.
 		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(finalResult)})
 		job.Append(store.LogLine{Type: "done", Content: "✅ 分析完成！"})
+		// Record the effective model for this stage on the success path only
+		// (a failed run above returns before reaching here, so the last good
+		// record is never clobbered).
+		if perr := h.reqSvc.UpdateAnalystModel(req.RequirementID, model); perr != nil {
+			log.Printf("[analyst-chat] failed to persist analyst_model for %s: %v", req.RequirementID, perr)
+		}
 		job.Finish(0, store.JobDone)
 		log.Printf("[analyst-chat] job %s finished for %s", job.ID, req.RequirementID)
 	}()
@@ -388,7 +450,7 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 	historyParts = append(historyParts, "AI: "+strings.TrimSpace(finalResult))
 	updatedHistory := strings.Join(historyParts, "\n")
 
-	doneData, _ := json.Marshal(map[string]string{"type": "done", "history": updatedHistory})
+	doneData, _ := json.Marshal(map[string]interface{}{"type": "done", "history": updatedHistory, "model": model})
 	fmt.Fprintf(w, "data: %s\n\n", string(doneData))
 	rc.Flush()
 }
@@ -619,9 +681,12 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			// Persist the finished job's full log so a backend restart doesn't
 			// wipe the development record. All exit paths above call job.Finish,
-			// so by the time this defer runs the snapshot is terminal.
+			// so by the time this defer runs the snapshot is terminal. The
+			// effective model is read back from job.Model (set by SetModel
+			// below once roleConfig resolves it) so the defer doesn't capture a
+			// `model` local that would shadow the model package.
 			lines, status, exitCode := job.Snapshot()
-			if perr := h.jobLogSvc.Save(job.ID, req.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines); perr != nil {
+			if perr := h.jobLogSvc.Save(job.ID, req.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
 				log.Printf("[start-coding] failed to persist job log %s: %v", job.ID, perr)
 			}
 		}()
@@ -766,6 +831,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		}
 
 		systemPrompt, model := h.roleConfig("developer")
+		job.SetModel(model)
 		var prompt string
 		if sourceSID == "" {
 			// Legacy fresh-session path: feed the full title+desc as before.
@@ -788,7 +854,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			Prompt:       prompt,
 			WorkDir:      workDir,
 			SystemPrompt: systemPrompt,
-			Model:        model,
+			Model:        cliModelArg(model),
 			SessionID:    sourceSID,
 			Resume:       sourceSID != "",
 			Fork:         fork,
@@ -831,6 +897,12 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		}
 		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
 		job.Append(store.LogLine{Type: "done", Content: "✅ 开发完成！"})
+		// Record the effective developer model (success path only).
+		if req.RequirementID != "" {
+			if perr := h.reqSvc.UpdateDeveloperModel(req.RequirementID, model); perr != nil {
+				log.Printf("[start-coding] failed to persist developer_model for %s: %v", req.RequirementID, perr)
+			}
+		}
 		job.Finish(0, store.JobDone)
 		log.Printf("[start-coding] job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
 	}()
@@ -895,6 +967,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 	_, model := h.roleConfig("developer")
 
 	job := h.jobs.Create(body.RequirementID)
+	job.SetModel(model)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	go func() {
@@ -902,7 +975,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			// Persist the finished job's full log so a backend restart doesn't
 			// wipe the adjustment record (same durability pattern as StartCoding).
 			lines, status, exitCode := job.Snapshot()
-			if perr := h.jobLogSvc.Save(job.ID, body.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines); perr != nil {
+			if perr := h.jobLogSvc.Save(job.ID, body.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, model); perr != nil {
 				log.Printf("[adjust-coding] failed to persist job log %s: %v", job.ID, perr)
 			}
 		}()
@@ -928,7 +1001,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			Prompt:       body.Message,
 			WorkDir:      workDir,
 			SystemPrompt: "", // resume 已携带 developer persona，不再注入
-			Model:        model,
+			Model:        cliModelArg(model),
 			SessionID:    req.CodingSessionID,
 			Resume:       true,
 			Fork:         false,
@@ -958,6 +1031,11 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		// round resumes the SAME original coding session.
 		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
 		job.Append(store.LogLine{Type: "done", Content: "✅ 追加调整完成！"})
+		// Record the effective developer model for this adjust round (success
+		// path only — "most recent successful run" semantics).
+		if perr := h.reqSvc.UpdateDeveloperModel(body.RequirementID, model); perr != nil {
+			log.Printf("[adjust-coding] failed to persist developer_model for %s: %v", body.RequirementID, perr)
+		}
 		job.Finish(0, store.JobDone)
 		log.Printf("[adjust-coding] job %s finished for %s", job.ID, body.RequirementID)
 	}()
@@ -1108,6 +1186,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	}
 
 	systemPrompt, model := h.roleConfig("architect")
+	job.SetModel(model)
 
 	go func() {
 		log.Printf("[architect-design] job %s started for %s (fork=%v skip=%v)", job.ID, id, fork, skipAnalysis && sourceSID == "")
@@ -1120,7 +1199,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 			Prompt:         prompt,
 			WorkDir:        workDir,
 			SystemPrompt:   systemPrompt,
-			Model:          model,
+			Model:          cliModelArg(model),
 			SessionID:      sourceSID,
 			Resume:         sourceSID != "",
 			Fork:           fork,
@@ -1211,6 +1290,10 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		}
 		_ = h.reqSvc.UpdateDesignJob(id, "")
 
+		// Record the effective model for the architect stage (success path only).
+		if perr := h.reqSvc.UpdateArchitectModel(id, model); perr != nil {
+			log.Printf("[architect-design] failed to persist architect_model for %s: %v", id, perr)
+		}
 		job.Append(store.LogLine{Type: "done", Content: "✅ 技术方案已生成！"})
 		job.Finish(0, store.JobDone)
 		log.Printf("[architect-design] job %s finished for %s", job.ID, id)
@@ -1228,7 +1311,7 @@ func (h *WizardHandler) GetJob(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		// Backend may have restarted since the job ran — try the durable log
 		// store so the user can still review the development record.
-		status, exitCode, startedAt, finishedAt, lines, perr := h.jobLogSvc.Get(id)
+		status, exitCode, startedAt, finishedAt, jobModel, lines, perr := h.jobLogSvc.Get(id)
 		if perr != nil {
 			writeError(w, 404, "NOT_FOUND", "job not found")
 			return
@@ -1238,6 +1321,7 @@ func (h *WizardHandler) GetJob(w http.ResponseWriter, r *http.Request) {
 			"status":      status,
 			"exit_code":   exitCode,
 			"log":         lines,
+			"model":       jobModel,
 			"started_at":  startedAt,
 			"finished_at": finishedAt,
 		})
@@ -1249,6 +1333,7 @@ func (h *WizardHandler) GetJob(w http.ResponseWriter, r *http.Request) {
 		"status":      status,
 		"exit_code":   exitCode,
 		"log":         logLines,
+		"model":       job.Model,
 		"started_at":  job.StartedAt,
 		"finished_at": job.FinishedAt,
 	})
@@ -1750,7 +1835,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 		Prompt:          prompt,
 		WorkDir:         projectPath,
 		SystemPrompt:    systemPrompt,
-		Model:           model,
+		Model:           cliModelArg(model),
 		SessionID:       sessionID,
 		Resume:          resume,
 		DisallowedTools: disallowed,
@@ -1770,7 +1855,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 			Prompt:          prompt,
 			WorkDir:         projectPath,
 			SystemPrompt:    systemPrompt,
-			Model:           model,
+			Model:           cliModelArg(model),
 			SessionID:       freshID,
 			DisallowedTools: analystFirstTurnDisallowedTools,
 		})
@@ -1813,7 +1898,7 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 		Prompt:          prompt,
 		WorkDir:         projectPath,
 		SystemPrompt:    systemPrompt,
-		Model:           model,
+		Model:           cliModelArg(model),
 		SessionID:       sessionID,
 		Resume:          resume,
 		Fork:            fork,
@@ -1834,7 +1919,7 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 			Prompt:          prompt,
 			WorkDir:         projectPath,
 			SystemPrompt:    systemPrompt,
-			Model:           model,
+			Model:           cliModelArg(model),
 			SessionID:       freshID,
 			DisallowedTools: developerChatDisallowedTools,
 		})
@@ -2054,7 +2139,7 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 		Prompt:       prompt,
 		WorkDir:      workDir,
 		SystemPrompt: systemPrompt,
-		Model:        model,
+		Model:        cliModelArg(model),
 		SessionID:    sourceSID,
 		Resume:       !freshSession,
 	})
@@ -2231,7 +2316,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 			Prompt:       prompt,
 			WorkDir:      workDir,
 			SystemPrompt: systemPrompt,
-			Model:        model,
+			Model:        cliModelArg(model),
 			SessionID:    sourceSID,
 			Resume:       true,
 		})

@@ -181,6 +181,13 @@ export interface Requirement {
   skip_analysis: boolean;
   branch_name?: string;
   worktree_path?: string;
+  // Effective model actually dispatched to the claude CLI for each stage
+  // (the --model value, or the "默认模型" literal when none was specified).
+  // Empty = the stage hasn't run yet (or predates this feature).
+  analyst_model?: string;
+  architect_model?: string;
+  developer_model?: string;
+  reviewer_model?: string;
   created_at: string; updated_at: string;
   completed_at?: string;
 }
@@ -238,6 +245,10 @@ export interface RunJob {
   status: 'running' | 'done' | 'error';
   exit_code: number;
   log: { type: string; content: string }[];
+  // Effective model the claude CLI ran with (display value, may be the
+  // "默认模型" literal). Present for review jobs; empty for wizard jobs that
+  // predate the column or were never given one.
+  model?: string;
   started_at: string;
   finished_at: string;
 }

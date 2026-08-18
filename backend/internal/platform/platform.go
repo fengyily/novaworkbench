@@ -3,6 +3,8 @@ package platform
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"time"
 )
 
@@ -23,6 +25,17 @@ type PR struct {
 type Client interface {
 	ListOpenPRs(ctx context.Context, repoURL string) ([]PR, error)
 	SubmitComment(ctx context.Context, repoURL string, prNumber int, body string) error
+	CreatePR(ctx context.Context, repoURL string, base, head, title, body string) (*PR, error)
+}
+
+// readErrBody drains up to 2 KB of an error response body for a richer message
+// (creation failures carry useful detail like "already exists").
+func readErrBody(resp *http.Response) string {
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	if len(b) == 0 {
+		return ""
+	}
+	return ": " + string(b)
 }
 
 // New returns a Client for the given platform.

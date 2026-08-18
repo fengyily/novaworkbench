@@ -75,6 +75,9 @@ export default function ProjectDetail() {
   const [reviewingPR, setReviewingPR] = useState<PR | null>(null);
   const [reviewLines, setReviewLines] = useState<{ type: string; content: string }[]>([]);
   const [reviewDone, setReviewDone] = useState(false);
+  // Effective model the reviewer role ran with for the most recent review
+  // (from the job_done SSE frame). Empty until a review completes.
+  const [reviewModel, setReviewModel] = useState('');
   const [commentBody, setCommentBody] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitMsg, setSubmitMsg] = useState('');
@@ -289,6 +292,7 @@ export default function ProjectDetail() {
     setReviewingPR(pr);
     setReviewLines([]);
     setReviewDone(false);
+    setReviewModel('');
     setCommentBody('');
     setSubmitMsg('');
     reviewEsRef.current?.close();
@@ -306,6 +310,7 @@ export default function ProjectDetail() {
           if (data.type === 'job_done') {
             setCommentBody(messageLines.join('\n\n'));
             setReviewDone(true);
+            setReviewModel(data.model || '');
             setReviewingPR(null);
             es.close();
           } else if (data.content) {
@@ -838,6 +843,9 @@ export default function ProjectDetail() {
             <div className="review-comment-wrap">
               <div className="review-panel-header">
                 <span>PR Comment 草稿 — #{lastReviewedPRRef.current}</span>
+              </div>
+              <div className="review-model-line">
+                🤖 本次 review 使用模型：{reviewModel || '默认模型'}
               </div>
               <textarea
                 className="review-comment-editor"

@@ -1,11 +1,9 @@
 package handler
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -13,9 +11,11 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
+	"github.com/novaworkbench/backend/internal/platform"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 )
@@ -34,20 +34,22 @@ import (
 // branch, mid-merge MERGE_HEAD) lives on disk, so a backend restart between
 // steps is recoverable: /merge/state reads the real git state.
 type MergeHandler struct {
-	projectSvc *service.ProjectService
-	reqSvc     *service.RequirementService
-	llm        *llm.Gateway
-	jobs       *store.JobStore
-	roleSvc    *service.RoleService
+	projectSvc  *service.ProjectService
+	reqSvc      *service.RequirementService
+	llm         *llm.Gateway
+	jobs        *store.JobStore
+	roleSvc     *service.RoleService
+	platformSvc *service.PlatformTokenService
 }
 
-func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService) *MergeHandler {
+func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService) *MergeHandler {
 	return &MergeHandler{
-		projectSvc: projectSvc,
-		reqSvc:     reqSvc,
-		llm:        llmGateway,
-		jobs:       jobs,
-		roleSvc:    roleSvc,
+		projectSvc:  projectSvc,
+		reqSvc:      reqSvc,
+		llm:         llmGateway,
+		jobs:        jobs,
+		roleSvc:     roleSvc,
+		platformSvc: platformSvc,
 	}
 }
 
@@ -193,12 +195,18 @@ func commitAll(dir, msg string) (committed bool, err error) {
 	if _, err := gitRun(dir, "add", "-A"); err != nil {
 		return false, err
 	}
-	out, err := gitRun(dir, "commit", "-m", msg)
+	// Detect a clean tree via porcelain status before committing. This is
+	// locale-independent — matching git's "nothing to commit" message fails on a
+	// localized git (e.g. "无文件要提交，工作区干净"), which surfaces as an
+	// empty-stderr "exit status 1".
+	out, err := gitRun(dir, "status", "--porcelain")
 	if err != nil {
-		// "nothing to commit" — git exits non-zero with this message; treat as clean.
-		if strings.Contains(out, "nothing to commit") || strings.Contains(out, "working tree clean") {
-			return false, nil
-		}
+		return false, err
+	}
+	if strings.TrimSpace(out) == "" {
+		return false, nil
+	}
+	if _, err := gitRun(dir, "commit", "-m", msg); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -632,69 +640,74 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 			job.Append(store.LogLine{Type: "message", Content: "💾 已提交未提交改动: " + commitMsg})
 		}
 
-		// Stream git push output line-by-line (merge stdout+stderr).
+		// Push and surface the combined output. CombinedOutput is used instead of
+		// io.Pipe — an io.Pipe write end closed before the reader drains it fails
+		// with "read/write on closed pipe" (it's synchronous and unbuffered).
 		job.Append(store.LogLine{Type: "phase", Content: "🌐 正在推送 " + dev + " 到 origin..."})
-		cmd := exec.Command("git", "-C", devDir, "push", "-u", "origin", dev)
-		pr, pw := io.Pipe()
-		cmd.Stdout = pw
-		cmd.Stderr = pw
-		if err := cmd.Start(); err != nil {
-			pw.Close()
-			pr.Close()
-			job.Append(store.LogLine{Type: "error", Content: "❌ push 启动失败: " + err.Error()})
-			job.Finish(1, store.JobError)
-			return
-		}
-		pw.Close()
-		scanner := bufio.NewScanner(pr)
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" {
-				continue
+		out, err := exec.Command("git", "-C", devDir, "push", "-u", "origin", dev).CombinedOutput()
+		for _, line := range strings.Split(string(out), "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				job.Append(store.LogLine{Type: "message", Content: line})
 			}
-			job.Append(store.LogLine{Type: "message", Content: line})
 		}
-		pr.Close()
-		waitErr := cmd.Wait()
-		if waitErr != nil {
-			job.Append(store.LogLine{Type: "error", Content: "❌ 推送失败: " + waitErr.Error()})
+		if err != nil {
+			job.Append(store.LogLine{Type: "error", Content: "❌ 推送失败: " + strings.TrimSpace(err.Error())})
 			job.Finish(1, store.JobError)
 			return
 		}
 
-		// Build the PR link from the remote. base = target branch (we don't
-		// know the project default here without re-reading; use the project's
-		// stored default via a fresh lookup is overkill — use "main" fallback is
-		// wrong for non-main projects. Re-read project default branch instead.)
-		_, _, defaultBranch, _ := h.loadReqProjectNoWrite(reqRow.ID)
+		// Build the PR link from the remote. base = target branch.
+		project, _ := h.loadProjectNoWrite(reqRow.ID)
+		defaultBranch := "main"
+		if project != nil && project.DefaultBranch != "" {
+			defaultBranch = project.DefaultBranch
+		}
 		pf, webBase, owner, repo := parseRemote(remote, platformType)
 		prURL := buildPRURL(pf, webBase, owner, repo, defaultBranch, dev)
+
+		// Actually create the PR via the platform API when the project has a
+		// platform token configured; otherwise fall back to the compare link.
+		created := false
+		if project != nil && project.PlatformType != "" && project.PlatformTokenID != "" {
+			if tok, err := h.platformSvc.Get(project.PlatformTokenID); err == nil {
+				if client, err := platform.New(project.PlatformType, tok.BaseURL, tok.Token); err == nil {
+					title := reqRow.Title
+					if title == "" {
+						title = dev
+					}
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					pr, cerr := client.CreatePR(ctx, remote, defaultBranch, dev, title, reqRow.Description)
+					cancel()
+					if cerr != nil {
+						job.Append(store.LogLine{Type: "message", Content: "ℹ️ 自动创建 PR 失败（可点击下方链接手动创建）: " + cerr.Error()})
+					} else if pr != nil && pr.HTMLURL != "" {
+						prURL = pr.HTMLURL
+						created = true
+						job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("🎉 已创建 PR #%d", pr.Number)})
+					}
+				}
+			}
+		}
 		if prURL != "" {
 			job.Append(store.LogLine{Type: "pr_link", Content: prURL})
 		}
-		job.Append(store.LogLine{Type: "done", Content: "✅ 已推送到 origin/" + dev})
+		if created {
+			job.Append(store.LogLine{Type: "done", Content: "✅ 已推送并创建 PR: " + dev})
+		} else {
+			job.Append(store.LogLine{Type: "done", Content: "✅ 已推送到 origin/" + dev})
+		}
 		job.Finish(0, store.JobDone)
 	}()
 }
 
-// loadReqProjectNoWrite is the non-HTTP variant of loadReqProject for use inside
-// goroutines (after the response is already written). It returns sensible
-// defaults and never writes to w.
-func (h *MergeHandler) loadReqProjectNoWrite(reqID string) (projectPath, defaultBranch, platformType string, ok bool) {
+// loadProjectNoWrite re-reads the requirement's project inside a goroutine
+// (after the response is already written) to get its platform config.
+func (h *MergeHandler) loadProjectNoWrite(reqID string) (*model.Project, error) {
 	reqRow, err := h.reqSvc.Get(reqID)
 	if err != nil {
-		return "", "", "", false
+		return nil, err
 	}
-	project, err := h.projectSvc.Get(reqRow.ProjectID)
-	if err != nil || project.LocalPath == "" {
-		return "", "", "", false
-	}
-	db := project.DefaultBranch
-	if db == "" {
-		db = "main"
-	}
-	return project.LocalPath, db, project.PlatformType, true
+	return h.projectSvc.Get(reqRow.ProjectID)
 }
 
 // Cleanup removes the requirement's isolated worktree (and prunes git's

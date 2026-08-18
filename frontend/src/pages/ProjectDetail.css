@@ -253,6 +253,16 @@
   margin-top: 16px;
 }
 
+/* Effective-model line shown above the review comment editor after a review
+   completes. Mirrors the stage-model-tag styling on the requirement stepper. */
+.review-model-line {
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--color-text-muted, #64748b);
+  background: rgba(79, 70, 229, 0.04);
+  border-bottom: 1px solid var(--color-border);
+}
+
 .review-comment-editor {
   display: block;
   width: 100%;

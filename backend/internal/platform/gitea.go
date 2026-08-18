@@ -144,3 +144,31 @@ func (c *giteaClient) SubmitComment(ctx context.Context, repoURL string, prNumbe
 	}
 	return nil
 }
+
+func (c *giteaClient) CreatePR(ctx context.Context, repoURL string, base, head, title, body string) (*PR, error) {
+	owner, repo, err := c.parseRepo(repoURL)
+	if err != nil {
+		return nil, err
+	}
+
+	apiURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/pulls", c.baseURL, owner, repo)
+	payload, _ := json.Marshal(map[string]string{"title": title, "head": head, "base": base, "body": body})
+	resp, err := c.do(ctx, http.MethodPost, apiURL, string(payload))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("Gitea API error: %s%s", resp.Status, readErrBody(resp))
+	}
+
+	var raw struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	return &PR{Number: raw.Number, HTMLURL: raw.HTMLURL}, nil
+}

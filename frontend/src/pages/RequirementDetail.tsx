@@ -835,9 +835,9 @@ export default function RequirementDetail() {
   const showDesignToggle = designLines.length > 0 && !designProcessActive && !designError;
 
   const STEPS = [
-    { key: 'analyst', label: '需求分析', icon: '🔍', doneStatus: 'designing' },
-    { key: 'architect', label: '方案设计', icon: '📐', doneStatus: 'designed' },
-    { key: 'developer', label: '开发实现', icon: '🚀', doneStatus: 'done' },
+    { key: 'analyst', label: '需求分析', icon: '🔍', doneStatus: 'designing', modelKey: 'analyst_model' as const },
+    { key: 'architect', label: '方案设计', icon: '📐', doneStatus: 'designed', modelKey: 'architect_model' as const },
+    { key: 'developer', label: '开发实现', icon: '🚀', doneStatus: 'done', modelKey: 'developer_model' as const },
   ] as const;
   const stageIndex = stage === 'done' ? 3 : STEPS.findIndex(s => s.key === stage);
 
@@ -1025,10 +1025,16 @@ export default function RequirementDetail() {
         {STEPS.map((s, i) => {
           const isDone = stageIndex > i || (stage === 'done');
           const isActive = stageIndex === i;
+          const stageModel = req[s.modelKey];
           return (
             <div key={s.key} className={`stage-step${isActive ? ' active' : ''}${isDone ? ' done' : ''}`}>
               <span className="stage-num">{isDone ? '✅' : s.icon}</span>
               <span className="stage-label">{s.label}</span>
+              {stageModel && (
+                <span className="stage-model-tag" title={`${s.label}使用的执行模型`}>
+                  🤖 {stageModel}
+                </span>
+              )}
               {i < STEPS.length - 1 && <span className="stage-sep">→</span>}
             </div>
           );

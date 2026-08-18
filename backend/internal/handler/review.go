@@ -24,32 +24,53 @@ type ReviewHandler struct {
 	roleSvc     *service.RoleService
 	llm         *llm.Gateway
 	jobs        *store.JobStore
+	jobLogSvc   *service.JobLogService
+	claudeCfg   *service.ClaudeConfigService
 }
 
-func NewReviewHandler(projectSvc *service.ProjectService, platformSvc *service.PlatformTokenService, roleSvc *service.RoleService, llmGateway *llm.Gateway, jobs *store.JobStore) *ReviewHandler {
+func NewReviewHandler(projectSvc *service.ProjectService, platformSvc *service.PlatformTokenService, roleSvc *service.RoleService, llmGateway *llm.Gateway, jobs *store.JobStore, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService) *ReviewHandler {
 	return &ReviewHandler{
 		projectSvc:  projectSvc,
 		platformSvc: platformSvc,
 		roleSvc:     roleSvc,
 		llm:         llmGateway,
 		jobs:        jobs,
+		jobLogSvc:   jobLogSvc,
+		claudeCfg:   claudeCfg,
 	}
 }
 
-// roleConfig loads a role's system prompt + model by key. On error it returns
-// empty strings so a broken role config never blocks the review pipeline.
+// roleConfig loads a role's system prompt + effective model by key. The
+// returned model is the EFFECTIVE model (role override, else active config
+// default, else the "默认模型" literal) — pass it through cliModelArg before
+// handing it to StreamOpts.Model. On error it returns an empty system prompt +
+// the resolved default model so a broken role config never blocks the review.
 func (h *ReviewHandler) roleConfig(key string) (systemPrompt, model string) {
 	role, err := h.roleSvc.GetByKey(key)
 	if err != nil {
-		return "", ""
+		return "", h.effectiveModel("")
 	}
-	return role.SystemPrompt, role.Model
+	return role.SystemPrompt, h.effectiveModel(role.Model)
+}
+
+// effectiveModel mirrors WizardHandler.effectiveModel: role override > active
+// claude config default > "默认模型" literal. Defined here (rather than shared)
+// because the two handlers resolve the active config independently and the
+// resolution is trivial.
+func (h *ReviewHandler) effectiveModel(roleModel string) string {
+	configDefault := ""
+	if h.claudeCfg != nil {
+		if _, dm, err := h.claudeCfg.ActiveModels(); err == nil {
+			configDefault = dm
+		}
+	}
+	return effectiveModelFromValues(roleModel, configDefault)
 }
 
 // PRListResponse wraps the PR list with a configuration flag.
 type PRListResponse struct {
-	Configured bool           `json:"configured"`
-	PRs        []platform.PR  `json:"prs"`
+	Configured bool          `json:"configured"`
+	PRs        []platform.PR `json:"prs"`
 }
 
 func gitRemoteURL(localPath string) (string, error) {
@@ -190,6 +211,7 @@ func (h *ReviewHandler) StreamReviewJob(w http.ResponseWriter, r *http.Request) 
 					"type":      "job_done",
 					"status":    string(status),
 					"exit_code": exitCode,
+					"model":     job.Model,
 				})
 				fmt.Fprintf(w, "data: %s\n\n", b)
 				rc.Flush()
@@ -278,6 +300,9 @@ func (h *ReviewHandler) runReview(job *store.Job, projectPath string, req StartR
 	// configurable "reviewer" role (system prompt); the -p prompt carries only
 	// the dynamic task content (PR context, branches, operation steps).
 	systemPrompt, model := h.roleConfig("reviewer")
+	// Stamp the effective model on the in-memory job so StreamReviewJob's
+	// job_done frame + GetJob can surface it before the durable log is written.
+	job.SetModel(model)
 
 	prompt := fmt.Sprintf(
 		"请对以下 PR 的改动进行代码 Review。\n\n"+
@@ -294,7 +319,7 @@ func (h *ReviewHandler) runReview(job *store.Job, projectPath string, req StartR
 		Prompt:       prompt,
 		WorkDir:      projectPath,
 		SystemPrompt: systemPrompt,
-		Model:        model,
+		Model:        cliModelArg(model),
 	})
 
 	stdout, err := cmd.StdoutPipe()
@@ -369,6 +394,14 @@ func (h *ReviewHandler) runReview(job *store.Job, projectPath string, req StartR
 		}
 	}
 
+	// Persist the finished review job (incl. the effective reviewer model) so a
+	// backend restart doesn't wipe the record and the UI can surface "本次 review
+	// 使用模型". Review jobs aren't bound to a requirement, so requirement_id is
+	// empty and the model lives on job_logs.model.
+	lines, status, exitCode := job.Snapshot()
+	if perr := h.jobLogSvc.Save(job.ID, "", string(status), exitCode, job.StartedAt, job.FinishedAt, lines, model); perr != nil {
+		log.Printf("[Review] failed to persist job log %s: %v", job.ID, perr)
+	}
 	job.Finish(0, store.JobDone)
 }
 

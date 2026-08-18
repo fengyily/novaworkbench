@@ -124,3 +124,31 @@ func (c *githubClient) SubmitComment(ctx context.Context, repoURL string, prNumb
 	}
 	return nil
 }
+
+func (c *githubClient) CreatePR(ctx context.Context, repoURL string, base, head, title, body string) (*PR, error) {
+	owner, repo, err := c.parseRepo(repoURL)
+	if err != nil {
+		return nil, err
+	}
+
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls", owner, repo)
+	payload, _ := json.Marshal(map[string]string{"title": title, "head": head, "base": base, "body": body})
+	resp, err := c.do(ctx, http.MethodPost, apiURL, string(payload))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("GitHub API error: %s%s", resp.Status, readErrBody(resp))
+	}
+
+	var raw struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	return &PR{Number: raw.Number, HTMLURL: raw.HTMLURL}, nil
+}
