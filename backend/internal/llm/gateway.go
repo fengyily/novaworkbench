@@ -11,25 +11,32 @@ import (
 	"time"
 )
 
-// EnvProvider supplies configurable environment variables for the claude CLI
-// subprocess (auth token / base URL), sourced from the settings table by the
-// SettingService. nil means "use the process environment only".
-type EnvProvider interface {
+// ClaudeEnvProvider supplies the Claude CLI subprocess env vars (auth token /
+// base URL), sourced from the active claude_configs row by ClaudeConfigService.
+// nil means "use the process environment only".
+type ClaudeEnvProvider interface {
 	ClaudeEnvVars() (authToken, baseURL string, err error)
-	// LLMConfig returns the direct HTTP LLM channel config (base URL, API key,
-	// model) used for lightweight tasks like requirement formatting + title
-	// distillation. Called per request so runtime setting updates apply
-	// immediately.
+}
+
+// LLMConfigProvider supplies the direct HTTP LLM channel config (base URL, API
+// key, model) used for lightweight tasks like requirement formatting + title
+// distillation. Called per request so runtime setting updates apply
+// immediately. nil disables that channel.
+type LLMConfigProvider interface {
 	LLMConfig() (baseURL, apiKey, model string, err error)
 }
 
 type Gateway struct {
-	binPath     string
-	timeout     time.Duration
-	envProvider EnvProvider
+	binPath    string
+	timeout    time.Duration
+	claudeEnv  ClaudeEnvProvider
+	llmCfg     LLMConfigProvider
 }
 
-func New(envProvider EnvProvider) *Gateway {
+// New wires the gateway with separate providers for the Claude CLI env (auth
+// token / base URL, from the active claude_configs row) and the direct HTTP
+// LLM channel (from the settings table). Either may be nil.
+func New(claudeEnv ClaudeEnvProvider, llmCfg LLMConfigProvider) *Gateway {
 	binPath := os.Getenv("CLAUDE_BIN")
 	if binPath == "" {
 		binPath = "claude"
@@ -48,7 +55,7 @@ func New(envProvider EnvProvider) *Gateway {
 		fmt.Printf("[LLM] Install with: npm install -g @anthropic-ai/claude-code\n")
 	}
 
-	return &Gateway{binPath: binPath, timeout: timeout, envProvider: envProvider}
+	return &Gateway{binPath: binPath, timeout: timeout, claudeEnv: claudeEnv, llmCfg: llmCfg}
 }
 
 func (g *Gateway) GetBinPath() string { return g.binPath }
@@ -65,10 +72,10 @@ func (g *Gateway) GetBinPath() string { return g.binPath }
 // ANTHROPIC_API_KEY from the child environment so the configured token wins.
 func (g *Gateway) mergedEnv() []string {
 	env := os.Environ()
-	if g.envProvider == nil {
+	if g.claudeEnv == nil {
 		return env
 	}
-	tok, baseURL, err := g.envProvider.ClaudeEnvVars()
+	tok, baseURL, err := g.claudeEnv.ClaudeEnvVars()
 	if err != nil {
 		return env
 	}
@@ -115,10 +122,10 @@ func (g *Gateway) mergedEnv() []string {
 // ANTHROPIC_BASE_URL. We only do this when an override is actually present, so
 // a platform with no Claude config still falls back to the user's settings.
 func (g *Gateway) settingSources() string {
-	if g.envProvider == nil {
+	if g.claudeEnv == nil {
 		return ""
 	}
-	tok, baseURL, err := g.envProvider.ClaudeEnvVars()
+	tok, baseURL, err := g.claudeEnv.ClaudeEnvVars()
 	if err != nil || (tok == "" && baseURL == "") {
 		return ""
 	}
@@ -289,10 +296,10 @@ func (g *Gateway) runClaudeText(prompt string, timeout time.Duration) (string, e
 // for Markdown and the first line for the title (no claude CLI fallback, by
 // design) so requirement creation never fails just because this is unavailable.
 func (g *Gateway) GenerateDescriptionAndTitle(content string) (markdown, title string, err error) {
-	if g.envProvider == nil {
-		return "", "", fmt.Errorf("llm not configured: no env provider")
+	if g.llmCfg == nil {
+		return "", "", fmt.Errorf("llm not configured: no llm config provider")
 	}
-	baseURL, apiKey, model, err := g.envProvider.LLMConfig()
+	baseURL, apiKey, model, err := g.llmCfg.LLMConfig()
 	if err != nil {
 		return "", "", fmt.Errorf("llm config unavailable: %w", err)
 	}

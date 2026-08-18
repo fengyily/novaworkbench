@@ -8,23 +8,23 @@ import (
 	"github.com/novaworkbench/backend/internal/db"
 )
 
-// Setting keys for the Claude CLI configuration. Stored in the settings table
-// and injected as env vars when the gateway runs `claude`.
-const (
-	settingClaudeAuthToken = "claude.anthropic_auth_token"
-	settingClaudeBaseURL   = "claude.anthropic_base_url"
-)
-
 // Setting keys for the direct HTTP LLM channel (OpenAI-compatible, e.g.
 // DeepSeek). Used ONLY for lightweight tasks like requirement title
 // distillation — not the claude CLI pipeline. base_url + api_key both must
 // be set for the channel to activate; model may be empty (provider default).
+//
+// The Claude CLI configuration (auth token / base URL) no longer lives here;
+// it is stored in the dedicated claude_configs table (see ClaudeConfigService).
 const (
 	settingLLMBaseURL = "llm.base_url"
 	settingLLMAPIKey  = "llm.api_key"
 	settingLLMModel   = "llm.model"
 )
 
+// SettingService persists arbitrary key/value settings. The Claude CLI
+// configuration now lives in the dedicated claude_configs table (see
+// ClaudeConfigService); this service still owns the direct HTTP LLM channel
+// settings used for lightweight tasks like requirement title distillation.
 type SettingService struct {
 	db *db.DB
 }
@@ -71,42 +71,6 @@ func (s *SettingService) All() (map[string]string, error) {
 		out[k] = v
 	}
 	return out, nil
-}
-
-// ClaudeConfig returns the raw auth token + base URL configured for the claude
-// CLI. For internal use (gateway env injection) — the token is secret.
-func (s *SettingService) ClaudeConfig() (authToken, baseURL string, err error) {
-	if authToken, err = s.Get(settingClaudeAuthToken); err != nil {
-		return "", "", err
-	}
-	if baseURL, err = s.Get(settingClaudeBaseURL); err != nil {
-		return "", "", err
-	}
-	return authToken, baseURL, nil
-}
-
-// SetClaudeConfig upserts the auth token + base URL. An empty auth token means
-// "keep the existing value" (so the UI can save base-URL-only edits without
-// knowing the secret). An empty base URL clears it (use the API default).
-func (s *SettingService) SetClaudeConfig(authToken, baseURL string) error {
-	if authToken != "" {
-		if err := s.Set(settingClaudeAuthToken, authToken); err != nil {
-			return err
-		}
-	}
-	return s.Set(settingClaudeBaseURL, baseURL)
-}
-
-// ClearClaudeAuthToken removes the stored auth token, so the claude CLI falls
-// back to its default authentication (inherited env / login).
-func (s *SettingService) ClearClaudeAuthToken() error {
-	return s.Set(settingClaudeAuthToken, "")
-}
-
-// ClaudeEnvVars implements llm.EnvProvider so the gateway can pull the current
-// token + base URL at command-build time without importing service types.
-func (s *SettingService) ClaudeEnvVars() (authToken, baseURL string, err error) {
-	return s.ClaudeConfig()
 }
 
 // LLMConfig returns the direct HTTP LLM channel configuration (base URL, API

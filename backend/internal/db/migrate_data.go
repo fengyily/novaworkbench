@@ -26,6 +26,7 @@ var copyOrder = []string{
 	"platform_tokens",
 	"roles",
 	"settings",
+	"claude_configs",
 	"weekly_reports",
 	"job_logs",
 }

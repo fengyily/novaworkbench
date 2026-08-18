@@ -93,3 +93,16 @@
   justify-content: flex-end;
   gap: 10px;
 }
+
+.role-toast {
+  background: rgba(79, 70, 229, 0.1);
+  border: 1px solid rgba(79, 70, 229, 0.3);
+  color: var(--color-primary, #4F46E5);
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.role-model-input {
+  cursor: pointer;
+}

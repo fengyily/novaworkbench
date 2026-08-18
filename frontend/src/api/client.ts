@@ -335,16 +335,40 @@ export const platformApi = {
   delete: (id: string) => api.delete<{ status: string }>(`/api/settings/tokens/${id}`),
 };
 
-// Claude CLI configuration (auth token + base URL, injected as env vars)
-export interface ClaudeConfig {
-  anthropic_auth_token_set: boolean;
-  anthropic_auth_token_preview: string;
-  anthropic_base_url: string;
+// Claude CLI configurations (multiple named configs; the active one is
+// injected as env vars into every claude subprocess, and switching it also
+// re-points all roles to its default model). The auth token is never returned
+// in full — only a set flag + masked preview.
+export interface ClaudeConfigItem {
+  id: string;
+  name: string;
+  base_url: string;
+  auth_token_set: boolean;
+  auth_token_preview: string;
+  models: string[];
+  default_model: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+export interface ClaudeActiveModels {
+  models: string[];
+  default_model: string;
+}
+export interface ClaudeActivateResult {
+  configs: ClaudeConfigItem[];
+  roles_updated: boolean;
+  applied_model: string;
 }
 export const claudeApi = {
-  get: () => api.get<ClaudeConfig>('/api/settings/claude'),
-  update: (data: { anthropic_auth_token?: string; anthropic_base_url: string; clear_token?: boolean }) =>
-    api.put<ClaudeConfig>('/api/settings/claude', data),
+  list: () => api.get<ClaudeConfigItem[]>('/api/settings/claude/configs'),
+  create: (data: { name: string; base_url: string; auth_token?: string; models?: string[]; default_model?: string }) =>
+    api.post<ClaudeConfigItem>('/api/settings/claude/configs', data),
+  update: (id: string, data: { name: string; base_url: string; auth_token?: string; clear_token?: boolean; models?: string[]; default_model?: string }) =>
+    api.put<ClaudeConfigItem>(`/api/settings/claude/configs/${id}`, data),
+  remove: (id: string) => api.delete<{ status: string }>(`/api/settings/claude/configs/${id}`),
+  activate: (id: string) => api.post<ClaudeActivateResult>(`/api/settings/claude/configs/${id}/activate`, {}),
+  active: () => api.get<ClaudeActiveModels | null>('/api/settings/claude/configs/active'),
 };
 
 // Direct HTTP LLM channel config (OpenAI-compatible, e.g. DeepSeek). Used for
@@ -410,11 +434,15 @@ export interface Role {
   updated_at: string;
 }
 
+export interface RoleUpdateResult {
+  role: Role;
+  warning?: string;
+}
 export const rolesApi = {
   list: () => api.get<Role[]>('/api/settings/roles'),
   get: (id: string) => api.get<Role>(`/api/settings/roles/${id}`),
   update: (id: string, data: { system_prompt: string; model: string }) =>
-    api.put<Role>(`/api/settings/roles/${id}`, data),
+    api.put<RoleUpdateResult>(`/api/settings/roles/${id}`, data),
   reset: (id: string) => api.post<Role>(`/api/settings/roles/${id}/reset`, {}),
 };
 
