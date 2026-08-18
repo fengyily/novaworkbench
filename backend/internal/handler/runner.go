@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+
 	"fmt"
+	"github.com/novaworkbench/backend/internal/db"
 	"log"
 	"net/http"
 	"os"
@@ -29,12 +31,12 @@ type RunSession struct {
 type RunnerHandler struct {
 	projectSvc *service.ProjectService
 	jobs       *store.JobStore
-	db         *sql.DB
+	db         *db.DB
 	mu         sync.Mutex
 	sessions   map[string]*RunSession // keyed by project ID
 }
 
-func NewRunnerHandler(projectSvc *service.ProjectService, jobs *store.JobStore, db *sql.DB) *RunnerHandler {
+func NewRunnerHandler(projectSvc *service.ProjectService, jobs *store.JobStore, db *db.DB) *RunnerHandler {
 	return &RunnerHandler{
 		projectSvc: projectSvc,
 		jobs:       jobs,

@@ -12,6 +12,14 @@ services:
       - NOVA_PORT=9527
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Database driver: empty = local SQLite file (default). Set to mysql or
+      # postgres plus NOVA_DB_DSN to use an external database, e.g.
+      #   NOVA_DB_DRIVER=postgres
+      #   NOVA_DB_DSN=postgres://user:pass@db:5432/novaworkbench?sslmode=disable
+      #   NOVA_DB_DRIVER=mysql
+      #   NOVA_DB_DSN=user:pass@tcp(db:3306)/novaworkbench?parseTime=true&charset=utf8mb4
+      - NOVA_DB_DRIVER=${NOVA_DB_DRIVER:-}
+      - NOVA_DB_DSN=${NOVA_DB_DSN:-}
     volumes:
       - ~/.novaworkbench:/root/.novaworkbench
       - ${HOME}/workspace:${HOME}/workspace

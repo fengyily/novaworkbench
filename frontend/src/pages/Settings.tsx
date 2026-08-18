@@ -11,6 +11,7 @@ export default function Settings() {
         <NavLink to="/settings/roles" className="settings-tab">角色管理</NavLink>
         <NavLink to="/settings/claude" className="settings-tab">Claude 配置</NavLink>
         <NavLink to="/settings/llm" className="settings-tab">直连 LLM</NavLink>
+        <NavLink to="/settings/database" className="settings-tab">数据库</NavLink>
       </nav>
 
       <div className="settings-content">

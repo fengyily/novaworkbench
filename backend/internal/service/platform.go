@@ -3,18 +3,20 @@ package service
 import (
 	"crypto/rand"
 	"database/sql"
+
 	"encoding/hex"
 	"fmt"
+	"github.com/novaworkbench/backend/internal/db"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/model"
 )
 
 type PlatformTokenService struct {
-	db *sql.DB
+	db *db.DB
 }
 
-func NewPlatformTokenService(db *sql.DB) *PlatformTokenService {
+func NewPlatformTokenService(db *db.DB) *PlatformTokenService {
 	return &PlatformTokenService{db: db}
 }
 

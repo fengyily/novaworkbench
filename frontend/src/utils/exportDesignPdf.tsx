@@ -91,7 +91,11 @@ export async function exportDesignPdf(input: DesignExportInput): Promise<void> {
     // Lazy-load html2pdf (it bundles html2canvas + jsPDF, ~600 KB) so it only
     // enters a separate chunk when the user actually clicks export.
     const { default: html2pdf } = await import('html2pdf.js');
-    await html2pdf()
+    const worker = html2pdf();
+    // html2pdf.js v0.14's bundled types omit `pagebreak` (supported at
+    // runtime), so the options object is cast past excess-property checks.
+    type Options = Parameters<typeof worker.set>[0] & { pagebreak?: { mode?: string[] } };
+    await worker
       .set({
         margin: [12, 12, 14, 12],
         filename,
@@ -105,7 +109,7 @@ export async function exportDesignPdf(input: DesignExportInput): Promise<void> {
         // the break-inside: avoid rules in STYLES, 'legacy' is a fallback that
         // still splits at element edges when a block is taller than a page.
         pagebreak: { mode: ['avoid-all', 'css', 'legacy'] },
-      })
+      } as Options)
       .from(container.querySelector('.pdf-doc') as HTMLElement)
       .save();
   } finally {

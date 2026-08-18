@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"net/http"
 	"os"
@@ -19,10 +20,23 @@ import (
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+	migrateFlag := flag.Bool("migrate", false,
+		"one-shot data migration: copy all data from a SQLite file into the configured target database (NOVA_DB_DRIVER/NOVA_DB_DSN or dbconfig.json), then exit")
+	fromFlag := flag.String("from", db.DefaultSQLitePath,
+		"SQLite source path for -migrate")
+	flag.Parse()
+
+	if *migrateFlag {
+		runMigration(*fromFlag)
+		return
+	}
+
 	log.Println("NovaWorkbench Backend starting...")
 
-	// Database
-	database, err := db.Init("~/.novaworkbench/data/nova.db")
+	// Database — driver from env > ~/.novaworkbench/dbconfig.json > sqlite default.
+	cfg := db.LoadConfig()
+	database, err := db.Init(cfg)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -68,6 +82,7 @@ func main() {
 	platformH := handler.NewPlatformHandler(platformSvc)
 	roleH := handler.NewRoleHandler(roleSvc)
 	settingH := handler.NewSettingHandler(settingSvc)
+	databaseH := handler.NewDatabaseHandler(database, cfg)
 
 	// Router
 	mux := http.NewServeMux()
@@ -132,6 +147,13 @@ func main() {
 	// lightweight tasks (requirement title distillation). Bypasses claude CLI.
 	mux.HandleFunc("GET /api/settings/llm", settingH.GetLLM)
 	mux.HandleFunc("PUT /api/settings/llm", settingH.UpdateLLM)
+
+	// Database (settings) — driver info, connection test, save (takes effect
+	// on restart), and one-shot SQLite → MySQL/Postgres data migration.
+	mux.HandleFunc("GET /api/settings/database", databaseH.Get)
+	mux.HandleFunc("POST /api/settings/database/test", databaseH.Test)
+	mux.HandleFunc("PUT /api/settings/database", databaseH.Save)
+	mux.HandleFunc("POST /api/settings/database/migrate", databaseH.Migrate)
 
 	// File system browser
 	mux.HandleFunc("GET /api/fs/ls", fsH.ListDir)
@@ -220,4 +242,39 @@ func main() {
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}
+}
+
+// runMigration implements the `-migrate` CLI command: copy all data from a
+// SQLite file into the configured target database, print a per-table report,
+// and exit.
+func runMigration(from string) {
+	cfg := db.LoadConfig()
+	if db.Dialect(cfg.Driver) == db.SQLite || cfg.Driver == "" {
+		log.Fatal("-migrate requires a MySQL/PostgreSQL target: set NOVA_DB_DRIVER+NOVA_DB_DSN or save a config in the settings UI first")
+	}
+
+	src, err := db.OpenSQLite(from)
+	if err != nil {
+		log.Fatalf("open source sqlite %s: %v", from, err)
+	}
+	defer src.Close()
+
+	dst, err := db.Init(cfg) // opens + creates schema on the target
+	if err != nil {
+		log.Fatalf("connect target: %v", err)
+	}
+	defer dst.Close()
+
+	log.Printf("Migrating %s → %s ...", from, cfg.Driver)
+	stats, err := db.Migrate(src, dst, func(msg string) { log.Printf("[migrate] %s", msg) })
+	if err != nil {
+		log.Fatalf("migration failed: %v", err)
+	}
+	inserted, skipped := 0, 0
+	for _, st := range stats {
+		inserted += st.Inserted
+		skipped += st.Skipped
+	}
+	log.Printf("Migration complete: %d rows inserted, %d skipped across %d tables. Restart the server to switch to %s.",
+		inserted, skipped, len(stats), cfg.Driver)
 }

@@ -5,12 +5,19 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/novaworkbench/backend/internal/db"
 	"github.com/novaworkbench/backend/internal/model"
 )
 
-type RoleService struct{ db *sql.DB }
+type RoleService struct{ db *db.DB }
 
-func NewRoleService(db *sql.DB) *RoleService { return &RoleService{db: db} }
+func NewRoleService(db *db.DB) *RoleService { return &RoleService{db: db} }
+
+// roleColumns is the SELECT column list for roles, with `key` quoted for the
+// active dialect (reserved word in MySQL).
+func (s *RoleService) roleColumns() string {
+	return "id, " + s.db.Ident("key") + ", name, description, system_prompt, model, sort_order, enabled, created_at, updated_at"
+}
 
 // SeedDefaults inserts the built-in roles if the table is empty (first run).
 // Idempotent — only seeds when no rows exist.
@@ -26,7 +33,7 @@ func (s *RoleService) SeedDefaults() error {
 	for _, r := range DefaultRoles() {
 		if _, err := s.db.Exec(
 			`INSERT INTO roles
-			(id, key, name, description, system_prompt, model, sort_order, enabled, created_at, updated_at)
+			(`+s.roleColumns()+`)
 			VALUES (?,?,?,?,?,?,?,?,?,?)`,
 			r.ID, r.Key, r.Name, r.Description, r.SystemPrompt, r.Model, r.SortOrder, r.Enabled, now, now,
 		); err != nil {
@@ -37,7 +44,7 @@ func (s *RoleService) SeedDefaults() error {
 }
 
 func (s *RoleService) List() ([]model.Role, error) {
-	rows, err := s.db.Query("SELECT id, key, name, description, system_prompt, model, sort_order, enabled, created_at, updated_at FROM roles ORDER BY sort_order ASC, key ASC")
+	rows, err := s.db.Query("SELECT " + s.roleColumns() + " FROM roles ORDER BY sort_order ASC, " + s.db.Ident("key") + " ASC")
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +66,7 @@ func (s *RoleService) List() ([]model.Role, error) {
 
 func (s *RoleService) Get(id string) (*model.Role, error) {
 	var r model.Role
-	err := s.db.QueryRow("SELECT id, key, name, description, system_prompt, model, sort_order, enabled, created_at, updated_at FROM roles WHERE id = ?", id).
+	err := s.db.QueryRow("SELECT "+s.roleColumns()+" FROM roles WHERE id = ?", id).
 		Scan(&r.ID, &r.Key, &r.Name, &r.Description, &r.SystemPrompt, &r.Model, &r.SortOrder, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("role not found")
@@ -74,7 +81,7 @@ func (s *RoleService) Get(id string) (*model.Role, error) {
 // used by wizard handlers to load the active system prompt + model.
 func (s *RoleService) GetByKey(key string) (*model.Role, error) {
 	var r model.Role
-	err := s.db.QueryRow("SELECT id, key, name, description, system_prompt, model, sort_order, enabled, created_at, updated_at FROM roles WHERE key = ?", key).
+	err := s.db.QueryRow("SELECT "+s.roleColumns()+" FROM roles WHERE "+s.db.Ident("key")+" = ?", key).
 		Scan(&r.ID, &r.Key, &r.Name, &r.Description, &r.SystemPrompt, &r.Model, &r.SortOrder, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("role not found: %s", key)

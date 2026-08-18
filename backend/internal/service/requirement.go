@@ -2,7 +2,9 @@ package service
 
 import (
 	"database/sql"
+
 	"fmt"
+	"github.com/novaworkbench/backend/internal/db"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/model"
@@ -10,10 +12,10 @@ import (
 )
 
 type RequirementService struct {
-	db *sql.DB
+	db *db.DB
 }
 
-func NewRequirementService(db *sql.DB) *RequirementService {
+func NewRequirementService(db *db.DB) *RequirementService {
 	return &RequirementService{db: db}
 }
 
@@ -250,7 +252,8 @@ func (s *RequirementService) GetRefinementChat(reqID string) (string, error) {
 
 func (s *RequirementService) SaveRefinementChat(reqID, messages string) error {
 	_, err := s.db.Exec(
-		"INSERT INTO refinement_chats (requirement_id, messages, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(requirement_id) DO UPDATE SET messages = ?, updated_at = CURRENT_TIMESTAMP",
+		"INSERT INTO refinement_chats (requirement_id, messages, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)"+
+			s.db.OnConflict("requirement_id", "messages = ?, updated_at = CURRENT_TIMESTAMP"),
 		reqID, messages, messages)
 	return err
 }

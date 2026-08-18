@@ -1,7 +1,7 @@
 package service
 
 import (
-	"database/sql"
+	"github.com/novaworkbench/backend/internal/db"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,21 +12,21 @@ import (
 )
 
 type ScannerService struct {
-	db *sql.DB
+	db *db.DB
 }
 
-func NewScannerService(db *sql.DB) *ScannerService {
+func NewScannerService(db *db.DB) *ScannerService {
 	return &ScannerService{db: db}
 }
 
 type ScanResult struct {
-	ProjectID     string   `json:"project_id"`
-	ProjectType   string   `json:"project_type"`
-	ClaudeFiles   []string `json:"claude_files"`
-	KnowledgeNew  int      `json:"knowledge_new"`
-	KnowledgeUpd  int      `json:"knowledge_updated"`
-	FilesScanned  int      `json:"files_scanned"`
-	Duration      string   `json:"duration"`
+	ProjectID    string   `json:"project_id"`
+	ProjectType  string   `json:"project_type"`
+	ClaudeFiles  []string `json:"claude_files"`
+	KnowledgeNew int      `json:"knowledge_new"`
+	KnowledgeUpd int      `json:"knowledge_updated"`
+	FilesScanned int      `json:"files_scanned"`
+	Duration     string   `json:"duration"`
 }
 
 func (s *ScannerService) Scan(projectID string) (*ScanResult, error) {

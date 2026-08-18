@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"strings"
 	"time"
+
+	"github.com/novaworkbench/backend/internal/db"
 )
 
 // Setting keys for the Claude CLI configuration. Stored in the settings table
@@ -24,17 +26,17 @@ const (
 )
 
 type SettingService struct {
-	db *sql.DB
+	db *db.DB
 }
 
-func NewSettingService(db *sql.DB) *SettingService {
+func NewSettingService(db *db.DB) *SettingService {
 	return &SettingService{db: db}
 }
 
 // Get returns the value for a key, or "" if the key does not exist.
 func (s *SettingService) Get(key string) (string, error) {
 	var v string
-	err := s.db.QueryRow("SELECT value FROM settings WHERE key = ?", key).Scan(&v)
+	err := s.db.QueryRow("SELECT value FROM settings WHERE "+s.db.Ident("key")+" = ?", key).Scan(&v)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -47,14 +49,15 @@ func (s *SettingService) Get(key string) (string, error) {
 // Set upserts a key/value pair.
 func (s *SettingService) Set(key, value string) error {
 	_, err := s.db.Exec(
-		"INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?",
+		"INSERT INTO settings ("+s.db.Ident("key")+", value, updated_at) VALUES (?, ?, ?)"+
+			s.db.OnConflict(s.db.Ident("key"), "value = ?, updated_at = ?"),
 		key, value, time.Now(), value, time.Now())
 	return err
 }
 
 // All returns every setting as a map.
 func (s *SettingService) All() (map[string]string, error) {
-	rows, err := s.db.Query("SELECT key, value FROM settings")
+	rows, err := s.db.Query("SELECT " + s.db.Ident("key") + ", value FROM settings")
 	if err != nil {
 		return nil, err
 	}

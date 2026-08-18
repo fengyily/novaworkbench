@@ -10,9 +10,9 @@ The backend shells out to the **`claude` CLI** (`@anthropic-ai/claude-code`) for
 
 ## Tech Stack
 
-- **Backend**: Go 1.25, stdlib `net/http` + SQLite via `modernc.org/sqlite` (pure Go, no CGO). Go 1.22+ router pattern (`METHOD /path/{id}`).
+- **Backend**: Go 1.25, stdlib `net/http` + `database/sql` with three pure-Go drivers (no CGO): SQLite via `modernc.org/sqlite`, MySQL via `github.com/go-sql-driver/mysql`, PostgreSQL via `github.com/jackc/pgx/v5/stdlib`. Go 1.22+ router pattern (`METHOD /path/{id}`).
 - **Frontend**: React 19 + TypeScript 6 + Vite 8 + React Router v7. Lint: `oxlint`.
-- **Storage**: SQLite (WAL mode, single writer `MaxOpenConns=1`) at `~/.novaworkbench/data/nova.db`.
+- **Storage**: SQLite by default (WAL mode, single writer `MaxOpenConns=1`) at `~/.novaworkbench/data/nova.db`; optionally MySQL/PostgreSQL via `NOVA_DB_DRIVER`/`NOVA_DB_DSN` or the 设置→数据库 page (saved to `~/.novaworkbench/dbconfig.json`; env wins; restart required to switch). One-shot data copy: `go run ./cmd/server -migrate [-from <sqlite path>]`.
 - **Dev**: Docker Compose (backend `:9527`, frontend `:5173`).
 
 ## Commands
@@ -34,7 +34,7 @@ npm run preview                  # serve the production build
 docker-compose up                # both services; backend mounts ~/.novaworkbench and $HOME/workspace
 ```
 
-Env vars the backend reads: `NOVA_PORT` (default `9527`), `CLAUDE_BIN` (default `claude`), `CLAUDE_TIMEOUT` (default `120s`; coding jobs floor it to `30m`). The frontend reads `VITE_API_BASE` (default `http://localhost:9527`).
+Env vars the backend reads: `NOVA_PORT` (default `9527`), `CLAUDE_BIN` (default `claude`), `CLAUDE_TIMEOUT` (default `120s`; coding jobs floor it to `30m`), `NOVA_DB_DRIVER` (`sqlite` default | `mysql` | `postgres`), `NOVA_DB_DSN`, `NOVA_DB_PATH` (sqlite file, default `~/.novaworkbench/data/nova.db`). The frontend reads `VITE_API_BASE` (default `http://localhost:9527`).
 
 ## Architecture
 
@@ -58,9 +58,13 @@ handler/  ->  service/  ->  *sql.DB (model/ holds structs, no behavior)
 
 `main.go` constructs a single `store.NewJobStore(50)` and passes it to the three handlers that run background work (`WizardHandler`, `RunnerHandler`, `ReviewHandler`), so jobs are shared in-process across those features.
 
-### SQLite init & migrations
+### Database layer & migrations (`internal/db/`)
 
-`db.Init` opens with `?_journal_mode=WAL&_busy_timeout=5000`, forces `MaxOpenConns=1` (SQLite single-writer), and runs one idempotent `CREATE TABLE IF NOT EXISTS` schema block in `migrate()`. New columns are added via `ALTER TABLE` statements run in a loop that **ignores the "duplicate column name" error** — this is the ad-hoc migration mechanism. When adding a column, follow that same pattern rather than writing a separate migration file.
+`db.Init(cfg)` opens the driver selected by `LoadConfig()` (env > `dbconfig.json` > sqlite default) and runs `migrate()`. SQLite keeps WAL + `MaxOpenConns=1`; MySQL/Postgres get a small pool. The schema lives in one canonical SQLite-flavored DDL block (`schema.go`); `fixupSchema` translates it per dialect (Postgres: `DATETIME`→`TIMESTAMP`; MySQL: indexed `TEXT`→`VARCHAR`, backticked `` `key` ``, expression defaults `DEFAULT ('…')` on TEXT). Statements run one by one; idempotency relies on per-dialect "duplicate column"/"duplicate key name" error matching.
+
+Services hold `*db.DB` (not `*sql.DB`) — a thin wrapper that rebinds `?`→`$N` on PostgreSQL (`Exec`/`Query`/`QueryRow`/`Begin`), quotes reserved identifiers via `Ident` (the `key` column is reserved in MySQL), and builds upsert suffixes via `OnConflict` (`ON CONFLICT … DO UPDATE` vs `ON DUPLICATE KEY UPDATE`). **Conventions for new SQL**: write `?` placeholders, go through the wrapper, use `Ident`/`OnConflict` where relevant. New columns still follow the ad-hoc pattern: append an `ALTER TABLE` to `alterColumns` in `schema.go` — no separate migration files.
+
+`db.Migrate(src, dst)` copies all 12 tables parent-first, preserving IDs and skipping duplicate PKs; it backs both the `-migrate` CLI flag and `POST /api/settings/database/migrate` (settings UI).
 
 Tables: `projects`, `memories`, `requirements`, `knowledge`, `conversations`, `refinement_chats`, `project_run_configs`, `platform_tokens`, `roles`. ID prefixes: `proj_`, `mem_`, `req_`, `kb_`, `sess_`, `job_`, `rc_`, `role_`.
 

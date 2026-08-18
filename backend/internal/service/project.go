@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"database/sql"
+
 	"fmt"
+	"github.com/novaworkbench/backend/internal/db"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,10 +17,10 @@ import (
 )
 
 type ProjectService struct {
-	db *sql.DB
+	db *db.DB
 }
 
-func NewProjectService(db *sql.DB) *ProjectService {
+func NewProjectService(db *db.DB) *ProjectService {
 	return &ProjectService{db: db}
 }
 
@@ -314,9 +316,9 @@ func (s *ProjectService) Dashboard() (*model.DashboardData, error) {
 
 func detectProjectType(path string) string {
 	indicators := map[string]string{
-		"package.json": "Node.js",
-		"go.mod":       "Go",
-		"Cargo.toml":   "Rust",
+		"package.json":     "Node.js",
+		"go.mod":           "Go",
+		"Cargo.toml":       "Rust",
 		"requirements.txt": "Python",
 		"pyproject.toml":   "Python",
 		"pom.xml":          "Java/Maven",

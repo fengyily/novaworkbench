@@ -2,7 +2,9 @@ package service
 
 import (
 	"database/sql"
+
 	"fmt"
+	"github.com/novaworkbench/backend/internal/db"
 	"strings"
 	"time"
 
@@ -44,10 +46,10 @@ func RulePresets() map[string]string {
 }
 
 type ReportService struct {
-	db *sql.DB
+	db *db.DB
 }
 
-func NewReportService(db *sql.DB) *ReportService { return &ReportService{db: db} }
+func NewReportService(db *db.DB) *ReportService { return &ReportService{db: db} }
 
 // ruleKey is the settings-table key holding a project's custom rule template.
 func ruleKey(projectID string) string { return "weekly_report_rule_" + projectID }
@@ -56,7 +58,7 @@ func ruleKey(projectID string) string { return "weekly_report_rule_" + projectID
 // when none is saved (or the saved one is blank).
 func (s *ReportService) GetRule(projectID string) string {
 	var v string
-	err := s.db.QueryRow("SELECT value FROM settings WHERE key = ?", ruleKey(projectID)).Scan(&v)
+	err := s.db.QueryRow("SELECT value FROM settings WHERE "+s.db.Ident("key")+" = ?", ruleKey(projectID)).Scan(&v)
 	if err != nil || strings.TrimSpace(v) == "" {
 		return DefaultWeeklyReportRule
 	}
@@ -66,7 +68,8 @@ func (s *ReportService) GetRule(projectID string) string {
 // SaveRule persists a custom rule template for the project.
 func (s *ReportService) SaveRule(projectID, rule string) error {
 	_, err := s.db.Exec(
-		"INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?",
+		"INSERT INTO settings ("+s.db.Ident("key")+", value, updated_at) VALUES (?, ?, ?)"+
+			s.db.OnConflict(s.db.Ident("key"), "value = ?, updated_at = ?"),
 		ruleKey(projectID), rule, time.Now(), rule, time.Now())
 	return err
 }

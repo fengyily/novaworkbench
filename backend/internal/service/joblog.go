@@ -1,10 +1,10 @@
 package service
 
 import (
-	"database/sql"
 	"encoding/json"
 	"time"
 
+	"github.com/novaworkbench/backend/internal/db"
 	"github.com/novaworkbench/backend/internal/store"
 )
 
@@ -12,10 +12,10 @@ import (
 // backend restart (the in-memory JobStore is lost on restart). Only the final
 // snapshot is written — once per job, on completion.
 type JobLogService struct {
-	db *sql.DB
+	db *db.DB
 }
 
-func NewJobLogService(db *sql.DB) *JobLogService {
+func NewJobLogService(db *db.DB) *JobLogService {
 	return &JobLogService{db: db}
 }
 
@@ -28,14 +28,14 @@ func (s *JobLogService) Save(jobID, reqID, status string, exitCode int, startedA
 		return err
 	}
 	_, err = s.db.Exec(`INSERT INTO job_logs (job_id, requirement_id, status, exit_code, started_at, finished_at, log)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(job_id) DO UPDATE SET
+		VALUES (?, ?, ?, ?, ?, ?, ?)`+
+		s.db.OnConflict("job_id", `
 			requirement_id = excluded.requirement_id,
 			status = excluded.status,
 			exit_code = excluded.exit_code,
 			started_at = excluded.started_at,
 			finished_at = excluded.finished_at,
-			log = excluded.log`,
+			log = excluded.log`),
 		jobID, reqID, status, exitCode, startedAt.Format(time.RFC3339), finishedAt.Format(time.RFC3339), string(blob))
 	return err
 }

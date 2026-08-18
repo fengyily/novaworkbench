@@ -348,6 +348,41 @@ export const llmApi = {
     api.put<LLMConfig>('/api/settings/llm', data),
 };
 
+// Database driver config (sqlite default; mysql/postgres via settings UI or
+// NOVA_DB_DRIVER/NOVA_DB_DSN env). Saving takes effect on server restart.
+export interface DatabaseInfo {
+  driver: string; // "sqlite" | "mysql" | "postgres"
+  dsn_masked: string;
+  source: string; // "env" | "file" | "default"
+  sqlite_path: string;
+}
+export interface DatabaseConnReq {
+  driver: string;
+  host: string;
+  port: string;
+  user: string;
+  password: string;
+  dbname: string;
+}
+export interface MigrateTableStat {
+  table: string;
+  inserted: number;
+  skipped: number;
+}
+export interface MigrateResult {
+  tables: MigrateTableStat[];
+  target_driver: string;
+  restart_required: boolean;
+}
+export const databaseApi = {
+  get: () => api.get<DatabaseInfo>('/api/settings/database'),
+  test: (data: DatabaseConnReq) =>
+    api.post<{ ok: boolean; version: string }>('/api/settings/database/test', data),
+  save: (data: DatabaseConnReq) =>
+    api.put<{ restart_required: boolean }>('/api/settings/database', data),
+  migrate: () => api.post<MigrateResult>('/api/settings/database/migrate', {}),
+};
+
 // Roles (per-role system prompt + model)
 export interface Role {
   id: string;
