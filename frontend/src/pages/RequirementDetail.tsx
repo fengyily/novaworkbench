@@ -1237,7 +1237,7 @@ export default function RequirementDetail() {
             <>
               <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
                 <button className="btn btn-primary" onClick={() => transition('designed', '方案完成')} disabled={!!busy}>
-                  {busy === '方案完成' ? '⏳ ...' : '✅ 方案完成'}
+                  {busy === '方案完成' ? '⏳ ...' : '📐 方案完成'}
                 </button>
               </div>
               <DocRefineChat

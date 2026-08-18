@@ -79,3 +79,27 @@ body { margin: 0; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--color-text-muted); }
+
+/* ── Status badges (shared: requirement list, project list, weekly report) ── */
+.status-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--color-active);
+  color: var(--color-primary);
+}
+/* requirement lifecycle */
+.status-badge.status-draft      { background: #f1f5f9; color: #475569; }
+.status-badge.status-analyzing  { background: #fef3c7; color: #b45309; }
+.status-badge.status-designing  { background: #ede9fe; color: #6d28d9; }
+.status-badge.status-designed   { background: #dbeafe; color: #1d4ed8; }
+.status-badge.status-developing { background: #cffafe; color: #0e7490; }
+.status-badge.status-done       { background: #d1fae5; color: #047857; }
+.status-badge.status-archived   { background: #f1f5f9; color: #64748b; }
+/* project status (Dashboard, PlaceholderPages, ProjectDetail info) */
+.status-badge.status-active     { background: #d1fae5; color: #047857; }
+.status-badge.status-missing    { background: #fef3c7; color: #b45309; }
+/* weekly-report run status */
+.status-badge.status-error      { background: #fee2e2; color: #dc2626; }

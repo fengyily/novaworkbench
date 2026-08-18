@@ -87,7 +87,3 @@
   font-size: 12px;
   color: var(--color-error);
 }
-
-.status-badge.status-error {
-  color: var(--color-error);
-}
