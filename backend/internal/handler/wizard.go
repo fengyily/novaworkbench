@@ -715,14 +715,22 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Session threading: the developer stage continues the SAME conversation
-		// thread as analysis+design. On the first coding pass we fork off the
-		// design session (--resume <design_sid> --fork-session) so the developer
-		// inherits the full analysis+design discussion and swaps in the developer
-		// persona; the forked session gets a new id we read from the stream and
-		// persist as coding_session_id. On a re-run we --resume coding_session_id.
-		// We do NOT re-feed the requirement desc / design JSON — the resumed
-		// conversation already has them.
+		// Session threading: the developer stage forks off the design session
+		// (--resume <design_sid> --fork-session) so the developer inherits the
+		// full analysis+design discussion and swaps in the developer persona; the
+		// forked session gets a new id we read from the stream and persist as
+		// coding_session_id. We do NOT re-feed the requirement desc / design JSON
+		// — the resumed conversation already has them.
+		//
+		// "重新开发"语义: when a coding_session_id already exists (a prior
+		// coding pass ran) we STILL fork off the design session instead of
+		// --resume'ing the prior coding session. Forking mints a NEW session that
+		// inherits only the requirement+design conversation, so leftover tool_use
+		// / half-written code / mid-run errors from the last coding pass cannot
+		// pollute the new round. The forked id overwrites coding_session_id
+		// below (fork && out.sessionID != "" guard), realizing "重新开发 = 新会话".
+		// First-ever coding (coding_session_id == "") takes the same path, so
+		// behavior is unchanged for the genuine first pass.
 		//
 		// Graceful fallback: the legacy /wizard quick-start page has no
 		// Requirement row (no requirement_id / session ids), so it can't join
@@ -738,14 +746,22 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if reqRow != nil {
-			if reqRow.CodingSessionID != "" {
-				sourceSID = reqRow.CodingSessionID
-			} else if reqRow.DesignSessionID != "" {
+			if reqRow.DesignSessionID != "" {
+				// 重新开发 / 首次开发: fork from the design session so the new
+				// coding session carries only requirement+design, never the prior
+				// coding pass's history.
 				sourceSID = reqRow.DesignSessionID
 				fork = true
 			} else if reqRow.AnalysisSessionID != "" {
+				// No design session yet but an analyst session exists — keep
+				// forking off the analyst session (skip-analysis-first path).
 				sourceSID = reqRow.AnalysisSessionID
 				fork = true
+			} else if reqRow.CodingSessionID != "" {
+				// Legacy fallback: no design / analysis session at all. Resume
+				// the prior coding session rather than losing threading for old
+				// data rows that predate session chaining.
+				sourceSID = reqRow.CodingSessionID
 			}
 		}
 
