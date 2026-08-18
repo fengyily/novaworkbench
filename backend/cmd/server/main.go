@@ -79,7 +79,7 @@ func main() {
 	reqH := handler.NewRequirementHandler(reqSvc, llmGateway, sharedJobs)
 	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc)
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
-	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, llmGateway, sharedJobs)
+	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs)
 	mergeH := handler.NewMergeHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)

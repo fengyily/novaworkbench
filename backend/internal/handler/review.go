@@ -21,17 +21,29 @@ import (
 type ReviewHandler struct {
 	projectSvc  *service.ProjectService
 	platformSvc *service.PlatformTokenService
+	roleSvc     *service.RoleService
 	llm         *llm.Gateway
 	jobs        *store.JobStore
 }
 
-func NewReviewHandler(projectSvc *service.ProjectService, platformSvc *service.PlatformTokenService, llmGateway *llm.Gateway, jobs *store.JobStore) *ReviewHandler {
+func NewReviewHandler(projectSvc *service.ProjectService, platformSvc *service.PlatformTokenService, roleSvc *service.RoleService, llmGateway *llm.Gateway, jobs *store.JobStore) *ReviewHandler {
 	return &ReviewHandler{
 		projectSvc:  projectSvc,
 		platformSvc: platformSvc,
+		roleSvc:     roleSvc,
 		llm:         llmGateway,
 		jobs:        jobs,
 	}
+}
+
+// roleConfig loads a role's system prompt + model by key. On error it returns
+// empty strings so a broken role config never blocks the review pipeline.
+func (h *ReviewHandler) roleConfig(key string) (systemPrompt, model string) {
+	role, err := h.roleSvc.GetByKey(key)
+	if err != nil {
+		return "", ""
+	}
+	return role.SystemPrompt, role.Model
 }
 
 // PRListResponse wraps the PR list with a configuration flag.
@@ -251,8 +263,6 @@ func (h *ReviewHandler) SubmitComment(w http.ResponseWriter, r *http.Request) {
 
 // runReview runs Claude CLI against the branch diff and streams output into the job.
 func (h *ReviewHandler) runReview(job *store.Job, projectPath string, req StartReviewReq) {
-	binPath := h.llm.GetBinPath()
-
 	prContext := ""
 	if req.PRTitle != "" {
 		prContext = fmt.Sprintf("PR 标题：%s\n", req.PRTitle)
@@ -264,35 +274,28 @@ func (h *ReviewHandler) runReview(job *store.Job, projectPath string, req StartR
 		prContext += fmt.Sprintf("额外审查要求：%s\n", req.ExtraRequirements)
 	}
 
+	// The reviewer persona + review checklist + report format live in the
+	// configurable "reviewer" role (system prompt); the -p prompt carries only
+	// the dynamic task content (PR context, branches, operation steps).
+	systemPrompt, model := h.roleConfig("reviewer")
+
 	prompt := fmt.Sprintf(
-		"你是一位资深代码审查工程师。请对以下 PR 的改动进行全面的代码 Review。\n\n"+
+		"请对以下 PR 的改动进行代码 Review。\n\n"+
 			"%s"+
 			"目标分支：`%s`\n基础分支：`%s`\n\n"+
 			"操作步骤：\n"+
 			"1. 先运行 `git fetch origin` 拉取最新远端分支\n"+
 			"2. 运行 `git diff origin/%s...origin/%s` 查看所有改动\n"+
 			"3. 阅读改动涉及的关键源文件\n"+
-			"4. 给出结构化的 Review 报告（中文）\n\n"+
-			"Review 要点：\n"+
-			"1. 代码正确性：逻辑错误、边界条件、并发安全\n"+
-			"2. 代码质量：可读性、命名规范、重复代码\n"+
-			"3. 安全性：注入、越权、敏感信息暴露\n"+
-			"4. 性能：不必要的查询、内存泄漏、大循环\n"+
-			"5. 测试覆盖：关键路径是否有测试\n\n"+
-			"报告格式（Markdown）：\n"+
-			"## 总体评价\n（一句话总结）\n\n"+
-			"## 问题清单\n（按严重程度排序，每项格式：**[严重程度]** `文件路径` — 问题描述及修改建议）\n\n"+
-			"## 优点\n（值得保留的好设计）\n\n"+
-			"## 总结建议\n",
+			"4. 给出结构化的 Review 报告\n",
 		prContext, req.Branch, req.BaseBranch, req.BaseBranch, req.Branch)
 
-	cmd := exec.Command(binPath,
-		"-p", prompt,
-		"--output-format", "stream-json",
-		"--verbose",
-		"--dangerously-skip-permissions",
-	)
-	cmd.Dir = projectPath
+	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+		Prompt:       prompt,
+		WorkDir:      projectPath,
+		SystemPrompt: systemPrompt,
+		Model:        model,
+	})
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

@@ -19,18 +19,19 @@ func (s *RoleService) roleColumns() string {
 	return "id, " + s.db.Ident("key") + ", name, description, system_prompt, model, sort_order, enabled, created_at, updated_at"
 }
 
-// SeedDefaults inserts the built-in roles if the table is empty (first run).
-// Idempotent — only seeds when no rows exist.
+// SeedDefaults inserts any built-in role whose key is not yet present.
+// Idempotent and per-key (not whole-table), so roles added in later releases
+// (e.g. reviewer) are backfilled into existing databases on startup.
 func (s *RoleService) SeedDefaults() error {
-	var count int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM roles").Scan(&count); err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
 	now := time.Now()
 	for _, r := range DefaultRoles() {
+		var count int
+		if err := s.db.QueryRow("SELECT COUNT(*) FROM roles WHERE "+s.db.Ident("key")+" = ?", r.Key).Scan(&count); err != nil {
+			return err
+		}
+		if count > 0 {
+			continue
+		}
 		if _, err := s.db.Exec(
 			`INSERT INTO roles
 			(`+s.roleColumns()+`)
