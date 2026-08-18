@@ -709,8 +709,15 @@ export default function ProjectDetail() {
             <CreateRequirementForm
               projectId={id}
               onClose={() => setShowCreateReq(false)}
-              onCreated={async () => {
+              onCreated={async (created: Requirement) => {
                 setShowCreateReq(false);
+                // 跳过需求分析 → 自动进入方案设计阶段：导航到详情页并传递
+                // autoStartDesign 意图标记，由 RequirementDetail 一次性触发 architect-design，
+                // 替代用户手动点击「生成技术方案」。非 skip 流程保持原行为（刷新列表、停留）。
+                if (created.skip_analysis) {
+                  navigate(`/requirements/${created.id}`, { state: { autoStartDesign: true } });
+                  return;
+                }
                 const data = await requirementsApi.list({ project_id: id });
                 setReqs(data);
               }}
@@ -890,7 +897,7 @@ export default function ProjectDetail() {
 function CreateRequirementForm({ projectId, onClose, onCreated }: {
   projectId: string;
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (req: Requirement) => void;
 }) {
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState('medium');
@@ -902,8 +909,8 @@ function CreateRequirementForm({ projectId, onClose, onCreated }: {
     if (!description) return;
     setSaving(true);
     try {
-      await requirementsApi.create({ project_id: projectId, description, priority, sprint, skip_analysis: skipAnalysis });
-      onCreated();
+      const created = await requirementsApi.create({ project_id: projectId, description, priority, sprint, skip_analysis: skipAnalysis });
+      onCreated(created);
     } catch (err: any) {
       alert(err.message);
     } finally {
