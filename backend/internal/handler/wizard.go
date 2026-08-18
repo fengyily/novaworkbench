@@ -117,29 +117,55 @@ func (h *WizardHandler) effectiveModel(roleModel string) string {
 // coding) to the same worktree means the forked/resumed conversation never
 // carries absolute paths back to the shared project checkout — without this the
 // coding stage inherits the analyst/architect's original-dir absolute paths and
-// edits the original files instead of the worktree. Non-git projects and empty
-// paths fall back to the project checkout (legacy behavior).
-func (h *WizardHandler) resolveWorkDir(req *model.Requirement, projectPath, defaultBranch string) string {
+// edits the original files instead of the worktree.
+//
+// Non-git projects (and empty paths) return the project checkout with a nil
+// error (legacy in-place behavior). A git repo whose worktree can't be created
+// returns a non-nil error so the caller fails loudly instead of silently coding
+// in-place and poisoning the session chain with original-dir paths.
+func (h *WizardHandler) resolveWorkDir(req *model.Requirement, projectPath, defaultBranch string) (string, error) {
 	if req == nil || projectPath == "" {
-		return projectPath
+		return projectPath, nil
 	}
 	if req.WorktreePath != "" {
 		if _, err := os.Stat(req.WorktreePath); err == nil {
-			return req.WorktreePath
+			return req.WorktreePath, nil
 		}
+		// Persisted path is gone — fall through to recreate it.
 	}
 	if defaultBranch == "" {
 		defaultBranch = "main"
 	}
 	branch := "feat/" + req.ID
 	wtPath, err := EnsureWorktree(projectPath, req.ID, branch, defaultBranch)
-	if err != nil || wtPath == "" {
-		return projectPath // non-git repo / worktree add failed → legacy in-place
+	if err != nil {
+		if errors.Is(err, ErrNotAGitRepo) {
+			return projectPath, nil // non-git repo → legacy in-place
+		}
+		return "", err // git repo but worktree add failed → hard error
+	}
+	if wtPath == "" {
+		return projectPath, nil
 	}
 	if perr := h.reqSvc.UpdateWorktree(req.ID, branch, wtPath); perr != nil {
 		log.Printf("[wizard] persist worktree for %s: %v", req.ID, perr)
 	}
-	return wtPath
+	return wtPath, nil
+}
+
+// requireAnchoredFork guards against forking a source session that was created
+// in-place (no persisted worktree_path) on a git repo. Forking such a session
+// carries its original-dir absolute paths into the new session, so the stage
+// edits the shared checkout instead of the worktree. Non-git projects have no
+// worktree by design and pass through.
+func (h *WizardHandler) requireAnchoredFork(req *model.Requirement, projectPath string) error {
+	if req == nil || req.WorktreePath != "" || projectPath == "" {
+		return nil
+	}
+	if _, err := gitRun(projectPath, "rev-parse", "--is-inside-work-tree"); err != nil {
+		return nil // non-git repo → legacy in-place
+	}
+	return fmt.Errorf("上游会话未在隔离 worktree 中生成，请重新执行「需求分析」或「生成技术方案」后再继续")
 }
 
 // docStageSession maps a refine/apply doc_type to the requirement's stored
@@ -240,7 +266,12 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		// Anchor the analyst stage to the isolated worktree (created here if
 		// missing) so the whole session chain — analysis → design → coding — is
 		// rooted in the worktree and never leaks original-dir absolute paths.
-		workDir := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+		workDir, err := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+		if err != nil {
+			job.Append(store.LogLine{Type: "error", Content: "❌ " + err.Error()})
+			job.Finish(1, store.JobError)
+			return
+		}
 
 		// firstTurnPrompt pre-reads a BOUNDED slice of the project (AI docs +
 		// a names-only structure tree) and emits each pre-read file as
@@ -383,7 +414,21 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 			defaultBranch = proj.DefaultBranch
 		}
 	}
-	workDir := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+	if fork {
+		if gerr := h.requireAnchoredFork(requirement, projectPath); gerr != nil {
+			sendStatus(w, rc, "error", gerr.Error())
+			fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+			rc.Flush()
+			return
+		}
+	}
+	workDir, err := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+	if err != nil {
+		sendStatus(w, rc, "error", err.Error())
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
 
 	systemPrompt, model := h.roleConfig("developer")
 
@@ -692,6 +737,20 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		}()
 		log.Printf("[start-coding] job %s started for %q in %s", job.ID, req.RequirementTitle, req.ProjectPath)
 
+		// Load the requirement row up front so we can (a) detect whether the
+		// source session was created in an isolated worktree, and (b) reuse it for
+		// the fork resolution below without a second Get.
+		var reqRow *model.Requirement
+		if req.RequirementID != "" {
+			if r, err := h.reqSvc.Get(req.RequirementID); err == nil {
+				reqRow = r
+			}
+		}
+		// hadWorktree records whether the upstream stage had already persisted a
+		// worktree before THIS coding run — false means the design/analysis session
+		// we're about to fork was created in-place (un-isolated).
+		hadWorktree := reqRow != nil && reqRow.WorktreePath != ""
+
 		// Resolve the working directory for coding. When a branch is requested
 		// AND the project is a git repo with a requirement id to key on, develop
 		// in an isolated git worktree per requirement so parallel requirements
@@ -804,12 +863,6 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		// so that path keeps working.
 		sourceSID := ""
 		fork := false
-		var reqRow *model.Requirement
-		if req.RequirementID != "" {
-			if r, err := h.reqSvc.Get(req.RequirementID); err == nil {
-				reqRow = r
-			}
-		}
 		if reqRow != nil {
 			if reqRow.DesignSessionID != "" {
 				// 重新开发 / 首次开发: fork from the design session so the new
@@ -828,6 +881,17 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 				// data rows that predate session chaining.
 				sourceSID = reqRow.CodingSessionID
 			}
+		}
+
+		// Forking a source session created in-place (no persisted worktree)
+		// leaks its original-dir absolute paths into the coding session, so
+		// Claude edits the shared checkout instead of the worktree. Guard only
+		// when we actually established a worktree this run (useWorktree=true),
+		// which also excludes non-git projects (legacy in-place coding).
+		if fork && useWorktree && !hadWorktree {
+			job.Append(store.LogLine{Type: "error", Content: "❌ 上游会话未在隔离 worktree 中生成，请重新执行「生成技术方案」后再开始开发。"})
+			job.Finish(1, store.JobError)
+			return
 		}
 
 		systemPrompt, model := h.roleConfig("developer")
@@ -1150,6 +1214,26 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Forking the analyst session requires it to have been anchored to the
+	// isolated worktree — otherwise the design (and later the coding stage that
+	// forks the design) inherits original-dir absolute paths.
+	if fork {
+		if gerr := h.requireAnchoredFork(req, projectPath); gerr != nil {
+			writeError(w, 409, "UNANCHORED_SESSION", gerr.Error())
+			return
+		}
+	}
+
+	// Anchor the architect stage to the isolated worktree (created here if the
+	// analyst stage was skipped) so the plan and its session are rooted in the
+	// worktree — otherwise the coding stage forks this session and follows the
+	// original-dir absolute paths back to the shared checkout.
+	workDir, wdErr := h.resolveWorkDir(req, projectPath, defaultBranch)
+	if wdErr != nil {
+		writeError(w, 500, "WORKTREE_FAILED", "worktree 创建失败："+wdErr.Error())
+		return
+	}
+
 	// Create the job, persist its id so a refresh can reconnect, and return
 	// the job id immediately. The plan-mode claude run happens in a goroutine
 	// writing progress into the job store.
@@ -1158,12 +1242,6 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[architect-design] failed to persist design_job_id for %s: %v", id, perr)
 	}
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
-
-	// Anchor the architect stage to the isolated worktree (created here if the
-	// analyst stage was skipped) so the plan and its session are rooted in the
-	// worktree — otherwise the coding stage forks this session and follows the
-	// original-dir absolute paths back to the shared checkout.
-	workDir := h.resolveWorkDir(req, projectPath, defaultBranch)
 
 	// Plan-mode task prompt. When resuming/forking an existing conversation
 	// (analyst session present), the resumed thread already carries the
@@ -2112,7 +2190,13 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 			defaultBranch = proj.DefaultBranch
 		}
 	}
-	workDir := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+	workDir, err := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+	if err != nil {
+		sendStatus(w, rc, "error", err.Error())
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
 
 	// The resumed conversation carries the doc + prior turns. Send only the
 	// user's latest message plus a steady instruction covering both mid-refine
@@ -2263,7 +2347,11 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		}
 		defaultBranch = proj.DefaultBranch
 	}
-	workDir := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+	workDir, err := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+	if err != nil {
+		writeError(w, 500, "WORKTREE_FAILED", "worktree 创建失败："+err.Error())
+		return
+	}
 
 	// Build the prompt that asks Claude to emit the final doc. For design docs we
 	// detect plan-markdown vs legacy JSON from the DB-stored doc (the apply call
