@@ -1892,15 +1892,20 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	// user's latest message plus a steady instruction covering both mid-refine
 	// responses and the completion signal. On the fresh-session fallback there
 	// is no prior conversation, so the doc itself is seeded into the prompt.
+	// The completeness instruction guards against Claude stopping after one
+	// heading and emitting a closing phrase (the prior symptom: "除了以上内容
+	// 就没有了更多了" after a section header with no content).
 	var prompt string
 	if freshSession {
 		prompt = "以下是当前的「" + docLabel + "」文档：\n\n" + requirement.DesignDocs +
 			fmt.Sprintf("\n\n用户消息：\n%s\n\n", req.UserMessage) +
-			"请基于上述文档回应用户对「" + docLabel + "」的修改意见，给出具体修改建议。" +
+			"请基于上述文档回应用户对「" + docLabel + "」的修改意见，" +
+			"完整列出每一个修改点的具体内容（包含涉及的表/字段/接口/逻辑），不要中途截断或留空。" +
 			"若用户确认修改已完成，在回复最后单独一行追加：[REFINE_COMPLETE]\n用中文。"
 	} else {
 		prompt = fmt.Sprintf("用户消息：\n%s\n\n", req.UserMessage) +
-			"请基于我们的对话上下文回应用户对「" + docLabel + "」的修改意见，给出具体修改建议。" +
+			"请基于我们的对话上下文回应用户对「" + docLabel + "」的修改意见，" +
+			"完整列出每一个修改点的具体内容（包含涉及的表/字段/接口/逻辑），不要中途截断或留空。" +
 			"若用户确认修改已完成，在回复最后单独一行追加：[REFINE_COMPLETE]\n用中文。"
 	}
 
@@ -1913,90 +1918,37 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 		Resume:       !freshSession,
 	})
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		sendStatus(w, rc, "error", "启动 Claude 失败: "+err.Error())
-		return
-	}
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
-	if err := cmd.Start(); err != nil {
-		sendStatus(w, rc, "error", "启动 Claude 失败: "+err.Error())
-		return
-	}
+	// Reuse runClaudeStream so this path gets live content_block_delta text
+	// deltas (the model streams incrementally via stream_event), tool-call
+	// labels, the "🤖 Claude 已连接" phase, stderr capture, and stale-session
+	// detection — the previous hand-rolled parser only handled the batched
+	// "assistant" event, so deltas arrived silently and a hung proxy wedged
+	// the SSE connection instead of failing fast.
+	out := runClaudeStream(sseSink{w: w, rc: rc}, cmd, "refine-doc")
 
-	var finalResult string
-	var errMsg string
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		var evt map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &evt); err != nil {
-			continue
-		}
-		switch evt["type"] {
-		case "assistant":
-			msg, _ := evt["message"].(map[string]interface{})
-			content, _ := msg["content"].([]interface{})
-			for _, block := range content {
-				b, _ := block.(map[string]interface{})
-				switch b["type"] {
-				case "tool_use":
-					toolName, _ := b["name"].(string)
-					input, _ := b["input"].(map[string]interface{})
-					sendStatus(w, rc, "tool_call", toolCallLabel(toolName, input))
-					rc.Flush()
-				case "text":
-					text, _ := b["text"].(string)
-					if text == "" {
-						continue
-					}
-					jsonLine, _ := json.Marshal(map[string]string{"type": "message", "content": text})
-					fmt.Fprintf(w, "data: %s\n\n", string(jsonLine))
-					rc.Flush()
-				}
-			}
-		case "result":
-			if evt["subtype"] == "success" {
-				finalResult, _ = evt["result"].(string)
-			} else if msg := claudeResultError("refine-doc", evt); msg != "" {
-				errMsg = msg
-			}
+	// The fresh-session fallback generated a new session id; persist it so the
+	// next refine/apply turn resumes this conversation instead of re-seeding.
+	if freshSession && out.errMsg == "" && req.RequirementID != "" {
+		if perr := h.reqSvc.UpdateDesignSession(req.RequirementID, sourceSID); perr != nil {
+			log.Printf("[refine-doc] failed to persist design session for %s: %v", req.RequirementID, perr)
 		}
 	}
 
-	cmd.Wait()
-
-	// Nothing came back — typically a stale session (the claude conversation
-	// file is gone) or a CLI/transport failure. Previously this ended the
-	// stream with an empty `done`, and the frontend (which only rendered
-	// message/done events) showed nothing. Surface the failure, and for a
-	// stale session clear the stored id so the next attempt either re-runs the
-	// stage or takes the fresh-session fallback above.
-	if finalResult == "" {
-		stale := isStaleSessionError(nil, stderrBuf.String())
-		if errMsg == "" {
-			if tail := strings.TrimSpace(stderrBuf.String()); tail != "" {
-				if len(tail) > 300 {
-					tail = tail[len(tail)-300:]
-				}
-				errMsg = tail
-			}
-		}
-		if stale {
+	if out.errMsg != "" || out.finalResult == "" {
+		// Stale --resume: the prior conversation file is gone. Clear the stored
+		// id so the next attempt either re-runs the stage or takes the
+		// fresh-session fallback above.
+		if out.staleSession && req.RequirementID != "" {
 			if req.DocType == "coding" {
 				_ = h.reqSvc.UpdateCodingSession(req.RequirementID, "")
 			} else {
 				_ = h.reqSvc.UpdateDesignSession(req.RequirementID, "")
 			}
+		}
+		if out.errMsg != "" {
+			sendStatus(w, rc, "error", out.errMsg)
+		} else if out.staleSession {
 			sendStatus(w, rc, "error", "该阶段的会话已过期，请重试（将以新会话继续）。")
-		} else if errMsg != "" {
-			sendStatus(w, rc, "error", errMsg)
 		} else {
 			sendStatus(w, rc, "error", "Claude 未返回结果，请重试。")
 		}
@@ -2005,26 +1957,18 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The fresh-session fallback generated a new session id; persist it so the
-	// next refine/apply turn resumes this conversation instead of re-seeding.
-	if freshSession && req.RequirementID != "" {
-		if perr := h.reqSvc.UpdateDesignSession(req.RequirementID, sourceSID); perr != nil {
-			log.Printf("[refine-doc] failed to persist design session for %s: %v", req.RequirementID, perr)
-		}
-	}
-
 	// The authoritative conversation lives in the resumed claude session; this
 	// history string is only for client-side rendering of the latest exchange.
 	var historyParts []string
 	if req.UserMessage != "" {
 		historyParts = append(historyParts, "User: "+req.UserMessage)
 	}
-	if finalResult != "" {
-		historyParts = append(historyParts, "AI: "+strings.TrimSpace(finalResult))
+	if out.finalResult != "" {
+		historyParts = append(historyParts, "AI: "+strings.TrimSpace(out.finalResult))
 	}
 	updatedHistory := strings.Join(historyParts, "\n")
 
-	refineComplete := strings.Contains(finalResult, "[REFINE_COMPLETE]")
+	refineComplete := strings.Contains(out.finalResult, "[REFINE_COMPLETE]")
 
 	doneData, _ := json.Marshal(map[string]interface{}{
 		"type":            "done",

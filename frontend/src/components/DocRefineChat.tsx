@@ -29,6 +29,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [working, setWorking] = useState(false);
+  const [refineLines, setRefineLines] = useState<{ type: string; content: string }[]>([]);
   const [refineComplete, setRefineComplete] = useState(false);
   const [applying, setApplying] = useState(false);
   const [applyLines, setApplyLines] = useState<{ type: string; content: string }[]>([]);
@@ -45,6 +46,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
     setMessages([]);
     setRefineComplete(false);
     setApplyLines([]);
+    setRefineLines([]);
   }, [currentDoc]);
 
   // The authoritative conversation lives in the resumed claude session on the
@@ -100,6 +102,14 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
             });
             continue;
           }
+          if (evt.type === 'phase' || evt.type === 'tool_call') {
+            // Live activity feed — surfaces "🤖 Claude 已连接" and tool labels
+            // during the (often multi-minute) refine turn so the user has
+            // progress feedback instead of just their echo + a static
+            // "思考中…" line.
+            setRefineLines(prev => appendLogLine(prev.slice(-49), { type: evt.type, content: evt.content ?? '' }));
+            continue;
+          }
           if (evt.type === 'message') {
             aiText += evt.content + '\n';
             setMessages(prev => {
@@ -137,6 +147,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
     setWorking(true);
     setRefineComplete(false);
     setMessages(prev => [...prev, { role: 'user', content: msg }]);
+    setRefineLines([]);
 
     try {
       const complete = await streamRefine(msg);
@@ -282,6 +293,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
     setMessages([]);
     setRefineComplete(false);
     setApplyLines([]);
+    setRefineLines([]);
   };
 
   if (!expanded) {
@@ -323,6 +335,13 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           <div className="chat-msg ai">
             <span className="chat-role">🤖 AI</span>
             <div className="chat-content">⏳ 思考中...</div>
+          </div>
+        )}
+        {working && refineLines.length > 0 && (
+          <div className="coding-panel" style={{ margin: '8px 0', maxHeight: 120 }}>
+            {refineLines.map((l, i) => (
+              <div key={i} className={`coding-line coding-line-${l.type}`}>{l.content}</div>
+            ))}
           </div>
         )}
       </div>
