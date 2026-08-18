@@ -1280,14 +1280,14 @@ export default function RequirementDetail() {
                   to mark done or re-run without a live coding log. */}
               {codingLines.length === 0 && (
                 <p style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 8 }}>
-                  开发任务已完成（日志因服务重启已清空）。确认代码无误后可标记开发完成，或重新运行。
+                  开发任务已完成（日志因服务重启已清空）。确认代码无误后可标记开发完成，或重新开发（基于技术方案 fork 新会话）。
                 </p>
               )}
               <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
                 <button className="btn btn-primary" onClick={() => transition('done', '开发完成')} disabled={!!busy}>
                   {busy === '开发完成' ? '⏳ ...' : '✅ 开发完成'}
                 </button>
-                <button className="btn" onClick={() => openBranchModal()}>🔄 重新运行</button>
+                <button className="btn" title="从技术方案重新 fork 新会话开始开发，不携带上次开发历史" onClick={() => openBranchModal()}>🔄 重新开发</button>
               </div>
 
               {/* ── Merge / PR step ── */}
