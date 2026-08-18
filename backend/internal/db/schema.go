@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS requirements (
 	assigned_to TEXT DEFAULT '',
 	sprint TEXT DEFAULT '',
 	created_by TEXT DEFAULT 'user',
+	branch_name TEXT NOT NULL DEFAULT '',
+	worktree_path TEXT NOT NULL DEFAULT '',
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 	completed_at DATETIME,
@@ -197,6 +199,11 @@ var alterColumns = []string{
 	`ALTER TABLE requirements ADD COLUMN analysis_job_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN apply_job_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN skip_analysis INTEGER NOT NULL DEFAULT 1`,
+	// Git worktree isolation for parallel development: each requirement's dev
+	// branch + worktree path so adjust-coding and the merge step can locate the
+	// isolated working tree instead of the shared project checkout.
+	`ALTER TABLE requirements ADD COLUMN branch_name TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN worktree_path TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE weekly_reports ADD COLUMN git_branch TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE weekly_reports ADD COLUMN git_author TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN deleted_at TEXT`,

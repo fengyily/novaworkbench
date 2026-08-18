@@ -220,6 +220,10 @@ func main() {
 	mux.HandleFunc("POST /api/requirements/{id}/merge/resolve", mergeH.Resolve)
 	mux.HandleFunc("POST /api/requirements/{id}/merge/push", mergeH.Push)
 
+	// Worktree cleanup — remove a finished/abandoned requirement's isolated
+	// dev worktree + branch so parallel dev dirs don't accumulate on disk.
+	mux.HandleFunc("POST /api/requirements/{id}/worktree/cleanup", mergeH.Cleanup)
+
 	// Memories
 	mux.HandleFunc("GET /api/memories", memoryH.List)
 	mux.HandleFunc("POST /api/memories", memoryH.Create)

@@ -179,6 +179,8 @@ export interface Requirement {
   sprint: string; created_by: string; analysis_session_id: string;
   design_session_id: string; design_job_id: string; analysis_job_id: string; apply_job_id: string; coding_session_id: string;
   skip_analysis: boolean;
+  branch_name?: string;
+  worktree_path?: string;
   created_at: string; updated_at: string;
   completed_at?: string;
 }
@@ -269,6 +271,7 @@ export interface MergeState {
   pr_url: string;
   mid_merge: boolean;
   conflict_files: string[];
+  worktree_path?: string;
 }
 export const mergeApi = {
   state: (reqId: string) => api.get<MergeState>(`/api/requirements/${reqId}/merge/state`),
@@ -279,6 +282,8 @@ export const mergeApi = {
   resolve: (reqId: string) => api.post<{ job_id: string }>(`/api/requirements/${reqId}/merge/resolve`, {}),
   push: (reqId: string, body: { commit_message?: string }) =>
     api.post<{ job_id: string }>(`/api/requirements/${reqId}/merge/push`, body),
+  cleanup: (reqId: string, body: { force?: boolean }) =>
+    api.post<{ ok: boolean }>(`/api/requirements/${reqId}/worktree/cleanup`, body),
   jobStreamUrl: (jobId: string) => `${API_BASE}/api/wizard/jobs/${jobId}/stream`,
   jobUrl: (jobId: string) => `${API_BASE}/api/wizard/jobs/${jobId}`,
 };
