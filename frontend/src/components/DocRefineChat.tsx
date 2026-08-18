@@ -87,6 +87,19 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
             complete = evt.refine_complete || false;
             continue;
           }
+          if (evt.type === 'error') {
+            // Backend failures (missing/stale session, claude exit) arrive as
+            // error events — render them, otherwise the user sees only their
+            // own echo with no explanation.
+            aiText += '❌ ' + evt.content + '\n';
+            setMessages(prev => {
+              const next = [...prev];
+              const idx = next.length - 1;
+              if (idx >= 0) next[idx] = { role: 'ai', content: (next[idx].content || '') + '❌ ' + evt.content + '\n', isError: true };
+              return next;
+            });
+            continue;
+          }
           if (evt.type === 'message') {
             aiText += evt.content + '\n';
             setMessages(prev => {
@@ -108,6 +121,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         next[idx] = {
           role: 'ai',
           content: (next[idx].content || aiText).replace('[REFINE_COMPLETE]', '').trim(),
+          isError: next[idx].isError,
         };
       }
       return next;

@@ -1021,12 +1021,13 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
-		// Persist the forked session id (only present on a fresh fork). On a
-		// plain resume re-run it equals the existing id, so skip the write. The
-		// skip-analysis path has no fork; a fresh session's id is read back
-		// from the stream but we don't persist it as design_session_id because
-		// there was no prior analysis thread to continue.
-		if fork && out.sessionID != "" {
+		// Persist the session id reported by the stream whenever it differs from
+		// the stored one. On a fork this is the new forked id; on the
+		// skip-analysis path it is the fresh session's id — persisting it is what
+		// lets refine-doc / apply-doc resume this stage later (previously it was
+		// only saved on fork, so skip-analysis designs could never be refined).
+		// On a plain resume re-run it equals the stored id, so skip the write.
+		if out.sessionID != "" && out.sessionID != req.DesignSessionID {
 			if perr := h.reqSvc.UpdateDesignSession(id, out.sessionID); perr != nil {
 				log.Printf("[architect-design] failed to persist design session for %s: %v", id, perr)
 			}
@@ -1866,20 +1867,42 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	if requirement != nil {
 		sourceSID, roleKey = docStageSession(requirement, req.DocType)
 	}
+	// Fallback: no resumable session for this stage. This hits design docs
+	// generated on the skip-analysis path by builds that didn't persist
+	// design_session_id (and any doc predating session threading). For design
+	// docs we can still refine: seed a FRESH session with the current doc
+	// content and persist its id below so subsequent turns resume it. Coding
+	// instructions are never persisted server-side, so without a coding
+	// session there is nothing to anchor a fresh session to — keep the hint.
+	freshSession := false
 	if sourceSID == "" {
-		sendStatus(w, rc, "error", "尚未找到该阶段的会话，请先生成"+docLabel+"后再 refine。")
-		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
-		rc.Flush()
-		return
+		if req.DocType == "design" && requirement != nil && requirement.DesignDocs != "" {
+			sourceSID = util.NewUUID()
+			freshSession = true
+		} else {
+			sendStatus(w, rc, "error", "尚未找到该阶段的会话，请先生成"+docLabel+"后再 refine。")
+			fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+			rc.Flush()
+			return
+		}
 	}
 	systemPrompt, model := h.roleConfig(roleKey)
 
 	// The resumed conversation carries the doc + prior turns. Send only the
 	// user's latest message plus a steady instruction covering both mid-refine
-	// responses and the completion signal.
-	prompt := fmt.Sprintf("用户消息：\n%s\n\n", req.UserMessage) +
-		"请基于我们的对话上下文回应用户对「" + docLabel + "」的修改意见，给出具体修改建议。" +
-		"若用户确认修改已完成，在回复最后单独一行追加：[REFINE_COMPLETE]\n用中文。"
+	// responses and the completion signal. On the fresh-session fallback there
+	// is no prior conversation, so the doc itself is seeded into the prompt.
+	var prompt string
+	if freshSession {
+		prompt = "以下是当前的「" + docLabel + "」文档：\n\n" + requirement.DesignDocs +
+			fmt.Sprintf("\n\n用户消息：\n%s\n\n", req.UserMessage) +
+			"请基于上述文档回应用户对「" + docLabel + "」的修改意见，给出具体修改建议。" +
+			"若用户确认修改已完成，在回复最后单独一行追加：[REFINE_COMPLETE]\n用中文。"
+	} else {
+		prompt = fmt.Sprintf("用户消息：\n%s\n\n", req.UserMessage) +
+			"请基于我们的对话上下文回应用户对「" + docLabel + "」的修改意见，给出具体修改建议。" +
+			"若用户确认修改已完成，在回复最后单独一行追加：[REFINE_COMPLETE]\n用中文。"
+	}
 
 	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
 		Prompt:       prompt,
@@ -1887,7 +1910,7 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 		SystemPrompt: systemPrompt,
 		Model:        model,
 		SessionID:    sourceSID,
-		Resume:       true,
+		Resume:       !freshSession,
 	})
 
 	stdout, err := cmd.StdoutPipe()
@@ -1895,13 +1918,15 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 		sendStatus(w, rc, "error", "启动 Claude 失败: "+err.Error())
 		return
 	}
-	cmd.Stderr = nil
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 	if err := cmd.Start(); err != nil {
 		sendStatus(w, rc, "error", "启动 Claude 失败: "+err.Error())
 		return
 	}
 
 	var finalResult string
+	var errMsg string
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
 
@@ -1939,11 +1964,54 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 		case "result":
 			if evt["subtype"] == "success" {
 				finalResult, _ = evt["result"].(string)
+			} else if msg := claudeResultError("refine-doc", evt); msg != "" {
+				errMsg = msg
 			}
 		}
 	}
 
 	cmd.Wait()
+
+	// Nothing came back — typically a stale session (the claude conversation
+	// file is gone) or a CLI/transport failure. Previously this ended the
+	// stream with an empty `done`, and the frontend (which only rendered
+	// message/done events) showed nothing. Surface the failure, and for a
+	// stale session clear the stored id so the next attempt either re-runs the
+	// stage or takes the fresh-session fallback above.
+	if finalResult == "" {
+		stale := isStaleSessionError(nil, stderrBuf.String())
+		if errMsg == "" {
+			if tail := strings.TrimSpace(stderrBuf.String()); tail != "" {
+				if len(tail) > 300 {
+					tail = tail[len(tail)-300:]
+				}
+				errMsg = tail
+			}
+		}
+		if stale {
+			if req.DocType == "coding" {
+				_ = h.reqSvc.UpdateCodingSession(req.RequirementID, "")
+			} else {
+				_ = h.reqSvc.UpdateDesignSession(req.RequirementID, "")
+			}
+			sendStatus(w, rc, "error", "该阶段的会话已过期，请重试（将以新会话继续）。")
+		} else if errMsg != "" {
+			sendStatus(w, rc, "error", errMsg)
+		} else {
+			sendStatus(w, rc, "error", "Claude 未返回结果，请重试。")
+		}
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+
+	// The fresh-session fallback generated a new session id; persist it so the
+	// next refine/apply turn resumes this conversation instead of re-seeding.
+	if freshSession && req.RequirementID != "" {
+		if perr := h.reqSvc.UpdateDesignSession(req.RequirementID, sourceSID); perr != nil {
+			log.Printf("[refine-doc] failed to persist design session for %s: %v", req.RequirementID, perr)
+		}
+	}
 
 	// The authoritative conversation lives in the resumed claude session; this
 	// history string is only for client-side rendering of the latest exchange.
