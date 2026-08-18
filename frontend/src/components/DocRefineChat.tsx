@@ -346,8 +346,13 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         )}
       </div>
 
-      {/* Apply progress */}
-      {applyLines.length > 0 && (
+      {/* Apply progress. Rendered as soon as `applying` flips true — the panel
+          must NOT wait for the first SSE line, otherwise there is a window
+          where both apply buttons have hidden (refineComplete && !applying /
+          !refineComplete && !applying) and nothing on screen shows an in-flight
+          state, which reads as "apply already finished" during a minutes-long
+          regeneration. */}
+      {(applying || applyLines.length > 0) && (
         <div className="coding-panel" style={{ margin: '8px 0', maxHeight: 160 }}>
           {applyLines.map((l, i) => (
             <div key={i} className={`coding-line coding-line-${l.type}`}>{l.content}</div>
