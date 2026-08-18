@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { requirementsApi, projectsApi, API_BASE, statusLabels, type Requirement, type Project, mergeApi, type MergeState } from '../api/client';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
@@ -95,6 +95,7 @@ function CodingLines({ lines }: { lines: { type: string; content: string }[] }) 
 export default function RequirementDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const [req, setReq] = useState<Requirement | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
@@ -104,6 +105,10 @@ export default function RequirementDetail() {
   const codingRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventSource | null>(null);
   const extraDescRef = useRef('');
+  // One-shot guard for the "auto-start design after skip-analysis creation"
+  // flow. Set when the autoStartDesign navigation intent triggers the architect
+  // stage so a subsequent refresh / req change doesn't re-fire it.
+  const autoStartRef = useRef(false);
 
   // Branch modal state
   const [showBranchModal, setShowBranchModal] = useState(false);
@@ -392,6 +397,25 @@ export default function RequirementDetail() {
       setDesigning(false);
     }
   };
+
+  // Auto-start the architect-design flow when the user just created a
+  // requirement with skip_analysis (navigated here with the autoStartDesign
+  // intent flag). This replaces the manual "生成技术方案" click for the
+  // skip-analysis path. It runs the SAME code path as that button:
+  // transition('designing') then runArchitectDesign(). One-shot guarded so a
+  // later refresh / req change can't re-fire it; if a design job is already
+  // running or a design already exists, we leave it to the reconnect effect.
+  useEffect(() => {
+    if (!req || autoStartRef.current) return;
+    const auto = (location.state as { autoStartDesign?: boolean } | null)?.autoStartDesign;
+    if (!auto) return;
+    if (req.skip_analysis && req.status === 'draft'
+        && !req.design_job_id && !req.design_docs) {
+      autoStartRef.current = true;
+      transition('designing', '生成技术方案').then(() => runArchitectDesign());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [req]);
 
   // Reconnect to an in-flight design job when (re)entering the page — e.g.
   // after a refresh. The requirement carries design_job_id (server truth); if
