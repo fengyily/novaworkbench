@@ -283,6 +283,70 @@ func stripJSONFences(s string) string {
 	return strings.TrimSpace(s)
 }
 
+// GenerateProjectSummary produces a short (≤120 char) Chinese project summary
+// from the project's CLAUDE.md content. It uses the claude CLI in single-shot
+// text mode with the project directory as CWD so Claude can also read adjacent
+// files if needed. When the CLI is not in PATH it degrades to extracting the
+// first non-heading paragraph of CLAUDE.md (the "stub" philosophy — keep the
+// feature working without AI). A run-time failure returns an error so the
+// caller can keep the previously stored value instead of clobbering it.
+func (g *Gateway) GenerateProjectSummary(projectPath, claudeMD string) (string, error) {
+	if claudeMD == "" {
+		return "", fmt.Errorf("CLAUDE.md content is empty")
+	}
+	// CLI missing → degrade to a CLAUDE.md extraction so a summary still exists.
+	if _, err := exec.LookPath(g.binPath); err != nil {
+		return summaryFallback(claudeMD), nil
+	}
+	prompt := "你是一名技术文案。请基于以下项目的 CLAUDE.md 内容，用中文生成一段不超过 120 字的项目简介。" +
+		"要求：纯文本一段，不要 markdown 标题/列表/代码块，不要 emoji，不要前后缀解释，直接输出简介内容本身。\n\n" +
+		"CLAUDE.md 内容：\n" + claudeMD
+
+	ctx, cancel := context.WithTimeout(context.Background(), g.timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, g.binPath, "-p", prompt, "--output-format", "text")
+	cmd.Env = g.mergedEnv()
+	if projectPath != "" {
+		cmd.Dir = projectPath
+	}
+
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("claude summary failed: %w", err)
+	}
+	out := strings.TrimSpace(stdout.String())
+	if out == "" {
+		return summaryFallback(claudeMD), nil
+	}
+	return out, nil
+}
+
+// summaryFallback extracts the first non-heading, non-empty paragraph from a
+// CLAUDE.md body. Used when the claude CLI is unavailable so the project still
+// has a usable (if less polished) description.
+func summaryFallback(claudeMD string) string {
+	var para []string
+	for _, line := range strings.Split(claudeMD, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			if len(para) > 0 {
+				break
+			}
+			continue
+		}
+		if strings.HasPrefix(t, "#") {
+			if len(para) > 0 {
+				break
+			}
+			continue
+		}
+		para = append(para, t)
+	}
+	return strings.Join(para, " ")
+}
+
 // GenerateCode invokes Claude CLI to implement a requirement.
 // Uses stream-json + dangerously-skip-permissions so Claude can read and write files.
 // Returns the command; caller streams stdout. systemPrompt/model come from the

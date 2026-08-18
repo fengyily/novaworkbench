@@ -4,17 +4,19 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/service"
 )
 
 type ProjectHandler struct {
-	svc *service.ProjectService
+	svc     *service.ProjectService
+	scanner *service.ScannerService
 }
 
-func NewProjectHandler(svc *service.ProjectService) *ProjectHandler {
-	return &ProjectHandler{svc: svc}
+func NewProjectHandler(svc *service.ProjectService, scanner *service.ScannerService) *ProjectHandler {
+	return &ProjectHandler{svc: svc, scanner: scanner}
 }
 
 func (h *ProjectHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -129,4 +131,57 @@ func (h *ProjectHandler) UpdatePlatform(w http.ResponseWriter, r *http.Request) 
 	}
 	p, _ := h.svc.Get(id)
 	writeJSON(w, http.StatusOK, p)
+}
+
+// UpdateDescription saves a manually-edited project description and locks it
+// from automatic regeneration.
+// PUT /api/projects/{id}/description  body: {description}
+func (h *ProjectHandler) UpdateDescription(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
+		return
+	}
+	if utf8.RuneCountInString(req.Description) > 500 {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "简介不能超过 500 字")
+		return
+	}
+	if err := h.svc.UpdateDescription(id, req.Description); err != nil {
+		writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", err.Error())
+		return
+	}
+	p, _ := h.svc.Get(id)
+	writeJSON(w, http.StatusOK, p)
+}
+
+// RegenerateDescription clears the manual lock and regenerates the AI summary
+// from the current CLAUDE.md on demand.
+// POST /api/projects/{id}/description/regenerate
+func (h *ProjectHandler) RegenerateDescription(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := h.scanner.RegenerateDescription(id); err != nil {
+		writeError(w, http.StatusInternalServerError, "REGENERATE_FAILED", err.Error())
+		return
+	}
+	p, _ := h.svc.Get(id)
+	writeJSON(w, http.StatusOK, p)
+}
+
+// BackfillDescriptions generates a description for every project that lacks one
+// and isn't manually locked. Returns per-outcome counts.
+// POST /api/projects/descriptions/backfill
+func (h *ProjectHandler) BackfillDescriptions(w http.ResponseWriter, r *http.Request) {
+	updated, skipped, failed, err := h.scanner.BackfillDescriptions()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "BACKFILL_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{
+		"updated": updated,
+		"skipped": skipped,
+		"failed":  failed,
+	})
 }

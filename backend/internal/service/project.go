@@ -20,6 +20,13 @@ type ProjectService struct {
 	db *db.DB
 }
 
+// ProjectRef is a lightweight project handle (id + path) used by callers that
+// only need to locate the on-disk project (e.g. description backfill).
+type ProjectRef struct {
+	ID        string
+	LocalPath string
+}
+
 func NewProjectService(db *db.DB) *ProjectService {
 	return &ProjectService{db: db}
 }
@@ -27,7 +34,7 @@ func NewProjectService(db *db.DB) *ProjectService {
 func (s *ProjectService) List() ([]model.Project, error) {
 	rows, err := s.db.Query(`SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
-		deleted_at, deleted_dir
+		deleted_at, deleted_dir, description, description_manual, description_hash
 		FROM projects WHERE deleted_at IS NULL ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
@@ -39,7 +46,7 @@ func (s *ProjectService) List() ([]model.Project, error) {
 		var p model.Project
 		err := rows.Scan(&p.ID, &p.Name, &p.LocalPath, &p.RemoteURL, &p.Status,
 			&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
-			&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir)
+			&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash)
 		if err != nil {
 			return nil, err
 		}
@@ -52,11 +59,11 @@ func (s *ProjectService) Get(id string) (*model.Project, error) {
 	var p model.Project
 	err := s.db.QueryRow(`SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
-		deleted_at, deleted_dir
+		deleted_at, deleted_dir, description, description_manual, description_hash
 		FROM projects WHERE id = ? AND deleted_at IS NULL`, id).Scan(
 		&p.ID, &p.Name, &p.LocalPath, &p.RemoteURL, &p.Status,
 		&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
-		&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir)
+		&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("project not found")
 	}
@@ -71,11 +78,11 @@ func (s *ProjectService) getAny(id string) (*model.Project, error) {
 	var p model.Project
 	err := s.db.QueryRow(`SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
-		deleted_at, deleted_dir
+		deleted_at, deleted_dir, description, description_manual, description_hash
 		FROM projects WHERE id = ?`, id).Scan(
 		&p.ID, &p.Name, &p.LocalPath, &p.RemoteURL, &p.Status,
 		&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
-		&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir)
+		&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("project not found")
 	}
@@ -89,7 +96,7 @@ func (s *ProjectService) getAny(id string) (*model.Project, error) {
 func (s *ProjectService) ListTrash() ([]model.Project, error) {
 	rows, err := s.db.Query(`SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
-		deleted_at, deleted_dir
+		deleted_at, deleted_dir, description, description_manual, description_hash
 		FROM projects WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC`)
 	if err != nil {
 		return nil, err
@@ -101,7 +108,7 @@ func (s *ProjectService) ListTrash() ([]model.Project, error) {
 		var p model.Project
 		err := rows.Scan(&p.ID, &p.Name, &p.LocalPath, &p.RemoteURL, &p.Status,
 			&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
-			&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir)
+			&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash)
 		if err != nil {
 			return nil, err
 		}
@@ -358,4 +365,77 @@ func (s *ProjectService) UpdatePlatformConfig(id, platformType, tokenID string) 
 		return fmt.Errorf("project not found: %s", id)
 	}
 	return nil
+}
+
+// UpdateDescription saves a manually-edited project description and locks it
+// from automatic regeneration (description_manual=1). A manual edit always
+// wins over the scanner's auto-regeneration.
+func (s *ProjectService) UpdateDescription(id, desc string) error {
+	res, err := s.db.Exec(
+		`UPDATE projects SET description = ?, description_manual = 1, updated_at = ? WHERE id = ?`,
+		desc, time.Now(), id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("project not found: %s", id)
+	}
+	return nil
+}
+
+// SetAutoDescription writes an AI-generated description only when the row is
+// not manually locked. Returns true when the row was updated (false = locked
+// meanwhile, or the project vanished), so callers can distinguish a race-safe
+// skip from a real write.
+func (s *ProjectService) SetAutoDescription(id, desc, hash string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE projects SET description = ?, description_hash = ?, description_manual = 0, updated_at = ?
+		 WHERE id = ? AND description_manual = 0`,
+		desc, hash, time.Now(), id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ForceAutoDescription writes an AI-generated description and clears the manual
+// lock unconditionally. Used by the explicit "regenerate" action, where the
+// user asks to override their manual edit with a fresh AI summary.
+func (s *ProjectService) ForceAutoDescription(id, desc, hash string) error {
+	_, err := s.db.Exec(
+		`UPDATE projects SET description = ?, description_hash = ?, description_manual = 0, updated_at = ?
+		 WHERE id = ?`,
+		desc, hash, time.Now(), id)
+	return err
+}
+
+// DescriptionState returns the stored description, its manual-lock flag, and
+// the SHA256 of the CLAUDE.md content the description was generated from.
+func (s *ProjectService) DescriptionState(id string) (desc string, manual bool, hash string, err error) {
+	err = s.db.QueryRow(
+		`SELECT description, description_manual, description_hash FROM projects WHERE id = ?`, id).
+		Scan(&desc, &manual, &hash)
+	return
+}
+
+// ListProjectsNeedingDescription returns projects whose description is empty
+// and not manually locked — candidates for the backfill endpoint.
+func (s *ProjectService) ListProjectsNeedingDescription() ([]ProjectRef, error) {
+	rows, err := s.db.Query(
+		`SELECT id, local_path FROM projects WHERE description = '' AND description_manual = 0 AND deleted_at IS NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ProjectRef
+	for rows.Next() {
+		var r ProjectRef
+		if err := rows.Scan(&r.ID, &r.LocalPath); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, nil
 }

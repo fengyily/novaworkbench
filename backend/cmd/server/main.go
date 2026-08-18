@@ -46,7 +46,6 @@ func main() {
 	projectSvc := service.NewProjectService(database)
 	memorySvc := service.NewMemoryService(database)
 	knowledgeSvc := service.NewKnowledgeService(database)
-	scannerSvc := service.NewScannerService(database)
 	reqSvc := service.NewRequirementService(database)
 	platformSvc := service.NewPlatformTokenService(database)
 	roleSvc := service.NewRoleService(database)
@@ -64,8 +63,12 @@ func main() {
 	// (via settingSvc, an llm.EnvProvider) and injects them into every claude subprocess.
 	llmGateway := llm.New(settingSvc)
 
+	// Scanner depends on the LLM gateway (auto project description generation)
+	// and the project service (description persistence).
+	scannerSvc := service.NewScannerService(database, projectSvc, llmGateway)
+
 	// Handlers
-	projectH := handler.NewProjectHandler(projectSvc)
+	projectH := handler.NewProjectHandler(projectSvc, scannerSvc)
 	healthH := handler.NewHealthHandler()
 	dashboardH := handler.NewDashboardHandler(projectSvc)
 	fsH := handler.NewFsHandler()
@@ -115,6 +118,11 @@ func main() {
 
 	// Project platform config
 	mux.HandleFunc("PATCH /api/projects/{id}/platform", projectH.UpdatePlatform)
+
+	// Project description (AI-generated from CLAUDE.md, manual-edit lockable)
+	mux.HandleFunc("PUT /api/projects/{id}/description", projectH.UpdateDescription)
+	mux.HandleFunc("POST /api/projects/{id}/description/regenerate", projectH.RegenerateDescription)
+	mux.HandleFunc("POST /api/projects/descriptions/backfill", projectH.BackfillDescriptions)
 
 	// Weekly reports (AI-generated from git log + requirement data)
 	mux.HandleFunc("GET /api/projects/{id}/reports", reportH.List)

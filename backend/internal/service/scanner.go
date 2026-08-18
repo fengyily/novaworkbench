@@ -1,7 +1,12 @@
 package service
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+
 	"github.com/novaworkbench/backend/internal/db"
+	"github.com/novaworkbench/backend/internal/llm"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,11 +17,13 @@ import (
 )
 
 type ScannerService struct {
-	db *db.DB
+	db         *db.DB
+	projectSvc *ProjectService
+	llm        *llm.Gateway
 }
 
-func NewScannerService(db *db.DB) *ScannerService {
-	return &ScannerService{db: db}
+func NewScannerService(db *db.DB, projectSvc *ProjectService, llm *llm.Gateway) *ScannerService {
+	return &ScannerService{db: db, projectSvc: projectSvc, llm: llm}
 }
 
 type ScanResult struct {
@@ -100,8 +107,110 @@ func (s *ScannerService) Scan(projectID string) (*ScanResult, error) {
 		// non-fatal, continue
 	}
 
+	// Auto-generate / refresh the project description from CLAUDE.md. Only
+	// overwrites when the description is empty or CLAUDE.md changed and the
+	// description hasn't been manually locked. Non-fatal — never blocks a scan.
+	s.maybeGenerateDescription(projectID, projectPath)
+
 	result.Duration = time.Since(start).Round(time.Millisecond).String()
 	return result, nil
+}
+
+// sha256Hex returns the hex SHA256 of a trimmed string, used to detect whether
+// CLAUDE.md content changed since the description was last generated.
+func sha256Hex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+// maybeGenerateDescription regenerates the AI summary when CLAUDE.md changed
+// (or the description is empty) and the description is not manually locked.
+func (s *ScannerService) maybeGenerateDescription(projectID, projectPath string) {
+	if s.llm == nil || s.projectSvc == nil {
+		return
+	}
+	content, err := os.ReadFile(filepath.Join(projectPath, "CLAUDE.md"))
+	if err != nil {
+		return // no CLAUDE.md → nothing to summarize
+	}
+	hash := sha256Hex(strings.TrimSpace(string(content)))
+
+	desc, manual, curHash, err := s.projectSvc.DescriptionState(projectID)
+	if err != nil {
+		return
+	}
+	if manual {
+		return // user-edited, respect the lock
+	}
+	if desc != "" && curHash == hash {
+		return // already up to date
+	}
+
+	summary, err := s.llm.GenerateProjectSummary(projectPath, string(content))
+	if err != nil || summary == "" {
+		return // keep the old value on failure
+	}
+	s.projectSvc.SetAutoDescription(projectID, summary, hash)
+}
+
+// RegenerateDescription forces a fresh AI summary for a project: it ignores the
+// manual lock, regenerates from the current CLAUDE.md, and clears the lock so
+// future scans can resume auto-updating. Returns the new summary.
+func (s *ScannerService) RegenerateDescription(projectID string) (string, error) {
+	var projectPath string
+	if err := s.db.QueryRow("SELECT local_path FROM projects WHERE id = ?", projectID).Scan(&projectPath); err != nil {
+		return "", err
+	}
+	content, err := os.ReadFile(filepath.Join(projectPath, "CLAUDE.md"))
+	if err != nil {
+		return "", fmt.Errorf("CLAUDE.md not found in project: %w", err)
+	}
+	hash := sha256Hex(strings.TrimSpace(string(content)))
+	summary, err := s.llm.GenerateProjectSummary(projectPath, string(content))
+	if err != nil {
+		return "", err
+	}
+	if summary == "" {
+		return "", fmt.Errorf("生成简介失败：返回为空")
+	}
+	if err := s.projectSvc.ForceAutoDescription(projectID, summary, hash); err != nil {
+		return "", err
+	}
+	return summary, nil
+}
+
+// BackfillDescriptions generates a description for every project that lacks one
+// and isn't manually locked. Projects are processed sequentially (each call
+// honors CLAUDE_TIMEOUT) so the request returns per-project counts.
+func (s *ScannerService) BackfillDescriptions() (updated, skipped, failed int, err error) {
+	refs, err := s.projectSvc.ListProjectsNeedingDescription()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	for _, r := range refs {
+		content, err := os.ReadFile(filepath.Join(r.LocalPath, "CLAUDE.md"))
+		if err != nil {
+			failed++
+			continue
+		}
+		hash := sha256Hex(strings.TrimSpace(string(content)))
+		summary, err := s.llm.GenerateProjectSummary(r.LocalPath, string(content))
+		if err != nil || summary == "" {
+			failed++
+			continue
+		}
+		ok, err := s.projectSvc.SetAutoDescription(r.ID, summary, hash)
+		if err != nil {
+			failed++
+			continue
+		}
+		if ok {
+			updated++
+		} else {
+			skipped++ // locked concurrently
+		}
+	}
+	return updated, skipped, failed, nil
 }
 
 func (s *ScannerService) indexStructure(projectID, projectPath string, count *int) error {

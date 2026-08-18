@@ -22,7 +22,10 @@ CREATE TABLE IF NOT EXISTS projects (
 	claude_files TEXT DEFAULT '{}',
 	added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-	last_scanned_at DATETIME
+	last_scanned_at DATETIME,
+	description TEXT NOT NULL DEFAULT '',
+	description_manual INTEGER NOT NULL DEFAULT 0,
+	description_hash TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS memories (
@@ -186,6 +189,9 @@ var alterColumns = []string{
 	`ALTER TABLE weekly_reports ADD COLUMN git_author TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN deleted_at TEXT`,
 	`ALTER TABLE projects ADD COLUMN deleted_dir INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE projects ADD COLUMN description_manual INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE projects ADD COLUMN description_hash TEXT NOT NULL DEFAULT ''`,
 }
 
 var (
