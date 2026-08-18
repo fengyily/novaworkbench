@@ -147,6 +147,18 @@ CREATE TABLE IF NOT EXISTS settings (
 	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS claude_configs (
+	id            TEXT PRIMARY KEY,
+	name          TEXT NOT NULL DEFAULT '',
+	base_url      TEXT NOT NULL DEFAULT '',
+	auth_token    TEXT NOT NULL DEFAULT '',
+	models        TEXT NOT NULL DEFAULT '[]',
+	default_model TEXT NOT NULL DEFAULT '',
+	is_active     INTEGER NOT NULL DEFAULT 0,
+	created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS weekly_reports (
 	id           TEXT PRIMARY KEY,
 	project_id   TEXT NOT NULL,

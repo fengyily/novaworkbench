@@ -58,10 +58,21 @@ func main() {
 		log.Printf("[main] role seed: %v", err)
 	}
 
-	// Shared LLM gateway (wraps the claude CLI) — used by the requirement and wizard handlers.
-	// The gateway pulls ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL from the settings table
-	// (via settingSvc, an llm.EnvProvider) and injects them into every claude subprocess.
-	llmGateway := llm.New(settingSvc)
+	// Claude CLI configurations (multi-config). Constructed before the gateway
+	// so it can serve as the ClaudeEnvProvider. MigrateLegacy is one-way +
+	// idempotent: it seeds a single active "默认配置" from the legacy settings
+	// keys the first time the new table is empty.
+	claudeCfgSvc := service.NewClaudeConfigService(database)
+	if err := claudeCfgSvc.MigrateLegacy(); err != nil {
+		log.Printf("[main] claude config legacy migrate: %v", err)
+	}
+
+	// Shared LLM gateway (wraps the claude CLI). The active claude_configs row
+	// supplies ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL (via claudeCfgSvc, the
+	// ClaudeEnvProvider); settingSvc supplies the direct HTTP LLM channel for
+	// lightweight tasks. Switching the active config applies immediately on
+	// the next subprocess — no restart needed.
+	llmGateway := llm.New(claudeCfgSvc, settingSvc)
 
 	// Scanner depends on the LLM gateway (auto project description generation)
 	// and the project service (description persistence).
@@ -83,8 +94,9 @@ func main() {
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs)
 	mergeH := handler.NewMergeHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)
-	roleH := handler.NewRoleHandler(roleSvc)
+	roleH := handler.NewRoleHandler(roleSvc, claudeCfgSvc)
 	settingH := handler.NewSettingHandler(settingSvc)
+	claudeCfgH := handler.NewClaudeConfigHandler(claudeCfgSvc)
 	databaseH := handler.NewDatabaseHandler(database, cfg)
 
 	// Router
@@ -146,10 +158,16 @@ func main() {
 	mux.HandleFunc("PUT /api/settings/roles/{id}", roleH.Update)
 	mux.HandleFunc("POST /api/settings/roles/{id}/reset", roleH.Reset)
 
-	// Claude CLI configuration (settings) — auth token + base URL, injected as
-	// env vars into every claude subprocess.
-	mux.HandleFunc("GET /api/settings/claude", settingH.GetClaude)
-	mux.HandleFunc("PUT /api/settings/claude", settingH.UpdateClaude)
+	// Claude CLI configurations (settings) — multiple named configs (auth
+	// token + base URL + model list); the active one is injected as env vars
+	// into every claude subprocess, and switching it also re-points all roles
+	// to its default model.
+	mux.HandleFunc("GET /api/settings/claude/configs", claudeCfgH.List)
+	mux.HandleFunc("POST /api/settings/claude/configs", claudeCfgH.Create)
+	mux.HandleFunc("PUT /api/settings/claude/configs/{id}", claudeCfgH.Update)
+	mux.HandleFunc("DELETE /api/settings/claude/configs/{id}", claudeCfgH.Delete)
+	mux.HandleFunc("POST /api/settings/claude/configs/{id}/activate", claudeCfgH.Activate)
+	mux.HandleFunc("GET /api/settings/claude/configs/active", claudeCfgH.Active)
 
 	// Direct HTTP LLM channel (settings) — base URL + API key + model for
 	// lightweight tasks (requirement title distillation). Bypasses claude CLI.

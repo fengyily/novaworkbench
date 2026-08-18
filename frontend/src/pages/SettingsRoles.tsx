@@ -1,25 +1,19 @@
 import { useState, useEffect } from 'react';
-import { rolesApi, type Role } from '../api/client';
+import { rolesApi, claudeApi, type Role } from '../api/client';
 import './SettingsRoles.css';
-
-// Suggested model ids shown as a datalist; users may type any value.
-const MODEL_SUGGESTIONS = [
-  'claude-opus-5',
-  'claude-sonnet-5',
-  'claude-haiku-4-5',
-  'sonnet',
-  'opus',
-  'haiku',
-];
 
 export default function SettingsRoles() {
   const [roles, setRoles] = useState<Role[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [toast, setToast] = useState('');
   // Per-role working copy (editable buffer, not yet saved).
   const [drafts, setDrafts] = useState<Record<string, { system_prompt: string; model: string }>>({});
   const [savingId, setSavingId] = useState('');
   const [resettingId, setResettingId] = useState('');
+
+  // Model options from the active Claude config (drives the model dropdown).
+  const [activeModels, setActiveModels] = useState<string[]>([]);
 
   useEffect(() => {
     rolesApi.list()
@@ -31,7 +25,17 @@ export default function SettingsRoles() {
       })
       .catch(err => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false));
+
+    // Load the active Claude config's model list for the model dropdown.
+    claudeApi.active()
+      .then(res => setActiveModels(res?.models ?? []))
+      .catch(() => setActiveModels([]));
   }, []);
+
+  const showToast = (msg: string) => {
+    setToast(msg);
+    window.setTimeout(() => setToast(''), 4000);
+  };
 
   const draft = (r: Role) => drafts[r.id] ?? { system_prompt: r.system_prompt, model: r.model };
   const isDirty = (r: Role) => {
@@ -48,9 +52,12 @@ export default function SettingsRoles() {
     setError('');
     try {
       const d = draft(r);
-      const updated = await rolesApi.update(r.id, d);
+      const res = await rolesApi.update(r.id, d);
+      const updated = res.role;
       setRoles(prev => prev.map(x => (x.id === updated.id ? updated : x)));
       setDrafts(prev => ({ ...prev, [r.id]: { system_prompt: updated.system_prompt, model: updated.model } }));
+      if (res.warning) showToast(res.warning);
+      else showToast('已保存');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -74,6 +81,14 @@ export default function SettingsRoles() {
 
   if (loading) return <div className="settings-empty">加载中...</div>;
 
+  // Whether a role's current draft model is outside the active config list.
+  // When true we append a disabled "current value" option so it is not lost.
+  const modelOutOfList = (current: string) => {
+    if (!current) return false;
+    if (activeModels.length === 0) return false;
+    return !activeModels.includes(current);
+  };
+
   return (
     <div className="settings-roles">
       <div className="section-header">
@@ -81,20 +96,19 @@ export default function SettingsRoles() {
           <h3 className="settings-section-title">角色管理</h3>
           <p className="settings-section-desc">
             为每个角色编辑系统提示词（通过 <code>--system-prompt</code> 注入）并选择模型（通过 <code>--model</code> 注入）。
-            模型留空则使用 claude CLI 默认模型。
+            模型下拉来自当前生效 Claude 配置的模型列表，留空则使用 claude CLI 默认模型。
+            {activeModels.length === 0 && '（当前生效配置未配置模型列表，可先在「Claude 配置」中维护。）'}
           </p>
         </div>
       </div>
 
       {error && <div className="form-error">{error}</div>}
-
-      <datalist id="role-model-suggestions">
-        {MODEL_SUGGESTIONS.map(m => <option key={m} value={m} />)}
-      </datalist>
+      {toast && <div className="role-toast">{toast}</div>}
 
       {roles.map(r => {
         const d = draft(r);
         const dirty = isDirty(r);
+        const outOfList = modelOutOfList(d.model);
         return (
           <div className="role-card" key={r.id}>
             <div className="role-card-head">
@@ -105,13 +119,22 @@ export default function SettingsRoles() {
               </div>
               <div className="role-model-field">
                 <label>模型</label>
-                <input
+                <select
                   className="form-input role-model-input"
-                  list="role-model-suggestions"
-                  placeholder="留空 = CLI 默认"
-                  value={d.model}
-                  onChange={e => update(r.id, { model: e.target.value })}
-                />
+                  value={outOfList ? `__legacy:${d.model}` : d.model}
+                  onChange={e => {
+                    const v = e.target.value;
+                    update(r.id, { model: v.startsWith('__legacy:') ? v.slice(9) : v });
+                  }}
+                >
+                  <option value="">默认（不指定）</option>
+                  {activeModels.map(m => <option key={m} value={m}>{m}</option>)}
+                  {outOfList && (
+                    <option value={`__legacy:${d.model}`} disabled>
+                      当前值：{d.model}（不在列表中）
+                    </option>
+                  )}
+                </select>
               </div>
             </div>
 
