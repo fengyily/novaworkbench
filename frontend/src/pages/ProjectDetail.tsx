@@ -50,6 +50,13 @@ export default function ProjectDetail() {
   const [platformSaving, setPlatformSaving] = useState(false);
   const [platformSaved, setPlatformSaved] = useState(false);
 
+  // Overview: project description (AI-generated, manually editable)
+  const [descEditing, setDescEditing] = useState(false);
+  const [descDraft, setDescDraft] = useState('');
+  const [descSaving, setDescSaving] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+  const [descMsg, setDescMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
   // Requirements (shared by the requirements tab and the overview recent list)
   const [reqs, setReqs] = useState<Requirement[]>([]);
   const [reqsLoading, setReqsLoading] = useState(false);
@@ -243,6 +250,38 @@ export default function ProjectDetail() {
     } catch { /* ignore */ } finally { setPlatformSaving(false); }
   };
 
+  // ── Overview: project description ───────────────────────────────────────────
+  const handleSaveDesc = async () => {
+    if (!id) return;
+    setDescSaving(true);
+    setDescMsg(null);
+    try {
+      const updated = await projectsApi.updateDescription(id, descDraft);
+      setProject(updated);
+      setDescEditing(false);
+      setDescMsg({ ok: true, text: '已保存' });
+    } catch (e: unknown) {
+      setDescMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setDescSaving(false);
+    }
+  };
+
+  const handleRegenerateDesc = async () => {
+    if (!id || regenerating) return;
+    setRegenerating(true);
+    setDescMsg(null);
+    try {
+      const updated = await projectsApi.regenerateDescription(id);
+      setProject(updated);
+      setDescMsg({ ok: true, text: '已重新生成' });
+    } catch (e: unknown) {
+      setDescMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setRegenerating(false);
+    }
+  };
+
   // ── Review tab handlers ────────────────────────────────────────────────────
 
   const handleReview = useCallback(async (pr: PR) => {
@@ -407,6 +446,69 @@ export default function ProjectDetail() {
               <div className="info-row">
                 <span className="info-label">仓库</span>
                 <code className="info-code">{project.remote_url}</code>
+              </div>
+            )}
+          </div>
+
+          {/* Project description (AI-generated from CLAUDE.md, manual-edit lockable) */}
+          <div className="detail-section" style={{ marginTop: 16 }}>
+            <div className="section-header" style={{ marginBottom: 12 }}>
+              <span style={{ fontWeight: 600, fontSize: 14 }}>简介</span>
+              <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                {project.description_manual ? '✍ 手动修改' : '🤖 AI 生成'}
+              </span>
+            </div>
+
+            {descEditing ? (
+              <div>
+                <textarea
+                  className="form-input"
+                  rows={3}
+                  value={descDraft}
+                  onChange={e => setDescDraft(e.target.value)}
+                  placeholder="项目简介，建议 120 字以内..."
+                  autoFocus
+                />
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <button className="btn btn-primary btn-sm" onClick={handleSaveDesc} disabled={descSaving}>
+                    {descSaving ? '保存中...' : '保存'}
+                  </button>
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => { setDescEditing(false); setDescMsg(null); }}
+                    disabled={descSaving}
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <div style={{ color: 'var(--color-text-secondary)', fontSize: 13, whiteSpace: 'pre-wrap' }}>
+                  {project.description || '暂无简介'}
+                </div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => { setDescDraft(project.description); setDescEditing(true); setDescMsg(null); }}
+                  >
+                    编辑
+                  </button>
+                  <button
+                    className="btn btn-sm"
+                    onClick={handleRegenerateDesc}
+                    disabled={regenerating}
+                    title="根据当前 CLAUDE.md 重新由 AI 生成（会清除手动修改标记）"
+                  >
+                    {regenerating ? '生成中...' : '重新生成'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {descMsg && (
+              <div style={{ marginTop: 8, fontSize: 12, color: descMsg.ok ? 'var(--color-success)' : 'var(--color-error)' }}>
+                {descMsg.ok ? '✅ ' : '❌ '}{descMsg.text}
               </div>
             )}
           </div>

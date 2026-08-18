@@ -18,6 +18,9 @@ type Project struct {
 	LastScannedAt   *time.Time `json:"last_scanned_at,omitempty"`
 	DeletedAt       *string    `json:"deleted_at,omitempty"`
 	DeletedDir      int        `json:"deleted_dir"`
+	Description      string     `json:"description"`
+	DescriptionManual bool      `json:"description_manual"`
+	DescriptionHash  string     `json:"-"`
 }
 
 type AddProjectRequest struct {

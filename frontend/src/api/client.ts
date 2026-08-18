@@ -60,6 +60,8 @@ export interface Project {
   last_scanned_at?: string;
   deleted_at?: string;
   deleted_dir?: number;
+  description: string;
+  description_manual: boolean;
 }
 
 export interface DashboardData {
@@ -86,6 +88,17 @@ export const projectsApi = {
   restore: (id: string) => api.post<Project>(`/api/projects/${id}/restore`, {}),
   updatePlatform: (id: string, platform_type: string, platform_token_id: string) =>
     api.patch<Project>(`/api/projects/${id}/platform`, { platform_type, platform_token_id }),
+  // Save a manually-edited description; locks it from auto-regeneration.
+  updateDescription: (id: string, description: string) =>
+    api.put<Project>(`/api/projects/${id}/description`, { description }),
+  // Clear the manual lock and regenerate the AI summary from CLAUDE.md on demand.
+  regenerateDescription: (id: string) =>
+    api.post<Project>(`/api/projects/${id}/description/regenerate`, {}),
+  // One-shot: generate a description for every project that lacks one.
+  backfillDescriptions: () =>
+    api.post<{ updated: number; skipped: number; failed: number }>(
+      '/api/projects/descriptions/backfill', {},
+    ),
 };
 
 export const dashboardApi = {

@@ -45,6 +45,9 @@ export function ProjectsList() {
   // Restore busy state (per-project id)
   const [restoringId, setRestoringId] = useState<string | null>(null);
 
+  // One-shot backfill of missing AI descriptions
+  const [backfilling, setBackfilling] = useState(false);
+
   const loadActive = useCallback(() => {
     setLoading(true);
     projectsApi.list()
@@ -123,6 +126,21 @@ export function ProjectsList() {
       setError((e as Error).message);
     } finally {
       setRestoringId(null);
+    }
+  };
+
+  const handleBackfill = async () => {
+    if (backfilling) return;
+    setBackfilling(true);
+    setError(null);
+    try {
+      const res = await projectsApi.backfillDescriptions();
+      setToast(`补齐完成：生成 ${res.updated}，跳过 ${res.skipped}，失败 ${res.failed}`);
+      await loadActive();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBackfilling(false);
     }
   };
 
@@ -230,9 +248,19 @@ export function ProjectsList() {
             {view === 'active' ? '🗑 回收站' : '← 返回项目列表'}
           </button>
           {view === 'active' && (
-            <button className="btn btn-primary" onClick={() => navigate('/projects/add')}>
-              + 添加
-            </button>
+            <>
+              <button
+                className="btn"
+                onClick={handleBackfill}
+                disabled={backfilling}
+                title="为缺少简介的项目自动生成 AI 简介"
+              >
+                {backfilling ? '生成中…' : '🤖 生成缺失简介'}
+              </button>
+              <button className="btn btn-primary" onClick={() => navigate('/projects/add')}>
+                + 添加
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -265,6 +293,7 @@ export function ProjectsList() {
           <thead>
             <tr>
               <th>名称</th>
+              <th>简介</th>
               <th>类型</th>
               <th>路径</th>
               <th>状态</th>
@@ -282,6 +311,11 @@ export function ProjectsList() {
                   onClick={view === 'active' ? () => navigate(`/projects/${p.id}`) : undefined}
                 >
                   <td className="project-name">{p.name}</td>
+                  <td className="project-desc-cell">
+                    <div className="project-desc-clamp">
+                      {p.description || <span style={{ color: 'var(--color-text-muted)' }}>暂无简介</span>}
+                    </div>
+                  </td>
                   <td><span className="type-tag">{p.project_type || 'Unknown'}</span></td>
                   <td className="path-cell" style={{ wordBreak: 'break-all' }}>
                     {p.local_path}
