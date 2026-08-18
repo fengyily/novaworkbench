@@ -179,6 +179,12 @@ export interface Requirement {
   sprint: string; created_by: string; analysis_session_id: string;
   design_session_id: string; design_job_id: string; analysis_job_id: string; apply_job_id: string; coding_session_id: string;
   skip_analysis: boolean;
+  // Effective model each stage ran with on its last successful run. Empty when
+  // the stage has not run yet; "默认模型" when no explicit model was specified.
+  analyst_model: string;
+  architect_model: string;
+  developer_model: string;
+  reviewer_model: string;
   created_at: string; updated_at: string;
   completed_at?: string;
 }
@@ -235,6 +241,9 @@ export interface RunJob {
   job_id: string;
   status: 'running' | 'done' | 'error';
   exit_code: number;
+  // Effective model the job ran with (see backend WizardHandler.effectiveModel).
+  // Empty for jobs that predate this field or never resolved a model.
+  model?: string;
   log: { type: string; content: string }[];
   started_at: string;
   finished_at: string;

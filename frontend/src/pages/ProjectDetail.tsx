@@ -79,6 +79,10 @@ export default function ProjectDetail() {
   const [submitting, setSubmitting] = useState(false);
   const [submitMsg, setSubmitMsg] = useState('');
   const [extraRequirements, setExtraRequirements] = useState('');
+  // Effective model the latest review ran with (empty until the job finishes).
+  // Fetched from the job snapshot on job_done so the UI can show which model
+  // performed the review (the reviewer role's model or the CLI default).
+  const [reviewModel, setReviewModel] = useState('');
   const reviewEsRef = useRef<EventSource | null>(null);
   const reviewPanelRef = useRef<HTMLDivElement>(null);
 
@@ -291,6 +295,7 @@ export default function ProjectDetail() {
     setReviewDone(false);
     setCommentBody('');
     setSubmitMsg('');
+    setReviewModel('');
     reviewEsRef.current?.close();
 
     try {
@@ -300,6 +305,15 @@ export default function ProjectDetail() {
 
       const messageLines: string[] = [];
 
+      // Fetch the job snapshot to read the effective model the review ran with
+      // (the SSE stream doesn't carry it). Best-effort — a failed fetch just
+      // leaves the model line hidden.
+      const fetchReviewModel = () => {
+        runnerApi.getJob(job_id)
+          .then(job => { if (job.model) setReviewModel(job.model); })
+          .catch(() => { /* model is display-only */ });
+      };
+
       es.onmessage = (e) => {
         try {
           const data = JSON.parse(e.data);
@@ -308,6 +322,7 @@ export default function ProjectDetail() {
             setReviewDone(true);
             setReviewingPR(null);
             es.close();
+            fetchReviewModel();
           } else if (data.content) {
             setReviewLines(prev => [...prev, { type: data.type, content: data.content }]);
             if (data.type === 'message') messageLines.push(data.content);
@@ -321,6 +336,7 @@ export default function ProjectDetail() {
         setReviewDone(true);
         setReviewingPR(null);
         es.close();
+        fetchReviewModel();
       };
     } catch (err: unknown) {
       setReviewLines([{ type: 'error', content: err instanceof Error ? err.message : String(err) }]);
@@ -809,7 +825,7 @@ export default function ProjectDetail() {
                 </span>
                 {reviewDone && (
                   <button className="btn btn-secondary btn-sm" onClick={() => {
-                    setReviewLines([]); setReviewDone(false); setCommentBody(''); setSubmitMsg('');
+                    setReviewLines([]); setReviewDone(false); setCommentBody(''); setSubmitMsg(''); setReviewModel('');
                   }}>
                     清除
                   </button>
@@ -823,6 +839,11 @@ export default function ProjectDetail() {
                   <div className="coding-line coding-line-tool_call">● Claude 正在审查代码...</div>
                 )}
               </div>
+              {reviewDone && reviewModel && (
+                <div className="review-model-line">
+                  🤖 本次 review 使用模型：<code>{reviewModel}</code>
+                </div>
+              )}
             </div>
           )}
 

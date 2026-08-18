@@ -27,9 +27,14 @@ type Job struct {
 	StartedAt     time.Time `json:"started_at"`
 	FinishedAt    time.Time `json:"finished_at"`
 	ExitCode      int       `json:"exit_code"`
-	Log           []LogLine `json:"log"`
-	mu            sync.RWMutex
-	subs          []chan LogLine
+	// Model is the effective model the job ran with (see
+	// WizardHandler.effectiveModel). Set by the handler that owns the job so
+	// GetJob can surface it to the UI even while the job is still in the
+	// in-memory ring buffer (the durable job_logs copy is written on finish).
+	Model string    `json:"model"`
+	Log   []LogLine `json:"log"`
+	mu    sync.RWMutex
+	subs  []chan LogLine
 }
 
 func (j *Job) Append(line LogLine) {

@@ -22,6 +22,15 @@ type Requirement struct {
 	ApplyJobID         string     `json:"apply_job_id"`    // active apply-doc JobStore job id; empty when no apply is running
 	CodingSessionID    string     `json:"coding_session_id"`
 	SkipAnalysis       bool       `json:"skip_analysis"` // when true, architect-design runs a fresh session instead of forking the analyst session
+	// Effective model used by each stage on its last successful run. Empty when
+	// the stage has not run yet (or for legacy rows predating this column).
+	// The claude CLI does not report the resolved model in stream-json, so we
+	// persist the value we computed + passed via --model (or the "默认模型"
+	// display literal when no model was specified). See WizardHandler.effectiveModel.
+	AnalystModel       string     `json:"analyst_model"`
+	ArchitectModel     string     `json:"architect_model"`
+	DeveloperModel     string     `json:"developer_model"`
+	ReviewerModel      string     `json:"reviewer_model"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
 	CompletedAt        *time.Time `json:"completed_at,omitempty"`

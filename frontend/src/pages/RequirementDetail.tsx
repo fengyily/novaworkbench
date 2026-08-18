@@ -967,10 +967,23 @@ export default function RequirementDetail() {
         {STEPS.map((s, i) => {
           const isDone = stageIndex > i || (stage === 'done');
           const isActive = stageIndex === i;
+          // Effective model each stage ran with on its last successful run.
+          // Empty when the stage hasn't run yet (or predates this column);
+          // only render the badge when there's a value to show.
+          const stageModel = (
+            s.key === 'analyst' ? req.analyst_model
+              : s.key === 'architect' ? req.architect_model
+                : req.developer_model
+          );
           return (
             <div key={s.key} className={`stage-step${isActive ? ' active' : ''}${isDone ? ' done' : ''}`}>
               <span className="stage-num">{isDone ? '✅' : s.icon}</span>
               <span className="stage-label">{s.label}</span>
+              {stageModel && (
+                <span className="stage-model-tag" title={`${s.label}使用的模型`}>
+                  🤖 {stageModel}
+                </span>
+              )}
               {i < STEPS.length - 1 && <span className="stage-sep">→</span>}
             </div>
           );
@@ -1014,6 +1027,15 @@ export default function RequirementDetail() {
           </details>
         );
       })()}
+
+      {/* Reviewer model — shown only when a review run recorded its model on
+          this requirement (review is project-level today, so this stays empty
+          until/unless a review is linked to the requirement). */}
+      {req.reviewer_model && (
+        <div className="review-model-line">
+          🛡️ 代码审查模型：<code>{req.reviewer_model}</code>
+        </div>
+      )}
 
       {/* ── Analyst stage ── */}
       {/* While analyzing, DeepRefineChat is itself the section (own card + header),

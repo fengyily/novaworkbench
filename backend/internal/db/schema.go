@@ -196,6 +196,18 @@ var alterColumns = []string{
 	`ALTER TABLE requirements ADD COLUMN coding_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN analysis_job_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN apply_job_id TEXT NOT NULL DEFAULT ''`,
+	// Effective model per stage: persisted on each stage's successful run so
+	// the UI can show which model was actually used (the claude CLI does not
+	// report the resolved model in stream-json events). Empty when a stage
+	// has not run yet or (for legacy rows) before this column existed.
+	`ALTER TABLE requirements ADD COLUMN analyst_model TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN architect_model TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN developer_model TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN reviewer_model TEXT NOT NULL DEFAULT ''`,
+	// Effective model used by a finished background job (review / coding). The
+	// review stage is project-level (not bound to a requirement), so its model
+	// lives here alongside the job's log snapshot.
+	`ALTER TABLE job_logs ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN skip_analysis INTEGER NOT NULL DEFAULT 1`,
 	`ALTER TABLE weekly_reports ADD COLUMN git_branch TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE weekly_reports ADD COLUMN git_author TEXT NOT NULL DEFAULT ''`,

@@ -24,26 +24,48 @@ type ReviewHandler struct {
 	roleSvc     *service.RoleService
 	llm         *llm.Gateway
 	jobs        *store.JobStore
+	jobLogSvc   *service.JobLogService
+	claudeCfg   *service.ClaudeConfigService
 }
 
-func NewReviewHandler(projectSvc *service.ProjectService, platformSvc *service.PlatformTokenService, roleSvc *service.RoleService, llmGateway *llm.Gateway, jobs *store.JobStore) *ReviewHandler {
+func NewReviewHandler(projectSvc *service.ProjectService, platformSvc *service.PlatformTokenService, roleSvc *service.RoleService, llmGateway *llm.Gateway, jobs *store.JobStore, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService) *ReviewHandler {
 	return &ReviewHandler{
 		projectSvc:  projectSvc,
 		platformSvc: platformSvc,
 		roleSvc:     roleSvc,
 		llm:         llmGateway,
 		jobs:        jobs,
+		jobLogSvc:   jobLogSvc,
+		claudeCfg:   claudeCfg,
 	}
+}
+
+// effectiveModel resolves the model to record for a review run, mirroring
+// WizardHandler.effectiveModel: role override → active claude_config default
+// → the "默认模型" display literal. See wizard.go for the full precedence.
+func (h *ReviewHandler) effectiveModel(roleModel string) string {
+	var configDefault string
+	if h.claudeCfg != nil {
+		if _, dm, err := h.claudeCfg.ActiveModels(); err == nil {
+			configDefault = dm
+		}
+	}
+	return effectiveModelFromValues(roleModel, configDefault)
 }
 
 // roleConfig loads a role's system prompt + model by key. On error it returns
 // empty strings so a broken role config never blocks the review pipeline.
+//
+// The returned "model" is the EFFECTIVE model to persist for this review
+// (role override → active config default → "默认模型" literal). It is passed
+// to streamArgs verbatim ONLY when concrete — the display literal maps to ""
+// (omit --model) via cliModel so the CLI uses its built-in default.
 func (h *ReviewHandler) roleConfig(key string) (systemPrompt, model string) {
 	role, err := h.roleSvc.GetByKey(key)
 	if err != nil {
-		return "", ""
+		return "", h.effectiveModel("")
 	}
-	return role.SystemPrompt, role.Model
+	return role.SystemPrompt, h.effectiveModel(role.Model)
 }
 
 // PRListResponse wraps the PR list with a configuration flag.
@@ -278,6 +300,7 @@ func (h *ReviewHandler) runReview(job *store.Job, projectPath string, req StartR
 	// configurable "reviewer" role (system prompt); the -p prompt carries only
 	// the dynamic task content (PR context, branches, operation steps).
 	systemPrompt, model := h.roleConfig("reviewer")
+	job.Model = model // surface via GetJob while the job is still in-memory
 
 	prompt := fmt.Sprintf(
 		"请对以下 PR 的改动进行代码 Review。\n\n"+
@@ -294,7 +317,7 @@ func (h *ReviewHandler) runReview(job *store.Job, projectPath string, req StartR
 		Prompt:       prompt,
 		WorkDir:      projectPath,
 		SystemPrompt: systemPrompt,
-		Model:        model,
+		Model:        cliModel(model),
 	})
 
 	stdout, err := cmd.StdoutPipe()
@@ -369,7 +392,23 @@ func (h *ReviewHandler) runReview(job *store.Job, projectPath string, req StartR
 		}
 	}
 
-	job.Finish(0, store.JobDone)
+	// Persist the finished review job's log + effective model so a backend
+	// restart (or ring-buffer eviction) doesn't wipe the review record, and so
+	// the UI can show which model ran the review even after the in-memory Job
+	// is gone. Review jobs are project-level (not bound to a requirement), so
+	// requirement_id is left empty here.
+	status := store.JobDone
+	exitCode := 0
+	if err != nil {
+		status = store.JobError
+		exitCode = 1
+	}
+	lines, _, _ := job.Snapshot()
+	if perr := h.jobLogSvc.Save(job.ID, "", string(status), exitCode, job.StartedAt, job.FinishedAt, lines, model); perr != nil {
+		log.Printf("[Review] failed to persist job log %s: %v", job.ID, perr)
+	}
+
+	job.Finish(exitCode, status)
 }
 
 // detectBaseBranch reads origin/HEAD or falls back to main/master.
