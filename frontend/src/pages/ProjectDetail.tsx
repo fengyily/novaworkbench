@@ -10,6 +10,7 @@ import {
 } from '../api/client';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
 import { stripMarkdownPreview } from '../utils/preview';
+import { createEventStream, type EventStream } from '../api/stream';
 import './RequirementDetail.css';
 import './ProjectDetail.css';
 import './KnowledgePage.css';
@@ -96,7 +97,7 @@ export default function ProjectDetail() {
   const [submitting, setSubmitting] = useState(false);
   const [submitMsg, setSubmitMsg] = useState('');
   const [extraRequirements, setExtraRequirements] = useState('');
-  const reviewEsRef = useRef<EventSource | null>(null);
+  const reviewEsRef = useRef<EventStream | null>(null);
   const reviewPanelRef = useRef<HTMLDivElement>(null);
 
   // Token usage tab — project total (excl review), per-requirement totals,
@@ -330,34 +331,32 @@ export default function ProjectDetail() {
 
     try {
       const { job_id } = await reviewApi.startReview(id, pr.head_branch, pr.base_branch, pr.number, pr.title, extraRequirements);
-      const es = new EventSource(reviewApi.streamJobUrl(id, job_id));
-      reviewEsRef.current = es;
 
       const messageLines: string[] = [];
 
-      es.onmessage = (e) => {
-        try {
-          const data = JSON.parse(e.data);
+      reviewEsRef.current = createEventStream(
+        reviewApi.streamJobUrl(id, job_id),
+        (data) => {
           if (data.type === 'job_done') {
             setCommentBody(messageLines.join('\n\n'));
             setReviewDone(true);
             setReviewModel(data.model || '');
             setReviewingPR(null);
-            es.close();
+            reviewEsRef.current?.close();
+            reviewEsRef.current = null;
           } else if (data.content) {
             setReviewLines(prev => [...prev, { type: data.type, content: data.content }]);
             if (data.type === 'message') messageLines.push(data.content);
           }
-        } catch { /* ignore */ }
-      };
-
-      es.onerror = () => {
-        setReviewLines(prev => [...prev, { type: 'error', content: 'SSE 连接中断' }]);
-        setCommentBody(messageLines.join('\n\n'));
-        setReviewDone(true);
-        setReviewingPR(null);
-        es.close();
-      };
+        },
+        () => {
+          setReviewLines(prev => [...prev, { type: 'error', content: 'SSE 连接中断' }]);
+          setCommentBody(messageLines.join('\n\n'));
+          setReviewDone(true);
+          setReviewingPR(null);
+          reviewEsRef.current = null;
+        },
+      );
     } catch (err: unknown) {
       setReviewLines([{ type: 'error', content: err instanceof Error ? err.message : String(err) }]);
       setReviewingPR(null);

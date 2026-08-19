@@ -26,26 +26,47 @@ interface APIResponse<T> {
   error?: APIError;
 }
 
+// authHeaders returns the bearer Authorization header when a session token is
+// present. Use it for any raw fetch() that bypasses request<T> (streaming/SSE,
+// job snapshots) so those calls authenticate too.
+export function authHeaders(): Record<string, string> {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// handleUnauthorized drops the stale token, bounces to /login, then throws so
+// the caller stops. Shared by request<T> and authedFetch().
+function handleUnauthorized(): never {
+  clearToken();
+  if (location.pathname !== '/login') {
+    location.replace('/login');
+  }
+  throw new Error('UNAUTHENTICATED: 未登录或会话已过期，请重新登录');
+}
+
+// authedFetch wraps fetch() for call sites that need a raw Response (streaming
+// SSE bodies, job snapshots) but must still send the bearer token and handle a
+// 401 exactly like request<T> does.
+export async function authedFetch(url: string, init?: RequestInit): Promise<Response> {
+  const headers: Record<string, string> = {
+    ...(init?.headers as Record<string, string> | undefined),
+    ...authHeaders(),
+  };
+  const res = await fetch(url, { ...init, headers });
+  if (res.status === 401) handleUnauthorized();
+  return res;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const url = `${API_BASE}${path}`;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options?.headers as Record<string, string> | undefined),
   };
-  const token = getToken();
-  if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  const res = await fetch(url, { ...options, headers });
-
-  // 401 → drop the stale token and bounce to /login. Don't try to parse JSON
-  // (the body is small + irrelevant), just surface the redirect.
-  if (res.status === 401) {
-    clearToken();
-    if (location.pathname !== '/login') {
-      location.replace('/login');
-    }
-    throw new Error('UNAUTHENTICATED: 未登录或会话已过期，请重新登录');
-  }
+  // authedFetch injects the bearer token and throws (after clearing the token
+  // + redirecting) on 401.
+  const res = await authedFetch(url, { ...options, headers });
 
   const json: APIResponse<T> = await res.json();
 

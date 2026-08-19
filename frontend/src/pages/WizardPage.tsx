@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { API_BASE, projectsApi } from '../api/client';
+import { API_BASE, authedFetch, projectsApi } from '../api/client';
 import FolderPicker from '../components/FolderPicker';
 import './WizardPage.css';
 
@@ -55,7 +55,7 @@ export default function WizardPage() {
     setChatting(true);
 
     try {
-      const res = await fetch(`${API_BASE}/api/wizard/analyst-chat`, {
+      const res = await authedFetch(`${API_BASE}/api/wizard/analyst-chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -115,7 +115,7 @@ export default function WizardPage() {
     setCodeOutput([]);
 
     try {
-      const res = await fetch(`${API_BASE}/api/wizard/start-coding`, {
+      const res = await authedFetch(`${API_BASE}/api/wizard/start-coding`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

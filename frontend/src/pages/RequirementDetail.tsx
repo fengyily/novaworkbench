@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { requirementsApi, projectsApi, API_BASE, statusLabels, mergeApi, usageApi, usageTotalInput, stepLabels, type Requirement, type Project, type MergeState, type RequirementUsage } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, stepLabels, type Requirement, type Project, type MergeState, type RequirementUsage } from '../api/client';
+import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
 import ReactMarkdown from 'react-markdown';
@@ -103,7 +104,7 @@ export default function RequirementDetail() {
   const [codingLines, setCodingLines] = useState<{ type: string; content: string }[]>([]);
   const [coding, setCoding] = useState(false);
   const codingRef = useRef<HTMLDivElement>(null);
-  const esRef = useRef<EventSource | null>(null);
+  const esRef = useRef<EventStream | null>(null);
   const extraDescRef = useRef('');
   // One-shot guard for the "auto-start design after skip-analysis creation"
   // flow. Set when the autoStartDesign navigation intent triggers the architect
@@ -130,7 +131,7 @@ export default function RequirementDetail() {
   const [merging, setMerging] = useState(false);
   const [conflictFiles, setConflictFiles] = useState<string[] | null>(null);
   const [prLink, setPrLink] = useState('');
-  const mergeEsRef = useRef<EventSource | null>(null);
+  const mergeEsRef = useRef<EventStream | null>(null);
 
   // Streaming design state (architect phase)
   const [designLines, setDesignLines] = useState<{ type: string; content: string }[]>([]);
@@ -141,7 +142,7 @@ export default function RequirementDetail() {
   // hides behind the "思考过程" toggle and the user has no idea the run failed.
   const [designError, setDesignError] = useState(false);
   const designRef = useRef<HTMLDivElement>(null);
-  const designEsRef = useRef<EventSource | null>(null);
+  const designEsRef = useRef<EventStream | null>(null);
 
   // Collapsible "思考过程" toggle for the architect design stream.
   // While the design job is actively running the panel stays open; once it
@@ -315,16 +316,14 @@ export default function RequirementDetail() {
   // or re-showing the "开始制定技术方案" button.
   const streamDesignJob = useCallback((jobId: string) => {
     if (designEsRef.current) designEsRef.current.close();
-    const es = new EventSource(`${API_BASE}/api/wizard/jobs/${jobId}/stream`);
-    designEsRef.current = es;
     setDesigning(true);
     setDesignError(false);
 
-    es.onmessage = (e) => {
-      try {
-        const evt = JSON.parse(e.data);
+    designEsRef.current = createEventStream(
+      `/api/wizard/jobs/${jobId}/stream`,
+      (evt) => {
         if (evt.type === 'job_done') {
-          es.close();
+          designEsRef.current?.close();
           designEsRef.current = null;
           setDesigning(false);
           // Keep the stream panel open when the job errored so the red error
@@ -341,17 +340,16 @@ export default function RequirementDetail() {
         // Coalesce consecutive "模型思考中… (N tokens)" phase lines into one
         // updatable row instead of stacking one per heartbeat.
         setDesignLines(prev => appendLogLine(prev, { type: evt.type, content: evt.content ?? '' }));
-      } catch { /* skip malformed */ }
-    };
-    es.onerror = () => {
-      es.close();
-      designEsRef.current = null;
-      // The SSE link can drop before the final job_done frame lands (network
-      // blip, proxy timeout). Poll the snapshot; if the job has finished
-      // server-side, finalize + refresh; otherwise keep designing and let the
-      // reconnect effect (keyed on design_job_id) or a later poll reconcile.
-      pollDesignJob(jobId, 0);
-    };
+      },
+      () => {
+        designEsRef.current = null;
+        // The SSE link can drop before the final job_done frame lands (network
+        // blip, proxy timeout). Poll the snapshot; if the job has finished
+        // server-side, finalize + refresh; otherwise keep designing and let the
+        // reconnect effect (keyed on design_job_id) or a later poll reconcile.
+        pollDesignJob(jobId, 0);
+      },
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refresh]);
 
@@ -370,7 +368,7 @@ export default function RequirementDetail() {
       return;
     }
     setTimeout(() => {
-      fetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
+      authedFetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
         .then(r => r.json())
         .then(json => {
           if (!json.success) { setDesigning(false); refresh(); return; }
@@ -397,7 +395,7 @@ export default function RequirementDetail() {
     setDesignError(false);
 
     try {
-      const res = await fetch(`${API_BASE}/api/wizard/architect-design`, {
+      const res = await authedFetch(`${API_BASE}/api/wizard/architect-design`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requirement_id: id }),
@@ -439,7 +437,7 @@ export default function RequirementDetail() {
   useEffect(() => {
     if (!id || !req?.design_job_id) return;
     const jobId = req.design_job_id;
-    fetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
+    authedFetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
       .then(r => r.json())
       .then(json => {
         if (!json.success) { setDesigning(false); refresh(); return; }
@@ -495,15 +493,13 @@ export default function RequirementDetail() {
   // writing the localStorage "done" marker like the first coding pass.
   const streamJob = useCallback((jobId: string, opts?: { keepDone?: boolean }) => {
     if (esRef.current) esRef.current.close();
-    const es = new EventSource(`${API_BASE}/api/wizard/jobs/${jobId}/stream`);
-    esRef.current = es;
     setCoding(true);
 
-    es.onmessage = (e) => {
-      try {
-        const evt = JSON.parse(e.data);
+    esRef.current = createEventStream(
+      `/api/wizard/jobs/${jobId}/stream`,
+      (evt) => {
         if (evt.type === 'job_done') {
-          es.close();
+          esRef.current?.close();
           esRef.current = null;
           setCoding(false);
           const ok = evt.status === 'done' || evt.exit_code === 0;
@@ -521,14 +517,12 @@ export default function RequirementDetail() {
         // Coalesce consecutive "模型思考中… (N tokens)" phase lines into one
         // updatable row instead of stacking one per heartbeat.
         setCodingLines(prev => appendLogLine(prev, { type: evt.type, content: evt.content ?? '' }));
-      } catch { /* skip malformed */ }
-    };
-
-    es.onerror = () => {
-      es.close();
-      esRef.current = null;
-      setCoding(false);
-    };
+      },
+      () => {
+        esRef.current = null;
+        setCoding(false);
+      },
+    );
   }, [id, refresh]);
 
   const doStartCoding = async (bName: string, bBase: string) => {
@@ -557,7 +551,7 @@ export default function RequirementDetail() {
       await requirementsApi.updateStatus(id, 'developing').catch(() => {});
       await refresh();
 
-      const res = await fetch(`${API_BASE}/api/wizard/start-coding`, {
+      const res = await authedFetch(`${API_BASE}/api/wizard/start-coding`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -588,7 +582,7 @@ export default function RequirementDetail() {
     setBranchName(defaultBranch);
     setBaseBranch(defaultBase);
     setShowBranchModal(true);
-    fetch(`${API_BASE}/api/fs/git-branches?path=${encodeURIComponent(project.local_path)}`)
+    authedFetch(`${API_BASE}/api/fs/git-branches?path=${encodeURIComponent(project.local_path)}`)
       .then(r => r.json())
       .then(json => {
         if (json.success && Array.isArray(json.data?.branches)) {
@@ -615,7 +609,7 @@ export default function RequirementDetail() {
     // Reuse coding state + coding-panel; do NOT clear codingLines (continuity).
     setCoding(true);
     try {
-      const res = await fetch(`${API_BASE}/api/wizard/adjust-coding`, {
+      const res = await authedFetch(`${API_BASE}/api/wizard/adjust-coding`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -647,36 +641,46 @@ export default function RequirementDetail() {
     } catch { /* not a git repo or not ready → keep null */ }
   }, [id]);
 
+  // applyMergeSignals derives conflictFiles / prLink from a full set of merge
+  // log lines (a "conflict" line drives the conflict panel, a "pr_link" line
+  // surfaces the create-PR link). Shared by the live job_done handler and the
+  // restore-on-refresh effect below.
+  const applyMergeSignals = useCallback((lines: { type: string; content: string }[]) => {
+    const conflict = lines.find(l => l.type === 'conflict');
+    if (conflict) {
+      try {
+        // content looks like "...[\"a\",\"b\"]"; pull out the JSON array.
+        const m = conflict.content.match(/\[[\s\S]*\]/);
+        setConflictFiles(m ? JSON.parse(m[0]) : []);
+      } catch { setConflictFiles([]); }
+    }
+    const link = lines.find(l => l.type === 'pr_link');
+    if (link) setPrLink(link.content);
+  }, []);
+
   // streamMergeJob subscribes to a merge/push/resolve job. It collects log lines
-  // into mergeLines and, on job_done, inspects the accumulated lines: a "conflict"
-  // line drives the conflict panel, a "pr_link" line surfaces the create-PR link.
+  // into mergeLines and, on job_done, inspects the accumulated lines via
+  // applyMergeSignals. The active job id is persisted to localStorage (same
+  // pattern as the coding job) so a page refresh can reload the finished log
+  // from the durable job_logs store.
   const streamMergeJob = useCallback((jobId: string) => {
     if (mergeEsRef.current) mergeEsRef.current.close();
-    const es = new EventSource(`${API_BASE}/api/wizard/jobs/${jobId}/stream`);
-    mergeEsRef.current = es;
     setMerging(true);
     setConflictFiles(null);
+    if (id) localStorage.setItem(`merge_job_${id}`, jobId);
 
     let acc: { type: string; content: string }[] = [];
-    es.onmessage = (e) => {
-      try {
-        const evt = JSON.parse(e.data);
+    mergeEsRef.current = createEventStream(
+      `/api/wizard/jobs/${jobId}/stream`,
+      (evt) => {
         if (evt.type === 'job_done') {
-          es.close();
+          mergeEsRef.current?.close();
           mergeEsRef.current = null;
           setMerging(false);
           const exitOk = evt.status === 'done' || evt.exit_code === 0;
-          // Resolve conflict / pr_link signals from the accumulated log.
+          if (id) localStorage.setItem(`merge_job_${id}`, `done:${jobId}`);
           const conflict = acc.find(l => l.type === 'conflict');
-          if (conflict) {
-            try {
-              // content looks like "...[\"a\",\"b\"]"; pull out the JSON array.
-              const m = conflict.content.match(/\[[\s\S]*\]/);
-              setConflictFiles(m ? JSON.parse(m[0]) : []);
-            } catch { setConflictFiles([]); }
-          }
-          const link = acc.find(l => l.type === 'pr_link');
-          if (link) setPrLink(link.content);
+          applyMergeSignals(acc);
           if (exitOk && !conflict) refreshMergeState();
           return;
         }
@@ -685,14 +689,13 @@ export default function RequirementDetail() {
         // updatable row instead of stacking one per heartbeat.
         acc = appendLogLine(acc, line);
         setMergeLines(prev => appendLogLine(prev, line));
-      } catch { /* skip malformed */ }
-    };
-    es.onerror = () => {
-      es.close();
-      mergeEsRef.current = null;
-      setMerging(false);
-    };
-  }, [refreshMergeState]);
+      },
+      () => {
+        mergeEsRef.current = null;
+        setMerging(false);
+      },
+    );
+  }, [id, applyMergeSignals, refreshMergeState]);
 
   const openMergeModal = async (mode: 'local' | 'push') => {
     if (!req || !id) return;
@@ -780,6 +783,34 @@ export default function RequirementDetail() {
     }
   };
 
+  // Restore the last merge / push / resolve job log when returning to this page.
+  // The job id is persisted to localStorage (see streamMergeJob); GetJob replays
+  // the durable job_logs snapshot, so the finished push/PR log + pr_link survive
+  // a refresh. Same pattern as the coding job restore below.
+  useEffect(() => {
+    if (!id) return;
+    const saved = localStorage.getItem(`merge_job_${id}`);
+    if (!saved) return;
+
+    const savedJobId = saved.startsWith('done:') ? saved.slice(5) : saved;
+
+    authedFetch(`${API_BASE}/api/wizard/jobs/${savedJobId}`)
+      .then(r => r.json())
+      .then(json => {
+        if (!json.success) {
+          localStorage.removeItem(`merge_job_${id}`);
+          return;
+        }
+        const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
+        if (!log || log.length === 0) return;
+        setMergeLines(coalesceLogLines(log));
+        applyMergeSignals(log);
+        if (status === 'running') streamMergeJob(savedJobId);
+      })
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
   // Restore active coding job when returning to this page
   useEffect(() => {
     if (!id) return;
@@ -789,7 +820,7 @@ export default function RequirementDetail() {
     const isDone = saved.startsWith('done:');
     const savedJobId = isDone ? saved.slice(5) : saved;
 
-    fetch(`${API_BASE}/api/wizard/jobs/${savedJobId}`)
+    authedFetch(`${API_BASE}/api/wizard/jobs/${savedJobId}`)
       .then(r => r.json())
       .then(json => {
         if (!json.success) {

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { reportsApi, type WeeklyReport, type ReportGitInfo, type GenerateReportBody } from '../api/client';
+import { createEventStream, type EventStream } from '../api/stream';
 import MarkdownViewer from '../components/MarkdownViewer';
 import './ProjectWeeklyReport.css';
 
@@ -43,7 +44,7 @@ export default function ProjectWeeklyReport({ projectId }: { projectId: string }
   const [generating, setGenerating] = useState(false);
   const [genLines, setGenLines] = useState<{ type: string; content: string }[]>([]);
   const [genError, setGenError] = useState('');
-  const esRef = useRef<EventSource | null>(null);
+  const esRef = useRef<EventStream | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
   // History
@@ -124,26 +125,24 @@ export default function ProjectWeeklyReport({ projectId }: { projectId: string }
       if (diffAnalysis) body.diff_analysis = true;
       const { job_id } = await reportsApi.generate(projectId, body);
 
-      const es = new EventSource(reportsApi.streamJobUrl(projectId, job_id));
-      esRef.current = es;
-
-      es.onmessage = (e) => {
-        try {
-          const data = JSON.parse(e.data);
+      esRef.current = createEventStream(
+        reportsApi.streamJobUrl(projectId, job_id),
+        (data) => {
           if (data.type === 'job_done') {
             setGenerating(false);
-            es.close();
+            esRef.current?.close();
+            esRef.current = null;
             if (data.status === 'done') loadReports();
           } else if (data.content) {
             setGenLines(prev => [...prev, { type: data.type, content: data.content }]);
           }
-        } catch { /* ignore */ }
-      };
-      es.onerror = () => {
-        setGenLines(prev => [...prev, { type: 'error', content: 'SSE 连接中断' }]);
-        setGenerating(false);
-        es.close();
-      };
+        },
+        () => {
+          setGenLines(prev => [...prev, { type: 'error', content: 'SSE 连接中断' }]);
+          setGenerating(false);
+          esRef.current = null;
+        },
+      );
     } catch (err: unknown) {
       setGenError(err instanceof Error ? err.message : String(err));
       setGenerating(false);

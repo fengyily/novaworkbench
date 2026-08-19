@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { API_BASE, requirementsApi } from '../api/client';
+import { API_BASE, authedFetch, requirementsApi } from '../api/client';
+import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, type LogLine } from '../utils/logLines';
 
 interface Props {
@@ -40,12 +41,12 @@ export default function DeepRefineChat({
   // job's "message" log lines — on a page refresh the job replays its history,
   // so this reconstructs the full turn output even mid-flight.
   const aiTextRef = useRef('');
-  const esRef = useRef<EventSource | null>(null);
+  const esRef = useRef<EventStream | null>(null);
 
   const saveMessages = useCallback(async (msgs: ChatMessage[]) => {
     if (!reqId) return;
     try {
-      await fetch(`${API_BASE}/api/requirements/${reqId}/chat-history`, {
+      await authedFetch(`${API_BASE}/api/requirements/${reqId}/chat-history`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: JSON.stringify(msgs) }),
@@ -56,7 +57,7 @@ export default function DeepRefineChat({
   const loadMessages = useCallback(async (): Promise<ChatMessage[] | null> => {
     if (!reqId) return null;
     try {
-      const res = await fetch(`${API_BASE}/api/requirements/${reqId}/chat-history`);
+      const res = await authedFetch(`${API_BASE}/api/requirements/${reqId}/chat-history`);
       const json = await res.json();
       if (json.data && json.data !== '[]') {
         const parsed = JSON.parse(json.data);
@@ -108,14 +109,11 @@ export default function DeepRefineChat({
     setToolLog([]);
     aiTextRef.current = '';
 
-    const es = new EventSource(`${API_BASE}/api/wizard/jobs/${jobId}/stream`);
-    esRef.current = es;
-
-    es.onmessage = (e) => {
-      try {
-        const evt = JSON.parse(e.data);
+    esRef.current = createEventStream(
+      `/api/wizard/jobs/${jobId}/stream`,
+      (evt) => {
         if (evt.type === 'job_done') {
-          es.close();
+          esRef.current?.close();
           esRef.current = null;
           setChatting(false);
           setToolLog([]);
@@ -134,7 +132,7 @@ export default function DeepRefineChat({
           return;
         }
         if (evt.type === 'error') {
-          es.close();
+          esRef.current?.close();
           esRef.current = null;
           setChatting(false);
           setToolLog([]);
@@ -166,60 +164,58 @@ export default function DeepRefineChat({
             return next;
           });
         }
-      } catch { /* skip malformed SSE */ }
-    };
-
-    es.onerror = () => {
-      // EventSource auto-reconnects on transient drops; if the job is gone
-      // (backend restarted, ring evicted) the stream errors repeatedly. Poll
-      // the snapshot once; if it's gone, drop to idle so the user can retry.
-      es.close();
-      esRef.current = null;
-      fetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
-        .then(r => r.json())
-        .then(json => {
-          if (!json.success) {
-            // Job evicted (backend restart) — surface a recoverable error.
-            setChatting(false);
-            setToolLog([]);
-            setMessages(prev => {
-              const next = [...prev];
-              const idx = next.length - 1;
-              if (idx >= 0 && next[idx]?.isStreaming) {
-                next[idx] = { role: 'ai', content: '⚠️ 任务已丢失（服务可能重启）。点击重试重新开始。', isError: true };
-              }
-              return next;
-            });
-            return;
-          }
-          const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
-          if (status === 'running') {
-            // transient drop — re-arm the stream
-            streamAnalystJob(jobId);
-          } else {
-            // finished but we missed job_done — reconstruct from the snapshot.
-            aiTextRef.current = '';
-            for (const l of log || []) {
-              if (l.type === 'message') aiTextRef.current += l.content;
+      },
+      () => {
+        // The stream dropped (or the job is gone — backend restarted, ring
+        // evicted). Poll the snapshot once; if it's gone, drop to idle so the
+        // user can retry.
+        esRef.current = null;
+        authedFetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
+          .then(r => r.json())
+          .then(json => {
+            if (!json.success) {
+              // Job evicted (backend restart) — surface a recoverable error.
+              setChatting(false);
+              setToolLog([]);
+              setMessages(prev => {
+                const next = [...prev];
+                const idx = next.length - 1;
+                if (idx >= 0 && next[idx]?.isStreaming) {
+                  next[idx] = { role: 'ai', content: '⚠️ 任务已丢失（服务可能重启）。点击重试重新开始。', isError: true };
+                }
+                return next;
+              });
+              return;
             }
-            setChatting(false);
-            setToolLog([]);
-            const finalText = aiTextRef.current.trim();
-            setMessages(prev => {
-              const next = [...prev];
-              const idx = next.length - 1;
-              if (idx >= 0 && next[idx]?.isStreaming) {
-                next[idx] = { role: 'ai', content: finalText || '(无回复)' };
+            const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
+            if (status === 'running') {
+              // transient drop — re-arm the stream
+              streamAnalystJob(jobId);
+            } else {
+              // finished but we missed job_done — reconstruct from the snapshot.
+              aiTextRef.current = '';
+              for (const l of log || []) {
+                if (l.type === 'message') aiTextRef.current += l.content;
               }
-              const saved = next.filter(m => !m.isError && !m.isStreaming);
-              saveMessages(saved);
-              return next;
-            });
-            onTurnDone?.();
-          }
-        })
-        .catch(() => { setChatting(false); });
-    };
+              setChatting(false);
+              setToolLog([]);
+              const finalText = aiTextRef.current.trim();
+              setMessages(prev => {
+                const next = [...prev];
+                const idx = next.length - 1;
+                if (idx >= 0 && next[idx]?.isStreaming) {
+                  next[idx] = { role: 'ai', content: finalText || '(无回复)' };
+                }
+                const saved = next.filter(m => !m.isError && !m.isStreaming);
+                saveMessages(saved);
+                return next;
+              });
+              onTurnDone?.();
+            }
+          })
+          .catch(() => { setChatting(false); });
+      },
+    );
   }, [ensureStreamingPlaceholder, saveMessages, onTurnDone]);
 
   // Start a new analyst turn: POST to create the job, then stream it. The
@@ -240,7 +236,7 @@ export default function DeepRefineChat({
     saveMessages(withUser);
 
     try {
-      const res = await fetch(`${API_BASE}/api/wizard/analyst-chat`, {
+      const res = await authedFetch(`${API_BASE}/api/wizard/analyst-chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
