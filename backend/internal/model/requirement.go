@@ -21,6 +21,7 @@ type Requirement struct {
 	ApplyJobID         string `json:"apply_job_id"`    // active apply-doc JobStore job id; empty when no apply is running
 	CodingSessionID    string `json:"coding_session_id"`
 	SkipAnalysis       bool   `json:"skip_analysis"` // when true, architect-design runs a fresh session instead of forking the analyst session
+	SkipDesign         bool   `json:"skip_design"`   // when true, skip analyst+architect stages and go straight to coding ("直接开发")
 	BranchName         string `json:"branch_name"`   // dev branch checked out in the worktree; empty = legacy in-place checkout
 	WorktreePath       string `json:"worktree_path"` // absolute path of the isolated git worktree; empty = no worktree (legacy)
 	// Effective model actually dispatched to the claude CLI for each stage
@@ -42,6 +43,7 @@ type CreateRequirementReq struct {
 	Description  string `json:"description"`
 	Priority     string `json:"priority"`
 	SkipAnalysis *bool  `json:"skip_analysis"` // pointer: nil omits the field so Create defaults to true (skip) and Update preserves the existing value
+	SkipDesign   *bool  `json:"skip_design"`   // pointer: nil → Create defaults to false; Update never references this column so it is preserved automatically
 }
 
 type UpdateStatusReq struct {
