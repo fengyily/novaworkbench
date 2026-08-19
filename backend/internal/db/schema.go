@@ -180,10 +180,28 @@ CREATE TABLE IF NOT EXISTS job_logs (
 	status          TEXT NOT NULL DEFAULT '',
 	exit_code       INTEGER NOT NULL DEFAULT 0,
 	started_at      TEXT NOT NULL DEFAULT '',
-	finished_at     TEXT NOT NULL DEFAULT '',
+	finished_at    TEXT NOT NULL DEFAULT '',
 	log             TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_job_logs_req ON job_logs(requirement_id);
+
+CREATE TABLE IF NOT EXISTS token_usage (
+	id                      TEXT PRIMARY KEY,
+	requirement_id          TEXT,
+	project_id              TEXT NOT NULL,
+	job_id                  TEXT NOT NULL DEFAULT '',
+	step                    TEXT NOT NULL,
+	model                   TEXT NOT NULL DEFAULT '',
+	input_tokens            INTEGER NOT NULL DEFAULT 0,
+	output_tokens           INTEGER NOT NULL DEFAULT 0,
+	cache_creation_tokens   INTEGER NOT NULL DEFAULT 0,
+	cache_read_tokens       INTEGER NOT NULL DEFAULT 0,
+	meta                    TEXT NOT NULL DEFAULT '',
+	created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_usage_req    ON token_usage(requirement_id);
+CREATE INDEX IF NOT EXISTS idx_usage_proj   ON token_usage(project_id);
+CREATE INDEX IF NOT EXISTS idx_usage_created ON token_usage(created_at);
 `
 
 // alterColumns adds columns to older databases. ALTER TABLE fails when the

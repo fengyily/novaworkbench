@@ -32,9 +32,10 @@ type WizardHandler struct {
 	roleSvc    *service.RoleService
 	jobLogSvc  *service.JobLogService
 	claudeCfg  *service.ClaudeConfigService
+	usageSvc   usageRecorder
 }
 
-func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService) *WizardHandler {
+func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder) *WizardHandler {
 	return &WizardHandler{
 		projectSvc: projectSvc,
 		reqSvc:     reqSvc,
@@ -43,6 +44,7 @@ func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.Requir
 		roleSvc:    roleSvc,
 		jobLogSvc:  jobLogSvc,
 		claudeCfg:  claudeCfg,
+		usageSvc:   usageSvc,
 	}
 }
 
@@ -109,6 +111,22 @@ func (h *WizardHandler) effectiveModel(roleModel string) string {
 		}
 	}
 	return effectiveModelFromValues(roleModel, configDefault)
+}
+
+// usageCtxFor builds a usageCtx for one claude invocation. The returned ctx
+// records the result event's tokens (best-effort) under the given step.
+// projectID may be empty when the requirement couldn't be loaded (legacy
+// no-requirement coding path) — the row is still recorded for global counts.
+func (h *WizardHandler) usageCtxFor(step, requirementID, projectID, jobID, model, meta string) *usageCtx {
+	return &usageCtx{
+		Rec:           h.usageSvc,
+		RequirementID: requirementID,
+		ProjectID:     projectID,
+		JobID:         jobID,
+		Step:          step,
+		Model:         model,
+		Meta:          meta,
+	}
 }
 
 // resolveWorkDir returns the directory the current claude stage should run in:
@@ -303,7 +321,8 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		// must not tie the claude subprocess's lifetime to r.Context() (which
 		// is cancelled the moment the handler returns — that was the bug that
 		// killed the turn on page refresh).
-		finalResult, newSessionID, err := h.runAnalystTurn(context.Background(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, sessionID, !isFirstRound, sink)
+		analystUsage := h.usageCtxFor("analyst_chat", req.RequirementID, requirement.ProjectID, job.ID, model, "")
+		finalResult, newSessionID, err := h.runAnalystTurn(context.Background(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, sessionID, !isFirstRound, sink, analystUsage)
 		if err != nil {
 			log.Printf("[analyst-chat] turn failed: %v", err)
 			job.Append(store.LogLine{Type: "error", Content: err.Error()})
@@ -466,7 +485,12 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		req.UserMessage,
 	)
 
-	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, sourceSID, fork, w, rc)
+	developerProjectID := ""
+	if requirement != nil {
+		developerProjectID = requirement.ProjectID
+	}
+	developerUsage := h.usageCtxFor("developer_chat", req.RequirementID, developerProjectID, "", model, "")
+	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, sourceSID, fork, w, rc, developerUsage)
 	if err != nil {
 		log.Printf("[developer-chat] turn failed: %v", err)
 		sendStatus(w, rc, "error", err.Error())
@@ -931,7 +955,12 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		// until the turn's batched assistant event arrived. It also surfaces an
 		// immediate "🤖 Claude 已连接" phase on the system/init event and a
 		// tool_call label on content_block_start, giving live progress.
-		out := runClaudeStream(jobSink{job}, cmd, "start-coding")
+		codingProjectID := ""
+		if reqRow != nil {
+			codingProjectID = reqRow.ProjectID
+		}
+		codingUsage := h.usageCtxFor("coding", req.RequirementID, codingProjectID, job.ID, model, "")
+		out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage)
 
 		// Persist the forked coding session id so later coding refine turns can
 		// --resume it (jobs are in-memory; the id must live in the DB to survive
@@ -1070,7 +1099,8 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			Resume:       true,
 			Fork:         false,
 		})
-		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding")
+		adjustUsage := h.usageCtxFor("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "")
+		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding", adjustUsage)
 
 		// Stale --resume: the coding session file is gone (~/.claude/ cleaned
 		// or too old). Surface a clear error rather than silently starting a
@@ -1283,7 +1313,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 			Fork:           fork,
 			PermissionMode: "plan",
 		})
-		out := runClaudeStream(jobSink{job}, cmd, "architect-design")
+		out := runClaudeStream(jobSink{job}, cmd, "architect-design", h.usageCtxFor("architect_design", id, req.ProjectID, job.ID, model, ""))
 
 		if out.staleSession {
 			// The source conversation is gone. Clear whichever session id was
@@ -1588,7 +1618,12 @@ func (s jobSink) emit(line store.LogLine) {
 // frames). It does NOT emit terminal error/done frames — the caller owns those.
 // On a non-success result it returns the error message (and flags a stale
 // --resume so the caller can recover). The caller must NOT have started cmd.
-func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string) claudeStreamOutcome {
+//
+// uctx, when non-nil, records the result event's token usage as a token_usage
+// row (best-effort — errors are logged and never break the stream). Pass the
+// same uctx to both calls of a stale-fallback retry so each invocation's
+// tokens are recorded.
+func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCtx) claudeStreamOutcome {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return claudeStreamOutcome{errMsg: "启动 Claude 失败: " + err.Error()}
@@ -1816,6 +1851,10 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string) claudeStreamO
 					log.Printf("[%s] stale --resume detected (session not on disk)", scope)
 				}
 			}
+			// Record token usage from the result event (success or failure —
+			// tokens are consumed either way). Best-effort: recordFrom swallows
+			// all errors so a DB hiccup can never break the claude stream.
+			uctx.recordFrom(evt)
 			gotResult = true
 		}
 		if gotResult {
@@ -1892,7 +1931,7 @@ var analystFirstTurnDisallowedTools = []string{"Read", "Glob", "Grep", "Bash", "
 // JobStore flow it is a jobSink so the lines survive a page refresh via the job's
 // replay buffer. Returns the final result text and the session id that actually
 // landed on disk (which the caller persists).
-func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, sessionID string, resume bool, sink streamSink) (finalResult, newSessionID string, err error) {
+func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, sessionID string, resume bool, sink streamSink, uctx *usageCtx) (finalResult, newSessionID string, err error) {
 	prompt := resumePrompt
 	if !resume {
 		prompt = firstTurnPrompt()
@@ -1918,7 +1957,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 		Resume:          resume,
 		DisallowedTools: disallowed,
 	})
-	out := runClaudeStream(sink, cmd, "analyst-chat")
+	out := runClaudeStream(sink, cmd, "analyst-chat", uctx)
 
 	if out.staleSession && resume {
 		// Stale --resume: the session file is gone (typically a stale id left by
@@ -1937,7 +1976,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 			SessionID:       freshID,
 			DisallowedTools: analystFirstTurnDisallowedTools,
 		})
-		out = runClaudeStream(sink, cmd, "analyst-chat")
+		out = runClaudeStream(sink, cmd, "analyst-chat", uctx)
 		sessionID = freshID
 	}
 
@@ -1964,7 +2003,7 @@ var developerChatDisallowedTools = []string{"Write", "Edit"}
 // disallowed so the turn stays discussion-only. Returns the final result text
 // and the session id that actually landed on disk (a forked or fresh id differs
 // from the input; the caller persists it).
-func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, sessionID string, fork bool, w http.ResponseWriter, rc *http.ResponseController) (finalResult, newSessionID string, err error) {
+func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, sessionID string, fork bool, w http.ResponseWriter, rc *http.ResponseController, uctx *usageCtx) (finalResult, newSessionID string, err error) {
 	resume := sessionID != ""
 	prompt := resumePrompt
 	if !resume {
@@ -1982,7 +2021,7 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 		Fork:            fork,
 		DisallowedTools: developerChatDisallowedTools,
 	})
-	out := runClaudeStream(sseSink{w, rc}, cmd, "developer-chat")
+	out := runClaudeStream(sseSink{w, rc}, cmd, "developer-chat", uctx)
 
 	if out.staleSession && resume {
 		// Stale --resume: the target conversation no longer exists on disk.
@@ -2001,7 +2040,7 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 			SessionID:       freshID,
 			DisallowedTools: developerChatDisallowedTools,
 		})
-		out = runClaudeStream(sseSink{w, rc}, cmd, "developer-chat")
+		out = runClaudeStream(sseSink{w, rc}, cmd, "developer-chat", uctx)
 		sessionID = freshID
 	}
 
@@ -2234,7 +2273,12 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	// detection — the previous hand-rolled parser only handled the batched
 	// "assistant" event, so deltas arrived silently and a hung proxy wedged
 	// the SSE connection instead of failing fast.
-	out := runClaudeStream(sseSink{w: w, rc: rc}, cmd, "refine-doc")
+	refineProjectID := ""
+	if requirement != nil {
+		refineProjectID = requirement.ProjectID
+	}
+	refineUsage := h.usageCtxFor("refine_doc", req.RequirementID, refineProjectID, "", model, fmt.Sprintf("{\"doc_type\":%q}", req.DocType))
+	out := runClaudeStream(sseSink{w: w, rc: rc}, cmd, "refine-doc", refineUsage)
 
 	// The fresh-session fallback generated a new session id; persist it so the
 	// next refine/apply turn resumes this conversation instead of re-seeding.
@@ -2408,7 +2452,8 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 			SessionID:    sourceSID,
 			Resume:       true,
 		})
-		out := runClaudeStream(jobSink{job}, cmd, "apply-doc")
+		applyUsage := h.usageCtxFor("apply_doc", reqID, requirement.ProjectID, job.ID, model, fmt.Sprintf("{\"doc_type\":%q}", docType))
+		out := runClaudeStream(jobSink{job}, cmd, "apply-doc", applyUsage)
 
 		if out.staleSession {
 			// The stage's conversation is gone. Clear its session id so the user

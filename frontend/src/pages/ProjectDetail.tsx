@@ -1,11 +1,12 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   projectsApi, runnerApi, reviewApi, platformApi, requirementsApi, knowledgeApi,
+  usageApi, usageTotalInput,
   type Project, type RunStatus, type PR, type PRListResponse, type PlatformToken,
-  type Requirement, type KnowledgeItem, statusLabels,
+  type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage, statusLabels,
 } from '../api/client';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
 import { stripMarkdownPreview } from '../utils/preview';
@@ -13,7 +14,7 @@ import './RequirementDetail.css';
 import './ProjectDetail.css';
 import './KnowledgePage.css';
 
-type Tab = 'overview' | 'knowledge' | 'run' | 'requirements' | 'review' | 'weekly';
+type Tab = 'overview' | 'knowledge' | 'run' | 'requirements' | 'review' | 'weekly' | 'usage';
 
 const priorityDots: Record<string, string> = {
   high: '🔴', medium: '🟡', low: '🟢',
@@ -64,6 +65,19 @@ export default function ProjectDetail() {
   const [reqsLoaded, setReqsLoaded] = useState(false);
   const [showCreateReq, setShowCreateReq] = useState(false);
 
+  // Per-requirement token totals (excl review) — drives the Tokens column in
+  // the requirements list + overview. Loaded alongside reqs and refetched when
+  // a requirement is created so the column stays current.
+  const [reqUsage, setReqUsage] = useState<ReqUsage[]>([]);
+  const refreshReqUsage = useCallback((projectId: string) => {
+    usageApi.byRequirement(projectId).then(setReqUsage).catch(() => {});
+  }, []);
+  const reqUsageMap = useMemo(() => {
+    const m = new Map<string, ReqUsage>();
+    for (const r of reqUsage) m.set(r.requirement_id, r);
+    return m;
+  }, [reqUsage]);
+
   // Overview: recent requirements (height-adaptive)
   const [visibleCount, setVisibleCount] = useState(6);
   const recentSectionRef = useRef<HTMLDivElement>(null);
@@ -84,6 +98,22 @@ export default function ProjectDetail() {
   const [extraRequirements, setExtraRequirements] = useState('');
   const reviewEsRef = useRef<EventSource | null>(null);
   const reviewPanelRef = useRef<HTMLDivElement>(null);
+
+  // Token usage tab — project total (excl review), per-requirement totals,
+  // and the review breakdown (recorded but not counted in the total).
+  const [projectUsage, setProjectUsage] = useState<ProjectUsage | null>(null);
+  const [projectUsageLoading, setProjectUsageLoading] = useState(false);
+  useEffect(() => {
+    if (tab !== 'usage' || !id) return;
+    let active = true;
+    setProjectUsageLoading(true);
+    usageApi.project(id)
+      .then(data => { if (active) setProjectUsage(data); })
+      .catch(() => {})
+      .finally(() => { if (active) setProjectUsageLoading(false); });
+    return () => { active = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, id]);
 
   // Load project
   useEffect(() => {
@@ -170,6 +200,7 @@ export default function ProjectDetail() {
       .then(data => { if (active) { setReqs(data); setReqsLoaded(true); } })
       .catch(err => { if (active) setReqsError(err instanceof Error ? err.message : String(err)); })
       .finally(() => { if (active) setReqsLoading(false); });
+    refreshReqUsage(id);
     return () => { active = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, id, reqsLoaded]);
@@ -368,6 +399,13 @@ export default function ProjectDetail() {
       <td><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
       <td><span className={`status-badge status-${req.status}`}>{statusLabels[req.status] ?? req.status}</span></td>
       <td>{req.sprint ? <code className="pr-branch">{req.sprint}</code> : '—'}</td>
+      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
+        {(() => {
+          const u = reqUsageMap.get(req.id);
+          if (!u) return '—';
+          return `${usageTotalInput(u).toLocaleString()} / ${u.output_tokens.toLocaleString()}`;
+        })()}
+      </td>
       <td style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
         {req.updated_at ? new Date(req.updated_at).toLocaleDateString('zh-CN') : '—'}
       </td>
@@ -427,6 +465,9 @@ export default function ProjectDetail() {
         </button>
         <button className={`tab-btn${tab === 'review' ? ' active' : ''}`} onClick={() => setTab('review')}>
           代码 Review{reviewingPR ? ' ●' : ''}
+        </button>
+        <button className={`tab-btn${tab === 'usage' ? ' active' : ''}`} onClick={() => setTab('usage')}>
+          Token 用量
         </button>
         <button className={`tab-btn${tab === 'weekly' ? ' active' : ''}`} onClick={() => setTab('weekly')}>
           周报
@@ -614,6 +655,7 @@ export default function ProjectDetail() {
                       <th style={{ width: 90 }}>优先级</th>
                       <th style={{ width: 130 }}>状态</th>
                       <th style={{ width: 110 }}>Sprint</th>
+                      <th style={{ width: 130 }}>Tokens (入/出)</th>
                       <th style={{ width: 110 }}>更新时间</th>
                     </tr>
                   </thead>
@@ -700,6 +742,7 @@ export default function ProjectDetail() {
                     <th style={{ width: 90 }}>优先级</th>
                     <th style={{ width: 130 }}>状态</th>
                     <th style={{ width: 110 }}>Sprint</th>
+                    <th style={{ width: 130 }}>Tokens (入/出)</th>
                     <th style={{ width: 110 }}>更新时间</th>
                   </tr>
                 </thead>
@@ -725,6 +768,7 @@ export default function ProjectDetail() {
                 }
                 const data = await requirementsApi.list({ project_id: id });
                 setReqs(data);
+                refreshReqUsage(id);
               }}
             />
           )}
@@ -875,6 +919,138 @@ export default function ProjectDetail() {
       {tab === 'weekly' && id && (
         <div className="tab-content">
           <ProjectWeeklyReport projectId={id} />
+        </div>
+      )}
+
+      {/* ── Token usage ── */}
+      {tab === 'usage' && id && (
+        <div className="tab-content">
+          {projectUsageLoading ? (
+            <div className="tab-empty"><p>加载中…</p></div>
+          ) : !projectUsage ? (
+            <div className="tab-empty"><p>暂无数据</p></div>
+          ) : (
+            <>
+              {/* Project total (excludes review rows) */}
+              <div className="detail-section" style={{ marginBottom: 16 }}>
+                <div className="section-header" style={{ marginBottom: 12 }}>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>项目 Token 消耗</span>
+                  <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>不含代码审查</span>
+                </div>
+                <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+                  <div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>输入</div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 600 }}>
+                      {usageTotalInput(projectUsage.total).toLocaleString()}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>输出</div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 600, color: 'var(--color-primary)' }}>
+                      {projectUsage.total.output_tokens.toLocaleString()}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>缓存读</div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 16 }}>
+                      {projectUsage.total.cache_read_tokens.toLocaleString()}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>缓存建</div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 16 }}>
+                      {projectUsage.total.cache_creation_tokens.toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Per-requirement breakdown */}
+              <div className="detail-section" style={{ marginBottom: 16 }}>
+                <div className="section-header" style={{ marginBottom: 12 }}>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>按需求</span>
+                </div>
+                {projectUsage.by_requirement.length === 0 ? (
+                  <div className="tab-empty"><p>暂无需求 Token 消耗</p></div>
+                ) : (
+                  <div className="pr-list">
+                    <table className="pr-table">
+                      <thead>
+                        <tr>
+                          <th>需求 ID</th>
+                          <th style={{ width: 120 }}>输入</th>
+                          <th style={{ width: 120 }}>输出</th>
+                          <th style={{ width: 120 }}>缓存读</th>
+                          <th style={{ width: 120 }}>缓存建</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {projectUsage.by_requirement.map(r => {
+                          const matched = reqs.find(q => q.id === r.requirement_id);
+                          return (
+                            <tr key={r.requirement_id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/requirements/${r.requirement_id}`)}>
+                              <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+                                {matched?.title || r.requirement_id}
+                              </td>
+                              <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(r).toLocaleString()}</td>
+                              <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{r.output_tokens.toLocaleString()}</td>
+                              <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{r.cache_read_tokens.toLocaleString()}</td>
+                              <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{r.cache_creation_tokens.toLocaleString()}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Review breakdown (recorded, NOT counted in the total above) */}
+              <div className="detail-section">
+                <div className="section-header" style={{ marginBottom: 12 }}>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>代码审查消耗</span>
+                  <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>不计入项目总额</span>
+                </div>
+                {projectUsage.review.length === 0 ? (
+                  <div className="tab-empty"><p>暂无代码审查记录</p></div>
+                ) : (
+                  <div className="pr-list">
+                    <table className="pr-table">
+                      <thead>
+                        <tr>
+                          <th style={{ width: 70 }}>PR</th>
+                          <th>标题</th>
+                          <th style={{ width: 160 }}>分支</th>
+                          <th style={{ width: 110 }}>输入</th>
+                          <th style={{ width: 110 }}>输出</th>
+                          <th style={{ width: 110 }}>时间</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {projectUsage.review.map(rv => (
+                          <tr key={rv.id}>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                              {rv.pr_number ? `#${rv.pr_number}` : '—'}
+                            </td>
+                            <td className="pr-title">{rv.pr_title || '—'}</td>
+                            <td>{rv.branch ? <code className="pr-branch">{rv.branch}</code> : '—'}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{rv.input_tokens.toLocaleString()}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{rv.output_tokens.toLocaleString()}</td>
+                            <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                              {rv.created_at ? new Date(rv.created_at).toLocaleString('zh-CN') : '—'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+              <small style={{ color: 'var(--color-text-muted)', fontSize: 12, display: 'block', marginTop: 8 }}>
+                输入 = 直接输入 + 缓存读 + 缓存建。仅统计已完成的完整调用。
+              </small>
+            </>
+          )}
         </div>
       )}
 

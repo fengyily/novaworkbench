@@ -516,3 +516,73 @@ export const reportsApi = {
   remove: (projectId: string, reportId: string) =>
     api.delete<{ status: string }>(`/api/projects/${projectId}/reports/${reportId}`),
 };
+
+// Token usage — per-step / per-requirement / per-project aggregation. Review
+// rows are recorded but never counted in requirement or project totals; they
+// are surfaced separately in the project breakdown.
+export interface UsageTotals {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+}
+export interface StepUsage {
+  step: string;
+  label: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  count: number;
+}
+export interface RequirementUsage {
+  by_step: StepUsage[];
+  total: UsageTotals;
+}
+export interface ReqUsage {
+  requirement_id: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+}
+export interface ReviewUsage {
+  id: string;
+  job_id: string;
+  pr_number: number;
+  pr_title: string;
+  branch: string;
+  input_tokens: number;
+  output_tokens: number;
+  created_at: string;
+}
+export interface ProjectUsage {
+  total: UsageTotals;
+  by_requirement: ReqUsage[];
+  review: ReviewUsage[];
+}
+
+// stepLabels mirrors backend service.StepLabels so the UI shows Chinese step
+// names for any raw step code (e.g. rows recorded before a label was joined).
+export const stepLabels: Record<string, string> = {
+  requirement_create: '需求整理',
+  analyst_chat: '需求分析',
+  architect_design: '技术方案',
+  refine_doc: '方案精炼',
+  apply_doc: '方案应用',
+  coding: '编码开发',
+  adjust_coding: '追加调整',
+  developer_chat: '开发讨论',
+  merge: '合入解决',
+  review: '代码审查',
+};
+
+// totalInput counts cache reads/creations as billed input tokens.
+export const usageTotalInput = (t: { input_tokens: number; cache_creation_tokens: number; cache_read_tokens: number }): number =>
+  t.input_tokens + t.cache_creation_tokens + t.cache_read_tokens;
+
+export const usageApi = {
+  requirement: (id: string) => api.get<RequirementUsage>(`/api/usage/requirement/${id}`),
+  byRequirement: (projectId: string) => api.get<ReqUsage[]>(`/api/usage/by-requirement?project_id=${projectId}`),
+  project: (id: string) => api.get<ProjectUsage>(`/api/usage/project/${id}`),
+};

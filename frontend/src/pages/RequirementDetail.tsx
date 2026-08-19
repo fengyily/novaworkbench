@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { requirementsApi, projectsApi, API_BASE, statusLabels, type Requirement, type Project, mergeApi, type MergeState } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, statusLabels, mergeApi, usageApi, usageTotalInput, stepLabels, type Requirement, type Project, type MergeState, type RequirementUsage } from '../api/client';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
 import ReactMarkdown from 'react-markdown';
@@ -165,6 +165,18 @@ export default function RequirementDetail() {
   // PDF export state for the technical design doc.
   const [exporting, setExporting] = useState(false);
 
+  // Token usage for this requirement (per-step + total). Refreshed on mount
+  // and after each stage completes (refresh()), so the breakdown reflects the
+  // latest claude turns.
+  const [usage, setUsage] = useState<RequirementUsage | null>(null);
+  const [usageLoading, setUsageLoading] = useState(false);
+  const loadUsage = useCallback(async () => {
+    if (!id) return;
+    setUsageLoading(true);
+    try { setUsage(await usageApi.requirement(id)); } catch { /* ignore */ }
+    finally { setUsageLoading(false); }
+  }, [id]);
+
   // Copy a ready-to-paste resume command to the clipboard. Instead of just the
   // bare session id, we compose `cd "<project_path>" && claude --resume "<sid>"`
   // so the user can paste it straight into a shell and land in the right CWD.
@@ -234,13 +246,15 @@ export default function RequirementDetail() {
       setReq(r);
       projectsApi.get(r.project_id).then(setProject).catch(() => {});
     }).catch(() => {}).finally(() => setLoading(false));
-  }, [id]);
+    loadUsage();
+  }, [id, loadUsage]);
 
   const refresh = useCallback(async () => {
     if (!id) return;
     const updated = await requirementsApi.get(id);
     setReq(updated);
-  }, [id]);
+    loadUsage();
+  }, [id, loadUsage]);
 
   const parseDesign = (raw: string): DesignData => {
     try { return JSON.parse(raw); } catch { return { plan_markdown: raw }; }
@@ -1019,6 +1033,58 @@ export default function RequirementDetail() {
           </div>
         </div>
       )}
+
+      {/* Token usage — per-step breakdown + total for this requirement.
+          input = input_tokens + cache_creation + cache_read (billed input). */}
+      <div className="detail-section usage-section">
+        <div className="section-header" style={{ marginBottom: 10 }}>
+          <span style={{ fontWeight: 600, fontSize: 14 }}>Token 消耗</span>
+          {usageLoading && <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>刷新中…</span>}
+        </div>
+        {usage && usage.by_step.length > 0 ? (
+          <>
+            <table className="pr-table" style={{ marginBottom: 8 }}>
+              <thead>
+                <tr>
+                  <th>步骤</th>
+                  <th style={{ width: 110 }}>输入</th>
+                  <th style={{ width: 110 }}>输出</th>
+                  <th style={{ width: 110 }}>缓存读</th>
+                  <th style={{ width: 110 }}>缓存建</th>
+                  <th style={{ width: 60 }}>次数</th>
+                </tr>
+              </thead>
+              <tbody>
+                {usage.by_step.map(s => (
+                  <tr key={s.step}>
+                    <td>{s.label || stepLabels[s.step] || s.step}</td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(s).toLocaleString()}</td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.output_tokens.toLocaleString()}</td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_read_tokens.toLocaleString()}</td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_creation_tokens.toLocaleString()}</td>
+                    <td style={{ fontSize: 12 }}>{s.count}</td>
+                  </tr>
+                ))}
+                <tr style={{ borderTop: '2px solid var(--color-border)' }}>
+                  <td style={{ fontWeight: 600 }}>合计</td>
+                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{usageTotalInput(usage.total).toLocaleString()}</td>
+                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{usage.total.output_tokens.toLocaleString()}</td>
+                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{usage.total.cache_read_tokens.toLocaleString()}</td>
+                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{usage.total.cache_creation_tokens.toLocaleString()}</td>
+                  <td></td>
+                </tr>
+              </tbody>
+            </table>
+            <small style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+              输入 = 直接输入 + 缓存读 + 缓存建（均按计费输入计入）。仅统计已完成的完整调用。
+            </small>
+          </>
+        ) : (
+          <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
+            {usageLoading ? '加载中…' : '暂无 Token 消耗记录。完成一次分析 / 方案 / 编码后将在此展示。'}
+          </div>
+        )}
+      </div>
 
       {/* Stage stepper */}
       <div className="stage-stepper">
