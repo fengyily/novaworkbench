@@ -83,6 +83,8 @@ These drive two claude CLI flags in `Gateway.streamArgs` (used by `StreamCmd` / 
 
 `GenerateCode` returns an `*exec.Cmd` (unstarted) so the **handler** owns the lifecycle and parses the stream itself — this is the pattern for anything that needs live progress.
 
+`Gateway.mergedEnv` builds the child env for every claude spawn: it injects `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL` from the active `claude_configs` row (via `ClaudeEnvProvider`), and when a `--model` is passed it also pins `ANTHROPIC_DEFAULT_HAIKU_MODEL`/`ANTHROPIC_DEFAULT_SONNET_MODEL`/`ANTHROPIC_DEFAULT_OPUS_MODEL` to that same model. The pinning matters because subagents spawned by the Agent tool default to the Sonnet tier; without it they fall back to the CLI's built-in Claude models (or `~/.claude/settings.json`, which `--setting-sources project,local` drops when an override is present) and break on a custom base URL — e.g. DeepSeek returns `{"code":400,"msg":"not found"}`.
+
 ### SSE + JobStore streaming pattern (the key architectural piece)
 
 Two distinct ways AI/long-running output reaches the browser, both under `text/event-stream`:

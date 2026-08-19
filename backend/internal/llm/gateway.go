@@ -61,30 +61,42 @@ func New(claudeEnv ClaudeEnvProvider, llmCfg LLMConfigProvider) *Gateway {
 func (g *Gateway) GetBinPath() string { return g.binPath }
 
 // mergedEnv returns the process environment with the configured Claude settings
-// (ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL) overriding any inherited values.
+// (ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL) overriding any inherited values,
+// plus the subagent/background tier models pinned to `model` when non-empty.
 // Empty configured values are not injected, so the API default / inherited env
 // still applies.
+//
+// Model tiers: when the caller passes a model (--model), the claude CLI's
+// Agent tool spawns subagents on the Sonnet tier (ANTHROPIC_DEFAULT_SONNET_MODEL)
+// and fast background tasks on the Haiku tier. Those defaults are otherwise
+// read from ~/.claude/settings.json — which we deliberately drop via
+// --setting-sources project,local (see settingSources) — so they fall back to
+// the CLI's built-in Anthropic models and break on a custom base URL
+// (e.g. DeepSeek: "not found"). Pinning the tier models to the main model keeps
+// every spawned subagent on the same endpoint/model as the main agent.
 //
 // Auth precedence: the claude CLI prefers ANTHROPIC_API_KEY over
 // ANTHROPIC_AUTH_TOKEN, so an inherited ANTHROPIC_API_KEY would silently shadow
 // a user-configured bearer token (and point it at the wrong auth scheme for a
 // custom base URL). When a token is configured, we therefore strip any inherited
 // ANTHROPIC_API_KEY from the child environment so the configured token wins.
-func (g *Gateway) mergedEnv() []string {
+func (g *Gateway) mergedEnv(model string) []string {
 	env := os.Environ()
-	if g.claudeEnv == nil {
-		return env
-	}
-	tok, baseURL, err := g.claudeEnv.ClaudeEnvVars()
-	if err != nil {
-		return env
-	}
 	overrides := map[string]string{}
-	if tok != "" {
-		overrides["ANTHROPIC_AUTH_TOKEN"] = tok
+	if g.claudeEnv != nil {
+		if tok, baseURL, err := g.claudeEnv.ClaudeEnvVars(); err == nil {
+			if tok != "" {
+				overrides["ANTHROPIC_AUTH_TOKEN"] = tok
+			}
+			if baseURL != "" {
+				overrides["ANTHROPIC_BASE_URL"] = baseURL
+			}
+		}
 	}
-	if baseURL != "" {
-		overrides["ANTHROPIC_BASE_URL"] = baseURL
+	if model != "" {
+		overrides["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
+		overrides["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
+		overrides["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
 	}
 	if len(overrides) == 0 {
 		return env
@@ -92,7 +104,7 @@ func (g *Gateway) mergedEnv() []string {
 	// Keys to strip from the inherited env because they would conflict with the
 	// configured auth. Only strip when we are actually injecting ANTHROPIC_AUTH_TOKEN.
 	dropKeys := map[string]bool{}
-	if tok != "" {
+	if _, ok := overrides["ANTHROPIC_AUTH_TOKEN"]; ok {
 		dropKeys["ANTHROPIC_API_KEY"] = true
 	}
 	out := make([]string, 0, len(env)+len(overrides))
@@ -215,7 +227,7 @@ type StreamOpts struct {
 // from the stream to persist it for later --resume.
 func (g *Gateway) StreamCmd(ctx context.Context, opts StreamOpts) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, g.binPath, g.streamArgs(opts.Prompt, opts.SystemPrompt, opts.Model, opts.SessionID, opts.Resume, opts.Fork, opts.DisallowedTools, opts.PermissionMode)...)
-	cmd.Env = g.mergedEnv()
+	cmd.Env = g.mergedEnv(opts.Model)
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
 	}
@@ -230,7 +242,7 @@ func (g *Gateway) runClaudeStreamJSON(prompt, workDir, systemPrompt, model strin
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, g.binPath, g.streamArgs(prompt, systemPrompt, model, "", false, false, nil, "")...)
-	cmd.Env = g.mergedEnv()
+	cmd.Env = g.mergedEnv(model)
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
@@ -274,7 +286,7 @@ func (g *Gateway) runClaudeText(prompt string, timeout time.Duration) (string, e
 		args = append(args, "--setting-sources", ss)
 	}
 	cmd := exec.CommandContext(ctx, g.binPath, args...)
-	cmd.Env = g.mergedEnv()
+	cmd.Env = g.mergedEnv("")
 
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -344,7 +356,7 @@ func (g *Gateway) GenerateProjectSummary(projectPath, claudeMD string) (string, 
 		args = append(args, "--setting-sources", ss)
 	}
 	cmd := exec.CommandContext(ctx, g.binPath, args...)
-	cmd.Env = g.mergedEnv()
+	cmd.Env = g.mergedEnv("")
 	if projectPath != "" {
 		cmd.Dir = projectPath
 	}
