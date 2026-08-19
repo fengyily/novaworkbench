@@ -397,7 +397,6 @@ export default function ProjectDetail() {
       <td className="pr-title">{req.title}</td>
       <td><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
       <td><span className={`status-badge status-${req.status}`}>{statusLabels[req.status] ?? req.status}</span></td>
-      <td>{req.sprint ? <code className="pr-branch">{req.sprint}</code> : '—'}</td>
       <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
         {(() => {
           const u = reqUsageMap.get(req.id);
@@ -664,7 +663,6 @@ export default function ProjectDetail() {
                       <th>标题</th>
                       <th style={{ width: 90 }}>优先级</th>
                       <th style={{ width: 130 }}>状态</th>
-                      <th style={{ width: 110 }}>Sprint</th>
                       <th style={{ width: 130 }}>Tokens (入/出)</th>
                       <th style={{ width: 110 }}>创建时间</th>
                       <th style={{ width: 110 }}>更新时间</th>
@@ -752,7 +750,6 @@ export default function ProjectDetail() {
                     <th>标题</th>
                     <th style={{ width: 90 }}>优先级</th>
                     <th style={{ width: 130 }}>状态</th>
-                    <th style={{ width: 110 }}>Sprint</th>
                     <th style={{ width: 130 }}>Tokens (入/出)</th>
                     <th style={{ width: 110 }}>创建时间</th>
                     <th style={{ width: 110 }}>更新时间</th>
@@ -1097,7 +1094,6 @@ function CreateRequirementForm({ projectId, onClose, onCreated }: {
 }) {
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState('medium');
-  const [sprint, setSprint] = useState('');
   const [skipAnalysis, setSkipAnalysis] = useState(true); // default: skip analyst chat, go straight to architect-design
   const [saving, setSaving] = useState(false);
 
@@ -1105,7 +1101,7 @@ function CreateRequirementForm({ projectId, onClose, onCreated }: {
     if (!description) return;
     setSaving(true);
     try {
-      const created = await requirementsApi.create({ project_id: projectId, description, priority, sprint, skip_analysis: skipAnalysis });
+      const created = await requirementsApi.create({ project_id: projectId, description, priority, skip_analysis: skipAnalysis });
       onCreated(created);
     } catch (err: any) {
       alert(err.message);
@@ -1136,11 +1132,6 @@ function CreateRequirementForm({ projectId, onClose, onCreated }: {
             <option value="medium">🟡 Medium</option>
             <option value="low">🟢 Low</option>
           </select>
-        </div>
-        <div className="form-group" style={{ flex: 1 }}>
-          <label>Sprint (可选)</label>
-          <input type="text" value={sprint} onChange={e => setSprint(e.target.value)} className="form-input"
-            placeholder="2026-W30" />
         </div>
       </div>
       <div className="form-group">

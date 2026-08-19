@@ -34,7 +34,7 @@
 .priority-tag.medium { background: #fef3c7; color: #d97706; }
 .priority-tag.low { background: #d1fae5; color: #059669; }
 
-.sprint-tag, .project-tag {
+.project-tag {
   padding: 3px 10px;
   background: var(--color-bg);
   border: 1px solid var(--color-border);

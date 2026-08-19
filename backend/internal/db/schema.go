@@ -54,7 +54,6 @@ CREATE TABLE IF NOT EXISTS requirements (
 	design_docs TEXT DEFAULT '[]',
 	conversation_ids TEXT DEFAULT '[]',
 	assigned_to TEXT DEFAULT '',
-	sprint TEXT DEFAULT '',
 	created_by TEXT DEFAULT 'user',
 	branch_name TEXT NOT NULL DEFAULT '',
 	worktree_path TEXT NOT NULL DEFAULT '',
