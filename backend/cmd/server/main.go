@@ -53,10 +53,20 @@ func main() {
 	reportSvc := service.NewReportService(database)
 	jobLogSvc := service.NewJobLogService(database)
 	usageSvc := service.NewUsageService(database)
+	aclSvc := service.NewACLService(database)
 
 	// Seed built-in roles on first run (idempotent).
 	if err := roleSvc.SeedDefaults(); err != nil {
 		log.Printf("[main] role seed: %v", err)
+	}
+
+	// Seed the RBAC catalog (permissions / roles / bindings) and a default
+	// admin account on first run. The default admin password is printed once
+	// so the first login can bootstrap user/project assignment.
+	if pw, err := aclSvc.SeedDefaults(); err != nil {
+		log.Printf("[main] acl seed: %v", err)
+	} else if pw != "" {
+		log.Printf("[acl] default admin account created — username: admin  password: %s  (change it after first login)", pw)
 	}
 
 	// Claude CLI configurations (multi-config). Constructed before the gateway
@@ -100,6 +110,8 @@ func main() {
 	claudeCfgH := handler.NewClaudeConfigHandler(claudeCfgSvc)
 	databaseH := handler.NewDatabaseHandler(database, cfg)
 	usageH := handler.NewUsageHandler(usageSvc)
+	authH := handler.NewAuthHandler(aclSvc)
+	aclH := handler.NewACLHandler(aclSvc)
 
 	// Router
 	mux := http.NewServeMux()
@@ -107,16 +119,40 @@ func main() {
 	// Health
 	mux.HandleFunc("GET /api/health", healthH.Health)
 
+	// Auth (login is public; logout/me require a session — enforced by the
+	// Auth middleware, which is applied to the whole mux below).
+	mux.HandleFunc("POST /api/auth/login", authH.Login)
+	mux.HandleFunc("POST /api/auth/logout", authH.Logout)
+	mux.HandleFunc("GET /api/auth/me", authH.Me)
+
+	// ACL — user / role / permission management. Every route is guarded by
+	// the setting.users (user management) or setting.acl (role/permission
+	// management) permission; admins ("*") always pass.
+	mux.HandleFunc("GET /api/acl/users", middleware.RequirePermission(aclSvc, "setting.users")(http.HandlerFunc(aclH.ListUsers)).ServeHTTP)
+	mux.HandleFunc("POST /api/acl/users", middleware.RequirePermission(aclSvc, "setting.users")(http.HandlerFunc(aclH.CreateUser)).ServeHTTP)
+	mux.HandleFunc("GET /api/acl/users/{id}", middleware.RequirePermission(aclSvc, "setting.users")(http.HandlerFunc(aclH.GetUser)).ServeHTTP)
+	mux.HandleFunc("PUT /api/acl/users/{id}", middleware.RequirePermission(aclSvc, "setting.users")(http.HandlerFunc(aclH.UpdateUser)).ServeHTTP)
+	mux.HandleFunc("DELETE /api/acl/users/{id}", middleware.RequirePermission(aclSvc, "setting.users")(http.HandlerFunc(aclH.DeleteUser)).ServeHTTP)
+	mux.HandleFunc("PUT /api/acl/users/{id}/projects", middleware.RequirePermission(aclSvc, "setting.users")(http.HandlerFunc(aclH.AssignProjects)).ServeHTTP)
+
+	mux.HandleFunc("GET /api/acl/roles", middleware.RequirePermission(aclSvc, "setting.acl")(http.HandlerFunc(aclH.ListRoles)).ServeHTTP)
+	mux.HandleFunc("POST /api/acl/roles", middleware.RequirePermission(aclSvc, "setting.acl")(http.HandlerFunc(aclH.CreateRole)).ServeHTTP)
+	mux.HandleFunc("GET /api/acl/roles/{id}", middleware.RequirePermission(aclSvc, "setting.acl")(http.HandlerFunc(aclH.GetRole)).ServeHTTP)
+	mux.HandleFunc("PUT /api/acl/roles/{id}", middleware.RequirePermission(aclSvc, "setting.acl")(http.HandlerFunc(aclH.UpdateRole)).ServeHTTP)
+	mux.HandleFunc("DELETE /api/acl/roles/{id}", middleware.RequirePermission(aclSvc, "setting.acl")(http.HandlerFunc(aclH.DeleteRole)).ServeHTTP)
+
+	mux.HandleFunc("GET /api/acl/permissions", middleware.RequirePermission(aclSvc, "setting.acl")(http.HandlerFunc(aclH.ListPermissions)).ServeHTTP)
+
 	// Dashboard
 	mux.HandleFunc("GET /api/dashboard", dashboardH.Dashboard)
 
 	// Projects
 	mux.HandleFunc("GET /api/projects", projectH.List)
-	mux.HandleFunc("POST /api/projects", projectH.Add)
+	mux.HandleFunc("POST /api/projects", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.Add)).ServeHTTP)
 	mux.HandleFunc("GET /api/projects/trash", projectH.Trash)
 	mux.HandleFunc("GET /api/projects/{id}", projectH.Get)
-	mux.HandleFunc("DELETE /api/projects/{id}", projectH.Remove)
-	mux.HandleFunc("POST /api/projects/{id}/restore", projectH.Restore)
+	mux.HandleFunc("DELETE /api/projects/{id}", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.Remove)).ServeHTTP)
+	mux.HandleFunc("POST /api/projects/{id}/restore", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.Restore)).ServeHTTP)
 	mux.HandleFunc("POST /api/projects/{id}/scan", scannerH.Scan)
 
 	// Run sessions (docker compose)
@@ -249,8 +285,10 @@ func main() {
 	mux.HandleFunc("GET /api/knowledge/review/list", knowledgeH.ListForReview)
 	mux.HandleFunc("POST /api/knowledge/review/batch", knowledgeH.BatchReview)
 
-	// Apply middleware
-	handler := middleware.CORS(middleware.Logger(mux))
+	// Apply middleware. Auth sits inside Logger/CORS so unauthenticated
+	// requests are still logged and CORS headers are present on 401s.
+	// (CORS is outermost so preflight OPTIONS never reaches Auth.)
+	handler := middleware.CORS(middleware.Logger(middleware.Auth(aclSvc)(mux)))
 
 	port := os.Getenv("NOVA_PORT")
 	if port == "" {

@@ -5,9 +5,19 @@ import (
 	"fmt"
 )
 
-func NewID(prefix string) string {
-	b := make([]byte, 8)
+// NewID returns "<prefix>_<8 hex chars>" from crypto/rand. The optional nBytes
+// overrides the default 8-byte length; pass 0 to keep the default. With an
+// empty prefix the result is a bare hex string (used for session tokens).
+func NewID(prefix string, nBytes ...int) string {
+	n := 8
+	if len(nBytes) > 0 && nBytes[0] > 0 {
+		n = nBytes[0]
+	}
+	b := make([]byte, n)
 	rand.Read(b)
+	if prefix == "" {
+		return fmt.Sprintf("%x", b)
+	}
 	return fmt.Sprintf("%s_%x", prefix, b)
 }
 

@@ -32,10 +32,31 @@ func NewProjectService(db *db.DB) *ProjectService {
 }
 
 func (s *ProjectService) List() ([]model.Project, error) {
-	rows, err := s.db.Query(`SELECT id, name, local_path, remote_url, status, default_branch,
+	return s.ListForUser("", true)
+}
+
+// ListForUser returns the projects visible to userID. Admins (isAdmin=true)
+// see every non-deleted project; non-admins see only projects assigned via the
+// user_projects table. An empty userID with isAdmin=true (the historical
+// call site / NOVA_AUTH_DISABLED bypass) returns all projects.
+func (s *ProjectService) ListForUser(userID string, isAdmin bool) ([]model.Project, error) {
+	q := `SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
 		deleted_at, deleted_dir, description, description_manual, description_hash
-		FROM projects WHERE deleted_at IS NULL ORDER BY updated_at DESC`)
+		FROM projects`
+	args := []any{}
+	if !isAdmin || userID == "" {
+		if userID == "" {
+			// No user and not admin → nothing visible.
+			return []model.Project{}, nil
+		}
+		q += ` WHERE deleted_at IS NULL AND id IN (SELECT project_id FROM user_projects WHERE user_id = ?)`
+		args = append(args, userID)
+	} else {
+		q += ` WHERE deleted_at IS NULL`
+	}
+	q += ` ORDER BY updated_at DESC`
+	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -53,6 +74,22 @@ func (s *ProjectService) List() ([]model.Project, error) {
 		projects = append(projects, p)
 	}
 	return projects, nil
+}
+
+// CanAccess reports whether userID may access projectID. Admins see all; an
+// empty userID with isAdmin=true (auth bypass) sees all.
+func (s *ProjectService) CanAccess(userID string, isAdmin bool, projectID string) (bool, error) {
+	if isAdmin || userID == "" {
+		return true, nil
+	}
+	var count int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM user_projects WHERE user_id = ? AND project_id = ?`, userID, projectID,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (s *ProjectService) Get(id string) (*model.Project, error) {
@@ -295,29 +332,67 @@ func (s *ProjectService) Restore(id string) (*model.Project, error) {
 }
 
 func (s *ProjectService) Dashboard() (*model.DashboardData, error) {
-	projects, err := s.List()
+	return s.DashboardForUser("", true)
+}
+
+// DashboardForUser is the user-scoped dashboard: projects are limited to what
+// userID can see (admin = all). Counts are derived from that same set so a
+// non-admin never learns about projects they're not assigned to.
+func (s *ProjectService) DashboardForUser(userID string, isAdmin bool) (*model.DashboardData, error) {
+	projects, err := s.ListForUser(userID, isAdmin)
 	if err != nil {
 		return nil, err
 	}
 
-	// Count active requirements
-	var activeReqs int
-	s.db.QueryRow("SELECT COUNT(*) FROM requirements WHERE status IN ('analysis','ready','in_progress')").Scan(&activeReqs)
+	visibleIDs := make(map[string]bool, len(projects))
+	for _, p := range projects {
+		visibleIDs[p.ID] = true
+	}
 
-	// Count pending reviews
+	// Count active requirements across visible projects only.
+	var activeReqs int
+	if len(visibleIDs) > 0 {
+		args := make([]any, 0, len(visibleIDs))
+		placeholders := ""
+		for id := range visibleIDs {
+			if placeholders != "" {
+				placeholders += ","
+			}
+			placeholders += "?"
+			args = append(args, id)
+		}
+		// status values kept as the historical dashboard query (the lifecycle
+		// names drift over releases; this is display-only).
+		q := `SELECT COUNT(*) FROM requirements WHERE project_id IN (` + placeholders + `) AND status IN ('analysis','ready','in_progress')`
+		s.db.QueryRow(q, args...).Scan(&activeReqs)
+	}
+
+	// Count pending reviews across visible projects only.
 	var pendingReviews int
-	s.db.QueryRow("SELECT COUNT(*) FROM knowledge WHERE is_reviewed = 0").Scan(&pendingReviews)
+	if len(visibleIDs) > 0 {
+		args := make([]any, 0, len(visibleIDs))
+		placeholders := ""
+		for id := range visibleIDs {
+			if placeholders != "" {
+				placeholders += ","
+			}
+			placeholders += "?"
+			args = append(args, id)
+		}
+		q := `SELECT COUNT(*) FROM knowledge WHERE project_id IN (` + placeholders + `) AND is_reviewed = 0`
+		s.db.QueryRow(q, args...).Scan(&pendingReviews)
+	}
 
 	// Count weekly commits (placeholder - needs git integration)
 	weeklyCommits := 0
 
 	return &model.DashboardData{
-		TotalProjects:  len(projects),
-		ActiveReqs:     activeReqs,
-		PendingReviews: pendingReviews,
-		WeeklyCommits:  weeklyCommits,
-		Projects:       projects,
-		RecentActivity: []model.ActivityItem{},
+		TotalProjects:   len(projects),
+		ActiveReqs:      activeReqs,
+		PendingReviews:  pendingReviews,
+		WeeklyCommits:   weeklyCommits,
+		Projects:        projects,
+		RecentActivity:  []model.ActivityItem{},
 	}, nil
 }
 

@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 
+	"github.com/novaworkbench/backend/internal/middleware"
 	"github.com/novaworkbench/backend/internal/service"
 )
 
@@ -15,7 +16,13 @@ func NewDashboardHandler(svc *service.ProjectService) *DashboardHandler {
 }
 
 func (h *DashboardHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
-	data, err := h.svc.Dashboard()
+	var userID string
+	isAdmin := true
+	if u := middleware.CurrentUser(r); u != nil {
+		userID = u.UserID
+		isAdmin = u.IsAdmin
+	}
+	data, err := h.svc.DashboardForUser(userID, isAdmin)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 		return
