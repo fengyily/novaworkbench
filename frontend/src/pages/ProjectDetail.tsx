@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   projectsApi, runnerApi, reviewApi, platformApi, requirementsApi, knowledgeApi,
-  usageApi, usageTotalInput,
+  usageApi, usageTotalInput, fmtCost,
   type Project, type RunStatus, type PR, type PRListResponse, type PlatformToken,
   type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage, statusLabels,
 } from '../api/client';
@@ -405,6 +405,13 @@ export default function ProjectDetail() {
           return `${usageTotalInput(u).toLocaleString()} / ${u.output_tokens.toLocaleString()}`;
         })()}
       </td>
+      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
+        {(() => {
+          const u = reqUsageMap.get(req.id);
+          if (!u) return '—';
+          return fmtCost(u.costs);
+        })()}
+      </td>
       <td style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
         {req.created_at ? new Date(req.created_at).toLocaleDateString('zh-CN') : '—'}
       </td>
@@ -666,6 +673,7 @@ export default function ProjectDetail() {
                       <th style={{ width: 130 }}>状态</th>
                       <th style={{ width: 110 }}>Sprint</th>
                       <th style={{ width: 130 }}>Tokens (入/出)</th>
+                      <th style={{ width: 110 }}>成本</th>
                       <th style={{ width: 110 }}>创建时间</th>
                       <th style={{ width: 110 }}>更新时间</th>
                     </tr>
@@ -754,6 +762,7 @@ export default function ProjectDetail() {
                     <th style={{ width: 130 }}>状态</th>
                     <th style={{ width: 110 }}>Sprint</th>
                     <th style={{ width: 130 }}>Tokens (入/出)</th>
+                      <th style={{ width: 110 }}>成本</th>
                     <th style={{ width: 110 }}>创建时间</th>
                     <th style={{ width: 110 }}>更新时间</th>
                   </tr>
@@ -974,6 +983,12 @@ export default function ProjectDetail() {
                       {projectUsage.total.cache_creation_tokens.toLocaleString()}
                     </div>
                   </div>
+                  <div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>费用</div>
+                    <div style={{ fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 600, color: '#10B981' }}>
+                      {fmtCost(projectUsage.total.costs)}
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -994,6 +1009,7 @@ export default function ProjectDetail() {
                           <th style={{ width: 120 }}>输出</th>
                           <th style={{ width: 120 }}>缓存读</th>
                           <th style={{ width: 120 }}>缓存建</th>
+                          <th style={{ width: 140 }}>成本</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1008,9 +1024,85 @@ export default function ProjectDetail() {
                               <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{r.output_tokens.toLocaleString()}</td>
                               <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{r.cache_read_tokens.toLocaleString()}</td>
                               <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{r.cache_creation_tokens.toLocaleString()}</td>
+                              <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{fmtCost(r.costs)}</td>
                             </tr>
                           );
                         })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Per-model breakdown */}
+              <div className="detail-section" style={{ marginBottom: 16 }}>
+                <div className="section-header" style={{ marginBottom: 12 }}>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>按模型</span>
+                  <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>成本按配置币种分组（同模型跨平台默认不作合并）</span>
+                </div>
+                {projectUsage.by_model.length === 0 ? (
+                  <div className="tab-empty"><p>暂无按模型统计</p></div>
+                ) : (
+                  <div className="pr-list">
+                    <table className="pr-table">
+                      <thead>
+                        <tr>
+                          <th>模型</th>
+                          <th style={{ width: 120 }}>输入</th>
+                          <th style={{ width: 120 }}>输出</th>
+                          <th style={{ width: 120 }}>缓存读</th>
+                          <th style={{ width: 120 }}>缓存建</th>
+                          <th style={{ width: 150 }}>成本</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {projectUsage.by_model.map(mu => (
+                          <tr key={mu.model}>
+                            <td><code className="pr-branch">{mu.model || '未知模型'}</code></td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(mu).toLocaleString()}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{mu.output_tokens.toLocaleString()}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{mu.cache_read_tokens.toLocaleString()}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{mu.cache_creation_tokens.toLocaleString()}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{fmtCost(mu.costs)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Per-day breakdown */}
+              <div className="detail-section" style={{ marginBottom: 16 }}>
+                <div className="section-header" style={{ marginBottom: 12 }}>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>按日</span>
+                </div>
+                {projectUsage.by_day.length === 0 ? (
+                  <div className="tab-empty"><p>暂无按日统计</p></div>
+                ) : (
+                  <div className="pr-list">
+                    <table className="pr-table">
+                      <thead>
+                        <tr>
+                          <th>日期</th>
+                          <th style={{ width: 120 }}>输入</th>
+                          <th style={{ width: 120 }}>输出</th>
+                          <th style={{ width: 120 }}>缓存读</th>
+                          <th style={{ width: 120 }}>缓存建</th>
+                          <th style={{ width: 150 }}>成本</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {projectUsage.by_day.map(d => (
+                          <tr key={d.date}>
+                            <td><code className="pr-branch">{d.date}</code></td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(d).toLocaleString()}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{d.output_tokens.toLocaleString()}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{d.cache_read_tokens.toLocaleString()}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{d.cache_creation_tokens.toLocaleString()}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{fmtCost(d.costs)}</td>
+                          </tr>
+                        ))}
                       </tbody>
                     </table>
                   </div>

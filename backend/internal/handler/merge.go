@@ -41,10 +41,11 @@ type MergeHandler struct {
 	roleSvc     *service.RoleService
 	platformSvc *service.PlatformTokenService
 	jobLogSvc   *service.JobLogService
+	claudeCfg   *service.ClaudeConfigService
 	usageSvc    usageRecorder
 }
 
-func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, jobLogSvc *service.JobLogService, usageSvc usageRecorder) *MergeHandler {
+func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder) *MergeHandler {
 	return &MergeHandler{
 		projectSvc:  projectSvc,
 		reqSvc:      reqSvc,
@@ -53,8 +54,23 @@ func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.Require
 		roleSvc:     roleSvc,
 		platformSvc: platformSvc,
 		jobLogSvc:   jobLogSvc,
+		claudeCfg:   claudeCfg,
 		usageSvc:    usageSvc,
 	}
+}
+
+// activeConfigMeta returns the currently-active claude config's id + currency
+// for cost attribution on token_usage rows. Best-effort: empty on no config /
+// any lookup error, so a pricing gap never blocks a merge.
+func (h *MergeHandler) activeConfigMeta() (id, currency string) {
+	if h.claudeCfg == nil {
+		return "", ""
+	}
+	c, err := h.claudeCfg.ActiveConfig()
+	if err != nil || c == nil {
+		return "", ""
+	}
+	return c.ID, c.Currency
 }
 
 // persistJob saves the finished job's full log to job_logs so it survives a
@@ -599,13 +615,16 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 			Model:        model,
 			// empty PermissionMode → --dangerously-skip-permissions (full tool use)
 		})
+		configID, currency := h.activeConfigMeta()
 		runClaudeStream(jobSink{job}, cmd, "merge-resolve", &usageCtx{
-			Rec:           h.usageSvc,
-			RequirementID: reqRow.ID,
-			ProjectID:     reqRow.ProjectID,
-			JobID:         job.ID,
-			Step:          "merge",
-			Model:         model,
+			Rec:            h.usageSvc,
+			RequirementID:  reqRow.ID,
+			ProjectID:      reqRow.ProjectID,
+			JobID:          job.ID,
+			Step:           "merge",
+			Model:          model,
+			ClaudeConfigID: configID,
+			Currency:       currency,
 		})
 
 		// After the run, inspect the repo: a concluded merge no longer has
@@ -808,13 +827,16 @@ func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflic
 		SystemPrompt: systemPrompt,
 		Model:        model,
 	})
+	configID, currency := h.activeConfigMeta()
 	runClaudeStream(jobSink{job}, cmd, "push-pr-resolve", &usageCtx{
-		Rec:           h.usageSvc,
-		RequirementID: reqRow.ID,
-		ProjectID:     reqRow.ProjectID,
-		JobID:         job.ID,
-		Step:          "merge",
-		Model:         model,
+		Rec:            h.usageSvc,
+		RequirementID:  reqRow.ID,
+		ProjectID:      reqRow.ProjectID,
+		JobID:          job.ID,
+		Step:           "merge",
+		Model:          model,
+		ClaudeConfigID: configID,
+		Currency:       currency,
 	})
 	return !midMerge(devDir) && len(conflictedFiles(devDir)) == 0
 }
@@ -836,13 +858,16 @@ func (h *MergeHandler) generatePRSummary(job *store.Job, devDir, base, dev strin
 		SystemPrompt: systemPrompt,
 		Model:        model,
 	})
+	configID, currency := h.activeConfigMeta()
 	out := runClaudeStream(jobSink{job}, cmd, "push-pr-summary", &usageCtx{
-		Rec:           h.usageSvc,
-		RequirementID: reqRow.ID,
-		ProjectID:     reqRow.ProjectID,
-		JobID:         job.ID,
-		Step:          "pr-summary",
-		Model:         model,
+		Rec:            h.usageSvc,
+		RequirementID:  reqRow.ID,
+		ProjectID:      reqRow.ProjectID,
+		JobID:          job.ID,
+		Step:           "pr-summary",
+		Model:          model,
+		ClaudeConfigID: configID,
+		Currency:       currency,
 	})
 	raw := strings.TrimSpace(out.finalResult)
 	if out.errMsg != "" {

@@ -397,18 +397,28 @@ export const platformApi = {
   delete: (id: string) => api.delete<{ status: string }>(`/api/settings/tokens/${id}`),
 };
 
+// One model of a Claude config (platform) with per-million-token unit prices.
+// Binding prices to the config means each platform can carry different rates.
+export interface ModelEntry {
+  model: string;
+  input_price: number;
+  output_price: number;
+}
+
 // Claude CLI configurations (multiple named configs; the active one is
 // injected as env vars into every claude subprocess, and switching it also
 // re-points all roles to its default model). The auth token is never returned
-// in full — only a set flag + masked preview.
+// in full — only a set flag + masked preview. currency is the platform's
+// accounting unit (USD/CNY); models are priced entries.
 export interface ClaudeConfigItem {
   id: string;
   name: string;
   base_url: string;
   auth_token_set: boolean;
   auth_token_preview: string;
-  models: string[];
+  models: ModelEntry[];
   default_model: string;
+  currency: string;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -424,9 +434,9 @@ export interface ClaudeActivateResult {
 }
 export const claudeApi = {
   list: () => api.get<ClaudeConfigItem[]>('/api/settings/claude/configs'),
-  create: (data: { name: string; base_url: string; auth_token?: string; models?: string[]; default_model?: string }) =>
+  create: (data: { name: string; base_url: string; auth_token?: string; models?: ModelEntry[]; default_model?: string; currency?: string }) =>
     api.post<ClaudeConfigItem>('/api/settings/claude/configs', data),
-  update: (id: string, data: { name: string; base_url: string; auth_token?: string; clear_token?: boolean; models?: string[]; default_model?: string }) =>
+  update: (id: string, data: { name: string; base_url: string; auth_token?: string; clear_token?: boolean; models?: ModelEntry[]; default_model?: string; currency?: string }) =>
     api.put<ClaudeConfigItem>(`/api/settings/claude/configs/${id}`, data),
   remove: (id: string) => api.delete<{ status: string }>(`/api/settings/claude/configs/${id}`),
   activate: (id: string) => api.post<ClaudeActivateResult>(`/api/settings/claude/configs/${id}/activate`, {}),
@@ -566,20 +576,27 @@ export const reportsApi = {
 // Token usage — per-step / per-requirement / per-project aggregation. Review
 // rows are recorded but never counted in requirement or project totals; they
 // are surfaced separately in the project breakdown.
+export interface CostItem {
+  currency: string;
+  amount: number;
+}
 export interface UsageTotals {
   input_tokens: number;
   output_tokens: number;
   cache_creation_tokens: number;
   cache_read_tokens: number;
+  costs: CostItem[];
 }
 export interface StepUsage {
   step: string;
   label: string;
+  model: string;
   input_tokens: number;
   output_tokens: number;
   cache_creation_tokens: number;
   cache_read_tokens: number;
   count: number;
+  costs: CostItem[];
 }
 export interface RequirementUsage {
   by_step: StepUsage[];
@@ -591,6 +608,23 @@ export interface ReqUsage {
   output_tokens: number;
   cache_creation_tokens: number;
   cache_read_tokens: number;
+  costs: CostItem[];
+}
+export interface ModelUsage {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  costs: CostItem[];
+}
+export interface DailyUsage {
+  date: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  costs: CostItem[];
 }
 export interface ReviewUsage {
   id: string;
@@ -605,6 +639,8 @@ export interface ReviewUsage {
 export interface ProjectUsage {
   total: UsageTotals;
   by_requirement: ReqUsage[];
+  by_model: ModelUsage[];
+  by_day: DailyUsage[];
   review: ReviewUsage[];
 }
 
@@ -626,6 +662,23 @@ export const stepLabels: Record<string, string> = {
 // totalInput counts cache reads/creations as billed input tokens.
 export const usageTotalInput = (t: { input_tokens: number; cache_creation_tokens: number; cache_read_tokens: number }): number =>
   t.input_tokens + t.cache_creation_tokens + t.cache_read_tokens;
+
+// currencySymbol maps a currency code to its display symbol; unknown codes show
+// the code itself so a new currency never renders as a bare number.
+const currencySymbol: Record<string, string> = {
+  CNY: '¥',
+  USD: '$',
+};
+
+// fmtCost renders a per-currency cost list as a display string. Single
+// currency → "¥123.45"; multiple currencies → "¥123.45 +1" (amounts from
+// different platforms are never summed); no pricing → "—".
+export const fmtCost = (costs?: CostItem[]): string => {
+  if (!costs || costs.length === 0) return '—';
+  const symbol = currencySymbol[costs[0].currency] ?? `${costs[0].currency} `;
+  const primary = `${symbol}${costs[0].amount.toFixed(2)}`;
+  return costs.length > 1 ? `${primary} +${costs.length - 1}` : primary;
+};
 
 export const usageApi = {
   requirement: (id: string) => api.get<RequirementUsage>(`/api/usage/requirement/${id}`),
