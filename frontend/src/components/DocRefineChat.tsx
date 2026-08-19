@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { API_BASE } from '../api/client';
+import { API_BASE, authedFetch } from '../api/client';
+import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, coalesceLogLines } from '../utils/logLines';
 
 interface Props {
@@ -34,7 +35,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   const [applying, setApplying] = useState(false);
   const [applyLines, setApplyLines] = useState<{ type: string; content: string }[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
-  const esRef = useRef<EventSource | null>(null);
+  const esRef = useRef<EventStream | null>(null);
   const label = LABEL[docType];
 
   useEffect(() => {
@@ -53,7 +54,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   // server (keyed by requirement_id + doc_type). We only stream the user's new
   // message; no conversation_history / current_doc is re-fed.
   const streamRefine = useCallback(async (userMessage: string) => {
-    const res = await fetch(`${API_BASE}/api/wizard/refine-doc`, {
+    const res = await authedFetch(`${API_BASE}/api/wizard/refine-doc`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -174,14 +175,11 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
     if (esRef.current) esRef.current.close();
     setApplying(true);
     setApplyLines([]);
-    const es = new EventSource(`${API_BASE}/api/wizard/jobs/${jobId}/stream`);
-    esRef.current = es;
-
-    es.onmessage = (e) => {
-      try {
-        const evt = JSON.parse(e.data);
+    esRef.current = createEventStream(
+      `/api/wizard/jobs/${jobId}/stream`,
+      (evt) => {
         if (evt.type === 'job_done') {
-          es.close();
+          esRef.current?.close();
           esRef.current = null;
           setApplying(false);
           if (evt.status === 'done' || evt.exit_code === 0) {
@@ -206,16 +204,13 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         if (evt.type === 'phase' || evt.type === 'tool_call') {
           setApplyLines(prev => appendLogLine(prev.slice(-49), { type: evt.type, content: evt.content ?? '' }));
         }
-      } catch { /* skip malformed SSE */ }
-    };
-
-    es.onerror = () => {
-      // EventSource auto-reconnects on transient drops; if the job is gone
-      // (backend restarted, ring evicted) the stream errors repeatedly. Poll
-      // the snapshot once; if it's gone, drop to idle so the user can retry.
-      es.close();
-      esRef.current = null;
-      fetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
+      },
+      () => {
+        // The stream dropped (or the job is gone — backend restarted, ring
+        // evicted). Poll the snapshot once; if it's gone, drop to idle so the
+        // user can retry.
+        esRef.current = null;
+        authedFetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
         .then(r => r.json())
         .then(json => {
           if (!json.success) {
@@ -233,14 +228,15 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           }
         })
         .catch(() => { setApplying(false); });
-    };
+      },
+    );
   }, [label, onTurnDone]);
 
   const handleApply = async () => {
     setApplyLines([]);
     setApplying(true);
     try {
-      const res = await fetch(`${API_BASE}/api/wizard/apply-doc`, {
+      const res = await authedFetch(`${API_BASE}/api/wizard/apply-doc`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -266,7 +262,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   useEffect(() => {
     if (!applyJobId) return;
     let cancelled = false;
-    fetch(`${API_BASE}/api/wizard/jobs/${applyJobId}`)
+    authedFetch(`${API_BASE}/api/wizard/jobs/${applyJobId}`)
       .then(r => r.json())
       .then(json => {
         if (cancelled || !json.success) return;

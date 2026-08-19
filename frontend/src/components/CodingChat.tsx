@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { API_BASE } from '../api/client';
+import { API_BASE, authedFetch } from '../api/client';
 
 interface Props {
   reqId: string;
@@ -39,7 +39,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
   // already-implemented code, so it must talk to the developer, not refine the
   // requirement.
   const streamReply = useCallback(async (userMessage: string) => {
-    const res = await fetch(`${API_BASE}/api/wizard/developer-chat`, {
+    const res = await authedFetch(`${API_BASE}/api/wizard/developer-chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

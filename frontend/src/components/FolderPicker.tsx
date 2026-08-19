@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { API_BASE } from '../api/client';
+import { API_BASE, authedFetch } from '../api/client';
 import './FolderPicker.css';
 
 interface FileItem {
@@ -31,7 +31,7 @@ export default function FolderPicker({ value, onChange }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/api/fs/ls?path=${encodeURIComponent(path)}`);
+      const res = await authedFetch(`${API_BASE}/api/fs/ls?path=${encodeURIComponent(path)}`);
       const json = await res.json();
       if (!json.success) throw new Error(json.error?.message || 'Failed');
       setCurrentPath(json.data.current);
