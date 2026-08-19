@@ -1,5 +1,19 @@
 export const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:9527';
 
+// Token storage for the bearer auth layer. login() stores the token here; the
+// request wrapper reads it on every call. On 401 the wrapper clears it and
+// redirects to /login.
+const TOKEN_KEY = 'nova_token';
+export function getToken(): string {
+  return localStorage.getItem(TOKEN_KEY) || '';
+}
+export function setToken(token: string): void {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+export function clearToken(): void {
+  localStorage.removeItem(TOKEN_KEY);
+}
+
 interface APIError {
   code: string;
   message: string;
@@ -14,13 +28,24 @@ interface APIResponse<T> {
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const url = `${API_BASE}${path}`;
-  const res = await fetch(url, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-  });
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options?.headers as Record<string, string> | undefined),
+  };
+  const token = getToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const res = await fetch(url, { ...options, headers });
+
+  // 401 → drop the stale token and bounce to /login. Don't try to parse JSON
+  // (the body is small + irrelevant), just surface the redirect.
+  if (res.status === 401) {
+    clearToken();
+    if (location.pathname !== '/login') {
+      location.replace('/login');
+    }
+    throw new Error('UNAUTHENTICATED: 未登录或会话已过期，请重新登录');
+  }
 
   const json: APIResponse<T> = await res.json();
 
@@ -586,3 +611,87 @@ export const usageApi = {
   byRequirement: (projectId: string) => api.get<ReqUsage[]>(`/api/usage/by-requirement?project_id=${projectId}`),
   project: (id: string) => api.get<ProjectUsage>(`/api/usage/project/${id}`),
 };
+
+// ---- Auth & RBAC ---------------------------------------------------------
+// User account (RBAC). Distinct from AI-persona Role below.
+export interface User {
+  id: string;
+  username: string;
+  display_name: string;
+  status: string; // active | disabled
+  is_admin: boolean;
+  last_login_at?: string;
+  created_at: string;
+  updated_at: string;
+  role_ids?: string[];
+  project_ids?: string[];
+}
+
+export interface Permission {
+  id: string;
+  key: string;
+  name: string;
+  module: string;
+  description: string;
+  sort_order: number;
+  created_at: string;
+}
+
+// ACLRole = RBAC role (NOT the AI-persona Role interface above). Holds the
+// permission set granted to the role.
+export interface ACLRole {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  is_builtin: boolean;
+  sort_order: number;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+  permission_ids?: string[];
+  permission_keys?: string[];
+  user_count?: number;
+}
+
+export interface SessionProfile {
+  token: string;
+  user: User;
+  permissions: string[]; // union across roles; ["*"] for admin
+}
+
+export const authApi = {
+  login: (username: string, password: string) =>
+    api.post<SessionProfile>('/api/auth/login', { username, password }),
+  logout: () => api.post<{ status: string }>('/api/auth/logout', {}),
+  me: () => api.get<SessionProfile>('/api/auth/me'),
+};
+
+export const aclApi = {
+  // users
+  listUsers: () => api.get<User[]>('/api/acl/users'),
+  createUser: (data: { username: string; password: string; display_name?: string; status?: string; is_admin?: boolean; role_ids?: string[]; project_ids?: string[] }) =>
+    api.post<User>('/api/acl/users', data),
+  getUser: (id: string) => api.get<User>(`/api/acl/users/${id}`),
+  updateUser: (id: string, data: Partial<{ display_name: string; password: string; status: string; is_admin: boolean; role_ids: string[]; project_ids: string[] }>) =>
+    api.put<User>(`/api/acl/users/${id}`, data),
+  deleteUser: (id: string) => api.delete<{ status: string }>(`/api/acl/users/${id}`),
+  assignProjects: (id: string, project_ids: string[]) =>
+    api.put<User>(`/api/acl/users/${id}/projects`, { project_ids }),
+  // roles
+  listRoles: () => api.get<ACLRole[]>('/api/acl/roles'),
+  createRole: (data: { key: string; name: string; description?: string; sort_order?: number; enabled?: boolean; permission_ids?: string[] }) =>
+    api.post<ACLRole>('/api/acl/roles', data),
+  updateRole: (id: string, data: Partial<{ name: string; description: string; sort_order: number; enabled: boolean; permission_ids: string[] }>) =>
+    api.put<ACLRole>(`/api/acl/roles/${id}`, data),
+  deleteRole: (id: string) => api.delete<{ status: string }>(`/api/acl/roles/${id}`),
+  // permissions
+  listPermissions: () => api.get<Permission[]>('/api/acl/permissions'),
+};
+
+// hasPermission checks a permission set (from SessionProfile) for a key. The
+// "*" wildcard (admin) grants everything.
+export function hasPermission(perms: string[] | undefined, key: string): boolean {
+  if (!perms) return false;
+  return perms.includes('*') || perms.includes(key);
+}

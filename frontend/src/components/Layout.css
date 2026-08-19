@@ -26,6 +26,44 @@
   font-size: 14px;
 }
 
+.app-header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.app-header-user {
+  font-size: 14px;
+  color: var(--color-text-secondary);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-header-admin {
+  font-size: 11px;
+  color: #fff;
+  background: var(--color-primary);
+  padding: 1px 7px;
+  border-radius: 10px;
+}
+
+.app-header-logout {
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.app-header-logout:hover {
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
 .app-body {
   display: flex;
   flex: 1;

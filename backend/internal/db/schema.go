@@ -202,6 +202,81 @@ CREATE TABLE IF NOT EXISTS token_usage (
 CREATE INDEX IF NOT EXISTS idx_usage_req    ON token_usage(requirement_id);
 CREATE INDEX IF NOT EXISTS idx_usage_proj   ON token_usage(project_id);
 CREATE INDEX IF NOT EXISTS idx_usage_created ON token_usage(created_at);
+
+-- User-Role-Permission (RBAC) tables. NOTE: the existing roles table above
+-- stores AI personas (analyst/architect/developer/reviewer) -- it is a DIFFERENT
+-- concept from the RBAC role definitions here, which live in acl_roles to
+-- avoid table-name / UI confusion.
+
+CREATE TABLE IF NOT EXISTS users (
+	id             TEXT PRIMARY KEY,
+	username       TEXT NOT NULL UNIQUE,
+	display_name   TEXT NOT NULL DEFAULT '',
+	password_hash  TEXT NOT NULL DEFAULT '',
+	status         TEXT NOT NULL DEFAULT 'active',
+	is_admin       INTEGER NOT NULL DEFAULT 0,
+	last_login_at  DATETIME,
+	created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+
+CREATE TABLE IF NOT EXISTS acl_roles (
+	id          TEXT PRIMARY KEY,
+	key         TEXT NOT NULL UNIQUE,
+	name        TEXT NOT NULL,
+	description TEXT DEFAULT '',
+	is_builtin  INTEGER NOT NULL DEFAULT 0,
+	sort_order  INTEGER NOT NULL DEFAULT 0,
+	enabled     INTEGER NOT NULL DEFAULT 1,
+	created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS permissions (
+	id          TEXT PRIMARY KEY,
+	key         TEXT NOT NULL UNIQUE,
+	name        TEXT NOT NULL,
+	module      TEXT NOT NULL DEFAULT '',
+	description TEXT DEFAULT '',
+	sort_order  INTEGER NOT NULL DEFAULT 0,
+	created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS acl_role_permissions (
+	role_id       TEXT NOT NULL,
+	permission_id TEXT NOT NULL,
+	PRIMARY KEY (role_id, permission_id),
+	FOREIGN KEY (role_id) REFERENCES acl_roles(id) ON DELETE CASCADE,
+	FOREIGN KEY (permission_id) REFERENCES permissions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS acl_user_roles (
+	user_id    TEXT NOT NULL,
+	role_id    TEXT NOT NULL,
+	PRIMARY KEY (user_id, role_id),
+	FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+	FOREIGN KEY (role_id) REFERENCES acl_roles(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_projects (
+	user_id    TEXT NOT NULL,
+	project_id TEXT NOT NULL,
+	assigned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (user_id, project_id),
+	FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+	FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_user_projects_user ON user_projects(user_id);
+
+CREATE TABLE IF NOT EXISTS sessions (
+	token       TEXT PRIMARY KEY,
+	user_id     TEXT NOT NULL,
+	expires_at  DATETIME NOT NULL,
+	created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 `
 
 // alterColumns adds columns to older databases. ALTER TABLE fails when the
@@ -247,7 +322,7 @@ var (
 	// MySQL cannot index TEXT columns (needs a key length), so every column
 	// that is a PK/UNIQUE/index target becomes a VARCHAR. Column definitions
 	// all start at the beginning of a line in the canonical schema.
-	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|session_id|type|status)(\s+)TEXT\b`)
+	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|session_id|type|status|username|role_id|permission_id|user_id|token)(\s+)TEXT\b`)
 	mysqlLocalPathCol = regexp.MustCompile(`(?m)^(\s*)local_path(\s+)TEXT\b`)
 	// `key` is a reserved word in MySQL — quote it in DDL. (Queries go
 	// through DB.Ident.)

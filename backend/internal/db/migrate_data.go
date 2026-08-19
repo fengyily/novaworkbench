@@ -30,6 +30,14 @@ var copyOrder = []string{
 	"weekly_reports",
 	"job_logs",
 	"token_usage",
+	// RBAC tables (parents before join tables).
+	"users",
+	"acl_roles",
+	"permissions",
+	"acl_role_permissions",
+	"acl_user_roles",
+	"user_projects",
+	"sessions",
 }
 
 // Migrate copies all data from src into dst (which must already be migrated —

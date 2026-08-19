@@ -141,3 +141,85 @@
   margin: 0 0 20px 0;
   color: var(--color-text);
 }
+
+/* ---- RBAC: user / role management pages ---- */
+.admin-badge,
+.builtin-badge {
+  display: inline-block;
+  font-size: 11px;
+  color: #fff;
+  background: var(--color-primary);
+  padding: 1px 7px;
+  border-radius: 10px;
+  margin-left: 6px;
+}
+.builtin-badge { background: var(--color-text-muted); }
+.disabled-badge {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--color-error);
+  background: rgba(239, 68, 68, 0.1);
+  padding: 1px 7px;
+  border-radius: 10px;
+  margin-left: 6px;
+}
+.status-badge { font-size: 12px; padding: 2px 8px; border-radius: 10px; }
+.status-badge.status-active { color: var(--color-success); background: rgba(16, 185, 129, 0.12); }
+.status-badge.status-disabled { color: var(--color-text-muted); background: var(--color-hover); }
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--color-text);
+  cursor: pointer;
+}
+.checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+.checkbox-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  margin-top: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.role-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+.role-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.role-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+.role-name { font-weight: 600; color: var(--color-text); }
+.role-key { display: block; font-size: 12px; color: var(--color-text-muted); margin-top: 2px; }
+.role-card-actions { display: flex; gap: 12px; white-space: nowrap; }
+.role-desc { margin: 0; font-size: 13px; color: var(--color-text-secondary); }
+.role-perms { display: flex; flex-wrap: wrap; gap: 6px; }
+.perm-chip {
+  font-size: 12px;
+  color: var(--color-primary);
+  background: var(--color-active);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+.role-meta { font-size: 12px; color: var(--color-text-muted); margin-top: 4px; }
+
+.perm-module { margin-bottom: 12px; }
+.perm-module-title { font-size: 13px; font-weight: 600; color: var(--color-text-secondary); margin-bottom: 4px; }
+.perm-key-hint { display: block; font-size: 11px; color: var(--color-text-muted); }

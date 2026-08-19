@@ -6,6 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/novaworkbench/backend/internal/middleware"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/service"
 )
@@ -20,7 +21,13 @@ func NewProjectHandler(svc *service.ProjectService, scanner *service.ScannerServ
 }
 
 func (h *ProjectHandler) List(w http.ResponseWriter, r *http.Request) {
-	projects, err := h.svc.List()
+	var userID string
+	isAdmin := true
+	if u := middleware.CurrentUser(r); u != nil {
+		userID = u.UserID
+		isAdmin = u.IsAdmin
+	}
+	projects, err := h.svc.ListForUser(userID, isAdmin)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 		return
@@ -33,6 +40,25 @@ func (h *ProjectHandler) List(w http.ResponseWriter, r *http.Request) {
 
 func (h *ProjectHandler) Get(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	var userID string
+	isAdmin := true
+	if u := middleware.CurrentUser(r); u != nil {
+		userID = u.UserID
+		isAdmin = u.IsAdmin
+	}
+	// Non-admins can only fetch projects assigned to them (prevents ID
+	// enumeration). Admins / the auth-bypass pass through.
+	if !isAdmin && userID != "" {
+		ok, err := h.svc.CanAccess(userID, false, id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", "project not found")
+			return
+		}
+	}
 	p, err := h.svc.Get(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", err.Error())
