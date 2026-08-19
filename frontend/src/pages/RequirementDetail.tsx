@@ -939,6 +939,16 @@ export default function RequirementDetail() {
                   <span>远程仓库</span>
                   <code>{mergeState.remote_url || '（未配置）'}</code>
                 </div>
+                {mergeState.behind > 0 && (
+                  <p className="merge-warn">⚠️ 落后主分支 {mergeState.behind} 个提交，将先合并主分支再提交 PR。</p>
+                )}
+                <div className="merge-hint">
+                  <span>执行流程</span>
+                  <span>合并主分支 → 解决冲突 → 生成 PR 摘要 → 推送并发起 PR</span>
+                </div>
+                {mergeState.mid_merge && (
+                  <p className="merge-warn">⚠️ 当前存在未完成的合并，请先解决冲突或中止合并。</p>
+                )}
                 <div className="modal-field">
                   <label>提交信息</label>
                   <input className="input" value={mergeCommitMsg} onChange={e => setMergeCommitMsg(e.target.value)} />
@@ -947,7 +957,7 @@ export default function RequirementDetail() {
                   <p className="merge-warn">该项目未配置 origin 远程仓库，无法推送。</p>
                 )}
                 <div className="modal-actions">
-                  <button className="btn btn-primary" onClick={confirmMerge} disabled={!!busy || !mergeState.has_remote}>🌐 确认推送</button>
+                  <button className="btn btn-primary" onClick={confirmMerge} disabled={!!busy || !mergeState.has_remote}>🌐 推送并发起 PR</button>
                   <button className="btn" onClick={() => setShowMergeModal(false)} disabled={!!busy}>取消</button>
                 </div>
               </>

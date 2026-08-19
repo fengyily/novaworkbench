@@ -40,10 +40,11 @@ type MergeHandler struct {
 	jobs        *store.JobStore
 	roleSvc     *service.RoleService
 	platformSvc *service.PlatformTokenService
+	jobLogSvc   *service.JobLogService
 	usageSvc    usageRecorder
 }
 
-func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, usageSvc usageRecorder) *MergeHandler {
+func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, jobLogSvc *service.JobLogService, usageSvc usageRecorder) *MergeHandler {
 	return &MergeHandler{
 		projectSvc:  projectSvc,
 		reqSvc:      reqSvc,
@@ -51,16 +52,33 @@ func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.Require
 		jobs:        jobs,
 		roleSvc:     roleSvc,
 		platformSvc: platformSvc,
+		jobLogSvc:   jobLogSvc,
 		usageSvc:    usageSvc,
 	}
 }
 
-// roleConfig loads the developer role's system prompt + model. On miss it
-// returns empty strings so a broken role config never blocks merge resolution.
-func (h *MergeHandler) roleConfig() (systemPrompt, model string) {
-	r, err := h.roleSvc.GetByKey("developer")
+// persistJob saves the finished job's full log to job_logs so it survives a
+// backend restart (the in-memory JobStore is lost on restart). Mirrors the
+// defer pattern used by start-coding / review. Best-effort: errors are logged
+// and never break the goroutine. model is the effective model the claude CLI
+// ran with (empty when the role had no model override → CLI default).
+func (h *MergeHandler) persistJob(job *store.Job, reqID, model string) {
+	if h.jobLogSvc == nil {
+		return
+	}
+	lines, status, exitCode := job.Snapshot()
+	if perr := h.jobLogSvc.Save(job.ID, reqID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, model); perr != nil {
+		log.Printf("[merge] failed to persist job log %s: %v", job.ID, perr)
+	}
+}
+
+// roleConfig loads a role's system prompt + model by key (developer for
+// conflict resolution, pr_author for PR summary). On miss it returns empty
+// strings so a broken role config never blocks the merge/PR flow.
+func (h *MergeHandler) roleConfig(key string) (systemPrompt, model string) {
+	r, err := h.roleSvc.GetByKey(key)
 	if err != nil {
-		log.Printf("[merge] developer role not found, using CLI defaults: %v", err)
+		log.Printf("[merge] role %q not found, using CLI defaults: %v", key, err)
 		return "", ""
 	}
 	return r.SystemPrompt, r.Model
@@ -388,6 +406,7 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
 
 	go func() {
+		defer h.persistJob(job, reqRow.ID, "")
 		log.Printf("[merge/local] job %s req %s: %s → %s", job.ID, reqRow.ID, dev, target)
 
 		// 1. Commit pending dev-branch changes first (in the worktree / checkout
@@ -516,6 +535,7 @@ func (h *MergeHandler) Continue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
 
 	go func() {
+		defer h.persistJob(job, reqRow.ID, "")
 		if _, err := gitRun(dir, "add", "-A"); err != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ git add 失败: " + err.Error()})
 			job.Finish(1, store.JobError)
@@ -560,9 +580,10 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 	job := h.jobs.Create(reqRow.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
 
-	systemPrompt, model := h.roleConfig()
+	systemPrompt, model := h.roleConfig("developer")
 
 	go func() {
+		defer h.persistJob(job, reqRow.ID, model)
 		job.Append(store.LogLine{Type: "phase", Content: "🤖 Claude 正在解决合并冲突..."})
 
 		fileList := strings.Join(conflicts, "\n")
@@ -604,9 +625,17 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// Push commits pending dev-branch changes, pushes the branch to origin, and
-// appends a "pr_link" log line with a ready-to-open "create PR" URL built from
-// the remote.
+// Push orchestrates the end-to-end "推送发起 PR" flow as a background job:
+// commit pending dev-branch changes → fetch+merge the main (base) branch into
+// dev to surface conflicts with main → AI-resolve any conflicts (Claude, full
+// tool use) → AI-organize a PR Summary (title + body) from the diff → push the
+// dev branch to origin → CreatePR via the platform API with the AI summary.
+//
+// When the merge hits conflicts Claude can't resolve, the merge is aborted
+// (restoring dev to a clean tree), a "conflict" frame is surfaced for human
+// intervention, and the job STOPS — no push, no PR — so the user can resolve
+// manually and retry. Re-running is idempotent: a re-push after a PR already
+// exists surfaces the existing PR link (multi-push fine-tuning).
 // POST /api/requirements/{id}/merge/push
 func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	reqRow, dir, _, platformType, ok := h.loadReqProject(w, r)
@@ -635,8 +664,18 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
 
 	go func() {
+		var effModel string
+		defer func() { h.persistJob(job, reqRow.ID, effModel) }()
 		log.Printf("[merge/push] job %s req %s: branch=%s", job.ID, reqRow.ID, dev)
 
+		// base = the main branch to merge into dev + the PR base target.
+		project, _ := h.loadProjectNoWrite(reqRow.ID)
+		base := "main"
+		if project != nil && project.DefaultBranch != "" {
+			base = project.DefaultBranch
+		}
+
+		// 1. Commit pending dev-branch changes.
 		commitMsg := body.CommitMessage
 		if commitMsg == "" {
 			commitMsg = dev
@@ -649,9 +688,24 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 			job.Append(store.LogLine{Type: "message", Content: "💾 已提交未提交改动: " + commitMsg})
 		}
 
-		// Push and surface the combined output. CombinedOutput is used instead of
-		// io.Pipe — an io.Pipe write end closed before the reader drains it fails
-		// with "read/write on closed pipe" (it's synchronous and unbuffered).
+		// 2-3. Merge main into dev (conflict pre-check) + AI-resolve if needed.
+		// On an unrecoverable conflict the helper aborts the merge and surfaces
+		// a "conflict" frame; we STOP (no push, no PR) for human intervention.
+		resolveModel, stop := h.mergeAndResolveBase(job, devDir, base, dev, reqRow)
+		effModel = resolveModel
+		if stop {
+			job.Finish(1, store.JobError)
+			return
+		}
+
+		// 4. AI-organized PR Summary (title + body) from the dev...base diff.
+		prTitle, prBody, summaryModel := h.generatePRSummary(job, devDir, base, dev, reqRow)
+		if summaryModel != "" {
+			effModel = summaryModel
+		}
+
+		// 5. Push the dev branch to origin. CombinedOutput is used instead of an
+		// io.Pipe — a pipe write end closed before the reader drains it fails.
 		job.Append(store.LogLine{Type: "phase", Content: "🌐 正在推送 " + dev + " 到 origin..."})
 		out, err := exec.Command("git", "-C", devDir, "push", "-u", "origin", dev).CombinedOutput()
 		for _, line := range strings.Split(string(out), "\n") {
@@ -665,38 +719,9 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Build the PR link from the remote. base = target branch.
-		project, _ := h.loadProjectNoWrite(reqRow.ID)
-		defaultBranch := "main"
-		if project != nil && project.DefaultBranch != "" {
-			defaultBranch = project.DefaultBranch
-		}
-		pf, webBase, owner, repo := parseRemote(remote, platformType)
-		prURL := buildPRURL(pf, webBase, owner, repo, defaultBranch, dev)
-
-		// Actually create the PR via the platform API when the project has a
-		// platform token configured; otherwise fall back to the compare link.
-		created := false
-		if project != nil && project.PlatformType != "" && project.PlatformTokenID != "" {
-			if tok, err := h.platformSvc.Get(project.PlatformTokenID); err == nil {
-				if client, err := platform.New(project.PlatformType, tok.BaseURL, tok.Token); err == nil {
-					title := reqRow.Title
-					if title == "" {
-						title = dev
-					}
-					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-					pr, cerr := client.CreatePR(ctx, remote, defaultBranch, dev, title, reqRow.Description)
-					cancel()
-					if cerr != nil {
-						job.Append(store.LogLine{Type: "message", Content: "ℹ️ 自动创建 PR 失败（可点击下方链接手动创建）: " + cerr.Error()})
-					} else if pr != nil && pr.HTMLURL != "" {
-						prURL = pr.HTMLURL
-						created = true
-						job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("🎉 已创建 PR #%d", pr.Number)})
-					}
-				}
-			}
-		}
+		// 6. Create the PR via the platform API with the AI summary; fall back to
+		// a compare link when there's no token or creation fails.
+		prURL, created := h.createPRWithFallback(job, project, remote, platformType, base, dev, prTitle, prBody, reqRow)
 		if prURL != "" {
 			job.Append(store.LogLine{Type: "pr_link", Content: prURL})
 		}
@@ -707,6 +732,207 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 		}
 		job.Finish(0, store.JobDone)
 	}()
+}
+
+// mergeAndResolveBase fetches origin/base and merges it into the dev branch
+// (checked out in devDir), running Claude (developer role) to resolve any
+// conflicts. It returns (model, stop): stop=true means the merge hit an
+// unrecoverable conflict and the caller must stop WITHOUT pushing or creating
+// a PR — the dev tree was already restored (merge --abort) and a "conflict"
+// frame was appended for human intervention. stop=false means the merge is
+// clean (or was resolved) and the flow may continue.
+func (h *MergeHandler) mergeAndResolveBase(job *store.Job, devDir, base, dev string, reqRow *model.Requirement) (string, bool) {
+	systemPrompt, model := h.roleConfig("developer")
+
+	// 2. fetch origin/base (best-effort; a fetch failure just skips the merge).
+	job.Append(store.LogLine{Type: "phase", Content: "⬇️ 拉取主分支 origin/" + base + " ..."})
+	if out, ferr := gitRun(devDir, "fetch", "origin", base); ferr != nil {
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 拉取主分支失败，跳过合并主分支检查: " + strings.TrimSpace(out+" "+ferr.Error())})
+		return model, false
+	} else if out = strings.TrimSpace(out); out != "" {
+		job.Append(store.LogLine{Type: "message", Content: out})
+	}
+
+	// 3. merge origin/base into dev.
+	job.Append(store.LogLine{Type: "phase", Content: "🌿 合并主分支 origin/"+base+" → "+dev})
+	mergeOut, mergeErr := gitRun(devDir, "merge", "--no-edit", "origin/"+base)
+	for _, line := range strings.Split(mergeOut, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			job.Append(store.LogLine{Type: "message", Content: line})
+		}
+	}
+	if mergeErr == nil {
+		return model, false // clean merge (or fast-forward / already up to date)
+	}
+
+	conflicts := conflictedFiles(devDir)
+	if len(conflicts) == 0 {
+		// Non-conflict merge error — abort to be safe and stop.
+		if midMerge(devDir) {
+			_, _ = gitRun(devDir, "merge", "--abort")
+		}
+		job.Append(store.LogLine{Type: "error", Content: "❌ 合并主分支失败: " + mergeErr.Error()})
+		return model, true
+	}
+
+	// AI resolve the conflicts (developer role, full tool use).
+	resolved := h.aiResolveConflicts(job, devDir, conflicts, systemPrompt, model, reqRow)
+	if resolved {
+		return model, false
+	}
+
+	// Unresolvable: abort to restore a clean dev tree and surface the conflict
+	// files so the user can intervene manually, then stop (no push / no PR).
+	remaining := conflictedFiles(devDir)
+	_, _ = gitRun(devDir, "merge", "--abort")
+	filesJSON, _ := json.Marshal(remaining)
+	job.Append(store.LogLine{Type: "conflict", Content: "⚠️ 与主分支冲突且未能自动解决，已中止合并，请人为介入处理: " + string(filesJSON)})
+	job.Append(store.LogLine{Type: "error", Content: "未推送、未创建 PR。请在编辑器中合并主分支并解决冲突后重试。"})
+	return model, true
+}
+
+// aiResolveConflicts runs Claude (developer role) to resolve the active merge's
+// conflict markers in devDir and conclude the merge. Returns true when the
+// merge is concluded (MERGE_HEAD gone, no conflict files left); the repo stays
+// mid-merge on failure so the caller can abort.
+func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflicts []string, systemPrompt, model string, reqRow *model.Requirement) bool {
+	job.Append(store.LogLine{Type: "phase", Content: "🤖 Claude 正在解决与主分支的合并冲突..."})
+	fileList := strings.Join(conflicts, "\n")
+	prompt := fmt.Sprintf("当前开发分支正在与主分支合并，以下文件存在冲突标记（<<<<<<< / ======= / >>>>>>>）：\n%s\n\n"+
+		"请逐个读取这些冲突文件，理解 \"ours\"（当前开发分支）与 \"theirs\"（主分支）双方的意图，"+
+		"合理整合两边的改动、消除冲突标记后写回文件。完成后执行 git add -A 暂存所有已解决的文件，"+
+		"再执行 git commit --no-edit 完成合并提交。不要留下任何冲突标记。用中文说明你的处理。", fileList)
+	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+		Prompt:       prompt,
+		WorkDir:      devDir,
+		SystemPrompt: systemPrompt,
+		Model:        model,
+	})
+	runClaudeStream(jobSink{job}, cmd, "push-pr-resolve", &usageCtx{
+		Rec:           h.usageSvc,
+		RequirementID: reqRow.ID,
+		ProjectID:     reqRow.ProjectID,
+		JobID:         job.ID,
+		Step:          "merge",
+		Model:         model,
+	})
+	return !midMerge(devDir) && len(conflictedFiles(devDir)) == 0
+}
+
+// generatePRSummary runs Claude (pr_author role) to organize a PR title + body
+// from the dev...base diff. Falls back to ("", "", model) on failure so the
+// caller degrades to reqRow.Title / reqRow.Description without blocking.
+func (h *MergeHandler) generatePRSummary(job *store.Job, devDir, base, dev string, reqRow *model.Requirement) (title, body, modelOut string) {
+	systemPrompt, model := h.roleConfig("pr_author")
+	modelOut = model
+	job.Append(store.LogLine{Type: "phase", Content: "📝 Claude 正在生成 PR 摘要..."})
+	prompt := fmt.Sprintf("请为本次开发分支的改动撰写 PR 描述。\n\n开发分支：%s\n主分支（base）：%s\n需求标题：%s\n需求描述：\n%s\n\n"+
+		"操作步骤：\n1. 运行 git diff origin/%s...%s 查看本次相对主分支的全部改动\n2. 必要时运行 git log 查看提交历史\n"+
+		"3. 结合需求理解改动意图\n4. 按 system prompt 要求的 JSON 格式输出 PR 标题与正文",
+		dev, base, reqRow.Title, reqRow.Description, base, dev)
+	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+		Prompt:       prompt,
+		WorkDir:      devDir,
+		SystemPrompt: systemPrompt,
+		Model:        model,
+	})
+	out := runClaudeStream(jobSink{job}, cmd, "push-pr-summary", &usageCtx{
+		Rec:           h.usageSvc,
+		RequirementID: reqRow.ID,
+		ProjectID:     reqRow.ProjectID,
+		JobID:         job.ID,
+		Step:          "pr-summary",
+		Model:         model,
+	})
+	raw := strings.TrimSpace(out.finalResult)
+	if out.errMsg != "" {
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ PR 摘要生成异常，将使用默认标题: " + out.errMsg})
+		return "", "", model
+	}
+	if raw == "" {
+		return "", "", model
+	}
+	js := extractJSON(raw)
+	var parsed struct {
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(js), &parsed); err == nil && strings.TrimSpace(parsed.Title) != "" {
+		job.Append(store.LogLine{Type: "message", Content: "📝 PR 标题: " + parsed.Title})
+		return parsed.Title, parsed.Body, model
+	}
+	job.Append(store.LogLine{Type: "message", Content: "ℹ️ PR 摘要解析失败，将使用默认标题"})
+	return "", "", model
+}
+
+// createPRWithFallback calls the platform CreatePR API with the AI-organized
+// title/body. On a "PR already exists" error (multi-push fine-tuning) it looks
+// up the existing open PR for this head→base and surfaces its link. Falls back
+// to a compare URL when no token is configured or creation fails.
+func (h *MergeHandler) createPRWithFallback(job *store.Job, project *model.Project, remote, platformType, base, dev, prTitle, prBody string, reqRow *model.Requirement) (prURL string, created bool) {
+	pf, webBase, owner, repo := parseRemote(remote, platformType)
+	prURL = buildPRURL(pf, webBase, owner, repo, base, dev)
+
+	if project == nil || project.PlatformType == "" || project.PlatformTokenID == "" {
+		return prURL, false
+	}
+	tok, err := h.platformSvc.Get(project.PlatformTokenID)
+	if err != nil {
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 获取平台 Token 失败（可点击下方链接手动创建）: " + err.Error()})
+		return prURL, false
+	}
+	client, err := platform.New(project.PlatformType, tok.BaseURL, tok.Token)
+	if err != nil {
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 平台客户端初始化失败: " + err.Error()})
+		return prURL, false
+	}
+
+	title := prTitle
+	if title == "" {
+		title = reqRow.Title
+	}
+	if title == "" {
+		title = dev
+	}
+	body := prBody
+	if body == "" {
+		body = reqRow.Description
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pr, cerr := client.CreatePR(ctx, remote, base, dev, title, body)
+	if cerr == nil && pr != nil && pr.HTMLURL != "" {
+		job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("🎉 已创建 PR #%d", pr.Number)})
+		return pr.HTMLURL, true
+	}
+	if cerr != nil {
+		// Likely "PR already exists" for this head→base (re-push fine-tuning) —
+		// look up the existing open PR and surface its link.
+		if existing := findExistingPR(client, remote, base, dev); existing != "" {
+			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 该分支已存在 PR，已推送更新: " + cerr.Error()})
+			return existing, false
+		}
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 自动创建 PR 失败（可点击下方链接手动创建）: " + cerr.Error()})
+	}
+	return prURL, false
+}
+
+// findExistingPR lists open PRs and returns the HTMLURL of the one whose head
+// matches dev (and base matches when given). Empty when none / lookup fails.
+func findExistingPR(client platform.Client, repoURL, base, dev string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	prs, err := client.ListOpenPRs(ctx, repoURL)
+	if err != nil {
+		return ""
+	}
+	for _, p := range prs {
+		if p.HeadBranch == dev && (base == "" || p.BaseBranch == base) {
+			return p.HTMLURL
+		}
+	}
+	return ""
 }
 
 // loadProjectNoWrite re-reads the requirement's project inside a goroutine

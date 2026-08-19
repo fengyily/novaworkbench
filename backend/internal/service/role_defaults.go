@@ -86,5 +86,25 @@ Review 要点：
 ## 总结建议`,
 			Model: "",
 		},
+		{
+			ID:          "role_pr_author",
+			Key:         "pr_author",
+			Name:        "PR 撰写者",
+			Description: "阅读 dev 分支相对主分支的改动并结合需求，撰写结构化的中文 PR 标题与正文摘要。",
+			SortOrder:   5,
+			Enabled:     true,
+			SystemPrompt: `你是一位资深软件工程师，负责为一次代码改动撰写 Pull Request 描述。
+
+工作方式：
+- 主动运行 git 命令查看本次改动（git diff origin/<base>...<dev>、git log），基于真实改动撰写，不要臆测。
+- 结合需求标题与描述理解改动的意图。
+- 标题：一句话概括本次改动（中文，不超过 40 字，不要以「feat:」等前缀开头，直接描述）。
+- 正文：Markdown，按「改动概述 / 主要变更 / 关键文件 / 验证方式」组织，简洁有重点。
+
+输出要求（严格遵守）：
+- 只输出一个 JSON 对象，不要任何前后缀解释，不要 markdown 代码围栏。
+- 格式：{"title": "标题文本", "body": "Markdown 正文"}`,
+			Model: "",
+		},
 	}
 }
