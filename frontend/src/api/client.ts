@@ -447,6 +447,13 @@ export const llmApi = {
     api.put<LLMConfig>('/api/settings/llm', data),
 };
 
+// Max duration for a single coding task (start-coding / adjust-coding). Stored
+// as a Go duration string ("2h", "90m"); default 2h.
+export const codingTimeoutApi = {
+  get: () => api.get<{ coding_timeout: string }>('/api/settings/coding-timeout'),
+  update: (coding_timeout: string) => api.put<{ coding_timeout: string }>('/api/settings/coding-timeout', { coding_timeout }),
+};
+
 // Database driver config (sqlite default; mysql/postgres via settings UI or
 // NOVA_DB_DRIVER/NOVA_DB_DSN env). Saving takes effect on server restart.
 export interface DatabaseInfo {

@@ -83,7 +83,7 @@ func main() {
 	// ClaudeEnvProvider); settingSvc supplies the direct HTTP LLM channel for
 	// lightweight tasks. Switching the active config applies immediately on
 	// the next subprocess — no restart needed.
-	llmGateway := llm.New(claudeCfgSvc, settingSvc)
+	llmGateway := llm.New(claudeCfgSvc, settingSvc, settingSvc)
 
 	// Scanner depends on the LLM gateway (auto project description generation)
 	// and the project service (description persistence).
@@ -211,6 +211,10 @@ func main() {
 	// lightweight tasks (requirement title distillation). Bypasses claude CLI.
 	mux.HandleFunc("GET /api/settings/llm", settingH.GetLLM)
 	mux.HandleFunc("PUT /api/settings/llm", settingH.UpdateLLM)
+	// Coding-task timeout (settings) — max duration for a single start-coding /
+	// adjust-coding run, default 2h.
+	mux.HandleFunc("GET /api/settings/coding-timeout", settingH.GetCodingTimeout)
+	mux.HandleFunc("PUT /api/settings/coding-timeout", settingH.UpdateCodingTimeout)
 
 	// Database (settings) — driver info, connection test, save (takes effect
 	// on restart), and one-shot SQLite → MySQL/Postgres data migration.

@@ -30,6 +30,13 @@ type usageCtx struct {
 	Meta          string
 }
 
+// usageSnapshot is a partial token count captured from a non-result stream
+// event (best-effort). Used to record a token row for an interrupted run that
+// was killed before its terminal result event.
+type usageSnapshot struct {
+	in, out, cc, cr int
+}
+
 // extractUsage reads the four token counts from a stream-json result event's
 // top-level "usage" field. The CLI emits these as JSON numbers, which decode
 // into float64 via map[string]interface{}; truncate to int. Missing/zero
@@ -39,8 +46,36 @@ func extractUsage(evt map[string]interface{}) (in, out, cc, cr int) {
 	if !ok {
 		return
 	}
+	return usageCounts(u)
+}
+
+// usageCounts reads the four token counts from a single "usage" map.
+func usageCounts(u map[string]interface{}) (in, out, cc, cr int) {
 	return toInt(u["input_tokens"]), toInt(u["output_tokens"]),
 		toInt(u["cache_creation_input_tokens"]), toInt(u["cache_read_input_tokens"])
+}
+
+// captureUsageFromEvent looks for a "usage" block in a few known spots of a
+// stream-json event (top-level, or under "message") and returns its token
+// counts. Used for best-effort partial usage capture before the terminal
+// result event. ok=false when no non-zero usage block is present.
+func captureUsageFromEvent(evt map[string]interface{}) (usageSnapshot, bool) {
+	candidates := []map[string]interface{}{}
+	if u, ok := evt["usage"].(map[string]interface{}); ok {
+		candidates = append(candidates, u)
+	}
+	if m, ok := evt["message"].(map[string]interface{}); ok {
+		if u, ok := m["usage"].(map[string]interface{}); ok {
+			candidates = append(candidates, u)
+		}
+	}
+	for _, u := range candidates {
+		in, out, cc, cr := usageCounts(u)
+		if in+out+cc+cr > 0 {
+			return usageSnapshot{in, out, cc, cr}, true
+		}
+	}
+	return usageSnapshot{}, false
 }
 
 // toInt coerces a JSON number (float64) or json.Number to int. 0 for anything else.
@@ -85,6 +120,34 @@ func (c *usageCtx) recordFrom(evt map[string]interface{}) {
 	}
 	if err := c.Rec.Record(u); err != nil {
 		log.Printf("[usage] record %s for %s failed: %v (ignored)", c.Step, c.RequirementID, err)
+	}
+}
+
+// recordInterrupted persists a token-usage row for a run that was killed before
+// its terminal result event (timeout / hard kill). The authoritative billed
+// counts are never reported in that case, so this records whatever partial
+// usage was captured (possibly zero) and marks the row interrupted so the
+// usage page reflects that an invocation happened rather than silently
+// dropping it. Unlike recordFrom, it does NOT skip zero-usage rows — the point
+// is to leave a marker that the call occurred.
+func (c *usageCtx) recordInterrupted(snap usageSnapshot) {
+	if c == nil || c.Rec == nil {
+		return
+	}
+	u := model.TokenUsage{
+		RequirementID:       c.RequirementID,
+		ProjectID:            c.ProjectID,
+		JobID:                c.JobID,
+		Step:                 c.Step,
+		Model:                c.Model,
+		Meta:                 `{"interrupted":true}`,
+		InputTokens:          snap.in,
+		OutputTokens:         snap.out,
+		CacheCreationTokens:  snap.cc,
+		CacheReadTokens:      snap.cr,
+	}
+	if err := c.Rec.Record(u); err != nil {
+		log.Printf("[usage] record interrupted %s for %s failed: %v (ignored)", c.Step, c.RequirementID, err)
 	}
 }
 

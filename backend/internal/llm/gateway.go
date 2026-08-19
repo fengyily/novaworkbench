@@ -26,17 +26,25 @@ type LLMConfigProvider interface {
 	LLMConfig() (baseURL, apiKey, model string, err error)
 }
 
+// CodingTimeoutProvider supplies the max duration for a single coding task
+// (start-coding / adjust-coding), resolved from the settings table + env by
+// SettingService. nil means "use the built-in default (2h)".
+type CodingTimeoutProvider interface {
+	CodingTimeout() time.Duration
+}
+
 type Gateway struct {
-	binPath    string
-	timeout    time.Duration
-	claudeEnv  ClaudeEnvProvider
-	llmCfg     LLMConfigProvider
+	binPath       string
+	timeout       time.Duration
+	claudeEnv     ClaudeEnvProvider
+	llmCfg        LLMConfigProvider
+	codingTimeout CodingTimeoutProvider
 }
 
 // New wires the gateway with separate providers for the Claude CLI env (auth
 // token / base URL, from the active claude_configs row) and the direct HTTP
 // LLM channel (from the settings table). Either may be nil.
-func New(claudeEnv ClaudeEnvProvider, llmCfg LLMConfigProvider) *Gateway {
+func New(claudeEnv ClaudeEnvProvider, llmCfg LLMConfigProvider, codingTimeout CodingTimeoutProvider) *Gateway {
 	binPath := os.Getenv("CLAUDE_BIN")
 	if binPath == "" {
 		binPath = "claude"
@@ -55,7 +63,7 @@ func New(claudeEnv ClaudeEnvProvider, llmCfg LLMConfigProvider) *Gateway {
 		fmt.Printf("[LLM] Install with: npm install -g @anthropic-ai/claude-code\n")
 	}
 
-	return &Gateway{binPath: binPath, timeout: timeout, claudeEnv: claudeEnv, llmCfg: llmCfg}
+	return &Gateway{binPath: binPath, timeout: timeout, claudeEnv: claudeEnv, llmCfg: llmCfg, codingTimeout: codingTimeout}
 }
 
 func (g *Gateway) GetBinPath() string { return g.binPath }
@@ -397,19 +405,36 @@ func summaryFallback(claudeMD string) string {
 	return strings.Join(para, " ")
 }
 
+// resolveCodingTimeout returns the coding-task timeout from the provider,
+// falling back to a 2h default. Always positive.
+func (g *Gateway) resolveCodingTimeout() time.Duration {
+	if g.codingTimeout != nil {
+		if d := g.codingTimeout.CodingTimeout(); d > 0 {
+			return d
+		}
+	}
+	return 2 * time.Hour
+}
+
+// CodingTimeout exposes the resolved coding timeout so handlers can detect a
+// timeout (elapsed >= deadline) and surface a clear message instead of a raw
+// "signal: killed".
+func (g *Gateway) CodingTimeout() time.Duration { return g.resolveCodingTimeout() }
+
 // GenerateCode invokes Claude CLI to implement a requirement.
 // Uses stream-json + dangerously-skip-permissions so Claude can read and write files.
-// Returns the command; caller streams stdout. systemPrompt/model come from the
+// Returns the command (caller streams stdout) and a cancel func to release the
+// timeout timer once the run has been reaped. systemPrompt/model come from the
 // "developer" role config. When opts.SessionID is set with Resume/Fork, the
 // coding turn continues (or forks from) the design conversation so the developer
 // inherits the full analysis+design context instead of being re-fed it.
-func (g *Gateway) GenerateCode(opts StreamOpts) *exec.Cmd {
-	// Use a long timeout for coding tasks — real implementations can take many minutes.
-	codingTimeout := g.timeout
-	if codingTimeout < 30*time.Minute {
-		codingTimeout = 30 * time.Minute
-	}
-	ctx, _ := context.WithTimeout(context.Background(), codingTimeout) //nolint:govet
+func (g *Gateway) GenerateCode(opts StreamOpts) (*exec.Cmd, context.CancelFunc) {
+	// Coding tasks get a long, configurable timeout (default 2h) — real
+	// implementations can take many minutes. Resolved at call time from the
+	// settings table / CLAUDE_CODING_TIMEOUT env so a change applies to the next
+	// task without a restart.
+	codingTimeout := g.resolveCodingTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), codingTimeout)
 
-	return g.StreamCmd(ctx, opts)
+	return g.StreamCmd(ctx, opts), cancel
 }

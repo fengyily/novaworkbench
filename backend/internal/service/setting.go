@@ -2,6 +2,7 @@ package service
 
 import (
 	"database/sql"
+	"os"
 	"strings"
 	"time"
 
@@ -19,6 +20,12 @@ const (
 	settingLLMBaseURL = "llm.base_url"
 	settingLLMAPIKey  = "llm.api_key"
 	settingLLMModel   = "llm.model"
+
+	// settingCodingTimeout is the max wall-clock duration for a single coding
+	// task (start-coding / adjust-coding), stored as a Go duration string
+	// ("2h", "90m"). Editable from the Claude settings page; applies to the
+	// next task without a restart.
+	settingCodingTimeout = "llm.coding_timeout"
 )
 
 // SettingService persists arbitrary key/value settings. The Claude CLI
@@ -108,6 +115,29 @@ func (s *SettingService) SetLLMConfig(baseURL, apiKey, model string) error {
 // channel (base URL + api key both must be set for it to activate).
 func (s *SettingService) ClearLLMAPIKey() error {
 	return s.Set(settingLLMAPIKey, "")
+}
+
+// CodingTimeout returns the coding-task timeout, resolved from the settings
+// table first, then the CLAUDE_CODING_TIMEOUT env, then a 2h default. Always
+// returns a positive duration — a DB read error or unparseable value falls
+// through to the next source rather than failing the caller.
+func (s *SettingService) CodingTimeout() time.Duration {
+	if v, err := s.Get(settingCodingTimeout); err == nil && v != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err == nil && d > 0 {
+			return d
+		}
+	}
+	if t := os.Getenv("CLAUDE_CODING_TIMEOUT"); t != "" {
+		if d, err := time.ParseDuration(strings.TrimSpace(t)); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 2 * time.Hour
+}
+
+// SetCodingTimeout persists the coding-task timeout as a duration string.
+func (s *SettingService) SetCodingTimeout(d time.Duration) error {
+	return s.Set(settingCodingTimeout, d.String())
 }
 
 // MaskToken returns a redacted preview of a secret token for API responses.

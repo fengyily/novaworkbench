@@ -723,6 +723,47 @@ func truncateStr(s string, n int) string {
 	return s[:n] + "..."
 }
 
+// persistJobProgress starts a background ticker that checkpoints the job's
+// in-progress log to job_logs (status "running") every 30s. This protects the
+// development record against a backend crash/restart mid-run — the terminal
+// Save only runs in the goroutine's defer, which a hard kill skips, so without
+// periodic checkpoints an in-flight run's log would be lost entirely. Returns a
+// stop func that halts the ticker and waits for any in-flight write to finish;
+// call it from the job goroutine's defer before the terminal Save so the final
+// status can't be clobbered by a concurrent "running" write.
+func (h *WizardHandler) persistJobProgress(job *store.Job, reqID, model string) (stop func()) {
+	ticker := time.NewTicker(30 * time.Second)
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		lastCount := -1
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+			}
+			lines, status, _ := job.Snapshot()
+			if status != store.JobRunning {
+				return
+			}
+			if len(lines) == lastCount {
+				continue // nothing new since the last checkpoint
+			}
+			lastCount = len(lines)
+			if err := h.jobLogSvc.Save(job.ID, reqID, "running", 0, job.StartedAt, time.Now(), lines, model); err != nil {
+				log.Printf("[job-checkpoint] %s failed: %v", job.ID, err)
+			}
+		}
+	}()
+	return func() {
+		close(stopCh)
+		ticker.Stop()
+		<-doneCh
+	}
+}
+
 // StartCoding creates a background job and immediately returns its ID.
 // The claude CLI runs in a goroutine; progress is parsed by runClaudeStream
 // (stream_event increments + init phase + tool_call labels) and written to the
@@ -747,7 +788,13 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	go func() {
+		var stopCheckpoint func()
 		defer func() {
+			// Stop the progress checkpoint before the terminal Save so the final
+			// status can't be clobbered by a concurrent "running" write.
+			if stopCheckpoint != nil {
+				stopCheckpoint()
+			}
 			// Persist the finished job's full log so a backend restart doesn't
 			// wipe the development record. All exit paths above call job.Finish,
 			// so by the time this defer runs the snapshot is terminal. The
@@ -920,6 +967,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 
 		systemPrompt, model := h.roleConfig("developer")
 		job.SetModel(model)
+		stopCheckpoint = h.persistJobProgress(job, req.RequirementID, model)
 		var prompt string
 		if sourceSID == "" {
 			// Legacy fresh-session path: feed the full title+desc as before.
@@ -938,7 +986,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 				prompt += "\n\n用户在开发前的追加调整说明：\n" + req.RequirementDesc
 			}
 		}
-		cmd := h.llm.GenerateCode(llm.StreamOpts{
+		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:       prompt,
 			WorkDir:      workDir,
 			SystemPrompt: systemPrompt,
@@ -947,6 +995,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			Resume:       sourceSID != "",
 			Fork:         fork,
 		})
+		defer cancel()
 
 		// runClaudeStream owns the subprocess lifecycle (Start/Wait) and parses
 		// stream-json events into job log lines via jobSink — including the
@@ -960,6 +1009,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			codingProjectID = reqRow.ProjectID
 		}
 		codingUsage := h.usageCtxFor("coding", req.RequirementID, codingProjectID, job.ID, model, "")
+		start := time.Now()
 		out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage)
 
 		// Persist the forked coding session id so later coding refine turns can
@@ -979,11 +1029,25 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if out.errMsg != "" {
-			job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+			msg := out.errMsg
+			// A run that ended right at the deadline was almost certainly killed
+			// by the coding timeout — surface that clearly instead of a raw
+			// "signal: killed", and record an interrupted token row if the CLI
+			// never emitted a result event (authoritative usage is unrecoverable).
+			if time.Since(start) >= h.llm.CodingTimeout()-time.Second {
+				msg = fmt.Sprintf("⏱️ 开发超时（超过 %s），任务已中断。可点击「继续开发」续接，或「重新开发」全新开始。", h.llm.CodingTimeout().Round(time.Minute))
+			}
+			if !out.recordedUsage {
+				codingUsage.recordInterrupted(out.lastUsage)
+			}
+			job.Append(store.LogLine{Type: "error", Content: "❌ " + msg})
 			job.Finish(1, store.JobError)
 			return
 		}
 		if out.finalResult == "" {
+			if !out.recordedUsage {
+				codingUsage.recordInterrupted(out.lastUsage)
+			}
 			job.Append(store.LogLine{Type: "error", Content: "❌ Claude 未返回结果，请重试"})
 			job.Finish(1, store.JobError)
 			return
@@ -1064,7 +1128,13 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	go func() {
+		var stopCheckpoint func()
 		defer func() {
+			// Stop the progress checkpoint before the terminal Save so the final
+			// status can't be clobbered by a concurrent "running" write.
+			if stopCheckpoint != nil {
+				stopCheckpoint()
+			}
 			// Persist the finished job's full log so a backend restart doesn't
 			// wipe the adjustment record (same durability pattern as StartCoding).
 			lines, status, exitCode := job.Snapshot()
@@ -1072,6 +1142,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[adjust-coding] failed to persist job log %s: %v", job.ID, perr)
 			}
 		}()
+		stopCheckpoint = h.persistJobProgress(job, body.RequirementID, model)
 		log.Printf("[adjust-coding] job %s started for %s (resume %s)", job.ID, body.RequirementID, req.CodingSessionID)
 		job.Append(store.LogLine{Type: "phase", Content: "🤖 Claude 正在续接开发会话，处理追加调整..."})
 
@@ -1090,7 +1161,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 				workDir = req.WorktreePath
 			}
 		}
-		cmd := h.llm.GenerateCode(llm.StreamOpts{
+		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:       body.Message,
 			WorkDir:      workDir,
 			SystemPrompt: "", // resume 已携带 developer persona，不再注入
@@ -1099,6 +1170,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			Resume:       true,
 			Fork:         false,
 		})
+		defer cancel()
 		adjustUsage := h.usageCtxFor("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "")
 		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding", adjustUsage)
 
@@ -1111,11 +1183,17 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if out.errMsg != "" {
+			if !out.recordedUsage {
+				adjustUsage.recordInterrupted(out.lastUsage)
+			}
 			job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
 			job.Finish(1, store.JobError)
 			return
 		}
 		if out.finalResult == "" {
+			if !out.recordedUsage {
+				adjustUsage.recordInterrupted(out.lastUsage)
+			}
 			job.Append(store.LogLine{Type: "error", Content: "❌ Claude 未返回结果，请重试"})
 			job.Finish(1, store.JobError)
 			return
@@ -1550,6 +1628,8 @@ type claudeStreamOutcome struct {
 	errMsg          string
 	hadStreamEvents bool   // true if any stream_event/content_block_delta arrived
 	planContent     string // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
+	lastUsage       usageSnapshot // latest partial usage captured from a non-result event (best-effort)
+	recordedUsage   bool          // true once a terminal result event was seen (so callers don't double-record an "interrupted" row)
 }
 
 // isStaleSessionError reports whether a non-success result event (optionally
@@ -1713,6 +1793,13 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 			}
 			continue
 		}
+		// Best-effort partial usage capture: some proxies/models emit a "usage"
+		// block on assistant/stream_event events before the terminal result
+		// event. Capture the latest so an interrupted run (killed before its
+		// result) can still record a partial token row via recordInterrupted.
+		if snap, ok := captureUsageFromEvent(evt); ok {
+			out.lastUsage = snap
+		}
 		evtType, _ := evt["type"].(string)
 		switch evtType {
 		case "system":
@@ -1855,6 +1942,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 			// tokens are consumed either way). Best-effort: recordFrom swallows
 			// all errors so a DB hiccup can never break the claude stream.
 			uctx.recordFrom(evt)
+			out.recordedUsage = true
 			gotResult = true
 		}
 		if gotResult {

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { claudeApi, type ClaudeConfigItem } from '../api/client';
+import { claudeApi, codingTimeoutApi, type ClaudeConfigItem } from '../api/client';
 import './SettingsClaude.css';
 
 interface ConfigForm {
@@ -24,6 +24,8 @@ export default function SettingsClaude() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
+  const [codingTimeout, setCodingTimeout] = useState('');
+  const [savingTimeout, setSavingTimeout] = useState(false);
 
   // Edit/create modal state.
   const [showModal, setShowModal] = useState(false);
@@ -41,6 +43,28 @@ export default function SettingsClaude() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    codingTimeoutApi.get()
+      .then(cfg => setCodingTimeout(cfg.coding_timeout || ''))
+      .catch(() => { /* non-fatal: keep default placeholder */ });
+  }, []);
+
+  const handleSaveTimeout = async () => {
+    const v = codingTimeout.trim();
+    if (!v) { setError('请输入编码超时时长，如 2h'); return; }
+    setSavingTimeout(true);
+    setError('');
+    try {
+      const cfg = await codingTimeoutApi.update(v);
+      setCodingTimeout(cfg.coding_timeout || v);
+      showToast('编码超时已更新');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingTimeout(false);
+    }
+  };
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -170,6 +194,26 @@ export default function SettingsClaude() {
 
       {error && <div className="form-error">{error}</div>}
       {toast && <div className="claude-toast">{toast}</div>}
+
+      {/* Global coding timeout — applies to the claude CLI coding pipeline. */}
+      <div className="form-group" style={{ maxWidth: 360 }}>
+        <label>编码超时（单次开发任务）</label>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input
+            className="form-input"
+            type="text"
+            placeholder="2h"
+            value={codingTimeout}
+            onChange={e => setCodingTimeout(e.target.value)}
+          />
+          <button className="btn btn-secondary" onClick={handleSaveTimeout} disabled={savingTimeout}>
+            {savingTimeout ? '保存中...' : '保存'}
+          </button>
+        </div>
+        <small className="form-hint">
+          单个开发/追加调整任务的最长运行时长（如 2h / 90m / 45m30s）。默认 2 小时；仅对之后发起的任务生效，超时后可「继续开发」续接。
+        </small>
+      </div>
 
       {configs.length === 0 && !loading && (
         <div className="settings-empty">

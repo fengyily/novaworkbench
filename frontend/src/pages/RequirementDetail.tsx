@@ -504,13 +504,17 @@ export default function RequirementDetail() {
           setCoding(false);
           const ok = evt.status === 'done' || evt.exit_code === 0;
           if (opts?.keepDone) {
-            // 追加调整: preserve current status, just refresh on success.
+            // 追加调整 / 继续开发: preserve current status, just refresh on success.
             if (ok) refresh();
           } else if (id && ok) {
             requirementsApi.updateStatus(id, 'developing').then(() => refresh());
             localStorage.setItem(`coding_job_${id}`, `done:${jobId}`);
-          } else {
-            localStorage.removeItem(`coding_job_${id}`);
+          } else if (id) {
+            // Job failed (error/timeout). Keep the pointer so a refresh can
+            // recover the persisted error log from job_logs — removing it here
+            // made the error log unrecoverable and surfaced a misleading
+            // "日志因服务重启已清空" message.
+            localStorage.setItem(`coding_job_${id}`, jobId);
           }
           return;
         }
@@ -621,6 +625,32 @@ export default function RequirementDetail() {
       const jobId = json.data?.job_id;
       if (!jobId) throw new Error(json.error?.message || '未获取到任务 ID');
       setAdjustInput('');
+      streamJob(jobId, { keepDone: true });
+    } catch (err: any) {
+      setCodingLines(prev => [...prev, { type: 'error', content: '❌ ' + err.message }]);
+      setCoding(false);
+    }
+  };
+
+  // ── 继续开发: 一键续接被中断（超时/出错）的 coding session ────────────────
+  // Reuses adjust-coding's --resume path, only swapping the user instruction for
+  // a fixed "please continue" prompt. Appends to the same codingLines panel so
+  // the continuation reads as a single dev log with the interrupted first pass.
+  const continueCoding = async () => {
+    if (!req || !id) return;
+    setCoding(true);
+    try {
+      const res = await authedFetch(`${API_BASE}/api/wizard/adjust-coding`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requirement_id: id,
+          message: '请继续完成未完成的开发任务',
+        }),
+      });
+      const json = await res.json();
+      const jobId = json.data?.job_id;
+      if (!jobId) throw new Error(json.error?.message || '未获取到任务 ID');
       streamJob(jobId, { keepDone: true });
     } catch (err: any) {
       setCodingLines(prev => [...prev, { type: 'error', content: '❌ ' + err.message }]);
@@ -1414,13 +1444,21 @@ export default function RequirementDetail() {
             <>
               {/* After a backend restart the in-memory job log is gone, but the
                   developing status is persisted in the DB — still allow the user
-                  to mark done or re-run without a live coding log. */}
+                  to continue / mark done / re-run without a live coding log. */}
               {codingLines.length === 0 && (
                 <p style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 8 }}>
-                  开发任务已完成（日志因服务重启已清空）。确认代码无误后可标记开发完成，或重新开发（基于技术方案 fork 新会话）。
+                  开发任务已中断或日志不可用。
+                  {req.coding_session_id
+                    ? '可「继续开发」续接原会话，或「重新开发」全新开始；确认代码无误后也可直接标记完成。'
+                    : '可「重新开发」全新开始，或确认代码无误后直接标记完成。'}
                 </p>
               )}
               <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+                {req.coding_session_id && (
+                  <button className="btn btn-primary" title="--resume 原开发会话，从上次中断处继续" onClick={continueCoding} disabled={!!busy}>
+                    ▶️ 继续开发
+                  </button>
+                )}
                 <button className="btn btn-primary" onClick={() => transition('done', '开发完成')} disabled={!!busy}>
                   {busy === '开发完成' ? '⏳ ...' : '✅ 开发完成'}
                 </button>

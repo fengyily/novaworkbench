@@ -3,6 +3,8 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/novaworkbench/backend/internal/service"
 )
@@ -75,4 +77,34 @@ func (h *SettingHandler) UpdateLLM(w http.ResponseWriter, r *http.Request) {
 		APIKeyPreview: service.MaskToken(apiKey),
 		Model:         model,
 	})
+}
+
+// GetCodingTimeout returns the effective coding-task timeout as a duration
+// string (resolved from the settings table / env, default 2h).
+// GET /api/settings/coding-timeout
+func (h *SettingHandler) GetCodingTimeout(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]string{"coding_timeout": h.svc.CodingTimeout().String()})
+}
+
+// UpdateCodingTimeout persists the coding-task timeout. The value must be a
+// parseable Go duration string ("2h", "90m", "45m30s").
+// PUT /api/settings/coding-timeout
+func (h *SettingHandler) UpdateCodingTimeout(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CodingTimeout string `json:"coding_timeout"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(req.CodingTimeout))
+	if err != nil || d <= 0 {
+		writeError(w, 400, "INVALID", "无效的时长，示例: 2h / 90m / 45m30s")
+		return
+	}
+	if err := h.svc.SetCodingTimeout(d); err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]string{"coding_timeout": d.String()})
 }
