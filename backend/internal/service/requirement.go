@@ -39,7 +39,7 @@ var validTransitions = map[string][]string{
 	"archived": {"done"},
 }
 
-func (s *RequirementService) List(projectID string, status string, priority string, sprint string) ([]model.Requirement, error) {
+func (s *RequirementService) List(projectID string, status string, priority string) ([]model.Requirement, error) {
 	where := "WHERE 1=1"
 	args := []interface{}{}
 
@@ -61,13 +61,9 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		where += " AND priority = ?"
 		args = append(args, priority)
 	}
-	if sprint != "" {
-		where += " AND sprint = ?"
-		args = append(args, sprint)
-	}
 
 	rows, err := s.db.Query(
-		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END ASC, created_at DESC",
+		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END ASC, created_at DESC",
 		args...)
 	if err != nil {
 		return nil, err
@@ -78,7 +74,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	for rows.Next() {
 		var r model.Requirement
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority,
-			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo, &r.Sprint,
+			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
 			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
@@ -95,9 +91,9 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	var r model.Requirement
 	err := s.db.QueryRow(
-		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,sprint,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
+		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority,
-			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo, &r.Sprint,
+			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
 			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
@@ -124,8 +120,8 @@ func (s *RequirementService) Create(req model.CreateRequirementReq) (*model.Requ
 	now := time.Now()
 
 	_, err := s.db.Exec(
-		"INSERT INTO requirements (id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,sprint,created_by,skip_analysis,created_at,updated_at) VALUES (?,?,?,?,'draft',?,'[]','[]','[]',?,'user',?,?,?)",
-		id, req.ProjectID, req.Title, req.Description, req.Priority, req.Sprint, skipAnalysis, now, now)
+		"INSERT INTO requirements (id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,created_by,skip_analysis,created_at,updated_at) VALUES (?,?,?,?,'draft',?,'[]','[]','[]','user',?,?,?)",
+		id, req.ProjectID, req.Title, req.Description, req.Priority, skipAnalysis, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -137,14 +133,14 @@ func (s *RequirementService) Update(id string, req model.CreateRequirementReq) (
 	// skip_analysis is a *bool: nil preserves the stored value (COALESCE keeps
 	// the existing column when the param is NULL), a non-nil pointer updates it.
 	// This lets the edit modal toggle the flag while other callers that only
-	// touch title/description/priority/sprint leave it untouched.
+	// touch title/description/priority leave it untouched.
 	var skipArg interface{}
 	if req.SkipAnalysis != nil {
 		skipArg = *req.SkipAnalysis
 	}
 	_, err := s.db.Exec(
-		"UPDATE requirements SET title=?, description=?, priority=?, sprint=?, skip_analysis=COALESCE(?,skip_analysis), updated_at=? WHERE id=?",
-		req.Title, req.Description, req.Priority, req.Sprint, skipArg, time.Now(), id)
+		"UPDATE requirements SET title=?, description=?, priority=?, skip_analysis=COALESCE(?,skip_analysis), updated_at=? WHERE id=?",
+		req.Title, req.Description, req.Priority, skipArg, time.Now(), id)
 	if err != nil {
 		return nil, err
 	}

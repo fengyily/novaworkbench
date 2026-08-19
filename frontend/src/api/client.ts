@@ -222,7 +222,7 @@ export interface Requirement {
   id: string; project_id: string; title: string; description: string;
   status: string; priority: string; acceptance_criteria: string;
   design_docs: string; conversation_ids: string; assigned_to: string;
-  sprint: string; created_by: string; analysis_session_id: string;
+  created_by: string; analysis_session_id: string;
   design_session_id: string; design_job_id: string; analysis_job_id: string; apply_job_id: string; coding_session_id: string;
   skip_analysis: boolean;
   branch_name?: string;
@@ -250,15 +250,15 @@ export const statusLabels: Record<string, string> = {
 };
 
 export const requirementsApi = {
-  list: (params?: { project_id?: string; status?: string; priority?: string; sprint?: string }) => {
+  list: (params?: { project_id?: string; status?: string; priority?: string }) => {
     const q = new URLSearchParams();
     Object.entries(params || {}).forEach(([k, v]) => { if (v) q.set(k, String(v)); });
     return api.get<Requirement[]>(`/api/requirements?${q.toString()}`);
   },
-  create: (data: { project_id: string; description: string; priority?: string; sprint?: string; skip_analysis?: boolean }) =>
+  create: (data: { project_id: string; description: string; priority?: string; skip_analysis?: boolean }) =>
     api.post<Requirement>('/api/requirements', data),
   get: (id: string) => api.get<Requirement>(`/api/requirements/${id}`),
-  update: (id: string, data: { title: string; description: string; priority: string; sprint: string; skip_analysis?: boolean }) =>
+  update: (id: string, data: { title: string; description: string; priority: string; skip_analysis?: boolean }) =>
     api.put<Requirement>(`/api/requirements/${id}`, data),
   updateStatus: (id: string, status: string) =>
     api.patch<Requirement>(`/api/requirements/${id}/status`, { status }),

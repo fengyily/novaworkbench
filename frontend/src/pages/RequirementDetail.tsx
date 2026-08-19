@@ -154,7 +154,6 @@ export default function RequirementDetail() {
   const [editTitle, setEditTitle] = useState('');
   const [editDesc, setEditDesc] = useState('');
   const [editPriority, setEditPriority] = useState('medium');
-  const [editSprint, setEditSprint] = useState('');
   const [editSkipAnalysis, setEditSkipAnalysis] = useState(true);
 
   // 追加调整 input. Resume the prior coding session (--resume coding_session_id)
@@ -454,13 +453,12 @@ export default function RequirementDetail() {
     if (designRef.current) designRef.current.scrollTop = designRef.current.scrollHeight;
   }, [designLines]);
 
-  // ── Edit requirement (title/description/priority/sprint) ───────────────────
+  // ── Edit requirement (title/description/priority) ─────────────────────────
   const openEdit = () => {
     if (!req) return;
     setEditTitle(req.title);
     setEditDesc(req.description);
     setEditPriority(req.priority);
-    setEditSprint(req.sprint);
     setEditSkipAnalysis(req.skip_analysis);
     setShowEditModal(true);
   };
@@ -473,7 +471,6 @@ export default function RequirementDetail() {
         title: editTitle,
         description: editDesc,
         priority: editPriority,
-        sprint: editSprint,
         skip_analysis: editSkipAnalysis,
       });
       setShowEditModal(false);
@@ -1020,10 +1017,6 @@ export default function RequirementDetail() {
                   <option value="critical">critical</option>
                 </select>
               </div>
-              <div className="modal-field" style={{ flex: 1 }}>
-                <label>Sprint</label>
-                <input className="input" value={editSprint} onChange={e => setEditSprint(e.target.value)} />
-              </div>
             </div>
             {/* skip_analysis toggle — only meaningful before architect-design runs */}
             {req && (req.status === 'draft' || req.status === 'analyzing') && (
@@ -1063,7 +1056,6 @@ export default function RequirementDetail() {
       <div className="detail-meta">
         <span className={`status-tag status-${req.status}`}>{statusLabels[req.status] || req.status}</span>
         <span className={`priority-tag ${req.priority}`}>{req.priority.toUpperCase()}</span>
-        {req.sprint && <span className="sprint-tag">Sprint: {req.sprint}</span>}
         {project && <span className="project-tag">📁 {project.name}</span>}
       </div>
 

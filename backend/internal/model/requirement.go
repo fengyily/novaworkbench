@@ -13,7 +13,6 @@ type Requirement struct {
 	DesignDocs         string `json:"design_docs"`         // JSON array
 	ConversationIDs    string `json:"conversation_ids"`    // JSON array
 	AssignedTo         string `json:"assigned_to"`
-	Sprint             string `json:"sprint"`
 	CreatedBy          string `json:"created_by"`
 	AnalysisSessionID  string `json:"analysis_session_id"`
 	DesignSessionID    string `json:"design_session_id"`
@@ -42,7 +41,6 @@ type CreateRequirementReq struct {
 	Title        string `json:"title"`
 	Description  string `json:"description"`
 	Priority     string `json:"priority"`
-	Sprint       string `json:"sprint"`
 	SkipAnalysis *bool  `json:"skip_analysis"` // pointer: nil omits the field so Create defaults to true (skip) and Update preserves the existing value
 }
 

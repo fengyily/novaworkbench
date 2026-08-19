@@ -25,7 +25,7 @@ func NewRequirementHandler(svc *service.RequirementService, llmGateway *llm.Gate
 
 func (h *RequirementHandler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	items, err := h.svc.List(q.Get("project_id"), q.Get("status"), q.Get("priority"), q.Get("sprint"))
+	items, err := h.svc.List(q.Get("project_id"), q.Get("status"), q.Get("priority"))
 	if err != nil {
 		writeError(w, 500, "INTERNAL", err.Error())
 		return
