@@ -29,6 +29,26 @@ const platformLabels: Record<string, string> = {
   github: 'GitHub', gitlab: 'GitLab', gitea: 'Gitea',
 };
 
+// Requirements tab pagination: 15 rows per page, first page shown by default.
+const REQ_PAGE_SIZE = 15;
+
+// Page-number window for the pagination control — always include the first and
+// last page, keep a small neighborhood around the current one, and collapse the
+// gap in between into an ellipsis. Yields numbers interleaved with '…'.
+function reqPageWindow(total: number, current: number): (number | '…')[] {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const candidates = new Set([1, total, current - 1, current, current + 1]);
+  const pages = [...candidates].filter(p => p >= 1 && p <= total).sort((a, b) => a - b);
+  const out: (number | '…')[] = [];
+  let prev = 0;
+  for (const p of pages) {
+    if (prev && p - prev > 1) out.push('…');
+    out.push(p);
+    prev = p;
+  }
+  return out;
+}
+
 export default function ProjectDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -65,6 +85,8 @@ export default function ProjectDetail() {
   const [reqsError, setReqsError] = useState('');
   const [reqsLoaded, setReqsLoaded] = useState(false);
   const [showCreateReq, setShowCreateReq] = useState(false);
+  // Requirements tab pagination — first page by default ("默认加载第一页").
+  const [reqPage, setReqPage] = useState(1);
 
   // Per-requirement token totals (excl review) — drives the Tokens column in
   // the requirements list + overview. Loaded alongside reqs and refetched when
@@ -205,6 +227,11 @@ export default function ProjectDetail() {
     return () => { active = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, id, reqsLoaded]);
+
+  // Snaps the requirements-tab page back to the first page whenever the list is
+  // replaced (initial load, post-create refresh), so a previously selected page
+  // can never land past the new last page and "默认加载第一页" holds after refresh.
+  useEffect(() => { setReqPage(1); }, [reqs]);
 
   // Overview: adapt the visible row count to the viewport's remaining space
   // below the section's top. Measuring the section's own height would
@@ -424,6 +451,13 @@ export default function ProjectDetail() {
   // The requirements tab keeps showing everything (done sorts to the end).
   const overviewReqs = reqs.filter(r => r.status !== 'done');
 
+  // Requirements tab pagination. The page is clamped to the (possibly shrunken)
+  // list so a stale reqPage never escapes the array; the reset effect below
+  // normally snaps back to page 1 after a list refresh.
+  const totalReqPages = Math.max(1, Math.ceil(reqs.length / REQ_PAGE_SIZE));
+  const curReqPage = Math.min(reqPage, totalReqPages);
+  const pagedReqs = reqs.slice((curReqPage - 1) * REQ_PAGE_SIZE, curReqPage * REQ_PAGE_SIZE);
+
   // Render a group of knowledge entries under a labeled section. Reuses the
   // kb-card styles from KnowledgePage.css. The content preview is stripped of
   // markdown noise (stripMarkdownPreview) and clamped to a fixed number of
@@ -472,7 +506,7 @@ export default function ProjectDetail() {
         <button className={`tab-btn${tab === 'run' ? ' active' : ''}`} onClick={() => setTab('run')}>
           运行{isRunning ? ' ●' : ''}
         </button>
-        <button className={`tab-btn${tab === 'requirements' ? ' active' : ''}`} onClick={() => setTab('requirements')}>
+        <button className={`tab-btn${tab === 'requirements' ? ' active' : ''}`} onClick={() => { setTab('requirements'); setReqPage(1); }}>
           需求
         </button>
         <button className={`tab-btn${tab === 'review' ? ' active' : ''}`} onClick={() => setTab('review')}>
@@ -648,7 +682,7 @@ export default function ProjectDetail() {
           <div className="detail-section recent-reqs-section" style={{ marginTop: 16 }} ref={recentSectionRef}>
             <div className="recent-reqs-header">
               <span style={{ fontWeight: 600, fontSize: 14 }}>最近需求</span>
-              <button className="recent-reqs-more" onClick={() => setTab('requirements')}>查看全部 →</button>
+              <button className="recent-reqs-more" onClick={() => { setTab('requirements'); setReqPage(1); }}>查看全部 →</button>
             </div>
 
             {reqsLoading && <div className="tab-empty">⏳ 加载中...</div>}
@@ -765,9 +799,38 @@ export default function ProjectDetail() {
                   </tr>
                 </thead>
                 <tbody>
-                  {renderRequirementRows(reqs)}
+                  {renderRequirementRows(pagedReqs)}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {/* Pagination — 15 rows per page; the summary shows the true total
+              (count of all requirements, not just the current page). */}
+          {!reqsLoading && !reqsError && totalReqPages > 1 && (
+            <div className="pagination">
+              <span className="pagination-info">
+                共 {reqs.length} 条 · 第 {curReqPage} / {totalReqPages} 页
+              </span>
+              <button className="btn btn-sm" disabled={curReqPage <= 1} onClick={() => setReqPage(curReqPage - 1)}>
+                ‹ 上一页
+              </button>
+              {reqPageWindow(totalReqPages, curReqPage).map((p, i) =>
+                p === '…' ? (
+                  <span key={`e${i}`} className="pagination-ellipsis">…</span>
+                ) : (
+                  <button
+                    key={p}
+                    className={`btn btn-sm${p === curReqPage ? ' active' : ''}`}
+                    onClick={() => setReqPage(p)}
+                  >
+                    {p}
+                  </button>
+                ),
+              )}
+              <button className="btn btn-sm" disabled={curReqPage >= totalReqPages} onClick={() => setReqPage(curReqPage + 1)}>
+                下一页 ›
+              </button>
             </div>
           )}
 
