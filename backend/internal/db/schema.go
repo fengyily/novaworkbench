@@ -291,6 +291,10 @@ var alterColumns = []string{
 	`ALTER TABLE requirements ADD COLUMN analysis_job_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN apply_job_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN skip_analysis INTEGER NOT NULL DEFAULT 1`,
+	// skip_design: "直接开发" — when true, the requirement skips the analyst AND
+	// architect stages entirely and goes straight to coding (draft → developing).
+	// Default 0 because the full pipeline stays the default flow.
+	`ALTER TABLE requirements ADD COLUMN skip_design INTEGER NOT NULL DEFAULT 0`,
 	// Git worktree isolation for parallel development: each requirement's dev
 	// branch + worktree path so adjust-coding and the merge step can locate the
 	// isolated working tree instead of the shared project checkout.

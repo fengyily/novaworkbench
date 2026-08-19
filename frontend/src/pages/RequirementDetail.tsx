@@ -23,9 +23,13 @@ interface DesignData {
 // draft → analyzing → designing → designed → developing → done
 type Stage = 'analyst' | 'architect' | 'developer' | 'done';
 
-function stageFor(status: string): Stage {
+function stageFor(status: string, skipDesign?: boolean): Stage {
   switch (status) {
     case 'draft':
+      // "直接开发" (skip_design) 的草稿直接落在 developer 阶段：分析师/架构师
+      // 区段不再渲染，详情页从「开始开发」入口进入。
+      if (skipDesign) return 'developer';
+      return 'analyst';
     case 'analyzing':
       return 'analyst';
     case 'designing':
@@ -424,6 +428,22 @@ export default function RequirementDetail() {
         && !req.design_job_id && !req.design_docs) {
       autoStartRef.current = true;
       transition('designing', '生成技术方案').then(() => runArchitectDesign());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [req]);
+
+  // Auto-open the branch selection modal when the user just created a
+  // requirement with skip_design (navigated here with the autoStartCoding
+  // intent flag). We deliberately stop at the branch modal — the 30-minute
+  // coding job needs the user to confirm the dev branch first, matching the
+  // manual "开始开发" interaction. One-shot guarded like autoStartDesign.
+  useEffect(() => {
+    if (!req || autoStartRef.current) return;
+    const auto = (location.state as { autoStartCoding?: boolean } | null)?.autoStartCoding;
+    if (!auto) return;
+    if (req.skip_design && req.status === 'draft' && !req.coding_session_id) {
+      autoStartRef.current = true;
+      openBranchModal();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [req]);
@@ -867,7 +887,7 @@ export default function RequirementDetail() {
 
   const design = parseDesign(req.design_docs);
   const hasDesign = !!(design.overview || (design.steps && design.steps.length > 0) || design.plan_markdown);
-  const stage = stageFor(req.status);
+  const stage = stageFor(req.status, req.skip_design);
   // Design (architect) stream state. While the job runs the panel stays open;
   // once finished it collapses behind the "思考过程" toggle.
   const designProcessActive = designing || !!req.design_job_id;
@@ -1359,13 +1379,15 @@ export default function RequirementDetail() {
       )}
 
       {/* ── Developer stage ── */}
-      {(stage === 'developer' || stage === 'done') && hasDesign && (
+      {(stage === 'developer' || stage === 'done') && (hasDesign || req.skip_design) && (
         <div className="detail-section">
           <div className="section-header"><h3>🚀 开发实现</h3></div>
 
-          {req.status === 'designed' && codingLines.length === 0 && !coding && (
+          {(req.status === 'designed' || (req.status === 'draft' && req.skip_design)) && codingLines.length === 0 && !coding && (
             <div className="tab-empty">
-              <p>方案已完成。将根据技术方案进行开发实现。</p>
+              <p>{req.status === 'designed'
+                ? '方案已完成。将根据技术方案进行开发实现。'
+                : '直接开发模式：已跳过分析与设计，将直接根据需求内容进行开发实现。'}</p>
               <p style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>项目路径：<code>{project?.local_path}</code></p>
               <p style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                 将在独立 git worktree 中隔离开发（<code>{project?.local_path}.worktrees/{req.id}</code>），多需求并行互不干扰。

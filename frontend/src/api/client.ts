@@ -225,6 +225,7 @@ export interface Requirement {
   created_by: string; analysis_session_id: string;
   design_session_id: string; design_job_id: string; analysis_job_id: string; apply_job_id: string; coding_session_id: string;
   skip_analysis: boolean;
+  skip_design: boolean;
   branch_name?: string;
   worktree_path?: string;
   // Effective model actually dispatched to the claude CLI for each stage
@@ -255,7 +256,7 @@ export const requirementsApi = {
     Object.entries(params || {}).forEach(([k, v]) => { if (v) q.set(k, String(v)); });
     return api.get<Requirement[]>(`/api/requirements?${q.toString()}`);
   },
-  create: (data: { project_id: string; description: string; priority?: string; skip_analysis?: boolean }) =>
+  create: (data: { project_id: string; description: string; priority?: string; skip_analysis?: boolean; skip_design?: boolean }) =>
     api.post<Requirement>('/api/requirements', data),
   get: (id: string) => api.get<Requirement>(`/api/requirements/${id}`),
   update: (id: string, data: { title: string; description: string; priority: string; skip_analysis?: boolean }) =>

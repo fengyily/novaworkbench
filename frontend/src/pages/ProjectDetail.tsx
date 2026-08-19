@@ -779,7 +779,13 @@ export default function ProjectDetail() {
                 setShowCreateReq(false);
                 // 跳过需求分析 → 自动进入方案设计阶段：导航到详情页并传递
                 // autoStartDesign 意图标记，由 RequirementDetail 一次性触发 architect-design，
-                // 替代用户手动点击「生成技术方案」。非 skip 流程保持原行为（刷新列表、停留）。
+                // 替代用户手动点击「生成技术方案」。
+                if (created.skip_design) {
+                  // 跳过设计 → 直接开发：导航到详情页并传递 autoStartCoding 意图标记，
+                  // 由 RequirementDetail 自动唤起分支选择弹窗，直接进入开发流程。
+                  navigate(`/requirements/${created.id}`, { state: { autoStartCoding: true } });
+                  return;
+                }
                 if (created.skip_analysis) {
                   navigate(`/requirements/${created.id}`, { state: { autoStartDesign: true } });
                   return;
@@ -1186,14 +1192,17 @@ function CreateRequirementForm({ projectId, onClose, onCreated }: {
 }) {
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState('medium');
-  const [skipAnalysis, setSkipAnalysis] = useState(true); // default: skip analyst chat, go straight to architect-design
+  // 开发流程：full（标准：分析→设计→开发）| skip-analysis（默认：跳过分析→设计→开发）| direct（直接开发：跳过分析与设计）
+  const [flow, setFlow] = useState<'full' | 'skip-analysis' | 'direct'>('skip-analysis');
   const [saving, setSaving] = useState(false);
 
   const handleSubmit = async () => {
     if (!description) return;
     setSaving(true);
     try {
-      const created = await requirementsApi.create({ project_id: projectId, description, priority, skip_analysis: skipAnalysis });
+      const skipAnalysis = flow !== 'full';
+      const skipDesign = flow === 'direct';
+      const created = await requirementsApi.create({ project_id: projectId, description, priority, skip_analysis: skipAnalysis, skip_design: skipDesign });
       onCreated(created);
     } catch (err: any) {
       alert(err.message);
@@ -1227,13 +1236,26 @@ function CreateRequirementForm({ projectId, onClose, onCreated }: {
         </div>
       </div>
       <div className="form-group">
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
-          <input type="checkbox" checked={skipAnalysis} onChange={e => setSkipAnalysis(e.target.checked)}
-            style={{ width: 'auto' }} />
-          <span>跳过需求分析，直接进入方案设计</span>
-        </label>
+        <label>开发流程</label>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
+            <input type="radio" name="dev-flow" checked={flow === 'skip-analysis'} onChange={() => setFlow('skip-analysis')}
+              style={{ width: 'auto' }} />
+            <span>跳过分析（直接方案设计 → 开发）</span>
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
+            <input type="radio" name="dev-flow" checked={flow === 'direct'} onChange={() => setFlow('direct')}
+              style={{ width: 'auto' }} />
+            <span>直接开发（跳过分析与设计）</span>
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
+            <input type="radio" name="dev-flow" checked={flow === 'full'} onChange={() => setFlow('full')}
+              style={{ width: 'auto' }} />
+            <span>标准流程（分析 → 设计 → 开发）</span>
+          </label>
+        </div>
         <small style={{ display: 'block', marginTop: 4, color: 'var(--text-secondary, #64748B)' }}>
-          勾选后将跳过需求分析阶段，直接生成技术方案；创建后仍可在需求详情页切换。
+          小改动可选「直接开发」，跳过分析与设计阶段，创建后直接在详情页进入开发实现。
         </small>
       </div>
       <div className="form-actions">

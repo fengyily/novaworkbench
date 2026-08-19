@@ -27,8 +27,11 @@ func NewRequirementService(db *db.DB) *RequirementService {
 // "draft → designing" is the skip-analysis path: when a requirement has
 // skip_analysis=true the user goes straight to architect-design without an
 // analyst conversation.
+// "draft → developing" is the skip-design path ("直接开发"): when a requirement
+// has skip_design=true the user goes straight to coding without analyst OR
+// architect stages.
 var validTransitions = map[string][]string{
-	"draft":      {"analyzing", "designing", "archived"},
+	"draft":      {"analyzing", "designing", "developing", "archived"},
 	"analyzing":  {"designing", "draft", "archived"},
 	"designing":  {"designed", "analyzing", "archived"},
 	"designed":   {"developing", "archived"},
@@ -63,7 +66,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	}
 
 	rows, err := s.db.Query(
-		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END ASC, created_at DESC",
+		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,skip_design,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END ASC, created_at DESC",
 		args...)
 	if err != nil {
 		return nil, err
@@ -75,7 +78,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		var r model.Requirement
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
-			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.BranchName, &r.WorktreePath,
+			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
 			return nil, err
@@ -91,10 +94,10 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	var r model.Requirement
 	err := s.db.QueryRow(
-		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
+		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,skip_design,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
-			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.BranchName, &r.WorktreePath,
+			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
 	if err == sql.ErrNoRows {
@@ -117,11 +120,17 @@ func (s *RequirementService) Create(req model.CreateRequirementReq) (*model.Requ
 	if req.SkipAnalysis != nil {
 		skipAnalysis = *req.SkipAnalysis
 	}
+	// Default to NOT skipping design (false) — "直接开发" is opt-in, the full
+	// analyst→architect→developer pipeline stays the default.
+	skipDesign := false
+	if req.SkipDesign != nil {
+		skipDesign = *req.SkipDesign
+	}
 	now := time.Now()
 
 	_, err := s.db.Exec(
-		"INSERT INTO requirements (id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,created_by,skip_analysis,created_at,updated_at) VALUES (?,?,?,?,'draft',?,'[]','[]','[]','user',?,?,?)",
-		id, req.ProjectID, req.Title, req.Description, req.Priority, skipAnalysis, now, now)
+		"INSERT INTO requirements (id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,created_by,skip_analysis,skip_design,created_at,updated_at) VALUES (?,?,?,?,'draft',?,'[]','[]','[]','user',?,?,?,?)",
+		id, req.ProjectID, req.Title, req.Description, req.Priority, skipAnalysis, skipDesign, now, now)
 	if err != nil {
 		return nil, err
 	}
