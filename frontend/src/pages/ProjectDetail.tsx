@@ -407,10 +407,17 @@ export default function ProjectDetail() {
         })()}
       </td>
       <td style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+        {req.created_at ? new Date(req.created_at).toLocaleDateString('zh-CN') : '—'}
+      </td>
+      <td style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
         {req.updated_at ? new Date(req.updated_at).toLocaleDateString('zh-CN') : '—'}
       </td>
     </tr>
   ));
+
+  // Overview shows only tasks that have not finished development ('done').
+  // The requirements tab keeps showing everything (done sorts to the end).
+  const overviewReqs = reqs.filter(r => r.status !== 'done');
 
   // Render a group of knowledge entries under a labeled section. Reuses the
   // kb-card styles from KnowledgePage.css. The content preview is stripped of
@@ -640,12 +647,16 @@ export default function ProjectDetail() {
             </div>
 
             {reqsLoading && <div className="tab-empty">⏳ 加载中...</div>}
-            {!reqsLoading && reqs.length === 0 && (
+            {!reqsLoading && overviewReqs.length === 0 && (
               <div className="tab-empty">
-                <p>该项目暂无需求，<button className="recent-reqs-link" onClick={() => { setTab('requirements'); setShowCreateReq(true); }}>去创建 →</button></p>
+                {reqs.length === 0 ? (
+                  <p>该项目暂无需求，<button className="recent-reqs-link" onClick={() => { setTab('requirements'); setShowCreateReq(true); }}>去创建 →</button></p>
+                ) : (
+                  <p>暂无未完成的需求</p>
+                )}
               </div>
             )}
-            {!reqsLoading && reqs.length > 0 && (
+            {!reqsLoading && overviewReqs.length > 0 && (
               <div className="pr-list" style={{ marginBottom: 0 }}>
                 <table className="pr-table">
                   <thead>
@@ -656,11 +667,12 @@ export default function ProjectDetail() {
                       <th style={{ width: 130 }}>状态</th>
                       <th style={{ width: 110 }}>Sprint</th>
                       <th style={{ width: 130 }}>Tokens (入/出)</th>
+                      <th style={{ width: 110 }}>创建时间</th>
                       <th style={{ width: 110 }}>更新时间</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {renderRequirementRows(reqs.slice(0, Math.min(reqs.length, visibleCount)))}
+                    {renderRequirementRows(overviewReqs.slice(0, Math.min(overviewReqs.length, visibleCount)))}
                   </tbody>
                 </table>
               </div>
@@ -743,6 +755,7 @@ export default function ProjectDetail() {
                     <th style={{ width: 130 }}>状态</th>
                     <th style={{ width: 110 }}>Sprint</th>
                     <th style={{ width: 130 }}>Tokens (入/出)</th>
+                    <th style={{ width: 110 }}>创建时间</th>
                     <th style={{ width: 110 }}>更新时间</th>
                   </tr>
                 </thead>
