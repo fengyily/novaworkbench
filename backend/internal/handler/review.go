@@ -26,9 +26,10 @@ type ReviewHandler struct {
 	jobs        *store.JobStore
 	jobLogSvc   *service.JobLogService
 	claudeCfg   *service.ClaudeConfigService
+	usageSvc    usageRecorder
 }
 
-func NewReviewHandler(projectSvc *service.ProjectService, platformSvc *service.PlatformTokenService, roleSvc *service.RoleService, llmGateway *llm.Gateway, jobs *store.JobStore, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService) *ReviewHandler {
+func NewReviewHandler(projectSvc *service.ProjectService, platformSvc *service.PlatformTokenService, roleSvc *service.RoleService, llmGateway *llm.Gateway, jobs *store.JobStore, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder) *ReviewHandler {
 	return &ReviewHandler{
 		projectSvc:  projectSvc,
 		platformSvc: platformSvc,
@@ -37,6 +38,7 @@ func NewReviewHandler(projectSvc *service.ProjectService, platformSvc *service.P
 		jobs:        jobs,
 		jobLogSvc:   jobLogSvc,
 		claudeCfg:   claudeCfg,
+		usageSvc:    usageSvc,
 	}
 }
 
@@ -176,7 +178,7 @@ func (h *ReviewHandler) StartReview(w http.ResponseWriter, r *http.Request) {
 	job := h.jobs.Create(id)
 	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
 
-	go h.runReview(job, project.LocalPath, req)
+	go h.runReview(job, project.ID, project.LocalPath, req)
 }
 
 // StreamReviewJob streams a review job via SSE.
@@ -284,7 +286,7 @@ func (h *ReviewHandler) SubmitComment(w http.ResponseWriter, r *http.Request) {
 }
 
 // runReview runs Claude CLI against the branch diff and streams output into the job.
-func (h *ReviewHandler) runReview(job *store.Job, projectPath string, req StartReviewReq) {
+func (h *ReviewHandler) runReview(job *store.Job, projectID, projectPath string, req StartReviewReq) {
 	prContext := ""
 	if req.PRTitle != "" {
 		prContext = fmt.Sprintf("PR 标题：%s\n", req.PRTitle)
@@ -303,6 +305,20 @@ func (h *ReviewHandler) runReview(job *store.Job, projectPath string, req StartR
 	// Stamp the effective model on the in-memory job so StreamReviewJob's
 	// job_done frame + GetJob can surface it before the durable log is written.
 	job.SetModel(model)
+
+	// Token-usage recorder for this review run. requirement_id is empty
+	// (reviews are project-level, not tied to a requirement), so review rows
+	// are never counted in requirement/project totals — only in the project's
+	// review breakdown. Best-effort: recordFrom swallows all errors.
+	reviewMeta := fmt.Sprintf("{\"pr_number\":%d,\"pr_title\":%q,\"branch\":%q}", req.PRNumber, req.PRTitle, req.Branch)
+	reviewUsage := &usageCtx{
+		Rec:       h.usageSvc,
+		ProjectID: projectID,
+		JobID:     job.ID,
+		Step:      "review",
+		Model:     model,
+		Meta:      reviewMeta,
+	}
 
 	prompt := fmt.Sprintf(
 		"请对以下 PR 的改动进行代码 Review。\n\n"+
@@ -372,6 +388,8 @@ func (h *ReviewHandler) runReview(job *store.Job, projectPath string, req StartR
 				}
 			}
 		case "result":
+			// Record token usage from the result event (best-effort).
+			reviewUsage.recordFrom(evt)
 			if sub, _ := evt["subtype"].(string); sub == "success" {
 				if result, ok := evt["result"].(string); ok && strings.TrimSpace(result) != "" {
 					job.Append(store.LogLine{Type: "message", Content: result})

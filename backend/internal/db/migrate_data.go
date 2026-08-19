@@ -29,6 +29,7 @@ var copyOrder = []string{
 	"claude_configs",
 	"weekly_reports",
 	"job_logs",
+	"token_usage",
 }
 
 // Migrate copies all data from src into dst (which must already be migrated —
@@ -73,6 +74,12 @@ func copyTable(src, dst *DB, table string) (TableStat, error) {
 
 	srcCols, err := tableColumns(src, table)
 	if err != nil {
+		// A table added in a later release won't exist in an older source
+		// database (e.g. token_usage when migrating from a pre-usage DB).
+		// Skip it instead of aborting the whole migration.
+		if isNoTableError(err) {
+			return st, nil
+		}
 		return st, fmt.Errorf("read %s columns: %w", table, err)
 	}
 	dstCols, err := tableColumns(dst, table)
@@ -147,6 +154,17 @@ func copyTable(src, dst *DB, table string) (TableStat, error) {
 		return st, fmt.Errorf("read %s: %w", table, err)
 	}
 	return st, nil
+}
+
+// isNoTableError reports whether err is a "table does not exist" error from
+// the source driver. The migration source is always SQLite, so we only match
+// SQLite's "no such table" spelling; this lets copyTable skip tables that were
+// added in a release newer than the source database.
+func isNoTableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "no such table")
 }
 
 // isSkippableRowError reports whether a row-level insert error is safe to

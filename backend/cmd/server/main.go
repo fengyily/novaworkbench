@@ -52,6 +52,7 @@ func main() {
 	settingSvc := service.NewSettingService(database)
 	reportSvc := service.NewReportService(database)
 	jobLogSvc := service.NewJobLogService(database)
+	usageSvc := service.NewUsageService(database)
 
 	// Seed built-in roles on first run (idempotent).
 	if err := roleSvc.SeedDefaults(); err != nil {
@@ -87,17 +88,18 @@ func main() {
 	knowledgeH := handler.NewKnowledgeHandler(knowledgeSvc)
 	scannerH := handler.NewScannerHandler(scannerSvc)
 	sharedJobs := store.NewJobStore(50)
-	reqH := handler.NewRequirementHandler(reqSvc, llmGateway, sharedJobs)
-	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc)
+	reqH := handler.NewRequirementHandler(reqSvc, llmGateway, sharedJobs, usageSvc)
+	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc)
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
-	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc)
+	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs)
-	mergeH := handler.NewMergeHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc)
+	mergeH := handler.NewMergeHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, usageSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)
 	roleH := handler.NewRoleHandler(roleSvc, claudeCfgSvc)
 	settingH := handler.NewSettingHandler(settingSvc)
 	claudeCfgH := handler.NewClaudeConfigHandler(claudeCfgSvc)
 	databaseH := handler.NewDatabaseHandler(database, cfg)
+	usageH := handler.NewUsageHandler(usageSvc)
 
 	// Router
 	mux := http.NewServeMux()
@@ -198,6 +200,12 @@ func main() {
 	mux.HandleFunc("DELETE /api/requirements/{id}/analysis-session", reqH.ClearAnalysisSession)
 	mux.HandleFunc("POST /api/requirements/{id}/archive", reqH.Archive)
 	mux.HandleFunc("POST /api/requirements/{id}/unarchive", reqH.Unarchive)
+
+	// Token usage (per-requirement / per-project aggregation; review rows
+	// are recorded but excluded from project totals — surfaced separately).
+	mux.HandleFunc("GET /api/usage/requirement/{id}", usageH.Requirement)
+	mux.HandleFunc("GET /api/usage/by-requirement", usageH.ByRequirement)
+	mux.HandleFunc("GET /api/usage/project/{id}", usageH.Project)
 
 	// Wizard (requirement refinement + coding via Claude CLI)
 	// Three-role stage-gate: analyst → architect → developer.

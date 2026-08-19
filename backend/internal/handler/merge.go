@@ -40,9 +40,10 @@ type MergeHandler struct {
 	jobs        *store.JobStore
 	roleSvc     *service.RoleService
 	platformSvc *service.PlatformTokenService
+	usageSvc    usageRecorder
 }
 
-func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService) *MergeHandler {
+func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, usageSvc usageRecorder) *MergeHandler {
 	return &MergeHandler{
 		projectSvc:  projectSvc,
 		reqSvc:      reqSvc,
@@ -50,6 +51,7 @@ func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.Require
 		jobs:        jobs,
 		roleSvc:     roleSvc,
 		platformSvc: platformSvc,
+		usageSvc:    usageSvc,
 	}
 }
 
@@ -576,7 +578,14 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 			Model:        model,
 			// empty PermissionMode → --dangerously-skip-permissions (full tool use)
 		})
-		runClaudeStream(jobSink{job}, cmd, "merge-resolve")
+		runClaudeStream(jobSink{job}, cmd, "merge-resolve", &usageCtx{
+			Rec:           h.usageSvc,
+			RequirementID: reqRow.ID,
+			ProjectID:     reqRow.ProjectID,
+			JobID:         job.ID,
+			Step:          "merge",
+			Model:         model,
+		})
 
 		// After the run, inspect the repo: a concluded merge no longer has
 		// MERGE_HEAD. If it's gone, the AI finished; otherwise surface a hint

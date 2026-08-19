@@ -295,16 +295,16 @@ func (g *Gateway) runClaudeText(prompt string, timeout time.Duration) (string, e
 // otherwise it returns an error and the caller falls back to the raw content
 // for Markdown and the first line for the title (no claude CLI fallback, by
 // design) so requirement creation never fails just because this is unavailable.
-func (g *Gateway) GenerateDescriptionAndTitle(content string) (markdown, title string, err error) {
+func (g *Gateway) GenerateDescriptionAndTitle(content string) (markdown, title string, usage *Usage, err error) {
 	if g.llmCfg == nil {
-		return "", "", fmt.Errorf("llm not configured: no llm config provider")
+		return "", "", nil, fmt.Errorf("llm not configured: no llm config provider")
 	}
 	baseURL, apiKey, model, err := g.llmCfg.LLMConfig()
 	if err != nil {
-		return "", "", fmt.Errorf("llm config unavailable: %w", err)
+		return "", "", nil, fmt.Errorf("llm config unavailable: %w", err)
 	}
 	if baseURL == "" || apiKey == "" {
-		return "", "", fmt.Errorf("llm not configured: base_url and api_key required")
+		return "", "", nil, fmt.Errorf("llm not configured: base_url and api_key required")
 	}
 	return formatAndTitleViaHTTP(baseURL, apiKey, model, content)
 }

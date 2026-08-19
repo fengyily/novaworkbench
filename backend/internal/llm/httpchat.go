@@ -48,13 +48,31 @@ type chatMessage struct {
 }
 
 // chatResponse is the minimal slice of the OpenAI-compatible response needed
-// to extract the assistant text.
+// to extract the assistant text and token usage.
 type chatResponse struct {
 	Choices []struct {
 		Message struct {
 			Content string `json:"content"`
 		} `json:"message"`
 	} `json:"choices"`
+	Usage *chatUsage `json:"usage,omitempty"`
+}
+
+// chatUsage is the OpenAI-compatible usage object. Some self-hosted gateways
+// omit it, so it is a pointer (nil → unreported).
+type chatUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// Usage is the token consumption of one LLM round over the direct HTTP
+// channel. The claude CLI stream path reads usage directly from the result
+// event instead, so this type is only for the HTTP-bypass tasks.
+type Usage struct {
+	PromptTokens     int    `json:"prompt_tokens"`
+	CompletionTokens int    `json:"completion_tokens"`
+	Model            string `json:"model"`
 }
 
 // chatCompletion sends a single-turn chat completion to an OpenAI-compatible
@@ -64,7 +82,7 @@ type chatResponse struct {
 // without /v1); the path /chat/completions is appended. maxTokens caps the
 // response; the caller picks a size appropriate to the task. A 30s timeout
 // keeps the request fail-fast so the caller's fallback path is not stalled.
-func chatCompletion(baseURL, apiKey, model, systemPrompt, userContent string, maxTokens int) (string, error) {
+func chatCompletion(baseURL, apiKey, model, systemPrompt, userContent string, maxTokens int) (string, *Usage, error) {
 	url := strings.TrimRight(baseURL, "/") + "/chat/completions"
 
 	body := chatRequest{
@@ -82,7 +100,7 @@ func chatCompletion(baseURL, apiKey, model, systemPrompt, userContent string, ma
 
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return "", fmt.Errorf("llm http: marshal request: %w", err)
+		return "", nil, fmt.Errorf("llm http: marshal request: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -90,20 +108,20 @@ func chatCompletion(baseURL, apiKey, model, systemPrompt, userContent string, ma
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
-		return "", fmt.Errorf("llm http: build request: %w", err)
+		return "", nil, fmt.Errorf("llm http: build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("llm http: request failed: %w", err)
+		return "", nil, fmt.Errorf("llm http: request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap, defensive
 	if err != nil {
-		return "", fmt.Errorf("llm http: read response: %w", err)
+		return "", nil, fmt.Errorf("llm http: read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -113,17 +131,25 @@ func chatCompletion(baseURL, apiKey, model, systemPrompt, userContent string, ma
 		if len(snippet) > 256 {
 			snippet = snippet[:256]
 		}
-		return "", fmt.Errorf("llm http: status %d: %s", resp.StatusCode, strings.TrimSpace(snippet))
+		return "", nil, fmt.Errorf("llm http: status %d: %s", resp.StatusCode, strings.TrimSpace(snippet))
 	}
 
 	var cr chatResponse
 	if err := json.Unmarshal(raw, &cr); err != nil {
-		return "", fmt.Errorf("llm http: decode response: %w", err)
+		return "", nil, fmt.Errorf("llm http: decode response: %w", err)
 	}
 	if len(cr.Choices) == 0 || cr.Choices[0].Message.Content == "" {
-		return "", fmt.Errorf("llm http: empty response")
+		return "", nil, fmt.Errorf("llm http: empty response")
 	}
-	return cr.Choices[0].Message.Content, nil
+	var usage *Usage
+	if cr.Usage != nil {
+		usage = &Usage{
+			PromptTokens:     cr.Usage.PromptTokens,
+			CompletionTokens: cr.Usage.CompletionTokens,
+			Model:            model,
+		}
+	}
+	return cr.Choices[0].Message.Content, usage, nil
 }
 
 // formatAndTitleViaHTTP reorganizes the user's raw requirement content into
@@ -133,23 +159,23 @@ func chatCompletion(baseURL, apiKey, model, systemPrompt, userContent string, ma
 // one request keeps title and body consistent and transmits the content once.
 // On failure the caller falls back (raw content for Markdown, first line for
 // title) so requirement creation never fails just because this is unavailable.
-func formatAndTitleViaHTTP(baseURL, apiKey, model, content string) (markdown, title string, err error) {
-	out, err := chatCompletion(baseURL, apiKey, model, formatAndTitleSystemPrompt, content, 3072)
+func formatAndTitleViaHTTP(baseURL, apiKey, model, content string) (markdown, title string, usage *Usage, err error) {
+	out, usage, err := chatCompletion(baseURL, apiKey, model, formatAndTitleSystemPrompt, content, 3072)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	var res formatAndTitleResult
 	if jerr := json.Unmarshal([]byte(stripJSONFences(out)), &res); jerr != nil {
-		return "", "", fmt.Errorf("llm http: decode format+title json: %w", jerr)
+		return "", "", usage, fmt.Errorf("llm http: decode format+title json: %w", jerr)
 	}
 	// Strip any surrounding quotes / whitespace the model may add despite
 	// instructions (same post-processing as the legacy title path).
 	res.Title = strings.Trim(res.Title, "\"'` \n\r\t")
 	if strings.TrimSpace(res.Markdown) == "" {
-		return "", "", fmt.Errorf("llm http: empty markdown")
+		return "", "", usage, fmt.Errorf("llm http: empty markdown")
 	}
 	if res.Title == "" {
-		return "", "", fmt.Errorf("llm http: empty title")
+		return "", "", usage, fmt.Errorf("llm http: empty title")
 	}
-	return res.Markdown, res.Title, nil
+	return res.Markdown, res.Title, usage, nil
 }

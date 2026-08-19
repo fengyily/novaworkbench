@@ -13,13 +13,14 @@ import (
 )
 
 type RequirementHandler struct {
-	svc  *service.RequirementService
-	llm  *llm.Gateway
-	jobs *store.JobStore
+	svc      *service.RequirementService
+	llm      *llm.Gateway
+	jobs     *store.JobStore
+	usageSvc usageRecorder
 }
 
-func NewRequirementHandler(svc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore) *RequirementHandler {
-	return &RequirementHandler{svc: svc, llm: llmGateway, jobs: jobs}
+func NewRequirementHandler(svc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, usageSvc usageRecorder) *RequirementHandler {
+	return &RequirementHandler{svc: svc, llm: llmGateway, jobs: jobs, usageSvc: usageSvc}
 }
 
 func (h *RequirementHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -93,13 +94,14 @@ func (h *RequirementHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// Title is no longer entered by the user — distill it from the requirement
 	// content via the LLM. Fall back to the first line of the content if the
 	// LLM is unavailable (e.g. claude CLI not installed) so creation never fails.
+	var httpUsage *llm.Usage
 	if req.Title == "" {
 		// Reorganize the raw, free-form content into structured Markdown AND
 		// distill a title in a single LLM round, so the title and body stay
 		// consistent and the content is transmitted once. Each half falls back
 		// independently on failure — creation must not fail just because the
 		// formatter is unavailable.
-		markdown, title, err := h.llm.GenerateDescriptionAndTitle(req.Description)
+		markdown, title, usage, err := h.llm.GenerateDescriptionAndTitle(req.Description)
 		switch {
 		case err != nil:
 			log.Printf("[requirement] GenerateDescriptionAndTitle failed: %v — using raw content and fallback title", err)
@@ -119,11 +121,29 @@ func (h *RequirementHandler) Create(w http.ResponseWriter, r *http.Request) {
 			req.Description = markdown
 			req.Title = title
 		}
+		// usage may be nil (channel unconfigured / gateway omitted usage);
+		// keep it so the token row can be recorded after Create mints the id.
+		httpUsage = usage
 	}
 	item, err := h.svc.Create(req)
 	if err != nil {
 		writeError(w, 500, "INTERNAL", err.Error())
 		return
+	}
+	// Record the requirement-creation (title distillation) token usage. Only
+	// when the HTTP LLM channel was used and reported a usage object. Best-effort.
+	if httpUsage != nil && h.usageSvc != nil {
+		u := model.TokenUsage{
+			RequirementID: item.ID,
+			ProjectID:     req.ProjectID,
+			Step:          "requirement_create",
+			Model:         httpUsage.Model,
+			InputTokens:   httpUsage.PromptTokens,
+			OutputTokens:  httpUsage.CompletionTokens,
+		}
+		if rerr := h.usageSvc.Record(u); rerr != nil {
+			log.Printf("[requirement] record usage for %s failed: %v (ignored)", item.ID, rerr)
+		}
 	}
 	writeJSON(w, 201, item)
 }
