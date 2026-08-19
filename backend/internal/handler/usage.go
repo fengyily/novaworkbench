@@ -18,16 +18,20 @@ type usageRecorder interface {
 
 // usageCtx carries the identity of one claude invocation so its result event
 // can be recorded as a token_usage row. Counts are filled from the result
-// event's usage field at record time. Pass nil to skip recording (e.g. when
-// no UsageService is wired).
+// event's usage field at record time. ClaudeConfigID is the platform whose
+// config was active when the request ran; Currency is that config's currency
+// snapshot — both let cost be recomputed from the config's current prices.
+// Pass nil to skip recording (e.g. when no UsageService is wired).
 type usageCtx struct {
-	Rec           usageRecorder
-	RequirementID string
-	ProjectID     string
-	JobID         string
-	Step          string
-	Model         string
-	Meta          string
+	Rec            usageRecorder
+	RequirementID  string
+	ProjectID      string
+	JobID          string
+	Step           string
+	Model          string
+	ClaudeConfigID string
+	Currency       string
+	Meta           string
 }
 
 // extractUsage reads the four token counts from a stream-json result event's
@@ -73,15 +77,17 @@ func (c *usageCtx) recordFrom(evt map[string]interface{}) {
 	}
 	u := model.TokenUsage{
 		RequirementID:       c.RequirementID,
-		ProjectID:            c.ProjectID,
-		JobID:                c.JobID,
-		Step:                 c.Step,
-		Model:                c.Model,
-		Meta:                 c.Meta,
-		InputTokens:          in,
-		OutputTokens:         out,
-		CacheCreationTokens:  cc,
-		CacheReadTokens:      cr,
+		ProjectID:           c.ProjectID,
+		JobID:               c.JobID,
+		Step:                c.Step,
+		Model:               c.Model,
+		ClaudeConfigID:      c.ClaudeConfigID,
+		Currency:            c.Currency,
+		Meta:                c.Meta,
+		InputTokens:         in,
+		OutputTokens:        out,
+		CacheCreationTokens: cc,
+		CacheReadTokens:     cr,
 	}
 	if err := c.Rec.Record(u); err != nil {
 		log.Printf("[usage] record %s for %s failed: %v (ignored)", c.Step, c.RequirementID, err)

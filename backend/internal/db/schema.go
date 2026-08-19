@@ -316,6 +316,16 @@ var alterColumns = []string{
 	// Review jobs are project-level (not bound to a requirement), so the review
 	// model is persisted on the durable job log instead of the requirement row.
 	`ALTER TABLE job_logs ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
+	// Model pricing is bound to each Claude config (platform): the models
+	// column carries per-model input/output unit prices, and currency is the
+	// accounting unit for that platform (USD/CNY; empty = not yet set).
+	`ALTER TABLE claude_configs ADD COLUMN currency TEXT NOT NULL DEFAULT ''`,
+	// Cost attribution: every token_usage row records which config (platform)
+	// served the request and a currency snapshot, so cost can be recomputed
+	// from that config's (possibly later-edited) unit prices. The price itself
+	// is NOT snapshotted — edits take effect retroactively ("设置后生效").
+	`ALTER TABLE token_usage ADD COLUMN claude_config_id TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE token_usage ADD COLUMN currency TEXT NOT NULL DEFAULT ''`,
 }
 
 var (

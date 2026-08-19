@@ -20,23 +20,24 @@ func NewClaudeConfigHandler(svc *service.ClaudeConfigService) *ClaudeConfigHandl
 }
 
 // toItem builds the masked API shape from a model. The auth token is replaced
-// by a set-flag + preview; models/default_model pass through verbatim.
+// by a set-flag + preview; models (priced entries) and currency pass through.
 func toItem(c model.ClaudeConfig) model.ClaudeConfigItem {
 	models := c.Models
 	if models == nil {
-		models = []string{}
+		models = []model.ModelEntry{}
 	}
 	return model.ClaudeConfigItem{
-		ID:                c.ID,
-		Name:              c.Name,
-		BaseURL:           c.BaseURL,
-		AuthTokenSet:      c.AuthToken != "",
-		AuthTokenPreview:  service.MaskToken(c.AuthToken),
-		Models:            models,
-		DefaultModel:      c.DefaultModel,
-		IsActive:          c.IsActive,
-		CreatedAt:         c.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-		UpdatedAt:         c.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		ID:               c.ID,
+		Name:             c.Name,
+		BaseURL:          c.BaseURL,
+		AuthTokenSet:     c.AuthToken != "",
+		AuthTokenPreview: service.MaskToken(c.AuthToken),
+		Models:           models,
+		DefaultModel:     c.DefaultModel,
+		Currency:         c.Currency,
+		IsActive:         c.IsActive,
+		CreatedAt:        c.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		UpdatedAt:        c.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
 	}
 }
 
@@ -63,7 +64,7 @@ func (h *ClaudeConfigHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID", "请求格式错误: "+err.Error())
 		return
 	}
-	c, err := h.svc.Create(req.Name, req.BaseURL, req.AuthToken, req.Models, req.DefaultModel)
+	c, err := h.svc.Create(req.Name, req.BaseURL, req.AuthToken, req.Models, req.DefaultModel, req.Currency)
 	if err != nil {
 		if errors.Is(err, service.ErrDefaultModelNotInList) {
 			writeError(w, http.StatusBadRequest, "INVALID_MODEL", err.Error())
@@ -84,7 +85,7 @@ func (h *ClaudeConfigHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID", "请求格式错误: "+err.Error())
 		return
 	}
-	c, err := h.svc.Update(r.PathValue("id"), req.Name, req.BaseURL, req.AuthToken, req.ClearToken, req.Models, req.DefaultModel)
+	c, err := h.svc.Update(r.PathValue("id"), req.Name, req.BaseURL, req.AuthToken, req.ClearToken, req.Models, req.DefaultModel, req.Currency)
 	if err != nil {
 		if errors.Is(err, service.ErrConfigNotFound) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())

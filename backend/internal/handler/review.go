@@ -69,6 +69,20 @@ func (h *ReviewHandler) effectiveModel(roleModel string) string {
 	return effectiveModelFromValues(roleModel, configDefault)
 }
 
+// activeConfigMeta returns the currently-active claude config's id + currency
+// for cost attribution on the review token row. Best-effort: empty when no
+// config is active or on lookup error.
+func (h *ReviewHandler) activeConfigMeta() (id, currency string) {
+	if h.claudeCfg == nil {
+		return "", ""
+	}
+	c, err := h.claudeCfg.ActiveConfig()
+	if err != nil || c == nil {
+		return "", ""
+	}
+	return c.ID, c.Currency
+}
+
 // PRListResponse wraps the PR list with a configuration flag.
 type PRListResponse struct {
 	Configured bool          `json:"configured"`
@@ -311,13 +325,16 @@ func (h *ReviewHandler) runReview(job *store.Job, projectID, projectPath string,
 	// are never counted in requirement/project totals — only in the project's
 	// review breakdown. Best-effort: recordFrom swallows all errors.
 	reviewMeta := fmt.Sprintf("{\"pr_number\":%d,\"pr_title\":%q,\"branch\":%q}", req.PRNumber, req.PRTitle, req.Branch)
+	configID, currency := h.activeConfigMeta()
 	reviewUsage := &usageCtx{
-		Rec:       h.usageSvc,
-		ProjectID: projectID,
-		JobID:     job.ID,
-		Step:      "review",
-		Model:     model,
-		Meta:      reviewMeta,
+		Rec:            h.usageSvc,
+		ProjectID:      projectID,
+		JobID:          job.ID,
+		Step:           "review",
+		Model:          model,
+		ClaudeConfigID: configID,
+		Currency:       currency,
+		Meta:           reviewMeta,
 	}
 
 	prompt := fmt.Sprintf(

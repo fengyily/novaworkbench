@@ -117,16 +117,34 @@ func (h *WizardHandler) effectiveModel(roleModel string) string {
 // records the result event's tokens (best-effort) under the given step.
 // projectID may be empty when the requirement couldn't be loaded (legacy
 // no-requirement coding path) — the row is still recorded for global counts.
+// The active claude config's id + currency are stamped so cost can later be
+// recomputed from that platform's current model prices.
 func (h *WizardHandler) usageCtxFor(step, requirementID, projectID, jobID, model, meta string) *usageCtx {
+	configID, currency := h.activeConfigMeta()
 	return &usageCtx{
-		Rec:           h.usageSvc,
-		RequirementID: requirementID,
-		ProjectID:     projectID,
-		JobID:         jobID,
-		Step:          step,
-		Model:         model,
-		Meta:          meta,
+		Rec:            h.usageSvc,
+		RequirementID:  requirementID,
+		ProjectID:      projectID,
+		JobID:          jobID,
+		Step:           step,
+		Model:          model,
+		ClaudeConfigID: configID,
+		Currency:       currency,
+		Meta:           meta,
 	}
+}
+
+// activeConfigMeta returns the currently-active claude config's id + currency.
+// Best-effort: empty values when no config is active or on any lookup error.
+func (h *WizardHandler) activeConfigMeta() (id, currency string) {
+	if h.claudeCfg == nil {
+		return "", ""
+	}
+	c, err := h.claudeCfg.ActiveConfig()
+	if err != nil || c == nil {
+		return "", ""
+	}
+	return c.ID, c.Currency
 }
 
 // resolveWorkDir returns the directory the current claude stage should run in:
@@ -1550,6 +1568,7 @@ type claudeStreamOutcome struct {
 	errMsg          string
 	hadStreamEvents bool   // true if any stream_event/content_block_delta arrived
 	planContent     string // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
+	actualModel     string // model id returned by the API, captured from the assistant event's message.model
 }
 
 // isStaleSessionError reports whether a non-success result event (optionally
@@ -1791,6 +1810,13 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 			// assistant event carries the only copy of the text, so we emit it now.
 			// We track whether any stream_event text arrived to decide which path to take.
 			msg, _ := evt["message"].(map[string]interface{})
+			// The message carries the model id the API actually served — capture
+			// it so the recorded token_usage row matches a model in the config's
+			// price list (used for cost attribution; overrides the pre-dispatch
+			// role-config model at the result event below).
+			if m, ok := msg["model"].(string); ok {
+				out.actualModel = m
+			}
 			content, _ := msg["content"].([]interface{})
 			for _, block := range content {
 				b, _ := block.(map[string]interface{})
@@ -1850,6 +1876,12 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 					out.staleSession = true
 					log.Printf("[%s] stale --resume detected (session not on disk)", scope)
 				}
+			}
+			// Override the pre-dispatch model with the API-returned one so the
+			// recorded row costs against the right model entry. No-op when the
+			// proxy didn't report a model (fall back to the effective model).
+			if out.actualModel != "" && uctx != nil {
+				uctx.Model = out.actualModel
 			}
 			// Record token usage from the result event (success or failure —
 			// tokens are consumed either way). Best-effort: recordFrom swallows

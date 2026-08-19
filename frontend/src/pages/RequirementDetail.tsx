@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, stepLabels, type Requirement, type Project, type MergeState, type RequirementUsage } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, type Requirement, type Project, type MergeState, type RequirementUsage } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
@@ -1088,30 +1088,36 @@ export default function RequirementDetail() {
               <thead>
                 <tr>
                   <th>步骤</th>
+                  <th style={{ width: 170 }}>模型</th>
                   <th style={{ width: 110 }}>输入</th>
                   <th style={{ width: 110 }}>输出</th>
                   <th style={{ width: 110 }}>缓存读</th>
                   <th style={{ width: 110 }}>缓存建</th>
+                  <th style={{ width: 110 }}>费用</th>
                   <th style={{ width: 60 }}>次数</th>
                 </tr>
               </thead>
               <tbody>
                 {usage.by_step.map(s => (
-                  <tr key={s.step}>
+                  <tr key={`${s.step}:${s.model}`}>
                     <td>{s.label || stepLabels[s.step] || s.step}</td>
+                    <td><code className="pr-branch">{s.model || '未知模型'}</code></td>
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(s).toLocaleString()}</td>
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.output_tokens.toLocaleString()}</td>
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_read_tokens.toLocaleString()}</td>
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_creation_tokens.toLocaleString()}</td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{fmtCost(s.costs)}</td>
                     <td style={{ fontSize: 12 }}>{s.count}</td>
                   </tr>
                 ))}
                 <tr style={{ borderTop: '2px solid var(--color-border)' }}>
                   <td style={{ fontWeight: 600 }}>合计</td>
+                  <td></td>
                   <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{usageTotalInput(usage.total).toLocaleString()}</td>
                   <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{usage.total.output_tokens.toLocaleString()}</td>
                   <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{usage.total.cache_read_tokens.toLocaleString()}</td>
                   <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{usage.total.cache_creation_tokens.toLocaleString()}</td>
+                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{fmtCost(usage.total.costs)}</td>
                   <td></td>
                 </tr>
               </tbody>

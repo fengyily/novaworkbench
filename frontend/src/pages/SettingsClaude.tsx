@@ -1,13 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
-import { claudeApi, type ClaudeConfigItem } from '../api/client';
+import { claudeApi, type ClaudeConfigItem, type ModelEntry } from '../api/client';
 import './SettingsClaude.css';
 
 interface ConfigForm {
   name: string;
   base_url: string;
   auth_token: string;
-  models: string[];
+  models: ModelEntry[];
   default_model: string;
+  currency: string;
 }
 
 const emptyForm: ConfigForm = {
@@ -16,6 +17,7 @@ const emptyForm: ConfigForm = {
   auth_token: '',
   models: [],
   default_model: '',
+  currency: '',
 };
 
 export default function SettingsClaude() {
@@ -63,6 +65,7 @@ export default function SettingsClaude() {
       auth_token: '',
       models: [...(c.models ?? [])],
       default_model: c.default_model ?? '',
+      currency: c.currency ?? '',
     });
     setModelInput('');
     setError('');
@@ -72,14 +75,22 @@ export default function SettingsClaude() {
   const addModel = () => {
     const m = modelInput.trim();
     if (!m) return;
-    if (form.models.includes(m)) { setModelInput(''); return; }
-    setForm(f => ({ ...f, models: [...f.models, m] }));
+    if (form.models.some(x => x.model === m)) { setModelInput(''); return; }
+    setForm(f => ({ ...f, models: [...f.models, { model: m, input_price: 0, output_price: 0 }] }));
     setModelInput('');
+  };
+
+  const updateModel = (idx: number, entry: ModelEntry) => {
+    setForm(f => {
+      const models = [...f.models];
+      models[idx] = entry;
+      return { ...f, models };
+    });
   };
 
   const removeModel = (m: string) => {
     setForm(f => {
-      const models = f.models.filter(x => x !== m);
+      const models = f.models.filter(x => x.model !== m);
       // If the removed model was the default, drop the default too.
       const default_model = f.default_model === m ? '' : f.default_model;
       return { ...f, models, default_model };
@@ -88,7 +99,7 @@ export default function SettingsClaude() {
 
   const handleSave = async () => {
     if (!form.name.trim()) { setError('名称不能为空'); return; }
-    if (form.default_model && !form.models.includes(form.default_model)) {
+    if (form.default_model && !form.models.some(x => x.model === form.default_model)) {
       setError('默认模型必须在模型列表中'); return;
     }
     setSaving(true);
@@ -101,6 +112,7 @@ export default function SettingsClaude() {
           auth_token: form.auth_token || undefined,
           models: form.models,
           default_model: form.default_model,
+          currency: form.currency,
         });
         showToast('配置已更新');
       } else {
@@ -110,6 +122,7 @@ export default function SettingsClaude() {
           auth_token: form.auth_token || undefined,
           models: form.models,
           default_model: form.default_model,
+          currency: form.currency,
         });
         showToast('配置已创建');
       }
@@ -185,6 +198,7 @@ export default function SettingsClaude() {
               <th>Base URL</th>
               <th>Token</th>
               <th>默认模型</th>
+              <th>币种</th>
               <th>状态</th>
               <th></th>
             </tr>
@@ -200,6 +214,7 @@ export default function SettingsClaude() {
                     : <span className="claude-token-unset">未设置</span>}
                 </td>
                 <td>{c.default_model || <span className="claude-token-unset">CLI 默认</span>}</td>
+                <td>{c.currency || '—'}</td>
                 <td>{c.is_active && <span className="claude-active-badge">当前生效</span>}</td>
                 <td className="claude-row-actions">
                   {!c.is_active && (
@@ -273,18 +288,39 @@ export default function SettingsClaude() {
             </div>
 
             <div className="form-group">
-              <label>模型列表</label>
-              <div className="model-chips">
-                {form.models.map(m => (
-                  <span className="model-chip" key={m}>
-                    {m}
-                    <button type="button" className="model-chip-remove" onClick={() => removeModel(m)}>×</button>
-                  </span>
-                ))}
-                {form.models.length === 0 && (
-                  <span className="claude-token-unset">尚未添加模型</span>
-                )}
-              </div>
+              <label>模型列表（单价：¥ 或 $ / 百万 tokens）</label>
+              {form.models.map((m, idx) => (
+                <div className="model-price-row" key={`${m.model}-${idx}`}>
+                  <input
+                    className="form-input model-name-input"
+                    placeholder="模型名，如 claude-sonnet-4-5"
+                    value={m.model}
+                    onChange={e => updateModel(idx, { ...m, model: e.target.value })}
+                  />
+                  <input
+                    className="form-input model-price-input"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="输入价"
+                    value={m.input_price}
+                    onChange={e => updateModel(idx, { ...m, input_price: Number(e.target.value) || 0 })}
+                  />
+                  <input
+                    className="form-input model-price-input"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="输出价"
+                    value={m.output_price}
+                    onChange={e => updateModel(idx, { ...m, output_price: Number(e.target.value) || 0 })}
+                  />
+                  <button type="button" className="model-chip-remove" onClick={() => removeModel(m.model)}>×</button>
+                </div>
+              ))}
+              {form.models.length === 0 && (
+                <div className="claude-token-unset" style={{ margin: '4px 0 8px' }}>尚未添加模型</div>
+              )}
               <div className="model-input-row">
                 <input
                   className="form-input"
@@ -295,7 +331,24 @@ export default function SettingsClaude() {
                 />
                 <button type="button" className="btn btn-secondary" onClick={addModel}>添加</button>
               </div>
-              <small className="form-hint">该配置可用的模型；角色的模型将从这里下拉选择。</small>
+              <small className="form-hint">
+                该配置可用的模型（角色将从这里下拉选择）；单价留 0 表示该模型不参与成本核算，
+                成本按「每百万 tokens」计算，改价后历史用量立即按新价重算。
+              </small>
+            </div>
+
+            <div className="form-group">
+              <label>计价币种</label>
+              <select
+                className="form-input"
+                value={form.currency}
+                onChange={e => setForm(f => ({ ...f, currency: e.target.value }))}
+              >
+                <option value="">未设置</option>
+                <option value="CNY">CNY（人民币 ¥）</option>
+                <option value="USD">USD（美元 $）</option>
+              </select>
+              <small className="form-hint">不同平台（配置）的价格与币种可能不同，成本统计按币种分组展示。</small>
             </div>
 
             <div className="form-group">
@@ -306,7 +359,7 @@ export default function SettingsClaude() {
                 onChange={e => setForm(f => ({ ...f, default_model: e.target.value }))}
               >
                 <option value="">不指定（CLI 默认）</option>
-                {form.models.map(m => <option key={m} value={m}>{m}</option>)}
+                {form.models.map(m => <option key={m.model} value={m.model}>{m.model}</option>)}
               </select>
               <small className="form-hint">切换为生效配置时，所有角色的模型会重置为此项。</small>
             </div>

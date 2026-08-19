@@ -38,30 +38,46 @@ func NewClaudeConfigService(database *db.DB) *ClaudeConfigService {
 	return &ClaudeConfigService{db: database}
 }
 
-// fullCols includes auth_token — for internal use (env injection, activate,
-// and list which needs the token to produce a masked preview).
-const fullCols = "id, name, base_url, auth_token, models, default_model, is_active, created_at, updated_at"
+// fullCols includes the config columns for internal use — including auth_token
+// so env injection / activate / the masked list can reuse one scan.
+const fullCols = "id, name, base_url, auth_token, models, default_model, currency, is_active, created_at, updated_at"
 
-// decodeModels parses the JSON array stored in the models column. An empty or
-// malformed value yields an empty (non-nil) slice so callers never see null.
-func decodeModels(raw string) []string {
+// DecodeModels parses the JSON stored in the models column: an array of
+// {model,input_price,output_price} objects, OR a legacy array of plain model-id
+// strings (recorded before pricing existed) converted to entries with 0 unit
+// prices. An empty or malformed value yields an empty (non-nil) slice so
+// callers never see null.
+func DecodeModels(raw string) []model.ModelEntry {
 	raw = trimSpace(raw)
 	if raw == "" || raw == "null" {
-		return []string{}
+		return []model.ModelEntry{}
 	}
-	var out []string
-	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		return []string{}
+	var out []model.ModelEntry
+	if err := json.Unmarshal([]byte(raw), &out); err == nil {
+		if out == nil {
+			out = []model.ModelEntry{}
+		}
+		return out
 	}
-	if out == nil {
-		return []string{}
+	// Legacy string-array format: ["m1","m2"].
+	var ids []string
+	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+		return []model.ModelEntry{}
 	}
-	return out
+	entries := make([]model.ModelEntry, 0, len(ids))
+	for _, m := range ids {
+		m = trimSpace(m)
+		if m == "" {
+			continue
+		}
+		entries = append(entries, model.ModelEntry{Model: m})
+	}
+	return entries
 }
 
-func encodeModels(models []string) string {
+func encodeModels(models []model.ModelEntry) string {
 	if models == nil {
-		models = []string{}
+		models = []model.ModelEntry{}
 	}
 	b, err := json.Marshal(models)
 	if err != nil {
@@ -70,20 +86,30 @@ func encodeModels(models []string) string {
 	return string(b)
 }
 
-// normalizeModels trims whitespace, drops empties, and de-duplicates while
-// preserving order.
-func normalizeModels(in []string) []string {
-	out := make([]string, 0, len(in))
+// normalizeModels trims model names, drops empties, and de-duplicates by model
+// id while preserving order (keeping each entry's unit prices).
+func normalizeModels(in []model.ModelEntry) []model.ModelEntry {
+	out := make([]model.ModelEntry, 0, len(in))
 	seen := make(map[string]bool, len(in))
 	for _, m := range in {
-		m = trimSpace(m)
-		if m == "" || seen[m] {
+		m.Model = trimSpace(m.Model)
+		if m.Model == "" || seen[m.Model] {
 			continue
 		}
-		seen[m] = true
+		seen[m.Model] = true
 		out = append(out, m)
 	}
 	return out
+}
+
+// modelEntryIDs projects a models entry list down to its model-id strings, for
+// the role-settings dropdown and membership checks that only need names.
+func modelEntryIDs(entries []model.ModelEntry) []string {
+	ids := make([]string, 0, len(entries))
+	for _, e := range entries {
+		ids = append(ids, e.Model)
+	}
+	return ids
 }
 
 func trimSpace(s string) string {
@@ -95,10 +121,10 @@ func scanFull(row interface{ Scan(...any) error }) (*model.ClaudeConfig, error) 
 	var c model.ClaudeConfig
 	var modelsJSON string
 	var isActive int
-	if err := row.Scan(&c.ID, &c.Name, &c.BaseURL, &c.AuthToken, &modelsJSON, &c.DefaultModel, &isActive, &c.CreatedAt, &c.UpdatedAt); err != nil {
+	if err := row.Scan(&c.ID, &c.Name, &c.BaseURL, &c.AuthToken, &modelsJSON, &c.DefaultModel, &c.Currency, &isActive, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return nil, err
 	}
-	c.Models = decodeModels(modelsJSON)
+	c.Models = DecodeModels(modelsJSON)
 	c.IsActive = isActive != 0
 	return &c, nil
 }
@@ -148,7 +174,7 @@ func (s *ClaudeConfigService) count() (int, error) {
 // validateModelsDefaults normalizes models and enforces that defaultModel (if
 // non-empty) is a member of models. When models is empty, defaultModel is
 // forced empty (no default without a list).
-func validateModelsDefaults(models []string, defaultModel string) ([]string, string, error) {
+func validateModelsDefaults(models []model.ModelEntry, defaultModel string) ([]model.ModelEntry, string, error) {
 	models = normalizeModels(models)
 	defaultModel = trimSpace(defaultModel)
 	if len(models) == 0 {
@@ -157,7 +183,7 @@ func validateModelsDefaults(models []string, defaultModel string) ([]string, str
 	if defaultModel != "" {
 		found := false
 		for _, m := range models {
-			if m == defaultModel {
+			if m.Model == defaultModel {
 				found = true
 				break
 			}
@@ -171,7 +197,7 @@ func validateModelsDefaults(models []string, defaultModel string) ([]string, str
 
 // Create inserts a new config. The first config is auto-activated so the
 // system is never left without an active configuration.
-func (s *ClaudeConfigService) Create(name, baseURL, authToken string, models []string, defaultModel string) (*model.ClaudeConfig, error) {
+func (s *ClaudeConfigService) Create(name, baseURL, authToken string, models []model.ModelEntry, defaultModel, currency string) (*model.ClaudeConfig, error) {
 	name = trimSpace(name)
 	if name == "" {
 		return nil, errors.New("名称不能为空")
@@ -180,6 +206,7 @@ func (s *ClaudeConfigService) Create(name, baseURL, authToken string, models []s
 	if err != nil {
 		return nil, err
 	}
+	currency = trimSpace(currency)
 
 	id := util.NewID("ccfg")
 	now := time.Now()
@@ -193,9 +220,9 @@ func (s *ClaudeConfigService) Create(name, baseURL, authToken string, models []s
 	}
 
 	if _, err := s.db.Exec(
-		`INSERT INTO claude_configs (id, name, base_url, auth_token, models, default_model, is_active, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, name, trimSpace(baseURL), authToken, encodeModels(models), defaultModel, isActive, now, now,
+		`INSERT INTO claude_configs (id, name, base_url, auth_token, models, default_model, currency, is_active, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, name, trimSpace(baseURL), authToken, encodeModels(models), defaultModel, currency, isActive, now, now,
 	); err != nil {
 		return nil, err
 	}
@@ -205,7 +232,7 @@ func (s *ClaudeConfigService) Create(name, baseURL, authToken string, models []s
 // Update modifies a config. An empty authToken means "keep the existing
 // secret"; set clearToken to explicitly remove it. A nil models slice means
 // "leave the list unchanged"; a non-nil slice (empty or populated) replaces it.
-func (s *ClaudeConfigService) Update(id, name, baseURL, authToken string, clearToken bool, models []string, defaultModel string) (*model.ClaudeConfig, error) {
+func (s *ClaudeConfigService) Update(id, name, baseURL, authToken string, clearToken bool, models []model.ModelEntry, defaultModel, currency string) (*model.ClaudeConfig, error) {
 	existing, err := s.Get(id)
 	if err != nil {
 		return nil, err
@@ -215,9 +242,10 @@ func (s *ClaudeConfigService) Update(id, name, baseURL, authToken string, clearT
 	if name == "" {
 		return nil, errors.New("名称不能为空")
 	}
+	currency = trimSpace(currency)
 
 	// Resolve the models list: nil arg = keep existing; otherwise replace.
-	var nextModels []string
+	var nextModels []model.ModelEntry
 	if models == nil {
 		nextModels = existing.Models
 	} else {
@@ -237,8 +265,8 @@ func (s *ClaudeConfigService) Update(id, name, baseURL, authToken string, clearT
 	}
 
 	if _, err := s.db.Exec(
-		`UPDATE claude_configs SET name=?, base_url=?, auth_token=?, models=?, default_model=?, updated_at=? WHERE id=?`,
-		name, trimSpace(baseURL), nextToken, encodeModels(nextModels), defaultModel, time.Now(), id,
+		`UPDATE claude_configs SET name=?, base_url=?, auth_token=?, models=?, default_model=?, currency=?, updated_at=? WHERE id=?`,
+		name, trimSpace(baseURL), nextToken, encodeModels(nextModels), defaultModel, currency, time.Now(), id,
 	); err != nil {
 		return nil, err
 	}
@@ -346,7 +374,7 @@ func (s *ClaudeConfigService) ActiveModels() (models []string, defaultModel stri
 	if err != nil || c == nil {
 		return nil, "", err
 	}
-	return c.Models, c.DefaultModel, nil
+	return modelEntryIDs(c.Models), c.DefaultModel, nil
 }
 
 // ModelInActiveList reports whether m is among the active config's models.
@@ -360,8 +388,8 @@ func (s *ClaudeConfigService) ModelInActiveList(m string) (bool, error) {
 	if len(c.Models) == 0 {
 		return true, nil
 	}
-	for _, x := range c.Models {
-		if x == m {
+	for _, e := range c.Models {
+		if e.Model == m {
 			return true, nil
 		}
 	}

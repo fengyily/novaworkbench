@@ -111,3 +111,22 @@
 .model-input-row .form-input {
   flex: 1;
 }
+
+/* Per-model pricing rows: name + input price + output price + remove. */
+.model-price-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.model-name-input {
+  flex: 2;
+}
+
+.model-price-input {
+  flex: 1;
+  min-width: 84px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 13px;
+}
