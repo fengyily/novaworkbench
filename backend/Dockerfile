@@ -5,7 +5,10 @@
 FROM node:22-alpine AS frontend
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+# Use `npm install` rather than `npm ci`: when the lockfile drifts from
+# package.json (common during feature-branch development), `npm ci` aborts
+# the build. `--no-audit --no-fund` keeps logs small and the build fast.
+RUN npm install --no-audit --no-fund
 COPY . .
 RUN npm run build
 
