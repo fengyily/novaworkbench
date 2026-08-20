@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -49,10 +50,21 @@ func New(claudeEnv ClaudeEnvProvider, llmCfg LLMConfigProvider) *Gateway {
 		}
 	}
 
-	// Verify claude CLI is available
-	if _, err := exec.LookPath(binPath); err != nil {
+	// Verify claude CLI is available; resolve to the real executable path so
+	// exec.Cmd.Start() always uses an absolute ELF path rather than a wrapper
+	// script or multi-hop symlink (which can cause a misleading ENOENT on Linux
+	// even when the file exists).
+	if abs, err := exec.LookPath(binPath); err != nil {
 		fmt.Printf("[LLM] WARNING: 'claude' CLI not found in PATH. AI features will use stub responses.\n")
 		fmt.Printf("[LLM] Install with: npm install -g @anthropic-ai/claude-code\n")
+	} else {
+		// Follow symlinks all the way to the actual binary so cmd.Path never
+		// points at a shell wrapper whose shebang interpreter may be absent.
+		if real, err := filepath.EvalSymlinks(abs); err == nil {
+			binPath = real
+		} else {
+			binPath = abs
+		}
 	}
 
 	return &Gateway{binPath: binPath, timeout: timeout, claudeEnv: claudeEnv, llmCfg: llmCfg}
