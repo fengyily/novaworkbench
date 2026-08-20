@@ -16,7 +16,11 @@ export default function AddProject() {
     setError(null);
     setLoading(true);
     try {
-      await projectsApi.add(localPath, remoteUrl, true); // always allow git init for new dirs
+      if (mode === 'remote') {
+        await projectsApi.add('', remoteUrl, false);
+      } else {
+        await projectsApi.add(localPath, '', true); // always allow git init for new dirs
+      }
       navigate('/');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Unknown error');
@@ -67,7 +71,7 @@ export default function AddProject() {
           <button
             className="btn btn-primary"
             onClick={handleSubmit}
-            disabled={loading || !localPath}
+            disabled={loading || (mode === 'local' ? !localPath : !remoteUrl)}
           >
             {loading ? '⏳ 添加中...' : '开始添加'}
           </button>
