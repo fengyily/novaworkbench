@@ -2098,7 +2098,9 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	// Windows the helpers in wizard_proc_windows.go fall back to signaling
 	// just the direct process — no orphan grand-children issue exists there.
 	setProcessGroup(cmd)
+	logClaudeExecDiag(scope, cmd)
 	if err := cmd.Start(); err != nil {
+		log.Printf("[%s] exec diag: cmd.Start() failed: %T %v", scope, err, err)
 		return claudeStreamOutcome{errMsg: "启动 Claude 失败: " + err.Error()}
 	}
 	logClaudeEnvConfig(scope, cmd)
@@ -2595,6 +2597,97 @@ func logClaudeEnvConfig(scope string, cmd *exec.Cmd) {
 	}
 	log.Printf("[%s] claude env present: ANTHROPIC_AUTH_TOKEN=%v ANTHROPIC_BASE_URL=%v ANTHROPIC_API_KEY=%v",
 		scope, has("ANTHROPIC_AUTH_TOKEN"), has("ANTHROPIC_BASE_URL"), has("ANTHROPIC_API_KEY"))
+}
+
+// logClaudeExecDiag dumps a diagnostic snapshot of the binary Go is about to
+// exec. The single-line ENOENT returned by cmd.Start() is one of the most
+// misleading errors in Go/Linux — the kernel returns ENOENT for at least
+// half a dozen distinct causes (file missing, symlink target missing, ELF
+// PT_INTERP missing, shebang script interpreter missing, noexec mount, …).
+// When the next deploy hits this, we need enough raw state in the log to
+// pinpoint the cause without another round-trip. Always log BEFORE Start so
+// the failure case still gets the snapshot.
+func logClaudeExecDiag(scope string, cmd *exec.Cmd) {
+	if cmd.Path == "" {
+		log.Printf("[%s] exec diag: cmd.Path is empty (LookPath must have failed earlier)", scope)
+		return
+	}
+	log.Printf("[%s] exec diag: cmd.Path=%q args=%d env=%d", scope, cmd.Path, len(cmd.Args), len(cmd.Env))
+
+	// 1. LookPath — does Go itself still find the path it just resolved?
+	if _, err := exec.LookPath(cmd.Path); err != nil {
+		log.Printf("[%s] exec diag: LookPath(%q) failed: %v", scope, cmd.Path, err)
+	}
+
+	// 2. Resolve symlinks — the kernel uses the resolved path for exec().
+	resolved, err := filepath.EvalSymlinks(cmd.Path)
+	if err != nil {
+		log.Printf("[%s] exec diag: EvalSymlinks(%q) failed: %v", scope, cmd.Path, err)
+		resolved = cmd.Path
+	} else {
+		log.Printf("[%s] exec diag: resolved=%q", scope, resolved)
+	}
+
+	// 3. stat the resolved file so we can see mode, size, mtime.
+	if info, err := os.Stat(resolved); err != nil {
+		log.Printf("[%s] exec diag: stat(%q) failed: %v", scope, resolved, err)
+	} else {
+		log.Printf("[%s] exec diag: stat mode=%s size=%d mtime=%s", scope, info.Mode(), info.Size(), info.ModTime().Format(time.RFC3339))
+	}
+
+	// 4. Magic bytes — distinguish script (#!) from ELF (\\x7fELF) from junk.
+	if f, openErr := os.Open(resolved); openErr == nil {
+		var head [4]byte
+		n, _ := io.ReadFull(f, head[:])
+		_ = f.Close()
+		switch {
+		case n >= 4 && head[0] == 0x7f && head[1] == 'E' && head[2] == 'L' && head[3] == 'F':
+			log.Printf("[%s] exec diag: magic=ELF (pkg-bundled binary, no shebang)", scope)
+		case n >= 2 && head[0] == '#' && head[1] == '!':
+			log.Printf("[%s] exec diag: magic=#! (script), first line likely contains the interpreter path", scope)
+		default:
+			log.Printf("[%s] exec diag: magic=\\% x (n=%d)", scope, head[:n], n)
+		}
+	} else {
+		log.Printf("[%s] exec diag: open(%q) failed: %v", scope, resolved, openErr)
+	}
+
+	// 5. ldd — surfaces missing shared libs (ENOENT-class) and the ELF PT_INTERP.
+	if lddOut, lddErr := exec.Command("ldd", resolved).CombinedOutput(); lddErr == nil {
+		out := strings.TrimSpace(string(lddOut))
+		if out == "" {
+			log.Printf("[%s] exec diag: ldd: (no output — binary not dynamic?)", scope)
+		} else {
+			log.Printf("[%s] exec diag: ldd:\n%s", scope, out)
+		}
+	} else {
+		log.Printf("[%s] exec diag: ldd failed (%v): %s", scope, lddErr, strings.TrimSpace(string(lddOut)))
+	}
+
+	// 6. Critical env vars — PATH tells us where exec will look for the
+	// interpreter if this is a script; HOME matters for nm/nvm-managed nodes.
+	for _, kv := range cmd.Env {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "PATH", "HOME", "PWD", "NODE_HOME", "NVM_HOME", "NVM_BIN":
+			log.Printf("[%s] exec diag: env %s=%s", scope, k, v)
+		}
+	}
+
+	// 7. CWD — both the server's own cwd and cmd.Dir (the project dir).
+	if cwd, err := os.Getwd(); err == nil {
+		log.Printf("[%s] exec diag: server cwd=%q", scope, cwd)
+	}
+	if cmd.Dir != "" {
+		log.Printf("[%s] exec diag: cmd.Dir=%q", scope, cmd.Dir)
+	}
+
+	// 8. uid/gid — the Go process is the same throughout, but past bugs have
+	// caught us when a service drops privileges. Cheap to log.
+	log.Printf("[%s] exec diag: uid=%d gid=%d euid=%d egid=%d", scope, os.Getuid(), os.Getgid(), os.Geteuid(), os.Getegid())
 }
 
 // logClaudeCmd logs the actual claude CLI invocation as a shell command that
