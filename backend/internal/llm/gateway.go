@@ -110,9 +110,9 @@ func (g *Gateway) mergedEnv(model string) []string {
 		overrides["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
 		overrides["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
 	}
-	if len(overrides) == 0 {
-		return env
-	}
+	// Allow claude CLI to run under root (e.g. in Docker). The CLI blocks
+	// --dangerously-skip-permissions when uid==0 unless this var is set.
+	overrides["CLAUDE_ALLOW_ROOT"] = "1"
 	// Keys to strip from the inherited env because they would conflict with the
 	// configured auth. Only strip when we are actually injecting ANTHROPIC_AUTH_TOKEN.
 	dropKeys := map[string]bool{}
