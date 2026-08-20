@@ -739,3 +739,56 @@
   color: var(--color-text-muted);
   line-height: 1.4;
 }
+
+/* Optional "读取项目知识库" step panel (architect / developer cards). Rendered
+   only when the user opted in and the backend emitted a "knowledge" event. */
+.knowledge-read-panel {
+  background: var(--color-surface, #fff);
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-left: 3px solid var(--color-primary, #4F46E5);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+}
+.knowledge-read-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--color-text);
+}
+.knowledge-read-link {
+  text-decoration: none;
+  padding: 2px 8px;
+  font-size: 12px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 6px;
+  color: var(--color-primary, #4F46E5);
+  background: var(--color-bg, #fff);
+}
+.knowledge-read-count {
+  margin: 6px 0 4px;
+  font-size: 12px;
+  color: var(--color-text-muted, #64748B);
+}
+.knowledge-read-empty {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--color-text-muted, #64748B);
+}
+.knowledge-read-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.knowledge-read-tag {
+  display: inline-block;
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 12px;
+  background: #EEF2FF;
+  color: #4F46E5;
+  border: 1px solid #E0E7FF;
+}

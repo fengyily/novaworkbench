@@ -25,27 +25,197 @@ import (
 )
 
 type WizardHandler struct {
-	projectSvc *service.ProjectService
-	reqSvc     *service.RequirementService
-	llm        *llm.Gateway
-	jobs       *store.JobStore
-	roleSvc    *service.RoleService
-	jobLogSvc  *service.JobLogService
-	claudeCfg  *service.ClaudeConfigService
-	usageSvc   usageRecorder
+	projectSvc   *service.ProjectService
+	reqSvc       *service.RequirementService
+	knowledgeSvc *service.KnowledgeService
+	llm          *llm.Gateway
+	jobs         *store.JobStore
+	roleSvc      *service.RoleService
+	jobLogSvc    *service.JobLogService
+	claudeCfg    *service.ClaudeConfigService
+	usageSvc     usageRecorder
 }
 
-func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder) *WizardHandler {
+func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder) *WizardHandler {
 	return &WizardHandler{
-		projectSvc: projectSvc,
-		reqSvc:     reqSvc,
-		llm:        llmGateway,
-		jobs:       jobs,
-		roleSvc:    roleSvc,
-		jobLogSvc:  jobLogSvc,
-		claudeCfg:  claudeCfg,
-		usageSvc:   usageSvc,
+		projectSvc:   projectSvc,
+		reqSvc:       reqSvc,
+		knowledgeSvc: knowledgeSvc,
+		llm:          llmGateway,
+		jobs:         jobs,
+		roleSvc:      roleSvc,
+		jobLogSvc:    jobLogSvc,
+		claudeCfg:    claudeCfg,
+		usageSvc:     usageSvc,
 	}
+}
+
+// buildKnowledgeBlock loads the project knowledge most relevant to a
+// requirement and renders it as a prompt section (## 项目知识库). It returns an
+// empty block when nothing relevant exists (the caller then leaves the prompt
+// unchanged). Per-entry content is capped at ~8KB and the whole block at ~60KB
+// so a large knowledge base can't blow up the prompt budget. The returned
+// titles drive the SSE "knowledge" event so the UI can show what was read.
+func (h *WizardHandler) buildKnowledgeBlock(projectID, requirementTitle string) (block string, titles []string) {
+	if h.knowledgeSvc == nil {
+		return "", nil
+	}
+	items, err := h.knowledgeSvc.ListForRequirement(projectID, requirementTitle, 20)
+	if err != nil || len(items) == 0 {
+		if err != nil {
+			log.Printf("[wizard] load knowledge %s: %v", projectID, err)
+		}
+		return "", nil
+	}
+	const (
+		perItem  = 8 * 1024
+		maxBlock = 60 * 1024
+	)
+	var b strings.Builder
+	b.WriteString("## 项目知识库\n\n以下是与本需求相关的项目知识库内容，请先阅读再进行分析：\n\n")
+	titles = make([]string, 0, len(items))
+	total := 0
+	omitted := 0
+	for _, k := range items {
+		content := k.Content
+		if len(content) > perItem {
+			content = content[:perItem] + "\n…（已截断）"
+		}
+		if total+len(content) > maxBlock {
+			omitted++
+			continue
+		}
+		b.WriteString(fmt.Sprintf("### %s\n%s\n\n", k.Title, content))
+		titles = append(titles, k.Title)
+		total += len(content)
+	}
+	if omitted > 0 {
+		b.WriteString(fmt.Sprintf("…（知识库内容较多，略去 %d 条）\n", omitted))
+	}
+	block = b.String()
+	if block == "" {
+		block = "(项目知识库为空)"
+	}
+	return block, titles
+}
+
+// emitKnowledgeEvent writes the wizard's SSE "knowledge" event into a JobStore
+// job so subscribers can render the entries read before the stage started. The
+// event carries only titles (full content goes into the claude prompt, not the
+// SSE stream). Emit it BEFORE invoking claude, once per job.
+func emitKnowledgeEvent(job *store.Job, titles []string) {
+	items := make([]map[string]string, 0, len(titles))
+	for _, t := range titles {
+		items = append(items, map[string]string{"title": t})
+	}
+	data, _ := json.Marshal(map[string]interface{}{
+		"type":  "knowledge",
+		"count": len(titles),
+		"items": items,
+	})
+	job.Append(store.LogLine{Type: "knowledge", Content: string(data)})
+}
+
+// inputToolPath extracts the file path / search pattern a tool_use input
+// targets, for the "was the injected knowledge actually used?" evaluation.
+// Read/Write/Edit carry file_path; Grep/Glob a pattern. Bash is skipped (its
+// command is too noisy). Empty string means "nothing path-like".
+func inputToolPath(name string, input map[string]interface{}) string {
+	if input == nil {
+		return ""
+	}
+	switch name {
+	case "Read", "Write", "Edit":
+		if p, ok := input["file_path"].(string); ok {
+			return p
+		}
+	case "Glob":
+		if p, ok := input["pattern"].(string); ok {
+			return p
+		}
+	case "Grep":
+		if p, ok := input["pattern"].(string); ok {
+			return p
+		}
+	}
+	return ""
+}
+
+// knowledgeUseItem is one evaluated knowledge entry: did the run actually
+// touch the file the entry describes, or mention the entry's title in its
+// final output?
+type knowledgeUseItem struct {
+	Title string `json:"title"`
+	Used  bool   `json:"used"`
+}
+
+// evaluateKnowledgeUse marks whether each read knowledge entry left a trace of
+// actual use in the run: (1) a tool call touched a path whose basename matches
+// the entry title (e.g. knowledge "CLAUDE.md" and the CLI Read'ed CLAUDE.md),
+// or (2) the entry title appears in the final result text. This is a cheap
+// signal derived from events already captured — NO extra LLM call. It is
+// intentionally conservative: a not-marked entry isn't proof it was useless
+// (e.g. Project Structure informs behavior without being re-read or named).
+func evaluateKnowledgeUsage(titles []string, toolFiles []string, resultText string) (items []knowledgeUseItem, usedCount int) {
+	if len(titles) == 0 {
+		return nil, 0
+	}
+	lowerResult := strings.ToLower(resultText)
+	tools := make([]string, 0, len(toolFiles))
+	for _, f := range toolFiles {
+		tools = append(tools, strings.ToLower(filepath.ToSlash(f)))
+	}
+	items = make([]knowledgeUseItem, 0, len(titles))
+	for _, t := range titles {
+		normTitle := strings.TrimSpace(strings.TrimSuffix(t, "/"))
+		used := false
+		if normTitle == "" {
+			items = append(items, knowledgeUseItem{Title: t, Used: false})
+			continue
+		}
+		lower := strings.ToLower(normTitle)
+		for _, tf := range tools {
+			base := tf
+			if i := strings.LastIndexByte(tf, '/'); i >= 0 {
+				base = tf[i+1:]
+			}
+			// Basename equality, or a direct basename containment (covers
+			// tool paths like ".../docs/CLAUDE.md" against title "CLAUDE.md").
+			if base == lower || (len(lower) >= 3 && strings.Contains(base, lower)) {
+				used = true
+				break
+			}
+		}
+		if !used && lowerResult != "" && strings.Contains(lowerResult, lower) {
+			used = true
+		}
+		if used {
+			usedCount++
+		}
+		items = append(items, knowledgeUseItem{Title: t, Used: used})
+	}
+	return items, usedCount
+}
+
+// emitKnowledgeResultEvent closes the "读取项目知识库" loop with the evaluation
+// of each entry's actual use (tool trace + result-text mentions). Emitted once
+// from the stage that performed the read, on the success path, so the UI can
+// mark each entry as 已引用 / 未直接引用.
+func emitKnowledgeResultEvent(job *store.Job, items []knowledgeUseItem, usedCount int) {
+	if len(items) == 0 {
+		return
+	}
+	jsonItems := make([]map[string]interface{}, 0, len(items))
+	for _, it := range items {
+		jsonItems = append(jsonItems, map[string]interface{}{"title": it.Title, "used": it.Used})
+	}
+	data, _ := json.Marshal(map[string]interface{}{
+		"type":  "knowledge_result",
+		"total": len(items),
+		"used":  usedCount,
+		"items": jsonItems,
+	})
+	job.Append(store.LogLine{Type: "knowledge_result", Content: string(data)})
 }
 
 // DefaultModelLabel is the display + persistence literal used when neither the
@@ -785,11 +955,17 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		BranchName       string `json:"branch_name"`
 		BaseBranch       string `json:"base_branch"`
 		Model            string `json:"model"`
+		ReadKnowledge    bool   `json:"read_knowledge"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "INVALID", "Invalid JSON")
 		return
 	}
+
+	// Optional "读取项目知识库" switch: when true, the project's knowledge
+	// relevant to this requirement is injected into the claude prompt and a
+	// "knowledge" SSE event is emitted before the coding job starts.
+	readKnowledge := req.ReadKnowledge
 
 	job := h.jobs.Create(req.RequirementID)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
@@ -1010,6 +1186,23 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 				prompt += "\n\n用户在开发前的追加调整说明：\n" + req.RequirementDesc
 			}
 		}
+
+		// Optional knowledge pre-read: inject the project knowledge relevant to
+		// this requirement and surface what was read via a "knowledge" SSE event.
+		// Default off (read_knowledge=false) keeps the legacy behavior untouched.
+		var kbReadTitles []string
+		if readKnowledge {
+			codingProjID := ""
+			if reqRow != nil {
+				codingProjID = reqRow.ProjectID
+			}
+			kbBlock, kbTitles := h.buildKnowledgeBlock(codingProjID, req.RequirementTitle)
+			if kbBlock != "" {
+				prompt = kbBlock + "\n" + prompt
+			}
+			emitKnowledgeEvent(job, kbTitles)
+			kbReadTitles = kbTitles
+		}
 		sessionArg := sourceSID
 		forkSessionID := ""
 		if fork {
@@ -1067,6 +1260,11 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		// Close the knowledge loop: mark which read entries the run actually used.
+		if len(kbReadTitles) > 0 {
+			items, used := evaluateKnowledgeUsage(kbReadTitles, out.toolFiles, out.finalResult)
+			emitKnowledgeResultEvent(job, items, used)
+		}
 		job.Append(store.LogLine{Type: "done", Content: "✅ 开发完成！"})
 		// Record the effective developer model (success path only).
 		if req.RequirementID != "" {
@@ -1412,6 +1610,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	var body struct {
 		RequirementID string `json:"requirement_id"`
 		Model         string `json:"model"`
+		ReadKnowledge bool   `json:"read_knowledge"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	id := body.RequirementID
@@ -1530,6 +1729,20 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 
 	go func() {
 		log.Printf("[architect-design] job %s started for %s (fork=%v skip=%v)", job.ID, id, fork, skipAnalysis && sourceSID == "")
+
+		// Optional knowledge pre-read: inject the project knowledge relevant to
+		// this requirement and surface what was read via a "knowledge" SSE event.
+		// Default off (read_knowledge=false) keeps the legacy behavior untouched.
+		var kbReadTitles []string
+		if body.ReadKnowledge {
+			kbBlock, kbTitles := h.buildKnowledgeBlock(req.ProjectID, req.Title)
+			if kbBlock != "" {
+				prompt = kbBlock + "\n" + prompt
+			}
+			emitKnowledgeEvent(job, kbTitles)
+			kbReadTitles = kbTitles
+		}
+
 		job.Append(store.LogLine{Type: "phase", Content: "📐 Claude 正在 plan 模式下探索代码并制定技术方案..."})
 
 		// context.Background(): the HTTP request has already returned, so we
@@ -1638,6 +1851,11 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		// Record the effective model for the architect stage (success path only).
 		if perr := h.reqSvc.UpdateArchitectModel(id, model); perr != nil {
 			log.Printf("[architect-design] failed to persist architect_model for %s: %v", id, perr)
+		}
+		// Close the knowledge loop: mark which read entries the run actually used.
+		if len(kbReadTitles) > 0 {
+			items, used := evaluateKnowledgeUsage(kbReadTitles, out.toolFiles, planMarkdown)
+			emitKnowledgeResultEvent(job, items, used)
 		}
 		job.Append(store.LogLine{Type: "done", Content: "✅ 技术方案已生成！"})
 		job.Finish(0, store.JobDone)
@@ -1785,9 +2003,10 @@ type claudeStreamOutcome struct {
 	sessionID       string // session_id of this run, read from the system/init event. For a --fork-session run this is the NEW forked id.
 	staleSession    bool
 	errMsg          string
-	hadStreamEvents bool   // true if any stream_event/content_block_delta arrived
-	planContent     string // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
-	actualModel     string // model id returned by the API, captured from the assistant event's message.model
+	hadStreamEvents bool     // true if any stream_event/content_block_delta arrived
+	planContent     string   // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
+	actualModel     string   // model id returned by the API, captured from the assistant event's message.model
+	toolFiles       []string // file paths / patterns touched by Read/Write/Edit/Grep/Glob tool calls (for knowledge-usage evaluation)
 }
 
 // isStaleSessionError reports whether a non-success result event (optionally
@@ -2055,6 +2274,12 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 								}
 							}
 						}
+					}
+					// Harvest the touched path/pattern for the "was the injected
+					// knowledge actually used?" evaluation (cheap: no LLM call, just
+					// string capture from events that are already flowing).
+					if p := inputToolPath(toolName, input); p != "" {
+						out.toolFiles = append(out.toolFiles, p)
 					}
 					// Emit with full input context (content_block_start fired bare label already,
 					// but only if stream_event was delivered — safe to emit again, client dedupes by rendering order).
