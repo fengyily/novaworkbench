@@ -9,10 +9,31 @@ SHELL := /bin/bash
 #   make build-backend - backend only (assumes backend/web/dist already exists;
 #                       use this during pure backend dev with NOVA_SKIP_FRONTEND=1)
 #   make run           - dev backend (no embed; vite handles the SPA on :5173)
-#   make clean         - remove backend/web/dist
-.PHONY: build build-backend run clean
+#   make clean         - remove backend/web/dist and the deps-checked sentinel
+#   make doctor        - run scripts/check-build-deps.sh to verify toolchain
+#
+# Build-time preflight: the first `make build` after `make clean` runs
+# scripts/check-build-deps.sh to verify go / node / npm / git are present.
+# Set INSTALL=1 to auto-install missing tools via apt/brew/winget:
+#   INSTALL=1 make build
+# Set SKIP_DEPS_CHECK=1 to bypass the check (CI cache, dev loop).
+#
+# If you change scripts/check-build-deps.sh, `make clean` first to re-verify.
+.PHONY: build build-frontend build-backend run clean doctor
+
+SENTINEL := .deps-checked
+$(SENTINEL): scripts/check-build-deps.sh
+ifndef SKIP_DEPS_CHECK
+ifeq ($(INSTALL),1)
+	@scripts/check-build-deps.sh --install --with-frontend
+else
+	@scripts/check-build-deps.sh --with-frontend
+endif
+endif
+	@touch $(SENTINEL)
 
 build: build-frontend build-backend
+build-frontend build-backend: $(SENTINEL)
 
 build-frontend:
 	cd frontend && npm ci && npm run build
@@ -28,4 +49,7 @@ run:
 	cd backend && go run ./cmd/server
 
 clean:
-	rm -rf backend/web/dist dist/nova
+	rm -rf backend/web/dist dist/nova $(SENTINEL)
+
+doctor:
+	@scripts/check-build-deps.sh --with-frontend
