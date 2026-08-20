@@ -517,6 +517,59 @@ func (s *ProjectService) Restore(id string) (*model.Project, error) {
 	return s.Get(id)
 }
 
+// Purge permanently removes a soft-deleted project and its on-disk
+// directory. Errors are prefixed with NOT_IN_TRASH / PROJECT_NOT_FOUND /
+// REMOVE_DIR_FAILED / PURGE_FAILED so the handler can map them to HTTP
+// status codes.
+//
+// Only projects in the trash (deleted_at IS NOT NULL) can be purged. This
+// is a defensive gate: a user who hits Purge on an active row by mistake
+// should be redirected through the soft-delete modal first.
+//
+// Child rows in knowledge / memories / requirements / conversations /
+// project_run_configs / weekly_reports / user_projects / refinement_chats
+// are removed by ON DELETE CASCADE on the projects FK. token_usage has a
+// project_id column but no FK (append-only billing log), so we clean it up
+// explicitly to keep the table consistent with the project set.
+func (s *ProjectService) Purge(id string) error {
+	p, err := s.getAny(id)
+	if err != nil {
+		return err
+	}
+	if p.DeletedAt == nil {
+		return fmt.Errorf("NOT_IN_TRASH: project %s is not in the trash; soft-delete it first", id)
+	}
+
+	// Remove the directory when we still own it on disk. deleted_dir == 0
+	// means Remove() left it alone; == 1 means Remove() already wiped it.
+	// If the path has been re-created since (e.g. user cloned back
+	// manually), validateWorkspacePath guards against a runaway removal.
+	if p.LocalPath != "" && p.DeletedDir == 0 {
+		if _, err := os.Stat(p.LocalPath); err == nil {
+			if err := s.validateWorkspacePath(p.LocalPath); err != nil {
+				return err
+			}
+			if err := os.RemoveAll(p.LocalPath); err != nil {
+				return fmt.Errorf("REMOVE_DIR_FAILED: %w", err)
+			}
+		}
+	}
+
+	// Drop the billing-log rows first. token_usage has no FK to projects,
+	// so the cascade below wouldn't touch them.
+	if _, err := s.db.Exec(`DELETE FROM token_usage WHERE project_id = ?`, id); err != nil {
+		return fmt.Errorf("PURGE_FAILED: token_usage cleanup: %w", err)
+	}
+
+	// CASCADE deletes everything else (memories, requirements, knowledge,
+	// conversations, project_run_configs, weekly_reports, user_projects,
+	// refinement_chats). Token-usage cleanup already done.
+	if _, err := s.db.Exec(`DELETE FROM projects WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("PURGE_FAILED: %w", err)
+	}
+	return nil
+}
+
 func (s *ProjectService) Dashboard() (*model.DashboardData, error) {
 	return s.DashboardForUser("", true)
 }

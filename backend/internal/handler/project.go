@@ -151,6 +151,33 @@ func (h *ProjectHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, p)
 }
 
+// Purge permanently removes a soft-deleted project (and its on-disk
+// directory if still present) and all its child rows. Only callable on
+// projects already in the trash — the service refuses active projects
+// with NOT_IN_TRASH so a misclick on an active row can't wipe data.
+//
+// DELETE /api/projects/{id}/purge
+func (h *ProjectHandler) Purge(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.svc.Purge(id); err != nil {
+		msg := err.Error()
+		switch {
+		case strings.HasPrefix(msg, "NOT_IN_TRASH"):
+			writeError(w, http.StatusBadRequest, "NOT_IN_TRASH", msg)
+		case strings.HasPrefix(msg, "PROJECT_NOT_FOUND"), strings.Contains(msg, "project not found"):
+			writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", msg)
+		case strings.HasPrefix(msg, "PATH_OUT_OF_WORKSPACE"):
+			writeError(w, http.StatusBadRequest, "PATH_OUT_OF_WORKSPACE", msg)
+		case strings.HasPrefix(msg, "REMOVE_DIR_FAILED"):
+			writeError(w, http.StatusInternalServerError, "REMOVE_DIR_FAILED", msg)
+		default:
+			writeError(w, http.StatusInternalServerError, "PURGE_FAILED", msg)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": "purged"})
+}
+
 // UpdatePlatform binds a platform token to a project.
 // PATCH /api/projects/{id}/platform  body: {platform_type, platform_token_id}
 func (h *ProjectHandler) UpdatePlatform(w http.ResponseWriter, r *http.Request) {

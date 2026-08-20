@@ -186,6 +186,7 @@ func main() {
 	mux.HandleFunc("GET /api/projects/{id}", projectH.Get)
 	mux.HandleFunc("DELETE /api/projects/{id}", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.Remove)).ServeHTTP)
 	mux.HandleFunc("POST /api/projects/{id}/restore", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.Restore)).ServeHTTP)
+	mux.HandleFunc("DELETE /api/projects/{id}/purge", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.Purge)).ServeHTTP)
 	mux.HandleFunc("POST /api/projects/{id}/scan", scannerH.Scan)
 
 	// Run sessions (docker compose)

@@ -45,6 +45,12 @@ export function ProjectsList() {
   // Restore busy state (per-project id)
   const [restoringId, setRestoringId] = useState<string | null>(null);
 
+  // Purge (hard-delete) modal state — separate from the soft-delete modal
+  // so the two destructive flows can never share busy state.
+  const [purgeTarget, setPurgeTarget] = useState<Project | null>(null);
+  const [purgeAck, setPurgeAck] = useState(false);
+  const [purging, setPurging] = useState(false);
+
   // One-shot backfill of missing AI descriptions
   const [backfilling, setBackfilling] = useState(false);
 
@@ -144,7 +150,40 @@ export function ProjectsList() {
     }
   };
 
-  // ---- Delete Modal ----
+  const openPurgeModal = (p: Project) => {
+    setPurgeTarget(p);
+    setPurgeAck(false);
+  };
+  const closePurgeModal = () => {
+    if (purging) return;
+    setPurgeTarget(null);
+    setPurgeAck(false);
+  };
+  const handlePurge = async () => {
+    if (!purgeTarget || purging || !purgeAck) return;
+    setPurging(true);
+    setError(null);
+    try {
+      await projectsApi.purge(purgeTarget.id);
+      setTrashProjects(prev => prev.filter(p => p.id !== purgeTarget.id));
+      setToast(`已彻底删除「${purgeTarget.name}」`);
+      setPurgeTarget(null);
+      setPurgeAck(false);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setPurging(false);
+    }
+  };
+
+  // ---- Purge Modal ----
+//
+// Hard-delete confirmation. The risk checkbox must be ticked before the
+// confirm button enables — same pattern as the delete-dir checkbox on the
+// soft-delete modal, but the messaging is sterner because the row is gone
+// for good (no Restore can bring it back).
+
+// ---- Delete Modal ----
   const renderDeleteModal = () => {
     if (!deleteTarget) return null;
     const target = deleteTarget;
@@ -224,6 +263,73 @@ export function ProjectsList() {
               disabled={!canConfirm || deleting}
             >
               {deleting ? '删除中…' : (deleteDir ? '确认永久删除' : '确认删除')}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ---- Purge Modal ----
+  //
+  // Hard-delete confirmation. The risk checkbox must be ticked before the
+  // confirm button enables — same pattern as the delete-dir checkbox on
+  // the soft-delete modal, but the messaging is sterner because the row is
+  // gone for good (no Restore can bring it back).
+  const renderPurgeModal = () => {
+    if (!purgeTarget) return null;
+    const target = purgeTarget;
+    return (
+      <div
+        onClick={closePurgeModal}
+        style={{
+          position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.5)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+        }}
+      >
+        <div
+          onClick={e => e.stopPropagation()}
+          style={{
+            background: 'var(--color-surface)', borderRadius: 10, padding: 24,
+            width: 'min(480px, 92vw)', boxShadow: '0 10px 40px rgba(0,0,0,0.2)',
+          }}
+        >
+          <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 12, color: '#B91C1C' }}>
+            ⚠️ 彻底删除项目
+          </h2>
+          <div style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 12 }}>
+            将永久删除 <strong style={{ color: 'var(--color-text)' }}>{target.name}</strong> 的数据库记录，
+            以及其下所有需求、知识库、记忆、运行配置、Token 用量记录。
+          </div>
+          <div
+            style={{
+              background: '#FEF2F2', border: '1px solid #FCA5A5', borderRadius: 8,
+              padding: 12, marginBottom: 16, fontSize: 12, color: '#991B1B',
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>此操作不可恢复</div>
+            {target.deleted_dir === 0 && target.local_path ? (
+              <div>项目目录 <code style={{ wordBreak: 'break-all' }}>{target.local_path}</code> 也将被删除。</div>
+            ) : (
+              <div>项目目录此前已删除，此操作仅清理数据库记录。</div>
+            )}
+          </div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 16 }}>
+            <input
+              type="checkbox"
+              checked={purgeAck}
+              onChange={e => setPurgeAck(e.target.checked)}
+            />
+            <span style={{ fontSize: 13, color: '#991B1B' }}>我已了解风险，确认继续</span>
+          </label>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <button className="btn" onClick={closePurgeModal} disabled={purging}>取消</button>
+            <button
+              className="btn btn-danger"
+              onClick={handlePurge}
+              disabled={!purgeAck || purging}
+            >
+              {purging ? '删除中…' : '确认彻底删除'}
             </button>
           </div>
         </div>
@@ -334,14 +440,23 @@ export function ProjectsList() {
                         删除
                       </button>
                     ) : (
-                      <button
-                        className="btn btn-sm btn-primary"
-                        onClick={() => handleRestore(p)}
-                        disabled={!!restoringId || noRemote}
-                        title={noRemote ? '无远程地址，无法自动恢复' : undefined}
-                      >
-                        {restoringId === p.id ? '正在 clone…' : '恢复'}
-                      </button>
+                      <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                        <button
+                          className="btn btn-sm btn-primary"
+                          onClick={() => handleRestore(p)}
+                          disabled={!!restoringId || noRemote}
+                          title={noRemote ? '无远程地址，无法自动恢复' : undefined}
+                        >
+                          {restoringId === p.id ? '正在 clone…' : '恢复'}
+                        </button>
+                        <button
+                          className="btn btn-sm btn-danger"
+                          onClick={() => openPurgeModal(p)}
+                          disabled={!!restoringId}
+                        >
+                          彻底删除
+                        </button>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -352,9 +467,17 @@ export function ProjectsList() {
       )}
 
       {renderDeleteModal()}
+      {renderPurgeModal()}
     </div>
   );
 }
+
+// ---- Purge Modal ---------------------------------------------------------
+//
+// Hard-delete confirmation. The risk checkbox must be ticked before the
+// confirm button enables — same pattern as the delete-dir checkbox on the
+// soft-delete modal, but the messaging is sterner because the row is gone
+// for good (no Restore can bring it back).
 
 export function Requirements() {
   return <PlaceholderPage title="需求看板" emoji="📋" description="Kanban 需求管理和 AI 拆解" />;

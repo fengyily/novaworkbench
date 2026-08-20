@@ -158,6 +158,10 @@ export const projectsApi = {
     ),
   trash: () => api.get<Project[]>('/api/projects/trash'),
   restore: (id: string) => api.post<Project>(`/api/projects/${id}/restore`, {}),
+  // Permanently delete a soft-deleted project. Refuses on active rows
+  // (the backend returns NOT_IN_TRASH); pair with projectsApi.remove to
+  // first soft-delete then purge.
+  purge: (id: string) => api.delete<{ id: string; status: string }>(`/api/projects/${id}/purge`),
   updatePlatform: (id: string, platform_type: string, platform_token_id: string) =>
     api.patch<Project>(`/api/projects/${id}/platform`, { platform_type, platform_token_id }),
   // Save a manually-edited description; locks it from auto-regeneration.
