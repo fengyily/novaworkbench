@@ -661,6 +661,7 @@ export const stepLabels: Record<string, string> = {
   apply_doc: '方案应用',
   coding: '编码开发',
   adjust_coding: '追加调整',
+  continue_coding: '继续开发',
   developer_chat: '开发讨论',
   merge: '合入解决',
   review: '代码审查',
