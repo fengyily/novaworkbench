@@ -240,6 +240,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		RequirementTitle string `json:"requirement_title"`
 		CurrentAnalysis  string `json:"current_analysis"`
 		UserMessage      string `json:"user_message"`
+		Model            string `json:"model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("[analyst-chat] JSON decode error: %v", err)
@@ -268,6 +269,10 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	resumePrompt := req.UserMessage
 
 	systemPrompt, model := h.roleConfig("analyst")
+	// Per-request model override (highest precedence); empty means role default.
+	if req.Model != "" {
+		model = req.Model
+	}
 
 	// Create the job, persist its id so a refresh can reconnect, and return the
 	// job id immediately. The claude turn runs in a goroutine writing progress
@@ -396,6 +401,7 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		RequirementID    string `json:"requirement_id"`
 		RequirementTitle string `json:"requirement_title"`
 		UserMessage      string `json:"user_message"`
+		Model            string `json:"model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("[developer-chat] JSON decode error: %v", err)
@@ -468,6 +474,10 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	systemPrompt, model := h.roleConfig("developer")
+	// Per-request model override (highest precedence); empty means role default.
+	if req.Model != "" {
+		model = req.Model
+	}
 
 	// The resumed coding conversation already carries the requirement, analysis,
 	// and design, so a resume turn only sends the framed adjustment message. The
@@ -755,6 +765,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		RequirementID    string `json:"requirement_id"`
 		BranchName       string `json:"branch_name"`
 		BaseBranch       string `json:"base_branch"`
+		Model            string `json:"model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "INVALID", "Invalid JSON")
@@ -937,6 +948,10 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		}
 
 		systemPrompt, model := h.roleConfig("developer")
+		// Per-request model override (highest precedence); empty means role default.
+		if req.Model != "" {
+			model = req.Model
+		}
 		job.SetModel(model)
 		var prompt string
 		if sourceSID == "" {
@@ -1040,6 +1055,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RequirementID string `json:"requirement_id"`
 		Message       string `json:"message"`
+		Model         string `json:"model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		log.Printf("[adjust-coding] JSON decode error: %v", err)
@@ -1076,6 +1092,10 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 	// omitted: the resumed coding session already carries the developer
 	// persona, and re-injecting --system-prompt would replace it.
 	_, model := h.roleConfig("developer")
+	// Per-request model override (highest precedence); empty means role default.
+	if body.Model != "" {
+		model = body.Model
+	}
 
 	job := h.jobs.Create(body.RequirementID)
 	job.SetModel(model)
@@ -1215,6 +1235,7 @@ func (h *WizardHandler) StreamJob(w http.ResponseWriter, r *http.Request) {
 func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RequirementID string `json:"requirement_id"`
+		Model         string `json:"model"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	id := body.RequirementID
@@ -1312,6 +1333,10 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	}
 
 	systemPrompt, model := h.roleConfig("architect")
+	// Per-request model override (highest precedence); empty means role default.
+	if body.Model != "" {
+		model = body.Model
+	}
 	job.SetModel(model)
 
 	go func() {
@@ -2197,6 +2222,7 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 		CurrentDoc          string `json:"current_doc"`
 		ConversationHistory string `json:"conversation_history"`
 		UserMessage         string `json:"user_message"`
+		Model               string `json:"model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
@@ -2248,6 +2274,10 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	systemPrompt, model := h.roleConfig(roleKey)
+	// Per-request model override (highest precedence); empty means role default.
+	if req.Model != "" {
+		model = req.Model
+	}
 
 	// Anchor the refine to the same worktree as the stage it resumes, so the
 	// conversation never carries original-dir absolute paths.
@@ -2387,6 +2417,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		RequirementID string `json:"requirement_id"`
 		ProjectPath   string `json:"project_path"`
 		DocType       string `json:"doc_type"`
+		Model         string `json:"model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
@@ -2456,6 +2487,10 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 	}
 
 	systemPrompt, model := h.roleConfig(roleKey)
+	// Per-request model override (highest precedence); empty means role default.
+	if req.Model != "" {
+		model = req.Model
+	}
 
 	// Create the job, persist its id so a refresh can reconnect, and return the
 	// job id immediately. Claude runs in a goroutine writing progress into the

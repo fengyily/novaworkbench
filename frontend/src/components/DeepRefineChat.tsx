@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { API_BASE, authedFetch, requirementsApi } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, type LogLine } from '../utils/logLines';
+import ModelSelect from './ModelSelect';
 
 interface Props {
   reqId: string;
@@ -11,7 +12,17 @@ interface Props {
   requirementTitle: string;
   currentAnalysis: string;
   analysisJobId: string;
+  // Last-persisted model for the analyst stage (req.analyst_model); empty =
+  // never run. Used as the dropdown's default selection.
+  model?: string;
+  // Actual model that the empty "默认模型" selection resolves to for this stage
+  // (角色模型 > 生效配置默认), shown next to "默认模型" before the stage runs.
+  defaultModel?: string;
   onTurnDone?: () => void; // refresh req (sync status / clear analysis_job_id) after a turn
+  // Reports the live turn state upward so the detail header can show an
+  // accurate global "Claude 工作中" badge while an analyst turn runs (the
+  // persisted analysis_job_id is only refreshed after the turn finishes).
+  onWorkingChange?: (working: boolean) => void;
   onGenerateDesign: () => void;
   onReset?: () => void;
 }
@@ -19,7 +30,7 @@ interface Props {
 interface ChatMessage { role: string; content: string; isError?: boolean; isStreaming?: boolean; }
 
 export default function DeepRefineChat({
-  reqId, projectPath, requirementTitle, currentAnalysis, analysisJobId, onTurnDone, onGenerateDesign, onReset,
+  reqId, projectPath, requirementTitle, currentAnalysis, analysisJobId, model, defaultModel, onTurnDone, onWorkingChange, onGenerateDesign, onReset,
 }: Props) {
   const [expanded, setExpanded] = useState(true);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -32,10 +43,25 @@ export default function DeepRefineChat({
   // Guard against auto-start firing twice (StrictMode / concurrent renders).
   const bootedRef = useRef(false);
 
+  // Per-turn analyst model. Seeded from the server-persisted model (default
+  // selection = 已设置的模型); once the user switches it stays local and is
+  // sent with the next analyst-chat POST. Disabled while a turn is running.
+  const [selectedModel, setSelectedModel] = useState('');
+  const modelTouchedRef = useRef(false);
+  useEffect(() => {
+    if (!modelTouchedRef.current) {
+      const v = model || '';
+      setSelectedModel(v === '默认模型' ? '' : v);
+    }
+  }, [model]);
+
   // Mirror of `messages` for use inside async callbacks (POST / stream) where
   // the state closure would otherwise be stale.
   const messagesRef = useRef<ChatMessage[]>([]);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  // Surface the live turn state to the parent (RequirementDetail header badge).
+  useEffect(() => { onWorkingChange?.(chatting); }, [chatting, onWorkingChange]);
 
   // Accumulated AI text for the turn currently being streamed. Rebuilt from the
   // job's "message" log lines — on a page refresh the job replays its history,
@@ -245,6 +271,8 @@ export default function DeepRefineChat({
           requirement_title: requirementTitle,
           current_analysis: currentAnalysis,
           user_message: userMessage,
+          // Per-request model override — empty means the role's configured model.
+          ...(selectedModel ? { model: selectedModel } : {}),
         }),
       });
       const json = await res.json();
@@ -263,7 +291,7 @@ export default function DeepRefineChat({
         return next;
       });
     }
-  }, [projectPath, reqId, requirementTitle, currentAnalysis, saveMessages, streamAnalystJob]);
+  }, [projectPath, reqId, requirementTitle, currentAnalysis, selectedModel, saveMessages, streamAnalystJob]);
 
   const handleSend = async () => {
     if (!input.trim() || chatting) return;
@@ -350,7 +378,18 @@ export default function DeepRefineChat({
         <div>
           <h3>🔍 深入分析 — 确认具体改动点</h3>
         </div>
-        <div style={{ display: 'flex', gap: 6 }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          {/* Per-turn analyst model; disabled while a turn is running. The
+              model list comes from the active claude config; default = 已设置模型. */}
+          <ModelSelect
+            value={selectedModel}
+            onChange={m => { modelTouchedRef.current = true; setSelectedModel(m); }}
+            disabled={isWorking}
+            working={isWorking}
+            label="分析模型"
+            defaultModelName={defaultModel}
+            title={isWorking ? 'Claude 工作中，暂不能切换模型' : '需求分析使用的模型'}
+          />
           {messages.length > 0 && !isWorking && (
             <button className="btn btn-sm" onClick={handleClear} title="清除对话记录">🗑</button>
           )}

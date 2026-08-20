@@ -1,5 +1,11 @@
 export const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:9527';
 
+// Display + persistence literal for "no specific model was selected for a
+// stage" — mirrors backend handler.DefaultModelLabel. The backend treats it as
+// "no --model flag" (CLI default), and the UI normalizes it to the empty
+// option label "默认模型".
+export const DefaultModelLabel = '默认模型';
+
 // Token storage for the bearer auth layer. login() stores the token here; the
 // request wrapper reads it on every call. On 401 the wrapper clears it and
 // redirects to /login.
