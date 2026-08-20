@@ -68,7 +68,7 @@ export default function Dashboard() {
           </div>
         ) : (
           <div className="project-table-wrap">
-            <table className="project-table">
+            <table className="project-table table-cards">
               <thead>
                 <tr>
                   <th>名称</th>
@@ -81,11 +81,11 @@ export default function Dashboard() {
               <tbody>
                 {data?.projects.map(p => (
                   <tr key={p.id} onClick={() => navigate(`/projects/${p.id}`)} className="clickable-row">
-                    <td className="project-name">{p.name}</td>
-                    <td><span className="type-tag">{p.project_type || 'Unknown'}</span></td>
-                    <td className="path-cell">{p.local_path}</td>
-                    <td><span className={`status-badge status-${p.status}`}>{statusBadge(p.status)}</span></td>
-                    <td>{new Date(p.updated_at).toLocaleDateString()}</td>
+                    <td className="project-name" data-label="名称">{p.name}</td>
+                    <td data-label="类型"><span className="type-tag">{p.project_type || 'Unknown'}</span></td>
+                    <td className="path-cell" data-label="路径">{p.local_path}</td>
+                    <td data-label="状态"><span className={`status-badge status-${p.status}`}>{statusBadge(p.status)}</span></td>
+                    <td data-label="更新">{new Date(p.updated_at).toLocaleDateString()}</td>
                   </tr>
                 ))}
               </tbody>
@@ -94,7 +94,7 @@ export default function Dashboard() {
         )}
       </div>
 
-      <div className="quick-actions">
+      <div className="quick-actions btn-row-2col">
         <button className="btn btn-primary" onClick={() => navigate('/wizard')}>🪄 新建项目向导</button>
         <button className="btn" onClick={() => navigate('/projects/add')}>添加项目</button>
         <button className="btn" onClick={() => navigate('/requirements')}>新建需求</button>

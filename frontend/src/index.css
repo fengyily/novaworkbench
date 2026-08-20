@@ -19,6 +19,14 @@
   --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
 
+  /* Safe-area insets for notched devices. Defined once so every layout rule
+     reads the same value — if we ever need to disable them (e.g. PWA full-
+     screen mode) we override the vars on a wrapper, not every rule. */
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+
   font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.5;
@@ -34,12 +42,54 @@
 /* Reset */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-body { margin: 0; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  /* iOS Safari rubber-band scroll on the body is jarring while a modal or
+     sidebar drawer is open; the per-handler lock uses overflow:hidden, this
+     default keeps normal pages smooth. */
+  overscroll-behavior-y: contain;
+  /* Suppress the iOS gray tap highlight (we replace it with :focus-visible). */
+  -webkit-tap-highlight-color: transparent;
+}
 
 #root {
+  /* Use the dynamic viewport height where supported so iOS Safari's URL bar
+     doesn't truncate the layout. Falls back to 100vh on older browsers. */
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
+}
+
+/* Visible keyboard-only focus ring. Mouse users still get :hover; touch users
+   don't see it, which is the correct WCAG behavior. */
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Inputs must be ≥16px to stop iOS Safari from zooming the page on focus.
+   Buttons/textarea keep their native size (no zoom). */
+@media (max-width: 768px) {
+  input.form-input,
+  select.form-input,
+  textarea.form-input {
+    font-size: 16px;
+  }
+}
+
+/* Lock body scroll while a modal/drawer is open. Toggled via JS by adding
+   `body.no-scroll`. Prevents the underlying page from shifting under the
+   user when they scroll inside a fixed overlay. */
+body.no-scroll {
+  overflow: hidden;
+  /* Compensate for the scrollbar disappearance on desktop so the layout
+     doesn't jump; mobile has no scrollbar to begin with. */
+  padding-right: var(--scrollbar-comp, 0px);
 }
 
 /* Button system */
@@ -70,6 +120,104 @@ body { margin: 0; }
 .btn-sm { padding: 4px 10px; font-size: 12px; border-radius: 4px; }
 .btn-danger { background: #EF4444; color: white; border-color: #EF4444; }
 .btn-danger:hover { background: #DC2626; border-color: #DC2626; }
+
+/* ── Touch target sizing ────────────────────────────────────────
+   Apple HIG and WCAG 2.5.5 both call for ≥44×44px tap targets. On mobile
+   we expand small buttons (which are fine on desktop with a mouse) so the
+   hit area is comfortable for thumbs. */
+@media (max-width: 768px) {
+  .btn { min-height: 44px; }
+  .btn-sm { min-height: 36px; padding: 6px 12px; }
+}
+
+/* ── Mobile utilities (used across pages) ─────────────────────────
+   Shared rules so individual pages don't reinvent the same media-query
+   block. Add the class to the element; the styles only kick in below the
+   768px breakpoint. */
+
+/* Stack flex children vertically and stretch them full-width. Use on
+   `.form-actions`, `.detail-actions`, `.merge-actions`, `.review-actions`,
+   etc. that need their buttons full-width on phones. */
+@media (max-width: 768px) {
+  .stack-mobile { flex-direction: column; align-items: stretch; }
+  .stack-mobile > * { width: 100%; }
+}
+
+/* Lay out direct .btn children as a 2-up grid. Use when a row has 2-3
+   buttons that should stay side-by-side instead of stacking into a single
+   column. */
+@media (max-width: 768px) {
+  .btn-row-2col { flex-wrap: wrap; }
+  .btn-row-2col > .btn { flex: 1 1 calc(50% - 4px); min-width: 0; }
+}
+
+/* Tap-target utility for non-button interactive surfaces (nav items, tab
+   buttons, list rows). Buttons get the global .btn min-height automatically;
+   this is for the rest. */
+.touch-target {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.touch-target-sm { min-height: 36px; }
+
+/* Collapse any <table> with this class into stacked cards below 600px.
+   The table header disappears and each cell renders as a row with the
+   column header (from `data-label`) on the left and the cell content on
+   the right. Compose with `data-label` attributes on every <td>. */
+@media (max-width: 600px) {
+  .table-cards thead { display: none; }
+  .table-cards,
+  .table-cards tbody,
+  .table-cards tr,
+  .table-cards td { display: block; width: 100%; }
+  .table-cards tr {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+  .table-cards td {
+    padding: 4px 0;
+    border-bottom: 1px dashed var(--color-border);
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+  }
+  .table-cards td:last-child { border-bottom: none; }
+  .table-cards td::before {
+    content: attr(data-label);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    flex-shrink: 0;
+    max-width: 90px;
+  }
+  .table-cards td > * { text-align: right; min-width: 0; }
+}
+
+/* Full-screen modal override. Apply to the modal box (and optionally its
+   overlay) to make it occupy the entire phone viewport, with the right
+   safe-area insets so the close button stays reachable. */
+@media (max-width: 768px) {
+  .modal-fullscreen {
+    width: 100vw;
+    max-width: none;
+    height: 100dvh;
+    border-radius: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .modal-fullscreen-overlay {
+    align-items: stretch;
+    padding: 0;
+  }
+}
 
 /* ── Per-stage model picker (ModelSelect) ─────────────────────────────── */
 .model-select {

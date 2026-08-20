@@ -130,7 +130,7 @@ export default function SettingsLLM() {
         </small>
       </div>
 
-      <div className="form-actions">
+      <div className="form-actions stack-mobile">
         <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
           {saving ? '保存中...' : '💾 保存'}
         </button>

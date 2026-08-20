@@ -364,7 +364,7 @@ export default function SettingsClaude() {
               <small className="form-hint">切换为生效配置时，所有角色的模型会重置为此项。</small>
             </div>
 
-            <div className="form-actions">
+            <div className="form-actions stack-mobile">
               <button className="btn btn-secondary" onClick={() => setShowModal(false)}>取消</button>
               <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
                 {saving ? '保存中...' : '💾 保存'}
