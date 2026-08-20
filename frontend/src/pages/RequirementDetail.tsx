@@ -507,8 +507,11 @@ export default function RequirementDetail() {
   // codingLines (the shared coding-panel). keepDone=true is used by 追加调整
   // rounds: on job_done it leaves the requirement status untouched (stays
   // developing/done) and only refreshes, instead of flipping to developing and
-  // writing the localStorage "done" marker like the first coding pass.
-  const streamJob = useCallback((jobId: string, opts?: { keepDone?: boolean }) => {
+  // writing the localStorage "done" marker like the first coding pass. When
+  // keepDone is set, persistDone additionally writes the "done" marker so a
+  // refresh reloads THIS job's durable log — used by 继续开发, whose job log
+  // becomes the new authoritative record replacing the one lost to a restart.
+  const streamJob = useCallback((jobId: string, opts?: { keepDone?: boolean; persistDone?: boolean }) => {
     if (esRef.current) esRef.current.close();
     setCoding(true);
 
@@ -521,8 +524,13 @@ export default function RequirementDetail() {
           setCoding(false);
           const ok = evt.status === 'done' || evt.exit_code === 0;
           if (opts?.keepDone) {
-            // 追加调整: preserve current status, just refresh on success.
-            if (ok) refresh();
+            // 追加调整 / 继续开发: preserve current status, just refresh on success.
+            if (ok) {
+              if (opts.persistDone) {
+                localStorage.setItem(`coding_job_${id}`, `done:${jobId}`);
+              }
+              refresh();
+            }
           } else if (id && ok) {
             requirementsApi.updateStatus(id, 'developing').then(() => refresh());
             localStorage.setItem(`coding_job_${id}`, `done:${jobId}`);
@@ -641,6 +649,33 @@ export default function RequirementDetail() {
       streamJob(jobId, { keepDone: true });
     } catch (err: any) {
       setCodingLines(prev => [...prev, { type: 'error', content: '❌ ' + err.message }]);
+      setCoding(false);
+    }
+  };
+
+  // ── 继续开发: recover from a backend restart that cleared the in-memory
+  // coding log. Resumes coding_session_id (--resume) so Claude continues the
+  // interrupted task and re-reports what was done; the new job's durable log
+  // then "fills back" the lost development record. Unlike doAdjustCoding, no
+  // user message is needed — the prompt is a system-generated "continue"
+  // instruction. Only shown when status=developing and codingLines is empty.
+  const doContinueCoding = async () => {
+    if (!req || !id) return;
+    setCoding(true);
+    setCodingLines([]); // fresh continuation fills the panel back
+    try {
+      const res = await authedFetch(`${API_BASE}/api/wizard/continue-coding`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requirement_id: id }),
+      });
+      const json = await res.json();
+      const jobId = json.data?.job_id;
+      if (!jobId) throw new Error(json.error?.message || '未获取到任务 ID');
+      localStorage.setItem(`coding_job_${id}`, jobId);
+      streamJob(jobId, { keepDone: true, persistDone: true });
+    } catch (err: any) {
+      setCodingLines([{ type: 'error', content: '❌ ' + err.message }]);
       setCoding(false);
     }
   };
@@ -1441,6 +1476,16 @@ export default function RequirementDetail() {
                 </p>
               )}
               <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+                {req.coding_session_id && codingLines.length === 0 && (
+                  <button
+                    className="btn btn-primary"
+                    title="续接原开发会话（--resume），继续完成任务并补齐丢失的开发记录"
+                    onClick={doContinueCoding}
+                    disabled={!!busy}
+                  >
+                    ▶️ 继续开发
+                  </button>
+                )}
                 <button className="btn btn-primary" onClick={() => transition('done', '开发完成')} disabled={!!busy}>
                   {busy === '开发完成' ? '⏳ ...' : '✅ 开发完成'}
                 </button>

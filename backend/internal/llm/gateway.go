@@ -155,9 +155,13 @@ func (g *Gateway) settingSources() string {
 // (only meaningful with resume), --fork-session is added so the CLI mints a NEW
 // session id that inherits the resumed conversation's full history — this lets
 // us chain the analyst → architect → developer stages under one context thread
-// while swapping the role persona via --system-prompt at each fork. All three
-// flags can combine with --system-prompt/--model/--dangerously-skip-permissions.
-func (g *Gateway) streamArgs(prompt, systemPrompt, model, sessionID string, resume, fork bool, disallowedTools []string, permissionMode string) []string {
+// while swapping the role persona via --system-prompt at each fork. When a
+// forkSessionID is also supplied on a fork, it is passed as --session-id so the
+// CALLER pre-assigns the forked session's id (the CLI honors this override)
+// rather than having to read it back from the stream's init event after the
+// fact — this is what lets us persist the session id before the run even starts.
+// All flags combine with --system-prompt/--model/--dangerously-skip-permissions.
+func (g *Gateway) streamArgs(prompt, systemPrompt, model, sessionID string, resume, fork bool, forkSessionID string, disallowedTools []string, permissionMode string) []string {
 	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
 	if ss := g.settingSources(); ss != "" {
 		args = append(args, "--setting-sources", ss)
@@ -186,6 +190,9 @@ func (g *Gateway) streamArgs(prompt, systemPrompt, model, sessionID string, resu
 			args = append(args, "--resume", sessionID)
 			if fork {
 				args = append(args, "--fork-session")
+				if forkSessionID != "" {
+					args = append(args, "--session-id", forkSessionID)
+				}
 			}
 		} else {
 			args = append(args, "--session-id", sessionID)
@@ -214,7 +221,8 @@ type StreamOpts struct {
 	Model           string
 	SessionID       string
 	Resume          bool
-	Fork            bool // --fork-session; only meaningful when Resume is true
+	Fork            bool   // --fork-session; only meaningful when Resume is true
+	ForkSessionID   string // pre-assigned id for a forked session (--session-id on --fork-session); empty = let the CLI generate one
 	DisallowedTools []string
 	PermissionMode  string // "plan" to use --permission-mode plan, empty for --dangerously-skip-permissions
 }
@@ -223,10 +231,12 @@ type StreamOpts struct {
 // with full tool use. The caller owns the lifecycle (Start/Wait) and parses the
 // stream itself — this is the pattern for anything that needs live progress.
 // The stream-json "system"/"init" event carries the session_id of the run; for
-// a forked run that id is NEW (CLI-generated) and the caller must read it back
-// from the stream to persist it for later --resume.
+// a forked run that id is NEW unless the caller pre-assigns it via
+// opts.ForkSessionID (--session-id on --fork-session). Reading it back from the
+// stream is now a confirmation / safety net rather than the only source of the
+// id.
 func (g *Gateway) StreamCmd(ctx context.Context, opts StreamOpts) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, g.binPath, g.streamArgs(opts.Prompt, opts.SystemPrompt, opts.Model, opts.SessionID, opts.Resume, opts.Fork, opts.DisallowedTools, opts.PermissionMode)...)
+	cmd := exec.CommandContext(ctx, g.binPath, g.streamArgs(opts.Prompt, opts.SystemPrompt, opts.Model, opts.SessionID, opts.Resume, opts.Fork, opts.ForkSessionID, opts.DisallowedTools, opts.PermissionMode)...)
 	cmd.Env = g.mergedEnv(opts.Model)
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
@@ -241,7 +251,7 @@ func (g *Gateway) runClaudeStreamJSON(prompt, workDir, systemPrompt, model strin
 	ctx, cancel := context.WithTimeout(context.Background(), g.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, g.binPath, g.streamArgs(prompt, systemPrompt, model, "", false, false, nil, "")...)
+	cmd := exec.CommandContext(ctx, g.binPath, g.streamArgs(prompt, systemPrompt, model, "", false, false, "", nil, "")...)
 	cmd.Env = g.mergedEnv(model)
 	if workDir != "" {
 		cmd.Dir = workDir
