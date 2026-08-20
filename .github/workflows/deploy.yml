@@ -41,7 +41,8 @@ jobs:
       - name: Build & push
         uses: docker/build-push-action@v5
         with:
-          context: backend
+          context: .
+          file: backend/Dockerfile
           push: true
           tags: |
             ghcr.io/${{ env.NAMESPACE }}/nova:sha-${{ github.sha }}
