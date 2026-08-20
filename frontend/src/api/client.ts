@@ -1,4 +1,11 @@
-export const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:9527';
+// API_BASE defaults to empty (same-origin) so the embedded SPA works on
+// any host without a build-time VITE_API_BASE override. When empty, every
+// `api.*` call uses a relative path "/api/..." which the browser resolves
+// against the page's own origin. In dev (vite serves the SPA on :5173 with
+// /api proxied to :9527) this also works transparently. To point the UI
+// at a different backend, set VITE_API_BASE=http://other-host:9527 at build
+// time (vite inlines it).
+export const API_BASE = import.meta.env.VITE_API_BASE || '';
 
 // Display + persistence literal for "no specific model was selected for a
 // stage" — mirrors backend handler.DefaultModelLabel. The backend treats it as
