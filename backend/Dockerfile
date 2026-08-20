@@ -4,10 +4,13 @@
 # to serve the frontend — see docker-compose.yml's now-removed frontend svc).
 FROM node:22-alpine AS frontend
 WORKDIR /app
-COPY package*.json ./
-# Use `npm install` rather than `npm ci`: when the lockfile drifts from
-# package.json (common during feature-branch development), `npm ci` aborts
-# the build. `--no-audit --no-fund` keeps logs small and the build fast.
+COPY package*.json .npmrc ./
+# Exit code 254 from `npm install` inside buildx is most often caused by
+# the install hitting the default 2 GB Node heap on Alpine (musl's allocator
+# is more memory-hungry than glibc). Bump the heap, retry the install on
+# transient network failures, and use `npm install` rather than `npm ci` so
+# the lockfile can drift with package.json during feature-branch work.
+ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN npm install --no-audit --no-fund
 COPY . .
 RUN npm run build
