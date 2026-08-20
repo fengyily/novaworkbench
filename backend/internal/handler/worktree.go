@@ -14,14 +14,22 @@ import (
 var ErrNotAGitRepo = errors.New("not a git repository")
 
 // worktreeRoot is the directory that hosts per-requirement worktrees for the
-// given project: <project_parent>/<project_basename>.worktrees/. Placing it
-// OUTSIDE the project tree keeps readProjectContext's walk and Claude's own
-// tools from picking up the worktree, while staying on the same filesystem
-// (git worktree requires it) and inside the docker-compose workspace mount.
+// given project: ~/.novaworkbench/worktrees/<project_basename>/. Placing it in
+// the user home dir avoids permission issues when the project is on a mount
+// that is not owned by the current user (e.g. Docker volume mounted as root).
+// Git requires worktrees to be on the same filesystem as the repo; if they are
+// not, EnsureWorktree will return an error and the caller falls back to
+// in-place coding.
 func worktreeRoot(projectPath string) string {
-	parent := filepath.Dir(projectPath)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// Fallback: keep the worktree next to the project (old behaviour).
+		parent := filepath.Dir(projectPath)
+		base := filepath.Base(projectPath)
+		return filepath.Join(parent, base+".worktrees")
+	}
 	base := filepath.Base(projectPath)
-	return filepath.Join(parent, base+".worktrees")
+	return filepath.Join(home, ".novaworkbench", "worktrees", base)
 }
 
 // WorktreePath returns the absolute path of the worktree for a requirement.
