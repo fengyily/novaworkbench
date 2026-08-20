@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, type Requirement, type Project, type MergeState, type RequirementUsage } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, type Requirement, type Project, type MergeState, type RequirementUsage } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
+import ModelSelect from '../components/ModelSelect';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { exportDesignPdf } from '../utils/exportDesignPdf';
@@ -105,6 +106,56 @@ export default function RequirementDetail() {
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
+  // Live "analyst turn running" signal lifted from DeepRefineChat, so the
+  // header Claude-status badge is accurate during an in-flight turn.
+  const [analystWorking, setAnalystWorking] = useState(false);
+
+  // Per-stage model selection (analyst / architect / developer). Seeded once
+  // from the server-persisted stage model so each dropdown defaults to 已设置
+  // 的模型; a user switch is sent with the next stage POST. These are selectable
+  // BEFORE the stage starts (draft / designing-empty / designed-empty gates).
+  const [analystModel, setAnalystModel] = useState('');
+  const [architectModel, setArchitectModel] = useState('');
+  const [developerModel, setDeveloperModel] = useState('');
+  const modelSeedRef = useRef(false);
+  useEffect(() => {
+    if (!req || modelSeedRef.current) return;
+    modelSeedRef.current = true;
+    const norm = (m?: string) => (!m || m === '默认模型' ? '' : m);
+    setAnalystModel(norm(req.analyst_model ?? ''));
+    setArchitectModel(norm(req.architect_model ?? ''));
+    setDeveloperModel(norm(req.developer_model ?? ''));
+  }, [req]);
+
+  // Effective default model per role (角色配置模型 > 生效 Claude 配置默认模型).
+  // Used so ModelSelect's "默认模型" option shows the actual model name that
+  // will run for each stage before the stage starts.
+  const [roleDefaultModels, setRoleDefaultModels] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([rolesApi.list(), claudeApi.active()])
+      .then(([roles, active]) => {
+        if (cancelled) return;
+        const configDefault = active?.default_model || '';
+        const map: Record<string, string> = {};
+        for (const r of roles ?? []) {
+          // The role's model field may be empty (no override) or the literal
+          // "默认模型" sentinel — both fall back to the config default.
+          const rm = r.model && r.model !== '默认模型' ? r.model : '';
+          if (map[r.key] === undefined) map[r.key] = rm || configDefault;
+        }
+        // Stages whose role row is missing still resolve to the config default.
+        for (const k of ['analyst', 'architect', 'developer']) {
+          if (!map[k]) map[k] = configDefault;
+        }
+        setRoleDefaultModels(map);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  const analystDefaultModel = roleDefaultModels['analyst'] ?? '';
+  const architectDefaultModel = roleDefaultModels['architect'] ?? '';
+  const developerDefaultModel = roleDefaultModels['developer'] ?? '';
   const [codingLines, setCodingLines] = useState<{ type: string; content: string }[]>([]);
   const [coding, setCoding] = useState(false);
   const codingRef = useRef<HTMLDivElement>(null);
@@ -401,7 +452,11 @@ export default function RequirementDetail() {
       const res = await authedFetch(`${API_BASE}/api/wizard/architect-design`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requirement_id: id }),
+        body: JSON.stringify({
+          requirement_id: id,
+          // Per-request model override — empty means the role's configured model.
+          ...(architectModel ? { model: architectModel } : {}),
+        }),
       });
       const json = await res.json();
       const jobId = json.data?.job_id;
@@ -586,6 +641,8 @@ export default function RequirementDetail() {
           requirement_id: req.id,
           branch_name: bName,
           base_branch: bBase,
+          // Per-request model override — empty means the role's configured model.
+          ...(developerModel ? { model: developerModel } : {}),
         }),
       });
       const json = await res.json();
@@ -640,6 +697,8 @@ export default function RequirementDetail() {
         body: JSON.stringify({
           requirement_id: id,
           message: msg,
+          // Per-request model override — empty means the role's configured model.
+          ...(developerModel ? { model: developerModel } : {}),
         }),
       });
       const json = await res.json();
@@ -930,6 +989,15 @@ export default function RequirementDetail() {
   // the error line stays visible instead of collapsing behind the toggle.
   const designPanelOpen = designProcessActive || designError || showDesignProcess;
   const showDesignToggle = designLines.length > 0 && !designProcessActive && !designError;
+  // Claude working status. Analysis signal comes from DeepRefineChat's live
+  // onWorkingChange (the persisted analysis_job_id is only refreshed after a
+  // turn finishes, so it lags during the turn); design/apply use the persisted
+  // active job ids; coding/design add the local streaming states.
+  const claudeWorking = coding || designing || analystWorking ||
+    !!req.analysis_job_id || !!req.design_job_id || !!req.apply_job_id;
+  // Per-stage working flags drive the model-switch disable (task requirement:
+  // Claude 工作状态下禁止切换模型).
+  const architectWorking = designing || !!req.design_job_id;
 
   const STEPS = [
     { key: 'analyst', label: '需求分析', icon: '🔍', doneStatus: 'designing', modelKey: 'analyst_model' as const },
@@ -954,6 +1022,20 @@ export default function RequirementDetail() {
                 {availableBranches.length === 0 && <option value={baseBranch}>{baseBranch}</option>}
                 {availableBranches.map(b => <option key={b} value={b}>{b}</option>)}
               </select>
+            </div>
+            {/* Developer-stage model selection, visible right before launching
+                the coding job. Disabled while a coding job runs (Claude 工作中
+                禁止切换模型). */}
+            <div className="modal-field">
+              <ModelSelect
+                value={developerModel}
+                onChange={setDeveloperModel}
+                disabled={coding}
+                working={coding}
+                label="开发模型"
+                defaultModelName={developerDefaultModel}
+                title={coding ? 'Claude 正在开发中，暂不能切换模型' : '开发实现阶段使用的模型，开始前即可选择'}
+              />
             </div>
             <div className="modal-field">
               <label>新分支名</label>
@@ -1111,6 +1193,9 @@ export default function RequirementDetail() {
       <div className="detail-meta">
         <span className={`status-tag status-${req.status}`}>{statusLabels[req.status] || req.status}</span>
         <span className={`priority-tag ${req.priority}`}>{req.priority.toUpperCase()}</span>
+        <span className={`claude-status${claudeWorking ? ' working' : ''}`} title={claudeWorking ? 'Claude 正在执行分析/方案/开发任务' : '当前无 Claude 任务在运行'}>
+          {claudeWorking ? '🤖 Claude 工作中' : '😴 Claude 空闲'}
+        </span>
         {project && <span className="project-tag">📁 {project.name}</span>}
       </div>
 
@@ -1192,7 +1277,9 @@ export default function RequirementDetail() {
               <span className="stage-label">{s.label}</span>
               {stageModel && (
                 <span className="stage-model-tag" title={`${s.label}使用的执行模型`}>
-                  🤖 {stageModel}
+                  🤖 {stageModel === '默认模型'
+                    ? (roleDefaultModels[s.key] ? `默认模型（${roleDefaultModels[s.key]}）` : '默认模型')
+                    : stageModel}
                 </span>
               )}
               {i < STEPS.length - 1 && <span className="stage-sep">→</span>}
@@ -1250,7 +1337,10 @@ export default function RequirementDetail() {
           requirementTitle={req.title}
           currentAnalysis={req.acceptance_criteria}
           analysisJobId={req.analysis_job_id}
+          model={analystModel}
+          defaultModel={analystDefaultModel}
           onTurnDone={refresh}
+          onWorkingChange={setAnalystWorking}
           onGenerateDesign={() => transition('designing', '生成技术方案').then(() => runArchitectDesign())}
           onReset={() => setReq(prev => prev ? { ...prev, status: 'draft' } : prev)}
         />
@@ -1274,19 +1364,47 @@ export default function RequirementDetail() {
                     disabled={!!busy}>
                     {busy === '生成技术方案' ? '⏳ ...' : '📐 生成技术方案'}
                   </button>
+                  {/* Architect-model selectable BEFORE generating the plan. */}
+                  <ModelSelect
+                    value={architectModel}
+                    onChange={setArchitectModel}
+                    label="方案模型"
+                    defaultModelName={architectDefaultModel}
+                    title="方案设计阶段使用的模型，生成技术方案前即可选择"
+                  />
                   <button className="btn btn-sm"
                     onClick={() => transition('analyzing', '开始分析')} disabled={!!busy}
                     title="先进行需求分析，完善需求后再生成方案">
                     或先进行需求分析 →
                   </button>
+                  {/* Analyst-model selectable before opting into the analysis. */}
+                  <ModelSelect
+                    value={analystModel}
+                    onChange={setAnalystModel}
+                    label="分析模型"
+                    defaultModelName={analystDefaultModel}
+                    title="需求分析阶段使用的模型，开始分析前即可选择"
+                  />
                 </div>
               </>
             ) : (
               <>
                 <p>需求已创建。结合项目情况完善需求。</p>
-                <button className="btn btn-primary" onClick={() => transition('analyzing', '开始分析')} disabled={!!busy}>
-                  {busy === '开始分析' ? '⏳ ...' : '🤖 开始需求分析'}
-                </button>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <button className="btn btn-primary" onClick={() => transition('analyzing', '开始分析')} disabled={!!busy}>
+                    {busy === '开始分析' ? '⏳ ...' : '🤖 开始需求分析'}
+                  </button>
+                  {/* Analyst-stage model, selectable BEFORE starting the first
+                      analysis turn; the in-chat dropdown is otherwise disabled
+                      while the auto-started first turn runs. */}
+                  <ModelSelect
+                    value={analystModel}
+                    onChange={setAnalystModel}
+                    label="分析模型"
+                    defaultModelName={analystDefaultModel}
+                    title="需求分析阶段使用的模型，开始分析前即可选择"
+                  />
+                </div>
               </>
             )}
           </div>
@@ -1299,33 +1417,42 @@ export default function RequirementDetail() {
           {/* Compact toolbar: the architect role is already shown in the
               stepper, so this section leads with a content-oriented caption
               and parks the stream toggle + regenerate action together. */}
-          {(hasDesign || showDesignToggle) && (
-            <div className="design-toolbar">
-              {showDesignToggle && (
-                <button
-                  className="btn btn-sm process-toggle"
-                  onClick={() => setShowDesignProcess(v => !v)}
-                  aria-expanded={designPanelOpen}
-                >
-                  {designPanelOpen ? '▼ 收起思考过程' : '▶ 思考过程'}
-                </button>
-              )}
-              {req.status === 'designing' && hasDesign && (
-                <button className="btn btn-sm" onClick={runArchitectDesign} disabled={designing}>🔄 重新生成</button>
-              )}
-              {hasDesign && (
-                <button
-                  className="btn btn-sm"
-                  onClick={handleExportPdf}
-                  disabled={exporting}
-                  style={{ marginLeft: 'auto' }}
-                  title="将技术方案导出为 PDF"
-                >
-                  {exporting ? '⏳ 导出中...' : '📄 导出 PDF'}
-                </button>
-              )}
-            </div>
-          )}
+          <div className="design-toolbar model-row" style={{ gap: 8 }}>
+            {/* Per-stage architect model. Default = 已设置的方案模型; disabled
+                while a design job runs (Claude 工作中禁止切换). */}
+            <ModelSelect
+              value={architectModel}
+              onChange={setArchitectModel}
+              disabled={architectWorking}
+              working={architectWorking}
+              label="方案模型"
+              defaultModelName={architectDefaultModel}
+              title={architectWorking ? 'Claude 正在制定技术方案，暂不能切换模型' : '方案设计阶段使用的模型，开始前即可选择'}
+            />
+            {showDesignToggle && (
+              <button
+                className="btn btn-sm process-toggle"
+                onClick={() => setShowDesignProcess(v => !v)}
+                aria-expanded={designPanelOpen}
+              >
+                {designPanelOpen ? '▼ 收起思考过程' : '▶ 思考过程'}
+              </button>
+            )}
+            {req.status === 'designing' && hasDesign && (
+              <button className="btn btn-sm" onClick={runArchitectDesign} disabled={designing}>🔄 重新生成</button>
+            )}
+            {hasDesign && (
+              <button
+                className="btn btn-sm"
+                onClick={handleExportPdf}
+                disabled={exporting}
+                style={{ marginLeft: 'auto' }}
+                title="将技术方案导出为 PDF"
+              >
+                {exporting ? '⏳ 导出中...' : '📄 导出 PDF'}
+              </button>
+            )}
+          </div>
 
           {designPanelOpen && (
             <div className="coding-panel" ref={designRef} style={{ marginBottom: 16 }}>
@@ -1405,6 +1532,8 @@ export default function RequirementDetail() {
                 projectPath={project?.local_path || ''}
                 docType="design"
                 currentDoc={req.design_docs}
+                model={architectModel}
+                defaultModel={architectDefaultModel}
                 applyJobId={req.apply_job_id}
                 onTurnDone={refresh}
               />
@@ -1427,7 +1556,20 @@ export default function RequirementDetail() {
               <p style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                 将在独立 git worktree 中隔离开发（<code>{project?.local_path}.worktrees/{req.id}</code>），多需求并行互不干扰。
               </p>
-              <button className="btn btn-primary" onClick={() => openBranchModal()}>🚀 开始开发</button>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <button className="btn btn-primary" onClick={() => openBranchModal()}>🚀 开始开发</button>
+                {/* Per-stage developer model. Default = 已设置的开发模型; disabled
+                    while a coding job runs (Claude 工作中禁止切换). */}
+                <ModelSelect
+                  value={developerModel}
+                  onChange={setDeveloperModel}
+                  disabled={coding}
+                  working={coding}
+                  label="开发模型"
+                  defaultModelName={developerDefaultModel}
+                  title={coding ? 'Claude 正在开发中，暂不能切换模型' : '开发实现阶段使用的模型，开始前即可选择'}
+                />
+              </div>
             </div>
           )}
 
@@ -1445,6 +1587,17 @@ export default function RequirementDetail() {
               <div className="adjust-composer-header">
                 <span className="ac-title">🔧 追加调整</span>
                 <span className="ac-tag">续接原开发会话 · 仅携带本指令</span>
+                <div style={{ marginLeft: 'auto' }}>
+                  {/* Switch model for the next adjust round; the dropdown itself
+                      is disabled while a coding job runs. */}
+                  <ModelSelect
+                    value={developerModel}
+                    onChange={setDeveloperModel}
+                    disabled={coding}
+                    working={coding}
+                    defaultModelName={developerDefaultModel}
+                  />
+                </div>
               </div>
               <textarea
                 className="ac-textarea"

@@ -2,12 +2,19 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { API_BASE, authedFetch } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, coalesceLogLines } from '../utils/logLines';
+import ModelSelect from './ModelSelect';
 
 interface Props {
   reqId: string;
   projectPath: string;
   docType: 'design' | 'coding';
   currentDoc: string;
+  // Effective model for this stage's refine/apply turns (server-persisted
+  // stage model), used as the dropdown's default selection.
+  model?: string;
+  // Actual model that the empty "默认模型" selection resolves to for this stage
+  // (角色模型 > 生效配置默认), shown next to "默认模型" before the stage runs.
+  defaultModel?: string;
   // Active apply-doc JobStore job id (server truth, req.apply_job_id). When
   // set on mount we reconnect to the running apply so a page refresh mid-apply
   // resumes the stream instead of silently dropping it.
@@ -25,7 +32,7 @@ interface ChatMessage {
 
 const LABEL = { design: '技术方案', coding: '开发指令' };
 
-export default function DocRefineChat({ reqId, projectPath, docType, currentDoc, applyJobId, onTurnDone }: Props) {
+export default function DocRefineChat({ reqId, projectPath, docType, currentDoc, model, defaultModel, applyJobId, onTurnDone }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -37,6 +44,18 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   const chatRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventStream | null>(null);
   const label = LABEL[docType];
+
+  // Stage model for refine/apply turns. Seeded from the server-persisted
+  // model (default = 已设置模型); a user switch is sent with the next
+  // refine-doc / apply-doc POST and stays local. Disabled while working.
+  const [selectedModel, setSelectedModel] = useState('');
+  const modelTouchedRef = useRef(false);
+  useEffect(() => {
+    if (!modelTouchedRef.current) {
+      const v = model || '';
+      setSelectedModel(v === '默认模型' ? '' : v);
+    }
+  }, [model]);
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
@@ -62,6 +81,8 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         project_path: projectPath,
         doc_type: docType,
         user_message: userMessage,
+        // Per-request model override — empty means the role's configured model.
+        ...(selectedModel ? { model: selectedModel } : {}),
       }),
     });
 
@@ -139,7 +160,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
     });
 
     return complete;
-  }, [reqId, projectPath, docType]);
+  }, [reqId, projectPath, docType, selectedModel]);
 
   const handleSend = async () => {
     const msg = input.trim();
@@ -243,6 +264,8 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           requirement_id: reqId,
           project_path: projectPath,
           doc_type: docType,
+          // Per-request model override — empty means the role's configured model.
+          ...(selectedModel ? { model: selectedModel } : {}),
         }),
       });
       const json = await res.json();
@@ -306,7 +329,16 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
     <div className="detail-section" style={{ marginTop: 16 }}>
       <div className="deep-refine-header">
         <h3>💬 微调{label}</h3>
-        <div style={{ display: 'flex', gap: 6 }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <ModelSelect
+            value={selectedModel}
+            onChange={m => { modelTouchedRef.current = true; setSelectedModel(m); }}
+            disabled={working || applying}
+            working={working || applying}
+            label={`${label}模型`}
+            defaultModelName={defaultModel}
+            title={(working || applying) ? 'Claude 工作中，暂不能切换模型' : `微调${label}使用的模型`}
+          />
           {messages.length > 0 && !working && (
             <button className="btn btn-sm" onClick={handleClear} title="清除对话">🗑</button>
           )}

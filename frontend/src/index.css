@@ -71,6 +71,71 @@ body { margin: 0; }
 .btn-danger { background: #EF4444; color: white; border-color: #EF4444; }
 .btn-danger:hover { background: #DC2626; border-color: #DC2626; }
 
+/* ── Per-stage model picker (ModelSelect) ─────────────────────────────── */
+.model-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.model-select-label {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+.model-select-input {
+  padding: 3px 6px;
+  font-size: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  max-width: 220px;
+  cursor: pointer;
+}
+.model-select-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: var(--color-hover);
+}
+/* Inline Claude working-status indicator inside ModelSelect */
+.model-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #94A3B8; /* gray = idle */
+  flex: none;
+}
+.model-status-dot.is-work {
+  background: #10B981; /* green pulsing while working */
+  animation: model-blink 1.2s ease-in-out infinite;
+}
+@keyframes model-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.model-status-text {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* ── Claude working-status indicator (空闲 / 工作中) ──────────────────── */
+.claude-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #f1f5f9;
+  color: #64748b;
+}
+.claude-status.working {
+  background: #fef3c7;
+  color: #b45309;
+}
+
 /* Page title */
 .page-title { font-size: 22px; font-weight: 700; margin-bottom: 20px; color: var(--color-text); }
 
