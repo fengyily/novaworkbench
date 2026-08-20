@@ -156,6 +156,13 @@ func (s *ProjectService) ListTrash() ([]model.Project, error) {
 
 func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error) {
 	path := req.LocalPath
+
+	// Remote mode: no local path supplied yet — clone into the workspace using
+	// the repo name derived from the remote URL.
+	if path == "" && req.RemoteURL != "" {
+		home, _ := os.UserHomeDir()
+		path = filepath.Join(home, "workspace", repoName(req.RemoteURL))
+	}
 	if path == "" {
 		return nil, fmt.Errorf("local_path is required")
 	}
@@ -166,6 +173,15 @@ func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error
 		path = filepath.Join(home, path[1:])
 	}
 	path, _ = filepath.Abs(path)
+
+	// Clone the remote into the target when it doesn't exist yet.
+	if req.RemoteURL != "" {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			if err := cloneRepo(req.RemoteURL, "", path); err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	// Validate path exists
 	info, err := os.Stat(path)
@@ -290,6 +306,38 @@ func (s *ProjectService) validateWorkspacePath(path string) error {
 	return nil
 }
 
+// repoName extracts the repository name from a git URL (git@host:owner/repo.git,
+// https://host/owner/repo.git, or a bare path) so a remote add can clone into
+// ~/workspace/<repo>.
+func repoName(url string) string {
+	s := strings.TrimSpace(url)
+	s = strings.TrimSuffix(s, "/")
+	s = strings.TrimSuffix(s, ".git")
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		s = s[i+1:]
+	}
+	return s
+}
+
+// cloneRepo clones remote into dest, optionally pinning a branch, with a 5m
+// timeout. On failure it removes any half-finished clone.
+func cloneRepo(remote, branch, dest string) error {
+	args := []string{"clone", remote}
+	if branch != "" && branch != "main" && branch != "master" {
+		args = append(args, "--branch", branch)
+	}
+	args = append(args, dest)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		os.RemoveAll(dest) // clean up a half-finished clone
+		return fmt.Errorf("%s — %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 // Restore re-clones a soft-deleted project's directory from its stored
 // remote_url/default_branch and clears the soft-delete flags. It errors with
 // NO_REMOTE / DIR_EXISTS / RESTORE_FAILED prefix for the handler to map to
@@ -309,18 +357,8 @@ func (s *ProjectService) Restore(id string) (*model.Project, error) {
 		return nil, fmt.Errorf("DIR_EXISTS: target directory already exists: %s", p.LocalPath)
 	}
 
-	args := []string{"clone", p.RemoteURL}
-	if p.DefaultBranch != "" && p.DefaultBranch != "main" && p.DefaultBranch != "master" {
-		args = append(args, "--branch", p.DefaultBranch)
-	}
-	args = append(args, p.LocalPath)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		os.RemoveAll(p.LocalPath) // clean up a half-finished clone
-		return nil, fmt.Errorf("RESTORE_FAILED: %s: %w", strings.TrimSpace(string(out)), err)
+	if err := cloneRepo(p.RemoteURL, p.DefaultBranch, p.LocalPath); err != nil {
+		return nil, fmt.Errorf("RESTORE_FAILED: %w", err)
 	}
 
 	if _, err := s.db.Exec(
