@@ -332,6 +332,14 @@ func (h *WizardHandler) resolveWorkDir(req *model.Requirement, projectPath, defa
 	if req == nil || projectPath == "" {
 		return projectPath, nil
 	}
+	// Validate the project path exists before any git operations — a missing
+	// directory causes gitRun to fail with a generic error that EnsureWorktree
+	// maps to ErrNotAGitRepo, which then returns the non-existent path as the
+	// work dir. exec.Cmd.Start() will chdir to it and fail with a misleading
+	// ENOENT attributed to the binary rather than the directory.
+	if _, err := os.Stat(projectPath); err != nil {
+		return "", fmt.Errorf("project directory not found on this host: %s", projectPath)
+	}
 	if req.WorktreePath != "" {
 		if _, err := os.Stat(req.WorktreePath); err == nil {
 			return req.WorktreePath, nil
@@ -2682,7 +2690,11 @@ func logClaudeExecDiag(scope string, cmd *exec.Cmd) {
 		log.Printf("[%s] exec diag: server cwd=%q", scope, cwd)
 	}
 	if cmd.Dir != "" {
-		log.Printf("[%s] exec diag: cmd.Dir=%q", scope, cmd.Dir)
+		if _, err := os.Stat(cmd.Dir); err != nil {
+			log.Printf("[%s] exec diag: cmd.Dir=%q DOES NOT EXIST ← likely real ENOENT cause: %v", scope, cmd.Dir, err)
+		} else {
+			log.Printf("[%s] exec diag: cmd.Dir=%q (exists)", scope, cmd.Dir)
+		}
 	}
 
 	// 8. uid/gid — the Go process is the same throughout, but past bugs have
