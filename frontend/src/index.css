@@ -162,11 +162,14 @@ body.no-scroll {
 }
 .touch-target-sm { min-height: 36px; }
 
-/* Collapse any <table> with this class into stacked cards below 600px.
+/* Collapse any <table> with this class into stacked cards below 768px.
    The table header disappears and each cell renders as a row with the
    column header (from `data-label`) on the left and the cell content on
-   the right. Compose with `data-label` attributes on every <td>. */
-@media (max-width: 600px) {
+   the right. Compose with `data-label` attributes on every <td>. The
+   768px breakpoint matches the rest of the mobile rules so every table
+   gets the same treatment across the app — no horizontal scroll bar
+   sneaking through at 601-768px. */
+@media (max-width: 768px) {
   .table-cards thead { display: none; }
   .table-cards,
   .table-cards tbody,
@@ -196,9 +199,19 @@ body.no-scroll {
     text-transform: uppercase;
     letter-spacing: 0.4px;
     flex-shrink: 0;
-    max-width: 90px;
+    max-width: 100px;
   }
   .table-cards td > * { text-align: right; min-width: 0; }
+  /* The total row stretches across the whole row; let it live as a single
+     cell-less block so the dashed borders don't render between cells. */
+  .table-cards tr.table-cards-total {
+    padding: 6px 12px;
+  }
+  .table-cards tr.table-cards-total td {
+    padding: 0;
+    border: none;
+  }
+  .table-cards tr.table-cards-total td::before { display: none; }
 }
 
 /* Full-screen modal override. Apply to the modal box (and optionally its

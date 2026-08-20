@@ -1388,7 +1388,7 @@ export default function RequirementDetail() {
         </div>
         {usage && usage.by_step.length > 0 ? (
           <>
-            <table className="pr-table" style={{ marginBottom: 8 }}>
+            <table className="pr-table table-cards" style={{ marginBottom: 8 }}>
               <thead>
                 <tr>
                   <th>步骤</th>
@@ -1404,25 +1404,25 @@ export default function RequirementDetail() {
               <tbody>
                 {usage.by_step.map(s => (
                   <tr key={`${s.step}:${s.model}`}>
-                    <td>{s.label || stepLabels[s.step] || s.step}</td>
-                    <td><code className="pr-branch">{s.model || '未知模型'}</code></td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(s).toLocaleString()}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.output_tokens.toLocaleString()}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_read_tokens.toLocaleString()}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_creation_tokens.toLocaleString()}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{fmtCost(s.costs)}</td>
-                    <td style={{ fontSize: 12 }}>{s.count}</td>
+                    <td data-label="步骤">{s.label || stepLabels[s.step] || s.step}</td>
+                    <td data-label="模型"><code className="pr-branch">{s.model || '未知模型'}</code></td>
+                    <td data-label="输入" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(s).toLocaleString()}</td>
+                    <td data-label="输出" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.output_tokens.toLocaleString()}</td>
+                    <td data-label="缓存读" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_read_tokens.toLocaleString()}</td>
+                    <td data-label="缓存建" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_creation_tokens.toLocaleString()}</td>
+                    <td data-label="费用" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{fmtCost(s.costs)}</td>
+                    <td data-label="次数" style={{ fontSize: 12 }}>{s.count}</td>
                   </tr>
                 ))}
-                <tr style={{ borderTop: '2px solid var(--color-border)' }}>
-                  <td style={{ fontWeight: 600 }}>合计</td>
+                <tr className="table-cards-total" style={{ borderTop: '2px solid var(--color-border)' }}>
+                  <td data-label="合计" style={{ fontWeight: 600 }}>合计</td>
                   <td></td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{usageTotalInput(usage.total).toLocaleString()}</td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{usage.total.output_tokens.toLocaleString()}</td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{usage.total.cache_read_tokens.toLocaleString()}</td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{usage.total.cache_creation_tokens.toLocaleString()}</td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{fmtCost(usage.total.costs)}</td>
-                  <td></td>
+                  <td data-label="输入" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{usageTotalInput(usage.total).toLocaleString()}</td>
+                  <td data-label="输出" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{usage.total.output_tokens.toLocaleString()}</td>
+                  <td data-label="缓存读" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{usage.total.cache_read_tokens.toLocaleString()}</td>
+                  <td data-label="缓存建" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{usage.total.cache_creation_tokens.toLocaleString()}</td>
+                  <td data-label="费用" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{fmtCost(usage.total.costs)}</td>
+                  <td data-label="次数"></td>
                 </tr>
               </tbody>
             </table>

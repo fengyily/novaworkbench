@@ -20,13 +20,11 @@
 
   .projects-section { padding: 14px; }
 
-  /* Horizontal scroll is a safety net — the `.table-cards` utility (defined
-     in index.css) collapses the table into stacked cards at <600px so no
-     column is hidden off-screen. */
-  .projects-section .project-table-wrap {
-    overflow-x: auto;
-  }
-
+  /* `.table-cards` (index.css) collapses the project table into stacked
+     cards on every mobile width — no horizontal scroll bar even on rough
+     5-column rows. The path-cell / project-desc-cell max-widths are
+     irrelevant on mobile (cards don't need them) but we keep them off so
+     they don't conflict with any later rule. */
   .path-cell,
   .project-desc-cell { max-width: none; min-width: 0; }
 

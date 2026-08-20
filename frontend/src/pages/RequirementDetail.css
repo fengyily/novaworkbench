@@ -852,4 +852,13 @@
   }
 
   .adjust-composer-footer .ac-hint { margin-bottom: 4px; }
+
+  /* Token usage table — let the model `<code>` wrap inside its card so
+     long model names (e.g. claude-3-5-sonnet-20240620) don't get
+     truncated at 160px on a 360px-wide phone. */
+  .usage-section .pr-branch {
+    max-width: none;
+    white-space: normal;
+    word-break: break-all;
+  }
 }
