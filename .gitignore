@@ -3,3 +3,10 @@ dist/
 .env
 *.log
 .nova/
+
+# backend/web/dist holds the built SPA (gitignored) plus a tracked .gitkeep
+# placeholder so //go:embed all:dist (backend/web/embed.go) still compiles
+# without a frontend build. Keep the placeholder, ignore the rest.
+!backend/web/dist/
+backend/web/dist/*
+!backend/web/dist/.gitkeep

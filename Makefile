@@ -37,8 +37,8 @@ build-frontend build-backend: $(SENTINEL)
 
 build-frontend:
 	cd frontend && npm ci && npm run build
-	rm -rf backend/web/dist
 	mkdir -p backend/web/dist
+	find backend/web/dist -mindepth 1 ! -name '.gitkeep' -delete
 	cp -r frontend/dist/. backend/web/dist/
 
 build-backend:
@@ -49,7 +49,8 @@ run:
 	cd backend && go run ./cmd/server
 
 clean:
-	rm -rf backend/web/dist dist/nova $(SENTINEL)
+	find backend/web/dist -mindepth 1 ! -name '.gitkeep' -delete
+	rm -rf dist/nova $(SENTINEL)
 
 doctor:
 	@scripts/check-build-deps.sh --with-frontend
