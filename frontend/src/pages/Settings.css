@@ -21,15 +21,31 @@
     flex-shrink: 0;
     padding: 8px 12px;
     font-size: 13px;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
   }
 
   .role-grid {
     grid-template-columns: 1fr;
   }
 
-  .form-actions {
-    flex-wrap: wrap;
+  /* Form actions stack on phones via the `.stack-mobile` utility (index.css). */
+
+  /* Permission checkboxes: arrange two-per-row on phones instead of cramming
+     everything into a 1-column stack (which would scroll forever). */
+  .checkbox-grid {
+    gap: 10px 16px;
   }
+  .checkbox-row { font-size: 14px; min-height: 32px; }
+
+  .role-card-actions {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .role-card-actions > * { min-height: 36px; }
+
+  .settings-section { padding: 16px; }
 }
 
 .settings-tab {

@@ -1165,7 +1165,7 @@ export default function RequirementDetail() {
               <input type="checkbox" checked={readKnowledgeDesign} onChange={e => setReadKnowledgeDesign(e.target.checked)} />
               📚 开始前先读取项目知识库（默认不勾选）
             </label>
-            <div className="modal-actions">
+            <div className="modal-actions btn-row-2col">
               <button className="btn btn-primary" onClick={confirmDesignKnowledge}>确认</button>
               <button className="btn" onClick={() => setShowDesignKnowledgeModal(false)}>取消</button>
             </div>
@@ -1217,7 +1217,7 @@ export default function RequirementDetail() {
               <input type="checkbox" checked={readKnowledgeDev} onChange={e => setReadKnowledgeDev(e.target.checked)} />
               📚 开始前先读取项目知识库（默认不勾选）
             </label>
-            <div className="modal-actions">
+            <div className="modal-actions btn-row-2col">
               <button className="btn btn-primary" onClick={confirmBranchAndStart}>🚀 确认，开始开发</button>
               <button className="btn" onClick={() => setShowBranchModal(false)}>取消</button>
             </div>
@@ -1261,7 +1261,7 @@ export default function RequirementDetail() {
                   <input type="checkbox" checked={mergeDeleteBranch} onChange={e => setMergeDeleteBranch(e.target.checked)} />
                   合并后删除开发分支
                 </label>
-                <div className="modal-actions">
+                <div className="modal-actions btn-row-2col">
                   <button className="btn btn-primary" onClick={confirmMerge} disabled={!!busy}>🔀 确认合入</button>
                   <button className="btn" onClick={() => setShowMergeModal(false)} disabled={!!busy}>取消</button>
                 </div>
@@ -1293,7 +1293,7 @@ export default function RequirementDetail() {
                 {!mergeState.has_remote && (
                   <p className="merge-warn">该项目未配置 origin 远程仓库，无法推送。</p>
                 )}
-                <div className="modal-actions">
+                <div className="modal-actions btn-row-2col">
                   <button className="btn btn-primary" onClick={confirmMerge} disabled={!!busy || !mergeState.has_remote}>🌐 推送并发起 PR</button>
                   <button className="btn" onClick={() => setShowMergeModal(false)} disabled={!!busy}>取消</button>
                 </div>
@@ -1340,7 +1340,7 @@ export default function RequirementDetail() {
                 </small>
               </div>
             )}
-            <div className="modal-actions">
+            <div className="modal-actions btn-row-2col">
               <button className="btn btn-primary" onClick={saveEdit} disabled={!!busy}>
                 {busy === '保存' ? '⏳ 保存中...' : '💾 保存'}
               </button>
@@ -1789,7 +1789,7 @@ export default function RequirementDetail() {
                   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doAdjustCoding(); }
                 }}
               />
-              <div className="adjust-composer-footer">
+              <div className="adjust-composer-footer stack-mobile">
                 <span className="ac-hint">Enter 发送 · Shift+Enter 换行</span>
                 <button className="btn btn-primary" onClick={doAdjustCoding} disabled={!adjustInput.trim()}>
                   🚀 追加调整
@@ -1827,7 +1827,7 @@ export default function RequirementDetail() {
 
               {/* ── Merge / PR step ── */}
               <div className="merge-section">
-                <div className="merge-actions">
+                <div className="merge-actions stack-mobile">
                   <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}>🔀 本地合入</button>
                   <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}>🌐 推送并发起 PR</button>
                 </div>
@@ -1879,7 +1879,7 @@ export default function RequirementDetail() {
               ) : (
                 <div className="tab-empty"><p>✅ 开发已完成。</p></div>
               )}
-              <div className="merge-actions">
+              <div className="merge-actions stack-mobile">
                 <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}>🔀 本地合入</button>
                 <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}>🌐 推送并发起 PR</button>
               </div>
@@ -1890,7 +1890,7 @@ export default function RequirementDetail() {
                   <button className="btn btn-sm" onClick={cleanWorktree} disabled={merging || !!busy}>🧹 清理开发环境</button>
                 </div>
               )}
-              <div className="merge-actions" style={{ marginTop: 8 }}>
+              <div className="merge-actions stack-mobile" style={{ marginTop: 8 }}>
                 <button className="btn btn-primary" onClick={handleArchive} disabled={!!busy}>
                   {busy === '归档' ? '⏳ ...' : '📦 归档到知识库'}
                 </button>
@@ -1903,7 +1903,7 @@ export default function RequirementDetail() {
               <div className="tab-empty">
                 <p>📦 已归档至项目知识库（最终需求 + 技术方案）。</p>
               </div>
-              <div className="merge-actions" style={{ marginTop: 8 }}>
+              <div className="merge-actions stack-mobile" style={{ marginTop: 8 }}>
                 <button className="btn" onClick={handleUnarchive} disabled={!!busy}>
                   {busy === '取消归档' ? '⏳ ...' : '↩ 取消归档'}
                 </button>

@@ -20,8 +20,8 @@ export default function MarkdownViewer({ title, content, onClose }: Props) {
   }, [onClose]);
 
   return (
-    <div className="md-viewer-overlay" onClick={onClose}>
-      <div className="md-viewer-box" onClick={e => e.stopPropagation()}>
+    <div className="md-viewer-overlay modal-fullscreen-overlay" onClick={onClose}>
+      <div className="md-viewer-box modal-fullscreen" onClick={e => e.stopPropagation()}>
         <div className="md-viewer-header">
           <h3>{title || '文档预览'}</h3>
           <button className="btn btn-sm" onClick={onClose} title="关闭 (Esc)">✕ 关闭</button>

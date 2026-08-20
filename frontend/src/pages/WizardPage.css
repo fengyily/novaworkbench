@@ -155,9 +155,22 @@
 
   .wizard-card h2 { font-size: 16px; margin-bottom: 14px; }
 
-  .chat-panel { max-height: 240px; }
+  /* 240px is too short for a real conversation on a phone in landscape and
+     even cramped in portrait — the user can't read context while typing.
+     50dvh fills half the viewport but always leaves the input visible
+     above the keyboard on iOS Safari. */
+  .chat-panel {
+    max-height: none;
+    height: 50dvh;
+    min-height: 220px;
+  }
 
   .code-output { max-height: 300px; }
 
-  .form-actions { flex-wrap: wrap; }
+  /* Stack the chat input so the textarea can take the full row width on
+     narrow screens, and the send button + action buttons sit on their own
+     line where they can be tapped without overlapping the text caret. */
+  .chat-input-row { flex-direction: column; align-items: stretch; }
+  .chat-input-row .form-input { width: 100%; }
+  .chat-input-row .btn { width: 100%; }
 }

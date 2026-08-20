@@ -412,7 +412,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           <div className="confirm-panel-body">
             <strong>修改内容已确认</strong>
             <p>点击「应用到{label}」，Claude 将把对话中的修改写入文档并保存。</p>
-            <div className="confirm-panel-actions">
+            <div className="confirm-panel-actions btn-row-2col">
               <button className="btn btn-primary" onClick={handleApply} disabled={applying}>
                 {applying ? '⏳ 应用中...' : `📝 应用到${label}`}
               </button>

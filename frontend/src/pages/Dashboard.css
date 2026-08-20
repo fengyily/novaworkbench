@@ -20,13 +20,20 @@
 
   .projects-section { padding: 14px; }
 
-  /* Make the project table horizontally scrollable on small screens */
+  /* Horizontal scroll is a safety net — the `.table-cards` utility (defined
+     in index.css) collapses the table into stacked cards at <600px so no
+     column is hidden off-screen. */
   .projects-section .project-table-wrap {
     overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
   }
 
+  .path-cell,
+  .project-desc-cell { max-width: none; min-width: 0; }
+
+  /* The quick-actions row is a 2-up grid on phones; .btn-row-2col utility
+     handles the distribution. */
   .quick-actions { gap: 8px; }
+  .quick-actions.btn-row-2col > .btn { flex-basis: calc(50% - 4px); }
 }
 
 .stat-card {

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../utils/auth';
 import './Layout.css';
@@ -17,7 +17,36 @@ export default function Layout() {
   const visibleItems = navItems.filter((item) => hasPermission(item.permission));
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  const closeSidebar = () => setSidebarOpen(false);
+  const closeSidebar = useCallback(() => setSidebarOpen(false), []);
+
+  // ESC closes the mobile drawer (matches users' mental model from native
+  // modals and saves them a tap on the small ✕ in the corner). The listener
+  // is only attached while the drawer is open so we don't shadow other ESC
+  // handlers (e.g. inline editing).
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeSidebar();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [sidebarOpen, closeSidebar]);
+
+  // Lock body scroll while the drawer overlay is up so the page underneath
+  // doesn't scroll on touch. The single effect with cleanup handles both
+  // unmount and toggle-to-closed — the else branch is redundant.
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    const body = document.body;
+    // Only compensate on desktop where the scrollbar is visible.
+    const sbw = window.innerWidth - document.documentElement.clientWidth;
+    if (sbw > 0) body.style.setProperty('--scrollbar-comp', `${sbw}px`);
+    body.classList.add('no-scroll');
+    return () => {
+      body.classList.remove('no-scroll');
+      body.style.removeProperty('--scrollbar-comp');
+    };
+  }, [sidebarOpen]);
 
   return (
     <div className="app-layout">

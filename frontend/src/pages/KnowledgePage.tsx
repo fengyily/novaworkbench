@@ -210,7 +210,7 @@ export default function KnowledgePage() {
             <h3>{reviewItems[reviewIndex].title}</h3>
             <div className="review-content">{reviewItems[reviewIndex].content}</div>
           </div>
-          <div className="review-actions">
+          <div className="review-actions stack-mobile">
             <button className="btn" onClick={() => handleReview('edit')}>✏️ 编辑后确认</button>
             <button className="btn btn-primary" onClick={() => handleReview('approve')}>✅ 确认</button>
             <button className="btn" onClick={() => {
@@ -276,8 +276,8 @@ function MemoryDialog({ projects, selectedProject, memory, onClose, onSaved }: {
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
+    <div className="modal-overlay modal-fullscreen-overlay" onClick={onClose}>
+      <div className="modal modal-fullscreen" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
         <h3>{memory ? '编辑记忆' : '新增记忆'}</h3>
         <div className="form-group">
           <label>项目</label>
@@ -309,7 +309,7 @@ function MemoryDialog({ projects, selectedProject, memory, onClose, onSaved }: {
           <input type="text" value={tags} onChange={e => setTags(e.target.value)} className="form-input"
             placeholder="redis, config" />
         </div>
-        <div className="form-actions">
+        <div className="form-actions btn-row-2col">
           <button className="btn" onClick={onClose}>取消</button>
           <button className="btn btn-primary" onClick={handleSave} disabled={saving || !projectId || !content}>
             {saving ? '保存中...' : '保存'}

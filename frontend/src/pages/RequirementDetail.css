@@ -148,12 +148,6 @@
 .design-section { border-left: 3px solid var(--color-success); }
 .design-section p { white-space: pre-wrap; }
 
-.detail-actions {
-  display: flex;
-  gap: 10px;
-  padding: 16px 0;
-}
-
 .detail-desc {
   margin-bottom: 20px;
   padding: 14px 16px;
@@ -826,20 +820,36 @@
     padding: 20px 18px;
   }
 
-  .detail-actions {
-    flex-wrap: wrap;
-  }
-
   .confirm-panel {
     flex-direction: column;
     gap: 8px;
   }
+  /* Stack / grid distribution comes from the shared `.stack-mobile` and
+     `.btn-row-2col` utilities (index.css). The composer footer also picks
+     up `.stack-mobile` so the hint and send button don't crowd each other
+     under the iOS keyboard. */
 
   .deep-refine-panel .chat-panel {
-    max-height: 220px;
+    /* Use 50dvh (matching WizardPage) so chat stays usable on phones without
+       scrolling under the keyboard; min-height keeps it from collapsing on
+       tiny landscape windows. */
+    max-height: none;
+    height: 50dvh;
+    min-height: 220px;
   }
+
+  .deep-refine-panel .chat-input-row {
+    /* Stack input + send button vertically on mobile so the textarea gets
+       full width and the button doesn't sit underneath the keyboard. */
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .deep-refine-panel .chat-input-row .form-input { width: 100%; }
+  .deep-refine-panel .chat-input-row .btn { width: 100%; }
 
   .coding-panel {
     max-height: 360px;
   }
+
+  .adjust-composer-footer .ac-hint { margin-bottom: 4px; }
 }
