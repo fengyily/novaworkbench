@@ -12,6 +12,7 @@ const settingsTabs = [
   { to: '/settings/claude', label: 'Claude 配置', permission: 'setting.claude' },
   { to: '/settings/llm', label: '直连 LLM', permission: 'setting.llm' },
   { to: '/settings/database', label: '数据库', permission: 'setting.database' },
+  { to: '/settings/preflight', label: '环境依赖', permission: 'setting.preflight' },
 ];
 
 export default function Settings() {

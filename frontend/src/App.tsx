@@ -13,6 +13,7 @@ import SettingsRoles from './pages/SettingsRoles';
 import SettingsClaude from './pages/SettingsClaude';
 import SettingsLLM from './pages/SettingsLLM';
 import SettingsDatabase from './pages/SettingsDatabase';
+import SettingsPreflight from './pages/SettingsPreflight';
 import SettingsUsers from './pages/SettingsUsers';
 import SettingsACLRoles from './pages/SettingsACLRoles';
 import KnowledgePage from './pages/KnowledgePage';
@@ -63,6 +64,7 @@ export default function App() {
               <Route path="claude" element={<SettingsClaude />} />
               <Route path="llm" element={<SettingsLLM />} />
               <Route path="database" element={<SettingsDatabase />} />
+              <Route path="preflight" element={<SettingsPreflight />} />
             </Route>
           </Route>
         </Routes>

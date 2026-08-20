@@ -1,4 +1,11 @@
-export const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:9527';
+// API_BASE defaults to empty (same-origin) so the embedded SPA works on
+// any host without a build-time VITE_API_BASE override. When empty, every
+// `api.*` call uses a relative path "/api/..." which the browser resolves
+// against the page's own origin. In dev (vite serves the SPA on :5173 with
+// /api proxied to :9527) this also works transparently. To point the UI
+// at a different backend, set VITE_API_BASE=http://other-host:9527 at build
+// time (vite inlines it).
+export const API_BASE = import.meta.env.VITE_API_BASE || '';
 
 // Display + persistence literal for "no specific model was selected for a
 // stage" — mirrors backend handler.DefaultModelLabel. The backend treats it as
@@ -777,3 +784,28 @@ export function hasPermission(perms: string[] | undefined, key: string): boolean
   if (!perms) return false;
   return perms.includes('*') || perms.includes(key);
 }
+
+// Preflight — runtime dependency check + auto-install. The JSON wrapper
+// handles snapshot + install-start; install progress streams over SSE so the
+// UI uses raw fetch + EventSource (see SettingsPreflight).
+export interface PreflightDep {
+  key: string;
+  label: string;
+  installed: boolean;
+  version: string;
+  path: string;
+  required: boolean;
+  depends_on: string[];
+  err: string;
+  manual: string;
+}
+export interface PreflightSnapshot {
+  deps: PreflightDep[];
+  claude_bin: string;
+  autoinstall: boolean;
+}
+export const preflightApi = {
+  snapshot: () => api.get<PreflightSnapshot>('/api/preflight'),
+  install: (key: string) => api.post<{ job_id: string }>('/api/preflight/install', { key }),
+  installStreamUrl: (jobId: string) => `${API_BASE}/api/preflight/jobs/${jobId}/stream`,
+};
