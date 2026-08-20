@@ -12,6 +12,15 @@
   height: 48px;
   background: var(--color-surface);
   border-bottom: 1px solid var(--color-border);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.app-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .app-logo {
@@ -19,6 +28,29 @@
   font-size: 16px;
   color: var(--color-primary);
 }
+
+/* Hamburger — visible only on mobile */
+.app-hamburger {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  width: 36px;
+  height: 36px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+}
+.app-hamburger span {
+  display: block;
+  height: 2px;
+  background: var(--color-text);
+  border-radius: 2px;
+  transition: background 0.15s;
+}
+.app-hamburger:hover span { background: var(--color-primary); }
 
 .app-header-settings {
   color: var(--color-text-secondary);
@@ -67,7 +99,39 @@
 .app-body {
   display: flex;
   flex: 1;
+  position: relative;
 }
+
+/* Mobile overlay behind the open sidebar */
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 199;
+}
+
+/* Close button row inside sidebar — only rendered on mobile */
+.sidebar-close-row {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px 8px;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 4px;
+}
+
+.sidebar-close-btn {
+  background: none;
+  border: none;
+  font-size: 18px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  line-height: 1;
+}
+.sidebar-close-btn:hover { color: var(--color-text); background: var(--color-hover); }
 
 .app-sidebar {
   width: 220px;
@@ -76,6 +140,7 @@
   padding: 12px 0;
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
 }
 
 .nav-item {
@@ -104,6 +169,7 @@
   padding: 24px 32px;
   overflow-y: auto;
   background: var(--color-bg);
+  min-width: 0;
 }
 
 .app-footer {
@@ -114,4 +180,55 @@
   font-size: 12px;
   color: var(--color-text-muted);
   border-top: 1px solid var(--color-border);
+}
+
+/* ── Mobile breakpoint ─────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .app-hamburger {
+    display: flex;
+  }
+
+  .app-header-settings {
+    display: none;
+  }
+
+  .app-header-user {
+    font-size: 13px;
+    max-width: 100px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Sidebar slides in as a fixed drawer */
+  .app-sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 240px;
+    z-index: 200;
+    padding: 0;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    box-shadow: none;
+  }
+
+  .app-sidebar.sidebar-open {
+    transform: translateX(0);
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.15);
+  }
+
+  .sidebar-overlay {
+    display: block;
+  }
+
+  /* Show the close button row inside the drawer */
+  .sidebar-close-row {
+    display: flex;
+  }
+
+  .app-main {
+    padding: 16px;
+  }
 }

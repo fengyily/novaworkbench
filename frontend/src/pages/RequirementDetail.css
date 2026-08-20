@@ -171,7 +171,11 @@
   gap: 4px;
   margin-bottom: 16px;
   border-bottom: 2px solid var(--color-border);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
 }
+.detail-tabs::-webkit-scrollbar { display: none; }
 .tab-btn {
   padding: 8px 16px;
   background: none;
@@ -791,4 +795,51 @@
   background: #EEF2FF;
   color: #4F46E5;
   border: 1px solid #E0E7FF;
+}
+
+/* ── Mobile ────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .req-detail h1 { font-size: 18px; }
+
+  .tab-btn {
+    flex-shrink: 0;
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+
+  /* Stage stepper wraps on very narrow screens */
+  .stage-stepper {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .stage-sep { display: none; }
+
+  .stage-step {
+    font-size: 12px;
+  }
+
+  .modal-box {
+    min-width: unset;
+    width: 92vw;
+    padding: 20px 18px;
+  }
+
+  .detail-actions {
+    flex-wrap: wrap;
+  }
+
+  .confirm-panel {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .deep-refine-panel .chat-panel {
+    max-height: 220px;
+  }
+
+  .coding-panel {
+    max-height: 360px;
+  }
 }

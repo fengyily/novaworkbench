@@ -1,10 +1,8 @@
+import { useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../utils/auth';
 import './Layout.css';
 
-// navItem.to is the route; .permission is the RBAC permission key that grants
-// visibility. Items are dropped when the current user lacks the key (admins
-// get "*", so they see everything).
 const navItems = [
   { to: '/', label: '📊 仪表盘', end: true, permission: 'menu.dashboard' },
   { to: '/projects', label: '📁 项目', end: false, permission: 'menu.projects' },
@@ -17,11 +15,23 @@ const navItems = [
 export default function Layout() {
   const { user, hasPermission, logout } = useAuth();
   const visibleItems = navItems.filter((item) => hasPermission(item.permission));
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const closeSidebar = () => setSidebarOpen(false);
 
   return (
     <div className="app-layout">
       <header className="app-header">
-        <span className="app-logo">🔷 NovaWorkbench</span>
+        <div className="app-header-left">
+          <button
+            className="app-hamburger"
+            aria-label="打开导航"
+            onClick={() => setSidebarOpen((o) => !o)}
+          >
+            <span /><span /><span />
+          </button>
+          <span className="app-logo">🔷 NovaWorkbench</span>
+        </div>
         <div className="app-header-right">
           {user && (
             <span className="app-header-user">
@@ -38,13 +48,21 @@ export default function Layout() {
         </div>
       </header>
       <div className="app-body">
-        <nav className="app-sidebar">
+        {sidebarOpen && (
+          <div className="sidebar-overlay" onClick={closeSidebar} aria-hidden="true" />
+        )}
+        <nav className={`app-sidebar${sidebarOpen ? ' sidebar-open' : ''}`}>
+          <div className="sidebar-close-row">
+            <span className="app-logo">🔷 NovaWorkbench</span>
+            <button className="sidebar-close-btn" aria-label="关闭导航" onClick={closeSidebar}>✕</button>
+          </div>
           {visibleItems.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
               end={item.end}
               className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+              onClick={closeSidebar}
             >
               {item.label}
             </NavLink>
