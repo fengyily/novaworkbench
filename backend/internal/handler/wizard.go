@@ -264,6 +264,12 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	sessionID := storedSessionID
 	if isFirstRound {
 		sessionID = util.NewUUID()
+		// Persist the freshly minted id BEFORE the claude turn runs so it
+		// survives a mid-run backend restart (the session lives on disk; the id
+		// must already be in the DB for a later --resume to find it).
+		if perr := h.reqSvc.UpdateAnalysisSession(req.RequirementID, sessionID); perr != nil {
+			log.Printf("[analyst-chat] failed to persist analysis session for %s: %v", req.RequirementID, perr)
+		}
 	}
 	resumePrompt := req.UserMessage
 
@@ -436,6 +442,19 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Pre-mint + persist the coding session id BEFORE spawning claude for the
+	// fork and fresh cases (a plain resume reuses coding_session_id). The forked
+	// id is pre-assigned via --session-id so it's known and persisted up front.
+	newSID := ""
+	if fork || sourceSID == "" {
+		newSID = util.NewUUID()
+		if req.RequirementID != "" {
+			if perr := h.reqSvc.UpdateCodingSession(req.RequirementID, newSID); perr != nil {
+				log.Printf("[developer-chat] failed to persist coding session for %s: %v", req.RequirementID, perr)
+			}
+		}
+	}
+
 	sendStatus(w, rc, "phase", "🤖 开发者正在理解追加调整...")
 	rc.Flush()
 
@@ -508,7 +527,7 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		developerProjectID = requirement.ProjectID
 	}
 	developerUsage := h.usageCtxFor("developer_chat", req.RequirementID, developerProjectID, "", model, "")
-	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, sourceSID, fork, w, rc, developerUsage)
+	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, sourceSID, fork, newSID, w, rc, developerUsage)
 	if err != nil {
 		log.Printf("[developer-chat] turn failed: %v", err)
 		sendStatus(w, rc, "error", err.Error())
@@ -517,11 +536,11 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Persist any NEW session id (a fork off design/analysis, or a fresh
-	// stale-fallback session) as coding_session_id so later developer turns and
-	// the start-coding re-run resume the right conversation. A plain resume
-	// leaves the id unchanged, so we skip the write.
-	if req.RequirementID != "" && newSessionID != "" && newSessionID != sourceSID {
+	// The coding session id is already persisted upfront. Correct it only if the
+	// run produced a DIFFERENT id than we pre-minted — either a stale-fallback
+	// fresh session (runDeveloperTurn minted a fresh id) or the CLI reporting an
+	// id other than our --session-id override (a safety net).
+	if req.RequirementID != "" && newSessionID != "" && newSessionID != sourceSID && newSessionID != newSID {
 		if perr := h.reqSvc.UpdateCodingSession(req.RequirementID, newSessionID); perr != nil {
 			log.Printf("[developer-chat] Failed to persist coding session for %s: %v", req.RequirementID, perr)
 		}
@@ -917,11 +936,31 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 				// forking off the analyst session (skip-analysis-first path).
 				sourceSID = reqRow.AnalysisSessionID
 				fork = true
-			} else if reqRow.CodingSessionID != "" {
-				// Legacy fallback: no design / analysis session at all. Resume
-				// the prior coding session rather than losing threading for old
-				// data rows that predate session chaining.
+			} else if reqRow.CodingSessionID != "" && !reqRow.SkipDesign {
+				// Legacy fallback: no design / analysis session at all AND not a
+				// skip-design ("直接开发") row. Resume the prior coding session
+				// rather than losing threading for old data rows that predate
+				// session chaining. skip-design rows fall through to the fresh
+				// path below so "重新开发" mints a brand-new session instead of
+				// resuming the prior one.
 				sourceSID = reqRow.CodingSessionID
+			}
+		}
+
+		// Pre-mint + persist the coding session id BEFORE spawning claude so it
+		// survives a mid-run restart. This happens for BOTH a fork off the
+		// design/analysis session (--resume <src> --fork-session --session-id
+		// <new>) AND a fresh session (--session-id <new>) — the latter covers
+		// skip-design "直接开发" (no analysis/design session to fork, but a
+		// requirement row exists), so an interrupted direct-development run can
+		// still be resumed via 继续开发 instead of redoing everything. Only the
+		// legacy quick-start path (no requirement row) keeps a CLI-generated id
+		// and never persists it.
+		newCodingSID := ""
+		if req.RequirementID != "" && (fork || sourceSID == "") {
+			newCodingSID = util.NewUUID()
+			if perr := h.reqSvc.UpdateCodingSession(req.RequirementID, newCodingSID); perr != nil {
+				log.Printf("[start-coding] failed to persist coding session for %s: %v", req.RequirementID, perr)
 			}
 		}
 
@@ -956,14 +995,22 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 				prompt += "\n\n用户在开发前的追加调整说明：\n" + req.RequirementDesc
 			}
 		}
+		sessionArg := sourceSID
+		forkSessionID := ""
+		if fork {
+			forkSessionID = newCodingSID
+		} else if sourceSID == "" {
+			sessionArg = newCodingSID // fresh (skip-design 直接开发): --session-id <new>
+		}
 		cmd := h.llm.GenerateCode(llm.StreamOpts{
-			Prompt:       prompt,
-			WorkDir:      workDir,
-			SystemPrompt: systemPrompt,
-			Model:        cliModelArg(model),
-			SessionID:    sourceSID,
-			Resume:       sourceSID != "",
-			Fork:         fork,
+			Prompt:        prompt,
+			WorkDir:       workDir,
+			SystemPrompt:  systemPrompt,
+			Model:         cliModelArg(model),
+			SessionID:     sessionArg,
+			Resume:        sourceSID != "",
+			Fork:          fork,
+			ForkSessionID: forkSessionID,
 		})
 
 		// runClaudeStream owns the subprocess lifecycle (Start/Wait) and parses
@@ -980,12 +1027,10 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		codingUsage := h.usageCtxFor("coding", req.RequirementID, codingProjectID, job.ID, model, "")
 		out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage)
 
-		// Persist the forked coding session id so later coding refine turns can
-		// --resume it (jobs are in-memory; the id must live in the DB to survive
-		// a restart). runClaudeStream captured it from the system/init event;
-		// for a forked run it is the NEW id, for a plain resume it equals the
-		// input (we only write on fork).
-		if fork && out.sessionID != "" && req.RequirementID != "" {
+		// The coding session id is already persisted upfront. Correct it only if
+		// the CLI reported a different id than the one we pre-minted (a safety
+		// net in case the --session-id override semantics ever change).
+		if newCodingSID != "" && out.sessionID != "" && out.sessionID != newCodingSID {
 			if perr := h.reqSvc.UpdateCodingSession(req.RequirementID, out.sessionID); perr != nil {
 				log.Printf("[start-coding] Failed to persist coding session for %s: %v", req.RequirementID, perr)
 			}
@@ -1153,6 +1198,137 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
+// ContinueCoding resumes an interrupted/cleared coding task by --resume'ing the
+// persisted coding session and asking Claude to pick up where it left off. This
+// is the recovery path for the "开发任务已完成（日志因服务重启已清空）" state:
+// the in-memory job log is gone after a backend restart, but the coding session
+// lives on disk (~/.claude/) and coding_session_id is persisted in the DB, so a
+// --resume lets Claude continue the work and re-report what was done.
+//
+// Only requirements in status "developing" with a non-empty coding_session_id
+// may continue (developing = the first coding pass was launched; the lost-log
+// recovery block renders exactly in this state). Unlike start-coding — which
+// FORKS off the design session to realize "重新开发" — continue-coding RESUMES
+// the original coding session (Fork:false) and re-feeds NOTHING except a short
+// "continue" instruction, since the resumed conversation already carries the
+// requirement, design, developer persona, and prior coding progress. The
+// job_done handler does NOT change status and does NOT update coding_session_id
+// (every continue round resumes the SAME session). A stale --resume surfaces a
+// clear error instead of silently starting a fresh session.
+//
+// POST /api/wizard/continue-coding { requirement_id } -> { job_id }
+func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		RequirementID string `json:"requirement_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		log.Printf("[continue-coding] JSON decode error: %v", err)
+		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+
+	req, err := h.reqSvc.Get(body.RequirementID)
+	if err != nil {
+		writeError(w, 404, "NOT_FOUND", "requirement not found")
+		return
+	}
+	if req.Status != "developing" {
+		writeError(w, 409, "INVALID_STATUS", "仅开发中的需求可继续开发（当前状态: "+req.Status+"）")
+		return
+	}
+	if req.CodingSessionID == "" {
+		writeError(w, 409, "NO_SESSION", "无 coding session，无法 resume，请重新发起 coding")
+		return
+	}
+
+	proj, err := h.projectSvc.Get(req.ProjectID)
+	if err != nil {
+		writeError(w, 404, "NOT_FOUND", "project not found")
+		return
+	}
+
+	// Only the developer role's MODEL is honored (so the user's latest model
+	// setting applies to the continuation). The system prompt is deliberately
+	// omitted: the resumed coding session already carries the developer persona,
+	// and re-injecting --system-prompt would replace it (same as AdjustCoding).
+	_, model := h.roleConfig("developer")
+
+	job := h.jobs.Create(body.RequirementID)
+	job.SetModel(model)
+	writeJSON(w, 200, map[string]string{"job_id": job.ID})
+
+	go func() {
+		defer func() {
+			// Persist the finished job's full log so a backend restart doesn't
+			// wipe this continuation record (same durability pattern as
+			// StartCoding / AdjustCoding). This is what "fills back" the lost
+			// development record after a restart.
+			lines, status, exitCode := job.Snapshot()
+			if perr := h.jobLogSvc.Save(job.ID, body.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, model); perr != nil {
+				log.Printf("[continue-coding] failed to persist job log %s: %v", job.ID, perr)
+			}
+		}()
+		log.Printf("[continue-coding] job %s started for %s (resume %s)", job.ID, body.RequirementID, req.CodingSessionID)
+		job.Append(store.LogLine{Type: "phase", Content: "🤖 Claude 正在续接开发会话，继续完成任务..."})
+
+		// The resumed coding session already carries the requirement, design,
+		// developer persona, and prior coding progress, so the prompt is only a
+		// short "continue" instruction: re-inspect the workdir, finish whatever
+		// is incomplete, and report what was done. No project context re-feed.
+		workDir := proj.LocalPath
+		if req.WorktreePath != "" {
+			if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
+				workDir = req.WorktreePath
+			}
+		}
+		prompt := "继续完成之前中断的开发任务。请先检查当前代码与工作区状态，" +
+			"判断哪些部分已完成、哪些未完成或需要修复；然后基于技术方案继续完成剩余工作、补齐缺失内容。" +
+			"最后用中文总结本次完成的内容。"
+		cmd := h.llm.GenerateCode(llm.StreamOpts{
+			Prompt:       prompt,
+			WorkDir:      workDir,
+			SystemPrompt: "", // resume 已携带 developer persona，不再注入
+			Model:        cliModelArg(model),
+			SessionID:    req.CodingSessionID,
+			Resume:       true,
+			Fork:         false,
+		})
+		continueUsage := h.usageCtxFor("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "")
+		out := runClaudeStream(jobSink{job}, cmd, "continue-coding", continueUsage)
+
+		// Stale --resume: the coding session file is gone. Surface a clear error
+		// rather than silently starting fresh — the user can still 重新开发
+		// (which forks off the design session) as a fallback.
+		if out.staleSession {
+			job.Append(store.LogLine{Type: "error", Content: "❌ 原 coding 会话已失效（session 文件不存在），请重新发起 coding 或使用重新开发。"})
+			job.Finish(1, store.JobError)
+			return
+		}
+		if out.errMsg != "" {
+			job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+			job.Finish(1, store.JobError)
+			return
+		}
+		if out.finalResult == "" {
+			job.Append(store.LogLine{Type: "error", Content: "❌ Claude 未返回结果，请重试"})
+			job.Finish(1, store.JobError)
+			return
+		}
+		// job_done: keep status="developing" (no UpdateStatus call) and do NOT
+		// update coding_session_id (no UpdateCodingSession call) — every continue
+		// round resumes the SAME original coding session.
+		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		job.Append(store.LogLine{Type: "done", Content: "✅ 继续开发完成！"})
+		// Record the effective developer model for this continue round (success
+		// path only — "most recent successful run" semantics).
+		if perr := h.reqSvc.UpdateDeveloperModel(body.RequirementID, model); perr != nil {
+			log.Printf("[continue-coding] failed to persist developer_model for %s: %v", body.RequirementID, perr)
+		}
+		job.Finish(0, store.JobDone)
+		log.Printf("[continue-coding] job %s finished for %s", job.ID, body.RequirementID)
+	}()
+}
+
 // StreamJob streams a background job's log lines via SSE.
 // Replays all existing lines first, then pushes new ones until the job finishes or the client disconnects.
 func (h *WizardHandler) StreamJob(w http.ResponseWriter, r *http.Request) {
@@ -1272,6 +1448,19 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// Pre-mint + persist the design session id BEFORE spawning claude so it
+	// survives a mid-run restart. Two cases produce a NEW id: forking off the
+	// analyst session (--resume <src> --fork-session --session-id <new>) and the
+	// skip-analysis fresh session (--session-id <new>). A re-run just resumes the
+	// stored design_session_id (no new id).
+	newDesignSID := ""
+	if fork || sourceSID == "" {
+		newDesignSID = util.NewUUID()
+		if perr := h.reqSvc.UpdateDesignSession(id, newDesignSID); perr != nil {
+			log.Printf("[architect-design] failed to persist design session for %s: %v", id, perr)
+		}
+	}
+
 	// Anchor the architect stage to the isolated worktree (created here if the
 	// analyst stage was skipped) so the plan and its session are rooted in the
 	// worktree — otherwise the coding stage forks this session and follows the
@@ -1321,14 +1510,22 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		// context.Background(): the HTTP request has already returned, so we
 		// must not tie the claude subprocess's lifetime to r.Context() (which
 		// is cancelled the moment the handler returns).
+		sessionArg := sourceSID
+		forkSessionID := ""
+		if fork {
+			forkSessionID = newDesignSID
+		} else if sourceSID == "" {
+			sessionArg = newDesignSID // skip-analysis fresh session
+		}
 		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
 			Prompt:         prompt,
 			WorkDir:        workDir,
 			SystemPrompt:   systemPrompt,
 			Model:          cliModelArg(model),
-			SessionID:      sourceSID,
+			SessionID:      sessionArg,
 			Resume:         sourceSID != "",
 			Fork:           fork,
+			ForkSessionID:  forkSessionID,
 			PermissionMode: "plan",
 		})
 		out := runClaudeStream(jobSink{job}, cmd, "architect-design", h.usageCtxFor("architect_design", id, req.ProjectID, job.ID, model, ""))
@@ -1353,13 +1550,10 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
-		// Persist the session id reported by the stream whenever it differs from
-		// the stored one. On a fork this is the new forked id; on the
-		// skip-analysis path it is the fresh session's id — persisting it is what
-		// lets refine-doc / apply-doc resume this stage later (previously it was
-		// only saved on fork, so skip-analysis designs could never be refined).
-		// On a plain resume re-run it equals the stored id, so skip the write.
-		if out.sessionID != "" && out.sessionID != req.DesignSessionID {
+		// The design session id is already persisted upfront. Correct it only if
+		// the CLI reported a different id than the one we pre-minted (a safety
+		// net in case the --session-id override semantics ever change).
+		if out.sessionID != "" && out.sessionID != newDesignSID && out.sessionID != sourceSID {
 			if perr := h.reqSvc.UpdateDesignSession(id, out.sessionID); perr != nil {
 				log.Printf("[architect-design] failed to persist design session for %s: %v", id, perr)
 			}
@@ -2032,25 +2226,40 @@ var developerChatDisallowedTools = []string{"Write", "Edit"}
 // recovery, mirroring runAnalystTurn but for the developer role. firstTurnPrompt
 // is a lazy self-contained prompt (no pre-read — the developer reads files via
 // tools instead); resumePrompt is the framed user message. Write/Edit are
-// disallowed so the turn stays discussion-only. Returns the final result text
-// and the session id that actually landed on disk (a forked or fresh id differs
+// disallowed so the turn stays discussion-only. newSID is the pre-minted id the
+// caller assigned for a fork (--session-id on --fork-session) or a fresh session
+// (--session-id); it is "" on a plain resume. Returns the final result text and
+// the session id that actually landed on disk (a forked or fresh id differs
 // from the input; the caller persists it).
-func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, sessionID string, fork bool, w http.ResponseWriter, rc *http.ResponseController, uctx *usageCtx) (finalResult, newSessionID string, err error) {
+func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, sessionID string, fork bool, newSID string, w http.ResponseWriter, rc *http.ResponseController, uctx *usageCtx) (finalResult, newSessionID string, err error) {
 	resume := sessionID != ""
 	prompt := resumePrompt
 	if !resume {
 		prompt = firstTurnPrompt()
 	}
-	log.Printf("[developer-chat] Running claude stream-json (session=%s, resume=%v, fork=%v), prompt=%d bytes", sessionID, resume, fork, len(prompt))
+	log.Printf("[developer-chat] Running claude stream-json (session=%s, resume=%v, fork=%v, new=%s), prompt=%d bytes", sessionID, resume, fork, newSID, len(prompt))
 
+	// sessionID is the --resume source; newSID is the pre-minted id to assign —
+	// as the forked session id (--session-id on --fork-session) when fork is set,
+	// or as the fresh session id (--session-id) when starting with no session.
+	sessionArg := sessionID
+	forkSessionID := ""
+	if resume {
+		if fork {
+			forkSessionID = newSID
+		}
+	} else {
+		sessionArg = newSID
+	}
 	cmd := h.llm.StreamCmd(ctx, llm.StreamOpts{
 		Prompt:          prompt,
 		WorkDir:         projectPath,
 		SystemPrompt:    systemPrompt,
 		Model:           cliModelArg(model),
-		SessionID:       sessionID,
+		SessionID:       sessionArg,
 		Resume:          resume,
 		Fork:            fork,
+		ForkSessionID:   forkSessionID,
 		DisallowedTools: developerChatDisallowedTools,
 	})
 	out := runClaudeStream(sseSink{w, rc}, cmd, "developer-chat", uctx)
@@ -2240,6 +2449,14 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 		if req.DocType == "design" && requirement != nil && requirement.DesignDocs != "" {
 			sourceSID = util.NewUUID()
 			freshSession = true
+			// Persist the freshly minted id BEFORE the refine run so it survives a
+			// restart, consistent with the other wizard stages (analyst/architect/
+			// coding all persist their pre-minted id up front).
+			if req.RequirementID != "" {
+				if perr := h.reqSvc.UpdateDesignSession(req.RequirementID, sourceSID); perr != nil {
+					log.Printf("[refine-doc] failed to persist design session for %s: %v", req.RequirementID, perr)
+				}
+			}
 		} else {
 			sendStatus(w, rc, "error", "尚未找到该阶段的会话，请先生成"+docLabel+"后再 refine。")
 			fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
@@ -2311,14 +2528,6 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	}
 	refineUsage := h.usageCtxFor("refine_doc", req.RequirementID, refineProjectID, "", model, fmt.Sprintf("{\"doc_type\":%q}", req.DocType))
 	out := runClaudeStream(sseSink{w: w, rc: rc}, cmd, "refine-doc", refineUsage)
-
-	// The fresh-session fallback generated a new session id; persist it so the
-	// next refine/apply turn resumes this conversation instead of re-seeding.
-	if freshSession && out.errMsg == "" && req.RequirementID != "" {
-		if perr := h.reqSvc.UpdateDesignSession(req.RequirementID, sourceSID); perr != nil {
-			log.Printf("[refine-doc] failed to persist design session for %s: %v", req.RequirementID, perr)
-		}
-	}
 
 	if out.errMsg != "" || out.finalResult == "" {
 		// Stale --resume: the prior conversation file is gone. Clear the stored
