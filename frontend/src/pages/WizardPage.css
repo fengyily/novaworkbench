@@ -137,3 +137,27 @@
 .form-input:focus { outline: none; border-color: var(--color-primary); }
 
 .form-actions { display: flex; justify-content: space-between; gap: 12px; margin-top: 20px; }
+
+/* ── Mobile ────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .wizard-steps {
+    flex-wrap: wrap;
+    gap: 8px 0;
+    justify-content: flex-start;
+    padding: 0 4px;
+  }
+
+  .step-line { width: 20px; margin: 0 4px; }
+
+  .step-label { font-size: 12px; }
+
+  .wizard-card { padding: 16px; }
+
+  .wizard-card h2 { font-size: 16px; margin-bottom: 14px; }
+
+  .chat-panel { max-height: 240px; }
+
+  .code-output { max-height: 300px; }
+
+  .form-actions { flex-wrap: wrap; }
+}

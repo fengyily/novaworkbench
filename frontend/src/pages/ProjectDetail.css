@@ -336,8 +336,26 @@
   margin-bottom: 0;
 }
 
-.recent-reqs-section .pr-table tbody tr:last-child td {
-  border-bottom: none;
+/* ── Mobile ────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .project-detail { padding: 16px; }
+
+  .detail-title { font-size: 18px; }
+
+  .run-control-bar {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .compose-detect { width: 100%; }
+
+  .review-requirements-bar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .review-requirements-input { width: 100%; }
 }
 
 /* Requirements tab pagination */

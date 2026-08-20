@@ -67,28 +67,30 @@ export default function Dashboard() {
             </button>
           </div>
         ) : (
-          <table className="project-table">
-            <thead>
-              <tr>
-                <th>名称</th>
-                <th>类型</th>
-                <th>路径</th>
-                <th>状态</th>
-                <th>更新时间</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data?.projects.map(p => (
-                <tr key={p.id} onClick={() => navigate(`/projects/${p.id}`)} className="clickable-row">
-                  <td className="project-name">{p.name}</td>
-                  <td><span className="type-tag">{p.project_type || 'Unknown'}</span></td>
-                  <td className="path-cell">{p.local_path}</td>
-                  <td><span className={`status-badge status-${p.status}`}>{statusBadge(p.status)}</span></td>
-                  <td>{new Date(p.updated_at).toLocaleDateString()}</td>
+          <div className="project-table-wrap">
+            <table className="project-table">
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th>类型</th>
+                  <th>路径</th>
+                  <th>状态</th>
+                  <th>更新时间</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {data?.projects.map(p => (
+                  <tr key={p.id} onClick={() => navigate(`/projects/${p.id}`)} className="clickable-row">
+                    <td className="project-name">{p.name}</td>
+                    <td><span className="type-tag">{p.project_type || 'Unknown'}</span></td>
+                    <td className="path-cell">{p.local_path}</td>
+                    <td><span className={`status-badge status-${p.status}`}>{statusBadge(p.status)}</span></td>
+                    <td>{new Date(p.updated_at).toLocaleDateString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 
