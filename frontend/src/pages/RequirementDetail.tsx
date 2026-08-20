@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
-import { useParams, useNavigate, useLocation } from 'react-router-dom';
+import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, type Requirement, type Project, type MergeState, type RequirementUsage } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
@@ -98,6 +98,81 @@ function CodingLines({ lines }: { lines: { type: string; content: string }[] }) 
   return <>{nodes}</>;
 }
 
+// Strips wizard "knowledge" / "knowledge_result" events out of a log snapshot,
+// returning the plain lines plus the parsed knowledge payload (used when
+// replaying a job after a page refresh — the knowledge lines must never reach
+// the coding/design panel). The result event carries per-entry usage, so the
+// last payload wins.
+type KnowledgeEntry = { title: string; used?: boolean };
+
+function extractKnowledge(log: { type: string; content: string }[]) {
+  const lines: { type: string; content: string }[] = [];
+  let items: KnowledgeEntry[] = [];
+  let empty = false;
+  let any = false;
+  for (const l of log) {
+    if (l.type === 'knowledge' || l.type === 'knowledge_result') {
+      any = true;
+      try {
+        const kb = JSON.parse(l.content ?? '{}') as { count?: number; items?: KnowledgeEntry[] };
+        if (Array.isArray(kb.items)) items = kb.items;
+        empty = (kb.count ?? 0) === 0;
+      } catch { /* malformed frame — ignore */ }
+    } else {
+      lines.push(l);
+    }
+  }
+  return { lines, items, empty, any };
+}
+
+// The wizard's optional "读取项目知识库" step display: rendered at the top of
+// the architect / developer cards when a knowledge event arrived (i.e. the user
+// opted in and the backend read the project knowledge base before the stage).
+// Shows the titles read, a per-entry usage verdict (after the run emits
+// "knowledge_result": ✅ 已引用 / not-directly referenced — a cheap signal, not
+// an exact measurement), and a link to the full knowledge page. Hidden entirely
+// when the option was not used (no knowledge event).
+function KnowledgeReadPanel({ items, empty, projectId }: { items: KnowledgeEntry[]; empty: boolean; projectId?: string }) {
+  if (items.length === 0 && !empty) return null;
+  const usedCount = items.filter(k => k.used === true).length;
+  const assessed = items.length > 0 && items.some(k => k.used !== undefined);
+  return (
+    <div className="knowledge-read-panel">
+      <div className="knowledge-read-header">
+        <span>📚 已读取项目知识库</span>
+        {projectId && (
+          <Link className="btn btn-sm knowledge-read-link" to={`/knowledge?project_id=${projectId}`}>
+            查看知识库全文 →
+          </Link>
+        )}
+      </div>
+      {empty ? (
+        <p className="knowledge-read-empty">暂无相关知识，已直接进入代码分析。</p>
+      ) : (
+        <>
+          <p className="knowledge-read-count">已读取 {items.length} 条相关知识</p>
+          <div className="knowledge-read-tags">
+            {items.map((k, i) => (
+              <span
+                key={i}
+                className={`knowledge-read-tag${k.used === true ? ' tag-used' : k.used === false ? ' tag-unused' : ''}`}
+                title={k.used === true ? 'Claude 在本次运行中实际读取/引用了该知识' : k.used === false ? '未观测到直接使用痕迹（不必然等于无效）' : undefined}
+              >
+                {k.title}
+              </span>
+            ))}
+          </div>
+          {assessed && (
+            <p className="knowledge-read-usage">
+              评估：{usedCount}/{items.length} 条被 Claude 实际读取/引用（未标注者不代表无效，仅供参考）
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function RequirementDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -171,6 +246,17 @@ export default function RequirementDetail() {
   const [branchName, setBranchName] = useState('');
   const [baseBranch, setBaseBranch] = useState('');
   const [availableBranches, setAvailableBranches] = useState<string[]>([]);
+
+  // Optional "读取项目知识库" step (default off). The dev checkbox lives in the
+  // branch modal; the design one has its own confirm modal so the user can opt
+  // in right before generating the technical plan.
+  const [readKnowledgeDev, setReadKnowledgeDev] = useState(false);
+  const [showDesignKnowledgeModal, setShowDesignKnowledgeModal] = useState(false);
+  const [readKnowledgeDesign, setReadKnowledgeDesign] = useState(false);
+  const designNeedsTransitionRef = useRef(false);
+  // Titles read by the backend, surfaced via the SSE "knowledge" event.
+  const [knowledgeItems, setKnowledgeItems] = useState<KnowledgeEntry[]>([]);
+  const [knowledgeEmpty, setKnowledgeEmpty] = useState(false);
 
   // Merge / PR step state (post-coding 合入).
   // mergeState holds the git preview (dev/target branches, uncommitted, pr_url);
@@ -376,6 +462,17 @@ export default function RequirementDetail() {
     designEsRef.current = createEventStream(
       `/api/wizard/jobs/${jobId}/stream`,
       (evt) => {
+        if (evt.type === 'knowledge' || evt.type === 'knowledge_result') {
+          // Optional knowledge pre-read: surface the read titles instead of
+          // appending the raw line to the design panel. The result event
+          // carries the per-entry used flag, so it wins over the earlier one.
+          try {
+            const kb = JSON.parse(evt.content ?? '{}') as { count?: number; items?: KnowledgeEntry[] };
+            if (Array.isArray(kb.items)) setKnowledgeItems(kb.items);
+            if (kb.count !== undefined) setKnowledgeEmpty(kb.count === 0);
+          } catch { /* malformed frame — ignore */ }
+          return;
+        }
         if (evt.type === 'job_done') {
           designEsRef.current?.close();
           designEsRef.current = null;
@@ -442,11 +539,15 @@ export default function RequirementDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refresh]);
 
-  const runArchitectDesign = async () => {
+  const runArchitectDesign = async (useKnowledge: boolean) => {
     if (!id) return;
     setDesigning(true);
     setDesignLines([]);
     setDesignError(false);
+    // Reset the knowledge panel for a fresh run; without a new knowledge event
+    // (option not used) the panel stays hidden.
+    setKnowledgeItems([]);
+    setKnowledgeEmpty(false);
 
     try {
       const res = await authedFetch(`${API_BASE}/api/wizard/architect-design`, {
@@ -454,6 +555,7 @@ export default function RequirementDetail() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           requirement_id: id,
+          read_knowledge: useKnowledge,
           // Per-request model override — empty means the role's configured model.
           ...(architectModel ? { model: architectModel } : {}),
         }),
@@ -465,6 +567,27 @@ export default function RequirementDetail() {
     } catch (err: any) {
       setDesignLines([{ type: 'error', content: '❌ ' + err.message }]);
       setDesigning(false);
+    }
+  };
+
+  // Design-entry gates first show a "read project knowledge?" checkbox modal
+  // (default unchecked) — per 修改意见 "做成可选项，默认不勾选". needsTransition
+  // covers the draft/analyzing entries that must move status to designing
+  // before launching the job; status==='designing' entries run directly.
+  const requestDesignKnowledge = (needsTransition: boolean) => {
+    designNeedsTransitionRef.current = needsTransition;
+    setReadKnowledgeDesign(false); // reset to default (unchecked) each time
+    setShowDesignKnowledgeModal(true);
+  };
+
+  const confirmDesignKnowledge = async () => {
+    setShowDesignKnowledgeModal(false);
+    const useKnowledge = readKnowledgeDesign;
+    if (designNeedsTransitionRef.current) {
+      await transition('designing', '生成技术方案');
+      await runArchitectDesign(useKnowledge);
+    } else {
+      await runArchitectDesign(useKnowledge);
     }
   };
 
@@ -482,7 +605,7 @@ export default function RequirementDetail() {
     if (req.skip_analysis && req.status === 'draft'
         && !req.design_job_id && !req.design_docs) {
       autoStartRef.current = true;
-      transition('designing', '生成技术方案').then(() => runArchitectDesign());
+      transition('designing', '生成技术方案').then(() => runArchitectDesign(false));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [req]);
@@ -516,7 +639,11 @@ export default function RequirementDetail() {
       .then(json => {
         if (!json.success) { setDesigning(false); refresh(); return; }
         const { status, exit_code, log } = json.data as { status: string; exit_code: number; log: { type: string; content: string }[] };
-        if (log && log.length > 0) setDesignLines(coalesceLogLines(log));
+        if (log && log.length > 0) {
+          const kb = extractKnowledge(log);
+          if (kb.items.length > 0 || kb.empty) { setKnowledgeItems(kb.items); setKnowledgeEmpty(kb.empty); }
+          if (kb.lines.length > 0) setDesignLines(coalesceLogLines(kb.lines));
+        }
         if (status === 'running') streamDesignJob(jobId);
         else { setDesigning(false); setDesignError(status === 'error' || exit_code !== 0); refresh(); }
       })
@@ -573,6 +700,16 @@ export default function RequirementDetail() {
     esRef.current = createEventStream(
       `/api/wizard/jobs/${jobId}/stream`,
       (evt) => {
+        if (evt.type === 'knowledge') {
+          // Optional knowledge pre-read: surface the read titles instead of
+          // appending the raw line to the coding panel.
+          try {
+            const kb = JSON.parse(evt.content ?? '{}') as { count?: number; items?: { title: string }[] };
+            setKnowledgeItems(kb.items ?? []);
+            setKnowledgeEmpty((kb.count ?? 0) === 0);
+          } catch { /* malformed frame — ignore */ }
+          return;
+        }
         if (evt.type === 'job_done') {
           esRef.current?.close();
           esRef.current = null;
@@ -605,10 +742,14 @@ export default function RequirementDetail() {
     );
   }, [id, refresh]);
 
-  const doStartCoding = async (bName: string, bBase: string) => {
+  const doStartCoding = async (bName: string, bBase: string, useKnowledge: boolean) => {
     if (!req || !project || !id) return;
     setCoding(true);
     setCodingLines([]);
+    // Reset the knowledge panel for a fresh coding run; without a new knowledge
+    // event (option not used) the panel stays hidden.
+    setKnowledgeItems([]);
+    setKnowledgeEmpty(false);
 
     const design = parseDesign(req.design_docs);
     const baseDesc = (design.plan_markdown
@@ -641,6 +782,7 @@ export default function RequirementDetail() {
           requirement_id: req.id,
           branch_name: bName,
           base_branch: bBase,
+          read_knowledge: useKnowledge,
           // Per-request model override — empty means the role's configured model.
           ...(developerModel ? { model: developerModel } : {}),
         }),
@@ -663,6 +805,7 @@ export default function RequirementDetail() {
     const defaultBase = project.default_branch || 'main';
     setBranchName(defaultBranch);
     setBaseBranch(defaultBase);
+    setReadKnowledgeDev(false); // default unchecked each time
     setShowBranchModal(true);
     authedFetch(`${API_BASE}/api/fs/git-branches?path=${encodeURIComponent(project.local_path)}`)
       .then(r => r.json())
@@ -676,7 +819,7 @@ export default function RequirementDetail() {
 
   const confirmBranchAndStart = () => {
     setShowBranchModal(false);
-    doStartCoding(branchName, baseBranch);
+    doStartCoding(branchName, baseBranch, readKnowledgeDev);
   };
 
   // ── 追加调整: resume the prior coding session, output appends to codingLines
@@ -943,7 +1086,9 @@ export default function RequirementDetail() {
         }
         const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
         if (!log || log.length === 0) return;
-        setCodingLines(coalesceLogLines(log));
+        const kb = extractKnowledge(log);
+        if (kb.items.length > 0 || kb.empty) { setKnowledgeItems(kb.items); setKnowledgeEmpty(kb.empty); }
+        if (kb.lines.length > 0) setCodingLines(coalesceLogLines(kb.lines));
         if (status === 'running') streamJob(savedJobId);
       })
       .catch(() => {});
@@ -1008,6 +1153,26 @@ export default function RequirementDetail() {
 
   return (
     <div className="req-detail">
+      {/* Optional "read project knowledge" confirm modal for the design stage */}
+      {showDesignKnowledgeModal && (
+        <div className="modal-overlay" onClick={() => setShowDesignKnowledgeModal(false)}>
+          <div className="modal-box" onClick={e => e.stopPropagation()}>
+            <h3>📐 生成技术方案</h3>
+            <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+              开始方案设计前，可选择先读取项目知识库中与需求相关的知识。
+            </p>
+            <label className="merge-check" style={{ margin: '8px 0 12px' }}>
+              <input type="checkbox" checked={readKnowledgeDesign} onChange={e => setReadKnowledgeDesign(e.target.checked)} />
+              📚 开始前先读取项目知识库（默认不勾选）
+            </label>
+            <div className="modal-actions">
+              <button className="btn btn-primary" onClick={confirmDesignKnowledge}>确认</button>
+              <button className="btn" onClick={() => setShowDesignKnowledgeModal(false)}>取消</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Branch modal */}
       {showBranchModal && (
         <div className="modal-overlay" onClick={() => setShowBranchModal(false)}>
@@ -1045,6 +1210,13 @@ export default function RequirementDetail() {
                 {availableBranches.map(b => <option key={b} value={b} />)}
               </datalist>
             </div>
+            {/* Optional knowledge pre-read: default unchecked. When checked, the
+                coding job first reads the project knowledge base relevant to the
+                requirement before diving into the code. */}
+            <label className="merge-check">
+              <input type="checkbox" checked={readKnowledgeDev} onChange={e => setReadKnowledgeDev(e.target.checked)} />
+              📚 开始前先读取项目知识库（默认不勾选）
+            </label>
             <div className="modal-actions">
               <button className="btn btn-primary" onClick={confirmBranchAndStart}>🚀 确认，开始开发</button>
               <button className="btn" onClick={() => setShowBranchModal(false)}>取消</button>
@@ -1341,7 +1513,7 @@ export default function RequirementDetail() {
           defaultModel={analystDefaultModel}
           onTurnDone={refresh}
           onWorkingChange={setAnalystWorking}
-          onGenerateDesign={() => transition('designing', '生成技术方案').then(() => runArchitectDesign())}
+          onGenerateDesign={() => requestDesignKnowledge(true)}
           onReset={() => setReq(prev => prev ? { ...prev, status: 'draft' } : prev)}
         />
       )}
@@ -1360,7 +1532,7 @@ export default function RequirementDetail() {
                       then moves status to designing. We transition locally first
                       so the UI flips to the architect stage immediately. */}
                   <button className="btn btn-primary"
-                    onClick={() => transition('designing', '生成技术方案').then(() => runArchitectDesign())}
+                    onClick={() => requestDesignKnowledge(true)}
                     disabled={!!busy}>
                     {busy === '生成技术方案' ? '⏳ ...' : '📐 生成技术方案'}
                   </button>
@@ -1439,7 +1611,7 @@ export default function RequirementDetail() {
               </button>
             )}
             {req.status === 'designing' && hasDesign && (
-              <button className="btn btn-sm" onClick={runArchitectDesign} disabled={designing}>🔄 重新生成</button>
+              <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={designing}>🔄 重新生成</button>
             )}
             {hasDesign && (
               <button
@@ -1454,6 +1626,10 @@ export default function RequirementDetail() {
             )}
           </div>
 
+          {/* Optional knowledge pre-read display (renders only when the user
+              opted in and the backend emitted a knowledge event). */}
+          <KnowledgeReadPanel items={knowledgeItems} empty={knowledgeEmpty} projectId={project?.id} />
+
           {designPanelOpen && (
             <div className="coding-panel" ref={designRef} style={{ marginBottom: 16 }}>
               <CodingLines lines={designLines} />
@@ -1465,7 +1641,7 @@ export default function RequirementDetail() {
             <div className="tab-empty">
               <p>需求分析已完成。方案设计阶段将在 <strong>plan 模式</strong>下探索项目代码，制定具体可执行的技术实现方案（Markdown）。</p>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <button className="btn btn-primary" onClick={() => runArchitectDesign()} disabled={!!busy || designing}>
+                <button className="btn btn-primary" onClick={() => requestDesignKnowledge(false)} disabled={!!busy || designing}>
                   {busy === '生成技术方案' ? '⏳ ...' : '📐 开始制定技术方案'}
                 </button>
                 {/* Roll back to the analyst stage. The backend allows
@@ -1546,6 +1722,10 @@ export default function RequirementDetail() {
       {(stage === 'developer' || stage === 'done') && (hasDesign || req.skip_design) && (
         <div className="detail-section">
           <div className="section-header"><h3>🚀 开发实现</h3></div>
+
+          {/* Optional knowledge pre-read display (renders only when the user
+              opted in and the backend emitted a knowledge event). */}
+          <KnowledgeReadPanel items={knowledgeItems} empty={knowledgeEmpty} projectId={project?.id} />
 
           {(req.status === 'designed' || (req.status === 'draft' && req.skip_design)) && codingLines.length === 0 && !coding && (
             <div className="tab-empty">
