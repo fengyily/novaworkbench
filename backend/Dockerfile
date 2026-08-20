@@ -21,10 +21,13 @@ COPY . .
 COPY --from=frontend /app/dist ./web/dist/
 RUN CGO_ENABLED=0 go build -o /app/server ./cmd/server
 
-FROM alpine:3.21
+FROM node:22-alpine
 WORKDIR /app
+# Pre-install Claude CLI so the wizard pipeline works inside the container
+# without relying on the preflight auto-install path (which dies on restart).
+# ANTHROPIC_AUTH_TOKEN is injected at runtime via docker-compose env, never
+# baked into the image.
+RUN npm install -g @anthropic-ai/claude-code --no-audit --no-fund
 COPY --from=builder /app/server .
-# git/docker aren't part of the image — users install Claude CLI + Node on
-# the host (or rely on the preflight auto-install path).
 EXPOSE 9527
 CMD ["./server"]

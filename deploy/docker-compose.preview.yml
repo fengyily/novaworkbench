@@ -1,0 +1,27 @@
+services:
+  backend:
+    image: ghcr.io/${GHCR_NAMESPACE}/nova:${IMAGE_TAG}
+    restart: unless-stopped
+    environment:
+      - NOVA_PORT=9527
+      - NOVA_AUTOINSTALL=0
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
+      - NOVA_DB_PATH=/root/.novaworkbench/data/nova.db
+      - VIRTUAL_HOST=${VIRTUAL_HOST}
+      - VIRTUAL_PORT=9527
+      - HTTPS_METHOD=noredirect
+    volumes:
+      - /srv/nova/preview/${PROJECT_NAME}/data:/root/.novaworkbench
+      - /srv/nova/preview/${PROJECT_NAME}/workspace:/root/workspace
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9527/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - nginx-proxy
+
+networks:
+  nginx-proxy:
+    external: true
+    name: nginx-proxy
