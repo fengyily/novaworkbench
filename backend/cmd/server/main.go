@@ -46,11 +46,11 @@ func main() {
 	defer database.Close()
 
 	// Services
-	projectSvc := service.NewProjectService(database)
+	platformSvc := service.NewPlatformTokenService(database)
+	projectSvc := service.NewProjectService(database, platformSvc)
 	memorySvc := service.NewMemoryService(database)
 	knowledgeSvc := service.NewKnowledgeService(database)
 	reqSvc := service.NewRequirementService(database)
-	platformSvc := service.NewPlatformTokenService(database)
 	roleSvc := service.NewRoleService(database)
 	settingSvc := service.NewSettingService(database)
 	reportSvc := service.NewReportService(database)

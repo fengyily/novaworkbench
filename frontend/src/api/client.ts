@@ -135,8 +135,21 @@ export interface DashboardData {
 export const projectsApi = {
   list: () => api.get<Project[]>('/api/projects'),
   get: (id: string) => api.get<Project>(`/api/projects/${id}`),
-  add: (local_path: string, remote_url?: string, init_git?: boolean) =>
-    api.post<Project>('/api/projects', { local_path, remote_url: remote_url || '', init_git: init_git || false }),
+  add: (req: {
+    local_path?: string;
+    remote_url?: string;
+    init_git?: boolean;
+    branch?: string;
+    platform_type?: string;
+    platform_token_id?: string;
+  }) => api.post<Project>('/api/projects', {
+    local_path: req.local_path || '',
+    remote_url: req.remote_url || '',
+    init_git: req.init_git || false,
+    branch: req.branch || '',
+    platform_type: req.platform_type || '',
+    platform_token_id: req.platform_token_id || '',
+  }),
   // Soft-delete the project record. When delete_dir is true the local
   // directory is physically removed too (reclaimable later via restore).
   remove: (id: string, opts?: { delete_dir?: boolean }) =>

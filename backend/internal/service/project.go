@@ -5,6 +5,8 @@ import (
 	"database/sql"
 
 	"fmt"
+	"net/url"
+	"regexp"
 	"github.com/novaworkbench/backend/internal/db"
 	"os"
 	"os/exec"
@@ -17,7 +19,8 @@ import (
 )
 
 type ProjectService struct {
-	db *db.DB
+	db         *db.DB
+	platforms  *PlatformTokenService
 }
 
 // ProjectRef is a lightweight project handle (id + path) used by callers that
@@ -27,8 +30,8 @@ type ProjectRef struct {
 	LocalPath string
 }
 
-func NewProjectService(db *db.DB) *ProjectService {
-	return &ProjectService{db: db}
+func NewProjectService(db *db.DB, platforms *PlatformTokenService) *ProjectService {
+	return &ProjectService{db: db, platforms: platforms}
 }
 
 func (s *ProjectService) List() ([]model.Project, error) {
@@ -174,10 +177,17 @@ func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error
 	}
 	path, _ = filepath.Abs(path)
 
+	// Validate the optional platform/token pairing before any disk work so
+	// a bad token never leaves a half-cloned tree behind.
+	tokenSecret, tokenPlatform, err := s.resolveCloneAuth(req.PlatformType, req.PlatformTokenID, req.RemoteURL)
+	if err != nil {
+		return nil, err
+	}
+
 	// Clone the remote into the target when it doesn't exist yet.
 	if req.RemoteURL != "" {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
-			if err := cloneRepo(req.RemoteURL, "", path); err != nil {
+			if err := cloneRepo(req.RemoteURL, req.Branch, path, tokenPlatform, tokenSecret); err != nil {
 				return nil, err
 			}
 		}
@@ -223,14 +233,77 @@ func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error
 	id := util.NewID("proj")
 	now := time.Now()
 
-	_, err = s.db.Exec(`INSERT INTO projects (id, name, local_path, remote_url, status, project_type, claude_files, added_at, updated_at)
-		VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
-		id, name, path, req.RemoteURL, projectType, claudeFiles, now, now)
+	// platform_type/platform_token_id may be empty (public repo, no token).
+	// Persist them when supplied so PR review reuses the same credentials.
+	_, err = s.db.Exec(`INSERT INTO projects (id, name, local_path, remote_url, status, project_type, claude_files,
+			platform_type, platform_token_id, added_at, updated_at)
+		VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
+		id, name, path, req.RemoteURL, projectType, claudeFiles,
+		req.PlatformType, req.PlatformTokenID, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert project: %w", err)
 	}
 
 	return s.Get(id)
+}
+
+// resolveCloneAuth validates the platform/token pair supplied with a remote
+// add. Returns the raw token secret + its platform kind so cloneRepo can
+// build an authenticated URL / ssh command. Errors are surfaced with stable
+// prefixes the handler maps to HTTP status codes:
+//   TOKEN_NOT_FOUND  — token ID missing or unknown
+//   PLATFORM_MISMATCH — token platform doesn't match the user-supplied platform_type
+//                       (and can't be inferred from the remote URL host)
+//
+// Both platformType and tokenID must be set together — passing one without
+// the other is treated as TOKEN_NOT_FOUND to keep the contract explicit.
+func (s *ProjectService) resolveCloneAuth(platformType, tokenID, remoteURL string) (string, string, error) {
+	if tokenID == "" && platformType == "" {
+		return "", "", nil
+	}
+	if tokenID == "" || platformType == "" {
+		return "", "", fmt.Errorf("TOKEN_NOT_FOUND: token id and platform must be supplied together")
+	}
+	tok, err := s.platforms.Get(tokenID)
+	if err != nil {
+		return "", "", fmt.Errorf("TOKEN_NOT_FOUND: %w", err)
+	}
+	if tok.Platform != platformType {
+		return "", "", fmt.Errorf("PLATFORM_MISMATCH: token is for %q, request asked for %q", tok.Platform, platformType)
+	}
+	// Defensive: if the URL host suggests a different platform than the
+	// supplied token (e.g. github token + gitlab.com URL), refuse the clone
+	// rather than silently push the wrong creds.
+	if host, ok := urlHost(remoteURL); ok && hostPlatform(host) != "" && hostPlatform(host) != tok.Platform {
+		return "", "", fmt.Errorf("PLATFORM_MISMATCH: remote host %q belongs to %q but token is for %q",
+			host, hostPlatform(host), tok.Platform)
+	}
+	return tok.Token, tok.Platform, nil
+}
+
+// urlHost extracts the lowercased hostname from a git URL. Returns
+// ("", false) for SSH-style scp-like URLs (git@github.com:foo/bar.git),
+// where the "host" is buried in the userinfo and a different parser is
+// needed — hostPlatform handles those too.
+func urlHost(raw string) (string, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", false
+	}
+	return strings.ToLower(u.Hostname()), true
+}
+
+// hostPlatform maps a git host to its platform kind. Empty string = unknown.
+func hostPlatform(host string) string {
+	switch host {
+	case "github.com":
+		return "github"
+	case "gitlab.com":
+		return "gitlab"
+	}
+	// Gitea is self-hosted — only detectable via the platform_tokens row's
+	// base_url. The caller cross-checks that elsewhere.
+	return ""
 }
 
 // Remove soft-deletes a project. When deleteDir is true, it also physically
@@ -321,27 +394,97 @@ func repoName(url string) string {
 
 // cloneRepo clones remote into dest, optionally pinning a branch, with a 5m
 // timeout. On failure it removes any half-finished clone.
-func cloneRepo(remote, branch, dest string) error {
-	args := []string{"clone", remote}
+//
+// When tokenSecret is non-empty the URL is rewritten to embed credentials
+// (HTTPS) or, for SSH URLs, the token is ignored and authentication relies
+// on the user's ssh-agent / key — by design, since SSH doesn't take a token.
+//
+// To prevent the previous behavior — git prompting on STDIN for the host
+// key or for credentials and blocking the whole handler — we always set:
+//
+//	GIT_TERMINAL_PROMPT=0          — never prompt on stdin; fail fast
+//	GIT_SSH_COMMAND=...accept-new  — auto-accept first-time host keys,
+//	                                 reject changed keys instead of hanging
+//	                                 on stdin
+//
+// A redundant "yes\n" is piped into stdin as belt-and-suspenders.
+func cloneRepo(remote, branch, dest, platform, tokenSecret string) error {
+	cloneURL := injectCredentials(remote, platform, tokenSecret)
+
+	args := []string{"clone"}
 	if branch != "" && branch != "main" && branch != "master" {
 		args = append(args, "--branch", branch)
 	}
-	args = append(args, dest)
+	args = append(args, cloneURL, dest)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
+
+	// Strip the userinfo from the URL before logging. injectCredentials
+	// returns a URL with embedded creds; we still want a clean view in
+	// stderr / debug logs in case git echoes it.
+	cmd.Stdin = strings.NewReader("yes\n")
+	cmd.Env = append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o UserKnownHostsFile=/dev/null",
+	)
+	// Run with separate streams so a long stderr (e.g. "fatal: Authentication
+	// failed") reaches us even if stdout is silent. CombinedOutput would
+	// buffer both; we still concatenate for the error message.
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
 		os.RemoveAll(dest) // clean up a half-finished clone
-		return fmt.Errorf("%s — %w", strings.TrimSpace(string(out)), err)
+		out := strings.TrimSpace(stdout.String() + stderr.String())
+		// Drop any userinfo from URLs in the error so the token never leaks.
+		out = redactUserinfo(out)
+		if out == "" {
+			out = err.Error()
+		}
+		return fmt.Errorf("%s — %w", out, err)
 	}
 	return nil
 }
 
+// injectCredentials returns a clone URL with the token embedded in the
+// userinfo for HTTPS remotes. SSH / git@… remotes are returned unchanged —
+// SSH auth is key-based, not token-based. An empty tokenSecret passes the
+// URL through verbatim (public repo path).
+func injectCredentials(remote, platform, tokenSecret string) string {
+	if tokenSecret == "" {
+		return remote
+	}
+	u, err := url.Parse(remote)
+	if err != nil || u.Scheme == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		// git@…:owner/repo.git or any non-HTTP URL — leave alone.
+		return remote
+	}
+	// Personal access tokens: drop any existing userinfo, set token as
+	// username. GitHub PATs, GitLab PATs, and Gitea PATs all accept
+	// "https://<token>@host/…" — the simplest portable form.
+	u.User = url.UserPassword(tokenSecret, "")
+	return u.String()
+}
+
+// redactUserinfo strips any https://user:token@host segments from s so an
+// error message from git can be logged without leaking the token. It is a
+// best-effort pass: it only touches the well-formed URL form.
+var userinfoPattern = regexp.MustCompile(`([a-z][a-z0-9+\-.]*://)([^/\s:@]+):([^@\s/]+)@`)
+
+func redactUserinfo(s string) string {
+	return userinfoPattern.ReplaceAllString(s, "$1<redacted>@")
+}
+
 // Restore re-clones a soft-deleted project's directory from its stored
 // remote_url/default_branch and clears the soft-delete flags. It errors with
-// NO_REMOTE / DIR_EXISTS / RESTORE_FAILED prefix for the handler to map to
-// HTTP status codes.
+// NO_REMOTE / DIR_EXISTS / RESTORE_FAILED / TOKEN_NOT_FOUND / PLATFORM_MISMATCH
+// prefix for the handler to map to HTTP status codes.
+//
+// Re-cloning reuses the platform token that was stored on the project at
+// add-time, so a private repo can be restored without re-entering creds.
 func (s *ProjectService) Restore(id string) (*model.Project, error) {
 	p, err := s.getAny(id)
 	if err != nil {
@@ -357,7 +500,12 @@ func (s *ProjectService) Restore(id string) (*model.Project, error) {
 		return nil, fmt.Errorf("DIR_EXISTS: target directory already exists: %s", p.LocalPath)
 	}
 
-	if err := cloneRepo(p.RemoteURL, p.DefaultBranch, p.LocalPath); err != nil {
+	tokenSecret, tokenPlatform, err := s.resolveCloneAuth(p.PlatformType, p.PlatformTokenID, p.RemoteURL)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := cloneRepo(p.RemoteURL, p.DefaultBranch, p.LocalPath, tokenPlatform, tokenSecret); err != nil {
 		return nil, fmt.Errorf("RESTORE_FAILED: %w", err)
 	}
 

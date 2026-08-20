@@ -23,10 +23,25 @@ type Project struct {
 	DescriptionHash  string     `json:"-"`
 }
 
+// AddProjectRequest is the body of POST /api/projects.
+//
+// In remote mode (RemoteURL set, LocalPath empty) the server clones the
+// repository into ~/workspace/<repo-name>. To authenticate to a private
+// remote, supply PlatformType + PlatformTokenID — the same token record
+// created under 设置 → 平台 Token. The token is consumed for the clone only;
+// subsequent git operations inside the worktree rely on the credentials
+// git caches in the local repo config.
 type AddProjectRequest struct {
-	LocalPath string `json:"local_path"`
-	RemoteURL string `json:"remote_url"`
-	InitGit   bool   `json:"init_git"`
+	LocalPath       string `json:"local_path"`
+	RemoteURL       string `json:"remote_url"`
+	InitGit         bool   `json:"init_git"`
+	// Optional clone --branch (ignored in local mode).
+	Branch string `json:"branch,omitempty"`
+	// "github" | "gitlab" | "gitea" — required when PlatformTokenID is set.
+	PlatformType string `json:"platform_type,omitempty"`
+	// tok_xxx — when set, used to authenticate the clone and persisted on
+	// the project row for later PR review.
+	PlatformTokenID string `json:"platform_token_id,omitempty"`
 }
 
 type DashboardData struct {

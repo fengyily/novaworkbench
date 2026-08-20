@@ -30,7 +30,7 @@ export default function WizardPage() {
   const handleCreateProject = async () => {
     if (!projectPath || !projectName) return;
     try {
-      await projectsApi.add(projectPath, '', true); // init_git for new projects
+      await projectsApi.add({ local_path: projectPath, init_git: true }); // init_git for new projects
       // Start chat with initial AI greeting after small delay
       setStep(2);
       setTimeout(() => startInitialChat(), 500);
