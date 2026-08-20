@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { platformApi, projectsApi, type PlatformToken } from '../api/client';
-import FolderPicker from '../components/FolderPicker';
 import './AddProject.css';
 
 // Best-effort host → platform map. Mirrors backend internal/service/project.go
@@ -21,8 +20,6 @@ function detectPlatform(url: string): string {
 
 export default function AddProject() {
   const navigate = useNavigate();
-  const [mode, setMode] = useState<'local' | 'remote'>('local');
-  const [localPath, setLocalPath] = useState('');
   const [remoteUrl, setRemoteUrl] = useState('');
   const [branch, setBranch] = useState('');
   const [tokens, setTokens] = useState<PlatformToken[]>([]);
@@ -50,18 +47,14 @@ export default function AddProject() {
     setError(null);
     setLoading(true);
     try {
-      if (mode === 'remote') {
-        const chosen = tokens.find(t => t.id === platformTokenId);
-        const platformType = chosen?.platform ?? inferredPlatform;
-        await projectsApi.add({
-          remote_url: remoteUrl,
-          branch: branch || undefined,
-          platform_type: platformType || undefined,
-          platform_token_id: platformTokenId || undefined,
-        });
-      } else {
-        await projectsApi.add({ local_path: localPath, init_git: true });
-      }
+      const chosen = tokens.find(t => t.id === platformTokenId);
+      const platformType = chosen?.platform ?? inferredPlatform;
+      await projectsApi.add({
+        remote_url: remoteUrl,
+        branch: branch || undefined,
+        platform_type: platformType || undefined,
+        platform_token_id: platformTokenId || undefined,
+      });
       navigate('/');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Unknown error');
@@ -75,77 +68,56 @@ export default function AddProject() {
       <h1 className="page-title">📁 添加项目</h1>
 
       <div className="add-project-card">
-        <div className="mode-tabs">
-          <button
-            className={`mode-tab ${mode === 'local' ? 'active' : ''}`}
-            onClick={() => setMode('local')}
-          >
-            📂 本地目录
-          </button>
-          <button
-            className={`mode-tab ${mode === 'remote' ? 'active' : ''}`}
-            onClick={() => setMode('remote')}
-          >
-            🌐 Git 远程仓库
-          </button>
+        <div className="form-group">
+          <label>Git 仓库地址:</label>
+          <input
+            type="text"
+            value={remoteUrl}
+            onChange={e => setRemoteUrl(e.target.value)}
+            placeholder="https://github.com/user/repo.git  或  git@github.com:user/repo.git"
+            className="form-input"
+          />
+          {inferredPlatform && (
+            <span className="input-hint">
+              识别为 {inferredPlatform === 'github' ? 'GitHub' : inferredPlatform === 'gitlab' ? 'GitLab' : inferredPlatform}
+            </span>
+          )}
         </div>
-
-        {mode === 'local' ? (
-          <FolderPicker value={localPath} onChange={setLocalPath} />
-        ) : (
-          <>
-            <div className="form-group">
-              <label>Git 仓库地址:</label>
-              <input
-                type="text"
-                value={remoteUrl}
-                onChange={e => setRemoteUrl(e.target.value)}
-                placeholder="https://github.com/user/repo.git  或  git@github.com:user/repo.git"
-                className="form-input"
-              />
-              {inferredPlatform && (
-                <span className="input-hint">
-                  识别为 {inferredPlatform === 'github' ? 'GitHub' : inferredPlatform === 'gitlab' ? 'GitLab' : inferredPlatform}
-                </span>
-              )}
-            </div>
-            <div className="form-group">
-              <label>分支（可选）:</label>
-              <input
-                type="text"
-                value={branch}
-                onChange={e => setBranch(e.target.value)}
-                placeholder="默认克隆默认分支"
-                className="form-input"
-              />
-            </div>
-            <div className="form-group">
-              <label>平台 Token（私有仓库必填）:</label>
-              <select
-                value={platformTokenId}
-                onChange={e => setPlatformTokenId(e.target.value)}
-                className="form-input"
-              >
-                <option value="">— 无（仅适用公开仓库）—</option>
-                {visibleTokens.map(t => (
-                  <option key={t.id} value={t.id}>
-                    {t.name} ({t.platform})
-                  </option>
-                ))}
-              </select>
-              {visibleTokens.length === 0 && tokens.length > 0 && (
-                <span className="input-hint">
-                  当前 URL 未匹配已配置的 Token；请到「设置 → 平台 Token」添加，或确认 URL 正确。
-                </span>
-              )}
-              {tokens.length === 0 && (
-                <span className="input-hint">
-                  尚未配置任何 Token；公开仓库可不选，私有仓库请先到「设置 → 平台 Token」添加。
-                </span>
-              )}
-            </div>
-          </>
-        )}
+        <div className="form-group">
+          <label>分支（可选）:</label>
+          <input
+            type="text"
+            value={branch}
+            onChange={e => setBranch(e.target.value)}
+            placeholder="默认克隆默认分支"
+            className="form-input"
+          />
+        </div>
+        <div className="form-group">
+          <label>平台 Token（私有仓库必填）:</label>
+          <select
+            value={platformTokenId}
+            onChange={e => setPlatformTokenId(e.target.value)}
+            className="form-input"
+          >
+            <option value="">— 无（仅适用公开仓库）—</option>
+            {visibleTokens.map(t => (
+              <option key={t.id} value={t.id}>
+                {t.name} ({t.platform})
+              </option>
+            ))}
+          </select>
+          {visibleTokens.length === 0 && tokens.length > 0 && (
+            <span className="input-hint">
+              当前 URL 未匹配已配置的 Token；请到「设置 → 平台 Token」添加，或确认 URL 正确。
+            </span>
+          )}
+          {tokens.length === 0 && (
+            <span className="input-hint">
+              尚未配置任何 Token；公开仓库可不选，私有仓库请先到「设置 → 平台 Token」添加。
+            </span>
+          )}
+        </div>
 
         {error && <div className="form-error">❌ {error}</div>}
 
@@ -154,7 +126,7 @@ export default function AddProject() {
           <button
             className="btn btn-primary"
             onClick={handleSubmit}
-            disabled={loading || (mode === 'local' ? !localPath : !remoteUrl)}
+            disabled={loading || !remoteUrl}
           >
             {loading ? '⏳ 添加中...' : '开始添加'}
           </button>
