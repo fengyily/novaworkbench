@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -14,8 +15,10 @@ import (
 	"github.com/novaworkbench/backend/internal/handler"
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/middleware"
+	"github.com/novaworkbench/backend/internal/preflight"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
+	"github.com/novaworkbench/backend/web"
 )
 
 func main() {
@@ -78,6 +81,27 @@ func main() {
 		log.Printf("[main] claude config legacy migrate: %v", err)
 	}
 
+	// Preflight dependency registry — probes the host for Claude CLI / Node /
+	// npm / git / docker and (when NOVA_AUTOINSTALL is not "0") tries to
+	// install anything missing in the background. Same advisory style as
+	// llm.New: never halts the server; AI features already degrade to stub
+	// responses when claude is missing (see gateway.go:53).
+	pfRegistry := preflight.New(os.Getenv("CLAUDE_BIN"))
+	pfResults := pfRegistry.CheckAll(context.Background())
+	for _, r := range pfResults {
+		if !r.Installed {
+			log.Printf("[preflight] ⚠️  %s 未安装: %s (手动: %s)", r.Label, r.Err, r.Manual)
+		} else {
+			log.Printf("[preflight] ✅ %s: %s (%s)", r.Label, r.Path, r.Version)
+		}
+	}
+	if os.Getenv("NOVA_AUTOINSTALL") != "0" {
+		// Best-effort background install. Uses a noop sink at startup since
+		// the shared JobStore isn't constructed yet — installs run but
+		// progress isn't streamed until the user opens the settings page.
+		go pfRegistry.EnsureAll(context.Background(), nil)
+	}
+
 	// Shared LLM gateway (wraps the claude CLI). The active claude_configs row
 	// supplies ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL (via claudeCfgSvc, the
 	// ClaudeEnvProvider); settingSvc supplies the direct HTTP LLM channel for
@@ -91,13 +115,14 @@ func main() {
 
 	// Handlers
 	projectH := handler.NewProjectHandler(projectSvc, scannerSvc)
-	healthH := handler.NewHealthHandler()
+	healthH := handler.NewHealthHandler(pfRegistry)
 	dashboardH := handler.NewDashboardHandler(projectSvc)
 	fsH := handler.NewFsHandler()
 	memoryH := handler.NewMemoryHandler(memorySvc)
 	knowledgeH := handler.NewKnowledgeHandler(knowledgeSvc)
 	scannerH := handler.NewScannerHandler(scannerSvc)
 	sharedJobs := store.NewJobStore(50)
+	preflightH := handler.NewPreflightHandler(pfRegistry, sharedJobs)
 	reqH := handler.NewRequirementHandler(reqSvc, llmGateway, sharedJobs, usageSvc)
 	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc)
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
@@ -118,6 +143,14 @@ func main() {
 
 	// Health
 	mux.HandleFunc("GET /api/health", healthH.Health)
+
+	// Preflight — dependency snapshot + background install jobs. Reuses the
+	// shared JobStore + the same SSE shape as wizardH.StreamJob so the
+	// frontend can subscribe identically.
+	mux.HandleFunc("GET /api/preflight", preflightH.Snapshot)
+	mux.HandleFunc("POST /api/preflight/install", preflightH.Install)
+	mux.HandleFunc("GET /api/preflight/jobs/{id}", preflightH.GetJob)
+	mux.HandleFunc("GET /api/preflight/jobs/{id}/stream", preflightH.StreamJob)
 
 	// Auth (login is public; logout/me require a session — enforced by the
 	// Auth middleware, which is applied to the whole mux below).
@@ -289,7 +322,28 @@ func main() {
 	// Apply middleware. Auth sits inside Logger/CORS so unauthenticated
 	// requests are still logged and CORS headers are present on 401s.
 	// (CORS is outermost so preflight OPTIONS never reaches Auth.)
-	handler := middleware.CORS(middleware.Logger(middleware.Auth(aclSvc)(mux)))
+	//
+	// Two mux separation: apiMux is auth-gated (every /api/... route needs
+	// a session); spaMux serves the embedded frontend at / and is PUBLIC so
+	// the /login page can render before the user signs in. A top-level
+	// dispatcher routes by URL prefix.
+	apiHandler := middleware.CORS(middleware.Logger(middleware.Auth(aclSvc)(mux)))
+
+	// Register the embedded SPA (frontend/dist via //go:embed) on a separate
+	// public mux. Must run AFTER every precise /api/... route is registered
+	// on `mux` so the catch-all only fires for non-API paths on the SPA mux.
+	// No-ops when no frontend was embedded (backend-only mode via
+	// NOVA_SKIP_FRONTEND=1).
+	spaMux := http.NewServeMux()
+	web.Register(spaMux)
+
+	rootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			apiHandler.ServeHTTP(w, r)
+			return
+		}
+		spaMux.ServeHTTP(w, r)
+	})
 
 	port := os.Getenv("NOVA_PORT")
 	if port == "" {
@@ -298,7 +352,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:         ":" + port,
-		Handler:      handler,
+		Handler:      rootHandler,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 0, // disabled — background jobs and SSE handlers manage their own timeouts
 		IdleTimeout:  120 * time.Second,

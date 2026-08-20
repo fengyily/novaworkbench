@@ -24,6 +24,7 @@ func DefaultPermissions() []model.Permission {
 		{ID: "perm_set_claude", Key: "setting.claude", Name: "Claude 配置", Module: "setting", SortOrder: 24},
 		{ID: "perm_set_llm", Key: "setting.llm", Name: "直连 LLM", Module: "setting", SortOrder: 25},
 		{ID: "perm_set_database", Key: "setting.database", Name: "数据库", Module: "setting", SortOrder: 26},
+		{ID: "perm_set_preflight", Key: "setting.preflight", Name: "环境依赖", Module: "setting", SortOrder: 27},
 	}
 }
 
@@ -53,7 +54,7 @@ func DefaultRolePermissions() map[string][]string {
 	return map[string][]string{
 		"developer": {
 			"menu.dashboard", "menu.projects", "menu.knowledge", "menu.chat", "menu.reports",
-			"menu.settings", "setting.roles_ai",
+			"menu.settings", "setting.roles_ai", "setting.preflight",
 		},
 		"viewer": {
 			"menu.dashboard", "menu.projects", "menu.knowledge",

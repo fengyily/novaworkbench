@@ -12,6 +12,9 @@ services:
       - NOVA_PORT=9527
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Default: install missing deps at startup (NOVA_AUTOINSTALL=1).
+      # Set to "0" to skip — install manually via the settings page instead.
+      - NOVA_AUTOINSTALL=${NOVA_AUTOINSTALL:-1}
       # Database driver: empty = local SQLite file (default). Set to mysql or
       # postgres plus NOVA_DB_DSN to use an external database, e.g.
       #   NOVA_DB_DRIVER=postgres
@@ -25,26 +28,15 @@ services:
       - ${HOME}/workspace:${HOME}/workspace
     restart: unless-stopped
     healthcheck:
+      # /api/health now includes a deps summary + `ready` flag (true when
+      # Claude CLI is installed). The compose-level check still only needs
+      # HTTP 200 — `ready` surfaces in the frontend status bar.
       test: ["CMD", "wget", "-qO-", "http://localhost:9527/api/health"]
       interval: 10s
       timeout: 5s
       retries: 3
 
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      target: dev
-    container_name: novaworkbench-frontend
-    ports:
-      - "5173:5173"
-    environment:
-      - VITE_API_BASE=http://backend:9527
-    volumes:
-      - ./frontend/src:/app/src
-      - ./frontend/public:/app/public
-      - ./frontend/index.html:/app/index.html
-      - ./frontend/vite.config.ts:/app/vite.config.ts
-    depends_on:
-      - backend
-    restart: unless-stopped
+# Frontend service intentionally removed: the Go binary now embeds the SPA
+# via //go:embed (see backend/web/embed.go) and serves it at "/" with a
+# react-router fallback. For local frontend HMR dev, run separately:
+#   cd frontend && npm run dev    (vite on :5173 with /api proxied to :9527)

@@ -777,3 +777,28 @@ export function hasPermission(perms: string[] | undefined, key: string): boolean
   if (!perms) return false;
   return perms.includes('*') || perms.includes(key);
 }
+
+// Preflight — runtime dependency check + auto-install. The JSON wrapper
+// handles snapshot + install-start; install progress streams over SSE so the
+// UI uses raw fetch + EventSource (see SettingsPreflight).
+export interface PreflightDep {
+  key: string;
+  label: string;
+  installed: boolean;
+  version: string;
+  path: string;
+  required: boolean;
+  depends_on: string[];
+  err: string;
+  manual: string;
+}
+export interface PreflightSnapshot {
+  deps: PreflightDep[];
+  claude_bin: string;
+  autoinstall: boolean;
+}
+export const preflightApi = {
+  snapshot: () => api.get<PreflightSnapshot>('/api/preflight'),
+  install: (key: string) => api.post<{ job_id: string }>('/api/preflight/install', { key }),
+  installStreamUrl: (jobId: string) => `${API_BASE}/api/preflight/jobs/${jobId}/stream`,
+};
