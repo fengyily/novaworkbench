@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
@@ -2093,7 +2092,12 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	// final event: the CLI never exits on its own, holding stdout open so a
 	// plain scanner.Scan() blocks forever and the job never finishes. Killing
 	// the group on completion lets runClaudeStream return promptly.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	//
+	// The Setpgid assignment + group-kill logic live in wizard_proc_unix.go
+	// (//go:build !windows) because process groups are a POSIX concept. On
+	// Windows the helpers in wizard_proc_windows.go fall back to signaling
+	// just the direct process — no orphan grand-children issue exists there.
+	setProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		return claudeStreamOutcome{errMsg: "启动 Claude 失败: " + err.Error()}
 	}
@@ -2370,22 +2374,9 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	return out
 }
 
-// killProcessGroup sends SIGTERM to the claude subprocess's process group
-// (set up via Setpgid in runClaudeStream). It is idempotent and safe to call
-// after the process has already exited (errors are ignored). This reaps
-// tool/MCP grandchildren that may otherwise keep the stdout pipe open.
-func killProcessGroup(cmd *exec.Cmd) {
-	if cmd.Process == nil {
-		return
-	}
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err != nil {
-		// Fall back to signaling just the direct process.
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		return
-	}
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-}
+// killProcessGroup is implemented per-platform in wizard_proc_unix.go and
+// wizard_proc_windows.go — process groups are a POSIX concept, so the
+// Windows build falls back to signaling just the direct process.
 
 // analystFirstTurnDisallowedTools blocks file/code tools on the analyst first
 // turn so Claude answers from the pre-read context without tool use. The
