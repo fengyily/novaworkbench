@@ -24,7 +24,15 @@ docker network create nginx-proxy 2>/dev/null || true
 
 echo ">>> [1b] Ensuring the SSH user is in the 'docker' group"
 if ! id -nG "${USER}" | grep -qw docker; then
-  sudo usermod -aG docker "${USER}" || usermod -aG docker "${USER}"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    usermod -aG docker "${USER}"
+  elif sudo -n true 2>/dev/null; then
+    sudo usermod -aG docker "${USER}"
+  else
+    echo "!! cannot add ${USER} to docker group (no sudo / no root)" >&2
+    exit 1
+  fi
+  # Active for any new shell; current process keeps its old groups.
   echo "    added ${USER} to docker group — re-login (or 'newgrp docker') for it to take effect"
 fi
 

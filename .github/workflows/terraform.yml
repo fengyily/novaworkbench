@@ -1,0 +1,98 @@
+name: Terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Terraform action'
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+      auto_approve:
+        description: 'Skip the -auto-approve flag (only applies to apply / destroy)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: read
+  pull-requests: write  # for the plan-summary PR comment
+
+env:
+  TF_VERSION: 1.9.8
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Write terraform.tfvars
+        env:
+          SSH_PUBLIC_KEY: ${{ secrets.TERRAFORM_SSH_PUBLIC_KEY }}
+        run: |
+          cat > terraform.tfvars <<EOF
+          ssh_public_key = "$SSH_PUBLIC_KEY"
+          ssh_private_key_path = "/tmp/terraform_key"
+          EOF
+
+      - name: Write SSH private key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.TERRAFORM_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > /tmp/terraform_key
+          chmod 600 /tmp/terraform_key
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: terraform init
+        env:
+          TF_VAR_aliyun_access_key_id: ${{ secrets.ALI_ACCESS_KEY_ID }}
+          TF_VAR_aliyun_access_key_secret: ${{ secrets.ALI_ACCESS_KEY_SECRET }}
+        run: terraform init -input=false
+
+      - name: terraform validate
+        run: terraform validate
+
+      - name: terraform ${{ inputs.action }}
+        id: tf
+        env:
+          TF_VAR_aliyun_access_key_id: ${{ secrets.ALI_ACCESS_KEY_ID }}
+          TF_VAR_aliyun_access_key_secret: ${{ secrets.ALI_ACCESS_KEY_SECRET }}
+          TF_AUTO_APPROVE: ${{ inputs.auto_approve }}
+        run: |
+          ARGS=()
+          if [[ "${{ inputs.action }}" != "plan" && "$TF_AUTO_APPROVE" == "true" ]]; then
+            ARGS+=("-auto-approve")
+          fi
+          terraform ${{ inputs.action }} -var-file=terraform.tfvars -input=false "${ARGS[@]}"
+
+      - name: terraform output (apply only)
+        if: inputs.action == 'apply' && steps.tf.outputs.exitcode == '0'
+        env:
+          TF_VAR_aliyun_access_key_id: ${{ secrets.ALI_ACCESS_KEY_ID }}
+          TF_VAR_aliyun_access_key_secret: ${{ secrets.ALI_ACCESS_KEY_SECRET }}
+        run: |
+          echo "## Terraform apply output" >> $GITHUB_STEP_SUMMARY
+          terraform output -no-color >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f /tmp/terraform_key ~/.ssh/known_hosts
