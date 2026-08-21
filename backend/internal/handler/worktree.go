@@ -61,15 +61,24 @@ func worktreeRegistered(projectPath, wtPath string) (bool, error) {
 // requirement on the given branch, based off baseBranch. Returns the worktree's
 // absolute path. Returns ("", nil) when branch is "" (caller wants the legacy
 // path). ErrNotAGitRepo lets the caller fall back without erroring.
+//
+// baseBranch is a hint (typically the project's default branch such as "main"
+// or "master"). We do NOT trust it blindly — git fails with "invalid reference:
+// <base>" when the supplied ref doesn't exist, and the previous code's fallback
+// `git worktree add <path> <branch>` also failed because the branch never got
+// created in that case. The robust strategy:
+//   1. Try `git worktree add -b <branch> <path>` (no base) → branches off
+//      HEAD, which is always a valid commit.
+//   2. Fall back to `git worktree add -b <branch> <path> <baseBranch>` only
+//      if the user explicitly supplied one.
+//   3. Finally try attaching to the existing branch (`worktree add <path>
+//      <branch>`) — covers the case where the branch already exists locally.
 func EnsureWorktree(projectPath, reqID, branch, baseBranch string) (string, error) {
 	if branch == "" {
 		return "", nil
 	}
 	if _, err := gitRun(projectPath, "rev-parse", "--is-inside-work-tree"); err != nil {
 		return "", ErrNotAGitRepo
-	}
-	if baseBranch == "" {
-		baseBranch = "main"
 	}
 	wtPath := WorktreePath(projectPath, reqID)
 
@@ -89,17 +98,49 @@ func EnsureWorktree(projectPath, reqID, branch, baseBranch string) (string, erro
 		_ = os.RemoveAll(wtPath)
 	}
 
-	// Try creating a NEW branch off base. If the branch already exists, fall
-	// back to attaching the worktree to it (mirrors the legacy -b/checkout
-	// fallback in StartCoding).
-	if _, err := gitRun(projectPath, "worktree", "add", "-b", branch, wtPath, baseBranch); err == nil {
-		return wtPath, nil
-	}
-	if out, err := gitRun(projectPath, "worktree", "add", wtPath, branch); err == nil {
+	// 1. Create a new branch off HEAD (always valid). This is the safe default
+	//    — works on every repo regardless of whether "main"/"master" exists.
+	if out, err := gitRun(projectPath, "worktree", "add", "-b", branch, wtPath); err == nil {
 		return wtPath, nil
 	} else {
-		return "", fmt.Errorf("git worktree add: %s: %w", out, err)
+		// "fatal: a branch named <name> already exists" is the only expected
+		// failure here — fall through to the attach path below.
+		if !strings.Contains(out, "already exists") {
+			// Any other failure (e.g. dirty working tree) — surface the
+			// stderr so the user knows what to do.
+			if out != "" {
+				return "", fmt.Errorf("git worktree add: %s", out)
+			}
+			return "", fmt.Errorf("git worktree add: %w", err)
+		}
 	}
+
+	// 2. User-supplied base branch exists and the branch exists in another
+	//    worktree (or was deleted but not pruned) → recreate from the base.
+	if baseBranch != "" {
+		if out, err := gitRun(projectPath, "worktree", "add", "-b", branch, wtPath, baseBranch); err == nil {
+			return wtPath, nil
+		} else if !strings.Contains(out, "already exists") {
+			if out != "" {
+				return "", fmt.Errorf("git worktree add (%s): %s", baseBranch, out)
+			}
+			return "", fmt.Errorf("git worktree add (%s): %w", baseBranch, err)
+		}
+	}
+
+	// 3. Attach the worktree to the existing branch — covers the case where
+	//    the branch already exists locally from a previous run.
+	if out, err := gitRun(projectPath, "worktree", "add", wtPath, branch); err != nil {
+		// Both -b (off HEAD) and the attach attempt failed. Surface the
+		// attach failure's stderr verbatim — that's the most informative
+		// signal (e.g. "invalid reference: <branch>" means the branch
+		// simply doesn't exist).
+		if out != "" {
+			return "", fmt.Errorf("git worktree add: %s", out)
+		}
+		return "", fmt.Errorf("git worktree add: %w", err)
+	}
+	return wtPath, nil
 }
 
 // RemoveWorktree removes a registered worktree (and prunes stale worktree
