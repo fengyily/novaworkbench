@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
+import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, type Requirement, type Project, type MergeState, type RequirementUsage } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
@@ -387,10 +387,25 @@ export default function RequirementDetail() {
   // latest claude turns.
   const [usage, setUsage] = useState<RequirementUsage | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
+  // Per-invocation rows for the "追加调整" steps (adjust_coding +
+  // developer_chat + continue_coding). Loaded in parallel with usage() so the
+  // detailed history (each turn's model / tokens / cost / time / summary) is
+  // always available when the rollup is.
+  const [adjustRows, setAdjustRows] = useState<UsageRow[] | null>(null);
   const loadUsage = useCallback(async () => {
     if (!id) return;
     setUsageLoading(true);
-    try { setUsage(await usageApi.requirement(id)); } catch { /* ignore */ }
+    try {
+      setUsage(await usageApi.requirement(id));
+    } catch { /* ignore */ }
+    try {
+      const [chat, dev, cont] = await Promise.all([
+        usageApi.rows(id, 'adjust_coding'),
+        usageApi.rows(id, 'developer_chat'),
+        usageApi.rows(id, 'continue_coding'),
+      ]);
+      setAdjustRows([...chat, ...dev, ...cont].sort((a, b) => (a.created_at < b.created_at ? -1 : 1)));
+    } catch { /* ignore */ }
     finally { setUsageLoading(false); }
   }, [id]);
 
@@ -1494,16 +1509,18 @@ export default function RequirementDetail() {
               </thead>
               <tbody>
                 {usage.by_step.map(s => (
-                  <tr key={`${s.step}:${s.model}`}>
-                    <td data-label="步骤">{s.label || stepLabels[s.step] || s.step}</td>
-                    <td data-label="模型"><code className="pr-branch">{s.model || '未知模型'}</code></td>
-                    <td data-label="输入" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(s).toLocaleString()}</td>
-                    <td data-label="输出" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.output_tokens.toLocaleString()}</td>
-                    <td data-label="缓存读" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_read_tokens.toLocaleString()}</td>
-                    <td data-label="缓存建" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_creation_tokens.toLocaleString()}</td>
-                    <td data-label="费用" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{fmtCost(s.costs)}</td>
-                    <td data-label="次数" style={{ fontSize: 12 }}>{s.count}</td>
-                  </tr>
+                  <Fragment key={`${s.step}:${s.model}`}>
+                    <tr>
+                      <td data-label="步骤">{s.label || stepLabels[s.step] || s.step}</td>
+                      <td data-label="模型"><code className="pr-branch">{s.model || '未知模型'}</code></td>
+                      <td data-label="输入" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(s).toLocaleString()}</td>
+                      <td data-label="输出" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.output_tokens.toLocaleString()}</td>
+                      <td data-label="缓存读" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_read_tokens.toLocaleString()}</td>
+                      <td data-label="缓存建" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_creation_tokens.toLocaleString()}</td>
+                      <td data-label="费用" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{fmtCost(s.costs)}</td>
+                      <td data-label="次数" style={{ fontSize: 12 }}>{s.count}</td>
+                    </tr>
+                  </Fragment>
                 ))}
                 <tr className="table-cards-total" style={{ borderTop: '2px solid var(--color-border)' }}>
                   <td data-label="合计" style={{ fontWeight: 600 }}>合计</td>
@@ -1520,6 +1537,70 @@ export default function RequirementDetail() {
             <small style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
               输入 = 直接输入 + 缓存读 + 缓存建（均按计费输入计入）。仅统计已完成的完整调用。
             </small>
+
+            {adjustRows && adjustRows.length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6, color: 'var(--color-text)' }}>
+                  📋 追问 / 调整历史（{adjustRows.length} 次）
+                </div>
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {adjustRows.map((r, i) => (
+                    <div
+                      key={r.id}
+                      style={{
+                        background: '#FFFFFF',
+                        border: '1px solid #E2E8F0',
+                        borderLeft: '4px solid #F59E0B',
+                        borderRadius: 6,
+                        padding: '10px 12px',
+                        boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 6, fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ background: '#F59E0B', color: '#FFFFFF', borderRadius: 10, padding: '1px 8px', fontWeight: 700, fontSize: 11 }}>
+                            #{i + 1}
+                          </span>
+                          <span style={{ fontWeight: 600, color: 'var(--color-text)' }}>
+                            {stepLabels[r.step] || r.step}
+                          </span>
+                          <code className="pr-branch" style={{ fontSize: 11 }}>{r.model || '未知模型'}</code>
+                        </span>
+                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-text-muted)' }}>
+                          {new Date(r.created_at).toLocaleString()}
+                        </span>
+                      </div>
+                      {r.summary && (
+                        <div
+                          style={{
+                            background: '#FFFBEB',
+                            border: '1px dashed #F59E0B',
+                            borderRadius: 4,
+                            padding: '6px 8px',
+                            marginBottom: 6,
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: 12,
+                            color: '#1E293B',
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                            lineHeight: 1.5,
+                          }}
+                        >
+                          📤 {r.summary}
+                        </div>
+                      )}
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--color-text-secondary)', fontFamily: 'var(--font-mono)' }}>
+                        <span>输入 <strong style={{ color: 'var(--color-text)' }}>{usageTotalInput(r).toLocaleString()}</strong></span>
+                        <span>输出 <strong style={{ color: 'var(--color-text)' }}>{r.output_tokens.toLocaleString()}</strong></span>
+                        <span style={{ color: 'var(--color-text-muted)' }}>缓存读 {r.cache_read_tokens.toLocaleString()}</span>
+                        <span style={{ color: 'var(--color-text-muted)' }}>缓存建 {r.cache_creation_tokens.toLocaleString()}</span>
+                        <span style={{ color: 'var(--color-primary)', fontWeight: 600 }}>费用 {fmtCost(r.costs)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </>
         ) : (
           <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>

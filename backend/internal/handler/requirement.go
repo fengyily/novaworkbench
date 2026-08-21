@@ -250,6 +250,34 @@ func (h *RequirementHandler) SaveChatHistory(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
+// GetCodingChat returns the persisted 追加调整 (developer-chat) history for
+// a requirement, so the chat panel can rehydrate after a refresh. The
+// returned JSON is always a non-null array string.
+func (h *RequirementHandler) GetCodingChat(w http.ResponseWriter, r *http.Request) {
+	messages, err := h.svc.GetCodingChat(r.PathValue("id"))
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, messages)
+}
+
+// SaveCodingChat upserts the 追加调整 chat history for a requirement. The
+// frontend calls this after each completed turn so the conversation survives
+// a page refresh; the message array is the full developer-chat history.
+func (h *RequirementHandler) SaveCodingChat(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Messages string `json:"messages"` }
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON")
+		return
+	}
+	if err := h.svc.SaveCodingChat(r.PathValue("id"), req.Messages); err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
 // ClearAnalysisSession clears the stored claude analyst session id for a
 // requirement, so the next analyst-chat turn mints a fresh conversation instead
 // of --resume-ing a broken or over-long one. The chat's "clear" action calls

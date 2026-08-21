@@ -488,6 +488,7 @@
   border-radius: 6px;
 }
 
+
 .deep-refine-panel .chat-input-row { display: flex; gap: 8px; margin-bottom: 10px; align-items: flex-end; }
 .deep-refine-panel .chat-input-row .form-input { flex: 1; }
 .deep-refine-panel .chat-textarea {

@@ -278,6 +278,8 @@ func main() {
 	mux.HandleFunc("DELETE /api/requirements/{id}", reqH.Delete)
 	mux.HandleFunc("GET /api/requirements/{id}/chat-history", reqH.GetChatHistory)
 	mux.HandleFunc("PUT /api/requirements/{id}/chat-history", reqH.SaveChatHistory)
+	mux.HandleFunc("GET /api/requirements/{id}/coding-chat", reqH.GetCodingChat)
+	mux.HandleFunc("PUT /api/requirements/{id}/coding-chat", reqH.SaveCodingChat)
 	mux.HandleFunc("DELETE /api/requirements/{id}/analysis-session", reqH.ClearAnalysisSession)
 	mux.HandleFunc("POST /api/requirements/{id}/archive", reqH.Archive)
 	mux.HandleFunc("POST /api/requirements/{id}/unarchive", reqH.Unarchive)
@@ -285,6 +287,7 @@ func main() {
 	// Token usage (per-requirement / per-project aggregation; review rows
 	// are recorded but excluded from project totals — surfaced separately).
 	mux.HandleFunc("GET /api/usage/requirement/{id}", usageH.Requirement)
+	mux.HandleFunc("GET /api/usage/requirement/{id}/rows", usageH.Rows)
 	mux.HandleFunc("GET /api/usage/by-requirement", usageH.ByRequirement)
 	mux.HandleFunc("GET /api/usage/project/{id}", usageH.Project)
 

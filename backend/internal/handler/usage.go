@@ -22,6 +22,11 @@ type usageRecorder interface {
 // config was active when the request ran; Currency is that config's currency
 // snapshot — both let cost be recomputed from the config's current prices.
 // Pass nil to skip recording (e.g. when no UsageService is wired).
+//
+// Summary is a short Chinese label for what produced this row (e.g. the
+// truncated text of a 追加调整 request). It is persisted into the meta JSON
+// under the "summary" key so the requirement-detail token table can show a
+// collapsible per-row description per invocation. Empty stays empty.
 type usageCtx struct {
 	Rec            usageRecorder
 	RequirementID  string
@@ -32,6 +37,39 @@ type usageCtx struct {
 	ClaudeConfigID string
 	Currency       string
 	Meta           string
+	Summary        string
+}
+
+// summaryMetaMaxLen caps the persisted summary so a long 追加调整 prompt
+// doesn't bloat the token_usage row. 200 chars is enough to recognize the
+// adjustment in the log; longer text is elided with "…".
+const summaryMetaMaxLen = 200
+
+// buildSummaryMeta returns the JSON to drop into the token_usage.meta column.
+// If extra already contains a "summary" key, it is overwritten with the
+// supplied summary (keeping any other caller-provided keys intact). If extra
+// is empty/non-JSON, the result is a single-key {"summary":…} object. The
+// summary is truncated to summaryMetaMaxLen runes.
+func buildSummaryMeta(extra, summary string) string {
+	if summary == "" {
+		return extra
+	}
+	truncated := summary
+	if r := []rune(summary); len(r) > summaryMetaMaxLen {
+		truncated = string(r[:summaryMetaMaxLen]) + "…"
+	}
+	out := map[string]any{}
+	if extra != "" {
+		// Preserve caller-supplied fields (e.g. {"doc_type":"design"}); on parse
+		// failure fall through and overwrite — the caller is the only writer.
+		_ = json.Unmarshal([]byte(extra), &out)
+	}
+	out["summary"] = truncated
+	b, err := json.Marshal(out)
+	if err != nil {
+		return extra
+	}
+	return string(b)
 }
 
 // extractUsage reads the four token counts from a stream-json result event's
@@ -83,7 +121,7 @@ func (c *usageCtx) recordFrom(evt map[string]interface{}) {
 		Model:               c.Model,
 		ClaudeConfigID:      c.ClaudeConfigID,
 		Currency:            c.Currency,
-		Meta:                c.Meta,
+		Meta:                buildSummaryMeta(c.Meta, c.Summary),
 		InputTokens:         in,
 		OutputTokens:        out,
 		CacheCreationTokens: cc,
@@ -101,6 +139,28 @@ type UsageHandler struct {
 
 func NewUsageHandler(svc *service.UsageService) *UsageHandler {
 	return &UsageHandler{svc: svc}
+}
+
+// Rows returns one token_usage row per invocation for a requirement, optionally
+// filtered by step. The requirement-detail UI uses this to show every
+// individual 追加调整 (model, tokens, cost, time, summary) — the per-step
+// rollup hides which model each adjustment actually used. Empty step returns
+// all rows for the requirement.
+//
+// GET /api/usage/requirement/{id}/rows?step=adjust_coding
+func (h *UsageHandler) Rows(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "INVALID", "missing requirement id")
+		return
+	}
+	step := r.URL.Query().Get("step")
+	rows, err := h.svc.RowsByStep(id, step)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "USAGE_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
 }
 
 // Requirement returns per-step + total token usage for one requirement.
