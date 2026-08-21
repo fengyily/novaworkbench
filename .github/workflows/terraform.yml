@@ -20,6 +20,11 @@ on:
         options:
           - 'false'
           - 'true'
+      server_public_ip:
+        description: 'Public IPv4 of the ECS the DNS records point at (leave empty to fall back to the SERVER_PUBLIC_IP repo variable)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -33,6 +38,10 @@ jobs:
     defaults:
       run:
         working-directory: terraform
+    env:
+      # Input wins; fall back to the SERVER_PUBLIC_IP repo variable so the
+      # workflow works both ad-hoc (dispatch with an IP) and pre-configured.
+      TF_VAR_server_public_ip: ${{ inputs.server_public_ip != '' && inputs.server_public_ip || vars.SERVER_PUBLIC_IP }}
     steps:
       - uses: actions/checkout@v4
 
@@ -40,6 +49,14 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Verify server_public_ip is set
+        run: |
+          if [[ -z "${TF_VAR_server_public_ip}" ]]; then
+            echo "::error::server_public_ip is empty. Either set the SERVER_PUBLIC_IP Actions variable (repo Settings → Secrets and variables → Actions → Variables) or supply it as the 'Server IP' workflow input when dispatching."
+            exit 1
+          fi
+          echo "server_public_ip is set"
 
       - name: terraform fmt
         run: terraform fmt -check -recursive
@@ -49,8 +66,6 @@ jobs:
           # Sensitive credentials (Secrets — masked in logs)
           TF_VAR_aliyun_access_key_id: ${{ secrets.ALI_ACCESS_KEY_ID }}
           TF_VAR_aliyun_access_key_secret: ${{ secrets.ALI_ACCESS_KEY_SECRET }}
-          # Non-sensitive runtime value (Variable — visible in logs)
-          TF_VAR_server_public_ip: ${{ vars.SERVER_PUBLIC_IP }}
         run: terraform init -input=false
 
       - name: terraform validate
@@ -61,7 +76,6 @@ jobs:
         env:
           TF_VAR_aliyun_access_key_id: ${{ secrets.ALI_ACCESS_KEY_ID }}
           TF_VAR_aliyun_access_key_secret: ${{ secrets.ALI_ACCESS_KEY_SECRET }}
-          TF_VAR_server_public_ip: ${{ vars.SERVER_PUBLIC_IP }}
           TF_AUTO_APPROVE: ${{ inputs.auto_approve }}
         run: |
           ARGS=()
@@ -75,7 +89,6 @@ jobs:
         env:
           TF_VAR_aliyun_access_key_id: ${{ secrets.ALI_ACCESS_KEY_ID }}
           TF_VAR_aliyun_access_key_secret: ${{ secrets.ALI_ACCESS_KEY_SECRET }}
-          TF_VAR_server_public_ip: ${{ vars.SERVER_PUBLIC_IP }}
         run: |
           echo "## Terraform apply output" >> $GITHUB_STEP_SUMMARY
           terraform output -no-color >> $GITHUB_STEP_SUMMARY

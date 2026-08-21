@@ -22,9 +22,10 @@ to keep the blast radius small.
 
 ## Required Variables
 
-The Terraform workflow writes a `terraform.tfvars` file from inputs.
-Either pre-populate it locally, or supply `server_public_ip` via the
-workflow's `inputs` (see below).
+Supply `server_public_ip` either as the workflow's **Server IP** dispatch
+input (see below) or via the `SERVER_PUBLIC_IP` repo Actions variable; the
+input wins when both are set. Pre-populate a local `terraform.tfvars` for
+manual runs.
 
 | Variable           | Description                                               |
 |--------------------|-----------------------------------------------------------|
@@ -45,8 +46,12 @@ sensible defaults — override in `terraform.tfvars` if needed.
    - **Server IP**: your ECS's public IPv4 (e.g. `47.91.xx.xx`)
 
 The workflow injects the AK/SK as `TF_VAR_aliyun_access_key_id` /
-`TF_VAR_aliyun_access_key_secret` and writes `server_public_ip` into
-`terraform.tfvars`.
+`TF_VAR_aliyun_access_key_secret` Secrets and `server_public_ip` as the
+`TF_VAR_server_public_ip` env var. `server_public_ip` is taken from the
+**Server IP** dispatch input, falling back to the `SERVER_PUBLIC_IP` repo
+Actions variable when the input is left empty. The workflow fails fast
+with a clear error if neither is set (Aliyun's `AddDomainRecord` rejects an
+empty `Value`).
 
 ### Manual (once, then automate)
 
