@@ -293,6 +293,31 @@ func urlHost(raw string) (string, bool) {
 	return strings.ToLower(u.Hostname()), true
 }
 
+// isSSHRemote reports whether raw is an SSH-form git URL that requires the
+// `ssh` binary on PATH (i.e. `git` would invoke `GIT_SSH_COMMAND=ssh …`).
+// Both the explicit `ssh://` scheme and the scp-like `user@host:path` form
+// count; plain https/http URLs do not, even though they may also use a
+// token via injectCredentials.
+func isSSHRemote(raw string) bool {
+	s := strings.TrimSpace(raw)
+	if strings.HasPrefix(s, "ssh://") || strings.HasPrefix(s, "git+ssh://") {
+		return true
+	}
+	// scp-like form: `user@host:path`. url.Parse places the whole thing in
+	// Path for this shape, so the URL-based scheme check misses it. Fall
+	// back to a regex — `[user@]host:path` with no scheme prefix.
+	if strings.Contains(s, "://") {
+		return false // explicit non-ssh scheme wins
+	}
+	if i := strings.Index(s, "@"); i > 0 {
+		rest := s[i+1:]
+		if j := strings.Index(rest, ":"); j > 0 && !strings.Contains(rest[:j], "/") {
+			return true
+		}
+	}
+	return false
+}
+
 // hostPlatform maps a git host to its platform kind. Empty string = unknown.
 func hostPlatform(host string) string {
 	switch host {
@@ -445,6 +470,12 @@ func cloneRepo(remote, branch, dest, platform, tokenSecret string) error {
 		// actionable hint instead of the raw `executable file not found`.
 		if isMissingExecutable(err) {
 			return fmt.Errorf("git 未安装或不在 PATH 中，无法克隆仓库 %s：请在服务端安装 git（如 Alpine: apk add git）", redactUserinfo(remote))
+		}
+		// SSH remotes on a minimal image: `git` is there but `ssh` is not,
+		// and GIT_SSH_COMMAND=ssh … fails with `ssh: not found`. Detect that
+		// pattern and tell the user what to install (Alpine: openssh-client).
+		if isSSHRemote(remote) && strings.Contains(out, "ssh:") && (strings.Contains(out, "not found") || strings.Contains(out, "No such file")) {
+			return fmt.Errorf("ssh 未安装或不在 PATH 中，无法克隆 SSH 仓库 %s：请在服务端安装 openssh 客户端（如 Alpine: apk add openssh-client），或将远程地址改为 https://", redactUserinfo(remote))
 		}
 		if out == "" {
 			out = err.Error()
