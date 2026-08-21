@@ -9,7 +9,8 @@ import AtMentionTextarea from '../components/AtMentionTextarea';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { exportDesignPdf } from '../utils/exportDesignPdf';
-import { appendLogLine, coalesceLogLines } from '../utils/logLines';
+import { appendLogLine, coalesceLogLines, type LogLine } from '../utils/logLines';
+import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import './RequirementDetail.css';
 
 interface DesignData {
@@ -57,16 +58,40 @@ function stageFor(status: string, skipDesign?: boolean): Stage {
 // plain text that blends into the panel. Joining also avoids spurious
 // mid-line breaks: token deltas often split a single source line across two
 // LogLines, and rendering each in its own block div would wrap them apart.
-// tool_call / tool_result / phase / error / done lines render as before.
-function CodingLines({ lines }: { lines: { type: string; content: string }[] }) {
+// Renders the design / coding / merge job's progress panel: groups phase
+// + tool_call lines into named phases (with per-phase + per-tool-call
+// durations), while message / result / error / done / conflict lines render
+// as before so the AI summary and conflict list keep their ReactMarkdown
+// styling.
+function CodingLines({ lines, working }: { lines: LogLine[]; working?: boolean }) {
+  // Re-render every 500ms while working so any trailing (still-active) phase
+  // shows a live duration. The counter value is unused.
+  useTick(!!working);
   const nodes: ReactNode[] = [];
-  let i = 0;
   let key = 0;
+
+  // Walk through the line stream. When we hit a `phase` line, accumulate
+  // until the next `phase` (or end) and render the run as a single phase
+  // block. message / result / error / done / conflict pass through.
+  let i = 0;
   while (i < lines.length) {
     const line = lines[i];
-    // "message" lines are streamed token-by-token; group consecutive ones and
-    // render through ReactMarkdown so code blocks/headings/lists become real
-    // elements instead of blending into plain text.
+    if (line.type === 'phase') {
+      const phaseStart = i;
+      const group: LogLine[] = [];
+      while (i < lines.length && lines[i].type === 'phase') {
+        group.push(lines[i]);
+        i++;
+      }
+      while (i < lines.length && lines[i].type === 'tool_call') {
+        group.push(lines[i]);
+        i++;
+      }
+      nodes.push(
+        <PhaseBlock key={key++} group={group} working={!!working} phaseStartIdx={phaseStart} lines={lines} />,
+      );
+      continue;
+    }
     if (line.type === 'message') {
       const group: string[] = [];
       while (i < lines.length && lines[i].type === 'message') {
@@ -76,9 +101,11 @@ function CodingLines({ lines }: { lines: { type: string; content: string }[] }) 
       nodes.push(
         <div key={key++} className="coding-line coding-line-message coding-message-md">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{group.join('')}</ReactMarkdown>
-        </div>
+        </div>,
       );
-    } else if (line.type === 'result') {
+      continue;
+    }
+    if (line.type === 'result') {
       // The "result" line is the dev-complete summary emitted as a single
       // LogLine (e.g. "全部完成。下面是实现总结。…" + Markdown). Render it
       // through ReactMarkdown too — otherwise the summary's headings/code
@@ -86,17 +113,63 @@ function CodingLines({ lines }: { lines: { type: string; content: string }[] }) 
       nodes.push(
         <div key={key++} className="coding-line coding-line-message coding-message-md">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{line.content}</ReactMarkdown>
-        </div>
+        </div>,
       );
       i++;
-    } else {
-      nodes.push(
-        <div key={key++} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
-      );
-      i++;
+      continue;
     }
+    nodes.push(
+      <div key={key++} className={`coding-line coding-line-${line.type}`}>{line.content}</div>,
+    );
+    i++;
   }
   return <>{nodes}</>;
+}
+
+// One phase block: header (label + elapsed) + thinking line + tool_call rows.
+// `group` is the consecutive run of phase + tool_call lines. `working` flips
+// the trailing phase into live-tick mode.
+function PhaseBlock({
+  group,
+  working,
+  phaseStartIdx,
+  lines,
+}: {
+  group: LogLine[];
+  working: boolean;
+  phaseStartIdx: number;
+  lines: LogLine[];
+}) {
+  const phases = buildPhaseGroups(group);
+  // The first phase in `group` is always the one the user is looking at;
+  // mark it active iff `working` AND the next line in the original stream
+  // (if any) isn't another phase boundary.
+  const lastInOriginal = phaseStartIdx + group.length >= lines.length;
+  const phase = phases[0];
+  if (!phase) return null;
+  const active = working && lastInOriginal && phase.isActive;
+  const displayMs = active ? Date.now() - phase.startedAt : phase.durationMs;
+  return (
+    <div className={`coding-line-phase-group${active ? ' active' : ''}`}>
+      <div className="coding-line-phase-header">
+        <span className="coding-line-phase-label">{phase.label}</span>
+        <span className="coding-line-phase-time">{formatDuration(displayMs)}</span>
+      </div>
+      {phase.thinking && (
+        <div className="coding-line coding-line-phase">{phase.thinking.content}</div>
+      )}
+      {phase.toolCalls.map((tc, j) => (
+        <div key={j} className="coding-line coding-line-tool_call">
+          <span>{tc.content}</span>
+          {tc.durationMs != null && tc.durationMs > 0 && (
+            <span className="coding-line-entry-time">
+              {' · '}{formatDuration(tc.durationMs)}
+            </span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 // Strips wizard "knowledge" / "knowledge_result" events out of a log snapshot,
@@ -106,8 +179,8 @@ function CodingLines({ lines }: { lines: { type: string; content: string }[] }) 
 // last payload wins.
 type KnowledgeEntry = { title: string; used?: boolean };
 
-function extractKnowledge(log: { type: string; content: string }[]) {
-  const lines: { type: string; content: string }[] = [];
+function extractKnowledge(log: LogLine[]) {
+  const lines: LogLine[] = [];
   let items: KnowledgeEntry[] = [];
   let empty = false;
   let any = false;
@@ -120,6 +193,8 @@ function extractKnowledge(log: { type: string; content: string }[]) {
         empty = (kb.count ?? 0) === 0;
       } catch { /* malformed frame — ignore */ }
     } else {
+      // Preserve `at` so the phase timings survive a snapshot replay after a
+      // page refresh mid-stage.
       lines.push(l);
     }
   }
@@ -232,7 +307,7 @@ export default function RequirementDetail() {
   const analystDefaultModel = roleDefaultModels['analyst'] ?? '';
   const architectDefaultModel = roleDefaultModels['architect'] ?? '';
   const developerDefaultModel = roleDefaultModels['developer'] ?? '';
-  const [codingLines, setCodingLines] = useState<{ type: string; content: string }[]>([]);
+  const [codingLines, setCodingLines] = useState<LogLine[]>([]);
   const [coding, setCoding] = useState(false);
   const codingRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventStream | null>(null);
@@ -269,14 +344,14 @@ export default function RequirementDetail() {
   const [mergeTarget, setMergeTarget] = useState('main');
   const [mergeCommitMsg, setMergeCommitMsg] = useState('');
   const [mergeDeleteBranch, setMergeDeleteBranch] = useState(false);
-  const [mergeLines, setMergeLines] = useState<{ type: string; content: string }[]>([]);
+  const [mergeLines, setMergeLines] = useState<LogLine[]>([]);
   const [merging, setMerging] = useState(false);
   const [conflictFiles, setConflictFiles] = useState<string[] | null>(null);
   const [prLink, setPrLink] = useState('');
   const mergeEsRef = useRef<EventStream | null>(null);
 
   // Streaming design state (architect phase)
-  const [designLines, setDesignLines] = useState<{ type: string; content: string }[]>([]);
+  const [designLines, setDesignLines] = useState<LogLine[]>([]);
   const [designing, setDesigning] = useState(false);
   // Set when the design job ended in an error status. The stream panel
   // collapses on success (the design renders standalone), but on failure we
@@ -490,8 +565,10 @@ export default function RequirementDetail() {
           return;
         }
         // Coalesce consecutive "模型思考中… (N tokens)" phase lines into one
-        // updatable row instead of stacking one per heartbeat.
-        setDesignLines(prev => appendLogLine(prev, { type: evt.type, content: evt.content ?? '' }));
+        // updatable row instead of stacking one per heartbeat. Use the
+        // backend-stamped `at` so phase timings stay accurate.
+        const at = typeof evt.at === 'number' ? evt.at : Date.now();
+        setDesignLines(prev => appendLogLine(prev, { type: evt.type, content: evt.content ?? '', at }));
       },
       () => {
         designEsRef.current = null;
@@ -639,7 +716,7 @@ export default function RequirementDetail() {
       .then(r => r.json())
       .then(json => {
         if (!json.success) { setDesigning(false); refresh(); return; }
-        const { status, exit_code, log } = json.data as { status: string; exit_code: number; log: { type: string; content: string }[] };
+        const { status, exit_code, log } = json.data as { status: string; exit_code: number; log: LogLine[] };
         if (log && log.length > 0) {
           const kb = extractKnowledge(log);
           if (kb.items.length > 0 || kb.empty) { setKnowledgeItems(kb.items); setKnowledgeEmpty(kb.empty); }
@@ -733,8 +810,10 @@ export default function RequirementDetail() {
           return;
         }
         // Coalesce consecutive "模型思考中… (N tokens)" phase lines into one
-        // updatable row instead of stacking one per heartbeat.
-        setCodingLines(prev => appendLogLine(prev, { type: evt.type, content: evt.content ?? '' }));
+        // updatable row instead of stacking one per heartbeat. Use the
+        // backend-stamped `at` so phase timings stay accurate.
+        const at = typeof evt.at === 'number' ? evt.at : Date.now();
+        setCodingLines(prev => appendLogLine(prev, { type: evt.type, content: evt.content ?? '', at }));
       },
       () => {
         esRef.current = null;
@@ -900,7 +979,7 @@ export default function RequirementDetail() {
   // log lines (a "conflict" line drives the conflict panel, a "pr_link" line
   // surfaces the create-PR link). Shared by the live job_done handler and the
   // restore-on-refresh effect below.
-  const applyMergeSignals = useCallback((lines: { type: string; content: string }[]) => {
+  const applyMergeSignals = useCallback((lines: LogLine[]) => {
     const conflict = lines.find(l => l.type === 'conflict');
     if (conflict) {
       try {
@@ -924,7 +1003,7 @@ export default function RequirementDetail() {
     setConflictFiles(null);
     if (id) localStorage.setItem(`merge_job_${id}`, jobId);
 
-    let acc: { type: string; content: string }[] = [];
+    let acc: LogLine[] = [];
     mergeEsRef.current = createEventStream(
       `/api/wizard/jobs/${jobId}/stream`,
       (evt) => {
@@ -939,7 +1018,11 @@ export default function RequirementDetail() {
           if (exitOk && !conflict) refreshMergeState();
           return;
         }
-        const line = { type: evt.type, content: evt.content ?? '' };
+        const line: LogLine = {
+          type: evt.type,
+          content: evt.content ?? '',
+          at: typeof evt.at === 'number' ? evt.at : Date.now(),
+        };
         // Coalesce consecutive "模型思考中… (N tokens)" phase lines into one
         // updatable row instead of stacking one per heartbeat.
         acc = appendLogLine(acc, line);
@@ -1056,7 +1139,7 @@ export default function RequirementDetail() {
           localStorage.removeItem(`merge_job_${id}`);
           return;
         }
-        const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
+        const { status, log } = json.data as { status: string; log: LogLine[] };
         if (!log || log.length === 0) return;
         setMergeLines(coalesceLogLines(log));
         applyMergeSignals(log);
@@ -1085,7 +1168,7 @@ export default function RequirementDetail() {
           localStorage.removeItem(`coding_job_${id}`);
           return;
         }
-        const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
+        const { status, log } = json.data as { status: string; log: LogLine[] };
         if (!log || log.length === 0) return;
         const kb = extractKnowledge(log);
         if (kb.items.length > 0 || kb.empty) { setKnowledgeItems(kb.items); setKnowledgeEmpty(kb.empty); }
@@ -1640,7 +1723,7 @@ export default function RequirementDetail() {
 
           {designPanelOpen && (
             <div className="coding-panel" ref={designRef} style={{ marginBottom: 16 }}>
-              <CodingLines lines={designLines} />
+              <CodingLines lines={designLines} working={designing} />
               {designProcessActive && <div className="coding-line coding-line-tool_call">⏳ Claude 正在 plan 模式下制定技术方案...</div>}
             </div>
           )}
@@ -1763,7 +1846,7 @@ export default function RequirementDetail() {
 
           {(codingLines.length > 0 || coding) && (
             <div className="coding-panel" ref={codingRef}>
-              <CodingLines lines={codingLines} />
+              <CodingLines lines={codingLines} working={coding} />
               {coding && <div className="coding-line coding-line-tool_call">⏳ Claude 正在工作...</div>}
             </div>
           )}
@@ -1866,7 +1949,7 @@ export default function RequirementDetail() {
 
                 {mergeLines.length > 0 && (
                   <div className="coding-panel merge-panel">
-                    <CodingLines lines={mergeLines} />
+                    <CodingLines lines={mergeLines} working={merging} />
                     {merging && <div className="coding-line coding-line-tool_call">⏳ 执行中...</div>}
                   </div>
                 )}

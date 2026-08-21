@@ -15,6 +15,7 @@
 export interface LogLine {
   type: string;
   content: string;
+  at?: number; // Unix ms; 后端自动注入；老数据/直连 SSE 兜底缺省
 }
 
 const THINKING_PREFIX = '🤔 模型思考中';

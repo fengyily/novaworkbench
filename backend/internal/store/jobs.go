@@ -10,6 +10,7 @@ import (
 type LogLine struct {
 	Type    string `json:"type"` // "tool_call" | "tool_result" | "message" | "error" | "done"
 	Content string `json:"content"`
+	At      int64  `json:"at,omitempty"` // Unix ms; set automatically by Job.Append / sseSink.emit / sendStatus
 }
 
 type JobStatus string
@@ -46,6 +47,9 @@ func (j *Job) SetModel(model string) {
 }
 
 func (j *Job) Append(line LogLine) {
+	if line.At == 0 {
+		line.At = time.Now().UnixMilli()
+	}
 	j.mu.Lock()
 	j.Log = append(j.Log, line)
 	subs := j.subs

@@ -5,6 +5,7 @@ import { API_BASE, authedFetch, requirementsApi } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import AtMentionTextarea from './AtMentionTextarea';
 import { appendLogLine, type LogLine } from '../utils/logLines';
+import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import ModelSelect from './ModelSelect';
 
 interface Props {
@@ -143,7 +144,9 @@ export default function DeepRefineChat({
           esRef.current?.close();
           esRef.current = null;
           setChatting(false);
-          setToolLog([]);
+          // Keep toolLog visible so the user can see phase timings for the
+          // just-finished turn. `isWorking` will drop, and the render block
+          // still shows the phase view as long as toolLog is non-empty.
           const finalText = aiTextRef.current.trim();
           setMessages(prev => {
             const next = [...prev];
@@ -162,7 +165,7 @@ export default function DeepRefineChat({
           esRef.current?.close();
           esRef.current = null;
           setChatting(false);
-          setToolLog([]);
+          // Keep toolLog visible — same reason as job_done above.
           setMessages(prev => {
             const next = [...prev];
             const idx = next.length - 1;
@@ -175,8 +178,12 @@ export default function DeepRefineChat({
         }
         if (evt.type === 'tool_call' || evt.type === 'phase') {
           // Coalesce consecutive "模型思考中… (N tokens)" phase lines into a
-          // single updatable row instead of stacking one per heartbeat.
-          setToolLog(prev => appendLogLine(prev.slice(-19), { type: evt.type, content: evt.content ?? '' }));
+          // single updatable row instead of stacking one per heartbeat. Use
+          // the backend-stamped `at` (or Date.now() as a client-side fallback
+          // if the server didn't send one) so phaseGroups can compute
+          // accurate per-phase + per-tool-call durations.
+          const at = typeof evt.at === 'number' ? evt.at : Date.now();
+          setToolLog(prev => appendLogLine(prev.slice(-60), { type: evt.type, content: evt.content ?? '', at }));
           return;
         }
         if (evt.type === 'message') {
@@ -214,18 +221,24 @@ export default function DeepRefineChat({
               });
               return;
             }
-            const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
+            const { status, log } = json.data as { status: string; log: { type: string; content: string; at?: number }[] };
             if (status === 'running') {
               // transient drop — re-arm the stream
               streamAnalystJob(jobId);
             } else {
               // finished but we missed job_done — reconstruct from the snapshot.
               aiTextRef.current = '';
+              const replayLines: LogLine[] = [];
               for (const l of log || []) {
                 if (l.type === 'message') aiTextRef.current += l.content;
+                // Restore the phase/tool_call activity feed so the user can
+                // still see phase timings after a missed job_done frame.
+                if (l.type === 'phase' || l.type === 'tool_call') {
+                  replayLines.push({ type: l.type, content: l.content, at: l.at });
+                }
               }
               setChatting(false);
-              setToolLog([]);
+              setToolLog(replayLines);
               const finalText = aiTextRef.current.trim();
               setMessages(prev => {
                 const next = [...prev];
@@ -415,16 +428,10 @@ export default function DeepRefineChat({
           );
         })}
 
-        {/* Live tool-call activity feed */}
-        {isWorking && toolLog.length > 0 && (
-          <div className="tool-log">
-            {toolLog.map((entry, i) => (
-              <div key={i} className={`tool-log-entry${i === toolLog.length - 1 ? ' active' : ''}`}>
-                {entry.content}
-              </div>
-            ))}
-          </div>
-        )}
+        {/* Live / finished tool-call activity feed, grouped by phase.
+            Stays mounted after the job ends so the user can review phase
+            timings for the just-finished turn. */}
+        {toolLog.length > 0 && <ToolLogPhases toolLog={toolLog} isWorking={isWorking} />}
 
         {/* Spinner when working but no activity yet */}
         {showSpinner && (
@@ -497,4 +504,53 @@ function buildReplyTemplate(content: string): string {
   const lines: string[] = [];
   for (let i = 1; i <= maxNum; i++) lines.push(`${i}. `);
   return lines.join('\n');
+}
+
+// Renders the analyst turn's phase + tool-call activity as collapsible-style
+// rows with per-phase and per-tool-call elapsed time. The active (trailing)
+// phase ticks live via useTick; finished phases show their frozen duration.
+function ToolLogPhases({ toolLog, isWorking }: { toolLog: LogLine[]; isWorking: boolean }) {
+  // Re-render every 500ms while working so the active phase's elapsed time
+  // updates in place. The counter value is unused.
+  useTick(isWorking);
+  const phases = buildPhaseGroups(toolLog);
+  if (phases.length === 0) return null;
+  const firstAt = phases[0].startedAt;
+  const lastPhase = phases[phases.length - 1];
+  const lastAt = lastPhase.isActive ? Date.now() : lastPhase.finishedAt;
+  const totalMs = Math.max(0, lastAt - firstAt);
+  return (
+    <div className="tool-log">
+      <div className="tool-log-summary">
+        工具调用 · {phases.length} 个阶段 · 总计 {formatDuration(totalMs)}
+      </div>
+      {phases.map((p, i) => {
+        const active = p.isActive && isWorking;
+        const displayMs = active ? Date.now() - p.startedAt : p.durationMs;
+        return (
+          <div key={i} className={`tool-log-phase${active ? ' active' : ''}`}>
+            <div className="tool-log-phase-header">
+              <span className="tool-log-phase-label">{p.label}</span>
+              <span className="tool-log-phase-time">
+                {active ? `已用 ${formatDuration(displayMs)}` : formatDuration(displayMs)}
+              </span>
+            </div>
+            {p.thinking && (
+              <div className="tool-log-thinking">{p.thinking.content}</div>
+            )}
+            {p.toolCalls.map((tc, j) => (
+              <div key={j} className="tool-log-entry">
+                <span>{tc.content}</span>
+                {tc.durationMs != null && tc.durationMs > 0 && (
+                  <span className="tool-log-entry-time">
+                    {' · '}{formatDuration(tc.durationMs)}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
 }

@@ -326,6 +326,65 @@
 .coding-line-error { color: #fca5a5; }
 .coding-line-done { color: #86efac; font-weight: 600; }
 
+/* Phase grouping for the wizard's tool-log / coding-panel activity feed.
+   `phase` events open a new group; `tool_call` events under it render as
+   children with their own per-tool duration. The trailing (still-running)
+   phase gets a sky-blue left bar + 500ms live-ticked elapsed time. */
+.coding-line-summary,
+.tool-log-summary {
+  font-size: 11px;
+  color: #94a3b8;
+  padding: 4px 0 8px;
+  border-bottom: 1px dashed #334155;
+  margin-bottom: 6px;
+  font-family: var(--font-sans, system-ui);
+}
+
+.coding-line-phase-group,
+.tool-log-phase {
+  margin-bottom: 8px;
+  padding: 4px 0;
+}
+.coding-line-phase-group.active,
+.tool-log-phase.active {
+  border-left: 2px solid #38bdf8;
+  padding-left: 8px;
+}
+
+.coding-line-phase-header,
+.tool-log-phase-header {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 600;
+  color: #cbd5e1;
+  font-size: 12px;
+  margin-bottom: 4px;
+  gap: 12px;
+}
+.coding-line-phase-time,
+.tool-log-phase-time {
+  color: #94a3b8;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.coding-line-entry-time,
+.tool-log-entry-time {
+  color: #64748b;
+  font-size: 11px;
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.coding-line-thinking,
+.tool-log-thinking {
+  color: #94a3b8;
+  font-size: 12px;
+  padding-left: 8px;
+  font-style: italic;
+}
+
 /* Markdown rendering of grouped assistant "message" lines inside the dark
    coding panel. The panel background is #0f172a; code blocks get a slightly
    lighter slate background (#1e293b) + border so they stand out instead of

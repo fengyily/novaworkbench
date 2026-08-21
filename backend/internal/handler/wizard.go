@@ -1607,9 +1607,12 @@ func (h *WizardHandler) StreamJob(w http.ResponseWriter, r *http.Request) {
 				// Job finished — send final status event and close
 				_, status, exitCode := job.Snapshot()
 				doneData, _ := json.Marshal(map[string]interface{}{
-					"type":      "job_done",
-					"status":    string(status),
-					"exit_code": exitCode,
+					"type":        "job_done",
+					"status":      string(status),
+					"exit_code":   exitCode,
+					"started_at":  job.StartedAt.UnixMilli(),
+					"finished_at": job.FinishedAt.UnixMilli(),
+					"duration_ms": job.FinishedAt.Sub(job.StartedAt).Milliseconds(),
 				})
 				fmt.Fprintf(w, "data: %s\n\n", string(doneData))
 				rc.Flush()
@@ -1992,7 +1995,11 @@ func extractJSON(s string) string {
 }
 
 func sendStatus(w io.Writer, rc *http.ResponseController, typ string, content string) {
-	jsonLine, _ := json.Marshal(map[string]string{"type": typ, "content": content})
+	jsonLine, _ := json.Marshal(map[string]interface{}{
+		"type":    typ,
+		"content": content,
+		"at":      time.Now().UnixMilli(),
+	})
 	fmt.Fprintf(w, "data: %s\n\n", string(jsonLine))
 }
 
@@ -2086,6 +2093,9 @@ type sseSink struct {
 }
 
 func (s sseSink) emit(line store.LogLine) {
+	if line.At == 0 {
+		line.At = time.Now().UnixMilli()
+	}
 	data, _ := json.Marshal(line)
 	fmt.Fprintf(s.w, "data: %s\n\n", string(data))
 	s.rc.Flush()
