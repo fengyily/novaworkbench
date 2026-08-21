@@ -13,17 +13,13 @@ on:
           - apply
           - destroy
       auto_approve:
-        description: 'Skip the -auto-approve flag (only applies to apply / destroy)'
+        description: 'Skip the interactive confirmation prompt (apply / destroy only)'
         required: false
         default: 'false'
         type: choice
         options:
           - 'false'
           - 'true'
-      server_public_ip:
-        description: 'Public IPv4 of the ECS (required for plan/apply/destroy)'
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -45,21 +41,16 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Write terraform.tfvars
-        env:
-          SERVER_IP: ${{ inputs.server_public_ip }}
-        run: |
-          cat > terraform.tfvars <<EOF
-          server_public_ip = "$SERVER_IP"
-          EOF
-
       - name: terraform fmt
         run: terraform fmt -check -recursive
 
       - name: terraform init
         env:
+          # Sensitive credentials (Secrets — masked in logs)
           TF_VAR_aliyun_access_key_id: ${{ secrets.ALI_ACCESS_KEY_ID }}
           TF_VAR_aliyun_access_key_secret: ${{ secrets.ALI_ACCESS_KEY_SECRET }}
+          # Non-sensitive runtime value (Variable — visible in logs)
+          TF_VAR_server_public_ip: ${{ vars.SERVER_PUBLIC_IP }}
         run: terraform init -input=false
 
       - name: terraform validate
@@ -70,19 +61,21 @@ jobs:
         env:
           TF_VAR_aliyun_access_key_id: ${{ secrets.ALI_ACCESS_KEY_ID }}
           TF_VAR_aliyun_access_key_secret: ${{ secrets.ALI_ACCESS_KEY_SECRET }}
+          TF_VAR_server_public_ip: ${{ vars.SERVER_PUBLIC_IP }}
           TF_AUTO_APPROVE: ${{ inputs.auto_approve }}
         run: |
           ARGS=()
           if [[ "${{ inputs.action }}" != "plan" && "$TF_AUTO_APPROVE" == "true" ]]; then
             ARGS+=("-auto-approve")
           fi
-          terraform ${{ inputs.action }} -var-file=terraform.tfvars -input=false "${ARGS[@]}"
+          terraform ${{ inputs.action }} -input=false "${ARGS[@]}"
 
       - name: terraform output (apply only)
         if: inputs.action == 'apply' && steps.tf.outputs.exitcode == '0'
         env:
           TF_VAR_aliyun_access_key_id: ${{ secrets.ALI_ACCESS_KEY_ID }}
           TF_VAR_aliyun_access_key_secret: ${{ secrets.ALI_ACCESS_KEY_SECRET }}
+          TF_VAR_server_public_ip: ${{ vars.SERVER_PUBLIC_IP }}
         run: |
           echo "## Terraform apply output" >> $GITHUB_STEP_SUMMARY
           terraform output -no-color >> $GITHUB_STEP_SUMMARY
