@@ -33,7 +33,9 @@ DEPLOY_DIR="${NOVA_HOME}/deploy"
 cd "${DEPLOY_DIR}"
 
 echo ">>> Preparing persistent dirs"
-mkdir -p "${NOVA_HOME}/preview/${PROJECT_NAME}/data"
+# Shared across all preview environments (one DB for every req-xxx).
+mkdir -p "${NOVA_HOME}/preview/data"
+# Per-project workspace (different branches clone different repos).
 mkdir -p "${NOVA_HOME}/preview/${PROJECT_NAME}/workspace"
 
 echo ">>> Pulling ghcr.io/${GHCR_NAMESPACE}/nova:${IMAGE_TAG}"
