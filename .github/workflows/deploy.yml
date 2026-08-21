@@ -5,6 +5,13 @@ on:
     branches:
       - prod
       - 'feat/**'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build & deploy (e.g. prod or feat/req_af3ca270)'
+        required: true
+        default: prod
+        type: string
 
 env:
   NAMESPACE: ${{ vars.GHCR_NAMESPACE || github.repository_owner }}
@@ -18,7 +25,21 @@ jobs:
     outputs:
       image_tag: sha-${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Resolve target branch
+        id: branch
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BRANCH="${{ inputs.branch }}"
+          else
+            BRANCH="${{ github.ref_name }}"
+          fi
+          echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
+
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.branch.outputs.branch }}
+          fetch-depth: 1
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -35,7 +56,7 @@ jobs:
         run: |
           # Branch names contain '/' (e.g. feat/req_xxx) which Docker rejects
           # in image tags. Replace with '-' and lowercase.
-          REF_TAG=$(echo "${{ github.ref_name }}" | tr '/' '-' | tr '[:upper:]' '[:lower:]' | cut -c1-63)
+          REF_TAG=$(echo "${{ steps.branch.outputs.branch }}" | tr '/' '-' | tr '[:upper:]' '[:lower:]' | cut -c1-63)
           echo "ref_tag=${REF_TAG}" >> $GITHUB_OUTPUT
 
       - name: Build & push
@@ -52,11 +73,26 @@ jobs:
 
   deploy-prod:
     needs: build
-    if: github.ref == 'refs/heads/prod'
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/prod') ||
+      (github.event_name == 'workflow_dispatch' && inputs.branch == 'prod')
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - name: Resolve branch
+        id: branch
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "branch=${{ inputs.branch }}" >> $GITHUB_OUTPUT
+          else
+            echo "branch=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.branch.outputs.branch }}
+          fetch-depth: 1
 
       - name: Sync deploy files to server
         uses: appleboy/scp-action@v0.1.7
@@ -85,20 +121,38 @@ jobs:
 
   deploy-preview:
     needs: build
-    if: startsWith(github.ref, 'refs/heads/feat/')
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/feat/')) ||
+      (github.event_name == 'workflow_dispatch' && startsWith(inputs.branch, 'feat/'))
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve branch
+        id: branch
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BRANCH="${{ inputs.branch }}"
+          else
+            BRANCH="${{ github.ref_name }}"
+          fi
+          echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
+
       - name: Compute preview name
         id: preview
         run: |
           # feat/req_af3ca270 → req-af3ca270
-          BRANCH="${GITHUB_REF#refs/heads/feat/}"
+          BRANCH="${{ steps.branch.outputs.branch }}"
+          # Strip the feat/ prefix for the project name
+          SUFFIX="${BRANCH#feat/}"
           # Underscores / slashes → dashes, truncate to 63 chars (DNS label limit)
-          PROJECT=$(echo "$BRANCH" | tr '_/' '-' | cut -c1-63)
+          PROJECT=$(echo "$SUFFIX" | tr '_/' '-' | cut -c1-63)
           echo "project_name=${PROJECT}" >> $GITHUB_OUTPUT
           echo "virtual_host=${PROJECT}.nova.yishield.com" >> $GITHUB_OUTPUT
 
-      - uses: actions/checkout@v4
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.branch.outputs.branch }}
+          fetch-depth: 1
 
       - name: Sync deploy files to server
         uses: appleboy/scp-action@v0.1.7
