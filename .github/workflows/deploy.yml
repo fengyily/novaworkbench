@@ -101,7 +101,7 @@ jobs:
           username: ${{ vars.PROD_SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           source: "deploy/"
-          target: "/srv/nova/"
+          target: "~/nova/"
 
       - name: Deploy to production
         uses: appleboy/ssh-action@v1
@@ -115,7 +115,7 @@ jobs:
             export IMAGE_TAG="sha-${{ github.sha }}"
             export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN}"
 
-            bash /srv/nova/deploy/setup/deploy-prod.sh
+            bash ${HOME}/nova/deploy/setup/deploy-prod.sh
 
             docker image prune -f
 
@@ -161,7 +161,7 @@ jobs:
           username: ${{ vars.PREVIEW_SERVER_USER || vars.PROD_SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           source: "deploy/"
-          target: "/srv/nova/"
+          target: "~/nova/"
 
       - name: Deploy preview
         uses: appleboy/ssh-action@v1
@@ -177,7 +177,7 @@ jobs:
             export PROJECT_NAME="${{ steps.preview.outputs.project_name }}"
             export VIRTUAL_HOST="${{ steps.preview.outputs.virtual_host }}"
 
-            bash /srv/nova/deploy/setup/deploy-preview.sh
+            bash ${HOME}/nova/deploy/setup/deploy-preview.sh
 
             docker image prune -f
 
@@ -201,4 +201,4 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             export PROJECT_NAME="${{ steps.preview.outputs.project_name }}"
-            bash /srv/nova/deploy/setup/cleanup-preview.sh
+            bash ${HOME}/nova/deploy/setup/cleanup-preview.sh

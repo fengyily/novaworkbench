@@ -6,7 +6,10 @@ set -euo pipefail
 
 : "${PROJECT_NAME:?PROJECT_NAME required}"
 
-cd /srv/nova/deploy
+DEPLOY_DIR="${HOME}/nova/deploy"
+NOVA_HOME="${HOME}/nova"
+
+cd "${DEPLOY_DIR}"
 
 echo ">>> Stopping + removing stack ${PROJECT_NAME}"
 docker compose \
@@ -15,6 +18,6 @@ docker compose \
   down --remove-orphans || true
 
 echo ">>> Removing persistent data for ${PROJECT_NAME}"
-rm -rf "/srv/nova/preview/${PROJECT_NAME}" || true
+rm -rf "${NOVA_HOME}/preview/${PROJECT_NAME}" || true
 
 echo "✅ Preview ${PROJECT_NAME} cleaned up"

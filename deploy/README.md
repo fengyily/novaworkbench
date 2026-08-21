@@ -18,12 +18,12 @@ then truncated to 63 chars. e.g. `feat/req_af3ca270364fb2b0` →
 1. Install Docker on a fresh Ubuntu 22.04+ host.
 2. Add the `*.nova.yishield.com` A-record and `prod.nova` A-record in Aliyun DNS,
    both pointing at the host's public IP.
-3. Copy `deploy/` to `/srv/nova/` on the server (the GitHub workflow does this
+3. Copy `deploy/` to `~/nova/` on the server (the GitHub workflow does this
    for every push, but the first push has no files yet — sync manually or
    bootstrap via `git clone`).
 4. Run, as a user in the `docker` group:
    ```bash
-   Ali_Key=... Ali_Secret=... bash /srv/nova/deploy/setup/init-server.sh
+   Ali_Key=... Ali_Secret=... bash ~/nova/deploy/setup/init-server.sh
    ```
    This:
    - creates the shared `nginx-proxy` Docker network,

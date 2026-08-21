@@ -3,6 +3,9 @@
 # Run as the SSH user (e.g. ubuntu) on a fresh Ubuntu 22.04+ host that has
 # Docker installed and the public IP pointed at by nova.yishield.com.
 #
+# All paths live under the SSH user's home (~/nova/) so no root/sudo is
+# needed for the recurring deploys that GitHub Actions runs.
+#
 # Required env:
 #   Ali_Key           - Aliyun AccessKey ID (DNS-01 challenge)
 #   Ali_Secret        - Aliyun AccessKey Secret
@@ -13,33 +16,44 @@ set -euo pipefail
 
 ACME_EMAIL="${ACME_EMAIL:-admin@yishield.com}"
 CERT_DIR="/etc/nginx/ssl/nova.yishield.com"
+NOVA_HOME="${HOME}/nova"
+DEPLOY_DIR="${NOVA_HOME}/deploy"
 
-echo ">>> [1/5] Creating shared 'nginx-proxy' Docker network"
+echo ">>> [1/6] Creating shared 'nginx-proxy' Docker network"
 docker network create nginx-proxy 2>/dev/null || true
 
-echo ">>> [2/5] Starting nginx-proxy (loads /etc/nginx/ssl/nova.yishield.com as /etc/nginx/certs)"
-mkdir -p /etc/nginx/vhost.d
-docker compose -f /srv/nova/deploy/docker-compose.nginx-proxy.yml up -d
+echo ">>> [2/6] Setting up nova home + syncing deploy/ dir"
+mkdir -p "${NOVA_HOME}/prod/data" "${NOVA_HOME}/prod/workspace"
+mkdir -p "${NOVA_HOME}/preview"
+# deploy/ files were synced to ${NOVA_HOME}/deploy by GitHub Actions; if not
+# yet (first bootstrap), fall back to a manual copy from this script's dir.
+if [[ ! -f "${DEPLOY_DIR}/docker-compose.prod.yml" ]]; then
+  echo "!! ${DEPLOY_DIR} missing or empty; copy deploy/ to ${NOVA_HOME}/deploy manually first" >&2
+  exit 1
+fi
 
-echo ">>> [3/5] Installing acme.sh"
+echo ">>> [3/6] Starting nginx-proxy (loads /etc/nginx/ssl/nova.yishield.com as /etc/nginx/certs)"
+mkdir -p /etc/nginx/vhost.d
+docker compose -f "${DEPLOY_DIR}/docker-compose.nginx-proxy.yml" up -d
+
+echo ">>> [4/6] Installing acme.sh"
 curl -s https://get.acme.sh | sh -s email="${ACME_EMAIL}"
 # shellcheck disable=SC1091
 source ~/.bashrc
 
 if [[ -z "${Ali_Key:-}" || -z "${Ali_Secret:-}" ]]; then
-  echo "!! Ali_Key / Ali_Secret not set — exporting and retrying in caller shell" >&2
-  echo "!! Re-run with: Ali_Key=... Ali_Secret=... bash init-server.sh" >&2
+  echo "!! Ali_Key / Ali_Secret not set — re-run with: Ali_Key=... Ali_Secret=... bash init-server.sh" >&2
   exit 1
 fi
 
-echo ">>> [4/5] Issuing wildcard cert *.nova.yishield.com via Aliyun DNS-01"
+echo ">>> [5/6] Issuing wildcard cert *.nova.yishield.com via Aliyun DNS-01"
 ~/.acme.sh/acme.sh --issue \
   --dns dns_ali \
   -d nova.yishield.com \
   -d '*.nova.yishield.com' \
   --server letsencrypt
 
-echo ">>> [5/5] Installing cert into nginx-proxy cert dir"
+echo ">>> [6/6] Installing cert into nginx-proxy cert dir"
 mkdir -p "${CERT_DIR}"
 ~/.acme.sh/acme.sh --install-cert -d nova.yishield.com \
   --cert-file      "${CERT_DIR}/nova.yishield.com.crt" \
@@ -47,11 +61,8 @@ mkdir -p "${CERT_DIR}"
   --fullchain-file "${CERT_DIR}/nova.yishield.com.crt" \
   --reloadcmd      "docker kill --signal=HUP nginx-proxy"
 
-# Persistent data roots
-mkdir -p /srv/nova/prod/data /srv/nova/prod/workspace
-mkdir -p /srv/nova/preview
-
 echo ""
 echo "✅ Init complete. acme.sh cron handles auto-renewal (30 days before expiry)."
 echo "   - cert: ${CERT_DIR}"
+echo "   - deploy root: ${NOVA_HOME}"
 echo "   - nginx-proxy: docker logs nginx-proxy"

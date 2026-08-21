@@ -11,8 +11,8 @@ services:
       - VIRTUAL_PORT=9527
       - HTTPS_METHOD=noredirect
     volumes:
-      - /srv/nova/prod/data:/root/.novaworkbench
-      - /srv/nova/prod/workspace:/root/workspace
+      - ${HOME}/nova/prod/data:/root/.novaworkbench
+      - ${HOME}/nova/prod/workspace:/root/workspace
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9527/api/health"]
       interval: 10s

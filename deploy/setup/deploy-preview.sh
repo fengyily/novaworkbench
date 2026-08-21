@@ -11,11 +11,14 @@ set -euo pipefail
 : "${PROJECT_NAME:?PROJECT_NAME required}"
 : "${VIRTUAL_HOST:?VIRTUAL_HOST required}"
 
-cd /srv/nova/deploy
+NOVA_HOME="${HOME}/nova"
+DEPLOY_DIR="${NOVA_HOME}/deploy"
+
+cd "${DEPLOY_DIR}"
 
 echo ">>> Preparing persistent dirs"
-mkdir -p "/srv/nova/preview/${PROJECT_NAME}/data"
-mkdir -p "/srv/nova/preview/${PROJECT_NAME}/workspace"
+mkdir -p "${NOVA_HOME}/preview/${PROJECT_NAME}/data"
+mkdir -p "${NOVA_HOME}/preview/${PROJECT_NAME}/workspace"
 
 echo ">>> Pulling ghcr.io/${GHCR_NAMESPACE}/nova:${IMAGE_TAG}"
 docker compose \

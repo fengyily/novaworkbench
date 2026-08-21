@@ -8,7 +8,10 @@ set -euo pipefail
 : "${IMAGE_TAG:?IMAGE_TAG required}"
 : "${ANTHROPIC_AUTH_TOKEN:?ANTHROPIC_AUTH_TOKEN required}"
 
-cd /srv/nova/deploy
+NOVA_HOME="${HOME}/nova"
+DEPLOY_DIR="${NOVA_HOME}/deploy"
+
+cd "${DEPLOY_DIR}"
 
 echo ">>> Pulling ghcr.io/${GHCR_NAMESPACE}/nova:${IMAGE_TAG}"
 docker compose \
