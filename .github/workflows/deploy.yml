@@ -3,14 +3,16 @@ name: Build & Deploy
 on:
   push:
     branches:
-      - prod
-      - 'feat/**'
+      - main
+      - 'feat/req_*'
+  pull_request:
+    types: [closed]
   workflow_dispatch:
     inputs:
       branch:
-        description: 'Branch to build & deploy (e.g. prod or feat/req_af3ca270)'
+        description: 'Branch to build & deploy (e.g. main or feat/req_af3ca270)'
         required: true
-        default: prod
+        default: main
         type: string
 
 env:
@@ -74,8 +76,8 @@ jobs:
   deploy-prod:
     needs: build
     if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/prod') ||
-      (github.event_name == 'workflow_dispatch' && inputs.branch == 'prod')
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.branch == 'main')
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -129,8 +131,8 @@ jobs:
   deploy-preview:
     needs: build
     if: |
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/feat/')) ||
-      (github.event_name == 'workflow_dispatch' && startsWith(inputs.branch, 'feat/'))
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/feat/req_')) ||
+      (github.event_name == 'workflow_dispatch' && startsWith(inputs.branch, 'feat/req_'))
     runs-on: ubuntu-latest
     steps:
       - name: Resolve branch
@@ -208,7 +210,7 @@ jobs:
 
       - name: Cleanup preview on PR close
         uses: appleboy/ssh-action@v1
-        if: startsWith(github.event.pull_request.head.ref, 'feat/')
+        if: startsWith(github.event.pull_request.head.ref, 'feat/req_')
         with:
           host: ${{ vars.PREVIEW_SERVER_HOST || vars.PROD_SERVER_HOST }}
           username: ${{ vars.PREVIEW_SERVER_USER || vars.PROD_SERVER_USER }}
