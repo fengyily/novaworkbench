@@ -15,6 +15,17 @@
 
 set -euo pipefail
 
+# --- NovaWorkbench fronting model -----------------------------------------
+# The host's nginx terminates TLS for *.nova.yishield.com and proxies to an
+# INTERNAL nginx-proxy container (HTTP only) bound to 127.0.0.1. That container
+# auto-routes by each backend's VIRTUAL_HOST env, so prod.nova + every
+# req-xxx.nova preview are routed dynamically — no per-preview host vhost and
+# no per-preview port allocation. A single wildcard vhost + cert covers all.
+NOVA_DOMAIN="nova.yishield.com"
+NOVA_CERT_DIR="/etc/nginx/ssl/${NOVA_DOMAIN}"
+NOVA_NGINX_PROXY_PORT="${NOVA_NGINX_PROXY_PORT:-9580}"
+NOVA_DEPLOY_DIR="${HOME}/nova/deploy"
+
 ensure_docker_access() {
   # Already reachable → nothing to do.
   if docker info >/dev/null 2>&1; then
@@ -52,10 +63,84 @@ ensure_nginx_proxy_network() {
   echo "   (network created; nginx-proxy container + certs still need init-server.sh)"
 }
 
+# ensure_nginx_proxy_container — start the internal nginx-proxy HTTP upstream
+# (bound to 127.0.0.1, behind the host nginx which does TLS). Idempotent.
+ensure_nginx_proxy_container() {
+  if docker ps --format '{{.Names}}' | grep -qx nginx-proxy; then
+    return 0
+  fi
+  local f="${NOVA_DEPLOY_DIR}/docker-compose.nginx-proxy.yml"
+  if [[ ! -f "${f}" ]]; then
+    echo "!! ${f} missing — sync deploy/ to ${NOVA_DEPLOY_DIR} first" >&2
+    exit 1
+  fi
+  echo ">>> starting nginx-proxy (internal HTTP upstream on 127.0.0.1:${NOVA_NGINX_PROXY_PORT})"
+  docker compose -f "${f}" up -d
+}
+
+# ensure_nova_nginx_vhost — write the static *.nova.yishield.com server block
+# into the HOST nginx (sites-enabled), idempotent. One wildcard server covers
+# prod.nova + every req-xxx.nova preview; the internal nginx-proxy routes by
+# Host to the matching backend. MUST run after ensure_wildcard_cert so the cert
+# files exist before `nginx -t` validates the ssl_certificate directives.
+ensure_nova_nginx_vhost() {
+  local avail="/etc/nginx/sites-available/nova"
+  local enabled="/etc/nginx/sites-enabled/nova"
+  sudo mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/vhost.d
+
+  local tmp
+  tmp=$(mktemp)
+  cat > "${tmp}" <<EOF
+# Managed by NovaWorkbench deploy (ensure_nova_nginx_vhost) — do not edit by hand.
+# Host nginx terminates TLS for *.nova.yishield.com, then forwards to the
+# internal nginx-proxy which routes by Host to the matching backend container.
+server {
+    listen 443 ssl http2;
+    server_name *.nova.yishield.com nova.yishield.com;
+
+    ssl_certificate     ${NOVA_CERT_DIR}/${NOVA_DOMAIN}.crt;
+    ssl_certificate_key ${NOVA_CERT_DIR}/${NOVA_DOMAIN}.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:${NOVA_NGINX_PROXY_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+    }
+}
+
+server {
+    listen 80;
+    server_name *.nova.yishield.com nova.yishield.com;
+    return 301 https://\$host\$request_uri;
+}
+EOF
+
+  local changed=0
+  if [[ ! -f "${avail}" ]] || ! sudo cmp -s "${tmp}" "${avail}"; then
+    sudo cp "${tmp}" "${avail}"
+    changed=1
+  fi
+  rm -f "${tmp}"
+  if [[ ! -L "${enabled}" ]]; then
+    sudo ln -sf "${avail}" "${enabled}"
+    changed=1
+  fi
+  if [[ "${changed}" -eq 1 ]]; then
+    echo ">>> (re)installed host nginx vhost for *.nova.yishield.com; reloading nginx"
+    sudo nginx -t && sudo nginx -s reload
+  fi
+}
+
 # ensure_wildcard_cert — idempotent *.nova.yishield.com issuance + renewal
 # via Aliyun DNS-01. Safe to call on every deploy: issues only when absent,
-# renews only within RENEW_DAYS of expiry, and only re-installs / reloads
-# nginx-proxy when the cert content actually changed.
+# renews only within RENEW_DAYS of expiry, and only re-installs / reloads the
+# host nginx when the cert content actually changed.
 #
 # Credentials: the acme dns_ali plugin reads Ali_Key / Ali_Secret from the
 # env. deploy.yml maps them from the ALI_ACCESS_KEY_ID / _SECRET repo secrets.
@@ -153,17 +238,17 @@ ensure_wildcard_cert() {
   fi
 
   if [[ "${need_install}" -eq 1 ]]; then
-    echo ">>> Installing cert into nginx-proxy cert dir"
+    echo ">>> Installing cert into host nginx cert dir"
     sudo mkdir -p "${cert_dir}"
     sudo cp "${store_full}" "${installed_full}"
     sudo cp "${store_key}"  "${installed_key}"
     sudo chmod 644 "${installed_full}"
     sudo chmod 600 "${installed_key}"
-    # HUP makes nginx re-read the cert files; fall back to a restart if the
-    # signal can't be delivered (e.g. container freshly recreated).
-    docker kill --signal=HUP nginx-proxy 2>/dev/null \
-      || docker restart nginx-proxy 2>/dev/null \
-      || echo "!! could not reload nginx-proxy — is the container running?" >&2
+    # The host nginx terminates TLS with these files; reload it to pick up
+    # the new cert. (The internal nginx-proxy is HTTP-only, no cert reload
+    # needed there.) ensure_nova_nginx_vhost runs after this to write/reload
+    # the vhost that references these files.
+    sudo nginx -t && sudo nginx -s reload
   else
     echo ">>> Wildcard cert up to date — no reload needed"
   fi

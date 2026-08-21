@@ -1,14 +1,21 @@
+# nginx-proxy runs as an INTERNAL HTTP upstream behind the host nginx.
+# The host nginx terminates TLS for *.nova.yishield.com and proxies to
+# 127.0.0.1:9580 here; this container then routes by each backend's
+# VIRTUAL_HOST env (prod.nova + every req-xxx.nova preview) to the matching
+# backend container on the shared 'nginx-proxy' network — dynamically, no
+# per-preview host config needed.
+#
+# HTTP-only on purpose: TLS is the host nginx's job, so no certs are mounted
+# and 443 is not published.
 services:
   nginx-proxy:
     image: nginxproxy/nginx-proxy:alpine
     container_name: nginx-proxy
     restart: always
     ports:
-      - "80:80"
-      - "443:443"
+      - "127.0.0.1:9580:80"
     volumes:
       - /var/run/docker.sock:/tmp/docker.sock:ro
-      - /etc/nginx/ssl/nova.yishield.com:/etc/nginx/certs:ro
       - /etc/nginx/vhost.d:/etc/nginx/vhost.d
     networks:
       - nginx-proxy
