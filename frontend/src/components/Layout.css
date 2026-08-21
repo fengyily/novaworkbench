@@ -26,9 +26,43 @@
 }
 
 .app-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--color-text);
+  /* The slab SVG has its own background, so the wrapper shouldn't paint
+     anything that would clip its rounded corners on hover. */
+  line-height: 1;
+}
+
+.nw-mark {
+  /* Subtle "lift" on hover — a hint that the mark is a live element
+     rather than a static asset. Scaled down from the default 1.0 so it
+     doesn't compete with the wordmark for attention. */
+  flex-shrink: 0;
+  display: block;
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.app-logo:hover .nw-mark { transform: rotate(-4deg); }
+
+.app-logo-wordmark {
   font-weight: 700;
   font-size: 16px;
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+  /* The wordmark sits beside the slab, not above it — a small offset
+     below the optical baseline keeps the letters from looking
+     "dropped". */
+  display: inline-flex;
+  align-items: baseline;
+}
+.app-logo-nova {
+  /* "Nova" gets the spark/amber color so the wordmark visually echoes
+     the constellation in the icon. This is the one place the amber
+     shows up in the chrome — it ties logo → wordmark into a single
+     signature. */
   color: var(--color-primary);
+  margin-right: 1px;
 }
 
 /* Hamburger — visible only on mobile */
@@ -185,6 +219,21 @@
   border-top: 1px solid var(--color-border);
 }
 
+/* Sidebar nav-row icon — a small lead icon for menu rows that use a
+   two-element label (icon + text). Emoji-only rows keep their natural
+   baseline since the leading emoji is already part of the text. */
+.nav-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  flex-shrink: 0;
+  font-size: 14px;
+  line-height: 1;
+  /* Sit the icon on the same baseline as the Chinese label. */
+  margin-right: 4px;
+}
+
 /* ── Mobile breakpoint ─────────────────────────────────────────── */
 @media (max-width: 768px) {
   .app-hamburger {
@@ -217,7 +266,11 @@
      — the user is more interested in "我当前在哪个页面" than "这个 app 是
      什么". The inline back chevron is hidden on the root and on
      list pages; the sectionLabel resolver sets it for detail routes. */
-  .app-logo { font-size: 14px; opacity: 0.85; }
+  /* On phones the wordmark is hidden — the slab alone is enough to
+     identify the app, and the freed horizontal space is given back to
+     the inline section title so users always know where they are. */
+  .app-logo-wordmark { display: none; }
+  .nw-mark { width: 26px; height: 26px; }
   .app-header-section {
     display: inline-flex;
     align-items: center;
@@ -266,7 +319,7 @@
     border-radius: 8px;
   }
   .app-header-logout::before {
-    content: '�';
+    content: '⎋';
     font-size: 18px;
     line-height: 1;
   }

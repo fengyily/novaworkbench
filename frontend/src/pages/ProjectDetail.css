@@ -3,15 +3,94 @@
   padding: 24px;
 }
 
+/* ── Top header (breadcrumb back + title + type tag + path) ───────────
+   The old version put a bordered "← 项目列表" button alone in a row, then
+   the title, then the tabs — three rows that fought each other. The new
+   version is one continuous hierarchy: a small unbordered back link,
+   the project name as the dominant line, a type tag + optional repo
+   link inline next to it, and the filesystem path as muted metadata.
+   The eye now lands on the title first, then scans the path. */
 .detail-header {
-  margin-bottom: 16px;
+  margin-bottom: 14px;
+}
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 4px 0;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border-radius: 4px;
+  transition: color 0.15s;
+}
+.back-link:hover { color: var(--color-primary); }
+.back-arrow {
+  font-size: 18px;
+  line-height: 1;
+  /* A tiny optical lift — without it the chevron looks like it's
+     sitting on the baseline instead of pointing at the previous page. */
+  transform: translateY(-1px);
 }
 
+.detail-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
 .detail-title {
-  font-size: 22px;
+  font-size: 26px;
   font-weight: 700;
   color: var(--color-text);
-  margin: 0 0 20px 0;
+  margin: 0;
+  /* Tighten the letter spacing on the display title — large sizes
+     need less tracking to feel "designed" instead of "rendered". */
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+}
+.detail-type-tag {
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--color-active);
+  color: var(--color-primary);
+  padding: 4px 10px;
+  border-radius: 6px;
+  /* Lift the tag slightly above the title baseline so it sits with the
+     cap-height instead of dropping to the descender line. */
+  align-self: center;
+}
+.detail-remote-link {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  padding: 4px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  align-self: center;
+  transition: all 0.15s;
+}
+.detail-remote-link:hover {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.detail-path {
+  margin: 0 0 22px 0;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+.detail-path code {
+  font-family: var(--font-mono);
+  background: var(--color-bg);
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  word-break: break-all;
 }
 
 .run-control-bar {
@@ -62,6 +141,14 @@
 .run-status-error {
   background: #fee2e2;
   color: #dc2626;
+}
+
+/* When the composer is open, the trigger button wears a soft inset
+   ring so the user can see at a glance that the form is already
+   active (the label changes to "× 收起表单" but a visual cue
+   reinforces it). */
+.btn.btn-sm.is-open {
+  box-shadow: 0 0 0 2px var(--color-active) inset;
 }
 
 .btn-danger {
@@ -340,7 +427,9 @@
 @media (max-width: 768px) {
   .project-detail { padding: 16px; }
 
-  .detail-title { font-size: 18px; }
+  .detail-title { font-size: 20px; }
+  .detail-title-row { gap: 8px; }
+  .detail-remote-link { display: none; }
 
   .run-control-bar {
     flex-wrap: wrap;
@@ -452,12 +541,39 @@
 /* Inline "新需求" create form (replaces the old modal). Expanded in-place
    under the requirements tab — wider and taller than the modal, with a
    larger textarea and a hint explaining the AI Markdown step. */
+/* ── Inline "new requirement" composer anchor ──────────────────────
+   The composer used to render at the bottom of the requirements tab —
+   fine on an empty list, but with paginated lists the form lived past
+   the fold and clicking "+ 新需求" felt like nothing happened. It now
+   opens ABOVE the list with a scroll-into-view animation. These rules
+   make the anchor feel "lifted" — accent left-border, soft shadow,
+   scroll-margin so it doesn't end up under the sticky app header. */
+.create-req-anchor {
+  margin: 4px 0 18px;
+  /* Reserve space so scrollIntoView lands the composer a few pixels
+     below the sticky app header — otherwise the textarea would be
+     hidden under the 48px header. */
+  scroll-margin-top: calc(48px + var(--sat, 0px) + 12px);
+  /* Subtle entrance — keeps the "clicked → composer appeared" beat
+     from feeling jarring when the form expands inline. */
+  animation: create-req-anchor-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes create-req-anchor-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
 .create-req-form {
-  margin: 12px 0 16px;
-  padding: 16px;
+  margin: 0;
+  padding: 16px 18px;
   background: var(--color-surface);
+  /* Left accent — ties the composer to the indigo brand without
+     painting the whole border, so the form still reads as "above"
+     the white card list below. */
   border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-primary);
   border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
 }
 .create-req-form-header {
   display: flex;

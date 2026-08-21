@@ -7,9 +7,68 @@ const navItems = [
   { to: '/', label: '📊 仪表盘', end: true, permission: 'menu.dashboard', shortLabel: '仪表盘', icon: '📊' },
   { to: '/projects', label: '📁 项目', end: false, permission: 'menu.projects', shortLabel: '项目', icon: '📁' },
   { to: '/requirements', label: '📋 需求', end: false, permission: 'menu.projects', shortLabel: '需求', icon: '📋' },
-  { to: '/knowledge', label: '🧠 知识库', end: false, permission: 'menu.knowledge', shortLabel: '知识', icon: '🧠' },
   { to: '/reports', label: '📝 周报', end: false, permission: 'menu.reports', shortLabel: '周报', icon: '📝' },
 ];
+
+// NovaWorkbench mark — a deep-midnight rounded slab (the "workbench") with
+// a bone-white "N" whose diagonal stroke is replaced by a three-dot
+// constellation trailing up to a bright amber spark. The dark slab +
+// warm-spark palette deliberately breaks from the indigo-gradient default
+// that most dev-tool logos reach for, so the mark reads as its own object
+// instead of dissolving into the indigo chrome (#4F46E5) used elsewhere.
+function NovaLogo({ size = 28 }: { size?: number }) {
+  return (
+    <svg
+      className="nw-mark"
+      viewBox="0 0 28 28"
+      width={size}
+      height={size}
+      role="img"
+      aria-label="NovaWorkbench"
+    >
+      <defs>
+        <linearGradient id="nw-slab" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor="#312E81" />
+          <stop offset="55%" stopColor="#1E1B4B" />
+          <stop offset="100%" stopColor="#0F172A" />
+        </linearGradient>
+        <linearGradient id="nw-spark" x1="0" y1="1" x2="1" y2="0">
+          <stop offset="0%" stopColor="#FCD34D" />
+          <stop offset="100%" stopColor="#F59E0B" />
+        </linearGradient>
+      </defs>
+      {/* Slab — the workbench surface, with rounded corners and a faint
+          inner stroke so it feels "set down" instead of "painted on". */}
+      <rect x="1" y="1" width="26" height="26" rx="7" fill="url(#nw-slab)" />
+      <rect
+        x="1.5"
+        y="1.5"
+        width="25"
+        height="25"
+        rx="6.5"
+        fill="none"
+        stroke="#FBBF24"
+        strokeOpacity="0.10"
+      />
+      {/* "N" — two pillars. The diagonal isn't drawn as a line; instead
+          three stars fade in size from bottom-left to top-right, suggesting
+          the trail of a nova's ignition. */}
+      <path
+        d="M 6 7 L 8.2 7 L 8.2 21 L 6 21 Z M 19.8 7 L 22 7 L 22 21 L 19.8 21 Z"
+        fill="#F5F1E8"
+      />
+      {/* Constellation trail — small → medium → bright spark. Sizes and
+          opacities step up so the eye reads motion from bottom-left to
+          top-right, finishing on the brightest star. */}
+      <circle cx="10.2" cy="17.8" r="1.1" fill="#FCD34D" fillOpacity="0.55" />
+      <circle cx="13.5" cy="14.5" r="1.35" fill="#FCD34D" fillOpacity="0.85" />
+      <circle cx="16.8" cy="11.2" r="1.7" fill="url(#nw-spark)" />
+      {/* Spark highlight — a tiny inner dot to give the brightest star a
+          "burning" quality instead of looking flat. */}
+      <circle cx="16.8" cy="11.2" r="0.55" fill="#FFFBEB" />
+    </svg>
+  );
+}
 
 export default function Layout() {
   const { user, hasPermission, logout } = useAuth();
@@ -104,7 +163,7 @@ export default function Layout() {
     if (path.startsWith('/projects/')) return { label: '项目详情', back: '/projects' };
     if (path.startsWith('/projects')) return { label: '项目', back: null };
     if (path.startsWith('/knowledge')) return { label: '知识库', back: null };
-    if (path.startsWith('/chat')) return { label: 'AI 对话', back: null };
+    if (path.startsWith('/chat')) return { label: '助手', back: null };
     if (path.startsWith('/reports')) return { label: '周报', back: null };
     if (path.startsWith('/settings')) return { label: '设置', back: null };
     if (path === '/') return { label: '仪表盘', back: null };
@@ -124,7 +183,7 @@ export default function Layout() {
           >
             <span /><span /><span />
           </button>
-          <span className="app-logo">🔷 NovaWorkbench</span>
+          <span className="app-logo"><NovaLogo size={28} /><span className="app-logo-wordmark"><span className="app-logo-nova">Nova</span>Workbench</span></span>
           {/* Mobile-only: the section title lives inline next to the logo so
               the user always knows where they are without a separate title
               bar below the header. Hidden on desktop. */}
@@ -162,7 +221,7 @@ export default function Layout() {
         )}
         <nav className={`app-sidebar${sidebarOpen ? ' sidebar-open' : ''}`}>
           <div className="sidebar-close-row">
-            <span className="app-logo">🔷 NovaWorkbench</span>
+            <span className="app-logo"><NovaLogo size={28} /><span className="app-logo-wordmark"><span className="app-logo-nova">Nova</span>Workbench</span></span>
             <button className="sidebar-close-btn" aria-label="关闭导航" onClick={closeSidebar}>✕</button>
           </div>
           {visibleItems.map((item) => (
@@ -178,7 +237,8 @@ export default function Layout() {
           ))}
           {hasPermission('menu.chat') && (
             <NavLink to="/chat" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`} onClick={closeSidebar}>
-              � AI 对话
+              <span className="nav-item-icon" aria-hidden="true">✨</span>
+              <span>助手</span>
             </NavLink>
           )}
           {hasPermission('menu.settings') && (
@@ -215,7 +275,7 @@ export default function Layout() {
           onClick={onMore}
           aria-label="更多"
         >
-          <span className="tab-bar-icon">�</span>
+          <span className="tab-bar-icon">⋯</span>
           <span className="tab-bar-label">更多</span>
         </button>
       </nav>
