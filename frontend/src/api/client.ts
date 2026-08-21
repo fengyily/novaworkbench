@@ -673,6 +673,10 @@ export interface StepUsage {
   cache_read_tokens: number;
   count: number;
   costs: CostItem[];
+  // Per-invocation summaries lifted from token_usage.meta (e.g. each 追加调整
+  // request's first 200 chars). May be absent for steps that don't record a
+  // summary — render conditionally.
+  summaries?: string[];
 }
 export interface RequirementUsage {
   by_step: StepUsage[];

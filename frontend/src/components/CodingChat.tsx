@@ -18,11 +18,58 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [thinking, setThinking] = useState(false);
+  const [lastRequest, setLastRequest] = useState('');
   const chatRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages]);
+
+  // Load persisted developer-chat history on mount so the conversation
+  // survives a page refresh. Best-effort: a failed load leaves the panel
+  // empty (the same as "no prior conversation").
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await authedFetch(`${API_BASE}/api/requirements/${reqId}/coding-chat`);
+        if (!res.ok) return;
+        const raw = await res.text();
+        const parsed = JSON.parse(raw);
+        if (cancelled) return;
+        if (Array.isArray(parsed)) {
+          const loaded: ChatMessage[] = parsed
+            .filter((m: any) => (m?.role === 'user' || m?.role === 'ai') && typeof m?.content === 'string')
+            .map((m: any) => ({ role: m.role, content: m.content }));
+          if (loaded.length > 0) setMessages(loaded);
+        }
+      } catch { /* ignore — empty panel is fine */ }
+    })();
+    return () => { cancelled = true; };
+  }, [reqId]);
+
+  // Persist the full conversation after every change. Best-effort: a save
+  // failure is logged but does not break the in-flight chat turn. We save
+  // on a debounce window so typing/thinking doesn't spam the endpoint.
+  const saveMessages = useCallback(async (msgs: ChatMessage[]) => {
+    try {
+      const body = JSON.stringify({
+        messages: JSON.stringify(msgs.map(m => ({ role: m.role, content: m.content }))),
+      });
+      await authedFetch(`${API_BASE}/api/requirements/${reqId}/coding-chat`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+    } catch (err) {
+      console.warn('[coding-chat] persist failed', err);
+    }
+  }, [reqId]);
+  useEffect(() => {
+    if (messages.length === 0) return;
+    const t = setTimeout(() => { saveMessages(messages); }, 400);
+    return () => clearTimeout(t);
+  }, [messages, saveMessages]);
 
   // Build the desc to pass to onStartCoding: last user message + full conversation context
   const buildCodingDesc = useCallback(() => {
@@ -67,7 +114,14 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
         if (!line.startsWith('data: ')) continue;
         try {
           const data = JSON.parse(line.substring(6));
-          if (data.type === 'message') {
+          if (data.type === 'user_input') {
+            // Backend echoes the just-sent adjustment as a separate event so
+            // the output box can render a "📝 调整请求" strip confirming what
+            // the backend actually received. This is the same string that is
+            // persisted into token_usage.meta.summary for the token-stats
+            // table — the SSE echo lets the user verify that content.
+            setLastRequest(data.content || '');
+          } else if (data.type === 'message') {
             aiText += data.content + '\n';
             setMessages(prev => {
               const next = [...prev];
@@ -96,6 +150,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
     if (!msg || thinking) return;
     setInput('');
     setMessages(prev => [...prev, { role: 'user', content: msg }]);
+    setLastRequest('');
     setThinking(true);
 
     try {
@@ -127,9 +182,15 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
 
       {hasConversation && (
         <div className="chat-panel" ref={chatRef}>
+          {lastRequest && (
+            <div className="chat-msg user user-request" title="本次已发送到后端的调整请求">
+              <span className="chat-role">📤 已发送调整请求</span>
+              <div className="chat-content" style={{ whiteSpace: 'pre-wrap' }}>{lastRequest}</div>
+            </div>
+          )}
           {messages.map((msg, i) => (
             <div key={i} className={`chat-msg ${msg.role}${msg.isError ? ' error' : ''}`}>
-              <span className="chat-role">{msg.role === 'ai' ? '🤖 AI' : '👤 你'}</span>
+              <span className="chat-role">{msg.role === 'ai' ? '🤖 AI' : '👤 你的追问'}</span>
               <div className="chat-content" style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
             </div>
           ))}

@@ -105,6 +105,13 @@ CREATE TABLE IF NOT EXISTS refinement_chats (
 	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS coding_chats (
+	requirement_id TEXT PRIMARY KEY,
+	messages TEXT DEFAULT '[]',
+	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS project_run_configs (
 	id           TEXT PRIMARY KEY,
 	project_id   TEXT NOT NULL,

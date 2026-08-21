@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
+import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, type Requirement, type Project, type MergeState, type RequirementUsage } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
@@ -1494,16 +1494,34 @@ export default function RequirementDetail() {
               </thead>
               <tbody>
                 {usage.by_step.map(s => (
-                  <tr key={`${s.step}:${s.model}`}>
-                    <td data-label="步骤">{s.label || stepLabels[s.step] || s.step}</td>
-                    <td data-label="模型"><code className="pr-branch">{s.model || '未知模型'}</code></td>
-                    <td data-label="输入" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(s).toLocaleString()}</td>
-                    <td data-label="输出" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.output_tokens.toLocaleString()}</td>
-                    <td data-label="缓存读" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_read_tokens.toLocaleString()}</td>
-                    <td data-label="缓存建" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_creation_tokens.toLocaleString()}</td>
-                    <td data-label="费用" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{fmtCost(s.costs)}</td>
-                    <td data-label="次数" style={{ fontSize: 12 }}>{s.count}</td>
-                  </tr>
+                  <Fragment key={`${s.step}:${s.model}`}>
+                    <tr>
+                      <td data-label="步骤">{s.label || stepLabels[s.step] || s.step}</td>
+                      <td data-label="模型"><code className="pr-branch">{s.model || '未知模型'}</code></td>
+                      <td data-label="输入" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(s).toLocaleString()}</td>
+                      <td data-label="输出" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.output_tokens.toLocaleString()}</td>
+                      <td data-label="缓存读" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_read_tokens.toLocaleString()}</td>
+                      <td data-label="缓存建" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_creation_tokens.toLocaleString()}</td>
+                      <td data-label="费用" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{fmtCost(s.costs)}</td>
+                      <td data-label="次数" style={{ fontSize: 12 }}>{s.count}</td>
+                    </tr>
+                    {s.summaries && s.summaries.length > 0 && (
+                      <tr className="usage-summary-row">
+                        <td colSpan={8} style={{ padding: 0, background: 'var(--color-bg-secondary, #f8fafc)' }}>
+                          <details>
+                            <summary style={{ padding: '6px 12px', cursor: 'pointer', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                              <span className="session-caret">▶</span> 查看本次 {s.label || s.step} 的调整内容（{s.summaries.length}）
+                            </summary>
+                            <ol style={{ margin: 0, padding: '6px 12px 10px 32px', fontSize: 12, color: 'var(--color-text)', lineHeight: 1.7 }}>
+                              {s.summaries.map((msg, i) => (
+                                <li key={i} style={{ whiteSpace: 'pre-wrap' }}>{msg}</li>
+                              ))}
+                            </ol>
+                          </details>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))}
                 <tr className="table-cards-total" style={{ borderTop: '2px solid var(--color-border)' }}>
                   <td data-label="合计" style={{ fontWeight: 600 }}>合计</td>

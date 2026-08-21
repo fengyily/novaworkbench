@@ -52,6 +52,9 @@ func (t UsageTotals) TotalInput() int {
 
 // StepUsage aggregates token usage for one step of a requirement (split by
 // model so a step that ran on multiple models shows one row per model).
+// Summaries carries the per-invocation "summary" text lifted from
+// token_usage.meta (e.g. each 追加调整 request's first 200 chars), in the
+// natural SQL order. Empty for steps that don't record a summary.
 type StepUsage struct {
 	Step                string     `json:"step"`
 	Label               string     `json:"label"`
@@ -62,6 +65,7 @@ type StepUsage struct {
 	CacheReadTokens     int        `json:"cache_read_tokens"`
 	Count               int        `json:"count"`
 	Costs               []CostItem `json:"costs"`
+	Summaries           []string   `json:"summaries,omitempty"`
 }
 
 // ReqUsage aggregates token usage for one requirement (excludes review rows).
