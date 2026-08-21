@@ -22,6 +22,12 @@ DEPLOY_DIR="${NOVA_HOME}/deploy"
 echo ">>> [1/6] Creating shared 'nginx-proxy' Docker network"
 docker network create nginx-proxy 2>/dev/null || true
 
+echo ">>> [1b] Ensuring the SSH user is in the 'docker' group"
+if ! id -nG "${USER}" | grep -qw docker; then
+  sudo usermod -aG docker "${USER}" || usermod -aG docker "${USER}"
+  echo "    added ${USER} to docker group — re-login (or 'newgrp docker') for it to take effect"
+fi
+
 echo ">>> [2/6] Setting up nova home + syncing deploy/ dir"
 mkdir -p "${NOVA_HOME}/prod/data" "${NOVA_HOME}/prod/workspace"
 mkdir -p "${NOVA_HOME}/preview"

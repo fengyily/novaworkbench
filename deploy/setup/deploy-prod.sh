@@ -1,12 +1,22 @@
 #!/bin/bash
 # Production deploy — invoked by GitHub Actions via SSH.
 # Required env (exported by caller):
-#   GHCR_NAMESPACE, IMAGE_TAG, ANTHROPIC_AUTH_TOKEN
+#   GHCR_NAMESPACE, IMAGE_TAG
+# Optional env:
+#   ANTHROPIC_AUTH_TOKEN  - injected into the backend container so the
+#                           wizard pipeline's claude CLI can authenticate.
+#                           Without it the container still runs; only
+#                           AI-driven features (requirement wizard, code
+#                           generation) won't work.
 set -euo pipefail
 
 : "${GHCR_NAMESPACE:?GHCR_NAMESPACE required}"
 : "${IMAGE_TAG:?IMAGE_TAG required}"
-: "${ANTHROPIC_AUTH_TOKEN:?ANTHROPIC_AUTH_TOKEN required}"
+
+# Default to empty string when the secret isn't set so docker compose env
+# substitution doesn't choke. The Go backend treats an empty token as "no
+# claude CLI auth" — non-AI features still work.
+export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-}"
 
 NOVA_HOME="${HOME}/nova"
 DEPLOY_DIR="${NOVA_HOME}/deploy"
