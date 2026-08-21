@@ -6,17 +6,19 @@ services:
       - NOVA_PORT=9527
       - NOVA_AUTOINSTALL=0
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
-      - NOVA_DB_PATH=/root/.novaworkbench/data/nova.db
+      - NOVA_DB_PATH=/home/nova/.novaworkbench/data/nova.db
       - VIRTUAL_HOST=${VIRTUAL_HOST}
       - VIRTUAL_PORT=9527
       - HTTPS_METHOD=noredirect
     volumes:
       # Shared DB + NovaWorkbench state across ALL preview environments —
-      # every req-xxx.nova preview reads/writes the same nova.db.
-      - ${HOME}/nova/preview/data:/root/.novaworkbench
+      # every req-xxx.nova preview reads/writes the same nova.db. Mount paths
+      # under /home/nova because the container runs as a non-root user
+      # (Claude CLI refuses --dangerously-skip-permissions under uid 0).
+      - ${HOME}/nova/preview/data:/home/nova/.novaworkbench
       # Per-project workspace stays per-project (different branches clone
-      # different repos into /root/workspace).
-      - ${HOME}/nova/preview/${PROJECT_NAME}/workspace:/root/workspace
+      # different repos into /home/nova/workspace).
+      - ${HOME}/nova/preview/${PROJECT_NAME}/workspace:/home/nova/workspace
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9527/api/health"]
       interval: 10s
