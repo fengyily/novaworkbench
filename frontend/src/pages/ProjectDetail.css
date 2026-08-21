@@ -371,6 +371,36 @@
   /* Pagination buttons get equal width so the user can tap them on touch. */
   .pagination { justify-content: center; }
   .pagination .btn { min-width: 44px; }
+
+  /* The detail-tabs container scrolls horizontally so 7 tabs don't crowd
+     into a 360px-wide phone. Tab buttons get taller touch targets. */
+  .detail-tabs {
+    overflow-x: auto;
+    scrollbar-width: none;
+    margin: 0 -16px 16px;
+    padding: 0 16px;
+  }
+  .detail-tabs::-webkit-scrollbar { display: none; }
+  .tab-btn {
+    flex-shrink: 0;
+    padding: 10px 14px;
+    min-height: 44px;
+    font-size: 13px;
+  }
+
+  /* The platform-token form on the overview tab: stack the label-input
+     pairs vertically instead of horizontal rows that crowd on phones. */
+  .platform-form-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+
+  /* The new-requirement create form is the main composer on this page;
+     let it scroll naturally and give the action buttons full width. */
+  .create-req-form .form-row { flex-direction: column; gap: 14px; }
+  .create-req-form .form-actions { flex-direction: column; }
+  .create-req-form .form-actions > * { width: 100%; min-height: 44px; }
 }
 
 /* Requirements tab pagination */

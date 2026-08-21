@@ -54,18 +54,30 @@ export default function Dashboard() {
       <div className="projects-section">
         <div className="section-header">
           <h2>项目列表</h2>
-          <button className="btn btn-primary" onClick={() => navigate('/projects/add')}>
+          <button className="btn btn-primary desktop-only" onClick={() => navigate('/projects/add')}>
             + 添加
           </button>
         </div>
 
         {(!data?.projects || data.projects.length === 0) ? (
-          <div className="empty-state">
-            <p>还没有添加项目</p>
-            <button className="btn btn-primary" onClick={() => navigate('/projects/add')}>
-              添加你的第一个项目
-            </button>
-          </div>
+          <>
+            <div className="empty-state desktop-only">
+              <p>还没有添加项目</p>
+              <button className="btn btn-primary" onClick={() => navigate('/projects/add')}>
+                添加你的第一个项目
+              </button>
+            </div>
+            <div className="mobile-empty">
+              <span className="mobile-empty-mark">📁</span>
+              <div className="mobile-empty-title">还没有添加项目</div>
+              <p className="mobile-empty-desc">
+                从本地一个 git 仓库开始，或新建一个项目目录。
+              </p>
+              <button className="btn btn-primary" onClick={() => navigate('/projects/add')}>
+                + 添加项目
+              </button>
+            </div>
+          </>
         ) : (
           <div className="project-table-wrap">
             <table className="project-table table-cards">
@@ -102,6 +114,19 @@ export default function Dashboard() {
         <button className="btn" onClick={() => navigate('/reports')}>生成周报</button>
         <button className="btn" onClick={() => navigate('/knowledge')}>知识审查</button>
       </div>
+
+      {/* Mobile FAB: a single primary CTA pinned above the tab bar. On
+          desktop this button is hidden by .fab's display:none rule. The
+          label is the page's primary action — "新建项目向导" for the
+          dashboard, since wizard is the entry point for new work. */}
+      <button
+        className="fab fab-extended"
+        aria-label="新建项目向导"
+        onClick={() => navigate('/wizard')}
+      >
+        <span>＋</span>
+        <span>新建项目</span>
+      </button>
     </div>
   );
 }

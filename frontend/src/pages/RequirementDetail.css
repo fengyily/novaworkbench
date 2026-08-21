@@ -437,6 +437,30 @@
   min-height: 44px;
 }
 
+/* Compact chat-message layout — distinguish user / AI by background tint +
+   a left border accent rather than a per-bubble icon, so the bubble stays
+   narrow on phones and the role label reads at a glance. */
+.deep-refine-panel .chat-msg {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-left-width: 3px;
+}
+.deep-refine-panel .chat-msg.ai {
+  background: var(--color-parchment, var(--color-bg));
+  border-left-color: var(--color-primary);
+}
+.deep-refine-panel .chat-msg.user {
+  background: var(--color-active);
+  border-left-color: var(--color-accent-warm, var(--color-primary));
+}
+.deep-refine-panel .chat-msg.error {
+  background: #fef2f2;
+  border-left-color: var(--color-error);
+  color: var(--color-error);
+}
+
 .deep-refine-actions { display: flex; justify-content: flex-end; }
 
 /* Phase indicator */
@@ -501,6 +525,51 @@
 .modal-field { margin-bottom: 14px; }
 .modal-field label { font-size: 12px; font-weight: 600; color: var(--color-text-muted); display: block; margin-bottom: 5px; }
 .modal-actions { display: flex; gap: 8px; margin-top: 20px; }
+
+/* Bottom-sheet modal pattern on mobile. Override the centered .modal-box
+   to anchor at the bottom and slide up. The handle-bar is injected via a
+   `::before` pseudo so component code doesn't need to add a new element.
+   .modal-actions becomes a full-width column so the buttons stay reachable
+   with one thumb. */
+@media (max-width: 768px) {
+  .modal-overlay {
+    align-items: flex-end;
+    padding: 0;
+  }
+  .modal-box {
+    width: 100vw;
+    max-width: none;
+    min-width: 0;
+    border-radius: 16px 16px 0 0;
+    padding: 8px 16px calc(20px + var(--sab));
+    max-height: 88dvh;
+    overflow-y: auto;
+    animation: req-sheet-slide-up 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+    position: relative;
+  }
+  /* Drag-handle affordance — purely visual, signals the dismiss gesture. */
+  .modal-box::before {
+    content: '';
+    display: block;
+    width: 36px; height: 4px;
+    background: var(--color-border);
+    border-radius: 2px;
+    margin: 4px auto 12px;
+  }
+  .modal-box h3 { font-size: 16px; }
+  .modal-actions {
+    flex-direction: column;
+    margin-top: 16px;
+  }
+  .modal-actions > * {
+    width: 100%;
+    min-height: 44px;
+  }
+}
+@keyframes req-sheet-slide-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
 
 /* Analyze progress banner */
 .analyze-progress-banner {
@@ -576,7 +645,15 @@
   font-size: 13px;
   color: var(--color-text-muted, #94a3b8);
 }
-.stage-step.active { color: var(--color-primary, #4f46e5); font-weight: 600; }
+.stage-step.active {
+  color: var(--color-primary, #4f46e5);
+  font-weight: 600;
+  /* The active stage is the user's current focus — give it a subtle pill
+     background so it pops without screaming. */
+  background: rgba(79, 70, 229, 0.06);
+  padding: 4px 10px;
+  border-radius: 8px;
+}
 .stage-step.done { color: var(--color-success, #10b981); }
 .stage-num { font-size: 15px; }
 .stage-sep { margin: 0 8px; color: var(--color-text-muted, #cbd5e1); }
@@ -801,24 +878,31 @@
     font-size: 13px;
   }
 
-  /* Stage stepper wraps on very narrow screens */
+  /* Stage stepper: vertical compact list. Each step gets its own row so
+     the active one is the only one with strong visual presence, matching
+     the wizard stepper pattern. The model-tag wraps to a second line. */
   .stage-stepper {
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 10px 12px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 10px;
   }
-
-  .stage-sep { display: none; }
-
   .stage-step {
-    font-size: 12px;
+    width: 100%;
+    flex-wrap: wrap;
+    font-size: 13px;
+    padding: 8px 10px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
   }
-
-  .modal-box {
-    min-width: unset;
-    width: 92vw;
-    padding: 20px 18px;
+  .stage-step.active {
+    background: var(--color-parchment, var(--color-surface));
+    border-color: var(--color-primary);
   }
+  .stage-step.done { border-color: rgba(16, 185, 129, 0.4); }
+  .stage-sep { display: none; }
+  .stage-model-tag { width: 100%; margin-left: 0; margin-top: 4px; }
 
   .confirm-panel {
     flex-direction: column;
@@ -830,12 +914,13 @@
      under the iOS keyboard. */
 
   .deep-refine-panel .chat-panel {
-    /* Use 50dvh (matching WizardPage) so chat stays usable on phones without
-       scrolling under the keyboard; min-height keeps it from collapsing on
+    /* Use calc(100dvh - 380px) so chat stays usable on phones without
+       scrolling under the keyboard. The 380px accounts for header + tab
+       bar + composer + safe-area; min-height keeps it from collapsing on
        tiny landscape windows. */
     max-height: none;
-    height: 50dvh;
-    min-height: 220px;
+    height: calc(100dvh - 380px);
+    min-height: 200px;
   }
 
   .deep-refine-panel .chat-input-row {
@@ -861,4 +946,55 @@
     white-space: normal;
     word-break: break-all;
   }
+
+  /* Session id row: stack the long <code> on its own line on narrow
+     screens so the copy button doesn't push the id out of view. */
+  .session-row {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+  .session-row .session-stage {
+    flex-basis: 100%;
+    margin-bottom: 4px;
+  }
+  .session-row .session-id {
+    flex-basis: calc(100% - 80px);
+    white-space: normal;
+    word-break: break-all;
+  }
+  .session-row .session-copy {
+    flex: 0 0 auto;
+  }
+
+  /* Compact meta tag row at the top of the detail — drop the project
+     chip on narrow screens (it's already in the breadcrumb above) and
+     shrink the priority tag. */
+  .detail-meta {
+    gap: 6px;
+  }
+  .project-tag { font-size: 11px; padding: 2px 8px; }
+
+  /* The detail header has its own back button (in the layout bar) so the
+     inner "← 项目" button collapses on mobile to avoid two stacked
+     back arrows. */
+  .detail-header > .btn:first-child { display: none; }
+}
+
+/* ── Mobile sticky CTA bar (shared by detail pages) ─────────────
+   Pages that have a primary action buried deep inside a long scrolling
+   section can wrap it in `.mobile-cta-bar` to make it stick to the
+   bottom on phones. The bar reserves the safe-area at the bottom so
+   the home indicator stays clear. */
+@media (max-width: 768px) {
+  .mobile-cta-bar {
+    position: sticky;
+    bottom: var(--tabbar-h);
+    background: var(--color-surface);
+    padding: 10px 14px calc(10px + var(--sab));
+    margin: 16px -14px 0;
+    border-top: 1px solid var(--color-border);
+    box-shadow: 0 -4px 12px rgba(15, 23, 42, 0.04);
+    z-index: 5;
+  }
+  .mobile-cta-bar > * { min-height: 44px; width: 100%; }
 }

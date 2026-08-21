@@ -202,7 +202,7 @@
 
   .app-header-user {
     font-size: 13px;
-    max-width: 140px;
+    max-width: 100px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -211,6 +211,48 @@
   .app-header {
     padding-left: 12px;
     padding-right: 12px;
+  }
+
+  /* On mobile the logo shrinks and the section title takes the spotlight
+     — the user is more interested in "我当前在哪个页面" than "这个 app 是
+     什么". The inline back chevron is hidden on the root and on
+     list pages; the sectionLabel resolver sets it for detail routes. */
+  .app-logo { font-size: 14px; opacity: 0.85; }
+  .app-header-section {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 8px;
+    padding-left: 10px;
+    border-left: 1px solid var(--color-border);
+    min-width: 0;
+    flex: 1;
+  }
+  .app-header-back {
+    background: none;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    width: 28px; height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    line-height: 1;
+    color: var(--color-text);
+    cursor: pointer;
+    flex-shrink: 0;
+    padding: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .app-header-back:active { background: var(--color-hover); }
+  .app-header-section-label {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
   }
 
   /* Logout becomes a round icon on mobile to free up horizontal space for
@@ -224,7 +266,7 @@
     border-radius: 8px;
   }
   .app-header-logout::before {
-    content: '⎋';
+    content: '�';
     font-size: 18px;
     line-height: 1;
   }
@@ -272,7 +314,8 @@
   }
 
   /* Tighten the main area on small screens but keep at least 16px gutter
-     so content doesn't bleed under the round corners of an iPhone. */
+     so content doesn't bleed under the round corners of an iPhone. The
+     padding-bottom override in index.css adds extra space for the tab bar. */
   .app-main {
     padding: 14px;
   }

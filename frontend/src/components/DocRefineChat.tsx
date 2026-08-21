@@ -390,7 +390,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         </div>
       )}
 
-      <div className="chat-input-row">
+      <div className="chat-input-row composer-sticky">
         <AtMentionTextarea
           value={input}
           onChange={setInput}
