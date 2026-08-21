@@ -20,7 +20,9 @@ docker compose \
   --project-name "${PROJECT_NAME}" \
   down --remove-orphans || true
 
-echo ">>> Removing persistent data for ${PROJECT_NAME}"
-rm -rf "${NOVA_HOME}/preview/${PROJECT_NAME}" || true
+echo ">>> Removing per-project workspace for ${PROJECT_NAME}"
+# Note: the shared ${NOVA_HOME}/preview/data (DB used by all previews) is
+# intentionally kept — only the per-project workspace is torn down.
+rm -rf "${NOVA_HOME}/preview/${PROJECT_NAME}/workspace" || true
 
 echo "✅ Preview ${PROJECT_NAME} cleaned up"

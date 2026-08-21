@@ -105,15 +105,22 @@ jobs:
 
       - name: Deploy to production
         uses: appleboy/ssh-action@v1
+        env:
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ALI_ACCESS_KEY_ID: ${{ secrets.ALI_ACCESS_KEY_ID }}
+          ALI_ACCESS_KEY_SECRET: ${{ secrets.ALI_ACCESS_KEY_SECRET }}
         with:
           host: ${{ vars.PROD_SERVER_HOST }}
           username: ${{ vars.PROD_SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: ANTHROPIC_AUTH_TOKEN
+          envs: ANTHROPIC_AUTH_TOKEN,ALI_ACCESS_KEY_ID,ALI_ACCESS_KEY_SECRET
           script: |
             export GHCR_NAMESPACE="${{ env.NAMESPACE }}"
             export IMAGE_TAG="sha-${{ github.sha }}"
             export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN}"
+            # acme.sh dns_ali plugin reads Ali_Key / Ali_Secret for the DNS-01 challenge
+            export Ali_Key="${ALI_ACCESS_KEY_ID}"
+            export Ali_Secret="${ALI_ACCESS_KEY_SECRET}"
 
             bash ${HOME}/nova/deploy/setup/deploy-prod.sh
 
@@ -165,15 +172,22 @@ jobs:
 
       - name: Deploy preview
         uses: appleboy/ssh-action@v1
+        env:
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ALI_ACCESS_KEY_ID: ${{ secrets.ALI_ACCESS_KEY_ID }}
+          ALI_ACCESS_KEY_SECRET: ${{ secrets.ALI_ACCESS_KEY_SECRET }}
         with:
           host: ${{ vars.PREVIEW_SERVER_HOST || vars.PROD_SERVER_HOST }}
           username: ${{ vars.PREVIEW_SERVER_USER || vars.PROD_SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: ANTHROPIC_AUTH_TOKEN
+          envs: ANTHROPIC_AUTH_TOKEN,ALI_ACCESS_KEY_ID,ALI_ACCESS_KEY_SECRET
           script: |
             export GHCR_NAMESPACE="${{ env.NAMESPACE }}"
             export IMAGE_TAG="sha-${{ github.sha }}"
             export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN}"
+            # acme.sh dns_ali plugin reads Ali_Key / Ali_Secret for the DNS-01 challenge
+            export Ali_Key="${ALI_ACCESS_KEY_ID}"
+            export Ali_Secret="${ALI_ACCESS_KEY_SECRET}"
             export PROJECT_NAME="${{ steps.preview.outputs.project_name }}"
             export VIRTUAL_HOST="${{ steps.preview.outputs.virtual_host }}"
 

@@ -13,6 +13,9 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 ensure_docker_access "$@"
 ensure_nginx_proxy_network
+ensure_nginx_proxy_container
+ensure_wildcard_cert
+ensure_nova_nginx_vhost
 
 : "${GHCR_NAMESPACE:?GHCR_NAMESPACE required}"
 : "${IMAGE_TAG:?IMAGE_TAG required}"

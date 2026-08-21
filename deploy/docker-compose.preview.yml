@@ -11,7 +11,11 @@ services:
       - VIRTUAL_PORT=9527
       - HTTPS_METHOD=noredirect
     volumes:
-      - ${HOME}/nova/preview/${PROJECT_NAME}/data:/root/.novaworkbench
+      # Shared DB + NovaWorkbench state across ALL preview environments —
+      # every req-xxx.nova preview reads/writes the same nova.db.
+      - ${HOME}/nova/preview/data:/root/.novaworkbench
+      # Per-project workspace stays per-project (different branches clone
+      # different repos into /root/workspace).
       - ${HOME}/nova/preview/${PROJECT_NAME}/workspace:/root/workspace
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9527/api/health"]

@@ -13,6 +13,9 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 ensure_docker_access "$@"
 ensure_nginx_proxy_network
+ensure_nginx_proxy_container
+ensure_wildcard_cert
+ensure_nova_nginx_vhost
 
 : "${GHCR_NAMESPACE:?GHCR_NAMESPACE required}"
 : "${IMAGE_TAG:?IMAGE_TAG required}"
@@ -30,7 +33,9 @@ DEPLOY_DIR="${NOVA_HOME}/deploy"
 cd "${DEPLOY_DIR}"
 
 echo ">>> Preparing persistent dirs"
-mkdir -p "${NOVA_HOME}/preview/${PROJECT_NAME}/data"
+# Shared across all preview environments (one DB for every req-xxx).
+mkdir -p "${NOVA_HOME}/preview/data"
+# Per-project workspace (different branches clone different repos).
 mkdir -p "${NOVA_HOME}/preview/${PROJECT_NAME}/workspace"
 
 echo ">>> Pulling ghcr.io/${GHCR_NAMESPACE}/nova:${IMAGE_TAG}"
