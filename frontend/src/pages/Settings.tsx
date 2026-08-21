@@ -9,6 +9,7 @@ const settingsTabs = [
   { to: '/settings/acl', label: '角色权限', permission: 'setting.acl' },
   { to: '/settings', label: '平台 Token', permission: 'setting.tokens', end: true },
   { to: '/settings/roles', label: 'AI 角色', permission: 'setting.roles_ai' },
+  { to: '/settings/skills', label: 'Skills', permission: 'setting.roles_ai' },
   { to: '/settings/claude', label: 'Claude 配置', permission: 'setting.claude' },
   { to: '/settings/llm', label: '直连 LLM', permission: 'setting.llm' },
   { to: '/settings/database', label: '数据库', permission: 'setting.database' },

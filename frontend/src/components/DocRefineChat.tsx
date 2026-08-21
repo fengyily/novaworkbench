@@ -3,6 +3,7 @@ import { API_BASE, authedFetch } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, coalesceLogLines } from '../utils/logLines';
 import ModelSelect from './ModelSelect';
+import AtMentionTextarea from './AtMentionTextarea';
 
 interface Props {
   reqId: string;
@@ -390,13 +391,13 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
       )}
 
       <div className="chat-input-row">
-        <textarea
+        <AtMentionTextarea
           value={input}
-          onChange={e => setInput(e.target.value)}
+          onChange={setInput}
           onKeyDown={e => {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
           }}
-          placeholder={`描述你想修改或补充的内容...&#10;Enter 发送  ·  Shift+Enter 换行`}
+          placeholder={`描述你想修改或补充的内容... 输入 @ 引用 Skill&#10;Enter 发送  ·  Shift+Enter 换行`}
           className="form-input chat-textarea"
           disabled={working || applying}
           rows={2}

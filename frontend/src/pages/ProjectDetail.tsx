@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import AtMentionTextarea from '../components/AtMentionTextarea';
 import {
   projectsApi, runnerApi, reviewApi, platformApi, requirementsApi, knowledgeApi,
   usageApi, usageTotalInput, fmtCost,
@@ -1282,8 +1283,13 @@ function CreateRequirementForm({ projectId, onClose, onCreated }: {
       </div>
       <div className="form-group">
         <label>需求内容 (必填)</label>
-        <textarea value={description} onChange={e => setDescription(e.target.value)} className="form-input" rows={6}
-          placeholder="用自然语言描述你想要实现的功能。例如：报表支持导出为 Excel 格式，目前只支持 PDF，用户需要 Excel 导出以便在本地编辑；要能选择导出的列..." autoFocus />
+        <AtMentionTextarea
+          value={description}
+          onChange={setDescription}
+          className="form-input"
+          rows={6}
+          placeholder="用自然语言描述你想要实现的功能。输入 @ 可引用 Skill，例如 @frontend 。例如：报表支持导出为 Excel 格式..."
+        />
         <small className="form-hint">
           提交后由 AI 整理为结构化 Markdown（背景 / 目标 / 功能要点 / 验收标准）并提炼标题，可在详情页继续编辑。
         </small>

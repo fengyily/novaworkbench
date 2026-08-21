@@ -549,6 +549,51 @@ export const rolesApi = {
   reset: (id: string) => api.post<Role>(`/api/settings/roles/${id}/reset`, {}),
 };
 
+export interface Skill {
+  id: string;
+  name: string;
+  slug: string;
+  content: string;
+  description: string;
+  enabled: boolean;
+  source_url: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MarketSkill {
+  name: string;
+  slug: string;
+  description: string;
+  content: string;
+  source_url: string;
+}
+
+export interface SkillMarket {
+  id: string;
+  name: string;
+  description: string;
+  repo_url: string;
+}
+
+export const skillsApi = {
+  list: () => api.get<Skill[]>('/api/settings/skills'),
+  create: (data: { name: string; slug: string; content: string; description?: string; source_url?: string }) =>
+    api.post<Skill>('/api/settings/skills', data),
+  update: (id: string, data: { name: string; slug: string; content: string; description: string; enabled: boolean }) =>
+    api.put<Skill>(`/api/settings/skills/${id}`, data),
+  delete: (id: string) => api.delete<{ status: string }>(`/api/settings/skills/${id}`),
+  markets: () => api.get<SkillMarket[]>('/api/settings/skills/markets'),
+  market: (params: { market?: string; registry?: string }) => {
+    const qs = params.market
+      ? `?market=${params.market}`
+      : params.registry
+        ? `?registry=${encodeURIComponent(params.registry)}`
+        : '';
+    return api.get<MarketSkill[]>('/api/settings/skills/market' + qs);
+  },
+};
+
 // Weekly reports (AI-generated from git log + requirement data)
 export interface WeeklyReport {
   id: string;

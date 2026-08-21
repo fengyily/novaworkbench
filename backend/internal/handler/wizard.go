@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -33,9 +34,10 @@ type WizardHandler struct {
 	jobLogSvc    *service.JobLogService
 	claudeCfg    *service.ClaudeConfigService
 	usageSvc     usageRecorder
+	skillSvc     *service.SkillService
 }
 
-func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder) *WizardHandler {
+func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService) *WizardHandler {
 	return &WizardHandler{
 		projectSvc:   projectSvc,
 		reqSvc:       reqSvc,
@@ -46,6 +48,7 @@ func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.Requir
 		jobLogSvc:    jobLogSvc,
 		claudeCfg:    claudeCfg,
 		usageSvc:     usageSvc,
+		skillSvc:     skillSvc,
 	}
 }
 
@@ -527,6 +530,12 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		// must not tie the claude subprocess's lifetime to r.Context() (which
 		// is cancelled the moment the handler returns — that was the bug that
 		// killed the turn on page refresh).
+		skillsBlock := llm.BuildSkillsBlock(h.mentionedSkills(requirement.Title + " " + requirement.Description))
+		origFirstTurnPrompt := firstTurnPrompt
+		if skillsBlock != "" {
+			firstTurnPrompt = func() string { return skillsBlock + origFirstTurnPrompt() }
+			resumePrompt = skillsBlock + resumePrompt
+		}
 		analystUsage := h.usageCtxFor("analyst_chat", req.RequirementID, requirement.ProjectID, job.ID, model, "")
 		finalResult, newSessionID, err := h.runAnalystTurn(context.Background(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, sessionID, !isFirstRound, sink, analystUsage)
 		if err != nil {
@@ -1217,6 +1226,13 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		} else if sourceSID == "" {
 			sessionArg = newCodingSID // fresh (skip-design 直接开发): --session-id <new>
 		}
+		skillText := ""
+		if reqRow != nil {
+			skillText = reqRow.Title + " " + reqRow.Description
+		}
+		if block := llm.BuildSkillsBlock(h.mentionedSkills(skillText)); block != "" {
+			prompt = block + prompt
+		}
 		cmd := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:        prompt,
 			WorkDir:       workDir,
@@ -1378,8 +1394,12 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 				workDir = req.WorktreePath
 			}
 		}
+		adjustPrompt := body.Message
+		if block := llm.BuildSkillsBlock(h.mentionedSkills(req.Title + " " + req.Description + " " + body.Message)); block != "" {
+			adjustPrompt = block + body.Message
+		}
 		cmd := h.llm.GenerateCode(llm.StreamOpts{
-			Prompt:       body.Message,
+			Prompt:       adjustPrompt,
 			WorkDir:      workDir,
 			SystemPrompt: "", // resume 已携带 developer persona，不再注入
 			Model:        cliModelArg(model),
@@ -1761,6 +1781,9 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 			forkSessionID = newDesignSID
 		} else if sourceSID == "" {
 			sessionArg = newDesignSID // skip-analysis fresh session
+		}
+		if block := llm.BuildSkillsBlock(h.mentionedSkills(req.Title + " " + req.Description)); block != "" {
+			prompt = block + prompt
 		}
 		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
 			Prompt:         prompt,
@@ -2858,6 +2881,14 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 			"若用户确认修改已完成，在回复最后单独一行追加：[REFINE_COMPLETE]\n用中文。"
 	}
 
+	skillText := req.UserMessage
+	if requirement != nil {
+		skillText = requirement.Title + " " + requirement.Description + " " + req.UserMessage
+	}
+	if block := llm.BuildSkillsBlock(h.mentionedSkills(skillText)); block != "" {
+		prompt = block + prompt
+	}
+
 	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
 		Prompt:       prompt,
 		WorkDir:      workDir,
@@ -3041,8 +3072,13 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[apply-doc] job %s started for %s (doc_type=%s)", job.ID, reqID, docType)
 		job.Append(store.LogLine{Type: "phase", Content: fmt.Sprintf("🤖 Claude 正在基于对话整合修改%s…（预计需要几分钟）", docLabel)})
 
+		applyPrompt := prompt
+		if block := llm.BuildSkillsBlock(h.mentionedSkills(requirement.Title + " " + requirement.Description)); block != "" {
+			applyPrompt = block + prompt
+		}
+
 		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-			Prompt:       prompt,
+			Prompt:       applyPrompt,
 			WorkDir:      workDir,
 			SystemPrompt: systemPrompt,
 			Model:        cliModelArg(model),
@@ -3117,9 +3153,42 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
+// mentionedSkills parses @slug mentions from text and returns the matching
+// skill files. Only skills present in the DB are returned; unknown slugs are
+// silently ignored. A nil skillSvc returns nil without error.
+func (h *WizardHandler) mentionedSkills(text string) []struct{ Slug, Content string } {
+	if h.skillSvc == nil {
+		return nil
+	}
+	slugs := parseAtMentions(text)
+	if len(slugs) == 0 {
+		return nil
+	}
+	skills, _ := h.skillSvc.SkillsBySlug(slugs)
+	return skills
+}
+
+// parseAtMentions extracts unique @slug tokens from text.
+// A slug may contain letters, digits, hyphens, and underscores.
+var atMentionRe = regexp.MustCompile(`@([A-Za-z0-9_-]+)`)
+
+func parseAtMentions(text string) []string {
+	matches := atMentionRe.FindAllStringSubmatch(text, -1)
+	seen := make(map[string]bool)
+	var slugs []string
+	for _, m := range matches {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			slugs = append(slugs, m[1])
+		}
+	}
+	return slugs
+}
+
 // isLikelyJSON reports whether s looks like a JSON object (starts with '{' after
 // trimming whitespace). Used to distinguish plan-markdown design docs from the
 // legacy JSON design schema.
 func isLikelyJSON(s string) bool {
 	return strings.HasPrefix(strings.TrimSpace(s), "{")
 }
+

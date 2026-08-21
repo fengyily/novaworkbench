@@ -16,6 +16,7 @@ import SettingsDatabase from './pages/SettingsDatabase';
 import SettingsPreflight from './pages/SettingsPreflight';
 import SettingsUsers from './pages/SettingsUsers';
 import SettingsACLRoles from './pages/SettingsACLRoles';
+import SettingsSkills from './pages/SettingsSkills';
 import KnowledgePage from './pages/KnowledgePage';
 import RequirementDetail from './pages/RequirementDetail';
 import WizardPage from './pages/WizardPage';
@@ -61,6 +62,7 @@ export default function App() {
               <Route path="users" element={<SettingsUsers />} />
               <Route path="acl" element={<SettingsACLRoles />} />
               <Route path="roles" element={<SettingsRoles />} />
+              <Route path="skills" element={<SettingsSkills />} />
               <Route path="claude" element={<SettingsClaude />} />
               <Route path="llm" element={<SettingsLLM />} />
               <Route path="database" element={<SettingsDatabase />} />

@@ -5,6 +5,7 @@ import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
 import ModelSelect from '../components/ModelSelect';
+import AtMentionTextarea from '../components/AtMentionTextarea';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { exportDesignPdf } from '../utils/exportDesignPdf';
@@ -1314,7 +1315,14 @@ export default function RequirementDetail() {
             </div>
             <div className="modal-field">
               <label>描述</label>
-              <textarea className="input" rows={6} value={editDesc} onChange={e => setEditDesc(e.target.value)} style={{ resize: 'vertical' }} />
+              <AtMentionTextarea
+                className="input"
+                rows={6}
+                value={editDesc}
+                onChange={setEditDesc}
+                style={{ resize: 'vertical' }}
+                placeholder="输入 @ 可引用 Skill，例如 @frontend"
+              />
             </div>
             <div style={{ display: 'flex', gap: 12 }}>
               <div className="modal-field" style={{ flex: 1 }}>
