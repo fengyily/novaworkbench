@@ -6,7 +6,7 @@ output "server_public_ip" {
 output "dns_records" {
   description = "DNS A records Terraform manages"
   value = {
-    for k, v in alicloud_dns_record.nova :
+    for k, v in alicloud_alidns_record.nova :
     k => v.value
   }
 }
