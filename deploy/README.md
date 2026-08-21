@@ -33,6 +33,27 @@ then truncated to 63 chars. e.g. `feat/req_af3ca270364fb2b0` →
      nginx-proxy picks it up automatically,
    - registers a daily cron for auto-renewal.
 
+### Cert self-heal on every deploy
+
+Every prod **and** preview deploy runs `ensure_wildcard_cert` (in
+`deploy/setup/lib.sh`) before bringing the stack up:
+
+- **cert absent** → issues `*.nova.yishield.com` via Aliyun DNS-01 (uses
+  `Ali_Key`/`Ali_Secret`, mapped from the `ALI_ACCESS_KEY_ID`/`_SECRET`
+  repo secrets by `deploy.yml`). Issuance failure **aborts** the deploy —
+  we never ship to a cert-less site.
+- **cert within `RENEW_DAYS` (default 30) of expiry** → renews; renewal
+  failure only aborts if the installed cert is already expired, so a
+  transient Let's Encrypt hiccup doesn't block all deploys.
+- **cert fresh** → no-op (no reload).
+- Installs the cert into `/etc/nginx/ssl/nova.yishield.com/` and HUPs
+  `nginx-proxy`, but **only when the cert content changed**.
+
+So a server that lost its cert, or whose bootstrap was never run,
+self-heals on the next push — no manual `init-server.sh` needed for
+(re)issuance. `init-server.sh` remains the canonical first-time bootstrap
+(nginx-proxy container + network); the deploy flow then owns cert health.
+
 ## GitHub repository configuration
 
 ### Secrets (Settings → Secrets and variables → Actions → Secrets)
@@ -40,8 +61,8 @@ then truncated to 63 chars. e.g. `feat/req_af3ca270364fb2b0` →
 | Name                    | Purpose                                       |
 |-------------------------|-----------------------------------------------|
 | `SSH_PRIVATE_KEY`       | SSH key for the deploy user on the server     |
-| `ALI_ACCESS_KEY_ID`     | Aliyun DNS API (only if you re-issue manually)|
-| `ALI_ACCESS_KEY_SECRET` | Aliyun DNS API                                |
+| `ALI_ACCESS_KEY_ID`     | Aliyun DNS API — cert self-heal (DNS-01) + Terraform |
+| `ALI_ACCESS_KEY_SECRET` | Aliyun DNS API — cert self-heal (DNS-01) + Terraform |
 | `ANTHROPIC_AUTH_TOKEN`  | Injected into the backend container at runtime |
 
 ### Variables (Settings → Secrets and variables → Actions → Variables)
