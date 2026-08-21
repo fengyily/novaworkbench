@@ -15,9 +15,30 @@
   --color-hover: #F1F5F9;
   --color-active: #EEF2FF;
 
+  /* Mobile-only accents — warmer parchment surface + amber highlight for
+     "AI working" pulse / key CTAs. Kept scoped so the desktop palette stays
+     consistent (these are referenced only inside @media blocks below). */
+  --color-parchment: #FDFCF8;
+  --color-accent-warm: #D97706;
+  --color-accent-cool: #0E7490;
+
   /* Typography */
   --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+
+  /* Safe-area insets for notched devices. Defined once so every layout rule
+     reads the same value — if we ever need to disable them (e.g. PWA full-
+     screen mode) we override the vars on a wrapper, not every rule. */
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+
+  /* Mobile chrome heights — set once on :root so .app-main padding-bottom
+     and the tab-bar layout read the same value. Defined as 0 on desktop
+     (where the tab bar is hidden) so non-mobile rules don't need their own
+     overrides. */
+  --tabbar-h: 0px;
 
   font-family: var(--font-sans);
   font-size: 14px;
@@ -34,12 +55,54 @@
 /* Reset */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-body { margin: 0; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  /* iOS Safari rubber-band scroll on the body is jarring while a modal or
+     sidebar drawer is open; the per-handler lock uses overflow:hidden, this
+     default keeps normal pages smooth. */
+  overscroll-behavior-y: contain;
+  /* Suppress the iOS gray tap highlight (we replace it with :focus-visible). */
+  -webkit-tap-highlight-color: transparent;
+}
 
 #root {
+  /* Use the dynamic viewport height where supported so iOS Safari's URL bar
+     doesn't truncate the layout. Falls back to 100vh on older browsers. */
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
+}
+
+/* Visible keyboard-only focus ring. Mouse users still get :hover; touch users
+   don't see it, which is the correct WCAG behavior. */
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Inputs must be ≥16px to stop iOS Safari from zooming the page on focus.
+   Buttons/textarea keep their native size (no zoom). */
+@media (max-width: 768px) {
+  input.form-input,
+  select.form-input,
+  textarea.form-input {
+    font-size: 16px;
+  }
+}
+
+/* Lock body scroll while a modal/drawer is open. Toggled via JS by adding
+   `body.no-scroll`. Prevents the underlying page from shifting under the
+   user when they scroll inside a fixed overlay. */
+body.no-scroll {
+  overflow: hidden;
+  /* Compensate for the scrollbar disappearance on desktop so the layout
+     doesn't jump; mobile has no scrollbar to begin with. */
+  padding-right: var(--scrollbar-comp, 0px);
 }
 
 /* Button system */
@@ -70,6 +133,117 @@ body { margin: 0; }
 .btn-sm { padding: 4px 10px; font-size: 12px; border-radius: 4px; }
 .btn-danger { background: #EF4444; color: white; border-color: #EF4444; }
 .btn-danger:hover { background: #DC2626; border-color: #DC2626; }
+
+/* ── Touch target sizing ────────────────────────────────────────
+   Apple HIG and WCAG 2.5.5 both call for ≥44×44px tap targets. On mobile
+   we expand small buttons (which are fine on desktop with a mouse) so the
+   hit area is comfortable for thumbs. */
+@media (max-width: 768px) {
+  .btn { min-height: 44px; }
+  .btn-sm { min-height: 36px; padding: 6px 12px; }
+}
+
+/* ── Mobile utilities (used across pages) ─────────────────────────
+   Shared rules so individual pages don't reinvent the same media-query
+   block. Add the class to the element; the styles only kick in below the
+   768px breakpoint. */
+
+/* Stack flex children vertically and stretch them full-width. Use on
+   `.form-actions`, `.detail-actions`, `.merge-actions`, `.review-actions`,
+   etc. that need their buttons full-width on phones. */
+@media (max-width: 768px) {
+  .stack-mobile { flex-direction: column; align-items: stretch; }
+  .stack-mobile > * { width: 100%; }
+}
+
+/* Lay out direct .btn children as a 2-up grid. Use when a row has 2-3
+   buttons that should stay side-by-side instead of stacking into a single
+   column. */
+@media (max-width: 768px) {
+  .btn-row-2col { flex-wrap: wrap; }
+  .btn-row-2col > .btn { flex: 1 1 calc(50% - 4px); min-width: 0; }
+}
+
+/* Tap-target utility for non-button interactive surfaces (nav items, tab
+   buttons, list rows). Buttons get the global .btn min-height automatically;
+   this is for the rest. */
+.touch-target {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.touch-target-sm { min-height: 36px; }
+
+/* Collapse any <table> with this class into stacked cards below 768px.
+   The table header disappears and each cell renders as a row with the
+   column header (from `data-label`) on the left and the cell content on
+   the right. Compose with `data-label` attributes on every <td>. The
+   768px breakpoint matches the rest of the mobile rules so every table
+   gets the same treatment across the app — no horizontal scroll bar
+   sneaking through at 601-768px. */
+@media (max-width: 768px) {
+  .table-cards thead { display: none; }
+  .table-cards,
+  .table-cards tbody,
+  .table-cards tr,
+  .table-cards td { display: block; width: 100%; }
+  .table-cards tr {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+  .table-cards td {
+    padding: 4px 0;
+    border-bottom: 1px dashed var(--color-border);
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+  }
+  .table-cards td:last-child { border-bottom: none; }
+  .table-cards td::before {
+    content: attr(data-label);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    flex-shrink: 0;
+    max-width: 100px;
+  }
+  .table-cards td > * { text-align: right; min-width: 0; }
+  /* The total row stretches across the whole row; let it live as a single
+     cell-less block so the dashed borders don't render between cells. */
+  .table-cards tr.table-cards-total {
+    padding: 6px 12px;
+  }
+  .table-cards tr.table-cards-total td {
+    padding: 0;
+    border: none;
+  }
+  .table-cards tr.table-cards-total td::before { display: none; }
+}
+
+/* Full-screen modal override. Apply to the modal box (and optionally its
+   overlay) to make it occupy the entire phone viewport, with the right
+   safe-area insets so the close button stays reachable. */
+@media (max-width: 768px) {
+  .modal-fullscreen {
+    width: 100vw;
+    max-width: none;
+    height: 100dvh;
+    border-radius: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .modal-fullscreen-overlay {
+    align-items: stretch;
+    padding: 0;
+  }
+}
 
 /* ── Per-stage model picker (ModelSelect) ─────────────────────────────── */
 .model-select {
@@ -168,3 +342,388 @@ body { margin: 0; }
 .status-badge.status-missing    { background: #fef3c7; color: #b45309; }
 /* weekly-report run status */
 .status-badge.status-error      { background: #fee2e2; color: #dc2626; }
+
+/* ════════════════════════════════════════════════════════════════════
+   MOBILE PATTERNS — bottom tab bar, FAB, bottom sheet, sticky composer.
+   ────────────────────────────────────────────────────────────────────
+   These rules define the mobile "thumb zone": a persistent command
+   surface at the bottom of the screen that replaces the desktop
+   hamburger-and-scroll mental model. Everything below the breakpoint
+   uses these patterns; on desktop they're invisible (.tab-bar / .fab /
+   .sheet-overlay are display:none by default).
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ── Bottom tab bar ───────────────────────────────────────────────
+   Persistent navigation strip at the bottom of every screen. Active
+   tab gets a colored icon + label + a small dot indicator; inactive
+   tabs dim. Hides on desktop (768px+). */
+.tab-bar {
+  display: none;
+}
+@media (max-width: 768px) {
+  :root { --tabbar-h: calc(56px + var(--sab)); }
+
+  .tab-bar {
+    display: flex;
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    height: var(--tabbar-h);
+    padding-bottom: var(--sab);
+    background: var(--color-surface);
+    border-top: 1px solid var(--color-border);
+    z-index: 90;
+    /* Sits above content but below modals (1000) and the sidebar
+       drawer (200). Safe-area bottom inset keeps the home indicator
+       area on notched iPhones clear of the active tab. */
+    justify-content: space-around;
+    align-items: stretch;
+    box-shadow: 0 -2px 12px rgba(15, 23, 42, 0.04);
+  }
+  .tab-bar-item {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    text-decoration: none;
+    color: var(--color-text-muted);
+    font-size: 11px;
+    font-weight: 500;
+    padding: 6px 0;
+    min-width: 0;
+    position: relative;
+    transition: color 0.15s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .tab-bar-item .tab-bar-icon { font-size: 20px; line-height: 1; }
+  .tab-bar-item .tab-bar-label {
+    font-size: 10.5px;
+    line-height: 1.2;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 0 4px;
+  }
+  .tab-bar-item:hover { color: var(--color-text); }
+  .tab-bar-item.active { color: var(--color-primary); font-weight: 600; }
+  /* Active dot indicator: a thin pill at the top of the tab, centered.
+     Keeps the active state visible without crowding the icon. */
+  .tab-bar-item.active::before {
+    content: '';
+    position: absolute;
+    top: 4px; left: 50%;
+    transform: translateX(-50%);
+    width: 18px; height: 3px;
+    border-radius: 2px;
+    background: var(--color-primary);
+  }
+  /* "More" tab opens the existing sidebar drawer — the hamburger stays
+     reachable for the full nav list and admin links the tab bar trims. */
+  .tab-bar-item.more-tab .tab-bar-icon { font-size: 22px; }
+}
+
+/* ── Floating Action Button (FAB) ────────────────────────────────
+   A circular primary CTA anchored above the tab bar. Used for "+ 新建"
+   on list pages. Position fixed so it stays reachable while the user
+   scrolls long lists. */
+.fab {
+  display: none;
+}
+@media (max-width: 768px) {
+  .fab {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    right: 16px;
+    bottom: calc(var(--tabbar-h) + 12px);
+    width: 56px; height: 56px;
+    border-radius: 50%;
+    background: var(--color-primary);
+    color: #fff;
+    border: none;
+    box-shadow: 0 6px 18px rgba(79, 70, 229, 0.35);
+    font-size: 26px;
+    font-weight: 600;
+    z-index: 80;
+    cursor: pointer;
+    transition: transform 0.15s, box-shadow 0.15s, background 0.15s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .fab:hover { background: var(--color-primary-hover); }
+  .fab:active {
+    transform: scale(0.94);
+    box-shadow: 0 3px 10px rgba(79, 70, 229, 0.3);
+  }
+  /* `.fab-extended` is a pill variant for labelled CTAs (e.g. 新建需求).
+     Auto width, smaller font, icon + label inline. */
+  .fab-extended {
+    width: auto;
+    height: 48px;
+    padding: 0 18px;
+    border-radius: 24px;
+    font-size: 14px;
+    gap: 6px;
+    box-shadow: 0 4px 14px rgba(79, 70, 229, 0.28);
+  }
+  /* Hide the FAB on pages that don't need it (detail pages, settings). */
+  .fab-hidden { display: none !important; }
+}
+
+/* ── Bottom-sheet modal (mobile) ────────────────────────────────
+   Replaces the centered .modal-box on phones with a sheet that slides
+   up from the bottom. The handle-bar at the top is the conventional
+   "drag me" affordance — purely visual here, but it tells touch users
+   how the modal will dismiss (tap overlay or swipe down).
+   On desktop, .sheet stays display:none and the existing centered
+   modal-box is used. */
+.sheet-overlay {
+  display: none;
+}
+@media (max-width: 768px) {
+  .sheet-overlay {
+    display: flex;
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    z-index: 1000;
+    align-items: flex-end;
+    justify-content: center;
+    animation: sheet-fade-in 0.18s ease-out;
+  }
+  .sheet {
+    width: 100vw;
+    max-height: 88dvh;
+    background: var(--color-surface);
+    border-radius: 16px 16px 0 0;
+    padding: 8px 16px calc(16px + var(--sab));
+    box-shadow: 0 -8px 32px rgba(15, 23, 42, 0.18);
+    overflow-y: auto;
+    animation: sheet-slide-up 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+    /* Subtle overscroll so swiping down at the top of the content reveals
+       the bounce without scrolling the page underneath. */
+    overscroll-behavior: contain;
+  }
+  .sheet-handle {
+    width: 36px; height: 4px;
+    background: var(--color-border);
+    border-radius: 2px;
+    margin: 4px auto 12px;
+  }
+  .sheet-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--color-border);
+  }
+  .sheet-title { font-size: 16px; font-weight: 700; margin: 0; }
+  .sheet-close {
+    background: none;
+    border: none;
+    font-size: 18px;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 6px;
+    line-height: 1;
+    min-width: 36px;
+    min-height: 36px;
+  }
+  .sheet-close:hover { background: var(--color-hover); }
+  /* The sheet body just stacks its children with normal flow. Forms
+     inside should add the same field-spacing they use elsewhere. */
+  .sheet-body { font-size: 14px; }
+}
+@keyframes sheet-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes sheet-slide-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+
+/* ── Sticky composer (chat input row) ────────────────────────────
+   The chat composer is the most-touched surface in the app. On mobile
+   it pins to the bottom of the scroll container with a backdrop blur
+   so it stays visible while content scrolls behind it, and never gets
+   hidden under the iOS keyboard or the tab bar. Add `.composer-sticky`
+   to a `.chat-input-row` to enable. */
+@media (max-width: 768px) {
+  .composer-sticky {
+    position: sticky;
+    bottom: 0;
+    background: var(--color-surface);
+    /* Gradient mask so content scrolling under the composer fades
+       instead of vanishing abruptly. */
+    padding-top: 12px;
+    padding-bottom: max(12px, var(--sab));
+    margin-top: 8px;
+    /* Subtle separator + soft drop shadow so the composer reads as
+       "above the page" rather than "part of the chat". */
+    border-top: 1px solid var(--color-border);
+    box-shadow: 0 -4px 12px rgba(15, 23, 42, 0.04);
+    z-index: 5;
+  }
+}
+
+/* ── AI working pulse (mobile header dot) ────────────────────────
+   A persistent indicator in the header that pulses amber when Claude
+   is working. Distinctive because it surfaces the AI nature of the
+   tool on every screen, not just chat. The component is a small span
+   with .ai-pulse-dot; toggle .is-work to animate. */
+.ai-pulse-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--color-text-muted);
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+.ai-pulse-dot.is-work {
+  background: var(--color-accent-warm);
+  box-shadow: 0 0 0 0 rgba(217, 119, 6, 0.4);
+  animation: ai-pulse 1.4s ease-in-out infinite;
+}
+@keyframes ai-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(217, 119, 6, 0.4); }
+  70%  { box-shadow: 0 0 0 8px rgba(217, 119, 6, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(217, 119, 6, 0); }
+}
+
+/* ── Mobile empty state ───────────────────────────────────────────
+   Distinctive empty states for list pages: a centered illustration
+   mark + a primary CTA. Parchment surface so the empty area reads
+   as "intentional" rather than "missing data". */
+@media (max-width: 768px) {
+  .mobile-empty {
+    padding: 48px 24px;
+    margin: 16px 0;
+    text-align: center;
+    background: var(--color-parchment);
+    border: 1px dashed var(--color-border);
+    border-radius: 12px;
+    color: var(--color-text-secondary);
+  }
+  .mobile-empty-mark {
+    font-size: 40px;
+    margin-bottom: 12px;
+    opacity: 0.7;
+    display: block;
+  }
+  .mobile-empty-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--color-text);
+    margin-bottom: 6px;
+  }
+  .mobile-empty-desc {
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--color-text-secondary);
+    margin-bottom: 16px;
+  }
+  .mobile-empty .btn { min-width: 140px; }
+}
+
+/* ── Page title bar (mobile) ──────────────────────────────────────
+   Replaces .page-title on detail pages with a sticky bar that
+   includes a back button, page title, and overflow actions. On
+   desktop the .page-title element is used as-is. */
+.mobile-title-bar {
+  display: none;
+}
+@media (max-width: 768px) {
+  .mobile-title-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    position: sticky;
+    top: calc(48px + var(--sat));
+    background: var(--color-bg);
+    padding: 10px 14px;
+    margin: 0 -14px 16px;
+    border-bottom: 1px solid var(--color-border);
+    z-index: 10;
+  }
+  .mobile-title-bar-back {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px; height: 36px;
+    background: none;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 18px;
+    color: var(--color-text);
+    flex-shrink: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .mobile-title-bar-back:hover { background: var(--color-hover); }
+  .mobile-title-bar-title {
+    flex: 1;
+    min-width: 0;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mobile-title-bar-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+}
+
+/* ── Bottom-sheet action menu (mobile row context menu) ─────────
+   A vertical action list that slides up from the bottom when the
+   user long-presses or taps a "more" button on a table row. Replaces
+   the tiny inline icon buttons that are hard to hit accurately with
+   a thumb. Each .sheet-action-item is a 48px-tall touch row. */
+@media (max-width: 768px) {
+  .sheet-action-list {
+    list-style: none;
+    padding: 0;
+    margin: 8px 0 0;
+  }
+  .sheet-action-item {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    min-height: 48px;
+    padding: 0 16px;
+    background: none;
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    text-align: left;
+    font-size: 14px;
+    color: var(--color-text);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .sheet-action-item:last-child { border-bottom: none; }
+  .sheet-action-item:active { background: var(--color-hover); }
+  .sheet-action-item.danger { color: var(--color-error); }
+  .sheet-action-item.primary { color: var(--color-primary); font-weight: 600; }
+  .sheet-action-item .sheet-action-icon { font-size: 18px; flex-shrink: 0; width: 22px; text-align: center; }
+  .sheet-action-item .sheet-action-label { flex: 1; min-width: 0; }
+}
+
+/* ── Page-level bottom padding so content doesn't slip under the
+   fixed tab bar / FAB. Applied to .app-main on mobile. The
+   --tabbar-h token is 0 on desktop so the rule is a no-op there. */
+@media (max-width: 768px) {
+  .app-main {
+    padding-bottom: calc(var(--tabbar-h) + 80px) !important;
+  }
+  /* Pages with their own sticky composer should NOT add the extra
+     padding — the composer's own bottom padding handles the safe area. */
+  .app-main.no-tabbar-pad {
+    padding-bottom: 14px !important;
+  }
+}

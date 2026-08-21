@@ -108,3 +108,27 @@
   border-radius: 3px;
   font-size: 12px;
 }
+
+/* ── Mobile ──────────────────────────────────────────────────────
+   On desktop the picker is a small inline card. On a phone users are
+   picking a project root, so the list of folders benefits from a tall,
+   full-width scroller with comfortable row height (44px tap targets). */
+@media (max-width: 768px) {
+  .fp-list {
+    max-height: 50dvh;
+    min-height: 220px;
+  }
+  .fp-item {
+    min-height: 48px;
+    padding: 12px;
+  }
+  /* `padding` and `font-size` here override the inline `style="..."` that
+     pre-existing callers (AddProject) pass to this button. Without these
+     overrides the inline styles win. */
+  .fp-pick-btn {
+    min-height: 36px;
+    padding: 6px 14px;
+    font-size: 13px;
+  }
+  .fp-crumb { min-height: 32px; }
+}

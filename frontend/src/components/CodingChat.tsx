@@ -142,7 +142,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
         </div>
       )}
 
-      <div className="chat-input-row" style={{ marginTop: hasConversation ? 8 : 0 }}>
+      <div className="chat-input-row composer-sticky" style={{ marginTop: hasConversation ? 8 : 0 }}>
         <textarea
           value={input}
           onChange={e => setInput(e.target.value)}

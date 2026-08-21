@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { API_BASE, authedFetch, requirementsApi } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
+import AtMentionTextarea from './AtMentionTextarea';
 import { appendLogLine, type LogLine } from '../utils/logLines';
 import ModelSelect from './ModelSelect';
 
@@ -443,17 +444,17 @@ export default function DeepRefineChat({
         )}
       </div>
 
-      <div className="chat-input-row">
-        <textarea
+      <div className="chat-input-row composer-sticky">
+        <AtMentionTextarea
           value={input}
-          onChange={e => setInput(e.target.value)}
+          onChange={setInput}
           onKeyDown={e => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
               handleSend();
             }
           }}
-          placeholder="贴URL、描述页面元素、或回复AI的问题...&#10;Enter 发送  ·  Shift+Enter 换行"
+          placeholder="贴URL、描述页面元素、或回复AI的问题... 输入 @ 引用 Skill&#10;Enter 发送  ·  Shift+Enter 换行"
           className="form-input chat-textarea"
           disabled={isWorking}
           rows={2}

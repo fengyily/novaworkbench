@@ -5,6 +5,7 @@ import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
 import ModelSelect from '../components/ModelSelect';
+import AtMentionTextarea from '../components/AtMentionTextarea';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { exportDesignPdf } from '../utils/exportDesignPdf';
@@ -1165,7 +1166,7 @@ export default function RequirementDetail() {
               <input type="checkbox" checked={readKnowledgeDesign} onChange={e => setReadKnowledgeDesign(e.target.checked)} />
               📚 开始前先读取项目知识库（默认不勾选）
             </label>
-            <div className="modal-actions">
+            <div className="modal-actions btn-row-2col">
               <button className="btn btn-primary" onClick={confirmDesignKnowledge}>确认</button>
               <button className="btn" onClick={() => setShowDesignKnowledgeModal(false)}>取消</button>
             </div>
@@ -1217,7 +1218,7 @@ export default function RequirementDetail() {
               <input type="checkbox" checked={readKnowledgeDev} onChange={e => setReadKnowledgeDev(e.target.checked)} />
               📚 开始前先读取项目知识库（默认不勾选）
             </label>
-            <div className="modal-actions">
+            <div className="modal-actions btn-row-2col">
               <button className="btn btn-primary" onClick={confirmBranchAndStart}>🚀 确认，开始开发</button>
               <button className="btn" onClick={() => setShowBranchModal(false)}>取消</button>
             </div>
@@ -1261,7 +1262,7 @@ export default function RequirementDetail() {
                   <input type="checkbox" checked={mergeDeleteBranch} onChange={e => setMergeDeleteBranch(e.target.checked)} />
                   合并后删除开发分支
                 </label>
-                <div className="modal-actions">
+                <div className="modal-actions btn-row-2col">
                   <button className="btn btn-primary" onClick={confirmMerge} disabled={!!busy}>🔀 确认合入</button>
                   <button className="btn" onClick={() => setShowMergeModal(false)} disabled={!!busy}>取消</button>
                 </div>
@@ -1293,7 +1294,7 @@ export default function RequirementDetail() {
                 {!mergeState.has_remote && (
                   <p className="merge-warn">该项目未配置 origin 远程仓库，无法推送。</p>
                 )}
-                <div className="modal-actions">
+                <div className="modal-actions btn-row-2col">
                   <button className="btn btn-primary" onClick={confirmMerge} disabled={!!busy || !mergeState.has_remote}>🌐 推送并发起 PR</button>
                   <button className="btn" onClick={() => setShowMergeModal(false)} disabled={!!busy}>取消</button>
                 </div>
@@ -1314,7 +1315,14 @@ export default function RequirementDetail() {
             </div>
             <div className="modal-field">
               <label>描述</label>
-              <textarea className="input" rows={6} value={editDesc} onChange={e => setEditDesc(e.target.value)} style={{ resize: 'vertical' }} />
+              <AtMentionTextarea
+                className="input"
+                rows={6}
+                value={editDesc}
+                onChange={setEditDesc}
+                style={{ resize: 'vertical' }}
+                placeholder="输入 @ 可引用 Skill，例如 @frontend"
+              />
             </div>
             <div style={{ display: 'flex', gap: 12 }}>
               <div className="modal-field" style={{ flex: 1 }}>
@@ -1340,7 +1348,7 @@ export default function RequirementDetail() {
                 </small>
               </div>
             )}
-            <div className="modal-actions">
+            <div className="modal-actions btn-row-2col">
               <button className="btn btn-primary" onClick={saveEdit} disabled={!!busy}>
                 {busy === '保存' ? '⏳ 保存中...' : '💾 保存'}
               </button>
@@ -1388,7 +1396,7 @@ export default function RequirementDetail() {
         </div>
         {usage && usage.by_step.length > 0 ? (
           <>
-            <table className="pr-table" style={{ marginBottom: 8 }}>
+            <table className="pr-table table-cards" style={{ marginBottom: 8 }}>
               <thead>
                 <tr>
                   <th>步骤</th>
@@ -1404,25 +1412,25 @@ export default function RequirementDetail() {
               <tbody>
                 {usage.by_step.map(s => (
                   <tr key={`${s.step}:${s.model}`}>
-                    <td>{s.label || stepLabels[s.step] || s.step}</td>
-                    <td><code className="pr-branch">{s.model || '未知模型'}</code></td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(s).toLocaleString()}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.output_tokens.toLocaleString()}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_read_tokens.toLocaleString()}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_creation_tokens.toLocaleString()}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{fmtCost(s.costs)}</td>
-                    <td style={{ fontSize: 12 }}>{s.count}</td>
+                    <td data-label="步骤">{s.label || stepLabels[s.step] || s.step}</td>
+                    <td data-label="模型"><code className="pr-branch">{s.model || '未知模型'}</code></td>
+                    <td data-label="输入" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(s).toLocaleString()}</td>
+                    <td data-label="输出" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.output_tokens.toLocaleString()}</td>
+                    <td data-label="缓存读" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_read_tokens.toLocaleString()}</td>
+                    <td data-label="缓存建" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_creation_tokens.toLocaleString()}</td>
+                    <td data-label="费用" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{fmtCost(s.costs)}</td>
+                    <td data-label="次数" style={{ fontSize: 12 }}>{s.count}</td>
                   </tr>
                 ))}
-                <tr style={{ borderTop: '2px solid var(--color-border)' }}>
-                  <td style={{ fontWeight: 600 }}>合计</td>
+                <tr className="table-cards-total" style={{ borderTop: '2px solid var(--color-border)' }}>
+                  <td data-label="合计" style={{ fontWeight: 600 }}>合计</td>
                   <td></td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{usageTotalInput(usage.total).toLocaleString()}</td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{usage.total.output_tokens.toLocaleString()}</td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{usage.total.cache_read_tokens.toLocaleString()}</td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{usage.total.cache_creation_tokens.toLocaleString()}</td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{fmtCost(usage.total.costs)}</td>
-                  <td></td>
+                  <td data-label="输入" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{usageTotalInput(usage.total).toLocaleString()}</td>
+                  <td data-label="输出" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{usage.total.output_tokens.toLocaleString()}</td>
+                  <td data-label="缓存读" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{usage.total.cache_read_tokens.toLocaleString()}</td>
+                  <td data-label="缓存建" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{usage.total.cache_creation_tokens.toLocaleString()}</td>
+                  <td data-label="费用" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{fmtCost(usage.total.costs)}</td>
+                  <td data-label="次数"></td>
                 </tr>
               </tbody>
             </table>
@@ -1789,7 +1797,7 @@ export default function RequirementDetail() {
                   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doAdjustCoding(); }
                 }}
               />
-              <div className="adjust-composer-footer">
+              <div className="adjust-composer-footer stack-mobile">
                 <span className="ac-hint">Enter 发送 · Shift+Enter 换行</span>
                 <button className="btn btn-primary" onClick={doAdjustCoding} disabled={!adjustInput.trim()}>
                   🚀 追加调整
@@ -1827,7 +1835,7 @@ export default function RequirementDetail() {
 
               {/* ── Merge / PR step ── */}
               <div className="merge-section">
-                <div className="merge-actions">
+                <div className="merge-actions stack-mobile">
                   <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}>🔀 本地合入</button>
                   <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}>🌐 推送并发起 PR</button>
                 </div>
@@ -1879,7 +1887,7 @@ export default function RequirementDetail() {
               ) : (
                 <div className="tab-empty"><p>✅ 开发已完成。</p></div>
               )}
-              <div className="merge-actions">
+              <div className="merge-actions stack-mobile">
                 <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}>🔀 本地合入</button>
                 <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}>🌐 推送并发起 PR</button>
               </div>
@@ -1890,7 +1898,7 @@ export default function RequirementDetail() {
                   <button className="btn btn-sm" onClick={cleanWorktree} disabled={merging || !!busy}>🧹 清理开发环境</button>
                 </div>
               )}
-              <div className="merge-actions" style={{ marginTop: 8 }}>
+              <div className="merge-actions stack-mobile" style={{ marginTop: 8 }}>
                 <button className="btn btn-primary" onClick={handleArchive} disabled={!!busy}>
                   {busy === '归档' ? '⏳ ...' : '📦 归档到知识库'}
                 </button>
@@ -1903,7 +1911,7 @@ export default function RequirementDetail() {
               <div className="tab-empty">
                 <p>📦 已归档至项目知识库（最终需求 + 技术方案）。</p>
               </div>
-              <div className="merge-actions" style={{ marginTop: 8 }}>
+              <div className="merge-actions stack-mobile" style={{ marginTop: 8 }}>
                 <button className="btn" onClick={handleUnarchive} disabled={!!busy}>
                   {busy === '取消归档' ? '⏳ ...' : '↩ 取消归档'}
                 </button>

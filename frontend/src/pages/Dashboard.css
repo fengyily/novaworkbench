@@ -20,13 +20,50 @@
 
   .projects-section { padding: 14px; }
 
-  /* Make the project table horizontally scrollable on small screens */
-  .projects-section .project-table-wrap {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-  }
+  /* `.table-cards` (index.css) collapses the project table into stacked
+     cards on every mobile width — no horizontal scroll bar even on rough
+     5-column rows. The path-cell / project-desc-cell max-widths are
+     irrelevant on mobile (cards don't need them) but we keep them off so
+     they don't conflict with any later rule. */
+  .path-cell,
+  .project-desc-cell { max-width: none; min-width: 0; }
 
+  /* The quick-actions row is a 2-up grid on phones; .btn-row-2col utility
+     handles the distribution. */
   .quick-actions { gap: 8px; }
+  .quick-actions.btn-row-2col > .btn { flex-basis: calc(50% - 4px); }
+
+  /* Hide the desktop-only CTA in the section header — the FAB below
+     covers the same action and stays in the thumb zone while the user
+     scrolls. */
+  .desktop-only { display: none !important; }
+}
+
+/* Desktop: hide the mobile-only empty state. The FAB is also hidden by
+   .fab's display:none on desktop. */
+@media (min-width: 769px) {
+  .mobile-only { display: none !important; }
+}
+
+/* Stat-card gets a slightly more distinctive treatment on mobile — a
+   colored gradient accent on the active value so the dashboard reads as
+   more than four plain rectangles. */
+@media (max-width: 768px) {
+  .stat-card {
+    padding: 16px 12px;
+    text-align: left;
+    position: relative;
+    overflow: hidden;
+  }
+  .stat-card::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 3px;
+    background: linear-gradient(180deg, var(--color-primary), var(--color-accent-warm, var(--color-primary)));
+  }
+  .stat-value { font-size: 24px; }
+  .stat-label { font-size: 12px; }
 }
 
 .stat-card {

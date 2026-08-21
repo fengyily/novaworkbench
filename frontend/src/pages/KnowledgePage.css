@@ -40,6 +40,50 @@
 
 .kb-loading, .kb-empty { text-align: center; padding: 40px; color: var(--color-text-muted); }
 
+/* ── Mobile ──────────────────────────────────────────────────────
+   The knowledge page previously had no mobile-specific rules at all — every
+   toolbar, modal, and card was laid out for desktop. On a 375px-wide phone
+   the search input and filters would force the toolbar to wrap unpredictably
+   and the modal would overflow the viewport. These rules reproduce the same
+   desktop layout in a phone-friendly column stack. */
+@media (max-width: 768px) {
+  .kb-toolbar {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .kb-toolbar > * { flex: 1 1 auto; min-width: 0; }
+  .kb-search { min-width: 0; flex-basis: 100%; }
+  .kb-select { width: 100%; }
+
+  /* 8+ tabs into a column wastes vertical space; horizontal scroll lets the
+     user swipe through them like a native segmented control. */
+  .kb-tabs {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .kb-tabs::-webkit-scrollbar { display: none; }
+  .kb-tab {
+    flex-shrink: 0;
+    padding: 10px 14px;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .kb-card {
+    padding: 12px;
+  }
+  .kb-card-header { flex-wrap: wrap; gap: 4px 8px; }
+  .kb-card-meta { flex-wrap: wrap; gap: 4px 8px; }
+  .kb-actions { width: 100%; justify-content: flex-end; margin-left: 0; }
+
+  .review-panel { padding: 0; }
+  .review-card { padding: 16px; }
+
+  /* Modal full-screen + form-actions grid are handled by shared utilities
+     in index.css (`.modal-fullscreen`, `.btn-row-2col`). */
+}
+
 .kb-list { }
 .kb-list-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; font-size: 13px; color: var(--color-text-secondary); }
 

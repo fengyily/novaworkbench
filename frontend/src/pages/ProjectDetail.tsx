@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import AtMentionTextarea from '../components/AtMentionTextarea';
 import {
   projectsApi, runnerApi, reviewApi, platformApi, requirementsApi, knowledgeApi,
   usageApi, usageTotalInput, fmtCost,
@@ -420,28 +421,28 @@ export default function ProjectDetail() {
       style={{ cursor: 'pointer' }}
       onClick={() => navigate(`/requirements/${req.id}`)}
     >
-      <td style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{req.id}</td>
-      <td className="pr-title">{req.title}</td>
-      <td><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
-      <td><span className={`status-badge status-${req.status}`}>{statusLabels[req.status] ?? req.status}</span></td>
-      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
+      <td data-label="ID" style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{req.id}</td>
+      <td data-label="标题" className="pr-title">{req.title}</td>
+      <td data-label="优先级"><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
+      <td data-label="状态"><span className={`status-badge status-${req.status}`}>{statusLabels[req.status] ?? req.status}</span></td>
+      <td data-label="Tokens (入/出)" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
         {(() => {
           const u = reqUsageMap.get(req.id);
           if (!u) return '—';
           return `${usageTotalInput(u).toLocaleString()} / ${u.output_tokens.toLocaleString()}`;
         })()}
       </td>
-      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
+      <td data-label="成本" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
         {(() => {
           const u = reqUsageMap.get(req.id);
           if (!u) return '—';
           return fmtCost(u.costs);
         })()}
       </td>
-      <td style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+      <td data-label="创建时间" style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
         {req.created_at ? new Date(req.created_at).toLocaleDateString('zh-CN') : '—'}
       </td>
-      <td style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+      <td data-label="更新时间" style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
         {req.updated_at ? new Date(req.updated_at).toLocaleDateString('zh-CN') : '—'}
       </td>
     </tr>
@@ -697,7 +698,7 @@ export default function ProjectDetail() {
             )}
             {!reqsLoading && overviewReqs.length > 0 && (
               <div className="pr-list" style={{ marginBottom: 0 }}>
-                <table className="pr-table">
+                <table className="pr-table table-cards">
                   <thead>
                     <tr>
                       <th style={{ width: 110 }}>ID</th>
@@ -785,7 +786,7 @@ export default function ProjectDetail() {
 
           {!reqsLoading && !reqsError && reqs.length > 0 && (
             <div className="pr-list">
-              <table className="pr-table">
+              <table className="pr-table table-cards">
                 <thead>
                   <tr>
                     <th style={{ width: 110 }}>ID</th>
@@ -899,7 +900,7 @@ export default function ProjectDetail() {
                     />
                   </div>
                   <div className="pr-list">
-                  <table className="pr-table">
+                  <table className="pr-table table-cards">
                     <thead>
                       <tr>
                         <th style={{ width: 52 }}>#</th>
@@ -913,16 +914,16 @@ export default function ProjectDetail() {
                     <tbody>
                       {prData.prs.map(pr => (
                         <tr key={pr.number} className={reviewingPR?.number === pr.number ? 'pr-row-active' : ''}>
-                          <td style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>#{pr.number}</td>
-                          <td className="pr-title">
+                          <td data-label="#" style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>#{pr.number}</td>
+                          <td data-label="标题" className="pr-title">
                             <a href={pr.html_url} target="_blank" rel="noreferrer" style={{ color: 'var(--color-primary)' }}>
                               {pr.title}
                             </a>
                           </td>
-                          <td><code className="pr-branch">{pr.head_branch}</code> ← <code className="pr-branch">{pr.base_branch}</code></td>
-                          <td>{pr.author}</td>
-                          <td>{pr.updated_at ? new Date(pr.updated_at).toLocaleDateString('zh-CN') : '—'}</td>
-                          <td>
+                          <td data-label="分支"><code className="pr-branch">{pr.head_branch}</code> ← <code className="pr-branch">{pr.base_branch}</code></td>
+                          <td data-label="作者">{pr.author}</td>
+                          <td data-label="更新时间">{pr.updated_at ? new Date(pr.updated_at).toLocaleDateString('zh-CN') : '—'}</td>
+                          <td data-label="操作">
                             <button
                               className="btn btn-primary btn-sm"
                               onClick={() => handleReviewWithTracking(pr)}
@@ -1067,7 +1068,7 @@ export default function ProjectDetail() {
                   <div className="tab-empty"><p>暂无需求 Token 消耗</p></div>
                 ) : (
                   <div className="pr-list">
-                    <table className="pr-table">
+                    <table className="pr-table table-cards">
                       <thead>
                         <tr>
                           <th>需求 ID</th>
@@ -1110,7 +1111,7 @@ export default function ProjectDetail() {
                   <div className="tab-empty"><p>暂无按模型统计</p></div>
                 ) : (
                   <div className="pr-list">
-                    <table className="pr-table">
+                    <table className="pr-table table-cards">
                       <thead>
                         <tr>
                           <th>模型</th>
@@ -1147,7 +1148,7 @@ export default function ProjectDetail() {
                   <div className="tab-empty"><p>暂无按日统计</p></div>
                 ) : (
                   <div className="pr-list">
-                    <table className="pr-table">
+                    <table className="pr-table table-cards">
                       <thead>
                         <tr>
                           <th>日期</th>
@@ -1185,7 +1186,7 @@ export default function ProjectDetail() {
                   <div className="tab-empty"><p>暂无代码审查记录</p></div>
                 ) : (
                   <div className="pr-list">
-                    <table className="pr-table">
+                    <table className="pr-table table-cards">
                       <thead>
                         <tr>
                           <th style={{ width: 70 }}>PR</th>
@@ -1226,8 +1227,8 @@ export default function ProjectDetail() {
 
       {/* ── Knowledge detail modal (Markdown rendering) ── */}
       {knowledgeModal && (
-        <div className="kb-modal-overlay" onClick={() => setKnowledgeModal(null)}>
-          <div className="kb-modal" onClick={e => e.stopPropagation()}>
+        <div className="kb-modal-overlay modal-fullscreen-overlay" onClick={() => setKnowledgeModal(null)}>
+          <div className="kb-modal modal-fullscreen" onClick={e => e.stopPropagation()}>
             <div className="kb-modal-header">
               <h2>{knowledgeModal.title}</h2>
               <button className="kb-modal-close" onClick={() => setKnowledgeModal(null)}>×</button>
@@ -1239,6 +1240,20 @@ export default function ProjectDetail() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Mobile FAB: shown only on the requirements tab so each tab keeps
+          its own primary CTA in the thumb zone. CSS (.fab) hides it on
+          desktop, where the inline "+ 新需求" button is already reachable. */}
+      {tab === 'requirements' && (
+        <button
+          className="fab fab-extended"
+          aria-label="新建需求"
+          onClick={() => setShowCreateReq(true)}
+        >
+          <span>＋</span>
+          <span>新需求</span>
+        </button>
       )}
     </div>
   );
@@ -1282,8 +1297,13 @@ function CreateRequirementForm({ projectId, onClose, onCreated }: {
       </div>
       <div className="form-group">
         <label>需求内容 (必填)</label>
-        <textarea value={description} onChange={e => setDescription(e.target.value)} className="form-input" rows={6}
-          placeholder="用自然语言描述你想要实现的功能。例如：报表支持导出为 Excel 格式，目前只支持 PDF，用户需要 Excel 导出以便在本地编辑；要能选择导出的列..." autoFocus />
+        <AtMentionTextarea
+          value={description}
+          onChange={setDescription}
+          className="form-input"
+          rows={6}
+          placeholder="用自然语言描述你想要实现的功能。输入 @ 可引用 Skill，例如 @frontend 。例如：报表支持导出为 Excel 格式..."
+        />
         <small className="form-hint">
           提交后由 AI 整理为结构化 Markdown（背景 / 目标 / 功能要点 / 验收标准）并提炼标题，可在详情页继续编辑。
         </small>

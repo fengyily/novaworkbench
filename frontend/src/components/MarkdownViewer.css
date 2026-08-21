@@ -104,3 +104,17 @@
 .md-viewer-body th { background: var(--color-hover); font-weight: 600; }
 .md-viewer-body a { color: var(--color-primary); }
 .md-viewer-body hr { border: none; border-top: 1px solid var(--color-border); margin: 1.2em 0; }
+
+/* ── Mobile ──────────────────────────────────────────────────────
+   `.modal-fullscreen` + `.modal-fullscreen-overlay` (defined in index.css)
+   stretch the viewer edge-to-edge below the breakpoint. We just need the
+   safe-area-aware padding for the body and header so the close button and
+   last paragraph stay reachable on notched devices. */
+@media (max-width: 768px) {
+  .md-viewer-header {
+    padding: calc(12px + var(--sat)) 14px 12px;
+  }
+  .md-viewer-body {
+    padding: 16px 18px calc(32px + var(--sab));
+  }
+}
