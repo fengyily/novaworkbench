@@ -341,13 +341,20 @@ func (h *WizardHandler) resolveWorkDir(req *model.Requirement, projectPath, defa
 	if req == nil || projectPath == "" {
 		return projectPath, nil
 	}
-	// Validate the project path exists before any git operations — a missing
-	// directory causes gitRun to fail with a generic error that EnsureWorktree
-	// maps to ErrNotAGitRepo, which then returns the non-existent path as the
-	// work dir. exec.Cmd.Start() will chdir to it and fail with a misleading
-	// ENOENT attributed to the binary rather than the directory.
+	// Validate the project path exists before any git operations. A missing
+	// directory normally causes gitRun to fail with a generic error that
+	// EnsureWorktree maps to ErrNotAGitRepo, and exec.Cmd.Start() then chdirs
+	// to a non-existent path and fails with an opaque ENOENT. In Docker
+	// deployments the workspace bind-mount may be empty after a container
+	// rebuild, so auto-restore from the project's stored remote before
+	// giving up.
 	if _, err := os.Stat(projectPath); err != nil {
-		return "", fmt.Errorf("project directory not found on this host: %s", projectPath)
+		if restoreErr := h.projectSvc.EnsureCloned(req.ProjectID); restoreErr != nil {
+			return "", fmt.Errorf("project directory not found on this host: %s — %w", projectPath, restoreErr)
+		}
+		if _, err := os.Stat(projectPath); err != nil {
+			return "", fmt.Errorf("project directory not found on this host: %s", projectPath)
+		}
 	}
 	if req.WorktreePath != "" {
 		if _, err := os.Stat(req.WorktreePath); err == nil {
@@ -1031,6 +1038,20 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		// we're about to fork was created in-place (un-isolated).
 		hadWorktree := reqRow != nil && reqRow.WorktreePath != ""
 
+		// Recover the project directory if a Docker rebuild / fresh workspace
+		// mount left it absent. Without this, EnsureWorktree below returns
+		// ErrNotAGitRepo and the in-place checkout fails with the user-facing
+		// "git checkout 失败" error. Re-clone uses the project's stored
+		// remote_url + platform token; when there is no remote to restore from
+		// EnsureCloned returns a clear error naming the missing path.
+		if reqRow != nil {
+			if cerr := h.projectSvc.EnsureCloned(reqRow.ProjectID); cerr != nil {
+				job.Append(store.LogLine{Type: "error", Content: "❌ " + cerr.Error()})
+				job.Finish(1, store.JobError)
+				return
+			}
+		}
+
 		// Resolve the working directory for coding. When a branch is requested
 		// AND the project is a git repo with a requirement id to key on, develop
 		// in an isolated git worktree per requirement so parallel requirements
@@ -1063,24 +1084,48 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Checkout the development branch before coding. Skipped for worktrees
-		// — `git worktree add` already checked the branch out in the worktree.
+		// (`git worktree add` already checked the branch out) and skipped for
+		// non-git repos (nothing to check out — proceed in place rather than
+		// failing with the misleading "git checkout 失败"). For git repos we
+		// mirror EnsureWorktree's robust strategy: create off the base, switch
+		// to an already-existing branch, or branch off HEAD so a missing base
+		// ref never produces a cryptic error.
 		if req.BranchName != "" && !useWorktree {
-			gitCmd := exec.Command("git", "checkout", "-b", req.BranchName, baseBranch)
-			gitCmd.Dir = branchDir
-			out, err := gitCmd.CombinedOutput()
-			if err != nil {
-				// Branch may already exist, try switching to it
-				gitCmd2 := exec.Command("git", "checkout", req.BranchName)
-				gitCmd2.Dir = branchDir
-				out2, err2 := gitCmd2.CombinedOutput()
-				if err2 != nil {
-					job.Append(store.LogLine{Type: "error", Content: "❌ git checkout 失败: " + strings.TrimSpace(string(out2))})
+			if _, gerr := gitRun(branchDir, "rev-parse", "--is-inside-work-tree"); gerr != nil {
+				job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，跳过分支切换，在项目目录直接开发"})
+			} else {
+				checkoutOK := false
+				var lastErrOut string
+				attempt := func(args ...string) (string, bool) {
+					c := exec.Command("git", args...)
+					c.Dir = branchDir
+					out, err := c.CombinedOutput()
+					trimmed := strings.TrimSpace(string(out))
+					if err == nil {
+						return trimmed, true
+					}
+					lastErrOut = trimmed
+					return "", false
+				}
+				// 1. Create the branch off the requested base (typical happy path).
+				if out, ok := attempt("checkout", "-b", req.BranchName, baseBranch); ok {
+					job.Append(store.LogLine{Type: "message", Content: "🌿 " + out})
+					checkoutOK = true
+				} else if _, ok := attempt("checkout", req.BranchName); ok {
+					// 2. Branch already exists locally — switch to it.
+					job.Append(store.LogLine{Type: "message", Content: "🌿 切换到已有分支: " + req.BranchName})
+					checkoutOK = true
+				} else if out, ok := attempt("checkout", "-b", req.BranchName); ok {
+					// 3. Base ref missing locally — fall back to branching off HEAD
+					//    (matches EnsureWorktree's strategy).
+					job.Append(store.LogLine{Type: "message", Content: "🌿 " + out})
+					checkoutOK = true
+				}
+				if !checkoutOK {
+					job.Append(store.LogLine{Type: "error", Content: "❌ git checkout 失败: " + lastErrOut})
 					job.Finish(1, store.JobError)
 					return
 				}
-				job.Append(store.LogLine{Type: "message", Content: "🌿 切换到已有分支: " + req.BranchName})
-			} else {
-				job.Append(store.LogLine{Type: "message", Content: "🌿 " + strings.TrimSpace(string(out))})
 			}
 		}
 
