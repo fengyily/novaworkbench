@@ -1,0 +1,220 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/req_*'
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build & deploy (e.g. main or feat/req_af3ca270)'
+        required: true
+        default: main
+        type: string
+
+env:
+  NAMESPACE: ${{ vars.GHCR_NAMESPACE || github.repository_owner }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: sha-${{ github.sha }}
+    steps:
+      - name: Resolve target branch
+        id: branch
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BRANCH="${{ inputs.branch }}"
+          else
+            BRANCH="${{ github.ref_name }}"
+          fi
+          echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
+
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.branch.outputs.branch }}
+          fetch-depth: 1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Sanitize ref name for tag
+        id: tag
+        run: |
+          # Branch names contain '/' (e.g. feat/req_xxx) which Docker rejects
+          # in image tags. Replace with '-' and lowercase.
+          REF_TAG=$(echo "${{ steps.branch.outputs.branch }}" | tr '/' '-' | tr '[:upper:]' '[:lower:]' | cut -c1-63)
+          echo "ref_tag=${REF_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Build & push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ env.NAMESPACE }}/nova:sha-${{ github.sha }}
+            ghcr.io/${{ env.NAMESPACE }}/nova:${{ steps.tag.outputs.ref_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-prod:
+    needs: build
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.branch == 'main')
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Resolve branch
+        id: branch
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "branch=${{ inputs.branch }}" >> $GITHUB_OUTPUT
+          else
+            echo "branch=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.branch.outputs.branch }}
+          fetch-depth: 1
+
+      - name: Sync deploy files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ vars.PROD_SERVER_HOST }}
+          username: ${{ vars.PROD_SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "deploy/"
+          target: "~/nova/"
+
+      - name: Deploy to production
+        uses: appleboy/ssh-action@v1
+        env:
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ALI_ACCESS_KEY_ID: ${{ secrets.ALI_ACCESS_KEY_ID }}
+          ALI_ACCESS_KEY_SECRET: ${{ secrets.ALI_ACCESS_KEY_SECRET }}
+        with:
+          host: ${{ vars.PROD_SERVER_HOST }}
+          username: ${{ vars.PROD_SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: ANTHROPIC_AUTH_TOKEN,ALI_ACCESS_KEY_ID,ALI_ACCESS_KEY_SECRET
+          script: |
+            export GHCR_NAMESPACE="${{ env.NAMESPACE }}"
+            export IMAGE_TAG="sha-${{ github.sha }}"
+            export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN}"
+            # acme.sh dns_ali plugin reads Ali_Key / Ali_Secret for the DNS-01 challenge
+            export Ali_Key="${ALI_ACCESS_KEY_ID}"
+            export Ali_Secret="${ALI_ACCESS_KEY_SECRET}"
+
+            bash ${HOME}/nova/deploy/setup/deploy-prod.sh
+
+            docker image prune -f
+
+  deploy-preview:
+    needs: build
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/feat/req_')) ||
+      (github.event_name == 'workflow_dispatch' && startsWith(inputs.branch, 'feat/req_'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve branch
+        id: branch
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BRANCH="${{ inputs.branch }}"
+          else
+            BRANCH="${{ github.ref_name }}"
+          fi
+          echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
+
+      - name: Compute preview name
+        id: preview
+        run: |
+          # feat/req_af3ca270 → req-af3ca270
+          BRANCH="${{ steps.branch.outputs.branch }}"
+          # Strip the feat/ prefix for the project name
+          SUFFIX="${BRANCH#feat/}"
+          # Underscores / slashes → dashes, truncate to 63 chars (DNS label limit)
+          PROJECT=$(echo "$SUFFIX" | tr '_/' '-' | cut -c1-63)
+          echo "project_name=${PROJECT}" >> $GITHUB_OUTPUT
+          echo "virtual_host=${PROJECT}.nova.yishield.com" >> $GITHUB_OUTPUT
+
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.branch.outputs.branch }}
+          fetch-depth: 1
+
+      - name: Sync deploy files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ vars.PREVIEW_SERVER_HOST || vars.PROD_SERVER_HOST }}
+          username: ${{ vars.PREVIEW_SERVER_USER || vars.PROD_SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "deploy/"
+          target: "~/nova/"
+
+      - name: Deploy preview
+        uses: appleboy/ssh-action@v1
+        env:
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ALI_ACCESS_KEY_ID: ${{ secrets.ALI_ACCESS_KEY_ID }}
+          ALI_ACCESS_KEY_SECRET: ${{ secrets.ALI_ACCESS_KEY_SECRET }}
+        with:
+          host: ${{ vars.PREVIEW_SERVER_HOST || vars.PROD_SERVER_HOST }}
+          username: ${{ vars.PREVIEW_SERVER_USER || vars.PROD_SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: ANTHROPIC_AUTH_TOKEN,ALI_ACCESS_KEY_ID,ALI_ACCESS_KEY_SECRET
+          script: |
+            export GHCR_NAMESPACE="${{ env.NAMESPACE }}"
+            export IMAGE_TAG="sha-${{ github.sha }}"
+            export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN}"
+            # acme.sh dns_ali plugin reads Ali_Key / Ali_Secret for the DNS-01 challenge
+            export Ali_Key="${ALI_ACCESS_KEY_ID}"
+            export Ali_Secret="${ALI_ACCESS_KEY_SECRET}"
+            export PROJECT_NAME="${{ steps.preview.outputs.project_name }}"
+            export VIRTUAL_HOST="${{ steps.preview.outputs.virtual_host }}"
+
+            bash ${HOME}/nova/deploy/setup/deploy-preview.sh
+
+            docker image prune -f
+
+  cleanup-preview:
+    if: always() && github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute preview name from head branch
+        id: preview
+        run: |
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          PROJECT=$(echo "$BRANCH" | tr '_/' '-' | cut -c1-63)
+          echo "project_name=${PROJECT}" >> $GITHUB_OUTPUT
+
+      - name: Cleanup preview on PR close
+        uses: appleboy/ssh-action@v1
+        if: startsWith(github.event.pull_request.head.ref, 'feat/req_')
+        with:
+          host: ${{ vars.PREVIEW_SERVER_HOST || vars.PROD_SERVER_HOST }}
+          username: ${{ vars.PREVIEW_SERVER_USER || vars.PROD_SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            export PROJECT_NAME="${{ steps.preview.outputs.project_name }}"
+            bash ${HOME}/nova/deploy/setup/cleanup-preview.sh

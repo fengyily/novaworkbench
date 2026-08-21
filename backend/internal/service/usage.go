@@ -1,9 +1,12 @@
 package service
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/db"
@@ -82,10 +85,14 @@ func stepLabel(step string) string {
 // stepAgg folds the (step, model, config, currency) aggregation rows into one
 // per-(step, model) entry, summing tokens and cost. It embeds costAgg for the
 // token/cost bookkeeping and adds the label keys + invocation count.
+// metaJSONs collects the raw meta text of every row in the fold so the
+// summary field can be lifted into StepUsage.Summaries (multiple
+// 追加调整 invocations on the same model → multiple summaries on one row).
 type stepAgg struct {
 	step, model string
 	count       int
 	costAgg
+	metaJSONs []string
 }
 
 // StepsByRequirement returns per-step (and per-model) aggregates for one
@@ -125,6 +132,17 @@ func (s *UsageService) StepsByRequirement(reqID string) ([]model.StepUsage, erro
 		a.addCost(currency, cid, model, in, out, cc, cr, tables)
 	}
 
+	// Lift per-row summaries from token_usage.meta so the requirement-detail
+	// token table can show a collapsible per-invocation description per step.
+	// Loaded second because the aggregation query holds the only SQLite
+	// connection (MaxOpenConns=1) for its duration.
+	summaries, err := s.summariesByStep(reqID)
+	if err != nil {
+		// Best-effort: a parse/read error should not break the token table.
+		log.Printf("[usage] summaries for %s failed: %v (ignored)", reqID, err)
+		summaries = map[string][]string{}
+	}
+
 	items := make([]model.StepUsage, 0, len(acc))
 	for _, key := range order {
 		a := acc[key]
@@ -138,6 +156,7 @@ func (s *UsageService) StepsByRequirement(reqID string) ([]model.StepUsage, erro
 			CacheReadTokens:     a.cr,
 			Count:               a.count,
 			Costs:               a.done(),
+			Summaries:           summaries[a.step],
 		})
 	}
 	if items == nil {
@@ -386,6 +405,114 @@ func parseReviewMeta(meta string) (prNumber int, prTitle, branch string) {
 	}
 	return
 }
+
+// summariesByStep reads every requirement's token_usage.meta in created_at
+// order and lifts the "summary" key into a per-step list. Steps with no
+// summary (or only empty meta) are omitted from the map. Empty meta strings
+// are skipped; malformed JSON is skipped silently — the meta column carries
+// multiple schemas (review PR fields, doc_type, summary) and we only care
+// about the one key.
+func (s *UsageService) summariesByStep(reqID string) (map[string][]string, error) {
+	rows, err := s.db.Query(
+		"SELECT step, meta FROM token_usage WHERE requirement_id=? AND meta IS NOT NULL AND meta<>'' ORDER BY created_at",
+		reqID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var step, meta string
+		if err := rows.Scan(&step, &meta); err != nil {
+			return nil, err
+		}
+		summary := liftSummary(meta)
+		if summary == "" {
+			continue
+		}
+		out[step] = append(out[step], summary)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// liftSummary parses meta JSON and returns the trimmed "summary" value, or "".
+func liftSummary(meta string) string {
+	// Cheap path: meta we wrote is JSON; skip if it obviously isn't.
+	if !strings.HasPrefix(meta, "{") {
+		return ""
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(meta), &m); err != nil {
+		return ""
+	}
+	raw, ok := m["summary"]
+	if !ok {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(s)
+}
+
+// RowsByStep returns every token_usage row for one (requirement, step) pair
+// in created_at order. Used by the requirement-detail UI to display every
+// individual invocation (model, tokens, cost, time, summary) — the per-step
+// rollup hides which model each adjustment actually used. step may be empty
+// to fetch all rows for the requirement. Cost is recomputed per row from the
+// config's current prices (same recompute path as the rollups).
+func (s *UsageService) RowsByStep(reqID, step string) ([]model.UsageRow, error) {
+	tables := s.priceTablesBestEffort()
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if step == "" {
+		rows, err = s.db.Query(
+			"SELECT id, requirement_id, job_id, step, model, claude_config_id, currency, "+
+				"input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, meta, created_at "+
+				"FROM token_usage WHERE requirement_id=? ORDER BY created_at",
+			reqID)
+	} else {
+		rows, err = s.db.Query(
+			"SELECT id, requirement_id, job_id, step, model, claude_config_id, currency, "+
+				"input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, meta, created_at "+
+				"FROM token_usage WHERE requirement_id=? AND step=? ORDER BY created_at",
+			reqID, step)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []model.UsageRow
+	costByCur := map[string]float64{}
+	for rows.Next() {
+		var (
+			r                model.UsageRow
+			meta, cid, cur   string
+		)
+		if err := rows.Scan(&r.ID, &r.RequirementID, &r.JobID, &r.Step, &r.Model, &cid, &cur,
+			&r.InputTokens, &r.OutputTokens, &r.CacheCreationTokens, &r.CacheReadTokens, &meta, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		r.Summary = liftSummary(meta)
+		accumulateCost(costByCur, cur, cid, r.Model, r.InputTokens, r.OutputTokens, r.CacheCreationTokens, r.CacheReadTokens, tables)
+		r.Costs = costsToItems(costByCur)
+		costByCur = map[string]float64{}
+		items = append(items, r)
+	}
+	if items == nil {
+		items = []model.UsageRow{}
+	}
+	return items, rows.Err()
+}
+
 
 // ProjectSummary is the project-usage payload. Total excludes review rows;
 // the review breakdown is reported separately.

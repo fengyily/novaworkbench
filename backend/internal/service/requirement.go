@@ -308,6 +308,34 @@ func (s *RequirementService) SaveRefinementChat(reqID, messages string) error {
 	return err
 }
 
+// GetCodingChat returns the persisted 追加调整 chat history for a
+// requirement. Returned JSON is always a non-null array string ("[]" when no
+// record exists). The history is the full developer-chat conversation
+// (user + AI turns in order) so the chat panel can rehydrate on refresh.
+func (s *RequirementService) GetCodingChat(reqID string) (string, error) {
+	var messages string
+	err := s.db.QueryRow("SELECT messages FROM coding_chats WHERE requirement_id = ?", reqID).Scan(&messages)
+	if err == sql.ErrNoRows {
+		return "[]", nil
+	}
+	if err != nil {
+		return "[]", err
+	}
+	return messages, nil
+}
+
+// SaveCodingChat upserts the 追加调整 chat history for a requirement.
+// messages is a JSON array of {role,content} entries; the caller is
+// responsible for JSON-encoding (the handler keeps the in-memory copy). Best-
+// effort: a failure must never break the in-flight chat turn.
+func (s *RequirementService) SaveCodingChat(reqID, messages string) error {
+	_, err := s.db.Exec(
+		"INSERT INTO coding_chats (requirement_id, messages, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)"+
+			s.db.OnConflict("requirement_id", "messages = ?, updated_at = CURRENT_TIMESTAMP"),
+		reqID, messages, messages)
+	return err
+}
+
 // UpdateDesign persists the generated technical design and marks the architect
 // phase as in-progress (designing). The "design complete" gate is a separate
 // status transition driven by the user.

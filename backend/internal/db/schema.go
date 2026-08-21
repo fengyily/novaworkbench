@@ -105,6 +105,13 @@ CREATE TABLE IF NOT EXISTS refinement_chats (
 	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS coding_chats (
+	requirement_id TEXT PRIMARY KEY,
+	messages TEXT DEFAULT '[]',
+	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS project_run_configs (
 	id           TEXT PRIMARY KEY,
 	project_id   TEXT NOT NULL,
@@ -276,6 +283,18 @@ CREATE TABLE IF NOT EXISTS sessions (
 	FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+CREATE TABLE IF NOT EXISTS skills (
+	id          TEXT PRIMARY KEY,
+	name        TEXT NOT NULL,
+	slug        TEXT NOT NULL UNIQUE,
+	content     TEXT NOT NULL,
+	description TEXT NOT NULL DEFAULT '',
+	enabled     INTEGER NOT NULL DEFAULT 1,
+	source_url  TEXT NOT NULL DEFAULT '',
+	created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 `
 
 // alterColumns adds columns to older databases. ALTER TABLE fails when the

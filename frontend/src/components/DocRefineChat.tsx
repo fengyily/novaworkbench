@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { API_BASE, authedFetch } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
-import { appendLogLine, coalesceLogLines } from '../utils/logLines';
+import { appendLogLine, coalesceLogLines, type LogLine } from '../utils/logLines';
+import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import ModelSelect from './ModelSelect';
+import AtMentionTextarea from './AtMentionTextarea';
 
 interface Props {
   reqId: string;
@@ -37,10 +39,10 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [working, setWorking] = useState(false);
-  const [refineLines, setRefineLines] = useState<{ type: string; content: string }[]>([]);
+  const [refineLines, setRefineLines] = useState<LogLine[]>([]);
   const [refineComplete, setRefineComplete] = useState(false);
   const [applying, setApplying] = useState(false);
-  const [applyLines, setApplyLines] = useState<{ type: string; content: string }[]>([]);
+  const [applyLines, setApplyLines] = useState<LogLine[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventStream | null>(null);
   const label = LABEL[docType];
@@ -128,8 +130,10 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
             // Live activity feed — surfaces "🤖 Claude 已连接" and tool labels
             // during the (often multi-minute) refine turn so the user has
             // progress feedback instead of just their echo + a static
-            // "思考中…" line.
-            setRefineLines(prev => appendLogLine(prev.slice(-49), { type: evt.type, content: evt.content ?? '' }));
+            // "思考中…" line. Use the backend-stamped `at` so phase timings
+            // stay accurate; client-side Date.now() as fallback for old data.
+            const at = typeof evt.at === 'number' ? evt.at : Date.now();
+            setRefineLines(prev => appendLogLine(prev.slice(-80), { type: evt.type, content: evt.content ?? '', at }));
             continue;
           }
           if (evt.type === 'message') {
@@ -221,9 +225,11 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         // heartbeat). Skip "message" lines — the regenerated doc is large and
         // lands in design_docs via the refresh, not in this thin progress panel.
         // Coalesce consecutive thinking-tokens phase lines into one updatable
-        // row instead of stacking one per heartbeat.
+        // row instead of stacking one per heartbeat. Use backend `at` so phase
+        // timings are accurate; client-side Date.now() as fallback.
         if (evt.type === 'phase' || evt.type === 'tool_call') {
-          setApplyLines(prev => appendLogLine(prev.slice(-49), { type: evt.type, content: evt.content ?? '' }));
+          const at = typeof evt.at === 'number' ? evt.at : Date.now();
+          setApplyLines(prev => appendLogLine(prev.slice(-80), { type: evt.type, content: evt.content ?? '', at }));
         }
       },
       () => {
@@ -239,8 +245,8 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
             setApplyLines(prev => [...prev, { type: 'error', content: '⚠️ 任务已丢失（服务可能重启）' }]);
             return;
           }
-          const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
-          const visible = coalesceLogLines((log || []).filter(l => l.type === 'phase' || l.type === 'tool_call' || l.type === 'error'));
+          const { status, log } = json.data as { status: string; log: { type: string; content: string; at?: number }[] };
+          const visible = coalesceLogLines((log || []).filter(l => l.type === 'phase' || l.type === 'tool_call' || l.type === 'error') as LogLine[]);
           if (visible.length > 0) setApplyLines(visible);
           if (status === 'running') {
             streamApplyJob(jobId); // transient drop — re-arm the stream
@@ -289,8 +295,8 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
       .then(r => r.json())
       .then(json => {
         if (cancelled || !json.success) return;
-        const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
-        const visible = coalesceLogLines((log || []).filter(l => l.type === 'phase' || l.type === 'tool_call' || l.type === 'error'));
+        const { status, log } = json.data as { status: string; log: { type: string; content: string; at?: number }[] };
+        const visible = coalesceLogLines((log || []).filter(l => l.type === 'phase' || l.type === 'tool_call' || l.type === 'error') as LogLine[]);
         if (visible.length > 0) setApplyLines(visible);
         if (status === 'running') {
           setExpanded(true);
@@ -365,12 +371,8 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
             <div className="chat-content">⏳ 思考中...</div>
           </div>
         )}
-        {working && refineLines.length > 0 && (
-          <div className="coding-panel" style={{ margin: '8px 0', maxHeight: 120 }}>
-            {refineLines.map((l, i) => (
-              <div key={i} className={`coding-line coding-line-${l.type}`}>{l.content}</div>
-            ))}
-          </div>
+        {refineLines.length > 0 && (
+          <CodingPhasesPanel lines={refineLines} working={working} />
         )}
       </div>
 
@@ -381,22 +383,22 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           state, which reads as "apply already finished" during a minutes-long
           regeneration. */}
       {(applying || applyLines.length > 0) && (
-        <div className="coding-panel" style={{ margin: '8px 0', maxHeight: 160 }}>
-          {applyLines.map((l, i) => (
-            <div key={i} className={`coding-line coding-line-${l.type}`}>{l.content}</div>
-          ))}
-          {applying && <div className="coding-line coding-line-tool_call">⏳ 正在更新{label}，预计需要几分钟…</div>}
-        </div>
+        <CodingPhasesPanel
+          lines={applyLines}
+          working={applying}
+          trailingHint={applying ? `⏳ 正在更新${label}，预计需要几分钟…` : ''}
+          style={{ margin: '8px 0', maxHeight: 160 }}
+        />
       )}
 
-      <div className="chat-input-row">
-        <textarea
+      <div className="chat-input-row composer-sticky">
+        <AtMentionTextarea
           value={input}
-          onChange={e => setInput(e.target.value)}
+          onChange={setInput}
           onKeyDown={e => {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
           }}
-          placeholder={`描述你想修改或补充的内容...&#10;Enter 发送  ·  Shift+Enter 换行`}
+          placeholder={`描述你想修改或补充的内容... 输入 @ 引用 Skill&#10;Enter 发送  ·  Shift+Enter 换行`}
           className="form-input chat-textarea"
           disabled={working || applying}
           rows={2}
@@ -412,7 +414,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           <div className="confirm-panel-body">
             <strong>修改内容已确认</strong>
             <p>点击「应用到{label}」，Claude 将把对话中的修改写入文档并保存。</p>
-            <div className="confirm-panel-actions">
+            <div className="confirm-panel-actions btn-row-2col">
               <button className="btn btn-primary" onClick={handleApply} disabled={applying}>
                 {applying ? '⏳ 应用中...' : `📝 应用到${label}`}
               </button>
@@ -428,6 +430,67 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
             📝 直接应用修改到{label}
           </button>
         </div>
+      )}
+    </div>
+  );
+}
+
+// Shared rendering for the refine + apply progress panels: groups
+// phase/tool_call lines into named phases with per-phase and per-tool-call
+// durations, plus a top summary line.
+function CodingPhasesPanel({
+  lines,
+  working,
+  trailingHint,
+  style,
+}: {
+  lines: LogLine[];
+  working: boolean;
+  trailingHint?: string;
+  style?: React.CSSProperties;
+}) {
+  useTick(working);
+  const phases = buildPhaseGroups(lines);
+  const firstAt = phases[0]?.startedAt;
+  const lastPhase = phases[phases.length - 1];
+  const totalMs =
+    phases.length > 0 && firstAt != null
+      ? Math.max(0, (lastPhase.isActive ? Date.now() : lastPhase.finishedAt) - firstAt)
+      : 0;
+  return (
+    <div className="coding-panel" style={style ?? { margin: '8px 0', maxHeight: 160 }}>
+      <div className="coding-line-summary">
+        工具调用 · {phases.length} 个阶段 · 总计 {formatDuration(totalMs)}
+      </div>
+      {phases.map((p, i) => {
+        const active = p.isActive && working;
+        const displayMs = active ? Date.now() - p.startedAt : p.durationMs;
+        return (
+          <div key={i} className={`coding-line-phase-group${active ? ' active' : ''}`}>
+            <div className="coding-line-phase-header">
+              <span className="coding-line-phase-label">{p.label}</span>
+              <span className="coding-line-phase-time">
+                {formatDuration(displayMs)}
+              </span>
+            </div>
+            {p.thinking && (
+              <div className="coding-line coding-line-phase">{p.thinking.content}</div>
+            )}
+            {p.toolCalls.map((tc, j) => (
+              <div key={j} className="coding-line coding-line-tool_call">
+                <span>{tc.content}</span>
+                {tc.durationMs != null && tc.durationMs > 0 && (
+                  <span className="coding-line-entry-time">
+                    {' · '}{formatDuration(tc.durationMs)}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        );
+      })}
+      {trailingHint && (
+        <div className="coding-line coding-line-tool_call">{trailingHint}</div>
       )}
     </div>
   );

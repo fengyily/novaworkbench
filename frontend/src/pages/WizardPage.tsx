@@ -222,7 +222,7 @@ export default function WizardPage() {
             ))}
             {chatting && <div className="chat-msg ai"><span className="chat-role">🤖 AI</span><div className="chat-content">⏳ 思考中...</div></div>}
           </div>
-          <div className="chat-input-row">
+          <div className="chat-input-row composer-sticky">
             <input
               type="text"
               value={userInput}

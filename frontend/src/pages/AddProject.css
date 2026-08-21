@@ -41,3 +41,44 @@
 }
 
 .form-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px; }
+
+/* ── Mobile ──────────────────────────────────────────────────────
+   No mobile-specific rules existed before. The mode-tabs were flex:1 with a
+   desktop font-size; the drop-zone padding forced content out of the
+   viewport on narrow phones; the action row stuck buttons under the
+   keyboard. */
+@media (max-width: 768px) {
+  .add-project-card { padding: 16px; }
+
+  /* Drop zone — reduce padding so the long hint text wraps within the
+     viewport on a 360px-wide phone. */
+  .drop-zone { padding: 24px 16px; }
+  .drop-icon { font-size: 32px; }
+  .drop-text { font-size: 14px; }
+
+  .mode-tab {
+    padding: 12px 8px;
+    font-size: 13px;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Quick paths wrap into a horizontally scrollable strip so a long
+     workspace path doesn't break onto a second line and push the form
+     below the fold. */
+  .quick-paths-list {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    scrollbar-width: thin;
+  }
+  .quick-path-btn { flex-shrink: 0; min-height: 36px; }
+
+  /* Form actions use `.stack-mobile` (index.css) so each button is
+     full-width. We override the column order so the primary "Add" button
+     sits on top instead of bottom — closer to the user's thumb when the
+     form is tall. */
+  .form-actions.stack-mobile { flex-direction: column-reverse; }
+}

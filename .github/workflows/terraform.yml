@@ -1,0 +1,94 @@
+name: Terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Terraform action'
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+      auto_approve:
+        description: 'Skip the interactive confirmation prompt (apply / destroy only)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      server_public_ip:
+        description: 'Public IPv4 of the ECS the DNS records point at (leave empty to fall back to the SERVER_PUBLIC_IP repo variable)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  TF_VERSION: 1.9.8
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    env:
+      # Input wins; fall back to the SERVER_PUBLIC_IP repo variable so the
+      # workflow works both ad-hoc (dispatch with an IP) and pre-configured.
+      TF_VAR_server_public_ip: ${{ inputs.server_public_ip != '' && inputs.server_public_ip || vars.SERVER_PUBLIC_IP }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Verify server_public_ip is set
+        run: |
+          if [[ -z "${TF_VAR_server_public_ip}" ]]; then
+            echo "::error::server_public_ip is empty. Either set the SERVER_PUBLIC_IP Actions variable (repo Settings → Secrets and variables → Actions → Variables) or supply it as the 'Server IP' workflow input when dispatching."
+            exit 1
+          fi
+          echo "server_public_ip is set"
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: terraform init
+        env:
+          # Sensitive credentials (Secrets — masked in logs)
+          TF_VAR_aliyun_access_key_id: ${{ secrets.ALI_ACCESS_KEY_ID }}
+          TF_VAR_aliyun_access_key_secret: ${{ secrets.ALI_ACCESS_KEY_SECRET }}
+        run: terraform init -input=false
+
+      - name: terraform validate
+        run: terraform validate
+
+      - name: terraform ${{ inputs.action }}
+        id: tf
+        env:
+          TF_VAR_aliyun_access_key_id: ${{ secrets.ALI_ACCESS_KEY_ID }}
+          TF_VAR_aliyun_access_key_secret: ${{ secrets.ALI_ACCESS_KEY_SECRET }}
+          TF_AUTO_APPROVE: ${{ inputs.auto_approve }}
+        run: |
+          ARGS=()
+          if [[ "${{ inputs.action }}" != "plan" && "$TF_AUTO_APPROVE" == "true" ]]; then
+            ARGS+=("-auto-approve")
+          fi
+          terraform ${{ inputs.action }} -input=false "${ARGS[@]}"
+
+      - name: terraform output (apply only)
+        if: inputs.action == 'apply' && steps.tf.outputs.exitcode == '0'
+        env:
+          TF_VAR_aliyun_access_key_id: ${{ secrets.ALI_ACCESS_KEY_ID }}
+          TF_VAR_aliyun_access_key_secret: ${{ secrets.ALI_ACCESS_KEY_SECRET }}
+        run: |
+          echo "## Terraform apply output" >> $GITHUB_STEP_SUMMARY
+          terraform output -no-color >> $GITHUB_STEP_SUMMARY

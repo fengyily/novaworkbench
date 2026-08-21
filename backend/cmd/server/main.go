@@ -57,6 +57,7 @@ func main() {
 	jobLogSvc := service.NewJobLogService(database)
 	usageSvc := service.NewUsageService(database)
 	aclSvc := service.NewACLService(database)
+	skillSvc := service.NewSkillService(database)
 
 	// Seed built-in roles on first run (idempotent).
 	if err := roleSvc.SeedDefaults(); err != nil {
@@ -124,7 +125,7 @@ func main() {
 	sharedJobs := store.NewJobStore(50)
 	preflightH := handler.NewPreflightHandler(pfRegistry, sharedJobs)
 	reqH := handler.NewRequirementHandler(reqSvc, llmGateway, sharedJobs, usageSvc)
-	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc)
+	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc)
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs)
@@ -137,6 +138,7 @@ func main() {
 	usageH := handler.NewUsageHandler(usageSvc)
 	authH := handler.NewAuthHandler(aclSvc)
 	aclH := handler.NewACLHandler(aclSvc)
+	skillH := handler.NewSkillHandler(skillSvc)
 
 	// Router
 	mux := http.NewServeMux()
@@ -230,6 +232,15 @@ func main() {
 	mux.HandleFunc("PUT /api/settings/roles/{id}", roleH.Update)
 	mux.HandleFunc("POST /api/settings/roles/{id}/reset", roleH.Reset)
 
+	// Skills (settings) — managed skill files written into .claude/agents/ before
+	// each claude CLI invocation; market endpoint proxies a remote registry manifest.
+	mux.HandleFunc("GET /api/settings/skills", skillH.List)
+	mux.HandleFunc("POST /api/settings/skills", skillH.Create)
+	mux.HandleFunc("PUT /api/settings/skills/{id}", skillH.Update)
+	mux.HandleFunc("DELETE /api/settings/skills/{id}", skillH.Delete)
+	mux.HandleFunc("GET /api/settings/skills/markets", skillH.Markets)
+	mux.HandleFunc("GET /api/settings/skills/market", skillH.Market)
+
 	// Claude CLI configurations (settings) — multiple named configs (auth
 	// token + base URL + model list); the active one is injected as env vars
 	// into every claude subprocess, and switching it also re-points all roles
@@ -267,6 +278,8 @@ func main() {
 	mux.HandleFunc("DELETE /api/requirements/{id}", reqH.Delete)
 	mux.HandleFunc("GET /api/requirements/{id}/chat-history", reqH.GetChatHistory)
 	mux.HandleFunc("PUT /api/requirements/{id}/chat-history", reqH.SaveChatHistory)
+	mux.HandleFunc("GET /api/requirements/{id}/coding-chat", reqH.GetCodingChat)
+	mux.HandleFunc("PUT /api/requirements/{id}/coding-chat", reqH.SaveCodingChat)
 	mux.HandleFunc("DELETE /api/requirements/{id}/analysis-session", reqH.ClearAnalysisSession)
 	mux.HandleFunc("POST /api/requirements/{id}/archive", reqH.Archive)
 	mux.HandleFunc("POST /api/requirements/{id}/unarchive", reqH.Unarchive)
@@ -274,6 +287,7 @@ func main() {
 	// Token usage (per-requirement / per-project aggregation; review rows
 	// are recorded but excluded from project totals — surfaced separately).
 	mux.HandleFunc("GET /api/usage/requirement/{id}", usageH.Requirement)
+	mux.HandleFunc("GET /api/usage/requirement/{id}/rows", usageH.Rows)
 	mux.HandleFunc("GET /api/usage/by-requirement", usageH.ByRequirement)
 	mux.HandleFunc("GET /api/usage/project/{id}", usageH.Project)
 

@@ -348,6 +348,11 @@
     padding: 10px 12px;
   }
 
+  /* The start/stop buttons share the row; the danger stop takes a full
+     row on its own so the tap target doesn't crowd the label. */
+  .run-control-bar .btn { flex: 1 1 calc(50% - 8px); min-width: 0; }
+  .run-control-bar .btn-danger { flex-basis: 100%; }
+
   .compose-detect { width: 100%; }
 
   .review-requirements-bar {
@@ -356,6 +361,46 @@
   }
 
   .review-requirements-input { width: 100%; }
+
+  /* `.table-cards` (defined in index.css) collapses the pr-table into
+     stacked cards below 600px. We override .pr-title because the desktop
+     rule sets a max-width that no longer applies. */
+  .pr-list { overflow-x: visible; }
+  .pr-title { max-width: none; }
+
+  /* Pagination buttons get equal width so the user can tap them on touch. */
+  .pagination { justify-content: center; }
+  .pagination .btn { min-width: 44px; }
+
+  /* The detail-tabs container scrolls horizontally so 7 tabs don't crowd
+     into a 360px-wide phone. Tab buttons get taller touch targets. */
+  .detail-tabs {
+    overflow-x: auto;
+    scrollbar-width: none;
+    margin: 0 -16px 16px;
+    padding: 0 16px;
+  }
+  .detail-tabs::-webkit-scrollbar { display: none; }
+  .tab-btn {
+    flex-shrink: 0;
+    padding: 10px 14px;
+    min-height: 44px;
+    font-size: 13px;
+  }
+
+  /* The platform-token form on the overview tab: stack the label-input
+     pairs vertically instead of horizontal rows that crowd on phones. */
+  .platform-form-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+
+  /* The new-requirement create form is the main composer on this page;
+     let it scroll naturally and give the action buttons full width. */
+  .create-req-form .form-row { flex-direction: column; gap: 14px; }
+  .create-req-form .form-actions { flex-direction: column; }
+  .create-req-form .form-actions > * { width: 100%; min-height: 44px; }
 }
 
 /* Requirements tab pagination */
@@ -485,6 +530,13 @@
   display: flex;
   flex-direction: column;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+}
+.kb-modal-body { padding: 18px; }
+
+@media (max-width: 768px) {
+  /* `.modal-fullscreen` + `.modal-fullscreen-overlay` (from index.css)
+     stretch the knowledge modal edge-to-edge on phones. */
+  .kb-modal-body { padding: 16px 18px calc(16px + var(--sab)); }
 }
 .kb-modal-header {
   display: flex;

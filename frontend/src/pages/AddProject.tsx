@@ -121,7 +121,7 @@ export default function AddProject() {
 
         {error && <div className="form-error">❌ {error}</div>}
 
-        <div className="form-actions">
+        <div className="form-actions stack-mobile">
           <button className="btn" onClick={() => navigate('/')}>取消</button>
           <button
             className="btn btn-primary"

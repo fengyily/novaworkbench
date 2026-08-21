@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -33,9 +34,10 @@ type WizardHandler struct {
 	jobLogSvc    *service.JobLogService
 	claudeCfg    *service.ClaudeConfigService
 	usageSvc     usageRecorder
+	skillSvc     *service.SkillService
 }
 
-func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder) *WizardHandler {
+func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService) *WizardHandler {
 	return &WizardHandler{
 		projectSvc:   projectSvc,
 		reqSvc:       reqSvc,
@@ -46,6 +48,7 @@ func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.Requir
 		jobLogSvc:    jobLogSvc,
 		claudeCfg:    claudeCfg,
 		usageSvc:     usageSvc,
+		skillSvc:     skillSvc,
 	}
 }
 
@@ -288,7 +291,12 @@ func (h *WizardHandler) effectiveModel(roleModel string) string {
 // no-requirement coding path) — the row is still recorded for global counts.
 // The active claude config's id + currency are stamped so cost can later be
 // recomputed from that platform's current model prices.
-func (h *WizardHandler) usageCtxFor(step, requirementID, projectID, jobID, model, meta string) *usageCtx {
+//
+// summary is a short Chinese description of the invocation (e.g. the truncated
+// text of a 追加调整 request). It is persisted into the meta JSON so the
+// requirement-detail token table can show a per-row description. Pass "" for
+// steps that don't have a meaningful single-line summary.
+func (h *WizardHandler) usageCtxFor(step, requirementID, projectID, jobID, model, meta, summary string) *usageCtx {
 	configID, currency := h.activeConfigMeta()
 	return &usageCtx{
 		Rec:            h.usageSvc,
@@ -300,6 +308,7 @@ func (h *WizardHandler) usageCtxFor(step, requirementID, projectID, jobID, model
 		ClaudeConfigID: configID,
 		Currency:       currency,
 		Meta:           meta,
+		Summary:        summary,
 	}
 }
 
@@ -527,7 +536,13 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		// must not tie the claude subprocess's lifetime to r.Context() (which
 		// is cancelled the moment the handler returns — that was the bug that
 		// killed the turn on page refresh).
-		analystUsage := h.usageCtxFor("analyst_chat", req.RequirementID, requirement.ProjectID, job.ID, model, "")
+		skillsBlock := llm.BuildSkillsBlock(h.mentionedSkills(requirement.Title + " " + requirement.Description))
+		origFirstTurnPrompt := firstTurnPrompt
+		if skillsBlock != "" {
+			firstTurnPrompt = func() string { return skillsBlock + origFirstTurnPrompt() }
+			resumePrompt = skillsBlock + resumePrompt
+		}
+		analystUsage := h.usageCtxFor("analyst_chat", req.RequirementID, requirement.ProjectID, job.ID, model, "", "")
 		finalResult, newSessionID, err := h.runAnalystTurn(context.Background(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, sessionID, !isFirstRound, sink, analystUsage)
 		if err != nil {
 			log.Printf("[analyst-chat] turn failed: %v", err)
@@ -641,6 +656,16 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 	sendStatus(w, rc, "phase", "🤖 开发者正在理解追加调整...")
 	rc.Flush()
 
+	// Echo the user request as a dedicated SSE event so the output box can
+	// render it as a "👤 调整请求" bubble — this is the same content that is
+	// persisted into token_usage.meta.summary for the token-stats table.
+	if msg := strings.TrimSpace(req.UserMessage); msg != "" {
+		payload, _ := json.Marshal(map[string]string{"type": "user_input", "content": msg})
+		fmt.Fprintf(w, "data: %s\n\n", payload)
+		rc.Flush()
+	}
+	rc.Flush()
+
 	// Anchor to the worktree so the resumed coding session's conversation stays
 	// rooted in the isolated dir (this chat is read-only, but keeps cwd consistent).
 	projectPath := req.ProjectPath
@@ -713,7 +738,7 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 	if requirement != nil {
 		developerProjectID = requirement.ProjectID
 	}
-	developerUsage := h.usageCtxFor("developer_chat", req.RequirementID, developerProjectID, "", model, "")
+	developerUsage := h.usageCtxFor("developer_chat", req.RequirementID, developerProjectID, "", model, "", req.UserMessage)
 	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, sourceSID, fork, newSID, w, rc, developerUsage)
 	if err != nil {
 		log.Printf("[developer-chat] turn failed: %v", err)
@@ -1217,6 +1242,13 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		} else if sourceSID == "" {
 			sessionArg = newCodingSID // fresh (skip-design 直接开发): --session-id <new>
 		}
+		skillText := ""
+		if reqRow != nil {
+			skillText = reqRow.Title + " " + reqRow.Description
+		}
+		if block := llm.BuildSkillsBlock(h.mentionedSkills(skillText)); block != "" {
+			prompt = block + prompt
+		}
 		cmd := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:        prompt,
 			WorkDir:       workDir,
@@ -1239,7 +1271,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		if reqRow != nil {
 			codingProjectID = reqRow.ProjectID
 		}
-		codingUsage := h.usageCtxFor("coding", req.RequirementID, codingProjectID, job.ID, model, "")
+		codingUsage := h.usageCtxFor("coding", req.RequirementID, codingProjectID, job.ID, model, "", "")
 		out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage)
 
 		// The coding session id is already persisted upfront. Correct it only if
@@ -1363,6 +1395,13 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[adjust-coding] job %s started for %s (resume %s)", job.ID, body.RequirementID, req.CodingSessionID)
 		job.Append(store.LogLine{Type: "phase", Content: "🤖 Claude 正在续接开发会话，处理追加调整..."})
 
+		// Echo the user request so the job-stream SSE can render a "👤 调整请求"
+		// bubble before the first tool/phase line. The same text is persisted
+		// into token_usage.meta.summary for the project/requirement token table.
+		if msg := strings.TrimSpace(body.Message); msg != "" {
+			job.Append(store.LogLine{Type: "user_input", Content: msg})
+		}
+
 		// GenerateCode wraps StreamCmd with a long (>=30m) timeout — a real
 		// code edit can take minutes. SystemPrompt is left empty so the resumed
 		// session's persona is preserved; Prompt carries ONLY the user's
@@ -1378,8 +1417,12 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 				workDir = req.WorktreePath
 			}
 		}
+		adjustPrompt := body.Message
+		if block := llm.BuildSkillsBlock(h.mentionedSkills(req.Title + " " + req.Description + " " + body.Message)); block != "" {
+			adjustPrompt = block + body.Message
+		}
 		cmd := h.llm.GenerateCode(llm.StreamOpts{
-			Prompt:       body.Message,
+			Prompt:       adjustPrompt,
 			WorkDir:      workDir,
 			SystemPrompt: "", // resume 已携带 developer persona，不再注入
 			Model:        cliModelArg(model),
@@ -1387,7 +1430,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			Resume:       true,
 			Fork:         false,
 		})
-		adjustUsage := h.usageCtxFor("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "")
+		adjustUsage := h.usageCtxFor("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message)
 		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding", adjustUsage)
 
 		// Stale --resume: the coding session file is gone (~/.claude/ cleaned
@@ -1518,7 +1561,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 			Resume:       true,
 			Fork:         false,
 		})
-		continueUsage := h.usageCtxFor("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "")
+		continueUsage := h.usageCtxFor("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "")
 		out := runClaudeStream(jobSink{job}, cmd, "continue-coding", continueUsage)
 
 		// Stale --resume: the coding session file is gone. Surface a clear error
@@ -1587,9 +1630,12 @@ func (h *WizardHandler) StreamJob(w http.ResponseWriter, r *http.Request) {
 				// Job finished — send final status event and close
 				_, status, exitCode := job.Snapshot()
 				doneData, _ := json.Marshal(map[string]interface{}{
-					"type":      "job_done",
-					"status":    string(status),
-					"exit_code": exitCode,
+					"type":        "job_done",
+					"status":      string(status),
+					"exit_code":   exitCode,
+					"started_at":  job.StartedAt.UnixMilli(),
+					"finished_at": job.FinishedAt.UnixMilli(),
+					"duration_ms": job.FinishedAt.Sub(job.StartedAt).Milliseconds(),
 				})
 				fmt.Fprintf(w, "data: %s\n\n", string(doneData))
 				rc.Flush()
@@ -1762,6 +1808,9 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		} else if sourceSID == "" {
 			sessionArg = newDesignSID // skip-analysis fresh session
 		}
+		if block := llm.BuildSkillsBlock(h.mentionedSkills(req.Title + " " + req.Description)); block != "" {
+			prompt = block + prompt
+		}
 		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
 			Prompt:         prompt,
 			WorkDir:        workDir,
@@ -1773,7 +1822,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 			ForkSessionID:  forkSessionID,
 			PermissionMode: "plan",
 		})
-		out := runClaudeStream(jobSink{job}, cmd, "architect-design", h.usageCtxFor("architect_design", id, req.ProjectID, job.ID, model, ""))
+		out := runClaudeStream(jobSink{job}, cmd, "architect-design", h.usageCtxFor("architect_design", id, req.ProjectID, job.ID, model, "", ""))
 
 		if out.staleSession {
 			// The source conversation is gone. Clear whichever session id was
@@ -1969,7 +2018,11 @@ func extractJSON(s string) string {
 }
 
 func sendStatus(w io.Writer, rc *http.ResponseController, typ string, content string) {
-	jsonLine, _ := json.Marshal(map[string]string{"type": typ, "content": content})
+	jsonLine, _ := json.Marshal(map[string]interface{}{
+		"type":    typ,
+		"content": content,
+		"at":      time.Now().UnixMilli(),
+	})
 	fmt.Fprintf(w, "data: %s\n\n", string(jsonLine))
 }
 
@@ -2063,6 +2116,9 @@ type sseSink struct {
 }
 
 func (s sseSink) emit(line store.LogLine) {
+	if line.At == 0 {
+		line.At = time.Now().UnixMilli()
+	}
 	data, _ := json.Marshal(line)
 	fmt.Fprintf(s.w, "data: %s\n\n", string(data))
 	s.rc.Flush()
@@ -2858,6 +2914,14 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 			"若用户确认修改已完成，在回复最后单独一行追加：[REFINE_COMPLETE]\n用中文。"
 	}
 
+	skillText := req.UserMessage
+	if requirement != nil {
+		skillText = requirement.Title + " " + requirement.Description + " " + req.UserMessage
+	}
+	if block := llm.BuildSkillsBlock(h.mentionedSkills(skillText)); block != "" {
+		prompt = block + prompt
+	}
+
 	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
 		Prompt:       prompt,
 		WorkDir:      workDir,
@@ -2877,7 +2941,7 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	if requirement != nil {
 		refineProjectID = requirement.ProjectID
 	}
-	refineUsage := h.usageCtxFor("refine_doc", req.RequirementID, refineProjectID, "", model, fmt.Sprintf("{\"doc_type\":%q}", req.DocType))
+	refineUsage := h.usageCtxFor("refine_doc", req.RequirementID, refineProjectID, "", model, fmt.Sprintf("{\"doc_type\":%q}", req.DocType), "")
 	out := runClaudeStream(sseSink{w: w, rc: rc}, cmd, "refine-doc", refineUsage)
 
 	if out.errMsg != "" || out.finalResult == "" {
@@ -3041,15 +3105,20 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[apply-doc] job %s started for %s (doc_type=%s)", job.ID, reqID, docType)
 		job.Append(store.LogLine{Type: "phase", Content: fmt.Sprintf("🤖 Claude 正在基于对话整合修改%s…（预计需要几分钟）", docLabel)})
 
+		applyPrompt := prompt
+		if block := llm.BuildSkillsBlock(h.mentionedSkills(requirement.Title + " " + requirement.Description)); block != "" {
+			applyPrompt = block + prompt
+		}
+
 		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-			Prompt:       prompt,
+			Prompt:       applyPrompt,
 			WorkDir:      workDir,
 			SystemPrompt: systemPrompt,
 			Model:        cliModelArg(model),
 			SessionID:    sourceSID,
 			Resume:       true,
 		})
-		applyUsage := h.usageCtxFor("apply_doc", reqID, requirement.ProjectID, job.ID, model, fmt.Sprintf("{\"doc_type\":%q}", docType))
+		applyUsage := h.usageCtxFor("apply_doc", reqID, requirement.ProjectID, job.ID, model, fmt.Sprintf("{\"doc_type\":%q}", docType), "")
 		out := runClaudeStream(jobSink{job}, cmd, "apply-doc", applyUsage)
 
 		if out.staleSession {
@@ -3117,9 +3186,42 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
+// mentionedSkills parses @slug mentions from text and returns the matching
+// skill files. Only skills present in the DB are returned; unknown slugs are
+// silently ignored. A nil skillSvc returns nil without error.
+func (h *WizardHandler) mentionedSkills(text string) []struct{ Slug, Content string } {
+	if h.skillSvc == nil {
+		return nil
+	}
+	slugs := parseAtMentions(text)
+	if len(slugs) == 0 {
+		return nil
+	}
+	skills, _ := h.skillSvc.SkillsBySlug(slugs)
+	return skills
+}
+
+// parseAtMentions extracts unique @slug tokens from text.
+// A slug may contain letters, digits, hyphens, and underscores.
+var atMentionRe = regexp.MustCompile(`@([A-Za-z0-9_-]+)`)
+
+func parseAtMentions(text string) []string {
+	matches := atMentionRe.FindAllStringSubmatch(text, -1)
+	seen := make(map[string]bool)
+	var slugs []string
+	for _, m := range matches {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			slugs = append(slugs, m[1])
+		}
+	}
+	return slugs
+}
+
 // isLikelyJSON reports whether s looks like a JSON object (starts with '{' after
 // trimming whitespace). Used to distinguish plan-markdown design docs from the
 // legacy JSON design schema.
 func isLikelyJSON(s string) bool {
 	return strings.HasPrefix(strings.TrimSpace(s), "{")
 }
+

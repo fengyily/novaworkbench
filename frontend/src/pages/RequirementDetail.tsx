@@ -1,14 +1,16 @@
-import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
+import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, type Requirement, type Project, type MergeState, type RequirementUsage } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
 import ModelSelect from '../components/ModelSelect';
+import AtMentionTextarea from '../components/AtMentionTextarea';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { exportDesignPdf } from '../utils/exportDesignPdf';
-import { appendLogLine, coalesceLogLines } from '../utils/logLines';
+import { appendLogLine, coalesceLogLines, type LogLine } from '../utils/logLines';
+import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import './RequirementDetail.css';
 
 interface DesignData {
@@ -56,16 +58,40 @@ function stageFor(status: string, skipDesign?: boolean): Stage {
 // plain text that blends into the panel. Joining also avoids spurious
 // mid-line breaks: token deltas often split a single source line across two
 // LogLines, and rendering each in its own block div would wrap them apart.
-// tool_call / tool_result / phase / error / done lines render as before.
-function CodingLines({ lines }: { lines: { type: string; content: string }[] }) {
+// Renders the design / coding / merge job's progress panel: groups phase
+// + tool_call lines into named phases (with per-phase + per-tool-call
+// durations), while message / result / error / done / conflict lines render
+// as before so the AI summary and conflict list keep their ReactMarkdown
+// styling.
+function CodingLines({ lines, working }: { lines: LogLine[]; working?: boolean }) {
+  // Re-render every 500ms while working so any trailing (still-active) phase
+  // shows a live duration. The counter value is unused.
+  useTick(!!working);
   const nodes: ReactNode[] = [];
-  let i = 0;
   let key = 0;
+
+  // Walk through the line stream. When we hit a `phase` line, accumulate
+  // until the next `phase` (or end) and render the run as a single phase
+  // block. message / result / error / done / conflict pass through.
+  let i = 0;
   while (i < lines.length) {
     const line = lines[i];
-    // "message" lines are streamed token-by-token; group consecutive ones and
-    // render through ReactMarkdown so code blocks/headings/lists become real
-    // elements instead of blending into plain text.
+    if (line.type === 'phase') {
+      const phaseStart = i;
+      const group: LogLine[] = [];
+      while (i < lines.length && lines[i].type === 'phase') {
+        group.push(lines[i]);
+        i++;
+      }
+      while (i < lines.length && lines[i].type === 'tool_call') {
+        group.push(lines[i]);
+        i++;
+      }
+      nodes.push(
+        <PhaseBlock key={key++} group={group} working={!!working} phaseStartIdx={phaseStart} lines={lines} />,
+      );
+      continue;
+    }
     if (line.type === 'message') {
       const group: string[] = [];
       while (i < lines.length && lines[i].type === 'message') {
@@ -75,9 +101,11 @@ function CodingLines({ lines }: { lines: { type: string; content: string }[] }) 
       nodes.push(
         <div key={key++} className="coding-line coding-line-message coding-message-md">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{group.join('')}</ReactMarkdown>
-        </div>
+        </div>,
       );
-    } else if (line.type === 'result') {
+      continue;
+    }
+    if (line.type === 'result') {
       // The "result" line is the dev-complete summary emitted as a single
       // LogLine (e.g. "全部完成。下面是实现总结。…" + Markdown). Render it
       // through ReactMarkdown too — otherwise the summary's headings/code
@@ -85,17 +113,63 @@ function CodingLines({ lines }: { lines: { type: string; content: string }[] }) 
       nodes.push(
         <div key={key++} className="coding-line coding-line-message coding-message-md">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{line.content}</ReactMarkdown>
-        </div>
+        </div>,
       );
       i++;
-    } else {
-      nodes.push(
-        <div key={key++} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
-      );
-      i++;
+      continue;
     }
+    nodes.push(
+      <div key={key++} className={`coding-line coding-line-${line.type}`}>{line.content}</div>,
+    );
+    i++;
   }
   return <>{nodes}</>;
+}
+
+// One phase block: header (label + elapsed) + thinking line + tool_call rows.
+// `group` is the consecutive run of phase + tool_call lines. `working` flips
+// the trailing phase into live-tick mode.
+function PhaseBlock({
+  group,
+  working,
+  phaseStartIdx,
+  lines,
+}: {
+  group: LogLine[];
+  working: boolean;
+  phaseStartIdx: number;
+  lines: LogLine[];
+}) {
+  const phases = buildPhaseGroups(group);
+  // The first phase in `group` is always the one the user is looking at;
+  // mark it active iff `working` AND the next line in the original stream
+  // (if any) isn't another phase boundary.
+  const lastInOriginal = phaseStartIdx + group.length >= lines.length;
+  const phase = phases[0];
+  if (!phase) return null;
+  const active = working && lastInOriginal && phase.isActive;
+  const displayMs = active ? Date.now() - phase.startedAt : phase.durationMs;
+  return (
+    <div className={`coding-line-phase-group${active ? ' active' : ''}`}>
+      <div className="coding-line-phase-header">
+        <span className="coding-line-phase-label">{phase.label}</span>
+        <span className="coding-line-phase-time">{formatDuration(displayMs)}</span>
+      </div>
+      {phase.thinking && (
+        <div className="coding-line coding-line-phase">{phase.thinking.content}</div>
+      )}
+      {phase.toolCalls.map((tc, j) => (
+        <div key={j} className="coding-line coding-line-tool_call">
+          <span>{tc.content}</span>
+          {tc.durationMs != null && tc.durationMs > 0 && (
+            <span className="coding-line-entry-time">
+              {' · '}{formatDuration(tc.durationMs)}
+            </span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 // Strips wizard "knowledge" / "knowledge_result" events out of a log snapshot,
@@ -105,8 +179,8 @@ function CodingLines({ lines }: { lines: { type: string; content: string }[] }) 
 // last payload wins.
 type KnowledgeEntry = { title: string; used?: boolean };
 
-function extractKnowledge(log: { type: string; content: string }[]) {
-  const lines: { type: string; content: string }[] = [];
+function extractKnowledge(log: LogLine[]) {
+  const lines: LogLine[] = [];
   let items: KnowledgeEntry[] = [];
   let empty = false;
   let any = false;
@@ -119,6 +193,8 @@ function extractKnowledge(log: { type: string; content: string }[]) {
         empty = (kb.count ?? 0) === 0;
       } catch { /* malformed frame — ignore */ }
     } else {
+      // Preserve `at` so the phase timings survive a snapshot replay after a
+      // page refresh mid-stage.
       lines.push(l);
     }
   }
@@ -231,7 +307,7 @@ export default function RequirementDetail() {
   const analystDefaultModel = roleDefaultModels['analyst'] ?? '';
   const architectDefaultModel = roleDefaultModels['architect'] ?? '';
   const developerDefaultModel = roleDefaultModels['developer'] ?? '';
-  const [codingLines, setCodingLines] = useState<{ type: string; content: string }[]>([]);
+  const [codingLines, setCodingLines] = useState<LogLine[]>([]);
   const [coding, setCoding] = useState(false);
   const codingRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventStream | null>(null);
@@ -268,14 +344,14 @@ export default function RequirementDetail() {
   const [mergeTarget, setMergeTarget] = useState('main');
   const [mergeCommitMsg, setMergeCommitMsg] = useState('');
   const [mergeDeleteBranch, setMergeDeleteBranch] = useState(false);
-  const [mergeLines, setMergeLines] = useState<{ type: string; content: string }[]>([]);
+  const [mergeLines, setMergeLines] = useState<LogLine[]>([]);
   const [merging, setMerging] = useState(false);
   const [conflictFiles, setConflictFiles] = useState<string[] | null>(null);
   const [prLink, setPrLink] = useState('');
   const mergeEsRef = useRef<EventStream | null>(null);
 
   // Streaming design state (architect phase)
-  const [designLines, setDesignLines] = useState<{ type: string; content: string }[]>([]);
+  const [designLines, setDesignLines] = useState<LogLine[]>([]);
   const [designing, setDesigning] = useState(false);
   // Set when the design job ended in an error status. The stream panel
   // collapses on success (the design renders standalone), but on failure we
@@ -311,10 +387,25 @@ export default function RequirementDetail() {
   // latest claude turns.
   const [usage, setUsage] = useState<RequirementUsage | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
+  // Per-invocation rows for the "追加调整" steps (adjust_coding +
+  // developer_chat + continue_coding). Loaded in parallel with usage() so the
+  // detailed history (each turn's model / tokens / cost / time / summary) is
+  // always available when the rollup is.
+  const [adjustRows, setAdjustRows] = useState<UsageRow[] | null>(null);
   const loadUsage = useCallback(async () => {
     if (!id) return;
     setUsageLoading(true);
-    try { setUsage(await usageApi.requirement(id)); } catch { /* ignore */ }
+    try {
+      setUsage(await usageApi.requirement(id));
+    } catch { /* ignore */ }
+    try {
+      const [chat, dev, cont] = await Promise.all([
+        usageApi.rows(id, 'adjust_coding'),
+        usageApi.rows(id, 'developer_chat'),
+        usageApi.rows(id, 'continue_coding'),
+      ]);
+      setAdjustRows([...chat, ...dev, ...cont].sort((a, b) => (a.created_at < b.created_at ? -1 : 1)));
+    } catch { /* ignore */ }
     finally { setUsageLoading(false); }
   }, [id]);
 
@@ -489,8 +580,10 @@ export default function RequirementDetail() {
           return;
         }
         // Coalesce consecutive "模型思考中… (N tokens)" phase lines into one
-        // updatable row instead of stacking one per heartbeat.
-        setDesignLines(prev => appendLogLine(prev, { type: evt.type, content: evt.content ?? '' }));
+        // updatable row instead of stacking one per heartbeat. Use the
+        // backend-stamped `at` so phase timings stay accurate.
+        const at = typeof evt.at === 'number' ? evt.at : Date.now();
+        setDesignLines(prev => appendLogLine(prev, { type: evt.type, content: evt.content ?? '', at }));
       },
       () => {
         designEsRef.current = null;
@@ -638,7 +731,7 @@ export default function RequirementDetail() {
       .then(r => r.json())
       .then(json => {
         if (!json.success) { setDesigning(false); refresh(); return; }
-        const { status, exit_code, log } = json.data as { status: string; exit_code: number; log: { type: string; content: string }[] };
+        const { status, exit_code, log } = json.data as { status: string; exit_code: number; log: LogLine[] };
         if (log && log.length > 0) {
           const kb = extractKnowledge(log);
           if (kb.items.length > 0 || kb.empty) { setKnowledgeItems(kb.items); setKnowledgeEmpty(kb.empty); }
@@ -732,8 +825,10 @@ export default function RequirementDetail() {
           return;
         }
         // Coalesce consecutive "模型思考中… (N tokens)" phase lines into one
-        // updatable row instead of stacking one per heartbeat.
-        setCodingLines(prev => appendLogLine(prev, { type: evt.type, content: evt.content ?? '' }));
+        // updatable row instead of stacking one per heartbeat. Use the
+        // backend-stamped `at` so phase timings stay accurate.
+        const at = typeof evt.at === 'number' ? evt.at : Date.now();
+        setCodingLines(prev => appendLogLine(prev, { type: evt.type, content: evt.content ?? '', at }));
       },
       () => {
         esRef.current = null;
@@ -899,7 +994,7 @@ export default function RequirementDetail() {
   // log lines (a "conflict" line drives the conflict panel, a "pr_link" line
   // surfaces the create-PR link). Shared by the live job_done handler and the
   // restore-on-refresh effect below.
-  const applyMergeSignals = useCallback((lines: { type: string; content: string }[]) => {
+  const applyMergeSignals = useCallback((lines: LogLine[]) => {
     const conflict = lines.find(l => l.type === 'conflict');
     if (conflict) {
       try {
@@ -923,7 +1018,7 @@ export default function RequirementDetail() {
     setConflictFiles(null);
     if (id) localStorage.setItem(`merge_job_${id}`, jobId);
 
-    let acc: { type: string; content: string }[] = [];
+    let acc: LogLine[] = [];
     mergeEsRef.current = createEventStream(
       `/api/wizard/jobs/${jobId}/stream`,
       (evt) => {
@@ -938,7 +1033,11 @@ export default function RequirementDetail() {
           if (exitOk && !conflict) refreshMergeState();
           return;
         }
-        const line = { type: evt.type, content: evt.content ?? '' };
+        const line: LogLine = {
+          type: evt.type,
+          content: evt.content ?? '',
+          at: typeof evt.at === 'number' ? evt.at : Date.now(),
+        };
         // Coalesce consecutive "模型思考中… (N tokens)" phase lines into one
         // updatable row instead of stacking one per heartbeat.
         acc = appendLogLine(acc, line);
@@ -1055,7 +1154,7 @@ export default function RequirementDetail() {
           localStorage.removeItem(`merge_job_${id}`);
           return;
         }
-        const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
+        const { status, log } = json.data as { status: string; log: LogLine[] };
         if (!log || log.length === 0) return;
         setMergeLines(coalesceLogLines(log));
         applyMergeSignals(log);
@@ -1084,7 +1183,7 @@ export default function RequirementDetail() {
           localStorage.removeItem(`coding_job_${id}`);
           return;
         }
-        const { status, log } = json.data as { status: string; log: { type: string; content: string }[] };
+        const { status, log } = json.data as { status: string; log: LogLine[] };
         if (!log || log.length === 0) return;
         const kb = extractKnowledge(log);
         if (kb.items.length > 0 || kb.empty) { setKnowledgeItems(kb.items); setKnowledgeEmpty(kb.empty); }
@@ -1165,7 +1264,7 @@ export default function RequirementDetail() {
               <input type="checkbox" checked={readKnowledgeDesign} onChange={e => setReadKnowledgeDesign(e.target.checked)} />
               📚 开始前先读取项目知识库（默认不勾选）
             </label>
-            <div className="modal-actions">
+            <div className="modal-actions btn-row-2col">
               <button className="btn btn-primary" onClick={confirmDesignKnowledge}>确认</button>
               <button className="btn" onClick={() => setShowDesignKnowledgeModal(false)}>取消</button>
             </div>
@@ -1217,7 +1316,7 @@ export default function RequirementDetail() {
               <input type="checkbox" checked={readKnowledgeDev} onChange={e => setReadKnowledgeDev(e.target.checked)} />
               📚 开始前先读取项目知识库（默认不勾选）
             </label>
-            <div className="modal-actions">
+            <div className="modal-actions btn-row-2col">
               <button className="btn btn-primary" onClick={confirmBranchAndStart}>🚀 确认，开始开发</button>
               <button className="btn" onClick={() => setShowBranchModal(false)}>取消</button>
             </div>
@@ -1261,7 +1360,7 @@ export default function RequirementDetail() {
                   <input type="checkbox" checked={mergeDeleteBranch} onChange={e => setMergeDeleteBranch(e.target.checked)} />
                   合并后删除开发分支
                 </label>
-                <div className="modal-actions">
+                <div className="modal-actions btn-row-2col">
                   <button className="btn btn-primary" onClick={confirmMerge} disabled={!!busy}>🔀 确认合入</button>
                   <button className="btn" onClick={() => setShowMergeModal(false)} disabled={!!busy}>取消</button>
                 </div>
@@ -1293,7 +1392,7 @@ export default function RequirementDetail() {
                 {!mergeState.has_remote && (
                   <p className="merge-warn">该项目未配置 origin 远程仓库，无法推送。</p>
                 )}
-                <div className="modal-actions">
+                <div className="modal-actions btn-row-2col">
                   <button className="btn btn-primary" onClick={confirmMerge} disabled={!!busy || !mergeState.has_remote}>🌐 推送并发起 PR</button>
                   <button className="btn" onClick={() => setShowMergeModal(false)} disabled={!!busy}>取消</button>
                 </div>
@@ -1314,7 +1413,14 @@ export default function RequirementDetail() {
             </div>
             <div className="modal-field">
               <label>描述</label>
-              <textarea className="input" rows={6} value={editDesc} onChange={e => setEditDesc(e.target.value)} style={{ resize: 'vertical' }} />
+              <AtMentionTextarea
+                className="input"
+                rows={6}
+                value={editDesc}
+                onChange={setEditDesc}
+                style={{ resize: 'vertical' }}
+                placeholder="输入 @ 可引用 Skill，例如 @frontend"
+              />
             </div>
             <div style={{ display: 'flex', gap: 12 }}>
               <div className="modal-field" style={{ flex: 1 }}>
@@ -1340,7 +1446,7 @@ export default function RequirementDetail() {
                 </small>
               </div>
             )}
-            <div className="modal-actions">
+            <div className="modal-actions btn-row-2col">
               <button className="btn btn-primary" onClick={saveEdit} disabled={!!busy}>
                 {busy === '保存' ? '⏳ 保存中...' : '💾 保存'}
               </button>
@@ -1388,7 +1494,7 @@ export default function RequirementDetail() {
         </div>
         {usage && usage.by_step.length > 0 ? (
           <>
-            <table className="pr-table" style={{ marginBottom: 8 }}>
+            <table className="pr-table table-cards" style={{ marginBottom: 8 }}>
               <thead>
                 <tr>
                   <th>步骤</th>
@@ -1403,32 +1509,98 @@ export default function RequirementDetail() {
               </thead>
               <tbody>
                 {usage.by_step.map(s => (
-                  <tr key={`${s.step}:${s.model}`}>
-                    <td>{s.label || stepLabels[s.step] || s.step}</td>
-                    <td><code className="pr-branch">{s.model || '未知模型'}</code></td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(s).toLocaleString()}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.output_tokens.toLocaleString()}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_read_tokens.toLocaleString()}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_creation_tokens.toLocaleString()}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{fmtCost(s.costs)}</td>
-                    <td style={{ fontSize: 12 }}>{s.count}</td>
-                  </tr>
+                  <Fragment key={`${s.step}:${s.model}`}>
+                    <tr>
+                      <td data-label="步骤">{s.label || stepLabels[s.step] || s.step}</td>
+                      <td data-label="模型"><code className="pr-branch">{s.model || '未知模型'}</code></td>
+                      <td data-label="输入" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(s).toLocaleString()}</td>
+                      <td data-label="输出" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.output_tokens.toLocaleString()}</td>
+                      <td data-label="缓存读" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_read_tokens.toLocaleString()}</td>
+                      <td data-label="缓存建" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{s.cache_creation_tokens.toLocaleString()}</td>
+                      <td data-label="费用" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{fmtCost(s.costs)}</td>
+                      <td data-label="次数" style={{ fontSize: 12 }}>{s.count}</td>
+                    </tr>
+                  </Fragment>
                 ))}
-                <tr style={{ borderTop: '2px solid var(--color-border)' }}>
-                  <td style={{ fontWeight: 600 }}>合计</td>
+                <tr className="table-cards-total" style={{ borderTop: '2px solid var(--color-border)' }}>
+                  <td data-label="合计" style={{ fontWeight: 600 }}>合计</td>
                   <td></td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{usageTotalInput(usage.total).toLocaleString()}</td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{usage.total.output_tokens.toLocaleString()}</td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{usage.total.cache_read_tokens.toLocaleString()}</td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{usage.total.cache_creation_tokens.toLocaleString()}</td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{fmtCost(usage.total.costs)}</td>
-                  <td></td>
+                  <td data-label="输入" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{usageTotalInput(usage.total).toLocaleString()}</td>
+                  <td data-label="输出" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{usage.total.output_tokens.toLocaleString()}</td>
+                  <td data-label="缓存读" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{usage.total.cache_read_tokens.toLocaleString()}</td>
+                  <td data-label="缓存建" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{usage.total.cache_creation_tokens.toLocaleString()}</td>
+                  <td data-label="费用" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600 }}>{fmtCost(usage.total.costs)}</td>
+                  <td data-label="次数"></td>
                 </tr>
               </tbody>
             </table>
             <small style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
               输入 = 直接输入 + 缓存读 + 缓存建（均按计费输入计入）。仅统计已完成的完整调用。
             </small>
+
+            {adjustRows && adjustRows.length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6, color: 'var(--color-text)' }}>
+                  📋 追问 / 调整历史（{adjustRows.length} 次）
+                </div>
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {adjustRows.map((r, i) => (
+                    <div
+                      key={r.id}
+                      style={{
+                        background: '#FFFFFF',
+                        border: '1px solid #E2E8F0',
+                        borderLeft: '4px solid #F59E0B',
+                        borderRadius: 6,
+                        padding: '10px 12px',
+                        boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 6, fontSize: 12, color: 'var(--color-text-secondary)' }}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ background: '#F59E0B', color: '#FFFFFF', borderRadius: 10, padding: '1px 8px', fontWeight: 700, fontSize: 11 }}>
+                            #{i + 1}
+                          </span>
+                          <span style={{ fontWeight: 600, color: 'var(--color-text)' }}>
+                            {stepLabels[r.step] || r.step}
+                          </span>
+                          <code className="pr-branch" style={{ fontSize: 11 }}>{r.model || '未知模型'}</code>
+                        </span>
+                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-text-muted)' }}>
+                          {new Date(r.created_at).toLocaleString()}
+                        </span>
+                      </div>
+                      {r.summary && (
+                        <div
+                          style={{
+                            background: '#FFFBEB',
+                            border: '1px dashed #F59E0B',
+                            borderRadius: 4,
+                            padding: '6px 8px',
+                            marginBottom: 6,
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: 12,
+                            color: '#1E293B',
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                            lineHeight: 1.5,
+                          }}
+                        >
+                          📤 {r.summary}
+                        </div>
+                      )}
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--color-text-secondary)', fontFamily: 'var(--font-mono)' }}>
+                        <span>输入 <strong style={{ color: 'var(--color-text)' }}>{usageTotalInput(r).toLocaleString()}</strong></span>
+                        <span>输出 <strong style={{ color: 'var(--color-text)' }}>{r.output_tokens.toLocaleString()}</strong></span>
+                        <span style={{ color: 'var(--color-text-muted)' }}>缓存读 {r.cache_read_tokens.toLocaleString()}</span>
+                        <span style={{ color: 'var(--color-text-muted)' }}>缓存建 {r.cache_creation_tokens.toLocaleString()}</span>
+                        <span style={{ color: 'var(--color-primary)', fontWeight: 600 }}>费用 {fmtCost(r.costs)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </>
         ) : (
           <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
@@ -1632,7 +1804,7 @@ export default function RequirementDetail() {
 
           {designPanelOpen && (
             <div className="coding-panel" ref={designRef} style={{ marginBottom: 16 }}>
-              <CodingLines lines={designLines} />
+              <CodingLines lines={designLines} working={designing} />
               {designProcessActive && <div className="coding-line coding-line-tool_call">⏳ Claude 正在 plan 模式下制定技术方案...</div>}
             </div>
           )}
@@ -1755,7 +1927,7 @@ export default function RequirementDetail() {
 
           {(codingLines.length > 0 || coding) && (
             <div className="coding-panel" ref={codingRef}>
-              <CodingLines lines={codingLines} />
+              <CodingLines lines={codingLines} working={coding} />
               {coding && <div className="coding-line coding-line-tool_call">⏳ Claude 正在工作...</div>}
             </div>
           )}
@@ -1789,7 +1961,7 @@ export default function RequirementDetail() {
                   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doAdjustCoding(); }
                 }}
               />
-              <div className="adjust-composer-footer">
+              <div className="adjust-composer-footer stack-mobile">
                 <span className="ac-hint">Enter 发送 · Shift+Enter 换行</span>
                 <button className="btn btn-primary" onClick={doAdjustCoding} disabled={!adjustInput.trim()}>
                   🚀 追加调整
@@ -1827,7 +1999,7 @@ export default function RequirementDetail() {
 
               {/* ── Merge / PR step ── */}
               <div className="merge-section">
-                <div className="merge-actions">
+                <div className="merge-actions stack-mobile">
                   <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}>🔀 本地合入</button>
                   <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}>🌐 推送并发起 PR</button>
                 </div>
@@ -1858,7 +2030,7 @@ export default function RequirementDetail() {
 
                 {mergeLines.length > 0 && (
                   <div className="coding-panel merge-panel">
-                    <CodingLines lines={mergeLines} />
+                    <CodingLines lines={mergeLines} working={merging} />
                     {merging && <div className="coding-line coding-line-tool_call">⏳ 执行中...</div>}
                   </div>
                 )}
@@ -1879,7 +2051,7 @@ export default function RequirementDetail() {
               ) : (
                 <div className="tab-empty"><p>✅ 开发已完成。</p></div>
               )}
-              <div className="merge-actions">
+              <div className="merge-actions stack-mobile">
                 <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}>🔀 本地合入</button>
                 <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}>🌐 推送并发起 PR</button>
               </div>
@@ -1890,7 +2062,7 @@ export default function RequirementDetail() {
                   <button className="btn btn-sm" onClick={cleanWorktree} disabled={merging || !!busy}>🧹 清理开发环境</button>
                 </div>
               )}
-              <div className="merge-actions" style={{ marginTop: 8 }}>
+              <div className="merge-actions stack-mobile" style={{ marginTop: 8 }}>
                 <button className="btn btn-primary" onClick={handleArchive} disabled={!!busy}>
                   {busy === '归档' ? '⏳ ...' : '📦 归档到知识库'}
                 </button>
@@ -1903,7 +2075,7 @@ export default function RequirementDetail() {
               <div className="tab-empty">
                 <p>📦 已归档至项目知识库（最终需求 + 技术方案）。</p>
               </div>
-              <div className="merge-actions" style={{ marginTop: 8 }}>
+              <div className="merge-actions stack-mobile" style={{ marginTop: 8 }}>
                 <button className="btn" onClick={handleUnarchive} disabled={!!busy}>
                   {busy === '取消归档' ? '⏳ ...' : '↩ 取消归档'}
                 </button>

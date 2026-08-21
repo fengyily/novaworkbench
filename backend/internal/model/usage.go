@@ -52,6 +52,9 @@ func (t UsageTotals) TotalInput() int {
 
 // StepUsage aggregates token usage for one step of a requirement (split by
 // model so a step that ran on multiple models shows one row per model).
+// Summaries carries the per-invocation "summary" text lifted from
+// token_usage.meta (e.g. each 追加调整 request's first 200 chars), in the
+// natural SQL order. Empty for steps that don't record a summary.
 type StepUsage struct {
 	Step                string     `json:"step"`
 	Label               string     `json:"label"`
@@ -62,6 +65,7 @@ type StepUsage struct {
 	CacheReadTokens     int        `json:"cache_read_tokens"`
 	Count               int        `json:"count"`
 	Costs               []CostItem `json:"costs"`
+	Summaries           []string   `json:"summaries,omitempty"`
 }
 
 // ReqUsage aggregates token usage for one requirement (excludes review rows).
@@ -108,4 +112,23 @@ type ReviewUsage struct {
 	InputTokens   int       `json:"input_tokens"`
 	OutputTokens  int       `json:"output_tokens"`
 	CreatedAt     time.Time `json:"created_at"`
+}
+
+// UsageRow is one token_usage row in its native form, returned by the
+// per-requirement per-row endpoint so the UI can show every individual
+// invocation (model, tokens, cost, time, summary) instead of an aggregated
+// per-step rollup. The summary is lifted from the meta JSON "summary" key.
+type UsageRow struct {
+	ID                  string    `json:"id"`
+	RequirementID       string    `json:"requirement_id"`
+	JobID               string    `json:"job_id"`
+	Step                string    `json:"step"`
+	Model               string    `json:"model"`
+	InputTokens         int       `json:"input_tokens"`
+	OutputTokens        int       `json:"output_tokens"`
+	CacheCreationTokens int       `json:"cache_creation_tokens"`
+	CacheReadTokens     int       `json:"cache_read_tokens"`
+	Costs               []CostItem `json:"costs"`
+	Summary             string    `json:"summary"`
+	CreatedAt           time.Time `json:"created_at"`
 }
