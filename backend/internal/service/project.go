@@ -574,6 +574,55 @@ func (s *ProjectService) Restore(id string) (*model.Project, error) {
 	return s.Get(id)
 }
 
+// EnsureCloned makes sure the project's working directory exists on disk.
+// This is the recovery path for Docker environments where a container
+// rebuild / fresh workspace mount leaves a previously-added project's
+// directory absent: without it the next git operation fails with "非 git
+// 仓库" or "git checkout 失败" — the wizard's reported error.
+//
+// Behaviour:
+//   - Directory present → no-op (also a no-op when the path exists but is
+//     not a git repo; we deliberately do NOT wipe a populated tree, since
+//     removing user work would be far worse than a failed checkout).
+//   - Directory missing + RemoteURL empty → error (no remote to restore).
+//   - Directory missing + RemoteURL set  → re-clone into LocalPath using the
+//     stored platform token + DefaultBranch.
+//
+// Re-cloning reuses the platform token that was stored on the project at
+// add-time, so a private repo can be restored without re-entering creds.
+func (s *ProjectService) EnsureCloned(id string) error {
+	p, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	if p.LocalPath == "" {
+		return fmt.Errorf("project has no local_path")
+	}
+	switch _, statErr := os.Stat(p.LocalPath); {
+	case statErr == nil:
+		return nil
+	case !os.IsNotExist(statErr):
+		return fmt.Errorf("stat project dir: %w", statErr)
+	}
+	// Directory is missing — only safe to recreate when the project has a
+	// stored remote we can clone from.
+	if p.RemoteURL == "" {
+		return fmt.Errorf("project directory missing and no remote URL to re-clone: %s", p.LocalPath)
+	}
+	tokenSecret, tokenPlatform, err := s.resolveCloneAuth(p.PlatformType, p.PlatformTokenID, p.RemoteURL)
+	if err != nil {
+		return err
+	}
+	branch := p.DefaultBranch
+	if branch == "" {
+		branch = "main"
+	}
+	if err := cloneRepo(p.RemoteURL, branch, p.LocalPath, tokenPlatform, tokenSecret); err != nil {
+		return fmt.Errorf("re-clone from %s: %w", redactUserinfo(p.RemoteURL), err)
+	}
+	return nil
+}
+
 // Purge permanently removes a soft-deleted project and its on-disk
 // directory. Errors are prefixed with NOT_IN_TRASH / PROJECT_NOT_FOUND /
 // REMOVE_DIR_FAILED / PURGE_FAILED so the handler can map them to HTTP

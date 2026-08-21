@@ -94,6 +94,15 @@ func (h *RunnerHandler) Start(w http.ResponseWriter, r *http.Request) {
 	}
 	h.mu.Unlock()
 
+	// Recover the project directory if a Docker rebuild / fresh workspace mount
+	// left it absent — without a working tree detectComposeCmd can't even
+	// locate the compose file. Re-clones from the project's stored remote
+	// when there is one; surfaces a clear PROJECT_DIR_MISSING error otherwise.
+	if restoreErr := h.projectSvc.EnsureCloned(projectID); restoreErr != nil {
+		writeError(w, 422, "PROJECT_DIR_MISSING", restoreErr.Error())
+		return
+	}
+
 	bin, binArgs, composeFile, err := detectComposeCmd(project.LocalPath)
 	if err != nil {
 		writeError(w, 422, "COMPOSE_NOT_FOUND", err.Error())
