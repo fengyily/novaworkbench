@@ -22,7 +22,7 @@ terraform {
 provider "alicloud" {
   # Region / credentials come from TF_VAR_* env vars so the same code
   # works locally and inside GitHub Actions.
-  region     = var.region
+  region = var.region
   # Wire the sensitive vars (TF_VAR_aliyun_access_key_id /
   # _secret in CI) into the provider explicitly. The alicloud
   # provider's default credential chain only auto-reads
