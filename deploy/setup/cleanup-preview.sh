@@ -4,6 +4,9 @@
 #   PROJECT_NAME
 set -euo pipefail
 
+source "$(dirname "$0")/lib.sh"
+ensure_docker_access "$@"
+
 : "${PROJECT_NAME:?PROJECT_NAME required}"
 
 DEPLOY_DIR="${HOME}/nova/deploy"
