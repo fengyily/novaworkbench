@@ -1,6 +1,7 @@
 package service
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -456,6 +457,60 @@ func liftSummary(meta string) string {
 		return ""
 	}
 	return strings.TrimSpace(s)
+}
+
+// RowsByStep returns every token_usage row for one (requirement, step) pair
+// in created_at order. Used by the requirement-detail UI to display every
+// individual invocation (model, tokens, cost, time, summary) — the per-step
+// rollup hides which model each adjustment actually used. step may be empty
+// to fetch all rows for the requirement. Cost is recomputed per row from the
+// config's current prices (same recompute path as the rollups).
+func (s *UsageService) RowsByStep(reqID, step string) ([]model.UsageRow, error) {
+	tables := s.priceTablesBestEffort()
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if step == "" {
+		rows, err = s.db.Query(
+			"SELECT id, requirement_id, job_id, step, model, claude_config_id, currency, "+
+				"input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, meta, created_at "+
+				"FROM token_usage WHERE requirement_id=? ORDER BY created_at",
+			reqID)
+	} else {
+		rows, err = s.db.Query(
+			"SELECT id, requirement_id, job_id, step, model, claude_config_id, currency, "+
+				"input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, meta, created_at "+
+				"FROM token_usage WHERE requirement_id=? AND step=? ORDER BY created_at",
+			reqID, step)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []model.UsageRow
+	costByCur := map[string]float64{}
+	for rows.Next() {
+		var (
+			r                model.UsageRow
+			meta, cid, cur   string
+		)
+		if err := rows.Scan(&r.ID, &r.RequirementID, &r.JobID, &r.Step, &r.Model, &cid, &cur,
+			&r.InputTokens, &r.OutputTokens, &r.CacheCreationTokens, &r.CacheReadTokens, &meta, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		r.Summary = liftSummary(meta)
+		accumulateCost(costByCur, cur, cid, r.Model, r.InputTokens, r.OutputTokens, r.CacheCreationTokens, r.CacheReadTokens, tables)
+		r.Costs = costsToItems(costByCur)
+		costByCur = map[string]float64{}
+		items = append(items, r)
+	}
+	if items == nil {
+		items = []model.UsageRow{}
+	}
+	return items, rows.Err()
 }
 
 

@@ -113,3 +113,22 @@ type ReviewUsage struct {
 	OutputTokens  int       `json:"output_tokens"`
 	CreatedAt     time.Time `json:"created_at"`
 }
+
+// UsageRow is one token_usage row in its native form, returned by the
+// per-requirement per-row endpoint so the UI can show every individual
+// invocation (model, tokens, cost, time, summary) instead of an aggregated
+// per-step rollup. The summary is lifted from the meta JSON "summary" key.
+type UsageRow struct {
+	ID                  string    `json:"id"`
+	RequirementID       string    `json:"requirement_id"`
+	JobID               string    `json:"job_id"`
+	Step                string    `json:"step"`
+	Model               string    `json:"model"`
+	InputTokens         int       `json:"input_tokens"`
+	OutputTokens        int       `json:"output_tokens"`
+	CacheCreationTokens int       `json:"cache_creation_tokens"`
+	CacheReadTokens     int       `json:"cache_read_tokens"`
+	Costs               []CostItem `json:"costs"`
+	Summary             string    `json:"summary"`
+	CreatedAt           time.Time `json:"created_at"`
+}

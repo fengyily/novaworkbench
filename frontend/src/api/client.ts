@@ -682,6 +682,25 @@ export interface RequirementUsage {
   by_step: StepUsage[];
   total: UsageTotals;
 }
+
+// UsageRow is one token_usage row in its native form. Returned by the
+// per-requirement per-row endpoint so the UI can show every individual
+// invocation (model, tokens, cost, time, summary) instead of an aggregated
+// per-step rollup.
+export interface UsageRow {
+  id: string;
+  requirement_id: string;
+  job_id: string;
+  step: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  costs: CostItem[];
+  summary: string;
+  created_at: string;
+}
 export interface ReqUsage {
   requirement_id: string;
   input_tokens: number;
@@ -763,6 +782,7 @@ export const fmtCost = (costs?: CostItem[]): string => {
 
 export const usageApi = {
   requirement: (id: string) => api.get<RequirementUsage>(`/api/usage/requirement/${id}`),
+  rows: (id: string, step?: string) => api.get<UsageRow[]>(`/api/usage/requirement/${id}/rows${step ? `?step=${encodeURIComponent(step)}` : ''}`),
   byRequirement: (projectId: string) => api.get<ReqUsage[]>(`/api/usage/by-requirement?project_id=${projectId}`),
   project: (id: string) => api.get<ProjectUsage>(`/api/usage/project/${id}`),
 };

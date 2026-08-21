@@ -287,6 +287,7 @@ func main() {
 	// Token usage (per-requirement / per-project aggregation; review rows
 	// are recorded but excluded from project totals — surfaced separately).
 	mux.HandleFunc("GET /api/usage/requirement/{id}", usageH.Requirement)
+	mux.HandleFunc("GET /api/usage/requirement/{id}/rows", usageH.Rows)
 	mux.HandleFunc("GET /api/usage/by-requirement", usageH.ByRequirement)
 	mux.HandleFunc("GET /api/usage/project/{id}", usageH.Project)
 

@@ -141,6 +141,28 @@ func NewUsageHandler(svc *service.UsageService) *UsageHandler {
 	return &UsageHandler{svc: svc}
 }
 
+// Rows returns one token_usage row per invocation for a requirement, optionally
+// filtered by step. The requirement-detail UI uses this to show every
+// individual 追加调整 (model, tokens, cost, time, summary) — the per-step
+// rollup hides which model each adjustment actually used. Empty step returns
+// all rows for the requirement.
+//
+// GET /api/usage/requirement/{id}/rows?step=adjust_coding
+func (h *UsageHandler) Rows(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "INVALID", "missing requirement id")
+		return
+	}
+	step := r.URL.Query().Get("step")
+	rows, err := h.svc.RowsByStep(id, step)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "USAGE_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
 // Requirement returns per-step + total token usage for one requirement.
 // GET /api/usage/requirement/{id}
 func (h *UsageHandler) Requirement(w http.ResponseWriter, r *http.Request) {
