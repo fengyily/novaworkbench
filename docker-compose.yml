@@ -3,8 +3,12 @@ version: '3.8'
 services:
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      # Build context must be the repo root (.), not ./backend, because the
+      # Dockerfile references `frontend/...` (stage 1) and `backend/...`
+      # (stages 2 & 3) from the context root. CI workflow
+      # (.github/workflows/deploy.yml) uses the same context for parity.
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: novaworkbench-backend
     ports:
       - "9527:9527"

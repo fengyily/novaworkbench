@@ -64,12 +64,12 @@ jobs:
       - name: Build & push
         uses: docker/build-push-action@v5
         with:
-          # Build context must align with docker-compose.yml (context: ./backend)
-          # so a single Dockerfile can COPY docker-entrypoint.sh as a relative
-          # path. Using context=. here would require backend/docker-entrypoint.sh
-          # in the Dockerfile, which breaks `docker compose build`.
-          context: ./backend
-          file: ./backend/Dockerfile
+          # The Dockerfile references both `frontend/...` (stage 1 — builds
+          # the SPA) and `backend/...` (stage 2 — builds the Go binary; stage 3
+          # also needs `backend/docker-entrypoint.sh`), so the build context
+          # has to be the repo root. docker-compose.yml mirrors this.
+          context: .
+          file: backend/Dockerfile
           push: true
           tags: |
             ghcr.io/${{ env.NAMESPACE }}/nova:sha-${{ github.sha }}

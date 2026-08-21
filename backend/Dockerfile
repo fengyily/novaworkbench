@@ -54,13 +54,16 @@ RUN addgroup -g ${NOVA_UID} -S nova \
 RUN npm install -g @anthropic-ai/claude-code --no-audit --no-fund \
     && chown -R nova:nova /usr/local/lib/node_modules /usr/local/bin /usr/local/share
 WORKDIR /app
-# Copy the server binary from the builder stage. Build context is `./backend`
-# for both docker-compose (docker-compose.yml → context: ./backend) and the
-# CI workflow (.github/workflows/deploy.yml → context: ./backend after the
-# fix that aligns them), so docker-entrypoint.sh lives next to the Dockerfile
-# it serves.
+# Copy the server binary from the builder stage. Build context is the repo
+# root for both docker-compose (docker-compose.yml → context: .) and the CI
+# workflow (.github/workflows/deploy.yml → context: .), so paths in COPY are
+# anchored there: frontend/... in stage 1, backend/... in stage 2 and 3.
 COPY --from=builder --chown=nova:nova /app/server ./
-COPY --chown=nova:nova docker-entrypoint.sh ./
+# docker-entrypoint.sh lives at backend/docker-entrypoint.sh in the repo;
+# COPY it explicitly to /app/docker-entrypoint.sh so the ENTRYPOINT path
+# below stays unchanged. (Using './docker-entrypoint.sh' as the destination
+# preserves the `backend/` prefix and lands at /app/backend/... instead.)
+COPY --chown=nova:nova backend/docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
 EXPOSE 9527
 # HEALTHCHECK uses wget — no shell dependency; the entrypoint finishes the
