@@ -209,7 +209,7 @@ func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error
 			cmd := exec.Command("git", "init")
 			cmd.Dir = path
 			if out, err := cmd.CombinedOutput(); err != nil {
-				return nil, fmt.Errorf("git init failed: %s — %w", string(out), err)
+				return nil, wrapGitError("git init", string(out), err)
 			}
 		} else {
 			return nil, fmt.Errorf("not a git repository: %s (only git repos are supported)", path)
@@ -441,12 +441,38 @@ func cloneRepo(remote, branch, dest, platform, tokenSecret string) error {
 		out := strings.TrimSpace(stdout.String() + stderr.String())
 		// Drop any userinfo from URLs in the error so the token never leaks.
 		out = redactUserinfo(out)
+		// `git` missing on PATH (e.g. minimal container image) — surface a
+		// actionable hint instead of the raw `executable file not found`.
+		if isMissingExecutable(err) {
+			return fmt.Errorf("git 未安装或不在 PATH 中，无法克隆仓库 %s：请在服务端安装 git（如 Alpine: apk add git）", redactUserinfo(remote))
+		}
 		if out == "" {
 			out = err.Error()
 		}
 		return fmt.Errorf("%s — %w", out, err)
 	}
 	return nil
+}
+
+// isMissingExecutable reports whether err is the Go runtime's "executable
+// file not found in $PATH" error. exec.Command returns *exec.Error wrapping
+// fs.ErrNotExist with this exact message when LookPath fails. Matching the
+// string avoids depending on Go's internal error types.
+func isMissingExecutable(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "executable file not found in $PATH")
+}
+
+// wrapGitError returns a clear error when git is missing on PATH, otherwise
+// falls back to the previous "git <op> failed: <out> — <err>" format. Used
+// by Add's auto-init path where there is no captured git stderr.
+func wrapGitError(op, out string, err error) error {
+	if isMissingExecutable(err) {
+		return fmt.Errorf("git 未安装或不在 PATH 中，无法执行 %s：请在服务端安装 git（如 Alpine: apk add git）", op)
+	}
+	return fmt.Errorf("%s failed: %s — %w", op, out, err)
 }
 
 // injectCredentials returns a clone URL with the token embedded in the

@@ -28,6 +28,12 @@ RUN CGO_ENABLED=0 go build -o /app/server ./cmd/server
 
 FROM node:22-alpine
 WORKDIR /app
+# Alpine ships without git, but the project add flow shells out to
+# `git init` / `git clone` (project.go, fs.go, review.go, wizard.go, …).
+# Without git on PATH, "添加项目" returns ADD_FAILED: exec: "git":
+# executable file not found in $PATH. ca-certificates is required for
+# https:// clone remotes to verify TLS.
+RUN apk add --no-cache git ca-certificates
 # Pre-install Claude CLI so the wizard pipeline works inside the container
 # without relying on the preflight auto-install path (which dies on restart).
 # ANTHROPIC_AUTH_TOKEN is injected at runtime via docker-compose env, never
