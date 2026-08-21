@@ -20,10 +20,13 @@ on:
         options:
           - 'false'
           - 'true'
+      server_public_ip:
+        description: 'Public IPv4 of the ECS (required for plan/apply/destroy)'
+        required: true
+        type: string
 
 permissions:
   contents: read
-  pull-requests: write  # for the plan-summary PR comment
 
 env:
   TF_VERSION: 1.9.8
@@ -44,20 +47,11 @@ jobs:
 
       - name: Write terraform.tfvars
         env:
-          SSH_PUBLIC_KEY: ${{ secrets.TERRAFORM_SSH_PUBLIC_KEY }}
+          SERVER_IP: ${{ inputs.server_public_ip }}
         run: |
           cat > terraform.tfvars <<EOF
-          ssh_public_key = "$SSH_PUBLIC_KEY"
-          ssh_private_key_path = "/tmp/terraform_key"
+          server_public_ip = "$SERVER_IP"
           EOF
-
-      - name: Write SSH private key
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.TERRAFORM_SSH_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          echo "$SSH_PRIVATE_KEY" > /tmp/terraform_key
-          chmod 600 /tmp/terraform_key
 
       - name: terraform fmt
         run: terraform fmt -check -recursive
@@ -92,7 +86,3 @@ jobs:
         run: |
           echo "## Terraform apply output" >> $GITHUB_STEP_SUMMARY
           terraform output -no-color >> $GITHUB_STEP_SUMMARY
-
-      - name: Cleanup SSH key
-        if: always()
-        run: rm -f /tmp/terraform_key ~/.ssh/known_hosts

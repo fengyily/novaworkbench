@@ -1,8 +1,12 @@
-# NovaWorkbench infrastructure — single Alibaba Cloud region.
-# Run plan / apply via the GitHub Actions "Terraform" workflow, or locally:
+# NovaWorkbench DNS-only infrastructure.
+# Manages Aliyun DNS A records for *.nova.yishield.com and
+# prod.nova.yishield.com. The ECS instance is provisioned manually
+# (or out-of-band of this repo) — Terraform only owns the records.
+#
+# Run via the GitHub Actions "Terraform" workflow, or locally:
 #   terraform init
-#   terraform plan  -var-file=secrets.auto.tfvars
-#   terraform apply -var-file=secrets.auto.tfvars
+#   terraform plan  -var-file=terraform.tfvars
+#   terraform apply -var-file=terraform.tfvars
 
 terraform {
   required_version = ">= 1.6"
@@ -22,13 +26,4 @@ provider "alicloud" {
   # access_key / secret_key are read from ALICLOUD_ACCESS_KEY / _SECRET
   # env vars by the provider; we don't pin them here so secrets stay
   # out of state.
-}
-
-# Latest Ubuntu 22.04 LTS image, refreshed every apply so a fresh
-# security patch becomes the new default.
-data "alicloud_images" "ubuntu_22_04" {
-  name_regex  = "^ubuntu_22_04_x64"
-  most_recent = true
-  owners      = "system"
-  status      = "Available"
 }
