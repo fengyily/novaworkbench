@@ -64,6 +64,10 @@ jobs:
       - name: Build & push
         uses: docker/build-push-action@v5
         with:
+          # The Dockerfile references both `frontend/...` (stage 1 — builds
+          # the SPA) and `backend/...` (stage 2 — builds the Go binary; stage 3
+          # also needs `backend/docker-entrypoint.sh`), so the build context
+          # has to be the repo root. docker-compose.yml mirrors this.
           context: .
           file: backend/Dockerfile
           push: true
