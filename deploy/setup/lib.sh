@@ -4,9 +4,14 @@
 #   source "$(dirname "$0")/lib.sh"
 #
 # Provides:
-#   ensure_docker_access   - add the SSH user to the docker group on demand
-#                            and re-exec the current script under that group
-#                            so docker compose / docker inspect just work.
+#   ensure_docker_access       - add the SSH user to the docker group on
+#                                demand and re-exec the current script
+#                                under that group so docker compose /
+#                                docker inspect just work.
+#   ensure_nginx_proxy_network - create the shared 'nginx-proxy' Docker
+#                                network if it doesn't already exist
+#                                (init-server.sh is the canonical bootstrap
+#                                but a fresh server may not have run it).
 
 set -euo pipefail
 
@@ -36,4 +41,13 @@ ensure_docker_access() {
   # the same script under that group makes the rest of the deploy work
   # without further changes.
   exec sg docker -c "$(printf '%q ' "$0" "$@")"
+}
+
+ensure_nginx_proxy_network() {
+  if docker network inspect nginx-proxy >/dev/null 2>&1; then
+    return 0
+  fi
+  echo ">>> nginx-proxy network missing — creating"
+  docker network create nginx-proxy
+  echo "   (network created; nginx-proxy container + certs still need init-server.sh)"
 }

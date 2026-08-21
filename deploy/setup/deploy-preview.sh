@@ -12,6 +12,7 @@ set -euo pipefail
 
 source "$(dirname "$0")/lib.sh"
 ensure_docker_access "$@"
+ensure_nginx_proxy_network
 
 : "${GHCR_NAMESPACE:?GHCR_NAMESPACE required}"
 : "${IMAGE_TAG:?IMAGE_TAG required}"
