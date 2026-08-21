@@ -54,9 +54,11 @@ RUN addgroup -g ${NOVA_UID} -S nova \
 RUN npm install -g @anthropic-ai/claude-code --no-audit --no-fund \
     && chown -R nova:nova /usr/local/lib/node_modules /usr/local/bin /usr/local/share
 WORKDIR /app
-# Copy the server binary from the builder stage. The build context for the
-# final stage is `backend/` (see docker-compose.yml → context: ./backend),
-# so the entrypoint script is a plain host-side file, not a builder artifact.
+# Copy the server binary from the builder stage. Build context is `./backend`
+# for both docker-compose (docker-compose.yml → context: ./backend) and the
+# CI workflow (.github/workflows/deploy.yml → context: ./backend after the
+# fix that aligns them), so docker-entrypoint.sh lives next to the Dockerfile
+# it serves.
 COPY --from=builder --chown=nova:nova /app/server ./
 COPY --chown=nova:nova docker-entrypoint.sh ./
 RUN chmod +x /app/docker-entrypoint.sh
