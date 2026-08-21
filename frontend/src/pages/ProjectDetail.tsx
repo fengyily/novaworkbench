@@ -66,6 +66,10 @@ export default function ProjectDetail() {
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollCountRef = useRef(0);
   const logPanelRef = useRef<HTMLDivElement>(null);
+  // Anchor for the inline "new requirement" composer — used by the
+  // "+ 新需求" button to scroll the form into view when the list is
+  // long enough that the form would otherwise open below the fold.
+  const createReqFormRef = useRef<HTMLDivElement>(null);
 
   // Overview: platform config
   const [tokens, setTokens] = useState<PlatformToken[]>([]);
@@ -495,11 +499,34 @@ export default function ProjectDetail() {
 
   return (
     <div className="project-detail">
+      {/* Top header: breadcrumb-style back link, then the project's name +
+          type tag, then its filesystem path as muted metadata. Keeping the
+          back link small + unbordered stops it from competing visually with
+          the title (the old bordered button felt heavier than the title
+          underneath it). */}
       <div className="detail-header">
-        <button className="btn btn-secondary" onClick={() => navigate('/projects')}>← 项目列表</button>
+        <button className="back-link" onClick={() => navigate('/projects')}>
+          <span className="back-arrow" aria-hidden="true">‹</span>
+          <span>返回项目列表</span>
+        </button>
       </div>
 
-      <h2 className="detail-title">{project.name}</h2>
+      <div className="detail-title-row">
+        <h1 className="detail-title">{project.name}</h1>
+        <span className="detail-type-tag">{project.project_type || 'Unknown'}</span>
+        {project.remote_url && (
+          <a
+            className="detail-remote-link"
+            href={project.remote_url}
+            target="_blank"
+            rel="noreferrer"
+            title={project.remote_url}
+          >
+            仓库 ↗
+          </a>
+        )}
+      </div>
+      <p className="detail-path"><code>{project.local_path}</code></p>
 
       <div className="detail-tabs">
         <button className={`tab-btn${tab === 'overview' ? ' active' : ''}`} onClick={() => setTab('overview')}>概览</button>
@@ -772,10 +799,58 @@ export default function ProjectDetail() {
         <div className="tab-content">
           <div className="run-control-bar">
             <span className="compose-detect">本项目关联的需求（{reqs.length}）</span>
-            <button className="btn btn-primary btn-sm" onClick={() => setShowCreateReq(true)}>
-              + 新需求
+            <button
+              className={`btn btn-primary btn-sm${showCreateReq ? ' is-open' : ''}`}
+              onClick={() => {
+                setShowCreateReq(true);
+                // Defer the scroll one frame so the form is mounted
+                // before we try to measure it — otherwise
+                // scrollIntoView runs against the still-empty anchor
+                // and the page never moves.
+                requestAnimationFrame(() => {
+                  createReqFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  createReqFormRef.current?.querySelector('textarea')?.focus();
+                });
+              }}
+              aria-expanded={showCreateReq}
+              aria-controls="new-requirement-form"
+            >
+              {showCreateReq ? '× 收起表单' : '+ 新需求'}
             </button>
           </div>
+
+          {/* The composer is mounted ABOVE the requirements list so the
+              user sees it appear right under the button they just
+              clicked. Previously it rendered at the bottom of the tab
+              content — with paginated lists the form lived past the
+              fold and the click felt like nothing happened. */}
+          {showCreateReq && id && (
+            <div ref={createReqFormRef} id="new-requirement-form" className="create-req-anchor">
+              <CreateRequirementForm
+                projectId={id}
+                onClose={() => setShowCreateReq(false)}
+                onCreated={async (created: Requirement) => {
+                  setShowCreateReq(false);
+                  // 跳过需求分析 → 自动进入方案设计阶段：导航到详情页并传递
+                  // autoStartDesign 意图标记，由 RequirementDetail 一次性触发 architect-design，
+                  // 替代用户手动点击「生成技术方案」。
+                  if (created.skip_design) {
+                    // 跳过设计 → 直接开发：导航到详情页并传递 autoStartCoding 意图标记，
+                    // 由 RequirementDetail 自动唤起分支选择弹窗，直接进入开发流程。
+                    navigate(`/requirements/${created.id}`, { state: { autoStartCoding: true } });
+                    return;
+                  }
+                  if (created.skip_analysis) {
+                    navigate(`/requirements/${created.id}`, { state: { autoStartDesign: true } });
+                    return;
+                  }
+                  const data = await requirementsApi.list({ project_id: id });
+                  setReqs(data);
+                  refreshReqUsage(id);
+                }}
+              />
+            </div>
+          )}
 
           {reqsLoading && <div className="tab-empty">⏳ 加载中...</div>}
           {reqsError && <div className="tab-empty" style={{ color: 'var(--color-error)' }}>{reqsError}</div>}
@@ -835,31 +910,6 @@ export default function ProjectDetail() {
             </div>
           )}
 
-          {showCreateReq && id && (
-            <CreateRequirementForm
-              projectId={id}
-              onClose={() => setShowCreateReq(false)}
-              onCreated={async (created: Requirement) => {
-                setShowCreateReq(false);
-                // 跳过需求分析 → 自动进入方案设计阶段：导航到详情页并传递
-                // autoStartDesign 意图标记，由 RequirementDetail 一次性触发 architect-design，
-                // 替代用户手动点击「生成技术方案」。
-                if (created.skip_design) {
-                  // 跳过设计 → 直接开发：导航到详情页并传递 autoStartCoding 意图标记，
-                  // 由 RequirementDetail 自动唤起分支选择弹窗，直接进入开发流程。
-                  navigate(`/requirements/${created.id}`, { state: { autoStartCoding: true } });
-                  return;
-                }
-                if (created.skip_analysis) {
-                  navigate(`/requirements/${created.id}`, { state: { autoStartDesign: true } });
-                  return;
-                }
-                const data = await requirementsApi.list({ project_id: id });
-                setReqs(data);
-                refreshReqUsage(id);
-              }}
-            />
-          )}
         </div>
       )}
 
