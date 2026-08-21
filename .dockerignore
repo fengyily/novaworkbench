@@ -1,0 +1,32 @@
+# docker build context is the repo root (see docker-compose.yml +
+# .github/workflows/deploy.yml). Exclude everything the Dockerfile doesn't
+# COPY — keeps the build context tiny and prevents accidental leaks
+# (terraform state, deploy secrets, .git history) into the build daemon.
+
+.git
+.github
+.gitignore
+.terraform
+.idea
+.vscode
+.DS_Store
+node_modules
+**/node_modules
+**/dist
+**/.vite
+**/coverage
+
+# Operational directories the Dockerfile doesn't read.
+deploy
+terraform
+scripts
+*.log
+
+# Test artifacts.
+**/__pycache__
+**/*.pyc
+**/*.test
+**/*.spec
+
+# Frontend build cache (the Dockerfile builds it itself in stage 1).
+frontend/dist

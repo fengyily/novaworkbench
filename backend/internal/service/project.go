@@ -209,7 +209,7 @@ func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error
 			cmd := exec.Command("git", "init")
 			cmd.Dir = path
 			if out, err := cmd.CombinedOutput(); err != nil {
-				return nil, fmt.Errorf("git init failed: %s — %w", string(out), err)
+				return nil, wrapGitError("git init", string(out), err)
 			}
 		} else {
 			return nil, fmt.Errorf("not a git repository: %s (only git repos are supported)", path)
@@ -291,6 +291,31 @@ func urlHost(raw string) (string, bool) {
 		return "", false
 	}
 	return strings.ToLower(u.Hostname()), true
+}
+
+// isSSHRemote reports whether raw is an SSH-form git URL that requires the
+// `ssh` binary on PATH (i.e. `git` would invoke `GIT_SSH_COMMAND=ssh …`).
+// Both the explicit `ssh://` scheme and the scp-like `user@host:path` form
+// count; plain https/http URLs do not, even though they may also use a
+// token via injectCredentials.
+func isSSHRemote(raw string) bool {
+	s := strings.TrimSpace(raw)
+	if strings.HasPrefix(s, "ssh://") || strings.HasPrefix(s, "git+ssh://") {
+		return true
+	}
+	// scp-like form: `user@host:path`. url.Parse places the whole thing in
+	// Path for this shape, so the URL-based scheme check misses it. Fall
+	// back to a regex — `[user@]host:path` with no scheme prefix.
+	if strings.Contains(s, "://") {
+		return false // explicit non-ssh scheme wins
+	}
+	if i := strings.Index(s, "@"); i > 0 {
+		rest := s[i+1:]
+		if j := strings.Index(rest, ":"); j > 0 && !strings.Contains(rest[:j], "/") {
+			return true
+		}
+	}
+	return false
 }
 
 // hostPlatform maps a git host to its platform kind. Empty string = unknown.
@@ -441,12 +466,44 @@ func cloneRepo(remote, branch, dest, platform, tokenSecret string) error {
 		out := strings.TrimSpace(stdout.String() + stderr.String())
 		// Drop any userinfo from URLs in the error so the token never leaks.
 		out = redactUserinfo(out)
+		// `git` missing on PATH (e.g. minimal container image) — surface a
+		// actionable hint instead of the raw `executable file not found`.
+		if isMissingExecutable(err) {
+			return fmt.Errorf("git 未安装或不在 PATH 中，无法克隆仓库 %s：请在服务端安装 git（如 Alpine: apk add git）", redactUserinfo(remote))
+		}
+		// SSH remotes on a minimal image: `git` is there but `ssh` is not,
+		// and GIT_SSH_COMMAND=ssh … fails with `ssh: not found`. Detect that
+		// pattern and tell the user what to install (Alpine: openssh-client).
+		if isSSHRemote(remote) && strings.Contains(out, "ssh:") && (strings.Contains(out, "not found") || strings.Contains(out, "No such file")) {
+			return fmt.Errorf("ssh 未安装或不在 PATH 中，无法克隆 SSH 仓库 %s：请在服务端安装 openssh 客户端（如 Alpine: apk add openssh-client），或将远程地址改为 https://", redactUserinfo(remote))
+		}
 		if out == "" {
 			out = err.Error()
 		}
 		return fmt.Errorf("%s — %w", out, err)
 	}
 	return nil
+}
+
+// isMissingExecutable reports whether err is the Go runtime's "executable
+// file not found in $PATH" error. exec.Command returns *exec.Error wrapping
+// fs.ErrNotExist with this exact message when LookPath fails. Matching the
+// string avoids depending on Go's internal error types.
+func isMissingExecutable(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "executable file not found in $PATH")
+}
+
+// wrapGitError returns a clear error when git is missing on PATH, otherwise
+// falls back to the previous "git <op> failed: <out> — <err>" format. Used
+// by Add's auto-init path where there is no captured git stderr.
+func wrapGitError(op, out string, err error) error {
+	if isMissingExecutable(err) {
+		return fmt.Errorf("git 未安装或不在 PATH 中，无法执行 %s：请在服务端安装 git（如 Alpine: apk add git）", op)
+	}
+	return fmt.Errorf("%s failed: %s — %w", op, out, err)
 }
 
 // injectCredentials returns a clone URL with the token embedded in the

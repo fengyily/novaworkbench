@@ -27,12 +27,43 @@ COPY --from=frontend /app/dist ./web/dist/
 RUN CGO_ENABLED=0 go build -o /app/server ./cmd/server
 
 FROM node:22-alpine
+# Run as a non-root user. The Claude CLI refuses
+# `--dangerously-skip-permissions` when uid==0 regardless of any env
+# override, so the server MUST start as an unprivileged user inside the
+# container. su-exec is used by the entrypoint to drop from the build-time
+# root user into the runtime user after chowning the bind-mounted volumes
+# (see docker-entrypoint.sh).
+#
+# The official `node` image already ships a `node` user with UID/GID 1000
+# and HOME /home/node — we reuse it instead of creating a new user (which
+# would collide on UID 1000). Host bind-mounts can be chowned to the same
+# number via `chown -R 1000:1000 ~/.novaworkbench`.
+RUN apk add --no-cache git ca-certificates openssh-client su-exec tini
+# tini forwards signals and reaps zombies — Claude spawns subagents that
+# `claude -p` waits on; without tini the bash tool calls can leak zombies.
+#
+# Pre-install Claude CLI as root (writable /usr/local), then chown the
+# install to the `node` user so it can write to it later (e.g. `claude`
+# self-update via the preflight auto-install path). ANTHROPIC_AUTH_TOKEN is
+# injected at runtime via docker-compose env, never baked into the image.
+RUN npm install -g @anthropic-ai/claude-code --no-audit --no-fund \
+    && chown -R node:node /usr/local/lib/node_modules /usr/local/bin /usr/local/share
 WORKDIR /app
-# Pre-install Claude CLI so the wizard pipeline works inside the container
-# without relying on the preflight auto-install path (which dies on restart).
-# ANTHROPIC_AUTH_TOKEN is injected at runtime via docker-compose env, never
-# baked into the image.
-RUN npm install -g @anthropic-ai/claude-code --no-audit --no-fund
-COPY --from=builder /app/server .
+# Copy the server binary from the builder stage. Build context is the repo
+# root for both docker-compose (docker-compose.yml → context: .) and the CI
+# workflow (.github/workflows/deploy.yml → context: .), so paths in COPY are
+# anchored there: frontend/... in stage 1, backend/... in stage 2 and 3.
+COPY --from=builder --chown=node:node /app/server ./
+# docker-entrypoint.sh lives at backend/docker-entrypoint.sh in the repo;
+# COPY it explicitly to /app/docker-entrypoint.sh so the ENTRYPOINT path
+# below stays unchanged. (Using './docker-entrypoint.sh' as the destination
+# preserves the `backend/` prefix and lands at /app/backend/... instead.)
+COPY --chown=node:node backend/docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
 EXPOSE 9527
+# HEALTHCHECK uses wget — no shell dependency; the entrypoint finishes the
+# chown/su-exec handoff before this can succeed.
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
+    CMD wget -qO- http://localhost:9527/api/health || exit 1
+ENTRYPOINT ["/sbin/tini", "--", "/app/docker-entrypoint.sh"]
 CMD ["./server"]
