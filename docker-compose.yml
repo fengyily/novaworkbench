@@ -28,12 +28,13 @@ services:
       - NOVA_DB_DRIVER=${NOVA_DB_DRIVER:-}
       - NOVA_DB_DSN=${NOVA_DB_DSN:-}
     volumes:
-      # Container runs as the non-root `nova` user (UID 1000) — the Claude
-      # CLI refuses --dangerously-skip-permissions under uid 0. mount paths
-      # mirror the nova user's HOME; the entrypoint chowns the bind-mounts
-      # on every start so the host's existing dirs keep working.
-      - ~/.novaworkbench:/home/nova/.novaworkbench
-      - ${HOME}/workspace:/home/nova/workspace
+      # Container runs as the non-root `node` user (UID 1000, provided by
+      # the node base image) — the Claude CLI refuses
+      # --dangerously-skip-permissions under uid 0. Mount paths mirror the
+      # node user's HOME; the entrypoint chowns the bind-mounts on every
+      # start so the host's existing dirs keep working.
+      - ~/.novaworkbench:/home/node/.novaworkbench
+      - ${HOME}/workspace:/home/node/workspace
     restart: unless-stopped
     healthcheck:
       # /api/health now includes a deps summary + `ready` flag (true when
