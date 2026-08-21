@@ -22,8 +22,13 @@ terraform {
 provider "alicloud" {
   # Region / credentials come from TF_VAR_* env vars so the same code
   # works locally and inside GitHub Actions.
-  region = var.region
-  # access_key / secret_key are read from ALICLOUD_ACCESS_KEY / _SECRET
-  # env vars by the provider; we don't pin them here so secrets stay
-  # out of state.
+  region     = var.region
+  # Wire the sensitive vars (TF_VAR_aliyun_access_key_id /
+  # _secret in CI) into the provider explicitly. The alicloud
+  # provider's default credential chain only auto-reads
+  # ALICLOUD_ACCESS_KEY / ALICLOUD_SECRET_KEY env vars, which the
+  # GitHub Actions workflow does NOT set — without these arguments
+  # it errors with "no valid credential sources".
+  access_key = var.aliyun_access_key_id
+  secret_key = var.aliyun_access_key_secret
 }
