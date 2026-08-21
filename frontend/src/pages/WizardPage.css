@@ -140,16 +140,50 @@
 
 /* ── Mobile ────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
+  /* Step indicator: switch to a vertical, card-like stack on phones so
+     the active step is the only one with a strong visual presence — on
+     a narrow screen the horizontal "1 ─ 2 ─ 3" line cramps into nothing. */
   .wizard-steps {
-    flex-wrap: wrap;
-    gap: 8px 0;
-    justify-content: flex-start;
-    padding: 0 4px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 0;
+    margin-bottom: 16px;
   }
-
-  .step-line { width: 20px; margin: 0 4px; }
-
-  .step-label { font-size: 12px; }
+  .wizard-step {
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 12px;
+    padding: 10px 12px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    opacity: 0.55;
+  }
+  .wizard-step.active {
+    opacity: 1;
+    border-color: var(--color-primary);
+    background: var(--color-parchment, var(--color-surface));
+    box-shadow: 0 0 0 1px var(--color-primary) inset;
+  }
+  .wizard-step.done {
+    opacity: 0.85;
+    border-color: var(--color-success);
+  }
+  .step-line { display: none; }
+  .step-num {
+    width: 24px; height: 24px;
+    font-size: 12px;
+  }
+  .step-label {
+    font-size: 13px;
+    flex: 1;
+    text-align: left;
+  }
+  /* The done marker (a checkmark) replaces the step number when complete. */
+  .wizard-step.done .step-num::before { content: '✓ '; }
+  .wizard-step.done .step-num { font-size: 0; }
+  .wizard-step.done .step-num::before { font-size: 14px; color: var(--color-success); }
 
   .wizard-card { padding: 16px; }
 
@@ -157,11 +191,11 @@
 
   /* 240px is too short for a real conversation on a phone in landscape and
      even cramped in portrait — the user can't read context while typing.
-     50dvh fills half the viewport but always leaves the input visible
-     above the keyboard on iOS Safari. */
+     calc(100dvh - 360px) leaves room for header + stepper + sticky
+     composer + safe-area so the chat fills the available viewport. */
   .chat-panel {
     max-height: none;
-    height: 50dvh;
+    height: calc(100dvh - 360px);
     min-height: 220px;
   }
 
@@ -173,4 +207,26 @@
   .chat-input-row { flex-direction: column; align-items: stretch; }
   .chat-input-row .form-input { width: 100%; }
   .chat-input-row .btn { width: 100%; }
+
+  /* Sticky action bar: the wizard's primary CTA (下一步/确认/启动编码)
+     lives at the bottom of the page, and on mobile it pins there so the
+     user doesn't have to scroll back up after typing a long requirement.
+     The bar has its own safe-area padding so the home indicator stays clear. */
+  .form-actions {
+    position: sticky;
+    bottom: var(--tabbar-h);
+    background: var(--color-surface);
+    padding: 10px 0 calc(10px + var(--sab));
+    margin: 16px -16px -16px;
+    border-top: 1px solid var(--color-border);
+    box-shadow: 0 -4px 12px rgba(15, 23, 42, 0.04);
+    z-index: 5;
+  }
+  .form-actions > * { min-height: 44px; }
+
+  /* The wizard card on mobile needs extra bottom padding so its content
+     doesn't get hidden behind the sticky action bar. */
+  .wizard-card {
+    padding-bottom: calc(16px + 72px);
+  }
 }

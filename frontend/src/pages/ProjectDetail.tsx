@@ -1241,6 +1241,20 @@ export default function ProjectDetail() {
           </div>
         </div>
       )}
+
+      {/* Mobile FAB: shown only on the requirements tab so each tab keeps
+          its own primary CTA in the thumb zone. CSS (.fab) hides it on
+          desktop, where the inline "+ 新需求" button is already reachable. */}
+      {tab === 'requirements' && (
+        <button
+          className="fab fab-extended"
+          aria-label="新建需求"
+          onClick={() => setShowCreateReq(true)}
+        >
+          <span>＋</span>
+          <span>新需求</span>
+        </button>
+      )}
     </div>
   );
 }

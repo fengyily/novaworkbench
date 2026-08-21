@@ -386,14 +386,22 @@ export function ProjectsList() {
       {loading ? (
         <div className="loading">⏳ 加载中...</div>
       ) : list.length === 0 ? (
-        <div className="empty-state">
-          <p>{view === 'active' ? '还没有添加项目' : '回收站为空'}</p>
-          {view === 'active' && (
+        view === 'active' ? (
+          <div className="mobile-empty">
+            <span className="mobile-empty-mark">📁</span>
+            <div className="mobile-empty-title">还没有添加项目</div>
+            <p className="mobile-empty-desc">
+              添加一个本地 git 仓库，或从新建一个项目目录开始。
+            </p>
             <button className="btn btn-primary" onClick={() => navigate('/projects/add')}>
-              添加你的第一个项目
+              + 添加项目
             </button>
-          )}
-        </div>
+          </div>
+        ) : (
+          <div className="empty-state">
+            <p>回收站为空</p>
+          </div>
+        )
       ) : (
         <table className="project-table" style={{ width: '100%' }}>
           <thead>
@@ -468,6 +476,19 @@ export function ProjectsList() {
 
       {renderDeleteModal()}
       {renderPurgeModal()}
+
+      {/* Mobile FAB: "+ 添加项目". Hidden on the trash view where adding
+          projects doesn't make sense. CSS (.fab) hides it on desktop. */}
+      {view === 'active' && (
+        <button
+          className="fab fab-extended"
+          aria-label="添加项目"
+          onClick={() => navigate('/projects/add')}
+        >
+          <span>＋</span>
+          <span>添加项目</span>
+        </button>
+      )}
     </div>
   );
 }

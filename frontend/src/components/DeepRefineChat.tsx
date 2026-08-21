@@ -444,7 +444,7 @@ export default function DeepRefineChat({
         )}
       </div>
 
-      <div className="chat-input-row">
+      <div className="chat-input-row composer-sticky">
         <AtMentionTextarea
           value={input}
           onChange={setInput}
