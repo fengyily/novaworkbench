@@ -274,9 +274,13 @@
   .app-header-section {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    margin-left: 8px;
-    padding-left: 10px;
+    /* gap bumped from 6→10px so the back button doesn't crowd the section
+       title; padding-left 10→14 gives the divider line breathing room
+       before the button; margin-left 8→12 balances the logo's wordmark
+       width so the section doesn't feel jammed against the brand mark. */
+    gap: 10px;
+    margin-left: 12px;
+    padding-left: 14px;
     border-left: 1px solid var(--color-border);
     min-width: 0;
     flex: 1;
@@ -288,7 +292,10 @@
      constellation. */
   .app-header-back {
     position: relative;
-    width: 34px; height: 34px;
+    /* Sized to roughly 2× the section title's 15px line-height so it reads
+       as a peer control rather than dominating the row. 32px is still a
+       comfortable tap target on touch devices. */
+    width: 32px; height: 32px;
     border-radius: 50%;
     background: var(--color-surface);
     border: 1px solid var(--color-border);

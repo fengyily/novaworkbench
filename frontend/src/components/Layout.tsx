@@ -199,7 +199,7 @@ export default function Layout() {
                       opening) dims to 18% so the eye reads motion toward the
                       bright tip on the left. Echoes the constellation
                       gradient in NovaLogo (small → bright spark). */}
-                  <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+                  <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
                     <defs>
                       <linearGradient id="nw-back-trail" x1="1" y1="0.5" x2="0" y2="0.5">
                         <stop offset="0%" stopColor="currentColor" stopOpacity="0.18" />
