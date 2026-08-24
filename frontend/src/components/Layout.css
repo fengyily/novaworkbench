@@ -281,30 +281,82 @@
     min-width: 0;
     flex: 1;
   }
+  /* The back button is the only circular control in the chrome — the
+     circle marks it as a primary navigation affordance rather than a
+     UI toggle, and it pairs with the trail-fading chevron (which has a
+     single bright "spark" at the tip) to echo the NovaLogo
+     constellation. */
   .app-header-back {
+    position: relative;
+    width: 34px; height: 34px;
+    border-radius: 50%;
     background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: 8px;
-    width: 30px; height: 30px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--color-text);
+    color: var(--color-text-secondary);
     cursor: pointer;
     flex-shrink: 0;
     padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     -webkit-tap-highlight-color: transparent;
-    transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.15s;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+    transition:
+      color 0.2s ease,
+      border-color 0.2s ease,
+      background 0.2s ease,
+      box-shadow 0.2s ease,
+      transform 0.18s ease;
   }
   .app-header-back svg { display: block; }
+  /* Hover halo — a low-opacity primary ring around the button, softer
+     than a border swap. Reads as "focus" rather than "selected". */
   .app-header-back:hover {
     color: var(--color-primary);
-    border-color: var(--color-primary);
-    background: var(--color-hover);
+    border-color: color-mix(in srgb, var(--color-primary) 40%, var(--color-border));
+    box-shadow:
+      0 1px 2px rgba(15, 23, 42, 0.05),
+      0 0 0 3px color-mix(in srgb, var(--color-primary) 12%, transparent);
+  }
+  .app-header-back:focus-visible {
+    outline: none;
+    box-shadow:
+      0 1px 2px rgba(15, 23, 42, 0.05),
+      0 0 0 3px color-mix(in srgb, var(--color-primary) 28%, transparent);
   }
   .app-header-back:active {
-    background: var(--color-active);
-    transform: scale(0.94);
+    color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 10%, var(--color-surface));
+    transform: scale(0.92);
+  }
+  /* Tap ripple — a brief indigo ring expanding outward from the button.
+     The signature micro-interaction: pressing the back affordance emits a
+     short pulse, like an instrument being activated. */
+  .app-header-back::after {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    border-radius: 50%;
+    pointer-events: none;
+    opacity: 0;
+  }
+  .app-header-back:active::after {
+    animation: nw-back-ring 0.55s ease-out;
+  }
+  @keyframes nw-back-ring {
+    0% {
+      opacity: 0.55;
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-primary) 35%, transparent);
+    }
+    100% {
+      opacity: 0;
+      box-shadow: 0 0 0 14px color-mix(in srgb, var(--color-primary) 0%, transparent);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .app-header-back { transition: none; }
+    .app-header-back:active { transform: none; }
+    .app-header-back:active::after { animation: none; }
   }
   .app-header-section-label {
     font-size: 15px;
