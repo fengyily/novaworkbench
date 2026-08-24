@@ -194,7 +194,28 @@ export default function Layout() {
                   className="app-header-back"
                   aria-label="返回"
                   onClick={() => navigate(sectionLabel.back!)}
-                >‹</button>
+                >
+                  {/* Chevron with a trail-fading stroke — the tail (right
+                      opening) dims to 18% so the eye reads motion toward the
+                      bright tip on the left. Echoes the constellation
+                      gradient in NovaLogo (small → bright spark). */}
+                  <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                    <defs>
+                      <linearGradient id="nw-back-trail" x1="1" y1="0.5" x2="0" y2="0.5">
+                        <stop offset="0%" stopColor="currentColor" stopOpacity="0.18" />
+                        <stop offset="100%" stopColor="currentColor" stopOpacity="1" />
+                      </linearGradient>
+                    </defs>
+                    <path
+                      d="M15 5.5 L8.5 12 L15 18.5"
+                      fill="none"
+                      stroke="url(#nw-back-trail)"
+                      strokeWidth="2.2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
               )}
               <span className="app-header-section-label">{sectionLabel.label}</span>
             </span>
