@@ -38,7 +38,7 @@ FROM node:22-alpine
 # and HOME /home/node — we reuse it instead of creating a new user (which
 # would collide on UID 1000). Host bind-mounts can be chowned to the same
 # number via `chown -R 1000:1000 ~/.novaworkbench`.
-RUN apk add --no-cache git ca-certificates openssh-client su-exec tini
+RUN apk add --no-cache git ca-certificates openssh-client su-exec tini bash
 # tini forwards signals and reaps zombies — Claude spawns subagents that
 # `claude -p` waits on; without tini the bash tool calls can leak zombies.
 #

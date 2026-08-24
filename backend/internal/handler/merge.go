@@ -414,21 +414,21 @@ func (h *MergeHandler) State(w http.ResponseWriter, r *http.Request) {
 	prURL := buildPRURL(pf, webBase, owner, repo, target, dev)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"is_git":           true,
-		"requirement_id":   reqRow.ID,
-		"dev_branch":       dev,
-		"target_branch":    target,
+		"is_git":            true,
+		"requirement_id":    reqRow.ID,
+		"dev_branch":        dev,
+		"target_branch":     target,
 		"uncommitted_count": len(uncommitted),
 		"uncommitted_files": uncommitted,
-		"ahead":            ahead,
-		"behind":           behind,
-		"has_remote":       hasRemote,
-		"remote_url":       remote,
-		"platform":         pf,
-		"pr_url":           prURL,
-		"mid_merge":        midMerge(dir),
-		"conflict_files":   conflictedFiles(dir),
-		"worktree_path":    reqRow.WorktreePath,
+		"ahead":             ahead,
+		"behind":            behind,
+		"has_remote":        hasRemote,
+		"remote_url":        remote,
+		"platform":          pf,
+		"pr_url":            prURL,
+		"mid_merge":         midMerge(dir),
+		"conflict_files":    conflictedFiles(dir),
+		"worktree_path":     reqRow.WorktreePath,
 	})
 }
 
@@ -443,7 +443,7 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		TargetBranch string `json:"target_branch"`
+		TargetBranch  string `json:"target_branch"`
 		CommitMessage string `json:"commit_message"`
 		DeleteBranch  bool   `json:"delete_branch"`
 	}
@@ -866,7 +866,7 @@ func (h *MergeHandler) mergeAndResolveBase(job *store.Job, devDir, base, dev str
 
 	// 3. merge origin/base into dev. Inject -c user.name/email so the merge
 	// commit has a stable identity on Docker hosts.
-	job.Append(store.LogLine{Type: "phase", Content: "🌿 合并主分支 origin/"+base+" → "+dev})
+	job.Append(store.LogLine{Type: "phase", Content: "🌿 合并主分支 origin/" + base + " → " + dev})
 	mergeOut, mergeErr := gitRunIdentity(devDir, gitName, gitEmail, "merge", "--no-edit", "origin/"+base)
 	for _, line := range strings.Split(mergeOut, "\n") {
 		if line = strings.TrimSpace(line); line != "" {
@@ -1084,14 +1084,26 @@ func (h *MergeHandler) loadProjectNoWrite(reqID string) (*model.Project, error) 
 // back to git's normal config lookup, which preserves existing behaviour
 // on dev machines that already have a global ~/.gitconfig.
 func (h *MergeHandler) gitIdentityForReq(reqRow *model.Requirement) (string, string) {
-	if h.platformSvc == nil || reqRow == nil {
+	return lookupGitIdentity(h.projectSvc, h.platformSvc, reqRow)
+}
+
+// lookupGitIdentity resolves the (name, email) git committer identity for a
+// requirement from its project → platform_token. It is shared by the merge
+// flow (commit/push via -c user.name/user.email) and the coding stage — the
+// latter injects GIT_AUTHOR_*/GIT_COMMITTER_* env into the claude
+// subprocess so its Bash-tool `git commit` carries a real identity on hosts
+// without ~/.gitconfig (e.g. the Docker container, where the node user has
+// no global git identity). Empty strings on any miss; callers must treat
+// empty as "skip injection, fall back to git config".
+func lookupGitIdentity(projectSvc *service.ProjectService, platformSvc *service.PlatformTokenService, reqRow *model.Requirement) (string, string) {
+	if projectSvc == nil || platformSvc == nil || reqRow == nil {
 		return "", ""
 	}
-	project, err := h.projectSvc.Get(reqRow.ProjectID)
+	project, err := projectSvc.Get(reqRow.ProjectID)
 	if err != nil || project == nil || project.PlatformTokenID == "" {
 		return "", ""
 	}
-	tok, err := h.platformSvc.Get(project.PlatformTokenID)
+	tok, err := platformSvc.Get(project.PlatformTokenID)
 	if err != nil || tok == nil {
 		return "", ""
 	}

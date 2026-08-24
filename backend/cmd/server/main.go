@@ -125,7 +125,7 @@ func main() {
 	sharedJobs := store.NewJobStore(50)
 	preflightH := handler.NewPreflightHandler(pfRegistry, sharedJobs)
 	reqH := handler.NewRequirementHandler(reqSvc, llmGateway, sharedJobs, usageSvc)
-	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc)
+	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc)
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs)

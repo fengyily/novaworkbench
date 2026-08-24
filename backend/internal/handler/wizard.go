@@ -35,9 +35,10 @@ type WizardHandler struct {
 	claudeCfg    *service.ClaudeConfigService
 	usageSvc     usageRecorder
 	skillSvc     *service.SkillService
+	platformSvc  *service.PlatformTokenService
 }
 
-func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService) *WizardHandler {
+func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService) *WizardHandler {
 	return &WizardHandler{
 		projectSvc:   projectSvc,
 		reqSvc:       reqSvc,
@@ -49,6 +50,7 @@ func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.Requir
 		claudeCfg:    claudeCfg,
 		usageSvc:     usageSvc,
 		skillSvc:     skillSvc,
+		platformSvc:  platformSvc,
 	}
 }
 
@@ -1292,6 +1294,23 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		if block := llm.BuildSkillsBlock(h.mentionedSkills(skillText)); block != "" {
 			prompt = block + prompt
 		}
+		// Inject the project's git committer identity (from its platform
+		// token) as GIT_AUTHOR_*/GIT_COMMITTER_* env into the claude
+		// subprocess. git reads these env vars over any config, so when the
+		// developer role runs `git commit` via its Bash tool it carries a
+		// real identity on hosts without ~/.gitconfig (e.g. the Docker
+		// container). Empty on miss → no injection, git falls back to its
+		// own config lookup (preserves dev-machine behaviour). Mirrors
+		// MergeHandler.gitIdentityForReq via the shared lookupGitIdentity.
+		var codingExtraEnv []string
+		if name, email := lookupGitIdentity(h.projectSvc, h.platformSvc, reqRow); name != "" || email != "" {
+			if name != "" {
+				codingExtraEnv = append(codingExtraEnv, "GIT_AUTHOR_NAME="+name, "GIT_COMMITTER_NAME="+name)
+			}
+			if email != "" {
+				codingExtraEnv = append(codingExtraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
+			}
+		}
 		cmd := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:        prompt,
 			WorkDir:       workDir,
@@ -1301,6 +1320,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			Resume:        sourceSID != "",
 			Fork:          fork,
 			ForkSessionID: forkSessionID,
+			ExtraEnv:      codingExtraEnv,
 		})
 
 		// runClaudeStream owns the subprocess lifecycle (Start/Wait) and parses
@@ -3263,4 +3283,3 @@ func parseAtMentions(text string) []string {
 func isLikelyJSON(s string) bool {
 	return strings.HasPrefix(strings.TrimSpace(s), "{")
 }
-
