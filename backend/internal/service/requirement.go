@@ -5,6 +5,7 @@ import (
 
 	"fmt"
 	"github.com/novaworkbench/backend/internal/db"
+	"strings"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/model"
@@ -17,6 +18,43 @@ type RequirementService struct {
 
 func NewRequirementService(db *db.DB) *RequirementService {
 	return &RequirementService{db: db}
+}
+
+// Requirement kind values. Broadens the legacy "需求" concept into three
+// top-level categories: issue (a defect / bug report), requirement (a planned
+// feature — the legacy default), and idea (an exploratory note that may or
+// may not become an implementable feature). The wizard handler uses kind to
+// inject tailored prompt context blocks; the frontend uses it for badges and
+// CTA visibility. There is no CHECK constraint on the column — application-layer
+// validation happens via ValidKind (Create rejects anything outside this set).
+const (
+	KindIssue       = "issue"
+	KindRequirement = "requirement"
+	KindIdea        = "idea"
+)
+
+// ValidKind reports whether k is one of the accepted requirement kinds. Empty
+// is treated as valid at the boundary so the service can default it on the way
+// in (Create defaults to "requirement" when the caller omits the field).
+func ValidKind(k string) bool {
+	switch k {
+	case KindIssue, KindRequirement, KindIdea:
+		return true
+	case "":
+		return true // caller may omit; the service defaults it
+	default:
+		return false
+	}
+}
+
+// normalizeKind applies the default ("requirement") for empty/invalid-but-not-
+// yet-rejected values. Callers that already validated with ValidKind can pass
+// the result through unchanged; the only input that gets rewritten is "".
+func normalizeKind(k string) string {
+	if k == "" {
+		return KindRequirement
+	}
+	return k
 }
 
 // Valid status transitions — two-role stage-gate lifecycle:
@@ -42,7 +80,7 @@ var validTransitions = map[string][]string{
 	"archived": {"done"},
 }
 
-func (s *RequirementService) List(projectID string, status string, priority string) ([]model.Requirement, error) {
+func (s *RequirementService) List(projectID string, status string, priority string, kind string) ([]model.Requirement, error) {
 	where := "WHERE 1=1"
 	args := []interface{}{}
 
@@ -64,9 +102,25 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		where += " AND priority = ?"
 		args = append(args, priority)
 	}
+	// kind filter — empty (or "all") means no filtering; a comma-separated list
+	// (e.g. "issue,idea") becomes an IN clause for cross-project listings.
+	if kind != "" && kind != "all" {
+		kinds := splitKinds(kind)
+		if len(kinds) == 1 {
+			where += " AND kind = ?"
+			args = append(args, kinds[0])
+		} else if len(kinds) > 1 {
+			placeholders := make([]string, len(kinds))
+			for i, k := range kinds {
+				placeholders[i] = "?"
+				args = append(args, k)
+			}
+			where += " AND kind IN (" + strings.Join(placeholders, ",") + ")"
+		}
+	}
 
 	rows, err := s.db.Query(
-		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,skip_design,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END ASC, created_at DESC",
+		"SELECT id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,skip_design,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END ASC, created_at DESC",
 		args...)
 	if err != nil {
 		return nil, err
@@ -76,7 +130,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	var items []model.Requirement
 	for rows.Next() {
 		var r model.Requirement
-		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority,
+		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
 			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
@@ -91,11 +145,31 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	return items, nil
 }
 
+// splitKinds parses a comma-separated kind filter (e.g. "issue,idea"), trims
+// whitespace, lowercases, and drops any invalid entries so a malformed value
+// never produces SQL surprises. Always returns at least the single trimmed
+// input when non-empty.
+func splitKinds(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		switch p {
+		case KindIssue, KindRequirement, KindIdea:
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	var r model.Requirement
 	err := s.db.QueryRow(
-		"SELECT id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,skip_design,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
-		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority,
+		"SELECT id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,skip_design,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
+		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
 			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
@@ -106,6 +180,14 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Defensive: a legacy row upgraded before the kind column existed will scan
+	// as "" (the column's DEFAULT runs at INSERT time, but a SELECT against a
+	// pre-existing table with the column missing would have errored out — so a
+	// blank kind here would only happen if the column was added with NULL then
+	// backfilled partially). Normalize so callers never see "".
+	if r.Kind == "" {
+		r.Kind = KindRequirement
+	}
 	return &r, nil
 }
 
@@ -114,6 +196,13 @@ func (s *RequirementService) Create(req model.CreateRequirementReq) (*model.Requ
 	if req.Priority == "" {
 		req.Priority = "medium"
 	}
+	// Validate kind at the boundary; reject unknown values so a typo in the
+	// frontend or a future API consumer doesn't silently misclassify a
+	// requirement. Empty is allowed here and normalized below.
+	if !ValidKind(req.Kind) {
+		return nil, fmt.Errorf("invalid kind: %q (allowed: issue, requirement, idea)", req.Kind)
+	}
+	kind := normalizeKind(req.Kind)
 	// Default to skip-analysis (true) when the caller omits the field, so the
 	// "default skip" product decision holds even for clients that don't send it.
 	skipAnalysis := true
@@ -129,8 +218,8 @@ func (s *RequirementService) Create(req model.CreateRequirementReq) (*model.Requ
 	now := time.Now()
 
 	_, err := s.db.Exec(
-		"INSERT INTO requirements (id,project_id,title,description,status,priority,acceptance_criteria,design_docs,conversation_ids,created_by,skip_analysis,skip_design,created_at,updated_at) VALUES (?,?,?,?,'draft',?,'[]','[]','[]','user',?,?,?,?)",
-		id, req.ProjectID, req.Title, req.Description, req.Priority, skipAnalysis, skipDesign, now, now)
+		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,skip_analysis,skip_design,created_at,updated_at) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,?,?)",
+		id, req.ProjectID, req.Title, req.Description, req.Priority, kind, skipAnalysis, skipDesign, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -283,6 +372,43 @@ func (s *RequirementService) UpdateReviewerModel(id, model string) error {
 	return s.UpdateStageModel(id, "reviewer_model", model)
 }
 
+// UpdateKind switches a requirement's kind — used by the "📋 转为需求" CTA in
+// the detail page when the user decides an Issue has a confirmed fix path or
+// an Idea is worth promoting into a real feature. The transition is gated to
+// keep the data model honest:
+//
+//   - Source must be issue or idea (you can't "promote" a requirement).
+//   - Target must be requirement (the wizard is not currently wired for
+//     issue↔idea or requirement→something-else flows).
+//   - The requirement must be in a terminal state (done / archived) so we never
+//     rewrite kind mid-pipeline (a partially-analysed Idea becoming a
+//     Requirement would leave stale session ids / docs).
+//
+// The status itself is not touched — the caller is expected to follow up with
+// UpdateStatus if they want to re-open the row into "draft".
+func (s *RequirementService) UpdateKind(id, newKind string) (*model.Requirement, error) {
+	if !ValidKind(newKind) || newKind == "" {
+		return nil, fmt.Errorf("invalid kind: %q (allowed: issue, requirement, idea)", newKind)
+	}
+	if newKind != KindRequirement {
+		return nil, fmt.Errorf("can only promote to 'requirement' (got %q)", newKind)
+	}
+	r, err := s.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if r.Kind != KindIssue && r.Kind != KindIdea {
+		return nil, fmt.Errorf("cannot promote a requirement of kind %q", r.Kind)
+	}
+	if r.Status != "done" && r.Status != "archived" {
+		return nil, fmt.Errorf("can only promote finished requirements (current status: %s)", r.Status)
+	}
+	if _, err := s.db.Exec("UPDATE requirements SET kind=?, updated_at=? WHERE id=?", newKind, time.Now(), id); err != nil {
+		return nil, err
+	}
+	return s.Get(id)
+}
+
 func (s *RequirementService) Delete(id string) error {
 	_, err := s.db.Exec("DELETE FROM requirements WHERE id = ?", id)
 	return err
@@ -363,6 +489,12 @@ func (s *RequirementService) Archive(id string) (*model.Knowledge, error) {
 	}
 
 	content := "# " + r.Title + "\n\n" + r.Description + "\n\n## 技术方案\n\n" + r.DesignDocs
+	// Idea rows typically have no design_docs (the wizard never wrote one) —
+	// drop the dangling "## 技术方案" section header so the archived knowledge
+	// entry reads cleanly instead of trailing with an empty section.
+	if strings.TrimSpace(r.DesignDocs) == "" || r.DesignDocs == "[]" {
+		content = "# " + r.Title + "\n\n" + r.Description
+	}
 	now := time.Now()
 
 	tx, err := s.db.Begin()

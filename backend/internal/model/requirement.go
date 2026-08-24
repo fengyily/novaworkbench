@@ -9,6 +9,7 @@ type Requirement struct {
 	Description        string `json:"description"`
 	Status             string `json:"status"`
 	Priority           string `json:"priority"`
+	Kind               string `json:"kind"` // "issue" | "requirement" | "idea"; defaults to "requirement" for legacy rows
 	AcceptanceCriteria string `json:"acceptance_criteria"` // JSON array
 	DesignDocs         string `json:"design_docs"`         // JSON array
 	ConversationIDs    string `json:"conversation_ids"`    // JSON array
@@ -42,6 +43,7 @@ type CreateRequirementReq struct {
 	Title        string `json:"title"`
 	Description  string `json:"description"`
 	Priority     string `json:"priority"`
+	Kind         string `json:"kind"` // "issue" | "requirement" | "idea"; empty → defaults to "requirement"
 	SkipAnalysis *bool  `json:"skip_analysis"` // pointer: nil omits the field so Create defaults to true (skip) and Update preserves the existing value
 	SkipDesign   *bool  `json:"skip_design"`   // pointer: nil → Create defaults to false; Update never references this column so it is preserved automatically
 }

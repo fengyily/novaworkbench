@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabels, kindOf, STAGE_VISIBILITY, type Kind } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
@@ -542,6 +542,23 @@ export default function RequirementDetail() {
       await refresh();
     } catch (err: any) {
       alert('取消归档失败: ' + err.message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  // Promote an issue/idea (only allowed when status is done/archived) into a
+  // full "requirement" so the developer stage becomes reachable. One-way gate:
+  // the backend's UpdateKind rejects demotions back to issue/idea.
+  const handlePromoteToRequirement = async () => {
+    if (!id) return;
+    if (!confirm('将该条目转为「需求」，并启用方案设计与开发流程？')) return;
+    setBusy('转为需求');
+    try {
+      await requirementsApi.updateKind(id, 'requirement');
+      await refresh();
+    } catch (err: any) {
+      alert('转为需求失败: ' + err.message);
     } finally {
       setBusy('');
     }
@@ -1288,7 +1305,13 @@ export default function RequirementDetail() {
     { key: 'architect', label: '方案设计', icon: '📐', doneStatus: 'designed', modelKey: 'architect_model' as const },
     { key: 'developer', label: '开发实现', icon: '🚀', doneStatus: 'done', modelKey: 'developer_model' as const },
   ] as const;
-  const stageIndex = stage === 'done' ? 3 : STEPS.findIndex(s => s.key === stage);
+  // Per-kind stepper visibility: an Idea only walks the analyst stage.
+  const reqKind: Kind = kindOf(req);
+  const visibleStepKeys = STAGE_VISIBILITY[reqKind];
+  const visibleSteps = STEPS.filter((s) => (visibleStepKeys as readonly string[]).includes(s.key));
+  const stageIndex = stage === 'done' ? visibleSteps.length : visibleSteps.findIndex(s => s.key === stage);
+  // 「转为需求」CTA visible for finished Issue / Idea rows.
+  const showPromoteCta = (reqKind === 'idea' || reqKind === 'issue') && (req.status === 'done' || req.status === 'archived');
 
   return (
     <div className="req-detail">
@@ -1509,6 +1532,7 @@ export default function RequirementDetail() {
       <h1>{req.title}</h1>
 
       <div className="detail-meta">
+        <span className={`kind-badge kind-${reqKind}`} title={reqKind === 'idea' ? '想法 — 仅讨论方案，不进入开发' : reqKind === 'issue' ? '问题 — 排查根因并修复' : '需求 — 标准 3 阶段实现'}>{kindLabels[reqKind]}</span>
         <span className={`status-tag status-${req.status}`}>{statusLabels[req.status] || req.status}</span>
         <span className={`priority-tag ${req.priority}`}>{req.priority.toUpperCase()}</span>
         <span className={`claude-status${claudeWorking ? ' working' : ''}`} title={claudeWorking ? 'Claude 正在执行分析/方案/开发任务' : '当前无 Claude 任务在运行'}>
@@ -1649,9 +1673,10 @@ export default function RequirementDetail() {
         )}
       </div>
 
-      {/* Stage stepper */}
+      {/* Stage stepper — only the steps visible to this requirement's kind
+          are rendered (an Idea walks the analyst stage only). */}
       <div className="stage-stepper">
-        {STEPS.map((s, i) => {
+        {visibleSteps.map((s, i) => {
           const isDone = stageIndex > i || (stage === 'done');
           const isActive = stageIndex === i;
           const stageModel = req[s.modelKey];
@@ -1666,7 +1691,7 @@ export default function RequirementDetail() {
                     : stageModel}
                 </span>
               )}
-              {i < STEPS.length - 1 && <span className="stage-sep">→</span>}
+              {i < visibleSteps.length - 1 && <span className="stage-sep">→</span>}
             </div>
           );
         })}
@@ -1721,6 +1746,7 @@ export default function RequirementDetail() {
           requirementTitle={req.title}
           currentAnalysis={req.acceptance_criteria}
           analysisJobId={req.analysis_job_id}
+          kind={reqKind}
           model={analystModel}
           defaultModel={analystDefaultModel}
           onTurnDone={refresh}
@@ -1742,12 +1768,16 @@ export default function RequirementDetail() {
                       the backend ArchitectDesign handler tolerates the missing
                       analyst session when skip_analysis is set, and UpdateDesign
                       then moves status to designing. We transition locally first
-                      so the UI flips to the architect stage immediately. */}
-                  <button className="btn btn-primary"
-                    onClick={() => requestDesignKnowledge(true)}
-                    disabled={!!busy}>
-                    {busy === '生成技术方案' ? '⏳ ...' : '📐 生成技术方案'}
-                  </button>
+                      so the UI flips to the architect stage immediately.
+                      Hidden for kind=idea: ideas stay in the discussion stage
+                      and never reach architecture/code. */}
+                  {reqKind !== 'idea' && (
+                    <button className="btn btn-primary"
+                      onClick={() => requestDesignKnowledge(true)}
+                      disabled={!!busy}>
+                      {busy === '生成技术方案' ? '⏳ ...' : '📐 生成技术方案'}
+                    </button>
+                  )}
                   {/* Architect-model selectable BEFORE generating the plan. */}
                   <ModelSelect
                     value={architectModel}
@@ -1857,7 +1887,7 @@ export default function RequirementDetail() {
             </div>
           )}
 
-          {req.status === 'designing' && !hasDesign && !designing && !req.design_job_id && (
+          {req.status === 'designing' && !hasDesign && !designing && !req.design_job_id && reqKind !== 'idea' && (
             <div className="tab-empty">
               <p>需求分析已完成。方案设计阶段将在 <strong>plan 模式</strong>下探索项目代码，制定具体可执行的技术实现方案（Markdown）。</p>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -1923,6 +1953,7 @@ export default function RequirementDetail() {
                   {busy === '方案完成' ? '⏳ ...' : '📐 方案完成'}
                 </button>
               </div>
+              {reqKind !== 'idea' && (
               <DocRefineChat
                 reqId={req.id}
                 projectPath={project?.local_path || ''}
@@ -1933,6 +1964,7 @@ export default function RequirementDetail() {
                 applyJobId={req.apply_job_id}
                 onTurnDone={refresh}
               />
+              )}
             </>
           )}
         </div>
@@ -1947,7 +1979,7 @@ export default function RequirementDetail() {
               opted in and the backend emitted a knowledge event). */}
           <KnowledgeReadPanel items={knowledgeItems} empty={knowledgeEmpty} projectId={project?.id} />
 
-          {(req.status === 'designed' || (req.status === 'draft' && req.skip_design)) && codingLines.length === 0 && !coding && (
+          {(req.status === 'designed' || (req.status === 'draft' && req.skip_design)) && codingLines.length === 0 && !coding && reqKind !== 'idea' && (
             <div className="tab-empty">
               <p>{req.status === 'designed'
                 ? '方案已完成。将根据技术方案进行开发实现。'
@@ -2045,7 +2077,9 @@ export default function RequirementDetail() {
                 <button className="btn btn-primary" onClick={() => transition('done', '开发完成')} disabled={!!busy}>
                   {busy === '开发完成' ? '⏳ ...' : '✅ 开发完成'}
                 </button>
-                <button className="btn" title="从技术方案重新 fork 新会话开始开发，不携带上次开发历史" onClick={() => openBranchModal()}>🔄 重新开发</button>
+                {reqKind !== 'idea' && (
+                  <button className="btn" title="从技术方案重新 fork 新会话开始开发，不携带上次开发历史" onClick={() => openBranchModal()}>🔄 重新开发</button>
+                )}
               </div>
 
               {/* ── Merge / PR step ── */}
@@ -2120,6 +2154,11 @@ export default function RequirementDetail() {
                 <button className="btn btn-primary" onClick={handleArchive} disabled={!!busy}>
                   {busy === '归档' ? '⏳ ...' : '📦 归档到知识库'}
                 </button>
+                {showPromoteCta && (
+                  <button className="btn" onClick={handlePromoteToRequirement} disabled={!!busy}>
+                    {busy === '转为需求' ? '⏳ ...' : '📋 转为需求'}
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -2133,6 +2172,11 @@ export default function RequirementDetail() {
                 <button className="btn" onClick={handleUnarchive} disabled={!!busy}>
                   {busy === '取消归档' ? '⏳ ...' : '↩ 取消归档'}
                 </button>
+                {showPromoteCta && (
+                  <button className="btn" onClick={handlePromoteToRequirement} disabled={!!busy}>
+                    {busy === '转为需求' ? '⏳ ...' : '📋 转为需求'}
+                  </button>
+                )}
               </div>
             </div>
           )}

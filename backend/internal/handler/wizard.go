@@ -19,6 +19,7 @@ import (
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
+	promptpkg "github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/internal/util"
@@ -538,7 +539,11 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 			}
 			log.Printf("[analyst-chat] pre-read %d files, docBlock=%d bytes, tree=%d bytes, desc=%d bytes",
 				len(readFiles), len(docBlock), len(treeSummary), len(desc))
-			return buildAnalystFirstPrompt(title, desc, analysis, req.UserMessage, docBlock, treeSummary)
+			base := buildAnalystFirstPrompt(title, desc, analysis, req.UserMessage, docBlock, treeSummary)
+			if block := promptpkg.AnalystBlock(requirement.Kind, requirement); block != "" {
+				return base + "\n\n" + block
+			}
+			return base
 		}
 
 		// context.Background(): the HTTP request has already returned, so we
@@ -733,6 +738,12 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		}
 		b.WriteString("追加调整：\n")
 		b.WriteString(req.UserMessage)
+		if requirement != nil {
+			if block := promptpkg.DeveloperBlock(requirement.Kind, requirement); block != "" {
+				b.WriteString("\n\n")
+				b.WriteString(block)
+			}
+		}
 		return b.String()
 	}
 	resumePrompt := fmt.Sprintf(
@@ -1051,6 +1062,17 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// Defensive guard: an Idea must not reach the coding stage. The
+		// frontend hides the "🚀 开始开发" CTA when kind=idea and only Idea
+		// rows promoted via "📋 转为需求" can move on, but a stray API call
+		// (curl, the legacy /wizard quick-start path, or a future caller) must
+		// not silently start coding on a not-yet-defined requirement. Reject
+		// with a clear message before any claude subprocess is spawned.
+		if reqRow != nil && reqRow.Kind == "idea" {
+			job.Append(store.LogLine{Type: "error", Content: "❌ 「想法」类需求暂不支持进入开发阶段，请先在详情页点击「📋 转为需求」升级。"})
+			job.Finish(1, store.JobError)
+			return
+		}
 
 		// Resolve the working directory for coding. When a branch is requested
 		// AND the project is a git repo with a requirement id to key on, develop
@@ -1261,6 +1283,14 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			prompt = fmt.Sprintf("现在切换到「开发者」角色。基于我们刚才的需求分析与技术方案，请实现该需求（%s）。", req.RequirementTitle)
 			if strings.TrimSpace(req.RequirementDesc) != "" {
 				prompt += "\n\n用户在开发前的追加调整说明：\n" + req.RequirementDesc
+			}
+		}
+		// Kind-specific developer tail (currently only fires for kind=issue).
+		// Idea never reaches here — the frontend hides the "开始开发" CTA and
+		// we double-protect by checking reqRow.Kind below.
+		if reqRow != nil {
+			if block := promptpkg.DeveloperBlock(reqRow.Kind, reqRow); block != "" {
+				prompt += "\n\n" + block
 			}
 		}
 
@@ -1484,6 +1514,12 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		if block := llm.BuildSkillsBlock(h.mentionedSkills(req.Title + " " + req.Description + " " + body.Message)); block != "" {
 			adjustPrompt = block + body.Message
 		}
+		// Tail the kind-specific developer block so a resumed Issue session
+		// stays anchored to "最小改动、修复根因" framing on every follow-up
+		// turn. For requirement rows it's a no-op.
+		if block := promptpkg.DeveloperBlock(req.Kind, req); block != "" {
+			adjustPrompt += "\n\n" + block
+		}
 		cmd := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:       adjustPrompt,
 			WorkDir:      workDir,
@@ -1615,6 +1651,11 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		prompt := "继续完成之前中断的开发任务。请先检查当前代码与工作区状态，" +
 			"判断哪些部分已完成、哪些未完成或需要修复；然后基于技术方案继续完成剩余工作、补齐缺失内容。" +
 			"最后用中文总结本次完成的内容。"
+		// Kind-specific developer tail — keeps an Issue session's framing
+		// ("最小改动、修复根因") present on every continue round.
+		if block := promptpkg.DeveloperBlock(req.Kind, req); block != "" {
+			prompt += "\n\n" + block
+		}
 		cmd := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:       prompt,
 			WorkDir:      workDir,
@@ -1810,6 +1851,14 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 			"## 项目上下文\n" + docBlock + "\n" + treeSummary + "\n\n" +
 			"方案应涵盖：整体实现思路、需要新增或修改的文件、具体实现步骤、数据模型/数据库变更、实现风险及应对。" +
 			"请先复述你对需求的理解，再给出方案。"
+	}
+	// Tail: append the kind-specific block (Issue / Idea framing). For an Idea
+	// the user would normally have hidden this CTA in the frontend; we still
+	// inject the block defensively so an out-of-band call (e.g. curl, the
+	// wizard page, or a future "重新生成技术方案" path) sees consistent
+	// guidance. For Requirement the block is empty.
+	if block := promptpkg.ArchitectBlock(req.Kind, req); block != "" {
+		prompt += "\n\n" + block
 	}
 
 	systemPrompt, model := h.roleConfig("architect")

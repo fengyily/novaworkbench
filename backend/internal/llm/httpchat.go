@@ -25,6 +25,26 @@ markdown：纯 Markdown 正文；按以下结构组织，缺信息的章节直�
 保留用户表达的关键信息与术语，不要扩大或缩小需求范围，不要臆测技术实现方案。
 只输出该 JSON 对象，不要任何前后缀说明。`
 
+// formatAndTitleIssueSystemPrompt distills an Issue (bug report) into a
+// bug-shaped Markdown: 现象描述 / 复现步骤 / 期望行为 / 实际行为. No
+// 验收标准 / 背景 / 功能要点 — Issues aren't features.
+const formatAndTitleIssueSystemPrompt = `你是一位 Bug 分析助手。请把用户给出的问题描述整理成结构清晰的 Markdown 文档，并提炼一个简洁的问题标题。
+以 JSON 对象输出，格式严格为：{"title":"...","markdown":"..."}，不要用代码块围栏包裹整体输出。
+title：不超过20个汉字（或15个英文单词），用动词+宾语概括（如"修复 X 页面 500 错"）；不要加标点符号、引号或换行；不要任何额外说明或前缀。
+markdown：纯 Markdown 正文；按以下结构组织，缺信息的章节直接省略，不要编造内容：## 现象描述、## 复现步骤（用有序列表）、## 期望行为、## 实际行为、## 备注。
+保留用户给出的报错信息、堆栈、日志片段（如有）；不要臆测根因、不要扩大问题范围、不要补写功能需求或验收标准。
+只输出该 JSON 对象，不要任何前后缀说明。`
+
+// formatAndTitleIdeaSystemPrompt distills an Idea (exploratory note) into a
+// lightweight shape: 灵感来源 / 初步设想 / 待回答的关键问题. Never a 验收标准
+// — Ideas aren't yet committed features.
+const formatAndTitleIdeaSystemPrompt = `你是一位想法记录助手。请把用户给出的灵感或想法整理成结构清晰的 Markdown 文档，并提炼一个简洁的想法标题。
+以 JSON 对象输出，格式严格为：{"title":"...","markdown":"..."}，不要用代码块围栏包裹整体输出。
+title：不超过20个汉字（或15个英文单词），一句话表达核心想法；不要加标点符号、引号或换行；不要任何额外说明或前缀。
+markdown：纯 Markdown 正文；按以下结构组织，缺信息的章节直接省略，不要编造内容：## 灵感来源、## 初步设想、## 待回答的关键问题（用列表）、## 备注。
+不要求结构化需求模板，不要写"验收标准"或"功能要点"这种已经确定要做的章节；保留用户的发散与不确定性。
+只输出该 JSON 对象，不要任何前后缀说明。`
+
 // formatAndTitleResult is the JSON shape the model is asked to emit for the
 // combined format-and-title task.
 type formatAndTitleResult struct {
@@ -157,10 +177,23 @@ func chatCompletion(baseURL, apiKey, model, systemPrompt, userContent string, ma
 // an OpenAI-compatible /chat/completions endpoint (e.g. DeepSeek). Bypasses
 // the claude CLI — neither task needs tool use. Merging the two halves into
 // one request keeps title and body consistent and transmits the content once.
-// On failure the caller falls back (raw content for Markdown, first line for
-// title) so requirement creation never fails just because this is unavailable.
-func formatAndTitleViaHTTP(baseURL, apiKey, model, content string) (markdown, title string, usage *Usage, err error) {
-	out, usage, err := chatCompletion(baseURL, apiKey, model, formatAndTitleSystemPrompt, content, 3072)
+// The kind argument selects a kind-shaped system prompt so an Issue
+// description becomes a bug-report scaffold, an Idea becomes a lightweight
+// exploratory note, and a Requirement keeps the legacy four-section layout.
+// Empty kind falls back to the legacy prompt. On failure the caller falls back
+// (raw content for Markdown, first line for title) so requirement creation
+// never fails just because this is unavailable.
+func formatAndTitleViaHTTP(baseURL, apiKey, model, content, kind string) (markdown, title string, usage *Usage, err error) {
+	var systemPrompt string
+	switch kind {
+	case "issue":
+		systemPrompt = formatAndTitleIssueSystemPrompt
+	case "idea":
+		systemPrompt = formatAndTitleIdeaSystemPrompt
+	default:
+		systemPrompt = formatAndTitleSystemPrompt
+	}
+	out, usage, err := chatCompletion(baseURL, apiKey, model, systemPrompt, content, 3072)
 	if err != nil {
 		return "", "", nil, err
 	}

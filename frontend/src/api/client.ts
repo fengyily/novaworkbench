@@ -248,9 +248,12 @@ export const scannerApi = {
 };
 
 // Requirements
+export type Kind = 'issue' | 'requirement' | 'idea';
+
 export interface Requirement {
   id: string; project_id: string; title: string; description: string;
-  status: string; priority: string; acceptance_criteria: string;
+  status: string; priority: string; kind?: Kind;
+  acceptance_criteria: string;
   design_docs: string; conversation_ids: string; assigned_to: string;
   created_by: string; analysis_session_id: string;
   design_session_id: string; design_job_id: string; analysis_job_id: string; apply_job_id: string; coding_session_id: string;
@@ -269,6 +272,69 @@ export interface Requirement {
   completed_at?: string;
 }
 
+// Default to "requirement" on the client too, so legacy rows missing the
+// kind field (or pre-upgrade API responses) still render with a badge.
+export const kindOf = (r: { kind?: Kind } | null | undefined): Kind =>
+  (r && r.kind) || 'requirement';
+
+export const kindLabels: Record<Kind, string> = {
+  issue: '🐛 Issue',
+  requirement: '📋 需求',
+  idea: '💡 想法',
+};
+
+// Short plain-text label (no emoji) for chip-style filter buttons on the
+// cross-project RequirementsList page.
+export const kindShortLabels: Record<Kind, string> = {
+  issue: 'Issue',
+  requirement: '需求',
+  idea: '想法',
+};
+
+// Hint text shown beneath each kind card in the create form. Helps the user
+// pick the right category before they start typing.
+export const kindHints: Record<Kind, string> = {
+  issue: '需要：复现路径 / 报错信息 / 期望行为',
+  requirement: '需要：背景 / 目标 / 功能要点 / 验收标准',
+  idea: '一句话或一段话都行，AI 会帮你评估可行性',
+};
+
+// Placeholder text for the create-form description textarea, tuned per kind
+// so the user gets an immediate hint about the expected shape.
+export const kindPlaceholders: Record<Kind, string> = {
+  issue: '请描述问题现象 / 复现步骤 / 报错信息……',
+  requirement: '用自然语言描述你想要实现的功能……',
+  idea: '写下你的想法或灵感，AI 会帮你评估可行性……',
+};
+
+// CTA button label for the create form, per kind.
+export const kindCreateLabels: Record<Kind, string> = {
+  issue: '🐛 创建 Issue',
+  requirement: '📋 创建需求',
+  idea: '💡 创建想法',
+};
+
+// Placeholder text for the analyst-chat composer textarea, per kind. Idea
+// drops the URL/element wording and steers the user toward exploratory talk.
+export const kindChatPlaceholders: Record<Kind, string> = {
+  issue: '贴 URL、描述页面元素、报错截图，或补充复现步骤... 输入 @ 引用 Skill',
+  requirement: '贴URL、描述页面元素、或回复AI的问题... 输入 @ 引用 Skill',
+  idea: '说说你的疑问、顾虑或备选思路... 输入 @ 引用 Skill',
+};
+
+// Stages visible in the detail-page stepper, per kind. An Idea only walks the
+// analyst stage — the architect and developer stages are hidden in the UI
+// (the frontend doesn't render their CTAs), but the requirement row keeps
+// going through the legacy status lifecycle for storage simplicity.
+export const STAGE_KEYS = ['analyst', 'architect', 'developer'] as const;
+export type StageKey = typeof STAGE_KEYS[number];
+
+export const STAGE_VISIBILITY: Record<Kind, ReadonlyArray<StageKey>> = {
+  issue: ['analyst', 'architect', 'developer'],
+  requirement: ['analyst', 'architect', 'developer'],
+  idea: ['analyst'],
+};
+
 export const requirementStatuses = ['draft', 'analyzing', 'designing', 'designed', 'developing', 'done'] as const;
 export const statusLabels: Record<string, string> = {
   draft: '📝 草稿',
@@ -280,19 +346,38 @@ export const statusLabels: Record<string, string> = {
   archived: '📦 已归档',
 };
 
+// Priority display labels. The DB stores free-form "high"/"medium"/"low" (the
+// create-form only writes those three), but legacy rows can have anything —
+// the lookup falls back to the raw value so we never render undefined.
+export const priorityLabels: Record<string, string> = {
+  high: '🔴 High',
+  medium: '🟡 Medium',
+  low: '🟢 Low',
+};
+
 export const requirementsApi = {
-  list: (params?: { project_id?: string; status?: string; priority?: string }) => {
+  list: (params?: { project_id?: string; status?: string; priority?: string; kind?: string }) => {
     const q = new URLSearchParams();
     Object.entries(params || {}).forEach(([k, v]) => { if (v) q.set(k, String(v)); });
     return api.get<Requirement[]>(`/api/requirements?${q.toString()}`);
   },
-  create: (data: { project_id: string; description: string; priority?: string; skip_analysis?: boolean; skip_design?: boolean }) =>
-    api.post<Requirement>('/api/requirements', data),
+  create: (data: {
+    project_id: string;
+    description: string;
+    priority?: string;
+    kind?: Kind;
+    skip_analysis?: boolean;
+    skip_design?: boolean;
+  }) => api.post<Requirement>('/api/requirements', data),
   get: (id: string) => api.get<Requirement>(`/api/requirements/${id}`),
   update: (id: string, data: { title: string; description: string; priority: string; skip_analysis?: boolean }) =>
     api.put<Requirement>(`/api/requirements/${id}`, data),
   updateStatus: (id: string, status: string) =>
     api.patch<Requirement>(`/api/requirements/${id}/status`, { status }),
+  // Promote a finished Issue or Idea into a Requirement. Only one-way (issue/idea → requirement);
+  // the backend validates the rule and rejects everything else with a 400.
+  updateKind: (id: string, kind: Kind) =>
+    api.patch<Requirement>(`/api/requirements/${id}/kind`, { kind }),
   delete: (id: string) => api.delete<{ status: string }>(`/api/requirements/${id}`),
   // Drop the stored claude analyst session so the next chat turn starts fresh
   // instead of resuming a broken / over-long conversation.

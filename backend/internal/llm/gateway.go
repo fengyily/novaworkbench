@@ -339,11 +339,17 @@ func (g *Gateway) runClaudeText(prompt string, timeout time.Duration) (string, e
 // via the direct HTTP LLM channel (OpenAI-compatible, e.g. DeepSeek). This
 // bypasses the claude CLI for speed — neither task needs tool use, and merging
 // them keeps the title and body consistent while transmitting the content once.
-// The channel activates only when both base_url and api_key are configured;
-// otherwise it returns an error and the caller falls back to the raw content
-// for Markdown and the first line for the title (no claude CLI fallback, by
-// design) so requirement creation never fails just because this is unavailable.
-func (g *Gateway) GenerateDescriptionAndTitle(content string) (markdown, title string, usage *Usage, err error) {
+// The kind argument ("issue" / "requirement" / "idea") tweaks the system
+// prompt so the distilled Markdown carries the right shape: an Issue becomes
+// a bug-report scaffold (现象/复现步骤/期望/实际), a Requirement keeps the
+// legacy four-section layout (背景/目标/功能要点/验收标准), and an Idea
+// becomes a lightweight exploratory note (灵感来源/初步设想/待回答问题).
+// Empty kind falls back to the legacy behavior. The channel activates only
+// when both base_url and api_key are configured; otherwise it returns an error
+// and the caller falls back to the raw content for Markdown and the first
+// line for the title (no claude CLI fallback, by design) so requirement
+// creation never fails just because this is unavailable.
+func (g *Gateway) GenerateDescriptionAndTitle(content, kind string) (markdown, title string, usage *Usage, err error) {
 	if g.llmCfg == nil {
 		return "", "", nil, fmt.Errorf("llm not configured: no llm config provider")
 	}
@@ -354,7 +360,7 @@ func (g *Gateway) GenerateDescriptionAndTitle(content string) (markdown, title s
 	if baseURL == "" || apiKey == "" {
 		return "", "", nil, fmt.Errorf("llm not configured: base_url and api_key required")
 	}
-	return formatAndTitleViaHTTP(baseURL, apiKey, model, content)
+	return formatAndTitleViaHTTP(baseURL, apiKey, model, content, kind)
 }
 
 func stripJSONFences(s string) string {

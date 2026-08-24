@@ -276,6 +276,7 @@ func main() {
 	mux.HandleFunc("GET /api/requirements/{id}", reqH.Get)
 	mux.HandleFunc("PUT /api/requirements/{id}", reqH.Update)
 	mux.HandleFunc("PATCH /api/requirements/{id}/status", reqH.UpdateStatus)
+	mux.HandleFunc("PATCH /api/requirements/{id}/kind", reqH.UpdateKind)
 	mux.HandleFunc("DELETE /api/requirements/{id}", reqH.Delete)
 	mux.HandleFunc("GET /api/requirements/{id}/chat-history", reqH.GetChatHistory)
 	mux.HandleFunc("PUT /api/requirements/{id}/chat-history", reqH.SaveChatHistory)

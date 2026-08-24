@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS requirements (
 	description TEXT DEFAULT '',
 	status TEXT DEFAULT 'draft',
 	priority TEXT DEFAULT 'medium',
+	kind TEXT NOT NULL DEFAULT 'requirement',
 	acceptance_criteria TEXT DEFAULT '[]',
 	design_docs TEXT DEFAULT '[]',
 	conversation_ids TEXT DEFAULT '[]',
@@ -353,6 +354,15 @@ var alterColumns = []string{
 	// fall back to git's normal config lookup (host ~/.gitconfig etc.).
 	`ALTER TABLE platform_tokens ADD COLUMN git_user_name  TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE platform_tokens ADD COLUMN git_user_email TEXT NOT NULL DEFAULT ''`,
+	// Requirement kind: broadens "需求" into three top-level categories — issue
+	// (a defect/bug report), requirement (a planned feature, the legacy default),
+	// idea (an exploratory note). The wizard uses it to inject kind-specific
+	// prompt context blocks (see internal/prompt/kind_blocks.go) and the
+	// frontend uses it to drive UX affordances (badge, CTA visibility). Default
+	// 'requirement' keeps historical rows on the legacy flow without any data
+	// backfill. Validated in service.RequirementService; no CHECK constraint so
+	// the column behaves like the existing status/priority TEXT columns.
+	`ALTER TABLE requirements ADD COLUMN kind TEXT NOT NULL DEFAULT 'requirement'`,
 }
 
 var (

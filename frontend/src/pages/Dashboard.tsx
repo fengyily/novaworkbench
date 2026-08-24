@@ -109,7 +109,7 @@ export default function Dashboard() {
       <div className="quick-actions btn-row-2col">
         <button className="btn btn-primary" onClick={() => navigate('/wizard')}>🪄 新建项目向导</button>
         <button className="btn" onClick={() => navigate('/projects/add')}>添加项目</button>
-        <button className="btn" onClick={() => navigate('/requirements')}>新建需求</button>
+        <button className="btn" onClick={() => navigate('/requirements')}>需求列表</button>
         <button className="btn" onClick={() => navigate('/chat')}>开始对话</button>
         <button className="btn" onClick={() => navigate('/reports')}>生成周报</button>
         <button className="btn" onClick={() => navigate('/knowledge')}>知识审查</button>

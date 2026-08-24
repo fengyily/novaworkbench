@@ -25,7 +25,7 @@ func NewRequirementHandler(svc *service.RequirementService, llmGateway *llm.Gate
 
 func (h *RequirementHandler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	items, err := h.svc.List(q.Get("project_id"), q.Get("status"), q.Get("priority"))
+	items, err := h.svc.List(q.Get("project_id"), q.Get("status"), q.Get("priority"), q.Get("kind"))
 	if err != nil {
 		writeError(w, 500, "INTERNAL", err.Error())
 		return
@@ -101,7 +101,7 @@ func (h *RequirementHandler) Create(w http.ResponseWriter, r *http.Request) {
 		// consistent and the content is transmitted once. Each half falls back
 		// independently on failure — creation must not fail just because the
 		// formatter is unavailable.
-		markdown, title, usage, err := h.llm.GenerateDescriptionAndTitle(req.Description)
+		markdown, title, usage, err := h.llm.GenerateDescriptionAndTitle(req.Description, req.Kind)
 		switch {
 		case err != nil:
 			log.Printf("[requirement] GenerateDescriptionAndTitle failed: %v — using raw content and fallback title", err)
@@ -178,6 +178,26 @@ func (h *RequirementHandler) Update(w http.ResponseWriter, r *http.Request) {
 	item, err := h.svc.Update(r.PathValue("id"), req)
 	if err != nil {
 		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, item)
+}
+
+// UpdateKind promotes a finished Issue or Idea into a Requirement (one-way
+// upgrade; see service.UpdateKind for the validation rules). The status is
+// intentionally untouched — the caller can follow up with PATCH .../status if
+// they want to re-open the row into "draft" for a fresh analyst pass.
+func (h *RequirementHandler) UpdateKind(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON")
+		return
+	}
+	item, err := h.svc.UpdateKind(r.PathValue("id"), body.Kind)
+	if err != nil {
+		writeError(w, 400, "UPDATE_KIND_FAILED", err.Error())
 		return
 	}
 	writeJSON(w, 200, item)
