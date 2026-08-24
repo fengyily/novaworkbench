@@ -138,6 +138,32 @@ func gitRun(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// gitRunIdentity is gitRun with optional committer/author identity injected
+// via `-c user.name=...` / `-c user.email=...`. Either side may be empty —
+// the empty side is skipped and git falls back to its own config lookup.
+// This matters for subcommands that CREATE commits (merge --no-edit, etc.):
+// commitAll handles its own injection but the read-only helper can't know
+// whether the caller is about to create a commit, so the merge paths use
+// this variant explicitly.
+func gitRunIdentity(dir, gitName, gitEmail string, args ...string) (string, error) {
+	full := []string{"-C", dir}
+	if gitName != "" {
+		full = append(full, "-c", "user.name="+gitName)
+	}
+	if gitEmail != "" {
+		full = append(full, "-c", "user.email="+gitEmail)
+	}
+	full = append(full, args...)
+	cmd := exec.Command("git", full...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return stdout.String(), fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
 func currentBranch(dir string) string {
 	out, err := gitRun(dir, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
@@ -493,8 +519,10 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 			job.Append(store.LogLine{Type: "message", Content: "🌿 切换到 " + target})
 		}
 
-		// 4. Merge dev. Use --no-edit so a merge commit (if any) doesn't open an editor.
-		mergeOut, mergeErr := gitRun(mergeDir, "merge", "--no-edit", dev)
+		// 4. Merge dev. Use --no-edit so a merge commit (if any) doesn't open an
+		// editor. Inject the project identity so a Docker host without a
+		// mounted ~/.gitconfig can still author + commit the merge.
+		mergeOut, mergeErr := gitRunIdentity(mergeDir, gitName, gitEmail, "merge", "--no-edit", dev)
 		for _, line := range strings.Split(mergeOut, "\n") {
 			if line = strings.TrimSpace(line); line != "" {
 				job.Append(store.LogLine{Type: "message", Content: line})
@@ -650,11 +678,24 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 			"合理整合两边的改动、消除冲突标记后写回文件。完成后执行 `git add -A` 暂存所有已解决的文件，"+
 			"再执行 `git commit --no-edit` 完成合并提交。不要留下任何冲突标记。用中文说明你的处理。", fileList)
 
+		// Pin the project's git identity into Claude's env so its
+		// `git commit --no-edit` runs with a real committer on Docker hosts.
+		var extraEnv []string
+		if name, email := h.gitIdentityForReq(reqRow); name != "" || email != "" {
+			if name != "" {
+				extraEnv = append(extraEnv, "GIT_AUTHOR_NAME="+name, "GIT_COMMITTER_NAME="+name)
+			}
+			if email != "" {
+				extraEnv = append(extraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
+			}
+		}
+
 		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
 			Prompt:       prompt,
 			WorkDir:      dir,
 			SystemPrompt: systemPrompt,
 			Model:        model,
+			ExtraEnv:     extraEnv,
 			// empty PermissionMode → --dangerously-skip-permissions (full tool use)
 		})
 		configID, currency := h.activeConfigMeta()
@@ -809,6 +850,10 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 // clean (or was resolved) and the flow may continue.
 func (h *MergeHandler) mergeAndResolveBase(job *store.Job, devDir, base, dev string, reqRow *model.Requirement) (string, bool) {
 	systemPrompt, model := h.roleConfig("developer")
+	// Pull the project's commit identity so the merge commit (created by
+	// `git merge --no-edit`) carries the right author/committer on Docker
+	// hosts without a mounted ~/.gitconfig.
+	gitName, gitEmail := h.gitIdentityForReq(reqRow)
 
 	// 2. fetch origin/base (best-effort; a fetch failure just skips the merge).
 	job.Append(store.LogLine{Type: "phase", Content: "⬇️ 拉取主分支 origin/" + base + " ..."})
@@ -819,9 +864,10 @@ func (h *MergeHandler) mergeAndResolveBase(job *store.Job, devDir, base, dev str
 		job.Append(store.LogLine{Type: "message", Content: out})
 	}
 
-	// 3. merge origin/base into dev.
+	// 3. merge origin/base into dev. Inject -c user.name/email so the merge
+	// commit has a stable identity on Docker hosts.
 	job.Append(store.LogLine{Type: "phase", Content: "🌿 合并主分支 origin/"+base+" → "+dev})
-	mergeOut, mergeErr := gitRun(devDir, "merge", "--no-edit", "origin/"+base)
+	mergeOut, mergeErr := gitRunIdentity(devDir, gitName, gitEmail, "merge", "--no-edit", "origin/"+base)
 	for _, line := range strings.Split(mergeOut, "\n") {
 		if line = strings.TrimSpace(line); line != "" {
 			job.Append(store.LogLine{Type: "message", Content: line})
@@ -868,11 +914,25 @@ func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflic
 		"请逐个读取这些冲突文件，理解 \"ours\"（当前开发分支）与 \"theirs\"（主分支）双方的意图，"+
 		"合理整合两边的改动、消除冲突标记后写回文件。完成后执行 git add -A 暂存所有已解决的文件，"+
 		"再执行 git commit --no-edit 完成合并提交。不要留下任何冲突标记。用中文说明你的处理。", fileList)
+	// Hand Claude the project's git identity so its `git commit --no-edit`
+	// (run inside the merge step) carries the right author/committer on
+	// Docker hosts that have no ~/.gitconfig mounted.
+	var extraEnv []string
+	if reqRow != nil {
+		name, email := h.gitIdentityForReq(reqRow)
+		if name != "" {
+			extraEnv = append(extraEnv, "GIT_AUTHOR_NAME="+name, "GIT_COMMITTER_NAME="+name)
+		}
+		if email != "" {
+			extraEnv = append(extraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
+		}
+	}
 	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
 		Prompt:       prompt,
 		WorkDir:      devDir,
 		SystemPrompt: systemPrompt,
 		Model:        model,
+		ExtraEnv:     extraEnv,
 	})
 	configID, currency := h.activeConfigMeta()
 	runClaudeStream(jobSink{job}, cmd, "push-pr-resolve", &usageCtx{
