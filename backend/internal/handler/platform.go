@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/service"
@@ -71,4 +72,45 @@ func (h *PlatformHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// Update edits an existing platform token's metadata + optional Git identity.
+// The platform and the raw secret can't be changed in one shot here — secret
+// rotation only happens when new_token is non-empty (keeps the existing PAT
+// intact when the user only wants to fix the Git identity). Returns the
+// updated row with the raw secret omitted.
+// PUT /api/settings/tokens/{id}  body: {name, base_url, git_user_name?, git_user_email?, new_token?}
+func (h *PlatformHandler) Update(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		Name         string `json:"name"`
+		BaseURL      string `json:"base_url"`
+		GitUserName  string `json:"git_user_name"`
+		GitUserEmail string `json:"git_user_email"`
+		NewToken     string `json:"new_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_FIELDS", "name 不能为空")
+		return
+	}
+	if err := h.svc.Update(id, req.Name, req.BaseURL, req.GitUserName, req.GitUserEmail, req.NewToken); err != nil {
+		if strings.Contains(err.Error(), "token not found") {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	tok, err := h.svc.Get(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	// Don't echo the raw secret back to the client.
+	tok.Token = ""
+	writeJSON(w, http.StatusOK, tok)
 }
