@@ -20,8 +20,13 @@ set -eu
 # mount targets in docker-compose.yml and deploy/docker-compose.prod.yml.
 DATA_DIR="${NOVA_HOME:-/home/node}/.novaworkbench"
 WORK_DIR="${NOVA_WORK:-/home/node}/workspace"
+# Persist the Claude CLI session transcripts + plan files so re-deploying
+# the container (rebuilding the image, recreating the container) keeps
+# in-progress wizard/codegen sessions alive for --resume. Mirrors DATA_DIR
+# / WORK_DIR — host bind-mount + entrypoint chown handles ownership.
+CLAUDE_DIR="${NOVA_CLAUDE_HOME:-/home/node}/.claude"
 
-mkdir -p "$DATA_DIR" "$WORK_DIR"
+mkdir -p "$DATA_DIR" "$WORK_DIR" "$CLAUDE_DIR"
 
 # Backward-compat: if an older deployment wrote data to /root/... and
 # /home/node/... is empty, migrate it so users don't lose their projects.
@@ -33,11 +38,15 @@ if [ -d /root/workspace ] && [ -z "$(ls -A "$WORK_DIR" 2>/dev/null)" ]; then
   echo "[entrypoint] migrating /root/workspace → $WORK_DIR"
   cp -a /root/workspace/. "$WORK_DIR/" 2>/dev/null || true
 fi
+if [ -d /root/.claude ] && [ -z "$(ls -A "$CLAUDE_DIR" 2>/dev/null)" ]; then
+  echo "[entrypoint] migrating /root/.claude → $CLAUDE_DIR"
+  cp -a /root/.claude/. "$CLAUDE_DIR/" 2>/dev/null || true
+fi
 
 # Fix ownership of everything node will touch. -R is safe because the
 # only state these dirs hold is the bind-mount content; chowning it on
 # every start is a few ms and idempotent.
-chown -R node:node "$DATA_DIR" "$WORK_DIR"
+chown -R node:node "$DATA_DIR" "$WORK_DIR" "$CLAUDE_DIR"
 
 # Drop privileges and exec the server. su-exec (an Alpine-friendly
 # gosu-equivalent) replaces the shell so the server becomes PID 1's

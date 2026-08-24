@@ -37,6 +37,10 @@ echo ">>> Preparing persistent dirs"
 mkdir -p "${NOVA_HOME}/preview/data"
 # Per-project workspace (different branches clone different repos).
 mkdir -p "${NOVA_HOME}/preview/${PROJECT_NAME}/workspace"
+# Shared claude CLI session dir (transcripts/plan files). Sessions are isolated
+# by cwd-hash under ~/.claude/projects/<encoded-cwd>/ so different preview
+# projects don't collide even when the bind-mount is shared.
+mkdir -p "${NOVA_HOME}/preview/claude"
 
 echo ">>> Pulling ghcr.io/${GHCR_NAMESPACE}/nova:${IMAGE_TAG}"
 docker compose \

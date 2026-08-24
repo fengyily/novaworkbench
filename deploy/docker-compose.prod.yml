@@ -17,6 +17,11 @@ services:
       # drop-in.
       - ${HOME}/nova/prod/data:/home/node/.novaworkbench
       - ${HOME}/nova/prod/workspace:/home/node/workspace
+      # Persist claude CLI session transcripts + plan files so re-deploying
+      # the container keeps in-progress wizard/codegen sessions alive for
+      # --resume. Container runs as `node` (HOME=/home/node), so the in-container
+      # path is /home/node/.claude. Entrypoint chowns the bind-mount.
+      - ${HOME}/nova/prod/claude:/home/node/.claude
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9527/api/health"]
       interval: 10s

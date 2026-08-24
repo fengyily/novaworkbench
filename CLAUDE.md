@@ -31,7 +31,7 @@ npm run lint                     # oxlint
 npm run preview                  # serve the production build
 
 # Docker Compose (from repo root)
-docker-compose up                # both services; backend mounts ~/.novaworkbench and $HOME/workspace
+docker-compose up                # backend (uid 1000) mounts ~/.novaworkbench(+ claude subdir) and $HOME/workspace; entrypoint chowns bind-mounts on every start
 ```
 
 Env vars the backend reads: `NOVA_PORT` (default `9527`), `CLAUDE_BIN` (default `claude`), `CLAUDE_TIMEOUT` (default `120s`; coding jobs floor it to `30m`), `NOVA_DB_DRIVER` (`sqlite` default | `mysql` | `postgres`), `NOVA_DB_DSN`, `NOVA_DB_PATH` (sqlite file, default `~/.novaworkbench/data/nova.db`). The frontend reads `VITE_API_BASE` (default `http://localhost:9527`).

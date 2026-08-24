@@ -19,6 +19,12 @@ services:
       # Per-project workspace stays per-project (different branches clone
       # different repos into /home/node/workspace).
       - ${HOME}/nova/preview/${PROJECT_NAME}/workspace:/home/node/workspace
+      # Shared claude CLI session transcripts + plan files across all preview
+      # stacks. Each preview project's transcripts are naturally isolated by
+      # claude CLI's cwd-hash under ~/.claude/projects/<encoded-cwd>/, so
+      # sessions from different features don't collide. Entrypoint chowns the
+      # bind-mount to node (UID 1000).
+      - ${HOME}/nova/preview/claude:/home/node/.claude
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9527/api/health"]
       interval: 10s
