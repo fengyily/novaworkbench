@@ -786,13 +786,37 @@ export default function RequirementDetail() {
   // keepDone is set, persistDone additionally writes the "done" marker so a
   // refresh reloads THIS job's durable log — used by 继续开发, whose job log
   // becomes the new authoritative record replacing the one lost to a restart.
-  const streamJob = useCallback((jobId: string, opts?: { keepDone?: boolean; persistDone?: boolean }) => {
+  // skipFirst is used on reconnect (mount-time restore): the caller has just
+  // hydrated codingLines from the job snapshot, so we drop the first N SSE
+  // events the backend replays (they are already in codingLines) and only
+  // append new lines from there on. Without this, reconnecting to a running
+  // job doubles every historical line — once from the snapshot, once from
+  // the replay.
+  const streamJob = useCallback((jobId: string, opts?: { keepDone?: boolean; persistDone?: boolean; skipFirst?: number }) => {
     if (esRef.current) esRef.current.close();
     setCoding(true);
+
+    // Skip counter is captured per-stream — each new createEventStream call
+    // resets it, so multiple reconnects within the same component lifetime
+    // work correctly.
+    let seenCount = 0;
+    const skip = opts?.skipFirst ?? 0;
 
     esRef.current = createEventStream(
       `/api/wizard/jobs/${jobId}/stream`,
       (evt) => {
+        // job_done is terminal — never skip it, even if it lands within the
+        // replay window (it carries status/exit_code we need to act on).
+        if (evt.type !== 'job_done') {
+          // knowledge / message / tool_call / phase / error / done are all
+          // subject to the replay-skip: they correspond 1:1 to backend LogLines
+          // counted in `skip`.
+          if (seenCount < skip) {
+            seenCount++;
+            return;
+          }
+          seenCount++;
+        }
         if (evt.type === 'knowledge') {
           // Optional knowledge pre-read: surface the read titles instead of
           // appending the raw line to the coding panel.
@@ -1185,10 +1209,17 @@ export default function RequirementDetail() {
         }
         const { status, log } = json.data as { status: string; log: LogLine[] };
         if (!log || log.length === 0) return;
+        // rawCount = backend snapshot's total LogLine count, including
+        // knowledge rows that extractKnowledge filters out of codingLines.
+        // The SSE replay emits exactly `rawCount` events before the first
+        // live one, so we pass this as skipFirst to streamJob — otherwise the
+        // replay would re-append every historical line that the snapshot
+        // already hydrated, doubling the entire history on the panel.
+        const rawCount = log.length;
         const kb = extractKnowledge(log);
         if (kb.items.length > 0 || kb.empty) { setKnowledgeItems(kb.items); setKnowledgeEmpty(kb.empty); }
         if (kb.lines.length > 0) setCodingLines(coalesceLogLines(kb.lines));
-        if (status === 'running') streamJob(savedJobId);
+        if (status === 'running') streamJob(savedJobId, { skipFirst: rawCount });
       })
       .catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
