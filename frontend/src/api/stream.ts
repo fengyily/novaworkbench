@@ -29,7 +29,14 @@ export function createEventStream(
   // Accept a relative path (prepends API_BASE) or an absolute URL as-is.
   const url = path.startsWith('http') ? path : `${API_BASE}${path}`;
 
-  const headers: Record<string, string> = { Accept: 'text/event-stream' };
+  // Cache-Control: no-cache prevents intermediate proxies from caching the
+  // SSE response; X-Accel-Buffering: no on the response side (see
+  // backend/internal/handler/response.go writeSSEHeaders) handles nginx
+  // proxy buffering.
+  const headers: Record<string, string> = {
+    Accept: 'text/event-stream',
+    'Cache-Control': 'no-cache',
+  };
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
 

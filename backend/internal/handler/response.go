@@ -56,3 +56,16 @@ func writeErrorSuggestion(w http.ResponseWriter, code int, errCode, msg, suggest
 		},
 	})
 }
+
+// writeSSEHeaders sets the response headers required for an SSE stream.
+// X-Accel-Buffering: no disables nginx proxy buffering so each flushed frame
+// is forwarded to the client immediately instead of being held in nginx's
+// buffer (which manifested as delayed/batched output on desktop and missing
+// output on mobile when the upstream buffer was never flushed before the
+// connection was torn down by an intermediate proxy).
+func writeSSEHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+}
