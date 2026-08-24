@@ -17,7 +17,19 @@ The backend shells out to the **`claude` CLI** (`@anthropic-ai/claude-code`) for
 
 ## Commands
 
+The canonical build is **single-binary**: the frontend SPA is built into `frontend/dist`, copied to `backend/web/dist/`, then embedded into the Go binary via `//go:embed all:dist` (see `backend/web/embed.go`). The resulting Go binary serves the SPA at `/` with a react-router fallback.
+
 ```bash
+# Top-level Makefile (the production build path)
+make build                       # frontend build -> copy into backend/web/dist -> CGO_ENABLED=0 go build -> dist/nova
+make build-frontend              # frontend prod build only (npm ci + npm run build, then copy)
+make build-backend               # backend build only (assumes backend/web/dist exists; pair with NOVA_SKIP_FRONTEND=1)
+make run                         # dev backend only (frontend HMR runs separately)
+make doctor                      # scripts/check-build-deps.sh --with-frontend
+make clean                       # remove embedded dist, built binary, .deps-checked sentinel
+INSTALL=1 make build             # auto-install missing toolchain via scripts/check-build-deps.sh
+SKIP_DEPS_CHECK=1 make build     # bypass the preflight (CI cache, dev loop)
+
 # Backend (run from backend/)
 go run ./cmd/server              # dev server on :9527
 go build -o /app/server ./cmd/server   # what the Dockerfile builds
@@ -32,9 +44,12 @@ npm run preview                  # serve the production build
 
 # Docker Compose (from repo root)
 docker-compose up                # backend (uid 1000) mounts ~/.novaworkbench(+ claude subdir) and $HOME/workspace; entrypoint chowns bind-mounts on every start
+
+# Local debug launcher with PostgreSQL
+./run.sh                         # starts nova-postgres container, exports NOVA_DB_DRIVER=postgres, then go run ./cmd/server
 ```
 
-Env vars the backend reads: `NOVA_PORT` (default `9527`), `CLAUDE_BIN` (default `claude`), `CLAUDE_TIMEOUT` (default `120s`; coding jobs floor it to `30m`), `NOVA_DB_DRIVER` (`sqlite` default | `mysql` | `postgres`), `NOVA_DB_DSN`, `NOVA_DB_PATH` (sqlite file, default `~/.novaworkbench/data/nova.db`). The frontend reads `VITE_API_BASE` (default `http://localhost:9527`).
+Env vars the backend reads: `NOVA_PORT` (default `9527`), `CLAUDE_BIN` (default `claude`), `CLAUDE_TIMEOUT` (default `120s`; coding jobs floor it to `30m`), `NOVA_DB_DRIVER` (`sqlite` default | `mysql` | `postgres`), `NOVA_DB_DSN`, `NOVA_DB_PATH` (sqlite file, default `~/.novaworkbench/data/nova.db`), `NOVA_AUTOINSTALL` (default `1`; `0` disables preflight's auto-install of Claude CLI / Node / npm — install manually via the settings page instead), `NOVA_SKIP_FRONTEND` (pair with `make build-backend` when the embed dir already exists). The frontend reads `VITE_API_BASE` (default `http://localhost:9527`).
 
 ## Architecture
 
@@ -119,6 +134,12 @@ The gates map to status transitions: `draft → analyzing` (enter analyst chat) 
 
 `readProjectContext` (`wizard.go`) builds a ~40 KB prompt context by walking the project tree, always including doc files (`CLAUDE.md`, `AGENTS.md`, `README*`, `.cursorrules`) and source files whose paths match keywords from the requirement title. It skips `.git`/`node_modules`/`vendor`/`dist` and binary/large files.
 
+### Preflight (`internal/preflight/`)
+
+`preflight.New(CLAUDE_BIN)` builds a registry of runtime deps (`claude`, `node`, `npm`, `git`, `docker`) — `claude`/`node`/`npm` are required, `git`/`docker` are optional (docker enables the runner's compose sessions). `Registry.CheckAll` is network-free (LookPath + `--version`, 5s timeout); runs at startup, never halts the server. Surfaced at `GET /api/preflight` and folded into `/api/health` (`ready` flag = claude installed).
+
+`EnsureAll` / `Install` perform best-effort platform installs (`brew` on macOS, `nvm`/`npm` on Linux, etc., preferring user-space paths) and stream per-line progress into a `*store.Job` via the shared JobStore+SSE pattern, so the frontend renders a live "正在安装 Claude CLI..." panel. `NOVA_AUTOINSTALL=0` disables startup auto-install; the user can still trigger `POST /api/preflight/install` from the settings page. The `claude` dep's `Install` installs via `npm install -g @anthropic-ai/claude-code`; its `DependsOn` ensures `npm` (and thus `node`) is installed first. AI features degrade gracefully — `llm.Gateway` falls back to `analyzeStub` when the CLI is missing, so a host without claude still boots.
+
 ### Platform abstraction (`internal/platform/`)
 
 `platform.Client` interface (`ListOpenPRs`, `SubmitComment`) with three impls: `githubClient`, `gitlabClient`, `giteaClient`. `platform.New(platform, baseURL, token)` returns the right one — GitHub hits `api.github.com`; GitLab/Gitea need a `base_url` (Gitea requires it). Tokens are stored in the `platform_tokens` table and linked to a project via `projects.platform_token_id`. `review.go` lists PRs, starts an AI review job (Claude reads the diff in the project workdir and posts a comment), and streams the job.
@@ -126,6 +147,14 @@ The gates map to status transitions: `draft → analyzing` (enter analyst chat) 
 ### Scanner (`service/scanner.go`)
 
 `Scan` detects project type from indicator files (`go.mod` → Go, `package.json` → Node.js, etc.), records AI config files (`CLAUDE.md`/`AGENTS.md`/`.cursorrules`) in `projects.claude_files`, and indexes those docs plus a top-level structure summary into the `knowledge` table (upsert keyed on `source_ref`/`source_type`).
+
+### Deployment surfaces (`deploy/`, `terraform/`, `.github/workflows/`)
+
+- `deploy/docker-compose.prod.yml` + `docker-compose.nginx-proxy.yml` — production stack with nginx-proxy for TLS/host routing. `deploy/docker-compose.preview.yml` is the preview-channel variant.
+- `deploy/setup/` — host bootstrap scripts.
+- `terraform/` — infra-as-code for the production host.
+- `.github/workflows/deploy.yml` builds from repo root (matches `docker-compose.yml`'s `context: .`); `.github/workflows/terraform.yml` plans/applies the terraform stack.
+- `scripts/start.sh` / `scripts/start.ps1` — host boot helpers (parity with `run.sh`).
 
 ## Frontend
 
