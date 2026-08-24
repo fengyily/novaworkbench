@@ -120,6 +120,27 @@ Make sure the repo's GHCR visibility matches your intent (Settings → Packages)
 - Manually delete a preview: `PROJECT_NAME=req-xxx bash deploy/setup/cleanup-preview.sh`
   on the server.
 
+## Persistent state
+
+All backend state that must survive container rebuilds lives on the host via
+bind mounts. The container itself runs as the unprivileged `node` user
+(UID 1000); `backend/docker-entrypoint.sh` `chown`s the bind-mounts on every
+container start so the in-container `node` process can read/write them.
+
+| Concern          | Host path (prod)                         | Host path (preview)                                  | Host path (dev)               |
+|------------------|------------------------------------------|------------------------------------------------------|-------------------------------|
+| Nova app data/DB | `${HOME}/nova/prod/data`                 | `${HOME}/nova/preview/data` (shared across previews) | `~/.novaworkbench`            |
+| Project workspace| `${HOME}/nova/prod/workspace`            | `${HOME}/nova/preview/<project>/workspace` (per PR)  | `${HOME}/workspace`           |
+| Claude CLI state | `${HOME}/nova/prod/claude`               | `${HOME}/nova/preview/claude` (shared across previews; sessions isolated by cwd-hash) | `~/.novaworkbench/claude`     |
+
+The `claude` row persists the `~/.claude` directory (session transcripts,
+plan files, settings) so re-deploying the container keeps in-progress wizard
+and codegen sessions alive for `claude --resume`. Production prod dirs are
+auto-created on first `up`; preview dirs are pre-created by
+`deploy/setup/deploy-preview.sh`. Cleanup of a preview tears down only its
+workspace dir; the shared `preview/data` and `preview/claude` are kept so
+sibling previews and DB state are not affected.
+
 ## Files
 
 ```

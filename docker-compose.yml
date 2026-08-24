@@ -35,6 +35,12 @@ services:
       # start so the host's existing dirs keep working.
       - ~/.novaworkbench:/home/node/.novaworkbench
       - ${HOME}/workspace:/home/node/workspace
+      # Persist claude CLI session transcripts + plan files into the
+      # Nova-scoped host dir (keeps the developer's personal ~/.claude
+      # untouched). Nova-scoped follows the dev convention of keeping all
+      # Nova state under ~/.novaworkbench. Entrypoint chowns the bind-mount
+      # to node (UID 1000) on every start.
+      - ~/.novaworkbench/claude:/home/node/.claude
     restart: unless-stopped
     healthcheck:
       # /api/health now includes a deps summary + `ready` flag (true when
