@@ -31,13 +31,15 @@ func (h *PlatformHandler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 // Create adds a new platform token.
-// POST /api/settings/tokens  body: {name, platform, base_url, token}
+// POST /api/settings/tokens  body: {name, platform, base_url, token, git_user_name?, git_user_email?}
 func (h *PlatformHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name     string `json:"name"`
-		Platform string `json:"platform"`
-		BaseURL  string `json:"base_url"`
-		Token    string `json:"token"`
+		Name         string `json:"name"`
+		Platform     string `json:"platform"`
+		BaseURL      string `json:"base_url"`
+		Token        string `json:"token"`
+		GitUserName  string `json:"git_user_name"`
+		GitUserEmail string `json:"git_user_email"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
@@ -52,7 +54,7 @@ func (h *PlatformHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tok, err := h.svc.Create(req.Name, req.Platform, req.BaseURL, req.Token)
+	tok, err := h.svc.Create(req.Name, req.Platform, req.BaseURL, req.Token, req.GitUserName, req.GitUserEmail)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return

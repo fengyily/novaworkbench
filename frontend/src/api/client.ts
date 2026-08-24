@@ -417,14 +417,25 @@ export interface PlatformToken {
   name: string;
   platform: string;
   base_url: string;
+  // Git commit identity bound to this token — injected as `-c user.name=...`
+  // / `-c user.email=...` so commits work in Docker hosts without a mounted
+  // ~/.gitconfig. Empty values fall back to git's normal config lookup.
+  git_user_name: string;
+  git_user_email: string;
   created_at: string;
   updated_at: string;
 }
 
 export const platformApi = {
   list: () => api.get<PlatformToken[]>('/api/settings/tokens'),
-  create: (data: { name: string; platform: string; base_url: string; token: string }) =>
-    api.post<PlatformToken>('/api/settings/tokens', data),
+  create: (data: {
+    name: string;
+    platform: string;
+    base_url: string;
+    token: string;
+    git_user_name?: string;
+    git_user_email?: string;
+  }) => api.post<PlatformToken>('/api/settings/tokens', data),
   delete: (id: string) => api.delete<{ status: string }>(`/api/settings/tokens/${id}`),
 };
 
