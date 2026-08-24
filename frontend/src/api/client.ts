@@ -436,6 +436,16 @@ export const platformApi = {
     git_user_name?: string;
     git_user_email?: string;
   }) => api.post<PlatformToken>('/api/settings/tokens', data),
+  // Edit the editable fields of an existing token. Token secret is left alone
+  // by default (use new_token to rotate it). Updates immediately become the
+  // commit identity used by the wizard's merge push.
+  update: (id: string, data: {
+    name: string;
+    base_url: string;
+    git_user_name?: string;
+    git_user_email?: string;
+    new_token?: string;
+  }) => api.put<PlatformToken>(`/api/settings/tokens/${id}`, data),
   delete: (id: string) => api.delete<{ status: string }>(`/api/settings/tokens/${id}`),
 };
 

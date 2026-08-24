@@ -67,13 +67,22 @@ func (s *PlatformTokenService) Create(name, platform, baseURL, token, gitUserNam
 	}, nil
 }
 
-// Update rewrites the editable fields of a token row. The raw secret is left
-// alone here; the handler validates and passes the new value (or empty +
-// keep_secret flag).
-func (s *PlatformTokenService) Update(id, name, baseURL, gitUserName, gitUserEmail string) error {
-	res, err := s.db.Exec(
-		`UPDATE platform_tokens SET name = ?, base_url = ?, git_user_name = ?, git_user_email = ?, updated_at = ? WHERE id = ?`,
-		name, baseURL, gitUserName, gitUserEmail, time.Now(), id)
+// Update rewrites the editable fields of a token row. updateSecret is the
+// raw PAT to rotate — pass "" to keep the existing secret untouched (the
+// common case when only the Git identity changes).
+func (s *PlatformTokenService) Update(id, name, baseURL, gitUserName, gitUserEmail, updateSecret string) error {
+	now := time.Now()
+	var res sql.Result
+	var err error
+	if updateSecret != "" {
+		res, err = s.db.Exec(
+			`UPDATE platform_tokens SET name = ?, base_url = ?, git_user_name = ?, git_user_email = ?, token = ?, updated_at = ? WHERE id = ?`,
+			name, baseURL, gitUserName, gitUserEmail, updateSecret, now, id)
+	} else {
+		res, err = s.db.Exec(
+			`UPDATE platform_tokens SET name = ?, base_url = ?, git_user_name = ?, git_user_email = ?, updated_at = ? WHERE id = ?`,
+			name, baseURL, gitUserName, gitUserEmail, now, id)
+	}
 	if err != nil {
 		return err
 	}
