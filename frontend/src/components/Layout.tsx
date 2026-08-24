@@ -194,7 +194,18 @@ export default function Layout() {
                   className="app-header-back"
                   aria-label="返回"
                   onClick={() => navigate(sectionLabel.back!)}
-                >‹</button>
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                    <path
+                      d="M15 5.5 L8.2 12 L15 18.5"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
               )}
               <span className="app-header-section-label">{sectionLabel.label}</span>
             </span>
