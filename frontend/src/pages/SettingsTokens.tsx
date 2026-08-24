@@ -26,6 +26,8 @@ export default function SettingsTokens() {
     platform: 'github',
     base_url: '',
     token: '',
+    git_user_name: '',
+    git_user_email: '',
   });
 
   useEffect(() => {
@@ -36,7 +38,14 @@ export default function SettingsTokens() {
   }, []);
 
   const openModal = () => {
-    setForm({ name: '', platform: 'github', base_url: '', token: '' });
+    setForm({
+      name: '',
+      platform: 'github',
+      base_url: '',
+      token: '',
+      git_user_name: '',
+      git_user_email: '',
+    });
     setError('');
     setShowModal(true);
   };
@@ -102,6 +111,7 @@ export default function SettingsTokens() {
               <th>名称</th>
               <th>平台</th>
               <th>Base URL</th>
+              <th>Git 身份</th>
               <th>创建时间</th>
               <th></th>
             </tr>
@@ -116,6 +126,11 @@ export default function SettingsTokens() {
                   </span>
                 </td>
                 <td className="path-cell">{tok.base_url || '—'}</td>
+                <td className="path-cell">
+                  {tok.git_user_name || tok.git_user_email
+                    ? `${tok.git_user_name} <${tok.git_user_email}>`
+                    : '—'}
+                </td>
                 <td>{new Date(tok.created_at).toLocaleDateString('zh-CN')}</td>
                 <td>
                   <button
@@ -183,6 +198,29 @@ export default function SettingsTokens() {
                 value={form.token}
                 onChange={e => setForm(f => ({ ...f, token: e.target.value }))}
               />
+            </div>
+
+            <div className="form-group">
+              <label>Git 用户名（提交者姓名）</label>
+              <input
+                className="form-input"
+                placeholder="如：Zhang San"
+                value={form.git_user_name}
+                onChange={e => setForm(f => ({ ...f, git_user_name: e.target.value }))}
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Git 邮箱（提交者邮箱）</label>
+              <input
+                className="form-input"
+                placeholder="如：zhangsan@example.com"
+                value={form.git_user_email}
+                onChange={e => setForm(f => ({ ...f, git_user_email: e.target.value }))}
+              />
+              <small className="form-hint">
+                Docker 环境下没有挂载宿主机的 ~/.gitconfig 时，提交会使用这里填写的身份。可与平台账号的姓名/邮箱保持一致。
+              </small>
             </div>
 
             <div className="form-actions">

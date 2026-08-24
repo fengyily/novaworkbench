@@ -227,7 +227,12 @@ func remoteURL(dir string) string {
 
 // commitAll stages everything and commits with msg. Returns committed=true if a
 // commit was created; false (clean tree, nothing to commit) is NOT an error.
-func commitAll(dir, msg string) (committed bool, err error) {
+// gitName / gitEmail, when non-empty, are injected as `-c user.name=...` /
+// `-c user.email=...` to give the commit a stable identity on hosts that have
+// no global git config (notably Docker containers without ~/.gitconfig mounted).
+// Either may be empty — the empty side is skipped and git falls back to its
+// own config lookup, which keeps existing behaviour on developer machines.
+func commitAll(dir, msg, gitName, gitEmail string) (committed bool, err error) {
 	if _, err := gitRun(dir, "add", "-A"); err != nil {
 		return false, err
 	}
@@ -242,8 +247,24 @@ func commitAll(dir, msg string) (committed bool, err error) {
 	if strings.TrimSpace(out) == "" {
 		return false, nil
 	}
-	if _, err := gitRun(dir, "commit", "-m", msg); err != nil {
-		return false, err
+
+	// Build `git -C <dir> [-c user.name=...] [-c user.email=...] commit -m <msg>`.
+	// Args are passed as a string slice (no shell), so spaces / quotes in the
+	// identity are safe.
+	gitArgs := []string{"-C", dir}
+	if gitName != "" {
+		gitArgs = append(gitArgs, "-c", "user.name="+gitName)
+	}
+	if gitEmail != "" {
+		gitArgs = append(gitArgs, "-c", "user.email="+gitEmail)
+	}
+	gitArgs = append(gitArgs, "commit", "-m", msg)
+	cmd := exec.Command("git", gitArgs...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return false, fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
 	}
 	return true, nil
 }
@@ -425,12 +446,17 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 		defer h.persistJob(job, reqRow.ID, "")
 		log.Printf("[merge/local] job %s req %s: %s → %s", job.ID, reqRow.ID, dev, target)
 
+		// Pull the project's git identity from its platform token (best-effort;
+		// empty values fall back to host git config so existing behaviour is
+		// preserved on dev machines).
+		gitName, gitEmail := h.gitIdentityForReq(reqRow)
+
 		// 1. Commit pending dev-branch changes first (in the worktree / checkout
 		//    where dev is actually checked out).
 		if commitMsg == "" {
 			commitMsg = dev
 		}
-		if committed, err := commitAll(devDir, commitMsg); err != nil {
+		if committed, err := commitAll(devDir, commitMsg, gitName, gitEmail); err != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ 提交失败: " + err.Error()})
 			job.Finish(1, store.JobError)
 			return
@@ -564,8 +590,24 @@ func (h *MergeHandler) Continue(w http.ResponseWriter, r *http.Request) {
 			job.Finish(1, store.JobError)
 			return
 		}
-		if _, err := gitRun(dir, "commit", "--no-edit"); err != nil {
-			job.Append(store.LogLine{Type: "error", Content: "❌ 完成合并提交失败: " + err.Error()})
+
+		// Conclude the merge with a real `git -c user.name=... -c user.email=...`
+		// commit so it works on Docker hosts with no ~/.gitconfig mounted.
+		gitName, gitEmail := h.gitIdentityForReq(reqRow)
+		gitArgs := []string{"-C", dir}
+		if gitName != "" {
+			gitArgs = append(gitArgs, "-c", "user.name="+gitName)
+		}
+		if gitEmail != "" {
+			gitArgs = append(gitArgs, "-c", "user.email="+gitEmail)
+		}
+		gitArgs = append(gitArgs, "commit", "--no-edit")
+		cmd := exec.Command("git", gitArgs...)
+		var stdout, stderr strings.Builder
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			job.Append(store.LogLine{Type: "error", Content: "❌ 完成合并提交失败: " + strings.TrimSpace(stderr.String()) + ": " + err.Error()})
 			job.Finish(1, store.JobError)
 			return
 		}
@@ -694,12 +736,17 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 			base = project.DefaultBranch
 		}
 
+		// Pull the project's git identity from its platform token (best-effort;
+		// empty values fall back to host git config so existing behaviour is
+		// preserved on dev machines).
+		gitName, gitEmail := h.gitIdentityForReq(reqRow)
+
 		// 1. Commit pending dev-branch changes.
 		commitMsg := body.CommitMessage
 		if commitMsg == "" {
 			commitMsg = dev
 		}
-		if committed, err := commitAll(devDir, commitMsg); err != nil {
+		if committed, err := commitAll(devDir, commitMsg, gitName, gitEmail); err != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ 提交失败: " + err.Error()})
 			job.Finish(1, store.JobError)
 			return
@@ -968,6 +1015,27 @@ func (h *MergeHandler) loadProjectNoWrite(reqID string) (*model.Project, error) 
 		return nil, err
 	}
 	return h.projectSvc.Get(reqRow.ProjectID)
+}
+
+// gitIdentityForReq returns the (name, email) the merge commit should use,
+// looked up from the requirement's project → platform_token. Empty strings
+// when the project has no token, the token has no identity set, or any
+// lookup fails — commitAll treats empty as "skip -c injection" and falls
+// back to git's normal config lookup, which preserves existing behaviour
+// on dev machines that already have a global ~/.gitconfig.
+func (h *MergeHandler) gitIdentityForReq(reqRow *model.Requirement) (string, string) {
+	if h.platformSvc == nil || reqRow == nil {
+		return "", ""
+	}
+	project, err := h.projectSvc.Get(reqRow.ProjectID)
+	if err != nil || project == nil || project.PlatformTokenID == "" {
+		return "", ""
+	}
+	tok, err := h.platformSvc.Get(project.PlatformTokenID)
+	if err != nil || tok == nil {
+		return "", ""
+	}
+	return tok.GitUserName, tok.GitUserEmail
 }
 
 // Cleanup removes the requirement's isolated worktree (and prunes git's

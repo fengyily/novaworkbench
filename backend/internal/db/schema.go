@@ -348,6 +348,11 @@ var alterColumns = []string{
 	// is NOT snapshotted — edits take effect retroactively ("设置后生效").
 	`ALTER TABLE token_usage ADD COLUMN claude_config_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE token_usage ADD COLUMN currency TEXT NOT NULL DEFAULT ''`,
+	// Git commit identity bound to each platform token (so Docker runs without
+	// a mounted ~/.gitconfig can still commit as the right account). Empty =
+	// fall back to git's normal config lookup (host ~/.gitconfig etc.).
+	`ALTER TABLE platform_tokens ADD COLUMN git_user_name  TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE platform_tokens ADD COLUMN git_user_email TEXT NOT NULL DEFAULT ''`,
 }
 
 var (
