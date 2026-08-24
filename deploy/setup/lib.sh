@@ -155,6 +155,76 @@ EOF
   fi
 }
 
+# ensure_nginx_proxy_sse_tuning — write a vhost.d/default override into the
+# INTERNAL nginx-proxy container so its proxy→backend leg matches the host
+# nginx's SSE tuning (proxy_buffering off, proxy_read_timeout 3600s). The host
+# nginx leg is already tuned by ensure_nova_nginx_vhost; the internal
+# nginx-proxy image defaults to proxy_read_timeout 60s + proxy_buffering on,
+# which tears down long-lived SSE streams (claude design/coding jobs) during
+# claude's silent thinking gaps. nginx-proxy includes /etc/nginx/vhost.d/default
+# in every vhost server block when no host-specific override exists, so one
+# file covers prod.nova + every req-xxx.nova preview.
+#
+# Idempotent: rewrites + regenerates only on content change. The backend also
+# emits a 15s SSE comment heartbeat (sse.go), so this is belt-and-braces.
+# Safe: the file holds only proxy_* directives (valid in http/server/location),
+# so it cannot fail `nginx -t`; if regeneration ever leaves the container down,
+# the override is removed and the container restarted to restore routing.
+ensure_nginx_proxy_sse_tuning() {
+  local dir="/etc/nginx/vhost.d"
+  local f="${dir}/default"
+  sudo mkdir -p "${dir}"
+
+  local tmp
+  tmp=$(mktemp)
+  cat > "${tmp}" <<'EOF'
+# Managed by NovaWorkbench deploy (ensure_nginx_proxy_sse_tuning) — do not edit.
+# SSE / long-poll tuning for the internal nginx-proxy → backend leg. The host
+# nginx already disables buffering and raises proxy_read_timeout to 3600s; this
+# mirrors it here so the internal proxy's 60s default doesn't tear down
+# long-lived SSE streams (claude design/coding jobs) during silent thinking
+# gaps. (The backend also emits a 15s SSE comment heartbeat, so this is
+# belt-and-braces.)
+proxy_read_timeout 3600s;
+proxy_send_timeout 3600s;
+proxy_buffering off;
+proxy_cache off;
+chunked_transfer_encoding on;
+EOF
+
+  local changed=0
+  if [[ ! -f "${f}" ]] || ! sudo cmp -s "${tmp}" "${f}"; then
+    sudo cp "${tmp}" "${f}"
+    changed=1
+  fi
+  rm -f "${tmp}"
+  if [[ "${changed}" -ne 1 ]]; then
+    return 0
+  fi
+
+  echo ">>> (re)installed nginx-proxy vhost.d/default SSE tuning; regenerating nginx-proxy config"
+  # Restart (not reload) so docker-gen regenerates the config and the
+  # vhost.d/default include takes effect; a plain `nginx -s reload` would
+  # reuse the previously generated config that lacks the include.
+  docker restart nginx-proxy >/dev/null
+
+  # Safety: if the regenerated config is somehow invalid and the container
+  # fails to come back up, remove the override and restart to restore routing.
+  local up=0
+  for _ in {1..10}; do
+    if docker inspect --format='{{.State.Running}}' nginx-proxy 2>/dev/null | grep -q true; then
+      up=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "${up}" -ne 1 ]]; then
+    echo "!! nginx-proxy failed to restart after SSE tuning — reverting vhost.d/default" >&2
+    sudo rm -f "${f}"
+    docker restart nginx-proxy >/dev/null
+  fi
+}
+
 # ensure_wildcard_cert — idempotent *.nova.yishield.com issuance + renewal
 # via Aliyun DNS-01. Safe to call on every deploy: issues only when absent,
 # renews only within RENEW_DAYS of expiry, and only re-installs / reloads the

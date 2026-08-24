@@ -16,6 +16,7 @@ ensure_nginx_proxy_network
 ensure_nginx_proxy_container
 ensure_wildcard_cert
 ensure_nova_nginx_vhost
+ensure_nginx_proxy_sse_tuning
 
 : "${GHCR_NAMESPACE:?GHCR_NAMESPACE required}"
 : "${IMAGE_TAG:?IMAGE_TAG required}"
