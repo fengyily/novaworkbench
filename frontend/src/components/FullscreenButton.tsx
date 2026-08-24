@@ -3,8 +3,6 @@
 // (see .is-fullscreen in RequirementDetail.css), so this button is purely
 // a state toggle + label flip.
 
-import React from 'react';
-
 export interface FullscreenButtonProps {
   isFullscreen: boolean;
   onClick: () => void;
