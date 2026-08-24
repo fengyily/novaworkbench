@@ -20,6 +20,8 @@ env:
 
 jobs:
   build:
+    # Skip build on PR close — that event only triggers cleanup-preview.
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -209,7 +211,12 @@ jobs:
         id: preview
         run: |
           BRANCH="${{ github.event.pull_request.head.ref }}"
-          PROJECT=$(echo "$BRANCH" | tr '_/' '-' | cut -c1-63)
+          # Mirror deploy-preview: strip the feat/ prefix first, then
+          # replace underscores/slashes with dashes. This ensures the
+          # PROJECT_NAME matches the one used at deploy time.
+          # e.g. feat/req_af3ca270 → req_af3ca270 → req-af3ca270
+          SUFFIX="${BRANCH#feat/}"
+          PROJECT=$(echo "$SUFFIX" | tr '_/' '-' | cut -c1-63)
           echo "project_name=${PROJECT}" >> $GITHUB_OUTPUT
 
       - name: Cleanup preview on PR close
