@@ -5,6 +5,8 @@ import { appendLogLine, coalesceLogLines, type LogLine } from '../utils/logLines
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import ModelSelect from './ModelSelect';
 import AtMentionTextarea from './AtMentionTextarea';
+import { FullscreenButton } from './FullscreenButton';
+import { useFullscreen } from '../utils/useFullscreen';
 
 interface Props {
   reqId: string;
@@ -36,6 +38,7 @@ const LABEL = { design: '技术方案', coding: '开发指令' };
 
 export default function DocRefineChat({ reqId, projectPath, docType, currentDoc, model, defaultModel, applyJobId, onTurnDone }: Props) {
   const [expanded, setExpanded] = useState(false);
+  const { isFullscreen, toggle: toggleFullscreen, exit: exitFullscreen } = useFullscreen();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [working, setWorking] = useState(false);
@@ -349,10 +352,14 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
             <button className="btn btn-sm" onClick={handleClear} title="清除对话">🗑</button>
           )}
           <button className="btn btn-sm" onClick={() => setExpanded(false)}>收起</button>
+          <FullscreenButton isFullscreen={isFullscreen} onClick={toggleFullscreen} />
         </div>
       </div>
 
-      <div className="chat-panel" ref={chatRef}>
+      <div className={`chat-panel ${isFullscreen ? 'is-fullscreen' : ''}`} ref={chatRef}>
+        {isFullscreen && (
+          <FullscreenButton isFullscreen={true} onClick={exitFullscreen} variant="floating" />
+        )}
         {messages.length === 0 && (
           <div className="chat-msg ai">
             <span className="chat-role">🤖 AI</span>
