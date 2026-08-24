@@ -53,5 +53,12 @@ chown -R node:node "$DATA_DIR" "$WORK_DIR" "$CLAUDE_DIR"
 # child but receives signals from tini cleanly. HOME is set explicitly
 # because Go's os/user defaults to /etc/passwd and an unset HOME breaks
 # XDG lookups inside the node processes.
+# SHELL is set explicitly because the claude CLI's Bash tool reads it to
+# spawn the shell for tool calls (e.g. `git commit` during coding). Alpine
+# doesn't set SHELL by default and the Bash tool falls back to /bin/bash,
+# which is why bash is installed in the Dockerfile — without this the
+# coding-stage Claude reports "shell 不可用 (SHELL 未配置)" and refuses to
+# run git, falling back to telling the user to copy-paste commands.
 export HOME="${NOVA_HOME:-/home/node}"
-exec su-exec node env "HOME=$HOME" "$@"
+export SHELL="/bin/bash"
+exec su-exec node env "HOME=$HOME" "SHELL=$SHELL" "$@"
