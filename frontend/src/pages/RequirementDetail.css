@@ -1058,3 +1058,77 @@
   }
   .mobile-cta-bar > * { min-height: 44px; width: 100%; }
 }
+
+/* ── SSE panel fullscreen toggle ───────────────────────────────
+   `.is-fullscreen` is added to an SSE output container (`.chat-panel`,
+   `.coding-panel`, `.tool-log`, etc.) when the user activates the
+   fullscreen button. The visual is a CSS-only transform — React state,
+   refs, and the live EventStream are preserved, so the SSE feed keeps
+   flowing uninterrupted. Pair with the close button rendered inside
+   the panel itself (or with Esc) to exit. */
+.fullscreen-toggle-btn {
+  /* matches .btn .btn-sm but keeps a dedicated class so future tweaks
+     (icon-only / hover / focus ring) don't ripple through every toolbar */
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.is-fullscreen {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 9999 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: 100vw !important;
+  max-height: 100vh !important;
+  margin: 0 !important;
+  border-radius: 0 !important;
+  padding: 32px 28px !important;
+  background: #0f172a !important;          /* matches the coding panel dark bg */
+  color: #e2e8f0;
+  overflow-y: auto !important;
+  box-shadow: none !important;
+}
+
+/* Light-theme chat panels (deep-refine / doc-refine chat-panel) need a
+   light surface when fullscreen, otherwise the message bubble bg clashes. */
+.chat-panel.is-fullscreen {
+  background: #ffffff !important;
+  color: #1e293b;
+}
+
+/* Floating "exit fullscreen" affordance rendered inside the panel
+   while it is fullscreen — the panel's own toolbar is no longer in
+   view once the container goes fixed. */
+.fullscreen-close-btn {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 10000;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid #cbd5e1;
+  color: #1e293b;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
+}
+.fullscreen-close-btn:hover {
+  background: #ffffff;
+  color: #0f172a;
+}
+
+@media (max-width: 768px) {
+  .is-fullscreen {
+    padding: 24px 16px calc(24px + var(--sab)) !important;
+  }
+  .fullscreen-close-btn {
+    top: 12px;
+    right: 12px;
+    padding: 8px 12px;     /* larger tap target on touch */
+    min-height: 36px;
+  }
+}

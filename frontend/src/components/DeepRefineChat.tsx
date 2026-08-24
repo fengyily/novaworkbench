@@ -7,6 +7,8 @@ import AtMentionTextarea from './AtMentionTextarea';
 import { appendLogLine, type LogLine } from '../utils/logLines';
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import ModelSelect from './ModelSelect';
+import { FullscreenButton } from './FullscreenButton';
+import { useFullscreen } from '../utils/useFullscreen';
 
 interface Props {
   reqId: string;
@@ -35,6 +37,7 @@ export default function DeepRefineChat({
   reqId, projectPath, requirementTitle, currentAnalysis, analysisJobId, model, defaultModel, onTurnDone, onWorkingChange, onGenerateDesign, onReset,
 }: Props) {
   const [expanded, setExpanded] = useState(true);
+  const { isFullscreen, toggle: toggleFullscreen, exit: exitFullscreen } = useFullscreen();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [chatting, setChatting] = useState(false);
@@ -408,10 +411,14 @@ export default function DeepRefineChat({
             <button className="btn btn-sm" onClick={handleClear} title="清除对话记录">🗑</button>
           )}
           <button className="btn btn-sm" onClick={() => setExpanded(false)}>收起</button>
+          <FullscreenButton isFullscreen={isFullscreen} onClick={toggleFullscreen} />
         </div>
       </div>
 
-      <div className="chat-panel" ref={chatRef}>
+      <div className={`chat-panel ${isFullscreen ? 'is-fullscreen' : ''}`} ref={chatRef}>
+        {isFullscreen && (
+          <FullscreenButton isFullscreen={true} onClick={exitFullscreen} variant="floating" />
+        )}
         {messages.map((msg, i) => {
           // Skip the empty streaming placeholder — the spinner block below
           // renders the "starting" indicator. Once content arrives this

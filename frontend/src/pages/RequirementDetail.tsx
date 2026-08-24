@@ -12,6 +12,8 @@ import { exportDesignPdf } from '../utils/exportDesignPdf';
 import { appendLogLine, coalesceLogLines, type LogLine } from '../utils/logLines';
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import './RequirementDetail.css';
+import { FullscreenButton } from '../components/FullscreenButton';
+import { useFullscreen } from '../utils/useFullscreen';
 
 interface DesignData {
   overview?: string;
@@ -257,6 +259,13 @@ export default function RequirementDetail() {
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
+  // Independent fullscreen controllers for the three SSE panels that live
+  // here (design / coding / merge). Each panel toggles its own state via a
+  // toolbar button; CSS `.is-fullscreen` swaps the panel into a fixed
+  // full-viewport surface without disturbing React state or the live SSE.
+  const designFs = useFullscreen();
+  const codingFs = useFullscreen();
+  const mergeFs = useFullscreen();
   // Live "analyst turn running" signal lifted from DeepRefineChat, so the
   // header Claude-status badge is accurate during an in-flight turn.
   const [analystWorking, setAnalystWorking] = useState(false);
@@ -1827,6 +1836,7 @@ export default function RequirementDetail() {
                 {exporting ? '⏳ 导出中...' : '📄 导出 PDF'}
               </button>
             )}
+            <FullscreenButton isFullscreen={designFs.isFullscreen} onClick={designFs.toggle} />
           </div>
 
           {/* Optional knowledge pre-read display (renders only when the user
@@ -1834,7 +1844,14 @@ export default function RequirementDetail() {
           <KnowledgeReadPanel items={knowledgeItems} empty={knowledgeEmpty} projectId={project?.id} />
 
           {designPanelOpen && (
-            <div className="coding-panel" ref={designRef} style={{ marginBottom: 16 }}>
+            <div
+              className={`coding-panel ${designFs.isFullscreen ? 'is-fullscreen' : ''}`}
+              ref={designRef}
+              style={designFs.isFullscreen ? undefined : { marginBottom: 16 }}
+            >
+              {designFs.isFullscreen && (
+                <FullscreenButton isFullscreen onClick={designFs.exit} variant="floating" />
+              )}
               <CodingLines lines={designLines} working={designing} />
               {designProcessActive && <div className="coding-line coding-line-tool_call">⏳ Claude 正在 plan 模式下制定技术方案...</div>}
             </div>
@@ -1957,7 +1974,10 @@ export default function RequirementDetail() {
           )}
 
           {(codingLines.length > 0 || coding) && (
-            <div className="coding-panel" ref={codingRef}>
+            <div className={`coding-panel ${codingFs.isFullscreen ? 'is-fullscreen' : ''}`} ref={codingRef}>
+              {codingFs.isFullscreen && (
+                <FullscreenButton isFullscreen onClick={codingFs.exit} variant="floating" />
+              )}
               <CodingLines lines={codingLines} working={coding} />
               {coding && <div className="coding-line coding-line-tool_call">⏳ Claude 正在工作...</div>}
             </div>
@@ -2060,7 +2080,10 @@ export default function RequirementDetail() {
                 )}
 
                 {mergeLines.length > 0 && (
-                  <div className="coding-panel merge-panel">
+                  <div className={`coding-panel merge-panel ${mergeFs.isFullscreen ? 'is-fullscreen' : ''}`}>
+                    {mergeFs.isFullscreen && (
+                      <FullscreenButton isFullscreen onClick={mergeFs.exit} variant="floating" />
+                    )}
                     <CodingLines lines={mergeLines} working={merging} />
                     {merging && <div className="coding-line coding-line-tool_call">⏳ 执行中...</div>}
                   </div>
