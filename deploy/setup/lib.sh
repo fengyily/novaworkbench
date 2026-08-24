@@ -94,8 +94,19 @@ ensure_nova_nginx_vhost() {
 # Managed by NovaWorkbench deploy (ensure_nova_nginx_vhost) — do not edit by hand.
 # Host nginx terminates TLS for *.nova.yishield.com, then forwards to the
 # internal nginx-proxy which routes by Host to the matching backend container.
+#
+# HTTP/2 is intentionally DISABLED (`listen 443 ssl` instead of
+# `listen 443 ssl http2`) because the upstream (nginx-proxy → Go backend)
+# serves SSE over HTTP/1.1 chunked transfer encoding. When this vhost
+# terminates HTTP/2 on the client side, nginx has to repackage every
+# upstream chunked SSE frame as an HTTP/2 DATA frame; long-lived streams
+# then trigger `net::ERR_HTTP2_PROTOCOL_ERROR 200 (OK)` in the browser
+# (flow control / trailing-headers edge cases), which discards the entire
+# SSE response and leaves the UI with no output. Reverting to plain
+# HTTPS/HTTP/1.1 gives SSE a stable end-to-end path. Re-enable http2 once
+# the upstream chain supports native HTTP/2.
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
     server_name *.nova.yishield.com nova.yishield.com;
 
     ssl_certificate     ${NOVA_CERT_DIR}/${NOVA_DOMAIN}.crt;
@@ -107,10 +118,17 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
+        # Force HTTP/1.1 to nginx-proxy (already HTTP-only upstream) and
+        # disable all buffering so each SSE frame is flushed to the browser
+        # immediately. SSE backend responses carry X-Accel-Buffering: no;
+        # this is the belt-and-braces version for any non-SSE streaming path.
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_set_header Connection "";
+        chunked_transfer_encoding on;
         proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
     }
 }
 
