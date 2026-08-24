@@ -138,33 +138,12 @@ func (h *PreflightHandler) StreamJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rc := http.NewResponseController(w)
-	writeSSEHeaders(w)
-	w.WriteHeader(http.StatusOK)
-	rc.Flush()
-
-	ch, _ := job.Subscribe()
-	defer job.Unsubscribe(ch)
-
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case line, open := <-ch:
-			if !open {
-				_, status, exitCode := job.Snapshot()
-				doneData, _ := json.Marshal(map[string]interface{}{
-					"type":      "job_done",
-					"status":    string(status),
-					"exit_code": exitCode,
-				})
-				fmt.Fprintf(w, "data: %s\n\n", string(doneData))
-				rc.Flush()
-				return
-			}
-			data, _ := json.Marshal(line)
-			fmt.Fprintf(w, "data: %s\n\n", string(data))
-			rc.Flush()
-		}
-	}
+	streamJobSSE(w, r, job, func(status store.JobStatus, exitCode int) []byte {
+		b, _ := json.Marshal(map[string]interface{}{
+			"type":      "job_done",
+			"status":    string(status),
+			"exit_code": exitCode,
+		})
+		return b
+	})
 }

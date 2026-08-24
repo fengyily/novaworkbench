@@ -1654,39 +1654,17 @@ func (h *WizardHandler) StreamJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rc := http.NewResponseController(w)
-	writeSSEHeaders(w)
-	w.WriteHeader(http.StatusOK)
-	rc.Flush()
-
-	ch, _ := job.Subscribe()
-	defer job.Unsubscribe(ch)
-
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case line, open := <-ch:
-			if !open {
-				// Job finished — send final status event and close
-				_, status, exitCode := job.Snapshot()
-				doneData, _ := json.Marshal(map[string]interface{}{
-					"type":        "job_done",
-					"status":      string(status),
-					"exit_code":   exitCode,
-					"started_at":  job.StartedAt.UnixMilli(),
-					"finished_at": job.FinishedAt.UnixMilli(),
-					"duration_ms": job.FinishedAt.Sub(job.StartedAt).Milliseconds(),
-				})
-				fmt.Fprintf(w, "data: %s\n\n", string(doneData))
-				rc.Flush()
-				return
-			}
-			data, _ := json.Marshal(line)
-			fmt.Fprintf(w, "data: %s\n\n", string(data))
-			rc.Flush()
-		}
-	}
+	streamJobSSE(w, r, job, func(status store.JobStatus, exitCode int) []byte {
+		doneData, _ := json.Marshal(map[string]interface{}{
+			"type":        "job_done",
+			"status":      string(status),
+			"exit_code":   exitCode,
+			"started_at":  job.StartedAt.UnixMilli(),
+			"finished_at": job.FinishedAt.UnixMilli(),
+			"duration_ms": job.FinishedAt.Sub(job.StartedAt).Milliseconds(),
+		})
+		return doneData
+	})
 }
 
 // ArchitectDesign is the architect-phase design generator. It creates a
@@ -3263,4 +3241,3 @@ func parseAtMentions(text string) []string {
 func isLikelyJSON(s string) bool {
 	return strings.HasPrefix(strings.TrimSpace(s), "{")
 }
-

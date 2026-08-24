@@ -205,37 +205,15 @@ func (h *ReviewHandler) StreamReviewJob(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	rc := http.NewResponseController(w)
-	writeSSEHeaders(w)
-	w.WriteHeader(http.StatusOK)
-	rc.Flush()
-
-	ch, _ := job.Subscribe()
-	defer job.Unsubscribe(ch)
-
-	ctx := r.Context()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case line, more := <-ch:
-			if !more {
-				_, status, exitCode := job.Snapshot()
-				b, _ := json.Marshal(map[string]interface{}{
-					"type":      "job_done",
-					"status":    string(status),
-					"exit_code": exitCode,
-					"model":     job.Model,
-				})
-				fmt.Fprintf(w, "data: %s\n\n", b)
-				rc.Flush()
-				return
-			}
-			b, _ := json.Marshal(line)
-			fmt.Fprintf(w, "data: %s\n\n", b)
-			rc.Flush()
-		}
-	}
+	streamJobSSE(w, r, job, func(status store.JobStatus, exitCode int) []byte {
+		b, _ := json.Marshal(map[string]interface{}{
+			"type":      "job_done",
+			"status":    string(status),
+			"exit_code": exitCode,
+			"model":     job.Model,
+		})
+		return b
+	})
 }
 
 // SubmitComment posts the review body as a comment on the PR.

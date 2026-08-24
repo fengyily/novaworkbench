@@ -63,9 +63,14 @@ func writeErrorSuggestion(w http.ResponseWriter, code int, errCode, msg, suggest
 // buffer (which manifested as delayed/batched output on desktop and missing
 // output on mobile when the upstream buffer was never flushed before the
 // connection was torn down by an intermediate proxy).
+//
+// Connection is intentionally NOT set: it is a hop-by-hop header that is
+// forbidden under HTTP/2 (RFC 9113 §4.2). When an intermediate proxy
+// re-exposes the response over HTTP/2 to the browser, a Connection header
+// emitted here can surface as net::ERR_HTTP2_PROTOCOL_ERROR. Go's net/http
+// manages keep-alive itself, so there is nothing to add.
 func writeSSEHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
-	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 }
