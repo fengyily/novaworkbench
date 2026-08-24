@@ -92,7 +92,7 @@ func (g *Gateway) GetBinPath() string { return g.binPath }
 // a user-configured bearer token (and point it at the wrong auth scheme for a
 // custom base URL). When a token is configured, we therefore strip any inherited
 // ANTHROPIC_API_KEY from the child environment so the configured token wins.
-func (g *Gateway) mergedEnv(model string) []string {
+func (g *Gateway) mergedEnv(model string, extra ...string) []string {
 	env := os.Environ()
 	overrides := map[string]string{}
 	if g.claudeEnv != nil {
@@ -112,6 +112,15 @@ func (g *Gateway) mergedEnv(model string) []string {
 	}
 	// Allow claude CLI to run under root (e.g. in Docker). The CLI blocks
 	// --dangerously-skip-permissions when uid==0 unless this var is set.
+	// Extra caller-supplied overrides win over the inherited env (so the
+	// merge step can pin GIT_AUTHOR_* / GIT_COMMITTER_* into the Claude
+	// child process and let its `git commit --no-edit` carry a real identity
+	// on Docker hosts without ~/.gitconfig mounted).
+	for _, kv := range extra {
+		if eq := strings.Index(kv, "="); eq > 0 {
+			overrides[kv[:eq]] = kv[eq+1:]
+		}
+	}
 	overrides["CLAUDE_ALLOW_ROOT"] = "1"
 	// Keys to strip from the inherited env because they would conflict with the
 	// configured auth. Only strip when we are actually injecting ANTHROPIC_AUTH_TOKEN.
@@ -237,6 +246,11 @@ type StreamOpts struct {
 	ForkSessionID   string // pre-assigned id for a forked session (--session-id on --fork-session); empty = let the CLI generate one
 	DisallowedTools []string
 	PermissionMode  string // "plan" to use --permission-mode plan, empty for --dangerously-skip-permissions
+	// ExtraEnv is layered onto the spawned claude CLI's environment as
+	// KEY=VALUE entries — used to inject GIT_AUTHOR_* / GIT_COMMITTER_*
+	// when the merge step asks Claude to commit on a Docker host without
+	// ~/.gitconfig.
+	ExtraEnv []string
 }
 
 // StreamCmd returns an unstarted *exec.Cmd configured for stream-json output
@@ -249,7 +263,7 @@ type StreamOpts struct {
 // id.
 func (g *Gateway) StreamCmd(ctx context.Context, opts StreamOpts) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, g.binPath, g.streamArgs(opts.Prompt, opts.SystemPrompt, opts.Model, opts.SessionID, opts.Resume, opts.Fork, opts.ForkSessionID, opts.DisallowedTools, opts.PermissionMode)...)
-	cmd.Env = g.mergedEnv(opts.Model)
+	cmd.Env = g.mergedEnv(opts.Model, opts.ExtraEnv...)
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
 	}

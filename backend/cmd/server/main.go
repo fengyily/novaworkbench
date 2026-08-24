@@ -224,6 +224,7 @@ func main() {
 	// Platform tokens (settings)
 	mux.HandleFunc("GET /api/settings/tokens", platformH.List)
 	mux.HandleFunc("POST /api/settings/tokens", platformH.Create)
+	mux.HandleFunc("PUT /api/settings/tokens/{id}", platformH.Update)
 	mux.HandleFunc("DELETE /api/settings/tokens/{id}", platformH.Delete)
 
 	// Roles (settings) — per-role system prompt + model, drives claude CLI flags

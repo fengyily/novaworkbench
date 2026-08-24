@@ -138,6 +138,32 @@ func gitRun(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// gitRunIdentity is gitRun with optional committer/author identity injected
+// via `-c user.name=...` / `-c user.email=...`. Either side may be empty —
+// the empty side is skipped and git falls back to its own config lookup.
+// This matters for subcommands that CREATE commits (merge --no-edit, etc.):
+// commitAll handles its own injection but the read-only helper can't know
+// whether the caller is about to create a commit, so the merge paths use
+// this variant explicitly.
+func gitRunIdentity(dir, gitName, gitEmail string, args ...string) (string, error) {
+	full := []string{"-C", dir}
+	if gitName != "" {
+		full = append(full, "-c", "user.name="+gitName)
+	}
+	if gitEmail != "" {
+		full = append(full, "-c", "user.email="+gitEmail)
+	}
+	full = append(full, args...)
+	cmd := exec.Command("git", full...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return stdout.String(), fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
 func currentBranch(dir string) string {
 	out, err := gitRun(dir, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
@@ -227,7 +253,12 @@ func remoteURL(dir string) string {
 
 // commitAll stages everything and commits with msg. Returns committed=true if a
 // commit was created; false (clean tree, nothing to commit) is NOT an error.
-func commitAll(dir, msg string) (committed bool, err error) {
+// gitName / gitEmail, when non-empty, are injected as `-c user.name=...` /
+// `-c user.email=...` to give the commit a stable identity on hosts that have
+// no global git config (notably Docker containers without ~/.gitconfig mounted).
+// Either may be empty — the empty side is skipped and git falls back to its
+// own config lookup, which keeps existing behaviour on developer machines.
+func commitAll(dir, msg, gitName, gitEmail string) (committed bool, err error) {
 	if _, err := gitRun(dir, "add", "-A"); err != nil {
 		return false, err
 	}
@@ -242,8 +273,24 @@ func commitAll(dir, msg string) (committed bool, err error) {
 	if strings.TrimSpace(out) == "" {
 		return false, nil
 	}
-	if _, err := gitRun(dir, "commit", "-m", msg); err != nil {
-		return false, err
+
+	// Build `git -C <dir> [-c user.name=...] [-c user.email=...] commit -m <msg>`.
+	// Args are passed as a string slice (no shell), so spaces / quotes in the
+	// identity are safe.
+	gitArgs := []string{"-C", dir}
+	if gitName != "" {
+		gitArgs = append(gitArgs, "-c", "user.name="+gitName)
+	}
+	if gitEmail != "" {
+		gitArgs = append(gitArgs, "-c", "user.email="+gitEmail)
+	}
+	gitArgs = append(gitArgs, "commit", "-m", msg)
+	cmd := exec.Command("git", gitArgs...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return false, fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
 	}
 	return true, nil
 }
@@ -425,12 +472,17 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 		defer h.persistJob(job, reqRow.ID, "")
 		log.Printf("[merge/local] job %s req %s: %s → %s", job.ID, reqRow.ID, dev, target)
 
+		// Pull the project's git identity from its platform token (best-effort;
+		// empty values fall back to host git config so existing behaviour is
+		// preserved on dev machines).
+		gitName, gitEmail := h.gitIdentityForReq(reqRow)
+
 		// 1. Commit pending dev-branch changes first (in the worktree / checkout
 		//    where dev is actually checked out).
 		if commitMsg == "" {
 			commitMsg = dev
 		}
-		if committed, err := commitAll(devDir, commitMsg); err != nil {
+		if committed, err := commitAll(devDir, commitMsg, gitName, gitEmail); err != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ 提交失败: " + err.Error()})
 			job.Finish(1, store.JobError)
 			return
@@ -467,8 +519,10 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 			job.Append(store.LogLine{Type: "message", Content: "🌿 切换到 " + target})
 		}
 
-		// 4. Merge dev. Use --no-edit so a merge commit (if any) doesn't open an editor.
-		mergeOut, mergeErr := gitRun(mergeDir, "merge", "--no-edit", dev)
+		// 4. Merge dev. Use --no-edit so a merge commit (if any) doesn't open an
+		// editor. Inject the project identity so a Docker host without a
+		// mounted ~/.gitconfig can still author + commit the merge.
+		mergeOut, mergeErr := gitRunIdentity(mergeDir, gitName, gitEmail, "merge", "--no-edit", dev)
 		for _, line := range strings.Split(mergeOut, "\n") {
 			if line = strings.TrimSpace(line); line != "" {
 				job.Append(store.LogLine{Type: "message", Content: line})
@@ -564,8 +618,24 @@ func (h *MergeHandler) Continue(w http.ResponseWriter, r *http.Request) {
 			job.Finish(1, store.JobError)
 			return
 		}
-		if _, err := gitRun(dir, "commit", "--no-edit"); err != nil {
-			job.Append(store.LogLine{Type: "error", Content: "❌ 完成合并提交失败: " + err.Error()})
+
+		// Conclude the merge with a real `git -c user.name=... -c user.email=...`
+		// commit so it works on Docker hosts with no ~/.gitconfig mounted.
+		gitName, gitEmail := h.gitIdentityForReq(reqRow)
+		gitArgs := []string{"-C", dir}
+		if gitName != "" {
+			gitArgs = append(gitArgs, "-c", "user.name="+gitName)
+		}
+		if gitEmail != "" {
+			gitArgs = append(gitArgs, "-c", "user.email="+gitEmail)
+		}
+		gitArgs = append(gitArgs, "commit", "--no-edit")
+		cmd := exec.Command("git", gitArgs...)
+		var stdout, stderr strings.Builder
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			job.Append(store.LogLine{Type: "error", Content: "❌ 完成合并提交失败: " + strings.TrimSpace(stderr.String()) + ": " + err.Error()})
 			job.Finish(1, store.JobError)
 			return
 		}
@@ -608,11 +678,24 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 			"合理整合两边的改动、消除冲突标记后写回文件。完成后执行 `git add -A` 暂存所有已解决的文件，"+
 			"再执行 `git commit --no-edit` 完成合并提交。不要留下任何冲突标记。用中文说明你的处理。", fileList)
 
+		// Pin the project's git identity into Claude's env so its
+		// `git commit --no-edit` runs with a real committer on Docker hosts.
+		var extraEnv []string
+		if name, email := h.gitIdentityForReq(reqRow); name != "" || email != "" {
+			if name != "" {
+				extraEnv = append(extraEnv, "GIT_AUTHOR_NAME="+name, "GIT_COMMITTER_NAME="+name)
+			}
+			if email != "" {
+				extraEnv = append(extraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
+			}
+		}
+
 		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
 			Prompt:       prompt,
 			WorkDir:      dir,
 			SystemPrompt: systemPrompt,
 			Model:        model,
+			ExtraEnv:     extraEnv,
 			// empty PermissionMode → --dangerously-skip-permissions (full tool use)
 		})
 		configID, currency := h.activeConfigMeta()
@@ -694,12 +777,17 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 			base = project.DefaultBranch
 		}
 
+		// Pull the project's git identity from its platform token (best-effort;
+		// empty values fall back to host git config so existing behaviour is
+		// preserved on dev machines).
+		gitName, gitEmail := h.gitIdentityForReq(reqRow)
+
 		// 1. Commit pending dev-branch changes.
 		commitMsg := body.CommitMessage
 		if commitMsg == "" {
 			commitMsg = dev
 		}
-		if committed, err := commitAll(devDir, commitMsg); err != nil {
+		if committed, err := commitAll(devDir, commitMsg, gitName, gitEmail); err != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ 提交失败: " + err.Error()})
 			job.Finish(1, store.JobError)
 			return
@@ -762,6 +850,10 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 // clean (or was resolved) and the flow may continue.
 func (h *MergeHandler) mergeAndResolveBase(job *store.Job, devDir, base, dev string, reqRow *model.Requirement) (string, bool) {
 	systemPrompt, model := h.roleConfig("developer")
+	// Pull the project's commit identity so the merge commit (created by
+	// `git merge --no-edit`) carries the right author/committer on Docker
+	// hosts without a mounted ~/.gitconfig.
+	gitName, gitEmail := h.gitIdentityForReq(reqRow)
 
 	// 2. fetch origin/base (best-effort; a fetch failure just skips the merge).
 	job.Append(store.LogLine{Type: "phase", Content: "⬇️ 拉取主分支 origin/" + base + " ..."})
@@ -772,9 +864,10 @@ func (h *MergeHandler) mergeAndResolveBase(job *store.Job, devDir, base, dev str
 		job.Append(store.LogLine{Type: "message", Content: out})
 	}
 
-	// 3. merge origin/base into dev.
+	// 3. merge origin/base into dev. Inject -c user.name/email so the merge
+	// commit has a stable identity on Docker hosts.
 	job.Append(store.LogLine{Type: "phase", Content: "🌿 合并主分支 origin/"+base+" → "+dev})
-	mergeOut, mergeErr := gitRun(devDir, "merge", "--no-edit", "origin/"+base)
+	mergeOut, mergeErr := gitRunIdentity(devDir, gitName, gitEmail, "merge", "--no-edit", "origin/"+base)
 	for _, line := range strings.Split(mergeOut, "\n") {
 		if line = strings.TrimSpace(line); line != "" {
 			job.Append(store.LogLine{Type: "message", Content: line})
@@ -821,11 +914,25 @@ func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflic
 		"请逐个读取这些冲突文件，理解 \"ours\"（当前开发分支）与 \"theirs\"（主分支）双方的意图，"+
 		"合理整合两边的改动、消除冲突标记后写回文件。完成后执行 git add -A 暂存所有已解决的文件，"+
 		"再执行 git commit --no-edit 完成合并提交。不要留下任何冲突标记。用中文说明你的处理。", fileList)
+	// Hand Claude the project's git identity so its `git commit --no-edit`
+	// (run inside the merge step) carries the right author/committer on
+	// Docker hosts that have no ~/.gitconfig mounted.
+	var extraEnv []string
+	if reqRow != nil {
+		name, email := h.gitIdentityForReq(reqRow)
+		if name != "" {
+			extraEnv = append(extraEnv, "GIT_AUTHOR_NAME="+name, "GIT_COMMITTER_NAME="+name)
+		}
+		if email != "" {
+			extraEnv = append(extraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
+		}
+	}
 	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
 		Prompt:       prompt,
 		WorkDir:      devDir,
 		SystemPrompt: systemPrompt,
 		Model:        model,
+		ExtraEnv:     extraEnv,
 	})
 	configID, currency := h.activeConfigMeta()
 	runClaudeStream(jobSink{job}, cmd, "push-pr-resolve", &usageCtx{
@@ -968,6 +1075,27 @@ func (h *MergeHandler) loadProjectNoWrite(reqID string) (*model.Project, error) 
 		return nil, err
 	}
 	return h.projectSvc.Get(reqRow.ProjectID)
+}
+
+// gitIdentityForReq returns the (name, email) the merge commit should use,
+// looked up from the requirement's project → platform_token. Empty strings
+// when the project has no token, the token has no identity set, or any
+// lookup fails — commitAll treats empty as "skip -c injection" and falls
+// back to git's normal config lookup, which preserves existing behaviour
+// on dev machines that already have a global ~/.gitconfig.
+func (h *MergeHandler) gitIdentityForReq(reqRow *model.Requirement) (string, string) {
+	if h.platformSvc == nil || reqRow == nil {
+		return "", ""
+	}
+	project, err := h.projectSvc.Get(reqRow.ProjectID)
+	if err != nil || project == nil || project.PlatformTokenID == "" {
+		return "", ""
+	}
+	tok, err := h.platformSvc.Get(project.PlatformTokenID)
+	if err != nil || tok == nil {
+		return "", ""
+	}
+	return tok.GitUserName, tok.GitUserEmail
 }
 
 // Cleanup removes the requirement's isolated worktree (and prunes git's
