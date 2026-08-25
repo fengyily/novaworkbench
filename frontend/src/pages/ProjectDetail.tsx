@@ -731,6 +731,7 @@ export default function ProjectDetail() {
                   <thead>
                     <tr>
                       <th style={{ width: 110 }}>ID</th>
+                      <th style={{ width: 70 }}>类型</th>
                       <th>标题</th>
                       <th style={{ width: 90 }}>优先级</th>
                       <th style={{ width: 130 }}>状态</th>
@@ -867,6 +868,7 @@ export default function ProjectDetail() {
                 <thead>
                   <tr>
                     <th style={{ width: 110 }}>ID</th>
+                    <th style={{ width: 70 }}>类型</th>
                     <th>标题</th>
                     <th style={{ width: 90 }}>优先级</th>
                     <th style={{ width: 130 }}>状态</th>
