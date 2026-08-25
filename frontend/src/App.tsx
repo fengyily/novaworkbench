@@ -5,8 +5,9 @@ import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import AddProject from './pages/AddProject';
 import {
-  ProjectsList, Requirements, Chat, Reports,
+  ProjectsList, Chat, Reports,
 } from './pages/PlaceholderPages';
+import RequirementsList from './pages/RequirementsList';
 import Settings from './pages/Settings';
 import SettingsTokens from './pages/SettingsTokens';
 import SettingsRoles from './pages/SettingsRoles';
@@ -53,7 +54,7 @@ export default function App() {
             <Route path="projects/add" element={<AddProject />} />
             <Route path="projects" element={<ProjectsList />} />
             <Route path="projects/:id" element={<ProjectDetail />} />
-            <Route path="requirements" element={<Requirements />} />
+            <Route path="requirements" element={<RequirementsList />} />
             <Route path="requirements/:id" element={<RequirementDetail />} />
             <Route path="knowledge" element={<KnowledgePage />} />
             <Route path="chat" element={<Chat />} />

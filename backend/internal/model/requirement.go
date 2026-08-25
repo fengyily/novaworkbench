@@ -9,12 +9,19 @@ type Requirement struct {
 	Description        string `json:"description"`
 	Status             string `json:"status"`
 	Priority           string `json:"priority"`
+	Kind               string `json:"kind"` // "issue" | "requirement" | "idea"; defaults to "requirement" for legacy rows
 	AcceptanceCriteria string `json:"acceptance_criteria"` // JSON array
 	DesignDocs         string `json:"design_docs"`         // JSON array
 	ConversationIDs    string `json:"conversation_ids"`    // JSON array
 	AssignedTo         string `json:"assigned_to"`
 	CreatedBy          string `json:"created_by"`
 	AnalysisSessionID  string `json:"analysis_session_id"`
+	// SourceRequirementID links this row to the requirement it was promoted
+	// from — typically an idea whose discussion was summarized into a brand-
+	// new requirement by the "总结转需求" action. Empty for rows that were
+	// created directly (no parent) or that predate this column. The original
+	// row is left untouched so the discussion thread stays intact.
+	SourceRequirementID string `json:"source_requirement_id"`
 	DesignSessionID    string `json:"design_session_id"`
 	DesignJobID        string `json:"design_job_id"`   // active architect-design JobStore job id; empty when no design job is running
 	AnalysisJobID      string `json:"analysis_job_id"` // active analyst-chat JobStore job id; empty when no analyst turn is running
@@ -42,8 +49,14 @@ type CreateRequirementReq struct {
 	Title        string `json:"title"`
 	Description  string `json:"description"`
 	Priority     string `json:"priority"`
+	Kind         string `json:"kind"` // "issue" | "requirement" | "idea"; empty → defaults to "requirement"
 	SkipAnalysis *bool  `json:"skip_analysis"` // pointer: nil omits the field so Create defaults to true (skip) and Update preserves the existing value
 	SkipDesign   *bool  `json:"skip_design"`   // pointer: nil → Create defaults to false; Update never references this column so it is preserved automatically
+	// SourceRequirementID: optional parent reference. Set by the "总结转需求"
+	// action when an idea's discussion is summarized into a new requirement.
+	// Validated in service.RequirementService (must point to an existing row in
+	// the same project).
+	SourceRequirementID string `json:"source_requirement_id"`
 }
 
 type UpdateStatusReq struct {

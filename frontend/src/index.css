@@ -343,6 +343,24 @@ body.no-scroll {
 /* weekly-report run status */
 .status-badge.status-error      { background: #fee2e2; color: #dc2626; }
 
+/* ── Requirement kind badges (issue / requirement / idea) ──
+   Sit next to the status badge in lists and the detail-page header so the
+   user always sees what category the row belongs to. The colors pick up
+   red/indigo/cyan to read like traffic lights (action items vs features vs
+   explorations) without overlapping the status palette above. */
+.kind-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--color-active);
+  color: var(--color-primary);
+}
+.kind-badge.kind-issue       { background: #fee2e2; color: #b91c1c; }
+.kind-badge.kind-requirement { background: #e0e7ff; color: #4338ca; }
+.kind-badge.kind-idea        { background: #cffafe; color: #0e7490; }
+
 /* ════════════════════════════════════════════════════════════════════
    MOBILE PATTERNS — bottom tab bar, FAB, bottom sheet, sticky composer.
    ────────────────────────────────────────────────────────────────────

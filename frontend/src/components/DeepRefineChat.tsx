@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { API_BASE, authedFetch, requirementsApi } from '../api/client';
+import { API_BASE, authedFetch, kindChatPlaceholders, kindOf, requirementsApi, type Kind } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import AtMentionTextarea from './AtMentionTextarea';
 import { appendLogLine, type LogLine } from '../utils/logLines';
@@ -16,6 +16,10 @@ interface Props {
   requirementTitle: string;
   currentAnalysis: string;
   analysisJobId: string;
+  // Kind of the requirement — drives header title, input placeholder, default
+  // first-turn prompt, and whether the "生成技术方案" CTA is hidden (kind=idea
+  // is a discussion-only entry and never reaches the architect stage).
+  kind?: Kind | string;
   // Last-persisted model for the analyst stage (req.analyst_model); empty =
   // never run. Used as the dropdown's default selection.
   model?: string;
@@ -34,7 +38,7 @@ interface Props {
 interface ChatMessage { role: string; content: string; isError?: boolean; isStreaming?: boolean; }
 
 export default function DeepRefineChat({
-  reqId, projectPath, requirementTitle, currentAnalysis, analysisJobId, model, defaultModel, onTurnDone, onWorkingChange, onGenerateDesign, onReset,
+  reqId, projectPath, requirementTitle, currentAnalysis, analysisJobId, kind, model, defaultModel, onTurnDone, onWorkingChange, onGenerateDesign, onReset,
 }: Props) {
   const [expanded, setExpanded] = useState(true);
   const { isFullscreen, toggle: toggleFullscreen, exit: exitFullscreen } = useFullscreen();
@@ -351,7 +355,7 @@ export default function DeepRefineChat({
         // goroutine decoupled from this request.
         streamAnalystJob(analysisJobId);
       } else if (!saved || saved.length === 0) {
-        runTurn('');
+        runTurn(defaultInitMessage);
       }
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -389,11 +393,30 @@ export default function DeepRefineChat({
   const placeholderEmpty = !!lastMsg?.isStreaming && !lastMsg?.content;
   const showSpinner = isWorking && toolLog.length === 0 && placeholderEmpty;
 
+  // Kind-aware copy: idea → discussion thread, no architect handoff;
+  // issue → bug-investigation framing; requirement → standard 3-stage flow.
+  const reqKind: Kind = kindOf({ kind } as any);
+  const isIdea = reqKind === 'idea';
+  const chatHeaderTitle = isIdea
+    ? '💡 想法讨论 — 探索可行方案'
+    : reqKind === 'issue'
+      ? '🐞 问题分析 — 排查根因并修复'
+      : '🔍 深入分析 — 确认具体改动点';
+  const chatPlaceholder = kindChatPlaceholders[reqKind];
+  // First-turn kickoff prompt tailored per kind. The backend's prompt blocks
+  // (analyst-tail) carry the detailed instructions; this is just the user-
+  // facing seed message so the AI has context to react to.
+  const defaultInitMessage = isIdea
+    ? '请阅读相关代码并和我一起讨论这个想法的可行方案（不进入开发）。'
+    : reqKind === 'issue'
+      ? '请阅读相关代码，帮我定位这个问题的根因并提出修复方案。'
+      : '';
+
   return (
     <div className="detail-section deep-refine-panel">
       <div className="deep-refine-header">
         <div>
-          <h3>🔍 深入分析 — 确认具体改动点</h3>
+          <h3>{chatHeaderTitle}</h3>
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
           {/* Per-turn analyst model; disabled while a turn is running. The
@@ -468,7 +491,7 @@ export default function DeepRefineChat({
               handleSend();
             }
           }}
-          placeholder="贴URL、描述页面元素、或回复AI的问题... 输入 @ 引用 Skill&#10;Enter 发送  ·  Shift+Enter 换行"
+          placeholder={chatPlaceholder + '\nEnter 发送  ·  Shift+Enter 换行'}
           className="form-input chat-textarea"
           disabled={isWorking}
           rows={2}
@@ -477,14 +500,16 @@ export default function DeepRefineChat({
       </div>
 
       <div className="deep-refine-actions">
-        <button
-          className="btn btn-primary"
-          onClick={onGenerateDesign}
-          disabled={isWorking || messages.length === 0 || lastIsError}
-          title={lastIsError ? '当前分析回合已出错，请先重试成功后再生成技术方案' : undefined}
-        >
-          📐 生成技术方案
-        </button>
+        {!isIdea && (
+          <button
+            className="btn btn-primary"
+            onClick={onGenerateDesign}
+            disabled={isWorking || messages.length === 0 || lastIsError}
+            title={lastIsError ? '当前分析回合已出错，请先重试成功后再生成技术方案' : undefined}
+          >
+            📐 生成技术方案
+          </button>
+        )}
         {lastIsError && !isWorking && (
           <span style={{ color: '#B91C1C', fontSize: 12 }}>⚠️ 上一次分析出错，请先重试</span>
         )}

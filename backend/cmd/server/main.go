@@ -276,6 +276,11 @@ func main() {
 	mux.HandleFunc("GET /api/requirements/{id}", reqH.Get)
 	mux.HandleFunc("PUT /api/requirements/{id}", reqH.Update)
 	mux.HandleFunc("PATCH /api/requirements/{id}/status", reqH.UpdateStatus)
+	mux.HandleFunc("PATCH /api/requirements/{id}/kind", reqH.UpdateKind)
+	// PromoteFromIdea: turns a finished idea-discussion thread into a new
+	// requirement row (kind=requirement, source_requirement_id=idea.id). The
+	// original idea is left fully intact — see service.PromoteFromIdea.
+	mux.HandleFunc("POST /api/requirements/{id}/promote", reqH.PromoteFromIdea)
 	mux.HandleFunc("DELETE /api/requirements/{id}", reqH.Delete)
 	mux.HandleFunc("GET /api/requirements/{id}/chat-history", reqH.GetChatHistory)
 	mux.HandleFunc("PUT /api/requirements/{id}/chat-history", reqH.SaveChatHistory)

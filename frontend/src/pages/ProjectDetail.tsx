@@ -2,13 +2,14 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import AtMentionTextarea from '../components/AtMentionTextarea';
 import {
   projectsApi, runnerApi, reviewApi, platformApi, requirementsApi, knowledgeApi,
   usageApi, usageTotalInput, fmtCost,
   type Project, type RunStatus, type PR, type PRListResponse, type PlatformToken,
   type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage, statusLabels,
+  kindLabels, kindOf,
 } from '../api/client';
+import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
 import { stripMarkdownPreview } from '../utils/preview';
 import { createEventStream, type EventStream } from '../api/stream';
@@ -426,6 +427,7 @@ export default function ProjectDetail() {
       onClick={() => navigate(`/requirements/${req.id}`)}
     >
       <td data-label="ID" style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{req.id}</td>
+      <td data-label="类型"><span className={`kind-badge kind-${kindOf(req)}`}>{kindLabels[kindOf(req)]}</span></td>
       <td data-label="标题" className="pr-title">{req.title}</td>
       <td data-label="优先级"><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
       <td data-label="状态"><span className={`status-badge status-${req.status}`}>{statusLabels[req.status] ?? req.status}</span></td>
@@ -729,6 +731,7 @@ export default function ProjectDetail() {
                   <thead>
                     <tr>
                       <th style={{ width: 110 }}>ID</th>
+                      <th style={{ width: 70 }}>类型</th>
                       <th>标题</th>
                       <th style={{ width: 90 }}>优先级</th>
                       <th style={{ width: 130 }}>状态</th>
@@ -865,6 +868,7 @@ export default function ProjectDetail() {
                 <thead>
                   <tr>
                     <th style={{ width: 110 }}>ID</th>
+                    <th style={{ width: 70 }}>类型</th>
                     <th>标题</th>
                     <th style={{ width: 90 }}>优先级</th>
                     <th style={{ width: 130 }}>状态</th>
@@ -1309,94 +1313,7 @@ export default function ProjectDetail() {
   );
 }
 
-// Inline "新需求" create form — expanded in-place under the requirements tab
-// (replaces the old modal). After the user submits, the backend formats the
-// raw content into Markdown and distills a title via the LLM, so the button
-// label reflects that AI step.
-function CreateRequirementForm({ projectId, onClose, onCreated }: {
-  projectId: string;
-  onClose: () => void;
-  onCreated: (req: Requirement) => void;
-}) {
-  const [description, setDescription] = useState('');
-  const [priority, setPriority] = useState('medium');
-  // 开发流程：full（标准：分析→设计→开发）| skip-analysis（默认：跳过分析→设计→开发）| direct（直接开发：跳过分析与设计）
-  const [flow, setFlow] = useState<'full' | 'skip-analysis' | 'direct'>('skip-analysis');
-  const [saving, setSaving] = useState(false);
-
-  const handleSubmit = async () => {
-    if (!description) return;
-    setSaving(true);
-    try {
-      const skipAnalysis = flow !== 'full';
-      const skipDesign = flow === 'direct';
-      const created = await requirementsApi.create({ project_id: projectId, description, priority, skip_analysis: skipAnalysis, skip_design: skipDesign });
-      onCreated(created);
-    } catch (err: any) {
-      alert(err.message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="create-req-form">
-      <div className="create-req-form-header">
-        <h3>新需求</h3>
-        <button className="btn btn-secondary btn-sm" onClick={onClose} disabled={saving}>收起</button>
-      </div>
-      <div className="form-group">
-        <label>需求内容 (必填)</label>
-        <AtMentionTextarea
-          value={description}
-          onChange={setDescription}
-          className="form-input"
-          rows={6}
-          placeholder="用自然语言描述你想要实现的功能。输入 @ 可引用 Skill，例如 @frontend 。例如：报表支持导出为 Excel 格式..."
-        />
-        <small className="form-hint">
-          提交后由 AI 整理为结构化 Markdown（背景 / 目标 / 功能要点 / 验收标准）并提炼标题，可在详情页继续编辑。
-        </small>
-      </div>
-      <div className="form-row">
-        <div className="form-group" style={{ flex: 1 }}>
-          <label>优先级</label>
-          <select value={priority} onChange={e => setPriority(e.target.value)} className="form-input">
-            <option value="high">🔴 High</option>
-            <option value="medium">🟡 Medium</option>
-            <option value="low">🟢 Low</option>
-          </select>
-        </div>
-      </div>
-      <div className="form-group">
-        <label>开发流程</label>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
-            <input type="radio" name="dev-flow" checked={flow === 'skip-analysis'} onChange={() => setFlow('skip-analysis')}
-              style={{ width: 'auto' }} />
-            <span>跳过分析（直接方案设计 → 开发）</span>
-          </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
-            <input type="radio" name="dev-flow" checked={flow === 'direct'} onChange={() => setFlow('direct')}
-              style={{ width: 'auto' }} />
-            <span>直接开发（跳过分析与设计）</span>
-          </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
-            <input type="radio" name="dev-flow" checked={flow === 'full'} onChange={() => setFlow('full')}
-              style={{ width: 'auto' }} />
-            <span>标准流程（分析 → 设计 → 开发）</span>
-          </label>
-        </div>
-        <small style={{ display: 'block', marginTop: 4, color: 'var(--text-secondary, #64748B)' }}>
-          小改动可选「直接开发」，跳过分析与设计阶段，创建后直接在详情页进入开发实现。
-        </small>
-      </div>
-      <div className="form-actions">
-        <button className="btn" onClick={onClose} disabled={saving}>取消</button>
-        <button className="btn btn-primary" onClick={handleSubmit} disabled={saving || !description}>
-          {saving ? '创建中...（AI 整理中）' : '创建'}
-        </button>
-      </div>
-    </div>
-  );
-}
+// (CreateRequirementForm moved to its own component in
+// components/CreateRequirementForm/CreateRequirementForm.tsx so it can be reused
+// from the cross-project RequirementsList page. The local function above was
+// removed; the import at the top of this file supplies the same component.)

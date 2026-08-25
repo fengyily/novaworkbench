@@ -25,6 +25,54 @@ markdown：纯 Markdown 正文；按以下结构组织，缺信息的章节直�
 保留用户表达的关键信息与术语，不要扩大或缩小需求范围，不要臆测技术实现方案。
 只输出该 JSON 对象，不要任何前后缀说明。`
 
+// formatAndTitleIssueSystemPrompt distills an Issue (bug report) into a
+// bug-shaped Markdown: 现象描述 / 复现步骤 / 期望行为 / 实际行为. No
+// 验收标准 / 背景 / 功能要点 — Issues aren't features.
+const formatAndTitleIssueSystemPrompt = `你是一位 Bug 分析助手。请把用户给出的问题描述整理成结构清晰的 Markdown 文档，并提炼一个简洁的问题标题。
+以 JSON 对象输出，格式严格为：{"title":"...","markdown":"..."}，不要用代码块围栏包裹整体输出。
+title：不超过20个汉字（或15个英文单词），用动词+宾语概括（如"修复 X 页面 500 错"）；不要加标点符号、引号或换行；不要任何额外说明或前缀。
+markdown：纯 Markdown 正文；按以下结构组织，缺信息的章节直接省略，不要编造内容：## 现象描述、## 复现步骤（用有序列表）、## 期望行为、## 实际行为、## 备注。
+保留用户给出的报错信息、堆栈、日志片段（如有）；不要臆测根因、不要扩大问题范围、不要补写功能需求或验收标准。
+只输出该 JSON 对象，不要任何前后缀说明。`
+
+// formatAndTitleIdeaSystemPrompt distills an Idea (exploratory note) into a
+// lightweight shape: 灵感来源 / 初步设想 / 待回答的关键问题. Never a 验收标准
+// — Ideas aren't yet committed features.
+const formatAndTitleIdeaSystemPrompt = `你是一位想法记录助手。请把用户给出的灵感或想法整理成结构清晰的 Markdown 文档，并提炼一个简洁的想法标题。
+以 JSON 对象输出，格式严格为：{"title":"...","markdown":"..."}，不要用代码块围栏包裹整体输出。
+title：不超过20个汉字（或15个英文单词），一句话表达核心想法；不要加标点符号、引号或换行；不要任何额外说明或前缀。
+markdown：纯 Markdown 正文；按以下结构组织，缺信息的章节直接省略，不要编造内容：## 灵感来源、## 初步设想、## 待回答的关键问题（用列表）、## 备注。
+不要求结构化需求模板，不要写"验收标准"或"功能要点"这种已经确定要做的章节；保留用户的发散与不确定性。
+只输出该 JSON 对象，不要任何前后缀说明。`
+
+// summarizeIdeaToRequirementPrompt converts a finished idea-discussion thread
+// (initial idea + multi-turn analyst chat + acceptance_criteria list) into a
+// fully-fledged requirement draft. The output must follow the SAME shape as
+// the standard requirement template (背景/目标/功能要点/验收标准) so the new
+// requirement can drop straight into the 3-stage pipeline. Distinguish the
+// "what was decided in the discussion" from speculation; if the discussion
+// didn't actually commit a feature (still pure exploration), return empty
+// markdown so the caller can refuse rather than fabricate a feature.
+const summarizeIdeaToRequirementPrompt = `你是一位资深需求分析师。用户给出一段「想法」及其与 AI 助手的完整讨论记录，请把讨论中**已经达成共识**、**明确要实现**的部分提炼成一份可开发的需求文档（Markdown）。
+以 JSON 对象输出，格式严格为：{"title":"...","markdown":"...","acceptance_criteria":["...","..."]}，不要用代码块围栏包裹整体输出。
+title：不超过20个汉字（或15个英文单词），动词+宾语概括（如"实现 X 模块的 Y 能力"）；不要加标点符号、引号或换行；不要任何额外说明或前缀。
+markdown：纯 Markdown 正文；按以下结构组织，缺信息的章节直接省略，不要编造内容：## 需求背景（缘起）、## 目标、## 功能要点（用列表）、## 备注。
+acceptance_criteria：数组，每项一句话，描述"如何验证这个需求做完了"，不要列功能点。
+重要约束：
+- 只总结讨论中已经确定要做的内容，不要把"待回答的问题"、"备选思路"、"未确认的担忧"误当成需求条目。
+- 如果整段讨论还停留在发散阶段（用户最终没有决定要做什么），把 markdown 设为空字符串 ""，title 设为"（未达成共识）"，acceptance_criteria 设为[]，让前端可以拒绝这次总结并保留原想法。
+- 不要补写讨论中从未出现过的功能，不要臆测技术实现方案。
+只输出该 JSON 对象，不要任何前后缀说明。`
+
+// summarizeIdeaToRequirementResult is the JSON shape summarizeIdeaToRequirementPrompt
+// produces. The service treats an empty Markdown as "discussion didn't converge"
+// and refuses to create a new requirement.
+type summarizeIdeaToRequirementResult struct {
+	Title              string   `json:"title"`
+	Markdown           string   `json:"markdown"`
+	AcceptanceCriteria []string `json:"acceptance_criteria"`
+}
+
 // formatAndTitleResult is the JSON shape the model is asked to emit for the
 // combined format-and-title task.
 type formatAndTitleResult struct {
@@ -157,10 +205,23 @@ func chatCompletion(baseURL, apiKey, model, systemPrompt, userContent string, ma
 // an OpenAI-compatible /chat/completions endpoint (e.g. DeepSeek). Bypasses
 // the claude CLI — neither task needs tool use. Merging the two halves into
 // one request keeps title and body consistent and transmits the content once.
-// On failure the caller falls back (raw content for Markdown, first line for
-// title) so requirement creation never fails just because this is unavailable.
-func formatAndTitleViaHTTP(baseURL, apiKey, model, content string) (markdown, title string, usage *Usage, err error) {
-	out, usage, err := chatCompletion(baseURL, apiKey, model, formatAndTitleSystemPrompt, content, 3072)
+// The kind argument selects a kind-shaped system prompt so an Issue
+// description becomes a bug-report scaffold, an Idea becomes a lightweight
+// exploratory note, and a Requirement keeps the legacy four-section layout.
+// Empty kind falls back to the legacy prompt. On failure the caller falls back
+// (raw content for Markdown, first line for title) so requirement creation
+// never fails just because this is unavailable.
+func formatAndTitleViaHTTP(baseURL, apiKey, model, content, kind string) (markdown, title string, usage *Usage, err error) {
+	var systemPrompt string
+	switch kind {
+	case "issue":
+		systemPrompt = formatAndTitleIssueSystemPrompt
+	case "idea":
+		systemPrompt = formatAndTitleIdeaSystemPrompt
+	default:
+		systemPrompt = formatAndTitleSystemPrompt
+	}
+	out, usage, err := chatCompletion(baseURL, apiKey, model, systemPrompt, content, 3072)
 	if err != nil {
 		return "", "", nil, err
 	}
