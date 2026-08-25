@@ -58,8 +58,17 @@ export function SummarizeToRequirementModal({ sourceId, sourceTitle, onClose, on
     }
   };
 
+  // Click-outside-to-dismiss — but ONLY when the LLM call isn't running.
+  // Closing mid-flight would lose the in-progress summary state and force
+  // the user to re-run the summarize from scratch (and pay for another LLM
+  // round). The header × and Cancel buttons already gate on phase ===
+  // 'running' below; the backdrop handler must match.
+  const handleBackdropClick = () => {
+    if (phase !== 'running') onClose();
+  };
+
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={handleBackdropClick}>
       <div className="modal-card summarize-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <h3>📋 总结转需求</h3>

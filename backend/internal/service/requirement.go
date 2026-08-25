@@ -464,8 +464,15 @@ func (s *RequirementService) PromoteFromIdea(sourceID string, summarizer Summari
 
 	id := util.NewID("req")
 	now := time.Now()
+	// Columns (16) = VALUES list (16). 10 ? placeholders + 6 hardcoded literals
+	// ('draft', 2×'[]', 'user', 2×'0'). The LLM-summarized criteria are written
+	// into acceptance_criteria so the new requirement carries them forward; the
+	// hardcoded '[]' defaults stay for design_docs / conversation_ids (the
+	// promote action does NOT carry forward design state), and skip_analysis/
+	// skip_design are explicitly 0 — the new requirement starts in the full
+	// pipeline, no inherited skips.
 	_, err = s.db.Exec(
-		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,skip_analysis,skip_design,created_at,updated_at) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,0,0,?,?)",
+		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,skip_analysis,skip_design,created_at,updated_at) VALUES (?,?,?,?,'draft',?,?,?,'[]','[]','user',?,0,0,?,?)",
 		id, src.ProjectID, title, "", "medium", KindRequirement, criteriaJSON, sourceID, now, now)
 	if err != nil {
 		return nil, err
