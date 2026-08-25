@@ -315,3 +315,28 @@ func (h *RequirementHandler) ClearAnalysisSession(w http.ResponseWriter, r *http
 	}
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
+
+// PromoteFromIdea summarizes an idea's accumulated discussion (description +
+// analyst-accumulated acceptance_criteria + multi-turn chat) into a brand-new
+// requirement row, leaving the original idea intact (its kind stays "idea").
+// The new row's source_requirement_id points back to the idea for trace.
+//
+// Returns 422 when the LLM judges the discussion didn't converge into a
+// concrete feature (returns the empty-markdown sentinel) — the frontend turns
+// this into "讨论还没有达成共识，请继续完善".
+func (h *RequirementHandler) PromoteFromIdea(w http.ResponseWriter, r *http.Request) {
+	if h.llm == nil {
+		writeError(w, 500, "INTERNAL", "llm gateway not configured")
+		return
+	}
+	item, err := h.svc.PromoteFromIdea(r.PathValue("id"), h.llm)
+	if err != nil {
+		if err.Error() == "discussion did not converge into a concrete requirement" {
+			writeError(w, 422, "NOT_CONVERGED", err.Error())
+			return
+		}
+		writeError(w, 500, "PROMOTE_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, 201, item)
+}

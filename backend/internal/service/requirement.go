@@ -3,6 +3,7 @@ package service
 import (
 	"database/sql"
 
+	"encoding/json"
 	"fmt"
 	"github.com/novaworkbench/backend/internal/db"
 	"strings"
@@ -120,7 +121,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	}
 
 	rows, err := s.db.Query(
-		"SELECT id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,skip_design,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END ASC, created_at DESC",
+		"SELECT id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,source_requirement_id,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,skip_design,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END ASC, created_at DESC",
 		args...)
 	if err != nil {
 		return nil, err
@@ -132,7 +133,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		var r model.Requirement
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
-			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
+			&r.CreatedBy, &r.SourceRequirementID, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
 			return nil, err
@@ -168,10 +169,10 @@ func splitKinds(raw string) []string {
 func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	var r model.Requirement
 	err := s.db.QueryRow(
-		"SELECT id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,skip_design,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
+		"SELECT id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,source_requirement_id,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,skip_design,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
-			&r.CreatedBy, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
+			&r.CreatedBy, &r.SourceRequirementID, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
 	if err == sql.ErrNoRows {
@@ -217,9 +218,29 @@ func (s *RequirementService) Create(req model.CreateRequirementReq) (*model.Requ
 	}
 	now := time.Now()
 
+	// Validate source_requirement_id if provided: must point to an existing
+	// requirement in the SAME project. Cross-project source references would
+	// break the "summary lives next to its discussion" model — and a typo
+	// would silently orphan the linkage.
+	sourceID := ""
+	if req.SourceRequirementID != "" {
+		var ownerProject string
+		err := s.db.QueryRow("SELECT project_id FROM requirements WHERE id = ?", req.SourceRequirementID).Scan(&ownerProject)
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("source_requirement_id %q not found", req.SourceRequirementID)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if ownerProject != req.ProjectID {
+			return nil, fmt.Errorf("source_requirement_id %q belongs to a different project", req.SourceRequirementID)
+		}
+		sourceID = req.SourceRequirementID
+	}
+
 	_, err := s.db.Exec(
-		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,skip_analysis,skip_design,created_at,updated_at) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,?,?)",
-		id, req.ProjectID, req.Title, req.Description, req.Priority, kind, skipAnalysis, skipDesign, now, now)
+		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,skip_analysis,skip_design,created_at,updated_at) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,?,?,?)",
+		id, req.ProjectID, req.Title, req.Description, req.Priority, kind, sourceID, skipAnalysis, skipDesign, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -370,6 +391,136 @@ func (s *RequirementService) UpdateDeveloperModel(id, model string) error {
 
 func (s *RequirementService) UpdateReviewerModel(id, model string) error {
 	return s.UpdateStageModel(id, "reviewer_model", model)
+}
+
+// Summarizer is the LLM-side contract used by PromoteFromIdea to convert an
+// idea's discussion thread into a draft requirement. Defined as an interface so
+// service doesn't import llm (and the real Gateway satisfies it without
+// registering extra wiring).
+type Summarizer interface {
+	SummarizeIdeaToRequirement(content string) (markdown, title string, criteria []string, usage interface{ /* see llm.Usage */ }, err error)
+}
+
+// promoteSummaryErrUnconverged is returned by PromoteFromIdea when the LLM
+// decides the discussion never converged into an implementable feature
+// (empty Markdown + "（未达成共识）" title). The handler surfaces this as a
+// 422 so the frontend can show "讨论还没有达成共识" instead of a generic error.
+var promoteSummaryErrUnconverged = fmt.Errorf("discussion did not converge into a concrete requirement")
+
+// PromoteFromIdea summarizes an idea's accumulated discussion into a brand-new
+// requirement row in the SAME project. The new row carries kind="requirement"
+// and source_requirement_id pointing back to the original idea; the idea row
+// is left fully intact (its kind, status, chat history, session id all stay)
+// so the user can keep discussing or re-run the summarize after more turns.
+//
+// The summarizer is invoked with a payload assembled from:
+//   - the idea's original description
+//   - its acceptance_criteria array (analyst-accumulated bullets)
+//   - its chat history from refinement_chats (user/AI turn transcript)
+//
+// If the LLM returns empty Markdown ("discussion didn't converge"),
+// PromoteFromIdea refuses to create the new requirement and returns
+// promoteSummaryErrUnconverged so the caller can render a friendly error.
+func (s *RequirementService) PromoteFromIdea(sourceID string, summarizer Summarizer) (*model.Requirement, error) {
+	if summarizer == nil {
+		return nil, fmt.Errorf("summarizer not configured")
+	}
+	src, err := s.Get(sourceID)
+	if err != nil {
+		return nil, fmt.Errorf("source requirement not found: %w", err)
+	}
+	if src.Kind != KindIdea {
+		return nil, fmt.Errorf("only ideas can be promoted (kind=%q); got %q", KindIdea, src.Kind)
+	}
+
+	// Pull the chat history (analyst-side, user/AI turns). Empty string means
+	// "no chat yet" — the description alone is enough to summarize.
+	chatJSON, _ := s.GetRefinementChat(sourceID)
+	payload := assemblePromotePayload(src, chatJSON)
+
+	_, title, criteria, _, err := summarizer.SummarizeIdeaToRequirement(payload)
+	if err != nil {
+		return nil, fmt.Errorf("summarize failed: %w", err)
+	}
+
+	// Empty markdown = LLM decided the discussion didn't converge. Refuse so
+	// the frontend can prompt the user to keep chatting before retrying.
+	if title == "（未达成共识）" || strings.TrimSpace(title) == "" {
+		return nil, promoteSummaryErrUnconverged
+	}
+
+	// Marshal criteria back into the JSON-array-string shape the schema stores.
+	criteriaJSON := "[]"
+	if len(criteria) > 0 {
+		raw, mErr := json.Marshal(criteria)
+		if mErr == nil {
+			criteriaJSON = string(raw)
+		}
+	}
+
+	id := util.NewID("req")
+	now := time.Now()
+	_, err = s.db.Exec(
+		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,skip_analysis,skip_design,created_at,updated_at) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,0,0,?,?)",
+		id, src.ProjectID, title, "", "medium", KindRequirement, criteriaJSON, sourceID, now, now)
+	if err != nil {
+		return nil, err
+	}
+	return s.Get(id)
+}
+
+// assemblePromotePayload builds the user-content string the summarizer sees:
+// the original description, the analyst-accumulated acceptance_criteria, and
+// the multi-turn chat transcript. Format is plain Markdown so the model can
+// pull context out of it without a rigid schema. The chat-history JSON is
+// best-effort — malformed payloads degrade to "no chat" rather than erroring.
+func assemblePromotePayload(src *model.Requirement, chatJSON string) string {
+	var sb strings.Builder
+	sb.WriteString("# 原始想法描述\n\n")
+	sb.WriteString(strings.TrimSpace(src.Description))
+	sb.WriteString("\n\n# 讨论累积的要点\n\n")
+	if strings.TrimSpace(src.AcceptanceCriteria) != "" && src.AcceptanceCriteria != "[]" {
+		var bullets []string
+		if json.Unmarshal([]byte(src.AcceptanceCriteria), &bullets) == nil {
+			for _, b := range bullets {
+				if strings.TrimSpace(b) == "" {
+					continue
+				}
+				sb.WriteString("- ")
+				sb.WriteString(b)
+				sb.WriteString("\n")
+			}
+		}
+	} else {
+		sb.WriteString("（暂无）\n")
+	}
+	sb.WriteString("\n# 与 AI 的完整对话记录\n\n")
+	if strings.TrimSpace(chatJSON) == "" || chatJSON == "[]" {
+		sb.WriteString("（暂无对话）\n")
+	} else {
+		var msgs []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}
+		if json.Unmarshal([]byte(chatJSON), &msgs) == nil {
+			for _, m := range msgs {
+				if m.Role == "user" {
+					sb.WriteString("\n**用户**：")
+				} else if m.Role == "ai" {
+					sb.WriteString("\n**AI**：")
+				} else {
+					sb.WriteString("\n**")
+					sb.WriteString(m.Role)
+					sb.WriteString("**：")
+				}
+				sb.WriteString(strings.TrimSpace(m.Content))
+				sb.WriteString("\n")
+			}
+		} else {
+			sb.WriteString("（对话记录解析失败，忽略）\n")
+		}
+	}
+	return sb.String()
 }
 
 // UpdateKind switches a requirement's kind — used by the "📋 转为需求" CTA in

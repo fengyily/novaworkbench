@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS requirements (
 	conversation_ids TEXT DEFAULT '[]',
 	assigned_to TEXT DEFAULT '',
 	created_by TEXT DEFAULT 'user',
+	source_requirement_id TEXT NOT NULL DEFAULT '',
 	branch_name TEXT NOT NULL DEFAULT '',
 	worktree_path TEXT NOT NULL DEFAULT '',
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -363,6 +364,12 @@ var alterColumns = []string{
 	// backfill. Validated in service.RequirementService; no CHECK constraint so
 	// the column behaves like the existing status/priority TEXT columns.
 	`ALTER TABLE requirements ADD COLUMN kind TEXT NOT NULL DEFAULT 'requirement'`,
+	// Source traceability for promoted / split-off requirements. Set when an
+	// idea (or another kind) is summarized into a brand-new requirement via the
+	// "总结转需求" action. The original row keeps its own kind (so discussions
+	// aren't mutated); only the new requirement carries this pointer. Empty =
+	// no parent requirement.
+	`ALTER TABLE requirements ADD COLUMN source_requirement_id TEXT NOT NULL DEFAULT ''`,
 }
 
 var (

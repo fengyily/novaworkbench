@@ -6,6 +6,7 @@ import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
 import ModelSelect from '../components/ModelSelect';
 import AtMentionTextarea from '../components/AtMentionTextarea';
+import { SummarizeToRequirementModal } from '../components/SummarizeToRequirementModal';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { exportDesignPdf } from '../utils/exportDesignPdf';
@@ -563,6 +564,13 @@ export default function RequirementDetail() {
       setBusy('');
     }
   };
+
+  // ── Summarize-to-requirement modal (kind=idea) ────────────────────────────
+  // The modal lives at the page level so any CTA that triggers "总结转需求"
+  // (in the draft section, the chat header, or the done/archived footer) can
+  // open the same component. onCreated navigates to the brand-new requirement
+  // — the user lands on its freshly-minted detail page.
+  const [summarizeOpen, setSummarizeOpen] = useState(false);
 
   // ── Architect phase: async design generation via JobStore ─────────────────
   // The architect-design endpoint creates a background job and returns its id
@@ -1312,6 +1320,14 @@ export default function RequirementDetail() {
   const stageIndex = stage === 'done' ? visibleSteps.length : visibleSteps.findIndex(s => s.key === stage);
   // 「转为需求」CTA visible for finished Issue / Idea rows.
   const showPromoteCta = (reqKind === 'idea' || reqKind === 'issue') && (req.status === 'done' || req.status === 'archived');
+  // 「总结转需求」CTA — only for Idea, available the moment there's something
+  // to summarize (chat started, OR status is done/archived). Draft + no chat
+  // would summarize from the bare description which is fine too: the user may
+  // want a quick jump from "rough idea text" to "structured requirement".
+  const canSummarize = reqKind === 'idea' && (
+    req.status === 'draft' || req.status === 'analyzing' ||
+    req.status === 'done' || req.status === 'archived'
+  );
 
   return (
     <div className="req-detail">
@@ -1524,6 +1540,15 @@ export default function RequirementDetail() {
         <button className="btn" onClick={() => navigate(`/projects/${req.project_id}`)}>← 项目</button>
         <div className="detail-id">{req.id}</div>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          {canSummarize && (
+            <button
+              className="btn btn-sm"
+              onClick={() => setSummarizeOpen(true)}
+              title="将整段讨论总结为新的可开发需求（不会修改原想法）"
+            >
+              📋 总结转需求
+            </button>
+          )}
           <button className="btn btn-sm" onClick={openEdit}>✏️ 编辑</button>
           <button className="btn btn-sm btn-danger" onClick={handleDelete}>🗑️ 删除</button>
         </div>
@@ -1539,6 +1564,15 @@ export default function RequirementDetail() {
           {claudeWorking ? '🤖 Claude 工作中' : '😴 Claude 空闲'}
         </span>
         {project && <span className="project-tag">📁 {project.name}</span>}
+        {req.source_requirement_id && (
+          <Link
+            to={`/requirements/${req.source_requirement_id}`}
+            className="source-link"
+            title="点击查看来源想法的讨论"
+          >
+            ← 来源想法
+          </Link>
+        )}
       </div>
 
       {req.description && (
@@ -2212,6 +2246,18 @@ export default function RequirementDetail() {
             </div>
           )}
         </div>
+      )}
+
+      {summarizeOpen && (
+        <SummarizeToRequirementModal
+          sourceId={req.id}
+          sourceTitle={req.title}
+          onClose={() => setSummarizeOpen(false)}
+          onCreated={newId => {
+            setSummarizeOpen(false);
+            navigate(`/requirements/${newId}`);
+          }}
+        />
       )}
     </div>
   );

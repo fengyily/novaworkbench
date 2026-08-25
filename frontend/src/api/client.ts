@@ -256,6 +256,12 @@ export interface Requirement {
   acceptance_criteria: string;
   design_docs: string; conversation_ids: string; assigned_to: string;
   created_by: string; analysis_session_id: string;
+  // SourceRequirementID links this row to the requirement it was promoted
+  // from (typically an idea whose discussion was summarized into a brand-new
+  // requirement). Empty for directly-created rows or rows that predate this
+  // column. Rendered as a "← 来源: <title>" link in the detail header so the
+  // user can jump back to the originating idea.
+  source_requirement_id?: string;
   design_session_id: string; design_job_id: string; analysis_job_id: string; apply_job_id: string; coding_session_id: string;
   skip_analysis: boolean;
   skip_design: boolean;
@@ -390,6 +396,16 @@ export const requirementsApi = {
   // Reverse archive: status returns to "done" and the knowledge entry is removed.
   unarchive: (id: string) =>
     api.post<Requirement>(`/api/requirements/${id}/unarchive`, {}),
+  // PromoteFromIdea: summarize an idea's accumulated discussion (description +
+  // chat history + acceptance_criteria) into a brand-new requirement row. The
+  // original idea keeps its own kind + status; only the new row carries
+  // source_requirement_id back to the idea. The backend returns 422 with
+  // code "NOT_CONVERGED" when the LLM decides the discussion didn't converge
+  // into a concrete feature yet — the modal turns that into a friendlier
+  // "讨论还没有达成共识" message and lets the user keep chatting before
+  // retrying.
+  promoteFromIdea: (id: string) =>
+    api.post<Requirement>(`/api/requirements/${id}/promote`, {}),
 };
 
 export interface RunStatus {

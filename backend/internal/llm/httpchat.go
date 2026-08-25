@@ -45,6 +45,34 @@ markdown：纯 Markdown 正文；按以下结构组织，缺信息的章节直�
 不要求结构化需求模板，不要写"验收标准"或"功能要点"这种已经确定要做的章节；保留用户的发散与不确定性。
 只输出该 JSON 对象，不要任何前后缀说明。`
 
+// summarizeIdeaToRequirementPrompt converts a finished idea-discussion thread
+// (initial idea + multi-turn analyst chat + acceptance_criteria list) into a
+// fully-fledged requirement draft. The output must follow the SAME shape as
+// the standard requirement template (背景/目标/功能要点/验收标准) so the new
+// requirement can drop straight into the 3-stage pipeline. Distinguish the
+// "what was decided in the discussion" from speculation; if the discussion
+// didn't actually commit a feature (still pure exploration), return empty
+// markdown so the caller can refuse rather than fabricate a feature.
+const summarizeIdeaToRequirementPrompt = `你是一位资深需求分析师。用户给出一段「想法」及其与 AI 助手的完整讨论记录，请把讨论中**已经达成共识**、**明确要实现**的部分提炼成一份可开发的需求文档（Markdown）。
+以 JSON 对象输出，格式严格为：{"title":"...","markdown":"...","acceptance_criteria":["...","..."]}，不要用代码块围栏包裹整体输出。
+title：不超过20个汉字（或15个英文单词），动词+宾语概括（如"实现 X 模块的 Y 能力"）；不要加标点符号、引号或换行；不要任何额外说明或前缀。
+markdown：纯 Markdown 正文；按以下结构组织，缺信息的章节直接省略，不要编造内容：## 需求背景（缘起）、## 目标、## 功能要点（用列表）、## 备注。
+acceptance_criteria：数组，每项一句话，描述"如何验证这个需求做完了"，不要列功能点。
+重要约束：
+- 只总结讨论中已经确定要做的内容，不要把"待回答的问题"、"备选思路"、"未确认的担忧"误当成需求条目。
+- 如果整段讨论还停留在发散阶段（用户最终没有决定要做什么），把 markdown 设为空字符串 ""，title 设为"（未达成共识）"，acceptance_criteria 设为[]，让前端可以拒绝这次总结并保留原想法。
+- 不要补写讨论中从未出现过的功能，不要臆测技术实现方案。
+只输出该 JSON 对象，不要任何前后缀说明。`
+
+// summarizeIdeaToRequirementResult is the JSON shape summarizeIdeaToRequirementPrompt
+// produces. The service treats an empty Markdown as "discussion didn't converge"
+// and refuses to create a new requirement.
+type summarizeIdeaToRequirementResult struct {
+	Title              string   `json:"title"`
+	Markdown           string   `json:"markdown"`
+	AcceptanceCriteria []string `json:"acceptance_criteria"`
+}
+
 // formatAndTitleResult is the JSON shape the model is asked to emit for the
 // combined format-and-title task.
 type formatAndTitleResult struct {

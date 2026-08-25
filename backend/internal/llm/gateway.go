@@ -363,6 +363,43 @@ func (g *Gateway) GenerateDescriptionAndTitle(content, kind string) (markdown, t
 	return formatAndTitleViaHTTP(baseURL, apiKey, model, content, kind)
 }
 
+// SummarizeIdeaToRequirement converts a finished idea-discussion thread
+// (initial description + multi-turn analyst chat + accumulated
+// acceptance_criteria) into a draft requirement Markdown, title, and
+// acceptance-criteria list. Uses the same OpenAI-compatible HTTP LLM channel
+// as GenerateDescriptionAndTitle — there is no claude CLI fallback by design,
+// so the summarize action fails loud if the LLM is misconfigured.
+//
+// The prompt explicitly allows the model to refuse the conversion by emitting
+// an empty Markdown + empty criteria; the service treats that as
+// "discussion didn't converge" and refuses to create the new requirement,
+// leaving the original idea intact.
+func (g *Gateway) SummarizeIdeaToRequirement(content string) (markdown, title string, criteria []string, usage *Usage, err error) {
+	if g.llmCfg == nil {
+		return "", "", nil, nil, fmt.Errorf("llm not configured: no llm config provider")
+	}
+	baseURL, apiKey, model, err := g.llmCfg.LLMConfig()
+	if err != nil {
+		return "", "", nil, nil, fmt.Errorf("llm config unavailable: %w", err)
+	}
+	if baseURL == "" || apiKey == "" {
+		return "", "", nil, nil, fmt.Errorf("llm not configured: base_url and api_key required")
+	}
+	out, u, err := chatCompletion(baseURL, apiKey, model, summarizeIdeaToRequirementPrompt, content, 4096)
+	if err != nil {
+		return "", "", nil, nil, err
+	}
+	var res summarizeIdeaToRequirementResult
+	if jerr := json.Unmarshal([]byte(stripJSONFences(out)), &res); jerr != nil {
+		return "", "", nil, u, fmt.Errorf("llm http: decode summarize json: %w", jerr)
+	}
+	res.Title = strings.Trim(res.Title, "\"'` \n\r\t")
+	if res.Title == "" {
+		res.Title = "（未达成共识）"
+	}
+	return res.Markdown, res.Title, res.AcceptanceCriteria, u, nil
+}
+
 func stripJSONFences(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "```json")
