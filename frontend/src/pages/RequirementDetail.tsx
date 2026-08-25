@@ -1762,7 +1762,13 @@ export default function RequirementDetail() {
           <div className="tab-empty">
             {req.skip_analysis ? (
               <>
-                <p>需求已创建（已跳过需求分析）。可直接进入方案设计，或先进行需求分析完善需求。</p>
+                <p>
+                  {reqKind === 'idea'
+                    ? '想法已记录。开始与 AI 讨论可行性。'
+                    : reqKind === 'issue'
+                      ? '问题已记录。可直接进入方案设计，或先进行根因分析完善信息。'
+                      : '需求已创建（已跳过需求分析）。可直接进入方案设计，或先进行需求分析完善需求。'}
+                </p>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   {/* Primary: go straight to architect-design. status stays draft;
                       the backend ArchitectDesign handler tolerates the missing
@@ -1778,18 +1784,31 @@ export default function RequirementDetail() {
                       {busy === '生成技术方案' ? '⏳ ...' : '📐 生成技术方案'}
                     </button>
                   )}
-                  {/* Architect-model selectable BEFORE generating the plan. */}
-                  <ModelSelect
-                    value={architectModel}
-                    onChange={setArchitectModel}
-                    label="方案模型"
-                    defaultModelName={architectDefaultModel}
-                    title="方案设计阶段使用的模型，生成技术方案前即可选择"
-                  />
-                  <button className="btn btn-sm"
+                  {/* Architect-model selectable BEFORE generating the plan.
+                      Irrelevant for kind=idea — the architect stage is hidden. */}
+                  {reqKind !== 'idea' && (
+                    <ModelSelect
+                      value={architectModel}
+                      onChange={setArchitectModel}
+                      label="方案模型"
+                      defaultModelName={architectDefaultModel}
+                      title="方案设计阶段使用的模型，生成技术方案前即可选择"
+                    />
+                  )}
+                  {/* For kind=idea this is the only CTA — promote it from a
+                      muted "或先进行..." link to a primary button. */}
+                  <button
+                    className={reqKind === 'idea' ? 'btn btn-primary' : 'btn btn-sm'}
                     onClick={() => transition('analyzing', '开始分析')} disabled={!!busy}
-                    title="先进行需求分析，完善需求后再生成方案">
-                    或先进行需求分析 →
+                    title={reqKind === 'idea' ? '与 AI 讨论这个想法的可行性' : '先进行需求分析，完善需求后再生成方案'}
+                  >
+                    {busy === '开始分析'
+                      ? '⏳ ...'
+                      : reqKind === 'idea'
+                        ? '💬 与 AI 探讨这个想法'
+                        : reqKind === 'issue'
+                          ? '🔍 先排查根因'
+                          : '或先进行需求分析 →'}
                   </button>
                   {/* Analyst-model selectable before opting into the analysis. */}
                   <ModelSelect
@@ -1803,10 +1822,22 @@ export default function RequirementDetail() {
               </>
             ) : (
               <>
-                <p>需求已创建。结合项目情况完善需求。</p>
+                <p>
+                  {reqKind === 'idea'
+                    ? '想法已记录。结合项目情况，与 AI 一起探讨可行性。'
+                    : reqKind === 'issue'
+                      ? '问题已记录。结合项目代码，定位根因并提出修复方案。'
+                      : '需求已创建。结合项目情况完善需求。'}
+                </p>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   <button className="btn btn-primary" onClick={() => transition('analyzing', '开始分析')} disabled={!!busy}>
-                    {busy === '开始分析' ? '⏳ ...' : '🤖 开始需求分析'}
+                    {busy === '开始分析'
+                      ? '⏳ ...'
+                      : reqKind === 'idea'
+                        ? '💬 与 AI 探讨这个想法'
+                        : reqKind === 'issue'
+                          ? '🐞 开始排查问题'
+                          : '🤖 开始需求分析'}
                   </button>
                   {/* Analyst-stage model, selectable BEFORE starting the first
                       analysis turn; the in-chat dropdown is otherwise disabled

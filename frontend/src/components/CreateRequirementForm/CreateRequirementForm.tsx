@@ -63,11 +63,12 @@ export function CreateRequirementForm({
     setSaving(true);
     setError(null);
     try {
-      // Idea kind never reaches the developer stage — the backend StartCoding
-      // guard rejects it, but we also pre-set skip_analysis/skip_design so the
-      // legacy fields stay consistent.
-      const skipAnalysis = kind === 'idea' ? true : flow !== 'full';
-      const skipDesign = kind === 'idea' ? true : flow === 'direct';
+      // Idea kind is discussion-first by design: drop the user straight into
+      // the analyst stage so they can talk to Claude about feasibility. The
+      // architect/dev stages remain hidden in the UI, so the `flow` controls
+      // (and any skip flags) only apply to issue/requirement.
+      const skipAnalysis = kind === 'idea' ? false : flow !== 'full';
+      const skipDesign = kind === 'idea' ? false : flow === 'direct';
       const created = await requirementsApi.create({
         project_id: projectId,
         description,
