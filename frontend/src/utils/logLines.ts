@@ -16,6 +16,34 @@ export interface LogLine {
   type: string;
   content: string;
   at?: number; // Unix ms; 后端自动注入；老数据/直连 SSE 兜底缺省
+  // Usage snapshot emitted by wizard.go runClaudeStream's `usage` event.
+  // The Content field carries the same JSON as a string for backwards
+  // compatibility with callers that only read `type + content`; the parsed
+  // form is exposed here for components that want to render a live usage bar
+  // without re-parsing on every frame. Either may be absent for non-usage
+  // events.
+  usage?: UsageInfo;
+}
+
+/**
+ * Live token-usage snapshot for one wizard turn, emitted by the backend via
+ * the `usage` SSE event. The percentage (`pct`) and absolute used-token count
+ * (`used`) are pre-computed server-side from input_tokens + cache_creation +
+ * cache_read against `context_window`, so the UI doesn't need to know the
+ * denominator — just clamp `pct` to 0..100 and pick a color band.
+ */
+export interface UsageInfo {
+  step: 'analyst_chat' | 'architect_design' | 'coding' | 'adjust_coding' | string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  context_window: number;
+  /** input + cache_creation + cache_read — the input-side cost of this turn. */
+  used: number;
+  /** used / context_window * 100, may exceed 100 if cache_read dominates. */
+  pct: number;
 }
 
 const THINKING_PREFIX = '🤔 模型思考中';

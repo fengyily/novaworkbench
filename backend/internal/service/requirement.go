@@ -121,7 +121,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	}
 
 	rows, err := s.db.Query(
-		"SELECT id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,source_requirement_id,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,skip_design,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END ASC, created_at DESC",
+		"SELECT id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,source_requirement_id,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,skip_design,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,analyst_context_summary,analyst_compressed_at,design_context_summary,design_compressed_at,coding_context_summary,coding_compressed_at,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END ASC, created_at DESC",
 		args...)
 	if err != nil {
 		return nil, err
@@ -135,6 +135,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
 			&r.CreatedBy, &r.SourceRequirementID, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
+			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
 			return nil, err
 		}
@@ -169,11 +170,12 @@ func splitKinds(raw string) []string {
 func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	var r model.Requirement
 	err := s.db.QueryRow(
-		"SELECT id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,source_requirement_id,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,skip_design,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
+		"SELECT id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,source_requirement_id,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,skip_design,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,analyst_context_summary,analyst_compressed_at,design_context_summary,design_compressed_at,coding_context_summary,coding_compressed_at,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
 			&r.CreatedBy, &r.SourceRequirementID, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
+			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("requirement not found")
@@ -350,6 +352,94 @@ func (s *RequirementService) UpdateCodingSession(id, sessionID string) error {
 	_, err := s.db.Exec("UPDATE requirements SET coding_session_id=?, updated_at=? WHERE id=?",
 		sessionID, time.Now(), id)
 	return err
+}
+
+// contextSummaryColumns maps the wizard's step names ("analyst_chat" /
+// "architect_design" / "coding") to the (summary_col, compressed_at_col,
+// session_id_col) triple that the CompressContext wizard handler drives.
+// Centralizing the mapping here keeps UpdateContextSummary /
+// GetContextSummary / the wizard handler in lockstep — adding a fourth
+// stage would only touch this one switch.
+//
+// The keys match the wizard's `usageCtxFor(step, ...)` names used
+// everywhere else in the wizard pipeline (see wizard.go), so the frontend
+// can pass the same step value it uses for the usage-bar step key and
+// expect the right column to be written.
+//
+// The session_id column is cleared atomically with the summary write inside
+// UpdateContextSummary so the next turn in this stage starts a fresh session
+// (and the wizard handler injects the stored summary as a prompt prefix).
+var contextSummaryColumns = map[string]struct {
+	Summary      string
+	CompressedAt string
+	SessionID    string
+}{
+	"analyst_chat":     {"analyst_context_summary", "analyst_compressed_at", "analysis_session_id"},
+	"architect_design": {"design_context_summary", "design_compressed_at", "design_session_id"},
+	"coding":           {"coding_context_summary", "coding_compressed_at", "coding_session_id"},
+}
+
+// ValidContextSummaryStep reports whether step is one of the wizard stages
+// that supports context compression. The wizard CompressContext handler uses
+// this to reject bogus inputs early so a typo doesn't silently match the
+// zero-value entry in contextSummaryColumns.
+func ValidContextSummaryStep(step string) bool {
+	_, ok := contextSummaryColumns[step]
+	return ok
+}
+
+// UpdateContextSummary writes the Chinese summary produced by the compress-
+// context wizard handler into the matching *_context_summary column, stamps
+// compressed_at with NOW(), and clears the matching session id — all in a
+// single transaction so a failure never leaves the requirement in a half-
+// compressed state (summary without sid reset, or sid reset without summary).
+//
+// step must be one of "analyst_chat" / "architect_design" / "coding"
+// (validated via ValidContextSummaryStep); an invalid step returns an
+// error and writes nothing. summary is stored verbatim — the handler is
+// responsible for stripping the [COMPRESS_COMPLETE] sentinel before calling.
+func (s *RequirementService) UpdateContextSummary(id, step, summary string) error {
+	cols, ok := contextSummaryColumns[step]
+	if !ok {
+		return fmt.Errorf("invalid step %q (allowed: analyst_chat, architect_design, coding)", step)
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Ident() guards the column names against the (admittedly unlikely) future
+	// case where one of these names becomes a reserved word in MySQL. It is a
+	// no-op for SQLite/Postgres.
+	q := "UPDATE requirements SET " +
+		s.db.Ident(cols.Summary) + "=?, " +
+		s.db.Ident(cols.CompressedAt) + "=CURRENT_TIMESTAMP, " +
+		s.db.Ident(cols.SessionID) + "='', updated_at=? " +
+		"WHERE id=?"
+	if _, err := tx.Exec(q, summary, time.Now(), id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// GetContextSummary returns the stored compression summary for one stage.
+// Empty string + nil error means the stage hasn't been compressed yet.
+// Invalid step names return an error so the handler can surface a 400.
+func (s *RequirementService) GetContextSummary(id, step string) (string, error) {
+	cols, ok := contextSummaryColumns[step]
+	if !ok {
+		return "", fmt.Errorf("invalid step %q (allowed: analyst_chat, architect_design, coding)", step)
+	}
+	q := "SELECT " + s.db.Ident(cols.Summary) + " FROM requirements WHERE id=?"
+	var out string
+	if err := s.db.QueryRow(q, id).Scan(&out); err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("requirement not found")
+		}
+		return "", err
+	}
+	return out, nil
 }
 
 // UpdateWorktree persists the dev branch name and the absolute path of the

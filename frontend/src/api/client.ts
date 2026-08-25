@@ -274,6 +274,18 @@ export interface Requirement {
   architect_model?: string;
   developer_model?: string;
   reviewer_model?: string;
+  // Per-stage context-compression state. Populated by POST
+  // /api/wizard/compress-context (which writes the summary, stamps the time,
+  // and clears the matching session_id). Used by the requirement detail
+  // header to render a "📦 已压缩" badge and by the chat components to know
+  // whether to inject the summary into the next prompt's "上下文压缩摘要"
+  // section. Empty summary + null timestamp = never compressed.
+  analyst_context_summary?: string;
+  analyst_compressed_at?: string | null;
+  design_context_summary?: string;
+  design_compressed_at?: string | null;
+  coding_context_summary?: string;
+  coding_compressed_at?: string | null;
   created_at: string; updated_at: string;
   completed_at?: string;
 }
@@ -406,6 +418,58 @@ export const requirementsApi = {
   // retrying.
   promoteFromIdea: (id: string) =>
     api.post<Requirement>(`/api/requirements/${id}/promote`, {}),
+};
+
+/**
+ * Per-stage context-compression record returned by
+ * GET /api/wizard/requirement/{id}/context-summary?step=… and embedded in the
+ * `done` event of POST /api/wizard/compress-context. The frontend uses
+ * `summary` (Chinese summary produced by claude) to render a preview modal;
+ * `compressed_at` is the ISO timestamp the row was written, used as a stable
+ * key in the requirement header badge.
+ */
+export interface ContextSummary {
+  requirement_id: string;
+  step: 'analyst_chat' | 'architect_design' | 'coding' | 'adjust_coding';
+  summary: string;
+  compressed_at: string | null;
+}
+
+/**
+ * wizardApi — long-running / SSE wizard operations that aren't covered by
+ * the static CRUD endpoints on `requirementsApi`. The two endpoints here
+ * back the "📦 压缩上下文" button in each chat component: `compressContext`
+ * runs a one-shot claude turn that summarizes the session and persists it
+ * to the requirements row, while `getContextSummary` reads the persisted
+ * summary back for the preview modal and the requirement-detail badge.
+ */
+export const wizardApi = {
+  /**
+   * Trigger claude to compress the current stage's conversation into a short
+   * Chinese summary, persist it on `requirements.{step}_context_summary`,
+   * stamp `*_compressed_at`, and clear the matching session_id so the next
+   * turn sees a fresh context window.
+   *
+   * `step` is one of "analyst_chat" | "architect_design" | "coding" — the
+   * chat components send the value they used as their `usageCtx.Step`.
+   * Returns the compressed ContextSummary so the UI can refresh its badge
+   * without a second round-trip.
+   */
+  compressContext: (requirementId: string, step: string) =>
+    api.post<ContextSummary>('/api/wizard/compress-context', {
+      requirement_id: requirementId,
+      step,
+    }),
+  /**
+   * Fetch the persisted compression summary for one stage. Returns an
+   * empty summary + null timestamp when the stage has never been
+   * compressed — the chat components check this before showing the
+   * "📦 已压缩" badge.
+   */
+  getContextSummary: (requirementId: string, step: string) =>
+    api.get<ContextSummary>(
+      `/api/wizard/requirement/${requirementId}/context-summary?step=${encodeURIComponent(step)}`,
+    ),
 };
 
 export interface RunStatus {

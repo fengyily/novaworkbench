@@ -539,7 +539,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 			}
 			log.Printf("[analyst-chat] pre-read %d files, docBlock=%d bytes, tree=%d bytes, desc=%d bytes",
 				len(readFiles), len(docBlock), len(treeSummary), len(desc))
-			base := buildAnalystFirstPrompt(title, desc, analysis, req.UserMessage, docBlock, treeSummary)
+			base := buildAnalystFirstPrompt(requirement, desc, analysis, req.UserMessage, docBlock, treeSummary)
 			if block := promptpkg.AnalystBlock(requirement.Kind, requirement); block != "" {
 				return base + "\n\n" + block
 			}
@@ -726,6 +726,17 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 	}
 	firstTurnPrompt := func() string {
 		var b strings.Builder
+		// Coding-stage compression handoff (DeveloperChat first turn): when
+		// the user already compressed prior coding turns we want the
+		// developer to see the summary as scene-setting. Goes at the very
+		// top so the model treats it as ground truth, not as a post-hoc
+		// addendum. The disclaimer parenthetical discourages the model from
+		// acting on the summary as if it were a fresh instruction.
+		if requirement != nil && requirement.CodingContextSummary != "" {
+			b.WriteString("## 上下文压缩摘要（之前的开发对话已被压缩，请基于此继续工作，不要当作新指令）\n")
+			b.WriteString(requirement.CodingContextSummary)
+			b.WriteString("\n\n")
+		}
 		b.WriteString("现在以「开发者」角色处理用户的追加调整。请先阅读相关代码、确认你对调整意图的理解、给出实现思路与可能的影响；")
 		b.WriteString("**暂不要修改任何文件**——等用户在后续步骤确认后，再由开发任务执行修改。\n\n")
 		if title != "" {
@@ -1272,6 +1283,17 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			// Legacy fresh-session path: feed the full title+desc as before.
 			prompt = fmt.Sprintf("## %s\n\n%s", req.RequirementTitle, req.RequirementDesc)
 			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未关联需求会话，使用独立会话开始开发。"})
+			// Context-compression handoff (legacy fresh-session path): when
+			// the coding stage was previously compressed we still want the
+			// summary prepended so the new coding session inherits the
+			// compressed history. This branch covers pre-existing rows that
+			// never had a design_session_id (and the rare user who hits
+			// "重新开发" after a design session was already compressed and
+			// invalidated).
+			if reqRow != nil && reqRow.CodingContextSummary != "" {
+				prompt = "## 上下文压缩摘要（之前的开发对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
+					reqRow.CodingContextSummary + "\n\n" + prompt
+			}
 		} else {
 			// The resumed conversation carries the requirement, analysis, and
 			// design. We only tell Claude to switch to the developer role and
@@ -1283,6 +1305,15 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			prompt = fmt.Sprintf("现在切换到「开发者」角色。基于我们刚才的需求分析与技术方案，请实现该需求（%s）。", req.RequirementTitle)
 			if strings.TrimSpace(req.RequirementDesc) != "" {
 				prompt += "\n\n用户在开发前的追加调整说明：\n" + req.RequirementDesc
+			}
+			// Coding-stage compression handoff: even when resuming the design
+			// session, the prior coding turns may have been compressed. The
+			// summary goes at the TOP so the developer treats it as ground
+			// truth; the parenthetical tells the model not to act on it as if
+			// it were a fresh instruction.
+			if reqRow != nil && reqRow.CodingContextSummary != "" {
+				prompt = "## 上下文压缩摘要（之前的开发对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
+					reqRow.CodingContextSummary + "\n\n" + prompt
 			}
 		}
 		// Kind-specific developer tail (currently only fires for kind=issue).
@@ -1851,6 +1882,20 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 			"## 项目上下文\n" + docBlock + "\n" + treeSummary + "\n\n" +
 			"方案应涵盖：整体实现思路、需要新增或修改的文件、具体实现步骤、数据模型/数据库变更、实现风险及应对。" +
 			"请先复述你对需求的理解，再给出方案。"
+		// Context-compression handoff (fresh-session path only): when the
+		// design stage was previously compressed, the requirement carries a
+		// Chinese summary we want the architect to see as scene-setting
+		// context. We only inject on the fresh-session path because the
+		// resume path (skipAnalysis==false) inherits the analyst conversation
+		// natively via --resume, where the prior design summary isn't
+		// applicable. The prefix also goes BEFORE the rest of the prompt so
+		// the model treats it as ground truth rather than as a post-hoc
+		// addendum, and the parenthetical disclaimer discourages the model
+		// from acting on it as if it were a fresh instruction.
+		if req.DesignContextSummary != "" {
+			prompt = "## 上下文压缩摘要（之前的方案设计对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
+				req.DesignContextSummary + "\n\n" + prompt
+		}
 	}
 	// Tail: append the kind-specific block (Issue / Idea framing). For an Idea
 	// the user would normally have hidden this CTA in the frontend; we still
@@ -2155,6 +2200,22 @@ type claudeStreamOutcome struct {
 	planContent     string   // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
 	actualModel     string   // model id returned by the API, captured from the assistant event's message.model
 	toolFiles       []string // file paths / patterns touched by Read/Write/Edit/Grep/Glob tool calls (for knowledge-usage evaluation)
+	// lastUsage captures the four token counts from the terminal result event
+	// (or zero values when the stream ended before reaching a result). The
+	// compress-context handler reads this to populate the `done` payload's
+	// tokens_used field without a second DB roundtrip.
+	lastUsage lastUsageSnapshot
+}
+
+// lastUsageSnapshot is the token-count view of a single claude turn, derived
+// from the result.usage block. Stored on claudeStreamOutcome so handlers that
+// need to surface the cost of a turn (compress-context modal, future SSE
+// telemetry) can read it without re-extracting from the original event.
+type lastUsageSnapshot struct {
+	InputTokens         int
+	OutputTokens        int
+	CacheCreationTokens int
+	CacheReadTokens     int
 }
 
 // isStaleSessionError reports whether a non-success result event (optionally
@@ -2489,6 +2550,45 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 			// tokens are consumed either way). Best-effort: recordFrom swallows
 			// all errors so a DB hiccup can never break the claude stream.
 			uctx.recordFrom(evt)
+
+			// Stash the same counts onto the outcome so handlers (compress-
+			// context, future telemetry) can read the cost of THIS turn
+			// without going back to the original stream event.
+			if inTok, outTok, cc, cr, ok := llm.ParseStreamUsage(evt); ok {
+				out.lastUsage = lastUsageSnapshot{
+					InputTokens:         inTok,
+					OutputTokens:        outTok,
+					CacheCreationTokens: cc,
+					CacheReadTokens:     cr,
+				}
+			}
+
+			// Mirror the same usage data through SSE so the wizard chat panel
+			// can render a live "上下文 X%" bar without polling /api/usage/*.
+			// We emit even on failure paths (realSuccess==false) because the
+			// model still spent tokens before erroring out — those tokens
+			// count against the user's budget just the same. Only skip when
+			// the event carried no usage at all (ParseStreamUsage.ok=false).
+			if sink != nil && uctx != nil {
+				if inTok, outTok, cc, cr, ok := llm.ParseStreamUsage(evt); ok && (inTok+outTok+cc+cr) > 0 {
+					modelName := uctx.Model
+					if modelName == "" {
+						modelName = out.actualModel
+					}
+					payload := map[string]any{
+						"step":                  uctx.Step,
+						"model":                 modelName,
+						"input_tokens":          inTok,
+						"output_tokens":         outTok,
+						"cache_creation_tokens": cc,
+						"cache_read_tokens":     cr,
+						"context_window":        service.ModelContextWindow(modelName),
+					}
+					if b, mErr := json.Marshal(payload); mErr == nil {
+						sink.emit(store.LogLine{Type: "usage", Content: string(b)})
+					}
+				}
+			}
 			gotResult = true
 		}
 		if gotResult {
@@ -2705,8 +2805,20 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 // fallback (where the prior conversation is lost, so we restart from this
 // scaffold). The instruction deliberately tells Claude NOT to blindly traverse
 // the whole project — it already has the layout and key docs.
-func buildAnalystFirstPrompt(title, description, currentAnalysis, userMessage, docBlock, treeSummary string) string {
+// buildAnalystFirstPrompt renders the first-turn prompt for the analyst
+// stage. When the requirement carries an AnalystContextSummary (set by the
+// "📦 压缩上下文" action on a prior session) it is prepended as a
+// "## 上下文压缩摘要（之前的对话已被压缩）" block so the new session inherits
+// the compressed history instead of starting cold. The summary is plain
+// text — the wizard handler is responsible for stripping the
+// [COMPRESS_COMPLETE] sentinel before persisting.
+func buildAnalystFirstPrompt(req *model.Requirement, description, currentAnalysis, userMessage, docBlock, treeSummary string) string {
 	var b strings.Builder
+	if req != nil && req.AnalystContextSummary != "" {
+		b.WriteString("## 上下文压缩摘要（之前的对话已被压缩）\n")
+		b.WriteString(req.AnalystContextSummary)
+		b.WriteString("\n\n")
+	}
 	if description != "" {
 		b.WriteString(fmt.Sprintf("%s\n\n", description))
 	}
@@ -2988,11 +3100,27 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	// 就没有了更多了" after a section header with no content).
 	var prompt string
 	if freshSession {
+		// Fresh-session refine path (no resumable doc stage session). Seed
+		// the conversation with the doc body + user message + completion
+		// instructions, and when the matching wizard stage was previously
+		// compressed, prepend the summary so the new session inherits the
+		// compressed discussion context.
 		prompt = "以下是当前的「" + docLabel + "」文档：\n\n" + requirement.DesignDocs +
 			fmt.Sprintf("\n\n用户消息：\n%s\n\n", req.UserMessage) +
 			"请基于上述文档回应用户对「" + docLabel + "」的修改意见，" +
 			"完整列出每一个修改点的具体内容（包含涉及的表/字段/接口/逻辑），不要中途截断或留空。" +
 			"若用户确认修改已完成，在回复最后单独一行追加：[REFINE_COMPLETE]\n用中文。"
+		// Inject the matching stage's compressed summary on the fresh-session
+		// path only — the resume path inherits the conversation natively and
+		// doesn't need the prefix. Coding docs are routed through Coding*
+		// columns; design docs through Design*.
+		if req.DocType == "coding" && requirement.CodingContextSummary != "" {
+			prompt = "## 上下文压缩摘要（之前的开发对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
+				requirement.CodingContextSummary + "\n\n" + prompt
+		} else if req.DocType == "design" && requirement.DesignContextSummary != "" {
+			prompt = "## 上下文压缩摘要（之前的方案设计对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
+				requirement.DesignContextSummary + "\n\n" + prompt
+		}
 	} else {
 		prompt = fmt.Sprintf("用户消息：\n%s\n\n", req.UserMessage) +
 			"请基于我们的对话上下文回应用户对「" + docLabel + "」的修改意见，" +
@@ -3309,4 +3437,259 @@ func parseAtMentions(text string) []string {
 // legacy JSON design schema.
 func isLikelyJSON(s string) bool {
 	return strings.HasPrefix(strings.TrimSpace(s), "{")
+}
+
+// compressContextReq is the body of POST /api/wizard/compress-context.
+// step selects which wizard stage's session to summarize; it must be one of
+// "analyst_chat" / "architect_design" / "coding" (validated by
+// service.ValidContextSummaryStep).
+type compressContextReq struct {
+	RequirementID string `json:"requirement_id"`
+	Step          string `json:"step"`
+}
+
+// compressContextDone is the JSON payload of the terminal "done" event for
+// the compress-context SSE stream. Carrying the summary here (instead of a
+// follow-up GET) lets the modal pop with a single round-trip; the persisted
+// row is fetched separately by the frontend's requirementsApi.get() so the
+// rest of the detail page (sidebar / stepper) reflects the new compressed_at
+// timestamp too.
+type compressContextDone struct {
+	Step        string `json:"step"`
+	Summary     string `json:"summary"`
+	TokensUsed  int    `json:"tokens_used"`
+	Model       string `json:"model"`
+	StartedAt   int64  `json:"started_at_ms"`
+	CompletedAt int64  `json:"completed_at_ms"`
+}
+
+// CompressContext is the implementation of POST /api/wizard/compress-context.
+// It runs a single --resume turn asking Claude to summarize the current
+// wizard stage's conversation, writes the result to requirements.{step}_
+// context_summary + stamps compressed_at, and clears the matching session id
+// — all in one transaction via service.UpdateContextSummary so the next turn
+// in this stage starts fresh and sees the summary as a prompt prefix.
+//
+// Stream protocol (SSE under text/event-stream):
+//   phase       — human-readable status line
+//   message     — Claude's summary text as it streams in
+//   usage       — mirror of the result.usage block (powers the live usage bar)
+//   error       — terminal failure (no DB write happens)
+//   done        — terminal success; carries {step, summary, tokens_used, model}
+//
+// Failure policy: on any error path (stream failure, stale session, missing
+// [COMPRESS_COMPLETE] marker) we emit `error` + `done{success:false}` and
+// DELIBERATELY skip the DB write — the session stays intact so the user can
+// retry without losing context.
+func (h *WizardHandler) CompressContext(w http.ResponseWriter, r *http.Request) {
+	var req compressContextReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID", "invalid JSON: "+err.Error())
+		return
+	}
+	if req.RequirementID == "" {
+		writeError(w, http.StatusBadRequest, "INVALID", "requirement_id is required")
+		return
+	}
+	if !service.ValidContextSummaryStep(req.Step) {
+		writeError(w, http.StatusBadRequest, "INVALID", "step must be one of: analyst_chat, architect_design, coding")
+		return
+	}
+
+	rc := http.NewResponseController(w)
+	writeSSEHeaders(w)
+	w.WriteHeader(http.StatusOK)
+	rc.Flush()
+
+	startedAtMs := time.Now().UnixMilli()
+
+	requirement, err := h.reqSvc.Get(req.RequirementID)
+	if err != nil {
+		sendStatus(w, rc, "error", "未找到需求："+err.Error())
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+
+	// Pick the matching session id; reject the request when there is no
+	// resumable session so the user doesn't burn tokens summarizing nothing.
+	var sourceSID string
+	switch req.Step {
+	case "analyst":
+		sourceSID = requirement.AnalysisSessionID
+	case "design":
+		sourceSID = requirement.DesignSessionID
+	case "coding":
+		sourceSID = requirement.CodingSessionID
+	}
+	if sourceSID == "" {
+		sendStatus(w, rc, "error", "该阶段尚无可压缩的会话（先与 AI 对话一轮再试）")
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+
+	// Resolve project path the same way the other wizard stages do — anchor
+	// the resumed turn to the requirement's worktree (or the project root when
+	// no worktree exists) so absolute paths in the resume history still resolve.
+	projectPath := ""
+	defaultBranch := ""
+	if proj, perr := h.projectSvc.Get(requirement.ProjectID); perr == nil {
+		projectPath = proj.LocalPath
+		defaultBranch = proj.DefaultBranch
+	}
+	workDir, werr := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+	if werr != nil {
+		// Non-fatal: a missing worktree doesn't break --resume, which can run
+		// without a cwd. Log it so debugging is possible but proceed.
+		log.Printf("[compress-context] resolveWorkDir failed for %s: %v", req.RequirementID, werr)
+		workDir = projectPath
+	}
+
+	// Use the analyst role's system prompt — compression is essentially a
+	// summary-extraction skill, and reusing the analyst persona keeps the
+	// output style consistent with the other analytical turns. The model
+	// override follows the same precedence as other wizard handlers.
+	systemPrompt, model := h.roleConfig("analyst")
+
+	// Compression prompt (Chinese, fixed). The [COMPRESS_COMPLETE] sentinel
+	// is parsed by this handler to know when Claude has finished writing —
+	// text before the sentinel is the summary; text after (rare, in case the
+	// model emits trailing chatter) is discarded. We DISALLOW every tool so
+	// the resumed turn can only read the conversation history baked into
+	// --resume and produce a single textual summary.
+	const compressPrompt = `请把当前对话压缩为一段精炼的中文摘要（300-800 字），要求：
+1. 保留关键决策、技术约束、已确认的需求点
+2. 保留当前进展状态、待办事项
+3. 保留涉及的具体文件、函数、模块名
+4. 不要新增原对话没有的信息
+5. 不要输出代码片段（除非是必须保留的命名/路径）
+6. 末尾单独一行输出：[COMPRESS_COMPLETE]`
+
+	noTools := []string{
+		"Read", "Glob", "Grep", "Bash", "Write", "Edit",
+		"WebFetch", "WebSearch", "NotebookEdit",
+	}
+
+	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
+		Prompt:          compressPrompt,
+		WorkDir:         workDir,
+		SessionID:       sourceSID,
+		Resume:          true,
+		SystemPrompt:    systemPrompt,
+		Model:           cliModelArg(model),
+		DisallowedTools: noTools,
+	})
+
+	// Usage record: step is namespaced under "compress_<step>" so the existing
+	// usageApi.requirement() aggregation includes compression cost without
+	// confusing it with regular turn counts in the step dropdown.
+	usageStep := "compress_" + req.Step
+	uctx := h.usageCtxFor(usageStep, req.RequirementID, requirement.ProjectID, "", model, "", "")
+
+	sink := sseSink{w: w, rc: rc}
+	sink.emit(store.LogLine{Type: "phase", Content: "📦 正在压缩上下文..."})
+
+	out := runClaudeStream(sink, cmd, "compress-context", uctx)
+
+	if out.staleSession {
+		// Disk session is gone (cleaned up, container restart, etc.). We can't
+		// resume, so the right thing is to leave the (already-empty) sid
+		// alone — the next regular turn will start a fresh session anyway.
+		sendStatus(w, rc, "error", "⚠️ 该阶段的会话已过期（磁盘已被清理），无需压缩")
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+	if out.errMsg != "" {
+		sendStatus(w, rc, "error", "❌ "+out.errMsg)
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+
+	// Extract the summary: everything before [COMPRESS_COMPLETE], trimmed.
+	// A missing marker is treated as a soft failure so we don't store a half-
+	// formed or empty summary that would mislead future turns.
+	summary := out.finalResult
+	if idx := strings.Index(summary, "[COMPRESS_COMPLETE]"); idx >= 0 {
+		summary = summary[:idx]
+	}
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		sendStatus(w, rc, "error", "❌ Claude 未输出有效摘要（缺少 [COMPRESS_COMPLETE] 标记或摘要为空），请重试")
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+
+	// Token count for the done payload — read straight from the stream
+	// outcome we already have in scope (no DB roundtrip needed). The model
+	// comes from the result event's actualModel (set by runClaudeStream) with
+	// a fallback to the pre-dispatch role model.
+	tokensUsed := out.lastUsage.InputTokens +
+		out.lastUsage.OutputTokens +
+		out.lastUsage.CacheCreationTokens +
+		out.lastUsage.CacheReadTokens
+	modelOut := out.actualModel
+	if modelOut == "" {
+		modelOut = model
+	}
+
+	// Persist + clear session id atomically. A failure here leaves the
+	// summary un-saved so the user can retry — the original session stays
+	// live (we never cleared the sid before the write).
+	if perr := h.reqSvc.UpdateContextSummary(req.RequirementID, req.Step, summary); perr != nil {
+		log.Printf("[compress-context] persist failed for %s step=%s: %v", req.RequirementID, req.Step, perr)
+		sendStatus(w, rc, "error", "❌ 持久化失败："+perr.Error())
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
+		rc.Flush()
+		return
+	}
+
+	completedAtMs := time.Now().UnixMilli()
+	done := compressContextDone{
+		Step:        req.Step,
+		Summary:     summary,
+		TokensUsed:  tokensUsed,
+		Model:       modelOut,
+		StartedAt:   startedAtMs,
+		CompletedAt: completedAtMs,
+	}
+	if b, mErr := json.Marshal(done); mErr == nil {
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":true,\"payload\":%s}\n\n", string(b))
+	} else {
+		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":true}\n\n")
+	}
+	rc.Flush()
+}
+
+// GetContextSummary returns the persisted compression summary for one
+// requirement + step. Optional endpoint — the frontend can derive this from
+// the regular Requirement GET (which now exposes the *_context_summary +
+// *_compressed_at fields), but exposing a dedicated endpoint keeps the
+// "📦 已压缩" UI affordance cheap to refresh on its own.
+//
+// GET /api/wizard/requirement/{id}/context-summary?step=analyst_chat|architect_design|coding
+func (h *WizardHandler) GetContextSummary(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "INVALID", "missing requirement id")
+		return
+	}
+	step := r.URL.Query().Get("step")
+	if !service.ValidContextSummaryStep(step) {
+		writeError(w, http.StatusBadRequest, "INVALID", "step must be one of: analyst_chat, architect_design, coding")
+		return
+	}
+	summary, err := h.reqSvc.GetContextSummary(id, step)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "NOT_FOUND", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"requirement_id": id,
+		"step":           step,
+		"summary":        summary,
+	})
 }

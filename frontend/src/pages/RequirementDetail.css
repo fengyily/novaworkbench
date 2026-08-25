@@ -43,6 +43,21 @@
   color: var(--color-text-secondary);
 }
 
+/* Per-stage "📦 已压缩" badge in the requirement header meta row. Mirrors
+   the existing chip/tag patterns (kind-badge / status-tag) but uses a
+   neutral surface tint + amber text so it reads as "useful state" rather
+   than "warning" — the user explicitly invoked the compression, this
+   isn't an alert. Hover shows the timestamp via the title attr. */
+.compressed-badge {
+  padding: 3px 10px;
+  background: #FEF3C7;
+  color: #B45309;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: default;
+}
+
 .detail-section {
   background: var(--color-surface);
   border: 1px solid var(--color-border);

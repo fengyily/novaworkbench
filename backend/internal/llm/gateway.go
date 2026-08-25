@@ -498,3 +498,46 @@ func (g *Gateway) GenerateCode(opts StreamOpts) *exec.Cmd {
 
 	return g.StreamCmd(ctx, opts)
 }
+
+// usageInt coereces a JSON-decoded numeric value (float64 / int / int64 /
+// json.Number) to int, returning 0 for any non-numeric input. Used by
+// ParseStreamUsage below; mirrors the same helper in handler/usage.go so
+// the gateway can read stream-json usage without dragging the handler
+// package into its import graph.
+func usageInt(v interface{}) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	}
+	return 0
+}
+
+// ParseStreamUsage reads the four token-count fields from the top-level
+// "usage" object of a stream-json "result" event. The Claude CLI emits
+// this object exactly once per turn at completion, regardless of whether
+// the turn succeeded or was interrupted — so callers can record usage
+// for both success and failure paths.
+//
+// The ok return value is false when the event carries no usage field
+// (e.g. an early "result" with subtype:"error_during_execution" before
+// any tokens were spent); the four int values are zero in that case.
+// Callers that want "only record when at least one token was consumed"
+// can additionally check `in+out+cc+cr > 0`.
+func ParseStreamUsage(evt map[string]interface{}) (in, out, cc, cr int, ok bool) {
+	u, exists := evt["usage"].(map[string]interface{})
+	if !exists {
+		return 0, 0, 0, 0, false
+	}
+	return usageInt(u["input_tokens"]),
+		usageInt(u["output_tokens"]),
+		usageInt(u["cache_creation_input_tokens"]),
+		usageInt(u["cache_read_input_tokens"]),
+		true
+}

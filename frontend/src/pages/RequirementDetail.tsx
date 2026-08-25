@@ -1609,6 +1609,36 @@ export default function RequirementDetail() {
             ← 来源想法
           </Link>
         )}
+        {/* Per-stage "已压缩" badges. Each one is a passive indicator of
+            whether that wizard stage's session has been summarized into the
+            {step}_context_summary column — the chat components own the
+            compress button + summary modal, this is just a header-level
+            reminder so the user knows "压缩上下文" has been used without
+            scrolling into the chat panel. Hover for the timestamp. */}
+        {req.analyst_compressed_at && (
+          <span
+            className="compressed-badge"
+            title={`需求分析已于 ${req.analyst_compressed_at} 压缩`}
+          >
+            📦 分析已压缩
+          </span>
+        )}
+        {req.design_compressed_at && (
+          <span
+            className="compressed-badge"
+            title={`方案设计已于 ${req.design_compressed_at} 压缩`}
+          >
+            📦 设计已压缩
+          </span>
+        )}
+        {req.coding_compressed_at && (
+          <span
+            className="compressed-badge"
+            title={`开发调整已于 ${req.coding_compressed_at} 压缩`}
+          >
+            📦 开发已压缩
+          </span>
+        )}
       </div>
 
       {req.description && (

@@ -745,3 +745,111 @@ body.no-scroll {
     padding-bottom: 14px !important;
   }
 }
+
+/* ── ContextUsageBar ────────────────────────────────────────────────
+   紧凑型上下文用量条,挂在每个 wizard 聊天面板的顶部。
+   - 标签 + 数字行(模型 / 已用 / 百分比 / 压缩按钮),条形紧贴底部。
+   - 颜色阈值: < 80% 蓝, 80–95% 橙, ≥ 95% 红。
+   - 按钮在三态间切换: 压缩上下文 → 压缩中… → 已压缩 · 查看摘要。 */
+.usage-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+
+.usage-bar-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.usage-bar-step {
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.usage-bar-model {
+  font-family: var(--font-mono);
+  color: var(--color-text-muted);
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-bar-used {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  color: var(--color-text-secondary);
+}
+
+.usage-bar-pct {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-primary);
+  min-width: 40px;
+  text-align: right;
+}
+
+.usage-bar-pct-warn { color: var(--color-warning); }
+.usage-bar-pct-critical { color: var(--color-error); }
+
+.usage-bar-btn {
+  appearance: none;
+  border: 1px solid var(--color-border);
+  background: var(--color-hover);
+  color: var(--color-text);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.usage-bar-btn:hover:not(:disabled) {
+  background: var(--color-active);
+  border-color: var(--color-primary);
+}
+.usage-bar-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.usage-bar-track {
+  position: relative;
+  height: 4px;
+  background: var(--color-hover);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.usage-bar-band {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease, background 0.3s ease;
+}
+
+.usage-bar-band-ok {
+  background: var(--color-primary);
+}
+
+.usage-bar-band-warn {
+  background: var(--color-warning);
+}
+
+.usage-bar-band-critical {
+  background: var(--color-error);
+  animation: usage-bar-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes usage-bar-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}

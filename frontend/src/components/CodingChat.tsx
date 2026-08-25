@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { API_BASE, authedFetch } from '../api/client';
+import { API_BASE, authedFetch, wizardApi } from '../api/client';
+import { type UsageInfo } from '../utils/logLines';
+import { ContextUsageBar } from './ContextUsageBar';
 
 interface Props {
   reqId: string;
@@ -20,6 +22,13 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
   const [thinking, setThinking] = useState(false);
   const [lastRequest, setLastRequest] = useState('');
   const chatRef = useRef<HTMLDivElement>(null);
+  // Live context-usage snapshot for the developer-chat SSE stream. Updated
+  // on every `usage` event; mirrors DeepRefineChat's parsing rules. Undefined
+  // until the first claude turn of this session finishes.
+  const [usage, setUsage] = useState<UsageInfo | undefined>(undefined);
+  const [compressing, setCompressing] = useState(false);
+  const [compressedAt, setCompressedAt] = useState<string | null>(null);
+  const [summaryModal, setSummaryModal] = useState<string | null>(null);
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
@@ -70,6 +79,54 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
     const t = setTimeout(() => { saveMessages(messages); }, 400);
     return () => clearTimeout(t);
   }, [messages, saveMessages]);
+
+  // Boot fetch of the persisted compression record for the coding stage.
+  // Mirrors the other two chat components: loads the badge state once on
+  // mount so the bar's "📦 已压缩" label is correct after a page refresh,
+  // even before the user clicks anything.
+  useEffect(() => {
+    if (!reqId) return;
+    let cancelled = false;
+    wizardApi.getContextSummary(reqId, 'coding')
+      .then(data => { if (!cancelled && data) setCompressedAt(data.compressed_at ?? null); })
+      .catch(() => { /* silent */ });
+    return () => { cancelled = true; };
+  }, [reqId]);
+
+  // Trigger claude to summarize the current developer-chat conversation.
+  // Backend writes the summary into requirements.coding_context_summary,
+  // stamps coding_compressed_at, and clears coding_session_id so the next
+  // developer-chat turn sees the summary as its prepended context rather
+  // than the full session history.
+  // request<T> throws on a non-2xx response; alert on the caught error
+  // instead of checking a success field.
+  const handleCompress = useCallback(async () => {
+    if (!reqId || compressing) return;
+    if (!confirm('让 Claude 总结当前对话并压缩上下文？\n\n该操作会清空当前会话 ID,下次对话将看到压缩摘要而不是完整历史。')) return;
+    setCompressing(true);
+    try {
+      const data = await wizardApi.compressContext(reqId, 'coding');
+      setCompressedAt(data.compressed_at ?? null);
+      // Reset usage so the bar doesn't keep reporting the soon-cleared
+      // session's token counts; the next turn will push a fresh snapshot.
+      setUsage(undefined);
+    } catch (err: any) {
+      alert('压缩失败:' + (err?.message || String(err)));
+    } finally {
+      setCompressing(false);
+    }
+  }, [reqId, compressing]);
+
+  // Lazy fetch of the persisted summary text for the modal preview.
+  const handleShowSummary = useCallback(async () => {
+    if (!reqId) return;
+    try {
+      const data = await wizardApi.getContextSummary(reqId, 'coding');
+      setSummaryModal(data.summary || '(暂无压缩摘要)');
+    } catch {
+      setSummaryModal('(加载摘要失败)');
+    }
+  }, [reqId]);
 
   // Build the desc to pass to onStartCoding: last user message + full conversation context
   const buildCodingDesc = useCallback(() => {
@@ -129,6 +186,18 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
               if (idx >= 0) next[idx] = { role: 'ai', content: (next[idx].content || '') + data.content + '\n' };
               return next;
             });
+          } else if (data.type === 'usage') {
+            // Usage snapshot emitted at the end of this developer-chat turn.
+            // Same parsing as DeepRefineChat / DocRefineChat: backend serializes
+            // UsageInfo into `content` as a JSON string; we parse + compute
+            // derived fields here so the bar updates live.
+            try {
+              const parsed = JSON.parse(data.content || '{}') as UsageInfo;
+              const used = parsed.input_tokens + parsed.cache_creation_tokens + parsed.cache_read_tokens;
+              const cw = parsed.context_window || 200000;
+              const pct = cw > 0 ? (used / cw) * 100 : 0;
+              setUsage({ ...parsed, used, pct });
+            } catch { /* malformed payload — ignore */ }
           }
         } catch { /* skip malformed */ }
       }
@@ -332,6 +401,50 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
           <button className="btn btn-primary" onClick={handleConfirm}>
             ✅ 确认，开始修改
           </button>
+        </div>
+      )}
+
+      {/* Live context-usage bar + 压缩上下文 entry point. Sits at the bottom
+          of the chat panel so it's always reachable; mirrors the other two
+          chat components (DeepRefineChat, DocRefineChat). The disabled state
+          suppresses the click while a turn is in flight or a compression is
+          already running. */}
+      <ContextUsageBar
+        usage={usage}
+        onCompress={handleCompress}
+        compressing={compressing}
+        disabled={thinking || compressing}
+        stepLabel="开发调整"
+        compressedAt={compressedAt}
+        onShowSummary={handleShowSummary}
+      />
+
+      {/* Compressed-summary preview modal. Same shape as the other chat
+          components' modals so users get the same affordance wherever they
+          invoke a compression. */}
+      {summaryModal !== null && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setSummaryModal(null)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="modal"
+            onClick={e => e.stopPropagation()}
+            style={{ maxWidth: 640 }}
+          >
+            <div className="modal-header">
+              <h3>📦 已压缩上下文摘要</h3>
+              <button className="btn btn-sm" onClick={() => setSummaryModal(null)}>关闭</button>
+            </div>
+            <div
+              className="modal-body"
+              style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6, maxHeight: '60vh', overflowY: 'auto' }}
+            >
+              {summaryModal}
+            </div>
+          </div>
         </div>
       )}
     </div>
