@@ -374,30 +374,36 @@ func (g *Gateway) GenerateDescriptionAndTitle(content, kind string) (markdown, t
 // an empty Markdown + empty criteria; the service treats that as
 // "discussion didn't converge" and refuses to create the new requirement,
 // leaving the original idea intact.
-func (g *Gateway) SummarizeIdeaToRequirement(content string) (markdown, title string, criteria []string, usage *Usage, err error) {
+//
+// Token usage is not returned here: the service-side Summarizer interface
+// (see internal/service/requirement.go) intentionally omits it so service
+// doesn't have to import llm for a single type. If/when we want to record
+// usage for the summarize step, the handler can re-invoke the LLM channel
+// separately or we extend the Summarizer interface to carry usage back.
+func (g *Gateway) SummarizeIdeaToRequirement(content string) (markdown, title string, criteria []string, err error) {
 	if g.llmCfg == nil {
-		return "", "", nil, nil, fmt.Errorf("llm not configured: no llm config provider")
+		return "", "", nil, fmt.Errorf("llm not configured: no llm config provider")
 	}
 	baseURL, apiKey, model, err := g.llmCfg.LLMConfig()
 	if err != nil {
-		return "", "", nil, nil, fmt.Errorf("llm config unavailable: %w", err)
+		return "", "", nil, fmt.Errorf("llm config unavailable: %w", err)
 	}
 	if baseURL == "" || apiKey == "" {
-		return "", "", nil, nil, fmt.Errorf("llm not configured: base_url and api_key required")
+		return "", "", nil, fmt.Errorf("llm not configured: base_url and api_key required")
 	}
-	out, u, err := chatCompletion(baseURL, apiKey, model, summarizeIdeaToRequirementPrompt, content, 4096)
+	out, _, err := chatCompletion(baseURL, apiKey, model, summarizeIdeaToRequirementPrompt, content, 4096)
 	if err != nil {
-		return "", "", nil, nil, err
+		return "", "", nil, err
 	}
 	var res summarizeIdeaToRequirementResult
 	if jerr := json.Unmarshal([]byte(stripJSONFences(out)), &res); jerr != nil {
-		return "", "", nil, u, fmt.Errorf("llm http: decode summarize json: %w", jerr)
+		return "", "", nil, fmt.Errorf("llm http: decode summarize json: %w", jerr)
 	}
 	res.Title = strings.Trim(res.Title, "\"'` \n\r\t")
 	if res.Title == "" {
 		res.Title = "（未达成共识）"
 	}
-	return res.Markdown, res.Title, res.AcceptanceCriteria, u, nil
+	return res.Markdown, res.Title, res.AcceptanceCriteria, nil
 }
 
 func stripJSONFences(s string) string {

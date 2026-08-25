@@ -397,8 +397,12 @@ func (s *RequirementService) UpdateReviewerModel(id, model string) error {
 // idea's discussion thread into a draft requirement. Defined as an interface so
 // service doesn't import llm (and the real Gateway satisfies it without
 // registering extra wiring).
+//
+// Token-usage recording is NOT part of this contract: service doesn't consume
+// the usage object. Handlers that want to record tokens can do it against the
+// underlying *llm.Gateway separately (matches the pattern in Create).
 type Summarizer interface {
-	SummarizeIdeaToRequirement(content string) (markdown, title string, criteria []string, usage interface{ /* see llm.Usage */ }, err error)
+	SummarizeIdeaToRequirement(content string) (markdown, title string, criteria []string, err error)
 }
 
 // promoteSummaryErrUnconverged is returned by PromoteFromIdea when the LLM
@@ -438,7 +442,7 @@ func (s *RequirementService) PromoteFromIdea(sourceID string, summarizer Summari
 	chatJSON, _ := s.GetRefinementChat(sourceID)
 	payload := assemblePromotePayload(src, chatJSON)
 
-	_, title, criteria, _, err := summarizer.SummarizeIdeaToRequirement(payload)
+	_, title, criteria, err := summarizer.SummarizeIdeaToRequirement(payload)
 	if err != nil {
 		return nil, fmt.Errorf("summarize failed: %w", err)
 	}
