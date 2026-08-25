@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode } from 'react';
+import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode, type CSSProperties } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabels, kindOf, STAGE_VISIBILITY, type Kind } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabels, kindOf, STAGE_VISIBILITY, type Kind, type CostItem } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
@@ -28,6 +28,42 @@ interface DesignData {
 // Two-role stage-gate lifecycle. Each gate is completed by a manual action.
 // draft → analyzing → designing → designed → developing → done
 type Stage = 'analyst' | 'architect' | 'developer' | 'done';
+
+// Per-step emoji + accent color for the mobile token receipt. Color is the
+// `--accent` custom property the receipt card uses for its left stripe and
+// proportion-bar segment, so the visual identity of each stage is consistent
+// across the hero bar and the individual cards. Defaults to a neutral slate
+// for steps we don't have an opinion on (e.g. requirement_create).
+const STAGE_VISUALS: Record<string, { icon: string; accent: string }> = {
+  requirement_create: { icon: '🗂️', accent: '#94A3B8' },
+  analyst_chat:       { icon: '🔍', accent: '#4F46E5' },
+  architect_design:   { icon: '📐', accent: '#7C3AED' },
+  refine_doc:         { icon: '✏️', accent: '#7C3AED' },
+  apply_doc:          { icon: '🪄', accent: '#7C3AED' },
+  coding:             { icon: '🚀', accent: '#0E7490' },
+  developer_chat:     { icon: '💬', accent: '#0E7490' },
+  adjust_coding:      { icon: '🛠️', accent: '#0E7490' },
+  continue_coding:    { icon: '🔁', accent: '#0E7490' },
+  merge:              { icon: '🔀', accent: '#059669' },
+  review:             { icon: '🧐', accent: '#D97706' },
+};
+
+// Wizard-stage display order — used to sort the receipt cards so the user
+// reads them in the order the steps actually ran (analyst → architect → dev)
+// instead of by model. Anything not in this list falls through at the end.
+const RECEIPT_STAGE_ORDER = [
+  'requirement_create',
+  'analyst_chat',
+  'architect_design',
+  'refine_doc',
+  'apply_doc',
+  'coding',
+  'developer_chat',
+  'adjust_coding',
+  'continue_coding',
+  'merge',
+  'review',
+];
 
 function stageFor(status: string, skipDesign?: boolean): Stage {
   switch (status) {
@@ -1592,6 +1628,156 @@ export default function RequirementDetail() {
         </div>
         {usage && usage.by_step.length > 0 ? (
           <>
+            {/* Mobile-only receipt layout — replaced by CSS at ≤768px to give
+                the section a "bill" feel: hero total + segmented proportion
+                bar, then one card per stage with a thin left stripe in the
+                stage's accent color. The desktop table below stays untouched
+                for ≥769px viewports. */}
+            {(() => {
+              const primaryCost = (c?: CostItem[]): number => (c && c.length ? c[0].amount : 0);
+              const fmtCount = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : n.toLocaleString();
+              const stages = new Map<string, {
+                key: string; label: string; icon: string; accent: string;
+                cost: number; costs: CostItem[]; count: number;
+                input: number; output: number; cacheRead: number; cacheCreate: number;
+                models: string[];
+              }>();
+              for (const s of usage.by_step) {
+                const visual = STAGE_VISUALS[s.step] ?? { icon: '⚙️', accent: '#94A3B8' };
+                const cur = stages.get(s.step) ?? {
+                  key: s.step,
+                  label: s.label || stepLabels[s.step] || s.step,
+                  icon: visual.icon,
+                  accent: visual.accent,
+                  cost: 0, costs: [] as CostItem[], count: 0,
+                  input: 0, output: 0, cacheRead: 0, cacheCreate: 0,
+                  models: [],
+                };
+                cur.cost += primaryCost(s.costs);
+                if (s.costs && s.costs.length) cur.costs = cur.costs.concat(s.costs);
+                cur.count += s.count;
+                cur.input += s.input_tokens;
+                cur.output += s.output_tokens;
+                cur.cacheRead += s.cache_read_tokens;
+                cur.cacheCreate += s.cache_creation_tokens;
+                if (s.model && !cur.models.includes(s.model)) cur.models.push(s.model);
+                stages.set(s.step, cur);
+              }
+              const ordered = Array.from(stages.values()).sort((a, b) => {
+                const ai = RECEIPT_STAGE_ORDER.indexOf(a.key);
+                const bi = RECEIPT_STAGE_ORDER.indexOf(b.key);
+                return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+              });
+              const totalCost = ordered.reduce((acc, s) => acc + s.cost, 0);
+              const totalCount = ordered.reduce((acc, s) => acc + s.count, 0);
+              const totalTokens = usage.total.input_tokens + usage.total.output_tokens
+                + usage.total.cache_creation_tokens + usage.total.cache_read_tokens;
+              const cacheHitRate = (usage.total.input_tokens + usage.total.cache_creation_tokens + usage.total.cache_read_tokens) > 0
+                ? usage.total.cache_read_tokens / (usage.total.input_tokens + usage.total.cache_creation_tokens + usage.total.cache_read_tokens)
+                : 0;
+              return (
+                <div className="usage-receipt">
+                  <div className="usage-receipt-hero">
+                    <div className="usage-receipt-eyebrow">本需求总费用</div>
+                    <div className="usage-receipt-total">{fmtCost(usage.total.costs)}</div>
+                    <div className="usage-receipt-meta">
+                      <span>{totalCount.toLocaleString()} 次调用</span>
+                      <span className="usage-receipt-dot">·</span>
+                      <span>{fmtCount(totalTokens)} tokens</span>
+                      {cacheHitRate > 0 && (
+                        <>
+                          <span className="usage-receipt-dot">·</span>
+                          <span className="usage-receipt-cache">
+                            缓存命中 {Math.round(cacheHitRate * 100)}%
+                          </span>
+                        </>
+                      )}
+                    </div>
+                    {ordered.length > 0 && (
+                      <div className="usage-receipt-bar" role="img" aria-label="各阶段费用占比">
+                        {ordered.map(s => totalCost > 0 ? (
+                          <div
+                            key={s.key}
+                            className="usage-receipt-bar-seg"
+                            style={{
+                              width: `${(s.cost / totalCost) * 100}%`,
+                              background: s.accent,
+                            }}
+                            title={`${s.label}：${Math.round((s.cost / totalCost) * 100)}%`}
+                          />
+                        ) : null)}
+                      </div>
+                    )}
+                    {ordered.length > 0 && (
+                      <div className="usage-receipt-legend">
+                        {ordered.map(s => (
+                          <span key={s.key} className="usage-receipt-legend-item">
+                            <span className="usage-receipt-legend-swatch" style={{ background: s.accent }} />
+                            <span>{s.icon} {s.label}</span>
+                            <span className="usage-receipt-legend-pct">
+                              {totalCost > 0 ? Math.round((s.cost / totalCost) * 100) : 0}%
+                            </span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="usage-receipt-cards">
+                    {ordered.map(s => (
+                      <div
+                        key={s.key}
+                        className="usage-receipt-card"
+                        style={{ '--accent': s.accent } as CSSProperties}
+                      >
+                        <div className="usage-receipt-card-head">
+                          <div className="usage-receipt-card-title">
+                            <span className="usage-receipt-card-icon" aria-hidden>{s.icon}</span>
+                            <span className="usage-receipt-card-label">{s.label}</span>
+                          </div>
+                          <div className="usage-receipt-card-cost">{fmtCost(s.costs)}</div>
+                        </div>
+                        <div className="usage-receipt-card-sub">
+                          {s.models.length > 0 ? (
+                            <span className="usage-receipt-card-model" title={s.models.join(', ')}>
+                              {s.models.length === 1
+                                ? s.models[0]
+                                : `${s.models[0]} +${s.models.length - 1}`}
+                            </span>
+                          ) : (
+                            <span className="usage-receipt-card-model">未知模型</span>
+                          )}
+                          <span className="usage-receipt-card-dot">·</span>
+                          <span>{s.count.toLocaleString()} 次调用</span>
+                        </div>
+                        <div className="usage-receipt-card-bar" aria-hidden>
+                          <div
+                            className="usage-receipt-card-bar-fill"
+                            style={{ width: totalCost > 0 ? `${(s.cost / totalCost) * 100}%` : '0%' }}
+                          />
+                        </div>
+                        <div className="usage-receipt-card-stats">
+                          <div className="usage-receipt-card-stat">
+                            <span className="usage-receipt-card-stat-label">输入</span>
+                            <span className="usage-receipt-card-stat-value">{fmtCount(s.input + s.cacheRead + s.cacheCreate)}</span>
+                          </div>
+                          <div className="usage-receipt-card-stat">
+                            <span className="usage-receipt-card-stat-label">输出</span>
+                            <span className="usage-receipt-card-stat-value">{fmtCount(s.output)}</span>
+                          </div>
+                        </div>
+                        {(s.cacheRead > 0 || s.cacheCreate > 0) && (
+                          <div className="usage-receipt-card-cache">
+                            <span>缓存读 {s.cacheRead.toLocaleString()}</span>
+                            {s.cacheCreate > 0 && <span>· 缓存建 {s.cacheCreate.toLocaleString()}</span>}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+
             <table className="pr-table table-cards" style={{ marginBottom: 8 }}>
               <thead>
                 <tr>

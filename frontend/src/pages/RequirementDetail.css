@@ -1224,3 +1224,233 @@
 .modal-card .modal-error p {
   margin: 0;
 }
+
+/* ── Mobile token receipt ──────────────────────────────────────────────────
+   The desktop `<table class="pr-table table-cards">` is the canonical view;
+   below 768px it gets swapped for a "receipt" layout — one hero card with
+   the grand total + segmented cost bar, then one card per stage with a thin
+   left stripe in the stage's accent color. Hidden on desktop so the desktop
+   table continues to render unchanged. */
+.usage-receipt { display: none; }
+
+@media (max-width: 768px) {
+  /* On mobile the table is replaced by the receipt — keep the table markup
+     in the DOM for accessibility / data, but don't render it. */
+  .usage-section .pr-table,
+  .usage-section .usage-table-caption { display: none; }
+
+  .usage-receipt { display: block; }
+
+  /* ── Hero card ──────────────────────────────────────────────────────── */
+  .usage-receipt-hero {
+    position: relative;
+    background: linear-gradient(180deg, var(--color-parchment, #FDFCF8) 0%, #FFFFFF 100%);
+    border: 1px solid var(--color-border);
+    border-radius: 14px;
+    padding: 18px 18px 16px;
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+  .usage-receipt-hero::before {
+    /* faint dashed tear-line along the bottom — the receipt metaphor */
+    content: '';
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    height: 6px;
+    background-image: linear-gradient(90deg, var(--color-border) 50%, transparent 50%);
+    background-size: 8px 1px;
+    background-repeat: repeat-x;
+    background-position: 0 50%;
+    opacity: 0.55;
+    pointer-events: none;
+  }
+  .usage-receipt-eyebrow {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    margin-bottom: 6px;
+  }
+  .usage-receipt-total {
+    font-family: var(--font-mono);
+    font-size: 30px;
+    line-height: 1.1;
+    font-weight: 700;
+    color: var(--color-text);
+    letter-spacing: -0.4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .usage-receipt-meta {
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+  .usage-receipt-dot {
+    color: var(--color-text-muted);
+    opacity: 0.5;
+  }
+  .usage-receipt-cache {
+    color: var(--color-success, #10B981);
+    font-weight: 600;
+  }
+  .usage-receipt-bar {
+    margin-top: 14px;
+    display: flex;
+    width: 100%;
+    height: 6px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: var(--color-bg);
+  }
+  .usage-receipt-bar-seg {
+    height: 100%;
+    transition: width 320ms ease-out;
+  }
+  .usage-receipt-bar-seg:not(:last-child) {
+    /* hairline divider between segments — keeps the segments readable when
+       colors are close (e.g. violet refine_doc next to architect_design) */
+    border-right: 1px solid var(--color-surface, #FFFFFF);
+  }
+  .usage-receipt-legend {
+    margin-top: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    font-size: 12px;
+    color: var(--color-text-secondary);
+  }
+  .usage-receipt-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .usage-receipt-legend-swatch {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    display: inline-block;
+  }
+  .usage-receipt-legend-pct {
+    font-family: var(--font-mono);
+    color: var(--color-text);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ── Per-stage cards ────────────────────────────────────────────────── */
+  .usage-receipt-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .usage-receipt-card {
+    position: relative;
+    background: var(--color-surface, #FFFFFF);
+    border: 1px solid var(--color-border);
+    border-left: 4px solid var(--accent, var(--color-primary));
+    border-radius: 10px;
+    padding: 14px 14px 12px 16px;
+    overflow: hidden;
+  }
+  .usage-receipt-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .usage-receipt-card-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .usage-receipt-card-icon { font-size: 16px; line-height: 1; }
+  .usage-receipt-card-label {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-text);
+  }
+  .usage-receipt-card-cost {
+    font-family: var(--font-mono);
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--accent, var(--color-primary));
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .usage-receipt-card-sub {
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--color-text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow: hidden;
+  }
+  .usage-receipt-card-model {
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 180px;
+  }
+  .usage-receipt-card-dot { color: var(--color-text-muted); }
+  .usage-receipt-card-bar {
+    margin-top: 10px;
+    width: 100%;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--color-bg);
+    overflow: hidden;
+  }
+  .usage-receipt-card-bar-fill {
+    height: 100%;
+    background: var(--accent, var(--color-primary));
+    border-radius: 999px;
+    transition: width 320ms ease-out;
+  }
+  .usage-receipt-card-stats {
+    margin-top: 10px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 12px;
+    font-size: 12px;
+  }
+  .usage-receipt-card-stat {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+    border-bottom: 1px dashed var(--color-border);
+    padding-bottom: 4px;
+  }
+  .usage-receipt-card-stat-label {
+    font-size: 11px;
+    color: var(--color-text-muted);
+  }
+  .usage-receipt-card-stat-value {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--color-text);
+    font-variant-numeric: tabular-nums;
+  }
+  .usage-receipt-card-cache {
+    margin-top: 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--color-text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Honor the OS "reduce motion" preference for the bar fill transition —
+     keeps the receipt quiet for users who don't want animation. */
+  @media (prefers-reduced-motion: reduce) {
+    .usage-receipt-bar-seg,
+    .usage-receipt-card-bar-fill { transition: none; }
+  }
+}
