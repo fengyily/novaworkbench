@@ -18,6 +18,7 @@
  */
 
 import type { UsageInfo } from '../utils/logLines';
+import { clampPct, bandClass, formatTokens } from '../utils/logLines';
 
 export interface ContextUsageBarProps {
   /** 最新一次 result 事件的快照;未到结果事件时为 undefined(显示 0%)。 */
@@ -37,42 +38,20 @@ export interface ContextUsageBarProps {
    */
   compressedAt?: string | null;
   onShowSummary?: () => void;
+  /**
+   * 是否展示"压缩上下文"按钮。设计阶段不需要压缩(方案是一次性生成的
+   * plan-mode 产物,微调对话没有压缩价值),传 false 即只保留用量展示,
+   * 不渲染按钮、不响应点击。默认 true(分析师 / 开发阶段照常压缩)。
+   */
+  compressible?: boolean;
 }
 
 const COMPRESS_LABEL = '📦 压缩上下文';
 const COMPRESSING_LABEL = '⏳ 压缩中…';
 const COMPRESSED_LABEL = '📦 已压缩 · 查看摘要';
 
-/**
- * 把 server 给的 pct 夹紧到 [0, 100] 用于条形宽度;原始 pct 仍展示在 tooltip 上,
- * 因为 Claude 把 cache_read 计入后,pct 可能瞬间超过 100%(长会话 cache 命中时正常)。
- */
-function clampPct(pct: number): number {
-  if (!Number.isFinite(pct) || pct < 0) return 0;
-  if (pct > 100) return 100;
-  return pct;
-}
-
-/**
- * 数字格式化:把 123456 渲染成 "123K" / "1.2M"。条形上的紧凑数字用此函数,
- * 避免显示成 6 位数把标题挤掉。
- */
-function formatTokens(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return '0';
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
-  return String(n);
-}
-
-/**
- * 选择条形颜色:基于 clampPct(0..100),阈值 80 / 95。
- * 注意:不是基于原始 pct,避免缓存命中瞬间把条形染红又染回来闪烁。
- */
-function bandClass(pct: number): string {
-  if (pct >= 95) return 'usage-bar-band usage-bar-band-critical';
-  if (pct >= 80) return 'usage-bar-band usage-bar-band-warn';
-  return 'usage-bar-band usage-bar-band-ok';
-}
+// clampPct / bandClass / formatTokens are imported from utils/logLines so the
+// in-panel bars and the top SessionContextStrip share one set of thresholds.
 
 export function ContextUsageBar({
   usage,
@@ -82,6 +61,7 @@ export function ContextUsageBar({
   stepLabel,
   compressedAt,
   onShowSummary,
+  compressible = true,
 }: ContextUsageBarProps) {
   // 没有 usage 事件时(本轮没结束),给一个 0% 的稳定占位;条形不抖动。
   const used = usage?.used ?? 0;
@@ -125,15 +105,17 @@ export function ContextUsageBar({
         >
           {pct.toFixed(0)}%
         </span>
-        <button
-          type="button"
-          className="usage-bar-btn"
-          onClick={handleClick}
-          disabled={!!disabled && !showCompressed}
-          title={showCompressed ? '查看已压缩摘要' : '让 claude 总结当前会话并清空上下文'}
-        >
-          {buttonLabel}
-        </button>
+        {compressible && (
+          <button
+            type="button"
+            className="usage-bar-btn"
+            onClick={handleClick}
+            disabled={!!disabled && !showCompressed}
+            title={showCompressed ? '查看已压缩摘要' : '让 claude 总结当前会话并清空上下文'}
+          >
+            {buttonLabel}
+          </button>
+        )}
       </div>
       <div className="usage-bar-track" aria-hidden="true">
         <div

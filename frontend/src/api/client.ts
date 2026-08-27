@@ -286,6 +286,14 @@ export interface Requirement {
   design_compressed_at?: string | null;
   coding_context_summary?: string;
   coding_compressed_at?: string | null;
+  // Session-level context-usage snapshots, one JSON blob keyed by wizard
+  // session (analyst_chat / architect_design / coding). Written by the
+  // backend at the end of every claude turn (same point it emits the `usage`
+  // SSE event) so the usage bars can seed themselves from the Requirement GET
+  // and survive a page refresh / panel collapse instead of dropping to 0%.
+  // Empty/missing = no snapshot recorded yet. Parsed by parseUsageSnapshots
+  // in utils/logLines.ts.
+  usage_snapshots?: string;
   created_at: string; updated_at: string;
   completed_at?: string;
 }

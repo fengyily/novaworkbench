@@ -52,7 +52,16 @@ type Requirement struct {
 	DesignCompressedAt    *time.Time `json:"design_compressed_at,omitempty"`
 	CodingContextSummary  string     `json:"coding_context_summary"`
 	CodingCompressedAt    *time.Time `json:"coding_compressed_at,omitempty"`
-	CreatedAt             time.Time  `json:"created_at"`
+	// UsageSnapshots is a JSON blob keyed by wizard session
+	// (analyst_chat/architect_design/coding) carrying each session's most
+	// recent result-event token counts + context_window + model. Written by
+	// runClaudeStream at the same point it emits the `usage` SSE event, so the
+	// frontend can seed its usage bars from the Requirement GET and survive a
+	// page refresh / panel collapse instead of dropping to 0%. Empty = no
+	// snapshot recorded yet. Best-effort: write failures are logged, not
+	// surfaced, so they never break a claude turn.
+	UsageSnapshots string    `json:"usage_snapshots"`
+	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 	CompletedAt           *time.Time `json:"completed_at,omitempty"`
 }

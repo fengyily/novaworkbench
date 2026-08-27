@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { API_BASE, authedFetch, wizardApi } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
-import { appendLogLine, coalesceLogLines, type LogLine, type UsageInfo } from '../utils/logLines';
+import { appendLogLine, coalesceLogLines, type LogLine, type UsageInfo, computeUsage } from '../utils/logLines';
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import ModelSelect from './ModelSelect';
 import AtMentionTextarea from './AtMentionTextarea';
@@ -27,6 +27,13 @@ interface Props {
   // Refresh the requirement after an apply completes (design_docs was
   // persisted server-side; refresh renders it and clears apply_job_id).
   onTurnDone?: () => void;
+  // Controlled context-usage for this stage's session. Parent owns the live
+  // state so it can drive the always-on top strip AND seed from the persisted
+  // requirements.usage_snapshots blob. The session key is derived from
+  // docType (design→architect_design, coding→coding). We report each `usage`
+  // SSE event upward via onUsage and read the value back from `usage`.
+  usage?: UsageInfo;
+  onUsage?: (u: UsageInfo | undefined) => void;
 }
 
 interface ChatMessage {
@@ -37,7 +44,7 @@ interface ChatMessage {
 
 const LABEL = { design: '技术方案', coding: '开发指令' };
 
-export default function DocRefineChat({ reqId, projectPath, docType, currentDoc, model, defaultModel, applyJobId, onTurnDone }: Props) {
+export default function DocRefineChat({ reqId, projectPath, docType, currentDoc, model, defaultModel, applyJobId, onTurnDone, usage, onUsage }: Props) {
   const [expanded, setExpanded] = useState(false);
   const { isFullscreen, toggle: toggleFullscreen, exit: exitFullscreen } = useFullscreen();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -49,11 +56,11 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   const [applyLines, setApplyLines] = useState<LogLine[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventStream | null>(null);
-  // Live context-usage snapshot shared between the refine-doc and apply-doc
-  // SSE streams — both flows target the same wizard stage (design or coding),
-  // so a usage event from either should update the bar. Same parsing rules
-  // as DeepRefineChat: backend serializes UsageInfo as JSON in `content`.
-  const [usage, setUsage] = useState<UsageInfo | undefined>(undefined);
+  // Context-usage is CONTROLLED — the parent owns the live state (so the
+  // always-on top strip shares it and persists across refresh / panel
+  // collapse). We report `usage` SSE events upward via onUsage; the value
+  // comes back in via the `usage` prop for rendering. The session key below
+  // maps docType → wizard session for the report.
   const [compressing, setCompressing] = useState(false);
   const [compressedAt, setCompressedAt] = useState<string | null>(null);
   const [summaryModal, setSummaryModal] = useState<string | null>(null);
@@ -174,11 +181,8 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           // (used, pct) here so the bar updates live.
           if (evt.type === 'usage') {
             try {
-              const parsed = JSON.parse(evt.content ?? '{}') as UsageInfo;
-              const used = parsed.input_tokens + parsed.cache_creation_tokens + parsed.cache_read_tokens;
-              const cw = parsed.context_window || 200000;
-              const pct = cw > 0 ? (used / cw) * 100 : 0;
-              setUsage({ ...parsed, used, pct });
+              const parsed = JSON.parse(evt.content ?? '{}');
+              onUsage?.(computeUsage(parsed, compressStep));
             } catch { /* malformed payload — ignore */ }
           }
         } catch { /* skip */ }
@@ -272,11 +276,8 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         // last write wins on the bar regardless of which flow emitted it.
         if (evt.type === 'usage') {
           try {
-            const parsed = JSON.parse(evt.content ?? '{}') as UsageInfo;
-            const used = parsed.input_tokens + parsed.cache_creation_tokens + parsed.cache_read_tokens;
-            const cw = parsed.context_window || 200000;
-            const pct = cw > 0 ? (used / cw) * 100 : 0;
-            setUsage({ ...parsed, used, pct });
+            const parsed = JSON.parse(evt.content ?? '{}');
+            onUsage?.(computeUsage(parsed, compressStep));
           } catch { /* malformed payload — ignore */ }
         }
       },
@@ -361,7 +362,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
       setCompressedAt(data.compressed_at ?? null);
       // Reset usage so the bar doesn't keep reporting the soon-cleared
       // session's token counts; the next turn will push a fresh snapshot.
-      setUsage(undefined);
+      onUsage?.(undefined);
       onTurnDone?.();
     } catch (err: any) {
       alert('压缩失败:' + (err?.message || String(err)));
@@ -429,7 +430,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   }
 
   return (
-    <div className="detail-section" style={{ marginTop: 16 }}>
+    <div className="detail-section doc-refine-panel" style={{ marginTop: 16 }}>
       <div className="deep-refine-header">
         <h3>💬 微调{label}</h3>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -546,6 +547,9 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         stepLabel={stepLabel}
         compressedAt={compressedAt}
         onShowSummary={handleShowSummary}
+        // 设计阶段不压缩:方案是 plan-mode 一次性产物,微调对话没有压缩价值,
+        // 只保留上下文用量展示。
+        compressible={docType !== 'design'}
       />
 
       {/* Compressed-summary preview modal. Same shape as DeepRefineChat's

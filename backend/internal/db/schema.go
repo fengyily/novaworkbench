@@ -383,6 +383,16 @@ var alterColumns = []string{
 	`ALTER TABLE requirements ADD COLUMN design_compressed_at    DATETIME`,
 	`ALTER TABLE requirements ADD COLUMN coding_context_summary  TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN coding_compressed_at    DATETIME`,
+	// Session-level context-usage snapshots (analyst / design / coding). The
+	// wizard's runClaudeStream writes a JSON blob here at the end of every
+	// claude turn (same point it emits the `usage` SSE event), keyed by session:
+	// {"analyst_chat":{...},"architect_design":{...},"coding":{...}}. The
+	// frontend seeds its usage bars from this on load so the bar survives page
+	// refresh / panel collapse instead of dropping to 0%. One JSON column
+	// (read-modify-write in a tx) beats three columns and keeps the live
+	// telemetry out of the compression-summary columns above. Empty = no
+	// snapshot yet.
+	`ALTER TABLE requirements ADD COLUMN usage_snapshots TEXT NOT NULL DEFAULT ''`,
 }
 
 var (
@@ -463,12 +473,15 @@ func migrate(d *DB) error {
 		return err
 	}
 
+	// alterColumns are SQLite-flavored; run them through the same per-dialect
+	// fixup as the canonical schema so DATETIME→TIMESTAMP on Postgres and the
+	// MySQL TEXT-default / VARCHAR translations apply here too. (The MySQL
+	// block below used to do only the TEXT-default piece; fixupSchema is a
+	// superset and also covers the indexed-column / `key` regexes, which are
+	// harmless no-matches on these statements.)
 	alters := make([]string, len(alterColumns))
-	copy(alters, alterColumns)
-	if d.dialect == MySQL {
-		for i, stmt := range alters {
-			alters[i] = mysqlTextDefault.ReplaceAllString(stmt, "TEXT$1 DEFAULT ($2)")
-		}
+	for i, stmt := range alterColumns {
+		alters[i] = fixupSchema(d.dialect, stmt)
 	}
 	if err := execStatements(d, alters); err != nil {
 		return err

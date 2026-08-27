@@ -301,18 +301,53 @@ func (h *WizardHandler) effectiveModel(roleModel string) string {
 // steps that don't have a meaningful single-line summary.
 func (h *WizardHandler) usageCtxFor(step, requirementID, projectID, jobID, model, meta, summary string) *usageCtx {
 	configID, currency := h.activeConfigMeta()
-	return &usageCtx{
-		Rec:            h.usageSvc,
-		RequirementID:  requirementID,
-		ProjectID:      projectID,
-		JobID:          jobID,
-		Step:           step,
-		Model:          model,
-		ClaudeConfigID: configID,
-		Currency:       currency,
-		Meta:           meta,
-		Summary:        summary,
+	// Build the snapshot-persist closure up front. snapshotStep maps the usage
+	// step to the wizard session whose usage_snapshots entry this turn should
+	// update; "" means "don't persist" (compress_* turns — see snapshotStep).
+	// The closure captures requirementID + sessionKey and routes to
+	// reqSvc.UpdateUsageSnapshot, swallowing errors so a write failure never
+	// breaks the claude turn (mirrors usageCtx.recordFrom's best-effort policy).
+	var persist func(sessionKey, snapshotJSON string)
+	if sessionKey := snapshotStep(step); sessionKey != "" && requirementID != "" && h.reqSvc != nil {
+		persist = func(key, snapshotJSON string) {
+			if err := h.reqSvc.UpdateUsageSnapshot(requirementID, key, snapshotJSON); err != nil {
+				log.Printf("[usage-snapshot] persist failed for %s key=%s: %v", requirementID, key, err)
+			}
+		}
 	}
+	return &usageCtx{
+		Rec:             h.usageSvc,
+		RequirementID:   requirementID,
+		ProjectID:       projectID,
+		JobID:           jobID,
+		Step:            step,
+		Model:           model,
+		ClaudeConfigID:  configID,
+		Currency:        currency,
+		Meta:            meta,
+		Summary:         summary,
+		PersistSnapshot: persist,
+	}
+}
+
+// snapshotStep maps a usageCtx.Step (the wizard invocation label) to the wizard
+// session key whose usage_snapshots JSON entry this turn should update. Multiple
+// usage steps touch the SAME session — every coding-adjacent turn (coding /
+// adjust_coding / continue_coding / developer_chat) writes into the "coding"
+// session because they all --resume the coding_session_id. "" means "don't
+// persist": compress_* turns describe the summarize prompt rather than the
+// session's real fill and the session is cleared on success anyway, so
+// overwriting the snapshot would be misleading.
+func snapshotStep(step string) string {
+	switch step {
+	case "analyst_chat":
+		return "analyst_chat"
+	case "architect_design":
+		return "architect_design"
+	case "coding", "adjust_coding", "continue_coding", "developer_chat":
+		return "coding"
+	}
+	return ""
 }
 
 // activeConfigMeta returns the currently-active claude config's id + currency.
@@ -2586,6 +2621,31 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 					}
 					if b, mErr := json.Marshal(payload); mErr == nil {
 						sink.emit(store.LogLine{Type: "usage", Content: string(b)})
+						// Same payload, second outlet: persist into the
+						// requirements.usage_snapshots blob so the frontend can
+						// seed its usage bars from the Requirement GET and
+						// survive a page refresh / panel collapse instead of
+						// dropping to 0%. snapshotStep maps the usage step to
+						// the wizard session; "" (compress_* turns) skips. The
+						// closure swallows its own errors — never breaks the
+						// stream. The SSE payload carries `step` (the usage
+						// label) while the snapshot is keyed by session, so we
+						// rebuild the snapshot value without `step`.
+						if uctx.PersistSnapshot != nil {
+							if key := snapshotStep(uctx.Step); key != "" {
+								snap := map[string]any{
+									"model":                 modelName,
+									"input_tokens":          inTok,
+									"output_tokens":         outTok,
+									"cache_creation_tokens": cc,
+									"cache_read_tokens":     cr,
+									"context_window":        service.ModelContextWindow(modelName),
+								}
+								if sb, sErr := json.Marshal(snap); sErr == nil {
+									uctx.PersistSnapshot(key, string(sb))
+								}
+							}
+						}
 					}
 				}
 			}

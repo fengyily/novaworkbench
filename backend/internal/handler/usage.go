@@ -39,6 +39,17 @@ type usageCtx struct {
 	Currency       string
 	Meta           string
 	Summary        string
+	// PersistSnapshot, when non-nil, is called by runClaudeStream at the same
+	// point it emits the `usage` SSE event (end of a claude turn) to write the
+	// session's latest token-usage snapshot into requirements.usage_snapshots.
+	// The closure receives (sessionKey, snapshotJSON) — sessionKey is the
+	// wizard session the snapshot belongs to (analyst_chat / architect_design
+	// / coding), already mapped from Step by usageCtxFor via snapshotStep.
+	// nil means "don't persist" (e.g. compress_* turns, where the snapshot
+	// would describe the summarize prompt rather than the session's real fill
+	// and the session is about to be cleared anyway). Best-effort: the closure
+	// must swallow its own errors so a DB hiccup never breaks the claude turn.
+	PersistSnapshot func(sessionKey, snapshotJSON string)
 }
 
 // summaryMetaMaxLen caps the persisted summary so a long 追加调整 prompt

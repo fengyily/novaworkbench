@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { API_BASE, authedFetch, kindChatPlaceholders, kindOf, requirementsApi, wizardApi, type Kind } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import AtMentionTextarea from './AtMentionTextarea';
-import { appendLogLine, type LogLine, type UsageInfo } from '../utils/logLines';
+import { appendLogLine, type LogLine, type UsageInfo, computeUsage } from '../utils/logLines';
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import ModelSelect from './ModelSelect';
 import { FullscreenButton } from './FullscreenButton';
@@ -32,6 +32,14 @@ interface Props {
   // accurate global "Claude 工作中" badge while an analyst turn runs (the
   // persisted analysis_job_id is only refreshed after the turn finishes).
   onWorkingChange?: (working: boolean) => void;
+  // Controlled context-usage for the analyst session. The parent
+  // (RequirementDetail) owns the live usage state so it can also drive the
+  // always-on top strip AND seed it from requirements.usage_snapshots on
+  // load — the bar thus survives page refresh / panel collapse instead of
+  // dropping to 0%. The component reports each `usage` SSE event upward via
+  // onUsage; the parent feeds the same value back in here for rendering.
+  usage?: UsageInfo;
+  onUsage?: (u: UsageInfo | undefined) => void;
   onGenerateDesign: () => void;
   onReset?: () => void;
 }
@@ -39,7 +47,7 @@ interface Props {
 interface ChatMessage { role: string; content: string; isError?: boolean; isStreaming?: boolean; }
 
 export default function DeepRefineChat({
-  reqId, projectPath, requirementTitle, currentAnalysis, analysisJobId, kind, model, defaultModel, onTurnDone, onWorkingChange, onGenerateDesign, onReset,
+  reqId, projectPath, requirementTitle, currentAnalysis, analysisJobId, kind, model, defaultModel, onTurnDone, onWorkingChange, usage, onUsage, onGenerateDesign, onReset,
 }: Props) {
   const [expanded, setExpanded] = useState(true);
   const { isFullscreen, toggle: toggleFullscreen, exit: exitFullscreen } = useFullscreen();
@@ -50,11 +58,10 @@ export default function DeepRefineChat({
   const [toolLog, setToolLog] = useState<LogLine[]>([]);
   const [retryMsg, setRetryMsg] = useState('');
   const chatRef = useRef<HTMLDivElement>(null);
-  // Per-turn context-usage snapshot pushed by the backend's `usage` SSE event
-  // (see wizard.go runClaudeStream). Re-rendered live as new result events
-  // arrive; kept across job_done so the bar reflects the last completed turn
-  // until the next one starts. Undefined = no turn finished yet.
-  const [usage, setUsage] = useState<UsageInfo | undefined>(undefined);
+  // Context-usage snapshot is now CONTROLLED — the parent owns the live state
+  // so it can also feed the always-on top strip and seed from the persisted
+  // requirements.usage_snapshots blob. We report each `usage` SSE event upward
+  // via onUsage and read the value back from the `usage` prop below.
   // True while POST /api/wizard/compress-context is in flight. Disables the
   // compress button and shows the "⏳ 压缩中…" label to prevent duplicate
   // requests during the (potentially long) claude summarization run.
@@ -221,20 +228,14 @@ export default function DeepRefineChat({
             return next;
           });
         }
-        // Usage snapshot emitted at the end of every claude turn. The backend
-        // marshals UsageInfo into Content as a JSON string for backwards
-        // compatibility; we parse it here into the structured UsageInfo so
-        // the bar can render live without a second JSON.stringify round-trip.
-        // Multiple events per turn are fine — the bar just overwrites.
+        // Usage snapshot emitted at the end of every claude turn. Report the
+        // raw payload upward (parent owns the state) — computeUsage derives
+        // used + pct client-side so the bar fills before the backend stamps
+        // them. Multiple events per turn are fine — the parent just overwrites.
         if (evt.type === 'usage') {
           try {
-            const parsed = JSON.parse(evt.content ?? '{}') as UsageInfo;
-            // Compute used/pct on the client so the bar can render before
-            // the backend adds them; clamp pct > 100 so the bar still fills.
-            const used = parsed.input_tokens + parsed.cache_creation_tokens + parsed.cache_read_tokens;
-            const cw = parsed.context_window || 200000;
-            const pct = cw > 0 ? (used / cw) * 100 : 0;
-            setUsage({ ...parsed, used, pct });
+            const parsed = JSON.parse(evt.content ?? '{}');
+            onUsage?.(computeUsage(parsed, 'analyst_chat'));
           } catch { /* malformed payload — ignore */ }
         }
       },
@@ -397,7 +398,7 @@ export default function DeepRefineChat({
       setCompressedAt(data.compressed_at ?? null);
       // Reset the usage bar so it doesn't lie about context usage based on
       // the soon-to-be-cleared session — the next turn will refresh it.
-      setUsage(undefined);
+      onUsage?.(undefined);
       onTurnDone?.();
     } catch (err: any) {
       alert('压缩失败:' + (err?.message || String(err)));
