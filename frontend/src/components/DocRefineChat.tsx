@@ -1,12 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { API_BASE, authedFetch } from '../api/client';
+import { API_BASE, authedFetch, wizardApi } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
-import { appendLogLine, coalesceLogLines, type LogLine } from '../utils/logLines';
+import { appendLogLine, coalesceLogLines, type LogLine, type UsageInfo, computeUsage } from '../utils/logLines';
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import ModelSelect from './ModelSelect';
 import AtMentionTextarea from './AtMentionTextarea';
 import { FullscreenButton } from './FullscreenButton';
 import { useFullscreen } from '../utils/useFullscreen';
+import { ContextUsageBar } from './ContextUsageBar';
 
 interface Props {
   reqId: string;
@@ -26,6 +27,13 @@ interface Props {
   // Refresh the requirement after an apply completes (design_docs was
   // persisted server-side; refresh renders it and clears apply_job_id).
   onTurnDone?: () => void;
+  // Controlled context-usage for this stage's session. Parent owns the live
+  // state so it can drive the always-on top strip AND seed from the persisted
+  // requirements.usage_snapshots blob. The session key is derived from
+  // docType (design→architect_design, coding→coding). We report each `usage`
+  // SSE event upward via onUsage and read the value back from `usage`.
+  usage?: UsageInfo;
+  onUsage?: (u: UsageInfo | undefined) => void;
 }
 
 interface ChatMessage {
@@ -36,7 +44,7 @@ interface ChatMessage {
 
 const LABEL = { design: '技术方案', coding: '开发指令' };
 
-export default function DocRefineChat({ reqId, projectPath, docType, currentDoc, model, defaultModel, applyJobId, onTurnDone }: Props) {
+export default function DocRefineChat({ reqId, projectPath, docType, currentDoc, model, defaultModel, applyJobId, onTurnDone, usage, onUsage }: Props) {
   const [expanded, setExpanded] = useState(false);
   const { isFullscreen, toggle: toggleFullscreen, exit: exitFullscreen } = useFullscreen();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -48,6 +56,25 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   const [applyLines, setApplyLines] = useState<LogLine[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventStream | null>(null);
+  // Context-usage is CONTROLLED — the parent owns the live state (so the
+  // always-on top strip shares it and persists across refresh / panel
+  // collapse). We report `usage` SSE events upward via onUsage; the value
+  // comes back in via the `usage` prop for rendering. The session key below
+  // maps docType → wizard session for the report.
+  const [compressing, setCompressing] = useState(false);
+  const [compressedAt, setCompressedAt] = useState<string | null>(null);
+  const [summaryModal, setSummaryModal] = useState<string | null>(null);
+
+  // compressStep maps the docType (which the panel exposes) to the wizard
+  // stage key that the backend's context-summary columns use:
+  //   design  → architect_design  (design_docs is owned by this stage)
+  //   coding  → coding            (coding instructions live here)
+  // Computed once per render; the resulting string is what we send to
+  // wizardApi.compressContext / getContextSummary.
+  const compressStep = docType === 'design' ? 'architect_design' : 'coding';
+  // Step label shown in the usage bar header (matches the existing LABEL
+  // map's tone but uses the wizard's stage names rather than the doc name).
+  const stepLabel = docType === 'design' ? '架构师设计' : '开发指令';
   const label = LABEL[docType];
 
   // Stage model for refine/apply turns. Seeded from the server-persisted
@@ -148,6 +175,16 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
               return next;
             });
           }
+          // Usage snapshot emitted at the end of this refine-doc claude turn.
+          // Same parsing as DeepRefineChat: backend marshals UsageInfo into
+          // `content` as a JSON string; we parse + compute derived fields
+          // (used, pct) here so the bar updates live.
+          if (evt.type === 'usage') {
+            try {
+              const parsed = JSON.parse(evt.content ?? '{}');
+              onUsage?.(computeUsage(parsed, compressStep));
+            } catch { /* malformed payload — ignore */ }
+          }
         } catch { /* skip */ }
       }
     }
@@ -234,6 +271,15 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           const at = typeof evt.at === 'number' ? evt.at : Date.now();
           setApplyLines(prev => appendLogLine(prev.slice(-80), { type: evt.type, content: evt.content ?? '', at }));
         }
+        // Usage snapshot for the apply-doc turn. Same parsing as the refine-
+        // doc stream above; both feeds target the same wizard stage so the
+        // last write wins on the bar regardless of which flow emitted it.
+        if (evt.type === 'usage') {
+          try {
+            const parsed = JSON.parse(evt.content ?? '{}');
+            onUsage?.(computeUsage(parsed, compressStep));
+          } catch { /* malformed payload — ignore */ }
+        }
       },
       () => {
         // The stream dropped (or the job is gone — backend restarted, ring
@@ -287,6 +333,55 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
     }
   };
 
+  // Boot fetch of the persisted compression record. Mirrors DeepRefineChat:
+  // loads the badge state once on mount and on reqId change so a refresh
+  // surfaces "📦 已压缩" without waiting for the user to click the bar.
+  // The summary text itself is fetched lazily by handleShowSummary.
+  useEffect(() => {
+    if (!reqId) return;
+    let cancelled = false;
+    wizardApi.getContextSummary(reqId, compressStep)
+      .then(data => { if (!cancelled && data) setCompressedAt(data.compressed_at ?? null); })
+      .catch(() => { /* silent */ });
+    return () => { cancelled = true; };
+  }, [reqId, compressStep]);
+
+  // Trigger claude to summarize the current design / coding doc conversation.
+  // The backend writes the summary into the matching *{step}_context_summary
+  // column, stamps the *_compressed_at timestamp, and clears the session_id
+  // so subsequent refine/apply turns see the summary as their prepended
+  // context (rather than the full — possibly stale — history).
+  // request<T> throws on a non-2xx response; alert on the caught error
+  // instead of checking a success field.
+  const handleCompress = useCallback(async () => {
+    if (!reqId || compressing) return;
+    if (!confirm('让 Claude 总结当前对话并压缩上下文？\n\n该操作会清空当前会话 ID,下次对话将看到压缩摘要而不是完整历史。')) return;
+    setCompressing(true);
+    try {
+      const data = await wizardApi.compressContext(reqId, compressStep);
+      setCompressedAt(data.compressed_at ?? null);
+      // Reset usage so the bar doesn't keep reporting the soon-cleared
+      // session's token counts; the next turn will push a fresh snapshot.
+      onUsage?.(undefined);
+      onTurnDone?.();
+    } catch (err: any) {
+      alert('压缩失败:' + (err?.message || String(err)));
+    } finally {
+      setCompressing(false);
+    }
+  }, [reqId, compressing, compressStep, onTurnDone]);
+
+  // Open the summary preview modal. Lazy fetch keeps the boot-time GET small.
+  const handleShowSummary = useCallback(async () => {
+    if (!reqId) return;
+    try {
+      const data = await wizardApi.getContextSummary(reqId, compressStep);
+      setSummaryModal(data.summary || '(暂无压缩摘要)');
+    } catch {
+      setSummaryModal('(加载摘要失败)');
+    }
+  }, [reqId, compressStep]);
+
   // Boot: reconnect to an in-flight apply job (page refresh mid-apply). The
   // requirement carries apply_job_id (server truth); if the job is still
   // running we resume its stream, otherwise (server restarted, job evicted)
@@ -335,7 +430,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   }
 
   return (
-    <div className="detail-section" style={{ marginTop: 16 }}>
+    <div className="detail-section doc-refine-panel" style={{ marginTop: 16 }}>
       <div className="deep-refine-header">
         <h3>💬 微调{label}</h3>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -436,6 +531,52 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           <button className="btn" onClick={handleApply} disabled={applying}>
             📝 直接应用修改到{label}
           </button>
+        </div>
+      )}
+
+      {/* Live context-usage bar + 压缩上下文 entry point. Sits at the
+          bottom of the chat panel so it stays visible while the user
+          scrolls through messages / phase activity. Mirrors DeepRefineChat:
+          disabled while a refine or apply turn is running; tap opens
+          the summary modal when the stage has already been compressed. */}
+      <ContextUsageBar
+        usage={usage}
+        onCompress={handleCompress}
+        compressing={compressing}
+        disabled={working || applying || compressing}
+        stepLabel={stepLabel}
+        compressedAt={compressedAt}
+        onShowSummary={handleShowSummary}
+        // 设计阶段不压缩:方案是 plan-mode 一次性产物,微调对话没有压缩价值,
+        // 只保留上下文用量展示。
+        compressible={docType !== 'design'}
+      />
+
+      {/* Compressed-summary preview modal. Same shape as DeepRefineChat's
+          modal so the visual treatment is consistent across stages. */}
+      {summaryModal !== null && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setSummaryModal(null)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="modal"
+            onClick={e => e.stopPropagation()}
+            style={{ maxWidth: 640 }}
+          >
+            <div className="modal-header">
+              <h3>📦 已压缩上下文摘要</h3>
+              <button className="btn btn-sm" onClick={() => setSummaryModal(null)}>关闭</button>
+            </div>
+            <div
+              className="modal-body"
+              style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6, maxHeight: '60vh', overflowY: 'auto' }}
+            >
+              {summaryModal}
+            </div>
+          </div>
         </div>
       )}
     </div>

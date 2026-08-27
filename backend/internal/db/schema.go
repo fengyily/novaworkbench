@@ -370,6 +370,29 @@ var alterColumns = []string{
 	// aren't mutated); only the new requirement carries this pointer. Empty =
 	// no parent requirement.
 	`ALTER TABLE requirements ADD COLUMN source_requirement_id TEXT NOT NULL DEFAULT ''`,
+	// Per-stage context compression (analyst / architect / coding). When the
+	// user clicks "压缩上下文", the wizard handler asks Claude to summarize the
+	// current session via --resume and stores the result here, then clears the
+	// matching *_session_id so the next turn starts a fresh session with the
+	// summary prepended to its first prompt. compressed_at lets the UI show
+	// "已压缩 N 分钟前" without recomputing from the summary text. Empty string
+	// / NULL = stage not yet compressed.
+	`ALTER TABLE requirements ADD COLUMN analyst_context_summary TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN analyst_compressed_at   DATETIME`,
+	`ALTER TABLE requirements ADD COLUMN design_context_summary  TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN design_compressed_at    DATETIME`,
+	`ALTER TABLE requirements ADD COLUMN coding_context_summary  TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN coding_compressed_at    DATETIME`,
+	// Session-level context-usage snapshots (analyst / design / coding). The
+	// wizard's runClaudeStream writes a JSON blob here at the end of every
+	// claude turn (same point it emits the `usage` SSE event), keyed by session:
+	// {"analyst_chat":{...},"architect_design":{...},"coding":{...}}. The
+	// frontend seeds its usage bars from this on load so the bar survives page
+	// refresh / panel collapse instead of dropping to 0%. One JSON column
+	// (read-modify-write in a tx) beats three columns and keeps the live
+	// telemetry out of the compression-summary columns above. Empty = no
+	// snapshot yet.
+	`ALTER TABLE requirements ADD COLUMN usage_snapshots TEXT NOT NULL DEFAULT ''`,
 }
 
 var (
@@ -450,12 +473,15 @@ func migrate(d *DB) error {
 		return err
 	}
 
+	// alterColumns are SQLite-flavored; run them through the same per-dialect
+	// fixup as the canonical schema so DATETIME→TIMESTAMP on Postgres and the
+	// MySQL TEXT-default / VARCHAR translations apply here too. (The MySQL
+	// block below used to do only the TEXT-default piece; fixupSchema is a
+	// superset and also covers the indexed-column / `key` regexes, which are
+	// harmless no-matches on these statements.)
 	alters := make([]string, len(alterColumns))
-	copy(alters, alterColumns)
-	if d.dialect == MySQL {
-		for i, stmt := range alters {
-			alters[i] = mysqlTextDefault.ReplaceAllString(stmt, "TEXT$1 DEFAULT ($2)")
-		}
+	for i, stmt := range alterColumns {
+		alters[i] = fixupSchema(d.dialect, stmt)
 	}
 	if err := execStatements(d, alters); err != nil {
 		return err

@@ -310,6 +310,13 @@ func main() {
 	mux.HandleFunc("POST /api/wizard/refine-doc", wizardH.RefineDoc)
 	mux.HandleFunc("POST /api/wizard/apply-doc", wizardH.ApplyDoc)
 
+	// Context compression (analyst / architect / coding) — see wizard
+	// CompressContext for the SSE protocol and persist semantics. The
+	// lightweight GET mirrors a single stage's stored summary + the
+	// compressed_at timestamp for the "📦 已压缩" badge.
+	mux.HandleFunc("POST /api/wizard/compress-context", wizardH.CompressContext)
+	mux.HandleFunc("GET /api/wizard/requirement/{id}/context-summary", wizardH.GetContextSummary)
+
 	// Merge / PR step (post-coding 合入). Local merge + AI conflict
 	// resolution, or push + create-PR link. Jobs reuse the wizard job stream.
 	mux.HandleFunc("GET /api/requirements/{id}/merge/state", mergeH.State)

@@ -39,9 +39,31 @@ type Requirement struct {
 	ArchitectModel string     `json:"architect_model"`
 	DeveloperModel string     `json:"developer_model"`
 	ReviewerModel  string     `json:"reviewer_model"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+	// Context compression artifacts, one set per wizard stage. When the user
+	// clicks "📦 压缩上下文", the wizard handler runs a one-off --resume turn
+	// asking Claude to summarize the current session, stores the Chinese
+	// summary here, stamps compressed_at with NOW(), and clears the matching
+	// *_session_id so the next turn starts a fresh session with the summary
+	// prepended to its first prompt. Pre-populated summaries let the user see
+	// "已压缩" badges across refreshes without re-fetching the CLI.
+	AnalystContextSummary string     `json:"analyst_context_summary"`
+	AnalystCompressedAt   *time.Time `json:"analyst_compressed_at,omitempty"`
+	DesignContextSummary  string     `json:"design_context_summary"`
+	DesignCompressedAt    *time.Time `json:"design_compressed_at,omitempty"`
+	CodingContextSummary  string     `json:"coding_context_summary"`
+	CodingCompressedAt    *time.Time `json:"coding_compressed_at,omitempty"`
+	// UsageSnapshots is a JSON blob keyed by wizard session
+	// (analyst_chat/architect_design/coding) carrying each session's most
+	// recent result-event token counts + context_window + model. Written by
+	// runClaudeStream at the same point it emits the `usage` SSE event, so the
+	// frontend can seed its usage bars from the Requirement GET and survive a
+	// page refresh / panel collapse instead of dropping to 0%. Empty = no
+	// snapshot recorded yet. Best-effort: write failures are logged, not
+	// surfaced, so they never break a claude turn.
+	UsageSnapshots string    `json:"usage_snapshots"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
+	CompletedAt           *time.Time `json:"completed_at,omitempty"`
 }
 
 type CreateRequirementReq struct {

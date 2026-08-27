@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode, type CSSProperties } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabels, kindOf, STAGE_VISIBILITY, type Kind, type CostItem } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, wizardApi, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabels, kindOf, STAGE_VISIBILITY, type Kind, type CostItem } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
@@ -10,8 +10,10 @@ import { SummarizeToRequirementModal } from '../components/SummarizeToRequiremen
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { exportDesignPdf } from '../utils/exportDesignPdf';
-import { appendLogLine, coalesceLogLines, type LogLine } from '../utils/logLines';
+import { appendLogLine, coalesceLogLines, type LogLine, type UsageInfo, parseUsageSnapshots } from '../utils/logLines';
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
+import { ContextUsageBar } from '../components/ContextUsageBar';
+import { SessionContextStrip } from '../components/SessionContextStrip';
 import './RequirementDetail.css';
 import { FullscreenButton } from '../components/FullscreenButton';
 import { useFullscreen } from '../utils/useFullscreen';
@@ -355,6 +357,26 @@ export default function RequirementDetail() {
   const developerDefaultModel = roleDefaultModels['developer'] ?? '';
   const [codingLines, setCodingLines] = useState<LogLine[]>([]);
   const [coding, setCoding] = useState(false);
+  // Live context-usage snapshots for the three wizard sessions. All three are
+  // owned here (the page) — not inside each chat/panel component — because
+  // context usage is a SESSION attribute: it must survive page refresh (seed
+  // from req.usage_snapshots), panel collapse (design panel folds on success),
+  // and stage transitions. The top SessionContextStrip reads all three live;
+  // the in-panel ContextUsageBar reads the one for its stage. Live values are
+  // fed back here from DeepRefineChat / DocRefineChat via onUsage callbacks
+  // (analyst + design/coding-refine) and from the design/coding SSE handlers
+  // below (which setDesignUsage / setCodingUsage directly).
+  const [analystUsage, setAnalystUsage] = useState<UsageInfo | undefined>(undefined);
+  // Live context-usage snapshot for the coding job (start-coding / 调整 / 继续),
+  // pushed by the backend's `usage` SSE event. Rendered via ContextUsageBar at
+  // the top of the coding-panel. The coding stage is multi-turn (--resume
+  // coding_session_id), so compressible=true — the 压缩按钮 hands off to
+  // wizardApi.compressContext(step:'coding') which summarizes + clears the
+  // session, mirroring CodingChat / DeepRefineChat.
+  const [codingUsage, setCodingUsage] = useState<UsageInfo | undefined>(undefined);
+  const [codingCompressing, setCodingCompressing] = useState(false);
+  const [codingCompressedAt, setCodingCompressedAt] = useState<string | null>(null);
+  const [codingSummaryModal, setCodingSummaryModal] = useState<string | null>(null);
   const codingRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventStream | null>(null);
   const extraDescRef = useRef('');
@@ -399,6 +421,11 @@ export default function RequirementDetail() {
   // Streaming design state (architect phase)
   const [designLines, setDesignLines] = useState<LogLine[]>([]);
   const [designing, setDesigning] = useState(false);
+  // Live context-usage snapshot for the architect-design job, pushed by the
+  // backend's `usage` SSE event at the end of each claude turn. Rendered in
+  // the design panel header via ContextUsageBar so the user can see how full
+  // the plan-mode context is getting (plan-mode exploration can chew tokens).
+  const [designUsage, setDesignUsage] = useState<UsageInfo | undefined>(undefined);
   // Set when the design job ended in an error status. The stream panel
   // collapses on success (the design renders standalone), but on failure we
   // keep it open so the red error line stays visible — otherwise the error
@@ -453,6 +480,58 @@ export default function RequirementDetail() {
       setAdjustRows([...chat, ...dev, ...cont].sort((a, b) => (a.created_at < b.created_at ? -1 : 1)));
     } catch { /* ignore */ }
     finally { setUsageLoading(false); }
+  }, [id]);
+
+  // Seed the three session-usage snapshots from the persisted
+  // requirements.usage_snapshots blob. This is what makes the usage bar +
+  // top strip show the real last-known fill on page load / refresh instead
+  // of dropping to 0% — usage is a session attribute, so it belongs on the
+  // page and survives a remount. We only seed when a value is currently
+  // undefined (so a live SSE value mid-turn isn't clobbered by a stale
+  // persisted snapshot from a prior turn). Re-runs on every req refresh
+  // (after a turn the backend writes a fresh snapshot + the GET re-fetches,
+  // so the strip picks up the new value here too).
+  useEffect(() => {
+    if (!req) return;
+    const snaps = parseUsageSnapshots(req.usage_snapshots);
+    if (snaps.analyst_chat) setAnalystUsage(prev => prev ?? snaps.analyst_chat!);
+    if (snaps.architect_design) setDesignUsage(prev => prev ?? snaps.architect_design!);
+    if (snaps.coding) setCodingUsage(prev => prev ?? snaps.coding!);
+  }, [req]);
+
+  // ── Coding-stage context compression ───────────────────────────────────
+  // Mirrors CodingChat / DeepRefineChat: summarize the current coding
+  // session (coding_session_id), persist the summary, stamp
+  // coding_compressed_at, and clear the session id so the next coding turn
+  // sees the summary as prepended context instead of full history. The bar's
+  // 压缩按钮 is only meaningful for the multi-turn coding stage (not the
+  // one-shot plan-mode design stage).
+  const handleCodingCompress = useCallback(async () => {
+    if (!id || codingCompressing) return;
+    if (!confirm('让 Claude 总结当前开发会话并压缩上下文？\n\n该操作会清空当前会话 ID,下次开发将看到压缩摘要而不是完整历史。')) return;
+    setCodingCompressing(true);
+    try {
+      const data = await wizardApi.compressContext(id, 'coding');
+      setCodingCompressedAt(data.compressed_at ?? null);
+      // Reset usage so the bar doesn't keep reporting the soon-cleared
+      // session's token counts; the next turn pushes a fresh snapshot.
+      setCodingUsage(undefined);
+    } catch (err: any) {
+      alert('压缩失败:' + (err?.message || String(err)));
+    } finally {
+      setCodingCompressing(false);
+    }
+  }, [id, codingCompressing]);
+
+  // Lazy fetch of the persisted summary text for the modal preview.
+  const handleShowCodingSummary = useCallback(async () => {
+    if (!id) return;
+    try {
+      const data = await wizardApi.getContextSummary(id, 'coding');
+      setCodingSummaryModal(data.summary || '(暂无压缩摘要)');
+    } catch {
+      setCodingSummaryModal('(加载摘要失败)');
+    }
   }, [id]);
 
   // Copy a ready-to-paste resume command to the clipboard. Instead of just the
@@ -525,6 +604,11 @@ export default function RequirementDetail() {
       projectsApi.get(r.project_id).then(setProject).catch(() => {});
     }).catch(() => {}).finally(() => setLoading(false));
     loadUsage();
+    // Boot-fetch the coding stage's compression record so the bar's "📦 已压缩"
+    // badge is correct after a page refresh, before the user clicks anything.
+    wizardApi.getContextSummary(id, 'coding')
+      .then(data => setCodingCompressedAt(data.compressed_at ?? null))
+      .catch(() => { /* silent */ });
   }, [id, loadUsage]);
 
   const refresh = useCallback(async () => {
@@ -619,6 +703,9 @@ export default function RequirementDetail() {
     if (designEsRef.current) designEsRef.current.close();
     setDesigning(true);
     setDesignError(false);
+    // Fresh design run → drop the prior run's usage snapshot so the bar
+    // doesn't briefly show a stale percentage before the first turn lands.
+    setDesignUsage(undefined);
 
     designEsRef.current = createEventStream(
       `/api/wizard/jobs/${jobId}/stream`,
@@ -647,6 +734,22 @@ export default function RequirementDetail() {
           // the job ended in an error status (which a success-only refresh
           // would skip, leaving the stale job id wedging the stage).
           refresh();
+          return;
+        }
+        // Live context-usage snapshot emitted at the end of every claude turn
+        // (mirrors DeepRefineChat / DocRefineChat). Parse into UsageInfo so the
+        // design panel's ContextUsageBar can render without re-parsing; compute
+        // used/pct client-side so the bar fills before the backend stamps them.
+        // Handled here — NOT appended to designLines — otherwise the raw JSON
+        // shows up as a garbage "coding-line-usage" row in the thinking panel.
+        if (evt.type === 'usage') {
+          try {
+            const parsed = JSON.parse(evt.content ?? '{}') as UsageInfo;
+            const used = parsed.input_tokens + parsed.cache_creation_tokens + parsed.cache_read_tokens;
+            const cw = parsed.context_window || 200000;
+            const pct = cw > 0 ? (used / cw) * 100 : 0;
+            setDesignUsage({ ...parsed, used, pct });
+          } catch { /* malformed payload — ignore */ }
           return;
         }
         // Coalesce consecutive "模型思考中… (N tokens)" phase lines into one
@@ -865,6 +968,9 @@ export default function RequirementDetail() {
   const streamJob = useCallback((jobId: string, opts?: { keepDone?: boolean; persistDone?: boolean; skipFirst?: number }) => {
     if (esRef.current) esRef.current.close();
     setCoding(true);
+    // Fresh coding stream → drop the prior usage snapshot so the bar doesn't
+    // briefly show a stale percentage from a previous coding/adjust round.
+    setCodingUsage(undefined);
 
     // Skip counter is captured per-stream — each new createEventStream call
     // resets it, so multiple reconnects within the same component lifetime
@@ -895,6 +1001,22 @@ export default function RequirementDetail() {
             setKnowledgeItems(kb.items ?? []);
             setKnowledgeEmpty((kb.count ?? 0) === 0);
           } catch { /* malformed frame — ignore */ }
+          return;
+        }
+        // Live context-usage snapshot (end of each claude turn). Parse into
+        // UsageInfo and feed the coding-panel's ContextUsageBar; compute
+        // used/pct client-side so the bar fills before the backend stamps
+        // them. NOT appended to codingLines — otherwise the raw JSON shows
+        // up as a garbage "coding-line-usage" row. (Subject to the replay-
+        // skip above, so reconnect doesn't re-stamp a stale snapshot.)
+        if (evt.type === 'usage') {
+          try {
+            const parsed = JSON.parse(evt.content ?? '{}') as UsageInfo;
+            const used = parsed.input_tokens + parsed.cache_creation_tokens + parsed.cache_read_tokens;
+            const cw = parsed.context_window || 200000;
+            const pct = cw > 0 ? (used / cw) * 100 : 0;
+            setCodingUsage({ ...parsed, used, pct });
+          } catch { /* malformed payload — ignore */ }
           return;
         }
         if (evt.type === 'job_done') {
@@ -1609,7 +1731,49 @@ export default function RequirementDetail() {
             ← 来源想法
           </Link>
         )}
+        {/* Per-stage "已压缩" badges. Each one is a passive indicator of
+            whether that wizard stage's session has been summarized into the
+            {step}_context_summary column — the chat components own the
+            compress button + summary modal, this is just a header-level
+            reminder so the user knows "压缩上下文" has been used without
+            scrolling into the chat panel. Hover for the timestamp. */}
+        {req.analyst_compressed_at && (
+          <span
+            className="compressed-badge"
+            title={`需求分析已于 ${req.analyst_compressed_at} 压缩`}
+          >
+            📦 分析已压缩
+          </span>
+        )}
+        {req.design_compressed_at && (
+          <span
+            className="compressed-badge"
+            title={`方案设计已于 ${req.design_compressed_at} 压缩`}
+          >
+            📦 设计已压缩
+          </span>
+        )}
+        {req.coding_compressed_at && (
+          <span
+            className="compressed-badge"
+            title={`开发调整已于 ${req.coding_compressed_at} 压缩`}
+          >
+            📦 开发已压缩
+          </span>
+        )}
       </div>
+
+      {/* Always-on session-context strip. Sits in the header so it survives
+          stage completion / panel collapse / page refresh — the whole point
+          of making usage a session-level attribute. Reads the three live
+          usage values (seeded from req.usage_snapshots, updated by SSE /
+          onUsage) and the compressed_at badges. */}
+      <SessionContextStrip
+        analyst={analystUsage}
+        design={designUsage}
+        coding={codingUsage}
+        req={req}
+      />
 
       {req.description && (
         <div className="detail-desc">
@@ -1971,6 +2135,8 @@ export default function RequirementDetail() {
           defaultModel={analystDefaultModel}
           onTurnDone={refresh}
           onWorkingChange={setAnalystWorking}
+          usage={analystUsage}
+          onUsage={setAnalystUsage}
           onGenerateDesign={() => requestDesignKnowledge(true)}
           onReset={() => setReq(prev => prev ? { ...prev, status: 'draft' } : prev)}
         />
@@ -2133,6 +2299,18 @@ export default function RequirementDetail() {
               {designFs.isFullscreen && (
                 <FullscreenButton isFullscreen onClick={designFs.exit} variant="floating" />
               )}
+              {/* Live context-usage bar for the plan-mode design run. Design is
+                  a one-shot plan-mode product (no multi-turn conversation to
+                  compress), so compressible=false hides the 压缩按钮 and only
+                  the usage readout remains. Mirrors DocRefineChat's design-doc
+                  bar; onCompress is a no-op since the button is suppressed. */}
+              <ContextUsageBar
+                usage={designUsage}
+                onCompress={() => {}}
+                compressible={false}
+                disabled
+                stepLabel="方案设计"
+              />
               <CodingLines lines={designLines} working={designing} />
               {designProcessActive && <div className="coding-line coding-line-tool_call">⏳ Claude 正在 plan 模式下制定技术方案...</div>}
             </div>
@@ -2214,6 +2392,8 @@ export default function RequirementDetail() {
                 defaultModel={architectDefaultModel}
                 applyJobId={req.apply_job_id}
                 onTurnDone={refresh}
+                usage={designUsage}
+                onUsage={setDesignUsage}
               />
               )}
             </>
@@ -2261,8 +2441,51 @@ export default function RequirementDetail() {
               {codingFs.isFullscreen && (
                 <FullscreenButton isFullscreen onClick={codingFs.exit} variant="floating" />
               )}
+              {/* Live context-usage bar + 压缩上下文 entry point for the coding
+                  stage. Multi-turn (--resume coding_session_id), so compressible
+                  is true — the button hands off to wizardApi.compressContext
+                  (step:'coding'). Mirrors CodingChat / DeepRefineChat. Disabled
+                  while a coding/adjust turn is in flight or a compression runs. */}
+              <ContextUsageBar
+                usage={codingUsage}
+                onCompress={handleCodingCompress}
+                compressing={codingCompressing}
+                disabled={coding || codingCompressing}
+                stepLabel="开发"
+                compressedAt={codingCompressedAt}
+                onShowSummary={handleShowCodingSummary}
+              />
               <CodingLines lines={codingLines} working={coding} />
               {coding && <div className="coding-line coding-line-tool_call">⏳ Claude 正在工作...</div>}
+            </div>
+          )}
+
+          {/* Compressed-summary preview modal for the coding stage. Same shape
+              as the other chat components' modals so the visual treatment is
+              consistent wherever a compression is invoked. */}
+          {codingSummaryModal !== null && (
+            <div
+              className="modal-backdrop"
+              onClick={() => setCodingSummaryModal(null)}
+              role="dialog"
+              aria-modal="true"
+            >
+              <div
+                className="modal"
+                onClick={e => e.stopPropagation()}
+                style={{ maxWidth: 640 }}
+              >
+                <div className="modal-header">
+                  <h3>📦 已压缩上下文摘要</h3>
+                  <button className="btn btn-sm" onClick={() => setCodingSummaryModal(null)}>关闭</button>
+                </div>
+                <div
+                  className="modal-body"
+                  style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6, maxHeight: '60vh', overflowY: 'auto' }}
+                >
+                  {codingSummaryModal}
+                </div>
+              </div>
             </div>
           )}
 

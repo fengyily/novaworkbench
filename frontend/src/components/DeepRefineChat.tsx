@@ -1,14 +1,15 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { API_BASE, authedFetch, kindChatPlaceholders, kindOf, requirementsApi, type Kind } from '../api/client';
+import { API_BASE, authedFetch, kindChatPlaceholders, kindOf, requirementsApi, wizardApi, type Kind } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import AtMentionTextarea from './AtMentionTextarea';
-import { appendLogLine, type LogLine } from '../utils/logLines';
+import { appendLogLine, type LogLine, type UsageInfo, computeUsage } from '../utils/logLines';
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import ModelSelect from './ModelSelect';
 import { FullscreenButton } from './FullscreenButton';
 import { useFullscreen } from '../utils/useFullscreen';
+import { ContextUsageBar } from './ContextUsageBar';
 
 interface Props {
   reqId: string;
@@ -31,6 +32,14 @@ interface Props {
   // accurate global "Claude 工作中" badge while an analyst turn runs (the
   // persisted analysis_job_id is only refreshed after the turn finishes).
   onWorkingChange?: (working: boolean) => void;
+  // Controlled context-usage for the analyst session. The parent
+  // (RequirementDetail) owns the live usage state so it can also drive the
+  // always-on top strip AND seed it from requirements.usage_snapshots on
+  // load — the bar thus survives page refresh / panel collapse instead of
+  // dropping to 0%. The component reports each `usage` SSE event upward via
+  // onUsage; the parent feeds the same value back in here for rendering.
+  usage?: UsageInfo;
+  onUsage?: (u: UsageInfo | undefined) => void;
   onGenerateDesign: () => void;
   onReset?: () => void;
 }
@@ -38,7 +47,7 @@ interface Props {
 interface ChatMessage { role: string; content: string; isError?: boolean; isStreaming?: boolean; }
 
 export default function DeepRefineChat({
-  reqId, projectPath, requirementTitle, currentAnalysis, analysisJobId, kind, model, defaultModel, onTurnDone, onWorkingChange, onGenerateDesign, onReset,
+  reqId, projectPath, requirementTitle, currentAnalysis, analysisJobId, kind, model, defaultModel, onTurnDone, onWorkingChange, usage, onUsage, onGenerateDesign, onReset,
 }: Props) {
   const [expanded, setExpanded] = useState(true);
   const { isFullscreen, toggle: toggleFullscreen, exit: exitFullscreen } = useFullscreen();
@@ -49,6 +58,20 @@ export default function DeepRefineChat({
   const [toolLog, setToolLog] = useState<LogLine[]>([]);
   const [retryMsg, setRetryMsg] = useState('');
   const chatRef = useRef<HTMLDivElement>(null);
+  // Context-usage snapshot is now CONTROLLED — the parent owns the live state
+  // so it can also feed the always-on top strip and seed from the persisted
+  // requirements.usage_snapshots blob. We report each `usage` SSE event upward
+  // via onUsage and read the value back from the `usage` prop below.
+  // True while POST /api/wizard/compress-context is in flight. Disables the
+  // compress button and shows the "⏳ 压缩中…" label to prevent duplicate
+  // requests during the (potentially long) claude summarization run.
+  const [compressing, setCompressing] = useState(false);
+  // compressedAt: ISO timestamp persisted on requirements.analyst_compressed_at
+  // after a successful compression. Drives the "📦 已压缩" badge in the bar.
+  // summaryModal: when non-null, shows a modal with the persisted Chinese
+  // summary text so the user can review what claude distilled.
+  const [compressedAt, setCompressedAt] = useState<string | null>(null);
+  const [summaryModal, setSummaryModal] = useState<string | null>(null);
   // Guard against auto-start firing twice (StrictMode / concurrent renders).
   const bootedRef = useRef(false);
 
@@ -205,6 +228,16 @@ export default function DeepRefineChat({
             return next;
           });
         }
+        // Usage snapshot emitted at the end of every claude turn. Report the
+        // raw payload upward (parent owns the state) — computeUsage derives
+        // used + pct client-side so the bar fills before the backend stamps
+        // them. Multiple events per turn are fine — the parent just overwrites.
+        if (evt.type === 'usage') {
+          try {
+            const parsed = JSON.parse(evt.content ?? '{}');
+            onUsage?.(computeUsage(parsed, 'analyst_chat'));
+          } catch { /* malformed payload — ignore */ }
+        }
       },
       () => {
         // The stream dropped (or the job is gone — backend restarted, ring
@@ -334,6 +367,58 @@ export default function DeepRefineChat({
     setRetryMsg('');
     await runTurn(msg);
   };
+
+  // Boot-time fetch of the persisted compression record. Drives the "📦 已压缩"
+  // badge on the usage bar so a page refresh still shows the user that this
+  // stage has been summarized — and lets the bar's "查看摘要" link open the
+  // modal without a second round-trip after the user clicks the button.
+  useEffect(() => {
+    if (!reqId) return;
+    let cancelled = false;
+    wizardApi.getContextSummary(reqId, 'analyst_chat')
+      .then(data => { if (!cancelled && data) setCompressedAt(data.compressed_at ?? null); })
+      .catch(() => { /* silent */ });
+    return () => { cancelled = true; };
+  }, [reqId]);
+
+  // Trigger claude to summarize the current analyst conversation. The backend
+  // runs a one-shot `--resume` turn with a fixed Chinese prompt, then writes
+  // the summary into requirements.analyst_context_summary + stamps
+  // analyst_compressed_at + clears analysis_session_id. On success we
+  // refresh the requirement (so the detail header badge updates) and reload
+  // the compressedAt so the bar switches to "已压缩" state.
+  // request<T> throws on a non-2xx response; alert on the caught error
+  // instead of checking a success field.
+  const handleCompress = useCallback(async () => {
+    if (!reqId || compressing) return;
+    if (!confirm('让 Claude 总结当前对话并压缩上下文？\n\n该操作会清空当前会话 ID,下次对话将看到压缩摘要而不是完整历史。')) return;
+    setCompressing(true);
+    try {
+      const data = await wizardApi.compressContext(reqId, 'analyst_chat');
+      setCompressedAt(data.compressed_at ?? null);
+      // Reset the usage bar so it doesn't lie about context usage based on
+      // the soon-to-be-cleared session — the next turn will refresh it.
+      onUsage?.(undefined);
+      onTurnDone?.();
+    } catch (err: any) {
+      alert('压缩失败:' + (err?.message || String(err)));
+    } finally {
+      setCompressing(false);
+    }
+  }, [reqId, compressing, onTurnDone]);
+
+  // Open the summary preview modal. Lazily fetches the persisted summary so
+  // the boot-time fetch stays cheap — the modal is the only place that needs
+  // the full Chinese text, not the bar itself.
+  const handleShowSummary = useCallback(async () => {
+    if (!reqId) return;
+    try {
+      const data = await wizardApi.getContextSummary(reqId, 'analyst_chat');
+      setSummaryModal(data.summary || '(暂无压缩摘要)');
+    } catch {
+      setSummaryModal('(加载摘要失败)');
+    }
+  }, [reqId]);
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
@@ -498,6 +583,50 @@ export default function DeepRefineChat({
         />
         <button className="btn btn-primary" onClick={handleSend} disabled={isWorking || !input.trim()}>发送</button>
       </div>
+
+      {/* Live token-usage bar + 压缩上下文 entry point. Sits between the
+          composer and the action row so it stays visible while typing.
+          Disabled while no session has been started yet (chatting is false,
+          usage is undefined, and no compressedAt); the button is still
+          tappable once a turn has produced a usage snapshot. */}
+      <ContextUsageBar
+        usage={usage}
+        onCompress={handleCompress}
+        compressing={compressing}
+        disabled={isWorking || compressing}
+        stepLabel="需求分析师"
+        compressedAt={compressedAt}
+        onShowSummary={handleShowSummary}
+      />
+
+      {/* Compressed-summary preview modal. Rendered as a simple overlay
+          rather than reusing a generic modal library — kept inline so the
+          DeepRefineChat remains self-contained. */}
+      {summaryModal !== null && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setSummaryModal(null)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="modal"
+            onClick={e => e.stopPropagation()}
+            style={{ maxWidth: 640 }}
+          >
+            <div className="modal-header">
+              <h3>📦 已压缩上下文摘要</h3>
+              <button className="btn btn-sm" onClick={() => setSummaryModal(null)}>关闭</button>
+            </div>
+            <div
+              className="modal-body"
+              style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6, maxHeight: '60vh', overflowY: 'auto' }}
+            >
+              {summaryModal}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="deep-refine-actions">
         {!isIdea && (

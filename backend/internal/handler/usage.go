@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/service"
 )
@@ -38,6 +39,17 @@ type usageCtx struct {
 	Currency       string
 	Meta           string
 	Summary        string
+	// PersistSnapshot, when non-nil, is called by runClaudeStream at the same
+	// point it emits the `usage` SSE event (end of a claude turn) to write the
+	// session's latest token-usage snapshot into requirements.usage_snapshots.
+	// The closure receives (sessionKey, snapshotJSON) — sessionKey is the
+	// wizard session the snapshot belongs to (analyst_chat / architect_design
+	// / coding), already mapped from Step by usageCtxFor via snapshotStep.
+	// nil means "don't persist" (e.g. compress_* turns, where the snapshot
+	// would describe the summarize prompt rather than the session's real fill
+	// and the session is about to be cleared anyway). Best-effort: the closure
+	// must swallow its own errors so a DB hiccup never breaks the claude turn.
+	PersistSnapshot func(sessionKey, snapshotJSON string)
 }
 
 // summaryMetaMaxLen caps the persisted summary so a long 追加调整 prompt
@@ -73,32 +85,12 @@ func buildSummaryMeta(extra, summary string) string {
 }
 
 // extractUsage reads the four token counts from a stream-json result event's
-// top-level "usage" field. The CLI emits these as JSON numbers, which decode
-// into float64 via map[string]interface{}; truncate to int. Missing/zero
+// top-level "usage" field. Thin wrapper around llm.ParseStreamUsage so the
+// token-counting logic lives in one place (the gateway package). Missing/zero
 // fields default to 0.
 func extractUsage(evt map[string]interface{}) (in, out, cc, cr int) {
-	u, ok := evt["usage"].(map[string]interface{})
-	if !ok {
-		return
-	}
-	return toInt(u["input_tokens"]), toInt(u["output_tokens"]),
-		toInt(u["cache_creation_input_tokens"]), toInt(u["cache_read_input_tokens"])
-}
-
-// toInt coerces a JSON number (float64) or json.Number to int. 0 for anything else.
-func toInt(v interface{}) int {
-	switch n := v.(type) {
-	case float64:
-		return int(n)
-	case int:
-		return n
-	case int64:
-		return int(n)
-	case json.Number:
-		i, _ := n.Int64()
-		return int(i)
-	}
-	return 0
+	in, out, cc, cr, _ = llm.ParseStreamUsage(evt)
+	return
 }
 
 // recordFrom is called at a result event. It fills the counts from the event

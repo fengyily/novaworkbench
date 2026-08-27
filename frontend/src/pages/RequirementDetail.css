@@ -43,6 +43,92 @@
   color: var(--color-text-secondary);
 }
 
+/* Per-stage "📦 已压缩" badge in the requirement header meta row. Mirrors
+   the existing chip/tag patterns (kind-badge / status-tag) but uses a
+   neutral surface tint + amber text so it reads as "useful state" rather
+   than "warning" — the user explicitly invoked the compression, this
+   isn't an alert. Hover shows the timestamp via the title attr. */
+.compressed-badge {
+  padding: 3px 10px;
+  background: #FEF3C7;
+  color: #B45309;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: default;
+}
+
+/* SessionContextStrip — always-on row of three mini usage bars (分析师/方案/
+   开发) that lives in the detail header. Survives stage completion + panel
+   collapse + refresh because usage is a session attribute, not a per-mount
+   stream value. Reuses the global .usage-bar-band* color classes so the
+   thresholds (80/95) match the in-panel ContextUsageBar exactly. */
+.session-context-strip {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 8px 12px;
+  margin-bottom: 16px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+.session-context-seg {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.session-context-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+.session-context-track {
+  position: relative;
+  width: 96px;
+  height: 6px;
+  background: var(--color-hover);
+  border-radius: 3px;
+  overflow: hidden;
+}
+/* .usage-bar-band is the global fill (height:100% + transition); it stretches
+   to this track's 6px. The *-ok/-warn/-critical color classes carry the
+   80/95 thresholds + the pulse animation on critical. */
+.session-context-track .usage-bar-band {
+  height: 100%;
+  border-radius: 3px;
+}
+.session-context-pct {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+  min-width: 28px;
+  text-align: right;
+}
+.session-context-pct-warn { color: var(--color-warning); }
+.session-context-pct-critical { color: var(--color-error); }
+.session-context-used {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #94a3b8);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.session-context-compressed .session-context-badge {
+  font-size: 12px;
+  color: #B45309;
+  background: #FEF3C7;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+@media (max-width: 768px) {
+  /* Stack segments on mobile so the three bars don't cram into one row. */
+  .session-context-strip { flex-direction: column; align-items: stretch; gap: 6px; }
+  .session-context-track { width: 100%; flex: 1; }
+}
+
 .detail-section {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
@@ -495,6 +581,31 @@
   font-family: var(--font-sans);
   resize: vertical;
   min-height: 44px;
+}
+
+/* DocRefineChat ("微调技术方案") shares the same composer layout as the
+   analyst chat. Its textarea previously had no panel-scoped rule, so on
+   desktop it fell back to rows=2 (~44px) — too small to draft a refinement
+   request in. Give it the same treatment as .deep-refine-panel and raise
+   the default height on wide screens; mobile keeps the compact, stacked
+   layout defined in the 768px block below. */
+.doc-refine-panel .chat-input-row { display: flex; gap: 8px; margin-bottom: 10px; align-items: flex-end; }
+.doc-refine-panel .chat-input-row .form-input { flex: 1; }
+.doc-refine-panel .chat-textarea {
+  font-family: var(--font-sans);
+  resize: vertical;
+  min-height: 44px;
+}
+
+/* Taller compose box on desktop so there's room to draft a refinement
+   request without scrolling inside the textarea. Mobile (≤768px) stays
+   compact — the stacked layout below already gives it full width and a
+   comfortable touch height. */
+@media (min-width: 769px) {
+  .deep-refine-panel .chat-textarea,
+  .doc-refine-panel .chat-textarea {
+    min-height: 120px;
+  }
 }
 
 /* Compact chat-message layout — distinguish user / AI by background tint +
@@ -983,14 +1094,17 @@
     min-height: 200px;
   }
 
-  .deep-refine-panel .chat-input-row {
+  .deep-refine-panel .chat-input-row,
+  .doc-refine-panel .chat-input-row {
     /* Stack input + send button vertically on mobile so the textarea gets
        full width and the button doesn't sit underneath the keyboard. */
     flex-direction: column;
     align-items: stretch;
   }
-  .deep-refine-panel .chat-input-row .form-input { width: 100%; }
-  .deep-refine-panel .chat-input-row .btn { width: 100%; }
+  .deep-refine-panel .chat-input-row .form-input,
+  .doc-refine-panel .chat-input-row .form-input { width: 100%; }
+  .deep-refine-panel .chat-input-row .btn,
+  .doc-refine-panel .chat-input-row .btn { width: 100%; }
 
   .coding-panel {
     max-height: 360px;
