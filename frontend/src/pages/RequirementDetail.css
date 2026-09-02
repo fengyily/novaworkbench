@@ -1568,3 +1568,328 @@
     .usage-receipt-card-bar-fill { transition: none; }
   }
 }
+
+/* ── Sub-task panel ──────────────────────────────────────────────
+   Sits inside the developer stage after CodingChat / adjust-coder.
+   Visual signature: a 3px left accent stripe per card that mirrors the
+   status color, evoking a git-branch reference — every child agent is a
+   fork off the main agent. Token system mirrors .detail-section (surface +
+   border + 8px radius) so the panel reads as the same family, just with a
+   status-stripe accent that the rest of the page lacks. */
+
+.subtask-panel {
+  margin-top: 16px;
+  padding: 20px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.subtask-panel-header {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-bottom: 14px;
+}
+
+.subtask-panel-header h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+  letter-spacing: 0.01em;
+}
+
+.subtask-hint-mini {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.subtask-hint {
+  padding: 14px 16px;
+  background: var(--color-bg);
+  border: 1px dashed var(--color-border);
+  border-radius: 6px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.subtask-hint em {
+  display: block;
+  margin-top: 4px;
+  font-style: normal;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+/* ── Create form ── */
+
+.subtask-create {
+  margin-bottom: 16px;
+}
+
+.subtask-create-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.subtask-error {
+  font-size: 12px;
+  color: var(--color-error);
+}
+
+/* ── List ── */
+
+.subtask-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.subtask-loading,
+.subtask-empty-list {
+  padding: 14px 16px;
+  background: var(--color-bg);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  text-align: center;
+}
+
+/* ── Card ──
+   Card uses a 3px status stripe on the left (the signature element) and a
+   muted body card to the right. Hover state deepens the border so the user
+   sees the click target even though only the header is the click handler. */
+
+.subtask-card {
+  display: flex;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  overflow: hidden;
+  transition: border-color 0.15s ease;
+}
+
+.subtask-card:hover { border-color: #CBD5E1; }
+
+/* Status stripe: 3px wide, full card height. Color drives the visual
+   identity more than the chip — the stripe is always rendered even when
+   the chip is clipped on mobile. */
+.subtask-card::before {
+  content: "";
+  flex: 0 0 3px;
+  background: var(--subtask-stripe, var(--color-border));
+}
+
+.subtask-card-pending { --subtask-stripe: var(--color-text-muted); }
+.subtask-card-running { --subtask-stripe: var(--color-primary); }
+.subtask-card-done    { --subtask-stripe: var(--color-success); }
+.subtask-card-error   { --subtask-stripe: var(--color-error); }
+
+.subtask-card > * { flex: 1 1 auto; min-width: 0; }
+
+/* Running gets a slow ambient pulse so the eye finds the live card
+   without being distracting. Honors prefers-reduced-motion. */
+.subtask-card-running {
+  animation: subtask-running-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes subtask-running-pulse {
+  0%, 100% { background: var(--color-surface); }
+  50%      { background: #FAFBFF; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subtask-card-running { animation: none; }
+}
+
+.subtask-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.subtask-card-header:hover { background: var(--color-hover); }
+
+/* Status chip — compact pill in the upper-left of each card. */
+.subtask-chip {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 10px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.subtask-chip-pending { background: #F1F5F9; color: var(--color-text-secondary); }
+.subtask-chip-running { background: var(--color-active); color: var(--color-primary); }
+.subtask-chip-done    { background: #ECFDF5; color: var(--color-success); }
+.subtask-chip-error   { background: #FEF2F2; color: var(--color-error); }
+
+.subtask-card-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subtask-card-meta {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.subtask-card-toggle {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  width: 14px;
+  text-align: center;
+}
+
+.subtask-card-body {
+  padding: 0 16px 14px 16px;
+  border-top: 1px solid var(--color-border);
+}
+
+.subtask-card-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 0 8px 0;
+}
+
+.subtask-copy-btn {
+  font-size: 11px;
+  padding: 4px 10px;
+  color: var(--color-text-secondary);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.subtask-copy-btn:hover { background: var(--color-hover); }
+
+.subtask-artifact {
+  background: var(--color-bg);
+  border-radius: 6px;
+  padding: 14px 16px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--color-text);
+  overflow-x: auto;
+}
+
+/* Markdown body inside the artifact: keep the same rhythm as the rest
+   of RequirementDetail's markdown surfaces (16/13/24/8 etc). */
+.subtask-artifact > * + * { margin-top: 10px; }
+.subtask-artifact h1 { font-size: 16px; font-weight: 600; margin-top: 14px; }
+.subtask-artifact h2 { font-size: 14px; font-weight: 600; margin-top: 12px; }
+.subtask-artifact h3 { font-size: 13px; font-weight: 600; margin-top: 10px; }
+.subtask-artifact code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: #F1F5F9;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.subtask-artifact pre {
+  background: #0F172A;
+  color: #E2E8F0;
+  padding: 12px 14px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.subtask-artifact pre code { background: none; color: inherit; font-size: 12px; }
+.subtask-artifact ul,
+.subtask-artifact ol { padding-left: 22px; }
+.subtask-artifact li + li { margin-top: 4px; }
+.subtask-artifact blockquote {
+  border-left: 3px solid var(--color-border);
+  padding: 4px 12px;
+  color: var(--color-text-secondary);
+  background: #F8FAFC;
+}
+
+.subtask-empty {
+  padding: 14px 16px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+/* Live log mirror — keep parity with CodingLines' color palette so the
+   user reads the running card and the artifact the same way. */
+.subtask-log {
+  padding: 12px 14px;
+  background: #0F172A;
+  color: #E2E8F0;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.65;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.subtask-log-phase { color: #94A3B8; margin-bottom: 6px; }
+.subtask-log-phase .subtask-log-phase { margin-bottom: 2px; }
+.subtask-log-tool_call { color: #7DD3FC; font-style: italic; }
+.subtask-log-tool_result { color: #94A3B8; }
+.subtask-log-message { color: #E2E8F0; margin: 6px 0; white-space: pre-wrap; }
+.subtask-log-result  { color: #86EFAC; font-weight: 500; margin: 6px 0; }
+.subtask-log-error   { color: #FCA5A5; margin: 6px 0; }
+.subtask-log-done    { color: #86EFAC; font-weight: 600; margin: 6px 0; }
+.subtask-log-empty   {
+  padding: 14px;
+  color: #94A3B8;
+  text-align: center;
+  font-style: italic;
+}
+
+/* ── Mobile ──
+   Stack the create-row so the button is full-width under the textarea,
+   same pattern as .adjust-composer / .stack-mobile. Status chips and
+   meta collapse cleanly via the existing flex wrap on the header. */
+@media (max-width: 768px) {
+  .subtask-panel { padding: 16px; }
+  .subtask-panel-header h3 { font-size: 14px; }
+  .subtask-hint-mini { font-size: 11px; }
+
+  .subtask-create-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .subtask-create-row .btn { width: 100%; }
+
+  .subtask-card-header {
+    flex-wrap: wrap;
+    padding: 10px 12px;
+  }
+  .subtask-card-title { font-size: 13px; }
+  .subtask-card-meta { font-size: 10px; flex-basis: 100%; padding-left: 4px; }
+
+  .subtask-card-body { padding: 0 12px 12px 12px; }
+  .subtask-artifact { padding: 12px; font-size: 12px; }
+  .subtask-log { max-height: 240px; font-size: 11px; }
+}

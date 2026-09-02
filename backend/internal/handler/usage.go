@@ -155,6 +155,30 @@ func (h *UsageHandler) Rows(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rows)
 }
 
+// ByJobID returns the rolled-up token usage + cost for one JobStore job.
+// The sub-task panel uses this to render the 🪙 token strip on each sub-task
+// card; the job_id comes from sub_tasks.job_id (the JobStore job that drove
+// the child agent's SSE stream). The endpoint returns the zero-value
+// summary (empty token fields) when the job has no token_usage row yet —
+// that's normal during a still-running sub-task or for a job that died
+// before the terminal result event. The frontend renders "🪙 —" in that
+// case rather than inventing a number from nothing.
+//
+// GET /api/usage/job/{jobId}
+func (h *UsageHandler) ByJobID(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("jobId")
+	if jobID == "" {
+		writeError(w, http.StatusBadRequest, "INVALID", "missing job id")
+		return
+	}
+	summary, err := h.svc.ByJobID(jobID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "USAGE_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
+}
+
 // Requirement returns per-step + total token usage for one requirement.
 // GET /api/usage/requirement/{id}
 func (h *UsageHandler) Requirement(w http.ResponseWriter, r *http.Request) {

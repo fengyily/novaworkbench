@@ -334,6 +334,36 @@ func (g *Gateway) runClaudeText(prompt string, timeout time.Duration) (string, e
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// ExtractSubtasksJSON is the last-resort orchestration parser: when the main
+// agent's reply contains a task breakdown in NO machine-readable form (no
+// Write-captured subtasks.json, no sentinel+JSON, no parseable markdown
+// table), the handler feeds the raw reply to this cheap single-shot call and
+// asks for ONLY the {"subtasks":[{"title","prompt"}]} JSON object. feedback
+// carries the previous attempt's parse error so the caller can retry once
+// with the mistake made explicit (empty on the first attempt). The caller
+// JSON-decodes the returned text — this method performs no validation.
+func (g *Gateway) ExtractSubtasksJSON(mainReply, feedback string) (string, error) {
+	// Cap the source text: a coding turn's finalResult can be tens of KB and
+	// the extractor only needs the plan section.
+	const maxRunes = 24000
+	runes := []rune(mainReply)
+	if len(runes) > maxRunes {
+		mainReply = string(runes[:maxRunes]) + "\n…（后文省略）"
+	}
+	prompt := "下面是一个软件开发主 Agent 的任务拆分回复。请从中提取子任务列表，" +
+		"只输出一个 JSON 对象，不要输出任何其他文字、解释或 markdown 代码围栏。\n" +
+		"格式：{\"subtasks\":[{\"title\":\"<子任务标题>\",\"prompt\":\"<执行该子任务的完整提示词，包含涉及文件、改动内容、产物形式>\"}]}\n" +
+		"规则：\n" +
+		"- 每个表格行/列表项对应一个子任务；序号列（#、1、2…）不是标题。\n" +
+		"- prompt 字段要自包含：子 Agent 看不到原始对话，只看你给的 prompt。\n" +
+		"- 如果回复中确实没有任何任务拆分，输出 {\"subtasks\":[]}。\n"
+	if feedback != "" {
+		prompt += "\n你上一次的输出无法解析为合法 JSON，错误信息：" + feedback + "\n这次请严格输出合法 JSON。\n"
+	}
+	prompt += "\n主 Agent 的回复如下：\n" + mainReply
+	return g.runClaudeText(prompt, 120*time.Second)
+}
+
 // GenerateDescriptionAndTitle reorganizes the user's raw requirement content
 // into structured Markdown AND distills a concise title in a single LLM round,
 // via the direct HTTP LLM channel (OpenAI-compatible, e.g. DeepSeek). This

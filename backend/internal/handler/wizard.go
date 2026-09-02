@@ -37,9 +37,14 @@ type WizardHandler struct {
 	usageSvc     usageRecorder
 	skillSvc     *service.SkillService
 	platformSvc  *service.PlatformTokenService
+	// subTaskSvc handles persistence for sub-tasks (manually-triggered child
+	// agents that fork the requirement's main-agent session). Optional — when
+	// nil the sub-task endpoints are not registered (legacy / standalone
+	// deployments without the feature).
+	subTaskSvc *service.SubTaskService
 }
 
-func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService) *WizardHandler {
+func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, subTaskSvc *service.SubTaskService) *WizardHandler {
 	return &WizardHandler{
 		projectSvc:   projectSvc,
 		reqSvc:       reqSvc,
@@ -52,6 +57,7 @@ func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.Requir
 		usageSvc:     usageSvc,
 		skillSvc:     skillSvc,
 		platformSvc:  platformSvc,
+		subTaskSvc:   subTaskSvc,
 	}
 }
 
@@ -1315,31 +1321,57 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		job.SetModel(model)
 		var prompt string
 		if sourceSID == "" {
-			// Legacy fresh-session path: feed the full title+desc as before.
-			prompt = fmt.Sprintf("## %s\n\n%s", req.RequirementTitle, req.RequirementDesc)
+			// Fresh-session path: no design/analysis session to fork (skip-design
+			// "直接开发" rows, or legacy rows without session chaining). This
+			// branch used to feed a bare "## title\n\n desc" which is a generic
+			// "请实现该需求" prompt — and the developer role's system prompt
+			// only emits the [SUBTASKS_READY] sentinel when the -p message
+			// carries an explicit "开始开发/进入执行实现阶段" trigger. Without
+			// that trigger the agent did the work itself and auto-orchestration
+			// never fired (see req_04acb22d06fe3525). So we now send the SAME
+			// decomposition trigger as the fork branch — the only difference is
+			// wording: there is no "已完成的需求分析与技术方案" to reference, so we
+			// ask the agent to read the relevant files first to build context.
 			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未关联需求会话，使用独立会话开始开发。"})
+			// Same decomposition trigger as the fork branch — the developer
+			// role only emits [SUBTASKS_READY] when the -p message carries an
+			// explicit "开始开发" trigger. The fresh path has no prior design
+			// to reference, so it asks the agent to read files first.
+			prompt = developerDecomposePrompt(req.RequirementTitle,
+				"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后立即完成**任务拆分**：\n", workDir)
+			if desc := strings.TrimSpace(req.RequirementDesc); desc != "" {
+				prompt += "\n\n用户在开发前的追加说明：\n" + desc
+			}
 			// Context-compression handoff (legacy fresh-session path): when
 			// the coding stage was previously compressed we still want the
 			// summary prepended so the new coding session inherits the
 			// compressed history. This branch covers pre-existing rows that
 			// never had a design_session_id (and the rare user who hits
 			// "重新开发" after a design session was already compressed and
-			// invalidated).
+			// invalidated). The summary goes at the TOP so the developer
+			// treats it as ground truth; the parenthetical tells the model
+			// not to act on it as if it were a fresh instruction.
 			if reqRow != nil && reqRow.CodingContextSummary != "" {
 				prompt = "## 上下文压缩摘要（之前的开发对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
 					reqRow.CodingContextSummary + "\n\n" + prompt
 			}
 		} else {
 			// The resumed conversation carries the requirement, analysis, and
-			// design. We only tell Claude to switch to the developer role and
-			// implement. A one-line pointer to the title helps orientation.
-			// When the user ran a pre-coding "追加调整" chat, its outcome is
-			// passed as RequirementDesc — fold it in as an explicit adjustment
-			// note so it reaches the developer (the coding session forks off the
-			// DESIGN conversation, which doesn't itself contain that chat).
-			prompt = fmt.Sprintf("现在切换到「开发者」角色。基于我们刚才的需求分析与技术方案，请实现该需求（%s）。", req.RequirementTitle)
-			if strings.TrimSpace(req.RequirementDesc) != "" {
-				prompt += "\n\n用户在开发前的追加调整说明：\n" + req.RequirementDesc
+			// design. The developer role is now a coordinator (统筹协调者) that
+			// does NOT write code itself — it decomposes the work into sub-tasks
+			// and emits a [SUBTASKS_READY] sentinel so tryAutoOrchestrate (called
+			// at the end of this job) dispatches each child agent. The -p prompt
+			// MUST carry the explicit "进入执行实现阶段" trigger that the
+			// developer system prompt keys its JSON+sentinel emission on — a
+			// generic "请实现该需求" does NOT hit that branch, so the agent hedges
+			// into a prose plan + "等待确认" and auto-orchestration never fires.
+			// The per-turn -p instruction also overrides the system prompt's
+			// "always ask for confirmation" guidance so the agent emits the
+			// sentinel immediately instead of waiting on the user.
+			prompt = developerDecomposePrompt(req.RequirementTitle,
+				"基于已完成的需求分析与技术方案，请立即完成**任务拆分**：\n", workDir)
+			if desc := strings.TrimSpace(req.RequirementDesc); desc != "" {
+				prompt += "\n\n用户在开发前的追加调整说明：\n" + desc
 			}
 			// Coding-stage compression handoff: even when resuming the design
 			// session, the prior coding turns may have been compressed. The
@@ -1464,6 +1496,21 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			emitKnowledgeResultEvent(job, items, used)
 		}
 		job.Append(store.LogLine{Type: "done", Content: "✅ 开发完成！"})
+		// Capture the main agent's task breakdown (if any) into coding_plan
+		// so SubTaskPanel can show it as the suggested sub-task list. The
+		// helper accepts both sentinel-wrapped and "## 任务分解"-heading
+		// forms; empty result leaves coding_plan unchanged (we don't want
+		// to wipe a previously-persisted plan when the agent happens to
+		// re-run without emitting one).
+		if req.RequirementID != "" {
+			if plan := extractCodingPlan(out.finalResult); plan != "" {
+				if perr := h.reqSvc.UpdateCodingPlan(req.RequirementID, plan); perr != nil {
+					log.Printf("[start-coding] failed to persist coding_plan for %s: %v", req.RequirementID, perr)
+				} else {
+					job.Append(store.LogLine{Type: "message", Content: "📋 已捕获主Agent任务分解，存入 coding_plan"})
+				}
+			}
+		}
 		// Record the effective developer model (success path only).
 		if req.RequirementID != "" {
 			if perr := h.reqSvc.UpdateDeveloperModel(req.RequirementID, model); perr != nil {
@@ -1472,6 +1519,20 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		}
 		job.Finish(0, store.JobDone)
 		log.Printf("[start-coding] job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
+
+		// === AUTO-ORCHESTRATE ============================================
+		// 主 Agent 在 start-coding 阶段已经掌握需求 / 设计 / 项目上下文。
+		// 用户希望"一键编排 = 主 Agent 自动派发"——main agent 一返回
+		// finalResult，立刻交给 tryAutoOrchestrate：有 [SUBTASKS_READY]
+		// sentinel + JSON 时串行派发子 Agent + 异步汇总；没命中就把
+		// coding_plan 当作普通任务分解展示，但不派发（保持现有行为）。
+		//
+		// 该调用改用独立 goroutine，不阻塞 start-coding 自身的 job_done
+		// 信号，用户的开发启动 SSE 立即结束；子任务的进度仍由
+		// dispatchOneChild 的 JobStore job 推流。
+		if req.RequirementID != "" && newCodingSID != "" && h.subTaskSvc != nil {
+			go h.tryAutoOrchestrate(req.RequirementID, newCodingSID, out.finalResult, out.subTasksJSON, reqRow, workDir, model)
+		}
 	}()
 }
 
@@ -2233,6 +2294,14 @@ type claudeStreamOutcome struct {
 	errMsg          string
 	hadStreamEvents bool     // true if any stream_event/content_block_delta arrived
 	planContent     string   // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
+	// subTasksJSON is the authoritative sub-task decomposition payload,
+	// captured from a Write tool_use whose target path ends with
+	// /.novaworkbench/subtasks.json. Unlike the free-text JSON block +
+	// [SUBTASKS_READY] sentinel, the Write tool_use input arrives as one
+	// structured event — immune to embedded code fences, truncation, or
+	// markdown mangling (req_9d24ef181a5ad5c4). tryAutoOrchestrate prefers
+	// this over every text-parsing fallback.
+	subTasksJSON string
 	actualModel     string   // model id returned by the API, captured from the assistant event's message.model
 	toolFiles       []string // file paths / patterns touched by Read/Write/Edit/Grep/Glob tool calls (for knowledge-usage evaluation)
 	// lastUsage captures the four token counts from the terminal result event
@@ -2346,8 +2415,14 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	// Windows the helpers in wizard_proc_windows.go fall back to signaling
 	// just the direct process — no orphan grand-children issue exists there.
 	setProcessGroup(cmd)
-	logClaudeExecDiag(scope, cmd)
+	// Single concise startup line in the happy path so the server log doesn't
+	// flood with LookPath / EvalSymlinks / stat / magic / ldd dumps every
+	// time a sub-task forks. The full diagnostic only fires when Start()
+	// fails — that's the case that actually needs the snapshot to pinpoint
+	// the cause (ENOENT alone is ambiguous).
+	log.Printf("[%s] claude 启动中 (binary=%s args=%d)", scope, filepath.Base(cmd.Path), len(cmd.Args))
 	if err := cmd.Start(); err != nil {
+		logClaudeExecDiag(scope, cmd)
 		log.Printf("[%s] exec diag: cmd.Start() failed: %T %v", scope, err, err)
 		return claudeStreamOutcome{errMsg: "启动 Claude 失败: " + err.Error()}
 	}
@@ -2525,6 +2600,16 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 							if strings.Contains(filepath.ToSlash(fp), "/.claude/plans/") && strings.HasSuffix(fp, ".md") {
 								if c, ok := input["content"].(string); ok && c != "" {
 									out.planContent = c
+								}
+							}
+							// Primary orchestration channel: the developer main
+							// agent is asked to Write its decomposition to
+							// .novaworkbench/subtasks.json. Capture the content
+							// from the structured tool_use input instead of
+							// parsing the assistant's free text.
+							if strings.HasSuffix(filepath.ToSlash(fp), "/"+subTasksFileRelPath) {
+								if c, ok := input["content"].(string); ok && c != "" {
+									out.subTasksJSON = c
 								}
 							}
 						}
@@ -3753,3 +3838,1502 @@ func (h *WizardHandler) GetContextSummary(w http.ResponseWriter, r *http.Request
 		"summary":        summary,
 	})
 }
+
+// ----------------------------------------------------------------------------
+// Sub-task (子任务) endpoints
+//
+// A sub-task is a manually-triggered child agent that runs under a
+// requirement's developing stage. It forks the requirement's main-agent
+// session (coding_session_id, with design_session_id as fallback) so every
+// child agent shares the parent's context — project structure, design docs,
+// prior conversation — but executes in its own claude process and writes its
+// own Markdown artifact to sub_tasks.artifact on completion.
+//
+// Endpoints:
+//   POST /api/requirements/{id}/sub-tasks     → start a new child agent
+//   GET  /api/requirements/{id}/sub-tasks     → list child agents for the req
+//   GET  /api/requirements/{id}/sub-tasks/{sid} → fetch one (incl. artifact)
+//
+// The SSE stream for a running sub-task reuses the existing
+// /api/wizard/jobs/{jobId}/stream endpoint — the SubTaskPanel wires its
+// createEventStream to that path with sub_task.job_id so the panel gets the
+// exact same phase/tool_call/message/result event flow the developer stage
+// already uses.
+// ----------------------------------------------------------------------------
+
+// requireSubTaskSvc is a small guard helper. When the service was never
+// injected (legacy / standalone deployment) the sub-task endpoints must 503
+// rather than 500 from a nil-pointer panic. Returns false after writing the
+// 503 response; the caller returns immediately.
+func (h *WizardHandler) requireSubTaskSvc(w http.ResponseWriter) bool {
+	if h.subTaskSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "sub-task service not initialized")
+		return false
+	}
+	return true
+}
+
+// resolveSubTaskSource picks the session id a sub-task should fork off. The
+// primary source is the sub-task's explicit `source_session_id` (set by the
+// caller — either the requirement's coding_session_id for a fresh sub-task,
+// or another sub-task's session_id for an adjustment). Empty forces the
+// caller to error out (no main agent session exists yet).
+func subTaskSourceSID(req *model.Requirement, explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if req != nil && req.CodingSessionID != "" {
+		return req.CodingSessionID
+	}
+	if req != nil && req.DesignSessionID != "" {
+		return req.DesignSessionID
+	}
+	return ""
+}
+
+// runSubTask spawns the claude CLI subprocess for a sub-task row and writes
+// the final artifact to sub_tasks.artifact on completion. shared by
+// StartSubTask and AdjustSubTask so the only thing callers vary is the
+// source session id.
+//
+// Side effects on success:
+//   - sub_tasks.status transitions to running (via MarkRunning)
+//   - the spawned JobStore job is appended with live phase/message lines
+//   - on completion, sub_tasks.artifact is filled with a Markdown report
+//     wrapping the claude finalResult, and job.Finish is called
+//
+// Pre: the sub_tasks row is already created with status=pending and has
+// its source_session_id populated. Pre-minting a session id via
+// subTaskSvc.UpdateSession + a JobStore job via jobs.Create should happen
+// in the caller before invoking this function — see StartSubTask for the
+// canonical ordering.
+func (h *WizardHandler) runSubTask(
+	req *model.Requirement,
+	st *model.SubTask,
+	job *store.Job,
+	newSID string,
+	sourceSID string,
+	body string,
+	modelOverride string,
+	adjust bool,
+) {
+	startTime, mErr := h.subTaskSvc.MarkRunning(st.ID)
+	if mErr != nil {
+		log.Printf("[sub-task] failed to mark running for %s: %v", st.ID, mErr)
+	}
+	// Best-effort persistence: backend restart mid-run won't lose the log.
+	defer func() {
+		lines, status, exitCode := job.Snapshot()
+		if perr := h.jobLogSvc.Save(job.ID, st.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
+			log.Printf("[sub-task] failed to persist job log %s: %v", job.ID, perr)
+		}
+	}()
+
+	role := "🤖 调整子任务启动中..."
+	if !adjust {
+		role = "🤖 子任务启动中..."
+	}
+	job.Append(store.LogLine{Type: "phase", Content: role})
+	job.Append(store.LogLine{Type: "message", Content: "📝 提示词: " + truncateForLog(body, 240)})
+
+	// Resolve developer role for system prompt + model. The child agent is
+	// an executor, not the coordinator; we override the role's default
+	// system prompt inline below.
+	_, modelName := h.roleConfig("developer")
+	if modelOverride != "" {
+		modelName = modelOverride
+	}
+	job.SetModel(modelName)
+
+	// Workdir: prefer the requirement's isolated worktree. Fallback to
+	// project checkout for legacy rows.
+	workDir := ""
+	if proj, perr := h.projectSvc.Get(req.ProjectID); perr == nil {
+		workDir = proj.LocalPath
+	}
+	if req.WorktreePath != "" {
+		if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
+			workDir = req.WorktreePath
+		}
+	}
+	if workDir == "" {
+		job.Append(store.LogLine{Type: "error", Content: "❌ 无法解析工作目录"})
+		job.Finish(1, store.JobError)
+		h.subTaskSvc.Finish(st.ID, model.SubTaskStatusError, buildSubTaskArtifact(st, modelName, "无法解析工作目录", time.Now()), modelName, model.SubTaskTokens{}, 0, startTime)
+		return
+	}
+
+	systemPrompt := "你是一位资深软件工程师，正在执行一个由主 Agent 派发的子任务。\n" +
+		"工作方式：\n" +
+		"- 主 Agent 已与用户完成需求分析和技术方案设计，你的工作是基于当前项目上下文完成指定的子任务。\n" +
+		"- 主动读取项目相关文件，理解现有代码结构后，再开始编写代码。\n" +
+		"- 遵循现有代码风格，编写清晰的代码。\n" +
+		"- 如有测试文件则同步更新。\n" +
+		"- 用中文沟通。\n\n" +
+		"工作完成后，必须用 Markdown 输出一份完整的工作报告（作为子任务的产物），包含以下章节：\n" +
+		"1. 任务摘要：简要说明你完成了什么\n" +
+		"2. 修改文件：列出所有修改/创建的文件路径\n" +
+		"3. 关键决策：列出重要的实现选择及理由\n" +
+		"4. 遗留问题：如有任何未完成或需要后续处理的事项，请明确列出\n"
+
+	var prompt string
+	if adjust {
+		prompt = "## 追加调整\n\n" + body + "\n"
+	} else {
+		prompt = "## 子任务\n\n" + body + "\n"
+	}
+	if block := llm.BuildSkillsBlock(h.mentionedSkills(req.Title + " " + body)); block != "" {
+		prompt = block + prompt
+	}
+
+	cmd := h.llm.GenerateCode(llm.StreamOpts{
+		Prompt:       prompt,
+		WorkDir:      workDir,
+		SystemPrompt: systemPrompt,
+		Model:        cliModelArg(modelName),
+		// --resume <sourceSID> --fork-session --session-id <newSID>:
+		// child agent inherits the parent's conversation context but
+		// executes in its own session.
+		SessionID:     sourceSID,
+		Resume:        true,
+		Fork:          true,
+		ForkSessionID: newSID,
+	})
+
+	// "sub_task" step key — distinct from "coding" / "adjust_coding" so
+	// token-usage rollups don't double-count.
+	subUsage := h.usageCtxFor("sub_task", st.RequirementID, req.ProjectID, job.ID, modelName, "", body)
+	out := runClaudeStream(jobSink{job}, cmd, "sub-task", subUsage)
+
+	finalStatus := model.SubTaskStatusDone
+	var artifactBody string
+	switch {
+	case out.staleSession:
+		finalStatus = model.SubTaskStatusError
+		artifactBody = "❌ 源会话已失效（session 文件不存在），请重新发起 coding 后再试。"
+		job.Append(store.LogLine{Type: "error", Content: artifactBody})
+	case out.errMsg != "":
+		finalStatus = model.SubTaskStatusError
+		artifactBody = "❌ " + out.errMsg
+		job.Append(store.LogLine{Type: "error", Content: artifactBody})
+	case out.finalResult == "":
+		finalStatus = model.SubTaskStatusError
+		artifactBody = "❌ Claude 未返回结果，请重试"
+		job.Append(store.LogLine{Type: "error", Content: artifactBody})
+	default:
+		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		artifactBody = out.finalResult
+	}
+	job.Append(store.LogLine{Type: "done", Content: "✅ 子任务完成！"})
+
+	artifact := buildSubTaskArtifact(st, modelName, artifactBody, time.Now())
+	tokens := model.SubTaskTokens{
+		Input:         out.lastUsage.InputTokens,
+		Output:        out.lastUsage.OutputTokens,
+		CacheCreation: out.lastUsage.CacheCreationTokens,
+		CacheRead:     out.lastUsage.CacheReadTokens,
+	}
+	costCents := computeSubTaskCostCents(modelName, tokens, h.claudeCfg)
+	if perr := h.subTaskSvc.Finish(st.ID, finalStatus, artifact, modelName, tokens, costCents, startTime); perr != nil {
+		log.Printf("[sub-task] failed to persist finish for %s: %v", st.ID, perr)
+	}
+	job.Finish(0, store.JobDone)
+	log.Printf("[sub-task] job %s finished for %s status=%s", job.ID, st.ID, finalStatus)
+}
+
+// computeSubTaskCostCents resolves the run's USD-equivalent cost in cents
+// against the active claude config's per-model unit price (input / output
+// per million tokens, same convention the dashboard's usage rollup uses).
+// Cache creation + cache reads are billed as input. Returns 0 when there's
+// no active config, the model isn't priced, or the config hasn't
+// configured unit prices yet — the SubTaskPanel renders "—" rather than
+// "$0.00" in that case so the user knows pricing wasn't available.
+//
+// Best-effort: failures are silently swallowed (the artifact / status /
+// tokens are the durable record; cost is decorative). The active config
+// lookup mirrors the one roleConfig uses at sub-task start time, so this
+// resolves against the same source-of-truth the run actually billed.
+func computeSubTaskCostCents(modelName string, tokens model.SubTaskTokens, claudeCfg *service.ClaudeConfigService) int {
+	if claudeCfg == nil {
+		return 0
+	}
+	cfg, err := claudeCfg.ActiveConfig()
+	if err != nil || cfg == nil {
+		return 0
+	}
+	for _, p := range cfg.Models {
+		if p.Model != modelName {
+			continue
+		}
+		if p.InputPrice == 0 && p.OutputPrice == 0 {
+			return 0
+		}
+		inUSD := float64(tokens.Input+tokens.CacheCreation+tokens.CacheRead) / 1e6 * p.InputPrice
+		outUSD := float64(tokens.Output) / 1e6 * p.OutputPrice
+		cents := int((inUSD + outUSD) * 100)
+		if cents < 0 {
+			return 0
+		}
+		return cents
+	}
+	return 0
+}
+
+// StartSubTask handles POST /api/requirements/{id}/sub-tasks.
+//
+// Body: { "prompt": "...", "title": "..." }  (title optional)
+//
+// Response: 200 { "job_id": "...", "sub_task_id": "..." }
+//
+// Creates a fresh sub_task row that forks the requirement's main-agent
+// session (coding_session_id, with design_session_id as fallback). The
+// orchestration work (validate, persist session/job ids) happens inline;
+// the actual claude subprocess spawn is delegated to runSubTask so it can
+// be shared with AdjustSubTask.
+func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
+	if !h.requireSubTaskSvc(w) {
+		return
+	}
+	var body struct {
+		Prompt string `json:"prompt"`
+		Title  string `json:"title"`
+		Model  string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(body.Prompt) == "" {
+		writeError(w, http.StatusBadRequest, "INVALID", "prompt 不能为空")
+		return
+	}
+	id := r.PathValue("id")
+	req, err := h.reqSvc.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "requirement not found")
+		return
+	}
+	sourceSID := subTaskSourceSID(req, "")
+	if sourceSID == "" {
+		writeError(w, http.StatusConflict, "NO_SESSION",
+			"需求尚未启动 coding 或 design session，无法创建子任务")
+		return
+	}
+
+	st, err := h.subTaskSvc.Create(id, strings.TrimSpace(body.Title), body.Prompt)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	newSID := util.NewUUID()
+	if perr := h.subTaskSvc.UpdateSession(st.ID, newSID, sourceSID); perr != nil {
+		log.Printf("[sub-task] failed to persist session for %s: %v", st.ID, perr)
+	}
+	job := h.jobs.Create(id)
+	if perr := h.subTaskSvc.UpdateJobID(st.ID, job.ID); perr != nil {
+		log.Printf("[sub-task] failed to persist job_id for %s: %v", st.ID, perr)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"job_id":      job.ID,
+		"sub_task_id": st.ID,
+	})
+
+	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, false)
+}
+
+// ReOrchestrate handles POST /api/requirements/{id}/re-orchestrate — the
+// manual "🔄 重新拆分" escape hatch for when StartCoding's auto-orchestration
+// produced no children (main agent ignored every decomposition channel) or
+// the user simply wants a fresh split. It resumes the requirement's coding
+// session with the SAME decomposition trigger prompt StartCoding sends
+// (including the Write-tool subtasks.json instruction), then feeds the turn
+// through the exact same parse+dispatch pipeline as tryAutoOrchestrate
+// (resolveSubtasksPayload → dispatchChildrenSequential → summaryKickoff).
+//
+// Returns { job_id } immediately; the job carries the main agent's live
+// stream so the frontend can show progress via the usual job SSE endpoint.
+// 409 when a child is still running — re-splitting mid-batch would fork the
+// session concurrently and double-dispatch work.
+//
+// Body: { "model"?: "..." }
+func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
+	if !h.requireSubTaskSvc(w) {
+		return
+	}
+	var body struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	id := r.PathValue("id")
+	req, err := h.reqSvc.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "requirement not found")
+		return
+	}
+	if req.Kind == "idea" {
+		writeError(w, http.StatusConflict, "IDEA", "「想法」类需求不支持任务拆分，请先转为需求")
+		return
+	}
+	// Refuse to re-split while any child is alive — the children fork the
+	// coding session, and a concurrent decomposition turn would race them.
+	if existing, lerr := h.subTaskSvc.List(id); lerr == nil {
+		for _, st := range existing {
+			if st.Status == model.SubTaskStatusRunning || st.Status == model.SubTaskStatusPending {
+				writeError(w, http.StatusConflict, "BUSY", "有子任务正在执行，请等待完成后再重新拆分")
+				return
+			}
+		}
+	}
+
+	job := h.jobs.Create(id)
+	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
+
+	go func() {
+		// Best-effort persistence: backend restart mid-run won't lose the log.
+		defer func() {
+			lines, status, exitCode := job.Snapshot()
+			if perr := h.jobLogSvc.Save(job.ID, id, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
+				log.Printf("[re-orchestrate] failed to persist job log %s: %v", job.ID, perr)
+			}
+		}()
+
+		// Workdir: prefer the requirement's isolated worktree (mirrors
+		// runSubTask so both paths agree on where the code lives).
+		workDir := ""
+		if proj, perr := h.projectSvc.Get(req.ProjectID); perr == nil {
+			workDir = proj.LocalPath
+		}
+		if req.WorktreePath != "" {
+			if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
+				workDir = req.WorktreePath
+			}
+		}
+		if workDir == "" {
+			job.Append(store.LogLine{Type: "error", Content: "❌ 无法解析工作目录"})
+			job.Finish(1, store.JobError)
+			return
+		}
+
+		_, modelName := h.roleConfig("developer")
+		if body.Model != "" {
+			modelName = body.Model
+		}
+		job.SetModel(modelName)
+
+		// Session threading: resume the existing coding session so the main
+		// agent re-decomposes with full context. No coding session yet →
+		// fresh session carrying the requirement title + description.
+		systemPrompt, _ := h.roleConfig("developer")
+		sessionID := req.CodingSessionID
+		resume := sessionID != ""
+		var prompt string
+		if resume {
+			prompt = developerDecomposePrompt(req.Title,
+				"上次未能成功完成任务拆分。请基于已有的需求与上下文，重新立即完成**任务拆分**：\n", workDir)
+		} else {
+			sessionID = util.NewUUID()
+			if perr := h.reqSvc.UpdateCodingSession(id, sessionID); perr != nil {
+				log.Printf("[re-orchestrate] failed to persist coding session for %s: %v", id, perr)
+			}
+			prompt = developerDecomposePrompt(req.Title,
+				"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后立即完成**任务拆分**：\n", workDir)
+			if d := strings.TrimSpace(req.Description); d != "" {
+				prompt += "\n\n需求描述：\n" + d
+			}
+		}
+
+		job.Append(store.LogLine{Type: "phase", Content: "🔄 主 Agent 重新拆分任务中…"})
+		cmd := h.llm.GenerateCode(llm.StreamOpts{
+			Prompt:       prompt,
+			WorkDir:      workDir,
+			SystemPrompt: systemPrompt,
+			Model:        cliModelArg(modelName),
+			SessionID:    sessionID,
+			Resume:       resume,
+		})
+		usage := h.usageCtxFor("re_orchestrate", id, req.ProjectID, job.ID, modelName, "", "")
+		out := runClaudeStream(jobSink{job}, cmd, "re-orchestrate", usage)
+
+		switch {
+		case out.staleSession:
+			// Coding session file is gone — clear it so the next attempt
+			// takes the fresh-session path instead of failing again.
+			job.Append(store.LogLine{Type: "error", Content: "❌ 原开发会话已失效，请重新点击「重新拆分」（下次将使用全新会话）"})
+			if perr := h.reqSvc.UpdateCodingSession(id, ""); perr != nil {
+				log.Printf("[re-orchestrate] failed to clear coding session for %s: %v", id, perr)
+			}
+			job.Finish(1, store.JobError)
+			return
+		case out.errMsg != "":
+			job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+			job.Finish(1, store.JobError)
+			return
+		case out.finalResult == "" && out.subTasksJSON == "":
+			job.Append(store.LogLine{Type: "error", Content: "❌ Claude 未返回结果，请重试"})
+			job.Finish(1, store.JobError)
+			return
+		}
+		if out.finalResult != "" {
+			job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		}
+
+		// Same parse chain as the auto path. NOTE: unlike tryAutoOrchestrate
+		// the manual path does NOT fall back to a single whole-requirement
+		// child — the user explicitly asked for a SPLIT, so a total parse
+		// failure is reported, not silently converted.
+		payload := h.resolveManualReSplit(id, out.finalResult, out.subTasksJSON)
+		// Consume-then-clean: never leave subtasks.json in the worktree.
+		if rerr := os.Remove(subTasksFilePath(workDir)); rerr != nil && !os.IsNotExist(rerr) {
+			log.Printf("[re-orchestrate] %s: failed to remove %s: %v", id, subTasksFilePath(workDir), rerr)
+		}
+		if payload == nil {
+			job.Append(store.LogLine{Type: "error", Content: "❌ 主 Agent 仍未输出可解析的任务拆分。可在下方手动创建子任务，或调整提示词后重试。"})
+			job.Finish(1, store.JobError)
+			return
+		}
+		job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("📋 拆分完成：%d 个子任务，开始串行派发…", len(payload.Subtasks))})
+		job.Append(store.LogLine{Type: "done", Content: "✅ 重新拆分完成，子任务派发中"})
+		job.Finish(0, store.JobDone)
+
+		// Dispatch runs after job.Finish so the re-split SSE closes promptly;
+		// each child's own job streams its progress like the auto path.
+		subTaskIDs := dispatchChildrenSequential(id, sessionID, req, h, payload.Subtasks, workDir, modelName)
+		if len(subTaskIDs) == 0 {
+			log.Printf("[re-orchestrate] %s: dispatch produced 0 children", id)
+			return
+		}
+		log.Printf("[re-orchestrate] %s: dispatched %d children, scheduling summary", id, len(subTaskIDs))
+		summaryKickoff(id, sessionID, req, h, workDir, modelName, subTaskIDs)
+	}()
+}
+
+// resolveManualReSplit is the manual re-split's parse chain: identical to
+// resolveSubtasksPayload MINUS the whole-requirement fallback child — a user
+// who clicked 重新拆分 asked for a decomposition, so a total parse failure
+// must surface as an error instead of silently executing everything as one
+// task.
+func (h *WizardHandler) resolveManualReSplit(reqID, finalResult, capturedJSON string) *orchestratorPayload {
+	if p := decodeSubtasksPayload(capturedJSON); p != nil {
+		log.Printf("[re-orchestrate] %s: using Write-captured subtasks.json (%d subtasks)", reqID, len(p.Subtasks))
+		return p
+	}
+	if strings.TrimSpace(finalResult) == "" {
+		return nil
+	}
+	if p, ok := extractSubtasksPayload(finalResult); ok {
+		return p
+	}
+	if p := extractSubtasksFromMarkdown(finalResult); p != nil {
+		return p
+	}
+	return h.extractSubtasksWithLLM(reqID, finalResult)
+}
+
+// AdjustSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/adjust.
+//
+// Body: { "prompt": "...", "model"?: "..." }
+//
+// Creates a NEW sub_task row that forks the parent sub_task's session id —
+// letting the user push follow-up instructions into the same implementation
+// thread without re-forking from the (much older) main-agent session. The
+// prompt is the only new instruction; the rest of the context (project
+// files, design docs, prior code edits) is inherited automatically.
+func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
+	if !h.requireSubTaskSvc(w) {
+		return
+	}
+	var body struct {
+		Prompt string `json:"prompt"`
+		Model  string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(body.Prompt) == "" {
+		writeError(w, http.StatusBadRequest, "INVALID", "prompt 不能为空")
+		return
+	}
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	req, err := h.reqSvc.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "requirement not found")
+		return
+	}
+
+	// Look up the parent to validate ownership and capture its session id
+	// (the source for the adjustment's --fork-session resume).
+	parent, err := h.subTaskSvc.Get(sid)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task not found")
+		return
+	}
+	if parent.RequirementID != id {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task does not belong to this requirement")
+		return
+	}
+	if parent.SessionID == "" {
+		writeError(w, http.StatusConflict, "NO_SESSION",
+			"原子任务尚未生成 session（可能仍在启动或运行），无法追加调整")
+		return
+	}
+
+	// Adjusting a failed sub-task is allowed but its session file may have
+	// rolled back to a state before the failure — surfaced via staleSession
+	// at run time, same UX as the main adjust-coding path.
+	st, err := h.subTaskSvc.CreateAdjustment(id, sid, body.Prompt)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	newSID := util.NewUUID()
+	if perr := h.subTaskSvc.UpdateSession(st.ID, newSID, parent.SessionID); perr != nil {
+		log.Printf("[sub-task adjust] failed to persist session for %s: %v", st.ID, perr)
+	}
+	job := h.jobs.Create(id)
+	if perr := h.subTaskSvc.UpdateJobID(st.ID, job.ID); perr != nil {
+		log.Printf("[sub-task adjust] failed to persist job_id for %s: %v", st.ID, perr)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"job_id":      job.ID,
+		"sub_task_id": st.ID,
+	})
+
+	// Re-use the shared spawn helper with adjust=true. This runs the same
+	// prompt prefix + system prompt as a fresh sub-task, but the
+	// source_session_id is the parent's session id (not the main agent),
+	// so the conversation inherits the parent's edits.
+	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, true)
+}
+
+// ListSubTasks handles GET /api/requirements/{id}/sub-tasks.
+// Returns the sub-tasks ordered oldest-first so the panel renders them in
+// firing order. Validates the requirement exists first so a typo returns
+// 404 rather than an empty array (which would silently look like "no
+// sub-tasks yet").
+func (h *WizardHandler) ListSubTasks(w http.ResponseWriter, r *http.Request) {
+	if !h.requireSubTaskSvc(w) {
+		return
+	}
+	id := r.PathValue("id")
+	if _, err := h.reqSvc.Get(id); err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "requirement not found")
+		return
+	}
+	items, err := h.subTaskSvc.List(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+// GetSubTask handles GET /api/requirements/{id}/sub-tasks/{sid}.
+// Verifies the row's requirement_id matches the URL {id} so a forged URL
+// can't be used to fetch a sub-task that belongs to another requirement —
+// the front-end only knows ids from List, but a tampering curl call should
+// still hit this guard.
+func (h *WizardHandler) GetSubTask(w http.ResponseWriter, r *http.Request) {
+	if !h.requireSubTaskSvc(w) {
+		return
+	}
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	st, err := h.subTaskSvc.Get(sid)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task not found")
+		return
+	}
+	if st.RequirementID != id {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task does not belong to this requirement")
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+// buildSubTaskArtifact composes the final Markdown report persisted into
+// sub_tasks.artifact. The header carries the title / prompt / model /
+// timestamps so the report reads standalone — useful when the SubTaskPanel
+// downloads it or the user opens it from disk later. body is the claude
+// output verbatim (already trimmed upstream); error strings start with "❌"
+// so the panel can render them in the error style without further
+// inspection.
+func buildSubTaskArtifact(st *model.SubTask, model, body string, finishedAt time.Time) string {
+	var b strings.Builder
+	b.WriteString("# 子任务: ")
+	b.WriteString(st.Title)
+	b.WriteString("\n\n")
+	b.WriteString("**提示词**: ")
+	b.WriteString(strings.TrimSpace(st.Prompt))
+	b.WriteString("\n\n")
+	b.WriteString("**完成时间**: ")
+	b.WriteString(finishedAt.Format("2006-01-02 15:04:05"))
+	b.WriteString("  **模型**: ")
+	b.WriteString(model)
+	b.WriteString("\n\n---\n\n")
+	b.WriteString(strings.TrimSpace(body))
+	return b.String()
+}
+
+// truncateForLog shortens prompt for the "📝 提示词:" log line so a multi-KB
+// prompt doesn't spam the coding panel. Uses the same char-budget as the
+// SubTaskPanel card title (240) so the panel preview matches the panel.
+func truncateForLog(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
+}
+
+// codingPlanSectionRe finds the main agent's "任务分解" (task breakdown)
+// section inside a freeform claude response. The developer role's system
+// prompt instructs the main agent to emit a Markdown section between two
+// sentinel markers so we can locate it without resorting to full Markdown
+// AST parsing.
+//
+// Two layouts are accepted (both intentional — the agent picks whichever
+// reads better given the requirements):
+//
+//  1. Sentinel-wrapped (preferred for stable parsing):
+//     <!-- CODING_PLAN_START -->
+//     ... plan content ...
+//     <!-- CODING_PLAN_END -->
+//
+//  2. Heading-based fallback (when the agent forgets the sentinels but
+//     follows the "## 任务分解" instruction in the role prompt):
+//     ## 任务分解
+//     ... plan content ...
+//     ## 其他章节
+//
+// Returns the trimmed inner Markdown (sentinels stripped), or "" when no
+// plan section was found. The returned string is the value persisted into
+// requirements.coding_plan; the SubTaskPanel renders it directly.
+var (
+	codingPlanStart = regexp.MustCompile(`(?s)<!--\s*CODING_PLAN_START\s*-->`)
+	codingPlanEnd   = regexp.MustCompile(`(?s)<!--\s*CODING_PLAN_END\s*-->`)
+	codingPlanHead  = regexp.MustCompile(`(?m)^#{1,3}\s*任务分解\s*$`)
+)
+
+// extractCodingPlan pulls the main agent's task breakdown section out of a
+// freeform claude response. Tries sentinel-wrapped first (more robust against
+// nested ## sections), falls back to a "## 任务分解" heading scan. Returns ""
+// when no plan section is detected — callers persist "" to clear stale plans.
+func extractCodingPlan(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	// Layout 1: sentinel-wrapped.
+	startIdx := codingPlanStart.FindStringIndex(text)
+	endIdx := codingPlanEnd.FindStringIndex(text)
+	if startIdx != nil && endIdx != nil && endIdx[0] > startIdx[1] {
+		return strings.TrimSpace(text[startIdx[1]:endIdx[0]])
+	}
+	// Layout 2: heading-based. Take from the heading line through the next
+	// heading of equal or higher level (## or #), or end-of-text.
+	loc := codingPlanHead.FindStringIndex(text)
+	if loc == nil {
+		return ""
+	}
+	after := text[loc[1]:]
+	// Find the next heading at level 1 or 2 (## or #). Level 3+ (###) is
+	// sub-content of the plan and stays inside the captured block.
+	nextHead := regexp.MustCompile(`(?m)^#{1,2}\s+\S`).FindStringIndex(after)
+	if nextHead == nil {
+		return strings.TrimSpace(text[loc[0]:])
+	}
+	return strings.TrimSpace(text[loc[0] : loc[1]+nextHead[0]])
+}
+
+// ----------------------------------------------------------------------------
+// Auto-orchestrate (主 Agent 自动编排子任务)
+//
+// 工作流:
+//   1. 用户在 developer-chat（或直接 POST /orchestrate）说"开始执行"
+//   2. wizard handler 像普通 developer-chat 一样跑主Agent一轮（system prompt
+//      已被改写，要求输出 Markdown 表格 + JSON 子任务列表 + [SUBTASKS_READY]）
+//   3. finalResult 中包含 [SUBTASKS_READY] 时，解析 JSON，自动创建 sub_tasks 行
+//      并**串行**调度每个子Agent（沿用 StartSubTask 的 fork 主会话逻辑）
+//   4. 所有子任务结束后，自动 fork 主Agent的 session（--resume <main_sid>），
+//      把每个子任务的 artifact 作为上下文注入，触发主Agent生成汇总报告
+//   5. 汇总报告写入 requirements.coding_plan，前端 SubTaskPanel 顶部展示
+//
+// 设计取舍:
+//   - 串行而非并行：避免子任务改同一文件（worktree 已隔离但语义上仍冲突）
+//   - 不阻塞原始 SSE：编排启动后立即返回，主Agent 输出 + 子任务进度通过各自
+//     job_id 推给前端（不通过本编排 SSE 直接流），汇总报告则由前端轮询 Get
+//   - 与手动 StartSubTask 共用 sub_tasks 表：自动批次与手动创建的子任务在
+//     UI 上表现一致（状态、artifact、token 计量都一样）
+// ----------------------------------------------------------------------------
+
+// orchestratedSubtask is the JSON shape the main agent emits inside a code
+// fence when the user asks for "开始执行". Parsed in orchestrator; non-nil
+// prompt required (the orchestrator rejects empty prompts rather than
+// spawning a useless child agent).
+type orchestratedSubtask struct {
+	Title  string `json:"title"`
+	Prompt string `json:"prompt"`
+}
+
+// orchestratorPayload is the parsed JSON the main agent emits. The handler
+// reads this after extracting the ```json block from finalResult.
+type orchestratorPayload struct {
+	Subtasks []orchestratedSubtask `json:"subtasks"`
+}
+
+// SUBTASKS_READY is the sentinel token the main agent must end its
+// auto-orchestrate output with. Any text after the sentinel (until the next
+// newline / EOF) is ignored; the sentinel itself is stripped from the saved
+// chat history so the user-facing rendering never leaks "[SUBTASKS_READY]".
+const SUBTASKS_READY = "[SUBTASKS_READY]"
+
+// developerDecomposePrompt builds the -p prompt that triggers the developer
+// role's task-decomposition + [SUBTASKS_READY] emission. Used by BOTH the
+// fresh-session (sourceSID=="") and fork/resume (sourceSID!="") StartCoding
+// branches so auto-orchestration fires regardless of whether the requirement
+// went through the analyst/architect stages — the original bug was that only
+// the fork branch carried this trigger, so skip-design / "直接开发" rows got a
+// bare "## title\n\n desc" and the agent did the work itself (no sentinel →
+// no children dispatched). leadIn is the single line that differs: the fresh
+// path has no prior design to reference, so it asks the agent to read files
+// first; the fork path references the already-completed analysis + design.
+// Everything else (Markdown table → JSON block → [SUBTASKS_READY] sentinel,
+// "don't write code yourself", "don't ask for confirmation") is shared
+// verbatim so the two paths can never drift out of sync.
+// subTasksFileRelPath is the well-known path (relative to the coding work
+// dir) the developer main agent writes its sub-task decomposition to via the
+// Write tool. The backend captures the Write tool_use input from the
+// stream-json events (claudeStreamOutcome.subTasksJSON) — a structured
+// channel that can't be broken by embedded code fences or prose, unlike the
+// legacy "```json block + [SUBTASKS_READY] sentinel" text convention, which
+// stays as the fallback.
+const subTasksFileRelPath = ".novaworkbench/subtasks.json"
+
+// subTasksFilePath returns the absolute path the decompose prompt tells the
+// main agent to Write to. workDir is the coding worktree (or project dir).
+func subTasksFilePath(workDir string) string {
+	return filepath.Join(workDir, subTasksFileRelPath)
+}
+
+func developerDecomposePrompt(title, leadIn, workDir string) string {
+	return fmt.Sprintf(
+		"现在切换到「开发者」角色。用户已点击「开始开发」，正式进入执行实现阶段（需求：%s）。\n"+
+			leadIn+
+			"1. 输出一份 Markdown 任务分解表，让用户直观看到拆分结果；\n"+
+			"2. **然后必须调用 Write 工具**，把拆分结果以 JSON 写入文件 %s ，格式：\n"+
+			"   {\"subtasks\":[{\"title\":\"...\",\"prompt\":\"...\"}]}，每个子任务的 prompt 必须包含足够上下文（涉及文件、做什么改动、产物形式）；\n"+
+			"3. 最后在回复中单独一行输出 [SUBTASKS_READY] 哨兵。\n"+
+			"注意：第 2 步的 Write 文件是后端调度子Agent 的主要依据，务必调用 Write 工具完成，不要只在回复里贴 JSON。\n"+
+			"要求：不要直接编写项目代码（由子Agent完成）；不要输出『等待确认』——直接给出拆分结果，后端检测到拆分文件后会自动串行调度子Agent执行并在全部完成后交回主Agent汇总。",
+		title, subTasksFilePath(workDir))
+}
+
+// extractSubtasksPayload pulls the {"subtasks":[…]} JSON block out of
+// finalResult and verifies the [SUBTASKS_READY] sentinel is present. Returns
+// nil when either is missing — caller treats that as "main agent answered a
+// normal question, not a decompose request" and just renders the chat reply.
+//
+// We intentionally do NOT use the existing extractJSON() brace matcher
+// because the agent typically wraps the JSON in a ```json fence; this
+// function locates the first ```json block, then JSON-decodes its contents.
+// Falls back to a brace match when no fence is found (more permissive, lets
+// the agent omit the fence in low-token responses).
+func extractSubtasksPayload(text string) (*orchestratorPayload, bool) {
+	// Also accept a truncated sentinel "[SUBTASKS_READY" (missing the closing
+	// "]") — the model occasionally drops the last character when the stream
+	// ends right at the sentinel boundary.
+	hasSentinel := strings.Contains(text, SUBTASKS_READY) ||
+		strings.Contains(text, "[SUBTASKS_READY")
+	if !hasSentinel {
+		return nil, false
+	}
+	body := text
+	// Strip the sentinel itself so it doesn't bleed into the user-visible
+	// chat rendering (front-end would otherwise render "[SUBTASKS_READY]" as
+	// raw text after a successful orchestration).
+	body = strings.ReplaceAll(body, SUBTASKS_READY, "")
+	body = strings.ReplaceAll(body, "[SUBTASKS_READY", "") // truncated form
+
+	// Prefer the ```json fence. Do NOT cut at the first "```" after the
+	// fence: a subtask prompt may itself embed a code fence (e.g. a
+	// "\n```css\n…\n```\n" snippet inside a JSON string value), and the
+	// naive first-fence cut truncates the payload mid-JSON — the parse then
+	// fails and the caller silently degrades to the Markdown table heuristic
+	// (req_9d24ef181a5ad5c4). extractJSON brace-matches string-aware, so
+	// fences inside quoted strings are skipped and the trailing fence is
+	// ignored.
+	var candidates []string
+	if fenceStart := strings.Index(body, "```json"); fenceStart >= 0 {
+		candidates = append(candidates, extractJSON(body[fenceStart+len("```json"):]))
+	}
+	// Fallback: take the first {...} JSON block in the whole response so
+	// agents that omit the fence (or accidentally include prose around the
+	// JSON) still parse correctly.
+	candidates = append(candidates, extractJSON(body))
+	for _, raw := range candidates {
+		if p := decodeSubtasksPayload(raw); p != nil {
+			return p, true
+		}
+	}
+	log.Printf("[orchestrate] JSON parse failed: no usable subtasks payload in %d candidate(s)", len(candidates))
+	return nil, false
+}
+
+// decodeSubtasksPayload unmarshals one candidate JSON blob and normalizes it.
+// Returns nil on any parse/validation failure so the caller can try the next
+// candidate. Kept separate from extractSubtasksPayload so the fence and
+// brace-match candidates share one strict decode path.
+func decodeSubtasksPayload(raw string) *orchestratorPayload {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var p orchestratorPayload
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return nil
+	}
+	return normalizePayload(&p)
+}
+
+// extractSubtasksFromMarkdown is a permissive fallback used when the main
+// agent emits a Markdown task breakdown table but forgets to wrap the
+// matching JSON in a code fence (or forgets the [SUBTASKS_READY] sentinel).
+// The UX promise is "主Agent 拆分任务 → 后端自动派发", so we degrade
+// gracefully instead of leaving the user staring at a "未派发" panel.
+//
+// Heuristic (matches what the developer role prompt asks the agent to write):
+//   1. Locate the "## 任务分解" / "## 子任务" / "## 子任务清单" / "## 任务清单"
+//      heading (case-insensitive, trimmed).
+//   2. From the heading line onward, grab consecutive list items:
+//      - "- " or "* " or numbered "1. " markdown items
+//      - "**N. 标题**：提示词" — the agent's compressed form, separated by "：" / ":"
+//      - "| 列 | 列 |" table rows starting from the 2nd data row
+//   3. Skip blank lines; require at least 2 items to consider it a real plan
+//      (one-liner instructions are usually prose, not a decomposition).
+//
+// Returns nil when nothing usable is found; caller logs + skips dispatch.
+func extractSubtasksFromMarkdown(text string) *orchestratorPayload {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	// 1. Find the breakdown heading.
+	headingRe := regexp.MustCompile(`(?m)^#{1,3}\s*(任务分解表?|子任务|子任务清单|任务清单|任务拆分|子Agent\s*协作|子Agent协作)\s*$`)
+	loc := headingRe.FindStringIndex(text)
+	if loc == nil {
+		return nil
+	}
+	after := text[loc[1]:]
+	// Stop scanning at the next sibling heading (level 1 or 2). Level 3+ is
+	// sub-content of the plan and stays inside.
+	if next := regexp.MustCompile(`(?m)^#{1,2}\s+\S`).FindStringIndex(after); next != nil {
+		after = after[:next[0]]
+	}
+
+	// Trailing prose lines like "等待用户确认" / "完成后..." / "其他内容略。"
+	// aren't part of the task list — stop the scan when the line is plain
+	// prose with no list/table markers. We still keep lines whose content
+	// looks like a "标题：xxx" entry (heuristic: has a colon before the first
+	// non-space char of length >= 2, OR starts with a list marker, OR is a
+	// table row).
+	type entry struct {
+		title  string
+		prompt string
+	}
+	var entries []entry
+	lines := strings.Split(after, "\n")
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+
+		// Skip obvious non-entries (table dividers, code fences).
+		if regexp.MustCompile(`^[-=|:\s]+$`).MatchString(line) {
+			continue
+		}
+		if strings.HasPrefix(line, "```") {
+			continue
+		}
+
+		// Skip plain prose lines without list / table markers — these are
+		// the agent's closing remark, not a task entry. The check is
+		// strict: the line must start with one of the recognized markers.
+		isListItem := false
+		for _, prefix := range []string{"- ", "* ", "• ", "‣ ", "| "} {
+			if strings.HasPrefix(line, prefix) {
+				isListItem = true
+				break
+			}
+		}
+		isNumbered := regexp.MustCompile(`^\d+\.\s+\S`).MatchString(line)
+		if !isListItem && !isNumbered {
+			// Plain prose → stop scanning, the plan section is over.
+			break
+		}
+
+		// Strip common markdown list / numbering prefixes.
+		stripped := line
+		for _, prefix := range []string{"- ", "* ", "• ", "‣ "} {
+			if strings.HasPrefix(stripped, prefix) {
+				stripped = strings.TrimSpace(stripped[len(prefix):])
+				break
+			}
+		}
+		// Numbered prefix: "1. ", "2. ", … (single trailing dot).
+		if m := regexp.MustCompile(`^\d+\.\s+`).FindStringIndex(stripped); m != nil {
+			stripped = strings.TrimSpace(stripped[m[1]:])
+		}
+
+		// Strip ALL ** (markdown bold) — pairs of asterisks can sit
+		// anywhere in the line ("**修复登录 bug**" → "修复登录 bug").
+		stripped = stripAllBold(stripped)
+
+		// Table row: split into cells so "| 实现缓存层 | 在 …" →
+		// title="实现缓存层", prompt="在 …". We handle this BEFORE the
+		// colon/separator step so a table row never falls through to the
+		// default "whole line is the prompt" branch.
+		isTableRow := strings.HasPrefix(stripped, "|")
+		if isTableRow {
+			cells := splitTableRowCells(stripped)
+			if len(cells) >= 2 {
+				// Lead index column: tables shaped "| # | 子任务 | 涉及文件 | …"
+				// put the real title in the SECOND cell. Without this shift the
+				// header row becomes a bogus child (title="#", prompt="子任务 | …")
+				// and every data row gets a numbered title ("1", "2", …) — this
+				// is exactly what dispatched the garbage sub-task in
+				// req_9d24ef181a5ad5c4.
+				if isTableIndexCell(cells[0]) {
+					cells = cells[1:]
+				}
+				tableTitle := cells[0]
+				tablePrompt := strings.Join(cells[1:], " | ")
+				if tablePrompt == "" {
+					// Single-content-column row after the shift — keep the
+					// title as the prompt so normalizePayload doesn't drop it.
+					tablePrompt = tableTitle
+				}
+				// Filter the header row (its title cell is one of the marker
+				// words) and any other obvious non-entries.
+				if isTableHeaderCell(tableTitle) {
+					continue
+				}
+				entries = append(entries, entry{title: tableTitle, prompt: tablePrompt})
+				continue
+			}
+		}
+
+		// Two shapes (non-table rows):
+		//   "标题：提示词" / "标题: 提示词"
+		//   "标题 — 提示词" / "标题 - 提示词"
+		var title, prompt string
+		for _, sep := range []string{"：", ":", "—", " — ", " - "} {
+			if idx := strings.Index(stripped, sep); idx > 0 && idx < len(stripped)-1 {
+				title = strings.TrimSpace(stripped[:idx])
+				prompt = strings.TrimSpace(stripped[idx+len(sep):])
+				break
+			}
+		}
+		if title == "" {
+			// Whole line is the title/prompt; treat first 40 chars as title
+			// and the whole thing as the prompt so the panel renders
+			// something usable.
+			prompt = stripped
+			title = truncateForLog(stripped, 40)
+		}
+		// Filter: skip table headers like "子任务" / "提示词" / "描述" that
+		// the agent sometimes leaves in row 1.
+		lowerTitle := strings.ToLower(title)
+		if title == "" || strings.HasPrefix(lowerTitle, "子任务") || strings.HasPrefix(lowerTitle, "任务") || strings.HasPrefix(lowerTitle, "提示词") || strings.HasPrefix(lowerTitle, "说明") || strings.HasPrefix(lowerTitle, "步骤") {
+			continue
+		}
+		entries = append(entries, entry{title: title, prompt: prompt})
+	}
+	if len(entries) < 2 {
+		// A single bullet is usually prose ("- 等等") — don't auto-dispatch
+		// on it; the user can still copy-paste into the manual creator.
+		return nil
+	}
+	p := &orchestratorPayload{Subtasks: make([]orchestratedSubtask, 0, len(entries))}
+	for _, e := range entries {
+		p.Subtasks = append(p.Subtasks, orchestratedSubtask{Title: e.title, Prompt: e.prompt})
+	}
+	return normalizePayload(p) // normalizePayload may still return nil if everything cleaned out
+}
+
+// splitTableRowCells turns a Markdown table row into its trimmed cells:
+// "| a | b |" → ["a", "b"]. Empty cells are kept so column positions stay
+// aligned (the index-shift heuristic in the caller depends on position).
+func splitTableRowCells(row string) []string {
+	row = strings.TrimSpace(strings.Trim(row, "|"))
+	parts := strings.Split(row, "|")
+	cells := make([]string, 0, len(parts))
+	for _, c := range parts {
+		cells = append(cells, strings.TrimSpace(c))
+	}
+	return cells
+}
+
+// isTableIndexCell reports whether a leading table cell is just a row index
+// ("#", "1", "42", "序号", "编号") rather than real content — the cue that the
+// actual task title lives in the NEXT column.
+func isTableIndexCell(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	if s == "#" || s == "序号" || s == "编号" {
+		return true
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isTableHeaderCell reports whether a table title cell is really a header
+// label (子任务 / 提示词 / 涉及文件 / …) that must not become a sub-task.
+// Broader than the inline list-item filter because breakdown tables carry
+// more column kinds (涉及文件 / 关键改动 / 产物).
+func isTableHeaderCell(s string) bool {
+	lower := strings.ToLower(strings.TrimSpace(s))
+	if lower == "" {
+		return true
+	}
+	for _, marker := range []string{
+		"子任务", "任务", "提示词", "说明", "步骤",
+		"标题", "描述", "涉及文件", "关键改动", "产物",
+		"序号", "编号", "#",
+	} {
+		if strings.HasPrefix(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// stripAllBold removes every pair of ** asterisks from s, including
+// mid-string occurrences (so "**修复登录 bug** — 在 auth/login.go" →
+// "修复登录 bug — 在 auth/login.go"). The Markdown `*single*` form is left
+// alone — only the bold double-asterisk variant collides with our
+// title/prompt separator heuristics.
+func stripAllBold(s string) string {
+	for strings.Contains(s, "**") {
+		s = strings.ReplaceAll(s, "**", "")
+	}
+	return s
+}
+
+// normalizePayload drops empty / malformed entries (prompt required) and
+// auto-fills a missing title from the first 40 chars of the prompt. Returns
+// nil when no usable subtask survived — caller treats that as "no plan".
+func normalizePayload(p *orchestratorPayload) *orchestratorPayload {
+	if p == nil {
+		return nil
+	}
+	cleaned := p.Subtasks[:0]
+	for _, s := range p.Subtasks {
+		if strings.TrimSpace(s.Prompt) == "" {
+			continue
+		}
+		if s.Title == "" {
+			s.Title = truncateForLog(s.Prompt, 40)
+		}
+		cleaned = append(cleaned, s)
+	}
+	p.Subtasks = cleaned
+	if len(p.Subtasks) == 0 {
+		return nil
+	}
+	return p
+}
+
+// dispatchChildrenSequential is a small free function that runs dispatchOneChild
+// in a strict loop. Shared by StartCoding's auto-orchestrate path (the new
+// behavior; see tryAutoOrchestrate) — kept free-standing so each call site
+// stays one-liner clean. Errors per-child are logged and skipped; the returned
+// slice is whatever ids survived — empty means the entire batch failed.
+func dispatchChildrenSequential(
+	reqID, orchestratorSID string,
+	req *model.Requirement,
+	h *WizardHandler,
+	subtasks []orchestratedSubtask,
+	workDir, modelName string,
+) []string {
+	subTaskIDs := make([]string, 0, len(subtasks))
+	for _, t := range subtasks {
+		st, err := h.dispatchOneChild(reqID, orchestratorSID, t, req, workDir, modelName)
+		if err != nil {
+			log.Printf("[orchestrate] failed to dispatch child %q: %v", t.Title, err)
+			continue
+		}
+		subTaskIDs = append(subTaskIDs, st.ID)
+	}
+	return subTaskIDs
+}
+
+// summaryKickoff launches the orchestrator summary round in its own goroutine.
+// Used by both AutoOrchestrate and tryAutoOrchestrate so the trigger sites stay
+// symmetric.
+func summaryKickoff(
+	reqID, orchestratorSID string,
+	req *model.Requirement,
+	h *WizardHandler,
+	workDir, modelName string,
+	subTaskIDs []string,
+) {
+	go h.runOrchestratorSummary(reqID, orchestratorSID, req, workDir, modelName, subTaskIDs)
+}
+
+// tryAutoOrchestrate is the auto-dispatch path called by StartCoding right
+// after the main agent turn finishes. It resolves the main agent's
+// decomposition via resolveSubtasksPayload (Write-captured JSON → sentinel
+// text → markdown table → LLM extractor → single fallback child) and
+// dispatches each sub-task SEQUENTIALLY through the same dispatchOneChild
+// path the manual orchestrator uses, then schedules an orchestrator summary
+// round.
+//
+// This is the entry point for the new "一键编排 = 主 Agent 自动派发" UX:
+// StartCoding returns its job_id immediately, and the orchestrator-side
+// progress (parse → dispatch N children → write summary) runs as a separate
+// background goroutine. Frontend progress is fully observable via:
+//   - /api/requirements/{id}/sub-tasks          → live status of each child
+//   - /api/wizard/jobs/{child_job_id}/stream    → live tool calls of each
+//     child
+//   - requirements.coding_plan refresh          → final summary Markdown
+//   - /api/requirements/{id}                    → requirements.coding_plan
+//     surfaces the summary on the next GET.
+func (h *WizardHandler) tryAutoOrchestrate(
+	reqID string,
+	orchestratorSID string,
+	finalResult string,
+	capturedJSON string,
+	req *model.Requirement,
+	workDir, modelName string,
+) {
+	if h.subTaskSvc == nil {
+		return
+	}
+	if req == nil {
+		// Defensive: shouldn't happen (StartCoding fetched it before
+		// dispatching this goroutine), but skip cleanly if so.
+		log.Printf("[auto-orchestrate] %s: requirement row missing, skipping dispatch", reqID)
+		return
+	}
+	payload := h.resolveSubtasksPayload(reqID, finalResult, capturedJSON, req)
+	// The subtasks.json the main agent Wrote into the worktree has been
+	// consumed (or rejected) — remove it so it never pollutes the dev branch
+	// or gets mistaken for a fresh decomposition on the next turn.
+	if workDir != "" {
+		if rerr := os.Remove(subTasksFilePath(workDir)); rerr != nil && !os.IsNotExist(rerr) {
+			log.Printf("[orchestrate] %s: failed to remove %s: %v", reqID, subTasksFilePath(workDir), rerr)
+		}
+	}
+	if payload == nil {
+		return
+	}
+
+	// Children share orchestratorSID (the coding session forked in
+	// StartCoding) so they inherit the main agent's project / design /
+	// conversation context. Sequential dispatch keeps file edits safe in
+	// the shared worktree.
+	subTaskIDs := dispatchChildrenSequential(reqID, orchestratorSID, req, h, payload.Subtasks, workDir, modelName)
+	if len(subTaskIDs) == 0 {
+		log.Printf("[auto-orchestrate] %s: dispatch produced 0 children; ending", reqID)
+		return
+	}
+	log.Printf("[auto-orchestrate] %s: dispatched %d children, scheduling summary", reqID, len(subTaskIDs))
+	summaryKickoff(reqID, orchestratorSID, req, h, workDir, modelName, subTaskIDs)
+}
+
+// resolveSubtasksPayload turns the main agent's turn output into a concrete
+// sub-task list. The channels are tried in strict reliability order:
+//
+//  1. Write-captured subtasks.json (structured tool_use input — the primary
+//     channel; cannot be mangled by prose / code fences).
+//  2. ```json fence + [SUBTASKS_READY] sentinel in the reply text.
+//  3. Markdown breakdown table heuristic.
+//  4. A cheap single-shot LLM extractor over the raw reply (one retry with
+//     the parse error fed back).
+//  5. A single fallback child covering the whole requirement — the UX
+//     promise is "开始开发后一定有子 Agent 在工作", so the pipeline never
+//     stalls at zero children.
+//
+// Returns nil only when there is nothing to dispatch at all (empty reply
+// AND empty requirement prompt source). Shared by tryAutoOrchestrate and
+// ReOrchestrate so the manual re-split behaves identically.
+func (h *WizardHandler) resolveSubtasksPayload(
+	reqID, finalResult, capturedJSON string,
+	req *model.Requirement,
+) *orchestratorPayload {
+	// 1. Write-captured JSON (primary).
+	if p := decodeSubtasksPayload(capturedJSON); p != nil {
+		log.Printf("[orchestrate] %s: using Write-captured subtasks.json (%d subtasks)", reqID, len(p.Subtasks))
+		return p
+	}
+	if strings.TrimSpace(capturedJSON) != "" {
+		log.Printf("[orchestrate] %s: Write-captured subtasks.json failed to decode, falling through to text parsing", reqID)
+	}
+
+	if strings.TrimSpace(finalResult) != "" {
+		// 2. Sentinel + JSON text block.
+		if p, ok := extractSubtasksPayload(finalResult); ok {
+			log.Printf("[orchestrate] %s: using sentinel+JSON text block (%d subtasks)", reqID, len(p.Subtasks))
+			return p
+		}
+		// 3. Markdown table heuristic.
+		if p := extractSubtasksFromMarkdown(finalResult); p != nil {
+			log.Printf("[orchestrate] %s: no sentinel; using markdown plan (%d subtasks)", reqID, len(p.Subtasks))
+			return p
+		}
+		// 4. LLM extractor (single-shot, one retry with the parse error).
+		if p := h.extractSubtasksWithLLM(reqID, finalResult); p != nil {
+			log.Printf("[orchestrate] %s: using LLM-extracted subtasks (%d)", reqID, len(p.Subtasks))
+			return p
+		}
+	}
+
+	// 5. Single fallback child: the whole requirement as one task.
+	title := req.Title
+	prompt := "## 需求\n\n" + req.Title
+	if d := strings.TrimSpace(req.Description); d != "" {
+		prompt += "\n\n" + d
+	}
+	prompt += "\n\n> 说明：主 Agent 未能给出可用的任务拆分，请直接基于项目上下文完成整个需求。"
+	if title == "" {
+		title = "执行整个需求"
+	}
+	log.Printf("[auto-orchestrate] %s: all parse channels failed — dispatching whole requirement as one fallback child", reqID)
+	return &orchestratorPayload{Subtasks: []orchestratedSubtask{{Title: truncateForLog(title, 40), Prompt: prompt}}}
+}
+
+// extractSubtasksWithLLM is fallback channel 4: asks a cheap single-shot
+// claude call to convert the main agent's prose reply into the
+// {"subtasks":[…]} JSON, retrying once with the decode error fed back.
+// Returns nil when both attempts fail or the extraction yields no usable
+// entries.
+func (h *WizardHandler) extractSubtasksWithLLM(reqID, finalResult string) *orchestratorPayload {
+	feedback := ""
+	for attempt := 1; attempt <= 2; attempt++ {
+		raw, err := h.llm.ExtractSubtasksJSON(finalResult, feedback)
+		if err != nil {
+			log.Printf("[orchestrate] %s: extractor attempt %d failed: %v", reqID, attempt, err)
+			return nil
+		}
+		if p := decodeSubtasksPayload(extractJSON(raw)); p != nil {
+			return p
+		}
+		feedback = truncateForLog(raw, 200)
+		log.Printf("[orchestrate] %s: extractor attempt %d returned undecodable JSON, retrying", reqID, attempt)
+	}
+	return nil
+}
+
+// dispatchOneChild is the inner loop of AutoOrchestrate: persists a
+// sub_tasks row, spawns the claude process, blocks until it finishes, and
+// returns the final sub-task record. Errors are non-fatal — the caller
+// skips and continues with remaining children.
+func (h *WizardHandler) dispatchOneChild(
+	reqID, parentSID string,
+	t orchestratedSubtask,
+	req *model.Requirement,
+	workDir, modelName string,
+) (*model.SubTask, error) {
+	st, err := h.subTaskSvc.Create(reqID, t.Title, t.Prompt)
+	if err != nil {
+		return nil, fmt.Errorf("create sub_task: %w", err)
+	}
+	// Pre-mint child session id (forked from the orchestrator/main session).
+	childSID := util.NewUUID()
+	if perr := h.subTaskSvc.UpdateSession(st.ID, childSID, parentSID); perr != nil {
+		log.Printf("[orchestrate] failed to persist child session for %s: %v", st.ID, perr)
+	}
+	job := h.jobs.Create(reqID)
+	if perr := h.subTaskSvc.UpdateJobID(st.ID, job.ID); perr != nil {
+		log.Printf("[orchestrate] failed to persist child job_id for %s: %v", st.ID, perr)
+	}
+
+	// Start the child agent (same code path as StartSubTask — system prompt
+	// overrides role default to "executor" framing).
+	executorPrompt := "## 子任务\n\n" + t.Prompt + "\n\n" +
+		"> 本任务通过 --fork-session 继承了主 Agent 的项目上下文与代码库访问权限。\n" +
+		"> 如需补充信息，可正常读取项目文件或调用工具。\n"
+	childSystemPrompt := subTaskExecutorSystemPrompt()
+	cmd := h.llm.GenerateCode(llm.StreamOpts{
+		Prompt:        executorPrompt,
+		WorkDir:       workDir,
+		SystemPrompt:  childSystemPrompt,
+		Model:         cliModelArg(modelName),
+		SessionID:     parentSID,
+		Resume:        true,
+		Fork:          true,
+		ForkSessionID: childSID,
+	})
+	startTime, err := h.subTaskSvc.MarkRunning(st.ID)
+	if err != nil {
+		log.Printf("[orchestrate] failed to mark running for %s: %v", st.ID, err)
+	}
+
+	job.Append(store.LogLine{Type: "phase", Content: "🤖 [编排] 子任务启动: " + t.Title})
+	job.Append(store.LogLine{Type: "message", Content: "📝 提示词: " + truncateForLog(t.Prompt, 240)})
+	job.SetModel(modelName)
+
+	childUsage := h.usageCtxFor("sub_task", reqID, req.ProjectID, job.ID, modelName, "", t.Prompt)
+	out := runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage)
+
+	status := model.SubTaskStatusDone
+	artifactBody := out.finalResult
+	if out.staleSession {
+		status = model.SubTaskStatusError
+		artifactBody = "❌ 源会话已失效（session 文件不存在），请重新发起 coding 后再试。"
+	} else if out.errMsg != "" {
+		status = model.SubTaskStatusError
+		artifactBody = "❌ " + out.errMsg
+	} else if out.finalResult == "" {
+		status = model.SubTaskStatusError
+		artifactBody = "❌ Claude 未返回结果，请重试"
+	}
+	if status != model.SubTaskStatusError {
+		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	} else {
+		job.Append(store.LogLine{Type: "error", Content: artifactBody})
+	}
+	job.Append(store.LogLine{Type: "done", Content: "✅ 子任务完成！"})
+
+	artifact := buildSubTaskArtifact(st, modelName, artifactBody, time.Now())
+	tokens := model.SubTaskTokens{
+		Input:         out.lastUsage.InputTokens,
+		Output:        out.lastUsage.OutputTokens,
+		CacheCreation: out.lastUsage.CacheCreationTokens,
+		CacheRead:     out.lastUsage.CacheReadTokens,
+	}
+	if perr := h.subTaskSvc.Finish(st.ID, status, artifact, modelName, tokens, 0, startTime); perr != nil {
+		log.Printf("[orchestrate] failed to persist finish for %s: %v", st.ID, perr)
+	}
+	// Persist job log too (mirrors StartSubTask's defer — survives restart).
+	lines, jstatus, exitCode := job.Snapshot()
+	if perr := h.jobLogSvc.Save(job.ID, reqID, string(jstatus), exitCode, job.StartedAt, job.FinishedAt, lines, modelName); perr != nil {
+		log.Printf("[orchestrate] failed to persist job log %s: %v", job.ID, perr)
+	}
+	job.Finish(0, store.JobDone)
+	log.Printf("[orchestrate] child %s finished status=%s", st.ID, status)
+
+	// Return a fresh read of the row (Finish updated artifact / status).
+	return h.subTaskSvc.Get(st.ID)
+}
+
+// runOrchestratorSummary forks the orchestrator (or main) session and asks
+// the agent to summarize all completed children. The summary is the final
+// user-facing report the SubTaskPanel surfaces under the children's cards.
+//
+// Invoked from AutoOrchestrate as a goroutine so the HTTP response can
+// return child ids immediately. Errors are logged, never returned — a failed
+// summary just leaves coding_plan empty (the user can manually inspect
+// each child's artifact).
+func (h *WizardHandler) runOrchestratorSummary(
+	reqID, orchestratorSID string,
+	req *model.Requirement,
+	workDir, modelName string,
+	subTaskIDs []string,
+) {
+	// Collect each child's artifact + status. Sort by created_at so the
+	// summary reads in execution order.
+	children := make([]model.SubTask, 0, len(subTaskIDs))
+	for _, sid := range subTaskIDs {
+		st, err := h.subTaskSvc.Get(sid)
+		if err != nil {
+			continue
+		}
+		children = append(children, *st)
+	}
+	if len(children) == 0 {
+		return
+	}
+
+	// Build the summary prompt: stitch each child's artifact in execution
+	// order. Cap each child at 4KB so a chatty child doesn't blow up the
+	// main agent's context.
+	var summaryB strings.Builder
+	summaryB.WriteString("所有编排子任务已完成。请基于以下子任务产物，输出一份 Markdown 汇总报告，")
+	summaryB.WriteString("用于让用户一眼看到：\n1. 整体进展概述\n2. 各子任务的关键成果\n3. 修改的文件清单（按子任务组织）\n4. 整体遗留风险\n\n")
+	summaryB.WriteString("## 子任务产物\n\n")
+	for i, st := range children {
+		fmt.Fprintf(&summaryB, "### %d. %s (%s)\n", i+1, st.Title, st.Status)
+		body := st.Artifact
+		if len(body) > 4096 {
+			body = body[:4096] + "\n…（已截断）"
+		}
+		summaryB.WriteString(body)
+		summaryB.WriteString("\n\n")
+	}
+	summaryB.WriteString("---\n请直接输出汇总报告 Markdown。")
+
+	// Resume the orchestrator session — it's the main-agent thread that
+	// already saw the decompose prompt, so re-resuming lets it carry
+	// forward the requirements/design context plus its own decompose
+	// reasoning. ForkSession=false: we want a continuation, not a new
+	// session (the summary is a follow-up message in the same thread).
+	job := h.jobs.Create(reqID)
+	job.Append(store.LogLine{Type: "phase", Content: "📊 主 Agent 正在汇总子任务产物..."})
+	job.SetModel(modelName)
+
+	cmd := h.llm.GenerateCode(llm.StreamOpts{
+		Prompt:       summaryB.String(),
+		WorkDir:      workDir,
+		SystemPrompt: "", // resumed session already has developer persona
+		Model:        cliModelArg(modelName),
+		SessionID:    orchestratorSID,
+		Resume:       true,
+		Fork:         false,
+	})
+
+	summaryUsage := h.usageCtxFor("orchestrate_summary", reqID, req.ProjectID, job.ID, modelName, "", "auto-summary")
+	out := runClaudeStream(jobSink{job}, cmd, "orchestrate-summary", summaryUsage)
+
+	if out.errMsg != "" || out.finalResult == "" {
+		log.Printf("[orchestrate] summary turn failed: %s / empty=%v", out.errMsg, out.finalResult == "")
+		job.Finish(1, store.JobError)
+		return
+	}
+
+	// Persist the Markdown summary on the requirement. The SubTaskPanel
+	// reads it on the next GET and renders it above the children.
+	if perr := h.reqSvc.UpdateCodingPlan(reqID, out.finalResult); perr != nil {
+		log.Printf("[orchestrate] failed to persist coding_plan for %s: %v", reqID, perr)
+	}
+	job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	job.Append(store.LogLine{Type: "done", Content: "✅ 汇总完成！"})
+	job.Finish(0, store.JobDone)
+	log.Printf("[orchestrate] summary saved to requirements.coding_plan for %s", reqID)
+}
+
+// subTaskExecutorSystemPrompt is the executor persona override passed to
+// forked sub-task children. Distinct from the developer role default (now
+// "统筹协调") so a child writes code instead of yet another decomposition.
+func subTaskExecutorSystemPrompt() string {
+	return "你是一位资深软件工程师，正在执行一个由主 Agent 派发的子任务。\n" +
+		"工作方式：\n" +
+		"- 主 Agent 已与用户完成需求分析和技术方案设计，你的工作是基于当前项目上下文完成指定的子任务。\n" +
+		"- 主动读取项目相关文件，理解现有代码结构后，再开始编写代码。\n" +
+		"- 遵循现有代码风格，编写清晰的代码。\n" +
+		"- 如有测试文件则同步更新。\n" +
+		"- 用中文沟通。\n\n" +
+		"工作完成后，必须用 Markdown 输出一份完整的工作报告（作为子任务的产物），包含以下章节：\n" +
+		"1. 任务摘要：简要说明你完成了什么\n" +
+		"2. 修改文件：列出所有修改/创建的文件路径\n" +
+		"3. 关键决策：列出重要的实现选择及理由\n" +
+		"4. 遗留问题：如有任何未完成或需要后续处理的事项，请明确列出\n"
+}
+
+// silentSink is a streamSink that discards log output. AutoOrchestrate runs
+// the orchestrator's main-agent turn inline (synchronously) so the
+// streaming output is invisible to the user — only the terminal
+// finalResult matters. We still go through runClaudeStream so we get the
+// same token-usage recording as developer-chat.
+type silentSink struct{}
+
+func (silentSink) emit(line store.LogLine) {}
