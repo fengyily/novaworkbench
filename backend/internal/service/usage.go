@@ -71,6 +71,8 @@ var StepLabels = map[string]string{
 	"adjust_coding":       "追加调整",
 	"continue_coding":     "继续开发",
 	"developer_chat":      "开发讨论",
+	"sub_task":            "子任务",
+	"sub_task_adjust":     "子任务调整",
 	"merge":               "合入解决",
 	"review":              "代码审查",
 }
@@ -457,6 +459,95 @@ func liftSummary(meta string) string {
 		return ""
 	}
 	return strings.TrimSpace(s)
+}
+
+// JobUsageSummary is the rolled-up token usage for one JobStore job. The
+// sub-task panel renders this on each sub-task card so the user can see how
+// much each child agent spent. A sub-task typically produces a single row
+// (one claude invocation), but the shape is generic — summing keeps it
+// correct for any future stage that emits multiple rows per job.
+type JobUsageSummary struct {
+	JobID               string  `json:"job_id"`
+	InputTokens         int     `json:"input_tokens"`
+	OutputTokens        int     `json:"output_tokens"`
+	CacheCreationTokens int     `json:"cache_creation_tokens"`
+	CacheReadTokens     int     `json:"cache_read_tokens"`
+	TotalTokens         int     `json:"total_tokens"`
+	Step                string  `json:"step"`
+	Model               string  `json:"model"`
+	InvocationCount     int     `json:"invocation_count"`
+	// CostUSD is recomputed from the active claude_configs unit prices so
+	// edits to the price list apply retroactively. Empty when the job's
+	// tokens are zero or the model's price is unknown. Rounded to 6 dp to
+	// keep the JSON tidy without losing precision.
+	CostUSD float64 `json:"cost_usd"`
+}
+
+// ByJobID returns the rolled-up token usage + cost for one JobStore job.
+// The sub-task panel uses this to render the 🪙 token strip on each card;
+// the job_id comes from sub_tasks.job_id (the in-memory JobStore job that
+// drove the child agent's SSE stream). Returns the zero-value summary (no
+// rows) when the job has no recorded token_usage yet — that's the case
+// during a still-running sub-task or for a job that died before any
+// result event landed. Caller renders "🪙 —" instead of fabricating a
+// number from nothing.
+func (s *UsageService) ByJobID(jobID string) (JobUsageSummary, error) {
+	if jobID == "" {
+		return JobUsageSummary{}, nil
+	}
+	tables := s.priceTablesBestEffort()
+	rows, err := s.db.Query(
+		"SELECT step, model, claude_config_id, currency, "+
+			"SUM(input_tokens), SUM(output_tokens), SUM(cache_creation_tokens), SUM(cache_read_tokens), COUNT(*) "+
+			"FROM token_usage WHERE job_id=? "+
+			"GROUP BY step, model, claude_config_id, currency "+
+			"ORDER BY MIN(created_at)",
+		jobID)
+	if err != nil {
+		return JobUsageSummary{}, err
+	}
+	defer rows.Close()
+
+	out := JobUsageSummary{JobID: jobID}
+	var totalCostUSD float64
+	for rows.Next() {
+		var step, modelName, cid, currency string
+		var in, outTok, cc, cr, count int
+		if err := rows.Scan(&step, &modelName, &cid, &currency, &in, &outTok, &cc, &cr, &count); err != nil {
+			return JobUsageSummary{}, err
+		}
+		out.InputTokens += in
+		out.OutputTokens += outTok
+		out.CacheCreationTokens += cc
+		out.CacheReadTokens += cr
+		out.InvocationCount += count
+		// First non-empty step/model wins — by-job aggregation typically has
+		// one model per job (a sub-task is one claude invocation), so we
+		// don't try to be clever about mixed-model jobs here.
+		if out.Step == "" && step != "" {
+			out.Step = step
+		}
+		if out.Model == "" && modelName != "" {
+			out.Model = modelName
+		}
+		// Cost: recompute from the active price table. accumulateCost
+		// handles the unknown-price / mixed-currency cases by ignoring
+		// rows it can't price (the rollup keeps the token count, drops
+		// only the cost increment). We sum only USD into totalCostUSD so
+		// the JSON stays simple; a multi-currency job would surface that
+		// through per-row StepUsage later.
+		costByCur := map[string]float64{}
+		accumulateCost(costByCur, currency, cid, modelName, in, outTok, cc, cr, tables)
+		if v, ok := costByCur["USD"]; ok {
+			totalCostUSD += v
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return JobUsageSummary{}, err
+	}
+	out.TotalTokens = out.InputTokens + out.OutputTokens + out.CacheCreationTokens + out.CacheReadTokens
+	out.CostUSD = totalCostUSD
+	return out, nil
 }
 
 // RowsByStep returns every token_usage row for one (requirement, step) pair
