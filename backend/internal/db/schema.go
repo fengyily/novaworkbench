@@ -297,6 +297,28 @@ CREATE TABLE IF NOT EXISTS skills (
 	created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Agent servers: remote Linux/macOS execution targets. The credential
+-- (auth_value) is stored as an AES-256-GCM ciphertext (base64, nonce embedded)
+-- by internal/secret and never returned in API responses. status is updated
+-- by the Check goroutine and check_result holds the last human-readable summary.
+-- Schema added 2026-09 by Agent-Server feature.
+CREATE TABLE IF NOT EXISTS agent_servers (
+	id              TEXT PRIMARY KEY,
+	name            TEXT NOT NULL,
+	host            TEXT NOT NULL,
+	port            INTEGER NOT NULL DEFAULT 22,
+	username        TEXT NOT NULL DEFAULT 'root',
+	auth_type       TEXT NOT NULL DEFAULT 'key',
+	auth_value      TEXT NOT NULL DEFAULT '',
+	auth_value_algo TEXT NOT NULL DEFAULT 'aes-gcm',
+	status          TEXT NOT NULL DEFAULT 'unknown',
+	last_check_at   DATETIME,
+	check_result    TEXT NOT NULL DEFAULT '',
+	created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_agent_servers_status ON agent_servers(status);
 `
 
 // alterColumns adds columns to older databases. ALTER TABLE fails when the
@@ -393,6 +415,15 @@ var alterColumns = []string{
 	// telemetry out of the compression-summary columns above. Empty = no
 	// snapshot yet.
 	`ALTER TABLE requirements ADD COLUMN usage_snapshots TEXT NOT NULL DEFAULT ''`,
+	// Agent server table: covered in canonicalSchema; nothing further to alter.
+	// Project ↔ Claude session slug: claude CLI stores per-session JSONL under
+	// $NOVA_CLAUDE_HOME/projects/<slug>/, where <slug> is an encoding of the
+	// working directory path. The remote-coding path (handler/wizard.go
+	// runRemoteCoding) needs the same slug on the remote server so SFTP
+	// session sync lands in the right directory and `--resume <session_id>`
+	// finds the jsonl. Cached here on first local execution by scanning the
+	// local projects dir; empty = not yet discovered.
+	`ALTER TABLE projects ADD COLUMN claude_project_slug TEXT NOT NULL DEFAULT ''`,
 }
 
 var (

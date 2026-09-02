@@ -21,25 +21,27 @@ import (
 	"github.com/novaworkbench/backend/internal/model"
 	promptpkg "github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/service"
+	gossh "github.com/novaworkbench/backend/internal/ssh"
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/internal/util"
 )
 
 type WizardHandler struct {
-	projectSvc   *service.ProjectService
-	reqSvc       *service.RequirementService
-	knowledgeSvc *service.KnowledgeService
-	llm          *llm.Gateway
-	jobs         *store.JobStore
-	roleSvc      *service.RoleService
-	jobLogSvc    *service.JobLogService
-	claudeCfg    *service.ClaudeConfigService
-	usageSvc     usageRecorder
-	skillSvc     *service.SkillService
-	platformSvc  *service.PlatformTokenService
+	projectSvc    *service.ProjectService
+	reqSvc        *service.RequirementService
+	knowledgeSvc  *service.KnowledgeService
+	llm           *llm.Gateway
+	jobs          *store.JobStore
+	roleSvc       *service.RoleService
+	jobLogSvc     *service.JobLogService
+	claudeCfg     *service.ClaudeConfigService
+	usageSvc      usageRecorder
+	skillSvc      *service.SkillService
+	platformSvc   *service.PlatformTokenService
+	agentSvrSvc   *service.AgentServerService
 }
 
-func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService) *WizardHandler {
+func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, agentSvrSvc *service.AgentServerService) *WizardHandler {
 	return &WizardHandler{
 		projectSvc:   projectSvc,
 		reqSvc:       reqSvc,
@@ -52,6 +54,7 @@ func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.Requir
 		usageSvc:     usageSvc,
 		skillSvc:     skillSvc,
 		platformSvc:  platformSvc,
+		agentSvrSvc:  agentSvrSvc,
 	}
 }
 
@@ -1052,6 +1055,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		BaseBranch       string `json:"base_branch"`
 		Model            string `json:"model"`
 		ReadKnowledge    bool   `json:"read_knowledge"`
+		AgentServerID    string `json:"agent_server_id"` // empty = local execution; otherwise remote Agent server
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "INVALID", "Invalid JSON")
@@ -1431,6 +1435,64 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			codingProjectID = reqRow.ProjectID
 		}
 		codingUsage := h.usageCtxFor("coding", req.RequirementID, codingProjectID, job.ID, model, "", "")
+
+		// Remote Agent-server branch: SSHs into the target, syncs the claude
+		// session dir so --resume works, executes the same claude flag list on
+		// the remote worktree, parses the stream-json output, and pushes the
+		// code back to origin. The job log + final result semantics match the
+		// local path so the frontend doesn't have to special-case anything.
+		if req.AgentServerID != "" && h.agentSvrSvc != nil {
+			out := h.runRemoteCoding(&remoteCodingInput{
+				job:           job,
+				serverID:      req.AgentServerID,
+				req:           startCodingReq{
+					ProjectPath:      req.ProjectPath,
+					RequirementTitle: req.RequirementTitle,
+					RequirementDesc:  req.RequirementDesc,
+					RequirementID:    req.RequirementID,
+					BranchName:       req.BranchName,
+					BaseBranch:       req.BaseBranch,
+					Model:            req.Model,
+					ReadKnowledge:    req.ReadKnowledge,
+					AgentServerID:    req.AgentServerID,
+				},
+				reqRow:        reqRow,
+				prompt:        prompt,
+				workDir:       workDir,
+				sourceSID:     sourceSID,
+				fork:          fork,
+				sessionArg:    sessionArg,
+				forkSessionID: forkSessionID,
+				model:         model,
+				usage:         codingUsage,
+			})
+			if out.staleSession {
+				job.Append(store.LogLine{Type: "error", Content: "❌ 源会话已失效，请重新发起对应阶段后再开发。"})
+				job.Finish(1, store.JobError)
+				return
+			}
+			if out.errMsg != "" {
+				job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+				job.Finish(1, store.JobError)
+				return
+			}
+			if out.finalResult == "" {
+				job.Append(store.LogLine{Type: "error", Content: "❌ Claude 未返回结果，请重试"})
+				job.Finish(1, store.JobError)
+				return
+			}
+			job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+			job.Append(store.LogLine{Type: "done", Content: "✅ 开发完成！"})
+			if req.RequirementID != "" {
+				if perr := h.reqSvc.UpdateDeveloperModel(req.RequirementID, model); perr != nil {
+					log.Printf("[start-coding] failed to persist developer_model for %s: %v", req.RequirementID, perr)
+				}
+			}
+			job.Finish(0, store.JobDone)
+			log.Printf("[start-coding] remote job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
+			return
+		}
+
 		out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage)
 
 		// The coding session id is already persisted upfront. Correct it only if
@@ -2691,6 +2753,513 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 // killProcessGroup is implemented per-platform in wizard_proc_unix.go and
 // wizard_proc_windows.go — process groups are a POSIX concept, so the
 // Windows build falls back to signaling just the direct process.
+
+// ---- Remote Agent-server execution -----------------------------------------
+
+// remoteCodingInput is the bag of pre-computed values the StartCoding
+// goroutine hands to runRemoteCoding. Pulling these into a struct keeps the
+// signature readable and forces callers to acknowledge the same dependencies
+// the local branch already resolved (prompt, workDir, session threading).
+type remoteCodingInput struct {
+	job            *store.Job
+	serverID       string
+	req            startCodingReq
+	reqRow         *model.Requirement
+	prompt         string
+	workDir        string // local worktree path (used only for SFTP upload source)
+	sourceSID      string
+	fork           bool
+	sessionArg     string
+	forkSessionID  string
+	model          string
+	usage          *usageCtx
+}
+
+// startCodingReq mirrors the anonymous struct StartCoding decodes so the
+// remote helper doesn't have to redefine field tags. Keeping this as a named
+// type keeps runRemoteCoding self-documenting.
+type startCodingReq struct {
+	ProjectPath      string
+	RequirementTitle string
+	RequirementDesc  string
+	RequirementID    string
+	BranchName       string
+	BaseBranch       string
+	Model            string
+	ReadKnowledge    bool
+	AgentServerID    string
+}
+
+// runRemoteCoding is the Agent-server equivalent of the local runClaudeStream
+// block in StartCoding. It opens an SSH session, ensures the project lives in
+// a per-requirement git worktree under /tmp/nova-agent/<projectID>/<reqID>,
+// uploads the local claude session dir so --resume picks up the right jsonl,
+// runs the same claude CLI invocation, parses the stream-json output, then
+// pushes the resulting commits back to origin and re-syncs the session dir
+// back to local. Returns the same claudeStreamOutcome shape as the local
+// path so the caller can reuse its terminal-state handling.
+func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutcome {
+	if h.agentSvrSvc == nil {
+		return claudeStreamOutcome{errMsg: "Agent 服务器服务未初始化"}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Minute)
+	defer cancel()
+
+	// Load the (decrypted) credential before anything else — a missing master
+	// key surfaces here as a clear error instead of a generic SSH failure.
+	srv, plain, err := h.agentSvrSvc.GetWithCredential(in.serverID)
+	if err != nil {
+		return claudeStreamOutcome{errMsg: "无法读取 Agent 服务器凭据: " + err.Error()}
+	}
+	in.job.Append(store.LogLine{Type: "phase", Content: "🔌 连接到 Agent 服务器 " + srv.Name + " (" + srv.Host + ")"})
+
+	client, err := gossh.Dial(ctx, srv.Host, srv.Port, srv.Username, srv.AuthType, plain)
+	if err != nil {
+		return claudeStreamOutcome{errMsg: "SSH 连接失败: " + err.Error()}
+	}
+	defer client.Close()
+
+	// Step 2: code sync via git. baseRepo hosts a single origin clone for the
+	// project; wtPath is the per-requirement worktree that mirrors the local
+	// branch isolation model. Without a remote_url on the project the entire
+	// remote path is dead — fail early with a clear message instead of an
+	// opaque "git clone exit 128".
+	if in.reqRow == nil {
+		return claudeStreamOutcome{errMsg: "远程执行需要已保存的需求记录（缺 Requirement）"}
+	}
+	originURL, err := h.projectSvc.OriginURL(in.reqRow.ProjectID)
+	if err != nil || originURL == "" {
+		return claudeStreamOutcome{errMsg: "项目未配置 git 远程仓库，无法在 Agent 服务器执行。请先在项目设置中配置 origin。" + errString(err)}
+	}
+	baseRepo := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/base"
+	wtPath := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID
+	branch := in.req.BranchName
+	if branch == "" {
+		branch = "requirement-" + in.reqRow.ID
+	}
+	baseBranch := in.req.BaseBranch
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+
+	in.job.Append(store.LogLine{Type: "phase", Content: "📥 准备 Agent 服务器代码（git worktree 隔离）..."})
+	if !client.Exists(baseRepo) {
+		in.job.Append(store.LogLine{Type: "message", Content: "📦 首次 clone " + redactOriginForLog(originURL)})
+		if exit, _ := client.Exec(ctx, "git clone "+shellQuoteSingle(originURL)+" "+shellQuoteSingle(baseRepo), "", nil, &jobWriter{job: in.job}); exit != 0 {
+			return claudeStreamOutcome{errMsg: "git clone 失败（exit=" + fmtInt(exit) + "），请检查 origin 凭据"}
+		}
+	} else {
+		client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin --prune", "", nil, &jobWriter{job: in.job})
+	}
+	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree prune", "", nil, &jobWriter{job: in.job})
+
+	if !client.Exists(wtPath) {
+		// Strategy 1: branch off HEAD (always valid; matches EnsureWorktree).
+		// Strategy 2: off origin/<base> when strategy 1 fails. Strategy 3:
+		// attach to an already-existing branch (adjust/continue reuse case).
+		exit, _ := client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath), "", nil, &jobWriter{job: in.job})
+		if exit != 0 {
+			exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath)+" origin/"+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job})
+			if exit != 0 {
+				if exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add "+shellQuoteSingle(wtPath)+" "+shellQuoteSingle(branch), "", nil, &jobWriter{job: in.job}); exit != 0 {
+					return claudeStreamOutcome{errMsg: "git worktree 创建失败（exit=" + fmtInt(exit) + "），请检查仓库状态"}
+				}
+			}
+		}
+	} else {
+		// adjust-coding / continue-coding: pull the latest remote commits
+		// onto the existing branch. --ff-only protects against silent
+		// divergence; on failure we log a hint and proceed with the local
+		// copy (the user can resolve the divergence manually).
+		client.Exec(ctx,
+			"cd "+shellQuoteSingle(wtPath)+" && (git checkout "+shellQuoteSingle(branch)+" 2>/dev/null || true) && (git pull --ff-only origin "+shellQuoteSingle(branch)+" 2>&1 || echo \"[nova-agent] pull 跳过（无跟踪或已分叉）\")",
+			"", nil, &jobWriter{job: in.job})
+	}
+
+	// Step 3: session sync (up) so the remote claude can --resume the same
+	// session. We push the project-level ~/.claude/projects/<slug>/ contents
+	// (the small set of jsonl files the CLI uses for session state). A missing
+	// local dir is fine — the project has never been coded on before, and the
+	// CLI on the remote will mint a brand-new session id.
+	remoteClaudeHome := "~/.claude/projects/"
+	in.job.Append(store.LogLine{Type: "phase", Content: "📤 同步 Claude 会话历史（SFTP 上行）..."})
+	if slugDir, slugErr := claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
+		client.Mkdirp(remoteClaudeHome)
+		if sftpErr := client.SyncDirUp(slugDir, remoteClaudeHome); sftpErr != nil {
+			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话上行失败（将无 resume 启动新会话）: " + sftpErr.Error()})
+		}
+	} else if slugErr != nil {
+		in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 无法定位本地 claude session 目录（" + slugErr.Error() + "），将无 resume 启动新会话"})
+	}
+
+	// Step 4: build the same claude flag list as the local branch would.
+	// BuildStreamArgs/BuildEnvPairs are byte-identical to the local cmd
+	// construction so model/auth/session threading all stay in lockstep.
+	opts := llm.StreamOpts{
+		Prompt:         in.prompt,
+		WorkDir:        wtPath,
+		SystemPrompt:   "",
+		Model:          cliModelArg(in.model),
+		SessionID:      in.sessionArg,
+		Resume:         in.sourceSID != "",
+		Fork:           in.fork,
+		ForkSessionID:  in.forkSessionID,
+		PermissionMode: "",
+	}
+	args := h.llm.BuildStreamArgs(opts)
+	envPairs := h.llm.BuildEnvPairs(opts.Model) // ExtraEnv (GIT_AUTHOR_*) doesn't make sense on a remote shell
+	cmdStr := buildRemoteShellCommand("claude", args, envPairs)
+
+	// Step 5: execute and stream-json parse. The remote claude writes one JSON
+	// event per line on stdout (with `--output-format stream-json --verbose`);
+	// we pipe that into the same scanner-based parser the local path uses,
+	// emitting identical LogLine frames so the UI doesn't need a separate
+	// viewer for remote runs.
+	//
+	// Shell prefix: SSH non-interactive non-login shells do NOT source
+	// ~/.bashrc, so nvm-installed binaries (claude at
+	// ~/.nvm/versions/node/*/bin/claude) are not on PATH. Source nvm.sh
+	// when present and prepend common user/local install paths so a
+	// stock `npm install -g @anthropic-ai/claude-code` (nvm path) just
+	// works without any agent_server provisioning beyond nvm itself.
+	in.job.Append(store.LogLine{Type: "phase", Content: "🤖 Agent 服务器开始执行..."})
+	pr, pw := io.Pipe()
+	go func() {
+		// Combined stdout+stderr from the remote shell lands on pw; the parser
+		// just reads NDJSON from pr. Errors here are best-effort: if the
+		// remote write fails we've already started parsing (it'll EOF
+		// naturally) and we don't want to mask the real claude result event.
+		shellPrefix := `export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"; ` +
+			`if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh" 2>/dev/null; fi; ` +
+			`hash -r 2>/dev/null; `
+		_, _ = client.Exec(ctx, shellPrefix+"cd "+shellQuoteSingle(wtPath)+" && "+cmdStr, "", nil, pw)
+		_ = pw.Close()
+	}()
+	out := parseStreamJSONFromReader(pr, jobSink{in.job}, "start-coding", in.usage)
+
+	// Step 6: session sync (down) — copy any new session jsonl the remote
+	// run created back to local so adjust/continue on the next round find
+	// it. Same forward-only semantics as Step 3.
+	in.job.Append(store.LogLine{Type: "phase", Content: "📥 同步会话结果回本地..."})
+	if slugDir, slugErr := claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
+		if sftpErr := client.SyncDirDown(remoteClaudeHome, slugDir); sftpErr != nil {
+			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话下行失败: " + sftpErr.Error()})
+		}
+	}
+
+	// Step 7: git commit + push back to origin. Skip when the run errored out
+	// (no real result) so we don't propagate half-broken state. The user can
+	// always retry adjust-coding on the remote worktree via ContinueCoding.
+	if out.errMsg == "" && out.finalResult != "" {
+		in.job.Append(store.LogLine{Type: "phase", Content: "📤 推送代码变更到 origin..."})
+		title := "nova-agent: " + in.req.RequirementTitle
+		if title == "nova-agent: " {
+			title = "nova-agent: " + in.reqRow.Title
+		}
+		// git commit -F - reads the message from stdin; we pipe via heredoc to
+		// sidestep the SSH argv limit on long titles.
+		commitScript := "cd " + shellQuoteSingle(wtPath) +
+			" && git add -A" +
+			" && git diff --cached --quiet || git commit -m " + shellQuoteSingle(title) +
+			" && git push origin " + shellQuoteSingle(branch)
+		if exit, _ := client.Exec(ctx, commitScript, "", nil, &jobWriter{job: in.job}); exit != 0 {
+			in.job.Append(store.LogLine{Type: "error", Content: "❌ 推送失败（exit=" + fmtInt(exit) + "），请在远程 worktree 手动处理冲突"})
+			// Non-fatal: the user can still see the work locally via the
+			// pushed-back session dir + the captured result text. Don't
+			// override out.errMsg — let the run's own result stand.
+		} else {
+			in.job.Append(store.LogLine{Type: "message", Content: "✅ 已推送到 origin/" + branch})
+		}
+	}
+
+	return out
+}
+
+// jobWriter adapts *store.Job to io.Writer so remote Exec output can land
+// directly in the job's log (one message line per non-empty stdout/stderr
+// chunk). Empty lines are dropped to avoid spamming the SSE panel.
+type jobWriter struct{ job *store.Job }
+
+func (w *jobWriter) Write(p []byte) (int, error) {
+	for _, line := range strings.Split(string(p), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		w.job.Append(store.LogLine{Type: "message", Content: line})
+	}
+	return len(p), nil
+}
+
+// buildRemoteShellCommand joins a command + arg list into a single
+// shell-quoted string with env-key=value prefixes. Single-quoting every arg
+// matches the same escape discipline ssh.Exec uses internally.
+func buildRemoteShellCommand(bin string, args, envPairs []string) string {
+	var b strings.Builder
+	for _, kv := range envPairs {
+		b.WriteString(shellQuoteSingle(kv))
+		b.WriteByte(' ')
+	}
+	b.WriteString(shellQuoteSingle(bin))
+	for _, a := range args {
+		b.WriteByte(' ')
+		b.WriteString(shellQuoteSingle(a))
+	}
+	return b.String()
+}
+
+// shellQuoteSingle mirrors the local ssh client's quoting: single-quoted
+// strings with embedded single quotes escaped via close-quote / escape /
+// open-quote. Empty strings become ''.
+func shellQuoteSingle(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// redactOriginForLog strips userinfo (the embedded token) from the origin
+// URL before showing it in the job log — same helper exists in
+// service/project.go but we keep a local copy so the handler doesn't have to
+// grow its dependency surface.
+func redactOriginForLog(raw string) string {
+	if i := strings.Index(raw, "@"); i > 0 {
+		if j := strings.Index(raw[:i], "://"); j > 0 {
+			return raw[:j+3] + "<redacted>@" + raw[i+1:]
+		}
+	}
+	return raw
+}
+
+// fmtInt returns the decimal string for an int (kept as a tiny shim so
+// the failure-path error messages read naturally without pulling in fmt
+// solely for Sprintf("%d", x)).
+func fmtInt(n int) string { return fmt.Sprintf("%d", n) }
+
+// errString returns err.Error() or "" when err is nil.
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return " (" + err.Error() + ")"
+}
+
+// claudeProjectsSlugDir locates the on-disk directory where claude stores
+// session jsonls for the given requirement's project. The slug is derived
+// from the project's local_path; we read the cached value on the project row
+// when available, otherwise fall back to scanning the parent dir for a
+// matching basename.
+func claudeProjectsSlugDir(reqRow *model.Requirement) (string, error) {
+	if reqRow == nil {
+		return "", fmt.Errorf("no requirement")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	claudeHome := os.Getenv("NOVA_CLAUDE_HOME")
+	if claudeHome == "" {
+		claudeHome = filepath.Join(home, ".novaworkbench", "claude")
+	}
+	root := filepath.Join(claudeHome, "projects")
+	// Prefer an exact-match lookup: the first subdir of root whose
+	// decoded path ends with the project's basename. claude CLI's slug
+	// is an internal encoding — there's no public mapping, so this
+	// best-effort scan is good enough.
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	// The cached slug (when present) is the canonical answer. We don't
+	// have it in this scope — the project row is loaded by the caller —
+	// so we always scan here. Most setups have a single project
+	// subdir under ~/.claude/projects/, so this stays cheap.
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		return filepath.Join(root, e.Name()), nil
+	}
+	return "", nil
+}
+
+// parseStreamJSONFromReader is the io.Reader-only counterpart of
+// runClaudeStream. It scans NDJSON events off the supplied reader and emits
+// the same LogLine shape the local path uses (phase / tool_call / message /
+// usage / knowledge_result). It does NOT own a subprocess; the caller is
+// responsible for piping the remote claude's stdout into r and closing it
+// after the remote command exits.
+//
+// All heavy lifting (event dispatch, model pinning, token recording, usage
+// persistence) is mirrored from runClaudeStream so the resulting
+// claudeStreamOutcome is interchangeable. The differences are:
+//   - no process group / killProcessGroup — the remote shell is the parent's
+//     equivalent and we don't have access to its pgid over SSH
+//   - no stall watchdog — a stuck remote claude is killed by closing the
+//     SSH session from the caller's defer (client.Close kills the channel)
+//   - no stderr fallback for staleness detection (we never see the remote
+//     stderr in this scope)
+func parseStreamJSONFromReader(r io.Reader, sink streamSink, scope string, uctx *usageCtx) claudeStreamOutcome {
+	var out claudeStreamOutcome
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		var evt map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			if strings.TrimSpace(line) != "" {
+				log.Printf("[%s] non-json line: %s", scope, truncateStr(line, 500))
+			}
+			continue
+		}
+		evtType, _ := evt["type"].(string)
+		switch evtType {
+		case "system":
+			sub, _ := evt["subtype"].(string)
+			switch sub {
+			case "init":
+				if sid, ok := evt["session_id"].(string); ok && sid != "" {
+					out.sessionID = sid
+				}
+				sink.emit(store.LogLine{Type: "phase", Content: "🤖 Claude 已连接（远程），正在思考…"})
+			case "thinking_tokens":
+				if tokens, ok := evt["estimated_tokens"].(float64); ok {
+					sink.emit(store.LogLine{Type: "phase", Content: fmt.Sprintf("🤔 模型思考中… (%d tokens)", int(tokens))})
+				}
+			}
+		case "stream_event":
+			inner, _ := evt["event"].(map[string]interface{})
+			if inner == nil {
+				continue
+			}
+			switch inner["type"] {
+			case "content_block_delta":
+				delta, _ := inner["delta"].(map[string]interface{})
+				if delta == nil {
+					continue
+				}
+				switch delta["type"] {
+				case "text_delta":
+					text, _ := delta["text"].(string)
+					if text != "" {
+						out.hadStreamEvents = true
+						sink.emit(store.LogLine{Type: "message", Content: text})
+					}
+				}
+			case "content_block_start":
+				block, _ := inner["content_block"].(map[string]interface{})
+				if block != nil && block["type"] == "tool_use" {
+					if name, _ := block["name"].(string); name != "" {
+						sink.emit(store.LogLine{Type: "tool_call", Content: toolCallLabel(name, nil)})
+					}
+				}
+			}
+		case "assistant":
+			msg, _ := evt["message"].(map[string]interface{})
+			if m, ok := msg["model"].(string); ok {
+				out.actualModel = m
+			}
+			content, _ := msg["content"].([]interface{})
+			for _, block := range content {
+				b, _ := block.(map[string]interface{})
+				switch b["type"] {
+				case "tool_use":
+					toolName, _ := b["name"].(string)
+					input, _ := b["input"].(map[string]interface{})
+					if toolName == "Write" && input != nil {
+						if fp, ok := input["file_path"].(string); ok {
+							if strings.Contains(filepath.ToSlash(fp), "/.claude/plans/") && strings.HasSuffix(fp, ".md") {
+								if c, ok := input["content"].(string); ok && c != "" {
+									out.planContent = c
+								}
+							}
+						}
+					}
+					if p := inputToolPath(toolName, input); p != "" {
+						out.toolFiles = append(out.toolFiles, p)
+					}
+					if !out.hadStreamEvents {
+						sink.emit(store.LogLine{Type: "tool_call", Content: toolCallLabel(toolName, input)})
+					}
+				case "text":
+					if !out.hadStreamEvents {
+						if text, _ := b["text"].(string); text != "" {
+							sink.emit(store.LogLine{Type: "message", Content: text})
+						}
+					}
+				}
+			}
+		case "result":
+			subtype, _ := evt["subtype"].(string)
+			apiErrStatus := 0.0
+			if v, ok := evt["api_error_status"].(float64); ok {
+				apiErrStatus = v
+			}
+			isErr, _ := evt["is_error"].(bool)
+			terminalReason, _ := evt["terminal_reason"].(string)
+			realSuccess := subtype == "success" && !isErr &&
+				terminalReason != "api_error" && apiErrStatus == 0
+			if realSuccess {
+				out.finalResult, _ = evt["result"].(string)
+			} else {
+				out.errMsg = claudeResultError(scope, evt)
+				if isStaleSessionError(evt, "") {
+					out.staleSession = true
+				}
+			}
+			if out.actualModel != "" && uctx != nil {
+				uctx.Model = out.actualModel
+			}
+			uctx.recordFrom(evt)
+			if inTok, outTok, cc, cr, ok := llm.ParseStreamUsage(evt); ok {
+				out.lastUsage = lastUsageSnapshot{InputTokens: inTok, OutputTokens: outTok, CacheCreationTokens: cc, CacheReadTokens: cr}
+				if uctx != nil && (inTok+outTok+cc+cr) > 0 {
+					modelName := uctx.Model
+					if modelName == "" {
+						modelName = out.actualModel
+					}
+					payload := map[string]any{
+						"step":                  uctx.Step,
+						"model":                 modelName,
+						"input_tokens":          inTok,
+						"output_tokens":         outTok,
+						"cache_creation_tokens": cc,
+						"cache_read_tokens":     cr,
+						"context_window":        service.ModelContextWindow(modelName),
+					}
+					if b, mErr := json.Marshal(payload); mErr == nil {
+						sink.emit(store.LogLine{Type: "usage", Content: string(b)})
+						if uctx.PersistSnapshot != nil {
+							if key := snapshotStep(uctx.Step); key != "" {
+								snap := map[string]any{
+									"model":                 modelName,
+									"input_tokens":          inTok,
+									"output_tokens":         outTok,
+									"cache_creation_tokens": cc,
+									"cache_read_tokens":     cr,
+									"context_window":        service.ModelContextWindow(modelName),
+								}
+								if sb, sErr := json.Marshal(snap); sErr == nil {
+									uctx.PersistSnapshot(key, string(sb))
+								}
+							}
+						}
+					}
+				}
+			}
+			return out
+		}
+	}
+	// EOF without a result event — the remote claude exited before
+	// completing the turn (network drop, etc.).
+	if out.finalResult == "" && out.errMsg == "" {
+		out.errMsg = "远程 Claude 未返回结果（流中断）"
+	}
+	return out
+}
 
 // analystFirstTurnDisallowedTools blocks file/code tools on the analyst first
 // turn so Claude answers from the pre-read context without tool use. The

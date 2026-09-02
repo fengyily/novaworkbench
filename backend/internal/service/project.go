@@ -535,6 +535,32 @@ func redactUserinfo(s string) string {
 	return userinfoPattern.ReplaceAllString(s, "$1<redacted>@")
 }
 
+// OriginURL returns the project's git remote_url with the platform token
+// embedded in userinfo (HTTPS-only). Used by the Agent-server remote path
+// (handler/wizard.go runRemoteCoding) so a remote `git clone` can pull the
+// repo without the user configuring any credentials on the remote host.
+//
+// Returns:
+//   - ("", NO_REMOTE) when the project has no remote_url
+//   - (url, nil)         for the HTTPS-injected case
+//   - (raw, nil)         for SSH remotes or projects without a token (pass-through)
+func (s *ProjectService) OriginURL(projectID string) (string, error) {
+	p, err := s.Get(projectID)
+	if err != nil {
+		return "", err
+	}
+	if p.RemoteURL == "" {
+		return "", fmt.Errorf("NO_REMOTE: project %s has no remote_url configured", projectID)
+	}
+	tok, _, err := s.resolveCloneAuth(p.PlatformType, p.PlatformTokenID, p.RemoteURL)
+	if err != nil {
+		// TOKEN_NOT_FOUND / PLATFORM_MISMATCH: propagate but caller may choose
+		// to fall back to the raw URL for a public repo.
+		return "", err
+	}
+	return injectCredentials(p.RemoteURL, p.PlatformType, tok), nil
+}
+
 // Restore re-clones a soft-deleted project's directory from its stored
 // remote_url/default_branch and clears the soft-delete flags. It errors with
 // NO_REMOTE / DIR_EXISTS / RESTORE_FAILED / TOKEN_NOT_FOUND / PLATFORM_MISMATCH

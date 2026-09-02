@@ -165,6 +165,24 @@ func (g *Gateway) settingSources() string {
 	return "project,local"
 }
 
+// BuildStreamArgs is the public version of streamArgs — exposed so the remote
+// Agent-server code path (handler/wizard.go runRemoteCoding) can render the
+// same flag list as a remote shell command. The output is byte-identical to
+// the unexported streamArgs above; both go through settingSources so a custom
+// base URL stays in sync with the local execution.
+func (g *Gateway) BuildStreamArgs(opts StreamOpts) []string {
+	return g.streamArgs(opts.Prompt, opts.SystemPrompt, opts.Model, opts.SessionID, opts.Resume, opts.Fork, opts.ForkSessionID, opts.DisallowedTools, opts.PermissionMode)
+}
+
+// BuildEnvPairs returns the merged KEY=VALUE environment entries that StreamCmd
+// would apply to the claude CLI subprocess. Exposed so the remote path can
+// prefix the same env into the remote shell command — keeping the local and
+// remote executions behaviourally identical (same auth token, same
+// tier-model pinning, same ExtraEnv).
+func (g *Gateway) BuildEnvPairs(model string, extras ...string) []string {
+	return g.mergedEnv(model, extras...)
+}
+
 // streamArgs builds the shared claude CLI flag list for stream-json +
 // dangerously-skip-permissions runs. When systemPrompt is non-empty it is passed
 // via --system-prompt (full replace); when model is non-empty it is passed via
@@ -262,8 +280,8 @@ type StreamOpts struct {
 // stream is now a confirmation / safety net rather than the only source of the
 // id.
 func (g *Gateway) StreamCmd(ctx context.Context, opts StreamOpts) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, g.binPath, g.streamArgs(opts.Prompt, opts.SystemPrompt, opts.Model, opts.SessionID, opts.Resume, opts.Fork, opts.ForkSessionID, opts.DisallowedTools, opts.PermissionMode)...)
-	cmd.Env = g.mergedEnv(opts.Model, opts.ExtraEnv...)
+	cmd := exec.CommandContext(ctx, g.binPath, g.BuildStreamArgs(opts)...)
+	cmd.Env = g.BuildEnvPairs(opts.Model, opts.ExtraEnv...)
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
 	}

@@ -1089,3 +1089,58 @@ export const preflightApi = {
   install: (key: string) => api.post<{ job_id: string }>('/api/preflight/install', { key }),
   installStreamUrl: (jobId: string) => `${API_BASE}/api/preflight/jobs/${jobId}/stream`,
 };
+
+// Agent servers — remote Linux/macOS execution targets with AES-256-GCM
+// encrypted credentials (the plaintext auth_value never leaves the backend).
+// auth_value_set on the read shape tells the UI whether a credential is
+// configured without exposing it; create/update accepts the plaintext once
+// and the service encrypts before INSERT/UPDATE.
+export type AgentServerStatus = 'unknown' | 'checking' | 'installing' | 'ready' | 'error';
+export interface AgentServer {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  auth_type: 'key' | 'password';
+  auth_value_set: boolean;
+  auth_value_algo: string;
+  status: AgentServerStatus;
+  last_check_at: string | null;
+  check_result: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface CreateAgentServerReq {
+  name: string;
+  host: string;
+  port?: number;
+  username?: string;
+  auth_type: 'key' | 'password';
+  auth_value: string;
+}
+export interface UpdateAgentServerReq {
+  name?: string;
+  host?: string;
+  port?: number;
+  username?: string;
+  auth_type?: 'key' | 'password';
+  auth_value?: string;
+}
+
+export const agentServersApi = {
+  list: () => api.get<AgentServer[]>('/api/settings/agent-servers'),
+  get: (id: string) => api.get<AgentServer>(`/api/settings/agent-servers/${id}`),
+  create: (data: CreateAgentServerReq) =>
+    api.post<AgentServer>('/api/settings/agent-servers', data),
+  update: (id: string, data: UpdateAgentServerReq) =>
+    api.put<AgentServer>(`/api/settings/agent-servers/${id}`, data),
+  remove: (id: string) =>
+    api.delete<void>(`/api/settings/agent-servers/${id}`),
+  check: (id: string) =>
+    api.post<{ job_id: string }>(`/api/settings/agent-servers/${id}/check`, {}),
+  install: (id: string) =>
+    api.post<{ job_id: string }>(`/api/settings/agent-servers/${id}/install`, {}),
+  jobUrl: (jobId: string) => `${API_BASE}/api/settings/agent-servers/jobs/${jobId}`,
+  jobStreamUrl: (jobId: string) => `${API_BASE}/api/settings/agent-servers/jobs/${jobId}/stream`,
+};
