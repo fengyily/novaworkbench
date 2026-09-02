@@ -319,6 +319,39 @@ CREATE TABLE IF NOT EXISTS agent_servers (
 	updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_agent_servers_status ON agent_servers(status);
+
+-- Sub-task: a manually-triggered child agent under a requirement's developing
+-- stage. Each sub-task forks the requirement's coding_session_id (or
+-- design_session_id as fallback) so every child agent shares the main agent's
+-- context — project files, design docs, prior conversation — but runs in its
+-- own claude process with its own session id. Artifact holds the final
+-- Markdown report the child agent produced, persisted on completion so the
+-- history survives JobStore ring-buffer eviction and server restarts.
+-- Lifecycle: pending → running → done | error. Status mirrors JobStore job
+-- status so the UI can show the same spinner / error chip pattern.
+CREATE TABLE IF NOT EXISTS sub_tasks (
+	id                 TEXT PRIMARY KEY,
+	requirement_id     TEXT NOT NULL,
+	title              TEXT NOT NULL DEFAULT '',
+	prompt             TEXT NOT NULL DEFAULT '',
+	status             TEXT NOT NULL DEFAULT 'pending',
+	session_id         TEXT NOT NULL DEFAULT '',
+	source_session_id  TEXT NOT NULL DEFAULT '',
+	job_id             TEXT NOT NULL DEFAULT '',
+	artifact           TEXT NOT NULL DEFAULT '',
+	model              TEXT NOT NULL DEFAULT '',
+	input_tokens       INTEGER NOT NULL DEFAULT 0,
+	output_tokens      INTEGER NOT NULL DEFAULT 0,
+	cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+	cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+	cost_cents         INTEGER NOT NULL DEFAULT 0,
+	duration_seconds   INTEGER NOT NULL DEFAULT 0,
+	created_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
+	completed_at       DATETIME,
+	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_sub_tasks_req ON sub_tasks(requirement_id);
 `
 
 // alterColumns adds columns to older databases. ALTER TABLE fails when the
@@ -424,6 +457,29 @@ var alterColumns = []string{
 	// finds the jsonl. Cached here on first local execution by scanning the
 	// local projects dir; empty = not yet discovered.
 	`ALTER TABLE projects ADD COLUMN claude_project_slug TEXT NOT NULL DEFAULT ''`,
+	// coding_plan: the developer main-agent's "task breakdown" Markdown,
+	// produced on the start-coding turn and refreshed whenever the user asks
+	// the main agent to re-plan. Empty = main agent hasn't emitted one yet, or
+	// the user is using the developer stage in the legacy single-process mode.
+	// Surfaced by the SubTaskPanel as the parent plan every child task forks
+	// from; persisted on completion so a server restart / JobStore eviction
+	// doesn't lose the breakdown.
+	`ALTER TABLE requirements ADD COLUMN coding_plan TEXT NOT NULL DEFAULT ''`,
+	// Per-sub-task token usage (mirrors token_usage per-row columns but stays
+	// inline so a child agent's cost lives next to its artifact without a
+	// second SELECT against token_usage). input_tokens / output_tokens are the
+	// terminal result-event counts; cache_* tokens help the UI display the
+	// "缓存命中率" badge alongside the cost. cost_cents is the resolved cost
+	// (config's per-model unit price × tokens, same formula the dashboard
+	// uses), written best-effort on completion — empty when the model has no
+	// pricing configured yet. duration_seconds records wall-clock from
+	// MarkRunning to Finish so the SubTaskCard header can show "耗时 2m15s".
+	`ALTER TABLE sub_tasks ADD COLUMN input_tokens         INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE sub_tasks ADD COLUMN output_tokens        INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE sub_tasks ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE sub_tasks ADD COLUMN cache_read_tokens     INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE sub_tasks ADD COLUMN cost_cents            INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE sub_tasks ADD COLUMN duration_seconds      INTEGER NOT NULL DEFAULT 0`,
 }
 
 var (
@@ -522,6 +578,39 @@ func migrate(d *DB) error {
 	// (the analyst-complete finalization step was deleted). Map leftover
 	// "analyzed" rows to "analyzing". Idempotent: a no-op after the first run.
 	if _, err := d.Exec("UPDATE requirements SET status='analyzing' WHERE status='analyzed'"); err != nil {
+		return err
+	}
+
+	// Data migration: upgrade the developer role's default system_prompt to
+	// the "统筹协调" framing introduced when sub-task collaboration shipped.
+	// SeedDefaults is per-key upsert, so a role_developer row written by an
+	// older build keeps its original prompt forever. We match the old prompt
+	// by a stable substring (the first user-visible sentence is unique enough
+	// for a fingerprint) and replace it with the new framing. Idempotent:
+	// re-running after the upgrade is a no-op because the substring won't
+	// match anymore.
+	//
+	// Identifier quoting: `key` is reserved in MySQL and a quoted identifier
+	// in Postgres/SQLite. db.Ident handles all three dialects — never use
+	// raw backticks here (Postgres rejects them with "syntax error at or
+	// near `=`" on the line that follows the SET clause).
+	if _, err := d.Exec(`UPDATE roles SET system_prompt = ?
+		WHERE `+d.Ident("key")+` = 'developer'
+		  AND system_prompt LIKE ?
+		  AND system_prompt NOT LIKE ?`,
+		`你是一位资深软件工程师，担任本需求的开发**统筹协调者**。
+
+工作方式：
+- 先读取项目中的相关文件，理解现有代码结构与已确定的技术方案。
+- **不要直接编写项目代码**——所有具体实现工作由子Agent完成。
+- 分析当前情况后，给出可执行的子任务分解清单（每条包含：标题 + 具体提示词），方便用户据此创建子任务。
+- 若用户已经在子任务中执行了某些工作，请基于子任务产物评估进度，并提示下一步建议的子任务。
+- 输出 Markdown 任务分解表，便于用户复制粘贴。
+- 用中文沟通。
+- 最后务必包含一段「等待用户创建子任务」的明确提示。`,
+		"%正在实现一个需求%",
+		"%统筹协调%",
+	); err != nil {
 		return err
 	}
 

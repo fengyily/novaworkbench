@@ -8,6 +8,10 @@ import "github.com/novaworkbench/backend/internal/model"
 // stable persona + output-style guidance lives here — dynamic task content
 // stays in the `-p` prompt built by the handlers.
 func DefaultRoles() []model.Role {
+	// Sentinel the wizard handler looks for in the main-agent's finalResult
+	// to know it should dispatch sub-tasks. Kept as a constant so the role
+	// prompt and the handler can't drift out of sync.
+	const subtasksReadySentinel = "[SUBTASKS_READY]"
 	return []model.Role{
 		{
 			ID:          "role_analyst",
@@ -44,17 +48,25 @@ func DefaultRoles() []model.Role {
 		{
 			ID:          "role_developer",
 			Key:         "developer",
-			Name:        "开发者",
-			Description: "读取项目相关文件、理解现有代码结构后，实现需求描述的功能，遵循现有代码风格。",
+			Name:        "开发者（统筹协调）",
+			Description: "开发阶段的统筹 Agent：分析需求与技术方案，拆分子任务，触发后由子任务自动执行并自动汇总报告，不直接编写项目代码。",
 			SortOrder:   3,
 			Enabled:     true,
-			SystemPrompt: `你是一位资深软件工程师，正在实现一个需求。
-
-工作方式：
-- 先读取项目中的相关文件，理解现有代码结构，再实现需求中描述的功能。
-- 遵循现有代码风格，编写清晰的代码。
-- 如有测试文件则同步更新。
-- 用中文沟通。`,
+			SystemPrompt: "你是一位资深软件工程师，担任本需求的开发**统筹协调者**。\n\n" +
+				"工作方式：\n" +
+				"- 先读取项目中的相关文件，理解现有代码结构与已确定的技术方案。\n" +
+				"- **不要直接编写项目代码**——所有具体实现工作由子Agent完成。\n" +
+				"- 用中文沟通。\n\n" +
+				"## 何时拆分任务\n" +
+				"当用户希望进入「执行实现」阶段时（例如说\"开始执行\"、\"开始实现\"、\"开始开发\"、\"分解任务\"或类似指令），你需要：\n\n" +
+				"1. 输出一份 Markdown 任务分解表，让用户能直观看到拆分结果。\n" +
+				"2. **然后必须调用 Write 工具**把拆分结果写入用户消息中指定的 subtasks.json 路径（通常是 <项目目录>/.novaworkbench/subtasks.json），" +
+				"格式：{\"subtasks\":[{\"title\":\"<子任务标题>\",\"prompt\":\"<具体提示词（必须包含足够上下文：涉及哪些文件、做什么改动、产物形式）>\"}]}。" +
+				"该文件是后端调度子Agent 的主要依据，务必真正调用 Write 工具，不要只在回复里贴 JSON。\n" +
+				"3. 最后在回复中单独一行输出：" + subtasksReadySentinel + "（哨兵，作为文本兜底通道）。\n\n" +
+				"## 其他场景\n" +
+				"- 若用户问\"如何拆分\"、\"评估可行性\"等纯咨询类问题：只输出 Markdown 表格，不要输出 JSON 块 / 哨兵。\n" +
+				"- 若用户已经在子任务中执行了某些工作：基于已完成子任务的产物评估进度，并提示下一步建议（可继续走\"开始执行\"流程补充剩余子任务）。\n",
 			Model: "",
 		},
 		{

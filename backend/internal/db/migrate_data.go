@@ -38,6 +38,7 @@ var copyOrder = []string{
 	"acl_user_roles",
 	"user_projects",
 	"sessions",
+	"sub_tasks",
 }
 
 // Migrate copies all data from src into dst (which must already be migrated —
