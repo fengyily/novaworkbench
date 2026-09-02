@@ -356,6 +356,7 @@ body.no-scroll {
   font-weight: 600;
   background: var(--color-active);
   color: var(--color-primary);
+  white-space: nowrap;
 }
 .kind-badge.kind-issue       { background: #fee2e2; color: #b91c1c; }
 .kind-badge.kind-requirement { background: #e0e7ff; color: #4338ca; }

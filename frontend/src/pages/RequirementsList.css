@@ -125,6 +125,38 @@
   white-space: nowrap;
 }
 
+/* Pin per-column widths so the table never crowds the kind badge onto
+   two lines. The badge itself (Issue / 需求 / 想法) sits inside the type
+   column; its content is already short, but the column auto-distributes
+   width across 6 headers and the type column gets squeezed. Holding
+   width + white-space keeps the cell single-line.
+   Widths chosen so a 1280px viewport still leaves the title column with
+   ~400px before its max-width kicks in. */
+.req-table thead th:nth-child(1),
+.req-table tbody td:nth-child(1) {
+  width: 100px;
+  white-space: nowrap;
+}
+
+.req-table thead th:nth-child(5),
+.req-table tbody td:nth-child(5) {
+  width: 88px;
+  white-space: nowrap;
+}
+
+.req-table thead th:nth-child(6),
+.req-table tbody td:nth-child(6) {
+  width: 180px;
+  white-space: nowrap;
+}
+
+/* The title column is the only flexible one — let it absorb the
+   remaining width up to its 360px ellipsis cap. */
+.req-table thead th:nth-child(2),
+.req-table tbody td:nth-child(2) {
+  min-width: 240px;
+}
+
 @media (max-width: 720px) {
   .req-filter-select {
     min-width: 0;
