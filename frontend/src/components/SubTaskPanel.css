@@ -1,0 +1,795 @@
+/* SubTaskPanel — sits inside the developer stage alongside CodingChat.
+ *
+ * Visual intent (per @frontend-design):
+ *   - Panel surface, header, composer, cards all share the platform's
+ *     white-card-on-slate-bg language (border / radius / shadow match the
+ *     adjacent CodingChat panel so the eye reads this as another stage
+ *     sub-section, not a foreign surface).
+ *   - Display copy (titles, hints, buttons) uses the platform sans stack
+ *     so the panel doesn't read as "another product" sitting inside the
+ *     detail page.
+ *   - The CLI / terminal motif is preserved in exactly two places where
+ *     it carries information:
+ *       (a) the live log strip — it really is a claude terminal scrollback,
+ *       (b) the "复制到终端继续" code block — it really is a shell command.
+ *     Everything else is sans + platform colors. The signature is the
+ *     contrast between the calm white panel and these two dark strips.
+ *   - Status tones reuse the platform palette: indigo (running / pending),
+ *     emerald (done), rose (error). No third-party accent color introduced.
+ */
+
+.sub-panel {
+  margin-top: 24px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  overflow: hidden;
+}
+
+/* Header — flat with a hairline divider, like the rest of the stage. */
+.sub-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--color-border);
+}
+.sub-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+.sub-panel-title-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--color-active);
+  color: var(--color-primary);
+  font-size: 13px;
+}
+.sub-panel-meta {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.sub-panel-meta code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  background: var(--color-hover);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.sub-panel-count {
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+/* Pre-flight hint (when coding session hasn't been started yet) */
+.sub-panel-hint {
+  padding: 24px 20px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.sub-panel-hint em {
+  color: var(--color-text-muted);
+  font-style: normal;
+}
+
+/* ─── Composer ───
+ * Same shape as CodingChat's input area: label + input + textarea +
+ * hint + primary button. Spacing reads as one form, not three controls.
+ */
+.sub-composer {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+.sub-composer-title-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.sub-composer-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+.sub-composer-input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.sub-composer-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+}
+.sub-composer-input:disabled {
+  background: var(--color-hover);
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+}
+.sub-composer-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.sub-composer-textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  /* AtMentionTextarea renders a <textarea> wrapped in a relative
+     container — the textarea itself is the styled target here. */
+}
+.sub-composer-textarea:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+}
+.sub-composer-textarea:disabled {
+  background: var(--color-hover);
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+}
+.sub-composer-textarea::placeholder {
+  color: var(--color-text-muted);
+}
+
+.sub-composer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.sub-composer-hint {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  flex: 1;
+  min-width: 0;
+}
+.sub-composer-err {
+  color: var(--color-error);
+  font-size: 12px;
+}
+.sub-composer-submit {
+  /* Uses the platform .btn .btn-primary from index.css — no override needed. */
+  flex-shrink: 0;
+}
+.sub-composer-resplit {
+  flex-shrink: 0;
+}
+
+/* Manual re-split (🔄 重新拆分) live progress — rides on the orchestrator
+   status banner styling, plus a small scrolling log of the last events. */
+.sub-resplit-status {
+  display: block;
+}
+.sub-resplit-log {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+.sub-resplit-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sub-resplit-line-error {
+  color: var(--color-error);
+}
+
+/* ─── Sub-task list ─── */
+.sub-list {
+  padding: 16px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.sub-list-loading,
+.sub-list-empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+.sub-list-empty-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--color-active);
+  color: var(--color-primary);
+  font-size: 18px;
+  margin-bottom: 8px;
+}
+
+/* ─── Card ───
+ * Each card is a flat white surface with a left-edge accent stripe whose
+ * color mirrors the status. The stripe does the visual work that the
+ * previous dark card background was doing, but stays inside the platform
+ * language.
+ */
+.sub-card {
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-border); /* default; overridden per status */
+  border-radius: 6px;
+  background: var(--color-surface);
+  overflow: hidden;
+  transition: border-color 0.15s ease;
+}
+.sub-card:hover {
+  border-color: var(--color-text-muted);
+}
+.sub-card-running { border-left-color: var(--color-primary); }
+.sub-card-done    { border-left-color: var(--color-success); }
+.sub-card-error   { border-left-color: var(--color-error); }
+.sub-card-pending { border-left-color: var(--color-text-muted); }
+
+.sub-card-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px 14px;
+  cursor: pointer;
+  user-select: none;
+  background: var(--color-surface);
+  transition: background 0.12s ease;
+}
+.sub-card-header:hover {
+  background: var(--color-hover);
+}
+.sub-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+.sub-card-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--color-hover);
+  color: var(--color-text-secondary);
+}
+.sub-card-status-running {
+  background: rgba(79, 70, 229, 0.10);
+  color: var(--color-primary);
+}
+.sub-card-status-done {
+  background: rgba(16, 185, 129, 0.12);
+  color: #047857;
+}
+.sub-card-status-error {
+  background: rgba(239, 68, 68, 0.10);
+  color: var(--color-error);
+}
+.sub-card-status-pending {
+  background: var(--color-hover);
+  color: var(--color-text-muted);
+}
+.sub-card-counter {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+.sub-card-model {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  background: var(--color-hover);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.sub-card-time {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+.sub-card-toggle {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 10px;
+}
+.sub-card-title {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.sub-card-body {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.sub-card-empty {
+  color: var(--color-text-muted);
+  font-style: italic;
+  font-size: 12px;
+  text-align: center;
+  padding: 8px;
+}
+
+/* Live log strip — the panel's CLI signature. Dark surface, mono font,
+ * monospace "›" prompt gutter. Stays compact (~360px tall, scrolls) so
+ * a long run doesn't push the artifact / token strip off-screen. */
+.sub-log {
+  background: #0F172A;
+  border: 1px solid #1E293B;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  max-height: 360px;
+  overflow-y: auto;
+  color: #E2E8F0;
+}
+.sub-log-empty {
+  background: #0F172A;
+  border: 1px solid #1E293B;
+  border-radius: 6px;
+  padding: 18px;
+  color: #94A3B8;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-align: center;
+}
+.sub-log-phase-block {
+  border-left: 2px solid #475569;
+  padding-left: 10px;
+  margin-bottom: 6px;
+}
+.sub-log-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  line-height: 1.5;
+}
+.sub-log-prompt {
+  color: #FB923C; /* kept as the lone accent — Claude's shell prompt */
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-weight: 700;
+}
+.sub-log-text { flex: 1; min-width: 0; word-break: break-word; }
+.sub-log-phase   { color: #38BDF8; }
+.sub-log-tool_call { color: #A5B4FC; }
+.sub-log-message { color: #E2E8F0; }
+.sub-log-result  { color: #E2E8F0; }
+.sub-log-error   { color: #FCA5A5; }
+.sub-log-error .sub-log-prompt { color: #FCA5A5; }
+.sub-log-done    { color: #6EE7B7; }
+.sub-log-md {
+  margin: 6px 0 4px;
+  padding-left: 22px;
+  color: #E2E8F0;
+  word-break: break-word;
+}
+.sub-log-md p:first-child { margin-top: 0; }
+.sub-log-md p:last-child  { margin-bottom: 0; }
+.sub-log-md code {
+  background: #1E293B;
+  padding: 1px 4px;
+  border-radius: 2px;
+  font-size: 11px;
+}
+.sub-log-md pre {
+  background: #1E293B;
+  padding: 8px 10px;
+  border-radius: 3px;
+  overflow-x: auto;
+  margin: 6px 0;
+}
+
+/* Artifact (finished sub-task reports) — same dark surface so finished
+ * cards keep the CLI feel but with typography tuned for reading prose,
+ * not scrollback. */
+.sub-card-artifact {
+  background: #0F172A;
+  border: 1px solid #1E293B;
+  border-radius: 6px;
+  padding: 16px 20px;
+  color: #E2E8F0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.65;
+}
+.sub-card-artifact h1 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #E2E8F0;
+  margin: 0 0 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #1E293B;
+}
+.sub-card-artifact h2 {
+  font-size: 13px;
+  font-weight: 600;
+  color: #38BDF8;
+  margin: 16px 0 6px;
+}
+.sub-card-artifact h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: #E2E8F0;
+  margin: 12px 0 6px;
+}
+.sub-card-artifact p { margin: 6px 0; }
+.sub-card-artifact ul,
+.sub-card-artifact ol { margin: 6px 0; padding-left: 22px; }
+.sub-card-artifact li { margin: 3px 0; }
+.sub-card-artifact code {
+  background: #1E293B;
+  padding: 1px 5px;
+  border-radius: 2px;
+  font-size: 12px;
+}
+.sub-card-artifact pre {
+  background: #1E293B;
+  padding: 10px 12px;
+  border-radius: 4px;
+  overflow-x: auto;
+  margin: 8px 0;
+  font-size: 12px;
+}
+.sub-card-artifact blockquote {
+  border-left: 2px solid #475569;
+  margin: 8px 0;
+  padding: 0 12px;
+  color: #94A3B8;
+}
+
+/* CLI copy block — dark shell prompt block. This is the second place
+ * where dark + mono earns its keep: it's literally a paste-able shell
+ * command, so it should look like one. */
+.sub-card-cli {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sub-card-cli-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+.sub-cli {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #0F172A;
+  border: 1px solid #1E293B;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.sub-cli-prompt {
+  color: #FB923C;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.sub-cli-cmd {
+  flex: 1;
+  min-width: 0;
+  color: #38BDF8;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+.sub-cli-copy {
+  background: transparent;
+  border: 1px solid #334155;
+  color: #94A3B8;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+.sub-cli-copy:hover {
+  color: #FB923C;
+  border-color: #FB923C;
+}
+
+/* ─── Append-adjustment composer ───
+ * Lighter touch than the main composer — a textarea + two buttons inside
+ * an already-busy card. */
+.sub-card-adjust {
+  border-top: 1px dashed var(--color-border);
+  padding-top: 12px;
+}
+.sub-adjust-toggle {
+  background: transparent;
+  border: 1px dashed var(--color-border);
+  color: var(--color-primary);
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.sub-adjust-toggle:hover {
+  border-style: solid;
+  border-color: var(--color-primary);
+  background: var(--color-active);
+}
+.sub-adjust-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sub-adjust-textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.sub-adjust-textarea:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+}
+.sub-adjust-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.sub-adjust-hint {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  flex: 1;
+  font-family: var(--font-sans);
+}
+.sub-adjust-err {
+  color: var(--color-error);
+  font-size: 12px;
+  flex: 1;
+}
+
+/* ─── Token strip ───
+ * Stays inside the platform palette — slate chip on the white card body,
+ * no orange / amber accents (cost value uses a quiet amber only). */
+.sub-tokens {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  background: var(--color-hover);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.sub-tokens-glyph {
+  font-size: 13px;
+}
+.sub-tokens-empty {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+.sub-tokens-cell {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.sub-tokens-label {
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+.sub-tokens-val {
+  color: var(--color-text);
+  font-weight: 600;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.sub-tokens-cache .sub-tokens-val { color: var(--color-primary); }
+.sub-tokens-total .sub-tokens-val { color: var(--color-text); }
+.sub-tokens-cost .sub-tokens-val  { color: #D97706; }
+.sub-tokens-val-sep {
+  color: var(--color-text-muted);
+  margin: 0 2px;
+}
+.sub-tokens-model {
+  margin-left: auto;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  border: 1px solid var(--color-border);
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--color-surface);
+}
+
+/* Reduced-motion users — drop transitions. */
+@media (prefers-reduced-motion: reduce) {
+  .sub-composer-input,
+  .sub-composer-textarea,
+  .sub-card,
+  .sub-cli-copy,
+  .sub-adjust-toggle,
+  .sub-adjust-textarea {
+    transition: none;
+  }
+}
+
+/* Responsive: tighten padding on narrow screens. */
+@media (max-width: 640px) {
+  .sub-panel-header { padding: 12px 16px; flex-wrap: wrap; }
+  .sub-composer { padding: 12px 16px; }
+  .sub-list { padding: 12px 16px 16px; }
+  .sub-composer-toolbar { flex-wrap: wrap; }
+  .sub-composer-hint { flex-basis: 100%; }
+}
+
+/* ─── Orchestrator (主 Agent 自动编排) ───
+ * Sits above the manual composer. The input + button live on a single row
+ * so "开始执行" can't drift into the textarea — without this flex row the
+ * browser falls back to native inline layout and the button renders
+ * inside the text input area. Background uses a faint indigo wash so the
+ * user reads it as the "primary" affordance; the manual composer below
+ * stays neutral.
+ */
+.sub-orchestrator {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--color-border);
+  background: rgba(79, 70, 229, 0.04);
+}
+.sub-orchestrator-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sub-orchestrator-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.sub-orchestrator-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+}
+.sub-orchestrator-input:disabled {
+  background: var(--color-hover);
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+}
+.sub-orchestrator-input::placeholder {
+  color: var(--color-text-muted);
+}
+.sub-orchestrator-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.sub-orchestrator-status {
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: rgba(79, 70, 229, 0.08);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--color-primary);
+}
+.sub-orchestrator-reply {
+  margin-top: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  padding: 8px 12px;
+}
+.sub-orchestrator-reply summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  user-select: none;
+}
+.sub-orchestrator-reply-body {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text);
+}
+
+/* ─── Summary report (主 Agent 汇总报告) ───
+ * Renders requirements.coding_plan ABOVE the children list. Distinct
+ * surface from the cards so the eye reads it as "the high-level picture"
+ * vs the per-child artifact that lives inside each card.
+ */
+.sub-summary {
+  margin: 16px 20px 0;
+  padding: 16px 20px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  border-left: 3px solid var(--color-primary);
+}
+.sub-summary-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+.sub-summary-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--color-active);
+  font-size: 13px;
+}
+.sub-summary-title {
+  color: var(--color-text);
+}
+.sub-summary-body {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text);
+}

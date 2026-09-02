@@ -61,6 +61,13 @@ type Requirement struct {
 	// snapshot recorded yet. Best-effort: write failures are logged, not
 	// surfaced, so they never break a claude turn.
 	UsageSnapshots string    `json:"usage_snapshots"`
+	// CodingPlan: the auto-orchestrate summary Markdown produced by the
+	// developer main agent after every child sub-task in a batch has
+	// finished. Empty = no orchestrated batch has produced a summary yet
+	// (legacy rows / manual-only flow). Surfaced by SubTaskPanel as the
+	// parent plan every child task forks from; persisted on completion so
+	// a server restart / JobStore eviction doesn't lose the breakdown.
+	CodingPlan         string    `json:"coding_plan"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 	CompletedAt           *time.Time `json:"completed_at,omitempty"`

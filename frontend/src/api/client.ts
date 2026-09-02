@@ -247,6 +247,137 @@ export const scannerApi = {
   scan: (projectId: string) => api.post<ScanResult>(`/api/projects/${projectId}/scan`, {}),
 };
 
+// Sub-tasks: manually-triggered child agents that fork a requirement's main
+// session (coding_session_id). Shown in the developer stage's SubTaskPanel.
+// The status field mirrors JobStore job status (pending/running/done/error);
+// `artifact` holds the final Markdown report and survives JobStore eviction.
+export type SubTaskStatus = 'pending' | 'running' | 'done' | 'error';
+
+export interface SubTask {
+  id: string;
+  requirement_id: string;
+  title: string;
+  prompt: string;
+  status: SubTaskStatus;
+  session_id: string;
+  source_session_id: string;
+  job_id: string;
+  artifact: string;
+  model: string;
+  // Terminal token usage as recorded on Finish (zero until then). The
+  // header badge combines these into a single "12.4k↓ / 3.1k↑" readout
+  // without a second token_usage SELECT, so the badge stays cheap to
+  // render for every visible card.
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  // Resolved cost in cents (USD-equivalent of the platform's currency).
+  // Zero when the active claude config has no unit price for the model
+  // yet — the badge then hides the cost cell entirely.
+  cost_cents: number;
+  // Wall-clock duration from MarkRunning → Finish. Zero while running;
+  // the SubTaskCard renders a live ticker (every second) until then.
+  duration_seconds: number;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string;
+}
+
+export const subTasksApi = {
+  // Start a child agent. Returns the JobStore job_id (for SSE stream) and
+  // the sub_task_id (for refetch / list updates).
+  create: (requirementId: string, data: { prompt: string; title?: string; model?: string }) =>
+    api.post<{ job_id: string; sub_task_id: string }>(`/api/requirements/${requirementId}/sub-tasks`, data),
+  // List all sub-tasks for a requirement (oldest first).
+  list: (requirementId: string) =>
+    api.get<SubTask[]>(`/api/requirements/${requirementId}/sub-tasks`),
+  // Manual re-split (🔄 重新拆分): resumes the coding session with the
+  // decomposition trigger and runs the same parse+dispatch pipeline as
+  // StartCoding's auto-orchestrate. Returns a job_id — subscribe to
+  // /api/wizard/jobs/{job_id}/stream for the main agent's progress; the
+  // dispatched children appear in the sub-tasks list afterwards.
+  // 409 when a child is still running.
+  reOrchestrate: (requirementId: string, data?: { model?: string }) =>
+    api.post<{ job_id: string }>(`/api/requirements/${requirementId}/re-orchestrate`, data ?? {}),
+  // Fetch one sub-task (incl. artifact Markdown). 404 when the id doesn't
+  // belong to the requirement.
+  get: (requirementId: string, subTaskId: string) =>
+    api.get<SubTask>(`/api/requirements/${requirementId}/sub-tasks/${subTaskId}`),
+  // Append a follow-up instruction to an existing sub-task. Resumes the
+  // parent's claude session via --fork-session so the child inherits the
+  // parent's prior edits + transcript. Returns a new job_id/sub_task_id
+  // (the adjustment itself is a new sub-task row).
+  adjust: (requirementId: string, subTaskId: string, data: { prompt: string; model?: string }) =>
+    api.post<{ job_id: string; sub_task_id: string }>(
+      `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/adjust`,
+      data,
+    ),
+  // Auto-orchestrate: ask the developer main agent to decompose + dispatch.
+  // Returns the main-agent's reply (sentinel-stripped) + ids of the
+  // children it just spawned. Each child's progress streams via the
+  // existing /api/wizard/jobs/{jobId}/stream endpoint (use those job_ids
+  // on the response to subscribe). The summary Markdown appears on the
+  // next GET of the requirement (see requirements.coding_plan).
+  orchestrate: (requirementId: string, data: { user_message: string; model?: string }) =>
+    api.post<SubTaskOrchestrateResponse>(
+      `/api/requirements/${requirementId}/orchestrate`, data,
+    ),
+};
+
+// SubTaskOrchestrateResponse is what the backend returns from POST
+// /orchestrate. sub_task_ids are the children the orchestrator created in
+// this call; the caller subscribes to each child's
+// /api/wizard/jobs/{id}/stream to see live progress. job_id is the
+// orchestrator's own JobStore job (no public stream for it — the main
+// agent's text is folded into the children + the next coding_plan
+// refresh). plan_id (optional) is the orchestrator's forked session id.
+export interface SubTaskOrchestrateResponse {
+  job_id: string;
+  sub_task_ids: string[];
+  plan_id?: string;
+}
+
+// CLI command constructor — renders the `claude ...` invocation the user
+// can paste into an external terminal to continue a sub-task's session
+// outside Nova. The exact command depends on whether the session has been
+// forked yet: a fresh sub-task that already ran needs --resume <sid> (not
+// --fork-session) so the user continues *that* session verbatim. The
+// command is a UI hint, not executed by Nova — the user copies and runs
+// it in their own shell.
+export function subTaskCliCommand(st: SubTask): string {
+  const sid = (st.session_id || '').trim();
+  if (!sid) {
+    // Sub-task never spawned yet — show the placeholder command the user
+    // would issue from the parent's session to fork a new one.
+    const parent = (st.source_session_id || '').trim();
+    if (parent) {
+      return `claude --resume ${parent} --fork-session --session-id <new-uuid> -p "${escapeForShell(st.prompt)}"`;
+    }
+    return `# 等待主 Agent 会话就绪 (需求未启动 coding)`;
+  }
+  // Standard continue command — matches the canonical "claude -r"
+  // short-flag the CLI accepts.
+  return `claude --resume ${sid}`;
+}
+
+// subTaskAdjustCommand: paste-able --fork-session resume that continues
+// this sub-task's session with a new instruction. Useful after the user
+// applies an AdjustSubTask round inside Nova and wants to keep iterating
+// from their own terminal.
+export function subTaskAdjustCommand(st: SubTask, nextPrompt: string): string {
+  const sid = (st.session_id || '').trim();
+  if (!sid) return subTaskCliCommand(st);
+  return `claude --resume ${sid} --fork-session --session-id <new-uuid> -p "${escapeForShell(nextPrompt)}"`;
+}
+
+// escapeForShell quotes the prompt for inclusion in a bash/zsh single
+// command. Keeps things conservative (single quotes, escape any inner '
+// as '\''), so a multi-line prompt pasted into a terminal stays parseable.
+function escapeForShell(s: string): string {
+  return s.replace(/'/g, `'\\''`).replace(/\n/g, ' ');
+}
+
 // Requirements
 export type Kind = 'issue' | 'requirement' | 'idea';
 
@@ -294,6 +425,13 @@ export interface Requirement {
   // Empty/missing = no snapshot recorded yet. Parsed by parseUsageSnapshots
   // in utils/logLines.ts.
   usage_snapshots?: string;
+  // coding_plan: the developer main agent's task breakdown Markdown. Set
+  // either (a) when StartCoding's mainAgent output contains a
+  // `## 任务分解` (or `<!-- CODING_PLAN_START -->...<!-- CODING_PLAN_END -->`)
+  // section, or (b) when /api/requirements/{id}/orchestrate runs and the
+  // main agent emits its structured plan. Rendered by SubTaskPanel as the
+  // "建议子任务" preview.
+  coding_plan?: string;
   created_at: string; updated_at: string;
   completed_at?: string;
 }
@@ -974,11 +1112,44 @@ export const fmtCost = (costs?: CostItem[]): string => {
   return costs.length > 1 ? `${primary} +${costs.length - 1}` : primary;
 };
 
+// fmtNum renders a token count with k/M suffix for >=1k numbers so the
+// sub-task TokenStrip stays compact on narrow screens. < 10k keeps one
+// decimal ("1.2k"); >= 10k rounds to whole ("12k"). Zero → "0".
+export const fmtNum = (n: number): string => {
+  if (n === 0) return '0';
+  if (n >= 1000000) return `${(n / 1000000).toFixed(n >= 10000000 ? 0 : 1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
+  return n.toLocaleString();
+};
+
+// JobUsageSummary mirrors the backend's service.JobUsageSummary. The
+// sub-task panel calls usageApi.byJob() to render the 🪙 token strip on
+// each sub-task card. total_tokens is the pre-summed convenience field
+// (input + output + cache_creation + cache_read) so the UI doesn't have
+// to add them up. cost_usd is recomputed from the active config's unit
+// prices so a price-list edit applies retroactively.
+export interface JobUsageSummary {
+  job_id: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  total_tokens: number;
+  step: string;
+  model: string;
+  invocation_count: number;
+  cost_usd: number;
+}
+
 export const usageApi = {
   requirement: (id: string) => api.get<RequirementUsage>(`/api/usage/requirement/${id}`),
   rows: (id: string, step?: string) => api.get<UsageRow[]>(`/api/usage/requirement/${id}/rows${step ? `?step=${encodeURIComponent(step)}` : ''}`),
   byRequirement: (projectId: string) => api.get<ReqUsage[]>(`/api/usage/by-requirement?project_id=${projectId}`),
   project: (id: string) => api.get<ProjectUsage>(`/api/usage/project/${id}`),
+  // Per-JobStore-job token rollup — sub-task cards fetch this so each child
+  // agent's 🪙 token strip can show its own usage. Empty body when the job
+  // has no token_usage row yet (still-running / pre-result).
+  byJob: (jobId: string) => api.get<JobUsageSummary>(`/api/usage/job/${jobId}`),
 };
 
 // ---- Auth & RBAC ---------------------------------------------------------

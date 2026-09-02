@@ -6,6 +6,7 @@ import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
 import ModelSelect from '../components/ModelSelect';
 import AtMentionTextarea from '../components/AtMentionTextarea';
+import SubTaskPanel from '../components/SubTaskPanel';
 import { SummarizeToRequirementModal } from '../components/SummarizeToRequirementModal';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -2555,6 +2556,18 @@ export default function RequirementDetail() {
                   <button className="btn" title="从技术方案重新 fork 新会话开始开发，不携带上次开发历史" onClick={() => openBranchModal()}>🔄 重新开发</button>
                 )}
               </div>
+
+              {/* ── 子Agent 协作 ── 由用户手动触发的子任务，共享主Agent上下文。
+                  在 developing/done 阶段都可用（开发期间创建子任务分工；完成后
+                  也可继续触发小修改子任务）。位置紧跟在「开发完成 / 重新开发」
+                  之后、Merge/PR 步骤之前，符合从上到下的 stage 流程。 */}
+              {(req.status === 'developing' || req.status === 'done') && reqKind !== 'idea' && (
+                <SubTaskPanel
+                  requirementId={req.id}
+                  codingSessionId={req.coding_session_id}
+                  requirement={req}
+                />
+              )}
 
               {/* ── Merge / PR step ── */}
               <div className="merge-section">

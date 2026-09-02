@@ -58,10 +58,40 @@ func main() {
 	usageSvc := service.NewUsageService(database)
 	aclSvc := service.NewACLService(database)
 	skillSvc := service.NewSkillService(database)
+	subTaskSvc := service.NewSubTaskService(database)
 
 	// Seed built-in roles on first run (idempotent).
 	if err := roleSvc.SeedDefaults(); err != nil {
 		log.Printf("[main] role seed: %v", err)
+	}
+	// Migrate the developer role prompt on upgrade: existing databases whose
+	// developer role still carries the pre-sub-task-collaboration "执行者"
+	// persona get rewritten to the new "统筹协调者" persona so the start-coding
+	// turn actually emits a task breakdown (without this, users who upgraded
+	// would still see Claude write code directly because SeedDefaults leaves
+	// existing rows alone). MigrateDeveloperRole is a no-op when the row
+	// already carries the new prompt or was genuinely user-customized.
+	if migrated, err := roleSvc.MigrateDeveloperRole(); err != nil {
+		log.Printf("[main] developer role migrate: %v", err)
+	} else if migrated {
+		log.Println("[main] developer role prompt 已升级到「统筹协调者」版本")
+	}
+	// Second-generation upgrade: v2 coordinator prompt (text JSON block) →
+	// v3 (Write tool writes subtasks.json; backend captures the structured
+	// tool_use). Same idempotent, per-boot style as MigrateDeveloperRole.
+	if migrated, err := roleSvc.MigrateDeveloperRoleWriteChannel(); err != nil {
+		log.Printf("[main] developer role write-channel migrate: %v", err)
+	} else if migrated {
+		log.Println("[main] developer role prompt 已升级到「Write 工具提交拆分」版本")
+	}
+
+	// Sub-task execution is driven by in-memory goroutines — a restart leaves
+	// running/pending rows orphaned (eternal spinner in the UI). Recover them
+	// to error so the user re-dispatches via 重新拆分.
+	if n, err := subTaskSvc.RecoverInterrupted(); err != nil {
+		log.Printf("[main] sub-task orphan recovery: %v", err)
+	} else if n > 0 {
+		log.Printf("[main] 回收了 %d 个因服务重启而中断的子任务", n)
 	}
 
 	// Seed the RBAC catalog (permissions / roles / bindings) and a default
@@ -125,7 +155,7 @@ func main() {
 	sharedJobs := store.NewJobStore(50)
 	preflightH := handler.NewPreflightHandler(pfRegistry, sharedJobs)
 	reqH := handler.NewRequirementHandler(reqSvc, llmGateway, sharedJobs, usageSvc)
-	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc)
+	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, subTaskSvc)
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs)
@@ -296,6 +326,10 @@ func main() {
 	mux.HandleFunc("GET /api/usage/requirement/{id}/rows", usageH.Rows)
 	mux.HandleFunc("GET /api/usage/by-requirement", usageH.ByRequirement)
 	mux.HandleFunc("GET /api/usage/project/{id}", usageH.Project)
+	// By-job usage summary — drives the per-sub-task 🪙 token strip on the
+	// SubTaskPanel. Returns the zero-value summary when no token_usage row
+	// exists yet (still-running / failed before result event).
+	mux.HandleFunc("GET /api/usage/job/{jobId}", usageH.ByJobID)
 
 	// Wizard (requirement refinement + coding via Claude CLI)
 	// Three-role stage-gate: analyst → architect → developer.
@@ -316,6 +350,30 @@ func main() {
 	// compressed_at timestamp for the "📦 已压缩" badge.
 	mux.HandleFunc("POST /api/wizard/compress-context", wizardH.CompressContext)
 	mux.HandleFunc("GET /api/wizard/requirement/{id}/context-summary", wizardH.GetContextSummary)
+
+	// Sub-task (子任务) endpoints — manually-triggered child agents that
+	// fork the requirement's coding_session_id so they share the main
+	// agent's context. Three REST routes; SSE streams reuse the existing
+	// /api/wizard/jobs/{id}/stream endpoint (sub_task.job_id is the wire
+	// that lets SubTaskPanel subscribe to the same event flow as
+	// CodingChat).
+	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks", wizardH.StartSubTask)
+	mux.HandleFunc("GET /api/requirements/{id}/sub-tasks", wizardH.ListSubTasks)
+	mux.HandleFunc("GET /api/requirements/{id}/sub-tasks/{sid}", wizardH.GetSubTask)
+	// Append a follow-up instruction to an existing sub-task (resumes the
+	// parent's claude session via --fork-session). Same scope as
+	// AdjustCoding — reuses the spawn helper in wizard.go.
+	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/{sid}/adjust", wizardH.AdjustSubTask)
+	// Manual re-split: resumes the coding session with the decomposition
+	// trigger and runs the same parse+dispatch pipeline as StartCoding's
+	// auto-orchestrate. Escape hatch for when auto-orchestration produced
+	// no children (or the user wants a fresh split).
+	mux.HandleFunc("POST /api/requirements/{id}/re-orchestrate", wizardH.ReOrchestrate)
+	// NOTE: /api/requirements/{id}/orchestrate is no longer registered —
+	// the old manual "一键编排" endpoint is replaced by StartCoding's auto
+	// dispatch (wizard.tryAutoOrchestrate). The main agent outputs
+	// [SUBTASKS_READY] as part of its normal decomposition turn and the
+	// handler fans out automatically.
 
 	// Merge / PR step (post-coding 合入). Local merge + AI conflict
 	// resolution, or push + create-PR link. Jobs reuse the wizard job stream.
