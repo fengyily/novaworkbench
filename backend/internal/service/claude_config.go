@@ -396,6 +396,39 @@ func (s *ClaudeConfigService) ModelInActiveList(m string) (bool, error) {
 	return false, nil
 }
 
+// ModelInAnyList reports whether m appears in the models list of ANY
+// claude_configs row. An empty m is treated as "no opinion" and accepted.
+// When no configs exist yet, every value is accepted (returns true).
+//
+// This loosens the role-model save gate so the user can pick a model from a
+// non-active config in the settings UI. The CLI subprocess still receives
+// env vars from the active config (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN),
+// so the caller is responsible for ensuring the chosen model is served by
+// the active gateway — the soft warning in handler/role.go communicates
+// that to the UI.
+func (s *ClaudeConfigService) ModelInAnyList(m string) (bool, error) {
+	if m == "" {
+		return true, nil
+	}
+	rows, err := s.db.Query("SELECT models FROM claude_configs")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var modelsJSON string
+		if err := rows.Scan(&modelsJSON); err != nil {
+			return false, err
+		}
+		for _, e := range DecodeModels(modelsJSON) {
+			if e.Model == m {
+				return true, nil
+			}
+		}
+	}
+	return true, rows.Err()
+}
+
 // MigrateLegacy is a one-way, idempotent migration: if claude_configs is empty
 // AND the old settings keys hold a token/base URL, seed a single "默认配置"
 // row marked active. The old settings rows are left untouched.
