@@ -1882,19 +1882,28 @@ export default function RequirementDetail() {
       />
 
       {req.description && (
-        <div className="detail-desc">
-          <div className="analysis-summary">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{req.description}</ReactMarkdown>
+        <div className="detail-desc spec-card">
+          <div className="spec-card-tag" aria-hidden>
+            <span className="spec-card-tag-label">BRIEF</span>
+            <span className="spec-card-tag-date">{req.created_at?.slice(0, 10) ?? ''}</span>
+          </div>
+          <div className="spec-card-body">
+            <div className="analysis-summary">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{req.description}</ReactMarkdown>
+            </div>
           </div>
         </div>
       )}
 
       {/* Token usage — per-step breakdown + total for this requirement.
           input = input_tokens + cache_creation + cache_read (billed input). */}
-      <div className="detail-section usage-section">
-        <div className="section-header" style={{ marginBottom: 10 }}>
-          <span style={{ fontWeight: 600, fontSize: 14 }}>Token 消耗</span>
-          {usageLoading && <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>刷新中…</span>}
+      <div className="detail-section usage-section ledger">
+        <div className="section-header ledger-header" style={{ marginBottom: 10 }}>
+          <span className="ledger-title">
+            <span className="ledger-title-mark" aria-hidden />
+            Token 消耗 · 账目
+          </span>
+          {usageLoading && <span className="ledger-loading">刷新中…</span>}
         </div>
         {usage && usage.by_step.length > 0 ? (
           <>
@@ -2157,8 +2166,18 @@ export default function RequirementDetail() {
             )}
           </>
         ) : (
-          <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
-            {usageLoading ? '加载中…' : '暂无 Token 消耗记录。完成一次分析 / 方案 / 编码后将在此展示。'}
+          <div className="ledger-empty">
+            <span className="ledger-empty-icon" aria-hidden>📭</span>
+            <span>
+              {usageLoading ? (
+                <>正在汇总本需求的账目…</>
+              ) : (
+                <>
+                  <strong>账目尚未生成。</strong>
+                  完成一次分析 / 方案 / 编码后，每一笔 token 与费用会按阶段写入此台账。
+                </>
+              )}
+            </span>
           </div>
         )}
       </div>

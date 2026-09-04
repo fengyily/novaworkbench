@@ -350,6 +350,19 @@ body.no-scroll {
   cursor: not-allowed;
   background: var(--color-hover);
 }
+/* Hint shown next to the model select when the picked config has no
+   models. Inline micro-copy rather than a full alert so the picker
+   layout doesn't reflow when it appears. */
+.model-select-hint {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(245, 158, 11, 0.08);
+  color: #b45309;
+  white-space: nowrap;
+  flex: none;
+}
 /* Working state — the card itself paints amber so the whole picker
    reads as "Claude is in flight on this stage"; the rail keeps its
    stage color but pulses opacity to draw the eye. Pair with the
