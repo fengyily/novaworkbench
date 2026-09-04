@@ -16,6 +16,7 @@ import (
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/middleware"
 	"github.com/novaworkbench/backend/internal/preflight"
+	"github.com/novaworkbench/backend/internal/secret"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/web"
@@ -45,6 +46,15 @@ func main() {
 	}
 	defer database.Close()
 
+	// Load (or generate) the master encryption key used by internal/secret to
+	// seal Agent-server credentials. Failure here is fatal — there is no
+	// recoverable mode for a missing master key, and silently degrading to
+	// plaintext storage would defeat the whole feature.
+	if err := secret.Init(); err != nil {
+		log.Fatalf("Failed to initialize secret store: %v", err)
+	}
+	log.Printf("[secret] master key loaded from %s", secret.KeyPath())
+
 	// Services
 	platformSvc := service.NewPlatformTokenService(database)
 	projectSvc := service.NewProjectService(database, platformSvc)
@@ -58,6 +68,7 @@ func main() {
 	usageSvc := service.NewUsageService(database)
 	aclSvc := service.NewACLService(database)
 	skillSvc := service.NewSkillService(database)
+	agentSvrSvc := service.NewAgentServerService(database)
 	subTaskSvc := service.NewSubTaskService(database)
 
 	// Seed built-in roles on first run (idempotent).
@@ -155,7 +166,7 @@ func main() {
 	sharedJobs := store.NewJobStore(50)
 	preflightH := handler.NewPreflightHandler(pfRegistry, sharedJobs)
 	reqH := handler.NewRequirementHandler(reqSvc, llmGateway, sharedJobs, usageSvc)
-	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, subTaskSvc)
+wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, subTaskSvc)
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs)
@@ -169,6 +180,12 @@ func main() {
 	authH := handler.NewAuthHandler(aclSvc)
 	aclH := handler.NewACLHandler(aclSvc)
 	skillH := handler.NewSkillHandler(skillSvc)
+
+	// Agent-server resource: SSH targets for remote claude execution. The
+	// credential is sealed by internal/secret (AES-256-GCM); the wizard's
+	// StartCoding remote branch consumes this service when a request carries
+	// agent_server_id.
+	agentSvrH := handler.NewAgentServerHandler(agentSvrSvc, sharedJobs)
 
 	// Router
 	mux := http.NewServeMux()
@@ -256,6 +273,19 @@ func main() {
 	mux.HandleFunc("POST /api/settings/tokens", platformH.Create)
 	mux.HandleFunc("PUT /api/settings/tokens/{id}", platformH.Update)
 	mux.HandleFunc("DELETE /api/settings/tokens/{id}", platformH.Delete)
+
+	// Agent servers (settings) — remote Linux/macOS execution targets with
+	// AES-256-GCM-encrypted credentials. CRUD + Check/Install (background
+	// JobStore jobs streamed over SSE, same shape as wizard/preflight).
+	mux.HandleFunc("GET /api/settings/agent-servers", agentSvrH.List)
+	mux.HandleFunc("POST /api/settings/agent-servers", agentSvrH.Create)
+	mux.HandleFunc("GET /api/settings/agent-servers/{id}", agentSvrH.Get)
+	mux.HandleFunc("PUT /api/settings/agent-servers/{id}", agentSvrH.Update)
+	mux.HandleFunc("DELETE /api/settings/agent-servers/{id}", agentSvrH.Delete)
+	mux.HandleFunc("POST /api/settings/agent-servers/{id}/check", agentSvrH.Check)
+	mux.HandleFunc("POST /api/settings/agent-servers/{id}/install", agentSvrH.Install)
+	mux.HandleFunc("GET /api/settings/agent-servers/jobs/{id}", agentSvrH.GetJob)
+	mux.HandleFunc("GET /api/settings/agent-servers/jobs/{id}/stream", agentSvrH.StreamJob)
 
 	// Roles (settings) — per-role system prompt + model, drives claude CLI flags
 	mux.HandleFunc("GET /api/settings/roles", roleH.List)

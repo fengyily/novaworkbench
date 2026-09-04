@@ -12,6 +12,7 @@ import Settings from './pages/Settings';
 import SettingsTokens from './pages/SettingsTokens';
 import SettingsRoles from './pages/SettingsRoles';
 import SettingsClaude from './pages/SettingsClaude';
+import SettingsAgentServers from './pages/SettingsAgentServers';
 import SettingsLLM from './pages/SettingsLLM';
 import SettingsDatabase from './pages/SettingsDatabase';
 import SettingsPreflight from './pages/SettingsPreflight';
@@ -64,6 +65,7 @@ export default function App() {
               <Route path="users" element={<SettingsUsers />} />
               <Route path="acl" element={<SettingsACLRoles />} />
               <Route path="roles" element={<SettingsRoles />} />
+              <Route path="agent-servers" element={<SettingsAgentServers />} />
               <Route path="skills" element={<SettingsSkills />} />
               <Route path="claude" element={<SettingsClaude />} />
               <Route path="llm" element={<SettingsLLM />} />

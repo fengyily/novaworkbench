@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode, type CSSProperties } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, wizardApi, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabels, kindOf, STAGE_VISIBILITY, type Kind, type CostItem } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, wizardApi, agentServersApi, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabels, kindOf, STAGE_VISIBILITY, type Kind, type CostItem } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
@@ -317,6 +317,17 @@ export default function RequirementDetail() {
   const [analystModel, setAnalystModel] = useState('');
   const [architectModel, setArchitectModel] = useState('');
   const [developerModel, setDeveloperModel] = useState('');
+  // Agent-server selector for the developer stage. Empty string = local
+  // execution (the historical default); non-empty = run claude on the chosen
+  // remote target. Only `ready` servers are listed — the wizard refuses to
+  // start coding on a target whose dependencies haven't been verified.
+  const [agentServerId, setAgentServerId] = useState('');
+  const [agentServers, setAgentServers] = useState<AgentServer[]>([]);
+  useEffect(() => {
+    agentServersApi.list()
+      .then((rows) => setAgentServers((rows ?? []).filter((s) => s.status === 'ready')))
+      .catch(() => {/* settings tab is the source of truth — silently ignore */});
+  }, []);
   const modelSeedRef = useRef(false);
   useEffect(() => {
     if (!req || modelSeedRef.current) return;
@@ -1105,6 +1116,12 @@ export default function RequirementDetail() {
           read_knowledge: useKnowledge,
           // Per-request model override — empty means the role's configured model.
           ...(developerModel ? { model: developerModel } : {}),
+          // Remote Agent-server execution. Empty string = local execution (the
+          // wizardH.StartCoding default branch handles the legacy path).
+          ...(agentServerId ? { agent_server_id: agentServerId } : {}),
+          // Remote Agent-server execution: empty string = local (legacy); a
+          // server id routes the coding job through SSH instead.
+          ...(agentServerId ? { agent_server_id: agentServerId } : {}),
         }),
       });
       const json = await res.json();
@@ -1554,6 +1571,30 @@ export default function RequirementDetail() {
                 defaultModelName={developerDefaultModel}
                 title={coding ? 'Claude 正在开发中，暂不能切换模型' : '开发实现阶段使用的模型，开始前即可选择'}
               />
+            </div>
+            {/* Agent-server selector: empty = local execution (legacy default).
+                Only ready servers are listed; the wizard remote branch refuses
+                to start on a non-ready target so this stays consistent with the
+                server-side guard. */}
+            <div className="modal-field">
+              <label>执行环境</label>
+              <select
+                className="input"
+                value={agentServerId}
+                onChange={e => setAgentServerId(e.target.value)}
+                disabled={coding}
+                title={agentServers.length === 0 ? '设置 → Agent 服务器 添加一台并完成环境检查后可用' : ''}
+              >
+                <option value="">本地执行</option>
+                {agentServers.map(s => (
+                  <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
+                ))}
+              </select>
+              {agentServers.length === 0 && (
+                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                  未配置就绪的 Agent 服务器，请在「设置 → Agent 服务器」中添加并检查环境。
+                </div>
+              )}
             </div>
             <div className="modal-field">
               <label>新分支名</label>
@@ -2449,6 +2490,33 @@ export default function RequirementDetail() {
                   defaultModelName={developerDefaultModel}
                   title={coding ? 'Claude 正在开发中，暂不能切换模型' : '开发实现阶段使用的模型，开始前即可选择'}
                 />
+                {/* Agent-server selector. Empty = local execution (the default
+                    and the only path before this feature); non-empty routes the
+                    claude CLI to that remote target. Only `ready` servers are
+                    listed — Check must succeed before coding can target them. */}
+                <label style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  执行环境
+                  <select
+                    className="form-input"
+                    style={{ minWidth: 140 }}
+                    value={agentServerId}
+                    onChange={(e) => setAgentServerId(e.target.value)}
+                    disabled={coding}
+                    title={agentServerId
+                      ? `将在 ${agentServers.find((s) => s.id === agentServerId)?.name ?? ''} 上执行 Claude CLI`
+                      : '本地执行（默认）'}
+                  >
+                    <option value="">本地执行</option>
+                    {agentServers.map((s) => (
+                      <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
+                    ))}
+                  </select>
+                </label>
+                {agentServers.length === 0 && (
+                  <Link to="/settings/agent-servers" style={{ fontSize: 12 }}>
+                    配置 Agent 服务器 →
+                  </Link>
+                )}
               </div>
             </div>
           )}

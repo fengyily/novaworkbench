@@ -8,9 +8,12 @@ import "github.com/novaworkbench/backend/internal/model"
 // stable persona + output-style guidance lives here — dynamic task content
 // stays in the `-p` prompt built by the handlers.
 func DefaultRoles() []model.Role {
-	// Sentinel the wizard handler looks for in the main-agent's finalResult
-	// to know it should dispatch sub-tasks. Kept as a constant so the role
-	// prompt and the handler can't drift out of sync.
+	// Sentinel the developer wizard handler looks for in the main-agent's
+	// finalResult to know it should dispatch sub-tasks. Kept as a constant
+	// so the role prompt and the handler can't drift out of sync. The
+	// "agent" role (used by Agent-Server execution) intentionally does NOT
+	// mention this sentinel — it should implement the requirement directly,
+	// not split into sub-tasks.
 	const subtasksReadySentinel = "[SUBTASKS_READY]"
 	return []model.Role{
 		{
@@ -67,6 +70,25 @@ func DefaultRoles() []model.Role {
 				"## 其他场景\n" +
 				"- 若用户问\"如何拆分\"、\"评估可行性\"等纯咨询类问题：只输出 Markdown 表格，不要输出 JSON 块 / 哨兵。\n" +
 				"- 若用户已经在子任务中执行了某些工作：基于已完成子任务的产物评估进度，并提示下一步建议（可继续走\"开始执行\"流程补充剩余子任务）。\n",
+			Model: "",
+		},
+		{
+			ID:          "role_agent",
+			Key:         "agent",
+			Name:        "Agent 开发者",
+			Description: "Agent-Server 执行环境的开发者角色：在远程服务器上直接实现需求，不拆分子任务、不输出 [SUBTASKS_READY]。",
+			SortOrder:   6,
+			Enabled:     true,
+			SystemPrompt: "你是一位资深软件工程师，正在远程 Agent 服务器上直接执行需求实现。\n\n" +
+				"工作方式：\n" +
+				"- 直接读取项目相关文件，基于真实代码实现需求；不要先拆分子任务。\n" +
+				"- 像 Claude Code 在本地一样使用 Read / Edit / Write / Bash 工具完成全部实现工作。\n" +
+				"- 一次会话内完成端到端开发（代码 + 验证 + git commit）。\n" +
+				"- 不要在回复里写任务分解 JSON / Markdown 拆分表；后端会直接根据你的代码改动提交结果，不调度子任务。\n" +
+				"- 用中文与用户沟通，commit message 用英文。\n\n" +
+				"## 何时结束\n" +
+				"- 所有代码已落盘并通过基础验证（构建 / 现有测试 / 手动 smoke）后即可结束。\n" +
+				"- 在最终回复里简短说明：做了什么、关键文件、验证方式、是否需要进一步追加调整。\n",
 			Model: "",
 		},
 		{

@@ -1,0 +1,35 @@
+[Unit]
+Description=NovaWorkbench Agent Worker
+# Only start after the network is up so the SDK can reach api.anthropic.com.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Worker is reached via SSH direct-tcpip from NovaWorkbench's Go side — no
+# network exposure needed. Bind 127.0.0.1 explicitly via env.
+Environment=NOVA_AGENT_WORKER_HOST=127.0.0.1
+Environment=NOVA_AGENT_WORKER_PORT=7000
+# WorkingDirectory and ExecStart are rewritten at deploy time to the resolved
+# $HOME/nova-agent-worker path (the embedded unit mirrors this behavior so
+# the repo copy and the SFTP-uploaded copy stay in lock-step).
+WorkingDirectory=/opt/nova-agent-worker
+ExecStart=/usr/bin/env node server.mjs
+# Restart on any failure. RestartSec is short (3s) so a killed worker comes
+# back quickly; StartLimitBurst guards against tight restart loops.
+Restart=always
+RestartSec=3
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# Logs land in journald; `journalctl --user -u nova-agent-worker -f` to tail.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+# This is a USER unit (drop into ~/.config/systemd/user/) — multi-user.target
+# is a system unit target and referencing it here makes `systemctl --user
+# enable` print "added as a dependency to a non-existent unit" and skip the
+# symlink. `default.target` is the user-mode equivalent; the worker starts
+# when the user logs in (which is exactly when NovaWorkbench is in use).
+WantedBy=default.target

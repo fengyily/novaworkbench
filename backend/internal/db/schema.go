@@ -298,6 +298,28 @@ CREATE TABLE IF NOT EXISTS skills (
 	updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Agent servers: remote Linux/macOS execution targets. The credential
+-- (auth_value) is stored as an AES-256-GCM ciphertext (base64, nonce embedded)
+-- by internal/secret and never returned in API responses. status is updated
+-- by the Check goroutine and check_result holds the last human-readable summary.
+-- Schema added 2026-09 by Agent-Server feature.
+CREATE TABLE IF NOT EXISTS agent_servers (
+	id              TEXT PRIMARY KEY,
+	name            TEXT NOT NULL,
+	host            TEXT NOT NULL,
+	port            INTEGER NOT NULL DEFAULT 22,
+	username        TEXT NOT NULL DEFAULT 'root',
+	auth_type       TEXT NOT NULL DEFAULT 'key',
+	auth_value      TEXT NOT NULL DEFAULT '',
+	auth_value_algo TEXT NOT NULL DEFAULT 'aes-gcm',
+	status          TEXT NOT NULL DEFAULT 'unknown',
+	last_check_at   DATETIME,
+	check_result    TEXT NOT NULL DEFAULT '',
+	created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_agent_servers_status ON agent_servers(status);
+
 -- Sub-task: a manually-triggered child agent under a requirement's developing
 -- stage. Each sub-task forks the requirement's coding_session_id (or
 -- design_session_id as fallback) so every child agent shares the main agent's
@@ -426,6 +448,15 @@ var alterColumns = []string{
 	// telemetry out of the compression-summary columns above. Empty = no
 	// snapshot yet.
 	`ALTER TABLE requirements ADD COLUMN usage_snapshots TEXT NOT NULL DEFAULT ''`,
+	// Agent server table: covered in canonicalSchema; nothing further to alter.
+	// Project ↔ Claude session slug: claude CLI stores per-session JSONL under
+	// $NOVA_CLAUDE_HOME/projects/<slug>/, where <slug> is an encoding of the
+	// working directory path. The remote-coding path (handler/wizard.go
+	// runRemoteCoding) needs the same slug on the remote server so SFTP
+	// session sync lands in the right directory and `--resume <session_id>`
+	// finds the jsonl. Cached here on first local execution by scanning the
+	// local projects dir; empty = not yet discovered.
+	`ALTER TABLE projects ADD COLUMN claude_project_slug TEXT NOT NULL DEFAULT ''`,
 	// coding_plan: the developer main-agent's "task breakdown" Markdown,
 	// produced on the start-coding turn and refreshed whenever the user asks
 	// the main agent to re-plan. Empty = main agent hasn't emitted one yet, or

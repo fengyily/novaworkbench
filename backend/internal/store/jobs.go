@@ -3,6 +3,7 @@ package store
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"strings"
 	"sync"
 	"time"
 )
@@ -36,6 +37,9 @@ type Job struct {
 	Model string `json:"model"`
 	mu    sync.RWMutex
 	subs  []chan LogLine
+	// lineCarry holds an unfinished line between successive Write calls so a
+	// streamed stdout doesn't get split mid-line. Access only via Write/finish.
+	lineCarry string
 }
 
 // SetModel records the effective model on the job so subscribers + snapshots
@@ -60,6 +64,34 @@ func (j *Job) Append(line LogLine) {
 		default:
 		}
 	}
+}
+
+// Write splits p into lines (keeping a small carry-over buffer for partial
+// lines) and emits each non-empty line as a `message` LogLine. It lets *Job
+// satisfy io.Writer so SSH and preflight code can stream stdout/stderr
+// straight into a job's log without a per-line adapter.
+func (j *Job) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	pending := string(p)
+	for {
+		i := strings.IndexByte(pending, '\n')
+		if i < 0 {
+			j.lineCarry = j.lineCarry + pending
+			break
+		}
+		line := pending[:i]
+		if j.lineCarry != "" {
+			line = j.lineCarry + line
+			j.lineCarry = ""
+		}
+		if line != "" {
+			j.Append(LogLine{Type: "message", Content: line})
+		}
+		pending = pending[i+1:]
+	}
+	return len(p), nil
 }
 
 func (j *Job) Finish(exitCode int, status JobStatus) {
