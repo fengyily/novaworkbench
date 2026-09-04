@@ -1893,3 +1893,48 @@
   .subtask-artifact { padding: 12px; font-size: 12px; }
   .subtask-log { max-height: 240px; font-size: 11px; }
 }
+
+/* ── Design doc collapse (long plans default to collapsed, expandable on click) ──
+   Lives at the end of the file so it follows the design-section/toolbar block
+   styles defined above. Uses --color-surface because .detail-section (the
+   wrapper around .design-section) has background: var(--color-surface); the
+   fade mask has to blend into that card surface, not the page background. */
+.design-content {
+  display: block;
+  transition: max-height 0.25s ease;
+  overflow: hidden;
+  position: relative;
+}
+.design-content-collapsed {
+  max-height: 320px; /* ≈ 6 lines of markdown + padding */
+}
+.design-content-collapsed::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 80px;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0), var(--color-surface, #ffffff));
+  pointer-events: none;
+}
+/* Avoid the fade mask clipping the last child's text. Only applies when the
+   container is in the collapsed state; existing .analysis-summary /
+   .analysis-block padding/margin are otherwise untouched. */
+.design-content-collapsed > *:last-child { padding-bottom: 16px; }
+
+.design-toggle-btn {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--color-primary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.design-toggle-btn:hover {
+  background: var(--color-hover, rgba(79, 70, 229, 0.06));
+  border-color: var(--color-primary);
+}
