@@ -60,9 +60,18 @@ func (h *RoleHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := roleUpdateResponse{Role: *role}
 	if req.Model != "" && h.ccfg != nil {
-		ok, werr := h.ccfg.ModelInActiveList(req.Model)
-		if werr == nil && !ok {
-			resp.Warning = "模型不在当前配置的模型列表中"
+		// First gate: model must appear in SOME config's list (any platform).
+		// ModelInAnyList returns true on lookup error and on empty DB, so a
+		// transient failure here cannot block the save.
+		if ok, werr := h.ccfg.ModelInAnyList(req.Model); werr == nil && !ok {
+			resp.Warning = "模型不在任何 Claude 配置的模型列表中"
+		} else if werr == nil {
+			// Second gate (soft): warn when the model is in a non-active config.
+			// Runtime still uses the active config's base URL / auth token, so
+			// the user should confirm the active gateway actually serves this model.
+			if inActive, _ := h.ccfg.ModelInActiveList(req.Model); !inActive {
+				resp.Warning = "模型不在当前生效配置的模型列表中（运行时仍走生效配置的网关，请确认网关支持该模型）"
+			}
 		}
 	}
 	writeJSON(w, 200, resp)

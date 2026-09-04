@@ -242,6 +242,12 @@ func emitKnowledgeResultEvent(job *store.Job, items []knowledgeUseItem, usedCoun
 // user "no specific model was selected for this stage".
 const DefaultModelLabel = "默认模型"
 
+// executorRoleKey is the roles-table key for the sub-task executor persona.
+// Child agents fork the orchestrator session (developer role = 统筹协调, which
+// decomposes and emits [SUBTASKS_READY]), so every child launch must override
+// the system prompt with this role or it re-decomposes instead of coding.
+const executorRoleKey = "executor"
+
 // effectiveModelFromValues resolves the effective model from its two sources:
 // the role's explicit per-role override (roleModel) and the active claude
 // config's default model (configDefaultModel). Precedence: role override >
@@ -1515,9 +1521,9 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		// local path so the frontend doesn't have to special-case anything.
 		if req.AgentServerID != "" && h.agentSvrSvc != nil {
 			out := h.runRemoteCoding(&remoteCodingInput{
-				job:           job,
-				serverID:      req.AgentServerID,
-				req:           startCodingReq{
+				job:      job,
+				serverID: req.AgentServerID,
+				req: startCodingReq{
 					ProjectPath:      req.ProjectPath,
 					RequirementTitle: req.RequirementTitle,
 					RequirementDesc:  req.RequirementDesc,
@@ -2560,15 +2566,15 @@ func workerCategoryHint(cat, msg string) string {
 // so the caller can transparently fall back to a fresh session instead of
 // surfacing a hard error.
 type claudeStreamOutcome struct {
-	finalResult     string
-	sessionID       string // session_id of this run, read from the system/init event. For a --fork-session run this is the NEW forked id.
-	staleSession    bool
-	errMsg          string
-	hadStreamEvents bool     // true if any stream_event/content_block_delta arrived
-	eventCount      int      // total NDJSON events parsed (any type)
-	streamEventCount int     // subset that are stream_event
-	lastEventType   string   // type field of the most recent event, used for EOF postmortem
-	planContent     string   // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
+	finalResult      string
+	sessionID        string // session_id of this run, read from the system/init event. For a --fork-session run this is the NEW forked id.
+	staleSession     bool
+	errMsg           string
+	hadStreamEvents  bool   // true if any stream_event/content_block_delta arrived
+	eventCount       int    // total NDJSON events parsed (any type)
+	streamEventCount int    // subset that are stream_event
+	lastEventType    string // type field of the most recent event, used for EOF postmortem
+	planContent      string // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
 	// subTasksJSON is the authoritative sub-task decomposition payload,
 	// captured from a Write tool_use whose target path ends with
 	// /.novaworkbench/subtasks.json. Unlike the free-text JSON block +
@@ -2577,8 +2583,8 @@ type claudeStreamOutcome struct {
 	// markdown mangling (req_9d24ef181a5ad5c4). tryAutoOrchestrate prefers
 	// this over every text-parsing fallback.
 	subTasksJSON string
-	actualModel     string   // model id returned by the API, captured from the assistant event's message.model
-	toolFiles       []string // file paths / patterns touched by Read/Write/Edit/Grep/Glob tool calls (for knowledge-usage evaluation)
+	actualModel  string   // model id returned by the API, captured from the assistant event's message.model
+	toolFiles    []string // file paths / patterns touched by Read/Write/Edit/Grep/Glob tool calls (for knowledge-usage evaluation)
 	// lastUsage captures the four token counts from the terminal result event
 	// (or zero values when the stream ended before reaching a result). The
 	// compress-context handler reads this to populate the `done` payload's
@@ -3076,18 +3082,18 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 // signature readable and forces callers to acknowledge the same dependencies
 // the local branch already resolved (prompt, workDir, session threading).
 type remoteCodingInput struct {
-	job            *store.Job
-	serverID       string
-	req            startCodingReq
-	reqRow         *model.Requirement
-	prompt         string
-	workDir        string // local worktree path (used only for SFTP upload source)
-	sourceSID      string
-	fork           bool
-	sessionArg     string
-	forkSessionID  string
-	model          string
-	usage          *usageCtx
+	job           *store.Job
+	serverID      string
+	req           startCodingReq
+	reqRow        *model.Requirement
+	prompt        string
+	workDir       string // local worktree path (used only for SFTP upload source)
+	sourceSID     string
+	fork          bool
+	sessionArg    string
+	forkSessionID string
+	model         string
+	usage         *usageCtx
 }
 
 // startCodingReq mirrors the anonymous struct StartCoding decodes so the
@@ -3226,15 +3232,15 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// shouldn't either. The `env` field carries every key the CLI needs.
 	ignoreLocal := true
 	opts := llm.StreamOpts{
-		Prompt:          in.prompt,
-		WorkDir:         wtPath,
-		SystemPrompt:    "",
-		Model:           cliModelArg(in.model),
-		SessionID:       in.sessionArg,
-		Resume:          in.sourceSID != "",
-		Fork:            in.fork,
-		ForkSessionID:   in.forkSessionID,
-		PermissionMode:  "",
+		Prompt:                 in.prompt,
+		WorkDir:                wtPath,
+		SystemPrompt:           "",
+		Model:                  cliModelArg(in.model),
+		SessionID:              in.sessionArg,
+		Resume:                 in.sourceSID != "",
+		Fork:                   in.fork,
+		ForkSessionID:          in.forkSessionID,
+		PermissionMode:         "",
 		OverrideSettingSources: &ignoreLocal, // legacy flag, kept true
 	}
 	// Use BuildRemoteEnvPairs, NOT BuildEnvPairs: the remote worker spawns
@@ -3372,17 +3378,17 @@ func (w *jobWriter) Write(p []byte) (int, error) {
 // A struct makes typos like `OverrideSettingSoures` a compile error rather
 // than a "worker returns 400 with no detail" at runtime.
 type workerRunBody struct {
-	WorkDir                string            `json:"workDir"`
-	Prompt                 string            `json:"prompt"`
-	Model                  string            `json:"model,omitempty"`
-	SystemPrompt           string            `json:"systemPrompt,omitempty"`
-	SessionID              string            `json:"sessionId,omitempty"`
-	Resume                 bool              `json:"resume,omitempty"`
-	Fork                   bool              `json:"fork,omitempty"`
-	ForkSessionID          string            `json:"forkSessionId,omitempty"`
-	Env                    map[string]string `json:"env,omitempty"`
-	AllowedTools           []string          `json:"allowedTools,omitempty"`
-	DisallowedTools        []string          `json:"disallowedTools,omitempty"`
+	WorkDir         string            `json:"workDir"`
+	Prompt          string            `json:"prompt"`
+	Model           string            `json:"model,omitempty"`
+	SystemPrompt    string            `json:"systemPrompt,omitempty"`
+	SessionID       string            `json:"sessionId,omitempty"`
+	Resume          bool              `json:"resume,omitempty"`
+	Fork            bool              `json:"fork,omitempty"`
+	ForkSessionID   string            `json:"forkSessionId,omitempty"`
+	Env             map[string]string `json:"env,omitempty"`
+	AllowedTools    []string          `json:"allowedTools,omitempty"`
+	DisallowedTools []string          `json:"disallowedTools,omitempty"`
 	// OverrideSettingSources is the legacy "drop the user source" flag —
 	// when true, the worker invokes claude with --setting-sources project,local.
 	// Kept for callers that still want project-level hooks etc.
@@ -3444,7 +3450,7 @@ func workerRunRequest(opts llm.StreamOpts, envPairs []string, in *remoteCodingIn
 
 // shellQuoteSingle mirrors the local ssh client's quoting: single-quoted
 // strings with embedded single quotes escaped via close-quote / escape /
-// open-quote. Empty strings become ''.
+// open-quote. Empty strings become ”.
 func shellQuoteSingle(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
@@ -4579,11 +4585,12 @@ type compressContextDone struct {
 // in this stage starts fresh and sees the summary as a prompt prefix.
 //
 // Stream protocol (SSE under text/event-stream):
-//   phase       — human-readable status line
-//   message     — Claude's summary text as it streams in
-//   usage       — mirror of the result.usage block (powers the live usage bar)
-//   error       — terminal failure (no DB write happens)
-//   done        — terminal success; carries {step, summary, tokens_used, model}
+//
+//	phase       — human-readable status line
+//	message     — Claude's summary text as it streams in
+//	usage       — mirror of the result.usage block (powers the live usage bar)
+//	error       — terminal failure (no DB write happens)
+//	done        — terminal success; carries {step, summary, tokens_used, model}
 //
 // Failure policy: on any error path (stream failure, stale session, missing
 // [COMPRESS_COMPLETE] marker) we emit `error` + `done{success:false}` and
@@ -4899,9 +4906,11 @@ func (h *WizardHandler) runSubTask(
 	job.Append(store.LogLine{Type: "phase", Content: role})
 	job.Append(store.LogLine{Type: "message", Content: "📝 提示词: " + truncateForLog(body, 240)})
 
-	// Resolve developer role for system prompt + model. The child agent is
-	// an executor, not the coordinator; we override the role's default
-	// system prompt inline below.
+	// Resolve the developer role's model, but run the child under the
+	// "executor" role system prompt: the sub-task forks the coding session,
+	// which carries the developer (统筹协调) persona that decomposes instead
+	// of implementing. Without the override the child re-emits
+	// [SUBTASKS_READY] and writes no code.
 	_, modelName := h.roleConfig("developer")
 	if modelOverride != "" {
 		modelName = modelOverride
@@ -4926,33 +4935,22 @@ func (h *WizardHandler) runSubTask(
 		return
 	}
 
-	systemPrompt := "你是一位资深软件工程师，正在执行一个由主 Agent 派发的子任务。\n" +
-		"工作方式：\n" +
-		"- 主 Agent 已与用户完成需求分析和技术方案设计，你的工作是基于当前项目上下文完成指定的子任务。\n" +
-		"- 主动读取项目相关文件，理解现有代码结构后，再开始编写代码。\n" +
-		"- 遵循现有代码风格，编写清晰的代码。\n" +
-		"- 如有测试文件则同步更新。\n" +
-		"- 用中文沟通。\n\n" +
-		"工作完成后，必须用 Markdown 输出一份完整的工作报告（作为子任务的产物），包含以下章节：\n" +
-		"1. 任务摘要：简要说明你完成了什么\n" +
-		"2. 修改文件：列出所有修改/创建的文件路径\n" +
-		"3. 关键决策：列出重要的实现选择及理由\n" +
-		"4. 遗留问题：如有任何未完成或需要后续处理的事项，请明确列出\n"
-
 	var prompt string
 	if adjust {
 		prompt = "## 追加调整\n\n" + body + "\n"
 	} else {
 		prompt = "## 子任务\n\n" + body + "\n"
 	}
+	prompt += "\n> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
 	if block := llm.BuildSkillsBlock(h.mentionedSkills(req.Title + " " + body)); block != "" {
 		prompt = block + prompt
 	}
 
+	execSystemPrompt, _ := h.roleConfig(executorRoleKey)
 	cmd := h.llm.GenerateCode(llm.StreamOpts{
 		Prompt:       prompt,
 		WorkDir:      workDir,
-		SystemPrompt: systemPrompt,
+		SystemPrompt: execSystemPrompt,
 		Model:        cliModelArg(modelName),
 		// --resume <sourceSID> --fork-session --session-id <newSID>:
 		// child agent inherits the parent's conversation context but
@@ -5690,14 +5688,14 @@ func decodeSubtasksPayload(raw string) *orchestratorPayload {
 // gracefully instead of leaving the user staring at a "未派发" panel.
 //
 // Heuristic (matches what the developer role prompt asks the agent to write):
-//   1. Locate the "## 任务分解" / "## 子任务" / "## 子任务清单" / "## 任务清单"
-//      heading (case-insensitive, trimmed).
-//   2. From the heading line onward, grab consecutive list items:
-//      - "- " or "* " or numbered "1. " markdown items
-//      - "**N. 标题**：提示词" — the agent's compressed form, separated by "：" / ":"
-//      - "| 列 | 列 |" table rows starting from the 2nd data row
-//   3. Skip blank lines; require at least 2 items to consider it a real plan
-//      (one-liner instructions are usually prose, not a decomposition).
+//  1. Locate the "## 任务分解" / "## 子任务" / "## 子任务清单" / "## 任务清单"
+//     heading (case-insensitive, trimmed).
+//  2. From the heading line onward, grab consecutive list items:
+//     - "- " or "* " or numbered "1. " markdown items
+//     - "**N. 标题**：提示词" — the agent's compressed form, separated by "：" / ":"
+//     - "| 列 | 列 |" table rows starting from the 2nd data row
+//  3. Skip blank lines; require at least 2 items to consider it a real plan
+//     (one-liner instructions are usually prose, not a decomposition).
 //
 // Returns nil when nothing usable is found; caller logs + skips dispatch.
 func extractSubtasksFromMarkdown(text string) *orchestratorPayload {
@@ -6142,16 +6140,21 @@ func (h *WizardHandler) dispatchOneChild(
 		log.Printf("[orchestrate] failed to persist child job_id for %s: %v", st.ID, perr)
 	}
 
-	// Start the child agent (same code path as StartSubTask — system prompt
-	// overrides role default to "executor" framing).
+	// Start the child agent (same code path as StartSubTask). The "executor"
+	// role system prompt MUST be injected: the child forks the orchestrator
+	// session, which carries the developer (统筹协调) persona telling it to
+	// decompose and emit [SUBTASKS_READY]. Without an explicit override the
+	// child inherits that persona and re-emits the sentinel instead of
+	// writing any code.
+	execSystemPrompt, _ := h.roleConfig(executorRoleKey)
 	executorPrompt := "## 子任务\n\n" + t.Prompt + "\n\n" +
 		"> 本任务通过 --fork-session 继承了主 Agent 的项目上下文与代码库访问权限。\n" +
-		"> 如需补充信息，可正常读取项目文件或调用工具。\n"
-	childSystemPrompt := subTaskExecutorSystemPrompt()
+		"> 如需补充信息，可正常读取项目文件或调用工具。\n" +
+		"> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
 	cmd := h.llm.GenerateCode(llm.StreamOpts{
 		Prompt:        executorPrompt,
 		WorkDir:       workDir,
-		SystemPrompt:  childSystemPrompt,
+		SystemPrompt:  execSystemPrompt,
 		Model:         cliModelArg(modelName),
 		SessionID:     parentSID,
 		Resume:        true,
@@ -6294,24 +6297,6 @@ func (h *WizardHandler) runOrchestratorSummary(
 	job.Append(store.LogLine{Type: "done", Content: "✅ 汇总完成！"})
 	job.Finish(0, store.JobDone)
 	log.Printf("[orchestrate] summary saved to requirements.coding_plan for %s", reqID)
-}
-
-// subTaskExecutorSystemPrompt is the executor persona override passed to
-// forked sub-task children. Distinct from the developer role default (now
-// "统筹协调") so a child writes code instead of yet another decomposition.
-func subTaskExecutorSystemPrompt() string {
-	return "你是一位资深软件工程师，正在执行一个由主 Agent 派发的子任务。\n" +
-		"工作方式：\n" +
-		"- 主 Agent 已与用户完成需求分析和技术方案设计，你的工作是基于当前项目上下文完成指定的子任务。\n" +
-		"- 主动读取项目相关文件，理解现有代码结构后，再开始编写代码。\n" +
-		"- 遵循现有代码风格，编写清晰的代码。\n" +
-		"- 如有测试文件则同步更新。\n" +
-		"- 用中文沟通。\n\n" +
-		"工作完成后，必须用 Markdown 输出一份完整的工作报告（作为子任务的产物），包含以下章节：\n" +
-		"1. 任务摘要：简要说明你完成了什么\n" +
-		"2. 修改文件：列出所有修改/创建的文件路径\n" +
-		"3. 关键决策：列出重要的实现选择及理由\n" +
-		"4. 遗留问题：如有任何未完成或需要后续处理的事项，请明确列出\n"
 }
 
 // silentSink is a streamSink that discards log output. AutoOrchestrate runs

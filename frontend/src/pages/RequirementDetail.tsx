@@ -1581,6 +1581,7 @@ export default function RequirementDetail() {
                 onChange={setDeveloperModel}
                 disabled={coding}
                 working={coding}
+                stage="developer"
                 label="开发模型"
                 defaultModelName={developerDefaultModel}
                 title={coding ? 'Claude 正在开发中，暂不能切换模型' : '开发实现阶段使用的模型，开始前即可选择'}
@@ -2253,6 +2254,7 @@ export default function RequirementDetail() {
                     <ModelSelect
                       value={architectModel}
                       onChange={setArchitectModel}
+                      stage="architect"
                       label="方案模型"
                       defaultModelName={architectDefaultModel}
                       title="方案设计阶段使用的模型，生成技术方案前即可选择"
@@ -2277,6 +2279,7 @@ export default function RequirementDetail() {
                   <ModelSelect
                     value={analystModel}
                     onChange={setAnalystModel}
+                    stage="analyst"
                     label="分析模型"
                     defaultModelName={analystDefaultModel}
                     title="需求分析阶段使用的模型，开始分析前即可选择"
@@ -2308,6 +2311,7 @@ export default function RequirementDetail() {
                   <ModelSelect
                     value={analystModel}
                     onChange={setAnalystModel}
+                    stage="analyst"
                     label="分析模型"
                     defaultModelName={analystDefaultModel}
                     title="需求分析阶段使用的模型，开始分析前即可选择"
@@ -2333,6 +2337,7 @@ export default function RequirementDetail() {
               onChange={setArchitectModel}
               disabled={architectWorking}
               working={architectWorking}
+              stage="architect"
               label="方案模型"
               defaultModelName={architectDefaultModel}
               title={architectWorking ? 'Claude 正在制定技术方案，暂不能切换模型' : '方案设计阶段使用的模型，开始前即可选择'}
@@ -2505,6 +2510,7 @@ export default function RequirementDetail() {
                   onChange={setDeveloperModel}
                   disabled={coding}
                   working={coding}
+                  stage="developer"
                   label="开发模型"
                   defaultModelName={developerDefaultModel}
                   title={coding ? 'Claude 正在开发中，暂不能切换模型' : '开发实现阶段使用的模型，开始前即可选择'}
@@ -2610,6 +2616,7 @@ export default function RequirementDetail() {
                     onChange={setDeveloperModel}
                     disabled={coding}
                     working={coding}
+                    stage="developer"
                     defaultModelName={developerDefaultModel}
                   />
                 </div>
