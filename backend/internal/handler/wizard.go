@@ -5365,6 +5365,86 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, true)
 }
 
+// RedoSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/redo.
+//
+// Body: { "model"?: "..." }
+//
+// Re-runs a FAILED sub-task with its original prompt. Unlike AdjustSubTask —
+// which forks the failed sub-task's own session to inherit partial edits — a
+// redo forks the parent's SOURCE session (the session it originally forked
+// from), so the child re-executes the original task from a clean starting
+// point. The optional model override lets the user switch models on the retry;
+// empty falls back to the developer role default inside runSubTask.
+func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
+	if !h.requireSubTaskSvc(w) {
+		return
+	}
+	var body struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	req, err := h.reqSvc.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "requirement not found")
+		return
+	}
+
+	// Look up the parent to validate ownership + capture the source session
+	// the failed run originally forked from (the clean redo starting point).
+	parent, err := h.subTaskSvc.Get(sid)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task not found")
+		return
+	}
+	if parent.RequirementID != id {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task does not belong to this requirement")
+		return
+	}
+	// Redo is scoped to failures — a done/pending/running row has nothing to
+	// recover; the UI only offers the button on error cards.
+	if parent.Status != model.SubTaskStatusError {
+		writeError(w, http.StatusConflict, "NOT_FAILED", "该子任务未失败，无需重做")
+		return
+	}
+
+	sourceSID := parent.SourceSessionID
+	if sourceSID == "" {
+		sourceSID = subTaskSourceSID(req, "")
+	}
+	if sourceSID == "" {
+		writeError(w, http.StatusConflict, "NO_SESSION",
+			"无法解析可复用的源会话，请重新发起 coding 后再试")
+		return
+	}
+
+	st, err := h.subTaskSvc.Redo(id, sid)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	newSID := util.NewUUID()
+	if perr := h.subTaskSvc.UpdateSession(st.ID, newSID, sourceSID); perr != nil {
+		log.Printf("[sub-task redo] failed to persist session for %s: %v", st.ID, perr)
+	}
+	job := h.jobs.Create(id)
+	if perr := h.subTaskSvc.UpdateJobID(st.ID, job.ID); perr != nil {
+		log.Printf("[sub-task redo] failed to persist job_id for %s: %v", st.ID, perr)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"job_id":      job.ID,
+		"sub_task_id": st.ID,
+	})
+
+	// Re-use the shared spawn helper with adjust=false and the ORIGINAL prompt
+	// (st.Prompt) so the child re-executes the same task from a clean fork.
+	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, false)
+}
+
 // ListSubTasks handles GET /api/requirements/{id}/sub-tasks.
 // Returns the sub-tasks ordered oldest-first so the panel renders them in
 // firing order. Validates the requirement exists first so a typo returns
