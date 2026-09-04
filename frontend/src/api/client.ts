@@ -313,6 +313,15 @@ export const subTasksApi = {
       `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/adjust`,
       data,
     ),
+  // Redo a failed sub-task: re-runs the SAME prompt (the backend reuses the
+  // original prompt) forking the original source session, optionally with a
+  // different model. Returns a new job_id/sub_task_id (the redo itself is a
+  // new sub-task row).
+  redo: (requirementId: string, subTaskId: string, data: { model?: string }) =>
+    api.post<{ job_id: string; sub_task_id: string }>(
+      `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/redo`,
+      data,
+    ),
   // Auto-orchestrate: ask the developer main agent to decompose + dispatch.
   // Returns the main-agent's reply (sentinel-stripped) + ids of the
   // children it just spawned. Each child's progress streams via the
