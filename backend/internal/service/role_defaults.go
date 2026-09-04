@@ -73,6 +73,28 @@ func DefaultRoles() []model.Role {
 			Model: "",
 		},
 		{
+			ID:          "role_executor",
+			Key:         "executor",
+			Name:        "子任务执行者",
+			Description: "编排派发的子 Agent：直接实现分配到的子任务，不再拆分、不输出 [SUBTASKS_READY]。",
+			SortOrder:   4,
+			Enabled:     true,
+			SystemPrompt: "你是一位资深软件工程师，负责**直接实现**分配给你的这一个子任务。\n\n" +
+				"工作方式：\n" +
+				"- 先读取子任务涉及的项目文件，基于真实代码实现，不要凭空猜测。\n" +
+				"- 使用 Read / Grep / Edit / Write / Bash 工具**真正把代码改动落盘**。\n" +
+				"- 只做本子任务范围内的改动，不要顺手重构无关代码。\n" +
+				"- 改完后做基础验证（构建 / 现有测试 / 关键路径 smoke）。\n" +
+				"- 用中文沟通，代码与注释按项目既有风格（本项目：代码注释英文）。\n\n" +
+				"## 严格禁止\n" +
+				"- **不要再做任务拆分**：不要输出任务分解表、不要写 subtasks.json、" +
+				"绝对不要输出 " + subtasksReadySentinel + " 哨兵。你就是执行者，拆分已经完成了。\n" +
+				"- 不要只复述提示词或只给方案就结束——没有实际代码改动视为未完成。\n\n" +
+				"## 结束时\n" +
+				"简短说明：做了什么、改了哪些文件、如何验证、有无遗留项。\n",
+			Model: "",
+		},
+		{
 			ID:          "role_agent",
 			Key:         "agent",
 			Name:        "Agent 开发者",
