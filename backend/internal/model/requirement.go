@@ -68,6 +68,14 @@ type Requirement struct {
 	// parent plan every child task forks from; persisted on completion so
 	// a server restart / JobStore eviction doesn't lose the breakdown.
 	CodingPlan         string    `json:"coding_plan"`
+	// SubTaskCount is the number of sub_tasks rows linked to this requirement.
+	// Populated by RequirementService.Get via a SELECT COUNT(*); used by the
+	// frontend to decide whether to hide the requirement-level "追加调整"
+	// entry (when the requirement has been decomposed into sub-tasks, all
+	// further adjustments must go through the sub-task flow instead). Not
+	// stored on the requirements row itself — it's a derived aggregate so
+	// the count stays in sync without an extra migration.
+	SubTaskCount   int       `json:"sub_task_count"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 	CompletedAt           *time.Time `json:"completed_at,omitempty"`

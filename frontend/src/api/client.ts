@@ -432,6 +432,14 @@ export interface Requirement {
   // main agent emits its structured plan. Rendered by SubTaskPanel as the
   // "建议子任务" preview.
   coding_plan?: string;
+  // sub_task_count: number of rows in sub_tasks linked to this requirement.
+  // Populated by the backend on GET /api/requirements/{id} via a
+  // SELECT COUNT(*); used by RequirementDetail to hide the requirement-
+  // level "追加调整" composer once the requirement has been decomposed
+  // into sub-tasks (further adjustments must then flow through the
+  // SubTaskPanel composer instead). Defaults to 0 on legacy responses that
+  // predate this field.
+  sub_task_count?: number;
   created_at: string; updated_at: string;
   completed_at?: string;
 }

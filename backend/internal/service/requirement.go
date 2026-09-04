@@ -193,6 +193,17 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	if r.Kind == "" {
 		r.Kind = KindRequirement
 	}
+	// Count linked sub_tasks so the requirement detail page can decide whether
+	// the requirement-level "追加调整" entry should be hidden (i.e. the
+	// requirement has already been decomposed into sub-tasks and further
+	// adjustments must flow through the sub-task composer instead). A
+	// separate COUNT is cheaper than re-fetching the sub-task list and avoids
+	// loading artifacts / SSE job ids the detail page doesn't render.
+	if err := s.db.QueryRow(
+		"SELECT COUNT(*) FROM sub_tasks WHERE requirement_id = ?", id,
+	).Scan(&r.SubTaskCount); err != nil {
+		return nil, err
+	}
 	return &r, nil
 }
 
