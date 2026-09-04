@@ -190,6 +190,14 @@ export default function ModelSelect({
             </option>
           )}
         </select>
+        {/* Hint when a config is picked but exposes no models. Keeps the
+            dropdown usable (still renders "默认模型") while telling the
+            user there's nothing to choose from in the active selection. */}
+        {selectedConfigId && currentConfig && cfgModels.length === 0 && (
+          <span className="model-select-hint" role="note">
+            该配置未配置模型列表
+          </span>
+        )}
       </div>
     </div>
   );
