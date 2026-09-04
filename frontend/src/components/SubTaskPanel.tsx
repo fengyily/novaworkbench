@@ -25,6 +25,15 @@ interface Props {
   // pre-flight hint instead of the create form.
   codingSessionId: string;
   requirement: Requirement;
+  // Optional callback fired after each successful list fetch with the
+  // current item count. Lets the parent hide the requirement-level
+  // "追加调整" composer the moment this panel shows at least one child,
+  // without waiting for the next refetch. The parent should pass a
+  // stable setter (useState's setState) so this callback reference is
+  // stable across re-renders — otherwise the panel's useEffect would
+  // re-fire and cause an infinite loop. The panel only re-emits when
+  // the count changes, so the parent never sees a redundant call.
+  onSubTasksChange?: (count: number) => void;
 }
 
 // Status vocabulary. The label stays in plain Chinese so the chip reads
@@ -426,7 +435,7 @@ function SubTaskCard({ st, index, total, onChanged }: CardProps) {
   );
 }
 
-export default function SubTaskPanel({ requirementId, codingSessionId, requirement }: Props) {
+export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange }: Props) {
   const [items, setItems] = useState<SubTask[] | null>(null);
   const [prompt, setPrompt] = useState('');
   const [title, setTitle] = useState('');
@@ -436,11 +445,24 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // path in StartCoding). Children may still be running so the panel shows
   // "auto-orchestrate in flight" status.
   const [activeBatch, setActiveBatch] = useState<{ childIds: string[]; startedAt: number } | null>(null);
+  // Remember the count we last reported to the parent so loadList (which
+  // re-runs on periodic poll + after every create / adjust) doesn't fire
+  // onSubTasksChange on every tick. Only emit on actual transitions.
+  const lastReportedCountRef = useRef<number>(-1);
 
   const loadList = useCallback(async () => {
     try {
       const list = await subTasksApi.list(requirementId);
       setItems(list);
+      // Forward the new count to the parent so the page can flip
+      // hasSubTasks and hide the requirement-level "追加调整" composer.
+      // The ref guard avoids redundant parent re-renders — the panel
+      // polls every 5s while children are alive and we don't want a
+      // fresh onChange call each tick.
+      if (onSubTasksChange && list.length !== lastReportedCountRef.current) {
+        lastReportedCountRef.current = list.length;
+        onSubTasksChange(list.length);
+      }
       // Detect a brand-new auto-orchestrate batch: any "running" child
       // whose created_at is within the last 10 minutes AND that we don't
       // yet have a local activeBatch marker for gets folded into the
@@ -469,7 +491,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     } catch (e: any) {
       setError(e?.message || '加载子任务失败');
     }
-  }, [requirementId, activeBatch]);
+  }, [requirementId, activeBatch, onSubTasksChange]);
 
   useEffect(() => {
     loadList();

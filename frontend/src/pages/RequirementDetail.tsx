@@ -385,6 +385,14 @@ export default function RequirementDetail() {
   // flow. Set when the autoStartDesign navigation intent triggers the architect
   // stage so a subsequent refresh / req change doesn't re-fire it.
   const autoStartRef = useRef(false);
+  // Live sub-task count: 0 until SubTaskPanel mounts and reports its current
+  // list size via the onSubTasksChange callback, then stays in sync as the
+  // panel creates / finishes children. Combined with req.sub_task_count
+  // (seeded by the GET response) to decide whether to hide the requirement-
+  // level "追加调整" composer. The state lives here (not just on req) so a
+  // newly-created child agent immediately hides the composer without waiting
+  // for the next refetch.
+  const [liveSubTaskCount, setLiveSubTaskCount] = useState(0);
 
   // Branch modal state
   const [showBranchModal, setShowBranchModal] = useState(false);
@@ -1449,6 +1457,14 @@ export default function RequirementDetail() {
 
   const design = parseDesign(req.design_docs);
   const hasDesign = !!(design.overview || (design.steps && design.steps.length > 0) || design.plan_markdown);
+  // Requirement has at least one sub-task: either seeded by the GET response
+  // (req.sub_task_count, present once the requirement has been decomposed)
+  // or reported live by the mounted SubTaskPanel (liveSubTaskCount, covers
+  // the brief window between "user clicks 创建子任务" and the next refetch).
+  // Once true, the requirement-level "追加调整" composer is hidden — all
+  // further adjustments must flow through the sub-task composer so the main
+  // agent's task breakdown stays the source of truth.
+  const hasSubTasks = (req.sub_task_count ?? 0) > 0 || liveSubTaskCount > 0;
   const stage = stageFor(req.status, req.skip_design);
   // Design (architect) stream state. While the job runs the panel stays open;
   // once finished it collapses behind the "思考过程" toggle.
@@ -2491,8 +2507,10 @@ export default function RequirementDetail() {
           )}
 
           {/* ── 追加调整 ── 续接 coding session（--resume），仅携带本指令；
-              输出追加到上方 coding-panel，与首轮开发连贯。developing/done 均可。 */}
-          {req.coding_session_id && (req.status === 'developing' || req.status === 'done') && !coding && (
+              输出追加到上方 coding-panel，与首轮开发连贯。developing/done 均可。
+              当需求已拆分为子任务（hasSubTasks）时隐藏 — 所有调整改走子任务，
+              避免子 Agent 的并行上下文被主会话续接覆盖。 */}
+          {req.coding_session_id && (req.status === 'developing' || req.status === 'done') && !coding && !hasSubTasks && (
             <div className="adjust-composer">
               <div className="adjust-composer-header">
                 <span className="ac-title">🔧 追加调整</span>
@@ -2560,12 +2578,16 @@ export default function RequirementDetail() {
               {/* ── 子Agent 协作 ── 由用户手动触发的子任务，共享主Agent上下文。
                   在 developing/done 阶段都可用（开发期间创建子任务分工；完成后
                   也可继续触发小修改子任务）。位置紧跟在「开发完成 / 重新开发」
-                  之后、Merge/PR 步骤之前，符合从上到下的 stage 流程。 */}
+                  之后、Merge/PR 步骤之前，符合从上到下的 stage 流程。
+                  onSubTasksChange 把当前子任务数回写到本页的 liveSubTaskCount，
+                  让 hasSubTasks 在子任务刚创建时就生效、立刻隐藏需求级
+                  「追加调整」入口。setter 引用稳定，不会导致面板重渲染循环。 */}
               {(req.status === 'developing' || req.status === 'done') && reqKind !== 'idea' && (
                 <SubTaskPanel
                   requirementId={req.id}
                   codingSessionId={req.coding_session_id}
                   requirement={req}
+                  onSubTasksChange={setLiveSubTaskCount}
                 />
               )}
 
@@ -2636,6 +2658,18 @@ export default function RequirementDetail() {
                   <code style={{ fontSize: 12 }}>{mergeState.worktree_path}</code>
                   <button className="btn btn-sm" onClick={cleanWorktree} disabled={merging || !!busy}>🧹 清理开发环境</button>
                 </div>
+              )}
+              {/* ── 子Agent 协作（done 阶段也开放）── 隐藏「追加调整」后，
+                  done 状态下唯一可用的调整入口就是子任务。位置与
+                  developing 分支一致：merge/PR 操作区之后、「📦 归档到知识库」
+                  按钮之前。Idea 不展示（避免对探索性想法暴露开发工具）。 */}
+              {reqKind !== 'idea' && (
+                <SubTaskPanel
+                  requirementId={req.id}
+                  codingSessionId={req.coding_session_id}
+                  requirement={req}
+                  onSubTasksChange={setLiveSubTaskCount}
+                />
               )}
               <div className="merge-actions stack-mobile" style={{ marginTop: 8 }}>
                 <button className="btn btn-primary" onClick={handleArchive} disabled={!!busy}>
