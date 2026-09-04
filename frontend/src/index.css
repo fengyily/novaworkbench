@@ -245,52 +245,139 @@ body.no-scroll {
   }
 }
 
-/* ── Per-stage model picker (ModelSelect) ─────────────────────────────── */
+/* ── Per-stage model picker (ModelSelect) ───────────────────────────────
+   The picker renders as a compact horizontal "card" with a 4px stage
+   accent rail + stage chip on the left and two selects on the right. The
+   horizontal layout keeps multiple ModelSelects from wrapping their
+   internal selects when they're laid out side by side — the outer flex
+   container handles wrapping the whole card. Working state is encoded
+   in the card border color + a soft rail pulse (matching the existing
+   ContextUsageBar / AI-pulse-dot visual language). Stage colors pick
+   up the analyst/architect/developer palette already used by the
+   requirement lifecycle status tags. */
 .model-select {
   display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  align-items: stretch;
+  min-width: 0;
+  max-width: 100%;
 }
-.model-select-label {
-  font-size: 12px;
+.model-select-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px 5px 10px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  /* White-space nowrap keeps the chip + two selects on a single line; the
+     outer flex container decides whether to wrap the whole card. */
+  white-space: nowrap;
+  min-width: 0;
+  max-width: 100%;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.model-select-card--neutral {
+  border-left: 1px solid var(--color-border);
+}
+/* Stage accent rail — 4px colored bar on the left that tags the card to
+   its wizard stage. Implemented as a ::before so it sits inside the
+   card's own border-radius and inherits the stage color via the
+   modifier class. */
+.model-select-card::before {
+  content: '';
+  display: block;
+  width: 4px;
+  align-self: stretch;
+  margin: -5px 0 -5px -10px; /* bleed into the card padding */
+  border-radius: 6px 0 0 6px;
+  background: var(--color-border);
+  transition: background 0.18s ease;
+}
+.model-select-card--analyst::before   { background: #f59e0b; }
+.model-select-card--architect::before { background: #8b5cf6; }
+.model-select-card--developer::before { background: #06b6d4; }
+
+.model-select-rail {
+  /* Reserved for future per-stage decoration (kept as a hook so callers
+     can opt in to extra visual without breaking the modifier classes). */
+  display: none;
+}
+.model-select-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  background: var(--color-hover);
   color: var(--color-text-secondary);
   white-space: nowrap;
+  flex: none;
 }
+.model-select-card--analyst .model-select-chip   { background: #fef3c7; color: #b45309; }
+.model-select-card--architect .model-select-chip { background: #ede9fe; color: #6d28d9; }
+.model-select-card--developer .model-select-chip { background: #cffafe; color: #0e7490; }
+
 .model-select-input {
-  padding: 3px 6px;
-  font-size: 12px;
+  padding: 4px 8px;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  line-height: 1.4;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: 5px;
   background: var(--color-surface);
   color: var(--color-text);
-  max-width: 220px;
   cursor: pointer;
+  /* Selects share the remaining row width; the model select takes more
+     because model ids are typically the longer string. */
+  min-width: 0;
+  max-width: 100%;
+}
+.model-select-type {
+  flex: 0 1 180px;
+  min-width: 120px;
+  font-family: var(--font-sans);
+  color: var(--color-text-secondary);
+}
+.model-select-model {
+  flex: 1 1 auto;
+  min-width: 160px;
 }
 .model-select-input:disabled {
-  opacity: 0.55;
+  opacity: 0.6;
   cursor: not-allowed;
   background: var(--color-hover);
 }
-/* Inline Claude working-status indicator inside ModelSelect */
-.model-status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #94A3B8; /* gray = idle */
+/* Hint shown next to the model select when the picked config has no
+   models. Inline micro-copy rather than a full alert so the picker
+   layout doesn't reflow when it appears. */
+.model-select-hint {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(245, 158, 11, 0.08);
+  color: #b45309;
+  white-space: nowrap;
   flex: none;
 }
-.model-status-dot.is-work {
-  background: #10B981; /* green pulsing while working */
-  animation: model-blink 1.2s ease-in-out infinite;
+/* Working state — the card itself paints amber so the whole picker
+   reads as "Claude is in flight on this stage"; the rail keeps its
+   stage color but pulses opacity to draw the eye. Pair with the
+   amber-pulse animation that already runs in ContextUsageBar /
+   .ai-pulse-dot.is-work. */
+.model-select-card.is-work {
+  border-color: #d97706;
+  box-shadow: 0 0 0 1px rgba(217, 119, 6, 0.18);
 }
-@keyframes model-blink {
+.model-select-card.is-work::before {
+  animation: model-select-rail-pulse 1.4s ease-in-out infinite;
+}
+@keyframes model-select-rail-pulse {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
-}
-.model-status-text {
-  color: var(--color-text-muted);
-  font-size: 12px;
-  white-space: nowrap;
+  50%      { opacity: 0.45; }
 }
 
 /* ── Claude working-status indicator (空闲 / 工作中) ──────────────────── */
