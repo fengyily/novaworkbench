@@ -1065,6 +1065,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		Model            string `json:"model"`
 		ReadKnowledge    bool   `json:"read_knowledge"`
 		AgentServerID    string `json:"agent_server_id"` // empty = local execution; otherwise remote Agent server
+		SplitTasks       bool   `json:"split_tasks"`     // false (default) = developer persona implements directly; true = current decomposition + auto-orchestrate flow
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "INVALID", "Invalid JSON")
@@ -1075,6 +1076,11 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 	// relevant to this requirement is injected into the claude prompt and a
 	// "knowledge" SSE event is emitted before the coding job starts.
 	readKnowledge := req.ReadKnowledge
+
+	// "是否拆分任务"开关：默认 false（不拆分，由 developer persona 直接实现），
+	// 勾选时走原有的拆分子任务 + tryAutoOrchestrate 自动派发链路。Agent-Server
+	// 路径（roleKey == "agent"）始终 agentDirectPrompt 直跑，该字段被忽略。
+	splitTasks := req.SplitTasks
 
 	job := h.jobs.Create(req.RequirementID)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})

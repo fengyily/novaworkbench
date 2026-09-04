@@ -415,6 +415,13 @@ export default function RequirementDetail() {
   // branch modal; the design one has its own confirm modal so the user can opt
   // in right before generating the technical plan.
   const [readKnowledgeDev, setReadKnowledgeDev] = useState(false);
+  // Optional "是否拆分任务" switch (default off — i.e. 默认不拆分). When
+  // checked, the backend runs the developer persona's task-decomposition
+  // branch + auto-dispatches sub-agents. When unchecked, the backend runs the
+  // developer persona in a "direct implementation" branch (no subtask split,
+  // no auto-orchestration). Reset to false each time the branch modal opens so
+  // the default is preserved across coding runs.
+  const [splitTasksDev, setSplitTasksDev] = useState(false);
   const [showDesignKnowledgeModal, setShowDesignKnowledgeModal] = useState(false);
   const [readKnowledgeDesign, setReadKnowledgeDesign] = useState(false);
   const designNeedsTransitionRef = useRef(false);
@@ -1073,7 +1080,7 @@ export default function RequirementDetail() {
     );
   }, [id, refresh]);
 
-  const doStartCoding = async (bName: string, bBase: string, useKnowledge: boolean) => {
+  const doStartCoding = async (bName: string, bBase: string, useKnowledge: boolean, splitTasks: boolean) => {
     if (!req || !project || !id) return;
     setCoding(true);
     setCodingLines([]);
@@ -1114,6 +1121,12 @@ export default function RequirementDetail() {
           branch_name: bName,
           base_branch: bBase,
           read_knowledge: useKnowledge,
+          // Whether to split the requirement into sub-tasks (developer persona
+          // decomposition + auto-dispatch). Default false = do not split; the
+          // backend runs the developer persona in its direct-implementation
+          // branch (mirrors the agent role's behavior). Sent explicitly even
+          // when false so the backend never sees a missing field.
+          split_tasks: splitTasks,
           // Per-request model override — empty means the role's configured model.
           ...(developerModel ? { model: developerModel } : {}),
           // Remote Agent-server execution. Empty string = local execution (the
@@ -1143,6 +1156,7 @@ export default function RequirementDetail() {
     setBranchName(defaultBranch);
     setBaseBranch(defaultBase);
     setReadKnowledgeDev(false); // default unchecked each time
+    setSplitTasksDev(false); // default unchecked each time — 默认不拆分
     setShowBranchModal(true);
     authedFetch(`${API_BASE}/api/fs/git-branches?path=${encodeURIComponent(project.local_path)}`)
       .then(r => r.json())
@@ -1156,7 +1170,7 @@ export default function RequirementDetail() {
 
   const confirmBranchAndStart = () => {
     setShowBranchModal(false);
-    doStartCoding(branchName, baseBranch, readKnowledgeDev);
+    doStartCoding(branchName, baseBranch, readKnowledgeDev, splitTasksDev);
   };
 
   // ── 追加调整: resume the prior coding session, output appends to codingLines
@@ -1610,6 +1624,11 @@ export default function RequirementDetail() {
             <label className="merge-check">
               <input type="checkbox" checked={readKnowledgeDev} onChange={e => setReadKnowledgeDev(e.target.checked)} />
               📚 开始前先读取项目知识库（默认不勾选）
+            </label>
+            {/* Optional sub-task decomposition switch: default unchecked (= 直接执行，不拆分子任务). When checked, the developer persona emits a subtasks.json + [SUBTASKS_READY] sentinel and the backend auto-dispatches sub-agents. When unchecked, the developer persona runs in direct-implementation mode (no sub-task orchestration). Mirrors readKnowledgeDev's pattern: reset to false in openBranchModal, explicit value (even when false) on the wire, same `merge-check` class for layout. */}
+            <label className="merge-check">
+              <input type="checkbox" checked={splitTasksDev} onChange={e => setSplitTasksDev(e.target.checked)} />
+              🧩 是否拆分任务（默认不勾选；勾选时拆分子任务并由系统自动派发）
             </label>
             <div className="modal-actions btn-row-2col">
               <button className="btn btn-primary" onClick={confirmBranchAndStart}>🚀 确认，开始开发</button>
