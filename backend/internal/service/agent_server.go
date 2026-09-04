@@ -38,6 +38,7 @@ func scanRow(row interface {
 		&a.ID, &a.Name, &a.Host, &a.Port, &a.Username,
 		&a.AuthType, &authValue, &a.AuthValueAlgo,
 		&a.Status, &lastCheck, &a.CheckResult,
+		&a.InstallJobID,
 		&a.CreatedAt, &a.UpdatedAt,
 	)
 	if err != nil {
@@ -54,7 +55,7 @@ func scanRow(row interface {
 	return &a, nil
 }
 
-const selectColumns = `id, name, host, port, username, auth_type, auth_value, auth_value_algo, status, last_check_at, check_result, created_at, updated_at`
+const selectColumns = `id, name, host, port, username, auth_type, auth_value, auth_value_algo, status, last_check_at, check_result, install_job_id, created_at, updated_at`
 
 // List returns all servers ordered by creation time. Credentials are NOT
 // decrypted — callers must use GetWithCredential for the plaintext.
@@ -223,6 +224,20 @@ func (s *AgentServerService) UpdateStatus(id, status, checkResult string) error 
 		 SET status = ?, check_result = ?, last_check_at = ?, updated_at = ?
 		 WHERE id = ?`,
 		status, checkResult, time.Now(), time.Now(), id,
+	)
+	return err
+}
+
+// UpdateInstallJob persists the JobStore job id of the currently running
+// install on this server so a page refresh can reconnect to its SSE stream
+// (the frontend's component-state jobId is otherwise lost on reload). Pass
+// jobID="" to clear it — runInstall does this on Finish so a stale id never
+// lingers after the job is gone (JobStore is in-memory and can evict the job
+// on backend restart while this DB column still holds the old id).
+func (s *AgentServerService) UpdateInstallJob(id, jobID string) error {
+	_, err := s.db.Exec(
+		`UPDATE agent_servers SET install_job_id = ?, updated_at = ? WHERE id = ?`,
+		jobID, time.Now(), id,
 	)
 	return err
 }

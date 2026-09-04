@@ -360,6 +360,13 @@ CREATE INDEX IF NOT EXISTS idx_sub_tasks_req ON sub_tasks(requirement_id);
 var alterColumns = []string{
 	`ALTER TABLE projects ADD COLUMN platform_type TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN platform_token_id TEXT NOT NULL DEFAULT ''`,
+	// install_job_id: persisted JobStore job id for the running install on an
+	// agent server, so a page refresh can reconnect to its SSE stream and
+	// replay history (same pattern as requirements.analysis_job_id / apply_job_id).
+	// Cleared by runInstall's defer on Finish so a stale id never lingers
+	// after the job is gone (matters because JobStore is in-memory and can
+	// evict the job on backend restart while the DB column still holds it).
+	`ALTER TABLE agent_servers ADD COLUMN install_job_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN analysis_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN design_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN design_job_id TEXT NOT NULL DEFAULT ''`,

@@ -350,12 +350,29 @@ func (h *AgentServerHandler) Install(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = h.svc.UpdateStatus(a.ID, model.AgentServerStatusInstalling, "正在远程安装依赖...")
 	job := h.jobs.Create(a.ID)
+	// Persist the job id BEFORE returning so a page refresh in the gap
+	// between writeJSON and the goroutine actually starting can still find
+	// the job via GET /api/settings/agent-servers/{id}. Without this write
+	// the frontend only learns jobId from the response body, which is lost
+	// on reload.
+	if perr := h.svc.UpdateInstallJob(a.ID, job.ID); perr != nil {
+		log.Printf("[agent-server] failed to persist install_job_id for %s: %v", a.ID, perr)
+	}
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 	go h.runInstall(job, a.ID)
 }
 
 func (h *AgentServerHandler) runInstall(job *store.Job, serverID string) {
 	defer func() {
+		// Always clear install_job_id on exit — whether normal Finish, error
+		// Finish, or panic. JobStore is in-memory and can evict the job on
+		// backend restart; leaving a stale id in the DB column would let a
+		// later refresh mount-time reconnect attempt hit a 404 / empty
+		// stream with no install actually running. Clearing unconditionally
+		// makes "stale install_job_id" an impossible state.
+		if cerr := h.svc.UpdateInstallJob(serverID, ""); cerr != nil {
+			log.Printf("[agent-server] failed to clear install_job_id for %s: %v", serverID, cerr)
+		}
 		if rec := recover(); rec != nil {
 			log.Printf("[agent-server] install panic for %s: %v", serverID, rec)
 			job.Append(store.LogLine{Type: "error", Content: fmt.Sprintf("panic: %v", rec)})
@@ -364,7 +381,14 @@ func (h *AgentServerHandler) runInstall(job *store.Job, serverID string) {
 		}
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	// 30min budget for the full install (platform script + npm install +
+	// systemd setup + worker fallback). 10min was too tight on slow networks
+	// where `brew update` + `npm i -g @anthropic-ai/claude-code` + npm install
+	// for the worker can eat 8-12min on their own, and the SSH ctx firing
+	// would terminate the foreground shell with SIGTERM (exit=143) on the
+	// nohup fallback. The actual install rarely needs this much; the headroom
+	// just absorbs the long tail without false-positive failures.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
 	job.Append(store.LogLine{Type: "phase", Content: "🔌 连接到 Agent 服务器..."})
@@ -689,6 +713,32 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 		return fmt.Errorf("npm install 失败（exit=%d err=%v）", exit, err)
 	}
 
+	// Resolve the absolute path to `node` on the remote host so the service
+	// unit can invoke it directly instead of through `/usr/bin/env node`.
+	// The service manager (systemd --user on Linux, launchd on macOS) runs
+	// with its own PATH that does NOT include user-space installs — nvm's
+	// ~/.nvm/versions/node/*/bin, or /opt/homebrew/bin on Apple Silicon — so
+	// a worker installed via the nvm/brew fallback would otherwise fail to
+	// start under the manager even though `node` is on the interactive PATH.
+	// Baking the absolute path makes the unit independent of that PATH.
+	// nodeBin stays "" (leaving the unit's `/usr/bin/env node` in place) if
+	// resolution fails or the result isn't absolute, so a broken probe never
+	// blocks the install.
+	var nodeBin string
+	{
+		var nodeBuf strings.Builder
+		if exit, _ := client.Exec(ctx,
+			`export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"; `+
+				`if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh" 2>/dev/null; fi; `+
+				`hash -r 2>/dev/null; `+
+				`command -v node`, "", nil, &nodeBuf, nil); exit == 0 {
+			bin := strings.TrimSpace(nodeBuf.String())
+			if strings.HasPrefix(bin, "/") {
+				nodeBin = bin
+			}
+		}
+	}
+
 	// Platform-specific service registration. systemd --user on Linux,
 	// LaunchAgent on macOS. Both bind 127.0.0.1 via the worker env so the
 	// service is only reachable through NovaWorkbench's SSH direct-tcpip
@@ -706,6 +756,15 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 		// differ. Bake the resolved absolute path into the unit instead.
 		unitBody := strings.ReplaceAll(agentWorkerSystemdUnit,
 			"/opt/nova-agent-worker", installDir)
+		// Bake the resolved node path into ExecStart too — see the nodeBin
+		// comment above. `/usr/bin/env node` would consult the user manager's
+		// own PATH, which misses nvm/brew node and leaves the service in a
+		// crash loop (and the worker permanently on the nohup fallback).
+		if nodeBin != "" {
+			unitBody = strings.ReplaceAll(unitBody,
+				"ExecStart=/usr/bin/env node server.mjs",
+				"ExecStart="+nodeBin+" server.mjs")
+		}
 		if err := client.WriteFile(unitDir+"/nova-agent-worker.service",
 			[]byte(unitBody), 0644); err != nil {
 			return fmt.Errorf("写入 systemd unit 失败: %w", err)
@@ -777,6 +836,14 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 		// dir into the plist before writing.
 		plistBody := strings.ReplaceAll(agentWorkerLaunchdPlist,
 			"/opt/nova-agent-worker", installDir)
+		// launchd runs agents with the system PATH too, so `/usr/bin/env
+		// node` misses Homebrew's /opt/homebrew/bin. Bake the resolved node
+		// path into ProgramArguments the same way we do for systemd.
+		if nodeBin != "" {
+			plistBody = strings.ReplaceAll(plistBody,
+				"<string>/usr/bin/env</string>\n    <string>node</string>",
+				"<string>"+nodeBin+"</string>")
+		}
 		plistPath := agentDir + "/com.novaworkbench.agent-worker.plist"
 		if err := client.WriteFile(plistPath, []byte(plistBody), 0644); err != nil {
 			return fmt.Errorf("写入 LaunchAgent plist 失败: %w", err)
@@ -819,10 +886,17 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 	// the OLD worker keeps serving real requests. We pkill the script
 	// path, not the generic `node`, so other node processes on the host
 	// (vite / npm / etc.) are untouched.
+	//
+	// The `grep -vx "$$"` is not optional: `pgrep -f` regex-matches the full
+	// command line, and this shell's own argv contains the literal string
+	// `nova-agent-worker/server.mjs` (in the `node .../server.mjs` line and
+	// the trailing echo). Without excluding our own PID, OLD_PID resolves to
+	// this shell and `kill "$OLD_PID"` SIGTERMs ourselves → exit 143, which
+	// surfaces as a spurious "nohup 启动失败" even though nothing was wrong.
 	launchCmd := `export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"; ` +
 		`if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh" 2>/dev/null; fi; ` +
 		`hash -r 2>/dev/null; ` +
-		`OLD_PID=$(pgrep -f nova-agent-worker/server.mjs | head -n1); ` +
+		`OLD_PID=$(pgrep -f nova-agent-worker/server.mjs | grep -vx "$$" | head -n1); ` +
 		`if [ -n "$OLD_PID" ]; then kill "$OLD_PID" 2>/dev/null; sleep 1; kill -9 "$OLD_PID" 2>/dev/null || true; fi; ` +
 		// TMPDIR=/tmp on the nohup env line guards against the macOS dev
 		// box's SendEnv forwarding /var/folders/... into the SSH session
@@ -833,7 +907,7 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 		`nohup env NOVA_AGENT_WORKER_HOST=127.0.0.1 NOVA_AGENT_WORKER_PORT=7000 TMPDIR=/tmp ` +
 		`node ` + installDir + `/server.mjs > ` + installDir + `/worker.log 2>&1 & ` +
 		`disown 2>/dev/null || true; ` +
-		`sleep 1; echo "[nova-agent] nohup launched, pid=$(pgrep -f nova-agent-worker/server.mjs | head -n1), killed_old=${OLD_PID:-none}"`
+		`sleep 1; echo "[nova-agent] nohup launched, pid=$(pgrep -f nova-agent-worker/server.mjs | grep -vx "$$" | head -n1), killed_old=${OLD_PID:-none}"`
 	if exit, err := client.Exec(ctx, launchCmd, "", nil, jobLineWriter(job), nil); err != nil || exit != 0 {
 		return fmt.Errorf("nohup 启动失败（exit=%d err=%v）", exit, err)
 	}

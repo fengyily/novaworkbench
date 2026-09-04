@@ -23,6 +23,13 @@ type AgentServer struct {
 	Status        string  `json:"status"`
 	LastCheckAt   *string `json:"last_check_at"`
 	CheckResult   string  `json:"check_result"`
+	// InstallJobID is the JobStore job id of the running install on this server,
+	// or "" when no install is in flight. Persisted so the frontend can
+	// reconnect to the SSE stream after a page refresh — without this the
+	// component state jobId is lost on reload and the install keeps running
+	// silently until Finish. Cleared by runInstall's defer on Finish so a
+	// stale id never lingers after the job has actually gone.
+	InstallJobID  string  `json:"install_job_id"`
 	CreatedAt     string  `json:"created_at"`
 	UpdatedAt     string  `json:"updated_at"`
 }
