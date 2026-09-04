@@ -70,6 +70,50 @@ export default function SettingsAgentServers() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Page-refresh reconnect: the backend persists the running install's
+  // job id in agent_servers.install_job_id (set by Install, cleared by
+  // runInstall's defer on Finish). On mount, for any server that still
+  // has a non-empty install_job_id, subscribe to that job's SSE stream so
+  // the user picks up the live log + history replay instead of staring at
+  // a frozen "安装中…" badge until the install finishes server-side.
+  //
+  // Guarded with a ref so the run-once intent is preserved across React
+  // StrictMode double-mounts in dev — without the ref the first mount
+  // would subscribe, then the immediate remount would open a second
+  // duplicate SSE connection to the same job.
+  const reconnectRanRef = useRef(false);
+  useEffect(() => {
+    if (reconnectRanRef.current) return;
+    reconnectRanRef.current = true;
+    let cancelled = false;
+    (async () => {
+      let rows: AgentServer[] = [];
+      try {
+        rows = (await agentServersApi.list()) ?? [];
+      } catch {
+        return;
+      }
+      if (cancelled) return;
+      for (const s of rows) {
+        if (!s.install_job_id) continue;
+        // Skip if a fresh job is already being driven by startJob (e.g.
+        // the user clicked Install then immediately refreshed; both paths
+        // set busy, and startJob's AbortController would conflict).
+        if (busy[s.id]) continue;
+        setBusy((b) => ({ ...b, [s.id]: 'install' }));
+        void subscribeToJob(s.id, s.install_job_id);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // subscribeToJob is intentionally omitted from deps: it reads load via
+    // closure but is itself stable across renders (useCallback with [load]
+    // dep — and load is also stable). Including it would re-fire the
+    // reconnect every time load's identity changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const showToast = (msg: string) => {
     setToast(msg);
     window.setTimeout(() => setToast(''), 4000);
@@ -161,25 +205,24 @@ export default function SettingsAgentServers() {
     }
   };
 
-  // Stream a check/install job to the per-server log panel. Reuses the SSE
-  // pump pattern the wizard's CodingChat uses: open POST → fetch response
-  // stream → parse `data:` lines → append to log.
-  const startJob = useCallback(async (serverId: string, action: 'check' | 'install') => {
-    setBusy((b) => ({ ...b, [serverId]: action }));
-    setLogs((l) => ({ ...l, [serverId]: [] }));
-
-    let jobId = '';
-    try {
-      const res = action === 'check'
-        ? await agentServersApi.check(serverId)
-        : await agentServersApi.install(serverId);
-      jobId = res.job_id;
-    } catch (err) {
-      setLogs((l) => ({ ...l, [serverId]: [...(l[serverId] ?? []), `❌ 提交失败: ${err instanceof Error ? err.message : String(err)}`] }));
-      setBusy((b) => ({ ...b, [serverId]: '' }));
-      return;
-    }
-
+  // Subscribe to an existing job's SSE stream and pump lines into the log
+  // panel. Split out from startJob so the page-refresh reconnect path can
+  // pass a jobId already persisted in agent_servers.install_job_id without
+  // re-clearing the log (which would discard lines the user wants to keep
+  // visible across reloads). streamJobSSE replays the full history first
+  // so the user sees everything that happened while they were away.
+  //
+  // Handles three terminal cases:
+  //   1. `job_done` frame → Finish arrived cleanly; reload to pick up the
+  //      cleared install_job_id and the post-install server status.
+  //   2. HTTP 404 (e.g. backend restarted and JobStore evicted the job while
+  //      DB still held the old id) → assume stale, reload to clear.
+  //   3. fetch error / aborted → mark not-busy so the button re-enables.
+  //
+  // Defined before startJob so startJob can list it as a dep without an
+  // ordering dance. `load` is wrapped in useCallback with no deps so its
+  // identity is stable; listing it is harmless and keeps oxlint happy.
+  const subscribeToJob = useCallback(async (serverId: string, jobId: string) => {
     const ctrl = new AbortController();
     abortRef.current[serverId] = ctrl;
     try {
@@ -187,7 +230,17 @@ export default function SettingsAgentServers() {
         headers: { Authorization: `Bearer ${localStorage.getItem('nova_token') || ''}` },
         signal: ctrl.signal,
       });
-      if (!resp.ok || !resp.body) throw new Error(`SSE 失败: HTTP ${resp.status}`);
+      if (!resp.ok || !resp.body) {
+        // 404 = the job is gone from JobStore (most likely because the
+        // backend restarted and the in-memory ring buffer was cleared
+        // while the DB still held this install_job_id). Reload to pick
+        // up the cleared id and the post-install status.
+        if (resp.status === 404) {
+          load();
+          return;
+        }
+        throw new Error(`SSE 失败: HTTP ${resp.status}`);
+      }
 
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
@@ -208,7 +261,7 @@ export default function SettingsAgentServers() {
             const parsed = JSON.parse(line);
             if (parsed.type === 'job_done') {
               setBusy((b) => ({ ...b, [serverId]: '' }));
-              load(); // refresh status badge
+              load(); // refresh status badge + install_job_id (now cleared by defer)
               return;
             }
             if (parsed.content) {
@@ -220,12 +273,40 @@ export default function SettingsAgentServers() {
         }
       }
     } catch (err) {
-      setLogs((l) => ({ ...l, [serverId]: [...(l[serverId] ?? []), `❌ ${err instanceof Error ? err.message : String(err)}`] }));
+      // AbortError is the cancelJob path — silent, the button click already
+      // cleared busy. Any other error is a real failure: surface it.
+      if ((err as Error)?.name !== 'AbortError') {
+        setLogs((l) => ({ ...l, [serverId]: [...(l[serverId] ?? []), `❌ ${err instanceof Error ? err.message : String(err)}`] }));
+      }
     } finally {
       setBusy((b) => ({ ...b, [serverId]: '' }));
       delete abortRef.current[serverId];
     }
   }, [load]);
+
+  // Stream a check/install job to the per-server log panel. Reuses the SSE
+  // pump pattern the wizard's CodingChat uses: open POST → fetch response
+  // stream → parse `data:` lines → append to log. The actual SSE pump lives
+  // in subscribeToJob so the mount-time reconnect path can reuse it without
+  // clearing the log buffer (which would drop the history replay).
+  const startJob = useCallback(async (serverId: string, action: 'check' | 'install') => {
+    setBusy((b) => ({ ...b, [serverId]: action }));
+    setLogs((l) => ({ ...l, [serverId]: [] }));
+
+    let jobId = '';
+    try {
+      const res = action === 'check'
+        ? await agentServersApi.check(serverId)
+        : await agentServersApi.install(serverId);
+      jobId = res.job_id;
+    } catch (err) {
+      setLogs((l) => ({ ...l, [serverId]: [...(l[serverId] ?? []), `❌ 提交失败: ${err instanceof Error ? err.message : String(err)}`] }));
+      setBusy((b) => ({ ...b, [serverId]: '' }));
+      return;
+    }
+
+    await subscribeToJob(serverId, jobId);
+  }, [subscribeToJob]);
 
   const cancelJob = (serverId: string) => {
     abortRef.current[serverId]?.abort();

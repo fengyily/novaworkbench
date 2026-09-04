@@ -1287,6 +1287,10 @@ export interface AgentServer {
   status: AgentServerStatus;
   last_check_at: string | null;
   check_result: string;
+  // Active install JobStore job id; empty when no install is running.
+  // Persisted server-side so a page refresh can reconnect to the SSE
+  // stream and replay history — see SettingsAgentServers mount effect.
+  install_job_id: string;
   created_at: string;
   updated_at: string;
 }
