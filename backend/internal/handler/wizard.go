@@ -1320,7 +1320,17 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		systemPrompt, model := h.roleConfig("developer")
+		// Agent-Server execution uses the "agent" role instead of "developer":
+		// the agent persona does NOT split work into sub-tasks and does NOT emit
+		// the [SUBTASKS_READY] sentinel — it implements the requirement directly
+		// on the remote server (see role_defaults.go: role_agent). Local execution
+		// keeps the developer/统筹协调者 persona so the existing orchestrator path
+		// (tryAutoOrchestrate) is unchanged.
+		roleKey := "developer"
+		if req.AgentServerID != "" {
+			roleKey = "agent"
+		}
+		systemPrompt, model := h.roleConfig(roleKey)
 		// Per-request model override (highest precedence); empty means role default.
 		if req.Model != "" {
 			model = req.Model
@@ -1340,14 +1350,26 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			// wording: there is no "已完成的需求分析与技术方案" to reference, so we
 			// ask the agent to read the relevant files first to build context.
 			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未关联需求会话，使用独立会话开始开发。"})
-			// Same decomposition trigger as the fork branch — the developer
-			// role only emits [SUBTASKS_READY] when the -p message carries an
-			// explicit "开始开发" trigger. The fresh path has no prior design
-			// to reference, so it asks the agent to read files first.
-			prompt = developerDecomposePrompt(req.RequirementTitle,
-				"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后立即完成**任务拆分**：\n", workDir)
+			if roleKey == "agent" {
+				// Agent-Server path: bypass the decomposition trigger entirely.
+				// The agent persona implements the requirement directly on the
+				// remote server (no sub-task orchestration, no sentinel).
+				prompt = agentDirectPrompt(req.RequirementTitle,
+					"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后直接实现需求：\n", workDir)
+			} else {
+				// Same decomposition trigger as the fork branch — the developer
+				// role only emits [SUBTASKS_READY] when the -p message carries an
+				// explicit "开始开发" trigger. The fresh path has no prior design
+				// to reference, so it asks the agent to read files first.
+				prompt = developerDecomposePrompt(req.RequirementTitle,
+					"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后立即完成**任务拆分**：\n", workDir)
+			}
 			if desc := strings.TrimSpace(req.RequirementDesc); desc != "" {
-				prompt += "\n\n用户在开发前的追加说明：\n" + desc
+				if roleKey == "agent" {
+					prompt += "\n\n用户在开发前的追加说明：\n" + desc
+				} else {
+					prompt += "\n\n用户在开发前的追加说明：\n" + desc
+				}
 			}
 			// Context-compression handoff (legacy fresh-session path): when
 			// the coding stage was previously compressed we still want the
@@ -1375,10 +1397,19 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			// The per-turn -p instruction also overrides the system prompt's
 			// "always ask for confirmation" guidance so the agent emits the
 			// sentinel immediately instead of waiting on the user.
-			prompt = developerDecomposePrompt(req.RequirementTitle,
-				"基于已完成的需求分析与技术方案，请立即完成**任务拆分**：\n", workDir)
+			if roleKey == "agent" {
+				prompt = agentDirectPrompt(req.RequirementTitle,
+					"基于已完成的需求分析与技术方案，请直接实现需求：\n", workDir)
+			} else {
+				prompt = developerDecomposePrompt(req.RequirementTitle,
+					"基于已完成的需求分析与技术方案，请立即完成**任务拆分**：\n", workDir)
+			}
 			if desc := strings.TrimSpace(req.RequirementDesc); desc != "" {
-				prompt += "\n\n用户在开发前的追加调整说明：\n" + desc
+				if roleKey == "agent" {
+					prompt += "\n\n用户在开发前的追加调整说明：\n" + desc
+				} else {
+					prompt += "\n\n用户在开发前的追加调整说明：\n" + desc
+				}
 			}
 			// Coding-stage compression handoff: even when resuming the design
 			// session, the prior coding turns may have been compressed. The
@@ -1592,10 +1623,15 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		// sentinel + JSON 时串行派发子 Agent + 异步汇总；没命中就把
 		// coding_plan 当作普通任务分解展示，但不派发（保持现有行为）。
 		//
+		// Agent-Server 路径走 "agent" 角色，该角色的 system prompt 与 -p 指令
+		// 都不要求 [SUBTASKS_READY] 哨兵 / subtasks.json；为了一致性直接跳过
+		// orchestrator（不调用，即便没有 sentinel 也会安全 no-op，但调用
+		// 本身会引入无谓的 goroutine + 日志噪音）。
+		//
 		// 该调用改用独立 goroutine，不阻塞 start-coding 自身的 job_done
 		// 信号，用户的开发启动 SSE 立即结束；子任务的进度仍由
 		// dispatchOneChild 的 JobStore job 推流。
-		if req.RequirementID != "" && newCodingSID != "" && h.subTaskSvc != nil {
+		if roleKey != "agent" && req.RequirementID != "" && newCodingSID != "" && h.subTaskSvc != nil {
 			go h.tryAutoOrchestrate(req.RequirementID, newCodingSID, out.finalResult, out.subTasksJSON, reqRow, workDir, model)
 		}
 	}()
@@ -1604,11 +1640,14 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 // AdjustCoding starts a background JobStore job that resumes the prior coding
 // session (--resume coding_session_id) to apply a follow-up adjustment to
 // already-implemented code. Because the resumed session already carries the
-// requirement, analysis, design, and the developer persona, we send ONLY the
-// user's follow-up message as -p and inject NEITHER the role system prompt NOR
-// the readProjectContext project context — re-feeding them would be redundant
-// and could distort the resumed conversation. The developer role's current model
-// is still honored (--model) so the user's latest model setting applies.
+// requirement, analysis, design, and the persona set by StartCoding
+// (developer for local execution; agent for Agent-Server execution), we send
+// ONLY the user's follow-up message as -p and inject NEITHER the role system
+// prompt NOR the readProjectContext project context — re-feeding them would be
+// redundant and could distort the resumed conversation. The model field is
+// honored (--model) so the user's latest setting applies; we keep the lookup
+// against the developer role for backward compat (the resumed session's
+// persona is what determines behaviour — model only affects token routing).
 //
 // Only requirements with status in {"done","developing"} and a non-empty
 // coding_session_id may adjust (developing = first coding pass just finished;
@@ -2346,6 +2385,168 @@ func claudeResultError(scope string, evt map[string]interface{}) string {
 	return msg
 }
 
+// extractStreamError pulls every diagnostic field we can out of a top-level
+// {"type":"error",...} NDJSON event. The Claude CLI and upstream proxies
+// each use their own conventions for the message:
+//   - claude CLI: {"type":"error","error":"<string>"} or
+//     {"type":"error","error":{"message":"<string>", ...}}
+//   - third-party relays sometimes nest as {"type":"error","message":"..."}
+//   - some payloads carry a sibling "api_error_status" / "error_type" hint
+//
+// nova-agent-worker additionally serializes a few extra fields from the
+// non-zero child-process exit: code / signal / stderr. The CLI's actual
+// error line ("401 Unauthorized", "ENOTFOUND api.anthropic.com", "model
+// not found") lives in `stderr` and is by far the most useful diagnostic —
+// we surface it after the top-level message, capped to ~1.5KB so a chatty
+// CLI can't blow up the SSE envelope. When the message / stderr hint at an
+// upstream 400 / not found, append the same proxy-config guidance
+// claudeResultError does.
+//
+// The worker also attaches an `errorCategory` (computed via its
+// classifyError) — auth_failed / network_unreachable / model_not_found /
+// unrecognized_model / etc. — that we map to a tailored Chinese fix hint
+// appended after stderr. This is what turns the previously opaque
+// "Claude Code process exited with code 1" into actionable guidance.
+func extractStreamError(evt map[string]interface{}) string {
+	var msg string
+	switch v := evt["error"].(type) {
+	case string:
+		msg = v
+	case map[string]interface{}:
+		if s, ok := v["message"].(string); ok && s != "" {
+			msg = s
+		}
+	}
+	if msg == "" {
+		if s, ok := evt["message"].(string); ok && s != "" {
+			msg = s
+		}
+	}
+	if msg == "" {
+		return ""
+	}
+
+	// Append the CLI's stderr (if the worker captured it) — this is where
+	// the actionable diagnostic usually is. Truncate to 1.5KB to keep the
+	// SSE message readable; the full text is also available in the backend
+	// log via the raw json.Marshal below.
+	if stderr, ok := evt["stderr"].(string); ok && strings.TrimSpace(stderr) != "" {
+		stderr = strings.TrimSpace(stderr)
+		if len(stderr) > 1500 {
+			stderr = stderr[:1500] + "\n…[truncated]"
+		}
+		msg += "\n[stderr]\n" + stderr
+	}
+
+	// Append the exit code if present, for quick scanning.
+	if code, ok := evt["code"]; ok {
+		msg += fmt.Sprintf("\n[exit_code] %v", code)
+	} else if code, ok := evt["exitCode"]; ok {
+		msg += fmt.Sprintf("\n[exit_code] %v", code)
+	}
+
+	// Append nested cause (one level) — sometimes an upstream relay wraps
+	// a transport error inside a higher-level Error and only the inner
+	// one names the host. Kept for forward-compat with the previous
+	// SDK-shaped payloads an older worker may still emit.
+	if cause, ok := evt["cause"].(string); ok && cause != "" {
+		msg += "\n[cause] " + cause
+	}
+
+	// Worker-classified category → tailored fix hint. When the worker emits
+	// a preflight failure we hoist the hint above the generic 400 check so
+	// the user sees the actionable reason first. Categories must match the
+	// strings nova-agent-worker/server.mjs:classifyError emits; if a new
+	// category is added there, add a hint here too.
+	if cat, _ := evt["errorCategory"].(string); cat != "" {
+		if hint := workerCategoryHint(cat, msg); hint != "" {
+			msg += "\n[诊断] " + hint
+		}
+	}
+
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "400") &&
+		(strings.Contains(lower, "bad request") || strings.Contains(lower, "not found")) {
+		msg += "\n（这是上游代理返回的 400，通常是 BASE_URL / Token / 模型 配置有误或额度耗尽，请在「设置」里检查 Claude 配置）"
+	}
+	if raw, err := json.Marshal(evt); err == nil {
+		log.Printf("[stream-error] %s", truncateStr(string(raw), 1200))
+	}
+	return msg
+}
+
+// workerCategoryHint maps nova-agent-worker's errorCategory to a Chinese
+// fix hint. Keep the categories in sync with classifyError in server.mjs
+// (the worker writes the strings verbatim — a typo here silently breaks
+// the hint without surfacing).
+//
+// Hint scope: actionable and bounded. We deliberately do NOT explain every
+// possible root cause (the stderr already does that); we tell the user
+// what knob to turn next.
+func workerCategoryHint(cat, msg string) string {
+	switch cat {
+	case "cli_not_found":
+		return "Claude CLI 未找到。请在 Agent 服务器上确认 `claude --version` 可执行，或重新「安装依赖」。"
+	case "auth_failed":
+		return "鉴权失败（401）。请在「设置 → Claude 配置」检查 ANTHROPIC_AUTH_TOKEN 是否已填写并生效。"
+	case "auth_forbidden":
+		return "权限不足（403）。Token 可能有效但缺少调用该模型的权限，或 base URL 指向了无权访问的端点。"
+	case "model_not_found":
+		return "上游 API 不认识这个 model（404）。请检查「设置 → Claude 配置」里的 model 与 base URL，或确认模型名拼写正确。"
+	case "unrecognized_model":
+		// We pass --model MiniMax-M3 (or similar custom id) plus the env
+		// var CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1 to
+		// suppress Claude Code's "model isn't in my local catalog, I'll
+		// assume 200k context and might fail" warning — see gateway.go:
+		// BuildEnvPairs. If the warning still surfaces here, either the
+		// env var didn't reach the worker (stale server.mjs) or the CLI
+		// version on the agent server doesn't honor that knob.
+		//
+		// The `[1m]` / `[0m]` markers in the stderr are Claude Code's
+		// own ANSI color escapes leaking into the JSON it emits — a CLI
+		// bug, not our model name. The actual id is whatever's set in
+		// 「设置 → Claude 配置」.
+		return "Claude Code 不在本地 model 目录里认识这个 model（自定义 model 走私有 base URL 时常见）。gateway.go 已自动注入 CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1 让 CLI 跳过 catalog 检查，但本机仍报此错通常意味着：(1) worker 还在跑旧版 server.mjs，没拿到新的 env（请在「设置 → Agent 服务器」点「安装依赖」）；(2) Agent 服务器上的 Claude Code 版本过旧不识别该 env 变量（请运行 `claude --version` 升级）。详细：stderr 里的 `[1m]`/`[0m` 是 Claude Code CLI 自带的 ANSI 颜色控制符泄漏进 JSON，不是 model 名真的带这些字符。"
+	case "rate_limited":
+		return "上游限流（429）。请稍候几分钟重试，或降低并发。"
+	case "quota_exceeded":
+		return "账户额度耗尽。请充值或换用其他 Claude 配置后重试。"
+	case "network_unreachable":
+		return "Agent 服务器无法访问到上游 API。请检查出口网络/防火墙/代理。"
+	case "dns_unresolved":
+		return "Agent 服务器 DNS 解析失败。请检查 /etc/resolv.conf 或上游 base URL 域名拼写。"
+	case "connection_refused":
+		return "上游连接被拒（ECONNREFUSED）。通常是 base URL 端口错，或上游服务未启动。"
+	case "connection_reset":
+		return "上游连接被重置（ECONNRESET）。通常是代理或防火墙打断了长连接，重试即可。"
+	case "permission_denied":
+		// When the EACCES path is /var/folders the real cause is almost
+		// always that $TMPDIR was inherited from a macOS dev box and
+		// forwarded into the SSH session on a Linux/Windows agent host
+		// where /var/folders doesn't exist. claude's internal tmpdir
+		// setup then EACCESes on the missing parent before --print ping
+		// even starts. nova-agent-worker now auto-overrides TMPDIR
+		// (existing → $HOME → /tmp → cwd → bare /tmp) before each
+		// spawn, and the systemd/launchd unit + nohup launcher all pin
+		// TMPDIR=/tmp so the worker process itself starts with a sane
+		// tmpdir. This hint therefore usually points at the worker not
+		// having picked up the new server.mjs yet (i.e. re-Install is
+		// the missing step), or at a stale node process holding the
+		// old in-memory code after a partial install.
+		if strings.Contains(msg, "/var/folders") {
+			return "Claude 进程的 $TMPDIR 指向 /var/folders，但该路径在 Agent 服务器上不存在（开发机是 macOS，$TMPDIR 跟随 SSH 会话转发到了 Linux 远端）。worker 已自动覆盖 TMPDIR（现有 → $HOME → /tmp → 兜底 /tmp），仍报错通常是 worker 还没拉到新版 server.mjs 或 systemd 未重启。请 SSH 到 Agent 服务器执行 `systemctl --user restart nova-agent-worker.service`（或在「设置 → Agent 服务器」点一次「安装依赖」），然后查看 ~/nova-agent-worker/worker.log 中 `[nova-agent-worker] resolved TMPDIR via …` 那行确认 TMPDIR 已切到 /home/<user>/.nova-agent-worker-XXXX 或 /tmp/.nova-agent-worker-XXXX。若日志显示 `/tmp` 兜底分支，说明 $HOME 不可写，请检查 Agent 服务器上 nova-agent-worker 进程对 $HOME 目录是否有写权限。"
+		}
+		return "本地文件系统权限不足（EACCES）。请检查 worktree 路径对当前 SSH 用户是否可写。"
+	case "session_not_found":
+		return "找不到要 resume 的会话。本地会话 jsonl 未上传到 Agent 服务器，或 slug 不匹配，建议重新分析或开新会话。"
+	case "max_turns":
+		return "Claude 达到单轮最大工具调用次数。请把需求拆小，或在提示词里限制工具调用总数。"
+	case "preflight_timeout":
+		return "preflight 5 秒内未完成（`claude --print ping` 卡住）。通常是 Agent 服务器无法访问 API，请检查网络。"
+	}
+	return ""
+}
+
 // claudeStreamOutcome is the result of running one claude stream-json command to
 // completion. finalResult holds the "result" event text on success. On failure
 // errMsg is a human-readable message; staleSession is true when the failure was
@@ -2358,6 +2559,9 @@ type claudeStreamOutcome struct {
 	staleSession    bool
 	errMsg          string
 	hadStreamEvents bool     // true if any stream_event/content_block_delta arrived
+	eventCount      int      // total NDJSON events parsed (any type)
+	streamEventCount int     // subset that are stream_event
+	lastEventType   string   // type field of the most recent event, used for EOF postmortem
 	planContent     string   // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
 	// subTasksJSON is the authoritative sub-task decomposition payload,
 	// captured from a Write tool_use whose target path ends with
@@ -2800,6 +3004,23 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 				}
 			}
 			gotResult = true
+		case "error":
+			// stream-json sometimes emits a top-level error event before any
+			// result/system (e.g. claude CLI exited non-zero on startup, auth
+			// rejected at the proxy, model rejected, network DNS failure).
+			// Without this case the error body is silently dropped and the
+			// EOF branch only knows lastEventType="error" — leaving the user
+			// guessing among "API hung", "401", "OOM", "argv truncated". The
+			// CLI and any relay both use a string `error` field; some
+			// payloads nest it as an object with a `message` sub-field, so
+			// accept both shapes.
+			msg := extractStreamError(evt)
+			if msg != "" {
+				if out.errMsg == "" {
+					out.errMsg = msg
+				}
+				sink.emit(store.LogLine{Type: "error", Content: msg})
+			}
 		}
 		if gotResult {
 			break
@@ -2934,23 +3155,23 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	in.job.Append(store.LogLine{Type: "phase", Content: "📥 准备 Agent 服务器代码（git worktree 隔离）..."})
 	if !client.Exists(baseRepo) {
 		in.job.Append(store.LogLine{Type: "message", Content: "📦 首次 clone " + redactOriginForLog(originURL)})
-		if exit, _ := client.Exec(ctx, "git clone "+shellQuoteSingle(originURL)+" "+shellQuoteSingle(baseRepo), "", nil, &jobWriter{job: in.job}); exit != 0 {
+		if exit, _ := client.Exec(ctx, "git clone "+shellQuoteSingle(originURL)+" "+shellQuoteSingle(baseRepo), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
 			return claudeStreamOutcome{errMsg: "git clone 失败（exit=" + fmtInt(exit) + "），请检查 origin 凭据"}
 		}
 	} else {
-		client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin --prune", "", nil, &jobWriter{job: in.job})
+		client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin --prune", "", nil, &jobWriter{job: in.job}, nil)
 	}
-	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree prune", "", nil, &jobWriter{job: in.job})
+	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree prune", "", nil, &jobWriter{job: in.job}, nil)
 
 	if !client.Exists(wtPath) {
 		// Strategy 1: branch off HEAD (always valid; matches EnsureWorktree).
 		// Strategy 2: off origin/<base> when strategy 1 fails. Strategy 3:
 		// attach to an already-existing branch (adjust/continue reuse case).
-		exit, _ := client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath), "", nil, &jobWriter{job: in.job})
+		exit, _ := client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath), "", nil, &jobWriter{job: in.job}, nil)
 		if exit != 0 {
-			exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath)+" origin/"+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job})
+			exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath)+" origin/"+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
 			if exit != 0 {
-				if exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add "+shellQuoteSingle(wtPath)+" "+shellQuoteSingle(branch), "", nil, &jobWriter{job: in.job}); exit != 0 {
+				if exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add "+shellQuoteSingle(wtPath)+" "+shellQuoteSingle(branch), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
 					return claudeStreamOutcome{errMsg: "git worktree 创建失败（exit=" + fmtInt(exit) + "），请检查仓库状态"}
 				}
 			}
@@ -2962,7 +3183,7 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		// copy (the user can resolve the divergence manually).
 		client.Exec(ctx,
 			"cd "+shellQuoteSingle(wtPath)+" && (git checkout "+shellQuoteSingle(branch)+" 2>/dev/null || true) && (git pull --ff-only origin "+shellQuoteSingle(branch)+" 2>&1 || echo \"[nova-agent] pull 跳过（无跟踪或已分叉）\")",
-			"", nil, &jobWriter{job: in.job})
+			"", nil, &jobWriter{job: in.job}, nil)
 	}
 
 	// Step 3: session sync (up) so the remote claude can --resume the same
@@ -2981,50 +3202,106 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 无法定位本地 claude session 目录（" + slugErr.Error() + "），将无 resume 启动新会话"})
 	}
 
-	// Step 4: build the same claude flag list as the local branch would.
-	// BuildStreamArgs/BuildEnvPairs are byte-identical to the local cmd
-	// construction so model/auth/session threading all stay in lockstep.
-	opts := llm.StreamOpts{
-		Prompt:         in.prompt,
-		WorkDir:        wtPath,
-		SystemPrompt:   "",
-		Model:          cliModelArg(in.model),
-		SessionID:      in.sessionArg,
-		Resume:         in.sourceSID != "",
-		Fork:           in.fork,
-		ForkSessionID:  in.forkSessionID,
-		PermissionMode: "",
-	}
-	args := h.llm.BuildStreamArgs(opts)
-	envPairs := h.llm.BuildEnvPairs(opts.Model) // ExtraEnv (GIT_AUTHOR_*) doesn't make sense on a remote shell
-	cmdStr := buildRemoteShellCommand("claude", args, envPairs)
-
-	// Step 5: execute and stream-json parse. The remote claude writes one JSON
-	// event per line on stdout (with `--output-format stream-json --verbose`);
-	// we pipe that into the same scanner-based parser the local path uses,
-	// emitting identical LogLine frames so the UI doesn't need a separate
-	// viewer for remote runs.
+	// Step 4: build the worker POST body. The mapping (NovaWorkbench
+	// StreamOpts → worker RunRequest) lives here so the wire format and the
+	// CLI invocation shape stay in one place; the worker mirrors the field
+	// names in its buildRunRequest helper and translates them to the
+	// matching `claude` CLI flags.
 	//
-	// Shell prefix: SSH non-interactive non-login shells do NOT source
-	// ~/.bashrc, so nvm-installed binaries (claude at
-	// ~/.nvm/versions/node/*/bin/claude) are not on PATH. Source nvm.sh
-	// when present and prepend common user/local install paths so a
-	// stock `npm install -g @anthropic-ai/claude-code` (nvm path) just
-	// works without any agent_server provisioning beyond nvm itself.
-	in.job.Append(store.LogLine{Type: "phase", Content: "🤖 Agent 服务器开始执行..."})
-	pr, pw := io.Pipe()
-	go func() {
-		// Combined stdout+stderr from the remote shell lands on pw; the parser
-		// just reads NDJSON from pr. Errors here are best-effort: if the
-		// remote write fails we've already started parsing (it'll EOF
-		// naturally) and we don't want to mask the real claude result event.
-		shellPrefix := `export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"; ` +
-			`if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh" 2>/dev/null; fi; ` +
-			`hash -r 2>/dev/null; `
-		_, _ = client.Exec(ctx, shellPrefix+"cd "+shellQuoteSingle(wtPath)+" && "+cmdStr, "", nil, pw)
-		_ = pw.Close()
-	}()
-	out := parseStreamJSONFromReader(pr, jobSink{in.job}, "start-coding", in.usage)
+	// Auth precedence on the remote path: the platform's active
+	// claude_configs row is the ONLY source of ANTHROPIC_AUTH_TOKEN /
+	// ANTHROPIC_BASE_URL / model pinning. We pass it via `env` (built by
+	// h.llm.BuildEnvPairs above) AND we set IgnoreLocalSettings=true so the
+	// worker invokes claude with --setting-sources "" (load no settings
+	// files at all — user / project / local). The agent host's
+	// ~/.claude/settings.json — which the install script seeds with a
+	// placeholder token — must not be able to shadow the platform config,
+	// and any project / local settings left in the worktree by accident
+	// shouldn't either. The `env` field carries every key the CLI needs.
+	ignoreLocal := true
+	opts := llm.StreamOpts{
+		Prompt:          in.prompt,
+		WorkDir:         wtPath,
+		SystemPrompt:    "",
+		Model:           cliModelArg(in.model),
+		SessionID:       in.sessionArg,
+		Resume:          in.sourceSID != "",
+		Fork:            in.fork,
+		ForkSessionID:   in.forkSessionID,
+		PermissionMode:  "",
+		OverrideSettingSources: &ignoreLocal, // legacy flag, kept true
+	}
+	// Use BuildRemoteEnvPairs, NOT BuildEnvPairs: the remote worker spawns
+	// claude inside the agent host's own environment, so we must only send the
+	// platform-pinned keys (auth token / base URL / model pins). BuildEnvPairs
+	// inherits os.Environ() of the NovaWorkbench host and would leak macOS
+	// HOME=/Users/... + TMPDIR=/var/folders/... into the Linux agent, making
+	// `claude --print ping` hang and fail the preflight (preflight_timeout).
+	envPairs := h.llm.BuildRemoteEnvPairs(opts.Model)
+	runBody := workerRunRequest(opts, envPairs, in)
+
+	// Step 5: POST to nova-agent-worker via SSH direct-tcpip channel. The
+	// HTTPTransport opens one channel per request through the existing SSH
+	// connection — no new TCP port on the network, and the worker is bound
+	// to 127.0.0.1 on the remote host, so even on the remote side it's not
+	// exposed. The response is a streaming NDJSON body (one JSON event per
+	// line, same shape as the old `claude --output-format stream-json`
+	// output) that the existing parseStreamJSONFromReader consumes directly.
+	in.job.Append(store.LogLine{Type: "phase", Content: "🤖 Agent 服务器开始执行（nova-agent-worker）..."})
+
+	workerAddr := "127.0.0.1:7000"
+	httpClient := &http.Client{Transport: client.HTTPTransport(workerAddr)}
+
+	// Pre-flight: GET /v1/health. The previous direct-CLI path had a
+	// `command -v claude` probe that surfaced "ENOENT" up front; this is
+	// its worker equivalent. A failed health probe is the most likely cause
+	// of "stream interrupted, 0 events" right now (the worker is new and
+	// a pre-existing Agent server without it would otherwise look like an
+	// opaque failure).
+	healthCtx, healthCancel := context.WithTimeout(ctx, 10*time.Second)
+	healthReq, hReqErr := http.NewRequestWithContext(healthCtx, http.MethodGet, "http://"+workerAddr+"/v1/health", nil)
+	if hReqErr != nil {
+		healthCancel()
+		return claudeStreamOutcome{errMsg: "构造健康检查请求失败: " + hReqErr.Error()}
+	}
+	healthResp, healthErr := httpClient.Do(healthReq)
+	if healthErr != nil {
+		healthCancel()
+		return claudeStreamOutcome{errMsg: "无法连接 nova-agent-worker（" + workerAddr + "）。请在「设置 → Agent 服务器」对该服务器点「安装依赖」后再试。详细: " + healthErr.Error()}
+	}
+	healthResp.Body.Close()
+	healthCancel()
+	if healthResp.StatusCode != http.StatusOK {
+		return claudeStreamOutcome{errMsg: fmt.Sprintf("nova-agent-worker 健康检查失败: HTTP %d", healthResp.StatusCode)}
+	}
+
+	// POST /v1/run with the JSON body. No overall http.Client timeout —
+	// the per-request ctx carries the 35-minute coding deadline.
+	bodyBytes, mErr := json.Marshal(runBody)
+	if mErr != nil {
+		return claudeStreamOutcome{errMsg: "序列化 worker 请求失败: " + mErr.Error()}
+	}
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+workerAddr+"/v1/run", bytes.NewReader(bodyBytes))
+	if reqErr != nil {
+		return claudeStreamOutcome{errMsg: "构造 worker 请求失败: " + reqErr.Error()}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, doErr := httpClient.Do(req)
+	if doErr != nil {
+		return claudeStreamOutcome{errMsg: "POST /v1/run 失败: " + doErr.Error()}
+	}
+	defer resp.Body.Close()
+
+	// Non-200 before the stream starts = worker rejected the request
+	// outright (bad JSON, missing fields, SDK query() threw on startup).
+	// Read the full body and surface it verbatim — usually a JSON message
+	// with the actual reason.
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(resp.Body)
+		return claudeStreamOutcome{errMsg: fmt.Sprintf("worker 返回 HTTP %d: %s", resp.StatusCode, truncateStr(string(errBody), 600))}
+	}
+
+	out := parseStreamJSONFromReader(resp.Body, jobSink{in.job}, "start-coding", in.usage)
 
 	// Step 6: session sync (down) — copy any new session jsonl the remote
 	// run created back to local so adjust/continue on the next round find
@@ -3051,7 +3328,7 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 			" && git add -A" +
 			" && git diff --cached --quiet || git commit -m " + shellQuoteSingle(title) +
 			" && git push origin " + shellQuoteSingle(branch)
-		if exit, _ := client.Exec(ctx, commitScript, "", nil, &jobWriter{job: in.job}); exit != 0 {
+		if exit, _ := client.Exec(ctx, commitScript, "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
 			in.job.Append(store.LogLine{Type: "error", Content: "❌ 推送失败（exit=" + fmtInt(exit) + "），请在远程 worktree 手动处理冲突"})
 			// Non-fatal: the user can still see the work locally via the
 			// pushed-back session dir + the captured result text. Don't
@@ -3079,21 +3356,84 @@ func (w *jobWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// buildRemoteShellCommand joins a command + arg list into a single
-// shell-quoted string with env-key=value prefixes. Single-quoting every arg
-// matches the same escape discipline ssh.Exec uses internally.
-func buildRemoteShellCommand(bin string, args, envPairs []string) string {
-	var b strings.Builder
+// workerRunBody is the JSON body sent to nova-agent-worker's POST /v1/run.
+// It mirrors the worker's buildRunRequest helper (see agent-worker/server.mjs):
+// every field here corresponds to one CLI flag the worker assembles. Keeping
+// the shape on the Go side means wire-format changes require only one update.
+//
+// Why a typed struct (instead of `map[string]any`): the worker validates
+// required fields at startup, and unknown fields would be silently dropped.
+// A struct makes typos like `OverrideSettingSoures` a compile error rather
+// than a "worker returns 400 with no detail" at runtime.
+type workerRunBody struct {
+	WorkDir                string            `json:"workDir"`
+	Prompt                 string            `json:"prompt"`
+	Model                  string            `json:"model,omitempty"`
+	SystemPrompt           string            `json:"systemPrompt,omitempty"`
+	SessionID              string            `json:"sessionId,omitempty"`
+	Resume                 bool              `json:"resume,omitempty"`
+	Fork                   bool              `json:"fork,omitempty"`
+	ForkSessionID          string            `json:"forkSessionId,omitempty"`
+	Env                    map[string]string `json:"env,omitempty"`
+	AllowedTools           []string          `json:"allowedTools,omitempty"`
+	DisallowedTools        []string          `json:"disallowedTools,omitempty"`
+	// OverrideSettingSources is the legacy "drop the user source" flag —
+	// when true, the worker invokes claude with --setting-sources project,local.
+	// Kept for callers that still want project-level hooks etc.
+	OverrideSettingSources bool `json:"overrideSettingSources,omitempty"`
+	// IgnoreLocalSettings, when true, is the strict "drop EVERY settings
+	// source" flag — the worker invokes claude with --setting-sources ""
+	// so the platform's claude_configs row (delivered via `env`) is the
+	// only source of ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / model
+	// pinning. The remote Agent-server path always sets this true: the
+	// install script seeds ~/.claude/settings.json with a placeholder
+	// token, and any stale value there would silently shadow the active row.
+	IgnoreLocalSettings bool `json:"ignoreLocalSettings,omitempty"`
+}
+
+// workerRunRequest builds the POST body for /v1/run from the NovaWorkbench
+// shape (llm.StreamOpts + remoteCodingInput). The env map is parsed from
+// envPairs (each entry is "KEY=VALUE"); the worker hands this map to the
+// claude subprocess's process env, so we don't need to strip the
+// ANTHROPIC_* keys — the worker passes the map straight to the child.
+//
+// systemPrompt is intentionally left empty for the wizard remote path: the
+// developer's persona is passed in the prompt itself (the -p payload
+// includes the role system prompt as a preamble), matching the previous
+// CLI invocation's behavior. If a future caller wants to pass it via
+// --system-prompt, set opts.SystemPrompt before this is called.
+func workerRunRequest(opts llm.StreamOpts, envPairs []string, in *remoteCodingInput) workerRunBody {
+	envMap := make(map[string]string, len(envPairs))
 	for _, kv := range envPairs {
-		b.WriteString(shellQuoteSingle(kv))
-		b.WriteByte(' ')
+		eq := strings.IndexByte(kv, '=')
+		if eq <= 0 {
+			continue
+		}
+		envMap[kv[:eq]] = kv[eq+1:]
 	}
-	b.WriteString(shellQuoteSingle(bin))
-	for _, a := range args {
-		b.WriteByte(' ')
-		b.WriteString(shellQuoteSingle(a))
+	override := false
+	if opts.OverrideSettingSources != nil {
+		override = *opts.OverrideSettingSources
 	}
-	return b.String()
+	return workerRunBody{
+		WorkDir:                opts.WorkDir,
+		Prompt:                 opts.Prompt,
+		Model:                  opts.Model,
+		SessionID:              opts.SessionID,
+		Resume:                 opts.Resume,
+		Fork:                   opts.Fork,
+		ForkSessionID:          opts.ForkSessionID,
+		Env:                    envMap,
+		OverrideSettingSources: override,
+		// Always drop local settings on the remote Agent-server path. The
+		// wizard remote-coding call site passes OverrideSettingSources=true
+		// (kept for backward compat with the legacy "drop user source"
+		// semantics) and now also gets IgnoreLocalSettings=true so the
+		// worker invokes claude with --setting-sources "" (load NO
+		// settings files). The platform env passed via `env` above is the
+		// sole source of auth / base URL / model pinning.
+		IgnoreLocalSettings: true,
+	}
 }
 
 // shellQuoteSingle mirrors the local ssh client's quoting: single-quoted
@@ -3191,7 +3531,13 @@ func parseStreamJSONFromReader(r io.Reader, sink streamSink, scope string, uctx 
 	var out claudeStreamOutcome
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+	// Track the first few non-JSON lines so the postmortem in runRemoteCoding
+	// can show what claude actually printed before the EOF (claude CLI often
+	// emits a warning or an error message on stdout/stderr that isn't valid
+	// NDJSON — e.g. "NotLoggedIn", "SyntaxError", or proxy banner lines).
+	var firstNonJSON []string
 	for scanner.Scan() {
+		out.eventCount++
 		line := scanner.Text()
 		if line == "" {
 			continue
@@ -3200,10 +3546,14 @@ func parseStreamJSONFromReader(r io.Reader, sink streamSink, scope string, uctx 
 		if err := json.Unmarshal([]byte(line), &evt); err != nil {
 			if strings.TrimSpace(line) != "" {
 				log.Printf("[%s] non-json line: %s", scope, truncateStr(line, 500))
+				if len(firstNonJSON) < 3 {
+					firstNonJSON = append(firstNonJSON, truncateStr(line, 240))
+				}
 			}
 			continue
 		}
 		evtType, _ := evt["type"].(string)
+		out.lastEventType = evtType
 		switch evtType {
 		case "system":
 			sub, _ := evt["subtype"].(string)
@@ -3219,6 +3569,8 @@ func parseStreamJSONFromReader(r io.Reader, sink streamSink, scope string, uctx 
 				}
 			}
 		case "stream_event":
+			out.streamEventCount++
+			out.lastEventType = "stream_event"
 			inner, _ := evt["event"].(map[string]interface{})
 			if inner == nil {
 				continue
@@ -3339,12 +3691,45 @@ func parseStreamJSONFromReader(r io.Reader, sink streamSink, scope string, uctx 
 				}
 			}
 			return out
+		case "error":
+			// nova-agent-worker emits {type:"error", error:"..."} when the
+			// spawned claude CLI exits non-zero during initialization (auth
+			// rejected at the proxy, DNS to api.anthropic.com failed, model
+			// rejected, etc.). Without this case the body is dropped and
+			// the EOF branch only knows lastEventType="error" — surfacing
+			// the generic hint about API unreachable / OOM / argv
+			// truncation, none of which pinpoints the actual cause. Accept
+			// both string and object {message:...} shapes since the CLI
+			// and any relay disagree.
+			msg := extractStreamError(evt)
+			if msg != "" {
+				if out.errMsg == "" {
+					out.errMsg = msg
+				}
+				sink.emit(store.LogLine{Type: "error", Content: msg})
+			}
 		}
 	}
 	// EOF without a result event — the remote claude exited before
-	// completing the turn (network drop, etc.).
+	// completing the turn (network drop, etc.). The diagnostic now includes
+	// stream-event count + last event type + any non-JSON preamble so the
+	// user can tell "API hung silently after init" from "claude crashed
+	// before producing anything".
+	scanErr := scanner.Err()
 	if out.finalResult == "" && out.errMsg == "" {
-		out.errMsg = "远程 Claude 未返回结果（流中断）"
+		var summary string
+		if out.streamEventCount == 0 {
+			summary = fmt.Sprintf("已收到 %d 个 NDJSON 事件（system/init 也未出现），最后类型=%q", out.eventCount, out.lastEventType)
+		} else {
+			summary = fmt.Sprintf("已收到 %d 个 NDJSON 事件，含 %d 个 stream_event（Claude 在输出文本/工具过程中断），最后类型=%q", out.eventCount, out.streamEventCount, out.lastEventType)
+		}
+		if len(firstNonJSON) > 0 {
+			summary += "；非 JSON 前导输出: " + strings.Join(firstNonJSON, " | ")
+		}
+		if scanErr != nil {
+			summary += "；scanner 错误: " + scanErr.Error()
+		}
+		out.errMsg = "远程 Claude 未返回结果（流中断 — " + summary + "）。最常见原因：Agent 服务器无法访问 api.anthropic.com（超时/DNS/防火墙），或 claude 进程崩溃/被 OOM kill，或 sshd exec argv 限制触发命令字符串被截断。"
 	}
 	return out
 }
@@ -5202,6 +5587,28 @@ func developerDecomposePrompt(title, leadIn, workDir string) string {
 			"注意：第 2 步的 Write 文件是后端调度子Agent 的主要依据，务必调用 Write 工具完成，不要只在回复里贴 JSON。\n"+
 			"要求：不要直接编写项目代码（由子Agent完成）；不要输出『等待确认』——直接给出拆分结果，后端检测到拆分文件后会自动串行调度子Agent执行并在全部完成后交回主Agent汇总。",
 		title, subTasksFilePath(workDir))
+}
+
+// agentDirectPrompt builds the -p prompt for the "agent" role on Agent-Server
+// execution. It deliberately omits the "开始开发/进入执行实现阶段" trigger that
+// the developer role keys its sub-task orchestration emission on — the agent
+// persona implements the requirement directly on the remote server in a single
+// session (no sub-task orchestration, no sentinel). leadIn mirrors
+// developerDecomposePrompt's wording so the two paths share intent.
+//
+// NB: the literal sentinel string is intentionally NOT mentioned anywhere in
+// this prompt — past experience shows models occasionally honor an explicit
+// "do not emit X" instruction by emitting X anyway (req_9d24ef181a5ad5c4).
+// Routing this prompt through the wizard is what guarantees no sentinel: the
+// orchestrator is short-circuited (see StartCoding) and the -p message
+// contains no trigger phrase.
+func agentDirectPrompt(title, leadIn, workDir string) string {
+	return fmt.Sprintf(
+		"现在切换到「Agent 开发者」角色，正在远程 Agent 服务器上执行需求（需求：%s，工作目录：%s）。\n"+
+			leadIn+
+			"直接使用 Read / Edit / Write / Bash 工具完成代码实现、构建与基础验证，并在结束时进行 git commit。\n"+
+			"完成后在最终回复里简要说明：做了什么、关键文件、验证方式。",
+		title, workDir)
 }
 
 // extractSubtasksPayload pulls the {"subtasks":[…]} JSON block out of

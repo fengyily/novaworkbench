@@ -14,11 +14,13 @@ package ssh
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -31,7 +33,8 @@ import (
 
 // Client wraps an established *ssh.Client. Close it when done.
 type Client struct {
-	conn *gossh.Client
+	conn    *gossh.Client
+	homeDir string // resolved once per Client for "~"-prefixed paths
 }
 
 // Dial establishes an SSH connection. authType is "key" or "password";
@@ -112,6 +115,68 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
+// HTTPTransport returns an *http.Transport whose DialContext opens a new
+// SSH direct-tcpip channel for every connection to remoteAddr (host:port on
+// the SSH server side). The returned Transport can be plugged into a
+// per-call *http.Client to talk to a loopback-only service on the remote
+// host — e.g. nova-agent-worker on 127.0.0.1:7000 — without exposing any
+// new port on the network.
+//
+// Why a custom DialContext instead of `ssh -L` style local-port forwarding:
+//   * No actual local TCP listener is created (cleaner, no port collisions
+//     across concurrent calls, no firewall prompts).
+//   * The SSH connection is reused end-to-end: we don't need a separate
+//     tunnel process or its lifecycle.
+//   * Each request gets its own channel, so concurrent calls are safe and
+//     the transport's per-host connection pooling works through the SSH
+//     multiplex layer.
+//
+// Threading: the returned Transport is safe for concurrent use — the
+// underlying *ssh.Client is concurrent-safe and we just open channels per
+// request. Multiple Transports / http.Clients can be created from one Client
+// (e.g. one per Agent-server coding run) without coordination.
+//
+// remoteAddr is the SSH-server-side address, typically "127.0.0.1:7000".
+// Passing a non-loopback address is allowed but defeats the purpose — the
+// whole point is to keep the worker from being reachable externally.
+func (c *Client) HTTPTransport(remoteAddr string) *http.Transport {
+	if c == nil || c.conn == nil {
+		// Returning a Transport whose Dial always errors is friendlier than
+		// panicking — callers can still build a Client and get a clear
+		// "client not connected" on the first request.
+		return &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return nil, errors.New("ssh: client not connected")
+			},
+		}
+	}
+	return &http.Transport{
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			// Honor the caller's context deadline — the SSH library's
+			// DialContext cancels the channel open on ctx cancellation,
+			// which is exactly what a short-deadline health probe wants.
+			return c.conn.DialContext(ctx, network, remoteAddr)
+		},
+		// Keep idle connections short — long-lived channels through SSH
+		// can hit server-side timeouts we don't control, and the cost of
+		// reopening is negligible (one SSH round trip per call).
+		IdleConnTimeout:     30 * time.Second,
+		MaxIdleConnsPerHost: 4,
+		TLSHandshakeTimeout: 10 * time.Second,
+		// Don't follow redirects automatically — the worker doesn't emit
+		// them and following could mask logic bugs.
+		DisableKeepAlives: false,
+	}
+}
+
+// HTTPClient returns a one-off *http.Client using HTTPTransport. Use this
+// for short-lived requests (health probes). For long-running SSE streams
+// where you want to set a custom timeout, build the Client yourself:
+//   httpClient := &http.Client{Transport: sshCli.HTTPTransport("127.0.0.1:7000")}
+func (c *Client) HTTPClient(remoteAddr string) *http.Client {
+	return &http.Client{Transport: c.HTTPTransport(remoteAddr)}
+}
+
 // Exec runs cmd on the remote host. stdout/stderr are merged into out, line
 // by line, prefixed with [label] when label is non-empty — the same shape
 // preflight.runLogged uses for the local install flow. env is a list of
@@ -119,10 +184,15 @@ func (c *Client) Close() error {
 // disable via AcceptEnv). The returned int is the remote exit code; an
 // error is returned for transport failures only.
 //
+// When stderrTail is non-nil, the last 4KB of stderr are also captured into
+// it (alongside the merged output) so callers can surface postmortem hints
+// when the combined writer was redirected to an opaque sink (e.g. an
+// io.Pipe feeding a JSON scanner that silently drops non-JSON lines).
+//
 // Cancel semantics: if ctx is cancelled, the remote session is closed
 // (SIGKILL-equivalent — ssh doesn't surface SIGTERM cleanly to shells
 // without a pty), and an error is returned.
-func (c *Client) Exec(ctx context.Context, cmd, label string, env []string, out io.Writer) (int, error) {
+func (c *Client) Exec(ctx context.Context, cmd, label string, env []string, out io.Writer, stderrTail *bytes.Buffer) (int, error) {
 	if c == nil || c.conn == nil {
 		return -1, errors.New("ssh: client not connected")
 	}
@@ -158,10 +228,10 @@ func (c *Client) Exec(ctx context.Context, cmd, label string, env []string, out 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		pump(stdoutPipe, label, out)
+		pump(stdoutPipe, label, out, nil)
 	}()
 	go func() {
-		pump(stderrPipe, label, out)
+		pump(stderrPipe, label, out, stderrTail)
 	}()
 
 	if err := sess.Start(cmd); err != nil {
@@ -196,7 +266,12 @@ func (c *Client) Exec(ctx context.Context, cmd, label string, env []string, out 
 }
 
 // pump scans r line by line and writes each to w with an optional label.
-func pump(r io.Reader, label string, w io.Writer) {
+// When stderrTail is non-nil, the last 4KB of pumped bytes are also mirrored
+// into it — useful for surfacing "command not found" / ENOENT-style errors
+// when the combined-stdout writer was redirected elsewhere (e.g. an
+// io.Pipe) and the caller can't otherwise distinguish empty-output from
+// crash.
+func pump(r io.Reader, label string, w io.Writer, stderrTail *bytes.Buffer) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
@@ -205,6 +280,16 @@ func pump(r io.Reader, label string, w io.Writer) {
 			line = "[" + label + "] " + line
 		}
 		_, _ = w.Write([]byte(line + "\n"))
+		if stderrTail != nil {
+			// Keep the last 4KB of stderr for postmortem. Bytes.Buffer
+			// doesn't have a Trim-from-front API; use the same circular
+			// trick (truncate when over cap).
+			if stderrTail.Len()+len(line)+1 > 4096 {
+				stderrTail.Reset()
+			}
+			stderrTail.WriteString(line)
+			stderrTail.WriteByte('\n')
+		}
 	}
 }
 
@@ -236,7 +321,7 @@ func (c *Client) RunScript(ctx context.Context, script, label string, env []stri
 	}
 	defer sftpCli.Remove(remote)
 
-	return c.Exec(ctx, "sh "+remote, label, env, out)
+	return c.Exec(ctx, "sh "+remote, label, env, out, nil)
 }
 
 // Exists returns true when remotePath exists on the remote host. The remote
@@ -244,7 +329,7 @@ func (c *Client) RunScript(ctx context.Context, script, label string, env []stri
 // permission errors on unreadable directories would be misinterpreted as
 // "not exists".
 func (c *Client) Exists(remotePath string) bool {
-	exit, _ := c.Exec(context.Background(), "test -e "+shellQuote(remotePath), "", nil, io.Discard)
+	exit, _ := c.Exec(context.Background(), "test -e "+shellQuote(remotePath), "", nil, io.Discard, nil)
 	return exit == 0
 }
 
@@ -253,8 +338,78 @@ func (c *Client) Mkdirp(remotePath string) error {
 	if remotePath == "" {
 		return errors.New("ssh: empty remote path")
 	}
-	_, err := c.Exec(context.Background(), "mkdir -p "+shellQuote(remotePath), "", nil, io.Discard)
+	_, err := c.Exec(context.Background(), "mkdir -p "+shellQuote(remotePath), "", nil, io.Discard, nil)
 	return err
+}
+
+// WriteFile uploads data to remotePath with the given mode, ensuring the
+// parent directory exists. Used by the agent-server check to seed a default
+// ~/.claude/settings.json without round-tripping through a shell heredoc
+// (which would mangle JSON's double quotes). Mode 0600 is the caller's
+// choice when the payload carries a bearer token.
+//
+// A leading "~" or "~/" in remotePath is expanded against the remote
+// user's $HOME (resolved once per call via `echo $HOME`). This matches the
+// shell's expansion rules while keeping the SFTP path concrete — passing a
+// literal "~/.claude/settings.json" to SFTP would create a file named
+// "~/.claude/settings.json" under the SSH session's CWD instead, with no
+// error reported. SFTP ignores ${HOME} syntax; we expand on our side.
+func (c *Client) WriteFile(remotePath string, data []byte, mode os.FileMode) error {
+	if c == nil || c.conn == nil {
+		return errors.New("ssh: client not connected")
+	}
+	if remotePath == "" {
+		return errors.New("ssh: empty remote path")
+	}
+	expanded, err := c.expandHome(remotePath)
+	if err != nil {
+		return err
+	}
+	sftpCli, err := c.sftp()
+	if err != nil {
+		return err
+	}
+	defer sftpCli.Close()
+
+	if dir := path.Dir(expanded); dir != "" && dir != "." {
+		if err := sftpCli.MkdirAll(dir); err != nil {
+			return fmt.Errorf("ssh: sftp mkdir %s: %w", dir, err)
+		}
+	}
+	dst, err := sftpCli.Create(expanded)
+	if err != nil {
+		return fmt.Errorf("ssh: sftp create %s: %w", expanded, err)
+	}
+	defer dst.Close()
+	if _, err := dst.Write(data); err != nil {
+		return fmt.Errorf("ssh: sftp write %s: %w", expanded, err)
+	}
+	if err := sftpCli.Chmod(expanded, mode); err != nil {
+		return fmt.Errorf("ssh: sftp chmod %s: %w", expanded, err)
+	}
+	return nil
+}
+
+// expandHome rewrites a leading "~" or "~/" in path to the remote user's
+// absolute home directory. Absolute paths and relative paths without a
+// leading "~" pass through unchanged. Cached per-Client after the first
+// resolution so back-to-back WriteFile calls don't fork a fresh exec.
+func (c *Client) expandHome(path string) (string, error) {
+	if len(path) < 2 || path[0] != '~' || (path[1] != '/' && path[1] != 0) {
+		return path, nil
+	}
+	if c.homeDir == "" {
+		var buf strings.Builder
+		if _, err := c.Exec(context.Background(), "echo $HOME", "", nil, &buf, nil); err != nil {
+			return "", fmt.Errorf("ssh: resolve $HOME: %w", err)
+		}
+		home := strings.TrimSpace(buf.String())
+		if home == "" {
+			home = "/root"
+		}
+		c.homeDir = home
+	}
+	return filepath.Join(c.homeDir, path[2:]), nil
 }
 
 // SyncDirUp uploads .jsonl and .md files from localDir to remoteDir,
