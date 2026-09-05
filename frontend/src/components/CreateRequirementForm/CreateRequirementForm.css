@@ -1,70 +1,218 @@
 /* CreateRequirementForm
    ------------------------------------------------------------------
-   Stays consistent with the legacy inline form (`.create-req-form` /
-   `.create-req-form-header` / `.create-req-anchor`) so existing project
-   detail tab styling continues to apply, while adding a 3-card kind
-   picker at the top with a selected/hover/disabled state. */
+   Keeps the outer shell classes (`.create-req-form` /
+   `.create-req-form-header` / `.create-req-anchor`) defined in
+   ProjectDetail.css so the panel still sits correctly in both the
+   project detail tab and the cross-project requirements list.
 
-.create-req-form .kind-card-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 6px;
-}
+   Layout intent: classify (one row) → write (the hero) → configure
+   (quiet controls). The flow selector renders the actual lifecycle
+   pipeline 分析 → 设计 → 开发 with skipped stages struck through, so the
+   consequence of the choice is visible instead of described. */
 
-.create-req-form .kind-card {
-  position: relative;
-  text-align: left;
-  background: var(--color-surface, #fff);
-  border: 1px solid var(--color-border, #E2E8F0);
-  border-radius: 8px;
-  padding: 12px 12px 14px;
-  cursor: pointer;
-  transition: border-color 120ms ease, background-color 120ms ease, transform 120ms ease;
-  font: inherit;
-  color: inherit;
-}
+/* --- Kind switcher --------------------------------------------- */
 
-.create-req-form .kind-card:hover:not(:disabled) {
-  border-color: var(--color-primary, #4F46E5);
+.create-req-form .create-req-kind {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
   background: var(--color-hover, #F1F5F9);
-  transform: translateY(-1px);
+  border-radius: 8px;
+  max-width: 100%;
 }
 
-.create-req-form .kind-card.selected {
-  border-color: var(--color-primary, #4F46E5);
-  background: var(--color-active, #EEF2FF);
-  box-shadow: 0 0 0 1px var(--color-primary, #4F46E5) inset;
+.create-req-form .create-req-kind-tab {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary, #64748B);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
-.create-req-form .kind-card:disabled {
-  opacity: 0.5;
+.create-req-form .create-req-kind-tab:hover:not(:disabled):not(.selected) {
+  color: var(--color-text, #1E293B);
+}
+
+.create-req-form .create-req-kind-tab.selected {
+  background: var(--color-surface, #fff);
+  color: var(--color-primary, #4F46E5);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1);
+}
+
+.create-req-form .create-req-kind-tab:disabled {
+  opacity: 0.55;
   cursor: not-allowed;
 }
 
-.create-req-form .kind-card-title {
-  font-weight: 600;
-  font-size: 14px;
-  margin-bottom: 6px;
-}
-
-.create-req-form .kind-card-hint {
+.create-req-form .create-req-kind-hint {
+  margin: 8px 0 12px;
   font-size: 12px;
-  color: var(--color-text-secondary, #64748B);
+  line-height: 1.5;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+/* --- Description ------------------------------------------------ */
+
+.create-req-form .create-req-desc textarea.form-input {
+  font-size: 14px;
+  padding: 12px;
+  min-height: 132px;
+}
+
+.create-req-form .create-req-desc-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.create-req-form .create-req-desc-meta .form-hint { margin-top: 0; }
+
+.create-req-form .create-req-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+/* --- Secondary settings ---------------------------------------- */
+
+.create-req-form .create-req-meta-row {
+  display: flex;
+  gap: 12px;
+}
+
+.create-req-form .create-req-meta-row .form-group {
+  flex: 1;
+  min-width: 0;
+}
+
+/* --- Flow pipeline selector ------------------------------------- */
+
+.create-req-form .create-req-flow {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.create-req-form .create-req-flow-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  text-align: left;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 8px;
+  background: var(--color-surface, #fff);
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.create-req-form .create-req-flow-option:hover:not(:disabled) {
+  border-color: var(--color-primary, #4F46E5);
+}
+
+.create-req-form .create-req-flow-option.selected {
+  border-color: var(--color-primary, #4F46E5);
+  background: var(--color-active, #EEF2FF);
+}
+
+.create-req-form .create-req-flow-option:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* The pipeline: three stages joined by thin arrows. Skipped stages are
+   struck through and muted — the visual difference between the three
+   options is the point. */
+.create-req-form .create-req-flow-pipeline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--color-text, #1E293B);
+}
+
+.create-req-form .create-req-flow-pipeline .stage + .stage::before {
+  content: '›';
+  margin-right: 4px;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+.create-req-form .create-req-flow-pipeline .stage.skipped {
+  color: var(--color-text-muted, #94A3B8);
+  text-decoration: line-through;
+}
+
+.create-req-form .create-req-flow-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.create-req-form .create-req-flow-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.create-req-form .create-req-flow-note {
+  font-size: 11px;
   line-height: 1.45;
+  color: var(--color-text-secondary, #64748B);
 }
 
-.create-req-form .kind-card-check {
-  position: absolute;
-  top: 8px;
-  right: 10px;
-  color: var(--color-primary, #4F46E5);
-  font-weight: 700;
+/* --- Error + actions -------------------------------------------- */
+
+.create-req-form .create-req-error {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border-left: 3px solid var(--color-error, #EF4444);
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--color-error, #EF4444);
+  font-size: 13px;
 }
 
-/* Mobile: collapse to single-column stack so cards don't get squashed. */
+.create-req-form .form-actions { align-items: center; }
+
+.create-req-form .create-req-shortcut {
+  margin-right: auto;
+  font-size: 11px;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+/* Keyboard users must be able to see where they are. */
+.create-req-form .create-req-kind-tab:focus-visible,
+.create-req-form .create-req-flow-option:focus-visible {
+  outline: 2px solid var(--color-primary, #4F46E5);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .create-req-form .create-req-kind-tab,
+  .create-req-form .create-req-flow-option { transition: none; }
+}
+
+/* Mobile: stack the flow options and the meta row; hide the desktop-only
+   keyboard shortcut hint. */
 @media (max-width: 640px) {
-  .create-req-form .kind-card-grid {
-    grid-template-columns: 1fr;
-  }
+  .create-req-form .create-req-flow { grid-template-columns: 1fr; }
+  .create-req-form .create-req-flow-option { flex-direction: row; align-items: center; gap: 12px; }
+  .create-req-form .create-req-meta-row { flex-direction: column; gap: 14px; }
+  .create-req-form .create-req-kind { display: flex; }
+  .create-req-form .create-req-shortcut { display: none; }
 }
