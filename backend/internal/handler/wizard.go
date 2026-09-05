@@ -1071,6 +1071,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		Model            string `json:"model"`
 		ReadKnowledge    bool   `json:"read_knowledge"`
 		AgentServerID    string `json:"agent_server_id"` // empty = local execution; otherwise remote Agent server
+		SplitTasks       bool   `json:"split_tasks"`     // false (default) = developer persona implements directly; true = current decomposition + auto-orchestrate flow
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "INVALID", "Invalid JSON")
@@ -1081,6 +1082,11 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 	// relevant to this requirement is injected into the claude prompt and a
 	// "knowledge" SSE event is emitted before the coding job starts.
 	readKnowledge := req.ReadKnowledge
+
+	// "是否拆分任务"开关：默认 false（不拆分，由 developer persona 直接实现），
+	// 勾选时走原有的拆分子任务 + tryAutoOrchestrate 自动派发链路。Agent-Server
+	// 路径（roleKey == "agent"）始终 agentDirectPrompt 直跑，该字段被忽略。
+	splitTasks := req.SplitTasks
 
 	job := h.jobs.Create(req.RequirementID)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
@@ -1326,14 +1332,27 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Agent-Server execution uses the "agent" role instead of "developer":
-		// the agent persona does NOT split work into sub-tasks and does NOT emit
-		// the [SUBTASKS_READY] sentinel — it implements the requirement directly
-		// on the remote server (see role_defaults.go: role_agent). Local execution
-		// keeps the developer/统筹协调者 persona so the existing orchestrator path
-		// (tryAutoOrchestrate) is unchanged.
+		// Role selection:
+		//   • "agent" — Agent-Server execution (remote) OR local with split_tasks=false
+		//     (the user explicitly chose "不拆分任务"). The agent persona's system
+		//     prompt says "不要先拆分子任务" + "一次会话内完成端到端开发", which is
+		//     exactly the behavior we want when the main agent is supposed to
+		//     implement the requirement itself.
+		//   • "developer" — local execution with split_tasks=true (default = true
+		//     for legacy / no-split-switch callers). The developer persona is the
+		//     统筹协调者 that decomposes into sub-tasks + emits [SUBTASKS_READY]
+		//     so tryAutoOrchestrate dispatches children.
+		//
+		// Why not "developer" + a "直接实现" -p override when split_tasks=false?
+		// The developer system prompt explicitly says "**不要直接编写项目代码**——
+		// 所有具体实现工作由子Agent完成" and has the "## 何时拆分任务" block keyed
+		// on "进入执行实现阶段"-style triggers; even with the prompt rewritten to
+		// "直接实现需求", models reflexively follow the system prompt and split
+		// anyway, defeating the user's "不拆分" choice. Routing through the agent
+		// role is the only reliable fix: its persona + system prompt consistently
+		// say "don't decompose, implement end-to-end" (see role_defaults.go).
 		roleKey := "developer"
-		if req.AgentServerID != "" {
+		if req.AgentServerID != "" || !req.SplitTasks {
 			roleKey = "agent"
 		}
 		systemPrompt, model := h.roleConfig(roleKey)
@@ -1357,16 +1376,21 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			// ask the agent to read the relevant files first to build context.
 			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未关联需求会话，使用独立会话开始开发。"})
 			if roleKey == "agent" {
-				// Agent-Server path: bypass the decomposition trigger entirely.
-				// The agent persona implements the requirement directly on the
-				// remote server (no sub-task orchestration, no sentinel).
+				// agent persona (Agent-Server remote OR local split_tasks=false):
+				// implement the requirement directly end-to-end. No decomposition
+				// trigger in the -p message, no [SUBTASKS_READY] expected, no
+				// .novaworkbench/subtasks.json Write. The agent system prompt says
+				// "不要先拆分子任务" and "一次会话内完成端到端开发", so the model
+				// consistently implements instead of splitting.
 				prompt = agentDirectPrompt(req.RequirementTitle,
 					"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后直接实现需求：\n", workDir)
 			} else {
-				// Same decomposition trigger as the fork branch — the developer
-				// role only emits [SUBTASKS_READY] when the -p message carries an
-				// explicit "开始开发" trigger. The fresh path has no prior design
-				// to reference, so it asks the agent to read files first.
+				// developer persona + fresh-session path + split_tasks=true.
+				// Keep the original decomposition trigger so the developer role
+				// emits [SUBTASKS_READY] + writes .novaworkbench/subtasks.json
+				// and tryAutoOrchestrate dispatches children. The split_tasks=false
+				// fresh-session case is handled by the roleKey=="agent" branch
+				// above (we route those requests through the agent role entirely).
 				prompt = developerDecomposePrompt(req.RequirementTitle,
 					"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后立即完成**任务拆分**：\n", workDir)
 			}
@@ -1404,9 +1428,18 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			// "always ask for confirmation" guidance so the agent emits the
 			// sentinel immediately instead of waiting on the user.
 			if roleKey == "agent" {
+				// agent persona (Agent-Server remote OR local split_tasks=false):
+				// fork/resume variant — the conversation already carries the
+				// requirement + analysis + design, so the leadIn references that
+				// history instead of asking the agent to re-read files.
 				prompt = agentDirectPrompt(req.RequirementTitle,
 					"基于已完成的需求分析与技术方案，请直接实现需求：\n", workDir)
 			} else {
+				// developer persona + fork/resume path + split_tasks=true.
+				// Decompose the work into sub-tasks so tryAutoOrchestrate (called
+				// below, gated on splitTasks) can dispatch children. The
+				// split_tasks=false fork/resume case is handled by roleKey=="agent"
+				// above — we route those requests through the agent role entirely.
 				prompt = developerDecomposePrompt(req.RequirementTitle,
 					"基于已完成的需求分析与技术方案，请立即完成**任务拆分**：\n", workDir)
 			}
@@ -1635,10 +1668,18 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		// orchestrator（不调用，即便没有 sentinel 也会安全 no-op，但调用
 		// 本身会引入无谓的 goroutine + 日志噪音）。
 		//
+		// 当 split_tasks=false（用户选择"不拆分任务"）时，StartCoding 已经把
+		// roleKey 切到 "agent" 并使用 agentDirectPrompt，-p 消息不携带任何触发
+		// 语、agent 的 system prompt 也明确"不要拆分子任务"；此时再调
+		// tryAutoOrchestrate 只会扫到空 payload 然后空转派发 0 个子任务，
+		// 等价于一次 no-op，但仍然多开一个 goroutine + 一段 resolveSubtasksPayload
+		// 的日志噪音，所以一并短路。split_tasks=true + 本地 = roleKey=="developer"，
+		// 走原 developerDecomposePrompt + 派发链路，行为与改动前一致。
+		//
 		// 该调用改用独立 goroutine，不阻塞 start-coding 自身的 job_done
 		// 信号，用户的开发启动 SSE 立即结束；子任务的进度仍由
 		// dispatchOneChild 的 JobStore job 推流。
-		if roleKey != "agent" && req.RequirementID != "" && newCodingSID != "" && h.subTaskSvc != nil {
+		if roleKey != "agent" && req.RequirementID != "" && newCodingSID != "" && h.subTaskSvc != nil && splitTasks {
 			go h.tryAutoOrchestrate(req.RequirementID, newCodingSID, out.finalResult, out.subTasksJSON, reqRow, workDir, model)
 		}
 	}()
