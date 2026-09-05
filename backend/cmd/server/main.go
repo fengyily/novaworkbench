@@ -394,6 +394,9 @@ wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway
 	// parent's claude session via --fork-session). Same scope as
 	// AdjustCoding — reuses the spawn helper in wizard.go.
 	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/{sid}/adjust", wizardH.AdjustSubTask)
+	// Re-run a FAILED sub-task with its original prompt (optionally switching
+	// models). Forks the failed run's source session for a clean retry.
+	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/{sid}/redo", wizardH.RedoSubTask)
 	// Manual re-split: resumes the coding session with the decomposition
 	// trigger and runs the same parse+dispatch pipeline as StartCoding's
 	// auto-orchestrate. Escape hatch for when auto-orchestration produced

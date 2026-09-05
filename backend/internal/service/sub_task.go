@@ -206,6 +206,54 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 	}, nil
 }
 
+// Redo creates a NEW sub-task row that re-runs a failed parent sub-task with
+// its original prompt. Unlike CreateAdjustment — which forks the parent's own
+// session to inherit its edits — a redo forks the parent's SOURCE session
+// (the session the failed run originally forked from), so the child re-executes
+// the original task from a clean starting point rather than inheriting a
+// broken/partial attempt. The redo row carries the parent's source_session_id
+// in its own source_session_id; the handler fills in a fallback when empty.
+//
+// Title defaults to "重做: <parent title>". The model is NOT persisted here —
+// the handler passes the chosen model into runSubTask, which stamps it via
+// Finish (mirrors Create/CreateAdjustment).
+func (s *SubTaskService) Redo(reqID, parentID string) (*model.SubTask, error) {
+	if reqID == "" || parentID == "" {
+		return nil, errors.New("requirement_id and parent sub_task id are required")
+	}
+	parent, err := s.Get(parentID)
+	if err != nil {
+		return nil, fmt.Errorf("load parent sub_task: %w", err)
+	}
+	if parent.RequirementID != reqID {
+		return nil, fmt.Errorf("parent sub_task belongs to requirement %s, not %s", parent.RequirementID, reqID)
+	}
+	id := util.NewID("st")
+	now := time.Now()
+	redoTitle := "重做: " + parent.Title
+	if len(redoTitle) > 80 {
+		redoTitle = redoTitle[:80]
+	}
+	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
+		source_session_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, reqID, redoTitle, parent.Prompt, model.SubTaskStatusPending,
+		parent.SourceSessionID, now, now)
+	if err != nil {
+		return nil, fmt.Errorf("insert redo sub_task: %w", err)
+	}
+	return &model.SubTask{
+		ID:              id,
+		RequirementID:   reqID,
+		Title:           redoTitle,
+		Prompt:          parent.Prompt,
+		Status:          model.SubTaskStatusPending,
+		SourceSessionID: parent.SourceSessionID,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}, nil
+}
+
 // Finish is the terminal write: status (done | error), artifact Markdown, the
 // effective model, terminal token usage, resolved cost (cents), and wall-
 // clock duration. completed_at is stamped automatically when status moves

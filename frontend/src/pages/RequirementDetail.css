@@ -2293,3 +2293,256 @@ select.preflight-field-input {
   .subtask-artifact { padding: 12px; font-size: 12px; }
   .subtask-log { max-height: 240px; font-size: 11px; }
 }
+
+/* ── Design doc collapse (long plans default to collapsed, expandable on click) ──
+   Lives at the end of the file so it follows the design-section/toolbar block
+   styles defined above. Uses --color-surface because .detail-section (the
+   wrapper around .design-section) has background: var(--color-surface); the
+   fade mask has to blend into that card surface, not the page background. */
+.design-content {
+  display: block;
+  transition: max-height 0.25s ease;
+  overflow: hidden;
+  position: relative;
+}
+.design-content-collapsed {
+  max-height: 320px; /* ≈ 6 lines of markdown + padding */
+}
+.design-content-collapsed::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 80px;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0), var(--color-surface, #ffffff));
+  pointer-events: none;
+}
+/* Avoid the fade mask clipping the last child's text. Only applies when the
+   container is in the collapsed state; existing .analysis-summary /
+   .analysis-block padding/margin are otherwise untouched. */
+.design-content-collapsed > *:last-child { padding-bottom: 16px; }
+
+.design-toggle-btn {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--color-primary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.design-toggle-btn:hover {
+  background: var(--color-hover, rgba(79, 70, 229, 0.06));
+  border-color: var(--color-primary);
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   Spec card — 需求背景
+   The brief pinned to the workbench. Distinct from the digital cards
+   below by leaning on --color-parchment (defined in index.css, previously
+   scoped to mobile-only) and a faint indigo margin line down the left,
+   like a ruled notebook margin. Avoids the cream+terracotta AI default
+   by staying near-white with a single muted indigo accent. Typography
+   uses a slightly looser tracking so Chinese reads as written-not-typed.
+   ────────────────────────────────────────────────────────────────────── */
+.spec-card {
+  position: relative;
+  margin-bottom: 20px;
+  padding: 18px 22px 16px 36px; /* 28px gutter for the binding margin */
+  background:
+    /* Faint paper grain — three soft dots, scaled-down inline SVG so no
+       extra HTTP request. Below the parchment fill so it reads as paper,
+       not noise. */
+    radial-gradient(circle at 12px 50%, rgba(79, 70, 229, 0.16) 1px, transparent 2px) 0 0 / 24px 24px repeat-y,
+    var(--color-parchment, #FDFCF8);
+  border: 1px solid #E8E2D2;
+  border-radius: 4px; /* sharper than other cards (8px) — paper, not card */
+  font-size: 14px;
+  color: var(--color-text);
+  line-height: 1.75;
+  letter-spacing: 0.01em;
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04);
+}
+.spec-card::before {
+  /* Hand-stamped BRIEF tag — sits in the top-left binding gutter, vertical
+     text so it doesn't compete with the description for horizontal space. */
+  content: 'BRIEF';
+  position: absolute;
+  top: 12px;
+  left: 8px;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  font-weight: 700;
+  color: rgba(79, 70, 229, 0.55);
+}
+.spec-card-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 2px 0;
+  border-bottom: 1px dashed #D6CFB8;
+}
+.spec-card-tag-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  color: var(--color-primary);
+  padding: 1px 6px;
+  background: rgba(79, 70, 229, 0.08);
+  border-radius: 2px;
+}
+.spec-card-tag-date {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #8B7E5E;
+}
+.spec-card-body {
+  /* Match the existing analysis-summary margin rules but tighter — the
+     paper card is meant to read dense, not airy. */
+}
+.spec-card-body .analysis-summary {
+  margin-bottom: 0;
+}
+.spec-card-body .analysis-summary > :first-child {
+  margin-top: 0;
+}
+.spec-card-body .analysis-summary p {
+  color: #2A2F3A;
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   Ledger — Token 消耗
+   The desktop table is reframed as a lab-notebook ledger. Numbers use
+   tabular-nums so columns line up at the decimal; row hover lifts the
+   stage-accent stripe on the left edge to anchor the eye. The hero
+   receipt (mobile) keeps its bill aesthetic — we only restyle the
+   table + section header here.
+   ────────────────────────────────────────────────────────────────────── */
+.ledger .ledger-header {
+  align-items: baseline;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-border);
+}
+.ledger-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--color-text);
+  text-transform: none;
+}
+.ledger-title-mark {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: var(--color-primary);
+  border-radius: 1px;
+  transform: rotate(45deg);
+  box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.18);
+}
+.ledger-loading {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  letter-spacing: 0.05em;
+}
+
+/* The desktop table (≥769px). Reframed as a ledger: row accent stripe,
+   tabular-nums numbers, hairline rules instead of full borders. */
+.usage-section .pr-table.table-cards {
+  margin-top: 12px;
+  font-family: var(--font-mono);
+}
+.usage-section .pr-table.table-cards thead th {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-border);
+  background: transparent;
+  white-space: nowrap;
+}
+.usage-section .pr-table.table-cards tbody td {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  padding: 9px 10px;
+  border-bottom: 1px solid #F1F5F9;
+  vertical-align: middle;
+}
+.usage-section .pr-table.table-cards tbody td[data-label="步骤"] {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text);
+}
+.usage-section .pr-table.table-cards tbody tr {
+  position: relative;
+  transition: background-color 0.15s ease;
+}
+.usage-section .pr-table.table-cards tbody tr:hover {
+  background: rgba(79, 70, 229, 0.03);
+}
+.usage-section .pr-table.table-cards tbody tr.table-cards-total {
+  border-top: 1px solid var(--color-text);
+  border-bottom: 2px double var(--color-text);
+}
+.usage-section .pr-table.table-cards tbody tr.table-cards-total td {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--color-primary-hover);
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+.usage-section .pr-table.table-cards tbody tr.table-cards-total td[data-label="步骤"] {
+  font-family: var(--font-sans);
+  color: var(--color-text);
+  letter-spacing: 0.04em;
+}
+
+/* The empty-state copy. Reframes the original "暂无 Token 消耗记录"
+   into a ledger-voice nudge that points to the action (run the wizard)
+   instead of apologising for missing data. */
+.usage-section .ledger-empty {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 20px;
+  margin-top: 10px;
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 23px,
+      rgba(79, 70, 229, 0.06) 23px,
+      rgba(79, 70, 229, 0.06) 24px
+    ),
+    var(--color-parchment, #FDFCF8);
+  border: 1px dashed #D6CFB8;
+  border-radius: 4px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.usage-section .ledger-empty-icon {
+  font-size: 18px;
+  color: var(--color-primary);
+  flex-shrink: 0;
+}
+.usage-section .ledger-empty strong {
+  color: var(--color-text);
+  font-weight: 600;
+}

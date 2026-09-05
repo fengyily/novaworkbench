@@ -28,6 +28,41 @@ interface DesignData {
   plan_markdown?: string; // plan-mode output (raw markdown, not the legacy JSON schema)
 }
 
+// Decide whether the stored design document is long enough to warrant the
+// "default collapsed / click to expand" treatment. The current rule: more than
+// 12 newline-separated lines OR more than 1200 characters is "long". The
+// check tolerates both the plan-mode markdown payload and the legacy JSON
+// schema by sniffing the first character (`{` → JSON, otherwise treat the
+// whole thing as markdown).
+//
+// Kept outside the component so it isn't recreated on every render — this is
+// called from a useEffect that fires on req.id / req.design_docs changes.
+function isLongDesignDoc(raw: string): boolean {
+  if (!raw || !raw.trim()) return false;
+  let body = raw;
+  if (raw.trimStart().startsWith('{')) {
+    try {
+      const obj = JSON.parse(raw) as Partial<DesignData>;
+      if (obj.plan_markdown) {
+        body = obj.plan_markdown;
+      } else {
+        body = [
+          obj.overview ?? '',
+          ...(obj.files ?? []),
+          ...(obj.steps ?? []),
+          obj.model_changes ?? '',
+          ...(obj.risks ?? []),
+        ].join('\n');
+      }
+    } catch {
+      // Fall through and treat raw as markdown.
+    }
+  }
+  const lines = body.split('\n').length;
+  const chars = body.length;
+  return lines > 12 || chars > 1200;
+}
+
 // Two-role stage-gate lifecycle. Each gate is completed by a manual action.
 // draft → analyzing → designing → designed → developing → done
 type Stage = 'analyst' | 'architect' | 'developer' | 'done';
@@ -465,6 +500,18 @@ export default function RequirementDetail() {
   // While the design job is actively running the panel stays open; once it
   // finishes the panel collapses and a toggle lets the user re-expand it.
   const [showDesignProcess, setShowDesignProcess] = useState(false);
+
+  // Collapsible design-doc state. Long design documents default to collapsed
+  // (truncated with a fade-mask + "展开全文" button); short ones render in
+  // full as before. Re-evaluated whenever the requirement or its stored
+  // design_docs change, and any switch collapses the view back to its
+  // default so the user isn't left with a stale "expanded" state.
+  const [designExpanded, setDesignExpanded] = useState(false);
+  const [isLongDesign, setIsLongDesign] = useState(false);
+  useEffect(() => {
+    setIsLongDesign(!!req?.design_docs && isLongDesignDoc(req.design_docs));
+    setDesignExpanded(false);
+  }, [req?.id, req?.design_docs]);
 
   // Edit modal state
   const [showEditModal, setShowEditModal] = useState(false);
@@ -1941,19 +1988,28 @@ export default function RequirementDetail() {
       />
 
       {req.description && (
-        <div className="detail-desc">
-          <div className="analysis-summary">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{req.description}</ReactMarkdown>
+        <div className="detail-desc spec-card">
+          <div className="spec-card-tag" aria-hidden>
+            <span className="spec-card-tag-label">BRIEF</span>
+            <span className="spec-card-tag-date">{req.created_at?.slice(0, 10) ?? ''}</span>
+          </div>
+          <div className="spec-card-body">
+            <div className="analysis-summary">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{req.description}</ReactMarkdown>
+            </div>
           </div>
         </div>
       )}
 
       {/* Token usage — per-step breakdown + total for this requirement.
           input = input_tokens + cache_creation + cache_read (billed input). */}
-      <div className="detail-section usage-section">
-        <div className="section-header" style={{ marginBottom: 10 }}>
-          <span style={{ fontWeight: 600, fontSize: 14 }}>Token 消耗</span>
-          {usageLoading && <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>刷新中…</span>}
+      <div className="detail-section usage-section ledger">
+        <div className="section-header ledger-header" style={{ marginBottom: 10 }}>
+          <span className="ledger-title">
+            <span className="ledger-title-mark" aria-hidden />
+            Token 消耗 · 账目
+          </span>
+          {usageLoading && <span className="ledger-loading">刷新中…</span>}
         </div>
         {usage && usage.by_step.length > 0 ? (
           <>
@@ -2216,8 +2272,18 @@ export default function RequirementDetail() {
             )}
           </>
         ) : (
-          <div style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
-            {usageLoading ? '加载中…' : '暂无 Token 消耗记录。完成一次分析 / 方案 / 编码后将在此展示。'}
+          <div className="ledger-empty">
+            <span className="ledger-empty-icon" aria-hidden>📭</span>
+            <span>
+              {usageLoading ? (
+                <>正在汇总本需求的账目…</>
+              ) : (
+                <>
+                  <strong>账目尚未生成。</strong>
+                  完成一次分析 / 方案 / 编码后，每一笔 token 与费用会按阶段写入此台账。
+                </>
+              )}
+            </span>
           </div>
         )}
       </div>
@@ -2513,33 +2579,45 @@ export default function RequirementDetail() {
 
           {hasDesign && (
             <>
-              {design.plan_markdown ? (
-                <div className="analysis-summary"><ReactMarkdown remarkPlugins={[remarkGfm]}>{design.plan_markdown}</ReactMarkdown></div>
-              ) : (
-                <>
-                  {design.overview && <div className="analysis-summary">{design.overview}</div>}
-                  {design.files && design.files.length > 0 && (
-                    <div className="analysis-block">
-                      <h4>📄 涉及文件</h4>
-                      <ul>{design.files.map((f, i) => <li key={i}><code>{f}</code></li>)}</ul>
-                    </div>
-                  )}
-                  {design.steps && design.steps.length > 0 && (
-                    <div className="analysis-block">
-                      <h4>🔢 实现步骤</h4>
-                      <ol>{design.steps.map((s, i) => <li key={i}>{s}</li>)}</ol>
-                    </div>
-                  )}
-                  {design.model_changes && design.model_changes !== '无' && (
-                    <div className="analysis-block"><h4>🗄️ 数据模型变更</h4><p>{design.model_changes}</p></div>
-                  )}
-                  {design.risks && design.risks.length > 0 && (
-                    <div className="analysis-block">
-                      <h4>⚠️ 实现风险</h4>
-                      <ul>{design.risks.map((r, i) => <li key={i} className="risk-item">{r}</li>)}</ul>
-                    </div>
-                  )}
-                </>
+              <div className={isLongDesign && !designExpanded ? 'design-content design-content-collapsed' : 'design-content'}>
+                {design.plan_markdown ? (
+                  <div className="analysis-summary"><ReactMarkdown remarkPlugins={[remarkGfm]}>{design.plan_markdown}</ReactMarkdown></div>
+                ) : (
+                  <>
+                    {design.overview && <div className="analysis-summary">{design.overview}</div>}
+                    {design.files && design.files.length > 0 && (
+                      <div className="analysis-block">
+                        <h4>📄 涉及文件</h4>
+                        <ul>{design.files.map((f, i) => <li key={i}><code>{f}</code></li>)}</ul>
+                      </div>
+                    )}
+                    {design.steps && design.steps.length > 0 && (
+                      <div className="analysis-block">
+                        <h4>🔢 实现步骤</h4>
+                        <ol>{design.steps.map((s, i) => <li key={i}>{s}</li>)}</ol>
+                      </div>
+                    )}
+                    {design.model_changes && design.model_changes !== '无' && (
+                      <div className="analysis-block"><h4>🗄️ 数据模型变更</h4><p>{design.model_changes}</p></div>
+                    )}
+                    {design.risks && design.risks.length > 0 && (
+                      <div className="analysis-block">
+                        <h4>⚠️ 实现风险</h4>
+                        <ul>{design.risks.map((r, i) => <li key={i} className="risk-item">{r}</li>)}</ul>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+              {isLongDesign && (
+                <button
+                  type="button"
+                  className="btn btn-sm design-toggle-btn"
+                  onClick={() => setDesignExpanded(v => !v)}
+                  aria-expanded={designExpanded}
+                >
+                  {designExpanded ? '▲ 收起方案' : '▼ 展开全文'}
+                </button>
               )}
             </>
           )}

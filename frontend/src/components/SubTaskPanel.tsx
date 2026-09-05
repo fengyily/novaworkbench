@@ -6,6 +6,7 @@ import {
   subTaskCliCommand,
   subTaskAdjustCommand,
   fmtNum,
+  DefaultModelLabel,
   type SubTask,
   type SubTaskStatus,
   type Requirement,
@@ -13,6 +14,7 @@ import {
 import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, type LogLine } from '../utils/logLines';
 import AtMentionTextarea from './AtMentionTextarea';
+import ModelSelect from './ModelSelect';
 import './SubTaskPanel.css';
 
 // fmtCost / fmtNum are imported from the shared API client. TokenStrip
@@ -201,9 +203,15 @@ interface CardProps {
   index: number;
   total: number;
   onChanged: (next: SubTask) => void;
+  // Optional callback fired after a redo (or any action that adds a NEW
+  // sub-task row) succeeds. The panel root passes loadList so the freshly
+  // created redo row appears immediately — the periodic poll only runs while
+  // a child is alive, so a redo of an otherwise-terminal list would never
+  // refresh without this.
+  onCreated?: () => void;
 }
 
-function SubTaskCard({ st, index, total, onChanged }: CardProps) {
+function SubTaskCard({ st, index, total, onChanged, onCreated }: CardProps) {
   // The card uses a layout that mirrors an issue tracker detail view:
   //   ┌─ terminal-style header line ────────────────────────────────┐
   //   │  ▶ $ sub-task [01/03] · claude-sonnet · 12s ago         ⌄  │
@@ -226,6 +234,13 @@ function SubTaskCard({ st, index, total, onChanged }: CardProps) {
   const [adjustInput, setAdjustInput] = useState('');
   const [adjustBusy, setAdjustBusy] = useState(false);
   const [adjustError, setAdjustError] = useState<string | null>(null);
+  // Redo (🔄 重做): re-run a failed sub-task with the original prompt. The
+  // user may switch the model before re-dispatching. Defaults to the failed
+  // run's model so a plain "重做" re-runs with the same model.
+  const [redoing, setRedoing] = useState(false);
+  const [redoModel, setRedoModel] = useState<string>(st.model);
+  const [redoBusy, setRedoBusy] = useState(false);
+  const [redoError, setRedoError] = useState<string | null>(null);
   // Live ticker for the header-right "⏱ 0:42" badge: starts when the card
   // mounts in "running" status and stops on terminal status. Replaced by
   // the persisted duration_seconds once the row finishes, so the badge
@@ -299,6 +314,29 @@ function SubTaskCard({ st, index, total, onChanged }: CardProps) {
       setAdjustBusy(false);
     }
   }, [adjustInput, adjustBusy, st.id, st.requirement_id]);
+
+  const submitRedo = useCallback(async () => {
+    if (redoBusy) return;
+    setRedoBusy(true);
+    setRedoError(null);
+    try {
+      // Normalize the sentinel so "默认模型" never reaches the backend as an
+      // explicit model id — the backend then falls back to the role default.
+      const model = redoModel && redoModel !== DefaultModelLabel ? redoModel : undefined;
+      await subTasksApi.redo(st.requirement_id, st.id, { model });
+      setRedoing(false);
+      setRedoError(null);
+      // The redo creates a brand-new sub-task row. Fire the parent's refresh
+      // callback so it appears immediately; the periodic poll only runs while
+      // a child is alive, so a redo of an otherwise-terminal list would never
+      // surface without this.
+      onCreated?.();
+    } catch (e: any) {
+      setRedoError(e?.message || '重做失败');
+    } finally {
+      setRedoBusy(false);
+    }
+  }, [redoBusy, redoModel, st.id, st.requirement_id, onCreated]);
 
   // The header-right summary block surfaces the four quick-glance signals
   // the user always wants at a glance without expanding the card:
@@ -401,13 +439,26 @@ function SubTaskCard({ st, index, total, onChanged }: CardProps) {
               --fork-session so the child inherits prior edits. */}
           {!streaming && (st.status === 'done' || st.status === 'error') && st.session_id && (
             <div className="sub-card-adjust">
-              {!adjusting ? (
-                <button
-                  type="button"
-                  className="sub-adjust-toggle"
-                  onClick={() => setAdjusting(true)}
-                >+ 追加调整</button>
-              ) : (
+              {/* Toggle row: both actions collapse to a single row when no
+                  pane is open. Redo is only offered on a FAILED sub-task. */}
+              {!adjusting && !redoing && (
+                <div className="sub-adjust-actions">
+                  <button
+                    type="button"
+                    className="sub-adjust-toggle"
+                    onClick={() => setAdjusting(true)}
+                  >+ 追加调整</button>
+                  {st.status === 'error' && (
+                    <button
+                      type="button"
+                      className="sub-adjust-toggle"
+                      onClick={() => setRedoing(true)}
+                    >🔄 重做</button>
+                  )}
+                </div>
+              )}
+
+              {adjusting && (
                 <div className="sub-adjust-pane">
                   <AtMentionTextarea
                     value={adjustInput}
@@ -423,6 +474,28 @@ function SubTaskCard({ st, index, total, onChanged }: CardProps) {
                     <button type="button" className="btn" onClick={() => { setAdjusting(false); setAdjustInput(''); setAdjustError(null); }} disabled={adjustBusy}>取消</button>
                     <button type="button" className="btn btn-primary" onClick={submitAdjust} disabled={!adjustInput.trim() || adjustBusy}>
                       {adjustBusy ? '启动中…' : '🚀 追加调整'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Redo: re-run the SAME prompt with an optional model switch.
+                  No textarea — the original prompt is reused verbatim. */}
+              {!adjusting && redoing && (
+                <div className="sub-adjust-pane">
+                  <div className="sub-adjust-hint">将以原提示词重新执行该子任务</div>
+                  <ModelSelect
+                    value={redoModel}
+                    onChange={setRedoModel}
+                    label="重做模型"
+                    defaultModelName={st.model && st.model !== DefaultModelLabel ? st.model : ''}
+                    disabled={redoBusy}
+                  />
+                  <div className="sub-adjust-toolbar">
+                    {redoError && <span className="sub-adjust-err">{redoError}</span>}
+                    <button type="button" className="btn" onClick={() => { setRedoing(false); setRedoError(null); }} disabled={redoBusy}>取消</button>
+                    <button type="button" className="btn btn-primary" onClick={submitRedo} disabled={redoBusy}>
+                      {redoBusy ? '启动中…' : '🚀 开始重做'}
                     </button>
                   </div>
                 </div>
@@ -752,6 +825,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             index={i}
             total={items.length}
             onChanged={onItemChanged}
+            onCreated={loadList}
           />
         ))}
       </div>

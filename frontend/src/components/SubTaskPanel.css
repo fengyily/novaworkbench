@@ -562,6 +562,12 @@
   border-color: var(--color-primary);
   background: var(--color-active);
 }
+.sub-adjust-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .sub-adjust-pane {
   display: flex;
   flex-direction: column;
