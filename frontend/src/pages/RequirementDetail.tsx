@@ -450,6 +450,13 @@ export default function RequirementDetail() {
   // branch modal; the design one has its own confirm modal so the user can opt
   // in right before generating the technical plan.
   const [readKnowledgeDev, setReadKnowledgeDev] = useState(false);
+  // Optional "是否拆分任务" switch (default off — i.e. 默认不拆分). When
+  // checked, the backend runs the developer persona's task-decomposition
+  // branch + auto-dispatches sub-agents. When unchecked, the backend runs the
+  // developer persona in a "direct implementation" branch (no subtask split,
+  // no auto-orchestration). Reset to false each time the branch modal opens so
+  // the default is preserved across coding runs.
+  const [splitTasksDev, setSplitTasksDev] = useState(false);
   const [showDesignKnowledgeModal, setShowDesignKnowledgeModal] = useState(false);
   const [readKnowledgeDesign, setReadKnowledgeDesign] = useState(false);
   const designNeedsTransitionRef = useRef(false);
@@ -1120,7 +1127,7 @@ export default function RequirementDetail() {
     );
   }, [id, refresh]);
 
-  const doStartCoding = async (bName: string, bBase: string, useKnowledge: boolean) => {
+  const doStartCoding = async (bName: string, bBase: string, useKnowledge: boolean, splitTasks: boolean) => {
     if (!req || !project || !id) return;
     setCoding(true);
     setCodingLines([]);
@@ -1161,6 +1168,12 @@ export default function RequirementDetail() {
           branch_name: bName,
           base_branch: bBase,
           read_knowledge: useKnowledge,
+          // Whether to split the requirement into sub-tasks (developer persona
+          // decomposition + auto-dispatch). Default false = do not split; the
+          // backend runs the developer persona in its direct-implementation
+          // branch (mirrors the agent role's behavior). Sent explicitly even
+          // when false so the backend never sees a missing field.
+          split_tasks: splitTasks,
           // Per-request model override — empty means the role's configured model.
           ...(developerModel ? { model: developerModel } : {}),
           // Remote Agent-server execution. Empty string = local execution (the
@@ -1190,6 +1203,7 @@ export default function RequirementDetail() {
     setBranchName(defaultBranch);
     setBaseBranch(defaultBase);
     setReadKnowledgeDev(false); // default unchecked each time
+    setSplitTasksDev(false); // default unchecked each time — 默认不拆分
     setShowBranchModal(true);
     authedFetch(`${API_BASE}/api/fs/git-branches?path=${encodeURIComponent(project.local_path)}`)
       .then(r => r.json())
@@ -1203,7 +1217,7 @@ export default function RequirementDetail() {
 
   const confirmBranchAndStart = () => {
     setShowBranchModal(false);
-    doStartCoding(branchName, baseBranch, readKnowledgeDev);
+    doStartCoding(branchName, baseBranch, readKnowledgeDev, splitTasksDev);
   };
 
   // ── 追加调整: resume the prior coding session, output appends to codingLines
@@ -1590,82 +1604,174 @@ export default function RequirementDetail() {
         </div>
       )}
 
-      {/* Branch modal */}
-      {showBranchModal && (
-        <div className="modal-overlay" onClick={() => setShowBranchModal(false)}>
-          <div className="modal-box" onClick={e => e.stopPropagation()}>
-            <h3>🌿 选择开发分支</h3>
-            <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 16 }}>
-              Claude 将在指定分支上进行代码修改
-            </p>
-            <div className="modal-field">
-              <label>基础分支（从哪里签出）</label>
-              <select className="input" value={baseBranch} onChange={e => setBaseBranch(e.target.value)}>
-                {availableBranches.length === 0 && <option value={baseBranch}>{baseBranch}</option>}
-                {availableBranches.map(b => <option key={b} value={b}>{b}</option>)}
-              </select>
-            </div>
-            {/* Developer-stage model selection, visible right before launching
-                the coding job. Disabled while a coding job runs (Claude 工作中
-                禁止切换模型). */}
-            <div className="modal-field">
-              <ModelSelect
-                value={developerModel}
-                onChange={setDeveloperModel}
-                disabled={coding}
-                working={coding}
-                stage="developer"
-                label="开发模型"
-                defaultModelName={developerDefaultModel}
-                title={coding ? 'Claude 正在开发中，暂不能切换模型' : '开发实现阶段使用的模型，开始前即可选择'}
-              />
-            </div>
-            {/* Agent-server selector: empty = local execution (legacy default).
-                Only ready servers are listed; the wizard remote branch refuses
-                to start on a non-ready target so this stays consistent with the
-                server-side guard. */}
-            <div className="modal-field">
-              <label>执行环境</label>
-              <select
-                className="input"
-                value={agentServerId}
-                onChange={e => setAgentServerId(e.target.value)}
-                disabled={coding}
-                title={agentServers.length === 0 ? '设置 → Agent 服务器 添加一台并完成环境检查后可用' : ''}
-              >
-                <option value="">本地执行</option>
-                {agentServers.map(s => (
-                  <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
-                ))}
-              </select>
-              {agentServers.length === 0 && (
-                <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
-                  未配置就绪的 Agent 服务器，请在「设置 → Agent 服务器」中添加并检查环境。
+      {/* Branch modal — pre-flight checklist */}
+      {showBranchModal && (() => {
+        // Derived values for the flight-strip status bar. Built once per
+        // render so the strip stays consistent with the form state.
+        const stripBase = baseBranch || 'main';
+        const stripNew = branchName || (req ? `feat/${req.id}` : '');
+        const stripEnv = agentServerId
+          ? (agentServers.find(s => s.id === agentServerId)?.name || 'remote')
+          : 'local';
+        const stripModel = developerModel || developerDefaultModel || 'default';
+        return (
+          <div className="modal-overlay" onClick={() => setShowBranchModal(false)}>
+            <div className="modal-box preflight-box" onClick={e => e.stopPropagation()}>
+              <div className="preflight-header">
+                <div className="preflight-eyebrow">Pre-flight</div>
+                <h3 className="preflight-title">启动开发会话</h3>
+                <p className="preflight-subtitle">
+                  Claude 将按下列配置进入编码执行阶段。
+                </p>
+              </div>
+
+              {/* Flight strip — the signature element. Compresses the
+                  configured mission into one monospace line the user can
+                  scan at a glance before launching. */}
+              <div className="flight-strip" aria-label="配置摘要">
+                <span className="flight-leg">
+                  <span className="flight-leg-label">GIT</span>
+                  <span className="flight-leg-value" title={stripBase}>{stripBase}</span>
+                  <span className="flight-arrow">→</span>
+                  <span className="flight-leg-value" title={stripNew}>{stripNew}</span>
+                </span>
+                <span className="flight-sep">·</span>
+                <span className="flight-leg">
+                  <span className="flight-leg-label">EXEC</span>
+                  <span className="flight-leg-value" title={stripEnv}>{stripEnv}</span>
+                  <span className="flight-arrow">·</span>
+                  <span className="flight-leg-value" title={stripModel}>{stripModel}</span>
+                </span>
+                <span className="flight-ready" aria-live="polite">
+                  <span className="flight-ready-dot" />
+                  READY
+                </span>
+              </div>
+
+              <div className="preflight-body">
+                <div className="preflight-section">
+                  <div className="preflight-section-label">Git · 工作分支</div>
+                  {/* Branch fields wear the same rail+chip+monospace card as
+                      ModelSelect, only tinted for the Git section. Keeps the
+                      panel's three editable surfaces speaking one vocabulary. */}
+                  <div className="modal-field">
+                    <label>基础分支（从哪里签出）</label>
+                    <div className="preflight-field-card preflight-field-card--git">
+                      <span className="preflight-field-chip" aria-hidden="true">BASE</span>
+                      <select
+                        className="form-input preflight-field-input"
+                        value={baseBranch}
+                        onChange={e => setBaseBranch(e.target.value)}
+                      >
+                        {availableBranches.length === 0 && <option value={baseBranch}>{baseBranch}</option>}
+                        {availableBranches.map(b => <option key={b} value={b}>{b}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="modal-field">
+                    <label>新分支名</label>
+                    <div className="preflight-field-card preflight-field-card--git">
+                      <span className="preflight-field-chip" aria-hidden="true">NEW</span>
+                      <input
+                        className="form-input preflight-field-input"
+                        list="branch-suggestions"
+                        value={branchName}
+                        onChange={e => setBranchName(e.target.value)}
+                        placeholder={`feat/${req.id}`}
+                      />
+                    </div>
+                    <datalist id="branch-suggestions">
+                      {availableBranches.map(b => <option key={b} value={b} />)}
+                    </datalist>
+                  </div>
                 </div>
-              )}
-            </div>
-            <div className="modal-field">
-              <label>新分支名</label>
-              <input className="input" list="branch-suggestions" value={branchName}
-                onChange={e => setBranchName(e.target.value)} placeholder={`feat/${req.id}`} />
-              <datalist id="branch-suggestions">
-                {availableBranches.map(b => <option key={b} value={b} />)}
-              </datalist>
-            </div>
-            {/* Optional knowledge pre-read: default unchecked. When checked, the
-                coding job first reads the project knowledge base relevant to the
-                requirement before diving into the code. */}
-            <label className="merge-check">
-              <input type="checkbox" checked={readKnowledgeDev} onChange={e => setReadKnowledgeDev(e.target.checked)} />
-              📚 开始前先读取项目知识库（默认不勾选）
-            </label>
-            <div className="modal-actions btn-row-2col">
-              <button className="btn btn-primary" onClick={confirmBranchAndStart}>🚀 确认，开始开发</button>
-              <button className="btn" onClick={() => setShowBranchModal(false)}>取消</button>
+
+                <div className="preflight-section">
+                  <div className="preflight-section-label">Execution · 执行计划</div>
+                  {/* Agent-server selector: empty = local execution (legacy default).
+                      Only ready servers are listed; the wizard remote branch refuses
+                      to start on a non-ready target so this stays consistent with the
+                      server-side guard. Violet-tinted field card — distinguishes
+                      "how to run" from the Git section's "where to run". */}
+                  <div className="modal-field">
+                    <label>执行环境</label>
+                    <div className="preflight-field-card preflight-field-card--exec">
+                      <span className="preflight-field-chip" aria-hidden="true">ENV</span>
+                      <select
+                        className="form-input preflight-field-input"
+                        value={agentServerId}
+                        onChange={e => setAgentServerId(e.target.value)}
+                        disabled={coding}
+                        title={agentServers.length === 0 ? '设置 → Agent 服务器 添加一台并完成环境检查后可用' : ''}
+                      >
+                        <option value="">本地执行</option>
+                        {agentServers.map(s => (
+                          <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
+                        ))}
+                      </select>
+                    </div>
+                    {agentServers.length === 0 && (
+                      <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                        未配置就绪的 Agent 服务器，请在「设置 → Agent 服务器」中添加并检查环境。
+                      </div>
+                    )}
+                  </div>
+                  {/* Developer-stage model selection, visible right before launching
+                      the coding job. Disabled while a coding job runs (Claude 工作中
+                      禁止切换模型). */}
+                  <div className="modal-field">
+                    <ModelSelect
+                      value={developerModel}
+                      onChange={setDeveloperModel}
+                      disabled={coding}
+                      working={coding}
+                      stage="developer"
+                      label="开发模型"
+                      defaultModelName={developerDefaultModel}
+                      title={coding ? 'Claude 正在开发中，暂不能切换模型' : '开发实现阶段使用的模型，开始前即可选择'}
+                    />
+                  </div>
+                </div>
+
+                <div className="preflight-section">
+                  <div className="preflight-section-label">Strategy · 上下文与策略</div>
+                  {/* Optional knowledge pre-read: default unchecked. When checked, the
+                      coding job first reads the project knowledge base relevant to the
+                      requirement before diving into the code. */}
+                  <label className={`preflight-toggle ${readKnowledgeDev ? 'is-checked' : ''}`}>
+                    <input type="checkbox" checked={readKnowledgeDev} onChange={e => setReadKnowledgeDev(e.target.checked)} />
+                    <div className="preflight-toggle-body">
+                      <div className="preflight-toggle-title">📚 读取项目知识库</div>
+                      <div className="preflight-toggle-desc">
+                        编码前先扫描项目内与本需求相关的知识条目，作为额外上下文注入。耗时约几秒，对复杂需求特别有用。
+                      </div>
+                    </div>
+                  </label>
+                  {/* Optional sub-task decomposition switch: default unchecked (= 直接执行，不拆分子任务). When checked, the developer persona emits a subtasks.json + [SUBTASKS_READY] sentinel and the backend auto-dispatches sub-agents. When unchecked, the developer persona runs in direct-implementation mode (no sub-task orchestration). Mirrors readKnowledgeDev's pattern: reset to false in openBranchModal, explicit value (even when false) on the wire. */}
+                  <label className={`preflight-toggle ${splitTasksDev ? 'is-checked' : ''}`}>
+                    <input type="checkbox" checked={splitTasksDev} onChange={e => setSplitTasksDev(e.target.checked)} />
+                    <div className="preflight-toggle-body">
+                      <div className="preflight-toggle-title">🧩 拆分任务并自动派发</div>
+                      <div className="preflight-toggle-desc">
+                        由主 Agent 把需求拆成子任务，再串行调度子 Agent 执行。默认关闭—— developer persona 会直接实现，更快。
+                      </div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              <div className="preflight-launch">
+                <button className="btn-launch" onClick={confirmBranchAndStart}>
+                  🚀 启动会话
+                </button>
+                <button className="btn-cancel" onClick={() => setShowBranchModal(false)}>
+                  取消
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Merge / PR modal */}
       {showMergeModal && mergeState && (
