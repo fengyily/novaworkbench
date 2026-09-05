@@ -742,6 +742,406 @@
   to   { transform: translateY(0); }
 }
 
+/* ── Pre-flight branch modal ─────────────────────────────────────────────
+   Re-skins the "开始开发" modal as a mission pre-flight checklist.
+   Visual signature: a monospace flight-strip status bar at the top
+   showing the configured path + execution target + ready indicator.
+   Three labeled sections (GIT / EXEC / STRATEGY) replace the flat field
+   list. Strategy toggles become card rows that show their consequence. */
+.preflight-box {
+  min-width: 480px;
+  max-width: 560px;
+  padding: 0;
+  overflow: hidden;
+}
+.preflight-header {
+  padding: 20px 28px 16px;
+  border-bottom: 1px solid var(--color-border);
+  background: linear-gradient(180deg, var(--color-bg) 0%, var(--color-surface) 100%);
+}
+.preflight-eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  font-weight: 700;
+  color: var(--color-primary);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.preflight-eyebrow::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.18);
+}
+.preflight-title {
+  font-size: 19px;
+  font-weight: 600;
+  margin: 0 0 4px;
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+}
+.preflight-subtitle {
+  font-size: 13px;
+  color: var(--color-text-muted);
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* Flight strip — the one signature element. A monospace HUD that
+   compresses git + exec + readiness into a single line the user can
+   scan before clicking launch. */
+.flight-strip {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 10px 28px;
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+.flight-strip::-webkit-scrollbar { display: none; }
+.flight-leg {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.flight-leg-label {
+  color: var(--color-text-muted);
+  letter-spacing: 0.08em;
+}
+.flight-leg-value {
+  color: var(--color-text);
+  font-weight: 600;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.flight-arrow {
+  margin: 0 10px;
+  color: var(--color-border);
+}
+.flight-sep {
+  margin: 0 4px;
+  color: var(--color-border);
+}
+.flight-ready {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--color-success);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  flex-shrink: 0;
+}
+.flight-ready-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.preflight-body {
+  padding: 18px 28px 8px;
+}
+.preflight-section { margin-bottom: 20px; }
+.preflight-section:last-child { margin-bottom: 0; }
+.preflight-section-label {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.preflight-section-label::before {
+  content: '';
+  display: inline-block;
+  width: 14px;
+  height: 1px;
+  background: var(--color-text-muted);
+}
+.preflight-section .modal-field:last-child { margin-bottom: 0; }
+
+/* Field card — extends the rail+chip vocabulary that ModelSelect already
+   uses for the developer-stage picker to every editable field in the
+   pre-flight panel. One 4px section-tinted accent rail (Git = cyan,
+   Exec = violet, mirroring ModelSelect's developer/architect rails) on
+   the left, a 2-letter uppercase role chip (BASE / NEW / ENV), and a
+   monospace `form-input` value that fills the remaining row.
+
+   Without this wrapper the three branch/env fields fall through to the
+   bare browser-default <select>/<input> styling — they look alien next
+   to the ModelSelect card sitting two rows below them. The card is
+   intentionally a thin horizontal pill (one line, no card shadow) so it
+   never competes with the preflight-toggle cards below; the visual
+   hierarchy stays: section label → field card → toggle card → launch. */
+.preflight-field-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px 5px 12px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  min-width: 0;
+  max-width: 100%;
+}
+/* Section-tinted accent rail. Implemented as a ::before so it sits
+   inside the card's own border-radius and inherits the section color
+   from the modifier class — same trick ModelSelect uses for its stage
+   rail (analyst/architect/developer). */
+.preflight-field-card::before {
+  content: '';
+  display: block;
+  width: 4px;
+  align-self: stretch;
+  margin: -5px 0 -5px -12px;
+  border-radius: 6px 0 0 6px;
+  background: var(--color-border);
+  transition: background 0.18s ease;
+}
+.preflight-field-card--git::before  { background: #06b6d4; }
+.preflight-field-card--exec::before { background: #8b5cf6; }
+/* Hover/focus: nudge the border to the section tint so the user feels
+   which band they're acting on. Matches the focus affordance ModelSelect
+   already provides for the developer-stage picker. */
+.preflight-field-card--git:hover,
+.preflight-field-card--git:focus-within {
+  border-color: rgba(6, 182, 212, 0.45);
+  box-shadow: 0 0 0 1px rgba(6, 182, 212, 0.18);
+}
+.preflight-field-card--exec:hover,
+.preflight-field-card--exec:focus-within {
+  border-color: rgba(139, 92, 246, 0.45);
+  box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.18);
+}
+
+.preflight-field-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  min-width: 30px;
+  padding: 0 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  background: var(--color-hover);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  flex: none;
+}
+/* Section-tinted chip background — same dual-color pattern as
+   ModelSelect's stage chip (analyst amber / architect violet /
+   developer cyan). Git chip pairs cyan with a soft tint so the chip
+   text stays legible; Exec chip pairs violet. */
+.preflight-field-card--git  .preflight-field-chip {
+  background: #cffafe;
+  color: #0e7490;
+}
+.preflight-field-card--exec .preflight-field-chip {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+/* The editable value fills the remaining row. Inherits font/border from
+   `form-input` (the same class ModelSelect uses) so all three fields +
+   the developer picker share one input style. Monospace is the right
+   voice here: branch names and execution targets are tokens, not prose. */
+.preflight-field-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px 8px;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  line-height: 1.4;
+  color: var(--color-text);
+  background: transparent;
+  border: none;
+  outline: none;
+}
+/* Keep the native select arrow on <select> elements — the card already
+   carries the visual chrome, removing it would just confuse the user. */
+select.preflight-field-input {
+  cursor: pointer;
+  appearance: auto;
+}
+/* When the card is locked (coding in flight) grey out the whole pill
+   so the user can't accidentally change the branch mid-session. */
+.preflight-field-card:has(.preflight-field-input:disabled) {
+  opacity: 0.6;
+  cursor: not-allowed;
+  background: var(--color-hover);
+}
+.preflight-field-input:disabled {
+  cursor: not-allowed;
+  color: var(--color-text-muted);
+}
+
+/* Toggle card — replaces the bare checkboxes at the bottom of the
+   previous modal. Each card states its own consequence so the user
+   understands what changes when they toggle it. */
+.preflight-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+  background: var(--color-surface);
+  margin-bottom: 8px;
+  user-select: none;
+}
+.preflight-toggle:last-child { margin-bottom: 0; }
+.preflight-toggle:hover {
+  background: var(--color-hover);
+}
+.preflight-toggle input[type="checkbox"] {
+  margin: 2px 0 0;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--color-primary);
+  flex-shrink: 0;
+}
+.preflight-toggle-body { flex: 1; min-width: 0; }
+.preflight-toggle-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+  line-height: 1.4;
+}
+.preflight-toggle-desc {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+.preflight-toggle.is-checked {
+  border-color: var(--color-primary);
+  background: var(--color-active);
+  box-shadow: inset 3px 0 0 var(--color-primary);
+}
+.preflight-toggle.is-checked .preflight-toggle-title {
+  color: var(--color-primary);
+}
+
+/* Launch bar — pinned at the bottom, separates the action from
+   the configuration so the eye lands on "start" after scanning the
+   sections above. */
+.preflight-launch {
+  padding: 14px 28px 18px;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.preflight-launch .btn-launch {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 11px 18px;
+  background: var(--color-primary);
+  color: #fff;
+  border: 1px solid var(--color-primary);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.12s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.preflight-launch .btn-launch:hover { background: var(--color-primary-hover); }
+.preflight-launch .btn-launch:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.preflight-launch .btn-cancel {
+  background: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid transparent;
+  font-size: 13px;
+  padding: 11px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.preflight-launch .btn-cancel:hover {
+  background: var(--color-hover);
+  color: var(--color-text);
+}
+
+/* Mobile: collapse the pre-flight bands tighter; preserve bottom-sheet
+   slide-up but ensure the flight strip and toggles stay reachable. */
+@media (max-width: 768px) {
+  .preflight-box {
+    width: 100vw;
+    max-width: none;
+    min-width: 0;
+    border-radius: 16px 16px 0 0;
+    padding: 0;
+    max-height: 90dvh;
+    overflow-y: auto;
+  }
+  .preflight-box::before {
+    content: '';
+    display: block;
+    width: 36px;
+    height: 4px;
+    background: var(--color-border);
+    border-radius: 2px;
+    margin: 4px auto 0;
+  }
+  .preflight-header { padding: 14px 18px 12px; }
+  .preflight-title { font-size: 17px; }
+  .flight-strip { padding: 9px 18px; font-size: 10px; }
+  .flight-leg-value { max-width: 90px; }
+  .preflight-body { padding: 14px 18px 6px; }
+  /* Field cards: keep chip + input on one line on mobile — the chip
+     shrinks and the input just gets more room. */
+  .preflight-field-card { padding: 5px 10px; }
+  .preflight-field-card::before {
+    margin-left: -10px;
+    margin-right: 0;
+  }
+  .preflight-launch {
+    padding: 12px 18px calc(16px + var(--sab));
+    flex-direction: column;
+    gap: 8px;
+  }
+  .preflight-launch .btn-launch,
+  .preflight-launch .btn-cancel {
+    width: 100%;
+    min-height: 44px;
+  }
+}
+
 /* Analyze progress banner */
 .analyze-progress-banner {
   display: flex;
