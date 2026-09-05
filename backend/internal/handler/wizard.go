@@ -1221,12 +1221,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		if perr := h.jobLogSvc.Save(job.ID, p.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
 			log.Printf("[start-coding] failed to persist job log %s: %v", job.ID, perr)
 		}
-		if cb != nil && cb.OnFinish != nil {
-			cb.OnFinish(job.ID, status == store.JobDone)
-		}
 	}()
-	log.Printf("[start-coding] job %s started for %q in %s", job.ID, p.RequirementTitle, p.ProjectPath)
-
 	// Load the requirement row up front so we can (a) detect whether the
 	// source session was created in an isolated worktree, and (b) reuse it for
 	// the fork resolution below without a second Get.
@@ -1236,7 +1231,28 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			reqRow = r
 		}
 	}
-		// hadWorktree records whether the upstream stage had already persisted a
+	// Stamp the development-environment provenance BEFORE the run starts.
+	// Doing it up front (rather than on the success path) means a failed or
+	// aborted remote run still leaves a record of WHICH Agent server holds
+	// the worktree — which is exactly the state where "清理开发环境" has to
+	// know where to go. UpdateDevSource forces server_id back to "" for
+	// local runs, so switching a requirement from remote to local execution
+	// stops routing follow-ups to the old server.
+	if p.RequirementID != "" {
+		devSource := service.DevSourceLocal
+		if p.AgentServerID != "" {
+			devSource = service.DevSourceAgent
+		}
+		if perr := h.reqSvc.UpdateDevSource(p.RequirementID, devSource, p.AgentServerID); perr != nil {
+			log.Printf("[start-coding] failed to persist dev_source for %s: %v", p.RequirementID, perr)
+		} else if reqRow != nil {
+			reqRow.DevSource, reqRow.AgentServerID = devSource, p.AgentServerID
+			if devSource == service.DevSourceLocal {
+				reqRow.AgentServerID = ""
+			}
+		}
+	}
+	// hadWorktree records whether the upstream stage had already persisted a
 	// worktree before THIS coding run — false means the design/analysis session
 	// we're about to fork was created in-place (un-isolated).
 	hadWorktree := reqRow != nil && reqRow.WorktreePath != ""
@@ -1922,6 +1938,34 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		if block := promptpkg.DeveloperBlock(req.Kind, req); block != "" {
 			adjustPrompt += "\n\n" + block
 		}
+		// Execution-consistency: a requirement that was coded on an Agent
+		// server has its working tree on THAT host, not here — the local
+		// worktree either doesn't exist or lags behind origin. Route the
+		// follow-up turn back to the same server so the adjustment applies to
+		// the real code (and gets committed + pushed from there). Falls
+		// through to local execution when the requirement was developed
+		// locally, or when the agent-server service isn't wired.
+		if req.AgentServerID != "" && h.agentSvrSvc != nil {
+			out := h.runRemoteCoding(&remoteCodingInput{
+				job:      job,
+				serverID: req.AgentServerID,
+				req: startCodingReq{
+					RequirementTitle: req.Title,
+					RequirementDesc:  body.Message,
+					RequirementID:    req.ID,
+					BranchName:       req.BranchName,
+					AgentServerID:    req.AgentServerID,
+				},
+				reqRow:     req,
+				prompt:     adjustPrompt,
+				sourceSID:  req.CodingSessionID,
+				sessionArg: req.CodingSessionID,
+				model:      model,
+				usage:      h.usageCtxFor("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message),
+			})
+			h.finishRemoteCodingJob(job, out, body.RequirementID, model, "adjust-coding", "✅ 追加调整完成！")
+			return
+		}
 		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:         adjustPrompt,
 			WorkDir:        workDir,
@@ -1967,6 +2011,38 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		job.Finish(0, store.JobDone)
 		log.Printf("[adjust-coding] job %s finished for %s", job.ID, body.RequirementID)
 	}()
+}
+
+// finishRemoteCodingJob applies the shared terminal-state handling for a
+// runRemoteCoding outcome: map the three failure shapes (stale session /
+// explicit error / empty result) onto job error frames, otherwise append the
+// result + a done frame and stamp developer_model. Factored out so
+// StartCoding / AdjustCoding / ContinueCoding all report remote runs
+// identically — the frontend can't tell a remote job from a local one.
+func (h *WizardHandler) finishRemoteCodingJob(job *store.Job, out claudeStreamOutcome, reqID, model, tag, doneMsg string) {
+	switch {
+	case out.staleSession:
+		job.Append(store.LogLine{Type: "error", Content: "❌ 原 coding 会话已失效（session 文件不存在），请重新发起 coding。"})
+		job.Finish(1, store.JobError)
+		return
+	case out.errMsg != "":
+		job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+		job.Finish(1, store.JobError)
+		return
+	case out.finalResult == "":
+		job.Append(store.LogLine{Type: "error", Content: "❌ Claude 未返回结果，请重试"})
+		job.Finish(1, store.JobError)
+		return
+	}
+	job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	job.Append(store.LogLine{Type: "done", Content: doneMsg})
+	if reqID != "" {
+		if perr := h.reqSvc.UpdateDeveloperModel(reqID, model); perr != nil {
+			log.Printf("[%s] failed to persist developer_model for %s: %v", tag, reqID, perr)
+		}
+	}
+	job.Finish(0, store.JobDone)
+	log.Printf("[%s] remote job %s finished for %s", tag, job.ID, reqID)
 }
 
 // ContinueCoding resumes an interrupted/cleared coding task by --resume'ing the
@@ -2059,6 +2135,28 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		// ("最小改动、修复根因") present on every continue round.
 		if block := promptpkg.DeveloperBlock(req.Kind, req); block != "" {
 			prompt += "\n\n" + block
+		}
+		// Same execution-consistency rule as AdjustCoding: continue the work
+		// where the working tree actually lives.
+		if req.AgentServerID != "" && h.agentSvrSvc != nil {
+			out := h.runRemoteCoding(&remoteCodingInput{
+				job:      job,
+				serverID: req.AgentServerID,
+				req: startCodingReq{
+					RequirementTitle: req.Title,
+					RequirementID:    req.ID,
+					BranchName:       req.BranchName,
+					AgentServerID:    req.AgentServerID,
+				},
+				reqRow:     req,
+				prompt:     prompt,
+				sourceSID:  req.CodingSessionID,
+				sessionArg: req.CodingSessionID,
+				model:      model,
+				usage:      h.usageCtxFor("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", ""),
+			})
+			h.finishRemoteCodingJob(job, out, body.RequirementID, model, "continue-coding", "✅ 续接开发完成！")
+			return
 		}
 		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:         prompt,
@@ -3398,6 +3496,15 @@ type startCodingReq struct {
 	Model            string
 	ReadKnowledge    bool
 	AgentServerID    string
+}
+
+// RunRemoteCoding exposes runRemoteCoding as a func value for SubTaskRunner.
+// main injects it via SubTaskRunner.SetRemoteCoding so every child dispatch
+// (manual sub-task / orchestrated child / merge push+PR sub-task) can run on
+// the Agent server the parent requirement was developed on without the runner
+// depending on the wizard handler's full dependency set.
+func (h *WizardHandler) RunRemoteCoding(in *remoteCodingInput) claudeStreamOutcome {
+	return h.runRemoteCoding(in)
 }
 
 // runRemoteCoding is the Agent-server equivalent of the local runClaudeStream
@@ -5225,6 +5332,10 @@ func (h *WizardHandler) runSubTask(
 		return
 	}
 	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, adjust)
+	// (The agent-server routing branch previously inlined here moved to
+	// SubTaskRunner.Run so that every sub-task path — manual children,
+	// orchestrated children, and push/PR sub-tasks — shares the same
+	// req.AgentServerID plumbing.)
 }
 
 // computeSubTaskCostCents resolves the run's USD-equivalent cost in cents
@@ -6523,7 +6634,32 @@ func (h *WizardHandler) dispatchOneChild(
 	job.SetModel(modelName)
 
 	childUsage := h.usageCtxFor("sub_task", reqID, req.ProjectID, job.ID, modelName, "", t.Prompt)
-	out := runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage)
+	// Route orchestrated children to the parent requirement's Agent server
+	// when it has one — same reasoning as runSubTask: the working tree lives
+	// on that host, so a locally-spawned child would edit the wrong checkout.
+	var out claudeStreamOutcome
+	if req.AgentServerID != "" && h.agentSvrSvc != nil {
+		out = h.runRemoteCoding(&remoteCodingInput{
+			job:      job,
+			serverID: req.AgentServerID,
+			req: startCodingReq{
+				RequirementTitle: req.Title + " / " + t.Title,
+				RequirementID:    req.ID,
+				BranchName:       req.BranchName,
+				AgentServerID:    req.AgentServerID,
+			},
+			reqRow:        req,
+			prompt:        executorPrompt,
+			sourceSID:     parentSID,
+			fork:          true,
+			sessionArg:    parentSID,
+			forkSessionID: childSID,
+			model:         modelName,
+			usage:         childUsage,
+		})
+	} else {
+		out = runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage)
+	}
 
 	status := model.SubTaskStatusDone
 	artifactBody := out.finalResult

@@ -17,6 +17,7 @@ import {
   type Kind, type Project, type Requirement,
 } from '../api/client';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
+import { DevSourceBadge } from '../components/DevSourceBadge';
 import { relativeTime } from '../utils/time';
 import './RequirementsList.css';
 
@@ -207,6 +208,7 @@ export default function RequirementsList() {
                 <th>类型</th>
                 <th>标题</th>
                 <th>状态</th>
+                <th>开发环境</th>
                 <th>项目</th>
                 <th>优先级</th>
                 <th>更新时间</th>
@@ -232,6 +234,9 @@ export default function RequirementsList() {
                       <span className={`status-badge status-${r.status}`}>
                         {statusLabels[r.status] || r.status}
                       </span>
+                    </td>
+                    <td data-label="开发环境" className="req-row-devsource">
+                      <DevSourceBadge req={r} compact />
                     </td>
                     <td data-label="项目">{projectNameOf(r.project_id)}</td>
                     <td data-label="优先级">

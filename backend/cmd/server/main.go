@@ -190,9 +190,17 @@ func main() {
 	// SubTaskRunner is the shared executor for child-agent rows: both the
 	// wizard (manual sub-tasks + auto-orchestrated children) and the merge
 	// handler (push + PR sub-task) delegate to it. Constructed once so the
-	// ring-buffer of live jobs is shared across handlers.
-	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc)
+	// ring-buffer of live jobs is shared across handlers. The wizard handler
+	// is built first and its remote-coding entrypoint is injected below —
+	// the runner needs it to dispatch children to an Agent server, while the
+	// wizard needs the runner for sub-task rows, so neither can be a pure
+	// constructor argument of the other.
+	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, agentSvrSvc, nil)
 	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, subTaskSvc, subTaskRunner)
+	// Wire the remote-coding entrypoint AFTER both are built: children of an
+	// Agent-server-developed requirement run on that server, so every sub-task
+	// dispatch (manual / orchestrated / push+PR) routes through it.
+	subTaskRunner.SetRemoteCoding(wizardH.RunRemoteCoding)
 	// Scheduled-task executor (wizard bridge) and HTTP handler. The
 	// scheduler package polls scheduled_tasks rows and dispatches through
 	// the executor; both live in main.go so the lifecycle is the same as
@@ -207,7 +215,7 @@ func main() {
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
-	mergeH := handler.NewMergeHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner)
+	mergeH := handler.NewMergeHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)
 	roleH := handler.NewRoleHandler(roleSvc, claudeCfgSvc)
 	settingH := handler.NewSettingHandler(settingSvc)
