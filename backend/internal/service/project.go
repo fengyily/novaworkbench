@@ -813,6 +813,89 @@ func (s *ProjectService) UpdatePlatformConfig(id, platformType, tokenID string) 
 	return nil
 }
 
+// UpdateBasicInfo updates the user-editable basic fields of a project:
+// display name, remote URL, project type, and local filesystem path.
+// Empty/whitespace-only inputs are normalized to "" before write so the
+// caller can rely on the same canonical form that's stored at Add time.
+//
+// name is required (the unique-by-local_path primary identifier is the
+// path, so name can repeat — but a blank name is rejected to keep the
+// project list readable).
+//
+// local_path is also required (it's the UNIQUE NOT NULL column); when it
+// changes, the new path must point to an existing directory or the update
+// is rejected with INVALID_LOCAL_PATH so a typo can't silently orphan the
+// project. The new path must also not collide with another active
+// project (DUPLICATE_LOCAL_PATH) since projects.local_path has a UNIQUE
+// constraint that a hand-edited value must continue to satisfy.
+//
+// project_type and remote_url are free-form strings and accept empty
+// values. Errors are prefixed with stable codes the handler maps to HTTP
+// status codes (PROJECT_NOT_FOUND / INVALID_NAME / INVALID_LOCAL_PATH /
+// DUPLICATE_LOCAL_PATH).
+func (s *ProjectService) UpdateBasicInfo(id, name, remoteURL, projectType, localPath string) error {
+	name = strings.TrimSpace(name)
+	remoteURL = strings.TrimSpace(remoteURL)
+	projectType = strings.TrimSpace(projectType)
+	localPath = strings.TrimSpace(localPath)
+
+	if name == "" {
+		return fmt.Errorf("INVALID_NAME: name is required")
+	}
+	if localPath == "" {
+		return fmt.Errorf("INVALID_LOCAL_PATH: local_path is required")
+	}
+
+	// Expand ~ and resolve to an absolute, symlink-cleaned path so the
+	// duplicate check (and downstream `cd "$local_path"`) operates on the
+	// canonical form the rest of the code expects.
+	if strings.HasPrefix(localPath, "~") {
+		home, _ := os.UserHomeDir()
+		localPath = filepath.Join(home, localPath[1:])
+	}
+	abs, err := filepath.Abs(localPath)
+	if err != nil {
+		return fmt.Errorf("INVALID_LOCAL_PATH: cannot resolve path: %w", err)
+	}
+	if info, statErr := os.Stat(abs); statErr != nil || !info.IsDir() {
+		return fmt.Errorf("INVALID_LOCAL_PATH: path does not exist or is not a directory: %s", abs)
+	}
+
+	// Load the current row so we can detect a real no-op (avoid
+	// touching updated_at on an unchanged edit) and validate uniqueness
+	// against the correct scope.
+	current, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+
+	if abs != current.LocalPath {
+		var dup int
+		if err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM projects WHERE local_path = ? AND id != ? AND deleted_at IS NULL`,
+			abs, id,
+		).Scan(&dup); err != nil {
+			return fmt.Errorf("DUPLICATE_LOCAL_PATH: %w", err)
+		}
+		if dup > 0 {
+			return fmt.Errorf("DUPLICATE_LOCAL_PATH: another project already uses %s", abs)
+		}
+	}
+
+	res, err := s.db.Exec(
+		`UPDATE projects SET name = ?, remote_url = ?, project_type = ?, local_path = ?, updated_at = ?
+		 WHERE id = ?`,
+		name, remoteURL, projectType, abs, time.Now(), id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("project not found: %s", id)
+	}
+	return nil
+}
+
 // UpdateDescription saves a manually-edited project description and locks it
 // from automatic regeneration (description_manual=1). A manual edit always
 // wins over the scanner's auto-regeneration.

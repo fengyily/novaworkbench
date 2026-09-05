@@ -78,6 +78,14 @@ export default function ProjectDetail() {
   const [platformSaving, setPlatformSaving] = useState(false);
   const [platformSaved, setPlatformSaved] = useState(false);
 
+  // Overview: basic info (name / remote_url / project_type / local_path)
+  const [basicEditing, setBasicEditing] = useState(false);
+  const [basicDraft, setBasicDraft] = useState({
+    name: '', remote_url: '', project_type: '', local_path: '',
+  });
+  const [basicSaving, setBasicSaving] = useState(false);
+  const [basicMsg, setBasicMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
   // Overview: project description (AI-generated, manually editable)
   const [descEditing, setDescEditing] = useState(false);
   const [descDraft, setDescDraft] = useState('');
@@ -318,6 +326,28 @@ export default function ProjectDetail() {
     } catch { /* ignore */ } finally { setPlatformSaving(false); }
   };
 
+  // ── Overview: basic info edit (name / remote_url / project_type / local_path) ─
+  const handleSaveBasic = async () => {
+    if (!id) return;
+    setBasicSaving(true);
+    setBasicMsg(null);
+    try {
+      const updated = await projectsApi.updateBasicInfo(id, {
+        name: basicDraft.name.trim() ? basicDraft.name : undefined,
+        remote_url: basicDraft.remote_url,
+        project_type: basicDraft.project_type,
+        local_path: basicDraft.local_path.trim() ? basicDraft.local_path : undefined,
+      });
+      setProject(updated);
+      setBasicEditing(false);
+      setBasicMsg({ ok: true, text: '已保存' });
+    } catch (e: unknown) {
+      setBasicMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBasicSaving(false);
+    }
+  };
+
   // ── Overview: project description ───────────────────────────────────────────
   const handleSaveDesc = async () => {
     if (!id) return;
@@ -554,20 +584,119 @@ export default function ProjectDetail() {
       {tab === 'overview' && (
         <div className="tab-content">
           <div className="detail-section">
-            <div className="info-row"><span className="info-label">名称</span><span>{project.name}</span></div>
-            <div className="info-row">
-              <span className="info-label">路径</span>
-              <code className="info-code">{project.local_path}</code>
+            <div className="section-header" style={{ marginBottom: 12 }}>
+              <span style={{ fontWeight: 600, fontSize: 14 }}>基本信息</span>
+              {!basicEditing && (
+                <button
+                  className="btn btn-sm"
+                  onClick={() => {
+                    setBasicDraft({
+                      name: project.name,
+                      remote_url: project.remote_url ?? '',
+                      project_type: project.project_type ?? '',
+                      local_path: project.local_path,
+                    });
+                    setBasicEditing(true);
+                    setBasicMsg(null);
+                  }}
+                >
+                  编辑
+                </button>
+              )}
             </div>
-            <div className="info-row"><span className="info-label">类型</span><span>{project.project_type || 'Unknown'}</span></div>
-            <div className="info-row">
-              <span className="info-label">状态</span>
-              <span className={`status-badge status-${project.status}`}>{project.status}</span>
-            </div>
-            {project.remote_url && (
-              <div className="info-row">
-                <span className="info-label">仓库</span>
-                <code className="info-code">{project.remote_url}</code>
+
+            {basicEditing ? (
+              <div style={{ display: 'grid', gap: 12 }}>
+                <div className="form-group" style={{ margin: 0 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
+                    名称
+                  </label>
+                  <input
+                    className="form-input"
+                    value={basicDraft.name}
+                    onChange={e => setBasicDraft(d => ({ ...d, name: e.target.value }))}
+                    placeholder="项目名称"
+                    autoFocus
+                  />
+                </div>
+                <div className="form-group" style={{ margin: 0 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
+                    仓库地址
+                  </label>
+                  <input
+                    className="form-input"
+                    value={basicDraft.remote_url}
+                    onChange={e => setBasicDraft(d => ({ ...d, remote_url: e.target.value }))}
+                    placeholder="https://github.com/user/repo.git  或  git@github.com:user/repo.git"
+                  />
+                </div>
+                <div className="form-group" style={{ margin: 0 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
+                    类型
+                  </label>
+                  <select
+                    className="form-input"
+                    value={basicDraft.project_type}
+                    onChange={e => setBasicDraft(d => ({ ...d, project_type: e.target.value }))}
+                  >
+                    <option value="">— 自动检测 —</option>
+                    <option value="Go">Go</option>
+                    <option value="Node.js">Node.js</option>
+                    <option value="Python">Python</option>
+                    <option value="Rust">Rust</option>
+                    <option value="Java/Maven">Java/Maven</option>
+                    <option value="Java/Gradle">Java/Gradle</option>
+                    <option value="Unknown">Unknown</option>
+                  </select>
+                </div>
+                <div className="form-group" style={{ margin: 0 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
+                    路径
+                  </label>
+                  <input
+                    className="form-input"
+                    value={basicDraft.local_path}
+                    onChange={e => setBasicDraft(d => ({ ...d, local_path: e.target.value }))}
+                    placeholder="/absolute/path/to/project"
+                  />
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="btn btn-primary btn-sm" onClick={handleSaveBasic} disabled={basicSaving}>
+                    {basicSaving ? '保存中...' : '保存'}
+                  </button>
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => { setBasicEditing(false); setBasicMsg(null); }}
+                    disabled={basicSaving}
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="info-row"><span className="info-label">名称</span><span>{project.name}</span></div>
+                <div className="info-row">
+                  <span className="info-label">路径</span>
+                  <code className="info-code">{project.local_path}</code>
+                </div>
+                <div className="info-row"><span className="info-label">类型</span><span>{project.project_type || 'Unknown'}</span></div>
+                <div className="info-row">
+                  <span className="info-label">状态</span>
+                  <span className={`status-badge status-${project.status}`}>{project.status}</span>
+                </div>
+                {project.remote_url && (
+                  <div className="info-row">
+                    <span className="info-label">仓库</span>
+                    <code className="info-code">{project.remote_url}</code>
+                  </div>
+                )}
+              </>
+            )}
+
+            {basicMsg && (
+              <div style={{ marginTop: 8, fontSize: 12, color: basicMsg.ok ? 'var(--color-success)' : 'var(--color-error)' }}>
+                {basicMsg.ok ? '✅ ' : '❌ '}{basicMsg.text}
               </div>
             )}
           </div>

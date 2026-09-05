@@ -250,6 +250,7 @@ wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway
 	mux.HandleFunc("POST /api/projects/{id}/prs/{pr_number}/comment", reviewH.SubmitComment)
 
 	// Project platform config
+	mux.HandleFunc("PATCH /api/projects/{id}", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.UpdateBasicInfo)).ServeHTTP)
 	mux.HandleFunc("PATCH /api/projects/{id}/platform", projectH.UpdatePlatform)
 
 	// Project description (AI-generated from CLAUDE.md, manual-edit lockable)
