@@ -28,10 +28,10 @@ type LLMConfigProvider interface {
 }
 
 type Gateway struct {
-	binPath    string
-	timeout    time.Duration
-	claudeEnv  ClaudeEnvProvider
-	llmCfg     LLMConfigProvider
+	binPath   string
+	timeout   time.Duration
+	claudeEnv ClaudeEnvProvider
+	llmCfg    LLMConfigProvider
 }
 
 // New wires the gateway with separate providers for the Claude CLI env (auth
@@ -94,9 +94,9 @@ func (g *Gateway) GetBinPath() string { return g.binPath }
 // ANTHROPIC_API_KEY from the child environment so the configured token wins.
 // claudeEnvOverrides builds the map of env vars the platform must pin on every
 // claude subprocess: auth token + base URL (from the active claude_configs row),
-// the three tier-model pins (when --model is set), caller-supplied extras, and
-// CLAUDE_ALLOW_ROOT=1. Shared by the local env builder (mergedEnv) and the
-// remote env builder (BuildRemoteEnvPairs) so both paths pin the same keys.
+// the three tier-model pins (when --model is set), and caller-supplied extras.
+// Shared by the local env builder (mergedEnv) and the remote env builder
+// (BuildRemoteEnvPairs) so both paths pin the same keys.
 func (g *Gateway) claudeEnvOverrides(model string, extras ...string) map[string]string {
 	overrides := map[string]string{}
 	if g.claudeEnv != nil {
@@ -123,9 +123,11 @@ func (g *Gateway) claudeEnvOverrides(model string, extras ...string) map[string]
 			overrides[kv[:eq]] = kv[eq+1:]
 		}
 	}
-	// Allow claude CLI to run under root (e.g. in Docker). The CLI blocks
-	// --dangerously-skip-permissions when uid==0 unless this var is set.
-	overrides["CLAUDE_ALLOW_ROOT"] = "1"
+	// NOTE: there is deliberately NO "allow root" env var here. The Claude CLI
+	// hard-blocks --dangerously-skip-permissions when uid==0, and its only
+	// bypass is its own sandbox (IS_SANDBOX=1 / bubblewrap) — faking that has
+	// side effects. A root agent host must be provisioned with a non-root user
+	// instead (see handler/agent_server.go:runInstall).
 	return overrides
 }
 
@@ -219,9 +221,9 @@ func (g *Gateway) BuildEnvPairs(model string, extras ...string) []string {
 }
 
 // BuildRemoteEnvPairs returns ONLY the platform-pinned env entries for a claude
-// run on a remote Agent server — auth token, base URL, tier-model pins,
-// CLAUDE_ALLOW_ROOT, and the model-window-enforcement bypass. Unlike
-// BuildEnvPairs it does NOT inherit os.Environ() from the NovaWorkbench host.
+// run on a remote Agent server — auth token, base URL, tier-model pins, and
+// the model-window-enforcement bypass. Unlike BuildEnvPairs it does NOT
+// inherit os.Environ() from the NovaWorkbench host.
 //
 // The remote nova-agent-worker spawns claude inside the remote host's own
 // process environment (its real $HOME / $TMPDIR / $PATH). Inheriting the
@@ -605,19 +607,22 @@ func summaryFallback(claudeMD string) string {
 
 // GenerateCode invokes Claude CLI to implement a requirement.
 // Uses stream-json + dangerously-skip-permissions so Claude can read and write files.
-// Returns the command; caller streams stdout. systemPrompt/model come from the
-// "developer" role config. When opts.SessionID is set with Resume/Fork, the
-// coding turn continues (or forks from) the design conversation so the developer
-// inherits the full analysis+design context instead of being re-fed it.
-func (g *Gateway) GenerateCode(opts StreamOpts) *exec.Cmd {
+// Returns the command and its cancel function; the caller MUST invoke the cancel
+// function when the run completes (the coding handler does so via `defer cancel()`)
+// so the long timeout's timer is released rather than held until the deadline.
+// Caller streams stdout. systemPrompt/model come from the "developer" role config.
+// When opts.SessionID is set with Resume/Fork, the coding turn continues (or forks
+// from) the design conversation so the developer inherits the full
+// analysis+design context instead of being re-fed it.
+func (g *Gateway) GenerateCode(opts StreamOpts) (*exec.Cmd, context.CancelFunc) {
 	// Use a long timeout for coding tasks — real implementations can take many minutes.
 	codingTimeout := g.timeout
 	if codingTimeout < 30*time.Minute {
 		codingTimeout = 30 * time.Minute
 	}
-	ctx, _ := context.WithTimeout(context.Background(), codingTimeout) //nolint:govet
+	ctx, cancel := context.WithTimeout(context.Background(), codingTimeout)
 
-	return g.StreamCmd(ctx, opts)
+	return g.StreamCmd(ctx, opts), cancel
 }
 
 // usageInt coereces a JSON-decoded numeric value (float64 / int / int64 /

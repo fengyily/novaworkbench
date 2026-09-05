@@ -1300,6 +1300,9 @@ export interface AgentServer {
   // Persisted server-side so a page refresh can reconnect to the SSE
   // stream and replay history — see SettingsAgentServers mount effect.
   install_job_id: string;
+  // nova-agent-worker version the last successful install deployed; empty
+  // until the first install that stamps it (see backend agentWorkerVersion).
+  worker_version: string;
   created_at: string;
   updated_at: string;
 }

@@ -56,6 +56,13 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, accessSync, constants as fsConstants } from 'node:fs';
 import { join } from 'node:path';
 
+// WORKER_VERSION is a placeholder that NovaWorkbench's install flow stamps
+// with the binary's own agentWorkerVersion before uploading this file to a
+// remote Agent host (see backend/internal/handler/agent_worker_files.go).
+// Running the worker directly via `npm start` in dev reports the raw
+// placeholder, which is harmless — no dev flow depends on this value.
+const WORKER_VERSION = '__WORKER_VERSION__';
+
 const app = express();
 // 50MB cap: the prompt can carry pre-read project context (~40KB) plus
 // resume session transcripts. Tight caps here would surface as 413 mid-stream,
@@ -74,7 +81,7 @@ app.get('/v1/health', async (_req, res) => {
     // deps" path is the one that surfaces that, not the per-run health
     // probe. An unknown version is a soft signal, not an error.
   }
-  res.json({ status: 'ok', claudeVersion });
+  res.json({ status: 'ok', claudeVersion, workerVersion: WORKER_VERSION });
 });
 
 // /v1/run — primary endpoint. Streams `claude -p ... --output-format
@@ -99,6 +106,26 @@ app.post('/v1/run', async (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders?.();
+
+  // Early bailout: if the worker itself is running as root (uid 0), the
+  // Claude CLI refuses --dangerously-skip-permissions with a hard error
+  // before doing any work. We don't want to wait through the 5s preflight
+  // + the real-run timeout to surface that — the Go side already maps the
+  // `running_as_root` category to a tailored fix hint telling the operator
+  // to provision a non-root SSH user. The check is `typeof process.getuid
+  // === 'function'` so platforms without a uid (Windows) silently skip —
+  // Windows doesn't have the root/sudo concept the CLI is rejecting here.
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    res.write(JSON.stringify({
+      type: 'error',
+      errorCategory: 'running_as_root',
+      error: 'Agent 服务器以 root 身份运行，Claude CLI 不允许 root/sudo 使用 --dangerously-skip-permissions',
+      stderr: '--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons',
+      code: -1,
+    }) + '\n');
+    res.end();
+    return;
+  }
 
   // Preflight — validate the claude CLI works in this env+cwd before
   // launching the real run. Without this probe, a misconfigured environment
@@ -456,6 +483,17 @@ function classifyError(err, stderr) {
   // "Authentication failed" and "not logged in" because Claude Code
   // changes wording between versions.
   if (/401|unauthorized|authentication failed|not logged in|invalid.{0,4}token|invalid.{0,4}api.{0,4}key|invalid.{0,4}auth/.test(text)) return 'auth_failed';
+
+  // Running as root — Claude CLI rejects --dangerously-skip-permissions
+  // with a hard error before any tool/API call when the effective uid is
+  // 0 or sudo is in effect. The exact stderr is "cannot be used with
+  // root/sudo privileges for security reasons"; we also accept the
+  // "must not be run as root" / "running with root" wordings some
+  // versions use, so a CLI wording change doesn't silently fall through
+  // to the `unknown` bucket. Keep this BEFORE the generic permission
+  // categories so it wins over a coincidental "permission" match in the
+  // same stderr.
+  if (/cannot be used with root|root\s*\/\s*sudo privileges|running with root|must not be run as root|running as root/.test(text)) return 'running_as_root';
 
   // Forbidden — token valid but lacks scope / region. Different fix from
   // auth_failed (token is right; permission is wrong).

@@ -315,6 +315,7 @@ CREATE TABLE IF NOT EXISTS agent_servers (
 	status          TEXT NOT NULL DEFAULT 'unknown',
 	last_check_at   DATETIME,
 	check_result    TEXT NOT NULL DEFAULT '',
+	worker_version  TEXT NOT NULL DEFAULT '',
 	created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -367,6 +368,11 @@ var alterColumns = []string{
 	// after the job is gone (matters because JobStore is in-memory and can
 	// evict the job on backend restart while the DB column still holds it).
 	`ALTER TABLE agent_servers ADD COLUMN install_job_id TEXT NOT NULL DEFAULT ''`,
+	// worker_version: the nova-agent-worker version the last successful install
+	// stamped into the uploaded server.mjs (see handler/agent_worker_files.go
+	// agentWorkerVersion). The check flow compares the running worker's reported
+	// version against this to detect a stale process that survived a restart.
+	`ALTER TABLE agent_servers ADD COLUMN worker_version TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN analysis_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN design_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN design_job_id TEXT NOT NULL DEFAULT ''`,

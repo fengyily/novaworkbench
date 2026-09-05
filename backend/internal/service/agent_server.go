@@ -38,7 +38,7 @@ func scanRow(row interface {
 		&a.ID, &a.Name, &a.Host, &a.Port, &a.Username,
 		&a.AuthType, &authValue, &a.AuthValueAlgo,
 		&a.Status, &lastCheck, &a.CheckResult,
-		&a.InstallJobID,
+		&a.InstallJobID, &a.WorkerVersion,
 		&a.CreatedAt, &a.UpdatedAt,
 	)
 	if err != nil {
@@ -55,7 +55,7 @@ func scanRow(row interface {
 	return &a, nil
 }
 
-const selectColumns = `id, name, host, port, username, auth_type, auth_value, auth_value_algo, status, last_check_at, check_result, install_job_id, created_at, updated_at`
+const selectColumns = `id, name, host, port, username, auth_type, auth_value, auth_value_algo, status, last_check_at, check_result, install_job_id, worker_version, created_at, updated_at`
 
 // List returns all servers ordered by creation time. Credentials are NOT
 // decrypted — callers must use GetWithCredential for the plaintext.
@@ -238,6 +238,18 @@ func (s *AgentServerService) UpdateInstallJob(id, jobID string) error {
 	_, err := s.db.Exec(
 		`UPDATE agent_servers SET install_job_id = ?, updated_at = ? WHERE id = ?`,
 		jobID, time.Now(), id,
+	)
+	return err
+}
+
+// UpdateWorkerVersion records the worker version a successful install just
+// deployed (mirrors handler.agentWorkerVersion). Written at the end of
+// runInstall so the settings UI can show what's actually on the host, and so
+// the check flow can cross-reference it against the running worker's report.
+func (s *AgentServerService) UpdateWorkerVersion(id, version string) error {
+	_, err := s.db.Exec(
+		`UPDATE agent_servers SET worker_version = ?, updated_at = ? WHERE id = ?`,
+		version, time.Now(), id,
 	)
 	return err
 }

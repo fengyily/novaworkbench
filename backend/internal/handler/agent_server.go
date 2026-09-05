@@ -408,7 +408,12 @@ func (h *AgentServerHandler) runInstall(job *store.Job, serverID string) {
 		job.Finish(1, store.JobError)
 		return
 	}
-	defer client.Close()
+	// No `defer client.Close()` here: when the SSH user is root we swap `client`
+	// for a re-dial as a non-root user partway through (see below), and a plain
+	// defer would capture the original root client, leaking the replacement.
+	// The closure re-reads `client` at return time so it always closes whichever
+	// connection is active.
+	defer func() { _ = client.Close() }()
 
 	// Re-probe platform — mirrors the check goroutine's logic so the script
 	// choice is in lockstep with what the user sees in the install UI.
@@ -434,6 +439,45 @@ func (h *AgentServerHandler) runInstall(job *store.Job, serverID string) {
 		return
 	}
 
+	// Root handling: the Claude CLI refuses --dangerously-skip-permissions as
+	// root, so a worker installed under root can never complete a coding pass.
+	// On Linux + key auth we provision a non-root user and re-dial the SSH
+	// session as that user below, so everything downstream (worker, git
+	// worktree, claude session dir) runs under one non-root account. See the
+	// provisioning section above for why this has to be a full user switch
+	// rather than a worker-only drop of privileges.
+	switchUser := false
+	if isRoot, rerr := detectRoot(ctx, client); rerr != nil {
+		job.Append(store.LogLine{Type: "error", Content: "❌ " + rerr.Error()})
+		_ = h.svc.UpdateStatus(serverID, model.AgentServerStatusError, rerr.Error())
+		job.Finish(1, store.JobError)
+		return
+	} else if isRoot {
+		switch {
+		case platform != "Linux":
+			// macOS root is vanishingly rare; keep the existing behavior and let
+			// the coding path's running_as_root diagnostic surface the fix.
+		case srv.AuthType != model.AgentServerAuthKey:
+			// Password-auth root: we can't hand a new user the same credential
+			// (there's no authorized_keys to copy), so auto-provision is off the
+			// table. Fail fast with the same guidance the diagnostic gives.
+			msg := "Agent 服务器以 root + 密码认证运行，无法自动切换普通用户。请在服务器上创建普通用户并把 NovaWorkbench 所在机器的 SSH 公钥写入其 ~/.ssh/authorized_keys，然后在「设置 → Agent 服务器」把用户名改为该普通用户后重试。"
+			job.Append(store.LogLine{Type: "error", Content: "❌ " + msg})
+			_ = h.svc.UpdateStatus(serverID, model.AgentServerStatusError, msg)
+			job.Finish(1, store.JobError)
+			return
+		default:
+			job.Append(store.LogLine{Type: "phase", Content: "🛡️ 检测到 root 运行，自动创建普通用户 " + agentWorkerNonRootUser + "..."})
+			if err := provisionNonRootUser(ctx, client, agentWorkerNonRootUser, job); err != nil {
+				job.Append(store.LogLine{Type: "error", Content: "❌ " + err.Error()})
+				_ = h.svc.UpdateStatus(serverID, model.AgentServerStatusError, err.Error())
+				job.Finish(1, store.JobError)
+				return
+			}
+			switchUser = true
+		}
+	}
+
 	// RunScript writes the script body to a local tempfile, uploads via SFTP,
 	// execs `sh <remote-path>`, and cleans up. We capture stdout/stderr line
 	// by line into the job log so the UI shows install progress in real time.
@@ -445,6 +489,25 @@ func (h *AgentServerHandler) runInstall(job *store.Job, serverID string) {
 		return
 	}
 
+	// Platform deps (claude/node/npm) are now installed system-wide, so the
+	// non-root user we just provisioned can reach them on the default PATH.
+	// Re-dial the SSH session AS that user before deploying the worker, so the
+	// worker, its systemd --user unit / nohup fallback, and every claude spawn
+	// run as non-root. This is the step that actually satisfies the CLI's root
+	// guard — merely installing the worker under root would not.
+	if switchUser {
+		_ = client.Close()
+		client, err = gossh.Dial(ctx, srv.Host, srv.Port, agentWorkerNonRootUser, srv.AuthType, plain)
+		if err != nil {
+			msg := "以普通用户 " + agentWorkerNonRootUser + " 重新连接失败（请确认服务器允许该用户 SSH 登录，且 authorized_keys 已复制）: " + err.Error()
+			job.Append(store.LogLine{Type: "error", Content: "❌ " + msg})
+			_ = h.svc.UpdateStatus(serverID, model.AgentServerStatusError, msg)
+			job.Finish(1, store.JobError)
+			return
+		}
+		job.Append(store.LogLine{Type: "message", Content: "✓ 已以普通用户 " + agentWorkerNonRootUser + " 重新连接"})
+	}
+
 	// Step 1b: deploy nova-agent-worker. The platform install script above
 	// only put `claude` on PATH; the worker is a separate Node.js service
 	// that bridges NovaWorkbench → claude CLI (POST → spawn claude → SSE).
@@ -453,12 +516,25 @@ func (h *AgentServerHandler) runInstall(job *store.Job, serverID string) {
 	// Without this step the wizard's remote coding flow has no /v1/run
 	// endpoint to POST to.
 	job.Append(store.LogLine{Type: "phase", Content: "🚀 部署 nova-agent-worker..."})
-	if err := h.installNodeWorker(ctx, client, platform, job); err != nil {
+	if err := h.installNodeWorker(ctx, client, platform, serverID, job); err != nil {
 		msg := fmt.Sprintf("nova-agent-worker 部署失败: %v", err)
 		job.Append(store.LogLine{Type: "error", Content: msg})
 		_ = h.svc.UpdateStatus(serverID, model.AgentServerStatusError, msg)
 		job.Finish(1, store.JobError)
 		return
+	}
+
+	// Only after the worker install succeeded do we flip the stored username.
+	// Ordering matters: if we wrote `nova` and the install failed, a later
+	// check/coding run would dial a half-provisioned account. Persisting last
+	// keeps the record self-consistent on every failure path above.
+	if switchUser {
+		nova := agentWorkerNonRootUser
+		if _, uerr := h.svc.Update(serverID, model.UpdateAgentServerReq{Username: &nova}); uerr != nil {
+			job.Append(store.LogLine{Type: "message", Content: "⚠ 更新 SSH 用户名失败（请手动改用户名后重试）: " + uerr.Error()})
+		} else {
+			job.Append(store.LogLine{Type: "message", Content: "✓ 已将 SSH 用户切换为 " + agentWorkerNonRootUser + "，后续操作将以普通用户运行"})
+		}
 	}
 
 	job.Append(store.LogLine{Type: "phase", Content: "🔍 重新检查依赖..."})
@@ -517,8 +593,18 @@ func (h *AgentServerHandler) probeWorkerAndAppend(
 	ctx context.Context, client *gossh.Client, homeDir string, job *store.Job,
 ) (status string, summary string) {
 	job.Append(store.LogLine{Type: "phase", Content: "🔍 检查 nova-agent-worker..."})
-	if err := probeWorkerHealth(ctx, client); err == nil {
-		job.Append(store.LogLine{Type: "message", Content: "✓ nova-agent-worker 已就绪"})
+	if ver, err := probeWorkerHealth(ctx, client); err == nil {
+		// The worker is listening, but it may be a stale process that survived
+		// a previous install (an old worker still bound to 7000). Compare the
+		// reported version against what this binary expects; a mismatch means
+		// the deployed worker predates this build and must be re-installed.
+		if ver != agentWorkerVersion {
+			msg := "运行中的 worker 版本为 " + workerVersionDisplay(ver) +
+				"，与当前期望 " + agentWorkerVersion + " 不一致：旧进程可能仍占用 7000 端口，请重新点「安装依赖」"
+			job.Append(store.LogLine{Type: "error", Content: "❌ " + msg})
+			return model.AgentServerStatusError, msg
+		}
+		job.Append(store.LogLine{Type: "message", Content: "✓ nova-agent-worker 已就绪（版本 " + ver + "）"})
 		return model.AgentServerStatusReady, ""
 	}
 
@@ -591,6 +677,82 @@ func (h *AgentServerHandler) StreamJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ---- non-root provisioning -------------------------------------------------
+//
+// The Claude CLI hard-refuses --dangerously-skip-permissions when the
+// effective uid is root (or sudo is in effect) — its guard is sandbox-only,
+// there is no env-var bypass (see the note in llm/gateway.go). The wizard's
+// remote coding path depends on that flag for full tool access, so a worker
+// running under root can never complete a coding pass. Rather than ask the
+// operator to manually create a non-root user and re-point the Agent-server
+// record at it, the install flow provisions one automatically (see
+// runInstall): create a regular user, hand it the same SSH key the operator
+// already uses for root, then re-dial the SSH session AS that user and
+// install the worker under its $HOME. Subsequent check/coding runs dial the
+// new user too, so the git worktree, claude session dir, and worker all live
+// under one non-root account — which is exactly what makes the CLI's root
+// guard happy.
+const agentWorkerNonRootUser = "nova"
+
+// detectRoot reports whether the SSH session's effective uid is 0. The CLI
+// rejects --dangerously-skip-permissions on uid 0 precisely, so this is the
+// single source of truth for whether provisioning is needed.
+func detectRoot(ctx context.Context, client *gossh.Client) (bool, error) {
+	var out strings.Builder
+	if exit, err := client.Exec(ctx, "id -u", "", nil, &out, nil); err != nil || exit != 0 {
+		return false, fmt.Errorf("读取远程 uid 失败（exit=%d err=%v）", exit, err)
+	}
+	return strings.TrimSpace(out.String()) == "0", nil
+}
+
+// nonRootProvisionScript builds the idempotent shell that provisions a
+// non-root agent user on a Linux host. Run as root only. Steps:
+//  1. create the user if missing (useradd, with an adduser fallback for
+//     Debian-family images that ship adduser but not useradd);
+//  2. enable-linger so the user's systemd --user manager survives SSH
+//     sessions (root can do this without a polkit agent — the worker's own
+//     `loginctl enable-linger $(id -u)` run AS the user often can't);
+//  3. resolve the new user's $HOME and stage ~/.ssh;
+//  4. copy root's authorized_keys so the SAME private key NovaWorkbench
+//     already holds can authenticate as the new user (key-auth only).
+//
+// Kept as a pure function so the provisioning contract is unit-testable.
+// PATH is widened first so useradd/adduser/loginctl (often under /usr/sbin,
+// off the default non-interactive SSH PATH) resolve without absolute paths.
+func nonRootProvisionScript(user string) string {
+	return `export PATH="/usr/local/sbin:/usr/sbin:/sbin:$PATH"
+if ! id ` + user + ` >/dev/null 2>&1; then
+  if ! useradd -m -s /bin/bash ` + user + ` 2>/dev/null; then
+    adduser --disabled-password --gecos "" ` + user + ` 2>/dev/null || true
+  fi
+fi
+id ` + user + ` >/dev/null 2>&1 || { echo "[nova-agent] 无法创建普通用户 ` + user + `"; exit 1; }
+loginctl enable-linger ` + user + ` 2>/dev/null || true
+HOMEDIR=$(getent passwd ` + user + ` | cut -d: -f6)
+if [ -n "$HOMEDIR" ]; then
+  mkdir -p "$HOMEDIR/.ssh"
+  if [ -f "$HOME/.ssh/authorized_keys" ]; then
+    cp "$HOME/.ssh/authorized_keys" "$HOMEDIR/.ssh/authorized_keys"
+  fi
+  chown -R ` + user + `:` + user + ` "$HOMEDIR/.ssh"
+  chmod 700 "$HOMEDIR/.ssh"
+  chmod 600 "$HOMEDIR/.ssh/authorized_keys" 2>/dev/null || true
+fi
+echo "[nova-agent] provisioned non-root user ` + user + ` at ${HOMEDIR:-?}"
+`
+}
+
+// provisionNonRootUser runs the provisioning script on the (root) SSH session
+// and streams its output into the job log. Idempotent: re-running install
+// re-copies the key and re-chowns, so a partially-provisioned or
+// manually-created user converges to the same state.
+func provisionNonRootUser(ctx context.Context, client *gossh.Client, user string, job *store.Job) error {
+	if exit, err := client.RunScript(ctx, nonRootProvisionScript(user), "provision", nil, jobLineWriter(job)); err != nil || exit != 0 {
+		return fmt.Errorf("创建普通用户 %s 失败（exit=%d err=%v）", user, exit, err)
+	}
+	return nil
+}
+
 // ---- nova-agent-worker deployment -----------------------------------------
 
 // installNodeWorker SFTPs the worker source files (embedded as Go constants
@@ -611,7 +773,7 @@ func (h *AgentServerHandler) StreamJob(w http.ResponseWriter, r *http.Request) {
 // files are pinned to this Go binary's compile-time version. Pulling from
 // GitHub at install time would silently drift between releases and make
 // regressions hard to bisect. Curl-from-URL can be added later as a fallback.
-func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *gossh.Client, platform string, job *store.Job) error {
+func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *gossh.Client, platform, serverID string, job *store.Job) error {
 	// Resolve $HOME via a one-shot echo. SSH non-interactive non-login shells
 	// don't source /etc/profile, but $HOME is set by sshd from /etc/passwd so
 	// it's reliable. Falls back to /root for safety (e.g. some Docker images
@@ -633,9 +795,9 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 
 	// Upload the worker files. We try the canonical GitHub source first so
 	// every install gives the user the latest main-branch worker (preflight,
-// classifyError, etc.) without requiring a NovaWorkbench binary bump —
-// worker bugfixes ship the moment they hit main, not the moment we cut a
-// release. Fall back to the Go-binary-embedded versions on any failure
+	// classifyError, etc.) without requiring a NovaWorkbench binary bump —
+	// worker bugfixes ship the moment they hit main, not the moment we cut a
+	// release. Fall back to the Go-binary-embedded versions on any failure
 	// (network down / GitHub 5xx / private network) so install never wedges
 	// on a connectivity issue; the embedded versions are what shipped with
 	// this binary, so they're at least as tested as the running Go server.
@@ -651,12 +813,19 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 	// logged with a clear marker so the dev sees at a glance which path
 	// served the file.
 	job.Append(store.LogLine{Type: "phase", Content: "📦 准备 nova-agent-worker 源码..."})
+	// Stamp the worker version into server.mjs before upload. agentWorkerVersion
+	// is the binary's single source of truth; the running worker reports it back
+	// via /v1/health so the install can confirm the new process (not a stale one
+	// still bound to 7000) actually took over. Both the disk and embedded sources
+	// carry the __WORKER_VERSION__ placeholder, so the stamp is uniform regardless
+	// of which source served the file.
+	serverBody := strings.ReplaceAll(workerSourceServerMJS(), "__WORKER_VERSION__", agentWorkerVersion)
 	for _, f := range []struct {
 		path string
 		body string
 		note string
 	}{
-		{installDir + "/server.mjs", workerSourceServerMJS(), workerSourceLabel("server.mjs")},
+		{installDir + "/server.mjs", serverBody, workerSourceLabel("server.mjs")},
 		{installDir + "/package.json", workerSourcePackageJSON(), workerSourceLabel("package.json")},
 	} {
 		if err := client.WriteFile(f.path, []byte(f.body), 0644); err != nil {
@@ -853,7 +1022,7 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 		// user domain (vs the system domain), no root needed.
 		client.Exec(ctx, "launchctl bootout gui/$UID/com.novaworkbench.agent-worker 2>/dev/null || true", "", nil, nil, nil)
 		if exit, _ := client.Exec(ctx,
-		"launchctl bootstrap gui/$UID "+plistPath+" && launchctl kickstart -k gui/$UID/com.novaworkbench.agent-worker",
+			"launchctl bootstrap gui/$UID "+plistPath+" && launchctl kickstart -k gui/$UID/com.novaworkbench.agent-worker",
 			"", nil, jobLineWriter(job), nil); exit != 0 {
 			return fmt.Errorf("launchctl bootstrap 失败（exit=%d）", exit)
 		}
@@ -866,9 +1035,20 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 	// if it's down we fall through to a nohup launch and re-probe. Only
 	// if BOTH paths fail do we report an error.
 	job.Append(store.LogLine{Type: "phase", Content: "🔍 worker 健康检查..."})
-	if err := probeWorkerHealth(ctx, client); err == nil {
-		job.Append(store.LogLine{Type: "message", Content: "✓ worker 健康检查通过"})
-		return nil
+	if ver, err := probeWorkerHealth(ctx, client); err == nil {
+		if ver != agentWorkerVersion {
+			// Worker is up but running stale code — the systemd restart was a
+			// silent no-op and an old process still holds 7000. Fall through to
+			// the nohup path, whose pkill kills the stale process before
+			// relaunching from the freshly-written server.mjs.
+			job.Append(store.LogLine{Type: "message", Content: "⚠ systemd 路径上的 worker 仍是旧版本 " + workerVersionDisplay(ver) + "，回落到 nohup（会先 kill 旧进程）"})
+		} else {
+			job.Append(store.LogLine{Type: "message", Content: "✓ worker 健康检查通过（版本 " + ver + "）"})
+			if err := h.svc.UpdateWorkerVersion(serverID, agentWorkerVersion); err != nil {
+				job.Append(store.LogLine{Type: "message", Content: "⚠ 记录 worker 版本失败（不影响安装）: " + err.Error()})
+			}
+			return nil
+		}
 	} else {
 		job.Append(store.LogLine{Type: "message", Content: "⚠ systemd 路径未在监听，回落到 nohup 启动"})
 	}
@@ -919,27 +1099,60 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 	if err := waitForWorkerHealth(ctx, client, 6*time.Second); err != nil {
 		return fmt.Errorf("worker 健康检查失败: %w（nohup 日志: %s/worker.log）", err, installDir)
 	}
-	job.Append(store.LogLine{Type: "message", Content: "✓ worker 健康检查通过 (nohup)"})
+	// Final version confirmation. By now we've overwritten server.mjs and (in
+	// the nohup path) killed any prior worker, so the running process must
+	// report agentWorkerVersion. Anything else means a stale process is still
+	// serving 7000 — a hard failure, not a silent "success" that would leave
+	// the old worker handling every coding run.
+	ver, err := probeWorkerHealth(ctx, client)
+	if err != nil {
+		return fmt.Errorf("读取 worker 版本失败: %w", err)
+	}
+	if ver != agentWorkerVersion {
+		return fmt.Errorf("worker 已就绪但版本仍为 %s（应为 %s）：旧进程可能仍占用 7000 端口，请 SSH 到服务器执行 `ps aux | grep server.mjs` 手动 kill 后重试", workerVersionDisplay(ver), agentWorkerVersion)
+	}
+	job.Append(store.LogLine{Type: "message", Content: "✓ worker 健康检查通过 (nohup，版本 " + ver + ")"})
+	if err := h.svc.UpdateWorkerVersion(serverID, agentWorkerVersion); err != nil {
+		job.Append(store.LogLine{Type: "message", Content: "⚠ 记录 worker 版本失败（不影响安装）: " + err.Error()})
+	}
 	return nil
 }
 
 // probeWorkerHealth opens an SSH direct-tcpip channel to 127.0.0.1:7000 on
-// the remote host and does a GET /v1/health. Used by both install and check
-// flows. Lives here (not in runCheck) so the install flow has its own copy
-// without tangling the Check goroutine's status logic.
-func probeWorkerHealth(ctx context.Context, client *gossh.Client) error {
+// the remote host, does a GET /v1/health, and returns the worker's reported
+// workerVersion (empty for a worker predating version reporting). Used by both
+// install and check flows. Lives here (not in runCheck) so the install flow has
+// its own copy without tangling the Check goroutine's status logic.
+func probeWorkerHealth(ctx context.Context, client *gossh.Client) (string, error) {
 	hc, hcCancel := context.WithTimeout(ctx, 8*time.Second)
 	defer hcCancel()
 	req, _ := http.NewRequestWithContext(hc, http.MethodGet, "http://127.0.0.1:7000/v1/health", nil)
 	resp, err := (&http.Client{Transport: client.HTTPTransport("127.0.0.1:7000")}).Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	return nil
+	var health struct {
+		Status        string `json:"status"`
+		ClaudeVersion string `json:"claudeVersion"`
+		WorkerVersion string `json:"workerVersion"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
+		return "", err
+	}
+	return health.WorkerVersion, nil
+}
+
+// workerVersionDisplay returns a human-readable version label; an empty
+// version (worker predates version reporting) shows as "未知".
+func workerVersionDisplay(v string) string {
+	if v == "" {
+		return "未知"
+	}
+	return v
 }
 
 // waitForWorkerHealth retries probeWorkerHealth until it succeeds or
@@ -952,7 +1165,7 @@ func waitForWorkerHealth(ctx context.Context, client *gossh.Client, total time.D
 	deadline := time.Now().Add(total)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		if err := probeWorkerHealth(ctx, client); err == nil {
+		if _, err := probeWorkerHealth(ctx, client); err == nil {
 			return nil
 		} else {
 			lastErr = err
@@ -1168,14 +1381,14 @@ func firstSemverToken(s string) string {
 // workerSourceDir resolves the directory the install flow reads worker
 // source files from. Three locations are tried, in order:
 //
-//   1. NOVA_AGENT_WORKER_SOURCE_DIR env var (operator-pinned path —
-//      wins outright so production deployments can point at /opt/...)
-//   2. "agent-worker/" relative to CWD — the layout used when running
-//      the binary from the repo root (e.g. ./dist/nova after make build)
-//   3. "../agent-worker/" relative to CWD — the layout used by
-//      `make run` (`cd backend && go run ./cmd/server` lands the
-//      process inside backend/, but the source tree lives at the
-//      repo root, one level up)
+//  1. NOVA_AGENT_WORKER_SOURCE_DIR env var (operator-pinned path —
+//     wins outright so production deployments can point at /opt/...)
+//  2. "agent-worker/" relative to CWD — the layout used when running
+//     the binary from the repo root (e.g. ./dist/nova after make build)
+//  3. "../agent-worker/" relative to CWD — the layout used by
+//     `make run` (`cd backend && go run ./cmd/server` lands the
+//     process inside backend/, but the source tree lives at the
+//     repo root, one level up)
 //
 // The first location that contains a non-empty server.mjs is the winner;
 // if none matches, the helpers fall through to the Go-binary-embedded
