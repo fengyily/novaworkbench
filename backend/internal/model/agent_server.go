@@ -18,8 +18,8 @@ type AgentServer struct {
 	Username      string  `json:"username"`
 	AuthType      string  `json:"auth_type"`
 	AuthValue     string  `json:"-"`               // ciphertext, never in API responses
-	AuthValueSet  bool    `json:"auth_value_set"`   // true when a credential is configured
-	AuthValueAlgo string  `json:"auth_value_algo"`  // algorithm id (currently "aes-gcm")
+	AuthValueSet  bool    `json:"auth_value_set"`  // true when a credential is configured
+	AuthValueAlgo string  `json:"auth_value_algo"` // algorithm id (currently "aes-gcm")
 	Status        string  `json:"status"`
 	LastCheckAt   *string `json:"last_check_at"`
 	CheckResult   string  `json:"check_result"`
@@ -29,9 +29,14 @@ type AgentServer struct {
 	// component state jobId is lost on reload and the install keeps running
 	// silently until Finish. Cleared by runInstall's defer on Finish so a
 	// stale id never lingers after the job has actually gone.
-	InstallJobID  string  `json:"install_job_id"`
-	CreatedAt     string  `json:"created_at"`
-	UpdatedAt     string  `json:"updated_at"`
+	InstallJobID string `json:"install_job_id"`
+	// WorkerVersion is the nova-agent-worker version the last successful install
+	// stamped into the uploaded server.mjs (mirrors handler.agentWorkerVersion).
+	// The check flow compares the running worker's reported version against this
+	// to detect a stale process that survived a restart.
+	WorkerVersion string `json:"worker_version"`
+	CreatedAt     string `json:"created_at"`
+	UpdatedAt     string `json:"updated_at"`
 }
 
 // CreateAgentServerReq is the create payload. AuthValue is the plaintext

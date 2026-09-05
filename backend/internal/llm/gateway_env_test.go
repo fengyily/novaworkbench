@@ -43,14 +43,15 @@ func TestBuildRemoteEnvPairsDoesNotLeakHostEnv(t *testing.T) {
 		got[k] = true
 	}
 
-	// Platform-pinned keys must be present.
+	// Platform-pinned keys must be present. (There is deliberately no
+	// CLAUDE_ALLOW_ROOT — the Claude CLI has no such bypass; root must be
+	// handled by provisioning a non-root user, see handler/agent_server.go.)
 	for _, want := range []string{
 		"ANTHROPIC_AUTH_TOKEN",
 		"ANTHROPIC_BASE_URL",
 		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
 		"ANTHROPIC_DEFAULT_SONNET_MODEL",
 		"ANTHROPIC_DEFAULT_OPUS_MODEL",
-		"CLAUDE_ALLOW_ROOT",
 		"CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT",
 	} {
 		if !got[want] {

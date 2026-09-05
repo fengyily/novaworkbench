@@ -1516,7 +1516,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 				codingExtraEnv = append(codingExtraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
 			}
 		}
-		cmd := h.llm.GenerateCode(llm.StreamOpts{
+		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:        prompt,
 			WorkDir:       workDir,
 			SystemPrompt:  systemPrompt,
@@ -1527,6 +1527,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			ForkSessionID: forkSessionID,
 			ExtraEnv:      codingExtraEnv,
 		})
+		defer cancel()
 
 		// runClaudeStream owns the subprocess lifecycle (Start/Wait) and parses
 		// stream-json events into job log lines via jobSink — including the
@@ -1798,7 +1799,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		if block := promptpkg.DeveloperBlock(req.Kind, req); block != "" {
 			adjustPrompt += "\n\n" + block
 		}
-		cmd := h.llm.GenerateCode(llm.StreamOpts{
+		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:       adjustPrompt,
 			WorkDir:      workDir,
 			SystemPrompt: "", // resume 已携带 developer persona，不再注入
@@ -1807,6 +1808,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			Resume:       true,
 			Fork:         false,
 		})
+		defer cancel()
 		adjustUsage := h.usageCtxFor("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message)
 		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding", adjustUsage)
 
@@ -1934,7 +1936,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		if block := promptpkg.DeveloperBlock(req.Kind, req); block != "" {
 			prompt += "\n\n" + block
 		}
-		cmd := h.llm.GenerateCode(llm.StreamOpts{
+		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:       prompt,
 			WorkDir:      workDir,
 			SystemPrompt: "", // resume 已携带 developer persona，不再注入
@@ -1943,6 +1945,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 			Resume:       true,
 			Fork:         false,
 		})
+		defer cancel()
 		continueUsage := h.usageCtxFor("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "")
 		out := runClaudeStream(jobSink{job}, cmd, "continue-coding", continueUsage)
 
@@ -2590,6 +2593,16 @@ func workerCategoryHint(cat, msg string) string {
 		return "Claude 达到单轮最大工具调用次数。请把需求拆小，或在提示词里限制工具调用总数。"
 	case "preflight_timeout":
 		return "preflight 5 秒内未完成（`claude --print ping` 卡住）。通常是 Agent 服务器无法访问 API，请检查网络。"
+	case "running_as_root":
+		// Claude CLI refuses --dangerously-skip-permissions when the current
+		// uid is root (or sudo is in effect) for security reasons. The CLI
+		// surfaces this as a non-zero exit before any tool/API call, so the
+		// wizard sees an opaque "exit 1" without this classification. The
+		// install flow now auto-provisions a non-root user and switches the
+		// stored SSH username (see agent_server.go:runInstall), so the first
+		// piece of advice is "re-run 安装依赖"; the manual steps stay as the
+		// password-auth / already-provisioned fallback.
+		return "Claude CLI 出于安全考虑拒绝以 root/sudo 身份执行 --dangerously-skip-permissions。如果这台服务器使用 SSH 私钥认证，回到「设置 → Agent 服务器」重新点「安装依赖」即可自动创建普通用户（nova）并把 SSH 用户名切换过去，无需手动操作；如果使用密码认证，请在服务器上手动创建普通用户并把 NovaWorkbench 所在机器的 SSH 公钥写入其 `~/.ssh/authorized_keys`，然后把该服务器的 SSH 用户名改为该普通用户后再重试。"
 	}
 	return ""
 }
@@ -4982,7 +4995,7 @@ func (h *WizardHandler) runSubTask(
 	}
 
 	execSystemPrompt, _ := h.roleConfig(executorRoleKey)
-	cmd := h.llm.GenerateCode(llm.StreamOpts{
+	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 		Prompt:       prompt,
 		WorkDir:      workDir,
 		SystemPrompt: execSystemPrompt,
@@ -4995,6 +5008,7 @@ func (h *WizardHandler) runSubTask(
 		Fork:          true,
 		ForkSessionID: newSID,
 	})
+	defer cancel()
 
 	// "sub_task" step key — distinct from "coding" / "adjust_coding" so
 	// token-usage rollups don't double-count.
@@ -5242,7 +5256,7 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 		}
 
 		job.Append(store.LogLine{Type: "phase", Content: "🔄 主 Agent 重新拆分任务中…"})
-		cmd := h.llm.GenerateCode(llm.StreamOpts{
+		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:       prompt,
 			WorkDir:      workDir,
 			SystemPrompt: systemPrompt,
@@ -5250,6 +5264,7 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 			SessionID:    sessionID,
 			Resume:       resume,
 		})
+		defer cancel()
 		usage := h.usageCtxFor("re_orchestrate", id, req.ProjectID, job.ID, modelName, "", "")
 		out := runClaudeStream(jobSink{job}, cmd, "re-orchestrate", usage)
 
@@ -6266,7 +6281,7 @@ func (h *WizardHandler) dispatchOneChild(
 		"> 本任务通过 --fork-session 继承了主 Agent 的项目上下文与代码库访问权限。\n" +
 		"> 如需补充信息，可正常读取项目文件或调用工具。\n" +
 		"> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
-	cmd := h.llm.GenerateCode(llm.StreamOpts{
+	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 		Prompt:        executorPrompt,
 		WorkDir:       workDir,
 		SystemPrompt:  execSystemPrompt,
@@ -6276,6 +6291,7 @@ func (h *WizardHandler) dispatchOneChild(
 		Fork:          true,
 		ForkSessionID: childSID,
 	})
+	defer cancel()
 	startTime, err := h.subTaskSvc.MarkRunning(st.ID)
 	if err != nil {
 		log.Printf("[orchestrate] failed to mark running for %s: %v", st.ID, err)
@@ -6384,7 +6400,7 @@ func (h *WizardHandler) runOrchestratorSummary(
 	job.Append(store.LogLine{Type: "phase", Content: "📊 主 Agent 正在汇总子任务产物..."})
 	job.SetModel(modelName)
 
-	cmd := h.llm.GenerateCode(llm.StreamOpts{
+	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 		Prompt:       summaryB.String(),
 		WorkDir:      workDir,
 		SystemPrompt: "", // resumed session already has developer persona
@@ -6393,6 +6409,7 @@ func (h *WizardHandler) runOrchestratorSummary(
 		Resume:       true,
 		Fork:         false,
 	})
+	defer cancel()
 
 	summaryUsage := h.usageCtxFor("orchestrate_summary", reqID, req.ProjectID, job.ID, modelName, "", "auto-summary")
 	out := runClaudeStream(jobSink{job}, cmd, "orchestrate-summary", summaryUsage)
