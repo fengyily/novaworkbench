@@ -3768,6 +3768,14 @@ func parseStreamJSONFromReader(r io.Reader, sink streamSink, scope string, uctx 
 				}
 				sink.emit(store.LogLine{Type: "error", Content: msg})
 			}
+		case "log":
+			// nova-agent-worker emits {type:"log", content:"..."} right before
+			// spawning claude, carrying the exact command (auth token already
+			// redacted) so a remote coding run is debuggable from the job panel
+			// without SSHing into the agent host. Show it as a plain message.
+			if content, _ := evt["content"].(string); content != "" {
+				sink.emit(store.LogLine{Type: "message", Content: content})
+			}
 		}
 	}
 	// EOF without a result event — the remote claude exited before

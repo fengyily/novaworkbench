@@ -53,5 +53,5 @@ func ModelContextWindow(model string) int {
 	}
 
 	// Unrecognized — let the frontend fall back to its 200k default.
-	return 0
+	return 1_000_000
 }
