@@ -26,18 +26,19 @@
 // Body fields for POST /v1/run map directly to the CLI flags we build:
 //   workDir     → cmd.Dir
 //   prompt      → -p <prompt>
-//   model       → --model <id>
+//   model       → ANTHROPIC_MODEL inside --settings '{"env":{...}}'
 //   systemPrompt→ --system-prompt (or --append-system-prompt in plan mode)
 //   sessionId   → --session-id (new) or --resume (existing)
 //   resume      → --resume when true
 //   fork        → --fork-session (with --resume)
 //   forkSessionId → --session-id on a forked run (pre-mint the id)
-//   env         → process env for the child
+//   env         → merged into --settings '{"env":{...}}' (auth / base URL /
+//                 tier-model pins); NOT the child process env
 //   allowedTools→ --allowedTools "Tool1 Tool2 ..."
 //   disallowedTools → --disallowedTools "Tool1 Tool2 ..."
 //   permissionMode  → "plan" → --permission-mode plan; "" → --dangerously-skip-permissions
 //   ignoreLocalSettings (default true) → --setting-sources "" (drop all
-//                       settings files; the platform's `env` is the only
+//                       settings files; the --settings env block is the only
 //                       source of auth / base URL / model pinning).
 //   overrideSettingSources (legacy) → --setting-sources project,local
 //                       (drop only the user source).
@@ -133,12 +134,13 @@ app.post('/v1/run', async (req, res) => {
   // exiting silently — indistinguishable from a successful empty run. 5s
   // budget keeps the round-trip short on the failure path; the success
   // path adds ~1-2s which is dominated by Node + claude cold-start anyway.
-  //
-  // The preflight env mirrors what we hand the real run so auth + base URL
-  // + model-pinning are identical. Merge process.env first so PATH + locale
-  // + DISPLAY survive even when options.env overrides only a handful of
-  // keys.
-  const mergedEnv = { ...process.env, ...opts.env };
+  // The child process env is the agent host's own environment only. The
+  // platform-pinned keys (auth token / base URL / model / tier pins) are NOT
+  // merged here — they're delivered via --settings '{"env":{...}}' (see
+  // buildSettingsArg) so they land at the top of the CLI's settings stack and
+  // can't be shadowed by a stale ~/.claude/settings.json or an inherited
+  // ANTHROPIC_API_KEY.
+  const childEnv = { ...process.env };
   // Ensure TMPDIR (and the TMP/TEMP aliases) point at a writable location
   // before we hand the env to claude. On macOS, agent users provisioned
   // only via SSH often inherit $TMPDIR=/var/folders/<random>/T from the
@@ -149,10 +151,10 @@ app.post('/v1/run', async (req, res) => {
   // --print ping even starts. We walk a fallback chain (existing TMPDIR →
   // $HOME → /tmp → cwd → bare /tmp) so the CLI always has a writable
   // scratch dir regardless of how the SSH user was provisioned.
-  const tmpdir = resolveTmpdir(mergedEnv);
-  mergedEnv.TMPDIR = tmpdir;
-  mergedEnv.TMP = tmpdir;
-  mergedEnv.TEMP = tmpdir;
+  const tmpdir = resolveTmpdir(childEnv);
+  childEnv.TMPDIR = tmpdir;
+  childEnv.TMP = tmpdir;
+  childEnv.TEMP = tmpdir;
   // Also export the resolved value back into this worker's own env so any
   // node-side libraries (e.g. any future fs.mkdtemp call inside the worker
   // itself, or a downstream SDK that we don't currently use) inherit the
@@ -161,25 +163,35 @@ app.post('/v1/run', async (req, res) => {
   process.env.TMPDIR = tmpdir;
   process.env.TMP = tmpdir;
   process.env.TEMP = tmpdir;
-  // Strip model-pinning env vars from the preflight env. gateway.go's
-  // BuildEnvPairs injects ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL so
-  // a real /v1/run call has every tier pinned to the user's model. But the
-  // preflight passes no --model — the CLI then reads those env vars and
-  // tries to use them, only to emit `[claude-code:unrecognized_model]` for
-  // any custom model id (MiniMax-M3 etc.) and either fail the ping or hang
-  // retrying. Locally the user sees `claude --print ping` work because
-  // their local env doesn't have ANTHROPIC_DEFAULT_*_MODEL set, so the CLI
-  // falls back to its built-in catalog model. We mirror that on the
-  // preflight by stripping these three vars +
-  // CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT (which only
-  // matters when a custom model is in play). Auth + base URL + TMPDIR
-  // override are preserved so the probe still validates connectivity.
-  const preflightEnv = { ...mergedEnv };
-  delete preflightEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL;
-  delete preflightEnv.ANTHROPIC_DEFAULT_SONNET_MODEL;
-  delete preflightEnv.ANTHROPIC_DEFAULT_OPUS_MODEL;
-  delete preflightEnv.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT;
-  const pf = await preflight(opts.workDir, preflightEnv);
+  // Build the --settings block once and hand the SAME string to both the
+  // preflight probe and the real run, so the ping validates byte-for-byte
+  // the auth / base URL / model the real run will use (instead of the agent
+  // host's CLI defaults, which a third-party endpoint may not serve).
+  const settingsArg = buildSettingsArg(opts);
+
+  // Log BOTH the preflight command and the planned real-run command up front
+  // — before any spawn. The previous shape only logged after preflight
+  // succeeded, so a preflight failure (timeout / unrecognized_model /
+  // network unreachable) left the journal and the wizard job panel with
+  // nothing but 'preflight 失败' — operators couldn't tell whether the
+  // settings JSON was wrong, the model name was wrong, or the auth token was
+  // missing. We now write three lines to stderr + the NDJSON stream so a
+  // failure shows the exact arg list the CLI was invoked with.
+  const realArgs = buildClaudeArgs(opts, settingsArg);
+  const realRendered = renderCommand(realArgs);
+  // The preflight uses its own (smaller) pingArgs list — render it the same
+  // way so the logged command is copy-pasteable, then append the same
+  // --settings JSON so the two logs diff cleanly on auth / base URL / model.
+  const pingArgs = ['--print', 'ping', '--output-format', 'text', '--setting-sources', 'project,local'];
+  if (settingsArg) pingArgs.push('--settings', settingsArg);
+  const pingRendered = renderCommand(pingArgs);
+  console.error('[nova-agent-worker] exec preflight: ' + pingRendered);
+  console.error('[nova-agent-worker] exec planned:  ' + realRendered);
+  res.write(JSON.stringify({ type: 'log', content: '准备 preflight: ' + pingRendered }) + '\n');
+  res.write(JSON.stringify({ type: 'log', content: '准备执行主命令: ' + realRendered }) + '\n');
+  if (typeof res.flush === 'function') res.flush();
+
+  const pf = await preflight(opts.workDir, childEnv, settingsArg);
   if (!pf.ok) {
     res.write(JSON.stringify({
       type: 'error',
@@ -193,12 +205,16 @@ app.post('/v1/run', async (req, res) => {
     return;
   }
 
-  const args = buildClaudeArgs(opts);
+  const args = realArgs;
+  // Real-run entry log — preflight already passed, just record the boundary.
+  console.error('[nova-agent-worker] exec: ' + realRendered);
+  res.write(JSON.stringify({ type: 'log', content: '执行命令: ' + realRendered }) + '\n');
+  if (typeof res.flush === 'function') res.flush();
   let proc;
   try {
     proc = spawn('claude', args, {
       cwd: opts.workDir,
-      env: mergedEnv,
+      env: childEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
   } catch (e) {
@@ -256,33 +272,43 @@ app.post('/v1/run', async (req, res) => {
 // call and returns {ok, errorCategory, stderr, stdout, code}. Catches the
 // actual CLI failure the Go side would otherwise see as a generic "exit 1".
 //
-// 5s timeout: `claude --print ping` round-trips through the Anthropic API
-// and normally completes in <2s on a healthy host. A timeout here is
-// indistinguishable from "API hung" — we surface it as its own category so
-// the Go side can show a network-unreachable hint without conflating it
-// with a 30s-deep hang the real run would otherwise expose.
-function preflight(workDir, env) {
+// 15s timeout: `claude --print ping` round-trips through the Anthropic API
+// and normally completes in <2s on a healthy host, but custom base URLs
+// (e.g. minimax, deepseek proxies) can run the CLI's TLS handshake +
+// first-call model catalog lookup in 5-8s on a cold cache, and a
+// freshly-restarted systemd --user worker adds another second of node
+// startup before the spawn even happens. 5s (the previous value) was
+// empirically too aggressive — even a healthy host with MiniMax-M3 on a
+// private base URL would surface as 'preflight_timeout' because the ping
+// takes ~6s end-to-end, masking the real CLI behaviour behind an opaque
+// timeout. 15s still distinguishes "API hung" from "slow first call"
+// without dragging the failure path into the 30s-deep territory a real
+// run exposes. Keep this in sync with the [preflight timeout after Xs]
+// string injected into the stderr below.
+const PREFLIGHT_TIMEOUT_MS = 15000;
+function preflight(workDir, env, settingsArg) {
   return new Promise((resolve) => {
     let proc;
     try {
-      // --setting-sources "project,local" drops the user source so the
-      // preflight mirrors the wizard remote path (which sets
-      // IgnoreLocalSettings=true on the wire). Without this, the
-      // preflight reads the seeded ~/.claude/settings.json — placed
-      // there by the install script with a placeholder
-      // ANTHROPIC_AUTH_TOKEN and ANTHROPIC_DEFAULT_*_MODEL=MiniMax-M3
-      // but WITHOUT CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT.
-      // The CLI's settings.json `env` block applies OVER the process env
-      // we pass in, so the placeholder token would shadow the platform's
-      // real auth, the unknown model would trigger
-      // [claude-code:unrecognized_model], and the ping call would hang /
-      // fail — making the preflight useless as an early-warning probe.
+      // The --settings block (built by buildSettingsArg, the same string the
+      // real run uses) is the PRIMARY source of auth / base URL / model: it
+      // sits at the top of the CLI's settings stack, above the seeded
+      // ~/.claude/settings.json the install script places on the agent host
+      // (placeholder token + MiniMax-M3 model pins), so the ping round-trips
+      // the platform's real config instead of the host's stale defaults.
       //
-      // CLI quirk: `--setting-sources` only accepts combinations of
-      // {user, project, local} — no "drop ALL" value. We pick project+local
-      // because the install only seeds the user source, so this gives us
-      // the platform-env-wins behavior the wizard wants.
-      proc = spawn('claude', ['--print', 'ping', '--output-format', 'text', '--setting-sources', 'project,local'], {
+      // --setting-sources "project,local" is kept as defense-in-depth: it
+      // drops the user source so other stray user-settings keys (permissions,
+      // hooks, a top-level 'model') can't leak into the probe. CLI quirk:
+      // '--setting-sources' only accepts combinations of {user, project,
+      // local} — no "drop ALL" value — so project+local is the best we can do;
+      // a fresh agent host only seeds the user source, so this is equivalent
+      // to "drop everything" in practice.
+      const pingArgs = ['--print', 'ping', '--output-format', 'text', '--setting-sources', 'project,local'];
+      if (settingsArg) {
+        pingArgs.push('--settings', settingsArg);
+      }
+      proc = spawn('claude', pingArgs, {
         cwd: workDir,
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -325,10 +351,10 @@ function preflight(workDir, env) {
       resolve({
         ok: false,
         errorCategory: 'preflight_timeout',
-        stderr: (stderr || '') + '\n[preflight timeout after 5s]',
+        stderr: (stderr || '') + '\n[preflight timeout after ' + (PREFLIGHT_TIMEOUT_MS / 1000) + 's]',
         code: 143,
       });
-    }, 5000);
+    }, PREFLIGHT_TIMEOUT_MS);
   });
 }
 
@@ -650,6 +676,88 @@ function buildRunRequest(body) {
   };
 }
 
+// buildSettingsArg renders the inline JSON for 'claude --settings'. Claude Code
+// accepts either a settings file path OR an inline JSON string; the inline form
+// lands at the top of the non-managed settings stack, so its 'env' block
+// overrides both the process environment and any ~/.claude/settings.json the
+// install script seeded on the agent host. That's where we now deliver the
+// platform-pinned keys (auth token / base URL / model / tier pins) instead of
+// leaking them into the child's process env or relying on --setting-sources to
+// suppress a stale user settings file.
+//
+// The 'env' block mirrors what BuildRemoteEnvPairs sends (ANTHROPIC_AUTH_TOKEN,
+// ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL,
+// CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT); we additionally fold
+// opts.model in as ANTHROPIC_MODEL — the CLI's documented env var for the
+// session model, equivalent to the old --model flag but settable here so the
+// model travels with the rest of the platform config.
+//
+// Returns null when there's nothing to pin (no env keys and no model) so the
+// caller can omit --settings entirely and leave the CLI defaults untouched.
+function buildSettingsArg(opts) {
+  const envBlock = { ...(opts.env || {}) };
+  if (opts.model) {
+    envBlock.ANTHROPIC_MODEL = opts.model;
+  }
+  if (Object.keys(envBlock).length === 0) {
+    return null;
+  }
+  return JSON.stringify({ env: envBlock });
+}
+
+// renderCommand joins a spawn argv into one shell-style line for the worker log
+// and the coding job panel. Two flags are special-cased so the line stays useful
+// without leaking secrets or flooding the log:
+//   --settings <json> → the value is re-serialized with the auth token
+//                        (ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY) blanked; the
+//                        rest (base URL / model / tier pins) is shown in full.
+//   -p <prompt>       → truncated to a short prefix (the prompt can carry ~40KB
+//                        of pre-read project context).
+// Everything else is single-quoted so the line can be copy-pasted to a shell.
+function renderCommand(args) {
+  const parts = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--settings' && i + 1 < args.length) {
+      parts.push('--settings ' + shellQuote(redactSettings(args[i + 1])));
+      i++;
+    } else if (a === '-p' && i + 1 < args.length) {
+      parts.push('-p ' + shellQuote(truncate(args[i + 1], 200)));
+      i++;
+    } else {
+      parts.push(shellQuote(a));
+    }
+  }
+  return parts.join(' ');
+}
+
+// redactSettings blanks the auth token inside a --settings JSON string so
+// secrets never reach a log. Parses + re-serializes; on parse failure returns
+// the raw string unchanged (better to log the raw JSON than hide the whole line).
+function redactSettings(jsonStr) {
+  try {
+    const obj = JSON.parse(jsonStr);
+    if (obj && obj.env && typeof obj.env === 'object') {
+      if (obj.env.ANTHROPIC_AUTH_TOKEN) obj.env.ANTHROPIC_AUTH_TOKEN = '***';
+      if (obj.env.ANTHROPIC_API_KEY) obj.env.ANTHROPIC_API_KEY = '***';
+    }
+    return JSON.stringify(obj);
+  } catch {
+    return jsonStr;
+  }
+}
+
+// shellQuote single-quotes a string so a logged command can be copy-pasted.
+function shellQuote(s) {
+  return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+// truncate clips a string to n chars and appends a length note when clipped.
+function truncate(s, n) {
+  s = String(s);
+  return s.length <= n ? s : s.slice(0, n) + '…(+' + (s.length - n) + ' chars)';
+}
+
 // buildClaudeArgs assembles the `claude -p ... --output-format stream-json
 // --verbose ...` flag list from buildRunRequest output. The mapping mirrors
 // backend/internal/llm/gateway.go:streamArgs so the local and remote paths
@@ -659,7 +767,7 @@ function buildRunRequest(body) {
 // --permission-mode / --dangerously-skip-permissions per the CLI's flag
 // parser. We follow the same ordering as gateway.go so a regression in one
 // doesn't slip past the other.
-function buildClaudeArgs(opts) {
+function buildClaudeArgs(opts, settingsArg) {
   const args = ['-p', opts.prompt, '--output-format', 'stream-json', '--verbose'];
   // Setting-sources always present so the user can't accidentally land on
   // the CLI default (which loads ~/.claude/settings.json over process env
@@ -673,10 +781,12 @@ function buildClaudeArgs(opts) {
     args.push('--dangerously-skip-permissions');
   }
 
-  if (opts.model) {
-    // Prepend --model so it lands before the -p block; gateway.go does
-    // the same to keep the relative ordering stable for diff debugging.
-    args.unshift('--model', opts.model);
+  if (settingsArg) {
+    // Prepend --settings so it lands before the -p block (mirrors how --model
+    // used to be prepended; gateway.go does the same to keep the relative
+    // ordering stable for diff debugging). The model + auth + base URL travel
+    // inside this JSON 'env' block instead of a --model flag + process env.
+    args.unshift('--settings', settingsArg);
   }
 
   if (opts.systemPrompt) {
