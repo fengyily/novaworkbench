@@ -92,7 +92,12 @@
   color: var(--color-text-secondary);
   text-decoration: none;
   font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: color 0.15s;
 }
+.app-header-settings:hover { color: var(--color-primary); }
 
 .app-header-right {
   display: flex;
@@ -186,6 +191,17 @@
   font-size: 14px;
   transition: background 0.15s, color 0.15s;
   border-left: 3px solid transparent;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.nav-item > span:last-child {
+  /* The text wrapper sits beside the leading icon. Truncate on overflow so
+     long project names in the sidebar don't break the column width on
+     narrow desktop windows. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .nav-item:hover {
@@ -219,20 +235,24 @@
   border-top: 1px solid var(--color-border);
 }
 
-/* Sidebar nav-row icon — a small lead icon for menu rows that use a
-   two-element label (icon + text). Emoji-only rows keep their natural
-   baseline since the leading emoji is already part of the text. */
+/* Sidebar nav-row icon — a small lead icon for menu rows. Sized at 18px
+   to match the SVG default; .nav-item already enforces `display:flex` so
+   the icon and the Chinese label share the same row without manual
+   margin hacking. */
 .nav-item-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 18px;
+  height: 18px;
   flex-shrink: 0;
   font-size: 14px;
   line-height: 1;
-  /* Sit the icon on the same baseline as the Chinese label. */
-  margin-right: 4px;
+  color: var(--color-text-muted);
+  transition: color 0.15s;
 }
+.nav-item:hover .nav-item-icon { color: var(--color-text); }
+.nav-item.active .nav-item-icon { color: var(--color-primary); }
 
 /* ── Mobile breakpoint ─────────────────────────────────────────── */
 @media (max-width: 768px) {

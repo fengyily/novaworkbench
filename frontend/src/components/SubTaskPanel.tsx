@@ -15,6 +15,7 @@ import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, type LogLine } from '../utils/logLines';
 import AtMentionTextarea from './AtMentionTextarea';
 import ModelSelect from './ModelSelect';
+import { IconRobot, IconDashboard, IconSparkles } from './icons';
 import './SubTaskPanel.css';
 
 // fmtCost / fmtNum are imported from the shared API client. TokenStrip
@@ -689,7 +690,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       <section className="sub-panel" aria-labelledby="sub-panel-title">
         <header className="sub-panel-header">
           <h3 id="sub-panel-title" className="sub-panel-title">
-            <span className="sub-panel-title-icon" aria-hidden="true">🤖</span>
+            <span className="sub-panel-title-icon" aria-hidden="true"><IconRobot size={16} /></span>
             <span>子任务协作</span>
           </h3>
         </header>
@@ -713,7 +714,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     <section className="sub-panel" aria-labelledby="sub-panel-title">
       <header className="sub-panel-header">
         <h3 id="sub-panel-title" className="sub-panel-title">
-          <span className="sub-panel-title-icon" aria-hidden="true">🤖</span>
+          <span className="sub-panel-title-icon" aria-hidden="true"><IconRobot size={16} /></span>
           <span>子任务协作</span>
         </h3>
         <span className="sub-panel-meta">
@@ -760,7 +761,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       {hasSummary && (
         <div className="sub-summary">
           <header className="sub-summary-header">
-            <span className="sub-summary-icon" aria-hidden="true">📊</span>
+            <span className="sub-summary-icon" aria-hidden="true"><IconDashboard size={14} /></span>
             <span className="sub-summary-title">主 Agent 汇总报告</span>
           </header>
           <div className="sub-summary-body">
@@ -809,7 +810,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         {items === null && <div className="sub-list-loading">加载中…</div>}
         {items && items.length === 0 && (
           <div className="sub-list-empty">
-            <div className="sub-list-empty-icon" aria-hidden="true">✨</div>
+            <div className="sub-list-empty-icon" aria-hidden="true"><IconSparkles size={28} /></div>
             <div>暂无子任务。可点击「🔄 重新拆分」让主 Agent 拆分并自动派发，或在上方手动创建。</div>
           </div>
         )}

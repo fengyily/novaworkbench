@@ -527,7 +527,17 @@ body.no-scroll {
     transition: color 0.15s;
     -webkit-tap-highlight-color: transparent;
   }
-  .tab-bar-item .tab-bar-icon { font-size: 20px; line-height: 1; }
+  .tab-bar-item .tab-bar-icon {
+    /* The icon is now a 20px SVG instead of a 20px emoji; pin the row
+       height so the label below sits on the same baseline across tabs. */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    line-height: 1;
+    color: inherit;
+  }
   .tab-bar-item .tab-bar-label {
     font-size: 10.5px;
     line-height: 1.2;
@@ -552,7 +562,7 @@ body.no-scroll {
   }
   /* "More" tab opens the existing sidebar drawer — the hamburger stays
      reachable for the full nav list and admin links the tab bar trims. */
-  .tab-bar-item.more-tab .tab-bar-icon { font-size: 22px; }
+  .tab-bar-item.more-tab .tab-bar-icon { font-size: 22px; width: 22px; height: 22px; }
 }
 
 /* ── Floating Action Button (FAB) ────────────────────────────────

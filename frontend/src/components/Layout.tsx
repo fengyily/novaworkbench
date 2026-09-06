@@ -1,13 +1,33 @@
 import { useCallback, useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../utils/auth';
+import {
+  IconDashboard,
+  IconFolder,
+  IconRequirements,
+  IconReport,
+  IconSparkles,
+  IconSettings,
+  IconMore,
+} from './icons';
 import './Layout.css';
 
+interface NavIconProps {
+  className?: string;
+}
+// Each sidebar / tab-bar entry resolves its icon from the shared component
+// library so the outline style (1.5 stroke, rounded caps) is identical to
+// the requirement detail stage icons — no more emoji drift.
+const DashboardIcon = (p: NavIconProps) => <IconDashboard size={18} {...p} />;
+const FolderIcon = (p: NavIconProps) => <IconFolder size={18} {...p} />;
+const RequirementsIcon = (p: NavIconProps) => <IconRequirements size={18} {...p} />;
+const ReportIcon = (p: NavIconProps) => <IconReport size={18} {...p} />;
+
 const navItems = [
-  { to: '/', label: '📊 仪表盘', end: true, permission: 'menu.dashboard', shortLabel: '仪表盘', icon: '📊' },
-  { to: '/projects', label: '📁 项目', end: false, permission: 'menu.projects', shortLabel: '项目', icon: '📁' },
-  { to: '/requirements', label: '📋 需求', end: false, permission: 'menu.projects', shortLabel: '需求', icon: '📋' },
-  { to: '/reports', label: '📝 周报', end: false, permission: 'menu.reports', shortLabel: '周报', icon: '📝' },
+  { to: '/', label: '仪表盘', end: true, permission: 'menu.dashboard', shortLabel: '仪表盘', Icon: DashboardIcon },
+  { to: '/projects', label: '项目', end: false, permission: 'menu.projects', shortLabel: '项目', Icon: FolderIcon },
+  { to: '/requirements', label: '需求', end: false, permission: 'menu.projects', shortLabel: '需求', Icon: RequirementsIcon },
+  { to: '/reports', label: '周报', end: false, permission: 'menu.reports', shortLabel: '周报', Icon: ReportIcon },
 ];
 
 // NovaWorkbench mark — a deep-midnight rounded slab (the "workbench") with
@@ -229,7 +249,10 @@ export default function Layout() {
             </span>
           )}
           {hasPermission('menu.settings') && (
-            <a href="/settings" className="app-header-settings">⚙️ 设置</a>
+            <a href="/settings" className="app-header-settings">
+              <IconSettings size={14} />
+              <span>设置</span>
+            </a>
           )}
           <button className="app-header-logout" onClick={() => logout()}>
             退出
@@ -245,26 +268,37 @@ export default function Layout() {
             <span className="app-logo"><NovaLogo size={28} /><span className="app-logo-wordmark"><span className="app-logo-nova">Nova</span>Workbench</span></span>
             <button className="sidebar-close-btn" aria-label="关闭导航" onClick={closeSidebar}>✕</button>
           </div>
-          {visibleItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.end}
-              className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-              onClick={closeSidebar}
-            >
-              {item.label}
-            </NavLink>
-          ))}
+          {visibleItems.map((item) => {
+            const Icon = item.Icon;
+            return (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.end}
+                className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+                onClick={closeSidebar}
+              >
+                <span className="nav-item-icon" aria-hidden="true">
+                  <Icon />
+                </span>
+                <span>{item.label}</span>
+              </NavLink>
+            );
+          })}
           {hasPermission('menu.chat') && (
             <NavLink to="/chat" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`} onClick={closeSidebar}>
-              <span className="nav-item-icon" aria-hidden="true">✨</span>
+              <span className="nav-item-icon" aria-hidden="true">
+                <IconSparkles size={18} />
+              </span>
               <span>助手</span>
             </NavLink>
           )}
           {hasPermission('menu.settings') && (
             <NavLink to="/settings" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`} onClick={closeSidebar}>
-              ⚙️ 设置
+              <span className="nav-item-icon" aria-hidden="true">
+                <IconSettings size={18} />
+              </span>
+              <span>设置</span>
             </NavLink>
           )}
         </nav>
@@ -277,17 +311,22 @@ export default function Layout() {
           Renders inside .app-layout so its position:fixed anchors to the
           viewport regardless of scroll. Hidden on desktop via CSS. */}
       <nav className="tab-bar" aria-label="主导航">
-        {visibleItems.slice(0, 4).map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            end={item.end}
-            className={({ isActive }) => `tab-bar-item ${isActive ? 'active' : ''}`}
-          >
-            <span className="tab-bar-icon">{item.icon}</span>
-            <span className="tab-bar-label">{item.shortLabel}</span>
-          </NavLink>
-        ))}
+        {visibleItems.slice(0, 4).map((item) => {
+          const Icon = item.Icon;
+          return (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.end}
+              className={({ isActive }) => `tab-bar-item ${isActive ? 'active' : ''}`}
+            >
+              <span className="tab-bar-icon" aria-hidden="true">
+                <Icon />
+              </span>
+              <span className="tab-bar-label">{item.shortLabel}</span>
+            </NavLink>
+          );
+        })}
         {/* The "更多" tab opens the sidebar drawer so the rest of the nav
             (AI 对话, 设置, etc.) is still one tap away. */}
         <button
@@ -296,7 +335,9 @@ export default function Layout() {
           onClick={onMore}
           aria-label="更多"
         >
-          <span className="tab-bar-icon">⋯</span>
+          <span className="tab-bar-icon" aria-hidden="true">
+            <IconMore size={20} />
+          </span>
           <span className="tab-bar-label">更多</span>
         </button>
       </nav>

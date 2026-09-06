@@ -8,6 +8,7 @@ import ModelSelect from '../components/ModelSelect';
 import AtMentionTextarea from '../components/AtMentionTextarea';
 import SubTaskPanel from '../components/SubTaskPanel';
 import { SummarizeToRequirementModal } from '../components/SummarizeToRequirementModal';
+import { StageIcon, IconCheck, IconMailbox, IconRobot } from '../components/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { exportDesignPdf } from '../utils/exportDesignPdf';
@@ -67,23 +68,24 @@ function isLongDesignDoc(raw: string): boolean {
 // draft → analyzing → designing → designed → developing → done
 type Stage = 'analyst' | 'architect' | 'developer' | 'done';
 
-// Per-step emoji + accent color for the mobile token receipt. Color is the
+// Per-step accent color for the mobile token receipt. Color is the
 // `--accent` custom property the receipt card uses for its left stripe and
 // proportion-bar segment, so the visual identity of each stage is consistent
-// across the hero bar and the individual cards. Defaults to a neutral slate
-// for steps we don't have an opinion on (e.g. requirement_create).
-const STAGE_VISUALS: Record<string, { icon: string; accent: string }> = {
-  requirement_create: { icon: '🗂️', accent: '#94A3B8' },
-  analyst_chat:       { icon: '🔍', accent: '#4F46E5' },
-  architect_design:   { icon: '📐', accent: '#7C3AED' },
-  refine_doc:         { icon: '✏️', accent: '#7C3AED' },
-  apply_doc:          { icon: '🪄', accent: '#7C3AED' },
-  coding:             { icon: '🚀', accent: '#0E7490' },
-  developer_chat:     { icon: '💬', accent: '#0E7490' },
-  adjust_coding:      { icon: '🛠️', accent: '#0E7490' },
-  continue_coding:    { icon: '🔁', accent: '#0E7490' },
-  merge:              { icon: '🔀', accent: '#059669' },
-  review:             { icon: '🧐', accent: '#D97706' },
+// across the hero bar and the individual cards. The icon for each step is
+// resolved through `STAGE_ICONS` (see components/icons) so the entire
+// requirement detail page shares one outline-icon family.
+const STAGE_ACCENTS: Record<string, string> = {
+  requirement_create: '#94A3B8',
+  analyst_chat:       '#4F46E5',
+  architect_design:   '#7C3AED',
+  refine_doc:         '#7C3AED',
+  apply_doc:          '#7C3AED',
+  coding:             '#0E7490',
+  developer_chat:     '#0E7490',
+  adjust_coding:      '#0E7490',
+  continue_coding:    '#0E7490',
+  merge:              '#059669',
+  review:             '#D97706',
 };
 
 // Wizard-stage display order — used to sort the receipt cards so the user
@@ -1713,9 +1715,9 @@ export default function RequirementDetail() {
   const architectWorking = designing || !!req.design_job_id;
 
   const STEPS = [
-    { key: 'analyst', label: '需求分析', icon: '🔍', doneStatus: 'designing', modelKey: 'analyst_model' as const },
-    { key: 'architect', label: '方案设计', icon: '📐', doneStatus: 'designed', modelKey: 'architect_model' as const },
-    { key: 'developer', label: '开发实现', icon: '🚀', doneStatus: 'done', modelKey: 'developer_model' as const },
+    { key: 'analyst', label: '需求分析', stage: 'analyst_chat', doneStatus: 'designing', modelKey: 'analyst_model' as const },
+    { key: 'architect', label: '方案设计', stage: 'architect_design', doneStatus: 'designed', modelKey: 'architect_model' as const },
+    { key: 'developer', label: '开发实现', stage: 'coding', doneStatus: 'done', modelKey: 'developer_model' as const },
   ] as const;
   // Per-kind stepper visibility: an Idea only walks the analyst stage.
   const reqKind: Kind = kindOf(req);
@@ -2170,18 +2172,18 @@ export default function RequirementDetail() {
               const primaryCost = (c?: CostItem[]): number => (c && c.length ? c[0].amount : 0);
               const fmtCount = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : n.toLocaleString();
               const stages = new Map<string, {
-                key: string; label: string; icon: string; accent: string;
+                key: string; label: string; stage: string; accent: string;
                 cost: number; costs: CostItem[]; count: number;
                 input: number; output: number; cacheRead: number; cacheCreate: number;
                 models: string[];
               }>();
               for (const s of usage.by_step) {
-                const visual = STAGE_VISUALS[s.step] ?? { icon: '⚙️', accent: '#94A3B8' };
+                const accent = STAGE_ACCENTS[s.step] ?? '#94A3B8';
                 const cur = stages.get(s.step) ?? {
                   key: s.step,
                   label: s.label || stepLabels[s.step] || s.step,
-                  icon: visual.icon,
-                  accent: visual.accent,
+                  stage: s.step,
+                  accent,
                   cost: 0, costs: [] as CostItem[], count: 0,
                   input: 0, output: 0, cacheRead: 0, cacheCreate: 0,
                   models: [],
@@ -2246,7 +2248,8 @@ export default function RequirementDetail() {
                         {ordered.map(s => (
                           <span key={s.key} className="usage-receipt-legend-item">
                             <span className="usage-receipt-legend-swatch" style={{ background: s.accent }} />
-                            <span>{s.icon} {s.label}</span>
+                            <StageIcon stage={s.stage} size={14} className="usage-receipt-legend-icon" style={{ color: s.accent }} />
+                            <span>{s.label}</span>
                             <span className="usage-receipt-legend-pct">
                               {totalCost > 0 ? Math.round((s.cost / totalCost) * 100) : 0}%
                             </span>
@@ -2264,7 +2267,9 @@ export default function RequirementDetail() {
                       >
                         <div className="usage-receipt-card-head">
                           <div className="usage-receipt-card-title">
-                            <span className="usage-receipt-card-icon" aria-hidden>{s.icon}</span>
+                            <span className="usage-receipt-card-icon" aria-hidden>
+                              <StageIcon stage={s.stage} size={16} style={{ color: s.accent }} />
+                            </span>
                             <span className="usage-receipt-card-label">{s.label}</span>
                           </div>
                           <div className="usage-receipt-card-cost">{fmtCost(s.costs)}</div>
@@ -2395,7 +2400,7 @@ export default function RequirementDetail() {
           </>
         ) : (
           <div className="ledger-empty">
-            <span className="ledger-empty-icon" aria-hidden>📭</span>
+            <span className="ledger-empty-icon" aria-hidden><IconMailbox size={28} /></span>
             <span>
               {usageLoading ? (
                 <>正在汇总本需求的账目…</>
@@ -2419,11 +2424,13 @@ export default function RequirementDetail() {
           const stageModel = req[s.modelKey];
           return (
             <div key={s.key} className={`stage-step${isActive ? ' active' : ''}${isDone ? ' done' : ''}`}>
-              <span className="stage-num">{isDone ? '✅' : s.icon}</span>
+              <span className="stage-num">
+                {isDone ? <IconCheck size={16} /> : <StageIcon stage={s.stage} size={16} />}
+              </span>
               <span className="stage-label">{s.label}</span>
               {stageModel && (
                 <span className="stage-model-tag" title={`${s.label}使用的执行模型`}>
-                  🤖 {stageModel === '默认模型'
+                  <IconRobot size={13} /> {stageModel === '默认模型'
                     ? (roleDefaultModels[s.key] ? `默认模型（${roleDefaultModels[s.key]}）` : '默认模型')
                     : stageModel}
                 </span>

@@ -10,6 +10,7 @@ import ModelSelect from './ModelSelect';
 import { FullscreenButton } from './FullscreenButton';
 import { useFullscreen } from '../utils/useFullscreen';
 import { ContextUsageBar } from './ContextUsageBar';
+import { IconChat, IconArchitect, IconAnalyst, IconSparkles, IconBot } from './icons';
 
 interface Props {
   reqId: string;
@@ -458,7 +459,7 @@ export default function DeepRefineChat({
     return (
       <div className="deep-refine-toggle">
         <button className="btn btn-sm" onClick={() => setExpanded(true)}>
-          💬 展开对话
+          <IconChat size={14} /> 展开对话
         </button>
       </div>
     );
@@ -483,10 +484,15 @@ export default function DeepRefineChat({
   const reqKind: Kind = kindOf({ kind } as any);
   const isIdea = reqKind === 'idea';
   const chatHeaderTitle = isIdea
-    ? '💡 想法讨论 — 探索可行方案'
+    ? '想法讨论 — 探索可行方案'
     : reqKind === 'issue'
-      ? '🐞 问题分析 — 排查根因并修复'
-      : '🔍 深入分析 — 确认具体改动点';
+      ? '问题分析 — 排查根因并修复'
+      : '深入分析 — 确认具体改动点';
+  const ChatHeaderIcon = isIdea
+    ? IconSparkles
+    : reqKind === 'issue'
+      ? IconAnalyst
+      : IconAnalyst;
   const chatPlaceholder = kindChatPlaceholders[reqKind];
   // First-turn kickoff prompt tailored per kind. The backend's prompt blocks
   // (analyst-tail) carry the detailed instructions; this is just the user-
@@ -500,7 +506,10 @@ export default function DeepRefineChat({
   return (
     <div className="detail-section deep-refine-panel">
       <div className="deep-refine-header">
-        <div>
+        <div className="deep-refine-header-title">
+          <span className="deep-refine-header-icon" aria-hidden="true">
+            <ChatHeaderIcon size={16} />
+          </span>
           <h3>{chatHeaderTitle}</h3>
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -534,7 +543,11 @@ export default function DeepRefineChat({
           if (msg.isStreaming && !msg.content) return null;
           return (
           <div key={i} className={`chat-msg ${msg.role}${msg.isError ? ' error' : ''}`}>
-            <span className="chat-role">{msg.role === 'ai' ? '🤖 AI' : '👤 你'}</span>
+            <span className="chat-role">
+              {msg.role === 'ai'
+                ? (<><IconBot size={13} /> AI</>)
+                : (<><span className="chat-role-dot" aria-hidden="true" /> 你</>)}
+            </span>
             {msg.role === 'ai' && !msg.isError
               ? <div className="chat-content chat-content-md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown></div>
               : <div className="chat-content" style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
@@ -551,7 +564,7 @@ export default function DeepRefineChat({
         {/* Spinner when working but no activity yet */}
         {showSpinner && (
           <div className="chat-msg ai">
-            <span className="chat-role">🤖 AI</span>
+            <span className="chat-role"><IconBot size={13} /> AI</span>
             <div className="chat-content">⏳ Claude 正在启动...</div>
           </div>
         )}
@@ -636,11 +649,11 @@ export default function DeepRefineChat({
             disabled={isWorking || messages.length === 0 || lastIsError}
             title={lastIsError ? '当前分析回合已出错，请先重试成功后再生成技术方案' : undefined}
           >
-            📐 生成技术方案
+            <IconArchitect size={14} /> 生成技术方案
           </button>
         )}
         {lastIsError && !isWorking && (
-          <span style={{ color: '#B91C1C', fontSize: 12 }}>⚠️ 上一次分析出错，请先重试</span>
+          <span style={{ color: '#B91C1C', fontSize: 12 }}>⚠ 上一次分析出错，请先重试</span>
         )}
       </div>
     </div>
