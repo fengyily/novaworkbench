@@ -2373,7 +2373,10 @@ export default function RequirementDetail() {
         />
       )}
 
-      {req.status === 'draft' && (
+      {/* "直接开发" (skip_design=true) 的草稿不走分析师/架构师区段 — 需求详情页
+          只显示开发实现入口。这里的 skip_design 检查确保「需求分析」一栏不会在
+          直接开发场景下出现 (与 stageFor 的 stage='developer' 语义保持一致)。 */}
+      {req.status === 'draft' && !req.skip_design && (
         <div className="detail-section analysis-section">
           <div className="section-header"><h3>🔍 需求分析</h3></div>
           <div className="tab-empty">
@@ -2651,7 +2654,15 @@ export default function RequirementDetail() {
       {/* ── Developer stage ── */}
       {(stage === 'developer' || stage === 'done') && (hasDesign || req.skip_design) && (
         <div className="detail-section">
-          <div className="section-header"><h3>🚀 开发实现</h3></div>
+          <div className="section-header">
+            <h3>🚀 开发实现</h3>
+            {/* Toolbar toggle for the coding panel fullscreen mode. The matching
+                floating exit button inside the panel handles Esc/close while
+                fullscreen; here we surface the entry point on the section
+                header so the developer stage is no longer the only panel
+                without a fullscreen toggle. */}
+            <FullscreenButton isFullscreen={codingFs.isFullscreen} onClick={codingFs.toggle} />
+          </div>
 
           {/* Optional knowledge pre-read display (renders only when the user
               opted in and the backend emitted a knowledge event). */}
