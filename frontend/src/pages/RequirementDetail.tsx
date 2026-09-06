@@ -1858,41 +1858,38 @@ export default function RequirementDetail() {
             <h3>✏️ 编辑需求</h3>
             <div className="modal-field">
               <label>标题</label>
-              <input className="input" value={editTitle} onChange={e => setEditTitle(e.target.value)} />
+              <input className="form-input" value={editTitle} onChange={e => setEditTitle(e.target.value)} />
             </div>
             <div className="modal-field">
               <label>描述</label>
               <AtMentionTextarea
-                className="input"
+                className="form-input form-textarea"
                 rows={6}
                 value={editDesc}
                 onChange={setEditDesc}
-                style={{ resize: 'vertical' }}
                 placeholder="输入 @ 可引用 Skill，例如 @frontend"
               />
             </div>
-            <div style={{ display: 'flex', gap: 12 }}>
-              <div className="modal-field" style={{ flex: 1 }}>
-                <label>优先级</label>
-                <select className="input" value={editPriority} onChange={e => setEditPriority(e.target.value)}>
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                  <option value="critical">critical</option>
-                </select>
-              </div>
+            <div className="modal-field">
+              <label>优先级</label>
+              <select className="form-input" value={editPriority} onChange={e => setEditPriority(e.target.value)}>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+                <option value="critical">critical</option>
+              </select>
             </div>
             {/* skip_analysis toggle — only meaningful before architect-design runs */}
             {req && (req.status === 'draft' || req.status === 'analyzing') && (
               <div className="modal-field">
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none', fontWeight: 'normal' }}>
+                <label className="edit-skip-row">
                   <input type="checkbox" checked={editSkipAnalysis}
-                    onChange={e => setEditSkipAnalysis(e.target.checked)} style={{ width: 'auto' }} />
+                    onChange={e => setEditSkipAnalysis(e.target.checked)} />
                   跳过需求分析，直接进入方案设计
                 </label>
-                <small style={{ display: 'block', marginTop: 4, color: 'var(--text-secondary, #64748B)' }}>
+                <div className="form-hint">
                   勾选后在详情页主操作变为「生成技术方案」；取消勾选则恢复「开始需求分析」入口。
-                </small>
+                </div>
               </div>
             )}
             <div className="modal-actions btn-row-2col">
@@ -1928,7 +1925,7 @@ export default function RequirementDetail() {
 
       <div className="detail-meta">
         <span className={`kind-badge kind-${reqKind}`} title={reqKind === 'idea' ? '想法 — 仅讨论方案，不进入开发' : reqKind === 'issue' ? '问题 — 排查根因并修复' : '需求 — 标准 3 阶段实现'}>{kindLabels[reqKind]}</span>
-        <span className={`status-tag status-${req.status}`}>{statusLabels[req.status] || req.status}</span>
+        <span className={`status-badge status-${req.status}`}>{statusLabels[req.status] || req.status}</span>
         <span className={`priority-tag ${req.priority}`}>{req.priority.toUpperCase()}</span>
         <span className={`claude-status${claudeWorking ? ' working' : ''}`} title={claudeWorking ? 'Claude 正在执行分析/方案/开发任务' : '当前无 Claude 任务在运行'}>
           {claudeWorking ? '🤖 Claude 工作中' : '😴 Claude 空闲'}

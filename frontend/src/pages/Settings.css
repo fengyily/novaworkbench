@@ -1,6 +1,7 @@
 .settings-page {
   width: 100%;
-  padding: 24px;
+  /* Padding provided by `.app-main` in Layout.css — duplicate padding
+     here doubled the inner gutter on desktop. */
 }
 
 .settings-tabs {
@@ -180,6 +181,10 @@
   color: var(--color-text);
 }
 
+/* `.modal-title` was the old custom class for modal headings — the
+   canonical `.modal-box h3` rule in index.css replaces it, so all the
+   settings sub-page modals now drop the wrapper class. */
+
 /* ---- RBAC: user / role management pages ---- */
 .admin-badge,
 .builtin-badge {
@@ -201,9 +206,6 @@
   border-radius: 10px;
   margin-left: 6px;
 }
-.status-badge { font-size: 12px; padding: 2px 8px; border-radius: 10px; }
-.status-badge.status-active { color: var(--color-success); background: rgba(16, 185, 129, 0.12); }
-.status-badge.status-disabled { color: var(--color-text-muted); background: var(--color-hover); }
 
 .checkbox-row {
   display: flex;

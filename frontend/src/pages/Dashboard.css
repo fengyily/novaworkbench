@@ -1,6 +1,8 @@
 .dashboard { width: 100%; }
 
-.page-title { font-size: 24px; font-weight: 700; margin-bottom: 24px; color: var(--color-text); }
+/* `.page-title` (22px) is defined globally in index.css — the previous
+   24px override gave Dashboard a slightly larger header than the rest
+   of the app, which read as a one-off instead of an intentional choice. */
 
 .stats-grid {
   display: grid;

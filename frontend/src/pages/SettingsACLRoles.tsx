@@ -188,7 +188,7 @@ export default function SettingsACLRoles() {
       {showModal && (
         <div className="modal-overlay" onClick={() => setShowModal(false)}>
           <div className="modal-box" style={{ maxWidth: 640 }} onClick={(e) => e.stopPropagation()}>
-            <h3 className="modal-title">{editingId ? '编辑角色' : '添加角色'}</h3>
+            <h3>{editingId ? '编辑角色' : '添加角色'}</h3>
             {error && <div className="form-error">{error}</div>}
 
             <div className="form-group">
