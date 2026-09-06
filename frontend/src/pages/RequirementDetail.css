@@ -324,6 +324,7 @@
   align-items: center;
   gap: 8px;
   margin-bottom: 12px;
+  flex-wrap: wrap;
 }
 
 /* Claude session panel: lists per-stage claude session ids so the user can
