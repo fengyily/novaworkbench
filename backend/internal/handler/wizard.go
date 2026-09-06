@@ -47,23 +47,30 @@ type WizardHandler struct {
 	// credentials are used when StartCoding runs against agent_server_id.
 	// nil in standalone / non-distributed deployments.
 	agentSvrSvc *service.AgentServerService
+	// subTaskRunner is the shared executor for sub-task rows. Both the wizard
+	// (manual sub-tasks + auto-orchestrated children) and the merge handler
+	// (push + PR sub-task) delegate to it so the runtime semantics — session
+	// fork, executor role persona, artifact + token persistence — stay in one
+	// place.
+	subTaskRunner *SubTaskRunner
 }
 
-func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, agentSvrSvc *service.AgentServerService, subTaskSvc *service.SubTaskService) *WizardHandler {
+func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, agentSvrSvc *service.AgentServerService, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner) *WizardHandler {
 	return &WizardHandler{
-		projectSvc:   projectSvc,
-		reqSvc:       reqSvc,
-		knowledgeSvc: knowledgeSvc,
-		llm:          llmGateway,
-		jobs:         jobs,
-		roleSvc:      roleSvc,
-		jobLogSvc:    jobLogSvc,
-		claudeCfg:    claudeCfg,
-		usageSvc:     usageSvc,
-		skillSvc:     skillSvc,
-		platformSvc:  platformSvc,
-		subTaskSvc:   subTaskSvc,
-		agentSvrSvc:  agentSvrSvc,
+		projectSvc:    projectSvc,
+		reqSvc:        reqSvc,
+		knowledgeSvc:  knowledgeSvc,
+		llm:           llmGateway,
+		jobs:          jobs,
+		roleSvc:       roleSvc,
+		jobLogSvc:     jobLogSvc,
+		claudeCfg:     claudeCfg,
+		usageSvc:      usageSvc,
+		skillSvc:      skillSvc,
+		platformSvc:   platformSvc,
+		subTaskSvc:    subTaskSvc,
+		agentSvrSvc:   agentSvrSvc,
+		subTaskRunner: subTaskRunner,
 	}
 }
 
@@ -4917,22 +4924,12 @@ func subTaskSourceSID(req *model.Requirement, explicit string) string {
 	return ""
 }
 
-// runSubTask spawns the claude CLI subprocess for a sub-task row and writes
-// the final artifact to sub_tasks.artifact on completion. shared by
-// StartSubTask and AdjustSubTask so the only thing callers vary is the
-// source session id.
+// runSubTask is a thin adapter that delegates to the shared SubTaskRunner.
+// Kept as a method (instead of inlining the call) so the existing call sites
+// in StartSubTask / AdjustSubTask / dispatchChildrenSequential stay unchanged
+// when the runner takes over the heavy lifting.
 //
-// Side effects on success:
-//   - sub_tasks.status transitions to running (via MarkRunning)
-//   - the spawned JobStore job is appended with live phase/message lines
-//   - on completion, sub_tasks.artifact is filled with a Markdown report
-//     wrapping the claude finalResult, and job.Finish is called
-//
-// Pre: the sub_tasks row is already created with status=pending and has
-// its source_session_id populated. Pre-minting a session id via
-// subTaskSvc.UpdateSession + a JobStore job via jobs.Create should happen
-// in the caller before invoking this function — see StartSubTask for the
-// canonical ordering.
+// See SubTaskRunner.Run for the full lifecycle.
 func (h *WizardHandler) runSubTask(
 	req *model.Requirement,
 	st *model.SubTask,
@@ -4943,120 +4940,13 @@ func (h *WizardHandler) runSubTask(
 	modelOverride string,
 	adjust bool,
 ) {
-	startTime, mErr := h.subTaskSvc.MarkRunning(st.ID)
-	if mErr != nil {
-		log.Printf("[sub-task] failed to mark running for %s: %v", st.ID, mErr)
-	}
-	// Best-effort persistence: backend restart mid-run won't lose the log.
-	defer func() {
-		lines, status, exitCode := job.Snapshot()
-		if perr := h.jobLogSvc.Save(job.ID, st.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
-			log.Printf("[sub-task] failed to persist job log %s: %v", job.ID, perr)
-		}
-	}()
-
-	role := "🤖 调整子任务启动中..."
-	if !adjust {
-		role = "🤖 子任务启动中..."
-	}
-	job.Append(store.LogLine{Type: "phase", Content: role})
-	job.Append(store.LogLine{Type: "message", Content: "📝 提示词: " + truncateForLog(body, 240)})
-
-	// Resolve the developer role's model, but run the child under the
-	// "executor" role system prompt: the sub-task forks the coding session,
-	// which carries the developer (统筹协调) persona that decomposes instead
-	// of implementing. Without the override the child re-emits
-	// [SUBTASKS_READY] and writes no code.
-	_, modelName := h.roleConfig("developer")
-	if modelOverride != "" {
-		modelName = modelOverride
-	}
-	job.SetModel(modelName)
-
-	// Workdir: prefer the requirement's isolated worktree. Fallback to
-	// project checkout for legacy rows.
-	workDir := ""
-	if proj, perr := h.projectSvc.Get(req.ProjectID); perr == nil {
-		workDir = proj.LocalPath
-	}
-	if req.WorktreePath != "" {
-		if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
-			workDir = req.WorktreePath
-		}
-	}
-	if workDir == "" {
-		job.Append(store.LogLine{Type: "error", Content: "❌ 无法解析工作目录"})
+	if h.subTaskRunner == nil {
+		log.Printf("[sub-task] runner not wired, cannot run %s", st.ID)
+		job.Append(store.LogLine{Type: "error", Content: "❌ 子任务执行器未初始化"})
 		job.Finish(1, store.JobError)
-		h.subTaskSvc.Finish(st.ID, model.SubTaskStatusError, buildSubTaskArtifact(st, modelName, "无法解析工作目录", time.Now()), modelName, model.SubTaskTokens{}, 0, startTime)
 		return
 	}
-
-	var prompt string
-	if adjust {
-		prompt = "## 追加调整\n\n" + body + "\n"
-	} else {
-		prompt = "## 子任务\n\n" + body + "\n"
-	}
-	prompt += "\n> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
-	if block := llm.BuildSkillsBlock(h.mentionedSkills(req.Title + " " + body)); block != "" {
-		prompt = block + prompt
-	}
-
-	execSystemPrompt, _ := h.roleConfig(executorRoleKey)
-	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
-		Prompt:       prompt,
-		WorkDir:      workDir,
-		SystemPrompt: execSystemPrompt,
-		Model:        cliModelArg(modelName),
-		// --resume <sourceSID> --fork-session --session-id <newSID>:
-		// child agent inherits the parent's conversation context but
-		// executes in its own session.
-		SessionID:     sourceSID,
-		Resume:        true,
-		Fork:          true,
-		ForkSessionID: newSID,
-	})
-	defer cancel()
-
-	// "sub_task" step key — distinct from "coding" / "adjust_coding" so
-	// token-usage rollups don't double-count.
-	subUsage := h.usageCtxFor("sub_task", st.RequirementID, req.ProjectID, job.ID, modelName, "", body)
-	out := runClaudeStream(jobSink{job}, cmd, "sub-task", subUsage)
-
-	finalStatus := model.SubTaskStatusDone
-	var artifactBody string
-	switch {
-	case out.staleSession:
-		finalStatus = model.SubTaskStatusError
-		artifactBody = "❌ 源会话已失效（session 文件不存在），请重新发起 coding 后再试。"
-		job.Append(store.LogLine{Type: "error", Content: artifactBody})
-	case out.errMsg != "":
-		finalStatus = model.SubTaskStatusError
-		artifactBody = "❌ " + out.errMsg
-		job.Append(store.LogLine{Type: "error", Content: artifactBody})
-	case out.finalResult == "":
-		finalStatus = model.SubTaskStatusError
-		artifactBody = "❌ Claude 未返回结果，请重试"
-		job.Append(store.LogLine{Type: "error", Content: artifactBody})
-	default:
-		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
-		artifactBody = out.finalResult
-	}
-	job.Append(store.LogLine{Type: "done", Content: "✅ 子任务完成！"})
-
-	artifact := buildSubTaskArtifact(st, modelName, artifactBody, time.Now())
-	tokens := model.SubTaskTokens{
-		Input:         out.lastUsage.InputTokens,
-		Output:        out.lastUsage.OutputTokens,
-		CacheCreation: out.lastUsage.CacheCreationTokens,
-		CacheRead:     out.lastUsage.CacheReadTokens,
-	}
-	costCents := computeSubTaskCostCents(modelName, tokens, h.claudeCfg)
-	if perr := h.subTaskSvc.Finish(st.ID, finalStatus, artifact, modelName, tokens, costCents, startTime); perr != nil {
-		log.Printf("[sub-task] failed to persist finish for %s: %v", st.ID, perr)
-	}
-	job.Finish(0, store.JobDone)
-	log.Printf("[sub-task] job %s finished for %s status=%s", job.ID, st.ID, finalStatus)
+	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, adjust)
 }
 
 // computeSubTaskCostCents resolves the run's USD-equivalent cost in cents
@@ -5105,9 +4995,11 @@ func computeSubTaskCostCents(modelName string, tokens model.SubTaskTokens, claud
 //
 // Creates a fresh sub_task row that forks the requirement's main-agent
 // session (coding_session_id, with design_session_id as fallback). The
-// orchestration work (validate, persist session/job ids) happens inline;
-// the actual claude subprocess spawn is delegated to runSubTask so it can
-// be shared with AdjustSubTask.
+// orchestration work (validate, persist session/job ids) happens inline via
+// the shared SubTaskRunner so the pre-Run state matches what every other
+// caller (push/PR, auto-orchestrate, adjust, redo) does; the actual claude
+// subprocess spawn is delegated to runner.Run so the runtime stays in one
+// place.
 func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 	if !h.requireSubTaskSvc(w) {
 		return
@@ -5138,18 +5030,18 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	st, err := h.subTaskSvc.Create(id, strings.TrimSpace(body.Title), body.Prompt)
+	// subTaskRunner is required to spawn the child process; refuse cleanly
+	// (503) instead of nil-deref if the runner wasn't wired (legacy / non-
+	// distributed deployment).
+	if h.subTaskRunner == nil {
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "子任务执行器未初始化")
+		return
+	}
+
+	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(id, strings.TrimSpace(body.Title), body.Prompt, body.Model, sourceSID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
-	}
-	newSID := util.NewUUID()
-	if perr := h.subTaskSvc.UpdateSession(st.ID, newSID, sourceSID); perr != nil {
-		log.Printf("[sub-task] failed to persist session for %s: %v", st.ID, perr)
-	}
-	job := h.jobs.Create(id)
-	if perr := h.subTaskSvc.UpdateJobID(st.ID, job.ID); perr != nil {
-		log.Printf("[sub-task] failed to persist job_id for %s: %v", st.ID, perr)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"job_id":      job.ID,
@@ -5404,6 +5296,15 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 	// Adjusting a failed sub-task is allowed but its session file may have
 	// rolled back to a state before the failure — surfaced via staleSession
 	// at run time, same UX as the main adjust-coding path.
+	if h.subTaskRunner == nil {
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "子任务执行器未初始化")
+		return
+	}
+	// CreateAdjustment creates the row with source_session_id already
+	// populated (= parent's session id), so we just need to fill in the
+	// session id / job id / model fields via the runner helper. We don't
+	// call runner.NewPendingSubTask because that creates a fresh row
+	// (CreateAdjustment sets the parent-fork relationship Create wouldn't).
 	st, err := h.subTaskSvc.CreateAdjustment(id, sid, body.Prompt)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
@@ -5416,6 +5317,11 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 	job := h.jobs.Create(id)
 	if perr := h.subTaskSvc.UpdateJobID(st.ID, job.ID); perr != nil {
 		log.Printf("[sub-task adjust] failed to persist job_id for %s: %v", st.ID, perr)
+	}
+	if body.Model != "" {
+		if perr := h.subTaskSvc.UpdateModel(st.ID, body.Model); perr != nil {
+			log.Printf("[sub-task adjust] failed to persist model for %s: %v", st.ID, perr)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"job_id":      job.ID,
@@ -5498,6 +5404,11 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 	job := h.jobs.Create(id)
 	if perr := h.subTaskSvc.UpdateJobID(st.ID, job.ID); perr != nil {
 		log.Printf("[sub-task redo] failed to persist job_id for %s: %v", st.ID, perr)
+	}
+	if body.Model != "" {
+		if perr := h.subTaskSvc.UpdateModel(st.ID, body.Model); perr != nil {
+			log.Printf("[sub-task redo] failed to persist model for %s: %v", st.ID, perr)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"job_id":      job.ID,
