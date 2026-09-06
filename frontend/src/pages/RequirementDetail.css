@@ -1207,6 +1207,16 @@ select.preflight-field-input {
   color: var(--color-text-secondary, #64748b);
   flex-wrap: wrap;
 }
+/* The worktree-path `<code>` can be a long absolute path (e.g.
+/Users/x/worktrees/req_<8hex>) that overruns its flex sibling and
+forces a horizontal page scroll. Break the path everywhere a wrap is
+allowed so the row collapses cleanly on every viewport. */
+.merge-hint code {
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  max-width: 100%;
+}
 
 .merge-modal .merge-hint {
   display: flex;
@@ -1475,6 +1485,26 @@ select.preflight-field-input {
   .adjust-composer-header {
     flex-wrap: wrap;
     align-items: flex-start;
+  }
+  /* Title + the "续接原开发会话 · 仅携带本指令" tag share the first row
+     on phones. Without these overrides the long tag (13 Chinese glyphs
+     + middle dot) stays `white-space: nowrap` and adds ~170px to the
+     row — combined with the 220px ModelSelect on the same line, the
+     whole header overflows the 360px viewport and the page grows a
+     horizontal scrollbar. Letting the tag wrap inside its pill and
+     letting title/tag each shrink to their natural content width
+     keeps the row within the viewport. The picker gets its own line
+     via the `> div:last-child` rule below. */
+  .adjust-composer-header .ac-title {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+  .adjust-composer-header .ac-tag {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    white-space: normal;
+    line-height: 1.4;
   }
   .adjust-composer-header > div:last-child {
     width: 100%;
