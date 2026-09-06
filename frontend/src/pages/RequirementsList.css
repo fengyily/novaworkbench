@@ -2,7 +2,15 @@
    ------------------------------------------------------------------
    Cross-project requirement list with kind-aware filter chips and
    a kind badge column. Uses the shared `.kind-badge` styles defined
-   in index.css (kind-issue / kind-requirement / kind-idea). */
+   in index.css (kind-issue / kind-requirement / kind-idea).
+
+   Mobile (≤768px) renders a dedicated card list (`.req-cards-mobile`)
+   instead of collapsing the table — the table doesn't squeeze well
+   into a 6-column layout and the original `::before { content:
+   attr(data-label) }` hack never had data-label attributes set, so
+   the mobile cards were unlabeled. The new card layout surfaces the
+   kind + status badges prominently, the title as the headline, and
+   project / priority / relative time as a compact footer. */
 
 .requirements-list-page {
   padding: 16px 0;
@@ -125,6 +133,8 @@
   white-space: nowrap;
 }
 
+.req-row-dim { color: var(--color-text-muted, #94A3B8); }
+
 /* Pin per-column widths so the table never crowds the kind badge onto
    two lines. The badge itself (Issue / 需求 / 想法) sits inside the type
    column; its content is already short, but the column auto-distributes
@@ -157,32 +167,208 @@
   min-width: 240px;
 }
 
-@media (max-width: 720px) {
-  .req-filter-select {
+/* Priority tag (desktop table column). Same color logic as the
+   kind-badge system but with the High/Medium/Low palette — borrowed
+   from index.css .status-badge convention. */
+.priority-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--color-hover, #F1F5F9);
+  color: var(--color-text-secondary, #64748B);
+  white-space: nowrap;
+}
+.priority-tag.priority-high   { background: #FEE2E2; color: #B91C1C; }
+.priority-tag.priority-medium { background: #FEF3C7; color: #B45309; }
+.priority-tag.priority-low    { background: #DCFCE7; color: #047857; }
+
+/* Priority dot — small colored bullet used on mobile cards where
+   horizontal space is tight. Pairs with the relative-time text so
+   priority stays glanceable without adding a full badge. */
+.priority-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-text-muted, #94A3B8);
+  flex-shrink: 0;
+}
+.priority-dot.priority-high   { background: #EF4444; }
+.priority-dot.priority-medium { background: #F59E0B; }
+.priority-dot.priority-low    { background: #10B981; }
+
+/* ── Desktop / mobile visibility helpers ──────────────────────────
+   Mirror the conventions used by Dashboard.tsx — `.desktop-only` is
+   hidden by `.fab`'s display:none rule on phones, and `.mobile-only`
+   is hidden by `.fab-hidden { display: none !important; }`-style
+   rules on desktop. Defined globally so every page can use them. */
+
+@media (max-width: 768px) {
+  .desktop-only { display: none !important; }
+}
+
+@media (min-width: 769px) {
+  .mobile-only { display: none !important; }
+}
+
+/* ── Mobile card list ─────────────────────────────────────────────
+   Renders the same rows as the desktop table but as a vertical stack
+   of cards. Each card is a <button> so it's keyboard- and screen-
+   reader-accessible by default. Tapping the card (anywhere) navigates
+   to the requirement detail page. */
+
+.req-cards-mobile {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.req-card-mobile {
+  /* Reset native button styles so the card looks like a div. */
+  appearance: none;
+  width: 100%;
+  text-align: left;
+  background: var(--color-surface, #fff);
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* A faint left rail picks up the kind color so the user can scan a
+     list of cards by color without reading the badge. Mirrors the
+     .model-select-card stage-rail pattern. */
+  border-left: 3px solid var(--color-border, #E2E8F0);
+  transition: transform 120ms ease, box-shadow 120ms ease,
+              border-color 120ms ease, background-color 120ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.req-card-mobile.kind-issue       { border-left-color: #EF4444; }
+.req-card-mobile.kind-requirement { border-left-color: #4F46E5; }
+.req-card-mobile.kind-idea        { border-left-color: #F59E0B; }
+
+.req-card-mobile:hover {
+  background: var(--color-hover, #F1F5F9);
+}
+
+.req-card-mobile:active {
+  /* Tiny press-down so the user gets tactile feedback on tap. */
+  transform: scale(0.985);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+}
+
+.req-card-mobile-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.req-card-mobile-head .kind-badge,
+.req-card-mobile-head .status-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+.req-card-mobile-title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--color-text, #1E293B);
+  /* Cap at 3 lines so a long title doesn't blow up the card; ellipsis
+     keeps the card height consistent for visual scanning. */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.req-card-mobile-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #64748B);
+  min-width: 0;
+}
+
+.req-card-mobile-project {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.req-card-mobile-spacer {
+  flex: 0 0 auto;
+  width: 4px;
+}
+
+.req-card-mobile-time {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+/* ── Mobile layout tweaks (≤768px) ─────────────────────────────────
+   The filter bar gets tighter, the kind chip row scrolls horizontally
+   so it never wraps into 3 lines on a 360px viewport, and the
+   `data-label` attr that table-cards would render is hidden inside
+   the data-* attribute fallback (we don't render the table at all on
+   mobile — `.req-cards-mobile` is the only list view). */
+
+@media (max-width: 768px) {
+  /* Tighten the page header — the h2 is the only thing left since
+     the "+ 新建需求" button is now in the FAB slot. */
+  .requirements-list-page .page-header {
+    margin-bottom: 12px;
+  }
+  .requirements-list-page .page-header h2 {
+    font-size: 20px;
+  }
+
+  /* Stack the filters vertically so each one gets full width on a
+     narrow viewport — three side-by-side selects barely fit on a
+     360px screen and the search input ends up too short. The order
+     is: search → project → status, with search on top because it's
+     the most common action. */
+  .req-filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .req-filter-select,
+  .req-filter-search {
+    width: 100%;
     min-width: 0;
-    flex: 1;
+    flex: none;
   }
-  .req-table thead {
-    display: none;
+
+  /* Horizontal scroll for the kind chips row. Lets users see all
+     three options with a swipe instead of wrapping into a second
+     row. The hint text stays after the chips, on its own line. */
+  .req-kind-chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    /* Suppress the scrollbar visually — the chips themselves are
+       the affordance. */
+    scrollbar-width: none;
+    padding-bottom: 2px;
   }
-  .req-table tbody tr {
-    display: block;
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--color-border, #E2E8F0);
+  .req-kind-chips::-webkit-scrollbar { display: none; }
+  .req-kind-chip {
+    flex: 0 0 auto;
   }
-  .req-table tbody td {
-    display: flex;
-    justify-content: space-between;
-    padding: 4px 0;
-    border-bottom: none;
-  }
-  .req-table tbody td::before {
-    content: attr(data-label);
-    color: var(--color-text-secondary, #64748B);
-    font-size: 12px;
-  }
-  .req-row-title {
-    max-width: none;
-    white-space: normal;
+  .req-kind-chip-hint {
+    flex: 0 0 auto;
   }
 }
