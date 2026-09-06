@@ -373,6 +373,7 @@ export default function SettingsAgentServers() {
               <label>名称 *</label>
               <input
                 type="text"
+                className="form-input"
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
                 placeholder="如：办公室 Mac mini"
@@ -382,6 +383,7 @@ export default function SettingsAgentServers() {
               <label>IP / 主机名 *</label>
               <input
                 type="text"
+                className="form-input"
                 value={form.host}
                 onChange={(e) => setForm({ ...form, host: e.target.value })}
                 placeholder="192.168.1.100 或 host.example.com"
@@ -392,6 +394,7 @@ export default function SettingsAgentServers() {
                 <label>端口</label>
                 <input
                   type="number"
+                  className="form-input"
                   value={form.port}
                   onChange={(e) => setForm({ ...form, port: parseInt(e.target.value || '22', 10) })}
                   min={1}
@@ -402,6 +405,7 @@ export default function SettingsAgentServers() {
                 <label>用户名</label>
                 <input
                   type="text"
+                  className="form-input"
                   value={form.username}
                   onChange={(e) => setForm({ ...form, username: e.target.value })}
                 />
@@ -410,6 +414,7 @@ export default function SettingsAgentServers() {
             <div className="form-group">
               <label>认证方式</label>
               <select
+                className="form-input"
                 value={form.auth_type}
                 onChange={(e) => setForm({ ...form, auth_type: e.target.value as 'key' | 'password' })}
               >
@@ -423,6 +428,7 @@ export default function SettingsAgentServers() {
                 {editingId && <span className="hint">（留空保持不变）</span>}
               </label>
               <textarea
+                className="form-input"
                 value={form.auth_value}
                 onChange={(e) => setForm({ ...form, auth_value: e.target.value })}
                 placeholder={
@@ -434,7 +440,7 @@ export default function SettingsAgentServers() {
                 style={{ fontFamily: form.auth_type === 'key' ? 'monospace' : 'inherit' }}
               />
             </div>
-            <div className="form-actions">
+            <div className="form-actions stack-mobile">
               <button className="btn" onClick={closeModal} disabled={saving}>取消</button>
               <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
                 {saving ? '保存中...' : '保存'}

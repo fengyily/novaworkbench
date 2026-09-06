@@ -13,6 +13,14 @@
      consistent across settings, wizard, and PR review.
    - The terminal output panel is a real monospace console with a small
      "TERMINAL OUTPUT" eyebrow and a blinking ▌ caret while streaming.
+   - The add/edit modal mirrors the platform's shared modal pattern
+     (KnowledgePage / RequirementDetail / Settings): opaque --color-surface
+     background, fixed overlay with a dark scrim, border + shadow so it
+     reads as a real dialog floating above the page. Form fields use the
+     same .form-input + .form-group vocabulary as AddProject / Wizard so
+     the add-server dialog feels indistinguishable from any other form
+     in the app. On mobile the modal becomes a bottom sheet so the user
+     can keep typing with one thumb.
 */
 
 .settings-section .security-banner {
@@ -315,4 +323,143 @@
   .server-card:hover { transform: none; }
   .agent-pulse { animation: none; box-shadow: none; }
   .server-card-caret { animation: none; opacity: 1; }
+}
+
+/* ── Add / edit modal ─────────────────────────────────────────────
+   Mirrors the .modal-overlay + .modal-content pair used in
+   KnowledgePage.css / RequirementDetail.css / Settings.css. Background
+   is an opaque --color-surface so the panel never reads as a transparent
+   scrim even when the underlying cards use translucent rgba. Inputs,
+   selects and textareas all get the same .form-input styling as
+   AddProject / Wizard so the dialog feels like one form vocabulary. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+}
+
+.modal-content {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 24px;
+  width: 100%;
+  max-width: 480px;
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.18);
+}
+
+.modal-content h3 {
+  margin: 0 0 16px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+/* Same field spacing as AddProject / Wizard / Settings so the form
+   inside the modal reads as the same vocabulary. Margin-bottom 14px
+   matches .create-req-form .form-group used by other forms. */
+.modal-content .form-group { margin-bottom: 14px; }
+.modal-content .form-group label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--color-text-secondary);
+}
+/* .form-row doesn't have a global rule (only .create-req-form defines
+   it). Layout port + username side-by-side on desktop, stacked on
+   mobile via the @media rule below — same pattern as create-req-form. */
+.modal-content .form-row {
+  display: flex;
+  gap: 12px;
+}
+.modal-content .form-row .form-group { flex: 1 1 0; min-width: 0; }
+
+/* Style the raw inputs inside the modal with the platform's .form-input
+   vocabulary (border / radius / padding / focus ring). The page CSS
+   only sets those on .form-input, so we either tag every input with
+   that class (TSX) OR mirror the rule here as a fallback. We do both:
+   the TSX gets className="form-input" for consistency with other forms
+   AND this rule so the dialog stays correct if a future field forgets. */
+.modal-content input,
+.modal-content select,
+.modal-content textarea {
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 14px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  box-sizing: border-box;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  font-family: inherit;
+}
+.modal-content textarea { resize: vertical; line-height: 1.6; }
+.modal-content input:focus,
+.modal-content select:focus,
+.modal-content textarea:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.12);
+}
+
+.modal-content .form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+.modal-content .form-actions > * { min-height: 36px; }
+
+/* Mobile: collapse to a bottom sheet (same affordance as
+   .modal-box / .sheet in other modals). form-row collapses to one column
+   so the port + username fields don't cramp on a 360px-wide phone. */
+@media (max-width: 768px) {
+  .modal-overlay {
+    align-items: flex-end;
+    padding: 0;
+  }
+  .modal-content {
+    width: 100vw;
+    max-width: none;
+    max-height: 88dvh;
+    border-radius: 16px 16px 0 0;
+    padding: 12px 16px calc(16px + var(--sab));
+    /* Drag-handle affordance — purely visual, signals the dismiss gesture
+       (tap overlay or swipe down). Injected via ::before so component
+       code doesn't need a new element. */
+    position: relative;
+    animation: agent-modal-slide-up 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .modal-content::before {
+    content: '';
+    display: block;
+    width: 36px;
+    height: 4px;
+    background: var(--color-border);
+    border-radius: 2px;
+    margin: 4px auto 12px;
+  }
+  .modal-content .form-row { flex-direction: column; gap: 14px; }
+  .modal-content .form-actions {
+    flex-direction: column-reverse;
+    gap: 8px;
+  }
+  .modal-content .form-actions > * { width: 100%; min-height: 44px; }
+  /* 16px on inputs prevents iOS Safari from zooming on focus. */
+  .modal-content input,
+  .modal-content select,
+  .modal-content textarea { font-size: 16px; }
+}
+@keyframes agent-modal-slide-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
 }
