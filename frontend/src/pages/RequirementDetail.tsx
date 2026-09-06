@@ -2855,9 +2855,9 @@ export default function RequirementDetail() {
                 </div>
 
                 {mergeState?.worktree_path && (
-                  <div className="merge-hint" style={{ marginTop: 8, alignItems: 'center' }}>
+                  <div className="merge-hint merge-hint--worktree">
                     <span>隔离开发目录</span>
-                    <code style={{ fontSize: 12 }}>{mergeState.worktree_path}</code>
+                    <code>{mergeState.worktree_path}</code>
                     <button className="btn btn-sm" onClick={cleanWorktree} disabled={merging || !!busy}>🧹 清理开发环境</button>
                   </div>
                 )}
@@ -2909,9 +2909,9 @@ export default function RequirementDetail() {
                 <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}>🌐 推送并发起 PR</button>
               </div>
               {mergeState?.worktree_path && (
-                <div className="merge-hint" style={{ marginTop: 8, alignItems: 'center' }}>
+                <div className="merge-hint merge-hint--worktree">
                   <span>隔离开发目录</span>
-                  <code style={{ fontSize: 12 }}>{mergeState.worktree_path}</code>
+                  <code>{mergeState.worktree_path}</code>
                   <button className="btn btn-sm" onClick={cleanWorktree} disabled={merging || !!busy}>🧹 清理开发环境</button>
                 </div>
               )}

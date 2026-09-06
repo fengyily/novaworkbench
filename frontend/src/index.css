@@ -1294,4 +1294,38 @@ body.no-scroll {
     flex-direction: column;
     gap: 14px;
   }
+
+  /* ── ModelSelect mobile ─────────────────────────────────────────
+     The card is `inline-flex` with `white-space: nowrap` and two child
+     selects pinned at min-width 120/160px. On a 360px viewport that's
+     already ~330px of guaranteed content before the chip + padding,
+     which pushes the parent (`.adjust-composer-header`, the design
+     toolbar, etc.) wider than the screen and creates the dreaded
+     horizontal scroll. On mobile, let the card itself wrap its
+     children into a vertical stack and let each select stretch
+     full-width — the picker is still tappable, just two rows tall. */
+  .model-select {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+  .model-select-card {
+    flex-wrap: wrap;
+    white-space: normal;
+    width: 100%;
+    max-width: 100%;
+  }
+  .model-select-chip {
+    flex: 0 0 auto;
+  }
+  .model-select-type,
+  .model-select-model {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .model-select-hint {
+    flex: 1 1 100%;
+    white-space: normal;
+  }
 }

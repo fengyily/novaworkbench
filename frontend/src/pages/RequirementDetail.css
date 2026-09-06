@@ -1192,6 +1192,21 @@ select.preflight-field-input {
 }
 .merge-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
+/* Inline status row inside `.merge-section` — currently used by the
+   "隔离开发目录 / path / 清理" line. Sits as a horizontal row on
+   desktop; the mobile media block below restacks the three children
+   into label / path-card / button so neither fights for space on
+   phones. */
+.merge-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--color-text-secondary, #64748b);
+  flex-wrap: wrap;
+}
+
 .merge-modal .merge-hint {
   display: flex;
   gap: 16px;
@@ -1450,6 +1465,23 @@ select.preflight-field-input {
 
   .adjust-composer-footer .ac-hint { margin-bottom: 4px; }
 
+  /* Header row: title + 「续接原开发会话」tag + ModelSelect picker.
+     On desktop these sit on one line with the picker right-aligned; on
+     phones the picker has a hard 280px minimum width (chip + two
+     selects at min-width 120/160) so it pushes the whole row wider
+     than the viewport. Wrap the row and let the picker take its own
+     full-width line. */
+  .adjust-composer-header {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+  .adjust-composer-header > div:last-child {
+    width: 100%;
+    margin-left: 0 !important;
+  }
+  /* The tag + title can wrap if the line gets tight, but the picker
+     gets its own row thanks to the rule above. */
+
   /* Token usage table — let the model `<code>` wrap inside its card so
      long model names (e.g. claude-3-5-sonnet-20240620) don't get
      truncated at 160px on a 360px-wide phone. */
@@ -1519,16 +1551,36 @@ select.preflight-field-input {
   }
 
   /* merge-section: the worktree path `<code>` is a long absolute path
-     that breaks the flex row on phones. Let it wrap inside its own
-     line and the surrounding row to wrap, so the cleanup button stays
-     reachable. */
+     that breaks the flex row on phones. Let the row stack into three
+     lines (label / wrapped path / cleanup button) so neither the path
+     nor the button fights for space. The desktop rule keeps them on
+     one line. */
   .merge-hint {
     flex-wrap: wrap;
+    align-items: stretch !important;
+  }
+  .merge-hint > span:first-child {
+    flex: 0 0 100%;
+    margin-bottom: 4px;
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    font-weight: 600;
   }
   .merge-hint code {
     word-break: break-all;
+    overflow-wrap: anywhere;
     white-space: normal;
-    flex-basis: 100%;
+    flex: 1 1 100%;
+    font-size: 12px;
+    background: var(--color-bg);
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+  }
+  .merge-hint > button {
+    flex: 1 1 100%;
+    margin-top: 8px;
+    min-height: 44px;
   }
 }
 
