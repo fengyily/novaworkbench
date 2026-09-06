@@ -1218,6 +1218,64 @@ allowed so the row collapses cleanly on every viewport. */
   max-width: 100%;
 }
 
+/* ── WorktreePathHint (developing / done stages) ─────────────────
+   The previous bare `.merge-hint--worktree` was a flat three-row label +
+   code + button combo. The new component renders four regions:
+     [label] [path] [actions: 📋 复制路径 / 📂 打开 / 🧹 清理]
+   Desktop: single row, label stays compact, path takes the remaining
+   space, actions pin to the right. Mobile: stack into three rows so
+   the action buttons get their own touch targets and the path
+   wraps cleanly underneath the label. */
+.merge-hint--worktree {
+  align-items: center;
+}
+.merge-hint-label {
+  flex-shrink: 0;
+  font-weight: 600;
+}
+.merge-hint-path {
+  flex: 1 1 240px;
+  /* Above the global `.merge-hint code` rule, the path here lives in
+     a card-like surface with a left accent so it reads as the focal
+     element of the row. word-break is inherited from `.merge-hint code`
+     so long POSIX / Windows paths still wrap. */
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  padding: 6px 10px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  align-self: center;
+}
+.merge-hint-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+  flex-shrink: 0;
+}
+.merge-hint-btn { min-height: 32px; }
+.merge-hint-btn--danger { color: var(--color-error); }
+/* Inline toast that appears next to the action buttons after a copy.
+   Uses the existing surface tokens so it reads as a confirmation
+   surface rather than a new visual element. Animates in to draw the
+   eye; auto-dismisses after 1.8s (handled in the component). */
+.merge-hint-toast {
+  font-size: 12px;
+  color: var(--color-primary);
+  background: var(--color-active);
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-sm);
+  padding: 3px 9px;
+  font-weight: 500;
+  animation: merge-hint-toast-in 0.18s ease-out;
+}
+@keyframes merge-hint-toast-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
 .merge-modal .merge-hint {
   display: flex;
   gap: 16px;
@@ -1721,6 +1779,43 @@ allowed so the row collapses cleanly on every viewport. */
     flex: 1 1 100%;
     margin-top: 8px;
     min-height: 44px;
+  }
+
+  /* WorktreePathHint: collapse the row into three vertical bands —
+     label, path card, action buttons — so neither the long path nor
+     the three small buttons fight for horizontal space. Each action
+     button still gets `flex: 1 1 calc(50% - 4px)` so the two most-used
+     ones (📋 复制路径 / 📂 打开) stay side-by-side while 🧹 清理 drops
+     to its own line below. */
+  .merge-hint--worktree {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .merge-hint-label {
+    font-size: 12px;
+    color: var(--color-text-secondary);
+  }
+  .merge-hint-path {
+    flex-basis: 100%;
+  }
+  .merge-hint-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+    width: 100%;
+  }
+  .merge-hint-actions .merge-hint-btn {
+    flex: 1 1 calc(50% - 4px);
+    min-width: 0;
+    min-height: 40px;
+  }
+  .merge-hint-actions .merge-hint-btn--danger {
+    flex-basis: 100%;
+  }
+  .merge-hint-toast {
+    flex-basis: 100%;
+    text-align: center;
+    margin-top: 2px;
   }
 }
 

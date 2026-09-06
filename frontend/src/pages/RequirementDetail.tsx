@@ -326,6 +326,157 @@ function KnowledgeReadPanel({ items, empty, projectId }: { items: KnowledgeEntry
   );
 }
 
+// ── WorktreePathHint ─────────────────────────────────────────────────
+// Rendered once per requirement detail page (developing / done stages) when
+// the requirement has a live git worktree directory. Three affordances:
+//
+//   1. <code>{path}</code> wraps long POSIX or Windows paths via word-break
+//      so they don't push the page width past the viewport on phones.
+//   2. 📋 Copy path: drops the bare absolute path on the clipboard.
+//   3. 📂 Open in file manager: detects the user's OS via
+//      navigator.userAgentData.platform (with a navigator.platform fallback
+//      for older browsers) and copies the platform-appropriate shell command
+//      — `open` on macOS, `explorer` on Windows, `xdg-open` on Linux — onto
+//      the clipboard. A small inline toast confirms the copy.
+//
+// We deliberately do NOT shell out from the frontend (would require a new
+// backend endpoint + audit, and we're not in scope for this UI pass).
+// Copying the command lets the user paste it into their terminal in one
+// keystroke, which is the same muscle-memory flow VS Code's "Reveal in
+// Finder → copy path" gesture uses.
+function WorktreePathHint({ path, onClean, cleaning, disabled }: {
+  path: string;
+  onClean?: () => void;
+  cleaning?: boolean;
+  disabled?: boolean;
+}) {
+  const [toast, setToast] = useState<string | null>(null);
+
+  // Auto-dismiss the toast after 1.8s so the hint row returns to its rest
+  // state without manual interaction.
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 1800);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  // `userAgentData.platform` is the modern (Chrome/Edge) API and returns
+  // one of "macOS" / "Windows" / "Linux" / "Android" / "Chrome OS" / etc.
+  // `navigator.platform` is the legacy fallback and returns things like
+  // "MacIntel" / "Win32" / "Linux x86_64". Combine the two so older
+  // browsers still pick the right command.
+  const detectOS = (): 'mac' | 'windows' | 'linux' | 'unknown' => {
+    if (typeof navigator === 'undefined') return 'unknown';
+    const uaData = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData;
+    const plat = (uaData?.platform || navigator.platform || '').toLowerCase();
+    if (plat.includes('mac')) return 'mac';
+    if (plat.includes('win')) return 'windows';
+    if (plat.includes('linux') || plat.includes('ubuntu') || plat.includes('debian')) return 'linux';
+    return 'unknown';
+  };
+
+  // Build the platform-appropriate shell command. Windows paths need their
+  // backslashes intact (we don't quote with `"` because explorer accepts
+  // bare paths with spaces up to Windows 10; for Windows 11 / PowerShell
+  // users we add double quotes around the path). POSIX paths are always
+  // wrapped in double quotes so a path containing spaces survives shell
+  // parsing.
+  const buildOpenCommand = (os: ReturnType<typeof detectOS>, target: string): string => {
+    if (os === 'mac') return `open "${target}"`;
+    if (os === 'windows') return `explorer "${target}"`;
+    if (os === 'linux') return `xdg-open "${target}"`;
+    return target;
+  };
+
+  const copyToClipboard = async (text: string): Promise<boolean> => {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Clipboard API unavailable (insecure context, old browser). Fall
+      // back to a transient textarea + legacy execCommand.
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch { /* noop */ }
+      ta.remove();
+      return ok;
+    }
+  };
+
+  const handleCopyPath = async () => {
+    const ok = await copyToClipboard(path);
+    setToast(ok ? '📋 路径已复制' : '❌ 复制失败');
+  };
+
+  const handleOpenInFileManager = async () => {
+    const os = detectOS();
+    if (os === 'unknown') {
+      setToast('⚠️ 未知系统，已复制路径');
+      await copyToClipboard(path);
+      return;
+    }
+    const cmd = buildOpenCommand(os, path);
+    const ok = await copyToClipboard(cmd);
+    const osLabel = os === 'mac' ? 'macOS' : os === 'windows' ? 'Windows' : 'Linux';
+    const verb = os === 'mac' ? 'open' : os === 'windows' ? 'explorer' : 'xdg-open';
+    setToast(ok ? `📂 ${osLabel}: 已复制 "${verb}" 命令` : '❌ 复制失败');
+  };
+
+  const os = typeof navigator !== 'undefined' ? detectOS() : 'unknown';
+  const osLabel = os === 'mac' ? 'macOS'
+    : os === 'windows' ? 'Windows'
+    : os === 'linux' ? 'Linux'
+    : '当前系统';
+
+  return (
+    <div className="merge-hint merge-hint--worktree">
+      <span className="merge-hint-label">隔离开发目录</span>
+      <code className="merge-hint-path" title={path}>{path}</code>
+      <div className="merge-hint-actions">
+        <button
+          type="button"
+          className="btn btn-sm merge-hint-btn"
+          onClick={handleCopyPath}
+          disabled={disabled}
+          title="复制完整路径"
+        >
+          📋 复制路径
+        </button>
+        <button
+          type="button"
+          className="btn btn-sm merge-hint-btn"
+          onClick={handleOpenInFileManager}
+          disabled={disabled}
+          title={`${osLabel} 系统：复制文件管理器打开命令（${
+            os === 'mac' ? 'open'
+            : os === 'windows' ? 'explorer'
+            : os === 'linux' ? 'xdg-open'
+            : '路径'
+          }）到剪贴板，粘贴到终端执行`}
+        >
+          📂 在文件管理器打开
+        </button>
+        {onClean && (
+          <button
+            className="btn btn-sm merge-hint-btn merge-hint-btn--danger"
+            onClick={onClean}
+            disabled={disabled || cleaning}
+            title="删除该需求的隔离 worktree 目录与开发分支"
+          >
+            🧹 清理
+          </button>
+        )}
+        {toast && <span className="merge-hint-toast" role="status">{toast}</span>}
+      </div>
+    </div>
+  );
+}
+
 export default function RequirementDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -2829,11 +2980,12 @@ export default function RequirementDetail() {
                 </div>
 
                 {mergeState?.worktree_path && (
-                  <div className="merge-hint merge-hint--worktree">
-                    <span>隔离开发目录</span>
-                    <code>{mergeState.worktree_path}</code>
-                    <button className="btn btn-sm" onClick={cleanWorktree} disabled={merging || !!busy}>🧹 清理开发环境</button>
-                  </div>
+                  <WorktreePathHint
+                    path={mergeState.worktree_path}
+                    onClean={cleanWorktree}
+                    cleaning={!!busy}
+                    disabled={merging}
+                  />
                 )}
 
                 {mergeState?.mid_merge && (
@@ -2883,11 +3035,12 @@ export default function RequirementDetail() {
                 <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}>🌐 推送并发起 PR</button>
               </div>
               {mergeState?.worktree_path && (
-                <div className="merge-hint merge-hint--worktree">
-                  <span>隔离开发目录</span>
-                  <code>{mergeState.worktree_path}</code>
-                  <button className="btn btn-sm" onClick={cleanWorktree} disabled={merging || !!busy}>🧹 清理开发环境</button>
-                </div>
+                <WorktreePathHint
+                  path={mergeState.worktree_path}
+                  onClean={cleanWorktree}
+                  cleaning={!!busy}
+                  disabled={merging}
+                />
               )}
               {/* ── 子Agent 协作（done 阶段也开放）── 隐藏「追加调整」后，
                   done 状态下唯一可用的调整入口就是子任务。位置与
