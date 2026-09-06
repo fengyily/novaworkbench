@@ -776,11 +776,9 @@ export default function ProjectDetail() {
               )}
             </div>
 
-            <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-              <div className="form-group" style={{ margin: 0, flex: '0 0 160px' }}>
-                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
-                  平台
-                </label>
+            <div className="platform-form-row">
+              <div className="form-group platform-form-field">
+                <label>平台</label>
                 <select
                   className="form-input"
                   value={platformForm.platform_type}
@@ -793,10 +791,8 @@ export default function ProjectDetail() {
                 </select>
               </div>
 
-              <div className="form-group" style={{ margin: 0, flex: '1 1 200px' }}>
-                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
-                  Token
-                </label>
+              <div className="form-group platform-form-field platform-form-field-grow">
+                <label>Token</label>
                 <select
                   className="form-input"
                   value={platformForm.platform_token_id}
@@ -813,8 +809,7 @@ export default function ProjectDetail() {
               </div>
 
               <button
-                className="btn btn-primary"
-                style={{ height: 38 }}
+                className="btn btn-primary platform-form-save"
                 onClick={handleSavePlatform}
                 disabled={platformSaving}
               >

@@ -326,6 +326,157 @@ function KnowledgeReadPanel({ items, empty, projectId }: { items: KnowledgeEntry
   );
 }
 
+// ── WorktreePathHint ─────────────────────────────────────────────────
+// Rendered once per requirement detail page (developing / done stages) when
+// the requirement has a live git worktree directory. Three affordances:
+//
+//   1. <code>{path}</code> wraps long POSIX or Windows paths via word-break
+//      so they don't push the page width past the viewport on phones.
+//   2. 📋 Copy path: drops the bare absolute path on the clipboard.
+//   3. 📂 Open in file manager: detects the user's OS via
+//      navigator.userAgentData.platform (with a navigator.platform fallback
+//      for older browsers) and copies the platform-appropriate shell command
+//      — `open` on macOS, `explorer` on Windows, `xdg-open` on Linux — onto
+//      the clipboard. A small inline toast confirms the copy.
+//
+// We deliberately do NOT shell out from the frontend (would require a new
+// backend endpoint + audit, and we're not in scope for this UI pass).
+// Copying the command lets the user paste it into their terminal in one
+// keystroke, which is the same muscle-memory flow VS Code's "Reveal in
+// Finder → copy path" gesture uses.
+function WorktreePathHint({ path, onClean, cleaning, disabled }: {
+  path: string;
+  onClean?: () => void;
+  cleaning?: boolean;
+  disabled?: boolean;
+}) {
+  const [toast, setToast] = useState<string | null>(null);
+
+  // Auto-dismiss the toast after 1.8s so the hint row returns to its rest
+  // state without manual interaction.
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 1800);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  // `userAgentData.platform` is the modern (Chrome/Edge) API and returns
+  // one of "macOS" / "Windows" / "Linux" / "Android" / "Chrome OS" / etc.
+  // `navigator.platform` is the legacy fallback and returns things like
+  // "MacIntel" / "Win32" / "Linux x86_64". Combine the two so older
+  // browsers still pick the right command.
+  const detectOS = (): 'mac' | 'windows' | 'linux' | 'unknown' => {
+    if (typeof navigator === 'undefined') return 'unknown';
+    const uaData = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData;
+    const plat = (uaData?.platform || navigator.platform || '').toLowerCase();
+    if (plat.includes('mac')) return 'mac';
+    if (plat.includes('win')) return 'windows';
+    if (plat.includes('linux') || plat.includes('ubuntu') || plat.includes('debian')) return 'linux';
+    return 'unknown';
+  };
+
+  // Build the platform-appropriate shell command. Windows paths need their
+  // backslashes intact (we don't quote with `"` because explorer accepts
+  // bare paths with spaces up to Windows 10; for Windows 11 / PowerShell
+  // users we add double quotes around the path). POSIX paths are always
+  // wrapped in double quotes so a path containing spaces survives shell
+  // parsing.
+  const buildOpenCommand = (os: ReturnType<typeof detectOS>, target: string): string => {
+    if (os === 'mac') return `open "${target}"`;
+    if (os === 'windows') return `explorer "${target}"`;
+    if (os === 'linux') return `xdg-open "${target}"`;
+    return target;
+  };
+
+  const copyToClipboard = async (text: string): Promise<boolean> => {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Clipboard API unavailable (insecure context, old browser). Fall
+      // back to a transient textarea + legacy execCommand.
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch { /* noop */ }
+      ta.remove();
+      return ok;
+    }
+  };
+
+  const handleCopyPath = async () => {
+    const ok = await copyToClipboard(path);
+    setToast(ok ? '📋 路径已复制' : '❌ 复制失败');
+  };
+
+  const handleOpenInFileManager = async () => {
+    const os = detectOS();
+    if (os === 'unknown') {
+      setToast('⚠️ 未知系统，已复制路径');
+      await copyToClipboard(path);
+      return;
+    }
+    const cmd = buildOpenCommand(os, path);
+    const ok = await copyToClipboard(cmd);
+    const osLabel = os === 'mac' ? 'macOS' : os === 'windows' ? 'Windows' : 'Linux';
+    const verb = os === 'mac' ? 'open' : os === 'windows' ? 'explorer' : 'xdg-open';
+    setToast(ok ? `📂 ${osLabel}: 已复制 "${verb}" 命令` : '❌ 复制失败');
+  };
+
+  const os = typeof navigator !== 'undefined' ? detectOS() : 'unknown';
+  const osLabel = os === 'mac' ? 'macOS'
+    : os === 'windows' ? 'Windows'
+    : os === 'linux' ? 'Linux'
+    : '当前系统';
+
+  return (
+    <div className="merge-hint merge-hint--worktree">
+      <span className="merge-hint-label">隔离开发目录</span>
+      <code className="merge-hint-path" title={path}>{path}</code>
+      <div className="merge-hint-actions">
+        <button
+          type="button"
+          className="btn btn-sm merge-hint-btn"
+          onClick={handleCopyPath}
+          disabled={disabled}
+          title="复制完整路径"
+        >
+          📋 复制路径
+        </button>
+        <button
+          type="button"
+          className="btn btn-sm merge-hint-btn"
+          onClick={handleOpenInFileManager}
+          disabled={disabled}
+          title={`${osLabel} 系统：复制文件管理器打开命令（${
+            os === 'mac' ? 'open'
+            : os === 'windows' ? 'explorer'
+            : os === 'linux' ? 'xdg-open'
+            : '路径'
+          }）到剪贴板，粘贴到终端执行`}
+        >
+          📂 在文件管理器打开
+        </button>
+        {onClean && (
+          <button
+            className="btn btn-sm merge-hint-btn merge-hint-btn--danger"
+            onClick={onClean}
+            disabled={disabled || cleaning}
+            title="删除该需求的隔离 worktree 目录与开发分支"
+          >
+            🧹 清理
+          </button>
+        )}
+        {toast && <span className="merge-hint-toast" role="status">{toast}</span>}
+      </div>
+    </div>
+  );
+}
+
 export default function RequirementDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -1858,41 +2009,38 @@ export default function RequirementDetail() {
             <h3>✏️ 编辑需求</h3>
             <div className="modal-field">
               <label>标题</label>
-              <input className="input" value={editTitle} onChange={e => setEditTitle(e.target.value)} />
+              <input className="form-input" value={editTitle} onChange={e => setEditTitle(e.target.value)} />
             </div>
             <div className="modal-field">
               <label>描述</label>
               <AtMentionTextarea
-                className="input"
+                className="form-input form-textarea"
                 rows={6}
                 value={editDesc}
                 onChange={setEditDesc}
-                style={{ resize: 'vertical' }}
                 placeholder="输入 @ 可引用 Skill，例如 @frontend"
               />
             </div>
-            <div style={{ display: 'flex', gap: 12 }}>
-              <div className="modal-field" style={{ flex: 1 }}>
-                <label>优先级</label>
-                <select className="input" value={editPriority} onChange={e => setEditPriority(e.target.value)}>
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                  <option value="critical">critical</option>
-                </select>
-              </div>
+            <div className="modal-field">
+              <label>优先级</label>
+              <select className="form-input" value={editPriority} onChange={e => setEditPriority(e.target.value)}>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+                <option value="critical">critical</option>
+              </select>
             </div>
             {/* skip_analysis toggle — only meaningful before architect-design runs */}
             {req && (req.status === 'draft' || req.status === 'analyzing') && (
               <div className="modal-field">
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none', fontWeight: 'normal' }}>
+                <label className="edit-skip-row">
                   <input type="checkbox" checked={editSkipAnalysis}
-                    onChange={e => setEditSkipAnalysis(e.target.checked)} style={{ width: 'auto' }} />
+                    onChange={e => setEditSkipAnalysis(e.target.checked)} />
                   跳过需求分析，直接进入方案设计
                 </label>
-                <small style={{ display: 'block', marginTop: 4, color: 'var(--text-secondary, #64748B)' }}>
+                <div className="form-hint">
                   勾选后在详情页主操作变为「生成技术方案」；取消勾选则恢复「开始需求分析」入口。
-                </small>
+                </div>
               </div>
             )}
             <div className="modal-actions btn-row-2col">
@@ -1928,7 +2076,7 @@ export default function RequirementDetail() {
 
       <div className="detail-meta">
         <span className={`kind-badge kind-${reqKind}`} title={reqKind === 'idea' ? '想法 — 仅讨论方案，不进入开发' : reqKind === 'issue' ? '问题 — 排查根因并修复' : '需求 — 标准 3 阶段实现'}>{kindLabels[reqKind]}</span>
-        <span className={`status-tag status-${req.status}`}>{statusLabels[req.status] || req.status}</span>
+        <span className={`status-badge status-${req.status}`}>{statusLabels[req.status] || req.status}</span>
         <span className={`priority-tag ${req.priority}`}>{req.priority.toUpperCase()}</span>
         <span className={`claude-status${claudeWorking ? ' working' : ''}`} title={claudeWorking ? 'Claude 正在执行分析/方案/开发任务' : '当前无 Claude 任务在运行'}>
           {claudeWorking ? '🤖 Claude 工作中' : '😴 Claude 空闲'}
@@ -2208,62 +2356,36 @@ export default function RequirementDetail() {
             </small>
 
             {adjustRows && adjustRows.length > 0 && (
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6, color: 'var(--color-text)' }}>
+              <div className="adjust-history">
+                <div className="adjust-history-title">
                   📋 追问 / 调整历史（{adjustRows.length} 次）
                 </div>
-                <div style={{ display: 'grid', gap: 8 }}>
+                <div className="adjust-history-list">
                   {adjustRows.map((r, i) => (
-                    <div
-                      key={r.id}
-                      style={{
-                        background: '#FFFFFF',
-                        border: '1px solid #E2E8F0',
-                        borderLeft: '4px solid #F59E0B',
-                        borderRadius: 6,
-                        padding: '10px 12px',
-                        boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
-                      }}
-                    >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 6, fontSize: 12, color: 'var(--color-text-secondary)' }}>
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                          <span style={{ background: '#F59E0B', color: '#FFFFFF', borderRadius: 10, padding: '1px 8px', fontWeight: 700, fontSize: 11 }}>
-                            #{i + 1}
-                          </span>
-                          <span style={{ fontWeight: 600, color: 'var(--color-text)' }}>
+                    <div key={r.id} className="adjust-history-card">
+                      <div className="adjust-history-head">
+                        <span className="adjust-history-head-left">
+                          <span className="adjust-history-index">#{i + 1}</span>
+                          <span className="adjust-history-stage">
                             {stepLabels[r.step] || r.step}
                           </span>
-                          <code className="pr-branch" style={{ fontSize: 11 }}>{r.model || '未知模型'}</code>
+                          <code className="pr-branch adjust-history-model">{r.model || '未知模型'}</code>
                         </span>
-                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-text-muted)' }}>
+                        <span className="adjust-history-time">
                           {new Date(r.created_at).toLocaleString()}
                         </span>
                       </div>
                       {r.summary && (
-                        <div
-                          style={{
-                            background: '#FFFBEB',
-                            border: '1px dashed #F59E0B',
-                            borderRadius: 4,
-                            padding: '6px 8px',
-                            marginBottom: 6,
-                            fontFamily: 'var(--font-mono)',
-                            fontSize: 12,
-                            color: '#1E293B',
-                            whiteSpace: 'pre-wrap',
-                            wordBreak: 'break-word',
-                            lineHeight: 1.5,
-                          }}
-                        >
+                        <div className="adjust-history-summary">
                           📤 {r.summary}
                         </div>
                       )}
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--color-text-secondary)', fontFamily: 'var(--font-mono)' }}>
-                        <span>输入 <strong style={{ color: 'var(--color-text)' }}>{usageTotalInput(r).toLocaleString()}</strong></span>
-                        <span>输出 <strong style={{ color: 'var(--color-text)' }}>{r.output_tokens.toLocaleString()}</strong></span>
-                        <span style={{ color: 'var(--color-text-muted)' }}>缓存读 {r.cache_read_tokens.toLocaleString()}</span>
-                        <span style={{ color: 'var(--color-text-muted)' }}>缓存建 {r.cache_creation_tokens.toLocaleString()}</span>
-                        <span style={{ color: 'var(--color-primary)', fontWeight: 600 }}>费用 {fmtCost(r.costs)}</span>
+                      <div className="adjust-history-stats">
+                        <span>输入 <strong>{usageTotalInput(r).toLocaleString()}</strong></span>
+                        <span>输出 <strong>{r.output_tokens.toLocaleString()}</strong></span>
+                        <span className="adjust-history-stat-muted">缓存读 {r.cache_read_tokens.toLocaleString()}</span>
+                        <span className="adjust-history-stat-muted">缓存建 {r.cache_creation_tokens.toLocaleString()}</span>
+                        <span className="adjust-history-stat-cost">费用 {fmtCost(r.costs)}</span>
                       </div>
                     </div>
                   ))}
@@ -2858,11 +2980,12 @@ export default function RequirementDetail() {
                 </div>
 
                 {mergeState?.worktree_path && (
-                  <div className="merge-hint" style={{ marginTop: 8, alignItems: 'center' }}>
-                    <span>隔离开发目录</span>
-                    <code style={{ fontSize: 12 }}>{mergeState.worktree_path}</code>
-                    <button className="btn btn-sm" onClick={cleanWorktree} disabled={merging || !!busy}>🧹 清理开发环境</button>
-                  </div>
+                  <WorktreePathHint
+                    path={mergeState.worktree_path}
+                    onClean={cleanWorktree}
+                    cleaning={!!busy}
+                    disabled={merging}
+                  />
                 )}
 
                 {mergeState?.mid_merge && (
@@ -2912,11 +3035,12 @@ export default function RequirementDetail() {
                 <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}>🌐 推送并发起 PR</button>
               </div>
               {mergeState?.worktree_path && (
-                <div className="merge-hint" style={{ marginTop: 8, alignItems: 'center' }}>
-                  <span>隔离开发目录</span>
-                  <code style={{ fontSize: 12 }}>{mergeState.worktree_path}</code>
-                  <button className="btn btn-sm" onClick={cleanWorktree} disabled={merging || !!busy}>🧹 清理开发环境</button>
-                </div>
+                <WorktreePathHint
+                  path={mergeState.worktree_path}
+                  onClean={cleanWorktree}
+                  cleaning={!!busy}
+                  disabled={merging}
+                />
               )}
               {/* ── 子Agent 协作（done 阶段也开放）── 隐藏「追加调整」后，
                   done 状态下唯一可用的调整入口就是子任务。位置与

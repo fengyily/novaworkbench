@@ -40,6 +40,31 @@
      overrides. */
   --tabbar-h: 0px;
 
+  /* ── Spacing / radius / shadow tokens ────────────────────────────────
+     Centralized so cross-page styles read the same vocabulary. Without
+     these tokens, individual pages drift: `.detail-section` was 8px,
+     `.wizard-card` 10px, `.login-card` 12px — every page reinvented the
+     corner. The four radii here cover every use site (small = chips,
+     medium = list rows / inline cards, large = page cards, xl = modal). */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --shadow-card: 0 2px 10px rgba(15, 23, 42, 0.04);
+  --shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.18);
+  --shadow-popover: 0 4px 12px rgba(0, 0, 0, 0.10);
+
+  /* Semantic-tone derivations. Used only where the solid token alone is
+     too saturated or too pale — e.g. inline alerts, success/error soft
+     backgrounds, deep-text variants on light fills. Avoid using these
+     when --color-success/--color-error themselves already work. */
+  --color-success-soft: #d1fae5;
+  --color-success-deep: #047857;
+  --color-warning-soft: #fef3c7;
+  --color-warning-deep: #b45309;
+  --color-error-soft: #fee2e2;
+  --color-error-deep: #dc2626;
+
   font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.5;
@@ -264,11 +289,11 @@ body.no-scroll {
 .model-select-card {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 8px 5px 10px;
+  gap: 6px;
+  padding: 2px 6px 2px 8px;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: 5px;
   /* White-space nowrap keeps the chip + two selects on a single line; the
      outer flex container decides whether to wrap the whole card. */
   white-space: nowrap;
@@ -286,10 +311,10 @@ body.no-scroll {
 .model-select-card::before {
   content: '';
   display: block;
-  width: 4px;
+  width: 3px;
   align-self: stretch;
-  margin: -5px 0 -5px -10px; /* bleed into the card padding */
-  border-radius: 6px 0 0 6px;
+  margin: -2px 0 -2px -8px; /* bleed into the card padding */
+  border-radius: 5px 0 0 5px;
   background: var(--color-border);
   transition: background 0.18s ease;
 }
@@ -305,10 +330,10 @@ body.no-scroll {
 .model-select-chip {
   display: inline-flex;
   align-items: center;
-  height: 20px;
-  padding: 0 8px;
-  border-radius: 4px;
-  font-size: 11px;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 3px;
+  font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.3px;
   background: var(--color-hover);
@@ -321,12 +346,12 @@ body.no-scroll {
 .model-select-card--developer .model-select-chip { background: #cffafe; color: #0e7490; }
 
 .model-select-input {
-  padding: 4px 8px;
-  font-size: 13px;
+  padding: 2px 6px;
+  font-size: 11.5px;
   font-family: var(--font-mono);
   line-height: 1.4;
   border: 1px solid var(--color-border);
-  border-radius: 5px;
+  border-radius: 4px;
   background: var(--color-surface);
   color: var(--color-text);
   cursor: pointer;
@@ -336,14 +361,14 @@ body.no-scroll {
   max-width: 100%;
 }
 .model-select-type {
-  flex: 0 1 180px;
-  min-width: 120px;
+  flex: 0 1 140px;
+  min-width: 96px;
   font-family: var(--font-sans);
   color: var(--color-text-secondary);
 }
 .model-select-model {
   flex: 1 1 auto;
-  min-width: 160px;
+  min-width: 120px;
 }
 .model-select-input:disabled {
   opacity: 0.6;
@@ -940,4 +965,367 @@ body.no-scroll {
 @keyframes usage-bar-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.55; }
+}
+
+/* ── Modal content primitives (used by destructive confirm modals) ─── */
+/* The placeholder "delete / purge" modals need a few sub-elements that
+   the generic `.modal-field` / `.form-group` rules don't quite cover:
+   a softer confirm-text block, a tinted risk panel for irreversible
+   actions, and a checkbox row that nests a path preview. Centralized
+   here so any future destructive modal can reuse the same vocabulary. */
+.modal-confirm-text {
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+  margin-bottom: 14px;
+}
+.modal-confirm-text strong { color: var(--color-text); }
+.modal-title-danger {
+  color: var(--color-error-deep);
+  margin: 0 0 12px;
+  font-size: 17px;
+}
+.modal-check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  margin-bottom: 14px;
+  font-size: 13px;
+}
+.modal-check-row input { margin-top: 3px; width: auto; }
+.modal-check-path {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+.modal-risk-panel {
+  background: var(--color-error-soft);
+  border: 1px solid #fca5a5;
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin-bottom: 14px;
+  font-size: 12px;
+  color: var(--color-error-deep);
+}
+.modal-risk-title { font-weight: 600; margin-bottom: 4px; color: var(--color-error-deep); }
+.modal-risk-desc { color: #991B1B; }
+.modal-risk-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  margin-bottom: 14px;
+  font-size: 13px;
+  color: var(--color-error-deep);
+}
+.modal-risk-check input { width: auto; }
+
+/* ════════════════════════════════════════════════════════════════════
+   CROSS-PAGE PRIMITIVES — form, modal, toast, action row, page-title.
+   ────────────────────────────────────────────────────────────────────
+   These rules were scattered across Settings.css, AddProject.css,
+   WizardPage.css, ProjectDetail.css, and RequirementDetail.css with
+   subtly different paddings and radii. Consolidating here stops the
+   drift — every form input, modal box, and toast now reads from the
+   same vocabulary. Pages may still extend with page-specific rules,
+   but the foundation matches.
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ── Form primitives ─────────────────────────────────────────────── */
+.form-group { margin-bottom: 16px; }
+.form-group label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--color-text-secondary);
+}
+.form-input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  box-sizing: border-box;
+  transition: border-color 0.15s;
+}
+.form-input:focus { outline: none; border-color: var(--color-primary); }
+/* Textareas inherit font and let users resize vertically. Apply via
+   `form-input form-textarea` so all `<textarea>`s in forms use the
+   project body face (not the mono fallback). */
+.form-textarea { font-family: inherit; resize: vertical; }
+.form-hint {
+  display: block;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin-top: 4px;
+}
+.form-error {
+  background: var(--color-error-soft);
+  color: var(--color-error-deep);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+/* Default actions row sits flush-right on desktop, primary on top on
+   mobile (column-reverse so the call to action lands in the thumb
+   zone above the cancel button). `.btn-row-2col` (defined earlier in
+   this file) overrides for two-button rows that should stay side by
+   side until 768px. */
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  margin-top: 24px;
+}
+/* Two-column form row for paired selects / label-input pairs. Stacks
+   on mobile via the global media query below. */
+.form-row { display: flex; gap: 12px; }
+
+/* ── Modal primitives ─────────────────────────────────────────────── */
+/* Single canonical modal. PC: centered card. Mobile: full-width
+   bottom sheet with a drag-handle affordance, safe-area aware. The
+   sheet's slide-up animation reuses `sheet-slide-up` defined above. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal-box {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  padding: 28px 32px;
+  min-width: 380px;
+  max-width: 480px;
+  box-shadow: var(--shadow-modal);
+}
+.modal-box h3 { margin: 0 0 8px; font-size: 17px; }
+.modal-field { margin-bottom: 14px; }
+.modal-field label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  margin-bottom: 5px;
+}
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 20px;
+}
+/* Header / body sections inside a `.modal-box` for modals that need a
+   sticky header (e.g. the CodingChat context-summary modal, which
+   keeps the close button reachable while the body scrolls). Header is
+   flex with the close button on the right; body is just normal flow. */
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--color-border);
+}
+.modal-header h3 { margin: 0; }
+.modal-body { font-size: 14px; line-height: 1.6; }
+@media (max-width: 768px) {
+  .modal-overlay {
+    align-items: flex-end;
+    padding: 0;
+  }
+  .modal-box {
+    width: 100vw;
+    max-width: none;
+    min-width: 0;
+    border-radius: 16px 16px 0 0;
+    padding: 8px 16px calc(20px + var(--sab));
+    max-height: 88dvh;
+    overflow-y: auto;
+    animation: sheet-slide-up 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+    position: relative;
+  }
+  /* Drag-handle affordance — purely visual, signals the dismiss gesture
+     (tap overlay to close). Pseudo-element keeps component code free
+     of a separate `<div>` for the handle. */
+  .modal-box::before {
+    content: '';
+    display: block;
+    width: 36px;
+    height: 4px;
+    background: var(--color-border);
+    border-radius: 2px;
+    margin: 4px auto 12px;
+  }
+  .modal-box h3 { font-size: 16px; }
+  .modal-actions {
+    flex-direction: column;
+    margin-top: 16px;
+  }
+  .modal-actions > * {
+    width: 100%;
+    min-height: 44px;
+  }
+}
+
+/* ── Toast / inline alert primitives ──────────────────────────────── */
+.toast-success {
+  background: var(--color-active);
+  border: 1px solid var(--color-primary);
+  color: var(--color-primary);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+.toast-error {
+  background: var(--color-error-soft);
+  color: var(--color-error-deep);
+  border: 1px solid #fca5a5;
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin-bottom: 16px;
+}
+.toast-warning {
+  background: var(--color-warning-soft);
+  color: var(--color-warning-deep);
+  border: 1px solid #fdba74;
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin-bottom: 16px;
+}
+
+/* ── Action rows ──────────────────────────────────────────────────── */
+/* Horizontal button group with wrapping. `.actions-spacer` pushes the
+   next sibling to the right edge — used by header-style rows that
+   have a left label + right actions (Project Detail header, etc.). */
+.actions-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.actions-spacer { flex: 1; }
+
+/* ── Page title (unified) ─────────────────────────────────────────── */
+/* Single canonical size — 22px — for every page-level title. Pages
+   that previously overrode to 24px (Dashboard) or other sizes now
+   inherit from this rule. Mobile overrides shrink to 18-20px for
+   compactness in the header. */
+.page-title {
+  font-size: 22px;
+  font-weight: 700;
+  margin-bottom: 20px;
+  color: var(--color-text);
+}
+
+/* ── Long-text word-break utility ─────────────────────────────────── */
+/* Apply to `<code>` blocks, IDs, paths, branch names, model strings —
+   anything that should wrap inside a card rather than push the card
+   width past the viewport. `overflow-wrap: anywhere` is the modern
+   equivalent and prevents the orphan-wide-space bug on iOS Safari. */
+.break-all {
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+/* ── @mention popover (textarea skill autocomplete) ───────────────── */
+/* Floats above the textarea at the cursor, anchored bottom-left of the
+   `position:relative` wrapper. Items inherit the system font and render
+   the skill slug in mono so it visually reads as code. The `.active`
+   class paints the keyboard-focused item with the indigo-tint token. */
+.at-mention-wrapper { position: relative; }
+.at-mention-popover {
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  margin-bottom: 4px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-popover);
+  z-index: 100;
+  min-width: 240px;
+  max-width: 360px;
+  overflow: hidden;
+}
+.at-mention-item {
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--color-hover);
+  background: var(--color-surface);
+}
+.at-mention-item:last-child { border-bottom: none; }
+.at-mention-item.active { background: var(--color-active); }
+.at-mention-slug {
+  font-weight: 600;
+  color: var(--color-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.at-mention-desc {
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+/* ── Mobile global form / row fallback ────────────────────────────── */
+/* Every page that uses `.form-actions` gets column stacking on mobile
+   automatically. Pages that need a different mobile behaviour (e.g. a
+   sticky bottom bar) can wrap in `.form-actions` plus their own media
+   query and they win because their rules live later in the cascade. */
+@media (max-width: 768px) {
+  .form-actions {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+  .form-actions > * {
+    width: 100%;
+    min-height: 44px;
+  }
+  .form-row {
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  /* ── ModelSelect mobile ─────────────────────────────────────────
+     The card is `inline-flex` with `white-space: nowrap` and two child
+     selects pinned at min-width 120/160px. On a 360px viewport that's
+     already ~330px of guaranteed content before the chip + padding,
+     which pushes the parent (`.adjust-composer-header`, the design
+     toolbar, etc.) wider than the screen and creates the dreaded
+     horizontal scroll. On mobile, let the card itself wrap its
+     children into a vertical stack and let each select stretch
+     full-width — the picker is still tappable, just two rows tall. */
+  .model-select {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+  .model-select-card {
+    flex-wrap: wrap;
+    white-space: normal;
+    width: 100%;
+    max-width: 100%;
+  }
+  .model-select-chip {
+    flex: 0 0 auto;
+  }
+  .model-select-type,
+  .model-select-model {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .model-select-hint {
+    flex: 1 1 100%;
+    white-space: normal;
+  }
 }

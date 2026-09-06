@@ -556,13 +556,13 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           modal so the visual treatment is consistent across stages. */}
       {summaryModal !== null && (
         <div
-          className="modal-backdrop"
+          className="modal-overlay"
           onClick={() => setSummaryModal(null)}
           role="dialog"
           aria-modal="true"
         >
           <div
-            className="modal"
+            className="modal-box"
             onClick={e => e.stopPropagation()}
             style={{ maxWidth: 640 }}
           >

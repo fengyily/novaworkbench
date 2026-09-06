@@ -3,26 +3,27 @@
 .detail-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
 .detail-id { font-size: 12px; color: var(--color-text-muted); font-family: var(--font-mono); }
 
+/* Edit-modal skip_analysis row — replaces the inline `<label style>` and
+   the previous `<small>` token typo (`var(--text-secondary, ...)` was
+   pointing at the wrong CSS variable name; the correct one is
+   `var(--color-text-secondary)`). The label row keeps its inline-flex
+   so the checkbox + caption stay aligned, but no longer overrides
+   font-weight which made it look like a section header. */
+.edit-skip-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-weight: 400;
+  font-size: 13px;
+  color: var(--color-text);
+}
+.edit-skip-row input { width: auto; }
+
 .req-detail h1 { font-size: 22px; font-weight: 700; margin-bottom: 12px; }
 
 .detail-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
-
-.status-tag {
-  display: inline-block;
-  padding: 3px 10px;
-  border-radius: 4px;
-  font-size: 12px;
-  font-weight: 600;
-  background: var(--color-active);
-  color: var(--color-primary);
-}
-.status-tag.status-draft      { background: #f1f5f9; color: #475569; }
-.status-tag.status-analyzing  { background: #fef3c7; color: #b45309; }
-.status-tag.status-designing  { background: #ede9fe; color: #6d28d9; }
-.status-tag.status-designed   { background: #dbeafe; color: #1d4ed8; }
-.status-tag.status-developing { background: #cffafe; color: #0e7490; }
-.status-tag.status-done       { background: #d1fae5; color: #047857; }
-.status-tag.status-archived   { background: #f1f5f9; color: #64748b; }
 
 .priority-tag {
   padding: 3px 10px;
@@ -323,6 +324,7 @@
   align-items: center;
   gap: 8px;
   margin-bottom: 12px;
+  flex-wrap: wrap;
 }
 
 /* Claude session panel: lists per-stage claude session ids so the user can
@@ -673,74 +675,11 @@
   margin: 0;
 }
 
-/* Branch selection modal */
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.4);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-}
-.modal-box {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  padding: 28px 32px;
-  min-width: 380px;
-  max-width: 480px;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.18);
-}
-.modal-box h3 { margin: 0 0 8px; font-size: 17px; }
-.modal-field { margin-bottom: 14px; }
-.modal-field label { font-size: 12px; font-weight: 600; color: var(--color-text-muted); display: block; margin-bottom: 5px; }
-.modal-actions { display: flex; gap: 8px; margin-top: 20px; }
-
-/* Bottom-sheet modal pattern on mobile. Override the centered .modal-box
-   to anchor at the bottom and slide up. The handle-bar is injected via a
-   `::before` pseudo so component code doesn't need to add a new element.
-   .modal-actions becomes a full-width column so the buttons stay reachable
-   with one thumb. */
-@media (max-width: 768px) {
-  .modal-overlay {
-    align-items: flex-end;
-    padding: 0;
-  }
-  .modal-box {
-    width: 100vw;
-    max-width: none;
-    min-width: 0;
-    border-radius: 16px 16px 0 0;
-    padding: 8px 16px calc(20px + var(--sab));
-    max-height: 88dvh;
-    overflow-y: auto;
-    animation: req-sheet-slide-up 0.22s cubic-bezier(0.16, 1, 0.3, 1);
-    position: relative;
-  }
-  /* Drag-handle affordance — purely visual, signals the dismiss gesture. */
-  .modal-box::before {
-    content: '';
-    display: block;
-    width: 36px; height: 4px;
-    background: var(--color-border);
-    border-radius: 2px;
-    margin: 4px auto 12px;
-  }
-  .modal-box h3 { font-size: 16px; }
-  .modal-actions {
-    flex-direction: column;
-    margin-top: 16px;
-  }
-  .modal-actions > * {
-    width: 100%;
-    min-height: 44px;
-  }
-}
-@keyframes req-sheet-slide-up {
-  from { transform: translateY(100%); }
-  to   { transform: translateY(0); }
-}
+/* Branch selection modal — `.modal-overlay`, `.modal-box`, `.modal-field`,
+   `.modal-actions`, and the mobile bottom-sheet treatment all live in
+   index.css now (single canonical modal across the app). The branch modal
+   here uses `<div className="modal-overlay">` + `<div className="modal-box">`
+   like every other modal. */
 
 /* ── Pre-flight branch modal ─────────────────────────────────────────────
    Re-skins the "开始开发" modal as a mission pre-flight checklist.
@@ -1254,6 +1193,89 @@ select.preflight-field-input {
 }
 .merge-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
+/* Inline status row inside `.merge-section` — currently used by the
+   "隔离开发目录 / path / 清理" line. Sits as a horizontal row on
+   desktop; the mobile media block below restacks the three children
+   into label / path-card / button so neither fights for space on
+   phones. */
+.merge-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--color-text-secondary, #64748b);
+  flex-wrap: wrap;
+}
+/* The worktree-path `<code>` can be a long absolute path (e.g.
+/Users/x/worktrees/req_<8hex>) that overruns its flex sibling and
+forces a horizontal page scroll. Break the path everywhere a wrap is
+allowed so the row collapses cleanly on every viewport. */
+.merge-hint code {
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  max-width: 100%;
+}
+
+/* ── WorktreePathHint (developing / done stages) ─────────────────
+   The previous bare `.merge-hint--worktree` was a flat three-row label +
+   code + button combo. The new component renders four regions:
+     [label] [path] [actions: 📋 复制路径 / 📂 打开 / 🧹 清理]
+   Desktop: single row, label stays compact, path takes the remaining
+   space, actions pin to the right. Mobile: stack into three rows so
+   the action buttons get their own touch targets and the path
+   wraps cleanly underneath the label. */
+.merge-hint--worktree {
+  align-items: center;
+}
+.merge-hint-label {
+  flex-shrink: 0;
+  font-weight: 600;
+}
+.merge-hint-path {
+  flex: 1 1 240px;
+  /* Above the global `.merge-hint code` rule, the path here lives in
+     a card-like surface with a left accent so it reads as the focal
+     element of the row. word-break is inherited from `.merge-hint code`
+     so long POSIX / Windows paths still wrap. */
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  padding: 6px 10px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  align-self: center;
+}
+.merge-hint-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+  flex-shrink: 0;
+}
+.merge-hint-btn { min-height: 32px; }
+.merge-hint-btn--danger { color: var(--color-error); }
+/* Inline toast that appears next to the action buttons after a copy.
+   Uses the existing surface tokens so it reads as a confirmation
+   surface rather than a new visual element. Animates in to draw the
+   eye; auto-dismisses after 1.8s (handled in the component). */
+.merge-hint-toast {
+  font-size: 12px;
+  color: var(--color-primary);
+  background: var(--color-active);
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-sm);
+  padding: 3px 9px;
+  font-weight: 500;
+  animation: merge-hint-toast-in 0.18s ease-out;
+}
+@keyframes merge-hint-toast-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
 .merge-modal .merge-hint {
   display: flex;
   gap: 16px;
@@ -1318,6 +1340,115 @@ select.preflight-field-input {
   border: none;
 }
 .pr-link-btn:hover { filter: brightness(0.95); }
+
+/* ── 追问 / 调整历史 ── Vertical list of per-invocation rows below the
+   token-usage table. Each card carries the same amber left rail as the
+   `.adjust-composer` so the two read as siblings of the same stage.
+   Mobile: the head row (index + stage + model + time) wraps into two
+   rows so the long model id doesn't push the timestamp off-screen;
+   the model `<code>` switches from inline-ellipsis to break-all to
+   match the wider tables above. */
+.adjust-history { margin-top: 14px; }
+.adjust-history-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 6px;
+  color: var(--color-text);
+}
+.adjust-history-list {
+  display: grid;
+  gap: 8px;
+}
+.adjust-history-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-left: 4px solid #F59E0B;
+  border-radius: 6px;
+  padding: 10px 12px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
+.adjust-history-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  min-width: 0;
+}
+.adjust-history-head-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+  /* Allow children (the long model <code> in particular) to wrap rather
+     than push the timestamp past the card edge. */
+  flex-wrap: wrap;
+}
+.adjust-history-index {
+  background: #F59E0B;
+  color: #FFFFFF;
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-weight: 700;
+  font-size: 11px;
+  flex: none;
+}
+.adjust-history-stage {
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+}
+.adjust-history-model {
+  font-size: 11px;
+  word-break: break-all;
+}
+.adjust-history-time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  flex: none;
+}
+.adjust-history-summary {
+  background: #FFFBEB;
+  border: 1px dashed #F59E0B;
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: #1E293B;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.adjust-history-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+}
+.adjust-history-stats strong { color: var(--color-text); }
+.adjust-history-stat-muted { color: var(--color-text-muted); }
+.adjust-history-stat-cost {
+  color: var(--color-primary);
+  font-weight: 600;
+}
+@media (max-width: 768px) {
+  /* On phones the head row's left cluster (index + stage + model) can
+     outgrow half the card. Push the timestamp to its own line so the
+     model id gets the full width to wrap. */
+  .adjust-history-head { flex-wrap: wrap; }
+  .adjust-history-head-left { flex-basis: 100%; }
+  .adjust-history-time { margin-left: auto; }
+  .adjust-history-card { padding: 10px; }
+}
 
 /* ── 追加调整 composer ── A compact card around the follow-up input that
    resumes the prior coding session. Surfaces the --resume behavior inline so
@@ -1512,6 +1643,43 @@ select.preflight-field-input {
 
   .adjust-composer-footer .ac-hint { margin-bottom: 4px; }
 
+  /* Header row: title + 「续接原开发会话」tag + ModelSelect picker.
+     On desktop these sit on one line with the picker right-aligned; on
+     phones the picker has a hard 280px minimum width (chip + two
+     selects at min-width 120/160) so it pushes the whole row wider
+     than the viewport. Wrap the row and let the picker take its own
+     full-width line. */
+  .adjust-composer-header {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+  /* Title + the "续接原开发会话 · 仅携带本指令" tag share the first row
+     on phones. Without these overrides the long tag (13 Chinese glyphs
+     + middle dot) stays `white-space: nowrap` and adds ~170px to the
+     row — combined with the 220px ModelSelect on the same line, the
+     whole header overflows the 360px viewport and the page grows a
+     horizontal scrollbar. Letting the tag wrap inside its pill and
+     letting title/tag each shrink to their natural content width
+     keeps the row within the viewport. The picker gets its own line
+     via the `> div:last-child` rule below. */
+  .adjust-composer-header .ac-title {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+  .adjust-composer-header .ac-tag {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    white-space: normal;
+    line-height: 1.4;
+  }
+  .adjust-composer-header > div:last-child {
+    width: 100%;
+    margin-left: 0 !important;
+  }
+  /* The tag + title can wrap if the line gets tight, but the picker
+     gets its own row thanks to the rule above. */
+
   /* Token usage table — let the model `<code>` wrap inside its card so
      long model names (e.g. claude-3-5-sonnet-20240620) don't get
      truncated at 160px on a 360px-wide phone. */
@@ -1546,12 +1714,109 @@ select.preflight-field-input {
   .detail-meta {
     gap: 6px;
   }
-  .project-tag { font-size: 11px; padding: 2px 8px; }
+  .project-tag { font-size: 11px; padding: 2px 8px; word-break: break-all; max-width: 100%; }
+  /* Claude status pill is `inline-flex` and never wrapped by default,
+     so on a 360px viewport it shoves the project tag off-screen. Let
+     it wrap and shrink like the other chips in this row. */
+  .detail-meta .claude-status {
+    max-width: 100%;
+    flex-shrink: 1;
+    white-space: normal;
+    line-height: 1.4;
+  }
 
   /* The detail header has its own back button (in the layout bar) so the
      inner "← 项目" button collapses on mobile to avoid two stacked
      back arrows. */
   .detail-header > .btn:first-child { display: none; }
+  /* The right-side actions cluster (`编辑 / 删除`) sits in an inline-flex
+     wrapper that originally had a fixed `margin-left:auto` — on phones
+     that pushed them past the viewport edge. Let the whole header wrap
+     and pin the action group to the right of the next row. */
+  .detail-header { flex-wrap: wrap; gap: 8px; }
+  .detail-header > div:last-child {
+    width: 100%;
+    justify-content: flex-end;
+    margin-left: 0 !important;
+  }
+  /* The req.id chip in the header is a 12-char prefix like `req_<8hex>`.
+     Mono font + Chinese characters in the same row used to push the
+     right actions off-screen at 360px. */
+  .detail-id {
+    word-break: break-all;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+  }
+
+  /* merge-section: the worktree path `<code>` is a long absolute path
+     that breaks the flex row on phones. Let the row stack into three
+     lines (label / wrapped path / cleanup button) so neither the path
+     nor the button fights for space. The desktop rule keeps them on
+     one line. */
+  .merge-hint {
+    flex-wrap: wrap;
+    align-items: stretch !important;
+  }
+  .merge-hint > span:first-child {
+    flex: 0 0 100%;
+    margin-bottom: 4px;
+    font-size: 12px;
+    color: var(--color-text-secondary);
+    font-weight: 600;
+  }
+  .merge-hint code {
+    word-break: break-all;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    flex: 1 1 100%;
+    font-size: 12px;
+    background: var(--color-bg);
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+  }
+  .merge-hint > button {
+    flex: 1 1 100%;
+    margin-top: 8px;
+    min-height: 44px;
+  }
+
+  /* WorktreePathHint: collapse the row into three vertical bands —
+     label, path card, action buttons — so neither the long path nor
+     the three small buttons fight for horizontal space. Each action
+     button still gets `flex: 1 1 calc(50% - 4px)` so the two most-used
+     ones (📋 复制路径 / 📂 打开) stay side-by-side while 🧹 清理 drops
+     to its own line below. */
+  .merge-hint--worktree {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .merge-hint-label {
+    font-size: 12px;
+    color: var(--color-text-secondary);
+  }
+  .merge-hint-path {
+    flex-basis: 100%;
+  }
+  .merge-hint-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+    width: 100%;
+  }
+  .merge-hint-actions .merge-hint-btn {
+    flex: 1 1 calc(50% - 4px);
+    min-width: 0;
+    min-height: 40px;
+  }
+  .merge-hint-actions .merge-hint-btn--danger {
+    flex-basis: 100%;
+  }
+  .merge-hint-toast {
+    flex-basis: 100%;
+    text-align: center;
+    margin-top: 2px;
+  }
 }
 
 /* ── Mobile sticky CTA bar (shared by detail pages) ─────────────
@@ -1667,77 +1932,12 @@ select.preflight-field-input {
   color: var(--color-primary, #4F46E5);
 }
 
-/* Summarize-to-requirement modal. Uses the same .modal-backdrop / .modal-card
-   scaffold the edit modal uses, but adds a few summarize-specific blocks. */
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(15, 23, 42, 0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-  padding: 16px;
-}
-.modal-card {
-  background: var(--color-surface, #fff);
-  border-radius: 10px;
-  width: 100%;
-  max-width: 520px;
-  padding: 20px 22px;
-  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
-}
-.modal-card.summarize-modal .modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-.modal-card.summarize-modal .modal-header h3 {
-  margin: 0;
-}
-.modal-card.summarize-modal .modal-body {
-  font-size: 14px;
-  line-height: 1.55;
-}
-.modal-card .modal-hint {
-  margin: 12px 0 0 0;
-  padding-left: 20px;
-  color: var(--color-text-secondary, #64748B);
-}
-.modal-card .modal-hint li {
-  margin-bottom: 6px;
-}
-.modal-card .modal-running {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 24px 0;
-  color: var(--color-text-secondary, #64748B);
-}
-.modal-card .modal-running .spinner {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  border: 3px solid var(--color-border, #E2E8F0);
-  border-top-color: var(--color-primary, #4F46E5);
-  animation: spin 0.8s linear infinite;
-}
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-.modal-card .modal-error {
-  padding: 12px 14px;
-  background: #FEF2F2;
-  border: 1px solid #FECACA;
-  border-radius: 6px;
-  color: #B91C1C;
-  font-size: 14px;
-}
-.modal-card .modal-error p {
-  margin: 0;
-}
+/* `.modal-overlay`, `.modal-box`, `.modal-header`, `.modal-body` now live in
+   index.css — the local `.modal-backdrop` / `.modal-card` /
+   `.summarize-modal` / `.modal-hint` / `.modal-running` / `.modal-error`
+   blocks were orphaned (no TSX referenced them) and have been removed.
+   CodingChat and DocRefineChat's "已压缩上下文摘要" modals now use the
+   canonical `.modal-overlay` + `.modal-box` classes directly. */
 
 /* ── Mobile token receipt ──────────────────────────────────────────────────
    The desktop `<table class="pr-table table-cards">` is the canonical view;
