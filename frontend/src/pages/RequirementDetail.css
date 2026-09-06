@@ -1283,6 +1283,115 @@ allowed so the row collapses cleanly on every viewport. */
 }
 .pr-link-btn:hover { filter: brightness(0.95); }
 
+/* ── 追问 / 调整历史 ── Vertical list of per-invocation rows below the
+   token-usage table. Each card carries the same amber left rail as the
+   `.adjust-composer` so the two read as siblings of the same stage.
+   Mobile: the head row (index + stage + model + time) wraps into two
+   rows so the long model id doesn't push the timestamp off-screen;
+   the model `<code>` switches from inline-ellipsis to break-all to
+   match the wider tables above. */
+.adjust-history { margin-top: 14px; }
+.adjust-history-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 6px;
+  color: var(--color-text);
+}
+.adjust-history-list {
+  display: grid;
+  gap: 8px;
+}
+.adjust-history-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-left: 4px solid #F59E0B;
+  border-radius: 6px;
+  padding: 10px 12px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
+.adjust-history-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  min-width: 0;
+}
+.adjust-history-head-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+  /* Allow children (the long model <code> in particular) to wrap rather
+     than push the timestamp past the card edge. */
+  flex-wrap: wrap;
+}
+.adjust-history-index {
+  background: #F59E0B;
+  color: #FFFFFF;
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-weight: 700;
+  font-size: 11px;
+  flex: none;
+}
+.adjust-history-stage {
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+}
+.adjust-history-model {
+  font-size: 11px;
+  word-break: break-all;
+}
+.adjust-history-time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  flex: none;
+}
+.adjust-history-summary {
+  background: #FFFBEB;
+  border: 1px dashed #F59E0B;
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: #1E293B;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.adjust-history-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+}
+.adjust-history-stats strong { color: var(--color-text); }
+.adjust-history-stat-muted { color: var(--color-text-muted); }
+.adjust-history-stat-cost {
+  color: var(--color-primary);
+  font-weight: 600;
+}
+@media (max-width: 768px) {
+  /* On phones the head row's left cluster (index + stage + model) can
+     outgrow half the card. Push the timestamp to its own line so the
+     model id gets the full width to wrap. */
+  .adjust-history-head { flex-wrap: wrap; }
+  .adjust-history-head-left { flex-basis: 100%; }
+  .adjust-history-time { margin-left: auto; }
+  .adjust-history-card { padding: 10px; }
+}
+
 /* ── 追加调整 composer ── A compact card around the follow-up input that
    resumes the prior coding session. Surfaces the --resume behavior inline so
    the user knows only their message is sent. */

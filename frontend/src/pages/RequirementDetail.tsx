@@ -2205,62 +2205,36 @@ export default function RequirementDetail() {
             </small>
 
             {adjustRows && adjustRows.length > 0 && (
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6, color: 'var(--color-text)' }}>
+              <div className="adjust-history">
+                <div className="adjust-history-title">
                   📋 追问 / 调整历史（{adjustRows.length} 次）
                 </div>
-                <div style={{ display: 'grid', gap: 8 }}>
+                <div className="adjust-history-list">
                   {adjustRows.map((r, i) => (
-                    <div
-                      key={r.id}
-                      style={{
-                        background: '#FFFFFF',
-                        border: '1px solid #E2E8F0',
-                        borderLeft: '4px solid #F59E0B',
-                        borderRadius: 6,
-                        padding: '10px 12px',
-                        boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
-                      }}
-                    >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 6, fontSize: 12, color: 'var(--color-text-secondary)' }}>
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                          <span style={{ background: '#F59E0B', color: '#FFFFFF', borderRadius: 10, padding: '1px 8px', fontWeight: 700, fontSize: 11 }}>
-                            #{i + 1}
-                          </span>
-                          <span style={{ fontWeight: 600, color: 'var(--color-text)' }}>
+                    <div key={r.id} className="adjust-history-card">
+                      <div className="adjust-history-head">
+                        <span className="adjust-history-head-left">
+                          <span className="adjust-history-index">#{i + 1}</span>
+                          <span className="adjust-history-stage">
                             {stepLabels[r.step] || r.step}
                           </span>
-                          <code className="pr-branch" style={{ fontSize: 11 }}>{r.model || '未知模型'}</code>
+                          <code className="pr-branch adjust-history-model">{r.model || '未知模型'}</code>
                         </span>
-                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-text-muted)' }}>
+                        <span className="adjust-history-time">
                           {new Date(r.created_at).toLocaleString()}
                         </span>
                       </div>
                       {r.summary && (
-                        <div
-                          style={{
-                            background: '#FFFBEB',
-                            border: '1px dashed #F59E0B',
-                            borderRadius: 4,
-                            padding: '6px 8px',
-                            marginBottom: 6,
-                            fontFamily: 'var(--font-mono)',
-                            fontSize: 12,
-                            color: '#1E293B',
-                            whiteSpace: 'pre-wrap',
-                            wordBreak: 'break-word',
-                            lineHeight: 1.5,
-                          }}
-                        >
+                        <div className="adjust-history-summary">
                           📤 {r.summary}
                         </div>
                       )}
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 11, color: 'var(--color-text-secondary)', fontFamily: 'var(--font-mono)' }}>
-                        <span>输入 <strong style={{ color: 'var(--color-text)' }}>{usageTotalInput(r).toLocaleString()}</strong></span>
-                        <span>输出 <strong style={{ color: 'var(--color-text)' }}>{r.output_tokens.toLocaleString()}</strong></span>
-                        <span style={{ color: 'var(--color-text-muted)' }}>缓存读 {r.cache_read_tokens.toLocaleString()}</span>
-                        <span style={{ color: 'var(--color-text-muted)' }}>缓存建 {r.cache_creation_tokens.toLocaleString()}</span>
-                        <span style={{ color: 'var(--color-primary)', fontWeight: 600 }}>费用 {fmtCost(r.costs)}</span>
+                      <div className="adjust-history-stats">
+                        <span>输入 <strong>{usageTotalInput(r).toLocaleString()}</strong></span>
+                        <span>输出 <strong>{r.output_tokens.toLocaleString()}</strong></span>
+                        <span className="adjust-history-stat-muted">缓存读 {r.cache_read_tokens.toLocaleString()}</span>
+                        <span className="adjust-history-stat-muted">缓存建 {r.cache_creation_tokens.toLocaleString()}</span>
+                        <span className="adjust-history-stat-cost">费用 {fmtCost(r.costs)}</span>
                       </div>
                     </div>
                   ))}
