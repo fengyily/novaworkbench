@@ -90,48 +90,14 @@
 }
 
 /* ─── Composer ───
- * Same shape as CodingChat's input area: label + input + textarea +
- * hint + primary button. Spacing reads as one form, not three controls.
+ * The composer is now description-only (the title input was removed):
+ * just the textarea + hint + primary button. Spacing reads as one form,
+ * not three controls.
  */
 .sub-composer {
   padding: 16px 20px;
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface);
-}
-.sub-composer-title-row {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 12px;
-}
-.sub-composer-label {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--color-text-secondary);
-}
-.sub-composer-input {
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-surface);
-  color: var(--color-text);
-  font-family: var(--font-sans);
-  font-size: 13px;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-.sub-composer-input:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
-}
-.sub-composer-input:disabled {
-  background: var(--color-hover);
-  color: var(--color-text-muted);
-  cursor: not-allowed;
-}
-.sub-composer-input::placeholder {
-  color: var(--color-text-muted);
 }
 
 .sub-composer-textarea {
@@ -665,7 +631,6 @@
 
 /* Reduced-motion users — drop transitions. */
 @media (prefers-reduced-motion: reduce) {
-  .sub-composer-input,
   .sub-composer-textarea,
   .sub-card,
   .sub-cli-copy,
