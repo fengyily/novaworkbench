@@ -219,17 +219,23 @@ func (h *ScheduleHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseRunAt accepts either the HTML datetime-local format
-// "2006-01-02T15:04" (no timezone, interpreted as server local time) or a
-// full RFC3339 string. The datetime-local case is the common path because
-// the frontend uses an <input type="datetime-local">. We always store in
-// server local time so the scheduler's `now <= run_at` comparison lines
-// up with the user's wall clock without DST surprises.
+// "2006-01-02T15:04" (no timezone) or a full RFC3339 string. The RFC3339
+// path is the canonical / bug-safe one: it includes a timezone offset so
+// the absolute moment is unambiguous regardless of where the server runs.
+// The frontend always sends RFC3339 (ScheduleModal converts the
+// datetime-local picker value to "...T23:30:00+08:00" via
+// toRFC3339Local before POSTing), which means RFC3339 is what we expect
+// in practice. The datetime-local fallback is kept for backward
+// compatibility — but be aware: it is interpreted as *server local*
+// time, so a bare datetime-local string from a client in a different TZ
+// than the server will be wrong by that offset. Prefer sending RFC3339.
 func parseRunAt(s string) (time.Time, error) {
-	if t, err := time.ParseInLocation("2006-01-02T15:04", strings.TrimSpace(s), time.Local); err == nil {
+	s = strings.TrimSpace(s)
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t, nil
 	}
-	if t, err := time.Parse(time.RFC3339, strings.TrimSpace(s)); err == nil {
+	if t, err := time.ParseInLocation("2006-01-02T15:04", s, time.Local); err == nil {
 		return t, nil
 	}
-	return time.Time{}, fmt.Errorf("无法解析时间 %q（期望 YYYY-MM-DDTHH:MM 或 RFC3339）", s)
+	return time.Time{}, fmt.Errorf("无法解析时间 %q（期望 RFC3339 或 YYYY-MM-DDTHH:MM）", s)
 }
