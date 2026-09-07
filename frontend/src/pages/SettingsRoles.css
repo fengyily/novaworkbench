@@ -53,6 +53,31 @@
   font-family: monospace;
 }
 
+.role-binding {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  background: var(--color-active);
+  color: var(--color-primary);
+}
+
+.role-binding-default {
+  /* Subtle, communicates "no explicit binding" without screaming about it. */
+  background: var(--color-bg);
+  color: var(--color-text-secondary);
+}
+
+.role-binding-bound {
+  /* Bound to a specific config — pop it slightly so users can spot which
+     gateway the role will use. */
+  background: rgba(79, 70, 229, 0.12);
+  color: var(--color-primary);
+}
+
 .role-model-field {
   flex-shrink: 0;
   display: flex;

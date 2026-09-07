@@ -167,7 +167,7 @@ export default function ModelSelect({
             <option value="">默认（不指定）</option>
             {configs.map(c => (
               <option key={c.id} value={c.id}>
-                {c.name}{c.is_active ? '（当前生效）' : ''}
+                {c.name}{c.is_active ? '（默认）' : ''}
               </option>
             ))}
           </select>

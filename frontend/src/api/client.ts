@@ -889,7 +889,12 @@ export const databaseApi = {
   migrate: () => api.post<MigrateResult>('/api/settings/database/migrate', {}),
 };
 
-// Roles (per-role system prompt + model)
+// Roles (per-role system prompt + model + Claude config binding)
+//
+// claude_config_id pins the role to a specific Claude configuration: the
+// role's chosen model then runs against that config's base URL + auth
+// token, not just the global active config. Empty = "use the global
+// active config" so old rows keep their pre-binding behavior.
 export interface Role {
   id: string;
   key: string;
@@ -897,6 +902,7 @@ export interface Role {
   description: string;
   system_prompt: string;
   model: string;
+  claude_config_id: string;
   sort_order: number;
   enabled: boolean;
   created_at: string;
@@ -910,7 +916,10 @@ export interface RoleUpdateResult {
 export const rolesApi = {
   list: () => api.get<Role[]>('/api/settings/roles'),
   get: (id: string) => api.get<Role>(`/api/settings/roles/${id}`),
-  update: (id: string, data: { system_prompt: string; model: string }) =>
+  update: (
+    id: string,
+    data: { system_prompt: string; model: string; claude_config_id?: string },
+  ) =>
     api.put<RoleUpdateResult>(`/api/settings/roles/${id}`, data),
   reset: (id: string) => api.post<Role>(`/api/settings/roles/${id}/reset`, {}),
 };

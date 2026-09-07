@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
+	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/platform"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
@@ -42,23 +43,34 @@ func NewReviewHandler(projectSvc *service.ProjectService, platformSvc *service.P
 	}
 }
 
-// roleConfig loads a role's system prompt + effective model by key. The
-// returned model is the EFFECTIVE model (role override, else active config
-// default, else the "默认模型" literal) — pass it through cliModelArg before
-// handing it to StreamOpts.Model. On error it returns an empty system prompt +
-// the resolved default model so a broken role config never blocks the review.
-func (h *ReviewHandler) roleConfig(key string) (systemPrompt, model string) {
+// roleConfig loads a role's system prompt + effective model + Claude config
+// binding by key. The returned model is the EFFECTIVE model (role override,
+// else the role's bound config's default, else the global active config's
+// default, else the "默认模型" literal) — pass it through cliModelArg
+// before handing it to StreamOpts.Model. The returned configID is the
+// binding the gateway uses to source auth + base URL; empty means fall back
+// to the global active config.
+//
+// On error it returns empty system prompt + the resolved default model +
+// the active config id (or empty when no config exists), so a missing/
+// broken role config never blocks the review.
+func (h *ReviewHandler) roleConfig(key string) (systemPrompt, model, configID string) {
 	role, err := h.roleSvc.GetByKey(key)
 	if err != nil {
-		return "", h.effectiveModel("")
+		return "", h.effectiveModelFromConfig("", nil), h.activeConfigID()
 	}
-	return role.SystemPrompt, h.effectiveModel(role.Model)
+	cfg, _ := h.claudeCfg.ResolveRoleConfig(role)
+	if cfg != nil {
+		return role.SystemPrompt, effectiveModelFromValues(role.Model, cfg.DefaultModel), cfg.ID
+	}
+	return role.SystemPrompt, h.effectiveModelFromConfig(role.Model, role), h.activeConfigID()
 }
 
 // effectiveModel mirrors WizardHandler.effectiveModel: role override > active
 // claude config default > "默认模型" literal. Defined here (rather than shared)
 // because the two handlers resolve the active config independently and the
-// resolution is trivial.
+// resolution is trivial. Prefer effectiveModelFromConfig for the per-role
+// binding path (this helper is the legacy single-active-config one).
 func (h *ReviewHandler) effectiveModel(roleModel string) string {
 	configDefault := ""
 	if h.claudeCfg != nil {
@@ -67,6 +79,34 @@ func (h *ReviewHandler) effectiveModel(roleModel string) string {
 		}
 	}
 	return effectiveModelFromValues(roleModel, configDefault)
+}
+
+// effectiveModelFromConfig resolves the model using the role's bound Claude
+// config (when present) instead of the global active config. A nil role
+// means "no role row in hand" and falls through to the legacy global
+// path so callers don't have to special case it.
+func (h *ReviewHandler) effectiveModelFromConfig(roleModel string, role *model.Role) string {
+	configDefault := ""
+	if h.claudeCfg != nil {
+		if cfg, _ := h.claudeCfg.ResolveRoleConfig(role); cfg != nil {
+			configDefault = cfg.DefaultModel
+		}
+	}
+	return effectiveModelFromValues(roleModel, configDefault)
+}
+
+// activeConfigID returns the active claude_configs row's id (or "" when no
+// config is active). Used as the StreamOpts.ClaudeConfigID fallback when a
+// role has no binding of its own.
+func (h *ReviewHandler) activeConfigID() string {
+	if h.claudeCfg == nil {
+		return ""
+	}
+	c, err := h.claudeCfg.ActiveConfig()
+	if err != nil || c == nil {
+		return ""
+	}
+	return c.ID
 }
 
 // activeConfigMeta returns the currently-active claude config's id + currency
@@ -291,7 +331,7 @@ func (h *ReviewHandler) runReview(job *store.Job, projectID, projectPath string,
 	// The reviewer persona + review checklist + report format live in the
 	// configurable "reviewer" role (system prompt); the -p prompt carries only
 	// the dynamic task content (PR context, branches, operation steps).
-	systemPrompt, model := h.roleConfig("reviewer")
+	systemPrompt, model, claudeConfigID := h.roleConfig("reviewer")
 	// Stamp the effective model on the in-memory job so StreamReviewJob's
 	// job_done frame + GetJob can surface it before the durable log is written.
 	job.SetModel(model)
@@ -325,10 +365,11 @@ func (h *ReviewHandler) runReview(job *store.Job, projectID, projectPath string,
 		prContext, req.Branch, req.BaseBranch, req.BaseBranch, req.Branch)
 
 	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-		Prompt:       prompt,
-		WorkDir:      projectPath,
-		SystemPrompt: systemPrompt,
-		Model:        cliModelArg(model),
+		Prompt:         prompt,
+		WorkDir:        projectPath,
+		SystemPrompt:   systemPrompt,
+		Model:          cliModelArg(model),
+		ClaudeConfigID: claudeConfigID,
 	})
 
 	stdout, err := cmd.StdoutPipe()

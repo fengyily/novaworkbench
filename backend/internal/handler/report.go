@@ -26,15 +26,32 @@ type ReportHandler struct {
 	reportSvc  *service.ReportService
 	llm        *llm.Gateway
 	jobs       *store.JobStore
+	claudeCfg  *service.ClaudeConfigService
 }
 
-func NewReportHandler(projectSvc *service.ProjectService, reportSvc *service.ReportService, llmGateway *llm.Gateway, jobs *store.JobStore) *ReportHandler {
+func NewReportHandler(projectSvc *service.ProjectService, reportSvc *service.ReportService, llmGateway *llm.Gateway, jobs *store.JobStore, claudeCfg *service.ClaudeConfigService) *ReportHandler {
 	return &ReportHandler{
 		projectSvc: projectSvc,
 		reportSvc:  reportSvc,
 		llm:        llmGateway,
 		jobs:       jobs,
+		claudeCfg:  claudeCfg,
 	}
+}
+
+// activeConfigID is the weekly-report equivalent of the wizard/review helpers:
+// weekly reports are project-level (no per-role binding), so we fall back
+// to the global active config. Empty when no config is active or the
+// service is not wired.
+func (h *ReportHandler) activeConfigID() string {
+	if h.claudeCfg == nil {
+		return ""
+	}
+	c, err := h.claudeCfg.ActiveConfig()
+	if err != nil || c == nil {
+		return ""
+	}
+	return c.ID
 }
 
 // List returns the report history for a project (newest first).
@@ -578,7 +595,14 @@ func (h *ReportHandler) runGenerate(job *store.Job, projectID, projectName, proj
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	cmd := h.llm.StreamCmd(ctx, llm.StreamOpts{Prompt: prompt, WorkDir: projectPath})
+	// Weekly reports are project-level (not bound to a wizard role), so we
+	// fall through to the global active config for auth + base URL. Same
+	// default the wizard uses for unbound roles.
+	cmd := h.llm.StreamCmd(ctx, llm.StreamOpts{
+		Prompt:         prompt,
+		WorkDir:        projectPath,
+		ClaudeConfigID: h.activeConfigID(),
+	})
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

@@ -32,6 +32,14 @@ type fakeClaudeEnv struct{ tok, baseURL string }
 
 func (f fakeClaudeEnv) ClaudeEnvVars() (string, string, error) { return f.tok, f.baseURL, nil }
 
+// ClaudeEnvForConfigID mirrors the real ClaudeConfigService fallback: empty
+// id = same as ClaudeEnvVars; non-empty id returns the per-config env (the
+// test fake only models the active-config path, so per-id lookups are not
+// differentiated from the global one here).
+func (f fakeClaudeEnv) ClaudeEnvForConfigID(id string) (string, string, error) {
+	return f.tok, f.baseURL, nil
+}
+
 func TestBuildRemoteEnvPairsDoesNotLeakHostEnv(t *testing.T) {
 	g := New(fakeClaudeEnv{tok: "tok-123", baseURL: "https://example.invalid"}, nil)
 

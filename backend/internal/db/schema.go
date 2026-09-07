@@ -405,6 +405,12 @@ var alterColumns = []string{
 	`ALTER TABLE requirements ADD COLUMN architect_model TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN developer_model TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN reviewer_model TEXT NOT NULL DEFAULT ''`,
+	// Per-role Claude-config binding: lets a role carry its own ANTHROPIC_BASE_URL
+	// + ANTHROPIC_AUTH_TOKEN pair (via claude_configs.id) so the role's chosen
+	// model runs against the role's chosen gateway, not just the global active
+	// config. Empty = "no binding → use the global default (active) config" so
+	// existing rows keep their current behavior.
+	`ALTER TABLE roles ADD COLUMN claude_config_id TEXT NOT NULL DEFAULT ''`,
 	// Review jobs are project-level (not bound to a requirement), so the review
 	// model is persisted on the durable job log instead of the requirement row.
 	`ALTER TABLE job_logs ADD COLUMN model TEXT NOT NULL DEFAULT ''`,

@@ -618,6 +618,7 @@ function buildRunRequest(body) {
     permissionMode,
     overrideSettingSources,
     ignoreLocalSettings,
+    claudeConfigId,
   } = body;
 
   if (!workDir) {
@@ -672,6 +673,10 @@ function buildRunRequest(body) {
     allowedTools: Array.isArray(allowedTools) ? allowedTools : [],
     disallowedTools: Array.isArray(disallowedTools) ? disallowedTools : [],
     permissionMode: permissionMode === 'plan' ? 'plan' : '',
+    // The Go side passes the resolved claude_config_id so future tweaks
+    // (e.g. surfacing the active gateway in the SSE log) can read it
+    // without a second round-trip. Today it's informational.
+    claudeConfigId: typeof claudeConfigId === 'string' ? claudeConfigId : '',
     settingSources,
   };
 }

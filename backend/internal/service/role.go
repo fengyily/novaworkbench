@@ -17,7 +17,7 @@ func NewRoleService(db *db.DB) *RoleService { return &RoleService{db: db} }
 // roleColumns is the SELECT column list for roles, with `key` quoted for the
 // active dialect (reserved word in MySQL).
 func (s *RoleService) roleColumns() string {
-	return "id, " + s.db.Ident("key") + ", name, description, system_prompt, model, sort_order, enabled, created_at, updated_at"
+	return "id, " + s.db.Ident("key") + ", name, description, system_prompt, model, claude_config_id, sort_order, enabled, created_at, updated_at"
 }
 
 // SeedDefaults inserts any built-in role whose key is not yet present.
@@ -42,11 +42,14 @@ func (s *RoleService) SeedDefaults() error {
 		if count > 0 {
 			continue
 		}
+		// claude_config_id is left empty so a freshly-seeded role inherits the
+		// global active config (matches pre-binding behavior). The user can
+		// attach a specific config from Settings → Roles.
 		if _, err := s.db.Exec(
 			`INSERT INTO roles
 			(`+s.roleColumns()+`)
-			VALUES (?,?,?,?,?,?,?,?,?,?)`,
-			r.ID, r.Key, r.Name, r.Description, r.SystemPrompt, r.Model, r.SortOrder, r.Enabled, now, now,
+			VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			r.ID, r.Key, r.Name, r.Description, r.SystemPrompt, r.Model, r.ClaudeConfigID, r.SortOrder, r.Enabled, now, now,
 		); err != nil {
 			return fmt.Errorf("seed role %s: %w", r.Key, err)
 		}
@@ -174,7 +177,7 @@ func (s *RoleService) List() ([]model.Role, error) {
 	var roles []model.Role
 	for rows.Next() {
 		var r model.Role
-		if err := rows.Scan(&r.ID, &r.Key, &r.Name, &r.Description, &r.SystemPrompt, &r.Model, &r.SortOrder, &r.Enabled, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Key, &r.Name, &r.Description, &r.SystemPrompt, &r.Model, &r.ClaudeConfigID, &r.SortOrder, &r.Enabled, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		roles = append(roles, r)
@@ -188,7 +191,7 @@ func (s *RoleService) List() ([]model.Role, error) {
 func (s *RoleService) Get(id string) (*model.Role, error) {
 	var r model.Role
 	err := s.db.QueryRow("SELECT "+s.roleColumns()+" FROM roles WHERE id = ?", id).
-		Scan(&r.ID, &r.Key, &r.Name, &r.Description, &r.SystemPrompt, &r.Model, &r.SortOrder, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
+		Scan(&r.ID, &r.Key, &r.Name, &r.Description, &r.SystemPrompt, &r.Model, &r.ClaudeConfigID, &r.SortOrder, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("role not found")
 	}
@@ -203,7 +206,7 @@ func (s *RoleService) Get(id string) (*model.Role, error) {
 func (s *RoleService) GetByKey(key string) (*model.Role, error) {
 	var r model.Role
 	err := s.db.QueryRow("SELECT "+s.roleColumns()+" FROM roles WHERE "+s.db.Ident("key")+" = ?", key).
-		Scan(&r.ID, &r.Key, &r.Name, &r.Description, &r.SystemPrompt, &r.Model, &r.SortOrder, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
+		Scan(&r.ID, &r.Key, &r.Name, &r.Description, &r.SystemPrompt, &r.Model, &r.ClaudeConfigID, &r.SortOrder, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("role not found: %s", key)
 	}
@@ -214,7 +217,14 @@ func (s *RoleService) GetByKey(key string) (*model.Role, error) {
 }
 
 func (s *RoleService) Update(id string, req model.UpdateRoleReq) (*model.Role, error) {
-	if _, err := s.db.Exec("UPDATE roles SET system_prompt=?, model=?, updated_at=? WHERE id=?", req.SystemPrompt, req.Model, time.Now(), id); err != nil {
+	// claude_config_id is intentionally always written (including as the
+	// empty string), so a user can "unbind" by saving with no config
+	// selected. The previous single-active-config behavior is preserved
+	// because empty falls through to the global active config.
+	if _, err := s.db.Exec(
+		"UPDATE roles SET system_prompt=?, model=?, claude_config_id=?, updated_at=? WHERE id=?",
+		req.SystemPrompt, req.Model, req.ClaudeConfigID, time.Now(), id,
+	); err != nil {
 		return nil, err
 	}
 	return s.Get(id)

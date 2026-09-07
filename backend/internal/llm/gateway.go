@@ -17,6 +17,11 @@ import (
 // nil means "use the process environment only".
 type ClaudeEnvProvider interface {
 	ClaudeEnvVars() (authToken, baseURL string, err error)
+	// ClaudeEnvForConfigID resolves the env for a SPECIFIC Claude config
+	// (the per-role binding lookup). Empty id = same as ClaudeEnvVars
+	// (the global active config). Implementations fall back to the active
+	// config on a missing id so a stale binding never silently kills a run.
+	ClaudeEnvForConfigID(id string) (authToken, baseURL string, err error)
 }
 
 // LLMConfigProvider supplies the direct HTTP LLM channel config (base URL, API
@@ -93,14 +98,22 @@ func (g *Gateway) GetBinPath() string { return g.binPath }
 // custom base URL). When a token is configured, we therefore strip any inherited
 // ANTHROPIC_API_KEY from the child environment so the configured token wins.
 // claudeEnvOverrides builds the map of env vars the platform must pin on every
-// claude subprocess: auth token + base URL (from the active claude_configs row),
-// the three tier-model pins (when --model is set), and caller-supplied extras.
-// Shared by the local env builder (mergedEnv) and the remote env builder
-// (BuildRemoteEnvPairs) so both paths pin the same keys.
-func (g *Gateway) claudeEnvOverrides(model string, extras ...string) map[string]string {
+// claude subprocess: auth token + base URL (from claude_config_id when set,
+// otherwise the global active config), the three tier-model pins (when
+// --model is set), and caller-supplied extras. Shared by the local env
+// builder (mergedEnv) and the remote env builder (BuildRemoteEnvPairs) so
+// both paths pin the same keys.
+//
+// configID drives the per-role binding: a non-empty value resolves the env
+// against that specific claude_configs row (so a role's chosen model runs
+// against the role's chosen base URL + auth token), empty falls back to the
+// global active config. This is what makes "freely select any model from
+// any config and have it execute against that config's gateway" work.
+func (g *Gateway) claudeEnvOverrides(model, configID string, extras ...string) map[string]string {
 	overrides := map[string]string{}
 	if g.claudeEnv != nil {
-		if tok, baseURL, err := g.claudeEnv.ClaudeEnvVars(); err == nil {
+		tok, baseURL, err := g.resolveClaudeEnv(configID)
+		if err == nil {
 			if tok != "" {
 				overrides["ANTHROPIC_AUTH_TOKEN"] = tok
 			}
@@ -131,9 +144,20 @@ func (g *Gateway) claudeEnvOverrides(model string, extras ...string) map[string]
 	return overrides
 }
 
-func (g *Gateway) mergedEnv(model string, extra ...string) []string {
+// resolveClaudeEnv picks the per-call or global env (token + base URL) from
+// the configured provider. Empty configID → the global active config.
+// Implementations are expected to fall back to the active config on a stale
+// binding, so a missing config id never silently kills a run.
+func (g *Gateway) resolveClaudeEnv(configID string) (authToken, baseURL string, err error) {
+	if g.claudeEnv == nil {
+		return "", "", nil
+	}
+	return g.claudeEnv.ClaudeEnvForConfigID(configID)
+}
+
+func (g *Gateway) mergedEnv(model, configID string, extra ...string) []string {
 	env := os.Environ()
-	overrides := g.claudeEnvOverrides(model, extra...)
+	overrides := g.claudeEnvOverrides(model, configID, extra...)
 	// Keys to strip from the inherited env because they would conflict with the
 	// configured auth. Only strip when we are actually injecting ANTHROPIC_AUTH_TOKEN.
 	dropKeys := map[string]bool{}
@@ -166,7 +190,7 @@ func (g *Gateway) mergedEnv(model string, extra ...string) []string {
 // settings.json would silently shadow the configured ANTHROPIC_AUTH_TOKEN /
 // ANTHROPIC_BASE_URL. We only do this when an override is actually present, so
 // a platform with no Claude config still falls back to the user's settings.
-func (g *Gateway) settingSources(override *bool) string {
+func (g *Gateway) settingSources(configID string, override *bool) string {
 	// Explicit override always wins — used by the remote Agent-server path
 	// where the host's ~/.claude/settings.json may be stale or carry a
 	// different base URL. Forcing --setting-sources project,local drops the
@@ -180,7 +204,7 @@ func (g *Gateway) settingSources(override *bool) string {
 	if g.claudeEnv == nil {
 		return ""
 	}
-	tok, baseURL, err := g.claudeEnv.ClaudeEnvVars()
+	tok, baseURL, err := g.resolveClaudeEnv(configID)
 	if err != nil || (tok == "" && baseURL == "") {
 		return ""
 	}
@@ -193,7 +217,7 @@ func (g *Gateway) settingSources(override *bool) string {
 // the unexported streamArgs above; both go through settingSources so a custom
 // base URL stays in sync with the local execution.
 func (g *Gateway) BuildStreamArgs(opts StreamOpts) []string {
-	return g.streamArgs(opts.Prompt, opts.SystemPrompt, opts.Model, opts.SessionID, opts.Resume, opts.Fork, opts.ForkSessionID, opts.DisallowedTools, opts.PermissionMode, opts.OverrideSettingSources)
+	return g.streamArgs(opts.Prompt, opts.SystemPrompt, opts.Model, opts.ClaudeConfigID, opts.SessionID, opts.Resume, opts.Fork, opts.ForkSessionID, opts.DisallowedTools, opts.PermissionMode, opts.OverrideSettingSources)
 }
 
 // BuildEnvPairs returns the merged KEY=VALUE environment entries that StreamCmd
@@ -214,10 +238,19 @@ func (g *Gateway) BuildStreamArgs(opts StreamOpts) []string {
 // behavior, which works for any model the API itself accepts — exactly
 // what we want when the user is pointing at a non-Anthropic endpoint.
 func (g *Gateway) BuildEnvPairs(model string, extras ...string) []string {
+	return g.BuildEnvPairsWithConfig(model, "", extras...)
+}
+
+// BuildEnvPairsWithConfig is the per-config-id variant of BuildEnvPairs: pass
+// a non-empty configID to pin the auth + base URL to that specific
+// claude_configs row, empty to use the global active config. The CLI
+// subprocess's tier-model pins + the model-window-enforcement bypass
+// remain model-driven (so they always reflect the actual --model value).
+func (g *Gateway) BuildEnvPairsWithConfig(model, configID string, extras ...string) []string {
 	if model != "" {
 		extras = append(extras, "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1")
 	}
-	return g.mergedEnv(model, extras...)
+	return g.mergedEnv(model, configID, extras...)
 }
 
 // BuildRemoteEnvPairs returns ONLY the platform-pinned env entries for a claude
@@ -234,10 +267,18 @@ func (g *Gateway) BuildEnvPairs(model string, extras ...string) []string {
 // The remote env must therefore carry only the keys the CLI can't derive from
 // the remote host itself.
 func (g *Gateway) BuildRemoteEnvPairs(model string, extras ...string) []string {
+	return g.BuildRemoteEnvPairsWithConfig(model, "", extras...)
+}
+
+// BuildRemoteEnvPairsWithConfig is the per-config-id variant for the remote
+// path. Same shape as BuildEnvPairsWithConfig; exists so a sub-task running
+// against a non-active Claude config (e.g. the executor role bound to a custom
+// gateway) injects the right auth + base URL into the remote shell.
+func (g *Gateway) BuildRemoteEnvPairsWithConfig(model, configID string, extras ...string) []string {
 	if model != "" {
 		extras = append(extras, "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1")
 	}
-	overrides := g.claudeEnvOverrides(model, extras...)
+	overrides := g.claudeEnvOverrides(model, configID, extras...)
 	out := make([]string, 0, len(overrides))
 	for k, v := range overrides {
 		out = append(out, k+"="+v)
@@ -249,6 +290,12 @@ func (g *Gateway) BuildRemoteEnvPairs(model string, extras ...string) []string {
 // dangerously-skip-permissions runs. When systemPrompt is non-empty it is passed
 // via --system-prompt (full replace); when model is non-empty it is passed via
 // --model. These come from the role config (see service.DefaultRoles).
+//
+// configID drives --setting-sources: when set, the gateway checks the
+// per-config env (rather than the global active env) to decide whether the
+// "user" ~/.claude/settings.json source must be dropped. The role's binding
+// thus controls both the auth + base URL AND whether the CLI applies the
+// --setting-sources project,local override.
 //
 // Session handling: when sessionID is non-empty, a non-resume call passes
 // --session-id <uuid> (starts a new conversation with a known id); a resume call
@@ -262,9 +309,9 @@ func (g *Gateway) BuildRemoteEnvPairs(model string, extras ...string) []string {
 // rather than having to read it back from the stream's init event after the
 // fact — this is what lets us persist the session id before the run even starts.
 // All flags combine with --system-prompt/--model/--dangerously-skip-permissions.
-func (g *Gateway) streamArgs(prompt, systemPrompt, model, sessionID string, resume, fork bool, forkSessionID string, disallowedTools []string, permissionMode string, overrideSettingSources *bool) []string {
+func (g *Gateway) streamArgs(prompt, systemPrompt, model, configID, sessionID string, resume, fork bool, forkSessionID string, disallowedTools []string, permissionMode string, overrideSettingSources *bool) []string {
 	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
-	if ss := g.settingSources(overrideSettingSources); ss != "" {
+	if ss := g.settingSources(configID, overrideSettingSources); ss != "" {
 		args = append(args, "--setting-sources", ss)
 	}
 	if permissionMode == "plan" {
@@ -320,6 +367,13 @@ type StreamOpts struct {
 	WorkDir         string
 	SystemPrompt    string
 	Model           string
+	// ClaudeConfigID pins this claude run to a specific claude_configs row —
+	// the gateway looks up that row's auth + base URL and injects them into
+	// the subprocess env instead of the global active config. Empty =
+	// "fall back to the global active config" (legacy single-config path).
+	// Handlers resolve the role's bound config here so the user's chosen
+	// model runs against the user's chosen gateway.
+	ClaudeConfigID  string
 	SessionID       string
 	Resume          bool
 	Fork            bool   // --fork-session; only meaningful when Resume is true
@@ -333,14 +387,14 @@ type StreamOpts struct {
 	ExtraEnv []string
 	// OverrideSettingSources tri-state:
 	//   nil  → auto (existing behavior): pass --setting-sources project,local
-	//          ONLY when an active claude_configs row supplies a non-empty
-	//          auth token or base URL (see Gateway.settingSources).
+	//          ONLY when the resolved (per-config) auth token or base URL is
+	//          non-empty. See Gateway.settingSources.
 	//   *true → force override: ALWAYS pass --setting-sources project,local,
 	//          dropping the user's ~/.claude/settings.json "env" block from
 	//          the merged process environment. Required by the remote
 	//          Agent-server path because the remote host's settings.json
 	//          may carry a stale/wrong base URL that would silently shadow
-	//          the platform's active claude_configs row.
+	//          the platform's claude_configs row.
 	//   *false → never override: always let the CLI load user + project +
 	//           local sources (default when no auth override is present).
 	OverrideSettingSources *bool
@@ -356,7 +410,7 @@ type StreamOpts struct {
 // id.
 func (g *Gateway) StreamCmd(ctx context.Context, opts StreamOpts) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, g.binPath, g.BuildStreamArgs(opts)...)
-	cmd.Env = g.BuildEnvPairs(opts.Model, opts.ExtraEnv...)
+	cmd.Env = g.BuildEnvPairsWithConfig(opts.Model, opts.ClaudeConfigID, opts.ExtraEnv...)
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
 	}
@@ -370,8 +424,8 @@ func (g *Gateway) runClaudeStreamJSON(prompt, workDir, systemPrompt, model strin
 	ctx, cancel := context.WithTimeout(context.Background(), g.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, g.binPath, g.streamArgs(prompt, systemPrompt, model, "", false, false, "", nil, "", nil)...)
-	cmd.Env = g.mergedEnv(model)
+	cmd := exec.CommandContext(ctx, g.binPath, g.streamArgs(prompt, systemPrompt, model, "", "", false, false, "", nil, "", nil)...)
+	cmd.Env = g.mergedEnv(model, "")
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
@@ -411,11 +465,11 @@ func (g *Gateway) runClaudeText(prompt string, timeout time.Duration) (string, e
 	defer cancel()
 
 	args := []string{"-p", prompt, "--output-format", "text"}
-	if ss := g.settingSources(nil); ss != "" {
+	if ss := g.settingSources("", nil); ss != "" {
 		args = append(args, "--setting-sources", ss)
 	}
 	cmd := exec.CommandContext(ctx, g.binPath, args...)
-	cmd.Env = g.mergedEnv("")
+	cmd.Env = g.mergedEnv("", "")
 
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -560,11 +614,11 @@ func (g *Gateway) GenerateProjectSummary(projectPath, claudeMD string) (string, 
 	defer cancel()
 
 	args := []string{"-p", prompt, "--output-format", "text"}
-	if ss := g.settingSources(nil); ss != "" {
+	if ss := g.settingSources("", nil); ss != "" {
 		args = append(args, "--setting-sources", ss)
 	}
 	cmd := exec.CommandContext(ctx, g.binPath, args...)
-	cmd.Env = g.mergedEnv("")
+	cmd.Env = g.mergedEnv("", "")
 	if projectPath != "" {
 		cmd.Dir = projectPath
 	}
