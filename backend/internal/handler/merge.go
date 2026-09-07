@@ -92,16 +92,22 @@ func (h *MergeHandler) persistJob(job *store.Job, reqID, model string) {
 	}
 }
 
-// roleConfig loads a role's system prompt + model by key (developer for
-// conflict resolution, pr_author for PR summary). On miss it returns empty
-// strings so a broken role config never blocks the merge/PR flow.
-func (h *MergeHandler) roleConfig(key string) (systemPrompt, model string) {
+// roleConfig loads a role's system prompt + model + the Claude config the
+// role is bound to (developer for conflict resolution, pr_author for PR
+// summary). On miss it returns empty strings so a broken role config never
+// blocks the merge/PR flow.
+func (h *MergeHandler) roleConfig(key string) (systemPrompt, model, configID string) {
 	r, err := h.roleSvc.GetByKey(key)
 	if err != nil {
 		log.Printf("[merge] role %q not found, using CLI defaults: %v", key, err)
-		return "", ""
+		return "", "", ""
 	}
-	return r.SystemPrompt, r.Model
+	cfg, _ := h.claudeCfg.ResolveRoleConfig(r)
+	cid := ""
+	if cfg != nil {
+		cid = cfg.ID
+	}
+	return r.SystemPrompt, r.Model, cid
 }
 
 // loadReqProject resolves the requirement + its project (LocalPath /
@@ -670,7 +676,7 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 	job := h.jobs.Create(reqRow.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
 
-	systemPrompt, model := h.roleConfig("developer")
+	systemPrompt, model, claudeConfigID := h.roleConfig("developer")
 
 	go func() {
 		defer h.persistJob(job, reqRow.ID, model)
@@ -695,11 +701,12 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 		}
 
 		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-			Prompt:       prompt,
-			WorkDir:      dir,
-			SystemPrompt: systemPrompt,
-			Model:        model,
-			ExtraEnv:     extraEnv,
+			Prompt:         prompt,
+			WorkDir:        dir,
+			SystemPrompt:   systemPrompt,
+			Model:          model,
+			ClaudeConfigID: claudeConfigID,
+			ExtraEnv:       extraEnv,
 			// empty PermissionMode → --dangerously-skip-permissions (full tool use)
 		})
 		configID, currency := h.activeConfigMeta()
@@ -797,9 +804,11 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	// when it actually spawns the CLI, so the persisted value matches the
 	// dispatched value.
 	effectiveModel := body.Model
+	roleConfigID := ""
 	if effectiveModel == "" {
-		_, roleModel := h.roleConfig("developer")
+		_, roleModel, cfgID := h.roleConfig("developer")
 		effectiveModel = roleModel
+		roleConfigID = cfgID
 	}
 
 	// Build the prompt that drives the sub-agent. The body lays out the
@@ -836,7 +845,7 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 		"sub_task_id": st.ID,
 	})
 
-	go h.subTaskRunner.Run(reqRow, st, job, newSID, sourceSID, prompt, effectiveModel, false)
+	go h.subTaskRunner.Run(reqRow, st, job, newSID, sourceSID, prompt, effectiveModel, roleConfigID, false)
 }
 
 // buildPushSubTaskPrompt composes the task description the push sub-agent
@@ -976,7 +985,7 @@ func truncateMergePrompt(s string, max int) string {
 // frame was appended for human intervention. stop=false means the merge is
 // clean (or was resolved) and the flow may continue.
 func (h *MergeHandler) mergeAndResolveBase(job *store.Job, devDir, base, dev string, reqRow *model.Requirement) (string, bool) {
-	systemPrompt, model := h.roleConfig("developer")
+	systemPrompt, model, claudeConfigID := h.roleConfig("developer")
 	// Pull the project's commit identity so the merge commit (created by
 	// `git merge --no-edit`) carries the right author/committer on Docker
 	// hosts without a mounted ~/.gitconfig.
@@ -1015,7 +1024,7 @@ func (h *MergeHandler) mergeAndResolveBase(job *store.Job, devDir, base, dev str
 	}
 
 	// AI resolve the conflicts (developer role, full tool use).
-	resolved := h.aiResolveConflicts(job, devDir, conflicts, systemPrompt, model, reqRow)
+	resolved := h.aiResolveConflicts(job, devDir, conflicts, systemPrompt, model, claudeConfigID, reqRow)
 	if resolved {
 		return model, false
 	}
@@ -1034,7 +1043,7 @@ func (h *MergeHandler) mergeAndResolveBase(job *store.Job, devDir, base, dev str
 // conflict markers in devDir and conclude the merge. Returns true when the
 // merge is concluded (MERGE_HEAD gone, no conflict files left); the repo stays
 // mid-merge on failure so the caller can abort.
-func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflicts []string, systemPrompt, model string, reqRow *model.Requirement) bool {
+func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflicts []string, systemPrompt, model, claudeConfigID string, reqRow *model.Requirement) bool {
 	job.Append(store.LogLine{Type: "phase", Content: "🤖 Claude 正在解决与主分支的合并冲突..."})
 	fileList := strings.Join(conflicts, "\n")
 	prompt := fmt.Sprintf("当前开发分支正在与主分支合并，以下文件存在冲突标记（<<<<<<< / ======= / >>>>>>>）：\n%s\n\n"+
@@ -1055,11 +1064,12 @@ func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflic
 		}
 	}
 	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-		Prompt:       prompt,
-		WorkDir:      devDir,
-		SystemPrompt: systemPrompt,
-		Model:        model,
-		ExtraEnv:     extraEnv,
+		Prompt:         prompt,
+		WorkDir:        devDir,
+		SystemPrompt:   systemPrompt,
+		Model:          model,
+		ClaudeConfigID: claudeConfigID,
+		ExtraEnv:       extraEnv,
 	})
 	configID, currency := h.activeConfigMeta()
 	runClaudeStream(jobSink{job}, cmd, "push-pr-resolve", &usageCtx{
@@ -1079,7 +1089,7 @@ func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflic
 // from the dev...base diff. Falls back to ("", "", model) on failure so the
 // caller degrades to reqRow.Title / reqRow.Description without blocking.
 func (h *MergeHandler) generatePRSummary(job *store.Job, devDir, base, dev string, reqRow *model.Requirement) (title, body, modelOut string) {
-	systemPrompt, model := h.roleConfig("pr_author")
+	systemPrompt, model, claudeConfigID := h.roleConfig("pr_author")
 	modelOut = model
 	job.Append(store.LogLine{Type: "phase", Content: "📝 Claude 正在生成 PR 摘要..."})
 	prompt := fmt.Sprintf("请为本次开发分支的改动撰写 PR 描述。\n\n开发分支：%s\n主分支（base）：%s\n需求标题：%s\n需求描述：\n%s\n\n"+
@@ -1087,10 +1097,11 @@ func (h *MergeHandler) generatePRSummary(job *store.Job, devDir, base, dev strin
 		"3. 结合需求理解改动意图\n4. 按 system prompt 要求的 JSON 格式输出 PR 标题与正文",
 		dev, base, reqRow.Title, reqRow.Description, base, dev)
 	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-		Prompt:       prompt,
-		WorkDir:      devDir,
-		SystemPrompt: systemPrompt,
-		Model:        model,
+		Prompt:         prompt,
+		WorkDir:        devDir,
+		SystemPrompt:   systemPrompt,
+		Model:          model,
+		ClaudeConfigID: claudeConfigID,
 	})
 	configID, currency := h.activeConfigMeta()
 	out := runClaudeStream(jobSink{job}, cmd, "push-pr-summary", &usageCtx{

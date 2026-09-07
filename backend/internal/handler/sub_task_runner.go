@@ -135,6 +135,7 @@ func (r *SubTaskRunner) Run(
 	sourceSID string,
 	body string,
 	modelOverride string,
+	configIDOverride string,
 	adjust bool,
 ) {
 	startTime, mErr := r.subTaskSvc.MarkRunning(st.ID)
@@ -161,7 +162,7 @@ func (r *SubTaskRunner) Run(
 	// which carries the developer (统筹协调) persona that decomposes instead
 	// of implementing. Without the override the child re-emits
 	// [SUBTASKS_READY] and writes no code.
-	_, modelName := r.roleConfig("developer")
+	_, modelName, _ := r.roleConfig("developer")
 	if modelOverride != "" {
 		modelName = modelOverride
 	}
@@ -200,12 +201,19 @@ func (r *SubTaskRunner) Run(
 		}
 	}
 
-	execSystemPrompt, _ := r.roleConfig(executorRoleKey)
+	execSystemPrompt, _, executorConfigID := r.roleConfig(executorRoleKey)
+	// Caller's configIDOverride (from merge handler etc.) wins over the role's
+	// default binding — keeps a per-run model override coherent with the
+	// per-run config override the caller wants to honor.
+	if configIDOverride != "" {
+		executorConfigID = configIDOverride
+	}
 	cmd, cancel := r.llm.GenerateCode(llm.StreamOpts{
-		Prompt:       prompt,
-		WorkDir:      workDir,
-		SystemPrompt: execSystemPrompt,
-		Model:        cliModelArg(modelName),
+		Prompt:         prompt,
+		WorkDir:        workDir,
+		SystemPrompt:   execSystemPrompt,
+		Model:          cliModelArg(modelName),
+		ClaudeConfigID: executorConfigID,
 		// --resume <sourceSID> --fork-session --session-id <newSID>:
 		// child agent inherits the parent's conversation context but
 		// executes in its own session.
@@ -257,18 +265,25 @@ func (r *SubTaskRunner) Run(
 	log.Printf("[sub-task] job %s finished for %s status=%s", job.ID, st.ID, finalStatus)
 }
 
-// roleConfig loads a role's system prompt + model by key. On miss it returns
+// roleConfig loads a role's system prompt + model + the Claude config the
+// role is bound to (so the sub-task executor can run against the role's
+// chosen gateway, not just the global active one). On miss it returns
 // empty strings so a broken role config never blocks the sub-task.
-func (r *SubTaskRunner) roleConfig(key string) (systemPrompt, model string) {
+func (r *SubTaskRunner) roleConfig(key string) (systemPrompt, model, configID string) {
 	if r.roleSvc == nil {
-		return "", ""
+		return "", "", ""
 	}
 	rr, err := r.roleSvc.GetByKey(key)
 	if err != nil {
 		log.Printf("[sub-task] role %q not found, using CLI defaults: %v", key, err)
-		return "", ""
+		return "", "", ""
 	}
-	return rr.SystemPrompt, rr.Model
+	cfg, _ := r.claudeCfg.ResolveRoleConfig(rr)
+	cid := ""
+	if cfg != nil {
+		cid = cfg.ID
+	}
+	return rr.SystemPrompt, rr.Model, cid
 }
 
 // usageCtxFor builds a usageCtx for one sub-task claude invocation. Mirrors

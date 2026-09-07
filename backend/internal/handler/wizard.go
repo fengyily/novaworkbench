@@ -282,27 +282,39 @@ func cliModelArg(effModel string) string {
 	return effModel
 }
 
-// roleConfig loads a role's system prompt + effective model by key. The
-// returned model is the EFFECTIVE model (role override, else active config
-// default, else the "默认模型" literal) — pass it through cliModelArg before
-// handing it to StreamOpts.Model so the sentinel never reaches the CLI. On
-// error it returns empty system prompt + the resolved default model (and logs)
-// so a missing/broken role config never blocks the wizard pipeline.
-func (h *WizardHandler) roleConfig(key string) (systemPrompt, model string) {
+// roleConfig loads a role's system prompt + effective model + the
+// Claude config the role is bound to. The returned model is the EFFECTIVE
+// model (role override → role's bound config's default → global active
+// config's default → "默认模型" literal). The configID is non-empty whenever
+// the role has its own binding or a global active config exists; it must be
+// threaded into StreamOpts.ClaudeConfigID so the gateway injects the right
+// auth + base URL into the claude subprocess. Pass the model through
+// cliModelArg before handing it to StreamOpts.Model so the sentinel never
+// reaches the CLI.
+//
+// A missing/broken role config never blocks the wizard pipeline: we return
+// empty system prompt + the resolved default model + the active config id
+// (or "" when no config exists), and log a one-line warning.
+func (h *WizardHandler) roleConfig(key string) (systemPrompt, model, configID string) {
 	r, err := h.roleSvc.GetByKey(key)
 	if err != nil {
 		log.Printf("[wizard] role %q not found, using CLI defaults: %v", key, err)
-		return "", h.effectiveModel("")
+		return "", h.effectiveModelFromConfig("", nil), h.activeConfigID()
 	}
-	return r.SystemPrompt, h.effectiveModel(r.Model)
+	cfg, _ := h.claudeCfg.ResolveRoleConfig(r)
+	if cfg != nil {
+		return r.SystemPrompt, effectiveModelFromValues(r.Model, cfg.DefaultModel), cfg.ID
+	}
+	return r.SystemPrompt, h.effectiveModelFromConfig(r.Model, r), h.activeConfigID()
 }
 
 // effectiveModel resolves the model that will actually be dispatched to the
-// claude CLI for a role. roleModel is the role's explicit override (pass the
-// already-loaded role.Model to avoid a second DB hit, or "" to look it up by
-// key — though roleConfig always loads the role first, so callers normally
-// pass r.Model directly). Falls back to the active claude config's default
-// model, then to the "默认模型" literal. See effectiveModelFromValues.
+// claude CLI for a role. roleModel is the role's explicit override. Falls
+// back to the role's bound config's default, then the global active
+// config's default, then the "默认模型" literal. See effectiveModelFromValues.
+//
+// This helper is the legacy "no role row in hand" path — prefer
+// effectiveModelFromConfig for the modern role binding resolution.
 func (h *WizardHandler) effectiveModel(roleModel string) string {
 	configDefault := ""
 	if h.claudeCfg != nil {
@@ -311,6 +323,34 @@ func (h *WizardHandler) effectiveModel(roleModel string) string {
 		}
 	}
 	return effectiveModelFromValues(roleModel, configDefault)
+}
+
+// effectiveModelFromConfig is the per-role variant: it uses the role's bound
+// Claude config (when present) instead of the global active config. A nil
+// role → the legacy global-active path so the caller doesn't have to special
+// case "no role row" before calling.
+func (h *WizardHandler) effectiveModelFromConfig(roleModel string, role *model.Role) string {
+	configDefault := ""
+	if h.claudeCfg != nil {
+		if cfg, _ := h.claudeCfg.ResolveRoleConfig(role); cfg != nil {
+			configDefault = cfg.DefaultModel
+		}
+	}
+	return effectiveModelFromValues(roleModel, configDefault)
+}
+
+// activeConfigID returns the active claude_configs row's id (or "" when no
+// config is active). Used as the StreamOpts.ClaudeConfigID fallback when a
+// role has no binding of its own.
+func (h *WizardHandler) activeConfigID() string {
+	if h.claudeCfg == nil {
+		return ""
+	}
+	c, err := h.claudeCfg.ActiveConfig()
+	if err != nil || c == nil {
+		return ""
+	}
+	return c.ID
 }
 
 // usageCtxFor builds a usageCtx for one claude invocation. The returned ctx
@@ -530,7 +570,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	}
 	resumePrompt := req.UserMessage
 
-	systemPrompt, model := h.roleConfig("analyst")
+	systemPrompt, model, claudeConfigID := h.roleConfig("analyst")
 	// Per-request model override (highest precedence); empty means role default.
 	if req.Model != "" {
 		model = req.Model
@@ -617,7 +657,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 			resumePrompt = skillsBlock + resumePrompt
 		}
 		analystUsage := h.usageCtxFor("analyst_chat", req.RequirementID, requirement.ProjectID, job.ID, model, "", "")
-		finalResult, newSessionID, err := h.runAnalystTurn(context.Background(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, sessionID, !isFirstRound, sink, analystUsage)
+		finalResult, newSessionID, err := h.runAnalystTurn(context.Background(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sessionID, !isFirstRound, sink, analystUsage)
 		if err != nil {
 			log.Printf("[analyst-chat] turn failed: %v", err)
 			job.Append(store.LogLine{Type: "error", Content: err.Error()})
@@ -766,7 +806,7 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	systemPrompt, model := h.roleConfig("developer")
+	systemPrompt, model, claudeConfigID := h.roleConfig("developer")
 	// Per-request model override (highest precedence); empty means role default.
 	if req.Model != "" {
 		model = req.Model
@@ -828,7 +868,7 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		developerProjectID = requirement.ProjectID
 	}
 	developerUsage := h.usageCtxFor("developer_chat", req.RequirementID, developerProjectID, "", model, "", req.UserMessage)
-	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, sourceSID, fork, newSID, w, rc, developerUsage)
+	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sourceSID, fork, newSID, w, rc, developerUsage)
 	if err != nil {
 		log.Printf("[developer-chat] turn failed: %v", err)
 		sendStatus(w, rc, "error", err.Error())
@@ -1362,7 +1402,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		if req.AgentServerID != "" || !req.SplitTasks {
 			roleKey = "agent"
 		}
-		systemPrompt, model := h.roleConfig(roleKey)
+		systemPrompt, model, claudeConfigID := h.roleConfig(roleKey)
 		// Per-request model override (highest precedence); empty means role default.
 		if req.Model != "" {
 			model = req.Model
@@ -1524,25 +1564,22 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
-			Prompt:        prompt,
-			WorkDir:       workDir,
-			SystemPrompt:  systemPrompt,
-			Model:         cliModelArg(model),
-			SessionID:     sessionArg,
-			Resume:        sourceSID != "",
-			Fork:          fork,
-			ForkSessionID: forkSessionID,
-			ExtraEnv:      codingExtraEnv,
+			Prompt:         prompt,
+			WorkDir:        workDir,
+			SystemPrompt:   systemPrompt,
+			Model:          cliModelArg(model),
+			ClaudeConfigID: claudeConfigID,
+			SessionID:      sessionArg,
+			Resume:         sourceSID != "",
+			Fork:           fork,
+			ForkSessionID:  forkSessionID,
+			ExtraEnv:       codingExtraEnv,
 		})
+		// Release the 30-minute context timer the moment runClaudeStream
+		// finishes (cmd.Wait returns) — the goroutine may then stay alive
+		// for tryAutoOrchestrate + log emission, but the claude subprocess
+		// itself is already done.
 		defer cancel()
-
-		// runClaudeStream owns the subprocess lifecycle (Start/Wait) and parses
-		// stream-json events into job log lines via jobSink — including the
-		// stream_event/content_block_delta increments the hand-written parser
-		// used here previously dropped, which made the coding panel look frozen
-		// until the turn's batched assistant event arrived. It also surfaces an
-		// immediate "🤖 Claude 已连接" phase on the system/init event and a
-		// tool_call label on content_block_start, giving live progress.
 		codingProjectID := ""
 		if reqRow != nil {
 			codingProjectID = reqRow.ProjectID
@@ -1569,15 +1606,16 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 					ReadKnowledge:    req.ReadKnowledge,
 					AgentServerID:    req.AgentServerID,
 				},
-				reqRow:        reqRow,
-				prompt:        prompt,
-				workDir:       workDir,
-				sourceSID:     sourceSID,
-				fork:          fork,
-				sessionArg:    sessionArg,
-				forkSessionID: forkSessionID,
-				model:         model,
-				usage:         codingUsage,
+				reqRow:         reqRow,
+				prompt:         prompt,
+				workDir:        workDir,
+				sourceSID:      sourceSID,
+				fork:           fork,
+				sessionArg:     sessionArg,
+				forkSessionID:  forkSessionID,
+				model:          model,
+				claudeConfigID: claudeConfigID,
+				usage:          codingUsage,
 			})
 			if out.staleSession {
 				job.Append(store.LogLine{Type: "error", Content: "❌ 源会话已失效，请重新发起对应阶段后再开发。"})
@@ -1687,7 +1725,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 		// 信号，用户的开发启动 SSE 立即结束；子任务的进度仍由
 		// dispatchOneChild 的 JobStore job 推流。
 		if roleKey != "agent" && req.RequirementID != "" && newCodingSID != "" && h.subTaskSvc != nil && splitTasks {
-			go h.tryAutoOrchestrate(req.RequirementID, newCodingSID, out.finalResult, out.subTasksJSON, reqRow, workDir, model)
+			go h.tryAutoOrchestrate(req.RequirementID, newCodingSID, out.finalResult, out.subTasksJSON, reqRow, workDir, model, claudeConfigID)
 		}
 	}()
 }
@@ -1752,7 +1790,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 	// setting applies to follow-up turns). The system prompt is deliberately
 	// omitted: the resumed coding session already carries the developer
 	// persona, and re-injecting --system-prompt would replace it.
-	_, model := h.roleConfig("developer")
+	_, model, claudeConfigID := h.roleConfig("developer")
 	// Per-request model override (highest precedence); empty means role default.
 	if body.Model != "" {
 		model = body.Model
@@ -1807,13 +1845,14 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			adjustPrompt += "\n\n" + block
 		}
 		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
-			Prompt:       adjustPrompt,
-			WorkDir:      workDir,
-			SystemPrompt: "", // resume 已携带 developer persona，不再注入
-			Model:        cliModelArg(model),
-			SessionID:    req.CodingSessionID,
-			Resume:       true,
-			Fork:         false,
+			Prompt:         adjustPrompt,
+			WorkDir:        workDir,
+			SystemPrompt:   "", // resume 已携带 developer persona，不再注入
+			Model:          cliModelArg(model),
+			ClaudeConfigID: claudeConfigID,
+			SessionID:      req.CodingSessionID,
+			Resume:         true,
+			Fork:           false,
 		})
 		defer cancel()
 		adjustUsage := h.usageCtxFor("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message)
@@ -1905,7 +1944,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 	// setting applies to the continuation). The system prompt is deliberately
 	// omitted: the resumed coding session already carries the developer persona,
 	// and re-injecting --system-prompt would replace it (same as AdjustCoding).
-	_, model := h.roleConfig("developer")
+	_, model, claudeConfigID := h.roleConfig("developer")
 
 	job := h.jobs.Create(body.RequirementID)
 	job.SetModel(model)
@@ -1944,13 +1983,14 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 			prompt += "\n\n" + block
 		}
 		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
-			Prompt:       prompt,
-			WorkDir:      workDir,
-			SystemPrompt: "", // resume 已携带 developer persona，不再注入
-			Model:        cliModelArg(model),
-			SessionID:    req.CodingSessionID,
-			Resume:       true,
-			Fork:         false,
+			Prompt:         prompt,
+			WorkDir:        workDir,
+			SystemPrompt:   "", // resume 已携带 developer persona，不再注入
+			Model:          cliModelArg(model),
+			ClaudeConfigID: claudeConfigID,
+			SessionID:      req.CodingSessionID,
+			Resume:         true,
+			Fork:           false,
 		})
 		defer cancel()
 		continueUsage := h.usageCtxFor("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "")
@@ -2163,7 +2203,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		prompt += "\n\n" + block
 	}
 
-	systemPrompt, model := h.roleConfig("architect")
+	systemPrompt, model, claudeConfigID := h.roleConfig("architect")
 	// Per-request model override (highest precedence); empty means role default.
 	if body.Model != "" {
 		model = body.Model
@@ -2206,6 +2246,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 			WorkDir:        workDir,
 			SystemPrompt:   systemPrompt,
 			Model:          cliModelArg(model),
+			ClaudeConfigID: claudeConfigID,
 			SessionID:      sessionArg,
 			Resume:         sourceSID != "",
 			Fork:           fork,
@@ -3137,18 +3178,19 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 // signature readable and forces callers to acknowledge the same dependencies
 // the local branch already resolved (prompt, workDir, session threading).
 type remoteCodingInput struct {
-	job           *store.Job
-	serverID      string
-	req           startCodingReq
-	reqRow        *model.Requirement
-	prompt        string
-	workDir       string // local worktree path (used only for SFTP upload source)
-	sourceSID     string
-	fork          bool
-	sessionArg    string
-	forkSessionID string
-	model         string
-	usage         *usageCtx
+	job            *store.Job
+	serverID       string
+	req            startCodingReq
+	reqRow         *model.Requirement
+	prompt         string
+	workDir        string // local worktree path (used only for SFTP upload source)
+	sourceSID      string
+	fork           bool
+	sessionArg     string
+	forkSessionID  string
+	model          string
+	claudeConfigID string // role-bound claude config; empty = global active
+	usage          *usageCtx
 }
 
 // startCodingReq mirrors the anonymous struct StartCoding decodes so the
@@ -3291,6 +3333,7 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		WorkDir:                wtPath,
 		SystemPrompt:           "",
 		Model:                  cliModelArg(in.model),
+		ClaudeConfigID:         in.claudeConfigID,
 		SessionID:              in.sessionArg,
 		Resume:                 in.sourceSID != "",
 		Fork:                   in.fork,
@@ -3304,7 +3347,7 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// inherits os.Environ() of the NovaWorkbench host and would leak macOS
 	// HOME=/Users/... + TMPDIR=/var/folders/... into the Linux agent, making
 	// `claude --print ping` hang and fail the preflight (preflight_timeout).
-	envPairs := h.llm.BuildRemoteEnvPairs(opts.Model)
+	envPairs := h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, in.claudeConfigID)
 	runBody := workerRunRequest(opts, envPairs, in)
 
 	// Step 5: POST to nova-agent-worker via SSH direct-tcpip channel. The
@@ -3444,6 +3487,12 @@ type workerRunBody struct {
 	Env             map[string]string `json:"env,omitempty"`
 	AllowedTools    []string          `json:"allowedTools,omitempty"`
 	DisallowedTools []string          `json:"disallowedTools,omitempty"`
+	// ClaudeConfigID records which claude_configs row was used to source the
+	// auth token + base URL carried in Env. The worker mirrors it into the
+	// inline --settings JSON's "env" block as ANTHROPIC_MODEL so the CLI's
+	// own env precedence can't be shadowed by a stale project / local
+	// settings file. Empty when the global active config was used.
+	ClaudeConfigID  string            `json:"claudeConfigId,omitempty"`
 	// OverrideSettingSources is the legacy "drop the user source" flag —
 	// when true, the worker invokes claude with --setting-sources project,local.
 	// Kept for callers that still want project-level hooks etc.
@@ -3491,6 +3540,11 @@ func workerRunRequest(opts llm.StreamOpts, envPairs []string, in *remoteCodingIn
 		Fork:                   opts.Fork,
 		ForkSessionID:          opts.ForkSessionID,
 		Env:                    envMap,
+		// Pass the config id so the worker can mirror ANTHROPIC_MODEL into
+		// the inline --settings JSON (the worker's buildSettingsArg already
+		// does this for opts.model; claudeConfigId is informational today but
+		// keeps the wire format ready for future per-config settings tweaks).
+		ClaudeConfigID:         opts.ClaudeConfigID,
 		OverrideSettingSources: override,
 		// Always drop local settings on the remote Agent-server path. The
 		// wizard remote-coding call site passes OverrideSettingSources=true
@@ -3829,7 +3883,7 @@ var analystFirstTurnDisallowedTools = []string{"Read", "Glob", "Grep", "Bash", "
 // JobStore flow it is a jobSink so the lines survive a page refresh via the job's
 // replay buffer. Returns the final result text and the session id that actually
 // landed on disk (which the caller persists).
-func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, sessionID string, resume bool, sink streamSink, uctx *usageCtx) (finalResult, newSessionID string, err error) {
+func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, claudeConfigID, sessionID string, resume bool, sink streamSink, uctx *usageCtx) (finalResult, newSessionID string, err error) {
 	prompt := resumePrompt
 	if !resume {
 		prompt = firstTurnPrompt()
@@ -3851,6 +3905,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 		WorkDir:         projectPath,
 		SystemPrompt:    systemPrompt,
 		Model:           cliModelArg(model),
+		ClaudeConfigID:  claudeConfigID,
 		SessionID:       sessionID,
 		Resume:          resume,
 		DisallowedTools: disallowed,
@@ -3871,6 +3926,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 			WorkDir:         projectPath,
 			SystemPrompt:    systemPrompt,
 			Model:           cliModelArg(model),
+			ClaudeConfigID:  claudeConfigID,
 			SessionID:       freshID,
 			DisallowedTools: analystFirstTurnDisallowedTools,
 		})
@@ -3903,7 +3959,7 @@ var developerChatDisallowedTools = []string{"Write", "Edit"}
 // (--session-id); it is "" on a plain resume. Returns the final result text and
 // the session id that actually landed on disk (a forked or fresh id differs
 // from the input; the caller persists it).
-func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, sessionID string, fork bool, newSID string, w http.ResponseWriter, rc *http.ResponseController, uctx *usageCtx) (finalResult, newSessionID string, err error) {
+func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, claudeConfigID, sessionID string, fork bool, newSID string, w http.ResponseWriter, rc *http.ResponseController, uctx *usageCtx) (finalResult, newSessionID string, err error) {
 	resume := sessionID != ""
 	prompt := resumePrompt
 	if !resume {
@@ -3928,6 +3984,7 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 		WorkDir:         projectPath,
 		SystemPrompt:    systemPrompt,
 		Model:           cliModelArg(model),
+		ClaudeConfigID:  claudeConfigID,
 		SessionID:       sessionArg,
 		Resume:          resume,
 		Fork:            fork,
@@ -3950,6 +4007,7 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 			WorkDir:         projectPath,
 			SystemPrompt:    systemPrompt,
 			Model:           cliModelArg(model),
+			ClaudeConfigID:  claudeConfigID,
 			SessionID:       freshID,
 			DisallowedTools: developerChatDisallowedTools,
 		})
@@ -4242,7 +4300,7 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	systemPrompt, model := h.roleConfig(roleKey)
+	systemPrompt, model, claudeConfigID := h.roleConfig(roleKey)
 	// Per-request model override (highest precedence); empty means role default.
 	if req.Model != "" {
 		model = req.Model
@@ -4314,12 +4372,13 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
-		Prompt:       prompt,
-		WorkDir:      workDir,
-		SystemPrompt: systemPrompt,
-		Model:        cliModelArg(model),
-		SessionID:    sourceSID,
-		Resume:       !freshSession,
+		Prompt:         prompt,
+		WorkDir:        workDir,
+		SystemPrompt:   systemPrompt,
+		Model:          cliModelArg(model),
+		ClaudeConfigID: claudeConfigID,
+		SessionID:      sourceSID,
+		Resume:         !freshSession,
 	})
 
 	// Reuse runClaudeStream so this path gets live content_block_delta text
@@ -4471,7 +4530,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	systemPrompt, model := h.roleConfig(roleKey)
+	systemPrompt, model, claudeConfigID := h.roleConfig(roleKey)
 	// Per-request model override (highest precedence); empty means role default.
 	if req.Model != "" {
 		model = req.Model
@@ -4502,12 +4561,13 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		}
 
 		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-			Prompt:       applyPrompt,
-			WorkDir:      workDir,
-			SystemPrompt: systemPrompt,
-			Model:        cliModelArg(model),
-			SessionID:    sourceSID,
-			Resume:       true,
+			Prompt:         applyPrompt,
+			WorkDir:        workDir,
+			SystemPrompt:   systemPrompt,
+			Model:          cliModelArg(model),
+			ClaudeConfigID: claudeConfigID,
+			SessionID:      sourceSID,
+			Resume:         true,
 		})
 		applyUsage := h.usageCtxFor("apply_doc", reqID, requirement.ProjectID, job.ID, model, fmt.Sprintf("{\"doc_type\":%q}", docType), "")
 		out := runClaudeStream(jobSink{job}, cmd, "apply-doc", applyUsage)
@@ -4728,7 +4788,7 @@ func (h *WizardHandler) CompressContext(w http.ResponseWriter, r *http.Request) 
 	// summary-extraction skill, and reusing the analyst persona keeps the
 	// output style consistent with the other analytical turns. The model
 	// override follows the same precedence as other wizard handlers.
-	systemPrompt, model := h.roleConfig("analyst")
+	systemPrompt, model, claudeConfigID := h.roleConfig("analyst")
 
 	// Compression prompt (Chinese, fixed). The [COMPRESS_COMPLETE] sentinel
 	// is parsed by this handler to know when Claude has finished writing —
@@ -4756,6 +4816,7 @@ func (h *WizardHandler) CompressContext(w http.ResponseWriter, r *http.Request) 
 		Resume:          true,
 		SystemPrompt:    systemPrompt,
 		Model:           cliModelArg(model),
+		ClaudeConfigID:  claudeConfigID,
 		DisallowedTools: noTools,
 	})
 
@@ -4929,6 +4990,11 @@ func subTaskSourceSID(req *model.Requirement, explicit string) string {
 // in StartSubTask / AdjustSubTask / dispatchChildrenSequential stay unchanged
 // when the runner takes over the heavy lifting.
 //
+// configIDOverride mirrors the body.Model override: empty lets the runner
+// resolve from the executor role's binding, non-empty pins the executor to
+// a specific Claude config so a per-run model override stays coherent with
+// the per-run config override the caller wants to honor.
+//
 // See SubTaskRunner.Run for the full lifecycle.
 func (h *WizardHandler) runSubTask(
 	req *model.Requirement,
@@ -4938,6 +5004,7 @@ func (h *WizardHandler) runSubTask(
 	sourceSID string,
 	body string,
 	modelOverride string,
+	configIDOverride string,
 	adjust bool,
 ) {
 	if h.subTaskRunner == nil {
@@ -4946,7 +5013,7 @@ func (h *WizardHandler) runSubTask(
 		job.Finish(1, store.JobError)
 		return
 	}
-	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, adjust)
+	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, adjust)
 }
 
 // computeSubTaskCostCents resolves the run's USD-equivalent cost in cents
@@ -5048,7 +5115,7 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		"sub_task_id": st.ID,
 	})
 
-	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, false)
+	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, "", false)
 }
 
 // ReOrchestrate handles POST /api/requirements/{id}/re-orchestrate — the
@@ -5127,7 +5194,7 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		_, modelName := h.roleConfig("developer")
+		systemPrompt, modelName, claudeConfigID := h.roleConfig("developer")
 		if body.Model != "" {
 			modelName = body.Model
 		}
@@ -5136,7 +5203,6 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 		// Session threading: resume the existing coding session so the main
 		// agent re-decomposes with full context. No coding session yet →
 		// fresh session carrying the requirement title + description.
-		systemPrompt, _ := h.roleConfig("developer")
 		sessionID := req.CodingSessionID
 		resume := sessionID != ""
 		var prompt string
@@ -5157,12 +5223,13 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 
 		job.Append(store.LogLine{Type: "phase", Content: "🔄 主 Agent 重新拆分任务中…"})
 		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
-			Prompt:       prompt,
-			WorkDir:      workDir,
-			SystemPrompt: systemPrompt,
-			Model:        cliModelArg(modelName),
-			SessionID:    sessionID,
-			Resume:       resume,
+			Prompt:         prompt,
+			WorkDir:        workDir,
+			SystemPrompt:   systemPrompt,
+			Model:          cliModelArg(modelName),
+			ClaudeConfigID: claudeConfigID,
+			SessionID:      sessionID,
+			Resume:         resume,
 		})
 		defer cancel()
 		usage := h.usageCtxFor("re_orchestrate", id, req.ProjectID, job.ID, modelName, "", "")
@@ -5217,7 +5284,7 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Printf("[re-orchestrate] %s: dispatched %d children, scheduling summary", id, len(subTaskIDs))
-		summaryKickoff(id, sessionID, req, h, workDir, modelName, subTaskIDs)
+		summaryKickoff(id, sessionID, req, h, workDir, modelName, claudeConfigID, subTaskIDs)
 	}()
 }
 
@@ -5332,7 +5399,7 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 	// prompt prefix + system prompt as a fresh sub-task, but the
 	// source_session_id is the parent's session id (not the main agent),
 	// so the conversation inherits the parent's edits.
-	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, true)
+	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, "", true)
 }
 
 // RedoSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/redo.
@@ -5417,7 +5484,7 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 
 	// Re-use the shared spawn helper with adjust=false and the ORIGINAL prompt
 	// (st.Prompt) so the child re-executes the same task from a clean fork.
-	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, false)
+	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false)
 }
 
 // ListSubTasks handles GET /api/requirements/{id}/sub-tasks.
@@ -6015,10 +6082,10 @@ func summaryKickoff(
 	reqID, orchestratorSID string,
 	req *model.Requirement,
 	h *WizardHandler,
-	workDir, modelName string,
+	workDir, modelName, claudeConfigID string,
 	subTaskIDs []string,
 ) {
-	go h.runOrchestratorSummary(reqID, orchestratorSID, req, workDir, modelName, subTaskIDs)
+	go h.runOrchestratorSummary(reqID, orchestratorSID, req, workDir, modelName, claudeConfigID, subTaskIDs)
 }
 
 // tryAutoOrchestrate is the auto-dispatch path called by StartCoding right
@@ -6045,7 +6112,7 @@ func (h *WizardHandler) tryAutoOrchestrate(
 	finalResult string,
 	capturedJSON string,
 	req *model.Requirement,
-	workDir, modelName string,
+	workDir, modelName, claudeConfigID string,
 ) {
 	if h.subTaskSvc == nil {
 		return
@@ -6079,7 +6146,7 @@ func (h *WizardHandler) tryAutoOrchestrate(
 		return
 	}
 	log.Printf("[auto-orchestrate] %s: dispatched %d children, scheduling summary", reqID, len(subTaskIDs))
-	summaryKickoff(reqID, orchestratorSID, req, h, workDir, modelName, subTaskIDs)
+	summaryKickoff(reqID, orchestratorSID, req, h, workDir, modelName, claudeConfigID, subTaskIDs)
 }
 
 // resolveSubtasksPayload turns the main agent's turn output into a concrete
@@ -6195,19 +6262,20 @@ func (h *WizardHandler) dispatchOneChild(
 	// decompose and emit [SUBTASKS_READY]. Without an explicit override the
 	// child inherits that persona and re-emits the sentinel instead of
 	// writing any code.
-	execSystemPrompt, _ := h.roleConfig(executorRoleKey)
+	execSystemPrompt, _, executorConfigID := h.roleConfig(executorRoleKey)
 	executorPrompt := "## 子任务\n\n" + t.Prompt + "\n\n" +
 		"> 本任务通过 --fork-session 继承了主 Agent 的项目上下文与代码库访问权限。\n" +
 		"> 如需补充信息，可正常读取项目文件或调用工具。\n" +
 		"> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
 	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
-		Prompt:        executorPrompt,
-		WorkDir:       workDir,
-		SystemPrompt:  execSystemPrompt,
-		Model:         cliModelArg(modelName),
-		SessionID:     parentSID,
-		Resume:        true,
-		Fork:          true,
+		Prompt:         executorPrompt,
+		WorkDir:        workDir,
+		SystemPrompt:   execSystemPrompt,
+		Model:          cliModelArg(modelName),
+		ClaudeConfigID: executorConfigID,
+		SessionID:      parentSID,
+		Resume:         true,
+		Fork:           true,
 		ForkSessionID: childSID,
 	})
 	defer cancel()
@@ -6275,7 +6343,7 @@ func (h *WizardHandler) dispatchOneChild(
 func (h *WizardHandler) runOrchestratorSummary(
 	reqID, orchestratorSID string,
 	req *model.Requirement,
-	workDir, modelName string,
+	workDir, modelName, claudeConfigID string,
 	subTaskIDs []string,
 ) {
 	// Collect each child's artifact + status. Sort by created_at so the
@@ -6320,13 +6388,14 @@ func (h *WizardHandler) runOrchestratorSummary(
 	job.SetModel(modelName)
 
 	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
-		Prompt:       summaryB.String(),
-		WorkDir:      workDir,
-		SystemPrompt: "", // resumed session already has developer persona
-		Model:        cliModelArg(modelName),
-		SessionID:    orchestratorSID,
-		Resume:       true,
-		Fork:         false,
+		Prompt:         summaryB.String(),
+		WorkDir:        workDir,
+		SystemPrompt:   "", // resumed session already has developer persona
+		Model:          cliModelArg(modelName),
+		ClaudeConfigID: claudeConfigID,
+		SessionID:      orchestratorSID,
+		Resume:         true,
+		Fork:           false,
 	})
 	defer cancel()
 
