@@ -539,7 +539,24 @@
 .deep-refine-toggle { padding: 8px 0; margin-bottom: 16px; }
 
 .deep-refine-panel { border-left: 3px solid var(--color-warning); }
-.deep-refine-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.deep-refine-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 8px; }
+.deep-refine-header-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.deep-refine-header-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+  color: var(--color-warning);
+  flex-shrink: 0;
+}
 .deep-refine-header h3 { margin-bottom: 0; }
 
 .deep-refine-panel .chat-panel {
@@ -552,7 +569,31 @@
   margin-bottom: 12px;
 }
 .deep-refine-panel .chat-msg { margin-bottom: 10px; }
-.deep-refine-panel .chat-role { font-size: 11px; font-weight: 600; color: var(--color-text-muted); display: block; margin-bottom: 2px; }
+.deep-refine-panel .chat-role {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 2px;
+}
+.deep-refine-panel .chat-role-dot {
+  /* The "you" side of the chat used to be a person emoji; replace with a
+     neutral accent dot so it visually matches the bot icon on the AI side
+     while still distinguishing the speaker. */
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.deep-refine-panel .chat-role svg {
+  /* The 13px robot glyph sits a hair lower than the 11px text baseline; the
+     nudge keeps both labels optically centered on the same line. */
+  margin-top: -1px;
+}
 .deep-refine-panel .chat-msg.user .chat-role { color: var(--color-primary); }
 .deep-refine-panel .chat-content { font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
 .deep-refine-panel .chat-content-md { white-space: normal; }
@@ -1165,7 +1206,21 @@ select.preflight-field-input {
   border-radius: 8px;
 }
 .stage-step.done { color: var(--color-success, #10b981); }
-.stage-num { font-size: 15px; }
+.stage-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--color-active, #eef2ff);
+  color: var(--color-primary, #4f46e5);
+  flex-shrink: 0;
+}
+.stage-step.done .stage-num {
+  background: var(--color-success-soft, #d1fae5);
+  color: var(--color-success-deep, #047857);
+}
 .stage-sep { margin: 0 8px; color: var(--color-text-muted, #cbd5e1); }
 /* Effective-model badge shown beside each stage label when the stage has run.
    Empty values are not rendered, so historical rows (pre-feature) stay clean. */
@@ -1179,8 +1234,13 @@ select.preflight-field-input {
   font-weight: 500;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
   white-space: nowrap;
+}
+.stage-model-tag svg {
+  /* the inline robot glyph is 13px; nudge up so it optically centers inside
+     the 11px text baseline (the row otherwise looks slightly off-center) */
+  margin-top: -1px;
 }
 
 /* ── Merge / PR step ─────────────────────────────────────────────── */
@@ -2049,6 +2109,13 @@ allowed so the row collapses cleanly on every viewport. */
     border-radius: 2px;
     display: inline-block;
   }
+  .usage-receipt-legend-icon {
+    /* matches the legend swatch height so the icon and color chip sit on
+       the same baseline — keeps the legend tidy next to mixed CJK + digits */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
   .usage-receipt-legend-pct {
     font-family: var(--font-mono);
     color: var(--color-text);
@@ -2083,7 +2150,16 @@ allowed so the row collapses cleanly on every viewport. */
     gap: 8px;
     min-width: 0;
   }
-  .usage-receipt-card-icon { font-size: 16px; line-height: 1; }
+  .usage-receipt-card-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--accent, var(--color-primary)) 12%, transparent);
+    flex-shrink: 0;
+  }
   .usage-receipt-card-label {
     font-size: 14px;
     font-weight: 600;
@@ -2738,7 +2814,13 @@ allowed so the row collapses cleanly on every viewport. */
   line-height: 1.7;
 }
 .usage-section .ledger-empty-icon {
-  font-size: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: var(--color-active);
   color: var(--color-primary);
   flex-shrink: 0;
 }
