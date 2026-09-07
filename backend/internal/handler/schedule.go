@@ -190,28 +190,22 @@ func (h *ScheduleHandler) Cancel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, t)
 }
 
-// Delete removes the row. Pending rows must be canceled first to keep the
-// scheduler from racing on a row that's about to be claimed; the handler
-// checks the row state and surfaces 409 in that case. Terminal-state
-// rows delete directly.
+// Delete removes the row outright regardless of status — pending,
+// running, succeeded, failed and canceled rows all delete. The earlier
+// "pending must be canceled first" gate was removed because the
+// scheduler's atomic Claim (`UPDATE ... WHERE id = ? AND status = ?`)
+// already guards the race: if a pending row is deleted between the
+// scheduler's Due() scan and its Claim(), Claim() sees 0 rows affected
+// and the dispatcher skips it. Forbidding delete on pending only pushed
+// the user into an awkward two-step dance with no real safety benefit.
 func (h *ScheduleHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	// Pre-check so we can return a 409 with a clear message instead of the
-	// service's "0 rows affected" / "not found" ambiguity.
-	t, err := h.svc.Get(id)
+	err := h.svc.Delete(id)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			writeError(w, 404, "NOT_FOUND", "scheduled task not found")
 			return
 		}
-		writeError(w, 500, "INTERNAL", err.Error())
-		return
-	}
-	if t.Status == model.SchedStatusPending {
-		writeError(w, 409, "PENDING_NOT_CANCELED", "pending 状态的任务请先取消再删除")
-		return
-	}
-	if err := h.svc.Delete(id); err != nil {
 		writeError(w, 500, "INTERNAL", err.Error())
 		return
 	}

@@ -223,9 +223,13 @@ func (s *ScheduledTaskService) Cancel(id string) error {
 	return nil
 }
 
-// Delete removes the row. Pending rows must be canceled first to keep the
-// scheduler from racing on a row that's about to be claimed; the handler
-// enforces this with a pre-check + 409.
+// Delete removes the row regardless of status — pending, running, and
+// terminal-state rows all delete. The atomic Claim (UPDATE ... WHERE id=? AND
+// status='pending') guards the scheduler race: a row deleted between the
+// scheduler's Due() scan and its Claim() simply has no rows to update, and
+// the dispatcher skips it. The pre-check that used to forbid pending deletes
+// lived in the handler; it was removed because it forced users into a
+// two-step "cancel then delete" with no real safety benefit.
 func (s *ScheduledTaskService) Delete(id string) error {
 	res, err := s.db.Exec(`DELETE FROM scheduled_tasks WHERE id = ?`, id)
 	if err != nil {
