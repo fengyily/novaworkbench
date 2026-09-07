@@ -158,8 +158,9 @@ func (h *ClaudeConfigHandler) Activate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Active returns the active config's model list + default model for the
-// role-settings UI. Returns null when no config is active.
+// Active returns the active config's model list + default model + base URL
+// for the role-settings UI and the copy-paste launch command. Returns null
+// when no config is active.
 // GET /api/settings/claude/configs/active
 func (h *ClaudeConfigHandler) Active(w http.ResponseWriter, r *http.Request) {
 	models, defaultModel, err := h.svc.ActiveModels()
@@ -171,8 +172,13 @@ func (h *ClaudeConfigHandler) Active(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, nil)
 		return
 	}
+	// baseURL feeds the frontend's `claude --settings '{"env":{"ANTHROPIC_BASE_URL":...}}'`
+	// launch-command hint. The auth token is intentionally absent — tokens
+	// never leave the backend in full.
+	baseURL, _, _ := h.svc.ActiveLaunchInfo()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"models":        models,
 		"default_model": defaultModel,
+		"base_url":      baseURL,
 	})
 }

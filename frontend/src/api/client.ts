@@ -9,8 +9,8 @@ export const API_BASE = import.meta.env.VITE_API_BASE || '';
 
 // Display + persistence literal for "no specific model was selected for a
 // stage" — mirrors backend handler.DefaultModelLabel. The backend treats it as
-// "no --model flag" (CLI default), and the UI normalizes it to the empty
-// option label "默认模型".
+// "no model pinned in the --settings env block" (CLI default), and the UI
+// normalizes it to the empty option label "默认模型".
 export const DefaultModelLabel = '默认模型';
 
 // Token storage for the bearer auth layer. login() stores the token here; the
@@ -357,33 +357,36 @@ export interface SubTaskOrchestrateResponse {
 // can paste into an external terminal to continue a sub-task's session
 // outside Nova. The exact command depends on whether the session has been
 // forked yet: a fresh sub-task that already ran needs --resume <sid> (not
-// --fork-session) so the user continues *that* session verbatim. The
-// command is a UI hint, not executed by Nova — the user copies and runs
-// it in their own shell.
-export function subTaskCliCommand(st: SubTask): string {
+// --fork-session) so the user continues *that* session verbatim. settings
+// (from claudeSettingsPrefix) is prepended so the pasted command hits the
+// same model + base URL Nova launches with. The command is a UI hint, not
+// executed by Nova — the user copies and runs it in their own shell.
+export function subTaskCliCommand(st: SubTask, settings = ''): string {
+  const prefix = settings ? `${settings} ` : '';
   const sid = (st.session_id || '').trim();
   if (!sid) {
     // Sub-task never spawned yet — show the placeholder command the user
     // would issue from the parent's session to fork a new one.
     const parent = (st.source_session_id || '').trim();
     if (parent) {
-      return `claude --resume ${parent} --fork-session --session-id <new-uuid> -p "${escapeForShell(st.prompt)}"`;
+      return `claude ${prefix}--resume ${parent} --fork-session --session-id <new-uuid> -p "${escapeForShell(st.prompt)}"`;
     }
     return `# 等待主 Agent 会话就绪 (需求未启动 coding)`;
   }
   // Standard continue command — matches the canonical "claude -r"
   // short-flag the CLI accepts.
-  return `claude --resume ${sid}`;
+  return `claude ${prefix}--resume ${sid}`;
 }
 
 // subTaskAdjustCommand: paste-able --fork-session resume that continues
 // this sub-task's session with a new instruction. Useful after the user
 // applies an AdjustSubTask round inside Nova and wants to keep iterating
 // from their own terminal.
-export function subTaskAdjustCommand(st: SubTask, nextPrompt: string): string {
+export function subTaskAdjustCommand(st: SubTask, nextPrompt: string, settings = ''): string {
+  const prefix = settings ? `${settings} ` : '';
   const sid = (st.session_id || '').trim();
-  if (!sid) return subTaskCliCommand(st);
-  return `claude --resume ${sid} --fork-session --session-id <new-uuid> -p "${escapeForShell(nextPrompt)}"`;
+  if (!sid) return subTaskCliCommand(st, settings);
+  return `claude ${prefix}--resume ${sid} --fork-session --session-id <new-uuid> -p "${escapeForShell(nextPrompt)}"`;
 }
 
 // escapeForShell quotes the prompt for inclusion in a bash/zsh single
@@ -414,8 +417,9 @@ export interface Requirement {
   branch_name?: string;
   worktree_path?: string;
   // Effective model actually dispatched to the claude CLI for each stage
-  // (the --model value, or the "默认模型" literal when none was specified).
-  // Empty = the stage hasn't run yet (or predates this feature).
+  // (the model pinned in the --settings env block, or the "默认模型" literal
+  // when none was specified). Empty = the stage hasn't run yet (or predates
+  // this feature).
   analyst_model?: string;
   architect_model?: string;
   developer_model?: string;
@@ -823,6 +827,32 @@ export interface ClaudeConfigItem {
 export interface ClaudeActiveModels {
   models: string[];
   default_model: string;
+  // Active config's base URL ("" = Anthropic default). Used to render the
+  // `--settings '{"env":{...}}'` prefix on copy-paste launch commands so they
+  // hit the same gateway + model Nova itself uses. The auth token is never
+  // sent to the frontend — the pasted command relies on the user's own
+  // `claude` login/auth, while --settings pins model + base URL.
+  base_url?: string;
+}
+
+// claudeSettingsPrefix renders the `--settings '{"env":{...}}'` argument that
+// every Nova-launched claude process carries (mirrors the backend gateway's
+// settingsArg and the agent-worker's buildSettingsArg — one launch shape
+// everywhere). baseURL / defaultModel come from the active claude config;
+// empty values are omitted so the CLI's own defaults apply. The auth token
+// is deliberately not part of it: tokens never leave the backend, and the
+// user's own claude auth takes over in their terminal.
+export function claudeSettingsPrefix(baseURL?: string, defaultModel?: string): string {
+  const env: Record<string, string> = {};
+  if (baseURL) env.ANTHROPIC_BASE_URL = baseURL;
+  if (defaultModel) {
+    env.ANTHROPIC_MODEL = defaultModel;
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = defaultModel;
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL = defaultModel;
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL = defaultModel;
+  }
+  if (Object.keys(env).length === 0) return '';
+  return `--settings '${JSON.stringify({ env })}'`;
 }
 export interface ClaudeActivateResult {
   configs: ClaudeConfigItem[];

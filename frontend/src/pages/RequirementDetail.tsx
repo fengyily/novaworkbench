@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode, type CSSProperties } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, wizardApi, agentServersApi, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabels, kindOf, STAGE_VISIBILITY, type Kind, type CostItem } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabels, kindOf, STAGE_VISIBILITY, type Kind, type CostItem } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
@@ -564,14 +564,17 @@ export default function RequirementDetail() {
 
   // Effective default model per role (角色配置模型 > 生效 Claude 配置默认模型).
   // Used so ModelSelect's "默认模型" option shows the actual model name that
-  // will run for each stage before the stage starts.
+  // will run for each stage before the stage starts. activeBaseURL feeds the
+  // copy-paste launch command's --settings prefix (same gateway Nova uses).
   const [roleDefaultModels, setRoleDefaultModels] = useState<Record<string, string>>({});
+  const [activeBaseURL, setActiveBaseURL] = useState('');
   useEffect(() => {
     let cancelled = false;
     Promise.all([rolesApi.list(), claudeApi.active()])
       .then(([roles, active]) => {
         if (cancelled) return;
         const configDefault = active?.default_model || '';
+        setActiveBaseURL(active?.base_url || '');
         const map: Record<string, string> = {};
         for (const r of roles ?? []) {
           // The role's model field may be empty (no override) or the literal
@@ -798,14 +801,18 @@ export default function RequirementDetail() {
   }, [id]);
 
   // Copy a ready-to-paste resume command to the clipboard. Instead of just the
-  // bare session id, we compose `cd "<project_path>" && claude --resume "<sid>"`
-  // so the user can paste it straight into a shell and land in the right CWD.
+  // bare session id, we compose `cd "<project_path>" && claude --settings '...'
+  // --resume "<sid>"` so the user can paste it straight into a shell, land in
+  // the right CWD, AND hit the same model + base URL Nova itself launches with
+  // (the --settings env block mirrors the backend gateway's settingsArg; the
+  // auth token is intentionally absent — the user's own claude auth applies).
   // Falls back to copying the sid alone when no project path is known.
   const copySessionId = async (sid: string): Promise<void> => {
     const path = project?.local_path;
-    const cmd = path
-      ? `cd "${path}" && claude --resume "${sid}"`
-      : `claude --resume "${sid}"`;
+    const settings = claudeSettingsPrefix(activeBaseURL, roleDefaultModels['developer'] || '');
+    const cmd = (path
+      ? `cd "${path}" && claude ${settings} --resume "${sid}"`
+      : `claude ${settings} --resume "${sid}"`).replace(/ {2,}/g, ' ').trim();
     try {
       await navigator.clipboard.writeText(cmd);
     } catch {
@@ -2493,7 +2500,7 @@ export default function RequirementDetail() {
             </summary>
             <div className="session-body">
               <p className="session-hint">
-                点击会话 ID 或「复制」按钮即可复制完整命令 <code>cd "&lt;项目路径&gt;" &amp;&amp; claude --resume "&lt;session_id&gt;"</code>，粘贴到终端即可在该项目目录中恢复对应阶段的会话。
+                点击会话 ID 或「复制」按钮即可复制完整命令 <code>cd "&lt;项目路径&gt;" &amp;&amp; claude --settings '…' --resume "&lt;session_id&gt;"</code>（--settings 指定当前生效的模型与 Base URL，与平台启动方式一致），粘贴到终端即可在该项目目录中恢复对应阶段的会话。
               </p>
               {rows.map(r => (
                 <div className="session-row" key={r.stage}>

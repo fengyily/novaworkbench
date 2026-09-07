@@ -208,7 +208,7 @@ func (c *Client) Exec(ctx context.Context, cmd, label string, env []string, out 
 
 	// Some sshd configs disable AcceptEnv. Build the command string with
 	// env prefix when env is provided — this works regardless of server
-	// config and matches the local `mergedEnv` semantics.
+	// config and matches the local `localEnv` semantics.
 	if len(env) > 0 {
 		cmd = "env " + strings.Join(env, " ") + " " + cmd
 	}
