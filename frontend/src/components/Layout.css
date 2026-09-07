@@ -227,12 +227,26 @@
 .app-footer {
   display: flex;
   align-items: center;
+  gap: 6px;
   /* Reserve the home-indicator area on iPhones with notches. */
   padding: 0 20px var(--sab);
   height: calc(32px + var(--sab));
   font-size: 12px;
   color: var(--color-text-muted);
   border-top: 1px solid var(--color-border);
+}
+
+/* Service-running status indicator. A 8px emerald circle + soft halo, in
+   the same outline-language as the sidebar nav-item icons so the footer
+   reads as part of the same icon family. */
+.app-footer-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #10B981;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18);
+  flex-shrink: 0;
 }
 
 /* Sidebar nav-row icon — a small lead icon for menu rows. Sized at 18px

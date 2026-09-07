@@ -262,8 +262,221 @@ export const IconMore = makeRichIcon(() => [
   <circle key="c" cx="19" cy="12" r="1.25" fill="currentColor" stroke="none" />,
 ]);
 
+// ── Status / action icons ─────────────────────────────────────────────────────
+//
+// Used by requirement detail and other pages for buttons, badges, and inline
+// adornments (toasts, copy/open/cleanup buttons). Same outline + rounded-cap
+// language as the workflow icons above so a 📋 button and a 🚀 CTA look like
+// they came from the same drawer.
+
+/** Copy — clipboard with a small page overlay; replaces 📋 */
+export const IconCopy = makeRichIcon(() => [
+  <rect key="a" x="8" y="8" width="12" height="13" rx="2" />,
+  <path key="b" d="M16 5.5h-7A1.5 1.5 0 0 0 7.5 7v1" />,
+  <path key="c" d="M16 8V5.5h.01" />,
+]);
+
+/** Open folder — page above a slightly-open folder; replaces 📂 */
+export const IconFolderOpen = makeRichIcon(() => [
+  <path key="a" d="M3.75 8A1.75 1.75 0 0 1 5.5 6.25h3.69a1.75 1.75 0 0 1 1.24.51l1.06 1.06a.25.25 0 0 0 .18.07H18.5A1.75 1.75 0 0 1 20.25 9.59V10H4.5" />,
+  <path key="b" d="M3.75 9.5h17l-1.7 8.5A1.75 1.75 0 0 1 17.32 19.5H5.68a1.75 1.75 0 0 1-1.73-1.5L3.75 9.5Z" />,
+]);
+
+/** Broom / cleanup — replaces 🧹 */
+export const IconBroom = makeRichIcon(() => [
+  <path key="a" d="M14 4.5 19.5 10" />,
+  <path key="b" d="m13 5.5 1.5-1.5a1.5 1.5 0 0 1 2.12 2.12L15.12 7.62" />,
+  <path key="c" d="M14.5 9 9 14.5l3.5 3.5L18 12.5Z" />,
+  <path key="d" d="M7.5 16 4 19.5M5.5 18 4 19.5M9 17.5l-1.5 1.5" />,
+]);
+
+/** Triangle alert — replaces ⚠️ */
+export const IconAlert = makeRichIcon(() => [
+  <path key="a" d="M12 4 21 19.5H3L12 4Z" />,
+  <path key="b" d="M12 10v4" />,
+  <circle key="c" cx="12" cy="16.5" r="0.6" fill="currentColor" stroke="none" />,
+]);
+
+/** Close / X — replaces ❌ / ✕ */
+export const IconClose = makeIcon('M6 6l12 12M18 6 6 18');
+
+/** Save / floppy — replaces 💾 */
+export const IconSave = makeRichIcon(() => [
+  <path key="a" d="M5.5 4.5h10L19 8v11a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 19V6a1.5 1.5 0 0 1 .5-1.06Z" />,
+  <path key="b" d="M8 4.5h6V7a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V4.5Z" />,
+  <path key="c" d="M8 13.5h8V18H8z" />,
+]);
+
+/** Open book — replaces 📚 */
+export const IconBook = makeRichIcon(() => [
+  <path key="a" d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v15.5H5.5A1.5 1.5 0 0 1 4 18V5.5Z" />,
+  <path key="b" d="M20 5.5A1.5 1.5 0 0 0 18.5 4H13v15.5h5.5A1.5 1.5 0 0 0 20 18V5.5Z" />,
+  <path key="c" d="M7 8.5h2M7 11.5h2M7 14.5h2M15 8.5h2M15 11.5h2M15 14.5h2" />,
+]);
+
+/** Rocket — replaces 🚀 */
+export const IconRocket = makeRichIcon(() => [
+  <path key="a" d="M14.5 4.5c2.5.5 4.5 2.5 5 5-2 .5-3.7 1.6-5 3.5l-3.5 1L9.5 12.5l1-3.5c1.9-1.3 3-2.5 4-4.5Z" />,
+  <path key="b" d="M5 19c.6-1.7 1.7-2.8 3.4-3.4M14 14l-4 4" />,
+  <circle key="c" cx="15.25" cy="8.75" r="1.25" />,
+]);
+
+/** Document with folded corner — replaces 📄 */
+export const IconFileText = makeRichIcon(() => [
+  <path key="a" d="M6 3.5h8.5L18 7v12.5A1.5 1.5 0 0 1 16.5 21h-10A1.5 1.5 0 0 1 5 19.5v-14.5A1.5 1.5 0 0 1 6.5 3.5Z" />,
+  <path key="b" d="M14.5 3.5V7H18" />,
+  <path key="c" d="M8 11h8M8 14h8M8 17h5" />,
+]);
+
+/** Hourglass — replaces ⏳ */
+export const IconHourglass = makeRichIcon(() => [
+  <path key="a" d="M7 4h10M7 20h10" />,
+  <path key="b" d="M7 4v2.5a4 4 0 0 0 1.5 3.13L11 11l-2.5 1.37A4 4 0 0 0 7 15.5V20" />,
+  <path key="c" d="M17 4v2.5a4 4 0 0 1-1.5 3.13L13 11l2.5 1.37A4 4 0 0 1 17 15.5V20" />,
+]);
+
+/** Magnifier — replaces 🔍 (alias of IconAnalyst's body for places that just
+ *  need a search affordance outside the analyst stage) */
+export const IconMagnifier = makeRichIcon(() => [
+  <circle key="a" cx="10.5" cy="10.5" r="6.25" />,
+  <path key="b" d="m20 20-4.35-4.35" />,
+]);
+
+/** Bug — replaces 🐞 */
+export const IconBug = makeRichIcon(() => [
+  <path key="a" d="M8.5 7.5a3.5 3.5 0 0 1 7 0v5a3.5 3.5 0 0 1-7 0v-5Z" />,
+  <path key="b" d="M6 11h2M16 11h2M6 15h2M16 15h2M8.5 8 7 6.5M15.5 8 17 6.5M12 4.5V3M9 18l-1.5 2.5M15 18l1.5 2.5" />,
+]);
+
+/** Refresh — replaces 🔄 */
+export const IconRefresh = makeRichIcon(() => [
+  <path key="a" d="M20 12a8 8 0 0 0-13.66-5.66L4 8.5" />,
+  <path key="b" d="M4 4v4.5h4.5" />,
+  <path key="c" d="M4 12a8 8 0 0 0 13.66 5.66L20 15.5" />,
+  <path key="d" d="M20 20v-4.5h-4.5" />,
+]);
+
+/** Globe — replaces 🌐 */
+export const IconGlobe = makeRichIcon(() => [
+  <circle key="a" cx="12" cy="12" r="9" />,
+  <path key="b" d="M3 12h18" />,
+  <path key="c" d="M12 3a13.5 13.5 0 0 1 0 18 13.5 13.5 0 0 1 0-18Z" />,
+]);
+
+/** Archive box — replaces 📦 */
+export const IconArchive = makeRichIcon(() => [
+  <rect key="a" x="3.5" y="4.5" width="17" height="4" rx="1" />,
+  <path key="b" d="M5 8.5V19a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 19V8.5" />,
+  <path key="c" d="M10 13h4" />,
+]);
+
+/** Wrench / screwdriver combo — replaces 🔧 */
+export const IconWrench = makeRichIcon(() => [
+  <path key="a" d="M14.5 4.5a4 4 0 0 0-4.95 5.45l-5.3 5.3a1.5 1.5 0 0 0 2.12 2.12l5.3-5.3A4 4 0 0 0 17.12 7.12l-2.12 2.12-2.12-2.12 2.12-2.12Z" />,
+]);
+
+/** Hand (raised / stop) — replaces ✋ */
+export const IconHand = makeRichIcon(() => [
+  <path key="a" d="M9 11V5.5a1.5 1.5 0 0 1 3 0V11" />,
+  <path key="b" d="M12 11V4.5a1.5 1.5 0 0 1 3 0V11" />,
+  <path key="c" d="M15 11V5.5a1.5 1.5 0 0 1 3 0V13a6 6 0 0 1-6 6H10a4 4 0 0 1-3.5-2l-2.5-4a1.5 1.5 0 0 1 2.5-1.6L8 13" />,
+]);
+
+/** Arrow right — replaces → / ➜ */
+export const IconArrowRight = makeIcon('M5 12h14M13 6l6 6-6 6');
+
+/** Arrow left turn-back — replaces ↩ */
+export const IconArrowBack = makeIcon('M9 5H5v4M5 9c0-2.5 2.5-4.5 6-4.5 4 0 7 2.5 7 5.5s-3 5.5-7 5.5H8');
+
+/** Numbered list — replaces 🔢 */
+export const IconListOrdered = makeRichIcon(() => [
+  <path key="a" d="M10.5 6h9M10.5 12h9M10.5 18h9" />,
+  <path key="b" d="M5 4v6M5 16l2-1.5V19M4 19h2" />,
+]);
+
+/** Send / paper-plane — used for 追问 composer submit */
+export const IconSend = makeRichIcon(() => [
+  <path key="a" d="M21 4 11 14" />,
+  <path key="b" d="M21 4 14 21l-3-7-7-3 17-7Z" />,
+]);
+
+/** Pin — replaces 📌 */
+export const IconPin = makeRichIcon(() => [
+  <path key="a" d="M9 4h6l-1 5 3 3H7l3-3-1-5Z" />,
+  <path key="b" d="M12 12v8" />,
+]);
+
+/** Play triangle — replaces ▶ / ▶️ */
+export const IconPlay = makeIcon('M8 5v14l11-7L8 5Z');
+
+/** Triangle ruler / set-square — replaces 📐 (alias of IconArchitect for
+ *  places that just want the glyph as an inline button adornment) */
+export const IconTriangle = makeIcon(
+  'M4 20 20 4M4 20h4M4 20v-4M7 17l10-10M10.5 13.5l3 3',
+);
+
+/** External link / open in new tab — replaces ↗ */
+export const IconExternalLink = makeRichIcon(() => [
+  <path key="a" d="M13 5h6v6" />,
+  <path key="b" d="M19 5 10 14" />,
+  <path key="c" d="M19 14v4a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 18V7a1.5 1.5 0 0 1 1.5-1.5H11" />,
+]);
+
+/** Database / archive-stack — replaces 🗄️ */
+export const IconDatabase = makeRichIcon(() => [
+  <ellipse key="a" cx="12" cy="5.5" rx="7" ry="2.5" />,
+  <path key="b" d="M5 5.5v6c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-6" />,
+  <path key="c" d="M5 11.5v6c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-6" />,
+]);
+
+/** Id-card / spec brief — used by the BRIEF header strip */
+export const IconIdCard = makeRichIcon(() => [
+  <rect key="a" x="3.5" y="5.5" width="17" height="13" rx="2" />,
+  <circle key="b" cx="9" cy="11" r="2" />,
+  <path key="c" d="M14 9.5h4M14 13h3" />,
+]);
+
+/** Send-out / arrow-up-from-tray — replaces 📤 */
+export const IconSendOut = makeRichIcon(() => [
+  <path key="a" d="M5 14.5V18a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 18v-3.5" />,
+  <path key="b" d="M12 4v11" />,
+  <path key="c" d="m7 9 5-5 5 5" />,
+]);
+
+/** Briefcase / archive-archive — generic "package" glyph */
+export const IconBriefcase = makeRichIcon(() => [
+  <rect key="a" x="3.5" y="7.5" width="17" height="12" rx="2" />,
+  <path key="b" d="M9 7.5V6a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 6v1.5" />,
+  <path key="c" d="M3.5 12h17" />,
+]);
+
 /** Robot — alias used in chat panels */
 export const IconBot = IconRobot;
+
+/** Robot / sub-agent in the "Claude 工作中" badge — keeps the analyst/chat
+ *  the same outline family while remaining distinguishable from the generic
+ *  IconRobot used in the wizard stepper */
+export const IconBotBadge = makeRichIcon(() => [
+  <rect key="a" x="4" y="7" width="16" height="12" rx="2" />,
+  <path key="b" d="M12 3v4M9 13h.01M15 13h.01M9.5 16h5" />,
+  <circle key="c" cx="8.5" cy="6" r="1" />,
+  <circle key="d" cx="15.5" cy="6" r="1" />,
+  <circle key="e" cx="18.5" cy="17" r="2.5" />,
+  <path key="f" d="M16.5 17h4M18.5 15v4" />,
+]);
+
+/** Sleep / idle — used by the "Claude 空闲" badge (replace 😴) */
+export const IconSleep = makeRichIcon(() => [
+  <path key="a" d="M20 14.5a8 8 0 1 1-9.5-9.5 6.5 6.5 0 0 0 9.5 9.5Z" />,
+  <path key="b" d="M16 4h4M16 4v4M16 4l4 4" />,
+]);
+
+/** Trash-out / remove — small "x over bin" used by delete confirmation */
+export const IconTrashAlt = makeRichIcon(() => [
+  <path key="a" d="M5 7h14M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2" />,
+  <path key="b" d="M6.5 7 7.5 19a1.5 1.5 0 0 0 1.5 1.4h6a1.5 1.5 0 0 0 1.5-1.4L17.5 7" />,
+  <path key="c" d="M3 3l18 18" />,
+]);
 
 /**
  * Stage-to-icon resolver. Single source of truth for the requirement detail

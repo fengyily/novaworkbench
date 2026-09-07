@@ -159,6 +159,39 @@ body.no-scroll {
 .btn-danger { background: #EF4444; color: white; border-color: #EF4444; }
 .btn-danger:hover { background: #DC2626; border-color: #DC2626; }
 
+/* ── Unified icon system ────────────────────────────────────────
+   All inline glyphs share the same outline + rounded-cap language (see
+   components/icons). Two helper utilities make them slot into the existing
+   button / inline-text typography without each call site hand-tuning
+   margins:
+
+   - `.btn-icon`       — first/last-child of a button. Pulls the icon flush
+     with the button edge and pairs it with the label via flex-gap so a
+     "💾 保存" button becomes "<IconSave/> 保存" with consistent spacing.
+   - `.icon-mr`        — text-adjacent icon. Provides a tiny right margin so
+     "📚 已读取项目知识库" reads as one unit instead of two glued glyphs.
+*/
+.btn-icon {
+  display: inline-block;
+  vertical-align: -0.125em;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+.btn-icon:last-child { margin-right: 0; margin-left: 6px; }
+.btn > .btn-icon:only-child { margin: 0; }
+
+.icon-mr {
+  display: inline-block;
+  vertical-align: -0.125em;
+  margin-right: 4px;
+  flex-shrink: 0;
+}
+
+/* "Claude 工作中 / 空闲" badge sits inside the detail-meta flex wrap;
+   ensure the icon sits flush with its label even when wrapped. */
+.claude-status { display: inline-flex; align-items: center; gap: 4px; }
+.claude-status .icon-mr { margin-right: 0; }
+
 /* ── Touch target sizing ────────────────────────────────────────
    Apple HIG and WCAG 2.5.5 both call for ≥44×44px tap targets. On mobile
    we expand small buttons (which are fine on desktop with a mouse) so the

@@ -343,7 +343,7 @@ export default function Layout() {
       </nav>
 
       <footer className="app-footer">
-        🟢 服务运行中 | localhost:9527 | v0.1.0
+        <span className="app-footer-dot" aria-hidden /> 服务运行中 | localhost:9527 | v0.1.0
       </footer>
     </div>
   );

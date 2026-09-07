@@ -8,7 +8,43 @@ import ModelSelect from '../components/ModelSelect';
 import AtMentionTextarea from '../components/AtMentionTextarea';
 import SubTaskPanel from '../components/SubTaskPanel';
 import { SummarizeToRequirementModal } from '../components/SummarizeToRequirementModal';
-import { StageIcon, IconCheck, IconMailbox, IconRobot } from '../components/icons';
+import {
+  StageIcon,
+  IconCheck,
+  IconMailbox,
+  IconRobot,
+  IconCopy,
+  IconFolderOpen,
+  IconBroom,
+  IconAlert,
+  IconSave,
+  IconBook,
+  IconRocket,
+  IconFileText,
+  IconHourglass,
+  IconMagnifier,
+  IconBug,
+  IconRefresh,
+  IconGlobe,
+  IconArchive,
+  IconWrench,
+  IconHand,
+  IconArrowBack,
+  IconListOrdered,
+  IconPin,
+  IconPlay,
+  IconTriangle,
+  IconDatabase,
+  IconSendOut,
+  IconSleep,
+  IconBotBadge,
+  IconFolder,
+  IconRefine,
+  IconMerge,
+  IconChat,
+  IconTrash,
+  IconSparkles,
+} from '../components/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { exportDesignPdf } from '../utils/exportDesignPdf';
@@ -284,7 +320,7 @@ function extractKnowledge(log: LogLine[]) {
 // the architect / developer cards when a knowledge event arrived (i.e. the user
 // opted in and the backend read the project knowledge base before the stage).
 // Shows the titles read, a per-entry usage verdict (after the run emits
-// "knowledge_result": ✅ 已引用 / not-directly referenced — a cheap signal, not
+// "knowledge_result": {used:true} = referenced, {used:false} = not-directly referenced — a cheap signal, not
 // an exact measurement), and a link to the full knowledge page. Hidden entirely
 // when the option was not used (no knowledge event).
 function KnowledgeReadPanel({ items, empty, projectId }: { items: KnowledgeEntry[]; empty: boolean; projectId?: string }) {
@@ -294,7 +330,7 @@ function KnowledgeReadPanel({ items, empty, projectId }: { items: KnowledgeEntry
   return (
     <div className="knowledge-read-panel">
       <div className="knowledge-read-header">
-        <span>📚 已读取项目知识库</span>
+        <span><IconBook size={14} className="icon-mr" />已读取项目知识库</span>
         {projectId && (
           <Link className="btn btn-sm knowledge-read-link" to={`/knowledge?project_id=${projectId}`}>
             查看知识库全文 →
@@ -334,8 +370,8 @@ function KnowledgeReadPanel({ items, empty, projectId }: { items: KnowledgeEntry
 //
 //   1. <code>{path}</code> wraps long POSIX or Windows paths via word-break
 //      so they don't push the page width past the viewport on phones.
-//   2. 📋 Copy path: drops the bare absolute path on the clipboard.
-//   3. 📂 Open in file manager: detects the user's OS via
+//   2. [Copy] path: drops the bare absolute path on the clipboard.
+//   3. [Open in file manager]: detects the user's OS via
 //      navigator.userAgentData.platform (with a navigator.platform fallback
 //      for older browsers) and copies the platform-appropriate shell command
 //      — `open` on macOS, `explorer` on Windows, `xdg-open` on Linux — onto
@@ -412,13 +448,13 @@ function WorktreePathHint({ path, onClean, cleaning, disabled }: {
 
   const handleCopyPath = async () => {
     const ok = await copyToClipboard(path);
-    setToast(ok ? '📋 路径已复制' : '❌ 复制失败');
+    setToast(ok ? '路径已复制' : '复制失败');
   };
 
   const handleOpenInFileManager = async () => {
     const os = detectOS();
     if (os === 'unknown') {
-      setToast('⚠️ 未知系统，已复制路径');
+      setToast('未知系统，已复制路径');
       await copyToClipboard(path);
       return;
     }
@@ -426,7 +462,7 @@ function WorktreePathHint({ path, onClean, cleaning, disabled }: {
     const ok = await copyToClipboard(cmd);
     const osLabel = os === 'mac' ? 'macOS' : os === 'windows' ? 'Windows' : 'Linux';
     const verb = os === 'mac' ? 'open' : os === 'windows' ? 'explorer' : 'xdg-open';
-    setToast(ok ? `📂 ${osLabel}: 已复制 "${verb}" 命令` : '❌ 复制失败');
+    setToast(ok ? `${osLabel}: 已复制 "${verb}" 命令` : '复制失败');
   };
 
   const os = typeof navigator !== 'undefined' ? detectOS() : 'unknown';
@@ -447,7 +483,7 @@ function WorktreePathHint({ path, onClean, cleaning, disabled }: {
           disabled={disabled}
           title="复制完整路径"
         >
-          📋 复制路径
+          <IconCopy size={14} className="btn-icon" /> 复制路径
         </button>
         <button
           type="button"
@@ -461,7 +497,7 @@ function WorktreePathHint({ path, onClean, cleaning, disabled }: {
             : '路径'
           }）到剪贴板，粘贴到终端执行`}
         >
-          📂 在文件管理器打开
+          <IconFolderOpen size={14} className="btn-icon" /> 在文件管理器打开
         </button>
         {onClean && (
           <button
@@ -470,7 +506,7 @@ function WorktreePathHint({ path, onClean, cleaning, disabled }: {
             disabled={disabled || cleaning}
             title="删除该需求的隔离 worktree 目录与开发分支"
           >
-            🧹 清理
+            <IconBroom size={14} className="btn-icon" /> 清理
           </button>
         )}
         {toast && <span className="merge-hint-toast" role="status">{toast}</span>}
@@ -831,7 +867,7 @@ export default function RequirementDetail() {
       projectsApi.get(r.project_id).then(setProject).catch(() => {});
     }).catch(() => {}).finally(() => setLoading(false));
     loadUsage();
-    // Boot-fetch the coding stage's compression record so the bar's "📦 已压缩"
+    // Boot-fetch the coding stage's compression record so the bar's "已压缩" badge
     // badge is correct after a page refresh, before the user clicks anything.
     wizardApi.getContextSummary(id, 'coding')
       .then(data => setCodingCompressedAt(data.compressed_at ?? null))
@@ -1058,7 +1094,7 @@ export default function RequirementDetail() {
       if (!jobId) throw new Error(json.error?.message || '未获取到任务 ID');
       streamDesignJob(jobId);
     } catch (err: any) {
-      setDesignLines([{ type: 'error', content: '❌ ' + err.message }]);
+      setDesignLines([{ type: 'error', content: err.message }]);
       setDesigning(false);
     }
   };
@@ -1343,7 +1379,7 @@ export default function RequirementDetail() {
       localStorage.setItem(`coding_job_${id}`, jobId);
       streamJob(jobId);
     } catch (err: any) {
-      setCodingLines([{ type: 'error', content: '❌ ' + err.message }]);
+      setCodingLines([{ type: 'error', content: err.message }]);
       setCoding(false);
     }
   };
@@ -1401,7 +1437,7 @@ export default function RequirementDetail() {
       setAdjustInput('');
       streamJob(jobId, { keepDone: true });
     } catch (err: any) {
-      setCodingLines(prev => [...prev, { type: 'error', content: '❌ ' + err.message }]);
+      setCodingLines(prev => [...prev, { type: 'error', content: err.message }]);
       setCoding(false);
     }
   };
@@ -1428,7 +1464,7 @@ export default function RequirementDetail() {
       localStorage.setItem(`coding_job_${id}`, jobId);
       streamJob(jobId, { keepDone: true, persistDone: true });
     } catch (err: any) {
-      setCodingLines([{ type: 'error', content: '❌ ' + err.message }]);
+      setCodingLines([{ type: 'error', content: err.message }]);
       setCoding(false);
     }
   };
@@ -1534,7 +1570,7 @@ export default function RequirementDetail() {
         : await mergeApi.push(id, body as any);
       streamMergeJob(job_id);
     } catch (err: any) {
-      setMergeLines([{ type: 'error', content: '❌ ' + err.message }]);
+      setMergeLines([{ type: 'error', content: err.message }]);
       setMerging(false);
     }
   };
@@ -1553,7 +1589,7 @@ export default function RequirementDetail() {
       const { job_id } = action === 'continue' ? await mergeApi.cont(id) : await mergeApi.resolve(id);
       streamMergeJob(job_id);
     } catch (err: any) {
-      setMergeLines([{ type: 'error', content: '❌ ' + err.message }]);
+      setMergeLines([{ type: 'error', content: err.message }]);
       setMerging(false);
     }
   };
@@ -1583,11 +1619,11 @@ export default function RequirementDetail() {
           try {
             await run(true);
           } catch (e: any) {
-            setMergeLines([{ type: 'error', content: '❌ ' + e.message }]);
+            setMergeLines([{ type: 'error', content: e.message }]);
           }
         }
       } else {
-        setMergeLines([{ type: 'error', content: '❌ ' + msg }]);
+        setMergeLines([{ type: 'error', content: msg }]);
       }
     }
   };
@@ -1683,8 +1719,8 @@ export default function RequirementDetail() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mergeState?.target_branch]);
 
-  if (loading) return <div className="detail-loading">⏳ 加载中...</div>;
-  if (!req) return <div className="detail-error">❌ 需求未找到</div>;
+  if (loading) return <div className="detail-loading"><IconHourglass size={16} className="icon-mr" />加载中...</div>;
+  if (!req) return <div className="detail-error"><IconAlert size={16} className="icon-mr" />需求未找到</div>;
 
   const design = parseDesign(req.design_docs);
   const hasDesign = !!(design.overview || (design.steps && design.steps.length > 0) || design.plan_markdown);
@@ -1741,13 +1777,13 @@ export default function RequirementDetail() {
       {showDesignKnowledgeModal && (
         <div className="modal-overlay" onClick={() => setShowDesignKnowledgeModal(false)}>
           <div className="modal-box" onClick={e => e.stopPropagation()}>
-            <h3>📐 生成技术方案</h3>
+            <h3><IconTriangle size={16} className="icon-mr" />生成技术方案</h3>
             <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
               开始方案设计前，可选择先读取项目知识库中与需求相关的知识。
             </p>
             <label className="merge-check" style={{ margin: '8px 0 12px' }}>
               <input type="checkbox" checked={readKnowledgeDesign} onChange={e => setReadKnowledgeDesign(e.target.checked)} />
-              📚 开始前先读取项目知识库（默认不勾选）
+              <IconBook size={13} className="icon-mr" />开始前先读取项目知识库（默认不勾选）
             </label>
             <div className="modal-actions btn-row-2col">
               <button className="btn btn-primary" onClick={confirmDesignKnowledge}>确认</button>
@@ -1894,7 +1930,7 @@ export default function RequirementDetail() {
                   <label className={`preflight-toggle ${readKnowledgeDev ? 'is-checked' : ''}`}>
                     <input type="checkbox" checked={readKnowledgeDev} onChange={e => setReadKnowledgeDev(e.target.checked)} />
                     <div className="preflight-toggle-body">
-                      <div className="preflight-toggle-title">📚 读取项目知识库</div>
+                      <div className="preflight-toggle-title"><IconBook size={14} className="icon-mr" />读取项目知识库</div>
                       <div className="preflight-toggle-desc">
                         编码前先扫描项目内与本需求相关的知识条目，作为额外上下文注入。耗时约几秒，对复杂需求特别有用。
                       </div>
@@ -1904,7 +1940,7 @@ export default function RequirementDetail() {
                   <label className={`preflight-toggle ${splitTasksDev ? 'is-checked' : ''}`}>
                     <input type="checkbox" checked={splitTasksDev} onChange={e => setSplitTasksDev(e.target.checked)} />
                     <div className="preflight-toggle-body">
-                      <div className="preflight-toggle-title">🧩 拆分任务并自动派发</div>
+                      <div className="preflight-toggle-title"><IconPin size={14} className="icon-mr" />拆分任务并自动派发</div>
                       <div className="preflight-toggle-desc">
                         由主 Agent 把需求拆成子任务，再串行调度子 Agent 执行。默认关闭—— developer persona 会直接实现，更快。
                       </div>
@@ -1915,7 +1951,7 @@ export default function RequirementDetail() {
 
               <div className="preflight-launch">
                 <button className="btn-launch" onClick={confirmBranchAndStart}>
-                  🚀 启动会话
+                  <IconRocket size={14} className="btn-icon" />启动会话
                 </button>
                 <button className="btn-cancel" onClick={() => setShowBranchModal(false)}>
                   取消
@@ -1930,7 +1966,7 @@ export default function RequirementDetail() {
       {showMergeModal && mergeState && (
         <div className="modal-overlay" onClick={() => !merging && setShowMergeModal(false)}>
           <div className="modal-box merge-modal" onClick={e => e.stopPropagation()}>
-            <h3>{mergeMode === 'local' ? '🔀 本地合入' : '🌐 推送并发起 PR'}</h3>
+            <h3>{mergeMode === 'local' ? <><IconMerge size={16} className="icon-mr" />本地合入</> : <><IconGlobe size={16} className="icon-mr" />推送并发起 PR</>}</h3>
             {mergeMode === 'local' ? (
               <>
                 <div className="modal-field">
@@ -1963,7 +1999,7 @@ export default function RequirementDetail() {
                   合并后删除开发分支
                 </label>
                 <div className="modal-actions btn-row-2col">
-                  <button className="btn btn-primary" onClick={confirmMerge} disabled={!!busy}>🔀 确认合入</button>
+                  <button className="btn btn-primary" onClick={confirmMerge} disabled={!!busy}><IconMerge size={14} className="btn-icon" />确认合入</button>
                   <button className="btn" onClick={() => setShowMergeModal(false)} disabled={!!busy}>取消</button>
                 </div>
               </>
@@ -1978,14 +2014,14 @@ export default function RequirementDetail() {
                   <code>{mergeState.remote_url || '（未配置）'}</code>
                 </div>
                 {mergeState.behind > 0 && (
-                  <p className="merge-warn">⚠️ 落后主分支 {mergeState.behind} 个提交，将先合并主分支再提交 PR。</p>
+                  <p className="merge-warn"><IconAlert size={14} className="icon-mr" />落后主分支 {mergeState.behind} 个提交，将先合并主分支再提交 PR。</p>
                 )}
                 <div className="merge-hint">
                   <span>执行流程</span>
                   <span>合并主分支 → 解决冲突 → 生成 PR 摘要 → 推送并发起 PR</span>
                 </div>
                 {mergeState.mid_merge && (
-                  <p className="merge-warn">⚠️ 当前存在未完成的合并，请先解决冲突或中止合并。</p>
+                  <p className="merge-warn"><IconAlert size={14} className="icon-mr" />当前存在未完成的合并，请先解决冲突或中止合并。</p>
                 )}
                 <div className="modal-field">
                   <label>提交信息</label>
@@ -1995,7 +2031,7 @@ export default function RequirementDetail() {
                   <p className="merge-warn">该项目未配置 origin 远程仓库，无法推送。</p>
                 )}
                 <div className="modal-actions btn-row-2col">
-                  <button className="btn btn-primary" onClick={confirmMerge} disabled={!!busy || !mergeState.has_remote}>🌐 推送并发起 PR</button>
+                  <button className="btn btn-primary" onClick={confirmMerge} disabled={!!busy || !mergeState.has_remote}><IconGlobe size={14} className="btn-icon" />推送并发起 PR</button>
                   <button className="btn" onClick={() => setShowMergeModal(false)} disabled={!!busy}>取消</button>
                 </div>
               </>
@@ -2008,7 +2044,7 @@ export default function RequirementDetail() {
       {showEditModal && req && (
         <div className="modal-overlay" onClick={() => setShowEditModal(false)}>
           <div className="modal-box" onClick={e => e.stopPropagation()}>
-            <h3>✏️ 编辑需求</h3>
+            <h3><IconRefine size={16} className="icon-mr" />编辑需求</h3>
             <div className="modal-field">
               <label>标题</label>
               <input className="form-input" value={editTitle} onChange={e => setEditTitle(e.target.value)} />
@@ -2047,7 +2083,7 @@ export default function RequirementDetail() {
             )}
             <div className="modal-actions btn-row-2col">
               <button className="btn btn-primary" onClick={saveEdit} disabled={!!busy}>
-                {busy === '保存' ? '⏳ 保存中...' : '💾 保存'}
+                {busy === '保存' ? <><IconHourglass size={13} className="btn-icon" />保存中...</> : <><IconSave size={13} className="btn-icon" />保存</>}
               </button>
               <button className="btn" onClick={() => setShowEditModal(false)}>取消</button>
             </div>
@@ -2066,11 +2102,11 @@ export default function RequirementDetail() {
               onClick={() => setSummarizeOpen(true)}
               title="将整段讨论总结为新的可开发需求（不会修改原想法）"
             >
-              📋 总结转需求
+              <IconSparkles size={13} className="btn-icon" /> 总结转需求
             </button>
           )}
-          <button className="btn btn-sm" onClick={openEdit}>✏️ 编辑</button>
-          <button className="btn btn-sm btn-danger" onClick={handleDelete}>🗑️ 删除</button>
+          <button className="btn btn-sm" onClick={openEdit}><IconRefine size={13} className="btn-icon" />编辑</button>
+          <button className="btn btn-sm btn-danger" onClick={handleDelete}><IconTrash size={13} className="btn-icon" />删除</button>
         </div>
       </div>
 
@@ -2081,9 +2117,9 @@ export default function RequirementDetail() {
         <span className={`status-badge status-${req.status}`}>{statusLabels[req.status] || req.status}</span>
         <span className={`priority-tag ${req.priority}`}>{req.priority.toUpperCase()}</span>
         <span className={`claude-status${claudeWorking ? ' working' : ''}`} title={claudeWorking ? 'Claude 正在执行分析/方案/开发任务' : '当前无 Claude 任务在运行'}>
-          {claudeWorking ? '🤖 Claude 工作中' : '😴 Claude 空闲'}
+          {claudeWorking ? <><IconBotBadge size={12} className="icon-mr" />Claude 工作中</> : <><IconSleep size={12} className="icon-mr" />Claude 空闲</>}
         </span>
-        {project && <span className="project-tag">📁 {project.name}</span>}
+        {project && <span className="project-tag"><IconFolder size={12} className="icon-mr" />{project.name}</span>}
         {req.source_requirement_id && (
           <Link
             to={`/requirements/${req.source_requirement_id}`}
@@ -2104,7 +2140,7 @@ export default function RequirementDetail() {
             className="compressed-badge"
             title={`需求分析已于 ${req.analyst_compressed_at} 压缩`}
           >
-            📦 分析已压缩
+            <IconArchive size={12} className="icon-mr" />分析已压缩
           </span>
         )}
         {req.design_compressed_at && (
@@ -2112,7 +2148,7 @@ export default function RequirementDetail() {
             className="compressed-badge"
             title={`方案设计已于 ${req.design_compressed_at} 压缩`}
           >
-            📦 设计已压缩
+            <IconArchive size={12} className="icon-mr" />设计已压缩
           </span>
         )}
         {req.coding_compressed_at && (
@@ -2120,7 +2156,7 @@ export default function RequirementDetail() {
             className="compressed-badge"
             title={`开发调整已于 ${req.coding_compressed_at} 压缩`}
           >
-            📦 开发已压缩
+            <IconArchive size={12} className="icon-mr" />开发已压缩
           </span>
         )}
       </div>
@@ -2363,7 +2399,7 @@ export default function RequirementDetail() {
             {adjustRows && adjustRows.length > 0 && (
               <div className="adjust-history">
                 <div className="adjust-history-title">
-                  📋 追问 / 调整历史（{adjustRows.length} 次）
+                  <IconListOrdered size={14} className="icon-mr" />追问 / 调整历史（{adjustRows.length} 次）
                 </div>
                 <div className="adjust-history-list">
                   {adjustRows.map((r, i) => (
@@ -2382,7 +2418,7 @@ export default function RequirementDetail() {
                       </div>
                       {r.summary && (
                         <div className="adjust-history-summary">
-                          📤 {r.summary}
+                          <IconSendOut size={13} className="icon-mr" />{r.summary}
                         </div>
                       )}
                       <div className="adjust-history-stats">
@@ -2452,8 +2488,8 @@ export default function RequirementDetail() {
         return (
           <details className="session-panel">
             <summary>
-              <span className="session-caret">▶</span>
-              🔧 Claude 会话（{rows.length}）
+              <span className="session-caret"><IconPlay size={11} /></span>
+              <IconWrench size={13} className="icon-mr" />Claude 会话（{rows.length}）
             </summary>
             <div className="session-body">
               <p className="session-hint">
@@ -2470,7 +2506,7 @@ export default function RequirementDetail() {
                     {r.sid}
                   </code>
                   <button className="btn btn-sm session-copy" onClick={() => copySessionId(r.sid)}>
-                    📋 复制
+                    <IconCopy size={12} className="btn-icon" />复制
                   </button>
                 </div>
               ))}
@@ -2482,7 +2518,7 @@ export default function RequirementDetail() {
       {/* ── Analyst stage ── */}
       {/* While analyzing, DeepRefineChat is itself the section (own card + header),
           so we render it standalone — no outer "需求分析" card around it, which
-          would otherwise create a card-in-card with two overlapping 🔍 headers. */}
+          would otherwise create a card-in-card with two overlapping magnifier headers. */}
       {req.status === 'analyzing' && (
         <DeepRefineChat
           reqId={req.id}
@@ -2504,7 +2540,7 @@ export default function RequirementDetail() {
 
       {req.status === 'draft' && (
         <div className="detail-section analysis-section">
-          <div className="section-header"><h3>🔍 需求分析</h3></div>
+          <div className="section-header"><h3><IconMagnifier size={16} className="icon-mr" />需求分析</h3></div>
           <div className="tab-empty">
             {req.skip_analysis ? (
               <>
@@ -2527,7 +2563,7 @@ export default function RequirementDetail() {
                     <button className="btn btn-primary"
                       onClick={() => requestDesignKnowledge(true)}
                       disabled={!!busy}>
-                      {busy === '生成技术方案' ? '⏳ ...' : '📐 生成技术方案'}
+                      {busy === '生成技术方案' ? <><IconHourglass size={13} className="btn-icon" />...</> : <><IconTriangle size={13} className="btn-icon" />生成技术方案</>}
                     </button>
                   )}
                   {/* Architect-model selectable BEFORE generating the plan.
@@ -2550,11 +2586,11 @@ export default function RequirementDetail() {
                     title={reqKind === 'idea' ? '与 AI 讨论这个想法的可行性' : '先进行需求分析，完善需求后再生成方案'}
                   >
                     {busy === '开始分析'
-                      ? '⏳ ...'
+                      ? <><IconHourglass size={13} className="btn-icon" />...</>
                       : reqKind === 'idea'
-                        ? '💬 与 AI 探讨这个想法'
+                        ? <><IconChat size={13} className="btn-icon" />与 AI 探讨这个想法</>
                         : reqKind === 'issue'
-                          ? '🔍 先排查根因'
+                          ? <><IconMagnifier size={13} className="btn-icon" />先排查根因</>
                           : '或先进行需求分析 →'}
                   </button>
                   {/* Analyst-model selectable before opting into the analysis. */}
@@ -2580,12 +2616,12 @@ export default function RequirementDetail() {
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   <button className="btn btn-primary" onClick={() => transition('analyzing', '开始分析')} disabled={!!busy}>
                     {busy === '开始分析'
-                      ? '⏳ ...'
+                      ? <><IconHourglass size={13} className="btn-icon" />...</>
                       : reqKind === 'idea'
-                        ? '💬 与 AI 探讨这个想法'
+                        ? <><IconChat size={13} className="btn-icon" />与 AI 探讨这个想法</>
                         : reqKind === 'issue'
-                          ? '🐞 开始排查问题'
-                          : '🤖 开始需求分析'}
+                          ? <><IconBug size={13} className="btn-icon" />开始排查问题</>
+                          : <><IconRobot size={13} className="btn-icon" />开始需求分析</>}
                   </button>
                   {/* Analyst-stage model, selectable BEFORE starting the first
                       analysis turn; the in-chat dropdown is otherwise disabled
@@ -2634,7 +2670,7 @@ export default function RequirementDetail() {
               </button>
             )}
             {req.status === 'designing' && hasDesign && (
-              <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={designing}>🔄 重新生成</button>
+              <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={designing}><IconRefresh size={13} className="btn-icon" />重新生成</button>
             )}
             {hasDesign && (
               <button
@@ -2644,7 +2680,7 @@ export default function RequirementDetail() {
                 style={{ marginLeft: 'auto' }}
                 title="将技术方案导出为 PDF"
               >
-                {exporting ? '⏳ 导出中...' : '📄 导出 PDF'}
+                {exporting ? <><IconHourglass size={13} className="btn-icon" />导出中...</> : <><IconFileText size={13} className="btn-icon" />导出 PDF</>}
               </button>
             )}
             <FullscreenButton isFullscreen={designFs.isFullscreen} onClick={designFs.toggle} />
@@ -2676,7 +2712,7 @@ export default function RequirementDetail() {
                 stepLabel="方案设计"
               />
               <CodingLines lines={designLines} working={designing} />
-              {designProcessActive && <div className="coding-line coding-line-tool_call">⏳ Claude 正在 plan 模式下制定技术方案...</div>}
+              {designProcessActive && <div className="coding-line coding-line-tool_call"><IconHourglass size={12} className="icon-mr" />Claude 正在 plan 模式下制定技术方案...</div>}
             </div>
           )}
 
@@ -2685,7 +2721,7 @@ export default function RequirementDetail() {
               <p>需求分析已完成。方案设计阶段将在 <strong>plan 模式</strong>下探索项目代码，制定具体可执行的技术实现方案（Markdown）。</p>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 <button className="btn btn-primary" onClick={() => requestDesignKnowledge(false)} disabled={!!busy || designing}>
-                  {busy === '生成技术方案' ? '⏳ ...' : '📐 开始制定技术方案'}
+                  {busy === '生成技术方案' ? <><IconHourglass size={13} className="btn-icon" />...</> : <><IconTriangle size={13} className="btn-icon" />开始制定技术方案</>}
                 </button>
                 {/* Roll back to the analyst stage. The backend allows
                     designing → analyzing; this is the recovery path when the
@@ -2699,7 +2735,7 @@ export default function RequirementDetail() {
                     disabled={!!busy}
                     title="退回到需求分析阶段继续完善对话"
                   >
-                    ↩ 返回重新分析
+                    <IconArrowBack size={12} className="btn-icon" />返回重新分析
                   </button>
                 )}
               </div>
@@ -2716,22 +2752,22 @@ export default function RequirementDetail() {
                     {design.overview && <div className="analysis-summary">{design.overview}</div>}
                     {design.files && design.files.length > 0 && (
                       <div className="analysis-block">
-                        <h4>📄 涉及文件</h4>
+                        <h4><IconFileText size={13} className="icon-mr" />涉及文件</h4>
                         <ul>{design.files.map((f, i) => <li key={i}><code>{f}</code></li>)}</ul>
                       </div>
                     )}
                     {design.steps && design.steps.length > 0 && (
                       <div className="analysis-block">
-                        <h4>🔢 实现步骤</h4>
+                        <h4><IconListOrdered size={13} className="icon-mr" />实现步骤</h4>
                         <ol>{design.steps.map((s, i) => <li key={i}>{s}</li>)}</ol>
                       </div>
                     )}
                     {design.model_changes && design.model_changes !== '无' && (
-                      <div className="analysis-block"><h4>🗄️ 数据模型变更</h4><p>{design.model_changes}</p></div>
+                      <div className="analysis-block"><h4><IconDatabase size={13} className="icon-mr" />数据模型变更</h4><p>{design.model_changes}</p></div>
                     )}
                     {design.risks && design.risks.length > 0 && (
                       <div className="analysis-block">
-                        <h4>⚠️ 实现风险</h4>
+                        <h4><IconAlert size={13} className="icon-mr" />实现风险</h4>
                         <ul>{design.risks.map((r, i) => <li key={i} className="risk-item">{r}</li>)}</ul>
                       </div>
                     )}
@@ -2755,7 +2791,7 @@ export default function RequirementDetail() {
             <>
               <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
                 <button className="btn btn-primary" onClick={() => transition('designed', '方案完成')} disabled={!!busy}>
-                  {busy === '方案完成' ? '⏳ ...' : '📐 方案完成'}
+                  {busy === '方案完成' ? <><IconHourglass size={13} className="btn-icon" />...</> : <><IconTriangle size={13} className="btn-icon" />方案完成</>}
                 </button>
               </div>
               {reqKind !== 'idea' && (
@@ -2780,7 +2816,7 @@ export default function RequirementDetail() {
       {/* ── Developer stage ── */}
       {(stage === 'developer' || stage === 'done') && (hasDesign || req.skip_design) && (
         <div className="detail-section">
-          <div className="section-header"><h3>🚀 开发实现</h3></div>
+          <div className="section-header"><h3><IconRocket size={16} className="icon-mr" />开发实现</h3></div>
 
           {/* Optional knowledge pre-read display (renders only when the user
               opted in and the backend emitted a knowledge event). */}
@@ -2796,7 +2832,7 @@ export default function RequirementDetail() {
                 将在独立 git worktree 中隔离开发（<code>{project?.local_path}.worktrees/{req.id}</code>），多需求并行互不干扰。
               </p>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                <button className="btn btn-primary" onClick={() => openBranchModal()}>🚀 开始开发</button>
+                <button className="btn btn-primary" onClick={() => openBranchModal()}><IconRocket size={13} className="btn-icon" />开始开发</button>
                 {/* Per-stage developer model. Default = 已设置的开发模型; disabled
                     while a coding job runs (Claude 工作中禁止切换). */}
                 <ModelSelect
@@ -2860,7 +2896,7 @@ export default function RequirementDetail() {
                 onShowSummary={handleShowCodingSummary}
               />
               <CodingLines lines={codingLines} working={coding} />
-              {coding && <div className="coding-line coding-line-tool_call">⏳ Claude 正在工作...</div>}
+              {coding && <div className="coding-line coding-line-tool_call"><IconHourglass size={12} className="icon-mr" />Claude 正在工作...</div>}
             </div>
           )}
 
@@ -2880,7 +2916,7 @@ export default function RequirementDetail() {
                 style={{ maxWidth: 640 }}
               >
                 <div className="modal-header">
-                  <h3>📦 已压缩上下文摘要</h3>
+                  <h3><IconArchive size={16} className="icon-mr" />已压缩上下文摘要</h3>
                   <button className="btn btn-sm" onClick={() => setCodingSummaryModal(null)}>关闭</button>
                 </div>
                 <div
@@ -2900,7 +2936,7 @@ export default function RequirementDetail() {
           {req.coding_session_id && (req.status === 'developing' || req.status === 'done') && !coding && !hasSubTasks && (
             <div className="adjust-composer">
               <div className="adjust-composer-header">
-                <span className="ac-title">🔧 追加调整</span>
+                <span className="ac-title"><IconWrench size={13} className="icon-mr" />追加调整</span>
                 <span className="ac-tag">续接原开发会话 · 仅携带本指令</span>
                 <div style={{ marginLeft: 'auto' }}>
                   {/* Switch model for the next adjust round; the dropdown itself
@@ -2928,7 +2964,7 @@ export default function RequirementDetail() {
               <div className="adjust-composer-footer stack-mobile">
                 <span className="ac-hint">Enter 发送 · Shift+Enter 换行</span>
                 <button className="btn btn-primary" onClick={doAdjustCoding} disabled={!adjustInput.trim()}>
-                  🚀 追加调整
+                  <IconRocket size={13} className="btn-icon" />追加调整
                 </button>
               </div>
             </div>
@@ -2956,10 +2992,10 @@ export default function RequirementDetail() {
                   </button>
                 )}
                 <button className="btn btn-primary" onClick={() => transition('done', '开发完成')} disabled={!!busy}>
-                  {busy === '开发完成' ? '⏳ ...' : '✅ 开发完成'}
+                  {busy === '开发完成' ? <><IconHourglass size={13} className="btn-icon" />...</> : <><IconCheck size={13} className="btn-icon" />开发完成</>}
                 </button>
                 {reqKind !== 'idea' && (
-                  <button className="btn" title="从技术方案重新 fork 新会话开始开发，不携带上次开发历史" onClick={() => openBranchModal()}>🔄 重新开发</button>
+                  <button className="btn" title="从技术方案重新 fork 新会话开始开发，不携带上次开发历史" onClick={() => openBranchModal()}><IconRefresh size={13} className="btn-icon" />重新开发</button>
                 )}
               </div>
 
@@ -2982,8 +3018,8 @@ export default function RequirementDetail() {
               {/* ── Merge / PR step ── */}
               <div className="merge-section">
                 <div className="merge-actions stack-mobile">
-                  <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}>🔀 本地合入</button>
-                  <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}>🌐 推送并发起 PR</button>
+                  <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}><IconMerge size={13} className="btn-icon" />本地合入</button>
+                  <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}><IconGlobe size={13} className="btn-icon" />推送并发起 PR</button>
                 </div>
 
                 {mergeState?.worktree_path && (
@@ -2997,16 +3033,16 @@ export default function RequirementDetail() {
 
                 {mergeState?.mid_merge && (
                   <div className="conflict-panel">
-                    <p className="conflict-title">⚠️ 仓库处于合并冲突状态</p>
+                    <p className="conflict-title"><IconAlert size={14} className="icon-mr" />仓库处于合并冲突状态</p>
                     {conflictFiles && conflictFiles.length > 0 && (
                       <ul className="conflict-file-list">
                         {conflictFiles.map((f, i) => <li key={i} className="conflict-file"><code>{f}</code></li>)}
                       </ul>
                     )}
                     <div className="conflict-actions">
-                      <button className="btn btn-primary" onClick={() => doMergeAction('resolve')} disabled={merging}>🤖 AI 解决冲突</button>
-                      <button className="btn" onClick={() => doMergeAction('continue')} disabled={merging}>✋ 已手动解决，继续</button>
-                      <button className="btn btn-danger" onClick={() => doMergeAction('abort')} disabled={merging}>↩️ 中止合并</button>
+                      <button className="btn btn-primary" onClick={() => doMergeAction('resolve')} disabled={merging}><IconRobot size={13} className="btn-icon" />AI 解决冲突</button>
+                      <button className="btn" onClick={() => doMergeAction('continue')} disabled={merging}><IconHand size={13} className="btn-icon" />已手动解决，继续</button>
+                      <button className="btn btn-danger" onClick={() => doMergeAction('abort')} disabled={merging}><IconArrowBack size={13} className="btn-icon" />中止合并</button>
                     </div>
                   </div>
                 )}
@@ -3017,13 +3053,13 @@ export default function RequirementDetail() {
                       <FullscreenButton isFullscreen onClick={mergeFs.exit} variant="floating" />
                     )}
                     <CodingLines lines={mergeLines} working={merging} />
-                    {merging && <div className="coding-line coding-line-tool_call">⏳ 执行中...</div>}
+                    {merging && <div className="coding-line coding-line-tool_call"><IconHourglass size={12} className="icon-mr" />执行中...</div>}
                   </div>
                 )}
 
                 {prLink && !merging && (
                   <a className="btn btn-primary pr-link-btn" href={prLink} target="_blank" rel="noreferrer">
-                    🌐 创建 PR
+                    <IconGlobe size={13} className="btn-icon" />创建 PR
                   </a>
                 )}
               </div>
@@ -3033,13 +3069,13 @@ export default function RequirementDetail() {
           {req.status === 'done' && (
             <div className="merge-section">
               {prLink ? (
-                <a className="btn btn-primary pr-link-btn" href={prLink} target="_blank" rel="noreferrer">🌐 查看 / 创建 PR</a>
+                <a className="btn btn-primary pr-link-btn" href={prLink} target="_blank" rel="noreferrer"><IconGlobe size={13} className="btn-icon" />查看 / 创建 PR</a>
               ) : (
-                <div className="tab-empty"><p>✅ 开发已完成。</p></div>
+                <div className="tab-empty"><p><IconCheck size={14} className="icon-mr" />开发已完成。</p></div>
               )}
               <div className="merge-actions stack-mobile">
-                <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}>🔀 本地合入</button>
-                <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}>🌐 推送并发起 PR</button>
+                <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}><IconMerge size={13} className="btn-icon" />本地合入</button>
+                <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}><IconGlobe size={13} className="btn-icon" />推送并发起 PR</button>
               </div>
               {mergeState?.worktree_path && (
                 <WorktreePathHint
@@ -3051,7 +3087,7 @@ export default function RequirementDetail() {
               )}
               {/* ── 子Agent 协作（done 阶段也开放）── 隐藏「追加调整」后，
                   done 状态下唯一可用的调整入口就是子任务。位置与
-                  developing 分支一致：merge/PR 操作区之后、「📦 归档到知识库」
+                  developing 分支一致：merge/PR 操作区之后、「归档到知识库」按钮之前
                   按钮之前。Idea 不展示（避免对探索性想法暴露开发工具）。 */}
               {reqKind !== 'idea' && (
                 <SubTaskPanel
@@ -3063,11 +3099,11 @@ export default function RequirementDetail() {
               )}
               <div className="merge-actions stack-mobile" style={{ marginTop: 8 }}>
                 <button className="btn btn-primary" onClick={handleArchive} disabled={!!busy}>
-                  {busy === '归档' ? '⏳ ...' : '📦 归档到知识库'}
+                  {busy === '归档' ? <><IconHourglass size={13} className="btn-icon" />...</> : <><IconArchive size={13} className="btn-icon" />归档到知识库</>}
                 </button>
                 {showPromoteCta && (
                   <button className="btn" onClick={handlePromoteToRequirement} disabled={!!busy}>
-                    {busy === '转为需求' ? '⏳ ...' : '📋 转为需求'}
+                    {busy === '转为需求' ? <><IconHourglass size={13} className="btn-icon" />...</> : <><IconCopy size={13} className="btn-icon" />转为需求</>}
                   </button>
                 )}
               </div>
@@ -3077,15 +3113,15 @@ export default function RequirementDetail() {
           {req.status === 'archived' && (
             <div className="merge-section">
               <div className="tab-empty">
-                <p>📦 已归档至项目知识库（最终需求 + 技术方案）。</p>
+                <p><IconArchive size={14} className="icon-mr" />已归档至项目知识库（最终需求 + 技术方案）。</p>
               </div>
               <div className="merge-actions stack-mobile" style={{ marginTop: 8 }}>
                 <button className="btn" onClick={handleUnarchive} disabled={!!busy}>
-                  {busy === '取消归档' ? '⏳ ...' : '↩ 取消归档'}
+                  {busy === '取消归档' ? <><IconHourglass size={13} className="btn-icon" />...</> : <><IconArrowBack size={13} className="btn-icon" />取消归档</>}
                 </button>
                 {showPromoteCta && (
                   <button className="btn" onClick={handlePromoteToRequirement} disabled={!!busy}>
-                    {busy === '转为需求' ? '⏳ ...' : '📋 转为需求'}
+                    {busy === '转为需求' ? <><IconHourglass size={13} className="btn-icon" />...</> : <><IconCopy size={13} className="btn-icon" />转为需求</>}
                   </button>
                 )}
               </div>
