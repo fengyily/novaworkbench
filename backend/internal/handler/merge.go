@@ -806,7 +806,7 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	effectiveModel := body.Model
 	roleConfigID := ""
 	if effectiveModel == "" {
-		_, roleModel, cfgID := h.roleConfig("developer")
+		_, roleModel, cfgID := h.roleConfig("pr_author")
 		effectiveModel = roleModel
 		roleConfigID = cfgID
 	}
@@ -818,17 +818,19 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	// just the task description.
 	prompt := buildPushSubTaskPrompt(reqRow, dev, base, remote, platformType, body.CommitMessage)
 
+	// 尝试不用主任务的 session 了，直接用子任务的 session 来做推送和创建 PR 的操作。因为主任务的 session 可能已经结束或者不适合继续使用，所以我们需要为子任务创建一个新的 session。
+	sourceSID := ""
 	// The sub-task forks the requirement's main-agent session (coding session
 	// with design session as fallback) so the child inherits the project's
 	// full context — same pattern as the wizard's manual sub-tasks. Empty
 	// sourceSID is treated as "no main session yet" and rejected with 409 to
 	// match StartSubTask's contract.
-	sourceSID := subTaskSourceSID(reqRow, "")
-	if sourceSID == "" {
-		writeError(w, http.StatusConflict, "NO_SESSION",
-			"需求尚未启动 coding 或 design session，无法触发推送子任务。请先开始开发。")
-		return
-	}
+	// sourceSID := subTaskSourceSID(reqRow, "")
+	// if sourceSID == "" {
+	// 	writeError(w, http.StatusConflict, "NO_SESSION",
+	// 		"需求尚未启动 coding 或 design session，无法触发推送子任务。请先开始开发。")
+	// 	return
+	// }
 
 	title := "推送并创建 PR"
 	if body.CommitMessage != "" {
