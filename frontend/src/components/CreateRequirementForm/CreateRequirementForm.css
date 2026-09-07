@@ -98,32 +98,54 @@
 
 /* --- Skip-AI-organize toggle ------------------------------------ */
 
-/* A compact iOS-style switch with a label that doubles as the affordance.
-   The label-as-control pattern keeps the entire row clickable on touch
-   without bloating the panel with a separate button. */
-.create-req-form .create-req-toggle {
+/* The toggle is a <label>, and it sits inside `.form-group` — which means
+   BOTH `.form-group label` (index.css) and `.create-req-form .form-group label`
+   (ProjectDetail.css) try to restyle it as a plain field caption
+   (`display: block`, tiny type, bottom margin). Those selectors win on
+   specificity over a bare `.create-req-toggle`, which flattened the whole
+   row: pill on one line, text stacked below. Re-declaring the control at
+   (0,3,1) puts it permanently out of their reach — no dependency on CSS
+   import order between the two stylesheets. Every property the caption
+   rules set is reset explicitly, so the row survives future edits to them. */
+.create-req-form .form-group label.create-req-toggle,
+.create-req-form label.create-req-toggle {
+  /* Layout */
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 12px;
+  width: 100%;
+  box-sizing: border-box;
+  position: relative; /* contains the visually-hidden checkbox */
+  /* Reset the field-caption rules this element also matches */
+  margin: 12px 0 0;
+  font-size: 13px;
+  font-weight: 400;
+  color: inherit;
+  /* Surface */
   padding: 9px 12px;
   border: 1px solid var(--color-border, #E2E8F0);
   border-radius: 8px;
   background: var(--color-surface, #fff);
   cursor: pointer;
   user-select: none;
+  -webkit-tap-highlight-color: transparent;
   transition: border-color 120ms ease, background-color 120ms ease;
 }
 
-.create-req-form .create-req-toggle:hover {
+.create-req-form .form-group label.create-req-toggle:hover,
+.create-req-form label.create-req-toggle:hover {
   border-color: var(--color-primary, #4F46E5);
 }
 
-.create-req-form .create-req-toggle.on {
+.create-req-form .form-group label.create-req-toggle.on,
+.create-req-form label.create-req-toggle.on {
   border-color: var(--color-primary, #4F46E5);
   background: var(--color-active, #EEF2FF);
 }
 
+/* Screen-reader-only checkbox: it stays in the tab order and carries the
+   space/enter toggling for keyboard users, while the pill below is pure
+   decoration painted from the label's `.on` class. */
 .create-req-form .create-req-toggle input[type='checkbox'] {
   position: absolute;
   width: 1px;
@@ -166,6 +188,8 @@
   transform: translateX(14px);
 }
 
+/* The text block takes the remaining width; `min-width: 0` is what lets a
+   long note wrap inside a flex row instead of pushing the pill out. */
 .create-req-form .create-req-toggle-text {
   display: flex;
   flex-direction: column;
@@ -263,4 +287,21 @@
   .create-req-form .create-req-meta-row { flex-direction: column; gap: 14px; }
   .create-req-form .create-req-kind { display: flex; }
   .create-req-form .create-req-shortcut { display: none; }
+
+  /* Touch target: the toggle is the only control in the panel without a
+     native 44px hit area, and it is the easiest one to fat-finger because
+     its ON state is the default. Same (0,3,1) selector as the base rule —
+     the media query wins on order, not on specificity. */
+  .create-req-form .form-group label.create-req-toggle,
+  .create-req-form label.create-req-toggle {
+    min-height: 44px;
+    padding: 10px 12px;
+    align-items: flex-start;
+  }
+
+  /* When the note wraps onto two lines on a narrow phone, a centred pill
+     floats mid-row and looks accidental; pinning it to the first text line
+     keeps the control anchored. 1px down offsets the pill's own border so
+     it optically centres against the 13px label. */
+  .create-req-form .create-req-toggle-track { margin-top: 1px; }
 }
