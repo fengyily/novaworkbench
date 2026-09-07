@@ -174,7 +174,7 @@ export default function SettingsRoles() {
         <div>
           <h3 className="settings-section-title">角色管理</h3>
           <p className="settings-section-desc">
-            为每个角色编辑系统提示词（通过 <code>--system-prompt</code> 注入）并选择模型（通过 <code>--model</code> 注入）。
+            为每个角色编辑系统提示词（通过 <code>--system-prompt</code> 注入）并选择模型（模型与所选配置的 Base URL/Token 一并通过 <code>--settings</code> 注入）。
             先选择 Claude 配置（默认 = 全局默认配置），再从该配置的模型列表中选择模型。所选配置会一并保存为该角色的绑定，
             后续方案设计、开发实现、推送/创建 PR 等场景均使用该绑定的 Base URL/Token 执行 —— 不再回退到全局默认。
             留空则回退到全局默认配置 + claude CLI 默认模型。

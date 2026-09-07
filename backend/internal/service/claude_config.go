@@ -425,6 +425,21 @@ func (s *ClaudeConfigService) ActiveModels() (models []string, defaultModel stri
 	return modelEntryIDs(c.Models), c.DefaultModel, nil
 }
 
+// ActiveLaunchInfo returns the active config's base URL + default model for
+// rendering the copy-paste `claude --settings '{"env":{...}}'` prefix the UI
+// shows next to session ids. The auth token is deliberately NOT returned —
+// tokens never leave the backend in full (same rule as the config list API);
+// the pasted command works because the user's own ~/.claude auth or an
+// interactive `claude /login` supplies it, while --settings pins the model +
+// base URL exactly as Nova's own launches do.
+func (s *ClaudeConfigService) ActiveLaunchInfo() (baseURL, defaultModel string, err error) {
+	c, err := s.ActiveConfig()
+	if err != nil || c == nil {
+		return "", "", err
+	}
+	return c.BaseURL, c.DefaultModel, nil
+}
+
 // ModelInActiveList reports whether m is among the active config's models.
 // Used for the role-model soft validation warning. When there is no active
 // config or its list is empty, every value is accepted (returns true).

@@ -5,6 +5,8 @@ import {
   subTasksApi,
   subTaskCliCommand,
   subTaskAdjustCommand,
+  claudeApi,
+  claudeSettingsPrefix,
   fmtNum,
   DefaultModelLabel,
   type SubTask,
@@ -176,11 +178,32 @@ function SubTaskLogView({ lines }: { lines: LogLine[] }) {
   return <div className="sub-log">{rendered}</div>;
 }
 
+// launchSettingsRef caches the --settings prefix for the copy-paste CLI
+// commands (one /active fetch per page load). Empty string = nothing to pin
+// (no active config with base URL / model) → commands render without the flag.
+let launchSettingsRef: string | null = null;
+async function launchSettings(): Promise<string> {
+  if (launchSettingsRef !== null) return launchSettingsRef;
+  try {
+    const active = await claudeApi.active();
+    launchSettingsRef = claudeSettingsPrefix(active?.base_url, active?.default_model);
+  } catch {
+    launchSettingsRef = '';
+  }
+  return launchSettingsRef;
+}
+
 function CopyCliBlock({ st, variant }: { st: SubTask; variant: 'continue' | 'adjust' }) {
   const [copied, setCopied] = useState(false);
+  const [settings, setSettings] = useState(launchSettingsRef ?? '');
+  useEffect(() => {
+    let cancelled = false;
+    launchSettings().then((s) => { if (!cancelled) setSettings(s); });
+    return () => { cancelled = true; };
+  }, []);
   const cmd = variant === 'continue'
-    ? subTaskCliCommand(st)
-    : subTaskAdjustCommand(st, '');
+    ? subTaskCliCommand(st, settings)
+    : subTaskAdjustCommand(st, '', settings);
   const onCopy = useCallback(async () => {
     const ok = await writeClipboard(cmd);
     if (ok) {

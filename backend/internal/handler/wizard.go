@@ -2592,13 +2592,14 @@ func workerCategoryHint(cat, msg string) string {
 	case "model_not_found":
 		return "上游 API 不认识这个 model（404）。请检查「设置 → Claude 配置」里的 model 与 base URL，或确认模型名拼写正确。"
 	case "unrecognized_model":
-		// We pass --model MiniMax-M3 (or similar custom id) plus the env
-		// var CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1 to
-		// suppress Claude Code's "model isn't in my local catalog, I'll
-		// assume 200k context and might fail" warning — see gateway.go:
-		// BuildEnvPairs. If the warning still surfaces here, either the
-		// env var didn't reach the worker (stale server.mjs) or the CLI
-		// version on the agent server doesn't honor that knob.
+		// We pin MiniMax-M3 (or a similar custom id) via the --settings env
+		// block together with CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_
+		// ENFORCEMENT=1, which suppresses Claude Code's "model isn't in my
+		// local catalog, I'll assume 200k context and might fail" warning —
+		// see gateway.go: settingsEnvOverrides. If the warning still surfaces
+		// here, either the env block didn't reach the worker (stale
+		// server.mjs) or the CLI version on the agent server doesn't honor
+		// that knob.
 		//
 		// The `[1m]` / `[0m]` markers in the stderr are Claude Code's
 		// own ANSI color escapes leaking into the JSON it emits — a CLI
@@ -3320,13 +3321,15 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// Auth precedence on the remote path: the platform's active
 	// claude_configs row is the ONLY source of ANTHROPIC_AUTH_TOKEN /
 	// ANTHROPIC_BASE_URL / model pinning. We pass it via `env` (built by
-	// h.llm.BuildEnvPairs above) AND we set IgnoreLocalSettings=true so the
-	// worker invokes claude with --setting-sources "" (load no settings
+	// BuildRemoteEnvPairsWithConfig below) AND we set IgnoreLocalSettings=true
+	// so the worker invokes claude with --setting-sources "" (load no settings
 	// files at all — user / project / local). The agent host's
 	// ~/.claude/settings.json — which the install script seeds with a
 	// placeholder token — must not be able to shadow the platform config,
 	// and any project / local settings left in the worktree by accident
-	// shouldn't either. The `env` field carries every key the CLI needs.
+	// shouldn't either. The worker folds the `env` map into its inline
+	// --settings JSON (buildSettingsArg), so the remote launch carries the
+	// pins exactly the way the local path does.
 	ignoreLocal := true
 	opts := llm.StreamOpts{
 		Prompt:                 in.prompt,
@@ -3341,12 +3344,14 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		PermissionMode:         "",
 		OverrideSettingSources: &ignoreLocal, // legacy flag, kept true
 	}
-	// Use BuildRemoteEnvPairs, NOT BuildEnvPairs: the remote worker spawns
-	// claude inside the agent host's own environment, so we must only send the
-	// platform-pinned keys (auth token / base URL / model pins). BuildEnvPairs
-	// inherits os.Environ() of the NovaWorkbench host and would leak macOS
+	// Use BuildRemoteEnvPairs (NOT a plain env inheritance): the remote worker
+	// spawns claude inside the agent host's own environment, so we must only
+	// send the platform-pinned keys (auth token / base URL / model pins).
+	// Inheriting os.Environ() of the NovaWorkbench host would leak macOS
 	// HOME=/Users/... + TMPDIR=/var/folders/... into the Linux agent, making
 	// `claude --print ping` hang and fail the preflight (preflight_timeout).
+	// The pairs come from the SAME settingsEnvOverrides map the local path
+	// serializes into its --settings JSON, so the two surfaces cannot drift.
 	envPairs := h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, in.claudeConfigID)
 	runBody := workerRunRequest(opts, envPairs, in)
 
@@ -4081,10 +4086,11 @@ func buildAnalystFirstPrompt(req *model.Requirement, description, currentAnalysi
 	return b.String()
 }
 
-// logClaudeEnvConfig logs which auth-related env vars are present on the claude
-// subprocess (presence only — never values, so secrets stay out of the logs).
-// Use it to confirm the configured ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL are
-// applied and that a conflicting inherited ANTHROPIC_API_KEY has been stripped.
+// logClaudeEnvConfig logs where the claude run's auth/config travels: the
+// --settings JSON flag (values redacted — see logClaudeCmd) plus the presence
+// of any auth keys left on the process env, which should be ABSENT when a
+// pin is configured (localEnv strips them so --settings is the single source).
+// Never logs values, only presence, so secrets stay out of the logs.
 func logClaudeEnvConfig(scope string, cmd *exec.Cmd) {
 	has := func(k string) bool {
 		for _, kv := range cmd.Env {
@@ -4094,8 +4100,15 @@ func logClaudeEnvConfig(scope string, cmd *exec.Cmd) {
 		}
 		return false
 	}
-	log.Printf("[%s] claude env present: ANTHROPIC_AUTH_TOKEN=%v ANTHROPIC_BASE_URL=%v ANTHROPIC_API_KEY=%v",
-		scope, has("ANTHROPIC_AUTH_TOKEN"), has("ANTHROPIC_BASE_URL"), has("ANTHROPIC_API_KEY"))
+	hasSettingsFlag := false
+	for _, a := range cmd.Args {
+		if a == "--settings" {
+			hasSettingsFlag = true
+			break
+		}
+	}
+	log.Printf("[%s] claude config: --settings flag=%v env ANTHROPIC_AUTH_TOKEN=%v ANTHROPIC_BASE_URL=%v ANTHROPIC_API_KEY=%v",
+		scope, hasSettingsFlag, has("ANTHROPIC_AUTH_TOKEN"), has("ANTHROPIC_BASE_URL"), has("ANTHROPIC_API_KEY"))
 }
 
 // logClaudeExecDiag dumps a diagnostic snapshot of the binary Go is about to
@@ -4194,10 +4207,17 @@ func logClaudeExecDiag(scope string, cmd *exec.Cmd) {
 }
 
 // logClaudeCmd logs the actual claude CLI invocation as a shell command that
-// can be copied and run directly in a terminal.
+// can be copied and run directly in a terminal. The --settings JSON value is
+// the one exception to "verbatim": it carries the configured auth token, so it
+// is re-serialized with ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY blanked (the
+// remote worker's renderCommand applies the same rule, keeping the local and
+// remote logs diffable on auth / base URL / model).
 func logClaudeCmd(scope string, cmd *exec.Cmd) {
 	parts := make([]string, 0, len(cmd.Args))
-	for _, a := range cmd.Args {
+	for i, a := range cmd.Args {
+		if i > 0 && cmd.Args[i-1] == "--settings" {
+			a = llm.RedactSettings(a)
+		}
 		if len(a) > 200 {
 			a = a[:200] + fmt.Sprintf("…(%d bytes total)", len(a))
 		}
