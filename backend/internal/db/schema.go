@@ -353,6 +353,39 @@ CREATE TABLE IF NOT EXISTS sub_tasks (
 	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_sub_tasks_req ON sub_tasks(requirement_id);
+
+-- Scheduled one-shot task: fires architect-design or start-coding at a future
+-- time with a pre-selected model. Lifecycle (no retry):
+--   pending → running → succeeded | failed
+--   pending → canceled                (user cancel)
+--   running → failed                  (boot recovery)
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+	id                TEXT PRIMARY KEY,
+	task_type         TEXT NOT NULL DEFAULT 'design',   -- 'design' | 'coding'
+	requirement_id    TEXT NOT NULL,
+	project_id        TEXT NOT NULL DEFAULT '',
+	requirement_title TEXT NOT NULL DEFAULT '',
+	run_at            DATETIME NOT NULL,
+	model             TEXT NOT NULL DEFAULT '',         -- '' = 角色默认（执行时再解析）
+	read_knowledge    INTEGER NOT NULL DEFAULT 0,
+	branch_name       TEXT NOT NULL DEFAULT '',         -- coding only
+	base_branch       TEXT NOT NULL DEFAULT '',         -- coding only
+	agent_server_id   TEXT NOT NULL DEFAULT '',         -- coding only ('' = 本地)
+	split_tasks       INTEGER NOT NULL DEFAULT 0,       -- coding only
+	status            TEXT NOT NULL DEFAULT 'pending',
+	job_id            TEXT NOT NULL DEFAULT '',         -- 关联 JobStore / job_logs
+	error_message     TEXT NOT NULL DEFAULT '',
+	created_by        TEXT NOT NULL DEFAULT '',         -- username
+	created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+	executed_at       DATETIME,                         -- 认领时间；pending 时 NULL
+	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_sched_status  ON scheduled_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_sched_req     ON scheduled_tasks(requirement_id);
+CREATE INDEX IF NOT EXISTS idx_sched_run_at  ON scheduled_tasks(run_at);
+-- NOTE: idx_sched_task_type intentionally omitted — task_type 不在
+-- mysqlIndexedCol 白名单，MySQL 下索引 TEXT 会失败。List 端 Go 侧过滤即可。
 `
 
 // alterColumns adds columns to older databases. ALTER TABLE fails when the
@@ -551,8 +584,79 @@ func isIgnorableDDLError(stmt string, err error) bool {
 	return false
 }
 
+// commentOnlyLine matches strings that contain nothing but `-- ...` or
+// `/* ... */` comments (possibly on multiple lines). Used by execStatements
+// to skip chunks the schema string leaves between the last `;` and the
+// closing backtick — those would otherwise be sent to the driver as an
+// empty statement and rejected by PostgreSQL with "syntax error at end of
+// input".
+func commentOnlyLine(s string) bool {
+	stripped := s
+	for {
+		start := strings.Index(stripped, "/*")
+		end := strings.Index(stripped, "*/")
+		if start >= 0 && end > start {
+			stripped = stripped[:start] + stripped[end+2:]
+			continue
+		}
+		break
+	}
+	for _, line := range strings.Split(stripped, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			continue
+		}
+		if !strings.HasPrefix(t, "--") {
+			return false
+		}
+	}
+	return true
+}
+
+// stripLeadingComments drops any lines at the top of a DDL chunk that are
+// purely `-- ...` or `/* ... */`. The pgx / Postgres extended-query
+// protocol that database/sql uses by default rejects chunks that have
+// comment-only prefixes (the lexer hands the comment to the server but the
+// parser complains "syntax error at end of input" once it strips them and
+// finds nothing DDL-shaped on the first non-comment line — this happens
+// when the chunk ALSO contains a CREATE statement later, but the
+// tokenizer apparently only inspects a prefix window). SQLite + MySQL are
+// tolerant; Postgres is strict. Stripping the comment lines client-side
+// keeps every chunk purely DDL.
+func stripLeadingComments(s string) string {
+	for {
+		trimmed := strings.TrimLeft(s, " \t\r\n")
+		if strings.HasPrefix(trimmed, "--") {
+			nl := strings.Index(trimmed, "\n")
+			if nl < 0 {
+				return ""
+			}
+			s = trimmed[nl+1:]
+			continue
+		}
+		if strings.HasPrefix(trimmed, "/*") {
+			end := strings.Index(trimmed, "*/")
+			if end < 0 {
+				return ""
+			}
+			s = trimmed[end+2:]
+			continue
+		}
+		break
+	}
+	return s
+}
+
 func execStatements(d *DB, stmts []string) error {
 	for _, stmt := range stmts {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" {
+			continue
+		}
+		if commentOnlyLine(stmt) {
+			continue
+		}
+		stmt = stripLeadingComments(stmt)
 		stmt = strings.TrimSpace(stmt)
 		if stmt == "" {
 			continue

@@ -415,6 +415,12 @@ export const IconTriangle = makeIcon(
   'M4 20 20 4M4 20h4M4 20v-4M7 17l10-10M10.5 13.5l3 3',
 );
 
+/** Clock — replaces ⏰ for "schedule a future action" affordances
+ *  (定时生成方案 / 定时开发 / scheduled-tasks page nav). */
+export const IconClock = makeIcon(
+  'M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z',
+);
+
 /** External link / open in new tab — replaces ↗ */
 export const IconExternalLink = makeRichIcon(() => [
   <path key="a" d="M13 5h6v6" />,

@@ -23,6 +23,7 @@ import KnowledgePage from './pages/KnowledgePage';
 import RequirementDetail from './pages/RequirementDetail';
 import WizardPage from './pages/WizardPage';
 import ProjectDetail from './pages/ProjectDetail';
+import SchedulesPage from './pages/SchedulesPage';
 
 // RequireAuth gates the authenticated app: while the session is being
 // restored it shows a minimal loader; once restored with no user it bounces
@@ -57,6 +58,7 @@ export default function App() {
             <Route path="projects/:id" element={<ProjectDetail />} />
             <Route path="requirements" element={<RequirementsList />} />
             <Route path="requirements/:id" element={<RequirementDetail />} />
+            <Route path="schedules" element={<SchedulesPage />} />
             <Route path="knowledge" element={<KnowledgePage />} />
             <Route path="chat" element={<Chat />} />
             <Route path="reports" element={<Reports />} />

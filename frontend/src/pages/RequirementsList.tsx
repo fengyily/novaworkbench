@@ -17,6 +17,7 @@ import {
   type Kind, type Project, type Requirement,
 } from '../api/client';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
+import { relativeTime } from '../utils/time';
 import './RequirementsList.css';
 
 const KIND_FILTERS: { value: Kind; label: string; emoji: string }[] = [
@@ -25,24 +26,8 @@ const KIND_FILTERS: { value: Kind; label: string; emoji: string }[] = [
   { value: 'idea', label: '想法', emoji: '💡' },
 ];
 
-// 表格 / 卡片通用的「相对时间」格式化。卡片在移动端用这个更易读，桌面
-// 端表格保留 toLocaleString() 的完整时间戳。
-function relativeTime(s: string): string {
-  const t = new Date(s).getTime();
-  if (Number.isNaN(t)) return s;
-  const diff = Math.max(0, Date.now() - t);
-  const min = Math.floor(diff / 60_000);
-  if (min < 1) return '刚刚';
-  if (min < 60) return `${min} 分钟前`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr} 小时前`;
-  const day = Math.floor(hr / 24);
-  if (day < 30) return `${day} 天前`;
-  const mo = Math.floor(day / 30);
-  if (mo < 12) return `${mo} 个月前`;
-  const yr = Math.floor(mo / 12);
-  return `${yr} 年前`;
-}
+// 表格 / 卡片通用的「相对时间」格式化在 utils/time.ts 抽出共用；本页仅
+// 引入，桌面端表格保留 toLocaleString() 的完整时间戳。
 
 export default function RequirementsList() {
   const navigate = useNavigate();

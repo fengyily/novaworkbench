@@ -648,6 +648,14 @@ export const wizardApi = {
     api.get<ContextSummary>(
       `/api/wizard/requirement/${requirementId}/context-summary?step=${encodeURIComponent(step)}`,
     ),
+  /**
+   * Snapshot of a finished background wizard job. Backs the schedule log
+   * popup — when a scheduled design/coding run finishes, the SchedulesPage
+   * "查看日志" button fetches this and renders the log lines inline (the
+   * durable job_logs row persists across backend restarts). The wizard's
+   * StreamJob SSE uses the same handler internally for live progress.
+   */
+  getJob: (jobId: string) => api.get<RunJob>(`/api/wizard/jobs/${jobId}`),
 };
 
 export interface RunStatus {
@@ -1394,4 +1402,69 @@ export const agentServersApi = {
     api.post<{ job_id: string }>(`/api/settings/agent-servers/${id}/install`, {}),
   jobUrl: (jobId: string) => `${API_BASE}/api/settings/agent-servers/jobs/${jobId}`,
   jobStreamUrl: (jobId: string) => `${API_BASE}/api/settings/agent-servers/jobs/${jobId}/stream`,
+};
+
+// ────────────────────────────────────────────────────────────────────────
+// Scheduled tasks (定时任务) — one-shot future-dated wizard actions.
+// See backend internal/service/scheduled_task.go for the persistence layer
+// and internal/scheduler for the polling loop.
+// ────────────────────────────────────────────────────────────────────────
+
+export type ScheduledTaskType = 'design' | 'coding';
+export type ScheduledTaskStatus =
+  | 'pending'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'canceled';
+
+export interface ScheduledTask {
+  id: string;
+  task_type: ScheduledTaskType;
+  requirement_id: string;
+  project_id: string;
+  requirement_title: string;
+  run_at: string; // RFC3339 from server (server local time)
+  model: string; // '' = 角色默认
+  read_knowledge: boolean;
+  branch_name: string; // coding only
+  base_branch: string; // coding only
+  agent_server_id: string; // coding only
+  split_tasks: boolean; // coding only
+  status: ScheduledTaskStatus;
+  job_id: string;
+  error_message: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  executed_at: string | null;
+}
+
+export interface CreateScheduleReq {
+  requirement_id: string;
+  task_type: ScheduledTaskType;
+  run_at: string; // datetime-local ("YYYY-MM-DDTHH:MM") or RFC3339
+  model?: string;
+  read_knowledge?: boolean;
+  branch_name?: string;
+  base_branch?: string;
+  agent_server_id?: string;
+  split_tasks?: boolean;
+}
+
+export const schedulesApi = {
+  list: (params?: { status?: string; task_type?: string; requirement_id?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.status) q.set('status', params.status);
+    if (params?.task_type) q.set('task_type', params.task_type);
+    if (params?.requirement_id) q.set('requirement_id', params.requirement_id);
+    const qs = q.toString();
+    return api.get<ScheduledTask[]>(`/api/schedules${qs ? `?${qs}` : ''}`);
+  },
+  get: (id: string) => api.get<ScheduledTask>(`/api/schedules/${id}`),
+  create: (data: CreateScheduleReq) =>
+    api.post<ScheduledTask>('/api/schedules', data),
+  cancel: (id: string) =>
+    api.post<ScheduledTask>(`/api/schedules/${id}/cancel`, {}),
+  remove: (id: string) => api.delete<{ id: string; status: string }>(`/api/schedules/${id}`),
 };

@@ -16,6 +16,7 @@ import (
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/middleware"
 	"github.com/novaworkbench/backend/internal/preflight"
+	"github.com/novaworkbench/backend/internal/scheduler"
 	"github.com/novaworkbench/backend/internal/secret"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
@@ -70,6 +71,7 @@ func main() {
 	skillSvc := service.NewSkillService(database)
 	agentSvrSvc := service.NewAgentServerService(database)
 	subTaskSvc := service.NewSubTaskService(database)
+	schedSvc := service.NewScheduledTaskService(database)
 
 	// Seed built-in roles on first run (idempotent).
 	if err := roleSvc.SeedDefaults(); err != nil {
@@ -172,6 +174,17 @@ func main() {
 	// ring-buffer of live jobs is shared across handlers.
 	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc)
 	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, subTaskSvc, subTaskRunner)
+	// Scheduled-task executor (wizard bridge) and HTTP handler. The
+	// scheduler package polls scheduled_tasks rows and dispatches through
+	// the executor; both live in main.go so the lifecycle is the same as
+	// the rest of the wiring.
+	schedExec := handler.NewScheduledExecutor(wizardH, schedSvc)
+	schedH := handler.NewScheduleHandler(schedSvc, reqSvc)
+	schedulerRunner := scheduler.New(database, schedExec)
+	if _, err := schedulerRunner.Recover(); err != nil {
+		log.Printf("[main] scheduler recovery: %v", err)
+	}
+	schedulerRunner.Start()
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
@@ -387,6 +400,19 @@ func main() {
 	mux.HandleFunc("POST /api/wizard/compress-context", wizardH.CompressContext)
 	mux.HandleFunc("GET /api/wizard/requirement/{id}/context-summary", wizardH.GetContextSummary)
 
+	// Scheduled tasks (定时任务) — one-shot, future-dated wizard actions
+	// (architect-design / start-coding) with a pre-selected model. Five
+	// routes: create / list / get / cancel / delete. Shares the wizard's
+	// JobStore for execution logs (scheduled_tasks.job_id references
+	// /api/wizard/jobs/{id}); execution semantics handled by the
+	// internal/scheduler package.
+	schedulePerm := middleware.RequirePermission(aclSvc, "menu.projects")
+	mux.HandleFunc("POST /api/schedules", schedulePerm(http.HandlerFunc(schedH.Create)).ServeHTTP)
+	mux.HandleFunc("GET /api/schedules", schedulePerm(http.HandlerFunc(schedH.List)).ServeHTTP)
+	mux.HandleFunc("GET /api/schedules/{id}", schedulePerm(http.HandlerFunc(schedH.Get)).ServeHTTP)
+	mux.HandleFunc("POST /api/schedules/{id}/cancel", schedulePerm(http.HandlerFunc(schedH.Cancel)).ServeHTTP)
+	mux.HandleFunc("DELETE /api/schedules/{id}", schedulePerm(http.HandlerFunc(schedH.Delete)).ServeHTTP)
+
 	// Sub-task (子任务) endpoints — manually-triggered child agents that
 	// fork the requirement's coding_session_id so they share the main
 	// agent's context. Three REST routes; SSE streams reuse the existing
@@ -492,6 +518,10 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		srv.Shutdown(ctx)
+		// Stop the scheduled-task poller after the HTTP server is down so
+		// any in-flight dispatcher finishes writing its job_log before we
+		// tear everything down. Stop() waits up to 2s for the loop to exit.
+		schedulerRunner.Stop()
 	}()
 
 	log.Printf("Server listening on http://localhost:%s", port)

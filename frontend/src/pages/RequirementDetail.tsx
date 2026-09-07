@@ -8,9 +8,12 @@ import ModelSelect from '../components/ModelSelect';
 import AtMentionTextarea from '../components/AtMentionTextarea';
 import SubTaskPanel from '../components/SubTaskPanel';
 import { SummarizeToRequirementModal } from '../components/SummarizeToRequirementModal';
+import { ScheduleModal } from '../components/ScheduleModal';
+import { schedulesApi, type ScheduledTask } from '../api/client';
 import {
   StageIcon,
   IconCheck,
+  IconClock,
   IconMailbox,
   IconRobot,
   IconCopy,
@@ -552,6 +555,38 @@ export default function RequirementDetail() {
       .then((rows) => setAgentServers((rows ?? []).filter((s) => s.status === 'ready')))
       .catch(() => {/* settings tab is the source of truth — silently ignore */});
   }, []);
+
+  // ── Scheduled-task state ──
+  // pendingByType[taskType] holds the pending row (if any) so the detail
+  // page can render "已定时 HH:MM ... [取消]" hints and disable the
+  // ScheduleModal once there's a pending row (the backend enforces 409
+  // anyway, but the UI being upfront avoids the round-trip). Modal is
+  // controlled by modalState — null when closed; otherwise carries the
+  // taskType we want to create.
+  const [pendingByType, setPendingByType] = useState<Record<'design' | 'coding', ScheduledTask | null>>({
+    design: null,
+    coding: null,
+  });
+  const [scheduleModal, setScheduleModal] = useState<{ taskType: 'design' | 'coding' } | null>(null);
+  const loadPendingSchedules = useCallback(async () => {
+    if (!req) return;
+    try {
+      const rows = await schedulesApi.list({ requirement_id: req.id, status: 'pending' });
+      const map: Record<'design' | 'coding', ScheduledTask | null> = { design: null, coding: null };
+      for (const r of rows ?? []) {
+        if (r.task_type === 'design' || r.task_type === 'coding') {
+          map[r.task_type] = r;
+        }
+      }
+      setPendingByType(map);
+    } catch {
+      // Silent — the SchedulesPage is the source of truth; this is a hint only.
+    }
+  }, [req]);
+  useEffect(() => {
+    loadPendingSchedules();
+  }, [loadPendingSchedules]);
+
   const modelSeedRef = useRef(false);
   useEffect(() => {
     if (!req || modelSeedRef.current) return;
@@ -2573,6 +2608,33 @@ export default function RequirementDetail() {
                       {busy === '生成技术方案' ? <><IconHourglass size={13} className="btn-icon" />...</> : <><IconTriangle size={13} className="btn-icon" />生成技术方案</>}
                     </button>
                   )}
+                  {/* ⏰ 定时生成方案 — opens ScheduleModal pre-loaded with the
+                      current architect model. Hidden for kind=idea (same
+                      gating as the primary button above). Disabled when a
+                      pending design row already exists (backend 409s in
+                      that case; the UI just gets there first). */}
+                  {reqKind !== 'idea' && !pendingByType.design && (
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => setScheduleModal({ taskType: 'design' })}
+                      disabled={!!busy}
+                      title="设置未来时间自动生成技术方案，可预选模型"
+                    >
+                      <IconClock size={13} className="btn-icon" />定时生成方案
+                    </button>
+                  )}
+                  {/* Pending schedule hint — surfaces the planned time and
+                      offers an inline cancel link so the user doesn't have
+                      to navigate to the SchedulesPage. */}
+                  {pendingByType.design && (
+                    <PendingScheduleHint
+                      task={pendingByType.design}
+                      onCancel={async () => {
+                        await schedulesApi.cancel(pendingByType.design!.id);
+                        loadPendingSchedules();
+                      }}
+                    />
+                  )}
                   {/* Architect-model selectable BEFORE generating the plan.
                       Irrelevant for kind=idea — the architect stage is hidden. */}
                   {reqKind !== 'idea' && (
@@ -2840,6 +2902,29 @@ export default function RequirementDetail() {
               </p>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                 <button className="btn btn-primary" onClick={() => openBranchModal()}><IconRocket size={13} className="btn-icon" />开始开发</button>
+                {/* ⏰ 定时开发 — opens ScheduleModal pre-loaded with the
+                    current developer model + branch defaults. Same gating
+                    as the primary button (kind=idea hidden; status in
+                    {designed, draft+skip_design} only). Disabled when a
+                    pending coding row already exists. */}
+                {!pendingByType.coding && (
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => setScheduleModal({ taskType: 'coding' })}
+                    title="设置未来时间自动开始开发，可预选模型与执行环境"
+                  >
+                    <IconClock size={13} className="btn-icon" />定时开发
+                  </button>
+                )}
+                {pendingByType.coding && (
+                  <PendingScheduleHint
+                    task={pendingByType.coding}
+                    onCancel={async () => {
+                      await schedulesApi.cancel(pendingByType.coding!.id);
+                      loadPendingSchedules();
+                    }}
+                  />
+                )}
                 {/* Per-stage developer model. Default = 已设置的开发模型; disabled
                     while a coding job runs (Claude 工作中禁止切换). */}
                 <ModelSelect
@@ -3148,6 +3233,69 @@ export default function RequirementDetail() {
           }}
         />
       )}
+
+      {scheduleModal && (
+        <ScheduleModal
+          open
+          taskType={scheduleModal.taskType}
+          requirementId={req.id}
+          requirementTitle={req.title}
+          initialModel={scheduleModal.taskType === 'design' ? architectModel : developerModel}
+          defaultBranchName={
+            scheduleModal.taskType === 'coding'
+              ? `feat/${req.id.replace(/^req_/, '')}`
+              : undefined
+          }
+          defaultBaseBranch={
+            scheduleModal.taskType === 'coding' ? (project?.default_branch ?? 'main') : undefined
+          }
+          agentServers={agentServers.map(s => ({ id: s.id, name: s.name, host: s.host }))}
+          onClose={() => setScheduleModal(null)}
+          onScheduled={() => {
+            setScheduleModal(null);
+            loadPendingSchedules();
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+// PendingScheduleHint is the inline "已定时 HH:MM ... [取消]" strip rendered
+// at the top of the design / developer sections when a pending row exists
+// for the current requirement. Kept tiny so it never displaces the real
+// wizard controls.
+function PendingScheduleHint({
+  task,
+  onCancel,
+}: {
+  task: ScheduledTask;
+  onCancel: () => void;
+}) {
+  const when = new Date(task.run_at);
+  const formatted = when.toLocaleString();
+  return (
+    <span
+      style={{
+        fontSize: 12,
+        color: '#0e7490',
+        background: '#cffafe',
+        borderRadius: 4,
+        padding: '4px 8px',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+      }}
+    >
+      <IconClock size={12} />已定时 {formatted}
+      <button
+        className="btn btn-sm"
+        onClick={onCancel}
+        style={{ padding: '0 6px', fontSize: 11 }}
+        title="取消该定时任务"
+      >
+        取消
+      </button>
+    </span>
   );
 }

@@ -1107,554 +1107,540 @@ func truncateStr(s string, n int) string {
 // job store, so the coding panel shows live progress instead of a frozen blank
 // until the turn's batched assistant event. Subscribe via
 // GET /api/wizard/jobs/{id}/stream; snapshot via GET /api/wizard/jobs/{id}.
+//
+// codingRunParams is the named request-body shape used by StartCoding (HTTP)
+// and RunScheduledCoding (scheduler). The HTTP path decodes the body into
+// this struct and passes it directly; the scheduler path constructs one with
+// the fields the requirement's current state requires (title/desc/branch
+// defaulted). Pulling the anonymous struct to a named type is what lets the
+// scheduler reuse the exec body without re-deriving any of the request-
+// shape semantics.
+type codingRunParams struct {
+	ProjectPath      string `json:"project_path"`
+	RequirementTitle string `json:"requirement_title"`
+	RequirementDesc  string `json:"requirement_desc"`
+	RequirementID    string `json:"requirement_id"`
+	BranchName       string `json:"branch_name"`
+	BaseBranch       string `json:"base_branch"`
+	Model            string `json:"model"`
+	ReadKnowledge    bool   `json:"read_knowledge"`
+	AgentServerID    string `json:"agent_server_id"` // empty = local execution; otherwise remote Agent server
+	SplitTasks       bool   `json:"split_tasks"`     // false (default) = developer persona implements directly; true = current decomposition + auto-orchestrate flow
+}
+
 func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		ProjectPath      string `json:"project_path"`
-		RequirementTitle string `json:"requirement_title"`
-		RequirementDesc  string `json:"requirement_desc"`
-		RequirementID    string `json:"requirement_id"`
-		BranchName       string `json:"branch_name"`
-		BaseBranch       string `json:"base_branch"`
-		Model            string `json:"model"`
-		ReadKnowledge    bool   `json:"read_knowledge"`
-		AgentServerID    string `json:"agent_server_id"` // empty = local execution; otherwise remote Agent server
-		SplitTasks       bool   `json:"split_tasks"`     // false (default) = developer persona implements directly; true = current decomposition + auto-orchestrate flow
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var p codingRunParams
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		writeError(w, 400, "INVALID", "Invalid JSON")
 		return
 	}
 
-	// Optional "读取项目知识库" switch: when true, the project's knowledge
-	// relevant to this requirement is injected into the claude prompt and a
-	// "knowledge" SSE event is emitted before the coding job starts.
-	readKnowledge := req.ReadKnowledge
-
-	// "是否拆分任务"开关：默认 false（不拆分，由 developer persona 直接实现），
-	// 勾选时走原有的拆分子任务 + tryAutoOrchestrate 自动派发链路。Agent-Server
-	// 路径（roleKey == "agent"）始终 agentDirectPrompt 直跑，该字段被忽略。
-	splitTasks := req.SplitTasks
-
-	job := h.jobs.Create(req.RequirementID)
+	job := h.jobs.Create(p.RequirementID)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
-	go func() {
-		defer func() {
-			// Persist the finished job's full log so a backend restart doesn't
-			// wipe the development record. All exit paths above call job.Finish,
-			// so by the time this defer runs the snapshot is terminal. The
-			// effective model is read back from job.Model (set by SetModel
-			// below once roleConfig resolves it) so the defer doesn't capture a
-			// `model` local that would shadow the model package.
-			lines, status, exitCode := job.Snapshot()
-			if perr := h.jobLogSvc.Save(job.ID, req.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
-				log.Printf("[start-coding] failed to persist job log %s: %v", job.ID, perr)
-			}
-		}()
-		log.Printf("[start-coding] job %s started for %q in %s", job.ID, req.RequirementTitle, req.ProjectPath)
+	go h.execStartCoding(&p, job, nil)
+}
 
-		// Load the requirement row up front so we can (a) detect whether the
-		// source session was created in an isolated worktree, and (b) reuse it for
-		// the fork resolution below without a second Get.
-		var reqRow *model.Requirement
-		if req.RequirementID != "" {
-			if r, err := h.reqSvc.Get(req.RequirementID); err == nil {
-				reqRow = r
-			}
+// RunScheduledCoding is the scheduler-facing entry point. It mirrors
+// StartCoding: JSON-body → struct → jobs.Create → go execStartCoding, but
+// the caller hands us a fully populated codingRunParams (the scheduler
+// adapter fills title/desc/branch from the current requirement row) and
+// the optional cb lets us flip the scheduled_tasks row when the job
+// finishes. Returns the JobStore job id.
+func (h *WizardHandler) RunScheduledCoding(p *codingRunParams, cb *runCallbacks) (string, error) {
+	job := h.jobs.Create(p.RequirementID)
+	go h.execStartCoding(p, job, cb)
+	return job.ID, nil
+}
+
+// execStartCoding is the goroutine body extracted from StartCoding. Same
+// line-for-line as the original anonymous goroutine: the JSON decode +
+// jobs.Create step was already synchronous, so this is a pure extraction
+// (body.X → p.X everywhere). The deferred jobLogSvc.Save that the original
+// already had is preserved verbatim; the cb.OnFinish hook is new and only
+// fires when a scheduler callback is provided (nil for the HTTP path).
+func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *runCallbacks) {
+	defer func() {
+		// Persist the finished job's full log so a backend restart doesn't
+		// wipe the development record. All exit paths above call job.Finish,
+		// so by the time this defer runs the snapshot is terminal. The
+		// effective model is read back from job.Model (set by SetModel
+		// below once roleConfig resolves it) so the defer doesn't capture a
+		// `model` local that would shadow the model package.
+		lines, status, exitCode := job.Snapshot()
+		if perr := h.jobLogSvc.Save(job.ID, p.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
+			log.Printf("[start-coding] failed to persist job log %s: %v", job.ID, perr)
 		}
+		if cb != nil && cb.OnFinish != nil {
+			cb.OnFinish(job.ID, status == store.JobDone)
+		}
+	}()
+	log.Printf("[start-coding] job %s started for %q in %s", job.ID, p.RequirementTitle, p.ProjectPath)
+
+	// Load the requirement row up front so we can (a) detect whether the
+	// source session was created in an isolated worktree, and (b) reuse it for
+	// the fork resolution below without a second Get.
+	var reqRow *model.Requirement
+	if p.RequirementID != "" {
+		if r, err := h.reqSvc.Get(p.RequirementID); err == nil {
+			reqRow = r
+		}
+	}
 		// hadWorktree records whether the upstream stage had already persisted a
-		// worktree before THIS coding run — false means the design/analysis session
-		// we're about to fork was created in-place (un-isolated).
-		hadWorktree := reqRow != nil && reqRow.WorktreePath != ""
+	// worktree before THIS coding run — false means the design/analysis session
+	// we're about to fork was created in-place (un-isolated).
+	hadWorktree := reqRow != nil && reqRow.WorktreePath != ""
 
-		// Recover the project directory if a Docker rebuild / fresh workspace
-		// mount left it absent. Without this, EnsureWorktree below returns
-		// ErrNotAGitRepo and the in-place checkout fails with the user-facing
-		// "git checkout 失败" error. Re-clone uses the project's stored
-		// remote_url + platform token; when there is no remote to restore from
-		// EnsureCloned returns a clear error naming the missing path.
-		if reqRow != nil {
-			if cerr := h.projectSvc.EnsureCloned(reqRow.ProjectID); cerr != nil {
-				job.Append(store.LogLine{Type: "error", Content: "❌ " + cerr.Error()})
+	// Recover the project directory if a Docker rebuild / fresh workspace
+	// mount left it absent. Without this, EnsureWorktree below returns
+	// ErrNotAGitRepo and the in-place checkout fails with the user-facing
+	// "git checkout 失败" error. Re-clone uses the project's stored
+	// remote_url + platform token; when there is no remote to restore from
+	// EnsureCloned returns a clear error naming the missing path.
+	if reqRow != nil {
+		if cerr := h.projectSvc.EnsureCloned(reqRow.ProjectID); cerr != nil {
+			job.Append(store.LogLine{Type: "error", Content: "❌ " + cerr.Error()})
+			job.Finish(1, store.JobError)
+			return
+		}
+	}
+	// Defensive guard: an Idea must not reach the coding stage. The
+	// frontend hides the "🚀 开始开发" CTA when kind=idea and only Idea
+	// rows promoted via "📋 转为需求" can move on, but a stray API call
+	// (curl, the legacy /wizard quick-start path, or a future caller) must
+	// not silently start coding on a not-yet-defined requirement. Reject
+	// with a clear message before any claude subprocess is spawned.
+	if reqRow != nil && reqRow.Kind == "idea" {
+		job.Append(store.LogLine{Type: "error", Content: "❌ 「想法」类需求暂不支持进入开发阶段，请先在详情页点击「📋 转为需求」升级。"})
+		job.Finish(1, store.JobError)
+		return
+	}
+
+	// Resolve the working directory for coding. When a branch is requested
+	// AND the project is a git repo with a requirement id to key on, develop
+	// in an isolated git worktree per requirement so parallel requirements
+	// don't stomp each other's checkout or edit the same files. The legacy
+	// path (no branch, non-git project, or no requirement_id) falls back to
+	// coding directly in the project directory as before.
+	workDir := p.ProjectPath
+	branchDir := p.ProjectPath // where git checkout/pull run
+	useWorktree := false
+	baseBranch := p.BaseBranch
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	if p.BranchName != "" && p.RequirementID != "" {
+		wtPath, wtErr := EnsureWorktree(p.ProjectPath, p.RequirementID, p.BranchName, baseBranch)
+		switch {
+		case wtErr == nil && wtPath != "":
+			workDir = wtPath
+			branchDir = wtPath
+			useWorktree = true
+			job.Append(store.LogLine{Type: "message", Content: "🌿 已创建/复用隔离 worktree: " + wtPath})
+		case errors.Is(wtErr, ErrNotAGitRepo):
+			// Fall through to the legacy in-place checkout below.
+			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，在项目目录直接开发"})
+		default:
+			job.Append(store.LogLine{Type: "error", Content: "❌ 创建 worktree 失败: " + wtErr.Error()})
+			job.Finish(1, store.JobError)
+			return
+		}
+	}
+
+	// Checkout the development branch before coding. Skipped for worktrees
+	// (`git worktree add` already checked the branch out) and skipped for
+	// non-git repos (nothing to check out — proceed in place rather than
+	// failing with the misleading "git checkout 失败"). For git repos we
+	// mirror EnsureWorktree's robust strategy: create off the base, switch
+	// to an already-existing branch, or branch off HEAD so a missing base
+	// ref never produces a cryptic error.
+	if p.BranchName != "" && !useWorktree {
+		if _, gerr := gitRun(branchDir, "rev-parse", "--is-inside-work-tree"); gerr != nil {
+			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，跳过分支切换，在项目目录直接开发"})
+		} else {
+			checkoutOK := false
+			var lastErrOut string
+			attempt := func(args ...string) (string, bool) {
+				c := exec.Command("git", args...)
+				c.Dir = branchDir
+				out, err := c.CombinedOutput()
+				trimmed := strings.TrimSpace(string(out))
+				if err == nil {
+					return trimmed, true
+				}
+				lastErrOut = trimmed
+				return "", false
+			}
+			// 1. Create the branch off the requested base (typical happy path).
+			if out, ok := attempt("checkout", "-b", p.BranchName, baseBranch); ok {
+				job.Append(store.LogLine{Type: "message", Content: "🌿 " + out})
+				checkoutOK = true
+			} else if _, ok := attempt("checkout", p.BranchName); ok {
+				// 2. Branch already exists locally — switch to it.
+				job.Append(store.LogLine{Type: "message", Content: "🌿 切换到已有分支: " + p.BranchName})
+				checkoutOK = true
+			} else if out, ok := attempt("checkout", "-b", p.BranchName); ok {
+				// 3. Base ref missing locally — fall back to branching off HEAD
+				//    (matches EnsureWorktree's strategy).
+				job.Append(store.LogLine{Type: "message", Content: "🌿 " + out})
+				checkoutOK = true
+			}
+			if !checkoutOK {
+				job.Append(store.LogLine{Type: "error", Content: "❌ git checkout 失败: " + lastErrOut})
 				job.Finish(1, store.JobError)
 				return
 			}
 		}
-		// Defensive guard: an Idea must not reach the coding stage. The
-		// frontend hides the "🚀 开始开发" CTA when kind=idea and only Idea
-		// rows promoted via "📋 转为需求" can move on, but a stray API call
-		// (curl, the legacy /wizard quick-start path, or a future caller) must
-		// not silently start coding on a not-yet-defined requirement. Reject
-		// with a clear message before any claude subprocess is spawned.
-		if reqRow != nil && reqRow.Kind == "idea" {
-			job.Append(store.LogLine{Type: "error", Content: "❌ 「想法」类需求暂不支持进入开发阶段，请先在详情页点击「📋 转为需求」升级。"})
-			job.Finish(1, store.JobError)
-			return
-		}
+	}
 
-		// Resolve the working directory for coding. When a branch is requested
-		// AND the project is a git repo with a requirement id to key on, develop
-		// in an isolated git worktree per requirement so parallel requirements
-		// don't stomp each other's checkout or edit the same files. The legacy
-		// path (no branch, non-git project, or no requirement_id) falls back to
-		// coding directly in the project directory as before.
-		workDir := req.ProjectPath
-		branchDir := req.ProjectPath // where git checkout/pull run
-		useWorktree := false
-		baseBranch := req.BaseBranch
-		if baseBranch == "" {
-			baseBranch = "main"
-		}
-		if req.BranchName != "" && req.RequirementID != "" {
-			wtPath, wtErr := EnsureWorktree(req.ProjectPath, req.RequirementID, req.BranchName, baseBranch)
-			switch {
-			case wtErr == nil && wtPath != "":
-				workDir = wtPath
-				branchDir = wtPath
-				useWorktree = true
-				job.Append(store.LogLine{Type: "message", Content: "🌿 已创建/复用隔离 worktree: " + wtPath})
-			case errors.Is(wtErr, ErrNotAGitRepo):
-				// Fall through to the legacy in-place checkout below.
-				job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，在项目目录直接开发"})
-			default:
-				job.Append(store.LogLine{Type: "error", Content: "❌ 创建 worktree 失败: " + wtErr.Error()})
-				job.Finish(1, store.JobError)
-				return
-			}
-		}
-
-		// Checkout the development branch before coding. Skipped for worktrees
-		// (`git worktree add` already checked the branch out) and skipped for
-		// non-git repos (nothing to check out — proceed in place rather than
-		// failing with the misleading "git checkout 失败"). For git repos we
-		// mirror EnsureWorktree's robust strategy: create off the base, switch
-		// to an already-existing branch, or branch off HEAD so a missing base
-		// ref never produces a cryptic error.
-		if req.BranchName != "" && !useWorktree {
-			if _, gerr := gitRun(branchDir, "rev-parse", "--is-inside-work-tree"); gerr != nil {
-				job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，跳过分支切换，在项目目录直接开发"})
+	// Best-effort pull: try to update the dev branch from its upstream so
+	// coding starts from the remote HEAD. This must NOT abort the coding
+	// job — the repo may have no remote at all, or the branch may have no
+	// upstream tracking info, in which case there is simply nothing to
+	// pull and we proceed on the already-checked-out branch.
+	if p.BranchName != "" {
+		pullCmd := exec.Command("git", "pull", "--ff-only")
+		pullCmd.Dir = branchDir
+		pullOut, pullErr := pullCmd.CombinedOutput()
+		if pullErr != nil {
+			// No upstream on the current branch — retry against origin/<base>
+			// if a remote exists. Missing remote / diverged history just means
+			// "nothing to pull"; log it and keep going.
+			fallbackCmd := exec.Command("git", "pull", "--ff-only", "origin", baseBranch)
+			fallbackCmd.Dir = branchDir
+			fbOut, fbErr := fallbackCmd.CombinedOutput()
+			if fbErr != nil {
+				job.Append(store.LogLine{Type: "message", Content: "ℹ️ 跳过 git pull（无远程跟踪或已分叉），继续在当前分支开发: " + strings.TrimSpace(string(append(pullOut, fbOut...)))})
 			} else {
-				checkoutOK := false
-				var lastErrOut string
-				attempt := func(args ...string) (string, bool) {
-					c := exec.Command("git", args...)
-					c.Dir = branchDir
-					out, err := c.CombinedOutput()
-					trimmed := strings.TrimSpace(string(out))
-					if err == nil {
-						return trimmed, true
-					}
-					lastErrOut = trimmed
-					return "", false
-				}
-				// 1. Create the branch off the requested base (typical happy path).
-				if out, ok := attempt("checkout", "-b", req.BranchName, baseBranch); ok {
-					job.Append(store.LogLine{Type: "message", Content: "🌿 " + out})
-					checkoutOK = true
-				} else if _, ok := attempt("checkout", req.BranchName); ok {
-					// 2. Branch already exists locally — switch to it.
-					job.Append(store.LogLine{Type: "message", Content: "🌿 切换到已有分支: " + req.BranchName})
-					checkoutOK = true
-				} else if out, ok := attempt("checkout", "-b", req.BranchName); ok {
-					// 3. Base ref missing locally — fall back to branching off HEAD
-					//    (matches EnsureWorktree's strategy).
-					job.Append(store.LogLine{Type: "message", Content: "🌿 " + out})
-					checkoutOK = true
-				}
-				if !checkoutOK {
-					job.Append(store.LogLine{Type: "error", Content: "❌ git checkout 失败: " + lastErrOut})
-					job.Finish(1, store.JobError)
-					return
-				}
-			}
-		}
-
-		// Best-effort pull: try to update the dev branch from its upstream so
-		// coding starts from the remote HEAD. This must NOT abort the coding
-		// job — the repo may have no remote at all, or the branch may have no
-		// upstream tracking info, in which case there is simply nothing to
-		// pull and we proceed on the already-checked-out branch.
-		if req.BranchName != "" {
-			pullCmd := exec.Command("git", "pull", "--ff-only")
-			pullCmd.Dir = branchDir
-			pullOut, pullErr := pullCmd.CombinedOutput()
-			if pullErr != nil {
-				// No upstream on the current branch — retry against origin/<base>
-				// if a remote exists. Missing remote / diverged history just means
-				// "nothing to pull"; log it and keep going.
-				fallbackCmd := exec.Command("git", "pull", "--ff-only", "origin", baseBranch)
-				fallbackCmd.Dir = branchDir
-				fbOut, fbErr := fallbackCmd.CombinedOutput()
-				if fbErr != nil {
-					job.Append(store.LogLine{Type: "message", Content: "ℹ️ 跳过 git pull（无远程跟踪或已分叉），继续在当前分支开发: " + strings.TrimSpace(string(append(pullOut, fbOut...)))})
-				} else {
-					job.Append(store.LogLine{Type: "message", Content: "⬇️ " + strings.TrimSpace(string(fbOut))})
-				}
-			} else {
-				job.Append(store.LogLine{Type: "message", Content: "⬇️ " + strings.TrimSpace(string(pullOut))})
-			}
-		}
-
-		// Persist the worktree location + branch so adjust-coding and the merge
-		// step can find the isolated working tree (jobs are in-memory; the path
-		// must live in the DB to survive a restart).
-		if useWorktree && req.RequirementID != "" {
-			if perr := h.reqSvc.UpdateWorktree(req.RequirementID, req.BranchName, workDir); perr != nil {
-				log.Printf("[start-coding] failed to persist worktree for %s: %v", req.RequirementID, perr)
-			}
-		}
-
-		// Session threading: the developer stage forks off the design session
-		// (--resume <design_sid> --fork-session) so the developer inherits the
-		// full analysis+design discussion and swaps in the developer persona; the
-		// forked session gets a new id we read from the stream and persist as
-		// coding_session_id. We do NOT re-feed the requirement desc / design JSON
-		// — the resumed conversation already has them.
-		//
-		// "重新开发"语义: when a coding_session_id already exists (a prior
-		// coding pass ran) we STILL fork off the design session instead of
-		// --resume'ing the prior coding session. Forking mints a NEW session that
-		// inherits only the requirement+design conversation, so leftover tool_use
-		// / half-written code / mid-run errors from the last coding pass cannot
-		// pollute the new round. The forked id overwrites coding_session_id
-		// below (fork && out.sessionID != "" guard), realizing "重新开发 = 新会话".
-		// First-ever coding (coding_session_id == "") takes the same path, so
-		// behavior is unchanged for the genuine first pass.
-		//
-		// Graceful fallback: the legacy /wizard quick-start page has no
-		// Requirement row (no requirement_id / session ids), so it can't join
-		// the session chain. When no source session exists we fall back to a
-		// fresh session and feed the full desc — i.e. the pre-chain behavior —
-		// so that path keeps working.
-		sourceSID := ""
-		fork := false
-		if reqRow != nil {
-			if reqRow.DesignSessionID != "" {
-				// 重新开发 / 首次开发: fork from the design session so the new
-				// coding session carries only requirement+design, never the prior
-				// coding pass's history.
-				sourceSID = reqRow.DesignSessionID
-				fork = true
-			} else if reqRow.AnalysisSessionID != "" {
-				// No design session yet but an analyst session exists — keep
-				// forking off the analyst session (skip-analysis-first path).
-				sourceSID = reqRow.AnalysisSessionID
-				fork = true
-			} else if reqRow.CodingSessionID != "" && !reqRow.SkipDesign {
-				// Legacy fallback: no design / analysis session at all AND not a
-				// skip-design ("直接开发") row. Resume the prior coding session
-				// rather than losing threading for old data rows that predate
-				// session chaining. skip-design rows fall through to the fresh
-				// path below so "重新开发" mints a brand-new session instead of
-				// resuming the prior one.
-				sourceSID = reqRow.CodingSessionID
-			}
-		}
-
-		// Pre-mint + persist the coding session id BEFORE spawning claude so it
-		// survives a mid-run restart. This happens for BOTH a fork off the
-		// design/analysis session (--resume <src> --fork-session --session-id
-		// <new>) AND a fresh session (--session-id <new>) — the latter covers
-		// skip-design "直接开发" (no analysis/design session to fork, but a
-		// requirement row exists), so an interrupted direct-development run can
-		// still be resumed via 继续开发 instead of redoing everything. Only the
-		// legacy quick-start path (no requirement row) keeps a CLI-generated id
-		// and never persists it.
-		newCodingSID := ""
-		if req.RequirementID != "" && (fork || sourceSID == "") {
-			newCodingSID = util.NewUUID()
-			if perr := h.reqSvc.UpdateCodingSession(req.RequirementID, newCodingSID); perr != nil {
-				log.Printf("[start-coding] failed to persist coding session for %s: %v", req.RequirementID, perr)
-			}
-		}
-
-		// Forking a source session created in-place (no persisted worktree)
-		// leaks its original-dir absolute paths into the coding session, so
-		// Claude edits the shared checkout instead of the worktree. Guard only
-		// when we actually established a worktree this run (useWorktree=true),
-		// which also excludes non-git projects (legacy in-place coding).
-		if fork && useWorktree && !hadWorktree {
-			job.Append(store.LogLine{Type: "error", Content: "❌ 上游会话未在隔离 worktree 中生成，请重新执行「生成技术方案」后再开始开发。"})
-			job.Finish(1, store.JobError)
-			return
-		}
-
-		// Role selection:
-		//   • "agent" — Agent-Server execution (remote) OR local with split_tasks=false
-		//     (the user explicitly chose "不拆分任务"). The agent persona's system
-		//     prompt says "不要先拆分子任务" + "一次会话内完成端到端开发", which is
-		//     exactly the behavior we want when the main agent is supposed to
-		//     implement the requirement itself.
-		//   • "developer" — local execution with split_tasks=true (default = true
-		//     for legacy / no-split-switch callers). The developer persona is the
-		//     统筹协调者 that decomposes into sub-tasks + emits [SUBTASKS_READY]
-		//     so tryAutoOrchestrate dispatches children.
-		//
-		// Why not "developer" + a "直接实现" -p override when split_tasks=false?
-		// The developer system prompt explicitly says "**不要直接编写项目代码**——
-		// 所有具体实现工作由子Agent完成" and has the "## 何时拆分任务" block keyed
-		// on "进入执行实现阶段"-style triggers; even with the prompt rewritten to
-		// "直接实现需求", models reflexively follow the system prompt and split
-		// anyway, defeating the user's "不拆分" choice. Routing through the agent
-		// role is the only reliable fix: its persona + system prompt consistently
-		// say "don't decompose, implement end-to-end" (see role_defaults.go).
-		roleKey := "developer"
-		if req.AgentServerID != "" || !req.SplitTasks {
-			roleKey = "agent"
-		}
-		systemPrompt, model, claudeConfigID := h.roleConfig(roleKey)
-		// Per-request model override (highest precedence); empty means role default.
-		if req.Model != "" {
-			model = req.Model
-		}
-		job.SetModel(model)
-		var prompt string
-		if sourceSID == "" {
-			// Fresh-session path: no design/analysis session to fork (skip-design
-			// "直接开发" rows, or legacy rows without session chaining). This
-			// branch used to feed a bare "## title\n\n desc" which is a generic
-			// "请实现该需求" prompt — and the developer role's system prompt
-			// only emits the [SUBTASKS_READY] sentinel when the -p message
-			// carries an explicit "开始开发/进入执行实现阶段" trigger. Without
-			// that trigger the agent did the work itself and auto-orchestration
-			// never fired (see req_04acb22d06fe3525). So we now send the SAME
-			// decomposition trigger as the fork branch — the only difference is
-			// wording: there is no "已完成的需求分析与技术方案" to reference, so we
-			// ask the agent to read the relevant files first to build context.
-			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未关联需求会话，使用独立会话开始开发。"})
-			if roleKey == "agent" {
-				// agent persona (Agent-Server remote OR local split_tasks=false):
-				// implement the requirement directly end-to-end. No decomposition
-				// trigger in the -p message, no [SUBTASKS_READY] expected, no
-				// .novaworkbench/subtasks.json Write. The agent system prompt says
-				// "不要先拆分子任务" and "一次会话内完成端到端开发", so the model
-				// consistently implements instead of splitting.
-				prompt = agentDirectPrompt(req.RequirementTitle,
-					"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后直接实现需求：\n", workDir)
-			} else {
-				// developer persona + fresh-session path + split_tasks=true.
-				// Keep the original decomposition trigger so the developer role
-				// emits [SUBTASKS_READY] + writes .novaworkbench/subtasks.json
-				// and tryAutoOrchestrate dispatches children. The split_tasks=false
-				// fresh-session case is handled by the roleKey=="agent" branch
-				// above (we route those requests through the agent role entirely).
-				prompt = developerDecomposePrompt(req.RequirementTitle,
-					"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后立即完成**任务拆分**：\n", workDir)
-			}
-			if desc := strings.TrimSpace(req.RequirementDesc); desc != "" {
-				if roleKey == "agent" {
-					prompt += "\n\n用户在开发前的追加说明：\n" + desc
-				} else {
-					prompt += "\n\n用户在开发前的追加说明：\n" + desc
-				}
-			}
-			// Context-compression handoff (legacy fresh-session path): when
-			// the coding stage was previously compressed we still want the
-			// summary prepended so the new coding session inherits the
-			// compressed history. This branch covers pre-existing rows that
-			// never had a design_session_id (and the rare user who hits
-			// "重新开发" after a design session was already compressed and
-			// invalidated). The summary goes at the TOP so the developer
-			// treats it as ground truth; the parenthetical tells the model
-			// not to act on it as if it were a fresh instruction.
-			if reqRow != nil && reqRow.CodingContextSummary != "" {
-				prompt = "## 上下文压缩摘要（之前的开发对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
-					reqRow.CodingContextSummary + "\n\n" + prompt
+				job.Append(store.LogLine{Type: "message", Content: "⬇️ " + strings.TrimSpace(string(fbOut))})
 			}
 		} else {
-			// The resumed conversation carries the requirement, analysis, and
-			// design. The developer role is now a coordinator (统筹协调者) that
-			// does NOT write code itself — it decomposes the work into sub-tasks
-			// and emits a [SUBTASKS_READY] sentinel so tryAutoOrchestrate (called
-			// at the end of this job) dispatches each child agent. The -p prompt
-			// MUST carry the explicit "进入执行实现阶段" trigger that the
-			// developer system prompt keys its JSON+sentinel emission on — a
-			// generic "请实现该需求" does NOT hit that branch, so the agent hedges
-			// into a prose plan + "等待确认" and auto-orchestration never fires.
-			// The per-turn -p instruction also overrides the system prompt's
-			// "always ask for confirmation" guidance so the agent emits the
-			// sentinel immediately instead of waiting on the user.
+			job.Append(store.LogLine{Type: "message", Content: "⬇️ " + strings.TrimSpace(string(pullOut))})
+		}
+	}
+
+	// Persist the worktree location + branch so adjust-coding and the merge
+	// step can find the isolated working tree (jobs are in-memory; the path
+	// must live in the DB to survive a restart).
+	if useWorktree && p.RequirementID != "" {
+		if perr := h.reqSvc.UpdateWorktree(p.RequirementID, p.BranchName, workDir); perr != nil {
+			log.Printf("[start-coding] failed to persist worktree for %s: %v", p.RequirementID, perr)
+		}
+	}
+
+	// Session threading: the developer stage forks off the design session
+	// (--resume <design_sid> --fork-session) so the developer inherits the
+	// full analysis+design discussion and swaps in the developer persona; the
+	// forked session gets a new id we read from the stream and persist as
+	// coding_session_id. We do NOT re-feed the requirement desc / design JSON
+	// — the resumed conversation already has them.
+	//
+	// "重新开发"语义: when a coding_session_id already exists (a prior
+	// coding pass ran) we STILL fork off the design session instead of
+	// --resume'ing the prior coding session. Forking mints a NEW session that
+	// inherits only the requirement+design conversation, so leftover tool_use
+	// / half-written code / mid-run errors from the last coding pass cannot
+	// pollute the new round. The forked id overwrites coding_session_id
+	// below (fork && out.sessionID != "" guard), realizing "重新开发 = 新会话".
+	// First-ever coding (coding_session_id == "") takes the same path, so
+	// behavior is unchanged for the genuine first pass.
+	//
+	// Graceful fallback: the legacy /wizard quick-start page has no
+	// Requirement row (no requirement_id / session ids), so it can't join
+	// the session chain. When no source session exists we fall back to a
+	// fresh session and feed the full desc — i.e. the pre-chain behavior —
+	// so that path keeps working.
+	sourceSID := ""
+	fork := false
+	if reqRow != nil {
+		if reqRow.DesignSessionID != "" {
+			// 重新开发 / 首次开发: fork from the design session so the new
+			// coding session carries only requirement+design, never the prior
+			// coding pass's history.
+			sourceSID = reqRow.DesignSessionID
+			fork = true
+		} else if reqRow.AnalysisSessionID != "" {
+			// No design session yet but an analyst session exists — keep
+			// forking off the analyst session (skip-analysis-first path).
+			sourceSID = reqRow.AnalysisSessionID
+			fork = true
+		} else if reqRow.CodingSessionID != "" && !reqRow.SkipDesign {
+			// Legacy fallback: no design / analysis session at all AND not a
+			// skip-design ("直接开发") row. Resume the prior coding session
+			// rather than losing threading for old data rows that predate
+			// session chaining. skip-design rows fall through to the fresh
+			// path below so "重新开发" mints a brand-new session instead of
+			// resuming the prior one.
+			sourceSID = reqRow.CodingSessionID
+		}
+	}
+
+	// Pre-mint + persist the coding session id BEFORE spawning claude so it
+	// survives a mid-run restart. This happens for BOTH a fork off the
+	// design/analysis session (--resume <src> --fork-session --session-id
+	// <new>) AND a fresh session (--session-id <new>) — the latter covers
+	// skip-design "直接开发" (no analysis/design session to fork, but a
+	// requirement row exists), so an interrupted direct-development run can
+	// still be resumed via 继续开发 instead of redoing everything. Only the
+	// legacy quick-start path (no requirement row) keeps a CLI-generated id
+	// and never persists it.
+	newCodingSID := ""
+	if p.RequirementID != "" && (fork || sourceSID == "") {
+		newCodingSID = util.NewUUID()
+		if perr := h.reqSvc.UpdateCodingSession(p.RequirementID, newCodingSID); perr != nil {
+			log.Printf("[start-coding] failed to persist coding session for %s: %v", p.RequirementID, perr)
+		}
+	}
+
+	// Forking a source session created in-place (no persisted worktree)
+	// leaks its original-dir absolute paths into the coding session, so
+	// Claude edits the shared checkout instead of the worktree. Guard only
+	// when we actually established a worktree this run (useWorktree=true),
+	// which also excludes non-git projects (legacy in-place coding).
+	if fork && useWorktree && !hadWorktree {
+		job.Append(store.LogLine{Type: "error", Content: "❌ 上游会话未在隔离 worktree 中生成，请重新执行「生成技术方案」后再开始开发。"})
+		job.Finish(1, store.JobError)
+		return
+	}
+
+	// Role selection:
+	//   • "agent" — Agent-Server execution (remote) OR local with split_tasks=false
+	//     (the user explicitly chose "不拆分任务"). The agent persona's system
+	//     prompt says "不要先拆分子任务" + "一次会话内完成端到端开发", which is
+	//     exactly the behavior we want when the main agent is supposed to
+	//     implement the requirement itself.
+	//   • "developer" — local execution with split_tasks=true (default = true
+	//     for legacy / no-split-switch callers). The developer persona is the
+	//     统筹协调者 that decomposes into sub-tasks + emits [SUBTASKS_READY]
+	//     so tryAutoOrchestrate dispatches children.
+	//
+	// Why not "developer" + a "直接实现" -p override when split_tasks=false?
+	// The developer system prompt explicitly says "**不要直接编写项目代码**——
+	// 所有具体实现工作由子Agent完成" and has the "## 何时拆分任务" block keyed
+	// on "进入执行实现阶段"-style triggers; even with the prompt rewritten to
+	// "直接实现需求", models reflexively follow the system prompt and split
+	// anyway, defeating the user's "不拆分" choice. Routing through the agent
+	// role is the only reliable fix: its persona + system prompt consistently
+	// say "don't decompose, implement end-to-end" (see role_defaults.go).
+	roleKey := "developer"
+	if p.AgentServerID != "" || !p.SplitTasks {
+		roleKey = "agent"
+	}
+	systemPrompt, model, claudeConfigID := h.roleConfig(roleKey)
+	// Per-request model override (highest precedence); empty means role default.
+	if p.Model != "" {
+		model = p.Model
+	}
+	job.SetModel(model)
+	var prompt string
+	if sourceSID == "" {
+		// Fresh-session path: no design/analysis session to fork (skip-design
+		// "直接开发" rows, or legacy rows without session chaining). This
+		// branch used to feed a bare "## title\n\n desc" which is a generic
+		// "请实现该需求" prompt — and the developer role's system prompt
+		// only emits the [SUBTASKS_READY] sentinel when the -p message
+		// carries an explicit "开始开发/进入执行实现阶段" trigger. Without
+		// that trigger the agent did the work itself and auto-orchestration
+		// never fired (see req_04acb22d06fe3525). So we now send the SAME
+		// decomposition trigger as the fork branch — the only difference is
+		// wording: there is no "已完成的需求分析与技术方案" to reference, so we
+		// ask the agent to read the relevant files first to build context.
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未关联需求会话，使用独立会话开始开发。"})
+		if roleKey == "agent" {
+			// agent persona (Agent-Server remote OR local split_tasks=false):
+			// implement the requirement directly end-to-end. No decomposition
+			// trigger in the -p message, no [SUBTASKS_READY] expected, no
+			// .novaworkbench/subtasks.json Write. The agent system prompt says
+			// "不要先拆分子任务" and "一次会话内完成端到端开发", so the model
+			// consistently implements instead of splitting.
+			prompt = agentDirectPrompt(p.RequirementTitle,
+				"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后直接实现需求：\n", workDir)
+		} else {
+			// developer persona + fresh-session path + split_tasks=true.
+			// Keep the original decomposition trigger so the developer role
+			// emits [SUBTASKS_READY] + writes .novaworkbench/subtasks.json
+			// and tryAutoOrchestrate dispatches children. The split_tasks=false
+			// fresh-session case is handled by the roleKey=="agent" branch
+			// above (we route those requests through the agent role entirely).
+			prompt = developerDecomposePrompt(p.RequirementTitle,
+				"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后立即完成**任务拆分**：\n", workDir)
+		}
+		if desc := strings.TrimSpace(p.RequirementDesc); desc != "" {
 			if roleKey == "agent" {
-				// agent persona (Agent-Server remote OR local split_tasks=false):
-				// fork/resume variant — the conversation already carries the
-				// requirement + analysis + design, so the leadIn references that
-				// history instead of asking the agent to re-read files.
-				prompt = agentDirectPrompt(req.RequirementTitle,
-					"基于已完成的需求分析与技术方案，请直接实现需求：\n", workDir)
+				prompt += "\n\n用户在开发前的追加说明：\n" + desc
 			} else {
-				// developer persona + fork/resume path + split_tasks=true.
-				// Decompose the work into sub-tasks so tryAutoOrchestrate (called
-				// below, gated on splitTasks) can dispatch children. The
-				// split_tasks=false fork/resume case is handled by roleKey=="agent"
-				// above — we route those requests through the agent role entirely.
-				prompt = developerDecomposePrompt(req.RequirementTitle,
-					"基于已完成的需求分析与技术方案，请立即完成**任务拆分**：\n", workDir)
-			}
-			if desc := strings.TrimSpace(req.RequirementDesc); desc != "" {
-				if roleKey == "agent" {
-					prompt += "\n\n用户在开发前的追加调整说明：\n" + desc
-				} else {
-					prompt += "\n\n用户在开发前的追加调整说明：\n" + desc
-				}
-			}
-			// Coding-stage compression handoff: even when resuming the design
-			// session, the prior coding turns may have been compressed. The
-			// summary goes at the TOP so the developer treats it as ground
-			// truth; the parenthetical tells the model not to act on it as if
-			// it were a fresh instruction.
-			if reqRow != nil && reqRow.CodingContextSummary != "" {
-				prompt = "## 上下文压缩摘要（之前的开发对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
-					reqRow.CodingContextSummary + "\n\n" + prompt
+				prompt += "\n\n用户在开发前的追加说明：\n" + desc
 			}
 		}
-		// Kind-specific developer tail (currently only fires for kind=issue).
-		// Idea never reaches here — the frontend hides the "开始开发" CTA and
-		// we double-protect by checking reqRow.Kind below.
-		if reqRow != nil {
-			if block := promptpkg.DeveloperBlock(reqRow.Kind, reqRow); block != "" {
-				prompt += "\n\n" + block
+		// Context-compression handoff (legacy fresh-session path): when
+		// the coding stage was previously compressed we still want the
+		// summary prepended so the new coding session inherits the
+		// compressed history. This branch covers pre-existing rows that
+		// never had a design_session_id (and the rare user who hits
+		// "重新开发" after a design session was already compressed and
+		// invalidated). The summary goes at the TOP so the developer
+		// treats it as ground truth; the parenthetical tells the model
+		// not to act on it as if it were a fresh instruction.
+		if reqRow != nil && reqRow.CodingContextSummary != "" {
+			prompt = "## 上下文压缩摘要（之前的开发对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
+				reqRow.CodingContextSummary + "\n\n" + prompt
+		}
+	} else {
+		// The resumed conversation carries the requirement, analysis, and
+		// design. The developer role is now a coordinator (统筹协调者) that
+		// does NOT write code itself — it decomposes the work into sub-tasks
+		// and emits a [SUBTASKS_READY] sentinel so tryAutoOrchestrate (called
+		// at the end of this job) dispatches each child agent. The -p prompt
+		// MUST carry the explicit "进入执行实现阶段" trigger that the
+		// developer system prompt keys its JSON+sentinel emission on — a
+		// generic "请实现该需求" does NOT hit that branch, so the agent hedges
+		// into a prose plan + "等待确认" and auto-orchestration never fires.
+		// The per-turn -p instruction also overrides the system prompt's
+		// "always ask for confirmation" guidance so the agent emits the
+		// sentinel immediately instead of waiting on the user.
+		if roleKey == "agent" {
+			// agent persona (Agent-Server remote OR local split_tasks=false):
+			// fork/resume variant — the conversation already carries the
+			// requirement + analysis + design, so the leadIn references that
+			// history instead of asking the agent to re-read files.
+			prompt = agentDirectPrompt(p.RequirementTitle,
+				"基于已完成的需求分析与技术方案，请直接实现需求：\n", workDir)
+		} else {
+			// developer persona + fork/resume path + split_tasks=true.
+			// Decompose the work into sub-tasks so tryAutoOrchestrate (called
+			// below, gated on splitTasks) can dispatch children. The
+			// split_tasks=false fork/resume case is handled by roleKey=="agent"
+			// above — we route those requests through the agent role entirely.
+			prompt = developerDecomposePrompt(p.RequirementTitle,
+				"基于已完成的需求分析与技术方案，请立即完成**任务拆分**：\n", workDir)
+		}
+		if desc := strings.TrimSpace(p.RequirementDesc); desc != "" {
+			if roleKey == "agent" {
+				prompt += "\n\n用户在开发前的追加调整说明：\n" + desc
+			} else {
+				prompt += "\n\n用户在开发前的追加调整说明：\n" + desc
 			}
 		}
+		// Coding-stage compression handoff: even when resuming the design
+		// session, the prior coding turns may have been compressed. The
+		// summary goes at the TOP so the developer treats it as ground
+		// truth; the parenthetical tells the model not to act on it as if
+		// it were a fresh instruction.
+		if reqRow != nil && reqRow.CodingContextSummary != "" {
+			prompt = "## 上下文压缩摘要（之前的开发对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
+				reqRow.CodingContextSummary + "\n\n" + prompt
+		}
+	}
+	// Kind-specific developer tail (currently only fires for kind=issue).
+	// Idea never reaches here — the frontend hides the "开始开发" CTA and
+	// we double-protect by checking reqRow.Kind below.
+	if reqRow != nil {
+		if block := promptpkg.DeveloperBlock(reqRow.Kind, reqRow); block != "" {
+			prompt += "\n\n" + block
+		}
+	}
 
-		// Optional knowledge pre-read: inject the project knowledge relevant to
-		// this requirement and surface what was read via a "knowledge" SSE event.
-		// Default off (read_knowledge=false) keeps the legacy behavior untouched.
-		var kbReadTitles []string
-		if readKnowledge {
-			codingProjID := ""
-			if reqRow != nil {
-				codingProjID = reqRow.ProjectID
-			}
-			kbBlock, kbTitles := h.buildKnowledgeBlock(codingProjID, req.RequirementTitle)
-			if kbBlock != "" {
-				prompt = kbBlock + "\n" + prompt
-			}
-			emitKnowledgeEvent(job, kbTitles)
-			kbReadTitles = kbTitles
-		}
-		sessionArg := sourceSID
-		forkSessionID := ""
-		if fork {
-			forkSessionID = newCodingSID
-		} else if sourceSID == "" {
-			sessionArg = newCodingSID // fresh (skip-design 直接开发): --session-id <new>
-		}
-		skillText := ""
+	// Optional knowledge pre-read: inject the project knowledge relevant to
+	// this requirement and surface what was read via a "knowledge" SSE event.
+	// Default off (read_knowledge=false) keeps the legacy behavior untouched.
+	var kbReadTitles []string
+	if p.ReadKnowledge {
+		codingProjID := ""
 		if reqRow != nil {
-			skillText = reqRow.Title + " " + reqRow.Description
+			codingProjID = reqRow.ProjectID
 		}
-		if block := llm.BuildSkillsBlock(h.mentionedSkills(skillText)); block != "" {
-			prompt = block + prompt
+		kbBlock, kbTitles := h.buildKnowledgeBlock(codingProjID, p.RequirementTitle)
+		if kbBlock != "" {
+			prompt = kbBlock + "\n" + prompt
 		}
-		// Inject the project's git committer identity (from its platform
-		// token) as GIT_AUTHOR_*/GIT_COMMITTER_* env into the claude
-		// subprocess. git reads these env vars over any config, so when the
-		// developer role runs `git commit` via its Bash tool it carries a
-		// real identity on hosts without ~/.gitconfig (e.g. the Docker
-		// container). Empty on miss → no injection, git falls back to its
-		// own config lookup (preserves dev-machine behaviour). Mirrors
-		// MergeHandler.gitIdentityForReq via the shared lookupGitIdentity.
-		var codingExtraEnv []string
-		if name, email := lookupGitIdentity(h.projectSvc, h.platformSvc, reqRow); name != "" || email != "" {
-			if name != "" {
-				codingExtraEnv = append(codingExtraEnv, "GIT_AUTHOR_NAME="+name, "GIT_COMMITTER_NAME="+name)
-			}
-			if email != "" {
-				codingExtraEnv = append(codingExtraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
-			}
+		emitKnowledgeEvent(job, kbTitles)
+		kbReadTitles = kbTitles
+	}
+	sessionArg := sourceSID
+	forkSessionID := ""
+	if fork {
+		forkSessionID = newCodingSID
+	} else if sourceSID == "" {
+		sessionArg = newCodingSID // fresh (skip-design 直接开发): --session-id <new>
+	}
+	skillText := ""
+	if reqRow != nil {
+		skillText = reqRow.Title + " " + reqRow.Description
+	}
+	if block := llm.BuildSkillsBlock(h.mentionedSkills(skillText)); block != "" {
+		prompt = block + prompt
+	}
+	// Inject the project's git committer identity (from its platform
+	// token) as GIT_AUTHOR_*/GIT_COMMITTER_* env into the claude
+	// subprocess. git reads these env vars over any config, so when the
+	// developer role runs `git commit` via its Bash tool it carries a
+	// real identity on hosts without ~/.gitconfig (e.g. the Docker
+	// container). Empty on miss → no injection, git falls back to its
+	// own config lookup (preserves dev-machine behaviour). Mirrors
+	// MergeHandler.gitIdentityForReq via the shared lookupGitIdentity.
+	var codingExtraEnv []string
+	if name, email := lookupGitIdentity(h.projectSvc, h.platformSvc, reqRow); name != "" || email != "" {
+		if name != "" {
+			codingExtraEnv = append(codingExtraEnv, "GIT_AUTHOR_NAME="+name, "GIT_COMMITTER_NAME="+name)
 		}
-		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
-			Prompt:         prompt,
-			WorkDir:        workDir,
-			SystemPrompt:   systemPrompt,
-			Model:          cliModelArg(model),
-			ClaudeConfigID: claudeConfigID,
-			SessionID:      sessionArg,
-			Resume:         sourceSID != "",
-			Fork:           fork,
-			ForkSessionID:  forkSessionID,
-			ExtraEnv:       codingExtraEnv,
+		if email != "" {
+			codingExtraEnv = append(codingExtraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
+		}
+	}
+	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
+		Prompt:         prompt,
+		WorkDir:        workDir,
+		SystemPrompt:   systemPrompt,
+		Model:          cliModelArg(model),
+		ClaudeConfigID: claudeConfigID,
+		SessionID:      sessionArg,
+		Resume:         sourceSID != "",
+		Fork:           fork,
+		ForkSessionID:  forkSessionID,
+		ExtraEnv:       codingExtraEnv,
+	})
+	// Release the 30-minute context timer the moment runClaudeStream
+	// finishes (cmd.Wait returns) — the goroutine may then stay alive
+	// for tryAutoOrchestrate + log emission, but the claude subprocess
+	// itself is already done.
+	defer cancel()
+	codingProjectID := ""
+	if reqRow != nil {
+		codingProjectID = reqRow.ProjectID
+	}
+	codingUsage := h.usageCtxFor("coding", p.RequirementID, codingProjectID, job.ID, model, "", "")
+
+	// Remote Agent-server branch: SSHs into the target, syncs the claude
+	// session dir so --resume works, executes the same claude flag list on
+	// the remote worktree, parses the stream-json output, and pushes the
+	// code back to origin. The job log + final result semantics match the
+	// local path so the frontend doesn't have to special-case anything.
+	if p.AgentServerID != "" && h.agentSvrSvc != nil {
+		out := h.runRemoteCoding(&remoteCodingInput{
+			job:      job,
+			serverID: p.AgentServerID,
+			req: startCodingReq{
+				ProjectPath:      p.ProjectPath,
+				RequirementTitle: p.RequirementTitle,
+				RequirementDesc:  p.RequirementDesc,
+				RequirementID:    p.RequirementID,
+				BranchName:       p.BranchName,
+				BaseBranch:       p.BaseBranch,
+				Model:            p.Model,
+				ReadKnowledge:    p.ReadKnowledge,
+				AgentServerID:    p.AgentServerID,
+			},
+			reqRow:         reqRow,
+			prompt:         prompt,
+			workDir:        workDir,
+			sourceSID:      sourceSID,
+			fork:           fork,
+			sessionArg:     sessionArg,
+			forkSessionID:  forkSessionID,
+			model:          model,
+			claudeConfigID: claudeConfigID,
+			usage:          codingUsage,
 		})
-		// Release the 30-minute context timer the moment runClaudeStream
-		// finishes (cmd.Wait returns) — the goroutine may then stay alive
-		// for tryAutoOrchestrate + log emission, but the claude subprocess
-		// itself is already done.
-		defer cancel()
-		codingProjectID := ""
-		if reqRow != nil {
-			codingProjectID = reqRow.ProjectID
-		}
-		codingUsage := h.usageCtxFor("coding", req.RequirementID, codingProjectID, job.ID, model, "", "")
-
-		// Remote Agent-server branch: SSHs into the target, syncs the claude
-		// session dir so --resume works, executes the same claude flag list on
-		// the remote worktree, parses the stream-json output, and pushes the
-		// code back to origin. The job log + final result semantics match the
-		// local path so the frontend doesn't have to special-case anything.
-		if req.AgentServerID != "" && h.agentSvrSvc != nil {
-			out := h.runRemoteCoding(&remoteCodingInput{
-				job:      job,
-				serverID: req.AgentServerID,
-				req: startCodingReq{
-					ProjectPath:      req.ProjectPath,
-					RequirementTitle: req.RequirementTitle,
-					RequirementDesc:  req.RequirementDesc,
-					RequirementID:    req.RequirementID,
-					BranchName:       req.BranchName,
-					BaseBranch:       req.BaseBranch,
-					Model:            req.Model,
-					ReadKnowledge:    req.ReadKnowledge,
-					AgentServerID:    req.AgentServerID,
-				},
-				reqRow:         reqRow,
-				prompt:         prompt,
-				workDir:        workDir,
-				sourceSID:      sourceSID,
-				fork:           fork,
-				sessionArg:     sessionArg,
-				forkSessionID:  forkSessionID,
-				model:          model,
-				claudeConfigID: claudeConfigID,
-				usage:          codingUsage,
-			})
-			if out.staleSession {
-				job.Append(store.LogLine{Type: "error", Content: "❌ 源会话已失效，请重新发起对应阶段后再开发。"})
-				job.Finish(1, store.JobError)
-				return
-			}
-			if out.errMsg != "" {
-				job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
-				job.Finish(1, store.JobError)
-				return
-			}
-			if out.finalResult == "" {
-				job.Append(store.LogLine{Type: "error", Content: "❌ Claude 未返回结果，请重试"})
-				job.Finish(1, store.JobError)
-				return
-			}
-			job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
-			job.Append(store.LogLine{Type: "done", Content: "✅ 开发完成！"})
-			if req.RequirementID != "" {
-				if perr := h.reqSvc.UpdateDeveloperModel(req.RequirementID, model); perr != nil {
-					log.Printf("[start-coding] failed to persist developer_model for %s: %v", req.RequirementID, perr)
-				}
-			}
-			job.Finish(0, store.JobDone)
-			log.Printf("[start-coding] remote job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
-			return
-		}
-
-		out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage)
-
-		// The coding session id is already persisted upfront. Correct it only if
-		// the CLI reported a different id than the one we pre-minted (a safety
-		// net in case the --session-id override semantics ever change).
-		if newCodingSID != "" && out.sessionID != "" && out.sessionID != newCodingSID {
-			if perr := h.reqSvc.UpdateCodingSession(req.RequirementID, out.sessionID); perr != nil {
-				log.Printf("[start-coding] Failed to persist coding session for %s: %v", req.RequirementID, perr)
-			}
-		}
-
 		if out.staleSession {
 			job.Append(store.LogLine{Type: "error", Content: "❌ 源会话已失效，请重新发起对应阶段后再开发。"})
 			job.Finish(1, store.JobError)
@@ -1671,63 +1657,100 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
-		// Close the knowledge loop: mark which read entries the run actually used.
-		if len(kbReadTitles) > 0 {
-			items, used := evaluateKnowledgeUsage(kbReadTitles, out.toolFiles, out.finalResult)
-			emitKnowledgeResultEvent(job, items, used)
-		}
 		job.Append(store.LogLine{Type: "done", Content: "✅ 开发完成！"})
-		// Capture the main agent's task breakdown (if any) into coding_plan
-		// so SubTaskPanel can show it as the suggested sub-task list. The
-		// helper accepts both sentinel-wrapped and "## 任务分解"-heading
-		// forms; empty result leaves coding_plan unchanged (we don't want
-		// to wipe a previously-persisted plan when the agent happens to
-		// re-run without emitting one).
-		if req.RequirementID != "" {
-			if plan := extractCodingPlan(out.finalResult); plan != "" {
-				if perr := h.reqSvc.UpdateCodingPlan(req.RequirementID, plan); perr != nil {
-					log.Printf("[start-coding] failed to persist coding_plan for %s: %v", req.RequirementID, perr)
-				} else {
-					job.Append(store.LogLine{Type: "message", Content: "📋 已捕获主Agent任务分解，存入 coding_plan"})
-				}
-			}
-		}
-		// Record the effective developer model (success path only).
-		if req.RequirementID != "" {
-			if perr := h.reqSvc.UpdateDeveloperModel(req.RequirementID, model); perr != nil {
-				log.Printf("[start-coding] failed to persist developer_model for %s: %v", req.RequirementID, perr)
+		if p.RequirementID != "" {
+			if perr := h.reqSvc.UpdateDeveloperModel(p.RequirementID, model); perr != nil {
+				log.Printf("[start-coding] failed to persist developer_model for %s: %v", p.RequirementID, perr)
 			}
 		}
 		job.Finish(0, store.JobDone)
-		log.Printf("[start-coding] job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
+		log.Printf("[start-coding] remote job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
+		return
+	}
 
-		// === AUTO-ORCHESTRATE ============================================
-		// 主 Agent 在 start-coding 阶段已经掌握需求 / 设计 / 项目上下文。
-		// 用户希望"一键编排 = 主 Agent 自动派发"——main agent 一返回
-		// finalResult，立刻交给 tryAutoOrchestrate：有 [SUBTASKS_READY]
-		// sentinel + JSON 时串行派发子 Agent + 异步汇总；没命中就把
-		// coding_plan 当作普通任务分解展示，但不派发（保持现有行为）。
-		//
-		// Agent-Server 路径走 "agent" 角色，该角色的 system prompt 与 -p 指令
-		// 都不要求 [SUBTASKS_READY] 哨兵 / subtasks.json；为了一致性直接跳过
-		// orchestrator（不调用，即便没有 sentinel 也会安全 no-op，但调用
-		// 本身会引入无谓的 goroutine + 日志噪音）。
-		//
-		// 当 split_tasks=false（用户选择"不拆分任务"）时，StartCoding 已经把
-		// roleKey 切到 "agent" 并使用 agentDirectPrompt，-p 消息不携带任何触发
-		// 语、agent 的 system prompt 也明确"不要拆分子任务"；此时再调
-		// tryAutoOrchestrate 只会扫到空 payload 然后空转派发 0 个子任务，
-		// 等价于一次 no-op，但仍然多开一个 goroutine + 一段 resolveSubtasksPayload
-		// 的日志噪音，所以一并短路。split_tasks=true + 本地 = roleKey=="developer"，
-		// 走原 developerDecomposePrompt + 派发链路，行为与改动前一致。
-		//
-		// 该调用改用独立 goroutine，不阻塞 start-coding 自身的 job_done
-		// 信号，用户的开发启动 SSE 立即结束；子任务的进度仍由
-		// dispatchOneChild 的 JobStore job 推流。
-		if roleKey != "agent" && req.RequirementID != "" && newCodingSID != "" && h.subTaskSvc != nil && splitTasks {
-			go h.tryAutoOrchestrate(req.RequirementID, newCodingSID, out.finalResult, out.subTasksJSON, reqRow, workDir, model, claudeConfigID)
+	out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage)
+
+	// The coding session id is already persisted upfront. Correct it only if
+	// the CLI reported a different id than the one we pre-minted (a safety
+	// net in case the --session-id override semantics ever change).
+	if newCodingSID != "" && out.sessionID != "" && out.sessionID != newCodingSID {
+		if perr := h.reqSvc.UpdateCodingSession(p.RequirementID, out.sessionID); perr != nil {
+			log.Printf("[start-coding] Failed to persist coding session for %s: %v", p.RequirementID, perr)
 		}
-	}()
+	}
+
+	if out.staleSession {
+		job.Append(store.LogLine{Type: "error", Content: "❌ 源会话已失效，请重新发起对应阶段后再开发。"})
+		job.Finish(1, store.JobError)
+		return
+	}
+	if out.errMsg != "" {
+		job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+		job.Finish(1, store.JobError)
+		return
+	}
+	if out.finalResult == "" {
+		job.Append(store.LogLine{Type: "error", Content: "❌ Claude 未返回结果，请重试"})
+		job.Finish(1, store.JobError)
+		return
+	}
+	job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	// Close the knowledge loop: mark which read entries the run actually used.
+	if len(kbReadTitles) > 0 {
+		items, used := evaluateKnowledgeUsage(kbReadTitles, out.toolFiles, out.finalResult)
+		emitKnowledgeResultEvent(job, items, used)
+	}
+	job.Append(store.LogLine{Type: "done", Content: "✅ 开发完成！"})
+	// Capture the main agent's task breakdown (if any) into coding_plan
+	// so SubTaskPanel can show it as the suggested sub-task list. The
+	// helper accepts both sentinel-wrapped and "## 任务分解"-heading
+	// forms; empty result leaves coding_plan unchanged (we don't want
+	// to wipe a previously-persisted plan when the agent happens to
+	// re-run without emitting one).
+	if p.RequirementID != "" {
+		if plan := extractCodingPlan(out.finalResult); plan != "" {
+			if perr := h.reqSvc.UpdateCodingPlan(p.RequirementID, plan); perr != nil {
+				log.Printf("[start-coding] failed to persist coding_plan for %s: %v", p.RequirementID, perr)
+			} else {
+				job.Append(store.LogLine{Type: "message", Content: "📋 已捕获主Agent任务分解，存入 coding_plan"})
+			}
+		}
+	}
+	// Record the effective developer model (success path only).
+	if p.RequirementID != "" {
+		if perr := h.reqSvc.UpdateDeveloperModel(p.RequirementID, model); perr != nil {
+			log.Printf("[start-coding] failed to persist developer_model for %s: %v", p.RequirementID, perr)
+		}
+	}
+	job.Finish(0, store.JobDone)
+	log.Printf("[start-coding] job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
+
+	// === AUTO-ORCHESTRATE ============================================
+	// 主 Agent 在 start-coding 阶段已经掌握需求 / 设计 / 项目上下文。
+	// 用户希望"一键编排 = 主 Agent 自动派发"——main agent 一返回
+	// finalResult，立刻交给 tryAutoOrchestrate：有 [SUBTASKS_READY]
+	// sentinel + JSON 时串行派发子 Agent + 异步汇总；没命中就把
+	// coding_plan 当作普通任务分解展示，但不派发（保持现有行为）。
+	//
+	// Agent-Server 路径走 "agent" 角色，该角色的 system prompt 与 -p 指令
+	// 都不要求 [SUBTASKS_READY] 哨兵 / subtasks.json；为了一致性直接跳过
+	// orchestrator（不调用，即便没有 sentinel 也会安全 no-op，但调用
+	// 本身会引入无谓的 goroutine + 日志噪音）。
+	//
+	// 当 split_tasks=false（用户选择"不拆分任务"）时，StartCoding 已经把
+	// roleKey 切到 "agent" 并使用 agentDirectPrompt，-p 消息不携带任何触发
+	// 语、agent 的 system prompt 也明确"不要拆分子任务"；此时再调
+	// tryAutoOrchestrate 只会扫到空 payload 然后空转派发 0 个子任务，
+	// 等价于一次 no-op，但仍然多开一个 goroutine + 一段 resolveSubtasksPayload
+	// 的日志噪音，所以一并短路。split_tasks=true + 本地 = roleKey=="developer"，
+	// 走原 developerDecomposePrompt + 派发链路，行为与改动前一致。
+	//
+	// 该调用改用独立 goroutine，不阻塞 start-coding 自身的 job_done
+	// 信号，用户的开发启动 SSE 立即结束；子任务的进度仍由
+	// dispatchOneChild 的 JobStore job 推流。
+	if roleKey != "agent" && p.RequirementID != "" && newCodingSID != "" && h.subTaskSvc != nil && p.SplitTasks {
+		go h.tryAutoOrchestrate(p.RequirementID, newCodingSID, out.finalResult, out.subTasksJSON, reqRow, workDir, model, claudeConfigID)
+	}
 }
 
 // AdjustCoding starts a background JobStore job that resumes the prior coding
@@ -2067,6 +2090,36 @@ func (h *WizardHandler) StreamJob(w http.ResponseWriter, r *http.Request) {
 // Subscribe to the live stream via GET /api/wizard/jobs/{job_id}/stream and
 // poll the snapshot via GET /api/wizard/jobs/{job_id} (same pattern as
 // start-coding).
+// designRunParams is the prepared-shape output of prepareArchitectDesign —
+// every input the goroutine body needs after the synchronous validation +
+// job creation + prompt build has succeeded. Splitting it out lets the
+// scheduler path reuse the exact same exec body via RunScheduledDesign, so
+// HTTP-driven and time-driven dispatches share one implementation of the
+// architect stage (no parallel maintenance).
+type designRunParams struct {
+	Req            *model.Requirement
+	ProjectPath    string
+	DefaultBranch  string
+	SourceSID      string
+	Fork           bool
+	SkipAnalysis   bool
+	NewDesignSID   string
+	WorkDir        string
+	Prompt         string
+	SystemPrompt   string
+	Model          string // 已经应用请求体覆盖
+	ClaudeConfigID string
+	ReadKnowledge  bool
+}
+
+// runCallbacks lets the scheduler hook into a job's terminal Finish so it
+// can flip the scheduled_tasks row from running → succeeded/failed. The
+// HTTP path passes nil; the scheduler path passes a closure built from
+// ScheduledExecutor.
+type runCallbacks struct {
+	OnFinish func(jobID string, ok bool)
+}
+
 func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RequirementID string `json:"requirement_id"`
@@ -2074,16 +2127,50 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		ReadKnowledge bool   `json:"read_knowledge"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	id := body.RequirementID
-	if id == "" {
-		writeError(w, 400, "INVALID", "missing requirement id")
+	p, job, af := h.prepareArchitectDesign(body.RequirementID, body.Model, body.ReadKnowledge)
+	if writeIfAPIError(w, af) {
 		return
+	}
+	writeJSON(w, 200, map[string]string{"job_id": job.ID})
+	go h.execArchitectDesign(p, job, nil)
+}
+
+// RunScheduledDesign is the scheduler-facing entry point. It performs the
+// same prepare step as ArchitectDesign (the validation is shared) and
+// dispatches the exec body in a goroutine tagged with the scheduler's
+// callback. Returns the JobStore job id (the scheduler records this in
+// scheduled_tasks.job_id so /api/wizard/jobs/{id} can replay the log).
+func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnowledge bool, cb *runCallbacks) (string, error) {
+	p, job, af := h.prepareArchitectDesign(requirementID, model, readKnowledge)
+	if af != nil {
+		return "", af
+	}
+	go h.execArchitectDesign(p, job, cb)
+	return job.ID, nil
+}
+
+// prepareArchitectDesign runs the synchronous portion of the architect-design
+// stage: requirement lookup, project path / default branch resolution,
+// session-thread resolution (design→analyst fallback), anchor check,
+// session-id pre-mint, worktree creation, JobStore creation, and prompt
+// construction. Returns (*designRunParams, *store.Job, *apiFailure); any
+// non-nil apiFailure is a 4xx/5xx the HTTP path writes verbatim. The exec
+// body (execArchitectDesign) consumes the params + job and writes progress
+// into JobStore.
+//
+// NOTE: this is a refactor of the original ArchitectDesign — the body is
+// line-for-line the same as the original synchronous section; only the
+// writeError calls have been replaced with returning *apiFailure so the
+// scheduler can reuse the same validation outcomes.
+func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride string, readKnowledge bool) (*designRunParams, *store.Job, *apiFailure) {
+	id := requirementID
+	if id == "" {
+		return nil, nil, fail(400, "INVALID", "missing requirement id")
 	}
 
 	req, err := h.reqSvc.Get(id)
 	if err != nil {
-		writeError(w, 404, "NOT_FOUND", "requirement not found")
-		return
+		return nil, nil, fail(404, "NOT_FOUND", "requirement not found")
 	}
 	project, _ := h.projectSvc.Get(req.ProjectID)
 	projectPath := ""
@@ -2115,8 +2202,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	// description + collectProjectContext. This bypasses the analyst stage.
 	skipAnalysis := req.SkipAnalysis
 	if sourceSID == "" && !skipAnalysis {
-		writeError(w, 400, "NO_SESSION", "尚未找到需求分析会话，请先完成「需求分析」再生成技术方案。")
-		return
+		return nil, nil, fail(400, "NO_SESSION", "尚未找到需求分析会话，请先完成「需求分析」再生成技术方案。")
 	}
 
 	// Forking the analyst session requires it to have been anchored to the
@@ -2124,8 +2210,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	// forks the design) inherits original-dir absolute paths.
 	if fork {
 		if gerr := h.requireAnchoredFork(req, projectPath); gerr != nil {
-			writeError(w, 409, "UNANCHORED_SESSION", gerr.Error())
-			return
+			return nil, nil, fail(409, "UNANCHORED_SESSION", gerr.Error())
 		}
 	}
 
@@ -2148,8 +2233,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	// original-dir absolute paths back to the shared checkout.
 	workDir, wdErr := h.resolveWorkDir(req, projectPath, defaultBranch)
 	if wdErr != nil {
-		writeError(w, 500, "WORKTREE_FAILED", "worktree 创建失败："+wdErr.Error())
-		return
+		return nil, nil, fail(500, "WORKTREE_FAILED", "worktree 创建失败："+wdErr.Error())
 	}
 
 	// Create the job, persist its id so a refresh can reconnect, and return
@@ -2159,7 +2243,6 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	if perr := h.reqSvc.UpdateDesignJob(id, job.ID); perr != nil {
 		log.Printf("[architect-design] failed to persist design_job_id for %s: %v", id, perr)
 	}
-	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	// Plan-mode task prompt. When resuming/forking an existing conversation
 	// (analyst session present), the resumed thread already carries the
@@ -2205,149 +2288,195 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 
 	systemPrompt, model, claudeConfigID := h.roleConfig("architect")
 	// Per-request model override (highest precedence); empty means role default.
-	if body.Model != "" {
-		model = body.Model
+	if modelOverride != "" {
+		model = modelOverride
 	}
 	job.SetModel(model)
 
-	go func() {
-		log.Printf("[architect-design] job %s started for %s (fork=%v skip=%v)", job.ID, id, fork, skipAnalysis && sourceSID == "")
+	return &designRunParams{
+		Req:            req,
+		ProjectPath:    projectPath,
+		DefaultBranch:  defaultBranch,
+		SourceSID:      sourceSID,
+		Fork:           fork,
+		SkipAnalysis:   skipAnalysis,
+		NewDesignSID:   newDesignSID,
+		WorkDir:        workDir,
+		Prompt:         prompt,
+		SystemPrompt:   systemPrompt,
+		Model:          model,
+		ClaudeConfigID: claudeConfigID,
+		ReadKnowledge:  readKnowledge,
+	}, job, nil
+}
 
-		// Optional knowledge pre-read: inject the project knowledge relevant to
-		// this requirement and surface what was read via a "knowledge" SSE event.
-		// Default off (read_knowledge=false) keeps the legacy behavior untouched.
-		var kbReadTitles []string
-		if body.ReadKnowledge {
-			kbBlock, kbTitles := h.buildKnowledgeBlock(req.ProjectID, req.Title)
-			if kbBlock != "" {
-				prompt = kbBlock + "\n" + prompt
-			}
-			emitKnowledgeEvent(job, kbTitles)
-			kbReadTitles = kbTitles
+// execArchitectDesign runs the goroutine body of the architect-design stage.
+// Same line-for-line as the original anonymous goroutine in ArchitectDesign,
+// except `body.X` references are now `p.X`. Two additions:
+//   - A deferred persist of the finished job log (jobLogSvc.Save) so the
+//     architect-design execution log survives a backend restart — same
+//     pattern StartCoding already had, now extended here to close the
+//     existing data-loss gap noted in plan-stateful-stardust.md (fact 1).
+//   - The OnFinish callback fires after Save so the scheduler can flip
+//     scheduled_tasks.running → succeeded/failed with the same job_id.
+func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, cb *runCallbacks) {
+	defer func() {
+		lines, status, exitCode := job.Snapshot()
+		if perr := h.jobLogSvc.Save(job.ID, p.Req.ID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
+			log.Printf("[architect-design] failed to persist job log %s: %v", job.ID, perr)
 		}
+		if cb != nil && cb.OnFinish != nil {
+			cb.OnFinish(job.ID, status == store.JobDone)
+		}
+	}()
 
-		job.Append(store.LogLine{Type: "phase", Content: "📐 Claude 正在 plan 模式下探索代码并制定技术方案..."})
+	id := p.Req.ID
+	fork := p.Fork
+	sourceSID := p.SourceSID
+	newDesignSID := p.NewDesignSID
+	workDir := p.WorkDir
+	model := p.Model
+	claudeConfigID := p.ClaudeConfigID
+	prompt := p.Prompt
+	skipAnalysis := p.SkipAnalysis
+	req := p.Req
 
-		// context.Background(): the HTTP request has already returned, so we
-		// must not tie the claude subprocess's lifetime to r.Context() (which
-		// is cancelled the moment the handler returns).
-		sessionArg := sourceSID
-		forkSessionID := ""
-		if fork {
-			forkSessionID = newDesignSID
-		} else if sourceSID == "" {
-			sessionArg = newDesignSID // skip-analysis fresh session
-		}
-		if block := llm.BuildSkillsBlock(h.mentionedSkills(req.Title + " " + req.Description)); block != "" {
-			prompt = block + prompt
-		}
-		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-			Prompt:         prompt,
-			WorkDir:        workDir,
-			SystemPrompt:   systemPrompt,
-			Model:          cliModelArg(model),
-			ClaudeConfigID: claudeConfigID,
-			SessionID:      sessionArg,
-			Resume:         sourceSID != "",
-			Fork:           fork,
-			ForkSessionID:  forkSessionID,
-			PermissionMode: "plan",
-		})
-		out := runClaudeStream(jobSink{job}, cmd, "architect-design", h.usageCtxFor("architect_design", id, req.ProjectID, job.ID, model, "", ""))
+	log.Printf("[architect-design] job %s started for %s (fork=%v skip=%v)", job.ID, id, fork, skipAnalysis && sourceSID == "")
 
-		if out.staleSession {
-			// The source conversation is gone. Clear whichever session id was
-			// stale so the user can redo the prior stage, surface a recovery
-			// hint, and clear the active job pointer. On the skip-analysis path
-			// there is no source session to be stale, so this branch is a
-			// no-op guard; we still surface a generic recovery hint.
-			if sourceSID == "" {
-				job.Append(store.LogLine{Type: "error", Content: "会话异常，请重试生成技术方案。"})
-			} else if fork {
-				_ = h.reqSvc.UpdateAnalysisSession(id, "")
-				job.Append(store.LogLine{Type: "error", Content: "需求分析会话已过期。请重新进行「需求分析」后再生成技术方案。"})
-			} else {
-				_ = h.reqSvc.UpdateDesignSession(id, "")
-				job.Append(store.LogLine{Type: "error", Content: "技术方案会话已过期。请重新生成技术方案。"})
-			}
-			_ = h.reqSvc.UpdateDesignJob(id, "")
-			job.Finish(1, store.JobError)
-			return
+	// Optional knowledge pre-read: inject the project knowledge relevant to
+	// this requirement and surface what was read via a "knowledge" SSE event.
+	// Default off (read_knowledge=false) keeps the legacy behavior untouched.
+	var kbReadTitles []string
+	if p.ReadKnowledge {
+		kbBlock, kbTitles := h.buildKnowledgeBlock(req.ProjectID, req.Title)
+		if kbBlock != "" {
+			prompt = kbBlock + "\n" + prompt
 		}
+		emitKnowledgeEvent(job, kbTitles)
+		kbReadTitles = kbTitles
+	}
 
-		// The design session id is already persisted upfront. Correct it only if
-		// the CLI reported a different id than the one we pre-minted (a safety
-		// net in case the --session-id override semantics ever change).
-		if out.sessionID != "" && out.sessionID != newDesignSID && out.sessionID != sourceSID {
-			if perr := h.reqSvc.UpdateDesignSession(id, out.sessionID); perr != nil {
-				log.Printf("[architect-design] failed to persist design session for %s: %v", id, perr)
-			}
-		}
+	job.Append(store.LogLine{Type: "phase", Content: "📐 Claude 正在 plan 模式下探索代码并制定技术方案..."})
 
-		// In plan mode, the full plan markdown is captured from the Write
-		// tool_use event that lands in ~/.claude/plans/*.md (runClaudeStream
-		// stores it in out.planContent). Fall back to the result text if
-		// capture missed it (e.g. a proxy that doesn't emit tool_use blocks in
-		// the assistant event).
-		planMarkdown := out.planContent
-		if planMarkdown == "" {
-			planMarkdown = out.finalResult
-		}
-		// The run ended with an error (upstream proxy 504, api_error result
-		// event, or non-zero exit). The Write tool_use that populates
-		// planContent fires BEFORE the model's final API call, so a 504 on that
-		// trailing call leaves planMarkdown non-empty while the run actually
-		// failed. Treating that as success appends a green ✅ and the user has
-		// no idea the run was interrupted (and the captured plan may be
-		// partial). Surface the error instead: save the captured plan as a
-		// fallback so the exploration work isn't lost, but mark the job errored
-		// so the UI shows the failure and the user can retry.
-		if out.errMsg != "" {
-			if planMarkdown != "" {
-				if _, err := h.reqSvc.UpdateDesign(id, planMarkdown); err != nil {
-					log.Printf("[architect-design] failed to save partial design for %s: %v", id, err)
-				}
-			}
-			_ = h.reqSvc.UpdateDesignJob(id, "")
-			job.Append(store.LogLine{Type: "error", Content: out.errMsg})
-			job.Finish(1, store.JobError)
-			return
-		}
-		if planMarkdown == "" {
-			errMsg := out.errMsg
-			if errMsg == "" {
-				errMsg = "Claude 未返回结果，请重试"
-			}
-			job.Append(store.LogLine{Type: "error", Content: errMsg})
-			_ = h.reqSvc.UpdateDesignJob(id, "")
-			job.Finish(1, store.JobError)
-			return
-		}
+	// context.Background(): the HTTP request has already returned, so we
+	// must not tie the claude subprocess's lifetime to r.Context() (which
+	// is cancelled the moment the handler returns).
+	sessionArg := sourceSID
+	forkSessionID := ""
+	if fork {
+		forkSessionID = newDesignSID
+	} else if sourceSID == "" {
+		sessionArg = newDesignSID // skip-analysis fresh session
+	}
+	if block := llm.BuildSkillsBlock(h.mentionedSkills(req.Title + " " + req.Description)); block != "" {
+		prompt = block + prompt
+	}
+	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+		Prompt:         prompt,
+		WorkDir:        workDir,
+		SystemPrompt:   p.SystemPrompt,
+		Model:          cliModelArg(model),
+		ClaudeConfigID: claudeConfigID,
+		SessionID:      sessionArg,
+		Resume:         sourceSID != "",
+		Fork:           fork,
+		ForkSessionID:  forkSessionID,
+		PermissionMode: "plan",
+	})
+	out := runClaudeStream(jobSink{job}, cmd, "architect-design", h.usageCtxFor("architect_design", id, req.ProjectID, job.ID, model, "", ""))
 
-		// Persist the design (sets status=designing) and clear the active job
-		// pointer so a refresh shows the finished design instead of "executing".
-		if _, err := h.reqSvc.UpdateDesign(id, planMarkdown); err != nil {
-			log.Printf("[architect-design] failed to save design for %s: %v", id, err)
-			job.Append(store.LogLine{Type: "error", Content: "保存技术方案失败: " + err.Error()})
-			_ = h.reqSvc.UpdateDesignJob(id, "")
-			job.Finish(1, store.JobError)
-			return
+	if out.staleSession {
+		// The source conversation is gone. Clear whichever session id was
+		// stale so the user can redo the prior stage, surface a recovery
+		// hint, and clear the active job pointer. On the skip-analysis path
+		// there is no source session to be stale, so this branch is a
+		// no-op guard; we still surface a generic recovery hint.
+		if sourceSID == "" {
+			job.Append(store.LogLine{Type: "error", Content: "会话异常，请重试生成技术方案。"})
+		} else if fork {
+			_ = h.reqSvc.UpdateAnalysisSession(id, "")
+			job.Append(store.LogLine{Type: "error", Content: "需求分析会话已过期。请重新进行「需求分析」后再生成技术方案。"})
+		} else {
+			_ = h.reqSvc.UpdateDesignSession(id, "")
+			job.Append(store.LogLine{Type: "error", Content: "技术方案会话已过期。请重新生成技术方案。"})
 		}
 		_ = h.reqSvc.UpdateDesignJob(id, "")
+		job.Finish(1, store.JobError)
+		return
+	}
 
-		// Record the effective model for the architect stage (success path only).
-		if perr := h.reqSvc.UpdateArchitectModel(id, model); perr != nil {
-			log.Printf("[architect-design] failed to persist architect_model for %s: %v", id, perr)
+	// The design session id is already persisted upfront. Correct it only if
+	// the CLI reported a different id than the one we pre-minted (a safety
+	// net in case the --session-id override semantics ever change).
+	if out.sessionID != "" && out.sessionID != newDesignSID && out.sessionID != sourceSID {
+		if perr := h.reqSvc.UpdateDesignSession(id, out.sessionID); perr != nil {
+			log.Printf("[architect-design] failed to persist design session for %s: %v", id, perr)
 		}
-		// Close the knowledge loop: mark which read entries the run actually used.
-		if len(kbReadTitles) > 0 {
-			items, used := evaluateKnowledgeUsage(kbReadTitles, out.toolFiles, planMarkdown)
-			emitKnowledgeResultEvent(job, items, used)
+	}
+
+	// In plan mode, the full plan markdown is captured from the Write
+	// tool_use event that lands in ~/.claude/plans/*.md (runClaudeStream
+	// stores it in out.planContent). Fall back to the result text if
+	// capture missed it (e.g. a proxy that doesn't emit tool_use blocks in
+	// the assistant event).
+	planMarkdown := out.planContent
+	if planMarkdown == "" {
+		planMarkdown = out.finalResult
+	}
+	// The run ended with an error (upstream proxy 504, api_error result
+	// event, or non-zero exit). The Write tool_use that populates
+	// planContent fires BEFORE the model's final API call, so a 504 on that
+	// trailing call leaves planMarkdown non-empty while the run actually
+	// failed. Treating that as success appends a green ✅ and the user has
+	// no idea the run was interrupted (and the captured plan may be
+	// partial). Surface the error instead: save the captured plan as a
+	// fallback so the exploration work isn't lost, but mark the job errored
+	// so the UI shows the failure and the user can retry.
+	if out.errMsg != "" {
+		if planMarkdown != "" {
+			if _, err := h.reqSvc.UpdateDesign(id, planMarkdown); err != nil {
+				log.Printf("[architect-design] failed to save partial design for %s: %v", id, err)
+			}
 		}
-		job.Append(store.LogLine{Type: "done", Content: "✅ 技术方案已生成！"})
-		job.Finish(0, store.JobDone)
-		log.Printf("[architect-design] job %s finished for %s", job.ID, id)
-	}()
+		_ = h.reqSvc.UpdateDesignJob(id, "")
+		job.Append(store.LogLine{Type: "error", Content: out.errMsg})
+		job.Finish(1, store.JobError)
+		return
+	}
+	if planMarkdown == "" {
+		errMsg := out.errMsg
+		if errMsg == "" {
+			errMsg = "Claude 未返回结果，请重试"
+		}
+		job.Append(store.LogLine{Type: "error", Content: errMsg})
+		_ = h.reqSvc.UpdateDesignJob(id, "")
+		job.Finish(1, store.JobError)
+		return
+	}
+
+	// Persist the design (sets status=designing) and clear the active job
+	// pointer so a refresh shows the finished design instead of "executing".
+	if _, err := h.reqSvc.UpdateDesign(id, planMarkdown); err != nil {
+		log.Printf("[architect-design] failed to save design for %s: %v", id, err)
+		job.Append(store.LogLine{Type: "error", Content: "保存技术方案失败: " + err.Error()})
+		_ = h.reqSvc.UpdateDesignJob(id, "")
+		job.Finish(1, store.JobError)
+		return
+	}
+	_ = h.reqSvc.UpdateDesignJob(id, "")
+
+	// Record the effective model for the architect stage (success path only).
+	if perr := h.reqSvc.UpdateArchitectModel(id, model); perr != nil {
+		log.Printf("[architect-design] failed to persist architect_model for %s: %v", id, perr)
+	}
+	// Close the knowledge loop: mark which read entries the run actually used.
+	if len(kbReadTitles) > 0 {
+		items, used := evaluateKnowledgeUsage(kbReadTitles, out.toolFiles, planMarkdown)
+		emitKnowledgeResultEvent(job, items, used)
+	}
+	job.Append(store.LogLine{Type: "done", Content: "✅ 技术方案已生成！"})
+	job.Finish(0, store.JobDone)
+	log.Printf("[architect-design] job %s finished for %s", job.ID, id)
 }
 
 // GetJob returns the current state and full log of a background coding job.

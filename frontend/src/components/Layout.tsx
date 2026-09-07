@@ -9,6 +9,7 @@ import {
   IconSparkles,
   IconSettings,
   IconMore,
+  IconClock,
 } from './icons';
 import './Layout.css';
 
@@ -22,11 +23,13 @@ const DashboardIcon = (p: NavIconProps) => <IconDashboard size={18} {...p} />;
 const FolderIcon = (p: NavIconProps) => <IconFolder size={18} {...p} />;
 const RequirementsIcon = (p: NavIconProps) => <IconRequirements size={18} {...p} />;
 const ReportIcon = (p: NavIconProps) => <IconReport size={18} {...p} />;
+const ScheduleIcon = (p: NavIconProps) => <IconClock size={18} {...p} />;
 
 const navItems = [
   { to: '/', label: '仪表盘', end: true, permission: 'menu.dashboard', shortLabel: '仪表盘', Icon: DashboardIcon },
   { to: '/projects', label: '项目', end: false, permission: 'menu.projects', shortLabel: '项目', Icon: FolderIcon },
   { to: '/requirements', label: '需求', end: false, permission: 'menu.projects', shortLabel: '需求', Icon: RequirementsIcon },
+  { to: '/schedules', label: '定时任务', end: false, permission: 'menu.projects', shortLabel: '定时', Icon: ScheduleIcon },
   { to: '/reports', label: '周报', end: false, permission: 'menu.reports', shortLabel: '周报', Icon: ReportIcon },
 ];
 
@@ -183,6 +186,7 @@ export default function Layout() {
     if (path.startsWith('/projects/')) return { label: '项目详情', back: '/projects' };
     if (path.startsWith('/projects')) return { label: '项目', back: null };
     if (path.startsWith('/knowledge')) return { label: '知识库', back: null };
+    if (path.startsWith('/schedules')) return { label: '定时任务', back: null };
     if (path.startsWith('/chat')) return { label: '助手', back: null };
     if (path.startsWith('/reports')) return { label: '周报', back: null };
     if (path.startsWith('/settings')) return { label: '设置', back: null };

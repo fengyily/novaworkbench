@@ -487,6 +487,12 @@ body.no-scroll {
 .status-badge.status-missing    { background: #fef3c7; color: #b45309; }
 /* weekly-report run status */
 .status-badge.status-error      { background: #fee2e2; color: #dc2626; }
+/* scheduled-task lifecycle (SchedulesPage) */
+.status-badge.status-pending    { background: #f1f5f9; color: #475569; }
+.status-badge.status-running    { background: #cffafe; color: #0e7490; }
+.status-badge.status-succeeded  { background: #d1fae5; color: #047857; }
+.status-badge.status-failed     { background: #fee2e2; color: #dc2626; }
+.status-badge.status-canceled   { background: #f1f5f9; color: #64748b; }
 
 /* ── Requirement kind badges (issue / requirement / idea) ──
    Sit next to the status badge in lists and the detail-page header so the
@@ -1372,3 +1378,50 @@ body.no-scroll {
     white-space: normal;
   }
 }
+
+
+/* ── Schedule modal & log viewer ── */
+.schedule-modal .modal-body { padding: 16px 20px; }
+.schedule-log-modal { max-width: 720px; width: 90vw; }
+.schedule-log-modal .modal-body { padding: 12px 16px; }
+.schedule-log-body {
+  max-height: 60vh;
+  overflow-y: auto;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 6px;
+  padding: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.schedule-log-line {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 2px 0;
+}
+.schedule-log-type {
+  flex: 0 0 auto;
+  background: #1e293b;
+  color: #cbd5e1;
+  padding: 0 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  text-transform: uppercase;
+  align-self: flex-start;
+  margin-top: 2px;
+}
+.schedule-log-content {
+  flex: 1 1 auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.schedule-log-tool_call { color: #93c5fd; }
+.schedule-log-tool_result { color: #c4b5fd; }
+.schedule-log-message { color: #e2e8f0; }
+.schedule-log-phase { color: #fbbf24; }
+.schedule-log-error { color: #fca5a5; }
+.schedule-log-done { color: #86efac; }
+.schedule-log-result { color: #a7f3d0; }
