@@ -15,6 +15,7 @@ import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, type LogLine } from '../utils/logLines';
 import AtMentionTextarea from './AtMentionTextarea';
 import ModelSelect from './ModelSelect';
+import { IconRobot, IconDashboard, IconSparkles } from './icons';
 import './SubTaskPanel.css';
 
 // fmtCost / fmtNum are imported from the shared API client. TokenStrip
@@ -511,7 +512,10 @@ function SubTaskCard({ st, index, total, onChanged, onCreated }: CardProps) {
 export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange }: Props) {
   const [items, setItems] = useState<SubTask[] | null>(null);
   const [prompt, setPrompt] = useState('');
-  const [title, setTitle] = useState('');
+  // Title input was removed: opening a sub-task now only needs a description.
+  // The backend auto-derives a card-header title from the prompt (first 40
+  // chars via truncateForTitle) when the caller leaves the title blank, so
+  // downstream rendering still has something to show in the card header.
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Track an auto-orchestrate batch (the new "一键编排 = 主 Agent 自动派发"
@@ -616,16 +620,18 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     setSubmitting(true);
     setError(null);
     try {
-      await subTasksApi.create(requirementId, { prompt: p, title: title.trim() || undefined });
+      // No title field on the composer — the backend derives a card-header
+      // title from the prompt's first 40 chars when title is omitted, so
+      // the sub-task row still has a human-readable header downstream.
+      await subTasksApi.create(requirementId, { prompt: p });
       setPrompt('');
-      setTitle('');
       await loadList();
     } catch (e: any) {
       setError(e?.message || '启动子任务失败');
     } finally {
       setSubmitting(false);
     }
-  }, [prompt, title, submitting, requirementId, loadList]);
+  }, [prompt, submitting, requirementId, loadList]);
 
   // --- Manual re-split (🔄 重新拆分) -------------------------------------
   // Escape hatch for when StartCoding's auto-orchestration produced no
@@ -684,7 +690,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       <section className="sub-panel" aria-labelledby="sub-panel-title">
         <header className="sub-panel-header">
           <h3 id="sub-panel-title" className="sub-panel-title">
-            <span className="sub-panel-title-icon" aria-hidden="true">🤖</span>
+            <span className="sub-panel-title-icon" aria-hidden="true"><IconRobot size={16} /></span>
             <span>子任务协作</span>
           </h3>
         </header>
@@ -708,7 +714,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     <section className="sub-panel" aria-labelledby="sub-panel-title">
       <header className="sub-panel-header">
         <h3 id="sub-panel-title" className="sub-panel-title">
-          <span className="sub-panel-title-icon" aria-hidden="true">🤖</span>
+          <span className="sub-panel-title-icon" aria-hidden="true"><IconRobot size={16} /></span>
           <span>子任务协作</span>
         </h3>
         <span className="sub-panel-meta">
@@ -755,7 +761,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       {hasSummary && (
         <div className="sub-summary">
           <header className="sub-summary-header">
-            <span className="sub-summary-icon" aria-hidden="true">📊</span>
+            <span className="sub-summary-icon" aria-hidden="true"><IconDashboard size={14} /></span>
             <span className="sub-summary-title">主 Agent 汇总报告</span>
           </header>
           <div className="sub-summary-body">
@@ -765,18 +771,8 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       )}
 
       <div className="sub-composer">
-        <label className="sub-composer-title-row">
-          <span className="sub-composer-label">标题（可选）</span>
-          <input
-            type="text"
-            className="sub-composer-input"
-            placeholder="给这个子任务起个名字，方便事后回看"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            disabled={submitting}
-            maxLength={80}
-          />
-        </label>
+        {/* 描述输入区（标题字段已移除：开启子任务只需要描述，后端会自动从描述
+            中截取前 40 字符作为卡片标题，避免额外输入成本）。 */}
         <AtMentionTextarea
           value={prompt}
           onChange={setPrompt}
@@ -814,7 +810,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         {items === null && <div className="sub-list-loading">加载中…</div>}
         {items && items.length === 0 && (
           <div className="sub-list-empty">
-            <div className="sub-list-empty-icon" aria-hidden="true">✨</div>
+            <div className="sub-list-empty-icon" aria-hidden="true"><IconSparkles size={28} /></div>
             <div>暂无子任务。可点击「🔄 重新拆分」让主 Agent 拆分并自动派发，或在上方手动创建。</div>
           </div>
         )}

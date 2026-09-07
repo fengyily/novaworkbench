@@ -8,6 +8,7 @@ import AtMentionTextarea from './AtMentionTextarea';
 import { FullscreenButton } from './FullscreenButton';
 import { useFullscreen } from '../utils/useFullscreen';
 import { ContextUsageBar } from './ContextUsageBar';
+import { IconCheck } from './icons';
 
 interface Props {
   reqId: string;
@@ -512,7 +513,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
 
       {refineComplete && !applying && (
         <div className="confirm-panel" style={{ marginTop: 8 }}>
-          <div className="confirm-panel-icon">✅</div>
+          <div className="confirm-panel-icon"><IconCheck size={22} /></div>
           <div className="confirm-panel-body">
             <strong>修改内容已确认</strong>
             <p>点击「应用到{label}」，Claude 将把对话中的修改写入文档并保存。</p>
@@ -556,13 +557,13 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           modal so the visual treatment is consistent across stages. */}
       {summaryModal !== null && (
         <div
-          className="modal-backdrop"
+          className="modal-overlay"
           onClick={() => setSummaryModal(null)}
           role="dialog"
           aria-modal="true"
         >
           <div
-            className="modal"
+            className="modal-box"
             onClick={e => e.stopPropagation()}
             style={{ maxWidth: 640 }}
           >

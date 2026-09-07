@@ -121,22 +121,12 @@
 .output-line { padding: 1px 0; }
 .output-line.stderr { color: #f87171; }
 
-/* Form */
-.form-group { margin-bottom: 16px; }
-.form-group label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; color: var(--color-text-secondary); }
-.form-input {
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  font-size: 14px;
-  background: var(--color-bg);
-  color: var(--color-text);
-  box-sizing: border-box;
-}
-.form-input:focus { outline: none; border-color: var(--color-primary); }
-
-.form-actions { display: flex; justify-content: space-between; gap: 12px; margin-top: 20px; }
+/* `.form-group`, `.form-input` are defined globally in index.css.
+   `.form-actions` is also global (justify-content:flex-end), but the
+   wizard wants `← 返回` on the left and `下一步/确认/启动编码` on the
+   right — so override with `space-between` on desktop. Mobile sticks
+   the row to the bottom of the viewport further down in this file. */
+.form-actions { justify-content: space-between; }
 
 /* ── Mobile ────────────────────────────────────────────────────── */
 @media (max-width: 768px) {

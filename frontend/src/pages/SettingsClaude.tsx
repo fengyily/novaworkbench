@@ -247,7 +247,7 @@ export default function SettingsClaude() {
       {showModal && (
         <div className="modal-overlay" onClick={() => setShowModal(false)}>
           <div className="modal-box claude-config-modal" onClick={e => e.stopPropagation()}>
-            <h3 className="modal-title">{editingId ? '编辑配置' : '添加配置'}</h3>
+            <h3>{editingId ? '编辑配置' : '添加配置'}</h3>
 
             {error && <div className="form-error">{error}</div>}
 

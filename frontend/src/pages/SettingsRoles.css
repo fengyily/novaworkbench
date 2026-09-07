@@ -116,3 +116,26 @@
 .role-model-input {
   cursor: pointer;
 }
+
+/* ── Mobile ──────────────────────────────────────────────────────
+   On phones the role-card-head row (name + model select) used to keep
+   its desktop horizontal layout and squashed both children into ~half
+   the card width each. Stacking vertically + stretching the model
+   field lets the select sit at its natural width and the header name
+   keeps the cap-height baseline. */
+@media (max-width: 768px) {
+  .role-card-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .role-model-field {
+    min-width: 0;
+  }
+  .role-card {
+    padding: 16px;
+  }
+  .role-prompt-input {
+    min-height: 140px;
+  }
+}

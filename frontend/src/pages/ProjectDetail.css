@@ -1,6 +1,7 @@
 .project-detail {
   width: 100%;
-  padding: 24px;
+  /* Padding provided by `.app-main` in Layout.css — duplicate padding
+     here doubled the inner gutter on desktop. */
 }
 
 /* ── Top header (breadcrumb back + title + type tag + path) ───────────
@@ -161,6 +162,21 @@
   font-size: 13px;
   font-weight: 500;
 }
+
+/* Platform-config row (Overview tab). Three columns — platform select,
+   token select, save button — laid out horizontally on desktop, stacked
+   on mobile (see media query below). The mobile media block earlier
+   flips the flex direction; here we just give each child a sensible
+   width. */
+.platform-form-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.platform-form-field { margin: 0; flex: 0 0 160px; }
+.platform-form-field-grow { flex: 1 1 200px; }
+.platform-form-save { height: 38px; flex: 0 0 auto; }
 
 .btn-danger:hover:not(:disabled) {
   background: #dc2626;
@@ -490,6 +506,27 @@
   .create-req-form .form-row { flex-direction: column; gap: 14px; }
   .create-req-form .form-actions { flex-direction: column; }
   .create-req-form .form-actions > * { width: 100%; min-height: 44px; }
+
+  /* The "最近需求" table on the Overview tab turns into stacked cards
+     via the global `.table-cards` rule (index.css). The pr-branch code
+     cells still inherit the desktop `max-width:160px` ellipsis, which
+     on a 360px phone clips `feat/req_xxxxx` mid-character. Let the
+     branches wrap inside their cell instead. */
+  .recent-reqs-section { padding: 12px; }
+  .recent-reqs-section .pr-branch {
+    max-width: none;
+    white-space: normal;
+    word-break: break-all;
+  }
+  /* The platform-token form on Overview was a horizontal flex-row on
+     desktop; on mobile it stacks vertically so the two selects + 保存
+     button each get a row of their own. */
+  .platform-form-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .platform-form-row > * { width: 100% !important; min-width: 0; }
 }
 
 /* Requirements tab pagination */

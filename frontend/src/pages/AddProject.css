@@ -3,7 +3,7 @@
 .add-project-card {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 24px;
 }
 
@@ -12,35 +12,18 @@
   font-size: 12px;
   color: var(--color-text-muted);
   margin-top: 4px;
+  /* Long hint text (e.g. a recognized GitHub URL on the inferred-platform
+     line, or a full path in the help text) used to overflow the form card
+     on phones. word-break:break-all + overflow-wrap:anywhere is the
+     belt-and-braces pair iOS Safari needs. */
+  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
-/* Form controls */
-.form-group { margin-bottom: 16px; }
-.form-group label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; color: var(--color-text-secondary); }
-
-.form-input {
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  font-size: 14px;
-  background: var(--color-bg);
-  color: var(--color-text);
-  box-sizing: border-box;
-  transition: border-color 0.15s;
-}
-.form-input:focus { outline: none; border-color: var(--color-primary); }
-
-.form-error {
-  background: #fef2f2;
-  color: var(--color-error);
-  padding: 10px 12px;
-  border-radius: 6px;
-  margin-bottom: 16px;
-  font-size: 14px;
-}
-
-.form-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px; }
+/* `.form-group`, `.form-input`, `.form-error`, `.form-actions` are
+   defined globally in index.css — the previous local copies gave the
+   Add-Project form a subtly different padding/radius from the rest of
+   the app. */
 
 /* ── Mobile ──────────────────────────────────────────────────────
    No mobile-specific rules existed before. The mode-tabs were flex:1 with a
@@ -75,10 +58,4 @@
     scrollbar-width: thin;
   }
   .quick-path-btn { flex-shrink: 0; min-height: 36px; }
-
-  /* Form actions use `.stack-mobile` (index.css) so each button is
-     full-width. We override the column order so the primary "Add" button
-     sits on top instead of bottom — closer to the user's thumb when the
-     form is tall. */
-  .form-actions.stack-mobile { flex-direction: column-reverse; }
 }

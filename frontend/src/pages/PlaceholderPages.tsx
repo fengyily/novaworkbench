@@ -191,71 +191,45 @@ export function ProjectsList() {
     const canConfirm = !showRiskStep || acknowledgedRisk;
 
     return (
-      <div
-        onClick={closeDeleteModal}
-        style={{
-          position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.5)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
-        }}
-      >
-        <div
-          onClick={e => e.stopPropagation()}
-          style={{
-            background: 'var(--color-surface)', borderRadius: 10, padding: 24,
-            width: 'min(480px, 92vw)', boxShadow: '0 10px 40px rgba(0,0,0,0.2)',
-          }}
-        >
-          <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>删除项目</h2>
-          <div style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 16 }}>
-            确认删除项目 <strong style={{ color: 'var(--color-text)' }}>{target.name}</strong>？
+      <div className="modal-overlay" onClick={closeDeleteModal}>
+        <div className="modal-box" onClick={e => e.stopPropagation()}>
+          <h3>删除项目</h3>
+          <div className="modal-confirm-text">
+            确认删除项目 <strong>{target.name}</strong>？
           </div>
 
-          <label
-            style={{
-              display: 'flex', alignItems: 'flex-start', gap: 8, padding: 12,
-              border: '1px solid var(--color-border)', borderRadius: 8, cursor: 'pointer',
-              marginBottom: 16,
-            }}
-          >
+          <label className="modal-check-row">
             <input
               type="checkbox"
               checked={deleteDir}
               onChange={e => { setDeleteDir(e.target.checked); setAcknowledgedRisk(false); }}
-              style={{ marginTop: 3 }}
             />
-            <span style={{ fontSize: 13 }}>
+            <span>
               同时删除项目目录
-              <div style={{ color: 'var(--color-text-muted)', fontSize: 12, marginTop: 2, wordBreak: 'break-all' }}>
-                {target.local_path}
-              </div>
+              <div className="modal-check-path break-all">{target.local_path}</div>
             </span>
           </label>
 
           {showRiskStep && (
-            <div
-              style={{
-                background: '#FEF2F2', border: '1px solid #FCA5A5', borderRadius: 8,
-                padding: 12, marginBottom: 16,
-              }}
-            >
-              <div style={{ color: '#B91C1C', fontWeight: 600, fontSize: 13, marginBottom: 6 }}>
+            <div className="modal-risk-panel">
+              <div className="modal-risk-title">
                 ⚠️ 此操作将永久删除目录及其中所有文件，且不可恢复
               </div>
-              <div style={{ color: '#991B1B', fontSize: 12 }}>
+              <div className="modal-risk-desc">
                 删除后可通过回收站重新 git clone 恢复（需要项目已配置远程地址）。
               </div>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, cursor: 'pointer' }}>
+              <label className="modal-risk-check">
                 <input
                   type="checkbox"
                   checked={acknowledgedRisk}
                   onChange={e => setAcknowledgedRisk(e.target.checked)}
                 />
-                <span style={{ fontSize: 13, color: '#991B1B' }}>我已了解风险，确认继续</span>
+                <span>我已了解风险，确认继续</span>
               </label>
             </div>
           )}
 
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <div className="modal-actions btn-row-2col">
             <button className="btn" onClick={closeDeleteModal} disabled={deleting}>取消</button>
             <button
               className="btn btn-danger"
@@ -280,49 +254,32 @@ export function ProjectsList() {
     if (!purgeTarget) return null;
     const target = purgeTarget;
     return (
-      <div
-        onClick={closePurgeModal}
-        style={{
-          position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.5)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
-        }}
-      >
-        <div
-          onClick={e => e.stopPropagation()}
-          style={{
-            background: 'var(--color-surface)', borderRadius: 10, padding: 24,
-            width: 'min(480px, 92vw)', boxShadow: '0 10px 40px rgba(0,0,0,0.2)',
-          }}
-        >
-          <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 12, color: '#B91C1C' }}>
-            ⚠️ 彻底删除项目
-          </h2>
-          <div style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 12 }}>
-            将永久删除 <strong style={{ color: 'var(--color-text)' }}>{target.name}</strong> 的数据库记录，
+      <div className="modal-overlay" onClick={closePurgeModal}>
+        <div className="modal-box" onClick={e => e.stopPropagation()}>
+          <h3 className="modal-title-danger">⚠️ 彻底删除项目</h3>
+          <div className="modal-confirm-text">
+            将永久删除 <strong>{target.name}</strong> 的数据库记录，
             以及其下所有需求、知识库、记忆、运行配置、Token 用量记录。
           </div>
-          <div
-            style={{
-              background: '#FEF2F2', border: '1px solid #FCA5A5', borderRadius: 8,
-              padding: 12, marginBottom: 16, fontSize: 12, color: '#991B1B',
-            }}
-          >
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>此操作不可恢复</div>
+          <div className="modal-risk-panel">
+            <div className="modal-risk-title">此操作不可恢复</div>
             {target.deleted_dir === 0 && target.local_path ? (
-              <div>项目目录 <code style={{ wordBreak: 'break-all' }}>{target.local_path}</code> 也将被删除。</div>
+              <div>
+                项目目录 <code className="break-all">{target.local_path}</code> 也将被删除。
+              </div>
             ) : (
               <div>项目目录此前已删除，此操作仅清理数据库记录。</div>
             )}
           </div>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 16 }}>
+          <label className="modal-risk-check">
             <input
               type="checkbox"
               checked={purgeAck}
               onChange={e => setPurgeAck(e.target.checked)}
             />
-            <span style={{ fontSize: 13, color: '#991B1B' }}>我已了解风险，确认继续</span>
+            <span>我已了解风险，确认继续</span>
           </label>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <div className="modal-actions btn-row-2col">
             <button className="btn" onClick={closePurgeModal} disabled={purging}>取消</button>
             <button
               className="btn btn-danger"
