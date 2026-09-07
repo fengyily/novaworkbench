@@ -572,18 +572,23 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // downstream rendering still has something to show in the card header.
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Per-stage model selection for the three sub-task entry points. Empty
+  // Per-stage model selection for the sub-task entry points. Empty
   // string means "leave it to the backend's role default" — the same
   // convention the main-task path uses (RequirementDetail.doStartCoding
   // spreads model only when truthy). Naming deliberately avoids the
   // per-card `redoModel` so each entry point owns its own picker without
-  // coupling. `adjustModel` is panel-level (shared across all cards'
-  // "追加调整" composers) — picking once applies to the next adjustment
-  // round, mirroring how a user thinks about model choice on the main
+  // coupling.
+  //
+  // `createModel` is the SINGLE composer picker shared by BOTH the
+  // "🚀 启动子任务" and "🔄 重新拆分" buttons — they live in the same
+  // toolbar so one selection covers both actions. (An earlier iteration
+  // had a second picker beside 重新拆分, which read as duplicate UI.)
+  // `adjustModel` is panel-level (shared across all cards' "追加调整"
+  // composers) — picking once applies to the next adjustment round,
+  // mirroring how a user thinks about model choice on the main
   // requirement.
   const [createModel, setCreateModel] = useState<string>('');
   const [adjustModel, setAdjustModel] = useState<string>('');
-  const [reSplitModel, setReSplitModel] = useState<string>('');
   // Track an auto-orchestrate batch (the new "一键编排 = 主 Agent 自动派发"
   // path in StartCoding). Children may still be running so the panel shows
   // "auto-orchestrate in flight" status.
@@ -723,12 +728,12 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     setError(null);
     try {
       // model is optional — empty selection lets the backend fall back to
-      // the developer-role effective model. Without this picker the
-      // backend would inherit whatever claude_configs.default_model is,
-      // which on a custom base URL can surface as "modelCode 不存在".
+      // the developer-role effective model. Shares the composer's
+      // createModel picker (there's only ONE model picker in the panel,
+      // beside the textarea) so the user doesn't pick the model twice.
       const { job_id } = await subTasksApi.reOrchestrate(
         requirementId,
-        { ...(reSplitModel ? { model: reSplitModel } : {}) },
+        { ...(createModel ? { model: createModel } : {}) },
       );
       reSplitEsRef.current?.close();
       reSplitEsRef.current = createEventStream(
@@ -759,7 +764,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       setError(e?.message || '重新拆分失败');
       setReSplitBusy(false);
     }
-  }, [reSplitBusy, reSplitModel, requirementId, loadList]);
+  }, [reSplitBusy, createModel, requirementId, loadList]);
 
   // Close the re-split stream on unmount.
   useEffect(() => () => { reSplitEsRef.current?.close(); reSplitEsRef.current = null; }, []);
@@ -860,19 +865,23 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           disabled={submitting}
           className="sub-composer-textarea"
         />
-        {/* Sub-task model picker. Per-stage (developer) so the dropdown
-            shows the same model list as the main "开始开发" picker on
-            RequirementDetail. Empty selection = let the backend fall
-            back to the developer-role effective model; "默认模型（X）"
-            shows what that fallback actually is. */}
+        {/* Sub-task model picker — the SINGLE picker for the panel's
+            composer row. It applies to BOTH the "🚀 启动子任务" and
+            "🔄 重新拆分" buttons (they share the same claude_configs
+            list, and dispatching a re-split with a different model
+            would just create a confusing mixed batch). Per-stage
+            (developer) so the dropdown shows the same model list as the
+            main "开始开发" picker on RequirementDetail. Empty selection
+            = let the backend fall back to the developer-role effective
+            model; "默认模型（X）" shows what that fallback actually is. */}
         <ModelSelect
           value={createModel}
           onChange={setCreateModel}
           label="子任务模型"
           stage="developer"
           defaultModelName={developerDefaultModel}
-          disabled={submitting}
-          working={submitting}
+          disabled={submitting || reSplitBusy}
+          working={submitting || reSplitBusy}
         />
         {!createModel && !developerDefaultModel && (
           <div className="sub-model-warning" role="note">
@@ -883,19 +892,6 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           <span className="sub-composer-hint">
             启动后子 Agent 将 fork 主会话上下文，所有子任务共享同一项目认知
           </span>
-          {/* Re-split model picker (compact, inline with the toolbar so
-              it doesn't add a row of vertical space). Shares the same
-              configs list as the createModel picker — the user picks a
-              model once and uses it for the re-decomposition turn. */}
-          <ModelSelect
-            value={reSplitModel}
-            onChange={setReSplitModel}
-            label="重新拆分模型"
-            stage="developer"
-            defaultModelName={developerDefaultModel}
-            disabled={reSplitBusy || submitting || anyAlive}
-            style={{ flex: '0 0 auto' }}
-          />
           {error && <span className="sub-composer-err">{error}</span>}
           <button
             type="button"
