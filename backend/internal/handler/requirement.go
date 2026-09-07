@@ -94,36 +94,47 @@ func (h *RequirementHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// Title is no longer entered by the user — distill it from the requirement
 	// content via the LLM. Fall back to the first line of the content if the
 	// LLM is unavailable (e.g. claude CLI not installed) so creation never fails.
+	//
+	// skip_organize (UI default true): the caller can opt out of the LLM-
+	// organized description pass entirely. When set, the raw description is
+	// stored as-is and a fallback title (first line) is used; no LLM round-
+	// trip and no token_usage row is recorded. Older clients that don't send
+	// the field keep the previous behavior (run the organizer).
 	var httpUsage *llm.Usage
 	if req.Title == "" {
-		// Reorganize the raw, free-form content into structured Markdown AND
-		// distill a title in a single LLM round, so the title and body stay
-		// consistent and the content is transmitted once. Each half falls back
-		// independently on failure — creation must not fail just because the
-		// formatter is unavailable.
-		markdown, title, usage, err := h.llm.GenerateDescriptionAndTitle(req.Description, req.Kind)
-		switch {
-		case err != nil:
-			log.Printf("[requirement] GenerateDescriptionAndTitle failed: %v — using raw content and fallback title", err)
+		skipOrganize := req.SkipOrganize != nil && *req.SkipOrganize
+		if skipOrganize {
 			req.Title = fallbackTitle(req.Description)
-		case markdown == "" || title == "":
-			// Shouldn't happen (the gateway returns an error in these cases),
-			// but guard against a partial result by filling the missing half.
-			if markdown != "" {
-				req.Description = markdown
-			}
-			if title != "" {
-				req.Title = title
-			} else {
+		} else {
+			// Reorganize the raw, free-form content into structured Markdown AND
+			// distill a title in a single LLM round, so the title and body stay
+			// consistent and the content is transmitted once. Each half falls back
+			// independently on failure — creation must not fail just because the
+			// formatter is unavailable.
+			markdown, title, usage, err := h.llm.GenerateDescriptionAndTitle(req.Description, req.Kind)
+			switch {
+			case err != nil:
+				log.Printf("[requirement] GenerateDescriptionAndTitle failed: %v — using raw content and fallback title", err)
 				req.Title = fallbackTitle(req.Description)
+			case markdown == "" || title == "":
+				// Shouldn't happen (the gateway returns an error in these cases),
+				// but guard against a partial result by filling the missing half.
+				if markdown != "" {
+					req.Description = markdown
+				}
+				if title != "" {
+					req.Title = title
+				} else {
+					req.Title = fallbackTitle(req.Description)
+				}
+			default:
+				req.Description = markdown
+				req.Title = title
 			}
-		default:
-			req.Description = markdown
-			req.Title = title
+			// usage may be nil (channel unconfigured / gateway omitted usage);
+			// keep it so the token row can be recorded after Create mints the id.
+			httpUsage = usage
 		}
-		// usage may be nil (channel unconfigured / gateway omitted usage);
-		// keep it so the token row can be recorded after Create mints the id.
-		httpUsage = usage
 	}
 	item, err := h.svc.Create(req)
 	if err != nil {

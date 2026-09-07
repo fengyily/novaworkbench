@@ -89,6 +89,13 @@ type CreateRequirementReq struct {
 	Kind         string `json:"kind"` // "issue" | "requirement" | "idea"; empty → defaults to "requirement"
 	SkipAnalysis *bool  `json:"skip_analysis"` // pointer: nil omits the field so Create defaults to true (skip) and Update preserves the existing value
 	SkipDesign   *bool  `json:"skip_design"`   // pointer: nil → Create defaults to false; Update never references this column so it is preserved automatically
+	// SkipOrganize: when true, the handler skips the LLM-organized description
+	// pass that normally distills a title + structured Markdown body. Raw
+	// description is stored verbatim and a fallback title (first line, capped)
+	// is used. Pointer so the absence of the field keeps the previous default
+	// (false = run the organizer) — older clients / scripts that don't send
+	// this continue to get the structured output. UI default = true.
+	SkipOrganize        *bool  `json:"skip_organize"`
 	// SourceRequirementID: optional parent reference. Set by the "总结转需求"
 	// action when an idea's discussion is summarized into a new requirement.
 	// Validated in service.RequirementService (must point to an existing row in
