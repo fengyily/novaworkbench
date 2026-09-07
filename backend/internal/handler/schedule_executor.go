@@ -146,7 +146,7 @@ func (e *ScheduledExecutor) RunScheduledCoding(ctx context.Context, p scheduler.
 // Returns an error if the scheduler forgot to inject schedID, which
 // indicates a programming error (the dispatcher must always set it).
 func (e *ScheduledExecutor) dispatchFromCtx(ctx context.Context) (jobID, schedID string, err error) {
-	if v, ok := ctx.Value(schedCtxKey{}).(schedCtxValue); ok {
+	if v, ok := ctx.Value(scheduler.SchedCtxKey{}).(scheduler.SchedCtxValue); ok {
 		if v.SchedID == "" {
 			return "", "", fmt.Errorf("scheduler ctx missing schedID")
 		}
@@ -155,18 +155,10 @@ func (e *ScheduledExecutor) dispatchFromCtx(ctx context.Context) (jobID, schedID
 	return "", "", fmt.Errorf("scheduler ctx not provided; Executor must be invoked through Scheduler.Dispatch")
 }
 
-// schedCtxKey / schedCtxValue is the wire format the scheduler uses to
-// hand off the (job_id, sched_id) pair it just claimed. Keeping both
-// values in one struct lets the dispatcher update scheduled_tasks.job_id
-// once at claim time (option B from the plan), but option A (map-based
-// lookup) ended up being simpler — this struct stays for future use and
-// keeps the type set self-contained.
-type schedCtxKey struct{}
-
-type schedCtxValue struct {
-	JobID   string
-	SchedID string
-}
+// (SchedCtxKey / SchedCtxValue moved to scheduler package so the producer
+// and consumer share one Go type — exporting them from scheduler lets
+// handler use scheduler.SchedCtxKey without introducing a third package
+// or inverting the dependency direction.)
 
 // callbackFor returns a *runCallbacks whose OnFinish flips the
 // scheduled_tasks row terminal when the wizard exec body finishes.
