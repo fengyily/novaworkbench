@@ -39,6 +39,13 @@ interface Props {
   // re-fire and cause an infinite loop. The panel only re-emits when
   // the count changes, so the parent never sees a redundant call.
   onSubTasksChange?: (count: number) => void;
+  // Effective developer-stage model id (role default → active config
+  // default). Shown beside the "默认模型" sentinel in every per-stage
+  // picker so the user sees the model that will actually be dispatched
+  // when they leave the picker on the default. Required for the new
+  // create / adjust / re-split pickers; the panel falls back to "" if
+  // omitted (legacy callers / tests).
+  developerDefaultModel?: string;
 }
 
 // Status vocabulary. The label stays in plain Chinese so the chip reads
@@ -233,9 +240,19 @@ interface CardProps {
   // a child is alive, so a redo of an otherwise-terminal list would never
   // refresh without this.
   onCreated?: () => void;
+  // Panel-level model selection — applies to the next "追加调整" turn so
+  // the user picks the model once at the panel header and every card
+  // uses it without owning its own copy. Distinct from the per-card
+  // `redoModel` (re-runs a failed sub-task with a possibly different
+  // model).
+  adjustModel?: string;
+  // Mirror setter so the per-card ModelSelect in the adjust drawer can
+  // write back to the panel-level adjustModel state. Without this each
+  // card would need its own picker copy.
+  onAdjustModelChange?: (model: string) => void;
 }
 
-function SubTaskCard({ st, index, total, onChanged, onCreated }: CardProps) {
+function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '', onAdjustModelChange }: CardProps) {
   // The card uses a layout that mirrors an issue tracker detail view:
   //   ┌─ terminal-style header line ────────────────────────────────┐
   //   │  ▶ $ sub-task [01/03] · claude-sonnet · 12s ago         ⌄  │
@@ -321,7 +338,14 @@ function SubTaskCard({ st, index, total, onChanged, onCreated }: CardProps) {
     setAdjustBusy(true);
     setAdjustError(null);
     try {
-      const resp = await subTasksApi.adjust(st.requirement_id, st.id, { prompt: p });
+      // The panel-level adjustModel flows through here so the user can
+      // change model between adjust rounds without re-picking on every
+      // card. Empty selection means "let the backend pick the developer
+      // role's effective model".
+      const resp = await subTasksApi.adjust(st.requirement_id, st.id, {
+        prompt: p,
+        ...(adjustModel ? { model: adjustModel } : {}),
+      });
       // Replace this card with a brand-new one driven by the new
       // sub_task_id via the parent's onChanged; for now, drop the
       // adjustment composer and let the next list-poll show the new row.
@@ -337,7 +361,7 @@ function SubTaskCard({ st, index, total, onChanged, onCreated }: CardProps) {
     } finally {
       setAdjustBusy(false);
     }
-  }, [adjustInput, adjustBusy, st.id, st.requirement_id]);
+  }, [adjustInput, adjustBusy, adjustModel, st.id, st.requirement_id]);
 
   const submitRedo = useCallback(async () => {
     if (redoBusy) return;
@@ -492,6 +516,13 @@ function SubTaskCard({ st, index, total, onChanged, onCreated }: CardProps) {
                     disabled={adjustBusy}
                     className="sub-adjust-textarea"
                   />
+                  <ModelSelect
+                    value={adjustModel}
+                    onChange={onAdjustModelChange || (() => {})}
+                    label="调整模型"
+                    defaultModelName={adjustModel}
+                    disabled={adjustBusy}
+                  />
                   <div className="sub-adjust-toolbar">
                     <span className="sub-adjust-hint">Enter 发送 · Shift+Enter 换行</span>
                     {adjustError && <span className="sub-adjust-err">{adjustError}</span>}
@@ -532,7 +563,7 @@ function SubTaskCard({ st, index, total, onChanged, onCreated }: CardProps) {
   );
 }
 
-export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange }: Props) {
+export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange, developerDefaultModel = '' }: Props) {
   const [items, setItems] = useState<SubTask[] | null>(null);
   const [prompt, setPrompt] = useState('');
   // Title input was removed: opening a sub-task now only needs a description.
@@ -541,6 +572,18 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // downstream rendering still has something to show in the card header.
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Per-stage model selection for the three sub-task entry points. Empty
+  // string means "leave it to the backend's role default" — the same
+  // convention the main-task path uses (RequirementDetail.doStartCoding
+  // spreads model only when truthy). Naming deliberately avoids the
+  // per-card `redoModel` so each entry point owns its own picker without
+  // coupling. `adjustModel` is panel-level (shared across all cards'
+  // "追加调整" composers) — picking once applies to the next adjustment
+  // round, mirroring how a user thinks about model choice on the main
+  // requirement.
+  const [createModel, setCreateModel] = useState<string>('');
+  const [adjustModel, setAdjustModel] = useState<string>('');
+  const [reSplitModel, setReSplitModel] = useState<string>('');
   // Track an auto-orchestrate batch (the new "一键编排 = 主 Agent 自动派发"
   // path in StartCoding). Children may still be running so the panel shows
   // "auto-orchestrate in flight" status.
@@ -646,7 +689,13 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       // No title field on the composer — the backend derives a card-header
       // title from the prompt's first 40 chars when title is omitted, so
       // the sub-task row still has a human-readable header downstream.
-      await subTasksApi.create(requirementId, { prompt: p });
+      // `model` is optional; empty selection lets the backend fall back to
+      // the developer-role effective model. Sending the literal "默认模型"
+      // sentinel would never happen here — ModelSelect normalises it to "".
+      await subTasksApi.create(requirementId, {
+        prompt: p,
+        ...(createModel ? { model: createModel } : {}),
+      });
       setPrompt('');
       await loadList();
     } catch (e: any) {
@@ -654,7 +703,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     } finally {
       setSubmitting(false);
     }
-  }, [prompt, submitting, requirementId, loadList]);
+  }, [prompt, submitting, createModel, requirementId, loadList]);
 
   // --- Manual re-split (🔄 重新拆分) -------------------------------------
   // Escape hatch for when StartCoding's auto-orchestration produced no
@@ -673,7 +722,14 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     setReSplitLines([]);
     setError(null);
     try {
-      const { job_id } = await subTasksApi.reOrchestrate(requirementId);
+      // model is optional — empty selection lets the backend fall back to
+      // the developer-role effective model. Without this picker the
+      // backend would inherit whatever claude_configs.default_model is,
+      // which on a custom base URL can surface as "modelCode 不存在".
+      const { job_id } = await subTasksApi.reOrchestrate(
+        requirementId,
+        { ...(reSplitModel ? { model: reSplitModel } : {}) },
+      );
       reSplitEsRef.current?.close();
       reSplitEsRef.current = createEventStream(
         `/api/wizard/jobs/${job_id}/stream`,
@@ -703,7 +759,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       setError(e?.message || '重新拆分失败');
       setReSplitBusy(false);
     }
-  }, [reSplitBusy, requirementId, loadList]);
+  }, [reSplitBusy, reSplitModel, requirementId, loadList]);
 
   // Close the re-split stream on unmount.
   useEffect(() => () => { reSplitEsRef.current?.close(); reSplitEsRef.current = null; }, []);
@@ -804,10 +860,42 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           disabled={submitting}
           className="sub-composer-textarea"
         />
+        {/* Sub-task model picker. Per-stage (developer) so the dropdown
+            shows the same model list as the main "开始开发" picker on
+            RequirementDetail. Empty selection = let the backend fall
+            back to the developer-role effective model; "默认模型（X）"
+            shows what that fallback actually is. */}
+        <ModelSelect
+          value={createModel}
+          onChange={setCreateModel}
+          label="子任务模型"
+          stage="developer"
+          defaultModelName={developerDefaultModel}
+          disabled={submitting}
+          working={submitting}
+        />
+        {!createModel && !developerDefaultModel && (
+          <div className="sub-model-warning" role="note">
+            ⚠️ 当前 Claude 配置中没有可用模型，请前往「设置 → Claude 配置」配置后再开启子任务。
+          </div>
+        )}
         <div className="sub-composer-toolbar">
           <span className="sub-composer-hint">
             启动后子 Agent 将 fork 主会话上下文，所有子任务共享同一项目认知
           </span>
+          {/* Re-split model picker (compact, inline with the toolbar so
+              it doesn't add a row of vertical space). Shares the same
+              configs list as the createModel picker — the user picks a
+              model once and uses it for the re-decomposition turn. */}
+          <ModelSelect
+            value={reSplitModel}
+            onChange={setReSplitModel}
+            label="重新拆分模型"
+            stage="developer"
+            defaultModelName={developerDefaultModel}
+            disabled={reSplitBusy || submitting || anyAlive}
+            style={{ flex: '0 0 auto' }}
+          />
           {error && <span className="sub-composer-err">{error}</span>}
           <button
             type="button"
@@ -845,6 +933,8 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             total={items.length}
             onChanged={onItemChanged}
             onCreated={loadList}
+            adjustModel={adjustModel}
+            onAdjustModelChange={setAdjustModel}
           />
         ))}
       </div>
