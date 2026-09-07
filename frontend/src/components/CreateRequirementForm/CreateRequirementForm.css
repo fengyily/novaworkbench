@@ -6,13 +6,17 @@
    project detail tab and the cross-project requirements list.
 
    Layout intent: classify (one row) → write (the hero) → configure
-   (quiet controls). The flow selector renders the actual lifecycle
-   pipeline 分析 → 设计 → 开发 with skipped stages struck through, so the
-   consequence of the choice is visible instead of described. */
+   (quiet controls). Two segmented controls share the `.create-req-kind`
+   visual treatment — 类型切换 (problem/requirement/idea) and 开发流程
+   (full/skip-analysis/direct) — so the panel reads as one family of
+   selections instead of two competing patterns. The flow selector's
+   helper note lives BELOW the control, not on every chip, since the
+   chips have to stay short enough to fit one row at any width. */
 
-/* --- Kind switcher --------------------------------------------- */
+/* --- Segmented control (shared by 类型 + 流程) -------------------- */
 
-.create-req-form .create-req-kind {
+.create-req-form .create-req-kind,
+.create-req-form .create-req-flow {
   display: inline-flex;
   gap: 2px;
   padding: 3px;
@@ -20,6 +24,13 @@
   border-radius: 8px;
   max-width: 100%;
 }
+
+.create-req-form .create-req-flow {
+  display: flex;
+  width: 100%;
+}
+
+/* --- Kind switcher ----------------------------------------------- */
 
 .create-req-form .create-req-kind-tab {
   flex: 1;
@@ -85,6 +96,102 @@
   color: var(--color-text-muted, #94A3B8);
 }
 
+/* --- Skip-AI-organize toggle ------------------------------------ */
+
+/* A compact iOS-style switch with a label that doubles as the affordance.
+   The label-as-control pattern keeps the entire row clickable on touch
+   without bloating the panel with a separate button. */
+.create-req-form .create-req-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 8px;
+  background: var(--color-surface, #fff);
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.create-req-form .create-req-toggle:hover {
+  border-color: var(--color-primary, #4F46E5);
+}
+
+.create-req-form .create-req-toggle.on {
+  border-color: var(--color-primary, #4F46E5);
+  background: var(--color-active, #EEF2FF);
+}
+
+.create-req-form .create-req-toggle input[type='checkbox'] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.create-req-form .create-req-toggle-track {
+  position: relative;
+  flex-shrink: 0;
+  width: 32px;
+  height: 18px;
+  border-radius: 999px;
+  background: #CBD5E1;
+  transition: background-color 160ms ease;
+}
+
+.create-req-form .create-req-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.25);
+  transition: transform 160ms ease;
+}
+
+.create-req-form .create-req-toggle.on .create-req-toggle-track {
+  background: var(--color-primary, #4F46E5);
+}
+
+.create-req-form .create-req-toggle.on .create-req-toggle-thumb {
+  transform: translateX(14px);
+}
+
+.create-req-form .create-req-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.create-req-form .create-req-toggle-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text, #1E293B);
+  line-height: 1.3;
+}
+
+.create-req-form .create-req-toggle-note {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+.create-req-form .create-req-toggle:focus-within {
+  outline: 2px solid var(--color-primary, #4F46E5);
+  outline-offset: 2px;
+}
+
 /* --- Secondary settings ---------------------------------------- */
 
 .create-req-form .create-req-meta-row {
@@ -97,82 +204,22 @@
   min-width: 0;
 }
 
-/* --- Flow pipeline selector ------------------------------------- */
+/* --- Flow segmented control ------------------------------------ */
 
 .create-req-form .create-req-flow {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
   margin-top: 2px;
 }
 
-.create-req-form .create-req-flow-option {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 8px;
-  text-align: left;
-  padding: 10px 12px;
-  border: 1px solid var(--color-border, #E2E8F0);
-  border-radius: 8px;
-  background: var(--color-surface, #fff);
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-  transition: border-color 120ms ease, background-color 120ms ease;
-}
-
-.create-req-form .create-req-flow-option:hover:not(:disabled) {
-  border-color: var(--color-primary, #4F46E5);
-}
-
-.create-req-form .create-req-flow-option.selected {
-  border-color: var(--color-primary, #4F46E5);
-  background: var(--color-active, #EEF2FF);
-}
-
-.create-req-form .create-req-flow-option:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-/* The pipeline: three stages joined by thin arrows. Skipped stages are
-   struck through and muted — the visual difference between the three
-   options is the point. */
-.create-req-form .create-req-flow-pipeline {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  color: var(--color-text, #1E293B);
-}
-
-.create-req-form .create-req-flow-pipeline .stage + .stage::before {
-  content: '›';
-  margin-right: 4px;
-  color: var(--color-text-muted, #94A3B8);
-}
-
-.create-req-form .create-req-flow-pipeline .stage.skipped {
-  color: var(--color-text-muted, #94A3B8);
-  text-decoration: line-through;
-}
-
-.create-req-form .create-req-flow-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.create-req-form .create-req-flow-label {
+.create-req-form .create-req-flow .create-req-kind-tab {
   font-size: 13px;
-  font-weight: 600;
+  padding: 7px 12px;
 }
 
 .create-req-form .create-req-flow-note {
-  font-size: 11px;
-  line-height: 1.45;
-  color: var(--color-text-secondary, #64748B);
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-muted, #94A3B8);
 }
 
 /* --- Error + actions -------------------------------------------- */
@@ -197,21 +244,22 @@
 
 /* Keyboard users must be able to see where they are. */
 .create-req-form .create-req-kind-tab:focus-visible,
-.create-req-form .create-req-flow-option:focus-visible {
+.create-req-form .create-req-toggle:focus-within {
   outline: 2px solid var(--color-primary, #4F46E5);
   outline-offset: 2px;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .create-req-form .create-req-kind-tab,
-  .create-req-form .create-req-flow-option { transition: none; }
+  .create-req-form .create-req-toggle-track,
+  .create-req-form .create-req-toggle-thumb { transition: none; }
 }
 
-/* Mobile: stack the flow options and the meta row; hide the desktop-only
-   keyboard shortcut hint. */
+/* Mobile: stack the meta row; hide the desktop-only keyboard shortcut hint.
+   Both segmented controls already wrap their tabs into a column on
+   narrow screens via the .create-req-flow { width: 100% } rule and the
+   `flex: 1` on each tab. */
 @media (max-width: 640px) {
-  .create-req-form .create-req-flow { grid-template-columns: 1fr; }
-  .create-req-form .create-req-flow-option { flex-direction: row; align-items: center; gap: 12px; }
   .create-req-form .create-req-meta-row { flex-direction: column; gap: 14px; }
   .create-req-form .create-req-kind { display: flex; }
   .create-req-form .create-req-shortcut { display: none; }

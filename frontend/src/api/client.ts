@@ -555,6 +555,11 @@ export const requirementsApi = {
     kind?: Kind;
     skip_analysis?: boolean;
     skip_design?: boolean;
+    // skip_organize: when true, the backend skips the LLM-organized markdown
+    // pass that normally distills a title + structured body from the raw
+    // description. The raw text is stored verbatim and a fallback title
+    // (first line, capped) is used. UI default = true (skip).
+    skip_organize?: boolean;
   }) => api.post<Requirement>('/api/requirements', data),
   get: (id: string) => api.get<Requirement>(`/api/requirements/${id}`),
   update: (id: string, data: { title: string; description: string; priority: string; skip_analysis?: boolean }) =>
