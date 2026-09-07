@@ -34,28 +34,32 @@ import (
 // branch, mid-merge MERGE_HEAD) lives on disk, so a backend restart between
 // steps is recoverable: /merge/state reads the real git state.
 type MergeHandler struct {
-	projectSvc  *service.ProjectService
-	reqSvc      *service.RequirementService
-	llm         *llm.Gateway
-	jobs        *store.JobStore
-	roleSvc     *service.RoleService
-	platformSvc *service.PlatformTokenService
-	jobLogSvc   *service.JobLogService
-	claudeCfg   *service.ClaudeConfigService
-	usageSvc    usageRecorder
+	projectSvc    *service.ProjectService
+	reqSvc        *service.RequirementService
+	llm           *llm.Gateway
+	jobs          *store.JobStore
+	roleSvc       *service.RoleService
+	platformSvc   *service.PlatformTokenService
+	jobLogSvc     *service.JobLogService
+	claudeCfg     *service.ClaudeConfigService
+	usageSvc      usageRecorder
+	subTaskSvc    *service.SubTaskService
+	subTaskRunner *SubTaskRunner
 }
 
-func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder) *MergeHandler {
+func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner) *MergeHandler {
 	return &MergeHandler{
-		projectSvc:  projectSvc,
-		reqSvc:      reqSvc,
-		llm:         llmGateway,
-		jobs:        jobs,
-		roleSvc:     roleSvc,
-		platformSvc: platformSvc,
-		jobLogSvc:   jobLogSvc,
-		claudeCfg:   claudeCfg,
-		usageSvc:    usageSvc,
+		projectSvc:    projectSvc,
+		reqSvc:        reqSvc,
+		llm:           llmGateway,
+		jobs:          jobs,
+		roleSvc:       roleSvc,
+		platformSvc:   platformSvc,
+		jobLogSvc:     jobLogSvc,
+		claudeCfg:     claudeCfg,
+		usageSvc:      usageSvc,
+		subTaskSvc:    subTaskSvc,
+		subTaskRunner: subTaskRunner,
 	}
 }
 
@@ -727,17 +731,25 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// Push orchestrates the end-to-end "推送发起 PR" flow as a background job:
+// Push orchestrates the "推送并发起 PR" flow by triggering a sub-task:
 // commit pending dev-branch changes → fetch+merge the main (base) branch into
-// dev to surface conflicts with main → AI-resolve any conflicts (Claude, full
-// tool use) → AI-organize a PR Summary (title + body) from the diff → push the
-// dev branch to origin → CreatePR via the platform API with the AI summary.
+// dev (AI-resolving conflicts if needed) → push the dev branch to origin →
+// CreatePR via the platform API. All work is delegated to a Claude sub-agent
+// (sharing the requirement's main-agent session context) so the configured
+// model drives the entire flow. The previous inline implementation did the
+// same work in goroutines owned by this handler — the requirement (req_xxx)
+// moved the work into a sub-task so the user gets the same model-aware
+// execution path as the other post-development flows.
 //
-// When the merge hits conflicts Claude can't resolve, the merge is aborted
-// (restoring dev to a clean tree), a "conflict" frame is surfaced for human
-// intervention, and the job STOPS — no push, no PR — so the user can resolve
-// manually and retry. Re-running is idempotent: a re-push after a PR already
-// exists surfaces the existing PR link (multi-push fine-tuning).
+// The sub-task is recorded as a row in sub_tasks and surfaces in the
+// SubTaskPanel like any other child agent — its artifact Markdown carries the
+// PR link + push status so the user can revisit it after the JobStore ring
+// buffer evicts the live job. The streaming experience is unchanged: the
+// handler returns { job_id, sub_task_id } immediately and the frontend
+// subscribes to /api/wizard/jobs/{job_id}/stream exactly like the old path.
+//
+// Re-running is idempotent: a re-push after a PR already exists surfaces the
+// existing PR link (multi-push fine-tuning).
 // POST /api/requirements/{id}/merge/push
 func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	reqRow, dir, _, platformType, ok := h.loadReqProject(w, r)
@@ -746,12 +758,14 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		CommitMessage string `json:"commit_message"`
+		Model         string `json:"model"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	// dev branch + the worktree/checkout where it lives. commit + push run
-	// there so the push carries the dev-branch work, not the main checkout.
-	dev, devDir := devBranchAndDir(reqRow, dir)
+	// dev branch + the worktree/checkout where it lives. The sub-task inherits
+	// the requirement's isolated worktree via SubTaskRunner.Run; we only need
+	// the branch name here (used by the prompt the child agent runs against).
+	dev, _ := devBranchAndDir(reqRow, dir)
 	if dev == "" || dev == "HEAD" {
 		writeError(w, http.StatusBadRequest, "NO_BRANCH", "当前处于 detached HEAD，无法推送")
 		return
@@ -762,83 +776,196 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job := h.jobs.Create(reqRow.ID)
-	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
+	// Refuse when the sub-task runner / service isn't wired (legacy / non-
+	// distributed deployment). Surfacing 503 lets the frontend fall back to a
+	// clear "功能不可用" message instead of an opaque 500.
+	if h.subTaskSvc == nil || h.subTaskRunner == nil {
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "推送子任务功能未启用")
+		return
+	}
 
-	go func() {
-		var effModel string
-		defer func() { h.persistJob(job, reqRow.ID, effModel) }()
-		log.Printf("[merge/push] job %s req %s: branch=%s", job.ID, reqRow.ID, dev)
+	// base = the main branch to merge into dev + the PR base target.
+	project, _ := h.loadProjectNoWrite(reqRow.ID)
+	base := "main"
+	if project != nil && project.DefaultBranch != "" {
+		base = project.DefaultBranch
+	}
 
-		// base = the main branch to merge into dev + the PR base target.
-		project, _ := h.loadProjectNoWrite(reqRow.ID)
-		base := "main"
-		if project != nil && project.DefaultBranch != "" {
-			base = project.DefaultBranch
-		}
+	// Resolve the effective model up-front so the SubTaskPanel can render the
+	// badge from the moment the row appears. Precedence: explicit body.Model >
+	// developer role's configured model. The runner will resolve the same way
+	// when it actually spawns the CLI, so the persisted value matches the
+	// dispatched value.
+	effectiveModel := body.Model
+	if effectiveModel == "" {
+		_, roleModel := h.roleConfig("developer")
+		effectiveModel = roleModel
+	}
 
-		// Pull the project's git identity from its platform token (best-effort;
-		// empty values fall back to host git config so existing behaviour is
-		// preserved on dev machines).
-		gitName, gitEmail := h.gitIdentityForReq(reqRow)
+	// Build the prompt that drives the sub-agent. The body lays out the
+	// step-by-step work plan (commit → merge main → push → create PR) so the
+	// child has the same plan the previous inline goroutine executed. The
+	// execution-role persona is appended by SubTaskRunner.Run; this prompt is
+	// just the task description.
+	prompt := buildPushSubTaskPrompt(reqRow, dev, base, remote, platformType, body.CommitMessage)
 
-		// 1. Commit pending dev-branch changes.
-		commitMsg := body.CommitMessage
-		if commitMsg == "" {
-			commitMsg = dev
-		}
-		if committed, err := commitAll(devDir, commitMsg, gitName, gitEmail); err != nil {
-			job.Append(store.LogLine{Type: "error", Content: "❌ 提交失败: " + err.Error()})
-			job.Finish(1, store.JobError)
-			return
-		} else if committed {
-			job.Append(store.LogLine{Type: "message", Content: "💾 已提交未提交改动: " + commitMsg})
-		}
+	// The sub-task forks the requirement's main-agent session (coding session
+	// with design session as fallback) so the child inherits the project's
+	// full context — same pattern as the wizard's manual sub-tasks. Empty
+	// sourceSID is treated as "no main session yet" and rejected with 409 to
+	// match StartSubTask's contract.
+	sourceSID := subTaskSourceSID(reqRow, "")
+	if sourceSID == "" {
+		writeError(w, http.StatusConflict, "NO_SESSION",
+			"需求尚未启动 coding 或 design session，无法触发推送子任务。请先开始开发。")
+		return
+	}
 
-		// 2-3. Merge main into dev (conflict pre-check) + AI-resolve if needed.
-		// On an unrecoverable conflict the helper aborts the merge and surfaces
-		// a "conflict" frame; we STOP (no push, no PR) for human intervention.
-		resolveModel, stop := h.mergeAndResolveBase(job, devDir, base, dev, reqRow)
-		effModel = resolveModel
-		if stop {
-			job.Finish(1, store.JobError)
-			return
-		}
+	title := "推送并创建 PR"
+	if body.CommitMessage != "" {
+		title = "推送并创建 PR: " + truncateMergePrompt(body.CommitMessage, 40)
+	}
+	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(reqRow.ID, title, prompt, effectiveModel, sourceSID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	log.Printf("[merge/push] sub-task %s job %s req %s: branch=%s", st.ID, job.ID, reqRow.ID, dev)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"job_id":      job.ID,
+		"sub_task_id": st.ID,
+	})
 
-		// 4. AI-organized PR Summary (title + body) from the dev...base diff.
-		prTitle, prBody, summaryModel := h.generatePRSummary(job, devDir, base, dev, reqRow)
-		if summaryModel != "" {
-			effModel = summaryModel
-		}
+	go h.subTaskRunner.Run(reqRow, st, job, newSID, sourceSID, prompt, effectiveModel, false)
+}
 
-		// 5. Push the dev branch to origin. CombinedOutput is used instead of an
-		// io.Pipe — a pipe write end closed before the reader drains it fails.
-		job.Append(store.LogLine{Type: "phase", Content: "🌐 正在推送 " + dev + " 到 origin..."})
-		out, err := exec.Command("git", "-C", devDir, "push", "-u", "origin", dev).CombinedOutput()
-		for _, line := range strings.Split(string(out), "\n") {
-			if line = strings.TrimSpace(line); line != "" {
-				job.Append(store.LogLine{Type: "message", Content: line})
-			}
-		}
-		if err != nil {
-			job.Append(store.LogLine{Type: "error", Content: "❌ 推送失败: " + strings.TrimSpace(err.Error())})
-			job.Finish(1, store.JobError)
-			return
-		}
+// buildPushSubTaskPrompt composes the task description the push sub-agent
+// runs against. The child uses its Bash tool to execute each step verbatim;
+// Claude is responsible for surfacing progress / errors through the same
+// store.LogLine stream the wizard's coding/adjust paths use.
+//
+// commitMessage is the user's preferred commit message; empty falls back to
+// the dev branch name inside the agent (matches the previous inline path).
+// platformType is the project's configured platform ("github" / "gitlab" /
+// "gitea") — empty tells the child to surface a compare URL via git
+// (no token / no automated PR).
+func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage string) string {
+	var b strings.Builder
+	b.WriteString("请完成「提交 → 合并主分支 → 推送 → 创建 PR」全流程。当前任务所有 git 操作都在当前工作目录（worktree / 项目目录）中执行；请避免在工作目录以外执行任何写操作。\n\n")
 
-		// 6. Create the PR via the platform API with the AI summary; fall back to
-		// a compare link when there's no token or creation fails.
-		prURL, created := h.createPRWithFallback(job, project, remote, platformType, base, dev, prTitle, prBody, reqRow)
-		if prURL != "" {
-			job.Append(store.LogLine{Type: "pr_link", Content: prURL})
+	b.WriteString("## 上下文\n")
+	b.WriteString("- 需求 ID: ")
+	b.WriteString(reqRow.ID)
+	b.WriteString("\n- 需求标题: ")
+	b.WriteString(reqRow.Title)
+	b.WriteString("\n- 需求描述: ")
+	b.WriteString(strings.TrimSpace(reqRow.Description))
+	b.WriteString("\n- 开发分支: ")
+	b.WriteString(dev)
+	b.WriteString("\n- 主分支（base）: ")
+	b.WriteString(base)
+	b.WriteString("\n- 远程仓库: ")
+	b.WriteString(remote)
+	b.WriteString("\n- 平台类型: ")
+	if platformType == "" {
+		b.WriteString("（未配置，将仅推送到 origin，不自动创建 PR）")
+	} else {
+		b.WriteString(platformType)
+	}
+	b.WriteString("\n- 提交信息: ")
+	if commitMessage == "" {
+		b.WriteString("(为空，使用「")
+		b.WriteString(dev)
+		b.WriteString("」作为默认提交信息)")
+	} else {
+		b.WriteString(commitMessage)
+	}
+	b.WriteString("\n\n")
+
+	b.WriteString("## 执行步骤\n")
+	b.WriteString("1. **提交工作区改动**：先 `git status` 检查工作区是否有未提交改动。如果有，运行 `git add -A` 然后用上面的提交信息（或默认信息）`git commit -m \"<提交信息>\"` 完成提交。干净的工作区跳过此步。\n")
+	b.WriteString("2. **同步主分支**：运行 `git fetch origin ")
+	b.WriteString(base)
+	b.WriteString("` 拉取主分支最新代码。\n")
+	b.WriteString("3. **合并主分支到开发分支**：运行 `git merge origin/")
+	b.WriteString(base)
+	b.WriteString(" --no-edit`。如果出现冲突：\n")
+	b.WriteString("   - 逐个读取冲突文件，理解 `<<<<<<<`（当前开发分支）与 `>>>>>>>`（主分支）双方的意图。\n")
+	b.WriteString("   - 整合双方改动、消除冲突标记后写回文件。\n")
+	b.WriteString("   - 运行 `git add -A` 暂存已解决的文件，再运行 `git commit --no-edit` 完成合并提交。\n")
+	b.WriteString("   - 不要留下任何冲突标记。\n")
+	b.WriteString("4. **推送分支**：运行 `git push -u origin ")
+	b.WriteString(dev)
+	b.WriteString("` 推送开发分支到 origin。如果推送失败（例如需要先 pull），请尝试 `git pull --rebase origin ")
+	b.WriteString(dev)
+	b.WriteString("` 后再推送，仍失败则报告错误并停止。\n")
+	b.WriteString("5. **创建 PR**（如平台支持）：\n")
+	switch platformType {
+	case "github":
+		b.WriteString("   - 使用 `gh pr create --base ")
+		b.WriteString(base)
+		b.WriteString(" --head ")
+		b.WriteString(dev)
+		b.WriteString(" --title \"<PR 标题>\" --body \"<PR 正文>\"` 创建 PR（gh CLI 已自动认证）。\n")
+		b.WriteString("   - 如果 `gh` 不可用，改用项目配置的 PlatformToken（通过环境变量或 backend API 调用），或告知用户手动访问 ")
+		b.WriteString(remote)
+		b.WriteString(" 上的 compare 链接创建。\n")
+	case "gitlab":
+		b.WriteString("   - 使用 `glab mr create --target-branch ")
+		b.WriteString(base)
+		b.WriteString(" --source-branch ")
+		b.WriteString(dev)
+		b.WriteString(" --title \"<PR 标题>\" --description \"<PR 正文>\"` 创建 Merge Request。\n")
+		b.WriteString("   - 如 `glab` 不可用，告知用户手动通过 GitLab Web UI 创建。\n")
+	case "gitea":
+		b.WriteString("   - 使用 `tea pr create --base ")
+		b.WriteString(base)
+		b.WriteString(" --head ")
+		b.WriteString(dev)
+		b.WriteString(" --title \"<PR 标题>\" --description \"<PR 正文>\"` 创建 PR。\n")
+		b.WriteString("   - 如 `tea` 不可用，告知用户手动通过 Gitea Web UI 创建。\n")
+	default:
+		b.WriteString("   - 项目未配置平台 Token / 平台类型。请推送到 origin 后，告知用户手动访问 ")
+		b.WriteString(remote)
+		b.WriteString(" 上的 compare 链接创建 PR。\n")
+	}
+	b.WriteString("\n## PR 摘要要求\n")
+	b.WriteString("- PR 标题使用中文，一句话概括本次改动（不超过 40 字，不要以 `feat:` 等前缀开头）。\n")
+	b.WriteString("- PR 正文使用 Markdown，按「改动概述 / 主要变更 / 关键文件 / 验证方式」组织，简洁有重点。\n")
+	b.WriteString("- 可执行 `git log origin/")
+	b.WriteString(base)
+	b.WriteString("..")
+	b.WriteString(dev)
+	b.WriteString("` 和 `git diff origin/")
+	b.WriteString(base)
+	b.WriteString("...")
+	b.WriteString(dev)
+	b.WriteString(" --stat` 查看本次改动，再撰写摘要。\n\n")
+
+	b.WriteString("## 重要约束\n")
+	b.WriteString("- 所有 git 操作必须显式 `git -C <dir>` 或先 `cd` 到工作目录再执行。\n")
+	b.WriteString("- 如遇网络 / 凭据 / 远端权限错误，请明确报告并停止后续步骤。\n")
+	b.WriteString("- 完成后请简要输出：执行了哪些步骤、最终状态（成功 / 失败）、PR 链接（如有），方便作为子任务产物落盘。\n")
+	return b.String()
+}
+
+// truncateMergePrompt renders a short preview of a user-supplied commit
+// message for the sub-task card title. Mirrors the existing
+// service.truncateForTitle behavior so the card header reads cleanly even
+// when the user pastes a multi-line commit template.
+func truncateMergePrompt(s string, max int) string {
+	cleaned := make([]rune, 0, len(s))
+	for _, r := range s {
+		if r == '\n' || r == '\r' || r == '\t' {
+			cleaned = append(cleaned, ' ')
+			continue
 		}
-		if created {
-			job.Append(store.LogLine{Type: "done", Content: "✅ 已推送并创建 PR: " + dev})
-		} else {
-			job.Append(store.LogLine{Type: "done", Content: "✅ 已推送到 origin/" + dev})
-		}
-		job.Finish(0, store.JobDone)
-	}()
+		cleaned = append(cleaned, r)
+	}
+	if len(cleaned) <= max {
+		return string(cleaned)
+	}
+	return string(cleaned[:max]) + "..."
 }
 
 // mergeAndResolveBase fetches origin/base and merges it into the dev branch

@@ -143,6 +143,18 @@ func (s *SubTaskService) UpdateJobID(id, jobID string) error {
 	return err
 }
 
+// UpdateModel records the effective model that will be (or was) dispatched to
+// the child agent. The runner persists it up-front (before MarkRunning) so
+// the SubTaskPanel can render the "🪙 claude-sonnet" badge from the moment
+// the row appears, even if Run never runs (e.g. pre-flight error). Finish
+// also stamps this column on terminal success — keeping them in sync is the
+// runner's responsibility.
+func (s *SubTaskService) UpdateModel(id, modelName string) error {
+	_, err := s.db.Exec(`UPDATE sub_tasks SET model=?, updated_at=? WHERE id=?`,
+		modelName, time.Now(), id)
+	return err
+}
+
 // MarkRunning transitions pending → running when the goroutine actually
 // spawns the claude CLI. Kept separate from Create so a Create that fails to
 // ever spawn (e.g. pre-flight error) doesn't leave the row visible as

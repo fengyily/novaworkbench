@@ -702,8 +702,14 @@ export const mergeApi = {
   abort: (reqId: string) => api.post<{ ok: boolean }>(`/api/requirements/${reqId}/merge/abort`, {}),
   cont: (reqId: string) => api.post<{ job_id: string }>(`/api/requirements/${reqId}/merge/continue`, {}),
   resolve: (reqId: string) => api.post<{ job_id: string }>(`/api/requirements/${reqId}/merge/resolve`, {}),
-  push: (reqId: string, body: { commit_message?: string }) =>
-    api.post<{ job_id: string }>(`/api/requirements/${reqId}/merge/push`, body),
+  // Push + create PR is now delegated to a sub-task. The backend returns the
+  // usual job_id (for the live SSE stream of the child agent) PLUS the
+  // sub_task_id so the SubTaskPanel can pick the row up via its periodic
+  // poll and render the artifact Markdown / model badge after completion.
+  // Existing callers can still use job_id directly; sub_task_id is read by
+  // RequirementDetail so the panel refreshes the moment the row appears.
+  push: (reqId: string, body: { commit_message?: string; model?: string }) =>
+    api.post<{ job_id: string; sub_task_id: string }>(`/api/requirements/${reqId}/merge/push`, body),
   cleanup: (reqId: string, body: { force?: boolean }) =>
     api.post<{ ok: boolean }>(`/api/requirements/${reqId}/worktree/cleanup`, body),
   jobStreamUrl: (jobId: string) => `${API_BASE}/api/wizard/jobs/${jobId}/stream`,
