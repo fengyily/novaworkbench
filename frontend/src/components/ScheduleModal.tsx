@@ -5,10 +5,13 @@
 // 填写时间 + 模型后提交到 POST /api/schedules。提交成功 → 父组件刷新
 // "已定时 HH:MM" 提示条并关闭弹层。
 //
-// 时间字段是原生 `<input type="datetime-local">`，后端接受
-// `YYYY-MM-DDTHH:MM`（本地时区）或 RFC3339；前端只发 datetime-local 字面量，
-// 后端用 ParseInLocation(time.Local) 解析。下方灰字提示用户"将在服务器
-// 本地时间执行"，避免时区歧义。
+// 时间字段是原生 `<input type="datetime-local">`，它的值是用户本地时间但
+// 不带时区后缀。直接发到后端会被后端当成 *服务器* 本地时间解析——若服务
+// 器跑在 Docker/UTC 而用户在 CST，前后端时差会让原本"9-7 23:30"的任务
+// 落到"9-8 07:30"。为消除歧义，提交时通过 `toRFC3339Local` 把它转成带
+// 用户本地时区偏移的 RFC3339 字符串（例如 `2026-09-07T23:30:00+08:00`），
+// 后端的 `parseRunAt` 直接走 RFC3339 分支，时区无关。下方灰字提示用户
+// "将在你设置的本地时间执行"，把责任说清。
 //
 // 模型选择复用 `<ModelSelect stage>`——同一个组件同时驱动手动"生成方案/
 // 开始开发"按钮和定时弹窗，UI 行为完全一致。
@@ -63,6 +66,40 @@ function minRunAtLocal(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// Convert the datetime-local string the picker hands us ("YYYY-MM-DDTHH:MM",
+// user-local, no offset) into an RFC3339 string carrying the user's local
+// timezone offset (e.g. "...T23:30:00+08:00"). This is the only way to ship
+// an unambiguous "wall clock + zone" to the backend; sending the bare
+// datetime-local string makes the backend guess, and that guess is wrong
+// whenever the server's local TZ differs from the user's (the original
+// bug: Docker/UTC server + CST user → "9-7 23:30" came back as "9-8 7:30").
+function toRFC3339Local(local: string): string {
+  // `new Date("YYYY-MM-DDTHH:MM")` (no Z, no offset) is parsed as *local*
+  // time per ECMAScript, so getTime() / getTimezoneOffset() line up with
+  // what the user typed in the picker.
+  const d = new Date(local);
+  if (Number.isNaN(d.getTime())) {
+    // Fall back to the raw input so the backend surfaces a parse error
+    // instead of a silently-empty request body.
+    return local;
+  }
+  const pad = (n: number) => `${n}`.padStart(2, '0');
+  const yyyy = d.getFullYear();
+  const mm = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  const hh = pad(d.getHours());
+  const mi = pad(d.getMinutes());
+  const ss = pad(d.getSeconds());
+  // getTimezoneOffset() returns minutes WEST of UTC (positive for CST).
+  // Flip the sign so the offset reads the conventional +HH:MM way.
+  const offMin = -d.getTimezoneOffset();
+  const sign = offMin >= 0 ? '+' : '-';
+  const abs = Math.abs(offMin);
+  const offH = pad(Math.floor(abs / 60));
+  const offM = pad(abs % 60);
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}${sign}${offH}:${offM}`;
+}
+
 export function ScheduleModal({
   open,
   onClose,
@@ -104,7 +141,7 @@ export function ScheduleModal({
       const body: CreateScheduleReq = {
         requirement_id: requirementId,
         task_type: taskType,
-        run_at: runAt,
+        run_at: toRFC3339Local(runAt),
         model: model || undefined,
         read_knowledge: readKnowledge,
       };
@@ -171,7 +208,7 @@ export function ScheduleModal({
               onChange={e => setRunAt(e.target.value)}
             />
             <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
-              将在服务器本地时间执行
+              将在你设置的本地时间执行（与浏览器时区一致，无需换算）
             </small>
           </div>
 

@@ -1424,7 +1424,7 @@ export interface ScheduledTask {
   requirement_id: string;
   project_id: string;
   requirement_title: string;
-  run_at: string; // RFC3339 from server (server local time)
+  run_at: string; // RFC3339 from server, preserves the offset the client sent so the moment round-trips correctly even when server TZ ≠ client TZ
   model: string; // '' = 角色默认
   read_knowledge: boolean;
   branch_name: string; // coding only
@@ -1443,7 +1443,7 @@ export interface ScheduledTask {
 export interface CreateScheduleReq {
   requirement_id: string;
   task_type: ScheduledTaskType;
-  run_at: string; // datetime-local ("YYYY-MM-DDTHH:MM") or RFC3339
+  run_at: string; // RFC3339 with timezone offset (e.g. "2026-09-07T23:30:00+08:00"); the frontend converts the datetime-local picker value to this so the absolute moment is unambiguous regardless of the server's local TZ.
   model?: string;
   read_knowledge?: boolean;
   branch_name?: string;
