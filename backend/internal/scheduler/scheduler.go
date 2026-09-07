@@ -241,7 +241,7 @@ func (s *Scheduler) tick() {
 // own in-memory JobStore job id internally and returns it via the
 // Executor return value (or via OnFinish's first arg).
 func (s *Scheduler) dispatch(t model.ScheduledTask) {
-	ctx := context.WithValue(context.Background(), schedCtxKey{}, schedCtxValue{
+	ctx := context.WithValue(context.Background(), SchedCtxKey{}, SchedCtxValue{
 		JobID:   "", // reserved — wizard allocates its own JobStore id
 		SchedID: t.ID,
 	})
@@ -278,14 +278,17 @@ func (s *Scheduler) dispatch(t model.ScheduledTask) {
 	log.Printf("[scheduler] dispatched %s (%s → %s) as job %s", t.ID, t.TaskType, t.RequirementID, jobID)
 }
 
-// schedCtxKey / schedCtxValue mirror the same names in
-// handler/schedule_executor.go — they share the context key so the scheduler
-// hands the executor the schedule id without a side-channel DB lookup.
-// Duplicating the type declarations in both packages keeps the dependency
-// direction one-way (scheduler doesn't import handler).
-type schedCtxKey struct{}
+// SchedCtxKey is the context.Value key the scheduler uses to hand the
+// scheduled_tasks row id to Executor implementations. SchedCtxValue
+// carries the (JobID, SchedID) pair; JobID is reserved for future use
+// (today wizard allocates its own JobStore job id internally and ignores
+// the scheduler-side slot). Both types are exported so the handler
+// package's Executor impl can read them — unexported duplicates in two
+// packages are different Go types and context.Value lookup would fail
+// silently (issue: "scheduler ctx not provided").
+type SchedCtxKey struct{}
 
-type schedCtxValue struct {
+type SchedCtxValue struct {
 	JobID   string
 	SchedID string
 }
