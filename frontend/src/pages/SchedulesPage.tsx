@@ -163,12 +163,29 @@ export default function SchedulesPage() {
 
   const handleCancel = async (id: string) => {
     if (!confirm('确认取消该定时任务？')) return;
-    await schedulesApi.cancel(id);
+    try {
+      await schedulesApi.cancel(id);
+    } catch (err) {
+      // Mirror handleDelete's error surfacing — silent failure on cancel
+      // looks identical to a stale row and confuses the user about whether
+      // the button worked.
+      const msg = err instanceof Error ? err.message : String(err);
+      alert(`取消失败：${msg}`);
+    }
     load();
   };
   const handleDelete = async (id: string) => {
     if (!confirm('确认删除该定时任务？')) return;
-    await schedulesApi.remove(id);
+    try {
+      await schedulesApi.remove(id);
+    } catch (err) {
+      // Surface the failure so the user knows the row is still on disk —
+      // otherwise they click 删除, see no visible change, and assume a
+      // bug. The message comes pre-formatted "<code>: <msg>" from the
+      // request wrapper, which is enough to point at the cause.
+      const msg = err instanceof Error ? err.message : String(err);
+      alert(`删除失败：${msg}`);
+    }
     load();
   };
   const handleOpenLog = async (jobId: string) => {
