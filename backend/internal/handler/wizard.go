@@ -2797,6 +2797,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	// time a sub-task forks. The full diagnostic only fires when Start()
 	// fails — that's the case that actually needs the snapshot to pinpoint
 	// the cause (ENOENT alone is ambiguous).
+
 	log.Printf("[%s] claude 启动中 (binary=%s args=%d)", scope, filepath.Base(cmd.Path), len(cmd.Args))
 	if err := cmd.Start(); err != nil {
 		logClaudeExecDiag(scope, cmd)
@@ -3492,7 +3493,7 @@ type workerRunBody struct {
 	// inline --settings JSON's "env" block as ANTHROPIC_MODEL so the CLI's
 	// own env precedence can't be shadowed by a stale project / local
 	// settings file. Empty when the global active config was used.
-	ClaudeConfigID  string            `json:"claudeConfigId,omitempty"`
+	ClaudeConfigID string `json:"claudeConfigId,omitempty"`
 	// OverrideSettingSources is the legacy "drop the user source" flag —
 	// when true, the worker invokes claude with --setting-sources project,local.
 	// Kept for callers that still want project-level hooks etc.
@@ -3532,14 +3533,14 @@ func workerRunRequest(opts llm.StreamOpts, envPairs []string, in *remoteCodingIn
 		override = *opts.OverrideSettingSources
 	}
 	return workerRunBody{
-		WorkDir:                opts.WorkDir,
-		Prompt:                 opts.Prompt,
-		Model:                  opts.Model,
-		SessionID:              opts.SessionID,
-		Resume:                 opts.Resume,
-		Fork:                   opts.Fork,
-		ForkSessionID:          opts.ForkSessionID,
-		Env:                    envMap,
+		WorkDir:       opts.WorkDir,
+		Prompt:        opts.Prompt,
+		Model:         opts.Model,
+		SessionID:     opts.SessionID,
+		Resume:        opts.Resume,
+		Fork:          opts.Fork,
+		ForkSessionID: opts.ForkSessionID,
+		Env:           envMap,
 		// Pass the config id so the worker can mirror ANTHROPIC_MODEL into
 		// the inline --settings JSON (the worker's buildSettingsArg already
 		// does this for opts.model; claudeConfigId is informational today but
@@ -5724,7 +5725,7 @@ func developerDecomposePrompt(title, leadIn, workDir string) string {
 // contains no trigger phrase.
 func agentDirectPrompt(title, leadIn, workDir string) string {
 	return fmt.Sprintf(
-		"现在切换到「Agent 开发者」角色，正在远程 Agent 服务器上执行需求（需求：%s，工作目录：%s）。\n"+
+		"现在切换到「Agent 开发者」角色，正在执行需求（需求：%s，工作目录：%s）。\n"+
 			leadIn+
 			"直接使用 Read / Edit / Write / Bash 工具完成代码实现、构建与基础验证，并在结束时进行 git commit。\n"+
 			"完成后在最终回复里简要说明：做了什么、关键文件、验证方式。",
@@ -6276,7 +6277,7 @@ func (h *WizardHandler) dispatchOneChild(
 		SessionID:      parentSID,
 		Resume:         true,
 		Fork:           true,
-		ForkSessionID: childSID,
+		ForkSessionID:  childSID,
 	})
 	defer cancel()
 	startTime, err := h.subTaskSvc.MarkRunning(st.ID)
