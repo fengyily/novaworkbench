@@ -5428,7 +5428,7 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 
 		// Dispatch runs after job.Finish so the re-split SSE closes promptly;
 		// each child's own job streams its progress like the auto path.
-		subTaskIDs := dispatchChildrenSequential(id, sessionID, req, h, payload.Subtasks, workDir, modelName)
+		subTaskIDs := dispatchChildrenSequential(id, sessionID, req, h, payload.Subtasks, workDir, modelName, claudeConfigID)
 		if len(subTaskIDs) == 0 {
 			log.Printf("[re-orchestrate] %s: dispatch produced 0 children", id)
 			return
@@ -6211,11 +6211,11 @@ func dispatchChildrenSequential(
 	req *model.Requirement,
 	h *WizardHandler,
 	subtasks []orchestratedSubtask,
-	workDir, modelName string,
+	workDir, modelName, devCfgID string,
 ) []string {
 	subTaskIDs := make([]string, 0, len(subtasks))
 	for _, t := range subtasks {
-		st, err := h.dispatchOneChild(reqID, orchestratorSID, t, req, workDir, modelName)
+		st, err := h.dispatchOneChild(reqID, orchestratorSID, t, req, workDir, modelName, devCfgID)
 		if err != nil {
 			log.Printf("[orchestrate] failed to dispatch child %q: %v", t.Title, err)
 			continue
@@ -6290,7 +6290,7 @@ func (h *WizardHandler) tryAutoOrchestrate(
 	// StartCoding) so they inherit the main agent's project / design /
 	// conversation context. Sequential dispatch keeps file edits safe in
 	// the shared worktree.
-	subTaskIDs := dispatchChildrenSequential(reqID, orchestratorSID, req, h, payload.Subtasks, workDir, modelName)
+	subTaskIDs := dispatchChildrenSequential(reqID, orchestratorSID, req, h, payload.Subtasks, workDir, modelName, claudeConfigID)
 	if len(subTaskIDs) == 0 {
 		log.Printf("[auto-orchestrate] %s: dispatch produced 0 children; ending", reqID)
 		return
@@ -6390,7 +6390,7 @@ func (h *WizardHandler) dispatchOneChild(
 	reqID, parentSID string,
 	t orchestratedSubtask,
 	req *model.Requirement,
-	workDir, modelName string,
+	workDir, modelName, devCfgID string,
 ) (*model.SubTask, error) {
 	st, err := h.subTaskSvc.Create(reqID, t.Title, t.Prompt)
 	if err != nil {
@@ -6413,6 +6413,29 @@ func (h *WizardHandler) dispatchOneChild(
 	// child inherits that persona and re-emits the sentinel instead of
 	// writing any code.
 	execSystemPrompt, _, executorConfigID := h.roleConfig(executorRoleKey)
+	// Pick the Claude config the resolved model actually belongs to. Priority:
+	//   1. devCfgID — the developer-role binding passed in from the call site
+	//      (StartCoding / ReOrchestrateSubTask both have it on hand; without
+	//      it we used to silently fall through to the executor role, which
+	//      could be bound to a different claude_configs row and send the
+	//      request to the wrong gateway)
+	//   2. reverse-lookup modelName in claude_configs.models (covers the case
+	//      where the caller passed a model from a non-developer-bound config)
+	//   3. executor role binding (legacy fallback; matches SubTaskRunner.Run
+	//      and the merge-push path semantics)
+	var finalConfigID string
+	switch {
+	case devCfgID != "":
+		finalConfigID = devCfgID
+	case modelName != "":
+		if cid, cerr := h.claudeCfg.ResolveConfigForModel(modelName); cerr == nil && cid != "" {
+			finalConfigID = cid
+		} else {
+			finalConfigID = executorConfigID
+		}
+	default:
+		finalConfigID = executorConfigID
+	}
 	executorPrompt := "## 子任务\n\n" + t.Prompt + "\n\n" +
 		"> 本任务通过 --fork-session 继承了主 Agent 的项目上下文与代码库访问权限。\n" +
 		"> 如需补充信息，可正常读取项目文件或调用工具。\n" +
@@ -6422,7 +6445,7 @@ func (h *WizardHandler) dispatchOneChild(
 		WorkDir:        workDir,
 		SystemPrompt:   execSystemPrompt,
 		Model:          cliModelArg(modelName),
-		ClaudeConfigID: executorConfigID,
+		ClaudeConfigID: finalConfigID,
 		SessionID:      parentSID,
 		Resume:         true,
 		Fork:           true,
