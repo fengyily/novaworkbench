@@ -153,6 +153,28 @@
 .sub-composer-resplit {
   flex-shrink: 0;
 }
+/* Inline model picker inside the composer toolbar — kept compact so it
+   shares the row with the "重新拆分" button without forcing a vertical
+   break on desktop widths. The inline style={flex: '0 0 auto'} on the
+   JSX side prevents the card from stretching to fill the row. */
+.sub-composer-toolbar .model-select {
+  flex: 0 0 auto;
+}
+
+/* Soft warning when no Claude config / model is available — keeps the
+   composer usable (CLI default still works) but points the user at the
+   settings page so they understand why "默认模型" can't show a concrete
+   model name. Amber tone matches the .is-work accent used elsewhere. */
+.sub-model-warning {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: rgba(245, 158, 11, 0.08);
+  color: #b45309;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
 
 /* Manual re-split (🔄 重新拆分) live progress — rides on the orchestrator
    status banner styling, plus a small scrolling log of the last events. */

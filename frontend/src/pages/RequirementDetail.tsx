@@ -3104,6 +3104,7 @@ export default function RequirementDetail() {
                   codingSessionId={req.coding_session_id}
                   requirement={req}
                   onSubTasksChange={setLiveSubTaskCount}
+                  developerDefaultModel={developerDefaultModel}
                 />
               )}
 
@@ -3187,6 +3188,7 @@ export default function RequirementDetail() {
                   codingSessionId={req.coding_session_id}
                   requirement={req}
                   onSubTasksChange={setLiveSubTaskCount}
+                  developerDefaultModel={developerDefaultModel}
                 />
               )}
               <div className="merge-actions stack-mobile" style={{ marginTop: 8 }}>
