@@ -157,12 +157,14 @@ func (r *SubTaskRunner) Run(
 	job.Append(store.LogLine{Type: "phase", Content: role})
 	job.Append(store.LogLine{Type: "message", Content: "📝 提示词: " + truncateForLog(body, 240)})
 
-	// Resolve the developer role's model, but run the child under the
-	// "executor" role system prompt: the sub-task forks the coding session,
-	// which carries the developer (统筹协调) persona that decomposes instead
-	// of implementing. Without the override the child re-emits
-	// [SUBTASKS_READY] and writes no code.
-	_, modelName, _ := r.roleConfig("developer")
+	// Resolve the developer role's model + its bound config id. The model
+	// drives which base URL the child should hit: when the user picks a
+	// model from a non-active claude_configs row (or the developer role is
+	// bound to a different config than the executor role), the executor's
+	// binding would send the request to the wrong gateway. We resolve the
+	// matching config below so model and base URL always agree.
+	_, devModel, devCfgID := r.roleConfig("developer")
+	modelName := devModel
 	if modelOverride != "" {
 		modelName = modelOverride
 	}
@@ -202,18 +204,40 @@ func (r *SubTaskRunner) Run(
 	}
 
 	execSystemPrompt, _, executorConfigID := r.roleConfig(executorRoleKey)
-	// Caller's configIDOverride (from merge handler etc.) wins over the role's
-	// default binding — keeps a per-run model override coherent with the
-	// per-run config override the caller wants to honor.
-	if configIDOverride != "" {
-		executorConfigID = configIDOverride
+	// Pick the Claude config the resolved model actually belongs to. Priority:
+	//   1. caller-supplied configIDOverride (merge push path — keeps the
+	//      pr_author-role binding explicit and bypasses the model lookup)
+	//   2. the model-override's owning config (user explicitly picked a
+	//      model from another config; without this we'd send the override
+	//      model to the developer/executor role's binding and the wrong
+	//      gateway would 400 on the unknown model id)
+	//   3. the developer role's bound config (covers the developer-default
+	//      model + its role-bound gateway)
+	//   4. the executor role's bound config (legacy fallback for users who
+	//      rely on executor-role binding only; harmless when 1–3 match)
+	var finalConfigID string
+	switch {
+	case configIDOverride != "":
+		finalConfigID = configIDOverride
+	case modelOverride != "":
+		if cid, cerr := r.claudeCfg.ResolveConfigForModel(modelOverride); cerr == nil && cid != "" {
+			finalConfigID = cid
+		} else if devCfgID != "" {
+			finalConfigID = devCfgID
+		} else {
+			finalConfigID = executorConfigID
+		}
+	case devCfgID != "":
+		finalConfigID = devCfgID
+	default:
+		finalConfigID = executorConfigID
 	}
 	cmd, cancel := r.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        workDir,
 		SystemPrompt:   execSystemPrompt,
 		Model:          cliModelArg(modelName),
-		ClaudeConfigID: executorConfigID,
+		ClaudeConfigID: finalConfigID,
 		// --resume <sourceSID> --fork-session --session-id <newSID>:
 		// child agent inherits the parent's conversation context but
 		// executes in its own session.

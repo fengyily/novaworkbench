@@ -415,6 +415,44 @@ func (s *ClaudeConfigService) ResolveRoleConfig(role *model.Role) (*model.Claude
 	return s.ActiveConfig()
 }
 
+// ResolveConfigForModel returns the id of the claude_configs row whose
+// models list contains modelName. Returns "" when no config claims it
+// (or on an empty modelName) so callers can fall back to a role binding
+// or the global active config without "no config" being treated as an
+// error. Multiple configs may list the same model id; the first match
+// (by created_at ASC, id ASC — matching List's order) wins so the lookup
+// is deterministic.
+//
+// Used by the wizard's sub-task dispatch paths (sub_task_runner.Run and
+// dispatchOneChild) so the resolved model always lands on the same gateway
+// as the model name. Fixes the "model and Base URL mismatch" bug where
+// modelName came from the developer role but ClaudeConfigID came from the
+// executor role — when the two roles were bound to different claude_configs
+// rows the request was sent to the wrong gateway.
+func (s *ClaudeConfigService) ResolveConfigForModel(modelName string) (configID string, err error) {
+	modelName = trimSpace(modelName)
+	if modelName == "" {
+		return "", nil
+	}
+	rows, err := s.db.Query("SELECT id, models FROM claude_configs ORDER BY created_at ASC, id ASC")
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, modelsJSON string
+		if serr := rows.Scan(&id, &modelsJSON); serr != nil {
+			return "", serr
+		}
+		for _, e := range DecodeModels(modelsJSON) {
+			if e.Model == modelName {
+				return id, nil
+			}
+		}
+	}
+	return "", rows.Err()
+}
+
 // ActiveModels returns the active config's model list + default model for the
 // role-settings UI. Returns nil, "", nil when no config is active.
 func (s *ClaudeConfigService) ActiveModels() (models []string, defaultModel string, err error) {
