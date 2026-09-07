@@ -1,0 +1,725 @@
+/* SchedulesPage — 定时任务列表
+   ------------------------------------------------------------------
+   Visual language intentionally borrows from the existing timetable
+   metaphor: each row reads as a "scheduled slot" with a colored rail
+   that signals its lifecycle status at a glance. The rail is the
+   single signature element — pending rows are slate (still waiting),
+   running rows pulse cyan (in flight), succeeded rows settle to
+   green, failed rows turn red, and canceled rows fade to a dim slate.
+
+   The page header carries a small "next fire" countdown so the user
+   sees when the soonest task will run before scrolling. The status
+   filters are a segmented pill row (counts inline) instead of two
+   bare dropdowns — matches the kind-chip vocabulary from
+   RequirementsList.
+
+   Card rows are used everywhere (desktop + mobile). They drop the
+   generic <table> layout because the data is heterogeneous (some
+   rows have error_message, some have overdue indicators) and a
+   card layout lets each row express its own metadata cleanly. */
+
+.schedules-page {
+  padding: 16px 0;
+}
+
+/* ── Page header ──────────────────────────────────────────────── */
+.schedules-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+  flex-wrap: wrap;
+}
+
+.schedules-header-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--color-text);
+  letter-spacing: -0.01em;
+}
+
+.schedules-header-title-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #4f46e5 0%, #8b5cf6 100%);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.25);
+}
+
+.schedules-header-meta {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  font-weight: 400;
+}
+
+.schedules-next-fire {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+  /* The ring sits right of the dot so the eye reads "this is the
+     next trigger" in one glance. The ring itself is the same
+     ai-pulse-dot color family — pulses amber only when a pending
+     task is overdue. */
+  white-space: nowrap;
+}
+
+.schedules-next-fire-label {
+  color: var(--color-text-muted);
+}
+
+.schedules-next-fire-value {
+  color: var(--color-text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.schedules-next-fire.overdue {
+  background: var(--color-error-soft);
+  border-color: #fca5a5;
+}
+
+.schedules-next-fire.overdue .schedules-next-fire-value {
+  color: var(--color-error-deep);
+}
+
+/* ── Status segmented pills ─────────────────────────────────────
+   Horizontal pill row that replaces two bare <select> dropdowns.
+   Each pill is a status "lane"; the count badge after the label
+   shows "how many rows would I see if I clicked this". Active pill
+   gets a soft tinted background matching its status. Mirrors the
+   .req-kind-chip vocabulary so the page feels native. */
+
+.schedules-filter-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.schedules-filter-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.schedules-filter-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-right: 4px;
+}
+
+.schedules-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease,
+              color 120ms ease, transform 120ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.schedules-pill:hover {
+  border-color: var(--color-border);
+  background: var(--color-hover);
+}
+
+.schedules-pill-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--color-hover);
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.schedules-pill.active {
+  color: var(--color-text);
+  background: var(--color-active);
+  border-color: var(--color-primary);
+  font-weight: 600;
+}
+
+.schedules-pill.active .schedules-pill-count {
+  background: var(--color-primary);
+  color: #fff;
+}
+
+/* Pill is tinted to its status when active so the user reads both
+   "what status" and "what filter" from one chip. Inactive pills
+   stay neutral so the page doesn't read as a color riot. */
+.schedules-pill.active.schedules-pill-pending    { background: #f1f5f9; border-color: #94a3b8; color: #475569; }
+.schedules-pill.active.schedules-pill-pending    .schedules-pill-count { background: #475569; }
+.schedules-pill.active.schedules-pill-running    { background: #cffafe; border-color: #06b6d4; color: #0e7490; }
+.schedules-pill.active.schedules-pill-running    .schedules-pill-count { background: #0891b2; }
+.schedules-pill.active.schedules-pill-succeeded  { background: #d1fae5; border-color: #10b981; color: #047857; }
+.schedules-pill.active.schedules-pill-succeeded  .schedules-pill-count { background: #059669; }
+.schedules-pill.active.schedules-pill-failed     { background: #fee2e2; border-color: #ef4444; color: #b91c1c; }
+.schedules-pill.active.schedules-pill-failed     .schedules-pill-count { background: #dc2626; }
+.schedules-pill.active.schedules-pill-canceled   { background: #f1f5f9; border-color: #cbd5e1; color: #64748b; }
+.schedules-pill.active.schedules-pill-canceled   .schedules-pill-count { background: #64748b; }
+
+/* ── Type filter — same vocabulary as kind chips ─────────────── */
+.schedules-type-chip {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: background-color 120ms ease, border-color 120ms ease,
+              color 120ms ease;
+}
+
+.schedules-type-chip:hover {
+  background: var(--color-hover);
+}
+
+.schedules-type-chip.active.schedules-type-design {
+  border-color: #4f46e5;
+  background: #eef2ff;
+  color: #4338ca;
+  font-weight: 600;
+}
+
+.schedules-type-chip.active.schedules-type-coding {
+  border-color: #06b6d4;
+  background: #cffafe;
+  color: #0e7490;
+  font-weight: 600;
+}
+
+/* ── Task list ─────────────────────────────────────────────────
+   Each row is a card with a 4px left rail (status color), a body
+   with the requirement title + meta, and a footer with actions.
+   Hover lifts the card subtly; running rows show a pulse on the
+   rail (handled by .schedules-row.schedules-row-running). */
+
+.schedules-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.schedules-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 14px 16px 14px 20px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  /* The left rail is rendered as a ::before so it doesn't take a
+     grid cell — keeps the grid template clean and the rail is part
+     of the card itself. */
+  transition: border-color 120ms ease, box-shadow 120ms ease,
+              transform 120ms ease;
+  box-shadow: var(--shadow-card);
+}
+
+.schedules-row::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 4px;
+  border-radius: 0 3px 3px 0;
+  background: var(--color-border);
+  transition: background-color 160ms ease;
+}
+
+.schedules-row:hover {
+  border-color: #cbd5e1;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
+}
+
+/* Status rail colors. The default slate matches the .color-border
+   so unstyled rows don't pop. */
+.schedules-row.schedules-row-pending::before   { background: #94a3b8; }
+.schedules-row.schedules-row-running::before   { background: #06b6d4; }
+.schedules-row.schedules-row-succeeded::before { background: #10b981; }
+.schedules-row.schedules-row-failed::before    { background: #ef4444; }
+.schedules-row.schedules-row-canceled::before  { background: #cbd5e1; }
+
+/* Running rows pulse the rail so the user can spot them in a long
+   list without reading every badge. Same vibe as the .ai-pulse-dot
+   animation already in use. */
+.schedules-row.schedules-row-running::before {
+  animation: schedule-rail-pulse 1.4s ease-in-out infinite;
+  box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.5);
+}
+
+@keyframes schedule-rail-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.45); }
+  50%      { box-shadow: 0 0 0 6px rgba(6, 182, 212, 0); }
+}
+
+/* Overdue pending rows turn the rail red — the row already says
+   "已过期" in the meta but the rail change is a non-textual cue
+   for at-a-glance scanning. */
+.schedules-row.schedules-row-overdue::before {
+  background: var(--color-error);
+}
+
+.schedules-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.schedules-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Type chip — picks up the analyst (amber) / architect (violet) /
+   developer (cyan) palette used in the wizard pipeline. Keeps the
+   "this is design work vs coding work" cue on-brand. */
+.schedules-type-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.schedules-type-badge.type-design {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+.schedules-type-badge.type-coding {
+  background: #cffafe;
+  color: #0e7490;
+}
+
+.schedules-row-title {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--color-text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.schedules-row-title a {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px dashed transparent;
+  transition: border-color 120ms ease, color 120ms ease;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.schedules-row-title a:hover {
+  color: var(--color-primary);
+  border-bottom-color: var(--color-primary);
+}
+
+.schedules-row-title-missing {
+  color: var(--color-text-muted);
+  font-style: italic;
+  font-weight: 500;
+}
+
+.schedules-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+}
+
+.schedules-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.schedules-meta-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.schedules-meta-overdue {
+  color: var(--color-error-deep);
+  font-weight: 600;
+}
+
+.schedules-meta-model {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+  background: var(--color-hover);
+  padding: 1px 6px;
+  border-radius: 3px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schedules-error-message {
+  font-size: 12px;
+  color: var(--color-error-deep);
+  background: var(--color-error-soft);
+  padding: 6px 10px;
+  border-radius: 6px;
+  margin-top: 4px;
+  word-break: break-word;
+}
+
+.schedules-row-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+
+.schedules-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* Ghost button variant for row actions — the previous styling
+   used the default .btn which was visually heavy in a card row.
+   The ghost variant fits a card better while still meeting the
+   36px min touch target on mobile. */
+.schedules-row-actions .btn {
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 6px;
+}
+
+.schedules-row-actions .btn.schedules-btn-danger {
+  color: var(--color-error-deep);
+  border-color: #fca5a5;
+  background: transparent;
+}
+
+.schedules-row-actions .btn.schedules-btn-danger:hover {
+  background: var(--color-error-soft);
+}
+
+/* ── Empty / loading states ─────────────────────────────────── */
+.schedules-empty {
+  padding: 56px 24px;
+  text-align: center;
+  background: var(--color-surface);
+  border: 1px dashed var(--color-border);
+  border-radius: 12px;
+  color: var(--color-text-secondary);
+}
+
+.schedules-empty-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #eef2ff 0%, #ede9fe 100%);
+  color: var(--color-primary);
+  margin-bottom: 14px;
+}
+
+.schedules-empty-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: 6px;
+}
+
+.schedules-empty-desc {
+  font-size: 13px;
+  line-height: 1.6;
+  max-width: 420px;
+  margin: 0 auto;
+}
+
+.schedules-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 36px 16px;
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+/* ── Mobile layout ─────────────────────────────────────────────
+   The card grid collapses to a single column so the side column
+   (status + actions) wraps below the main content. Status badges
+   stay visible at the top, actions land in the thumb zone at the
+   bottom of the card. */
+
+@media (max-width: 768px) {
+  .schedules-page {
+    padding-bottom: 24px;
+  }
+
+  .schedules-header {
+    margin-bottom: 14px;
+  }
+
+  .schedules-header-title {
+    font-size: 20px;
+  }
+
+  .schedules-header-title-icon {
+    width: 26px;
+    height: 26px;
+  }
+
+  .schedules-next-fire {
+    font-size: 12px;
+    padding: 5px 10px;
+  }
+
+  .schedules-filter-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .schedules-filter-group {
+    width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+
+  .schedules-filter-group::-webkit-scrollbar { display: none; }
+
+  .schedules-pill,
+  .schedules-type-chip {
+    flex: 0 0 auto;
+  }
+
+  /* Card switches to a vertical layout on mobile. The side
+     column (status + actions) moves below the main column. */
+  .schedules-row {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 12px 14px 12px 16px;
+  }
+
+  .schedules-row::before {
+    width: 3px;
+    top: 6px;
+    bottom: 6px;
+  }
+
+  .schedules-row-side {
+    align-items: stretch;
+    flex-direction: row;
+    justify-content: space-between;
+    gap: 8px;
+    border-top: 1px dashed var(--color-border);
+    padding-top: 10px;
+    margin-top: 4px;
+  }
+
+  .schedules-row-actions {
+    justify-content: flex-end;
+  }
+}
+
+/* Reduced motion — pause the rail pulse for users who've opted
+   out of large motion. The rest of the page stays static. */
+@media (prefers-reduced-motion: reduce) {
+  .schedules-row.schedules-row-running::before {
+    animation: none;
+  }
+}
+
+/* ── Schedule log modal ───────────────────────────────────────
+   The log viewer uses the shared .modal-overlay / .modal-box
+   primitives from index.css. Header strip carries the job id +
+   status so the user can copy/recognize which task they're
+   inspecting without scrolling the log body. */
+
+.schedules-log-modal {
+  max-width: 760px;
+  width: 92vw;
+}
+
+.schedules-log-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.schedules-log-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.schedules-log-meta-item strong {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.schedules-log-meta-id {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+}
+
+.schedules-log-meta-spacer {
+  flex: 1 1 auto;
+}
+
+.schedules-log-body {
+  max-height: 60vh;
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: var(--font-mono), "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.schedules-log-line {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 2px 0;
+}
+
+.schedules-log-type {
+  flex: 0 0 auto;
+  background: #1e293b;
+  color: #cbd5e1;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  align-self: flex-start;
+  margin-top: 3px;
+}
+
+.schedules-log-content {
+  flex: 1 1 auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.schedules-log-tool_call   { color: #93c5fd; }
+.schedules-log-tool_result { color: #c4b5fd; }
+.schedules-log-message     { color: #e2e8f0; }
+.schedules-log-phase       { color: #fbbf24; }
+.schedules-log-error       { color: #fca5a5; }
+.schedules-log-done        { color: #86efac; }
+.schedules-log-result      { color: #a7f3d0; }
+
+.schedules-log-empty {
+  padding: 28px 12px;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.schedules-log-running-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: #cffafe;
+  border: 1px solid #67e8f9;
+  border-radius: 6px;
+  color: #0e7490;
+  font-size: 12.5px;
+}
+
+.schedules-log-running-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #06b6d4;
+  box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.5);
+  animation: schedule-log-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes schedule-log-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.45); }
+  50%      { box-shadow: 0 0 0 6px rgba(6, 182, 212, 0); }
+}
+
+@media (max-width: 768px) {
+  .schedules-log-body {
+    max-height: 50vh;
+    font-size: 11.5px;
+  }
+}
