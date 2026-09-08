@@ -125,7 +125,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	}
 
 	rows, err := s.db.Query(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,ags.name,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.created_at,r.updated_at,r.completed_at"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,COALESCE(ags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.created_at,r.updated_at,r.completed_at"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id"+
 			" "+where+" ORDER BY CASE WHEN r.status = 'done' THEN 1 ELSE 0 END ASC, r.created_at DESC",
 		args...)
@@ -184,7 +184,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	// created_at / updated_at — unqualified references would be ambiguous on
 	// MySQL/Postgres.
 	err := s.db.QueryRow(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,ags.name,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.created_at,r.updated_at,r.completed_at"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,COALESCE(ags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.created_at,r.updated_at,r.completed_at"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id"+
 			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
