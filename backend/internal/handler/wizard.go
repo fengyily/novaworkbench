@@ -3752,8 +3752,33 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// --settings JSON (buildSettingsArg), so the remote launch carries the
 	// pins exactly the way the local path does.
 	ignoreLocal := true
+	// The -p prompt built upstream (StartCoding / AdjustCoding /
+	// ContinueCoding / tryAutoOrchestrate) bakes the LOCAL worktree path
+	// into the persona header via agentDirectPrompt / developerDecomposePrompt:
+	//
+	//   "现在切换到「Agent 开发者」角色，正在执行需求（需求：<title>，工作目录：<workDir>）"
+	//
+	// On the local path that's correct — the agent is sitting in <workDir>.
+	// On the remote path <workDir> is a /Users/f1/.novaworkbench/...
+	// worktree that doesn't exist on the agent host (the remote cwd is
+	// /tmp/nova-agent/<projectID>/<reqID>). Handing the original prompt
+	// through verbatim confuses the agent's "先读取项目中的相关文件" step —
+	// it tries to read a path that's not on its filesystem and either
+	// errors or falls back to its own cwd, which defeats the "based on
+	// workdir" intent the header expresses.
+	//
+	// Rewrite the persona header's workDir to the remote cwd before
+	// posting to the worker. The substitution locates the "工作目录："
+	// label in the persona header (a fixed string the prompt builders
+	// always emit right before the path) and replaces from there through
+	// the next "）" full-width closing paren. This way the requirement
+	// title and any other tokens between the opening "（" and the label
+	// are preserved verbatim — only the workDir segment is swapped.
+	// Embedded file content from collectProjectContext is left untouched.
+	// No-op when in.workDir is empty or doesn't appear in the prompt.
+	remotePrompt := rewritePersonaWorkDir(in.prompt, in.workDir, wtPath)
 	opts := llm.StreamOpts{
-		Prompt:                 in.prompt,
+		Prompt:                 remotePrompt,
 		WorkDir:                wtPath,
 		SystemPrompt:           "",
 		Model:                  cliModelArg(in.model),
@@ -6201,7 +6226,53 @@ func agentDirectPrompt(title, leadIn, workDir string) string {
 		title, workDir)
 }
 
-// extractSubtasksPayload pulls the {"subtasks":[…]} JSON block out of
+// rewritePersonaWorkDir rewrites the workDir path inside the persona
+// header of a coding prompt. The agentDirectPrompt / developerDecomposePrompt
+// builders emit a header of the form:
+//
+//	现在切换到「Agent 开发者」角色，正在执行需求（需求：<title>，工作目录：<workDir>）
+//
+// When the prompt is sent to the Agent Server, the local workDir is wrong —
+// the remote cwd is /tmp/nova-agent/<projectID>/<reqID> — so the agent on
+// the remote host would otherwise see a path that doesn't exist on its
+// filesystem. This helper finds the "工作目录：" label in the persona
+// header and replaces from there through the next "）" full-width closing
+// paren with the new path, leaving the requirement title and any other
+// tokens between "（" and the label untouched.
+//
+// Returns the prompt unchanged when the label isn't present (e.g. a
+// pre-built prompt without the persona header) or when localWorkDir is
+// empty (no-op). Only the FIRST match is rewritten — the persona header
+// is emitted exactly once per prompt, and looping would risk false
+// positives on file content that happens to mention the label.
+func rewritePersonaWorkDir(prompt, localWorkDir, remoteWorkDir string) string {
+	if prompt == "" || localWorkDir == "" || localWorkDir == remoteWorkDir {
+		return prompt
+	}
+	const label = "工作目录："
+	const closeParen = "）"
+	idx := strings.Index(prompt, label)
+	if idx < 0 {
+		return prompt
+	}
+	// Find the closing paren after the label. If absent, bail out
+	// and leave the prompt alone — the label showed up but the
+	// header structure we expect wasn't there.
+	end := strings.Index(prompt[idx+len(label):], closeParen)
+	if end < 0 {
+		return prompt
+	}
+	end += idx + len(label)
+	// Verify the slice between the label and the closing paren
+	// actually equals localWorkDir. If it doesn't match (e.g. the
+	// label appears in some unrelated text), return the prompt
+	// unchanged rather than corrupting it.
+	between := prompt[idx+len(label) : end]
+	if between != localWorkDir {
+		return prompt
+	}
+	return prompt[:idx+len(label)] + remoteWorkDir + prompt[end:]
+}
 // finalResult and verifies the [SUBTASKS_READY] sentinel is present. Returns
 // nil when either is missing — caller treats that as "main agent answered a
 // normal question, not a decompose request" and just renders the chat reply.
