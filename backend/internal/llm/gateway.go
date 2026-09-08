@@ -500,6 +500,12 @@ func (g *Gateway) StreamCmd(ctx context.Context, opts StreamOpts) *exec.Cmd {
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
 	}
+	// WaitDelay (Go 1.20+): on context cancel, send SIGTERM first and wait up
+	// to this long before escalating to SIGKILL. Without it, the runtime
+	// races to SIGKILL the Node.js child the moment the parent ctx ends,
+	// truncating its session jsonl tail and surfacing as "system exits for no
+	// reason" once we count those orphaned writes against the parent's RSS.
+	cmd.WaitDelay = 5 * time.Second
 	return cmd
 }
 
