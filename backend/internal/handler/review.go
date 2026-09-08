@@ -411,6 +411,12 @@ func (h *ReviewHandler) runReview(job *store.Job, projectID, projectPath string,
 						switch bmap["type"] {
 						case "text":
 							if text, ok := bmap["text"].(string); ok && strings.TrimSpace(text) != "" {
+								// MiniMax-M3 leaked <mm:think ...> wrappers — strip
+								// before they pollute the job log / PR comment.
+								text = store.CleanThinkTags(text)
+								if text == "" {
+									continue
+								}
 								job.Append(store.LogLine{Type: "message", Content: text})
 							}
 						case "tool_use":
@@ -426,7 +432,12 @@ func (h *ReviewHandler) runReview(job *store.Job, projectID, projectPath string,
 			reviewUsage.recordFrom(evt)
 			if sub, _ := evt["subtype"].(string); sub == "success" {
 				if result, ok := evt["result"].(string); ok && strings.TrimSpace(result) != "" {
-					job.Append(store.LogLine{Type: "message", Content: result})
+					// MiniMax-M3 leaked think-tag wrappers — same filter as the
+					// assistant-text path above.
+					result = store.CleanThinkTags(result)
+					if result != "" {
+						job.Append(store.LogLine{Type: "message", Content: result})
+					}
 				}
 			} else if sub == "error" {
 				if errMsg, ok := evt["error"].(string); ok {

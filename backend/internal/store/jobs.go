@@ -3,10 +3,60 @@ package store
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
+
+// thinkTagRE matches the MiniMax-M3 family of leaked internal tags:
+//   - <mm:think ...>, </mm:think ...>, <mm:think/>, </mm:think/>
+//   - (?is)               case-insensitive + . matches newlines (defensive)
+//   - <\s*/?\s*           left angle bracket, optional /, tolerant of whitespace
+//   - mm:think\b          exact name "mm:think" — the \b boundary prevents
+//                         accidental matches against other <...> constructs in
+//                         JSON payloads (e.g. legitimate XML-like tags).
+//   - [^>]*>              any attributes (id/class/...), closing bracket.
+// regexp.MustCompile on a package-level const cannot fail at runtime.
+var thinkTagRE = regexp.MustCompile(`(?is)<\s*/?\s*mm:think\b[^>]*>`)
+
+// thinkBulletRE matches the model-frontend bullets that MiniMax-M3 prepends
+// to a streamed fragment — typically "⏺" (U+23F2) followed by whitespace.
+// Stripping these after the tag removal ensures an all-think output (which
+// is the common case: the model emits `⏺ ` followed by stacked empty closing
+// tags) collapses to "" so the caller can drop the log line entirely instead
+// of rendering a lone bullet glyph.
+//
+// The character class is written with raw rune literals (Go string literals
+// hold UTF-8 bytes; regexp compiles the raw bytes into a rune class) rather
+// than \x{...} escapes — those escapes work outside [] but are not accepted
+// inside a [] rune class by Go's regexp engine.
+var thinkBulletRE = regexp.MustCompile(`[⏺●•]+`)
+
+// CleanThinkTags strips MiniMax-M3 style <mm:think ...> / </mm:think ...>
+// wrappers (plus the model-frontend bullet glyphs they often pair with) and
+// trims any whitespace left behind. An empty input is a no-op; an all-think
+// output is reduced to "" so callers can decide whether to drop the log line
+// entirely.
+//
+// This is a model-specific carve-out: MiniMax-M3 emits an internal reasoning
+// tag wrapped in these markers, polluting logs, the SQLite job_logs /
+// requirements / sub_tasks / weekly_reports tables, and — via the CLI's
+// session jsonl — every subsequent --resume call (which then bumps
+// cache_read_input_tokens by re-feeding the tags back into the API).
+// Anthropic / DeepSeek / OpenAI do not emit this tag, so the regex is exact.
+//
+// The function is intentionally narrow: it only matches the literal "mm:think"
+// name, so other <...> constructs (legitimate code samples, etc.) pass
+// through untouched.
+func CleanThinkTags(s string) string {
+	if s == "" {
+		return s
+	}
+	s = thinkTagRE.ReplaceAllString(s, "")
+	s = thinkBulletRE.ReplaceAllString(s, "")
+	return strings.TrimSpace(s)
+}
 
 type LogLine struct {
 	Type    string `json:"type"` // "tool_call" | "tool_result" | "message" | "error" | "done"
