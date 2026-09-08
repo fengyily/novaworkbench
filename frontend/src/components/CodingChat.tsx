@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { API_BASE, authedFetch, wizardApi } from '../api/client';
+import { errorMessage } from '../utils/errMsg';
 import { type UsageInfo } from '../utils/logLines';
 import { ContextUsageBar } from './ContextUsageBar';
 
@@ -17,6 +19,7 @@ interface ChatMessage {
 }
 
 export default function CodingChat({ reqId, projectPath, requirementTitle, onStartCoding }: Props) {
+  const { t } = useTranslation();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [thinking, setThinking] = useState(false);
@@ -82,7 +85,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
 
   // Boot fetch of the persisted compression record for the coding stage.
   // Mirrors the other two chat components: loads the badge state once on
-  // mount so the bar's "📦 已压缩" label is correct after a page refresh,
+  // mount so the bar's compressed badge reads correctly after a page refresh,
   // even before the user clicks anything.
   useEffect(() => {
     if (!reqId) return;
@@ -102,7 +105,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
   // instead of checking a success field.
   const handleCompress = useCallback(async () => {
     if (!reqId || compressing) return;
-    if (!confirm('让 Claude 总结当前对话并压缩上下文？\n\n该操作会清空当前会话 ID,下次对话将看到压缩摘要而不是完整历史。')) return;
+    if (!confirm(t('components.codingChat.compressConfirm'))) return;
     setCompressing(true);
     try {
       const data = await wizardApi.compressContext(reqId, 'coding');
@@ -111,7 +114,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
       // session's token counts; the next turn will push a fresh snapshot.
       setUsage(undefined);
     } catch (err: any) {
-      alert('压缩失败:' + (err?.message || String(err)));
+      alert(t('components.codingChat.compressFail') + ': ' + errorMessage(err));
     } finally {
       setCompressing(false);
     }
@@ -122,9 +125,9 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
     if (!reqId) return;
     try {
       const data = await wizardApi.getContextSummary(reqId, 'coding');
-      setSummaryModal(data.summary || '(暂无压缩摘要)');
+      setSummaryModal(data.summary || t('components.codingChat.compressSummaryFallback'));
     } catch {
-      setSummaryModal('(加载摘要失败)');
+      setSummaryModal(t('components.codingChat.compressSummaryLoadFail'));
     }
   }, [reqId]);
 
@@ -139,7 +142,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
   // The authoritative conversation lives in the resumed claude session
   // (coding_session_id, keyed by requirement_id). We only send the new user
   // message; no conversation_history is re-fed. This hits the DEVELOPER role
-  // (developer-chat), not the analyst — the 追加调整 panel adjusts the
+  // (developer-chat), not the analyst — the follow-up composer adjusts the
   // already-implemented code, so it must talk to the developer, not refine the
   // requirement.
   const streamReply = useCallback(async (userMessage: string) => {
@@ -173,7 +176,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
           const data = JSON.parse(line.substring(6));
           if (data.type === 'user_input') {
             // Backend echoes the just-sent adjustment as a separate event so
-            // the output box can render a "📝 调整请求" strip confirming what
+            // the output box can render a composer strip confirming what
             // the backend actually received. This is the same string that is
             // persisted into token_usage.meta.summary for the token-stats
             // table — the SSE echo lets the user verify that content.
@@ -246,7 +249,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
   return (
     <div className="detail-section coding-chat-panel">
       <div className="deep-refine-header">
-        <h3>💬 追加调整</h3>
+        <h3>{t('components.codingChat.composerTitle')}</h3>
       </div>
 
       {hasConversation && (() => {
@@ -283,7 +286,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
             {lastRequest && (
               <div
                 className="chat-msg user user-request"
-                title="本次已发送到后端的调整请求"
+                title={t('components.codingChat.composerTooltip')}
                 style={{
                   background: '#FFFBEB',
                   border: '2px solid #F59E0B',
@@ -294,7 +297,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
                 }}
               >
                 <span className="chat-role" style={{ color: '#B45309', fontWeight: 700, fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                  📤 已发送至后端的调整请求
+                  {t('components.devChat.sentHint')}
                 </span>
                 <div
                   className="chat-content"
@@ -317,7 +320,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
               </div>
             )}
             {rounds.map((r, i) => {
-              const userLabel = r.user.content ? truncate(r.user.content, 30) : '（空）';
+              const userLabel = r.user.content ? truncate(r.user.content, 30) : t('components.devChat.empty');
               return (
                 <details
                   key={i}
@@ -350,7 +353,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
                           wordBreak: 'break-word',
                         }}
                       >
-                        <strong style={{ color: '#4F46E5' }}>你追问：</strong> {r.user.content}
+                        <strong style={{ color: '#4F46E5' }}>{t('components.devChat.userPrefix')}</strong> {r.user.content}
                       </div>
                     )}
                     {r.ai && (
@@ -368,7 +371,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
                           wordBreak: 'break-word',
                         }}
                       >
-                        <strong style={{ color: r.ai.isError ? '#EF4444' : '#4F46E5' }}>🤖 AI：</strong> {r.ai.content || '⏳ 思考中…'}
+                        <strong style={{ color: r.ai.isError ? '#EF4444' : '#4F46E5' }}>{t('components.devChat.aiPrefix')}</strong> {r.ai.content || t('components.devChat.thinking')}
                       </div>
                     )}
                   </div>
@@ -386,25 +389,25 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
           onKeyDown={e => {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
           }}
-          placeholder={`描述需要调整的内容，AI 会先确认理解再开始修改...\nEnter 发送  ·  Shift+Enter 换行`}
+          placeholder={t('components.devChat.placeholder')}
           className="form-input chat-textarea"
           disabled={thinking}
           rows={2}
         />
         <button className="btn btn-primary" onClick={handleSend} disabled={thinking || !input.trim()}>
-          发送
+          {t('components.devChat.send')}
         </button>
       </div>
 
       {hasConversation && !thinking && (
         <div style={{ marginTop: 8 }}>
           <button className="btn btn-primary" onClick={handleConfirm}>
-            ✅ 确认，开始修改
+            {t('components.devChat.confirm')}
           </button>
         </div>
       )}
 
-      {/* Live context-usage bar + 压缩上下文 entry point. Sits at the bottom
+      {/* Live context-usage bar + compress-context entry point. Sits at the bottom
           of the chat panel so it's always reachable; mirrors the other two
           chat components (DeepRefineChat, DocRefineChat). The disabled state
           suppresses the click while a turn is in flight or a compression is
@@ -414,7 +417,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
         onCompress={handleCompress}
         compressing={compressing}
         disabled={thinking || compressing}
-        stepLabel="开发调整"
+        stepLabel={t('components.devChat.stepLabel')}
         compressedAt={compressedAt}
         onShowSummary={handleShowSummary}
       />
@@ -435,8 +438,8 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
             style={{ maxWidth: 640 }}
           >
             <div className="modal-header">
-              <h3>📦 已压缩上下文摘要</h3>
-              <button className="btn btn-sm" onClick={() => setSummaryModal(null)}>关闭</button>
+              <h3>{t('components.devChat.summaryTitle')}</h3>
+              <button className="btn btn-sm" onClick={() => setSummaryModal(null)}>{t('common.actions.close')}</button>
             </div>
             <div
               className="modal-body"

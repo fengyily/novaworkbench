@@ -11,6 +11,11 @@ type User struct {
 	DisplayName  string     `json:"display_name"`
 	Status       string     `json:"status"` // active | disabled
 	IsAdmin      bool       `json:"is_admin"`
+	// Locale is the user's preferred UI language (BCP-47, e.g. "zh-CN").
+	// Empty = no explicit preference; the client then follows the
+	// browser-level choice. Validated against the supported-language
+	// whitelist by ACLService.UpdateLocale.
+	Locale       string     `json:"locale"`
 	LastLoginAt  *time.Time `json:"last_login_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`

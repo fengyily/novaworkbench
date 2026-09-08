@@ -251,6 +251,7 @@ func main() {
 	mux.HandleFunc("POST /api/auth/login", authH.Login)
 	mux.HandleFunc("POST /api/auth/logout", authH.Logout)
 	mux.HandleFunc("GET /api/auth/me", authH.Me)
+	mux.HandleFunc("PUT /api/auth/locale", authH.UpdateLocale)
 
 	// ACL — user / role / permission management. Every route is guarded by
 	// the setting.users (user management) or setting.acl (role/permission

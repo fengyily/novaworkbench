@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { platformApi, type PlatformToken } from '../api/client';
+import { errorMessage } from '../utils/errMsg';
 import './Settings.css';
 
 const platformLabels: Record<string, string> = {
@@ -14,7 +16,7 @@ const platformColors: Record<string, string> = {
   gitea: '#609926',
 };
 
-// One form is reused for both the "+ 添加 Token" and "编辑" modals. The
+// One form is reused for both the add and edit modals. The
 // `editingId` state is empty in create mode and carries the token id in
 // edit mode, which swaps the title / button label and the role of the
 // Token input (required PAT vs. optional rotation).
@@ -37,6 +39,7 @@ const emptyForm: FormState = {
 };
 
 export default function SettingsTokens() {
+  const { t } = useTranslation();
   const [tokens, setTokens] = useState<PlatformToken[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -91,17 +94,17 @@ export default function SettingsTokens() {
 
   const handleSave = async () => {
     if (!form.name) {
-      setError('名称不能为空');
+      setError(t('settings.tokens.errNameRequired'));
       return;
     }
     if (!editingId && !form.token) {
       // New token rows must carry a PAT; edits can leave it blank to keep
       // the existing secret.
-      setError('Token 不能为空');
+      setError(t('settings.tokens.errTokenRequired'));
       return;
     }
     if (!editingId && (form.platform === 'gitea') && !form.base_url) {
-      setError('Gitea 需要填写 Base URL');
+      setError(t('settings.tokens.errGiteaNeedsUrl'));
       return;
     }
 
@@ -130,7 +133,7 @@ export default function SettingsTokens() {
       }
       closeModal();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -155,20 +158,19 @@ export default function SettingsTokens() {
     <div className="settings-section">
       <div className="section-header">
         <div>
-          <h3 className="settings-section-title">平台 Token</h3>
+          <h3 className="settings-section-title">{t('settings.tokens.title')}</h3>
           <p className="settings-section-desc">
-            配置 GitHub / GitLab / Gitea 的访问 Token，用于拉取 PR 列表和提交 Review 评论。
-            可同时填写 Git 提交身份，Docker 环境下没有挂载 ~/.gitconfig 时会自动使用。
+            {t('settings.tokens.desc')}
           </p>
         </div>
-        <button className="btn btn-primary" onClick={openCreateModal}>+ 添加 Token</button>
+        <button className="btn btn-primary" onClick={openCreateModal}>{t('settings.tokens.add')}</button>
       </div>
 
-      {loading && <div className="settings-empty">加载中...</div>}
+      {loading && <div className="settings-empty">{t('settings.tokens.loading')}</div>}
 
       {!loading && tokens.length === 0 && (
         <div className="settings-empty">
-          <p>暂无配置。点击「添加 Token」开始配置。</p>
+          <p>{t('settings.tokens.empty')}</p>
         </div>
       )}
 
@@ -176,11 +178,11 @@ export default function SettingsTokens() {
         <table className="project-table">
           <thead>
             <tr>
-              <th>名称</th>
-              <th>平台</th>
+              <th>{t('settings.tokens.colName')}</th>
+              <th>{t('settings.tokens.colPlatform')}</th>
               <th>Base URL</th>
-              <th>Git 身份</th>
-              <th>创建时间</th>
+              <th>{t('settings.tokens.colGitIdentity')}</th>
+              <th>{t('settings.tokens.colCreatedAt')}</th>
               <th></th>
             </tr>
           </thead>
@@ -205,14 +207,14 @@ export default function SettingsTokens() {
                     className="btn-link"
                     onClick={() => openEditModal(tok)}
                   >
-                    编辑
+                    {t('settings.tokens.edit')}
                   </button>
                   <button
                     className="btn-link btn-danger-link"
                     onClick={() => handleDelete(tok.id)}
                     disabled={deleteId === tok.id}
                   >
-                    {deleteId === tok.id ? '删除中...' : '删除'}
+                    {deleteId === tok.id ? t('settings.tokens.deleting') : t('settings.tokens.delete')}
                   </button>
                 </td>
               </tr>
@@ -224,15 +226,15 @@ export default function SettingsTokens() {
       {showModal && (
         <div className="modal-overlay" onClick={closeModal}>
           <div className="modal-box" onClick={e => e.stopPropagation()}>
-            <h3>{isEdit ? '编辑平台 Token' : '添加平台 Token'}</h3>
+            <h3>{isEdit ? t('settings.tokens.modal.editTitle') : t('settings.tokens.modal.createTitle')}</h3>
 
             {error && <div className="form-error">{error}</div>}
 
             <div className="modal-field">
-              <label>名称</label>
+              <label>{t('settings.tokens.modal.nameLabel')}</label>
               <input
                 className="form-input"
-                placeholder="如：GitHub Personal Token"
+                placeholder={t('settings.tokens.modal.namePlaceholder')}
                 value={form.name}
                 onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
               />
@@ -241,7 +243,7 @@ export default function SettingsTokens() {
             {!isEdit && (
               <>
                 <div className="modal-field">
-                  <label>平台</label>
+                  <label>{t('settings.tokens.modal.platformLabel')}</label>
                   <select
                     className="form-input"
                     value={form.platform}
@@ -249,7 +251,7 @@ export default function SettingsTokens() {
                   >
                     <option value="github">GitHub</option>
                     <option value="gitlab">GitLab</option>
-                    <option value="gitea">Gitea（自建）</option>
+                    <option value="gitea">{t('settings.tokens.modal.platformGitea')}</option>
                   </select>
                 </div>
 
@@ -258,7 +260,7 @@ export default function SettingsTokens() {
                     <label>Base URL</label>
                     <input
                       className="form-input"
-                      placeholder={form.platform === 'gitlab' ? 'https://gitlab.com（自建填实际地址）' : 'https://gitea.example.com'}
+                      placeholder={form.platform === 'gitlab' ? t('settings.tokens.modal.baseUrlPlaceholderGitlab') : t('settings.tokens.modal.baseUrlPlaceholderGitea')}
                       value={form.base_url}
                       onChange={e => setForm(f => ({ ...f, base_url: e.target.value }))}
                     />
@@ -279,43 +281,43 @@ export default function SettingsTokens() {
             )}
 
             <div className="modal-field">
-              <label>{isEdit ? '新 Token（留空保持原值）' : 'Token'}</label>
+              <label>{isEdit ? t('settings.tokens.modal.tokenLabelNew') : t('settings.tokens.modal.tokenLabel')}</label>
               <input
                 className="form-input"
                 type="password"
-                placeholder={isEdit ? '仅在轮换 Token 时填写' : '粘贴 Personal Access Token'}
+                placeholder={isEdit ? t('settings.tokens.modal.tokenPlaceholderEdit') : t('settings.tokens.modal.tokenPlaceholderNew')}
                 value={form.token}
                 onChange={e => setForm(f => ({ ...f, token: e.target.value }))}
               />
             </div>
 
             <div className="modal-field">
-              <label>Git 用户名（提交者姓名）</label>
+              <label>{t('settings.tokens.modal.gitUserLabel')}</label>
               <input
                 className="form-input"
-                placeholder="如：Zhang San"
+                placeholder={t('settings.tokens.modal.gitUserPlaceholder')}
                 value={form.git_user_name}
                 onChange={e => setForm(f => ({ ...f, git_user_name: e.target.value }))}
               />
             </div>
 
             <div className="modal-field">
-              <label>Git 邮箱（提交者邮箱）</label>
+              <label>{t('settings.tokens.modal.gitEmailLabel')}</label>
               <input
                 className="form-input"
-                placeholder="如：zhangsan@example.com"
+                placeholder={t('settings.tokens.modal.gitEmailPlaceholder')}
                 value={form.git_user_email}
                 onChange={e => setForm(f => ({ ...f, git_user_email: e.target.value }))}
               />
               <div className="form-hint">
-                Docker 环境下没有挂载宿主机的 ~/.gitconfig 时，提交会使用这里填写的身份。可与平台账号的姓名/邮箱保持一致。
+                {t('settings.tokens.modal.gitIdentityHint')}
               </div>
             </div>
 
             <div className="modal-actions btn-row-2col">
-              <button className="btn" onClick={closeModal}>取消</button>
+              <button className="btn" onClick={closeModal}>{t('settings.tokens.modal.cancel')}</button>
               <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-                {saving ? '保存中...' : '保存'}
+                {saving ? t('settings.tokens.modal.saving') : t('settings.tokens.modal.save')}
               </button>
             </div>
           </div>

@@ -1,14 +1,17 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   projectsApi, runnerApi, reviewApi, platformApi, requirementsApi, knowledgeApi,
   usageApi, usageTotalInput, fmtCost, wizardApi,
   type Project, type RunStatus, type PR, type PRListResponse, type PlatformToken,
-  type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage, statusLabels,
-  kindLabels, kindOf,
+  type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage, statusLabelKeys,
+  kindLabelKeys, kindOf,
 } from '../api/client';
+import { tLabel } from '../i18n/label';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
 import { IconPlug, IconRobot } from '../components/icons';
@@ -53,9 +56,10 @@ function reqPageWindow(total: number, current: number): (number | '…')[] {
 }
 
 export default function ProjectDetail() {
+  const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-
+  
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<Tab>('overview');
@@ -497,11 +501,11 @@ export default function ProjectDetail() {
       onClick={() => navigate(`/requirements/${req.id}`)}
     >
       <td data-label="ID" style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{req.id}</td>
-      <td data-label="类型"><span className={`kind-badge kind-${kindOf(req)}`}>{kindLabels[kindOf(req)]}</span></td>
+      <td data-label="类型"><span className={`kind-badge kind-${kindOf(req)}`}>{tLabel(t, kindLabelKeys as Record<string, string>, kindOf(req))}</span></td>
       <td data-label="标题" className="pr-title">{req.title}</td>
       <td data-label="优先级"><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
       <td data-label="状态">
-        <span className={`status-badge status-${req.status}`}>{statusLabels[req.status] ?? req.status}</span>
+        <span className={`status-badge status-${req.status}`}>{tLabel(t, statusLabelKeys as Record<string, string>, req.status)}</span>
         {/* Breathing dot for any wizard job in flight on this requirement
             (analyst/design/apply/coding). Set is populated by the 5s poll
             of /api/wizard/active-jobs above. aria-label + title so screen

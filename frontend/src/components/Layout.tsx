@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../utils/auth';
+import LanguageSwitcher from '../i18n/LanguageSwitcher';
 import {
   IconDashboard,
   IconFolder,
@@ -25,13 +27,17 @@ const RequirementsIcon = (p: NavIconProps) => <IconRequirements size={18} {...p}
 const ReportIcon = (p: NavIconProps) => <IconReport size={18} {...p} />;
 const ScheduleIcon = (p: NavIconProps) => <IconClock size={18} {...p} />;
 
+// navItems holds translation KEYS (not labels): a module-level string would
+// freeze the language at import time, while a key resolves on every render.
+// `as const` keeps the literal key types so `t(item.labelKey)` stays
+// compile-checked against the resource tree.
 const navItems = [
-  { to: '/', label: '仪表盘', end: true, permission: 'menu.dashboard', shortLabel: '仪表盘', Icon: DashboardIcon },
-  { to: '/projects', label: '项目', end: false, permission: 'menu.projects', shortLabel: '项目', Icon: FolderIcon },
-  { to: '/requirements', label: '需求', end: false, permission: 'menu.projects', shortLabel: '需求', Icon: RequirementsIcon },
-  { to: '/schedules', label: '定时任务', end: false, permission: 'menu.projects', shortLabel: '定时', Icon: ScheduleIcon },
-  { to: '/reports', label: '周报', end: false, permission: 'menu.reports', shortLabel: '周报', Icon: ReportIcon },
-];
+  { to: '/', labelKey: 'nav.dashboard', end: true, permission: 'menu.dashboard', shortLabelKey: 'nav.dashboard', Icon: DashboardIcon },
+  { to: '/projects', labelKey: 'nav.projects', end: false, permission: 'menu.projects', shortLabelKey: 'nav.projects', Icon: FolderIcon },
+  { to: '/requirements', labelKey: 'nav.requirements', end: false, permission: 'menu.projects', shortLabelKey: 'nav.requirements', Icon: RequirementsIcon },
+  { to: '/schedules', labelKey: 'nav.schedules', end: false, permission: 'menu.projects', shortLabelKey: 'nav.schedulesShort', Icon: ScheduleIcon },
+  { to: '/reports', labelKey: 'nav.reports', end: false, permission: 'menu.reports', shortLabelKey: 'nav.reports', Icon: ReportIcon },
+] as const;
 
 // NovaWorkbench mark — a deep-midnight rounded slab (the "workbench") with
 // a bone-white "N" whose diagonal stroke is replaced by a three-dot
@@ -94,6 +100,7 @@ function NovaLogo({ size = 28 }: { size?: number }) {
 }
 
 export default function Layout() {
+  const { t } = useTranslation();
   const { user, hasPermission, logout } = useAuth();
   const visibleItems = navItems.filter((item) => hasPermission(item.permission));
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -176,22 +183,23 @@ export default function Layout() {
   }, [sidebarOpen]);
 
   // Resolve the current section label for the mobile header title. The
-  // longest match wins so "/projects/proj_xxx" resolves to "项目" not "/".
+  // longest match wins so "/projects/proj_xxx" resolves to the projects
   // Detail pages show a back affordance instead of the section title.
   const sectionLabel = (() => {
     const path = location.pathname;
-    if (path.startsWith('/requirements/')) return { label: '需求详情', back: '/requirements' };
-    if (path.startsWith('/requirements')) return { label: '需求', back: null };
-    if (path.startsWith('/projects/add')) return { label: '添加项目', back: '/projects' };
-    if (path.startsWith('/projects/')) return { label: '项目详情', back: '/projects' };
-    if (path.startsWith('/projects')) return { label: '项目', back: null };
-    if (path.startsWith('/knowledge')) return { label: '知识库', back: null };
-    if (path.startsWith('/schedules')) return { label: '定时任务', back: null };
-    if (path.startsWith('/chat')) return { label: '助手', back: null };
-    if (path.startsWith('/reports')) return { label: '周报', back: null };
-    if (path.startsWith('/settings')) return { label: '设置', back: null };
-    if (path === '/') return { label: '仪表盘', back: null };
-    return { label: '', back: null };
+    // `as const` keeps each key a literal so `t()` stays compile-checked.
+    if (path.startsWith('/requirements/')) return { key: 'nav.section.requirementDetail' as const, back: '/requirements' };
+    if (path.startsWith('/requirements')) return { key: 'nav.section.requirements' as const, back: null };
+    if (path.startsWith('/projects/add')) return { key: 'nav.section.addProject' as const, back: '/projects' };
+    if (path.startsWith('/projects/')) return { key: 'nav.section.projectDetail' as const, back: '/projects' };
+    if (path.startsWith('/projects')) return { key: 'nav.section.projects' as const, back: null };
+    if (path.startsWith('/knowledge')) return { key: 'nav.section.knowledge' as const, back: null };
+    if (path.startsWith('/schedules')) return { key: 'nav.section.schedules' as const, back: null };
+    if (path.startsWith('/chat')) return { key: 'nav.section.chat' as const, back: null };
+    if (path.startsWith('/reports')) return { key: 'nav.section.reports' as const, back: null };
+    if (path.startsWith('/settings')) return { key: 'nav.section.settings' as const, back: null };
+    if (path === '/') return { key: 'nav.section.dashboard' as const, back: null };
+    return { key: '' as const, back: null };
   })();
 
   const onMore = () => setSidebarOpen(true);
@@ -202,7 +210,7 @@ export default function Layout() {
         <div className="app-header-left">
           <button
             className="app-hamburger"
-            aria-label="打开导航"
+            aria-label={t('nav.openNav')}
             onClick={() => setSidebarOpen((o) => !o)}
           >
             <span /><span /><span />
@@ -211,12 +219,12 @@ export default function Layout() {
           {/* Mobile-only: the section title lives inline next to the logo so
               the user always knows where they are without a separate title
               bar below the header. Hidden on desktop. */}
-          {sectionLabel.label && (
+          {sectionLabel.key && (
             <span className="app-header-section">
               {sectionLabel.back && (
                 <button
                   className="app-header-back"
-                  aria-label="返回"
+                  aria-label={t('nav.back')}
                   onClick={() => navigate(sectionLabel.back!)}
                 >
                   {/* Chevron with a trail-fading stroke — the tail (right
@@ -241,25 +249,26 @@ export default function Layout() {
                   </svg>
                 </button>
               )}
-              <span className="app-header-section-label">{sectionLabel.label}</span>
+              <span className="app-header-section-label">{t(sectionLabel.key)}</span>
             </span>
           )}
         </div>
         <div className="app-header-right">
+          <LanguageSwitcher />
           {user && (
             <span className="app-header-user">
               {user.display_name || user.username}
-              {user.is_admin && <span className="app-header-admin">管理员</span>}
+              {user.is_admin && <span className="app-header-admin">{t('nav.admin')}</span>}
             </span>
           )}
           {hasPermission('menu.settings') && (
             <a href="/settings" className="app-header-settings">
               <IconSettings size={14} />
-              <span>设置</span>
+              <span>{t('nav.settings')}</span>
             </a>
           )}
           <button className="app-header-logout" onClick={() => logout()}>
-            退出
+            {t('common.actions.logout')}
           </button>
         </div>
       </header>
@@ -270,7 +279,7 @@ export default function Layout() {
         <nav className={`app-sidebar${sidebarOpen ? ' sidebar-open' : ''}`}>
           <div className="sidebar-close-row">
             <span className="app-logo"><NovaLogo size={28} /><span className="app-logo-wordmark"><span className="app-logo-nova">Nova</span>Workbench</span></span>
-            <button className="sidebar-close-btn" aria-label="关闭导航" onClick={closeSidebar}>✕</button>
+            <button className="sidebar-close-btn" aria-label={t('nav.closeNav')} onClick={closeSidebar}>✕</button>
           </div>
           {visibleItems.map((item) => {
             const Icon = item.Icon;
@@ -285,7 +294,7 @@ export default function Layout() {
                 <span className="nav-item-icon" aria-hidden="true">
                   <Icon />
                 </span>
-                <span>{item.label}</span>
+                <span>{t(item.labelKey)}</span>
               </NavLink>
             );
           })}
@@ -294,7 +303,7 @@ export default function Layout() {
               <span className="nav-item-icon" aria-hidden="true">
                 <IconSparkles size={18} />
               </span>
-              <span>助手</span>
+              <span>{t('nav.chat')}</span>
             </NavLink>
           )}
           {hasPermission('menu.settings') && (
@@ -302,7 +311,7 @@ export default function Layout() {
               <span className="nav-item-icon" aria-hidden="true">
                 <IconSettings size={18} />
               </span>
-              <span>设置</span>
+              <span>{t('nav.settings')}</span>
             </NavLink>
           )}
         </nav>
@@ -314,7 +323,7 @@ export default function Layout() {
       {/* Mobile-only bottom tab bar. The persistent thumb-zone navigation.
           Renders inside .app-layout so its position:fixed anchors to the
           viewport regardless of scroll. Hidden on desktop via CSS. */}
-      <nav className="tab-bar" aria-label="主导航">
+      <nav className="tab-bar" aria-label={t('nav.mainNav')}>
         {visibleItems.slice(0, 4).map((item) => {
           const Icon = item.Icon;
           return (
@@ -327,27 +336,27 @@ export default function Layout() {
               <span className="tab-bar-icon" aria-hidden="true">
                 <Icon />
               </span>
-              <span className="tab-bar-label">{item.shortLabel}</span>
+              <span className="tab-bar-label">{t(item.shortLabelKey)}</span>
             </NavLink>
           );
         })}
-        {/* The "更多" tab opens the sidebar drawer so the rest of the nav
-            (AI 对话, 设置, etc.) is still one tap away. */}
+        {/* The "more" tab opens the sidebar drawer so the rest of the nav
+            (assistant, settings, …) is still one tap away. */}
         <button
           type="button"
           className="tab-bar-item more-tab"
           onClick={onMore}
-          aria-label="更多"
+          aria-label={t('nav.more')}
         >
           <span className="tab-bar-icon" aria-hidden="true">
             <IconMore size={20} />
           </span>
-          <span className="tab-bar-label">更多</span>
+          <span className="tab-bar-label">{t('nav.more')}</span>
         </button>
       </nav>
 
       <footer className="app-footer">
-        <span className="app-footer-dot" aria-hidden /> 服务运行中 | localhost:9527 | v0.1.0
+        <span className="app-footer-dot" aria-hidden /> {t('nav.footerRunning')} | localhost:9527 | v0.1.0
       </footer>
     </div>
   );

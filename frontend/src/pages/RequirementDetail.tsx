@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode, type CSSProperties } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabels, kindOf, STAGE_VISIBILITY, type Kind, type CostItem } from '../api/client';
+import { useTranslation } from 'react-i18next';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem } from '../api/client';
+import { tLabel } from '../i18n/label';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
@@ -523,6 +525,7 @@ export default function RequirementDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
+  const { t } = useTranslation();
   const [req, setReq] = useState<Requirement | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
@@ -2322,11 +2325,11 @@ export default function RequirementDetail() {
       <h1>{req.title}</h1>
 
       <div className="detail-meta">
-        <span className={`kind-badge kind-${reqKind}`} title={reqKind === 'idea' ? '想法 — 仅讨论方案，不进入开发' : reqKind === 'issue' ? '问题 — 排查根因并修复' : '需求 — 标准 3 阶段实现'}>{kindLabels[reqKind]}</span>
+        <span className={`kind-badge kind-${reqKind}`} title={reqKind === 'idea' ? '想法 — 仅讨论方案，不进入开发' : reqKind === 'issue' ? '问题 — 排查根因并修复' : '需求 — 标准 3 阶段实现'}>{tLabel(t, kindLabelKeys as Record<string,string>, reqKind)}</span>
         {/* claude-pulse 叠加在 status-badge + claude-status 上：amber 涟漪 +
             微缩放 + brightness 提升，1.6s 周期呼吸，详情页头一眼能看出当前
             是否处于 wizard job 运行中。prefers-reduced-motion 时自动静止。 */}
-        <span className={`status-badge status-${req.status}${claudeWorking ? ' claude-pulse' : ''}`}>{statusLabels[req.status] || req.status}</span>
+        <span className={`status-badge status-${req.status}${claudeWorking ? ' claude-pulse' : ''}`}>{tLabel(t, statusLabelKeys as Record<string,string>, req.status)}</span>
         <span className={`priority-tag ${req.priority}`}>{req.priority.toUpperCase()}</span>
         <span className={`claude-status${claudeWorking ? ' working claude-pulse' : ''}`} title={claudeWorking ? 'Claude 正在执行分析/方案/开发任务' : '当前无 Claude 任务在运行'}>
           {claudeWorking ? <><IconBotBadge size={12} className="icon-mr" />Claude 工作中</> : <><IconSleep size={12} className="icon-mr" />Claude 空闲</>}
@@ -2442,7 +2445,7 @@ export default function RequirementDetail() {
                 const accent = STAGE_ACCENTS[s.step] ?? '#94A3B8';
                 const cur = stages.get(s.step) ?? {
                   key: s.step,
-                  label: s.label || stepLabels[s.step] || s.step,
+                  label: s.label || tLabel(t, stepLabelKeys as Record<string,string>, s.step),
                   stage: s.step,
                   accent,
                   cost: 0, costs: [] as CostItem[], count: 0,
@@ -2594,7 +2597,7 @@ export default function RequirementDetail() {
                 {usage.by_step.map(s => (
                   <Fragment key={`${s.step}:${s.model}`}>
                     <tr>
-                      <td data-label="步骤">{s.label || stepLabels[s.step] || s.step}</td>
+                      <td data-label="步骤">{s.label || tLabel(t, stepLabelKeys as Record<string,string>, s.step)}</td>
                       <td data-label="模型"><code className="pr-branch">{s.model || '未知模型'}</code></td>
                       <td data-label="输入" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(s).toLocaleString()}</td>
                       <td data-label="输出" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.output_tokens.toLocaleString()}</td>
@@ -2633,7 +2636,7 @@ export default function RequirementDetail() {
                         <span className="adjust-history-head-left">
                           <span className="adjust-history-index">#{i + 1}</span>
                           <span className="adjust-history-stage">
-                            {stepLabels[r.step] || r.step}
+                            {tLabel(t, stepLabelKeys as Record<string,string>, r.step)}
                           </span>
                           <code className="pr-branch adjust-history-model">{r.model || '未知模型'}</code>
                         </span>

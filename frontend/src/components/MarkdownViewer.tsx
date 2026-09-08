@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import './MarkdownViewer.css';
@@ -10,6 +11,7 @@ interface Props {
 }
 
 export default function MarkdownViewer({ title, content, onClose }: Props) {
+  const { t } = useTranslation();
   // Close on Escape
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -23,8 +25,8 @@ export default function MarkdownViewer({ title, content, onClose }: Props) {
     <div className="md-viewer-overlay modal-fullscreen-overlay" onClick={onClose}>
       <div className="md-viewer-box modal-fullscreen" onClick={e => e.stopPropagation()}>
         <div className="md-viewer-header">
-          <h3>{title || '文档预览'}</h3>
-          <button className="btn btn-sm" onClick={onClose} title="关闭 (Esc)">✕ 关闭</button>
+          <h3>{title || t('components.markdownViewer.preview')}</h3>
+          <button className="btn btn-sm" onClick={onClose} title={t('components.markdownViewer.closeTitle')}>{t('components.markdownViewer.close')}</button>
         </div>
         <div className="md-viewer-body">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>

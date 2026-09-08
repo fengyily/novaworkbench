@@ -6,12 +6,13 @@
 // html2canvas — which html2pdf uses under the hood — renders reliably), and
 // hand it to html2pdf.js to produce an A4 PDF download.
 import { renderToStaticMarkup } from 'react-dom/server';
+import i18next from 'i18next';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 export interface DesignExportInput {
   title: string;
-  meta?: string; // e.g. "项目名 · req_xxx"
+  meta?: string; // e.g. "project-name · req_xxx"
   markdown: string;
   filename?: string;
 }
@@ -56,18 +57,18 @@ const STYLES = `
 `;
 
 function sanitizeFilename(name: string): string {
-  return name.replace(/[\\/:*?"<>|]/g, '_').slice(0, 80).trim() || '技术方案';
+  return name.replace(/[\\/:*?"<>|]/g, '_').slice(0, 80).trim() || i18next.t('exportDesign.designFallback');
 }
 
 export async function exportDesignPdf(input: DesignExportInput): Promise<void> {
   const { title, meta, markdown } = input;
-  const filename = `${sanitizeFilename(input.filename || title)}-技术方案.pdf`;
+  const filename = `${sanitizeFilename(input.filename || title)}-${i18next.t('exportDesign.pdfSuffix')}.pdf`;
 
   const body = renderToStaticMarkup(
     <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>,
   );
 
-  const stamp = new Date().toLocaleString('zh-CN', { hour12: false });
+  const stamp = new Date().toLocaleString(i18next.language || 'zh-CN', { hour12: false });
 
   const container = document.createElement('div');
   container.style.position = 'fixed';
@@ -80,7 +81,7 @@ export async function exportDesignPdf(input: DesignExportInput): Promise<void> {
     <div class="pdf-doc">
       <div class="pdf-header">
         <h1>${escapeHtml(title)}</h1>
-        <div class="pdf-meta">${meta ? escapeHtml(meta) + ' · ' : ''}生成于 ${escapeHtml(stamp)}</div>
+        <div class="pdf-meta">${meta ? escapeHtml(meta) + ' · ' : ''}${escapeHtml(i18next.t('exportDesign.generatedAt'))} ${escapeHtml(stamp)}</div>
       </div>
       <div class="pdf-body">${body}</div>
     </div>

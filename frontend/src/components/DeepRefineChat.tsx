@@ -1,7 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { API_BASE, authedFetch, kindChatPlaceholders, kindOf, requirementsApi, wizardApi, type Kind } from '../api/client';
+import { useTranslation } from 'react-i18next';
+
+import { API_BASE, authedFetch, kindChatPlaceholderKeys, kindOf, requirementsApi, wizardApi, type Kind } from '../api/client';
+import { tLabel } from '../i18n/label';
 import { createEventStream, type EventStream } from '../api/stream';
 import AtMentionTextarea from './AtMentionTextarea';
 import { appendLogLine, type LogLine, type UsageInfo, computeUsage } from '../utils/logLines';
@@ -52,7 +55,8 @@ export default function DeepRefineChat({
 }: Props) {
   const [expanded, setExpanded] = useState(true);
   const { isFullscreen, toggle: toggleFullscreen, exit: exitFullscreen } = useFullscreen();
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const { t } = useTranslation();
+    const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [chatting, setChatting] = useState(false);
   // toolLog: live activity feed (phase + tool-call labels)
@@ -493,7 +497,7 @@ export default function DeepRefineChat({
     : reqKind === 'issue'
       ? IconAnalyst
       : IconAnalyst;
-  const chatPlaceholder = kindChatPlaceholders[reqKind];
+  const chatPlaceholder = tLabel(t, kindChatPlaceholderKeys as Record<string, string>, reqKind);
   // First-turn kickoff prompt tailored per kind. The backend's prompt blocks
   // (analyst-tail) carry the detailed instructions; this is just the user-
   // facing seed message so the AI has context to react to.

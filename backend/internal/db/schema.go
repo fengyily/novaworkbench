@@ -223,6 +223,11 @@ CREATE TABLE IF NOT EXISTS users (
 	password_hash  TEXT NOT NULL DEFAULT '',
 	status         TEXT NOT NULL DEFAULT 'active',
 	is_admin       INTEGER NOT NULL DEFAULT 0,
+	-- locale: the user's preferred UI language (BCP-47, e.g. "zh-CN" /
+	-- "en-US"). Empty = no explicit preference — the frontend falls back to
+	-- the browser-level choice (localStorage nova_lang / navigator.language).
+	-- Written by PUT /api/auth/locale; must match the i18n whitelist.
+	locale         TEXT NOT NULL DEFAULT '',
 	last_login_at  DATETIME,
 	created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -392,6 +397,11 @@ CREATE INDEX IF NOT EXISTS idx_sched_run_at  ON scheduled_tasks(run_at);
 // column already exists — migrate ignores the dialect-specific "duplicate
 // column" error.
 var alterColumns = []string{
+	// locale: per-user UI language preference (BCP-47 tag, e.g. "zh-CN").
+	// Empty = follow the browser-level setting. See handler/auth.go
+	// UpdateLocale — the value is validated against the frontend's supported
+	// language whitelist before it is written.
+	`ALTER TABLE users ADD COLUMN locale TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN platform_type TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN platform_token_id TEXT NOT NULL DEFAULT ''`,
 	// install_job_id: persisted JobStore job id for the running install on an

@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   preflightApi,
   authedFetch,
   type PreflightDep,
   type PreflightSnapshot,
 } from '../api/client';
+import { errorMessage } from '../utils/errMsg';
 
 interface LogLine {
   type: string;
@@ -20,13 +22,16 @@ interface InstallState {
   abort?: () => void;
 }
 
-const STATUS_LABEL: Record<string, string> = {
-  installed: '已安装',
-  missing: '未安装',
-  running: '安装中',
+// Status labels are resolved at render time (module-level strings would
+// freeze the language at import time).
+const STATUS_LABEL_KEYS: Record<string, string> = {
+  installed: 'settings.preflight.status.installed',
+  missing: 'settings.preflight.status.missing',
+  running: 'settings.preflight.status.running',
 };
 
 export default function SettingsPreflight() {
+  const { t } = useTranslation();
   const [snap, setSnap] = useState<PreflightSnapshot | null>(null);
   const [error, setError] = useState('');
   const [installing, setInstalling] = useState<Record<string, InstallState>>({});
@@ -37,7 +42,7 @@ export default function SettingsPreflight() {
       setSnap(data);
       setError('');
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   };
 
@@ -68,7 +73,7 @@ export default function SettingsPreflight() {
         signal: ctrl.signal,
       });
       if (!res.ok || !res.body) {
-        throw new Error(`SSE 打开失败: HTTP ${res.status}`);
+        throw new Error(t('settings.preflight.sseOpenFailed', { status: res.status }));
       }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -127,12 +132,12 @@ export default function SettingsPreflight() {
         }
       })();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     }
   };
 
   if (!snap) {
-    return <div className="settings-empty">{error || '加载中...'}</div>;
+    return <div className="settings-empty">{error || t('settings.preflight.loading')}</div>;
   }
 
   const overallOk = snap.deps.filter(d => d.required).every(d => d.installed);
@@ -141,22 +146,20 @@ export default function SettingsPreflight() {
     <div className="settings-section">
       <div className="section-header">
         <div>
-          <h3 className="settings-section-title">环境依赖</h3>
+          <h3 className="settings-section-title">{t('settings.preflight.title')}</h3>
           <p className="settings-section-desc">
-            NovaWorkbench 在启动时会自动检查 Claude CLI、Node.js、git、docker 等运行依赖。
-            缺失依赖时后端会尽力自动安装；此处可手动重装或查看手动安装指引。
-            当前 <code>CLAUDE_BIN</code>：
-            <code>{snap.claude_bin || '(PATH 中寻找 claude)'}</code>。
+            {t('settings.preflight.descPrefix')}<code>CLAUDE_BIN</code>：
+            <code>{snap.claude_bin || t('settings.preflight.claudeBinPlaceholder')}</code>{t('settings.preflight.descSuffix')}
           </p>
         </div>
-        <button className="btn btn-secondary" onClick={refresh}>重新检测</button>
+        <button className="btn btn-secondary" onClick={refresh}>{t('settings.preflight.refresh')}</button>
       </div>
 
       {error && <div className="form-error">{error}</div>}
 
       {!overallOk && (
         <div className="form-hint" style={{ marginBottom: 12, color: '#b45309' }}>
-          必需依赖未全部就绪，AI 相关功能可能不可用。
+          {t('settings.preflight.notReady')}
         </div>
       )}
 
@@ -175,7 +178,8 @@ export default function SettingsPreflight() {
 }
 
 function DepCard({ dep, state, onInstall }: { dep: PreflightDep; state?: InstallState; onInstall: () => void }) {
-  const status: keyof typeof STATUS_LABEL = state?.done ? (state.status === 'done' ? 'installed' : 'missing')
+  const { t } = useTranslation();
+  const status: keyof typeof STATUS_LABEL_KEYS = state?.done ? (state.status === 'done' ? 'installed' : 'missing')
     : state ? 'running'
     : dep.installed ? 'installed' : 'missing';
   const statusColor = status === 'installed' ? '#10B981' : status === 'running' ? '#4F46E5' : '#b45309';
@@ -186,14 +190,14 @@ function DepCard({ dep, state, onInstall }: { dep: PreflightDep; state?: Install
         <div>
           <div style={{ fontSize: 15, fontWeight: 600 }}>
             {dep.label}
-            {dep.required && <span style={{ color: '#b91c1c', marginLeft: 6, fontSize: 12 }}>必需</span>}
+            {dep.required && <span style={{ color: '#b91c1c', marginLeft: 6, fontSize: 12 }}>{t('settings.preflight.required')}</span>}
             {dep.depends_on.length > 0 && (
               <span style={{ color: '#64748B', marginLeft: 6, fontSize: 12 }}>
-                依赖：{dep.depends_on.join(', ')}
+                {t('settings.preflight.dependsOn', { list: dep.depends_on.join(', ') })}
               </span>
             )}
           </div>
-          <div style={{ fontSize: 13, color: statusColor, marginTop: 4 }}>{STATUS_LABEL[status]}</div>
+          <div style={{ fontSize: 13, color: statusColor, marginTop: 4 }}>{t(STATUS_LABEL_KEYS[status])}</div>
           {dep.installed && dep.path && (
             <div style={{ fontSize: 12, color: '#64748B', marginTop: 4, fontFamily: 'monospace' }}>
               {dep.path}{dep.version ? `  (${dep.version})` : ''}
@@ -209,13 +213,13 @@ function DepCard({ dep, state, onInstall }: { dep: PreflightDep; state?: Install
           disabled={status === 'running'}
           style={{ whiteSpace: 'nowrap' }}
         >
-          {status === 'running' ? '安装中...' : dep.installed ? '重新安装' : '一键安装'}
+          {status === 'running' ? t('settings.preflight.installing') : dep.installed ? t('settings.preflight.reinstall') : t('settings.preflight.install')}
         </button>
       </div>
 
       {!dep.installed && dep.manual && status !== 'running' && (
         <div style={{ marginTop: 10, padding: 10, background: '#f8fafc', borderRadius: 6, fontSize: 12, color: '#475569' }}>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>手动安装：</div>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>{t('settings.preflight.manualTitle')}</div>
           <code style={{ wordBreak: 'break-all' }}>{dep.manual}</code>
         </div>
       )}
@@ -229,7 +233,7 @@ function DepCard({ dep, state, onInstall }: { dep: PreflightDep; state?: Install
           ))}
           {state.done && (
             <div style={{ marginTop: 8, color: state.status === 'done' ? '#86efac' : '#fca5a5' }}>
-              {state.status === 'done' ? `安装完成 (exit ${state.exit_code})` : `安装失败 (exit ${state.exit_code})`}
+              {state.status === 'done' ? t('settings.preflight.doneOk', { code: state.exit_code }) : t('settings.preflight.doneFail', { code: state.exit_code })}
             </div>
           )}
         </div>

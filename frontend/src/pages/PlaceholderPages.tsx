@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { projectsApi, type Project } from '../api/client';
+import { errorMessage } from '../utils/errMsg';
+import { fmtDateTime } from '../utils/intl';
 
 interface PlaceholderPageProps {
   title: string;
@@ -9,6 +12,7 @@ interface PlaceholderPageProps {
 }
 
 function PlaceholderPage({ title, emoji, description }: PlaceholderPageProps) {
+  const { t } = useTranslation();
   return (
     <div style={{ width: '100%' }}>
       <h1 className="page-title">{emoji} {title}</h1>
@@ -20,14 +24,15 @@ function PlaceholderPage({ title, emoji, description }: PlaceholderPageProps) {
         textAlign: 'center',
         color: 'var(--color-text-secondary)',
       }}>
-        <p style={{ fontSize: 16, marginBottom: 8 }}>{description || '功能开发中...'}</p>
-        <p style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>Phase 2+ 实现</p>
+        <p style={{ fontSize: 16, marginBottom: 8 }}>{description || t('projects.placeholders.developing')}</p>
+        <p style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>{t('projects.placeholders.phase')}</p>
       </div>
     </div>
   );
 }
 
 export function ProjectsList() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const [view, setView] = useState<'active' | 'trash'>('active');
   const [projects, setProjects] = useState<Project[]>([]);
@@ -58,7 +63,7 @@ export function ProjectsList() {
     setLoading(true);
     projectsApi.list()
       .then(data => setProjects(Array.isArray(data) ? data : []))
-      .catch(err => setError(err.message))
+      .catch(err => setError(errorMessage(err)))
       .finally(() => setLoading(false));
   }, []);
 
@@ -66,7 +71,7 @@ export function ProjectsList() {
     setLoading(true);
     projectsApi.trash()
       .then(data => setTrashProjects(Array.isArray(data) ? data : []))
-      .catch(err => setError(err.message))
+      .catch(err => setError(errorMessage(err)))
       .finally(() => setLoading(false));
   }, []);
 
@@ -83,7 +88,11 @@ export function ProjectsList() {
   }, [toast]);
 
   const statusBadge = (status: string) => {
-    const map: Record<string, string> = { active: '🟢 active', archived: '📦 archived', missing: '⚠️ missing' };
+    const map: Record<string, string> = {
+      active: t('projects.status.active'),
+      archived: t('projects.status.archived'),
+      missing: t('projects.status.missing'),
+    };
     return map[status] || status;
   };
 
@@ -107,12 +116,14 @@ export function ProjectsList() {
     try {
       await projectsApi.remove(deleteTarget.id, { delete_dir: deleteDir });
       setProjects(prev => prev.filter(p => p.id !== deleteTarget.id));
-      setToast(deleteDir ? '已删除项目及目录（可在回收站恢复）' : '已删除项目（目录已保留，可在回收站恢复）');
+      setToast(t(deleteDir
+        ? 'projects.toast.deletedWithDir'
+        : 'projects.toast.deleted'));
       setDeleteTarget(null);
       setDeleteDir(false);
       setAcknowledgedRisk(false);
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorMessage(e));
     } finally {
       setDeleting(false);
     }
@@ -124,12 +135,12 @@ export function ProjectsList() {
     setError(null);
     try {
       await projectsApi.restore(p.id);
-      setToast('已恢复项目并重新 clone');
+      setToast(t('projects.toast.restored'));
       // Refresh trash and active lists.
       await loadTrash();
       await loadActive();
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorMessage(e));
     } finally {
       setRestoringId(null);
     }
@@ -141,10 +152,12 @@ export function ProjectsList() {
     setError(null);
     try {
       const res = await projectsApi.backfillDescriptions();
-      setToast(`补齐完成：生成 ${res.updated}，跳过 ${res.skipped}，失败 ${res.failed}`);
+      setToast(t('projects.toast.backfillDone', {
+        updated: res.updated, skipped: res.skipped, failed: res.failed,
+      }));
       await loadActive();
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorMessage(e));
     } finally {
       setBackfilling(false);
     }
@@ -166,11 +179,11 @@ export function ProjectsList() {
     try {
       await projectsApi.purge(purgeTarget.id);
       setTrashProjects(prev => prev.filter(p => p.id !== purgeTarget.id));
-      setToast(`已彻底删除「${purgeTarget.name}」`);
+      setToast(t('projects.toast.purged', { name: purgeTarget.name }));
       setPurgeTarget(null);
       setPurgeAck(false);
     } catch (e) {
-      setError((e as Error).message);
+      setError(errorMessage(e));
     } finally {
       setPurging(false);
     }
@@ -193,9 +206,9 @@ export function ProjectsList() {
     return (
       <div className="modal-overlay" onClick={closeDeleteModal}>
         <div className="modal-box" onClick={e => e.stopPropagation()}>
-          <h3>删除项目</h3>
+          <h3>{t('projects.deleteModal.title')}</h3>
           <div className="modal-confirm-text">
-            确认删除项目 <strong>{target.name}</strong>？
+            {t('projects.deleteModal.confirmPrefix')} <strong>{target.name}</strong>{t('projects.deleteModal.confirmSuffix')}
           </div>
 
           <label className="modal-check-row">
@@ -205,7 +218,7 @@ export function ProjectsList() {
               onChange={e => { setDeleteDir(e.target.checked); setAcknowledgedRisk(false); }}
             />
             <span>
-              同时删除项目目录
+              {t('projects.deleteModal.deleteDir')}
               <div className="modal-check-path break-all">{target.local_path}</div>
             </span>
           </label>
@@ -213,10 +226,10 @@ export function ProjectsList() {
           {showRiskStep && (
             <div className="modal-risk-panel">
               <div className="modal-risk-title">
-                ⚠️ 此操作将永久删除目录及其中所有文件，且不可恢复
+                {t('projects.deleteModal.riskTitle')}
               </div>
               <div className="modal-risk-desc">
-                删除后可通过回收站重新 git clone 恢复（需要项目已配置远程地址）。
+                {t('projects.deleteModal.riskDesc')}
               </div>
               <label className="modal-risk-check">
                 <input
@@ -224,19 +237,21 @@ export function ProjectsList() {
                   checked={acknowledgedRisk}
                   onChange={e => setAcknowledgedRisk(e.target.checked)}
                 />
-                <span>我已了解风险，确认继续</span>
+                <span>{t('projects.deleteModal.ack')}</span>
               </label>
             </div>
           )}
 
           <div className="modal-actions btn-row-2col">
-            <button className="btn" onClick={closeDeleteModal} disabled={deleting}>取消</button>
+            <button className="btn" onClick={closeDeleteModal} disabled={deleting}>{t('projects.deleteModal.cancel')}</button>
             <button
               className="btn btn-danger"
               onClick={handleDelete}
               disabled={!canConfirm || deleting}
             >
-              {deleting ? '删除中…' : (deleteDir ? '确认永久删除' : '确认删除')}
+              {deleting
+                ? t('projects.deleteModal.deleting')
+                : (deleteDir ? t('projects.deleteModal.confirmPurgeDir') : t('projects.deleteModal.confirmDelete'))}
             </button>
           </div>
         </div>
@@ -256,19 +271,19 @@ export function ProjectsList() {
     return (
       <div className="modal-overlay" onClick={closePurgeModal}>
         <div className="modal-box" onClick={e => e.stopPropagation()}>
-          <h3 className="modal-title-danger">⚠️ 彻底删除项目</h3>
+          <h3 className="modal-title-danger">{t('projects.purgeModal.title')}</h3>
           <div className="modal-confirm-text">
-            将永久删除 <strong>{target.name}</strong> 的数据库记录，
-            以及其下所有需求、知识库、记忆、运行配置、Token 用量记录。
+            {t('projects.purgeModal.confirmPrefix')} <strong>{target.name}</strong>
+            {t('projects.purgeModal.confirmSuffix')}
           </div>
           <div className="modal-risk-panel">
-            <div className="modal-risk-title">此操作不可恢复</div>
+            <div className="modal-risk-title">{t('projects.purgeModal.riskTitle')}</div>
             {target.deleted_dir === 0 && target.local_path ? (
               <div>
-                项目目录 <code className="break-all">{target.local_path}</code> 也将被删除。
+                {t('projects.purgeModal.dirWillDeletePrefix')} <code className="break-all">{target.local_path}</code> {t('projects.purgeModal.dirWillDeleteSuffix')}
               </div>
             ) : (
-              <div>项目目录此前已删除，此操作仅清理数据库记录。</div>
+              <div>{t('projects.purgeModal.dirAlreadyDeleted')}</div>
             )}
           </div>
           <label className="modal-risk-check">
@@ -277,16 +292,16 @@ export function ProjectsList() {
               checked={purgeAck}
               onChange={e => setPurgeAck(e.target.checked)}
             />
-            <span>我已了解风险，确认继续</span>
+            <span>{t('projects.purgeModal.ack')}</span>
           </label>
           <div className="modal-actions btn-row-2col">
-            <button className="btn" onClick={closePurgeModal} disabled={purging}>取消</button>
+            <button className="btn" onClick={closePurgeModal} disabled={purging}>{t('projects.purgeModal.cancel')}</button>
             <button
               className="btn btn-danger"
               onClick={handlePurge}
               disabled={!purgeAck || purging}
             >
-              {purging ? '删除中…' : '确认彻底删除'}
+              {purging ? t('projects.purgeModal.deleting') : t('projects.purgeModal.confirm')}
             </button>
           </div>
         </div>
@@ -301,14 +316,14 @@ export function ProjectsList() {
     <div style={{ width: '100%', position: 'relative' }}>
       <div className="section-header" style={{ marginBottom: 20 }}>
         <h1 className="page-title" style={{ marginBottom: 0 }}>
-          {view === 'active' ? '📁 项目' : '🗑 回收站'}
+          {view === 'active' ? t('projects.list.title') : t('projects.list.trashTitle')}
         </h1>
         <div style={{ display: 'flex', gap: 8 }}>
           <button
             className={view === 'trash' ? 'btn' : 'btn btn-primary'}
             onClick={() => setView(view === 'active' ? 'trash' : 'active')}
           >
-            {view === 'active' ? '🗑 回收站' : '← 返回项目列表'}
+            {view === 'active' ? t('projects.list.openTrash') : t('projects.list.backToList')}
           </button>
           {view === 'active' && (
             <>
@@ -316,12 +331,12 @@ export function ProjectsList() {
                 className="btn"
                 onClick={handleBackfill}
                 disabled={backfilling}
-                title="为缺少简介的项目自动生成 AI 简介"
+                title={t('projects.list.backfillTitle')}
               >
-                {backfilling ? '生成中…' : '🤖 生成缺失简介'}
+                {backfilling ? t('projects.list.generating') : t('projects.list.backfill')}
               </button>
               <button className="btn btn-primary" onClick={() => navigate('/projects/add')}>
-                + 添加
+                {t('projects.list.add')}
               </button>
             </>
           )}
@@ -341,35 +356,35 @@ export function ProjectsList() {
       )}
 
       {loading ? (
-        <div className="loading">⏳ 加载中...</div>
+        <div className="loading">{t('projects.list.loading')}</div>
       ) : list.length === 0 ? (
         view === 'active' ? (
           <div className="mobile-empty">
             <span className="mobile-empty-mark">📁</span>
-            <div className="mobile-empty-title">还没有添加项目</div>
+            <div className="mobile-empty-title">{t('projects.list.emptyTitle')}</div>
             <p className="mobile-empty-desc">
-              添加一个本地 git 仓库，或从新建一个项目目录开始。
+              {t('projects.list.emptyDesc')}
             </p>
             <button className="btn btn-primary" onClick={() => navigate('/projects/add')}>
-              + 添加项目
+              {t('projects.list.addProject')}
             </button>
           </div>
         ) : (
           <div className="empty-state">
-            <p>回收站为空</p>
+            <p>{t('projects.list.trashEmpty')}</p>
           </div>
         )
       ) : (
         <table className="project-table" style={{ width: '100%' }}>
           <thead>
             <tr>
-              <th>名称</th>
-              <th>简介</th>
-              <th>类型</th>
-              <th>路径</th>
-              <th>状态</th>
-              <th>{view === 'active' ? '更新时间' : '删除时间'}</th>
-              <th>操作</th>
+              <th>{t('projects.list.colName')}</th>
+              <th>{t('projects.list.colDesc')}</th>
+              <th>{t('projects.list.colType')}</th>
+              <th>{t('projects.list.colPath')}</th>
+              <th>{t('projects.list.colStatus')}</th>
+              <th>{view === 'active' ? t('projects.list.colUpdated') : t('projects.list.colDeleted')}</th>
+              <th>{t('projects.list.colActions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -384,25 +399,25 @@ export function ProjectsList() {
                   <td className="project-name">{p.name}</td>
                   <td className="project-desc-cell">
                     <div className="project-desc-clamp">
-                      {p.description || <span style={{ color: 'var(--color-text-muted)' }}>暂无简介</span>}
+                      {p.description || <span style={{ color: 'var(--color-text-muted)' }}>{t('projects.list.noDesc')}</span>}
                     </div>
                   </td>
                   <td><span className="type-tag">{p.project_type || 'Unknown'}</span></td>
                   <td className="path-cell" style={{ wordBreak: 'break-all' }}>
                     {p.local_path}
                     {view === 'trash' && p.deleted_dir ? (
-                      <span style={{ color: 'var(--color-warning)', fontSize: 11, marginLeft: 6 }}>目录已删</span>
+                      <span style={{ color: 'var(--color-warning)', fontSize: 11, marginLeft: 6 }}>{t('projects.list.dirDeleted')}</span>
                     ) : null}
                   </td>
                   <td><span className={`status-badge status-${p.status}`}>{statusBadge(p.status)}</span></td>
-                  <td>{new Date(view === 'active' ? p.updated_at : (p.deleted_at || p.updated_at)).toLocaleString()}</td>
+                  <td>{fmtDateTime(view === 'active' ? p.updated_at : (p.deleted_at || p.updated_at))}</td>
                   <td onClick={e => e.stopPropagation()}>
                     {view === 'active' ? (
                       <button
                         className="btn btn-sm btn-danger"
                         onClick={() => openDeleteModal(p)}
                       >
-                        删除
+                        {t('projects.list.delete')}
                       </button>
                     ) : (
                       <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
@@ -410,16 +425,16 @@ export function ProjectsList() {
                           className="btn btn-sm btn-primary"
                           onClick={() => handleRestore(p)}
                           disabled={!!restoringId || noRemote}
-                          title={noRemote ? '无远程地址，无法自动恢复' : undefined}
+                          title={noRemote ? t('projects.list.noRemoteTitle') : undefined}
                         >
-                          {restoringId === p.id ? '正在 clone…' : '恢复'}
+                          {restoringId === p.id ? t('projects.list.cloning') : t('projects.list.restore')}
                         </button>
                         <button
                           className="btn btn-sm btn-danger"
                           onClick={() => openPurgeModal(p)}
                           disabled={!!restoringId}
                         >
-                          彻底删除
+                          {t('projects.list.purge')}
                         </button>
                       </div>
                     )}
@@ -434,16 +449,16 @@ export function ProjectsList() {
       {renderDeleteModal()}
       {renderPurgeModal()}
 
-      {/* Mobile FAB: "+ 添加项目". Hidden on the trash view where adding
+      {/* Mobile FAB: add project. Hidden on the trash view where adding
           projects doesn't make sense. CSS (.fab) hides it on desktop. */}
       {view === 'active' && (
         <button
           className="fab fab-extended"
-          aria-label="添加项目"
+          aria-label={t('projects.list.addProjectShort')}
           onClick={() => navigate('/projects/add')}
         >
           <span>＋</span>
-          <span>添加项目</span>
+          <span>{t('projects.list.addProjectShort')}</span>
         </button>
       )}
     </div>
@@ -457,22 +472,37 @@ export function ProjectsList() {
 // soft-delete modal, but the messaging is sterner because the row is gone
 // for good (no Restore can bring it back).
 
+// Placeholder takes translation KEYS (not strings) so these stub pages stay
+// live against a language switch. `tStrict` is keyed against the resource
+// tree, so we widen it to accept the dynamic `${base}.title` keys here.
+function Placeholder({ title, emoji }: { title: string; emoji: string }) {
+  const { t: tStrict } = useTranslation();
+  const t = tStrict as unknown as (key: string) => string;
+  return (
+    <PlaceholderPage
+      title={t(`${title}.title`)}
+      emoji={emoji}
+      description={t(`${title}.desc`)}
+    />
+  );
+}
+
 export function Requirements() {
-  return <PlaceholderPage title="需求看板" emoji="📋" description="Kanban 需求管理和 AI 拆解" />;
+  return <Placeholder title="projects.placeholders.requirements" emoji="📋" />;
 }
 
 export function Knowledge() {
-  return <PlaceholderPage title="知识库" emoji="🧠" description="项目知识管理、语义搜索、AI Review" />;
+  return <Placeholder title="projects.placeholders.knowledge" emoji="🧠" />;
 }
 
 export function Chat() {
-  return <PlaceholderPage title="AI 对话" emoji="💬" description="基于项目上下文的智能对话面板" />;
+  return <Placeholder title="projects.placeholders.chat" emoji="💬" />;
 }
 
 export function Reports() {
-  return <PlaceholderPage title="周报" emoji="📝" description="自动生成开发周报" />;
+  return <Placeholder title="projects.placeholders.reports" emoji="📝" />;
 }
 
 export function Settings() {
-  return <PlaceholderPage title="设置" emoji="⚙️" description="LLM 配置、代码风格、使用习惯" />;
+  return <Placeholder title="projects.placeholders.settings" emoji="⚙️" />;
 }

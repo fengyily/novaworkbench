@@ -1,0 +1,41 @@
+// wizard — WizardPage (the pre-Requirement creation wizard) plus the shared
+// labels rendered by ModelSelect and the analyst/architect/dev stage panels.
+export const wizard = {
+  page: {
+    title: '需求向导',
+    desc: '向 AI 描述你的需求，自动整理为结构化记录并启动开发。',
+    projectLabel: '项目',
+    projectPlaceholder: '选择项目',
+    inputPlaceholder: '描述你的需求，AI 会帮你完善...',
+    send: '发送',
+    back: '← 返回',
+    confirm: '确认需求，开始编码 →',
+    finalize: '汇总',
+    step3TitlePrefix: '🚀 开始编码 — ',
+    finalReqTitle: '📋 确认的需求',
+    projectLine: '项目: ',
+    ctaHint: 'Claude Code CLI 将读取项目文件并实现上述需求。',
+    startCoding: '🚀 启动 Claude Code 开始编码',
+    coding: '🔄 Claude Code 正在执行...',
+    editReq: '← 修改需求',
+    doneBack: '完成，返回仪表盘',
+    confirmMinTurns: '请至少与 AI 完成一轮对话后再继续',
+    errCreateProject: '创建项目失败',
+    greeting: '让我来帮你完善需求。请描述你想实现的功能。',
+    defaultRequirementTitle: '新需求',
+    step1Label: '创建项目',
+    step2Label: '完善需求',
+    step3Label: '开始编码',
+    newProjectTitle: '📁 新建项目',
+    projectNameLabel: '项目名称',
+    projectNamePlaceholder: '例如: nova-workbench',
+    projectPathLabel: '项目目录',
+    nextRefine: '下一步：完善需求 →',
+    step2Title: '💬 完善需求',
+    roleAI: '🤖 AI',
+    roleUser: '👤 你',
+    thinking: '⏳ 思考中...',
+  },
+} as const;
+
+export default wizard;
