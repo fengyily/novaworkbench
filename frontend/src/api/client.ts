@@ -471,6 +471,13 @@ export interface Requirement {
   // deleted after the requirement was developed on it.
   agent_server_id?: string;
   agent_server_name?: string;
+  // Development-mode provenance for the coding stage, stamped when StartCoding
+  // runs. 'session' = fork the design/analysis session (legacy default —
+  // Claude inherits the full conversation). 'design' = fresh session, hand
+  // the stored design doc to the agent via the -p prompt. Empty/undefined
+  // = never coded or predates this field; the UI shows no badge in that
+  // case rather than guessing "session".
+  dev_mode?: '' | 'session' | 'design';
   created_at: string; updated_at: string;
   completed_at?: string;
 }
@@ -661,6 +668,14 @@ export interface StartCodingReq {
   agent_server_id?: string;
   /** false = developer persona direct implementation; true = sub-task split. */
   split_tasks?: boolean;
+  /**
+   * Coding session threading strategy. 'session' = fork the design/analysis
+   * session (legacy default, Claude inherits the conversation). 'design' =
+   * fresh session, hand the stored design doc to the agent via the -p
+   * prompt. Empty/undefined = backend falls back to the requirement row's
+   * persisted value (or 'session' on rows that predate dev_mode).
+   */
+  dev_mode?: '' | 'session' | 'design';
 }
 
 export const wizardApi = {
@@ -698,7 +713,30 @@ export const wizardApi = {
    * StreamJob SSE uses the same handler internally for live progress.
    */
   getJob: (jobId: string) => api.get<RunJob>(`/api/wizard/jobs/${jobId}`),
+  /**
+   * Snapshot of all currently-running wizard jobs (across every project in
+   * this backend process). Used by the requirement list / detail pages to
+   * badge "Claude 工作中" on rows whose requirement_id appears in the
+   * returned set. Backed by GET /api/wizard/active-jobs which walks the
+   * in-memory JobStore ring buffer (cap 50). 5s polling cadence on the
+   * frontend — see RequirementDetail / ProjectDetail useEffect.
+   */
+  listActiveJobs: () => api.get<{ jobs: ActiveJob[] }>('/api/wizard/active-jobs'),
 };
+
+/**
+ * Per-job projection returned by GET /api/wizard/active-jobs. Intentionally
+ * minimal — the frontend only needs to know "is requirement X being worked
+ * on right now?" so we surface only id + requirement_id + status + the
+ * free-form type label. `status` is always "running" while the job is in
+ * the ring buffer (finished jobs are filtered out server-side).
+ */
+export interface ActiveJob {
+  job_id: string;
+  requirement_id: string;
+  status: 'running';
+  type: string;
+}
 
 export interface RunStatus {
   status: 'running' | 'done' | 'error' | 'stopped';

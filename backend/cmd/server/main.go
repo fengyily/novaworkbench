@@ -433,6 +433,7 @@ func main() {
 	mux.HandleFunc("POST /api/wizard/continue-coding", wizardH.ContinueCoding)
 	mux.HandleFunc("GET /api/wizard/jobs/{id}", wizardH.GetJob)
 	mux.HandleFunc("GET /api/wizard/jobs/{id}/stream", wizardH.StreamJob)
+	mux.HandleFunc("GET /api/wizard/active-jobs", wizardH.GetActiveJobs)
 	mux.HandleFunc("POST /api/wizard/refine-doc", wizardH.RefineDoc)
 	mux.HandleFunc("POST /api/wizard/apply-doc", wizardH.ApplyDoc)
 

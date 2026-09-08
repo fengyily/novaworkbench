@@ -35,6 +35,14 @@ type Job struct {
 	// GetJob + the job_done SSE frame can surface it without a DB round-trip
 	// while the job is still in the in-memory ring buffer.
 	Model string `json:"model"`
+	// Type is a free-form label set by the wizard handler right after Create
+	// (e.g. "analyst_chat" | "architect_design" | "apply_doc" |
+	// "start_coding" | "adjust_coding" | "continue_coding"). Survives in
+	// the ring buffer only — old in-flight jobs from a pre-upgrade process
+	// may have an empty Type; that's accepted (ActiveJobs consumers only
+	// care about requirement_id). Used by the global active-jobs endpoint
+	// to surface the wizard pipeline state to list / detail pages.
+	Type string `json:"type,omitempty"`
 	mu    sync.RWMutex
 	subs  []chan LogLine
 	// lineCarry holds an unfinished line between successive Write calls so a
@@ -47,6 +55,17 @@ type Job struct {
 func (j *Job) SetModel(model string) {
 	j.mu.Lock()
 	j.Model = model
+	j.mu.Unlock()
+}
+
+// SetType records the wizard pipeline label on the job
+// ("analyst_chat" | "architect_design" | "apply_doc" | "start_coding" |
+// "adjust_coding" | "continue_coding") right after Create. Mirrors the
+// SetModel pattern so the ActiveJobs reader (which RLock-gates access)
+// sees a consistent value without racing the handler's assignment.
+func (j *Job) SetType(t string) {
+	j.mu.Lock()
+	j.Type = t
 	j.mu.Unlock()
 }
 
@@ -212,4 +231,46 @@ func (s *JobStore) Live(id string) bool {
 		}
 	}
 	return false
+}
+
+// ActiveJob is the minimal per-job projection surfaced by ActiveJobs so
+// callers (frontend list / detail pages polling every 5s) get just enough
+// to badge "Claude 工作中" without paying for the full log history.
+type ActiveJob struct {
+	JobID         string    `json:"job_id"`
+	RequirementID string    `json:"requirement_id"`
+	Status        JobStatus `json:"status"`
+	Type          string    `json:"type"`
+}
+
+// ActiveJobs returns a snapshot of all currently-running jobs across all
+// requirements. Used by list / detail pages to badge "Claude 工作中"
+// without N+1 polling per-requirement *_job_id columns. Cost is O(cap) —
+// the ring buffer is bounded (default 50) and a single RLock per entry is
+// enough to read Status / Type without blocking writers. Once a job has
+// Finish()ed it's no longer running and is filtered out, so the returned
+// slice only ever contains in-flight work.
+func (s *JobStore) ActiveJobs() []ActiveJob {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]ActiveJob, 0, s.size)
+	for _, j := range s.ring {
+		if j == nil {
+			continue
+		}
+		j.mu.RLock()
+		running := j.Status == JobRunning
+		t := j.Type
+		j.mu.RUnlock()
+		if !running {
+			continue
+		}
+		out = append(out, ActiveJob{
+			JobID:         j.ID,
+			RequirementID: j.RequirementID,
+			Status:        JobRunning,
+			Type:          t,
+		})
+	}
+	return out
 }

@@ -537,6 +537,20 @@ export default function RequirementDetail() {
   // Live "analyst turn running" signal lifted from DeepRefineChat, so the
   // header Claude-status badge is accurate during an in-flight turn.
   const [analystWorking, setAnalystWorking] = useState(false);
+  // DocRefineChat (refine-doc / apply-doc) reports its in-flight turns
+  // through onWorkingChange; refine-doc streams straight to the response
+  // without entering JobStore, so this callback is the only signal we
+  // get while a refine turn runs. apply-doc does enter JobStore and is
+  // also picked up by activeReqIds (below), so this state is mostly a
+  // fallback that keeps the badge in sync within the same page.
+  const [refineWorking, setRefineWorking] = useState(false);
+  // Global view of all wizard jobs currently running in this backend
+  // process, projected to just the requirement ids. Populated by polling
+  // GET /api/wizard/active-jobs every 5s. Combined with the local in-page
+  // signals (coding/designing/analystWorking/refineWorking and the
+  // persisted *_job_id columns) to drive the global claudeWorking flag
+  // and the amber pulse animation on the status badge.
+  const [activeReqIds, setActiveReqIds] = useState<Set<string>>(new Set());
 
   // Per-stage model selection (analyst / architect / developer). Seeded once
   // from the server-persisted stage model so each dropdown defaults to 已设置
@@ -577,6 +591,46 @@ export default function RequirementDetail() {
       setAgentServerId((cur) => (cur === '' ? req.agent_server_id! : cur));
     }
   }, [req?.agent_server_id]);
+
+  // Poll /api/wizard/active-jobs every 5s so the status badge + claude-status
+  // row can pulse while a coding/design/apply job is running on this
+  // requirement — even if the persisted *_job_id column hasn't refreshed
+  // yet (it lags until the goroutine finishes). The endpoint walks the
+  // in-memory JobStore ring buffer (cap 50) so it's cheap enough to poll
+  // here plus on the list page simultaneously. The `cancelled` flag prevents
+  // a late tick from stomping on the cleanup after the requirement id
+  // changes (we don't want a stale set lingering into the next requirement).
+  useEffect(() => {
+    if (!req?.id) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const { jobs } = await wizardApi.listActiveJobs();
+        if (cancelled) return;
+        setActiveReqIds(new Set(jobs.map((j) => j.requirement_id).filter(Boolean)));
+      } catch {
+        /* transient network blip — keep the previous set until the next tick */
+      }
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [req?.id]);
+
+  // Development-mode selector for the coding stage. '' = the UI hasn't
+  // picked yet (the StartCoding request omits dev_mode and the backend
+  // falls back to the persisted value, or 'session' on rows that predate
+  // the column); 'session' = 基于会话开发 (fork the design session,
+  // legacy default); 'design' = 基于方案开发 (fresh session, hand the
+  // stored design doc to the agent via the -p prompt). Persisted in
+  // requirements.dev_mode and seeded from the row so a 重新开发 preserves
+  // the previous choice by default.
+  const [devMode, setDevMode] = useState<'' | 'session' | 'design'>('');
+  useEffect(() => {
+    if (req?.dev_mode) {
+      setDevMode((cur) => (cur === '' ? req.dev_mode! : cur));
+    }
+  }, [req?.dev_mode]);
 
   // ── Scheduled-task state ──
   // pendingByType[taskType] holds the pending row (if any) so the detail
@@ -1454,6 +1508,13 @@ export default function RequirementDetail() {
           // Remote Agent-server execution. Empty string = local execution (the
           // wizardH.StartCoding default branch handles the legacy path).
           ...(agentServerId ? { agent_server_id: agentServerId } : {}),
+          // Development-mode: 'session' (default when not set — fork the
+          // design session) or 'design' (fresh session, hand the stored
+          // design doc to the agent via the -p prompt). Sent only when the
+          // user explicitly picked one; otherwise the backend falls back to
+          // the persisted requirements.dev_mode (or 'session' on legacy
+          // rows), which keeps 重新开发 consistent with the previous run.
+          ...(devMode ? { dev_mode: devMode } : {}),
         }),
       });
       const json = await res.json();
@@ -1836,9 +1897,15 @@ export default function RequirementDetail() {
   // Claude working status. Analysis signal comes from DeepRefineChat's live
   // onWorkingChange (the persisted analysis_job_id is only refreshed after a
   // turn finishes, so it lags during the turn); design/apply use the persisted
-  // active job ids; coding/design add the local streaming states.
-  const claudeWorking = coding || designing || analystWorking ||
-    !!req.analysis_job_id || !!req.design_job_id || !!req.apply_job_id;
+  // active job ids; coding/design add the local streaming states. The global
+  // `activeReqIds` set (populated by the 5s /api/wizard/active-jobs poll)
+// catches jobs that have no per-requirement *_job_id column at all —
+// currently that means start-coding / adjust-coding / continue-coding, but
+// the aggregation also double-covers analyst/design/apply so the pulse stays
+// on even when this page hasn't loaded the latest persisted pointer yet.
+  const claudeWorking = coding || designing || analystWorking || refineWorking ||
+    !!req.analysis_job_id || !!req.design_job_id || !!req.apply_job_id ||
+    activeReqIds.has(req.id);
   // Per-stage working flags drive the model-switch disable (task requirement:
   // Claude 工作状态下禁止切换模型).
   const architectWorking = designing || !!req.design_job_id;
@@ -2041,6 +2108,53 @@ export default function RequirementDetail() {
                       </div>
                     </div>
                   </label>
+                  {/* Development-mode radio: 基于会话开发（默认）= fork 方案
+                      会话继续；基于方案开发 = 创建新会话，把方案作为唯一依据
+                      交给 Agent。Seed 与 dev_source/dev_mode 保持一致；本
+                      地选项在确认启动前可改。 */}
+                  <div className="preflight-toggle" style={{ display: 'block' }}>
+                    <div className="preflight-toggle-body">
+                      <div className="preflight-toggle-title">开发模式</div>
+                      <div className="preflight-toggle-desc" style={{ marginBottom: 8 }}>
+                        选择如何把方案交给开发 Agent。默认沿用上次设置。
+                      </div>
+                      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                          <input
+                            type="radio"
+                            name="devModeModal"
+                            value="session"
+                            checked={devMode === 'session'}
+                            onChange={() => setDevMode('session')}
+                            disabled={coding}
+                          />
+                          基于会话开发
+                        </label>
+                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                          <input
+                            type="radio"
+                            name="devModeModal"
+                            value="design"
+                            checked={devMode === 'design'}
+                            onChange={() => setDevMode('design')}
+                            disabled={coding}
+                          />
+                          基于方案开发
+                        </label>
+                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer', color: 'var(--color-text-muted)' }}>
+                          <input
+                            type="radio"
+                            name="devModeModal"
+                            value=""
+                            checked={devMode === ''}
+                            onChange={() => setDevMode('')}
+                            disabled={coding}
+                          />
+                          沿用上次设置
+                        </label>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -2209,15 +2323,28 @@ export default function RequirementDetail() {
 
       <div className="detail-meta">
         <span className={`kind-badge kind-${reqKind}`} title={reqKind === 'idea' ? '想法 — 仅讨论方案，不进入开发' : reqKind === 'issue' ? '问题 — 排查根因并修复' : '需求 — 标准 3 阶段实现'}>{kindLabels[reqKind]}</span>
-        <span className={`status-badge status-${req.status}`}>{statusLabels[req.status] || req.status}</span>
+        {/* claude-pulse 叠加在 status-badge + claude-status 上：amber 涟漪 +
+            微缩放 + brightness 提升，1.6s 周期呼吸，详情页头一眼能看出当前
+            是否处于 wizard job 运行中。prefers-reduced-motion 时自动静止。 */}
+        <span className={`status-badge status-${req.status}${claudeWorking ? ' claude-pulse' : ''}`}>{statusLabels[req.status] || req.status}</span>
         <span className={`priority-tag ${req.priority}`}>{req.priority.toUpperCase()}</span>
-        <span className={`claude-status${claudeWorking ? ' working' : ''}`} title={claudeWorking ? 'Claude 正在执行分析/方案/开发任务' : '当前无 Claude 任务在运行'}>
+        <span className={`claude-status${claudeWorking ? ' working claude-pulse' : ''}`} title={claudeWorking ? 'Claude 正在执行分析/方案/开发任务' : '当前无 Claude 任务在运行'}>
           {claudeWorking ? <><IconBotBadge size={12} className="icon-mr" />Claude 工作中</> : <><IconSleep size={12} className="icon-mr" />Claude 空闲</>}
         </span>
         {project && <span className="project-tag"><IconFolder size={12} className="icon-mr" />{project.name}</span>}
         {/* 开发来源：Agent Server（含服务器名 + 模型）或本地开发。coding 阶段
             启动时写入，未开发过的需求不渲染。 */}
         <DevSourceBadge req={req} />
+        {/* 开发模式：基于会话开发（在原方案会话中继续）vs 基于方案开发
+            （创建新会话，把方案作为唯一依据交给 Agent）。仅在 coding 阶
+            段启动过后渲染，badge 文案区分两种模式以便用户一眼看出上次
+            选了哪种。 */}
+        {req.dev_mode === 'session' && (
+          <span className="dev-mode-badge dev-mode-session" title="上次基于会话开发：fork 方案会话继续">基于会话开发</span>
+        )}
+        {req.dev_mode === 'design' && (
+          <span className="dev-mode-badge dev-mode-design" title="上次基于方案开发：创建新会话并把方案交给 Agent">基于方案开发</span>
+        )}
         {req.source_requirement_id && (
           <Link
             to={`/requirements/${req.source_requirement_id}`}
@@ -2929,6 +3056,7 @@ export default function RequirementDetail() {
                 defaultModel={architectDefaultModel}
                 applyJobId={req.apply_job_id}
                 onTurnDone={refresh}
+                onWorkingChange={setRefineWorking}
                 usage={designUsage}
                 onUsage={setDesignUsage}
               />
@@ -3015,6 +3143,30 @@ export default function RequirementDetail() {
                     {agentServers.map((s) => (
                       <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
                     ))}
+                  </select>
+                </label>
+                {/* Development-mode selector. Empty = 沿用上次设置（首次
+                    默认 session）; 'session' = 基于会话开发（在原方案会话
+                    中继续，legacy 行为）; 'design' = 基于方案开发（创建新
+                    会话，把方案作为唯一依据交给 Agent）。Seed 与 dev_source
+                    一致：首次进入从 req.dev_mode 取值。 */}
+                <label style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  开发模式
+                  <select
+                    className="form-input"
+                    style={{ minWidth: 150 }}
+                    value={devMode}
+                    onChange={(e) => setDevMode(e.target.value as '' | 'session' | 'design')}
+                    disabled={coding}
+                    title={devMode === 'design'
+                      ? '创建新会话并把方案作为唯一依据交给开发 Agent'
+                      : devMode === 'session'
+                      ? '沿用原方案会话继续开发（继承需求分析与方案讨论）'
+                      : '未选择，将使用上次保存的模式（首次默认为基于会话开发）'}
+                  >
+                    <option value="">沿用上次设置</option>
+                    <option value="session">基于会话开发</option>
+                    <option value="design">基于方案开发</option>
                   </select>
                 </label>
                 {agentServers.length === 0 && (

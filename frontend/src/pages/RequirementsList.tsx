@@ -208,7 +208,7 @@ export default function RequirementsList() {
                 <th>类型</th>
                 <th>标题</th>
                 <th>状态</th>
-                <th>开发环境</th>
+                <th>模型名称</th>
                 <th>项目</th>
                 <th>优先级</th>
                 <th>Agent 服务器</th>
@@ -236,8 +236,19 @@ export default function RequirementsList() {
                         {statusLabels[r.status] || r.status}
                       </span>
                     </td>
-                    <td data-label="开发环境" className="req-row-devsource">
-                      <DevSourceBadge req={r} compact />
+                    {/* Model column — the developer-stage model actually
+                        dispatched to the Claude CLI (the value pinned in
+                        --settings env). Empty for requirements whose coding
+                        stage hasn't run yet (or that predate this column);
+                        we show a dim em-dash rather than guessing. */}
+                    <td data-label="模型名称" className="req-row-model">
+                      {r.developer_model ? (
+                        <span className="req-row-model-tag" title={r.developer_model}>
+                          🤖 {r.developer_model}
+                        </span>
+                      ) : (
+                        <span className="req-row-dim">—</span>
+                      )}
                     </td>
                     <td data-label="项目">{projectNameOf(r.project_id)}</td>
                     <td data-label="优先级">
@@ -249,19 +260,15 @@ export default function RequirementsList() {
                         <span className="req-row-dim">-</span>
                       )}
                     </td>
-                    {/* Agent-server column: which remote execution target the
-                        requirement was developed on. Empty = 本地. The joined
-                        name comes from the backend's LEFT JOIN; a deleted
-                        server falls back to 本地 so stale ids never render as
-                        raw hex. */}
-                    <td data-label="Agent 服务器">
-                      {r.agent_server_name ? (
-                        <span className="agent-server-tag" title={r.agent_server_name}>
-                          🖥️ {r.agent_server_name}
-                        </span>
-                      ) : (
-                        <span className="req-row-dim">本地</span>
-                      )}
+                    {/* Agent-server column: now carries the full DevSourceBadge
+                        (本地开发 / 🛰️ Agent server_name) so users see where
+                        the requirement actually ran. The previous plain
+                        🖥️ <name> / 本地 text was redundant with the old
+                        "开发环境" column — merging them removes the
+                        duplication. The badge itself falls back to nothing
+                        when dev_source is empty (coding never ran). */}
+                    <td data-label="Agent 服务器" className="req-row-devsource">
+                      <DevSourceBadge req={r} compact />
                     </td>
                     <td data-label="更新时间">{new Date(r.updated_at).toLocaleString()}</td>
                   </tr>
@@ -317,14 +324,11 @@ export default function RequirementsList() {
                     📁 {projectName}
                   </span>
                   <span className="req-card-mobile-spacer" />
-                  {/* Agent-server chip: only when the requirement actually ran
-                      on a remote target — mobile is space-constrained, so a
-                      local run renders as the absence of the chip. */}
-                  {r.agent_server_name && (
-                    <span className="req-card-mobile-agent" title={r.agent_server_name}>
-                      🖥️ {r.agent_server_name}
-                    </span>
-                  )}
+                  {/* Dev-environment chip — mirrors the desktop Agent-server
+                      column. DevSourceBadge returns null when the coding
+                      stage hasn't run yet, so legacy rows simply render no
+                      chip (no local-vs-agent guess). */}
+                  <DevSourceBadge req={r} compact />
                   {r.priority && (
                     <span className={`priority-dot priority-${r.priority}`} title={`优先级: ${priorityLabels[r.priority] || r.priority}`} />
                   )}

@@ -619,6 +619,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	// job id immediately. The claude turn runs in a goroutine writing progress
 	// into the job store.
 	job := h.jobs.Create(req.RequirementID)
+	job.SetType("analyst_chat")
 	job.SetModel(model)
 	if perr := h.reqSvc.UpdateAnalysisJob(req.RequirementID, job.ID); perr != nil {
 		log.Printf("[analyst-chat] failed to persist analysis_job_id for %s: %v", req.RequirementID, perr)
@@ -1176,6 +1177,13 @@ type codingRunParams struct {
 	ReadKnowledge  bool   `json:"read_knowledge"`
 	AgentServerID  string `json:"agent_server_id"` // empty = local execution; otherwise remote Agent server
 	SplitTasks     bool   `json:"split_tasks"`     // false (default) = developer persona implements directly; true = current decomposition + auto-orchestrate flow
+	// DevMode picks the coding session threading strategy: "" / "session" =
+	// fork the design (or analysis) session (legacy default, Claude
+	// inherits the full conversation); "design" = fresh session, hand the
+	// stored design doc to the agent via the -p prompt. When empty, the
+	// handler falls back to the requirement row's persisted dev_mode so a
+	// re-run that omits the field stays consistent with the previous run.
+	DevMode string `json:"dev_mode"`
 }
 
 func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
@@ -1186,6 +1194,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := h.jobs.Create(p.RequirementID)
+	job.SetType("start_coding")
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	go h.execStartCoding(&p, job, nil)
@@ -1199,6 +1208,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 // finishes. Returns the JobStore job id.
 func (h *WizardHandler) RunScheduledCoding(p *codingRunParams, cb *runCallbacks) (string, error) {
 	job := h.jobs.Create(p.RequirementID)
+	job.SetType("start_coding")
 	go h.execStartCoding(p, job, cb)
 	return job.ID, nil
 }
@@ -1250,6 +1260,23 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			if devSource == service.DevSourceLocal {
 				reqRow.AgentServerID = ""
 			}
+		}
+		// Stamp the dev-mode provenance alongside dev_source. Empty request
+		// field → fall back to the previously persisted value (so 重新开发
+		// keeps the original mode) or to "session" (legacy default for rows
+		// that predate the column). UpdateDevMode normalizes invalid values
+		// to "" so a bad client never corrupts the column.
+		devMode := p.DevMode
+		if devMode == "" && reqRow != nil {
+			devMode = reqRow.DevMode
+		}
+		if devMode == "" {
+			devMode = service.DevModeSession
+		}
+		if perr := h.reqSvc.UpdateDevMode(p.RequirementID, devMode); perr != nil {
+			log.Printf("[start-coding] failed to persist dev_mode for %s: %v", p.RequirementID, perr)
+		} else if reqRow != nil {
+			reqRow.DevMode = devMode
 		}
 	}
 	// hadWorktree records whether the upstream stage had already persisted a
@@ -1411,6 +1438,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// First-ever coding (coding_session_id == "") takes the same path, so
 	// behavior is unchanged for the genuine first pass.
 	//
+	// "基于方案开发" (dev_mode == "design"): deliberately ignore the design
+	// / analysis / coding session chain. The new session starts fresh, and
+	// the stored design doc is fed to the agent via the -p prompt further
+	// down (see designDoc block). This is what the user picked when they
+	// want a clean slate that still has the plan in hand.
+	//
 	// Graceful fallback: the legacy /wizard quick-start page has no
 	// Requirement row (no requirement_id / session ids), so it can't join
 	// the session chain. When no source session exists we fall back to a
@@ -1418,7 +1451,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// so that path keeps working.
 	sourceSID := ""
 	fork := false
-	if reqRow != nil {
+	if reqRow != nil && reqRow.DevMode != service.DevModeDesign {
 		if reqRow.DesignSessionID != "" {
 			// 重新开发 / 首次开发: fork from the design session so the new
 			// coding session carries only requirement+design, never the prior
@@ -1506,17 +1539,27 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	var prompt string
 	if sourceSID == "" {
 		// Fresh-session path: no design/analysis session to fork (skip-design
-		// "直接开发" rows, or legacy rows without session chaining). This
-		// branch used to feed a bare "## title\n\n desc" which is a generic
-		// "请实现该需求" prompt — and the developer role's system prompt
-		// only emits the [SUBTASKS_READY] sentinel when the -p message
-		// carries an explicit "开始开发/进入执行实现阶段" trigger. Without
-		// that trigger the agent did the work itself and auto-orchestration
-		// never fired (see req_04acb22d06fe3525). So we now send the SAME
+		// "直接开发" rows, "基于方案开发" mode, or legacy rows without session
+		// chaining). This branch used to feed a bare "## title\n\n desc" which
+		// is a generic "请实现该需求" prompt — and the developer role's system
+		// prompt only emits the [SUBTASKS_READY] sentinel when the -p message
+		// carries an explicit "开始开发/进入执行实现阶段" trigger. Without that
+		// trigger the agent did the work itself and auto-orchestration never
+		// fired (see req_04acb22d06fe3525). So we now send the SAME
 		// decomposition trigger as the fork branch — the only difference is
 		// wording: there is no "已完成的需求分析与技术方案" to reference, so we
 		// ask the agent to read the relevant files first to build context.
 		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未关联需求会话，使用独立会话开始开发。"})
+		// "基于方案开发" (dev_mode == "design") hand-feeds the stored design
+		// doc to the agent in the -p prompt so the new session has the plan
+		// even though it never joined the design/analysis conversation.
+		// designMarkdown is sourced from reqRow.DesignDocs (raw — plan Markdown
+		// or legacy JSON, both formats are appended verbatim and the
+		// leadIn tells the agent to treat it as the implementation plan).
+		designMarkdown := ""
+		if reqRow != nil && reqRow.DevMode == service.DevModeDesign {
+			designMarkdown = strings.TrimSpace(reqRow.DesignDocs)
+		}
 		if roleKey == "agent" {
 			// agent persona (Agent-Server remote OR local split_tasks=false):
 			// implement the requirement directly end-to-end. No decomposition
@@ -1524,8 +1567,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			// .novaworkbench/subtasks.json Write. The agent system prompt says
 			// "不要先拆分子任务" and "一次会话内完成端到端开发", so the model
 			// consistently implements instead of splitting.
-			prompt = agentDirectPrompt(p.RequirementTitle,
-				"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后直接实现需求：\n", workDir)
+			leadIn := "请先读取项目中的相关文件理解现有代码结构与需求上下文，然后直接实现需求：\n"
+			if designMarkdown != "" {
+				leadIn = "用户选择「基于方案开发」：不会接续原方案会话，而是把下面的方案作为唯一依据创建新会话直接实现。\n" +
+					"请先读取项目中的相关文件理解现有代码结构，再依据方案直接实现：\n"
+			}
+			prompt = agentDirectPrompt(p.RequirementTitle, leadIn, workDir)
 		} else {
 			// developer persona + fresh-session path + split_tasks=true.
 			// Keep the original decomposition trigger so the developer role
@@ -1533,8 +1580,21 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			// and tryAutoOrchestrate dispatches children. The split_tasks=false
 			// fresh-session case is handled by the roleKey=="agent" branch
 			// above (we route those requests through the agent role entirely).
-			prompt = developerDecomposePrompt(p.RequirementTitle,
-				"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后立即完成**任务拆分**：\n", workDir)
+			leadIn := "请先读取项目中的相关文件理解现有代码结构与需求上下文，然后立即完成**任务拆分**：\n"
+			if designMarkdown != "" {
+				leadIn = "用户选择「基于方案开发」：不会接续原方案会话，而是把下面的方案作为唯一依据创建新会话。\n" +
+					"请先读取项目中的相关文件理解现有代码结构，然后依据方案立即完成**任务拆分**：\n"
+			}
+			prompt = developerDecomposePrompt(p.RequirementTitle, leadIn, workDir)
+		}
+		// Append the stored design doc to the prompt when dev_mode is
+		// "design". Both plan Markdown and legacy JSON formats are passed
+		// verbatim — the agent's tools will surface them. The block goes
+		// AFTER the leadIn so the developer persona's "开始开发/进入执行实
+		// 现阶段" trigger (preserved inside developerDecomposePrompt) stays
+		// at the top and the [SUBTASKS_READY] orchestration path still fires.
+		if designMarkdown != "" {
+			prompt += "\n\n## 技术方案（来自 requirements.design_docs，原方案会话的最终产物）\n\n" + designMarkdown
 		}
 		if desc := strings.TrimSpace(p.RequirementDesc); desc != "" {
 			if roleKey == "agent" {
@@ -1901,6 +1961,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := h.jobs.Create(body.RequirementID)
+	job.SetType("adjust_coding")
 	job.SetModel(model)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
@@ -2119,6 +2180,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 	_, model, claudeConfigID := h.roleConfig("developer")
 
 	job := h.jobs.Create(body.RequirementID)
+	job.SetType("continue_coding")
 	job.SetModel(model)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
@@ -2422,6 +2484,7 @@ func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride, cla
 	// the job id immediately. The plan-mode claude run happens in a goroutine
 	// writing progress into the job store.
 	job := h.jobs.Create(id)
+	job.SetType("architect_design")
 	if perr := h.reqSvc.UpdateDesignJob(id, job.ID); perr != nil {
 		log.Printf("[architect-design] failed to persist design_job_id for %s: %v", id, perr)
 	}
@@ -2700,6 +2763,18 @@ func (h *WizardHandler) GetJob(w http.ResponseWriter, r *http.Request) {
 		"started_at":  job.StartedAt,
 		"finished_at": job.FinishedAt,
 	})
+}
+
+// GetActiveJobs returns all currently-running wizard jobs across the process.
+// Used by list / detail pages to badge "Claude 工作中" without N+1 polling
+// each requirement's *_job_id columns. Returns an empty array (not null) when
+// no jobs are running so the JSON shape stays stable for the frontend.
+func (h *WizardHandler) GetActiveJobs(w http.ResponseWriter, r *http.Request) {
+	jobs := h.jobs.ActiveJobs()
+	if jobs == nil {
+		jobs = []store.ActiveJob{}
+	}
+	writeJSON(w, 200, map[string]any{"jobs": jobs})
 }
 
 // toolResultContent extracts and truncates the content of a tool_result block.
@@ -4883,6 +4958,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 	// job id immediately. Claude runs in a goroutine writing progress into the
 	// job store.
 	job := h.jobs.Create(req.RequirementID)
+	job.SetType("apply_doc")
 	if perr := h.reqSvc.UpdateApplyJob(req.RequirementID, job.ID); perr != nil {
 		log.Printf("[apply-doc] failed to persist apply_job_id for %s: %v", req.RequirementID, perr)
 	}
