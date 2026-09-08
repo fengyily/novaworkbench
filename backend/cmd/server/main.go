@@ -97,6 +97,16 @@ func main() {
 	} else if migrated {
 		log.Println("[main] developer role prompt 已升级到「Write 工具提交拆分」版本")
 	}
+	// Upgrade the executor role prompt to the "直接落地实现" persona. Same
+	// substring-fingerprint + idempotent pattern as MigrateDeveloperRole: the
+	// existing row's prompt is rewritten only when it still carries the old
+	// "严禁拆任务" signature; user-customized prompts are left alone (settings
+	// page reset button is the supported opt-in for those).
+	if migrated, err := roleSvc.MigrateExecutorRole(); err != nil {
+		log.Printf("[main] executor role migrate: %v", err)
+	} else if migrated {
+		log.Println("[main] executor role prompt 已升级到「直接落地实现」版本")
+	}
 
 	// Sub-task execution is driven by in-memory goroutines — a restart leaves
 	// running/pending rows orphaned (eternal spinner in the UI). Recover them
