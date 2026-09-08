@@ -82,7 +82,8 @@ type Requirement struct {
 	// a requirements column. Populated by RequirementService.List/Get so the
 	// requirement list and detail pages can render "Agent Server 开发 · <名称>"
 	// without a second round-trip. Empty when the server row was deleted.
-	AgentServerName string `json:"agent_server_name"`
+	// omitempty keeps the Create-response JSON clean (Create does not join).
+	AgentServerName string `json:"agent_server_name,omitempty"`
 	// SubTaskCount is the number of sub_tasks rows linked to this requirement.
 	// Populated by RequirementService.Get via a SELECT COUNT(*); used by the
 	// frontend to decide whether to hide the requirement-level "追加调整"

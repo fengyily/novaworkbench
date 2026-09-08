@@ -211,6 +211,7 @@ export default function RequirementsList() {
                 <th>开发环境</th>
                 <th>项目</th>
                 <th>优先级</th>
+                <th>Agent 服务器</th>
                 <th>更新时间</th>
               </tr>
             </thead>
@@ -246,6 +247,20 @@ export default function RequirementsList() {
                         </span>
                       ) : (
                         <span className="req-row-dim">-</span>
+                      )}
+                    </td>
+                    {/* Agent-server column: which remote execution target the
+                        requirement was developed on. Empty = 本地. The joined
+                        name comes from the backend's LEFT JOIN; a deleted
+                        server falls back to 本地 so stale ids never render as
+                        raw hex. */}
+                    <td data-label="Agent 服务器">
+                      {r.agent_server_name ? (
+                        <span className="agent-server-tag" title={r.agent_server_name}>
+                          🖥️ {r.agent_server_name}
+                        </span>
+                      ) : (
+                        <span className="req-row-dim">本地</span>
                       )}
                     </td>
                     <td data-label="更新时间">{new Date(r.updated_at).toLocaleString()}</td>
@@ -302,6 +317,14 @@ export default function RequirementsList() {
                     📁 {projectName}
                   </span>
                   <span className="req-card-mobile-spacer" />
+                  {/* Agent-server chip: only when the requirement actually ran
+                      on a remote target — mobile is space-constrained, so a
+                      local run renders as the absence of the chip. */}
+                  {r.agent_server_name && (
+                    <span className="req-card-mobile-agent" title={r.agent_server_name}>
+                      🖥️ {r.agent_server_name}
+                    </span>
+                  )}
                   {r.priority && (
                     <span className={`priority-dot priority-${r.priority}`} title={`优先级: ${priorityLabels[r.priority] || r.priority}`} />
                   )}

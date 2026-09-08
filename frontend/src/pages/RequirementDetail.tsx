@@ -554,6 +554,13 @@ export default function RequirementDetail() {
   // execution (the historical default); non-empty = run claude on the chosen
   // remote target. Only `ready` servers are listed — the wizard refuses to
   // start coding on a target whose dependencies haven't been verified.
+  //
+  // agentServerId is seeded from the persisted requirements.agent_server_id so
+  // a page refresh / re-entry preselects the server the requirement last ran
+  // on (and so adjust-coding / continue-coding re-send the same target without
+  // the user re-picking it). useState's initial value only applies on first
+  // render — by then the requirement row may not have loaded yet, so we sync
+  // it in an effect below once req.agent_server_id arrives.
   const [agentServerId, setAgentServerId] = useState('');
   const [agentServers, setAgentServers] = useState<AgentServer[]>([]);
   useEffect(() => {
@@ -561,6 +568,15 @@ export default function RequirementDetail() {
       .then((rows) => setAgentServers((rows ?? []).filter((s) => s.status === 'ready')))
       .catch(() => {/* settings tab is the source of truth — silently ignore */});
   }, []);
+  // Preselect the dropdown from the persisted binding once the requirement
+  // loads. Only fills the dropdown when the user hasn't already picked
+  // something locally this session (agentServerId === ''), so switching
+  // selections mid-session is never clobbered by a re-fetch.
+  useEffect(() => {
+    if (req?.agent_server_id) {
+      setAgentServerId((cur) => (cur === '' ? req.agent_server_id! : cur));
+    }
+  }, [req?.agent_server_id]);
 
   // ── Scheduled-task state ──
   // pendingByType[taskType] holds the pending row (if any) so the detail
@@ -1498,6 +1514,11 @@ export default function RequirementDetail() {
           ...(developerModel ? { model: developerModel } : {}),
           // Per-request claude_config id — see doStartCoding for the rationale.
           ...(developerConfigId ? { claude_config_id: developerConfigId } : {}),
+          // agent_server_id is intentionally NOT sent here: adjust-coding
+          // resumes the same coding session on the same worktree, so the
+          // dev_source / agent_server_id stamped by the original StartCoding
+          // prologue stays authoritative. To switch servers the user has to
+          // re-run start-coding from scratch.
         }),
       });
       const json = await res.json();
@@ -1525,6 +1546,9 @@ export default function RequirementDetail() {
       const res = await authedFetch(`${API_BASE}/api/wizard/continue-coding`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        // agent_server_id intentionally NOT sent: continue-coding resumes the same
+        // coding session / worktree as the original StartCoding, so the
+        // existing dev_source / agent_server_id binding stays authoritative.
         body: JSON.stringify({ requirement_id: id }),
       });
       const json = await res.json();
