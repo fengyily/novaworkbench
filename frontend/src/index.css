@@ -147,6 +147,10 @@ body.no-scroll {
 }
 .btn:hover { background: var(--color-hover); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn:focus-visible, .btn-primary:focus-visible, .btn-icon:focus-visible, .btn-sm:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
 
 .btn-primary {
   background: var(--color-primary);
@@ -1102,9 +1106,73 @@ body.no-scroll {
   background: var(--color-bg);
   color: var(--color-text);
   box-sizing: border-box;
-  transition: border-color 0.15s;
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
 }
-.form-input:focus { outline: none; border-color: var(--color-primary); }
+.form-input:hover { border-color: #CBD5E1; }
+.form-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  background: var(--color-surface);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
+}
+/* Keyboard-only focus ring: for users navigating without a mouse, a
+   visible outline beats the subtle box-shadow (which the mouse-hover
+   case never produces anyway). */
+.form-input:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 1px; }
+select.form-input { cursor: pointer; }
+
+/* ───────── 精致搜索栏 ─────────
+   左侧嵌入搜索 emoji（不引图标库），右侧可选 ×清除。视觉上比默认
+   .form-input 多一圈 ring 与内嵌图标占位，避免「文本框有点丑」的廉
+   价感。req-filter-search / req-filter-select / 任何 [data-search] 都
+   可直接套用。 */
+.search-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 220px;
+  padding: 0 8px 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  font-size: 13px;
+  color: var(--color-text);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.search-input:hover { border-color: #CBD5E1; }
+.search-input:focus-within {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.10);
+}
+.search-input-icon {
+  color: var(--color-text-muted);
+  font-size: 13px;
+  flex-shrink: 0;
+  user-select: none;
+}
+.search-input input {
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-size: 13px;
+  padding: 8px 0;
+  color: inherit;
+  min-width: 0;
+}
+.search-input input::placeholder { color: var(--color-text-muted); }
+.search-input-clear {
+  background: transparent;
+  border: 0;
+  color: var(--color-text-muted);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.search-input-clear:hover { color: var(--color-text); background: var(--color-hover); }
 /* Textareas inherit font and let users resize vertically. Apply via
    `form-input form-textarea` so all `<textarea>`s in forms use the
    project body face (not the mono fallback). */

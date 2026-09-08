@@ -175,12 +175,23 @@ export default function RequirementsList() {
           ))}
         </select>
 
-        <input
-          className="form-input req-filter-search"
-          placeholder="搜索标题或描述..."
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-        />
+        <div className="search-input req-filter-search">
+          <span className="search-input-icon" aria-hidden>🔍</span>
+          <input
+            placeholder="搜索标题或描述..."
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            aria-label="按标题或描述搜索"
+          />
+          {search && (
+            <button
+              type="button"
+              className="search-input-clear"
+              aria-label="清除搜索"
+              onClick={() => setSearch('')}
+            >×</button>
+          )}
+        </div>
       </div>
 
       {/* Kind filter chips (multi-select) */}

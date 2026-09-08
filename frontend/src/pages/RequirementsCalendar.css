@@ -107,6 +107,26 @@
 .cal-month-cell.is-today {
   background: linear-gradient(180deg, rgba(79, 70, 229, 0.06), transparent 30%);
 }
+/* 双击可新建的可视提示：悬停时整格底色变蓝，且出现「+」hint。 */
+.cal-month-cell.is-creatable { cursor: copy; }
+.cal-month-cell.is-creatable:hover {
+  background: rgba(79, 70, 229, 0.05);
+}
+.cal-month-cell.is-creatable:hover::after {
+  content: '＋';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  color: var(--color-primary);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+.cal-month-cell.is-creatable:hover .cal-month-cell-body { opacity: 0.45; }
+.cal-month-cell.is-creatable:hover::after { opacity: 0.45; }
 .cal-month-cell-head {
   display: flex;
   align-items: center;
@@ -428,17 +448,42 @@
   text-align: center;
   border: 1px dashed var(--color-border);
   border-radius: var(--radius-md);
+  background: var(--color-surface);
   color: var(--color-text-secondary);
+}
+.cal-empty-title {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+.cal-empty-hint {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+.cal-empty-actions {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
 }
 
 /* ============ 移动端 ============ */
 @media (max-width: 768px) {
   .cal-view-toggle.desktop-only { display: none; }
   .cal-view-toggle.mobile-only { display: inline-flex; margin-left: auto; }
+  .cal-mobile-new { margin-left: auto; }
   .cal-month-row { min-height: 80px; }
   .cal-month-cell { padding: 2px; }
   .cal-month-cell-num { font-size: 11px; }
   .cal-bar-title { display: none; }
   .cal-bar { padding: 0 4px; }
   .cal-year { grid-template-columns: 1fr 1fr; }
+  /* 移动端没有 hover，且 dblclick 与滚动易冲突 → 关闭双击新建，改
+     靠新建按钮 + 工具栏入口（页面顶部「📅 返回列表」旁加的「新建」）。 */
+  .cal-month-cell.is-creatable { cursor: default; }
+  .cal-month-cell.is-creatable:hover,
+  .cal-month-cell.is-creatable:hover::after,
+  .cal-month-cell.is-creatable:hover .cal-month-cell-body { all: revert; }
 }

@@ -26,6 +26,7 @@ import MonthView from '../components/calendar/MonthView';
 import DayView from '../components/calendar/DayView';
 import YearView from '../components/calendar/YearView';
 import RequirementModal from '../components/calendar/RequirementModal';
+import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import './RequirementsCalendar.css';
 
 type ViewMode = 'day' | 'month' | 'year';
@@ -50,6 +51,8 @@ export default function RequirementsCalendar() {
   );
   const [search, setSearch] = useState('');
   const [modalFor, setModalFor] = useState<Requirement | null>(null);
+  // 快捷新建：日历空白格双击打开面板，draftDay / draftProject 用于回填。
+  const [createAt, setCreateAt] = useState<{ day: Date } | null>(null);
   const toastTimer = useRef<number | null>(null);
   const [toast, setToast] = useState<string>('');
 
@@ -104,8 +107,8 @@ export default function RequirementsCalendar() {
             )
           : list,
       );
-    } catch (err: any) {
-      showToast('加载失败：' + (err?.message || ''));
+    } catch {
+      showToast('加载失败，请稍后重试');
       setEvents([]);
     } finally {
       setLoading(false);
@@ -140,9 +143,9 @@ export default function RequirementsCalendar() {
         planned_end_at: newEnd,
       });
       setEvents(curr => curr.map(e => e.id === id ? { ...e, ...next } : e));
-    } catch (err: any) {
+    } catch {
       setEvents(prev);
-      showToast('拖拽失败：' + (err?.message || ''));
+      showToast('拖拽失败，已恢复原位置');
     }
   }, [events, showToast]);
 
@@ -166,9 +169,9 @@ export default function RequirementsCalendar() {
         planned_end_at: newEnd,
       });
       setEvents(curr => curr.map(e => e.id === id ? { ...e, ...next } : e));
-    } catch (err: any) {
+    } catch {
       setEvents(prev);
-      showToast('拖拽失败：' + (err?.message || ''));
+      showToast('拖拽失败，已恢复原位置');
     }
   }, [events, showToast]);
 
@@ -219,6 +222,13 @@ export default function RequirementsCalendar() {
         <button className="btn btn-icon" onClick={() => shiftFocus(1)} aria-label="下一步">›</button>
         <span className="cal-toolbar-title">{headerLabel}</span>
         {loading && <span className="cal-toolbar-loading">加载中…</span>}
+        {/* 移动端没有 dblclick 新建 → 这里补一个 ➕ 按钮。 */}
+        <button
+          className="btn btn-sm cal-mobile-new mobile-only"
+          onClick={() => setCreateAt({ day: focus })}
+        >
+          ➕ 新建
+        </button>
         {/* 移动端视图切换放工具栏 */}
         <div className="cal-view-toggle mobile-only">
           {(['day', 'month', 'year'] as ViewMode[]).map(v => (
@@ -263,12 +273,23 @@ export default function RequirementsCalendar() {
             </button>
           ))}
         </div>
-        <input
-          className="req-filter-search"
-          placeholder="搜索标题…"
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-        />
+        <div className="search-input req-filter-search">
+          <span className="search-input-icon" aria-hidden>🔍</span>
+          <input
+            placeholder="搜索标题…"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            aria-label="按标题搜索"
+          />
+          {search && (
+            <button
+              type="button"
+              className="search-input-clear"
+              aria-label="清除搜索"
+              onClick={() => setSearch('')}
+            >×</button>
+          )}
+        </div>
       </div>
 
       {view === 'month' && (
@@ -282,6 +303,7 @@ export default function RequirementsCalendar() {
             if (r) setModalFor(r);
           }}
           onMoveEvent={moveEventDays}
+          onDayDoubleClick={(day) => setCreateAt({ day })}
         />
       )}
       {view === 'day' && (
@@ -294,6 +316,7 @@ export default function RequirementsCalendar() {
             if (r) setModalFor(r);
           }}
           onMoveEvent={moveEventMinutes}
+          onDayDoubleClick={() => setCreateAt({ day: focus })}
         />
       )}
       {view === 'year' && (
@@ -324,15 +347,56 @@ export default function RequirementsCalendar() {
         />
       )}
 
+      {createAt && (
+        <CreateRequirementForm
+          projectId={projectFilter || (projects[0]?.id ?? '')}
+          onClose={() => setCreateAt(null)}
+          onCreated={req => {
+            // 新建后把 planned_start_at 设 设为 createAt 当日 00:00，让它
+            // 立刻出现在刚双击的那一格里，不用手动拖一次。
+            const iso = new Date(createAt.day);
+            iso.setHours(0, 0, 0, 0);
+            requirementsApi.updateSchedule(req.id, {
+              planned_start_at: iso.toISOString(),
+              planned_end_at: iso.toISOString(),
+            }).catch(() => {});
+            setCreateAt(null);
+            setModalFor({ ...req, planned_start_at: iso.toISOString() });
+          }}
+        />
+      )}
+
       {toast && <div className="cal-toast">{toast}</div>}
 
-      {/* 用于语义化：当月没有需求时给出明确指引 */}
+      {/* 当月没有需求时给出明确指引：说明原因 + 提供两条出路（新建 / 清除过滤）。 */}
       {!loading && events.length === 0 && (
         <div className="cal-empty">
-          <p>📭 这个时间段还没有需求。</p>
-          <button className="btn btn-primary" onClick={() => navigate('/requirements')}>
-            去新建一个需求
-          </button>
+          <p className="cal-empty-title">
+            {search || projectFilter || activeKinds.size !== 3
+              ? '当前过滤条件下没有匹配的需求。'
+              : '这段时间还没有安排任何需求。'}
+          </p>
+          <p className="cal-empty-hint">
+            {search || projectFilter || activeKinds.size !== 3
+              ? '试试清除过滤，或在日历空白处双击新建。'
+              : '在日历空白处双击即可新建并自动落到那一格。'}
+          </p>
+          <div className="cal-empty-actions">
+            {(search || projectFilter || activeKinds.size !== 3) && (
+              <button
+                className="btn"
+                onClick={() => { setSearch(''); setProjectFilter(''); setActiveKinds(new Set(['issue', 'requirement', 'idea'])); }}
+              >
+                清除过滤
+              </button>
+            )}
+            <button
+              className="btn btn-primary"
+              onClick={() => setCreateAt({ day: focus })}
+            >
+              ➕ 新建需求
+            </button>
+          </div>
         </div>
       )}
       {/* projectNameOf 暴露给可能的详情展示（暂未使用，预留给日历信息条） */}

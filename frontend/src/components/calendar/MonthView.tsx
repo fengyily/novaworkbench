@@ -22,10 +22,12 @@ interface Props {
   today: Date;
   onPickEvent: (id: string) => void;
   onMoveEvent: (id: string, dayDelta: number) => void;
+  // 双击空白格（事件条以外）→ 快捷新建。移动端用不上，调用方负责决定。
+  onDayDoubleClick?: (day: Date) => void;
 }
 
 export default function MonthView({
-  year, month0, events, today, onPickEvent, onMoveEvent,
+  year, month0, events, today, onPickEvent, onMoveEvent, onDayDoubleClick,
 }: Props) {
   const matrix = useMemo(() => monthMatrix(year, month0), [year, month0]);
   const normalized = useMemo(() => normalizeAll(events), [events]);
@@ -67,7 +69,9 @@ export default function MonthView({
                     'cal-month-cell',
                     isToday ? 'is-today' : '',
                     isOtherMonth ? 'is-other-month' : '',
+                    onDayDoubleClick ? 'is-creatable' : '',
                   ].filter(Boolean).join(' ')}
+                  onDoubleClick={() => onDayDoubleClick?.(day)}
                   onDragOver={e => { e.preventDefault(); }}
                   onDrop={e => {
                     e.preventDefault();

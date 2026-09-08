@@ -15,9 +15,11 @@ interface Props {
   now: Date;
   onPickEvent: (id: string) => void;
   onMoveEvent: (id: string, minutesDelta: number) => void;
+  // 日视图：双击空白时段 → 快捷新建（移动端不响应）。
+  onDayDoubleClick?: () => void;
 }
 
-export default function DayView({ day, events, now, onPickEvent, onMoveEvent }: Props) {
+export default function DayView({ day, events, now, onPickEvent, onMoveEvent, onDayDoubleClick }: Props) {
   const normalized = normalizeAll(events);
   const { bars, continuations } = layoutDay(normalized, day);
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -74,7 +76,11 @@ export default function DayView({ day, events, now, onPickEvent, onMoveEvent }: 
         </div>
       )}
       <div className="cal-day-scroller" ref={scrollerRef}>
-        <div className="cal-day-grid" style={{ height: 24 * DAY_PX_PER_HOUR }}>
+        <div
+          className="cal-day-grid"
+          style={{ height: 24 * DAY_PX_PER_HOUR }}
+          onDoubleClick={() => onDayDoubleClick?.()}
+        >
           {Array.from({ length: 24 }).map((_, h) => (
             <div key={h} className="cal-day-hour" style={{ top: h * DAY_PX_PER_HOUR, height: DAY_PX_PER_HOUR }}>
               <span className="cal-day-hour-label">{h}:00</span>
