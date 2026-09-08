@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -223,24 +224,50 @@ func (d *DB) OnConflict(target, setClause string) string {
 	return " ON CONFLICT(" + target + ") DO UPDATE SET " + setClause
 }
 
-// normalizeArgs adapts Go values pgx cannot encode into INTEGER columns.
+// normalizeArgs adapts Go values pgx cannot encode or Postgres rejects.
 // The SQLite/MySQL drivers implicitly map Go bools to 0/1; pgx refuses (bool
-// has no binary encoding for int4), so the wrapper does it centrally.
-// PostgreSQL-only — other dialects get the args unchanged.
+// has no binary encoding for int4), so the wrapper does it centrally. Postgres
+// also rejects strings containing invalid UTF-8 or NUL bytes in TEXT columns
+// (SQLSTATE 22021), so we sanitize those centrally too — one malformed CLI
+// stdout line (subprocess split a rune mid-sequence, or produced a stray NUL)
+// would otherwise 500 the whole write. PostgreSQL-only — other dialects get
+// the args unchanged.
 func (d *DB) normalizeArgs(args []any) []any {
 	if d.dialect != Postgres {
 		return args
 	}
 	for i, a := range args {
-		if b, ok := a.(bool); ok {
-			if b {
+		switch v := a.(type) {
+		case bool:
+			if v {
 				args[i] = int64(1)
 			} else {
 				args[i] = int64(0)
 			}
+		case string:
+			if s := sanitizeText(v); s != v {
+				args[i] = s
+			}
 		}
 	}
 	return args
+}
+
+// sanitizeText makes a string safe to write into a Postgres TEXT/VARCHAR
+// column: it replaces any invalid UTF-8 bytes with U+FFFD (so a stray byte
+// from a half-read subprocess line doesn't fail the whole INSERT) and strips
+// NUL bytes (PG rejects them with SQLSTATE 22021). It returns the input
+// unchanged when no fix-up is needed, so the hot path stays alloc-free for
+// already-clean data. UTF-8 validity of inputs is presumed — bytes that come
+// from Go string literals, json.Unmarshal, or DB round-trips are already
+// valid; this guards the rare case where a []byte→string cast over raw
+// subprocess output has a partial rune.
+func sanitizeText(s string) string {
+	if !strings.ContainsRune(s, 0x00) && utf8.ValidString(s) {
+		return s
+	}
+	s = strings.ReplaceAll(s, "\x00", "")
+	return strings.ToValidUTF8(s, "�")
 }
 
 // Exec / Query / QueryRow rebind then delegate.

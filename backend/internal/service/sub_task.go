@@ -50,10 +50,10 @@ func (s *SubTaskService) Create(reqID, title, prompt string) (*model.SubTask, er
 	}
 	if title == "" {
 		title = truncateForTitle(prompt, 40)
-	} else if len(title) > 80 {
+	} else {
 		// Hard cap so a runaway input can't produce a card header wider than
 		// the panel — the rest still lives on the prompt.
-		title = title[:80]
+		title = capTitle(title, 80)
 	}
 	id := util.NewID("st")
 	now := time.Now()
@@ -194,10 +194,7 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 	}
 	id := util.NewID("st")
 	now := time.Now()
-	adjustTitle := "调整: " + parent.Title
-	if len(adjustTitle) > 80 {
-		adjustTitle = adjustTitle[:80]
-	}
+	adjustTitle := capTitle("调整: "+parent.Title, 80)
 	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
 		source_session_id, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -242,10 +239,7 @@ func (s *SubTaskService) Redo(reqID, parentID string) (*model.SubTask, error) {
 	}
 	id := util.NewID("st")
 	now := time.Now()
-	redoTitle := "重做: " + parent.Title
-	if len(redoTitle) > 80 {
-		redoTitle = redoTitle[:80]
-	}
+	redoTitle := capTitle("重做: "+parent.Title, 80)
 	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
 		source_session_id, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -336,6 +330,20 @@ func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 		st.CompletedAt = &t
 	}
 	return &st, nil
+}
+
+// capTitle hard-caps a title at max runes. Byte-slicing here would split a
+// multi-byte rune and hand PostgreSQL an invalid UTF-8 sequence
+// (SQLSTATE 22021) when the result is INSERTed — CJK titles hit this
+// immediately when the rune boundary doesn't fall on the byte boundary.
+// Inputs are presumed already-valid UTF-8 (the DB round-trips would have
+// rejected invalid bytes at write time).
+func capTitle(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
 }
 
 // truncateForTitle renders a single-line title preview from prompt. Replaces
