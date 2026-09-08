@@ -308,6 +308,39 @@ func (h *WizardHandler) roleConfig(key string) (systemPrompt, model, configID st
 	return r.SystemPrompt, h.effectiveModelFromConfig(r.Model, r), h.activeConfigID()
 }
 
+// resolveConfigIDForRun returns the claude_config_id the wizard should pass
+// into llm.StreamOpts for a stage run, honouring the user-picked config and
+// aligning it with the user-picked model.
+//
+// Priority:
+//  1. requestCl — explicit per-request override from the UI picker
+//     (frontend ModelSelect lifts the picked config id into the request body)
+//  2. ResolveConfigForModel(model) — the config whose models list owns the
+//     picked model id; covers the case where the user picks a model from a
+//     non-active config without explicitly choosing the config (e.g. the
+//     legacy wizard page that has no ModelSelect)
+//  3. devCfgID — role binding resolved by roleConfig (covers developer-
+//     default model + role-bound gateway)
+//  4. h.activeConfigID() — legacy global fallback
+//
+// Any empty/error step falls through; the chain never errors out so a broken
+// picker state cannot block a run. Mirrors the same priority chain used by
+// sub_task_runner.go for sub-task dispatch (see f10e1cc).
+func (h *WizardHandler) resolveConfigIDForRun(requestCl, model, devCfgID string) string {
+	if requestCl != "" {
+		return requestCl
+	}
+	if model != "" {
+		if cid, err := h.claudeCfg.ResolveConfigForModel(model); err == nil && cid != "" {
+			return cid
+		}
+	}
+	if devCfgID != "" {
+		return devCfgID
+	}
+	return h.activeConfigID()
+}
+
 // effectiveModel resolves the model that will actually be dispatched to the
 // claude CLI for a role. roleModel is the role's explicit override. Falls
 // back to the role's bound config's default, then the global active
@@ -537,6 +570,10 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		CurrentAnalysis  string `json:"current_analysis"`
 		UserMessage      string `json:"user_message"`
 		Model            string `json:"model"`
+		// ClaudeConfigID — user-picked claude_configs row id (UI ModelSelect);
+		// empty = backend resolves via the priority chain in
+		// resolveConfigIDForRun.
+		ClaudeConfigID string `json:"claude_config_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("[analyst-chat] JSON decode error: %v", err)
@@ -575,6 +612,8 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	if req.Model != "" {
 		model = req.Model
 	}
+	// Align the gateway config with the picked model. See resolveConfigIDForRun.
+	claudeConfigID = h.resolveConfigIDForRun(req.ClaudeConfigID, model, claudeConfigID)
 
 	// Create the job, persist its id so a refresh can reconnect, and return the
 	// job id immediately. The claude turn runs in a goroutine writing progress
@@ -714,6 +753,10 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		RequirementTitle string `json:"requirement_title"`
 		UserMessage      string `json:"user_message"`
 		Model            string `json:"model"`
+		// ClaudeConfigID — user-picked claude_configs row id (UI ModelSelect);
+		// empty = backend resolves via the priority chain in
+		// resolveConfigIDForRun.
+		ClaudeConfigID string `json:"claude_config_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("[developer-chat] JSON decode error: %v", err)
@@ -811,6 +854,8 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 	if req.Model != "" {
 		model = req.Model
 	}
+	// Align the gateway config with the picked model. See resolveConfigIDForRun.
+	claudeConfigID = h.resolveConfigIDForRun(req.ClaudeConfigID, model, claudeConfigID)
 
 	// The resumed coding conversation already carries the requirement, analysis,
 	// and design, so a resume turn only sends the framed adjustment message. The
@@ -1123,9 +1168,14 @@ type codingRunParams struct {
 	BranchName       string `json:"branch_name"`
 	BaseBranch       string `json:"base_branch"`
 	Model            string `json:"model"`
-	ReadKnowledge    bool   `json:"read_knowledge"`
-	AgentServerID    string `json:"agent_server_id"` // empty = local execution; otherwise remote Agent server
-	SplitTasks       bool   `json:"split_tasks"`     // false (default) = developer persona implements directly; true = current decomposition + auto-orchestrate flow
+	// ClaudeConfigID is the user-picked claude_configs row id from the UI
+	// ModelSelect picker (frontend lifts selectedConfigId alongside the model).
+	// Empty = backend resolves it from the priority chain (explicit > model
+	// owner > role binding > global active) inside resolveConfigIDForRun.
+	ClaudeConfigID string `json:"claude_config_id"`
+	ReadKnowledge  bool   `json:"read_knowledge"`
+	AgentServerID  string `json:"agent_server_id"` // empty = local execution; otherwise remote Agent server
+	SplitTasks     bool   `json:"split_tasks"`     // false (default) = developer persona implements directly; true = current decomposition + auto-orchestrate flow
 }
 
 func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
@@ -1431,6 +1481,11 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	if p.Model != "" {
 		model = p.Model
 	}
+	// Align the gateway config with the picked model: when the user picked a
+	// model from a non-active config (or explicitly named a config), prefer
+	// those over the role's binding so ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN
+	// match ANTHROPIC_MODEL. See resolveConfigIDForRun for the priority chain.
+	claudeConfigID = h.resolveConfigIDForRun(p.ClaudeConfigID, model, claudeConfigID)
 	job.SetModel(model)
 	var prompt string
 	if sourceSID == "" {
@@ -2124,10 +2179,14 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	var body struct {
 		RequirementID string `json:"requirement_id"`
 		Model         string `json:"model"`
-		ReadKnowledge bool   `json:"read_knowledge"`
+		// ClaudeConfigID — user-picked claude_configs row id (UI ModelSelect);
+		// empty = backend resolves via the priority chain in
+		// resolveConfigIDForRun.
+		ClaudeConfigID string `json:"claude_config_id"`
+		ReadKnowledge  bool   `json:"read_knowledge"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	p, job, af := h.prepareArchitectDesign(body.RequirementID, body.Model, body.ReadKnowledge)
+	p, job, af := h.prepareArchitectDesign(body.RequirementID, body.Model, body.ClaudeConfigID, body.ReadKnowledge)
 	if writeIfAPIError(w, af) {
 		return
 	}
@@ -2141,7 +2200,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 // callback. Returns the JobStore job id (the scheduler records this in
 // scheduled_tasks.job_id so /api/wizard/jobs/{id} can replay the log).
 func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnowledge bool, cb *runCallbacks) (string, error) {
-	p, job, af := h.prepareArchitectDesign(requirementID, model, readKnowledge)
+	p, job, af := h.prepareArchitectDesign(requirementID, model, "", readKnowledge)
 	if af != nil {
 		return "", af
 	}
@@ -2162,7 +2221,7 @@ func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnow
 // line-for-line the same as the original synchronous section; only the
 // writeError calls have been replaced with returning *apiFailure so the
 // scheduler can reuse the same validation outcomes.
-func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride string, readKnowledge bool) (*designRunParams, *store.Job, *apiFailure) {
+func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride, claudeConfigIDOverride string, readKnowledge bool) (*designRunParams, *store.Job, *apiFailure) {
 	id := requirementID
 	if id == "" {
 		return nil, nil, fail(400, "INVALID", "missing requirement id")
@@ -2291,6 +2350,8 @@ func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride stri
 	if modelOverride != "" {
 		model = modelOverride
 	}
+	// Align the gateway config with the picked model. See resolveConfigIDForRun.
+	claudeConfigID = h.resolveConfigIDForRun(claudeConfigIDOverride, model, claudeConfigID)
 	job.SetModel(model)
 
 	return &designRunParams{
