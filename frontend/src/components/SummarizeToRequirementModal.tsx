@@ -1,16 +1,19 @@
-// "📋 总结转需求" 弹窗
+// SummarizeToRequirementModal — turns an idea/issue into a requirement.
 //
-// 想法 / issue 详情页触发，把整段讨论（描述 + 累积 acceptance_criteria +
-// 分析师对话记录）一次性扔给 LLM 总结成可开发的需求。LLM 在 prompt 约束下
-// 可以用空 markdown 表达"讨论还没收敛"，service 把这种情况当成 422
-// NOT_CONVERGED 抛回，前端再翻译成"讨论还没达成共识"的友好错误，提示
-// 用户先继续聊天再重试。
+// Fired from the idea/issue detail page: it hands the whole discussion
+// (description + accumulated acceptance criteria + analyst transcript) to the
+// LLM in one shot to be summarized into a buildable requirement. The prompt
+// lets the model answer with an empty markdown body when the discussion has
+// not converged; the service surfaces that as 422 NOT_CONVERGED, which this
+// modal renders as a friendly "keep chatting first" message.
 //
-// 三种状态：idle（确认页）→ running（spinner）→ done（成功跳转 / 失败回退）。
-// 跳转由 onCreated 回调负责——父组件接住新 requirement id 后用 navigate
-// 跳到详情页。
+// Three phases: idle (confirm) → running (spinner) → done (navigates away on
+// success / falls back on failure). Navigation is the onCreated callback's
+// job — the parent receives the new requirement id and routes to the detail
+// page.
 
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { authedFetch, API_BASE } from '../api/client';
 
 type Phase = 'idle' | 'running' | 'error';
@@ -23,6 +26,7 @@ interface Props {
 }
 
 export function SummarizeToRequirementModal({ sourceId, sourceTitle, onClose, onCreated }: Props) {
+  const { t } = useTranslation();
   const [phase, setPhase] = useState<Phase>('idle');
   const [errorMsg, setErrorMsg] = useState('');
 
@@ -37,24 +41,25 @@ export function SummarizeToRequirementModal({ sourceId, sourceTitle, onClose, on
       });
       const json = await res.json();
       if (!res.ok || !json.success) {
-        // 422 NOT_CONVERGED — 讨论还没有达成共识。把后端 error 信息透传给用户
-        // （prompt 已经写好了"未达成共识"语义），并提示继续讨论再试。
+        // 422 NOT_CONVERGED — the discussion has not converged. Render the
+        // friendly message (the prompt already encodes that semantic) and let
+        // the user keep chatting before retrying.
         if (res.status === 422 || json.error?.code === 'NOT_CONVERGED') {
           setPhase('error');
-          setErrorMsg('讨论还没有达成共识。请继续完善想法的讨论，待明确要实现哪些功能后再试。');
+          setErrorMsg(t('requirements.promote.notConverged'));
           return;
         }
         setPhase('error');
-        setErrorMsg(json.error?.message || `请求失败 (${res.status})`);
+        setErrorMsg(json.error?.message || t('requirements.promote.requestFailed', { status: res.status }));
         return;
       }
-      // requirementsApi.promoteFromIdea 也可调用，但 modal 里已经手工处理了
-      // 422；这里直接消费 json.data。
+      // requirementsApi.promoteFromIdea could be used instead, but this modal
+      // handles the 422 case itself and consumes json.data directly.
       const newReq = json.data as { id: string };
       onCreated(newReq.id);
     } catch (err: any) {
       setPhase('error');
-      setErrorMsg(err?.message || '网络错误');
+      setErrorMsg(err?.message || t('requirements.promote.networkError'));
     }
   };
 
@@ -71,7 +76,7 @@ export function SummarizeToRequirementModal({ sourceId, sourceTitle, onClose, on
     <div className="modal-backdrop" onClick={handleBackdropClick}>
       <div className="modal-card summarize-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
-          <h3>📋 总结转需求</h3>
+          <h3>{t('requirements.promote.title')}</h3>
           <button className="btn btn-sm" onClick={onClose} disabled={phase === 'running'}>×</button>
         </div>
 
@@ -79,12 +84,12 @@ export function SummarizeToRequirementModal({ sourceId, sourceTitle, onClose, on
           {phase === 'idle' && (
             <>
               <p>
-                将把「<strong>{sourceTitle || '该想法'}</strong>」的描述、累积要点和与 AI 的完整对话记录总结成一份可开发的需求文档。
+                {t('requirements.promote.introPrefix')}<strong>{sourceTitle || t('requirements.promote.sourceFallback')}</strong>{t('requirements.promote.introSuffix')}
               </p>
               <ul className="modal-hint">
-                <li>新需求会以 <code>kind = requirement</code> 创建，状态 <code>draft</code>，可进入分析 → 设计 → 开发完整流程。</li>
-                <li>原想法的讨论、状态和历史<strong>保持不变</strong>，方便继续探讨或在不满意时重试。</li>
-                <li>如果讨论还没有明确要做什么，AI 会拒绝转换，请先继续聊天再试。</li>
+                <li>{t('requirements.promote.bullet1Prefix')}<code>kind = requirement</code>{t('requirements.promote.bullet1Middle')}<code>draft</code>{t('requirements.promote.bullet1Suffix')}</li>
+                <li>{t('requirements.promote.bullet2Prefix')}<strong>{t('requirements.promote.bullet2Bold')}</strong>{t('requirements.promote.bullet2Suffix')}</li>
+                <li>{t('requirements.promote.bullet3')}</li>
               </ul>
             </>
           )}
@@ -92,8 +97,8 @@ export function SummarizeToRequirementModal({ sourceId, sourceTitle, onClose, on
           {phase === 'running' && (
             <div className="modal-running">
               <div className="spinner" />
-              <p>AI 正在总结讨论内容…</p>
-              <small>这通常需要 5–15 秒，取决于讨论长度。</small>
+              <p>{t('requirements.promote.running')}</p>
+              <small>{t('requirements.promote.runningHint')}</small>
             </div>
           )}
 
@@ -106,17 +111,17 @@ export function SummarizeToRequirementModal({ sourceId, sourceTitle, onClose, on
 
         <div className="modal-actions">
           <button className="btn" onClick={onClose} disabled={phase === 'running'}>
-            {phase === 'error' ? '关闭' : '取消'}
+            {phase === 'error' ? t('common.actions.close') : t('common.actions.cancel')}
           </button>
           {phase === 'error' ? (
-            <button className="btn btn-primary" onClick={() => setPhase('idle')}>🔄 重试</button>
+            <button className="btn btn-primary" onClick={() => setPhase('idle')}>{t('requirements.promote.retry')}</button>
           ) : (
             <button
               className="btn btn-primary"
               onClick={handleConfirm}
               disabled={phase === 'running'}
             >
-              {phase === 'running' ? '总结中…' : '✨ 开始总结'}
+              {phase === 'running' ? t('requirements.promote.runningCta') : t('requirements.promote.startCta')}
             </button>
           )}
         </div>

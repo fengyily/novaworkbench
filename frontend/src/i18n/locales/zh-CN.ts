@@ -16,7 +16,6 @@ import chat from './modules/chat';
 import reports from './modules/reports';
 import schedules from './modules/schedules';
 import settings from './modules/settings';
-import settingsSub from './modules/settings.misc';
 import components from './modules/components';
 
 
@@ -36,7 +35,7 @@ const zhCN = {
   reports,
   schedules,
   settings,
-  settingsSub,
+
   components,
 };
 

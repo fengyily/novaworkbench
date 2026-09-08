@@ -1,4 +1,31 @@
 // dashboard (en-US) — must mirror modules/dashboard.ts key-for-key.
-export const dashboard = {};
+export const dashboard = {
+  title: '📊 Dashboard',
+  loading: '⏳ Loading…',
+  statProjects: 'Projects',
+  statActiveReqs: 'Active requirements',
+  statPendingReviews: 'Knowledge to review',
+  statWeeklyCommits: 'Commits this week',
+  projectList: 'Projects',
+  add: '+ Add',
+  emptyTitle: 'No projects yet',
+  emptyCta: 'Add your first project',
+  mobileEmptyDesc: 'Start from a local git repository, or create a new project directory.',
+  addProject: '+ Add project',
+  colName: 'Name',
+  colType: 'Type',
+  colPath: 'Path',
+  colStatus: 'Status',
+  colUpdated: 'Updated',
+  colUpdatedShort: 'Updated',
+  wizard: '🪄 New project wizard',
+  addProjectShort: 'Add project',
+  requirements: 'Requirements',
+  startChat: 'Start chatting',
+  weeklyReport: 'Generate report',
+  knowledgeReview: 'Review knowledge',
+  newProject: 'New project',
+  status: { active: '🟢 active', archived: '📦 archived', missing: '⚠️ missing' },
+} as const;
 
 export default dashboard;

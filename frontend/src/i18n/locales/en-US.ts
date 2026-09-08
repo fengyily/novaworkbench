@@ -15,7 +15,6 @@ import chat from './modules/chat.en';
 import reports from './modules/reports.en';
 import schedules from './modules/schedules.en';
 import settings from './modules/settings.en';
-import settingsSub from './modules/settings.misc.en';
 import components from './modules/components.en';
 
 const enUS = {
@@ -34,7 +33,7 @@ const enUS = {
   reports,
   schedules,
   settings,
-  settingsSub,
+
   components,
 };
 

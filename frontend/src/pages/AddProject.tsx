@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { platformApi, projectsApi, type PlatformToken } from '../api/client';
+import { errorMessage } from '../utils/errMsg';
 import './AddProject.css';
 
 // Best-effort host → platform map. Mirrors backend internal/service/project.go
@@ -19,6 +21,7 @@ function detectPlatform(url: string): string {
 }
 
 export default function AddProject() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const [remoteUrl, setRemoteUrl] = useState('');
   const [branch, setBranch] = useState('');
@@ -57,7 +60,7 @@ export default function AddProject() {
       });
       navigate('/');
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
+      setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -65,42 +68,42 @@ export default function AddProject() {
 
   return (
     <div className="add-project-page">
-      <h1 className="page-title">📁 添加项目</h1>
+      <h1 className="page-title">{t('projects.add.title')}</h1>
 
       <div className="add-project-card">
         <div className="form-group">
-          <label>Git 仓库地址:</label>
+          <label>{t('projects.add.remoteLabel')}</label>
           <input
             type="text"
             value={remoteUrl}
             onChange={e => setRemoteUrl(e.target.value)}
-            placeholder="https://github.com/user/repo.git  或  git@github.com:user/repo.git"
+            placeholder={t('projects.add.remotePlaceholder')}
             className="form-input"
           />
           {inferredPlatform && (
             <span className="input-hint">
-              识别为 {inferredPlatform === 'github' ? 'GitHub' : inferredPlatform === 'gitlab' ? 'GitLab' : inferredPlatform}
+              {t('projects.add.detected', { platform: inferredPlatform === 'github' ? 'GitHub' : inferredPlatform === 'gitlab' ? 'GitLab' : inferredPlatform })}
             </span>
           )}
         </div>
         <div className="form-group">
-          <label>分支（可选）:</label>
+          <label>{t('projects.add.branchLabel')}</label>
           <input
             type="text"
             value={branch}
             onChange={e => setBranch(e.target.value)}
-            placeholder="默认克隆默认分支"
+            placeholder={t('projects.add.branchPlaceholder')}
             className="form-input"
           />
         </div>
         <div className="form-group">
-          <label>平台 Token（私有仓库必填）:</label>
+          <label>{t('projects.add.tokenLabel')}</label>
           <select
             value={platformTokenId}
             onChange={e => setPlatformTokenId(e.target.value)}
             className="form-input"
           >
-            <option value="">— 无（仅适用公开仓库）—</option>
+            <option value="">{t('projects.add.tokenNone')}</option>
             {visibleTokens.map(t => (
               <option key={t.id} value={t.id}>
                 {t.name} ({t.platform})
@@ -109,12 +112,12 @@ export default function AddProject() {
           </select>
           {visibleTokens.length === 0 && tokens.length > 0 && (
             <span className="input-hint">
-              当前 URL 未匹配已配置的 Token；请到「设置 → 平台 Token」添加，或确认 URL 正确。
+              {t('projects.add.noMatchingToken')}
             </span>
           )}
           {tokens.length === 0 && (
             <span className="input-hint">
-              尚未配置任何 Token；公开仓库可不选，私有仓库请先到「设置 → 平台 Token」添加。
+              {t('projects.add.noTokens')}
             </span>
           )}
         </div>
@@ -122,13 +125,13 @@ export default function AddProject() {
         {error && <div className="form-error">❌ {error}</div>}
 
         <div className="form-actions stack-mobile">
-          <button className="btn" onClick={() => navigate('/')}>取消</button>
+          <button className="btn" onClick={() => navigate('/')}>{t('projects.add.cancel')}</button>
           <button
             className="btn btn-primary"
             onClick={handleSubmit}
             disabled={loading || !remoteUrl}
           >
-            {loading ? '⏳ 添加中...' : '开始添加'}
+            {loading ? t('projects.add.adding') : t('projects.add.submit')}
           </button>
         </div>
       </div>

@@ -18,7 +18,8 @@
 #   - src/components/CodingChat.tsx
 #                                '用户: ' / 'AI: ' composer prefixes that are
 #                                fed back to the LLM as speaker markers.
-#   - any line carrying the `// i18n: protocol literal` marker comment.
+#   - any line carrying the `// i18n: protocol literal` or
+#     `/* i18n: protocol literal */` marker comment (line-end or inline).
 #
 # Implementation notes: written for BusyBox grep — no `grep -P`. The CJK range
 # is expressed as a byte-class `[一-鿿]` (U+4E00–U+9FFF) which busybox matches
@@ -39,6 +40,16 @@ is_whitelisted() {
 	_line="$2"
 	case "$_line" in
 		# Explicit opt-out marker, one per line that must stay literal.
+		*"// i18n: protocol literal"*|*"/* i18n: protocol literal"*) return 0 ;;
+	esac
+	# Skip developer comments (not rendered to the user): JS/TS line/block
+	# comments and JSX block comments. CJK in a comment is documentation, not
+	# a leaked UI string, so it is safe to ignore.
+	case "$_line" in
+		"//"*) return 0 ;;
+		"/*"*) return 0 ;;
+		"*)"*"*/"*) return 0 ;;
+		"{/*"*"*/}"*) return 0 ;;
 		*"// i18n: protocol literal"*) return 0 ;;
 	esac
 	case "$_file" in

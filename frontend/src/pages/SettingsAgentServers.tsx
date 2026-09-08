@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   agentServersApi,
   type AgentServer,
@@ -15,12 +16,14 @@ const statusBadge: Record<AgentServer['status'], string> = {
   ready: 'badge-ready',
   error: 'badge-error',
 };
-const statusLabel: Record<AgentServer['status'], string> = {
-  unknown: '未检查',
-  checking: '检查中…',
-  installing: '安装中…',
-  ready: '就绪',
-  error: '异常',
+// Status labels are i18n KEYS (resolved at render). The chip class drives
+// the platform-color treatment.
+const statusLabelKeys: Record<AgentServer['status'], string> = {
+  unknown: 'settings.agentServersPage.statusUnknown',
+  checking: 'settings.agentServersPage.statusChecking',
+  installing: 'settings.agentServersPage.statusInstalling',
+  ready: 'settings.agentServersPage.statusReady',
+  error: 'settings.agentServersPage.statusError',
 };
 
 interface Form {
@@ -42,6 +45,7 @@ const emptyForm: Form = {
 };
 
 export default function SettingsAgentServers() {
+  const { t } = useTranslation();
   const [servers, setServers] = useState<AgentServer[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -75,7 +79,7 @@ export default function SettingsAgentServers() {
   // runInstall's defer on Finish). On mount, for any server that still
   // has a non-empty install_job_id, subscribe to that job's SSE stream so
   // the user picks up the live log + history replay instead of staring at
-  // a frozen "安装中…" badge until the install finishes server-side.
+  // a frozen "Installing…" badge until the install finishes server-side.
   //
   // Guarded with a ref so the run-once intent is preserved across React
   // StrictMode double-mounts in dev — without the ref the first mount
@@ -151,11 +155,11 @@ export default function SettingsAgentServers() {
 
   const handleSave = async () => {
     if (!form.name.trim() || !form.host.trim()) {
-      setModalError('名称和 IP/主机名必填');
+      setModalError(t('settings.agentServersPage.errRequired'));
       return;
     }
     if (!editingId && !form.auth_value.trim()) {
-      setModalError('请填写凭据（SSH 私钥或密码）');
+      setModalError(t('settings.agentServersPage.errCredential'));
       return;
     }
     setSaving(true);
@@ -185,7 +189,7 @@ export default function SettingsAgentServers() {
         await agentServersApi.create(req);
       }
       closeModal();
-      showToast(editingId ? '已保存' : '已添加');
+      showToast(editingId ? t('settings.agentServersPage.savedToast') : t('settings.agentServersPage.addedToast'));
       load();
     } catch (err) {
       setModalError(err instanceof Error ? err.message : String(err));
@@ -195,13 +199,13 @@ export default function SettingsAgentServers() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm('确认删除此 Agent 服务器？此操作不可撤销。')) return;
+    if (!window.confirm(t('settings.agentServersPage.deleteConfirm'))) return;
     try {
       await agentServersApi.remove(id);
-      showToast('已删除');
+      showToast(t('settings.agentServersPage.deletedToast'));
       load();
     } catch (err) {
-      showToast('删除失败: ' + (err instanceof Error ? err.message : String(err)));
+      showToast(t('settings.agentServersPage.deleteFailPrefix') + (err instanceof Error ? err.message : String(err)));
     }
   };
 
@@ -239,7 +243,7 @@ export default function SettingsAgentServers() {
           load();
           return;
         }
-        throw new Error(`SSE 失败: HTTP ${resp.status}`);
+        throw new Error(t('settings.agentServersPage.sseFailPrefix') + resp.status);
       }
 
       const reader = resp.body.getReader();
@@ -282,7 +286,7 @@ export default function SettingsAgentServers() {
       setBusy((b) => ({ ...b, [serverId]: '' }));
       delete abortRef.current[serverId];
     }
-  }, [load]);
+  }, [load, t]);
 
   // Stream a check/install job to the per-server log panel. Reuses the SSE
   // pump pattern the wizard's CodingChat uses: open POST → fetch response
@@ -300,13 +304,13 @@ export default function SettingsAgentServers() {
         : await agentServersApi.install(serverId);
       jobId = res.job_id;
     } catch (err) {
-      setLogs((l) => ({ ...l, [serverId]: [...(l[serverId] ?? []), `❌ 提交失败: ${err instanceof Error ? err.message : String(err)}`] }));
+      setLogs((l) => ({ ...l, [serverId]: [...(l[serverId] ?? []), t('settings.agentServersPage.submitFailPrefix') + (err instanceof Error ? err.message : String(err))] }));
       setBusy((b) => ({ ...b, [serverId]: '' }));
       return;
     }
 
     await subscribeToJob(serverId, jobId);
-  }, [subscribeToJob]);
+  }, [subscribeToJob, t]);
 
   const cancelJob = (serverId: string) => {
     abortRef.current[serverId]?.abort();
@@ -317,33 +321,34 @@ export default function SettingsAgentServers() {
     <div className="settings-section">
       <div className="section-header">
         <div>
-          <h3 className="settings-section-title">🖥️ Agent 服务器</h3>
+          <h3 className="settings-section-title">{t('settings.agentServersPage.title')}</h3>
           <p className="settings-section-desc">
-            配置远程 Linux / macOS 服务器作为 Claude CLI 的执行环境。平台自动检查并安装依赖（claude / node / npm / git），需求开发时可选择在该服务器上执行。
+            {t('settings.agentServersPage.desc')}
           </p>
         </div>
-        <button className="btn btn-primary" onClick={openCreate}>+ 添加服务器</button>
+        <button className="btn btn-primary" onClick={openCreate}>{t('settings.agentServersPage.addBtn')}</button>
       </div>
 
       {error && <div className="form-error">❌ {error}</div>}
       {toast && <div className="form-toast">✅ {toast}</div>}
 
       <div className="security-banner">
-        ⚠️ 凭据已使用 AES-256-GCM 加密存储，主密钥位于 <code>~/.novaworkbench/secret.key</code>，
-        请妥善保管该文件；密钥丢失则旧凭据不可解，需重新配置服务器。
+        {t('settings.agentServersPage.securityBanner')}{' '}
+        <code>{t('settings.agentServersPage.securityBannerPath')}</code>
+        {t('settings.agentServersPage.securityBannerTail')}
       </div>
 
       {loading ? (
-        <div className="loading">加载中...</div>
+        <div className="loading">{t('settings.agentServersPage.loading')}</div>
       ) : servers.length === 0 ? (
         <div className="empty-state">
           <span className="empty-state-mark" aria-hidden="true">🛰️</span>
-          <div className="empty-state-title">还没有 Agent 服务器</div>
+          <div className="empty-state-title">{t('settings.agentServersPage.emptyTitle')}</div>
           <div className="empty-state-desc">
-            添加一台远程 Linux 或 macOS 主机，让 Claude CLI 在那里执行需求开发。
+            {t('settings.agentServersPage.emptyDesc')}
           </div>
           <button className="btn btn-primary" onClick={openCreate} style={{ marginTop: 14 }}>
-            + 添加服务器
+            {t('settings.agentServersPage.addBtn')}
           </button>
         </div>
       ) : (
@@ -367,31 +372,31 @@ export default function SettingsAgentServers() {
       {showModal && (
         <div className="modal-overlay" onClick={closeModal}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <h3>{editingId ? '编辑 Agent 服务器' : '添加 Agent 服务器'}</h3>
+            <h3>{editingId ? t('settings.agentServersPage.modalEditTitle') : t('settings.agentServersPage.modalAddTitle')}</h3>
             {modalError && <div className="form-error">❌ {modalError}</div>}
             <div className="form-group">
-              <label>名称 *</label>
+              <label>{t('settings.agentServersPage.labelName')}</label>
               <input
                 type="text"
                 className="form-input"
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="如：办公室 Mac mini"
+                placeholder={t('settings.agentServersPage.namePlaceholder')}
               />
             </div>
             <div className="form-group">
-              <label>IP / 主机名 *</label>
+              <label>{t('settings.agentServersPage.labelHost')}</label>
               <input
                 type="text"
                 className="form-input"
                 value={form.host}
                 onChange={(e) => setForm({ ...form, host: e.target.value })}
-                placeholder="192.168.1.100 或 host.example.com"
+                placeholder={t('settings.agentServersPage.hostPlaceholder')}
               />
             </div>
             <div className="form-row">
               <div className="form-group">
-                <label>端口</label>
+                <label>{t('settings.agentServersPage.labelPort')}</label>
                 <input
                   type="number"
                   className="form-input"
@@ -402,7 +407,7 @@ export default function SettingsAgentServers() {
                 />
               </div>
               <div className="form-group">
-                <label>用户名</label>
+                <label>{t('settings.agentServersPage.labelUsername')}</label>
                 <input
                   type="text"
                   className="form-input"
@@ -412,20 +417,20 @@ export default function SettingsAgentServers() {
               </div>
             </div>
             <div className="form-group">
-              <label>认证方式</label>
+              <label>{t('settings.agentServersPage.labelAuth')}</label>
               <select
                 className="form-input"
                 value={form.auth_type}
                 onChange={(e) => setForm({ ...form, auth_type: e.target.value as 'key' | 'password' })}
               >
-                <option value="key">SSH 私钥（PEM）</option>
-                <option value="password">密码</option>
+                <option value="key">{t('settings.agentServersPage.authKey')}</option>
+                <option value="password">{t('settings.agentServersPage.authPassword')}</option>
               </select>
             </div>
             <div className="form-group">
               <label>
-                {form.auth_type === 'key' ? '私钥内容（PEM）' : '密码'}
-                {editingId && <span className="hint">（留空保持不变）</span>}
+                {form.auth_type === 'key' ? t('settings.agentServersPage.labelKeyOrPwd') : t('settings.agentServersPage.labelPwd')}
+                {editingId && <span className="hint">{t('settings.agentServersPage.keyKeepHint')}</span>}
               </label>
               <textarea
                 className="form-input"
@@ -433,17 +438,17 @@ export default function SettingsAgentServers() {
                 onChange={(e) => setForm({ ...form, auth_value: e.target.value })}
                 placeholder={
                   form.auth_type === 'key'
-                    ? '-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----'
-                    : '密码'
+                    ? t('settings.agentServersPage.keyPlaceholder')
+                    : t('settings.agentServersPage.passwordPlaceholder')
                 }
                 rows={form.auth_type === 'key' ? 8 : 2}
                 style={{ fontFamily: form.auth_type === 'key' ? 'monospace' : 'inherit' }}
               />
             </div>
             <div className="form-actions stack-mobile">
-              <button className="btn" onClick={closeModal} disabled={saving}>取消</button>
+              <button className="btn" onClick={closeModal} disabled={saving}>{t('settings.agentServersPage.cancel')}</button>
               <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-                {saving ? '保存中...' : '保存'}
+                {saving ? t('settings.agentServersPage.saving') : t('settings.agentServersPage.save')}
               </button>
             </div>
           </div>
@@ -466,6 +471,7 @@ function ServerCard({
   onInstall: () => void;
   onCancel: () => void;
 }) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(true); // expanded by default — install logs are the main signal
   const logRef = useRef<HTMLPreElement>(null);
   const showLogs = busy !== '' || logs.length > 0;
@@ -488,19 +494,19 @@ function ServerCard({
                 is doing something" using the platform's AI-busy vocabulary. */}
             {busy !== '' && <span className="agent-pulse" aria-hidden="true" />}
             <h4>{server.name}</h4>
-            <span className={`badge ${statusBadge[server.status]}`}>{statusLabel[server.status]}</span>
+            <span className={`badge ${statusBadge[server.status]}`}>{t(statusLabelKeys[server.status])}</span>
           </div>
           <div className="server-card-meta">
             {/* Terminal-style SSH connection: "$ ssh user@host:port". The "$"
                 prefix and host part are split so the prompt can stay muted
                 while the host is highlighted — like a real terminal line. */}
             <span className="server-card-ssh">
-              <span className="server-card-ssh-prompt">$ ssh</span>
+              <span className="server-card-ssh-prompt">{t('settings.agentServersPage.sshPrefix')}</span>
               <span className="server-card-ssh-host">{server.username}@{server.host}:{server.port}</span>
             </span>
             {server.last_check_at && (
               <span className="server-card-check-time">
-                上次检查: {new Date(server.last_check_at).toLocaleString()}
+                {t('settings.agentServersPage.lastCheckPrefix')}{new Date(server.last_check_at).toLocaleString()}
               </span>
             )}
           </div>
@@ -509,30 +515,30 @@ function ServerCard({
           )}
         </div>
         <div className="server-card-actions">
-          <button className="btn" onClick={onCheck} disabled={busy !== ''}>🔍 检查环境</button>
-          <button className="btn" onClick={onInstall} disabled={busy !== ''}>⚙️ 安装依赖</button>
-          <button className="btn" onClick={onEdit} disabled={busy !== ''}>编辑</button>
-          <button className="btn btn-danger" onClick={onDelete} disabled={busy !== ''}>删除</button>
+          <button className="btn" onClick={onCheck} disabled={busy !== ''}>{t('settings.agentServersPage.btnCheck')}</button>
+          <button className="btn" onClick={onInstall} disabled={busy !== ''}>{t('settings.agentServersPage.btnInstall')}</button>
+          <button className="btn" onClick={onEdit} disabled={busy !== ''}>{t('settings.agentServersPage.btnEdit')}</button>
+          <button className="btn btn-danger" onClick={onDelete} disabled={busy !== ''}>{t('settings.agentServersPage.btnDelete')}</button>
         </div>
       </div>
       {showLogs && (
         <div className="server-card-logs">
           <div className="server-card-logs-header">
             <span className="server-card-logs-header-left">
-              Terminal output
+              {t('settings.agentServersPage.logHeader')}
               {busy !== '' && <span className="server-card-caret" aria-hidden="true" />}
             </span>
             {busy !== '' ? (
-              <button className="btn-link" onClick={onCancel}>取消</button>
+              <button className="btn-link" onClick={onCancel}>{t('settings.agentServersPage.cancel')}</button>
             ) : (
               <button className="btn-link" onClick={() => setExpanded((v) => !v)}>
-                {expanded ? '收起' : '展开'}
+                {expanded ? t('settings.agentServersPage.btnCollapse') : t('settings.agentServersPage.btnExpand')}
               </button>
             )}
           </div>
           {expanded && (
             <pre className="server-card-log" ref={logRef}>
-              {logs.length === 0 ? '(暂无输出)' : logs.join('\n')}
+              {logs.length === 0 ? t('settings.agentServersPage.logEmpty') : logs.join('\n')}
             </pre>
           )}
         </div>

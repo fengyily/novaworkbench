@@ -135,7 +135,7 @@ export default function CodingChat({ reqId, projectPath, requirementTitle, onSta
   const buildCodingDesc = useCallback(() => {
     if (messages.length === 0) return input.trim();
     return messages
-      .map(m => (m.role === 'user' ? '用户: ' : 'AI: ') + m.content)
+      .map(m => (m.role === 'user' ? '用户: ' : 'AI: ') + m.content) // i18n: protocol literal
       .join('\n');
   }, [messages, input]);
 
