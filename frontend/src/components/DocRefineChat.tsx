@@ -28,6 +28,14 @@ interface Props {
   // Refresh the requirement after an apply completes (design_docs was
   // persisted server-side; refresh renders it and clears apply_job_id).
   onTurnDone?: () => void;
+  // Reports the live turn state upward so the detail header can show an
+  // accurate global "Claude 工作中" badge while a refine / apply turn runs.
+  // The persisted apply_job_id is only refreshed after the turn finishes
+  // and the parent has reloaded the requirement, so it lags during the
+  // turn — we mirror the DeepRefineChat.onWorkingChange pattern and let
+  // the parent aggregate "is any turn in flight?" alongside the global
+  // /api/wizard/active-jobs polling.
+  onWorkingChange?: (working: boolean) => void;
   // Controlled context-usage for this stage's session. Parent owns the live
   // state so it can drive the always-on top strip AND seed from the persisted
   // requirements.usage_snapshots blob. The session key is derived from
@@ -45,7 +53,7 @@ interface ChatMessage {
 
 const LABEL = { design: '技术方案', coding: '开发指令' };
 
-export default function DocRefineChat({ reqId, projectPath, docType, currentDoc, model, defaultModel, applyJobId, onTurnDone, usage, onUsage }: Props) {
+export default function DocRefineChat({ reqId, projectPath, docType, currentDoc, model, defaultModel, applyJobId, onTurnDone, onWorkingChange, usage, onUsage }: Props) {
   const [expanded, setExpanded] = useState(false);
   const { isFullscreen, toggle: toggleFullscreen, exit: exitFullscreen } = useFullscreen();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -93,6 +101,17 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages, applyLines]);
+
+  // Surface turn progress upward so the parent's claudeWorking aggregation
+  // (RequirementDetail's status badge + claude-status row) can pulse
+  // during a refine or apply turn. Mirrors DeepRefineChat's onWorkingChange
+  // effect — apply runs through JobStore (so the global polling also picks
+  // it up via listActiveJobs), but refine-doc streams straight to the
+  // response without entering JobStore, so this callback is the only path
+  // for the parent to know a refine turn is in flight.
+  useEffect(() => {
+    onWorkingChange?.(working || applying);
+  }, [working, applying, onWorkingChange]);
 
   // Reset when the doc changes externally (e.g. after an apply refresh).
   useEffect(() => {

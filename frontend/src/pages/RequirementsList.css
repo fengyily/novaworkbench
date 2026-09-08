@@ -141,10 +141,20 @@
    width across 6 headers and the type column gets squeezed. Holding
    width + white-space keeps the cell single-line.
    Widths chosen so a 1280px viewport still leaves the title column with
-   ~400px before its max-width kicks in. */
+   ~400px before its max-width kicks in.
+   Column order: 1 类型 / 2 标题 / 3 状态 / 4 模型名称 / 5 项目 / 6 优先级 / 7 Agent 服务器. */
 .req-table thead th:nth-child(1),
 .req-table tbody td:nth-child(1) {
   width: 100px;
+  white-space: nowrap;
+}
+
+.req-table thead th:nth-child(4),
+.req-table tbody td:nth-child(4) {
+  /* Model names like "claude-sonnet-4-5" can run ~16 chars; 150px is enough
+     to render them inline at 12px, and long ones ellipsize via the chip's
+     own max-width. */
+  width: 150px;
   white-space: nowrap;
 }
 
@@ -156,7 +166,16 @@
 
 .req-table thead th:nth-child(6),
 .req-table tbody td:nth-child(6) {
-  width: 180px;
+  width: 110px;
+  white-space: nowrap;
+}
+
+.req-table thead th:nth-child(7),
+.req-table tbody td:nth-child(7) {
+  /* Agent 服务器 now hosts the full DevSourceBadge ("🛰️ Agent server_name"
+     or "💻 本地开发"); 220px gives the longest server names room before
+     the chip's own max-width ellipsizes. */
+  width: 220px;
   white-space: nowrap;
 }
 
@@ -183,6 +202,48 @@
 .priority-tag.priority-high   { background: #FEE2E2; color: #B91C1C; }
 .priority-tag.priority-medium { background: #FEF3C7; color: #B45309; }
 .priority-tag.priority-low    { background: #DCFCE7; color: #047857; }
+
+/* Developer-model tag — the Claude model that was actually dispatched for
+   the coding stage (developer_model). Teal-tinted to distinguish it from
+   the violet Agent-server chip: "where it ran" vs "what model ran it".
+   Truncates inside the cell when the model id is long (e.g. a long custom
+   model name on a 3rd-party provider) so the column width stays bounded;
+   the tooltip always carries the full string. */
+.req-row-model-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  background: #ECFEFF;
+  color: #0E7490;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+/* Agent-server tag — which remote execution target the requirement was
+   developed on (desktop table column). Violet-tinted to match the
+   .agent-server-badge on the detail page and the violet preflight
+   field card, so "execution target" reads as one visual family across
+   pages. Local runs render as plain 本地 text (req-row-dim), not this tag. */
+.agent-server-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  background: #F5F3FF;
+  color: #7C3AED;
+  white-space: nowrap;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
 
 /* Priority dot — small colored bullet used on mobile cards where
    horizontal space is tight. Pairs with the relative-time text so
@@ -310,6 +371,20 @@
 .req-card-mobile-spacer {
   flex: 0 0 auto;
   width: 4px;
+}
+
+/* Mobile card chip for the Agent Server. Only rendered when the requirement
+   ran on a remote target (local runs render as the absence of the chip so
+   the tight footer row stays uncluttered). Shares the violet palette with
+   the desktop .agent-server-tag. */
+.req-card-mobile-agent {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: #7C3AED;
 }
 
 .req-card-mobile-time {

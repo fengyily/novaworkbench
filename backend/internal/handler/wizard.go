@@ -308,6 +308,39 @@ func (h *WizardHandler) roleConfig(key string) (systemPrompt, model, configID st
 	return r.SystemPrompt, h.effectiveModelFromConfig(r.Model, r), h.activeConfigID()
 }
 
+// resolveConfigIDForRun returns the claude_config_id the wizard should pass
+// into llm.StreamOpts for a stage run, honouring the user-picked config and
+// aligning it with the user-picked model.
+//
+// Priority:
+//  1. requestCl — explicit per-request override from the UI picker
+//     (frontend ModelSelect lifts the picked config id into the request body)
+//  2. ResolveConfigForModel(model) — the config whose models list owns the
+//     picked model id; covers the case where the user picks a model from a
+//     non-active config without explicitly choosing the config (e.g. the
+//     legacy wizard page that has no ModelSelect)
+//  3. devCfgID — role binding resolved by roleConfig (covers developer-
+//     default model + role-bound gateway)
+//  4. h.activeConfigID() — legacy global fallback
+//
+// Any empty/error step falls through; the chain never errors out so a broken
+// picker state cannot block a run. Mirrors the same priority chain used by
+// sub_task_runner.go for sub-task dispatch (see f10e1cc).
+func (h *WizardHandler) resolveConfigIDForRun(requestCl, model, devCfgID string) string {
+	if requestCl != "" {
+		return requestCl
+	}
+	if model != "" {
+		if cid, err := h.claudeCfg.ResolveConfigForModel(model); err == nil && cid != "" {
+			return cid
+		}
+	}
+	if devCfgID != "" {
+		return devCfgID
+	}
+	return h.activeConfigID()
+}
+
 // effectiveModel resolves the model that will actually be dispatched to the
 // claude CLI for a role. roleModel is the role's explicit override. Falls
 // back to the role's bound config's default, then the global active
@@ -537,6 +570,10 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		CurrentAnalysis  string `json:"current_analysis"`
 		UserMessage      string `json:"user_message"`
 		Model            string `json:"model"`
+		// ClaudeConfigID — user-picked claude_configs row id (UI ModelSelect);
+		// empty = backend resolves via the priority chain in
+		// resolveConfigIDForRun.
+		ClaudeConfigID string `json:"claude_config_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("[analyst-chat] JSON decode error: %v", err)
@@ -575,11 +612,14 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	if req.Model != "" {
 		model = req.Model
 	}
+	// Align the gateway config with the picked model. See resolveConfigIDForRun.
+	claudeConfigID = h.resolveConfigIDForRun(req.ClaudeConfigID, model, claudeConfigID)
 
 	// Create the job, persist its id so a refresh can reconnect, and return the
 	// job id immediately. The claude turn runs in a goroutine writing progress
 	// into the job store.
 	job := h.jobs.Create(req.RequirementID)
+	job.SetType("analyst_chat")
 	job.SetModel(model)
 	if perr := h.reqSvc.UpdateAnalysisJob(req.RequirementID, job.ID); perr != nil {
 		log.Printf("[analyst-chat] failed to persist analysis_job_id for %s: %v", req.RequirementID, perr)
@@ -714,6 +754,10 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		RequirementTitle string `json:"requirement_title"`
 		UserMessage      string `json:"user_message"`
 		Model            string `json:"model"`
+		// ClaudeConfigID — user-picked claude_configs row id (UI ModelSelect);
+		// empty = backend resolves via the priority chain in
+		// resolveConfigIDForRun.
+		ClaudeConfigID string `json:"claude_config_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("[developer-chat] JSON decode error: %v", err)
@@ -811,6 +855,8 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 	if req.Model != "" {
 		model = req.Model
 	}
+	// Align the gateway config with the picked model. See resolveConfigIDForRun.
+	claudeConfigID = h.resolveConfigIDForRun(req.ClaudeConfigID, model, claudeConfigID)
 
 	// The resumed coding conversation already carries the requirement, analysis,
 	// and design, so a resume turn only sends the framed adjustment message. The
@@ -1123,9 +1169,21 @@ type codingRunParams struct {
 	BranchName       string `json:"branch_name"`
 	BaseBranch       string `json:"base_branch"`
 	Model            string `json:"model"`
-	ReadKnowledge    bool   `json:"read_knowledge"`
-	AgentServerID    string `json:"agent_server_id"` // empty = local execution; otherwise remote Agent server
-	SplitTasks       bool   `json:"split_tasks"`     // false (default) = developer persona implements directly; true = current decomposition + auto-orchestrate flow
+	// ClaudeConfigID is the user-picked claude_configs row id from the UI
+	// ModelSelect picker (frontend lifts selectedConfigId alongside the model).
+	// Empty = backend resolves it from the priority chain (explicit > model
+	// owner > role binding > global active) inside resolveConfigIDForRun.
+	ClaudeConfigID string `json:"claude_config_id"`
+	ReadKnowledge  bool   `json:"read_knowledge"`
+	AgentServerID  string `json:"agent_server_id"` // empty = local execution; otherwise remote Agent server
+	SplitTasks     bool   `json:"split_tasks"`     // false (default) = developer persona implements directly; true = current decomposition + auto-orchestrate flow
+	// DevMode picks the coding session threading strategy: "" / "session" =
+	// fork the design (or analysis) session (legacy default, Claude
+	// inherits the full conversation); "design" = fresh session, hand the
+	// stored design doc to the agent via the -p prompt. When empty, the
+	// handler falls back to the requirement row's persisted dev_mode so a
+	// re-run that omits the field stays consistent with the previous run.
+	DevMode string `json:"dev_mode"`
 }
 
 func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
@@ -1136,6 +1194,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := h.jobs.Create(p.RequirementID)
+	job.SetType("start_coding")
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	go h.execStartCoding(&p, job, nil)
@@ -1149,6 +1208,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 // finishes. Returns the JobStore job id.
 func (h *WizardHandler) RunScheduledCoding(p *codingRunParams, cb *runCallbacks) (string, error) {
 	job := h.jobs.Create(p.RequirementID)
+	job.SetType("start_coding")
 	go h.execStartCoding(p, job, cb)
 	return job.ID, nil
 }
@@ -1171,12 +1231,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		if perr := h.jobLogSvc.Save(job.ID, p.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
 			log.Printf("[start-coding] failed to persist job log %s: %v", job.ID, perr)
 		}
-		if cb != nil && cb.OnFinish != nil {
-			cb.OnFinish(job.ID, status == store.JobDone)
-		}
 	}()
-	log.Printf("[start-coding] job %s started for %q in %s", job.ID, p.RequirementTitle, p.ProjectPath)
-
 	// Load the requirement row up front so we can (a) detect whether the
 	// source session was created in an isolated worktree, and (b) reuse it for
 	// the fork resolution below without a second Get.
@@ -1186,7 +1241,45 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			reqRow = r
 		}
 	}
-		// hadWorktree records whether the upstream stage had already persisted a
+	// Stamp the development-environment provenance BEFORE the run starts.
+	// Doing it up front (rather than on the success path) means a failed or
+	// aborted remote run still leaves a record of WHICH Agent server holds
+	// the worktree — which is exactly the state where "清理开发环境" has to
+	// know where to go. UpdateDevSource forces server_id back to "" for
+	// local runs, so switching a requirement from remote to local execution
+	// stops routing follow-ups to the old server.
+	if p.RequirementID != "" {
+		devSource := service.DevSourceLocal
+		if p.AgentServerID != "" {
+			devSource = service.DevSourceAgent
+		}
+		if perr := h.reqSvc.UpdateDevSource(p.RequirementID, devSource, p.AgentServerID); perr != nil {
+			log.Printf("[start-coding] failed to persist dev_source for %s: %v", p.RequirementID, perr)
+		} else if reqRow != nil {
+			reqRow.DevSource, reqRow.AgentServerID = devSource, p.AgentServerID
+			if devSource == service.DevSourceLocal {
+				reqRow.AgentServerID = ""
+			}
+		}
+		// Stamp the dev-mode provenance alongside dev_source. Empty request
+		// field → fall back to the previously persisted value (so 重新开发
+		// keeps the original mode) or to "session" (legacy default for rows
+		// that predate the column). UpdateDevMode normalizes invalid values
+		// to "" so a bad client never corrupts the column.
+		devMode := p.DevMode
+		if devMode == "" && reqRow != nil {
+			devMode = reqRow.DevMode
+		}
+		if devMode == "" {
+			devMode = service.DevModeSession
+		}
+		if perr := h.reqSvc.UpdateDevMode(p.RequirementID, devMode); perr != nil {
+			log.Printf("[start-coding] failed to persist dev_mode for %s: %v", p.RequirementID, perr)
+		} else if reqRow != nil {
+			reqRow.DevMode = devMode
+		}
+	}
+	// hadWorktree records whether the upstream stage had already persisted a
 	// worktree before THIS coding run — false means the design/analysis session
 	// we're about to fork was created in-place (un-isolated).
 	hadWorktree := reqRow != nil && reqRow.WorktreePath != ""
@@ -1345,6 +1438,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// First-ever coding (coding_session_id == "") takes the same path, so
 	// behavior is unchanged for the genuine first pass.
 	//
+	// "基于方案开发" (dev_mode == "design"): deliberately ignore the design
+	// / analysis / coding session chain. The new session starts fresh, and
+	// the stored design doc is fed to the agent via the -p prompt further
+	// down (see designDoc block). This is what the user picked when they
+	// want a clean slate that still has the plan in hand.
+	//
 	// Graceful fallback: the legacy /wizard quick-start page has no
 	// Requirement row (no requirement_id / session ids), so it can't join
 	// the session chain. When no source session exists we fall back to a
@@ -1352,7 +1451,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// so that path keeps working.
 	sourceSID := ""
 	fork := false
-	if reqRow != nil {
+	if reqRow != nil && reqRow.DevMode != service.DevModeDesign {
 		if reqRow.DesignSessionID != "" {
 			// 重新开发 / 首次开发: fork from the design session so the new
 			// coding session carries only requirement+design, never the prior
@@ -1431,21 +1530,36 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	if p.Model != "" {
 		model = p.Model
 	}
+	// Align the gateway config with the picked model: when the user picked a
+	// model from a non-active config (or explicitly named a config), prefer
+	// those over the role's binding so ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN
+	// match ANTHROPIC_MODEL. See resolveConfigIDForRun for the priority chain.
+	claudeConfigID = h.resolveConfigIDForRun(p.ClaudeConfigID, model, claudeConfigID)
 	job.SetModel(model)
 	var prompt string
 	if sourceSID == "" {
 		// Fresh-session path: no design/analysis session to fork (skip-design
-		// "直接开发" rows, or legacy rows without session chaining). This
-		// branch used to feed a bare "## title\n\n desc" which is a generic
-		// "请实现该需求" prompt — and the developer role's system prompt
-		// only emits the [SUBTASKS_READY] sentinel when the -p message
-		// carries an explicit "开始开发/进入执行实现阶段" trigger. Without
-		// that trigger the agent did the work itself and auto-orchestration
-		// never fired (see req_04acb22d06fe3525). So we now send the SAME
+		// "直接开发" rows, "基于方案开发" mode, or legacy rows without session
+		// chaining). This branch used to feed a bare "## title\n\n desc" which
+		// is a generic "请实现该需求" prompt — and the developer role's system
+		// prompt only emits the [SUBTASKS_READY] sentinel when the -p message
+		// carries an explicit "开始开发/进入执行实现阶段" trigger. Without that
+		// trigger the agent did the work itself and auto-orchestration never
+		// fired (see req_04acb22d06fe3525). So we now send the SAME
 		// decomposition trigger as the fork branch — the only difference is
 		// wording: there is no "已完成的需求分析与技术方案" to reference, so we
 		// ask the agent to read the relevant files first to build context.
 		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未关联需求会话，使用独立会话开始开发。"})
+		// "基于方案开发" (dev_mode == "design") hand-feeds the stored design
+		// doc to the agent in the -p prompt so the new session has the plan
+		// even though it never joined the design/analysis conversation.
+		// designMarkdown is sourced from reqRow.DesignDocs (raw — plan Markdown
+		// or legacy JSON, both formats are appended verbatim and the
+		// leadIn tells the agent to treat it as the implementation plan).
+		designMarkdown := ""
+		if reqRow != nil && reqRow.DevMode == service.DevModeDesign {
+			designMarkdown = strings.TrimSpace(reqRow.DesignDocs)
+		}
 		if roleKey == "agent" {
 			// agent persona (Agent-Server remote OR local split_tasks=false):
 			// implement the requirement directly end-to-end. No decomposition
@@ -1453,8 +1567,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			// .novaworkbench/subtasks.json Write. The agent system prompt says
 			// "不要先拆分子任务" and "一次会话内完成端到端开发", so the model
 			// consistently implements instead of splitting.
-			prompt = agentDirectPrompt(p.RequirementTitle,
-				"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后直接实现需求：\n", workDir)
+			leadIn := "请先读取项目中的相关文件理解现有代码结构与需求上下文，然后直接实现需求：\n"
+			if designMarkdown != "" {
+				leadIn = "用户选择「基于方案开发」：不会接续原方案会话，而是把下面的方案作为唯一依据创建新会话直接实现。\n" +
+					"请先读取项目中的相关文件理解现有代码结构，再依据方案直接实现：\n"
+			}
+			prompt = agentDirectPrompt(p.RequirementTitle, leadIn, workDir)
 		} else {
 			// developer persona + fresh-session path + split_tasks=true.
 			// Keep the original decomposition trigger so the developer role
@@ -1462,8 +1580,21 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			// and tryAutoOrchestrate dispatches children. The split_tasks=false
 			// fresh-session case is handled by the roleKey=="agent" branch
 			// above (we route those requests through the agent role entirely).
-			prompt = developerDecomposePrompt(p.RequirementTitle,
-				"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后立即完成**任务拆分**：\n", workDir)
+			leadIn := "请先读取项目中的相关文件理解现有代码结构与需求上下文，然后立即完成**任务拆分**：\n"
+			if designMarkdown != "" {
+				leadIn = "用户选择「基于方案开发」：不会接续原方案会话，而是把下面的方案作为唯一依据创建新会话。\n" +
+					"请先读取项目中的相关文件理解现有代码结构，然后依据方案立即完成**任务拆分**：\n"
+			}
+			prompt = developerDecomposePrompt(p.RequirementTitle, leadIn, workDir)
+		}
+		// Append the stored design doc to the prompt when dev_mode is
+		// "design". Both plan Markdown and legacy JSON formats are passed
+		// verbatim — the agent's tools will surface them. The block goes
+		// AFTER the leadIn so the developer persona's "开始开发/进入执行实
+		// 现阶段" trigger (preserved inside developerDecomposePrompt) stays
+		// at the top and the [SUBTASKS_READY] orchestration path still fires.
+		if designMarkdown != "" {
+			prompt += "\n\n## 技术方案（来自 requirements.design_docs，原方案会话的最终产物）\n\n" + designMarkdown
 		}
 		if desc := strings.TrimSpace(p.RequirementDesc); desc != "" {
 			if roleKey == "agent" {
@@ -1662,6 +1793,10 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			if perr := h.reqSvc.UpdateDeveloperModel(p.RequirementID, model); perr != nil {
 				log.Printf("[start-coding] failed to persist developer_model for %s: %v", p.RequirementID, perr)
 			}
+			// dev_source / agent_server_id were stamped up front by the
+			// execStartCoding prologue (see line ~1246) — no need to re-write on
+			// the success path. The prologue fires before the remote job starts
+			// so the binding is correct even if the run aborts.
 		}
 		job.Finish(0, store.JobDone)
 		log.Printf("[start-coding] remote job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
@@ -1720,6 +1855,24 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	if p.RequirementID != "" {
 		if perr := h.reqSvc.UpdateDeveloperModel(p.RequirementID, model); perr != nil {
 			log.Printf("[start-coding] failed to persist developer_model for %s: %v", p.RequirementID, perr)
+		}
+		// dev_source / agent_server_id were stamped up front by the
+		// execStartCoding prologue (line ~1246) before the claude subprocess
+		// was spawned. Local runs also flow through the prologue (with
+		// AgentServerID=""), which routes dev_source back to "local" so a
+		// previously-remote requirement doesn't keep pointing at the stale
+		// server after a local re-run.
+	}
+	// Cache the Claude CLI slug for this project on first successful local
+	// start-coding so future Agent Server runs can map local session files
+	// to the remote cwd's slug. Only runs locally: the Agent Server branch
+	// never creates local jsonl files (they live on the remote host under
+	// a deterministic slug derived from wtPath).
+	if p.AgentServerID == "" && p.RequirementID != "" && reqRow != nil && reqRow.ProjectID != "" {
+		if proj, perr := h.projectSvc.Get(reqRow.ProjectID); perr == nil && proj != nil {
+			if _, derr := h.projectSvc.DiscoverAndCacheClaudeProjectSlug(proj.ID, proj.LocalPath); derr != nil {
+				log.Printf("[start-coding] failed to cache claude_project_slug for %s: %v", proj.ID, derr)
+			}
 		}
 	}
 	job.Finish(0, store.JobDone)
@@ -1820,6 +1973,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := h.jobs.Create(body.RequirementID)
+	job.SetType("adjust_coding")
 	job.SetModel(model)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
@@ -1867,6 +2021,34 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		if block := promptpkg.DeveloperBlock(req.Kind, req); block != "" {
 			adjustPrompt += "\n\n" + block
 		}
+		// Execution-consistency: a requirement that was coded on an Agent
+		// server has its working tree on THAT host, not here — the local
+		// worktree either doesn't exist or lags behind origin. Route the
+		// follow-up turn back to the same server so the adjustment applies to
+		// the real code (and gets committed + pushed from there). Falls
+		// through to local execution when the requirement was developed
+		// locally, or when the agent-server service isn't wired.
+		if req.AgentServerID != "" && h.agentSvrSvc != nil {
+			out := h.runRemoteCoding(&remoteCodingInput{
+				job:      job,
+				serverID: req.AgentServerID,
+				req: startCodingReq{
+					RequirementTitle: req.Title,
+					RequirementDesc:  body.Message,
+					RequirementID:    req.ID,
+					BranchName:       req.BranchName,
+					AgentServerID:    req.AgentServerID,
+				},
+				reqRow:     req,
+				prompt:     adjustPrompt,
+				sourceSID:  req.CodingSessionID,
+				sessionArg: req.CodingSessionID,
+				model:      model,
+				usage:      h.usageCtxFor("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message),
+			})
+			h.finishRemoteCodingJob(job, out, body.RequirementID, model, "adjust-coding", "✅ 追加调整完成！")
+			return
+		}
 		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:         adjustPrompt,
 			WorkDir:        workDir,
@@ -1909,9 +2091,49 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		if perr := h.reqSvc.UpdateDeveloperModel(body.RequirementID, model); perr != nil {
 			log.Printf("[adjust-coding] failed to persist developer_model for %s: %v", body.RequirementID, perr)
 		}
+		// agent_server_id re-binding on the success path is intentionally
+		// skipped: dev_source / agent_server_id are already correct from the
+		// original StartCoding prologue. An adjust turn runs on the same
+		// coding session / worktree the requirement was already bound to, so
+		// re-writing the binding here would either no-op (same value) or risk
+		// silently re-pointing a running worktree to a different host. If the
+		// user genuinely wants to switch servers, they should re-run the full
+		// start-coding flow.
 		job.Finish(0, store.JobDone)
 		log.Printf("[adjust-coding] job %s finished for %s", job.ID, body.RequirementID)
 	}()
+}
+
+// finishRemoteCodingJob applies the shared terminal-state handling for a
+// runRemoteCoding outcome: map the three failure shapes (stale session /
+// explicit error / empty result) onto job error frames, otherwise append the
+// result + a done frame and stamp developer_model. Factored out so
+// StartCoding / AdjustCoding / ContinueCoding all report remote runs
+// identically — the frontend can't tell a remote job from a local one.
+func (h *WizardHandler) finishRemoteCodingJob(job *store.Job, out claudeStreamOutcome, reqID, model, tag, doneMsg string) {
+	switch {
+	case out.staleSession:
+		job.Append(store.LogLine{Type: "error", Content: "❌ 原 coding 会话已失效（session 文件不存在），请重新发起 coding。"})
+		job.Finish(1, store.JobError)
+		return
+	case out.errMsg != "":
+		job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+		job.Finish(1, store.JobError)
+		return
+	case out.finalResult == "":
+		job.Append(store.LogLine{Type: "error", Content: "❌ Claude 未返回结果，请重试"})
+		job.Finish(1, store.JobError)
+		return
+	}
+	job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	job.Append(store.LogLine{Type: "done", Content: doneMsg})
+	if reqID != "" {
+		if perr := h.reqSvc.UpdateDeveloperModel(reqID, model); perr != nil {
+			log.Printf("[%s] failed to persist developer_model for %s: %v", tag, reqID, perr)
+		}
+	}
+	job.Finish(0, store.JobDone)
+	log.Printf("[%s] remote job %s finished for %s", tag, job.ID, reqID)
 }
 
 // ContinueCoding resumes an interrupted/cleared coding task by --resume'ing the
@@ -1970,6 +2192,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 	_, model, claudeConfigID := h.roleConfig("developer")
 
 	job := h.jobs.Create(body.RequirementID)
+	job.SetType("continue_coding")
 	job.SetModel(model)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
@@ -2004,6 +2227,28 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		// ("最小改动、修复根因") present on every continue round.
 		if block := promptpkg.DeveloperBlock(req.Kind, req); block != "" {
 			prompt += "\n\n" + block
+		}
+		// Same execution-consistency rule as AdjustCoding: continue the work
+		// where the working tree actually lives.
+		if req.AgentServerID != "" && h.agentSvrSvc != nil {
+			out := h.runRemoteCoding(&remoteCodingInput{
+				job:      job,
+				serverID: req.AgentServerID,
+				req: startCodingReq{
+					RequirementTitle: req.Title,
+					RequirementID:    req.ID,
+					BranchName:       req.BranchName,
+					AgentServerID:    req.AgentServerID,
+				},
+				reqRow:     req,
+				prompt:     prompt,
+				sourceSID:  req.CodingSessionID,
+				sessionArg: req.CodingSessionID,
+				model:      model,
+				usage:      h.usageCtxFor("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", ""),
+			})
+			h.finishRemoteCodingJob(job, out, body.RequirementID, model, "continue-coding", "✅ 续接开发完成！")
+			return
 		}
 		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:         prompt,
@@ -2047,6 +2292,13 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		if perr := h.reqSvc.UpdateDeveloperModel(body.RequirementID, model); perr != nil {
 			log.Printf("[continue-coding] failed to persist developer_model for %s: %v", body.RequirementID, perr)
 		}
+		// Re-bind the Agent Server when the continuation ran on one. Empty body
+		// field = legacy client → keep the existing binding (same guard as
+		// AdjustCoding).
+		// dev_source / agent_server_id are intentionally NOT re-bound here — see the
+		// rationale in AdjustCoding's success-path comment: the binding is set by
+		// the original StartCoding prologue and a continue turn resumes the
+		// same coding session on the same worktree.
 		job.Finish(0, store.JobDone)
 		log.Printf("[continue-coding] job %s finished for %s", job.ID, body.RequirementID)
 	}()
@@ -2124,10 +2376,14 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	var body struct {
 		RequirementID string `json:"requirement_id"`
 		Model         string `json:"model"`
-		ReadKnowledge bool   `json:"read_knowledge"`
+		// ClaudeConfigID — user-picked claude_configs row id (UI ModelSelect);
+		// empty = backend resolves via the priority chain in
+		// resolveConfigIDForRun.
+		ClaudeConfigID string `json:"claude_config_id"`
+		ReadKnowledge  bool   `json:"read_knowledge"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	p, job, af := h.prepareArchitectDesign(body.RequirementID, body.Model, body.ReadKnowledge)
+	p, job, af := h.prepareArchitectDesign(body.RequirementID, body.Model, body.ClaudeConfigID, body.ReadKnowledge)
 	if writeIfAPIError(w, af) {
 		return
 	}
@@ -2141,7 +2397,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 // callback. Returns the JobStore job id (the scheduler records this in
 // scheduled_tasks.job_id so /api/wizard/jobs/{id} can replay the log).
 func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnowledge bool, cb *runCallbacks) (string, error) {
-	p, job, af := h.prepareArchitectDesign(requirementID, model, readKnowledge)
+	p, job, af := h.prepareArchitectDesign(requirementID, model, "", readKnowledge)
 	if af != nil {
 		return "", af
 	}
@@ -2162,7 +2418,7 @@ func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnow
 // line-for-line the same as the original synchronous section; only the
 // writeError calls have been replaced with returning *apiFailure so the
 // scheduler can reuse the same validation outcomes.
-func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride string, readKnowledge bool) (*designRunParams, *store.Job, *apiFailure) {
+func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride, claudeConfigIDOverride string, readKnowledge bool) (*designRunParams, *store.Job, *apiFailure) {
 	id := requirementID
 	if id == "" {
 		return nil, nil, fail(400, "INVALID", "missing requirement id")
@@ -2240,6 +2496,7 @@ func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride stri
 	// the job id immediately. The plan-mode claude run happens in a goroutine
 	// writing progress into the job store.
 	job := h.jobs.Create(id)
+	job.SetType("architect_design")
 	if perr := h.reqSvc.UpdateDesignJob(id, job.ID); perr != nil {
 		log.Printf("[architect-design] failed to persist design_job_id for %s: %v", id, perr)
 	}
@@ -2291,6 +2548,8 @@ func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride stri
 	if modelOverride != "" {
 		model = modelOverride
 	}
+	// Align the gateway config with the picked model. See resolveConfigIDForRun.
+	claudeConfigID = h.resolveConfigIDForRun(claudeConfigIDOverride, model, claudeConfigID)
 	job.SetModel(model)
 
 	return &designRunParams{
@@ -2516,6 +2775,18 @@ func (h *WizardHandler) GetJob(w http.ResponseWriter, r *http.Request) {
 		"started_at":  job.StartedAt,
 		"finished_at": job.FinishedAt,
 	})
+}
+
+// GetActiveJobs returns all currently-running wizard jobs across the process.
+// Used by list / detail pages to badge "Claude 工作中" without N+1 polling
+// each requirement's *_job_id columns. Returns an empty array (not null) when
+// no jobs are running so the JSON shape stays stable for the frontend.
+func (h *WizardHandler) GetActiveJobs(w http.ResponseWriter, r *http.Request) {
+	jobs := h.jobs.ActiveJobs()
+	if jobs == nil {
+		jobs = []store.ActiveJob{}
+	}
+	writeJSON(w, 200, map[string]any{"jobs": jobs})
 }
 
 // toolResultContent extracts and truncates the content of a tool_result block.
@@ -3364,6 +3635,15 @@ type startCodingReq struct {
 	AgentServerID    string
 }
 
+// RunRemoteCoding exposes runRemoteCoding as a func value for SubTaskRunner.
+// main injects it via SubTaskRunner.SetRemoteCoding so every child dispatch
+// (manual sub-task / orchestrated child / merge push+PR sub-task) can run on
+// the Agent server the parent requirement was developed on without the runner
+// depending on the wizard handler's full dependency set.
+func (h *WizardHandler) RunRemoteCoding(in *remoteCodingInput) claudeStreamOutcome {
+	return h.runRemoteCoding(in)
+}
+
 // runRemoteCoding is the Agent-server equivalent of the local runClaudeStream
 // block in StartCoding. It opens an SSH session, ensures the project lives in
 // a per-requirement git worktree under /tmp/nova-agent/<projectID>/<reqID>,
@@ -3456,11 +3736,22 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// (the small set of jsonl files the CLI uses for session state). A missing
 	// local dir is fine — the project has never been coded on before, and the
 	// CLI on the remote will mint a brand-new session id.
-	remoteClaudeHome := "~/.claude/projects/"
+	//
+	// The remote slug is derived deterministically from the remote cwd
+	// (wtPath, set up in step 1). Mapping local slug → remote slug lets the
+	// remote claude find the jsonl files under the directory matching its
+	// own cwd, which is what `--resume <session_id>` consults. Without this
+	// mapping the local slug (-Users-f1-...-req_xxx) lands at the remote
+	// projects root, while the remote CLI looks for sessions under its own
+	// slug (-tmp-nova-agent-<projectID>-<reqID>), producing "No conversation
+	// found" / "源会话已失效" on every run.
+	remoteProjectsRoot := "~/.claude/projects/"
+	remoteSlug := util.EncodeClaudeSlug(wtPath)
+	remoteSlugDir := remoteProjectsRoot + remoteSlug
 	in.job.Append(store.LogLine{Type: "phase", Content: "📤 同步 Claude 会话历史（SFTP 上行）..."})
-	if slugDir, slugErr := claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
-		client.Mkdirp(remoteClaudeHome)
-		if sftpErr := client.SyncDirUp(slugDir, remoteClaudeHome); sftpErr != nil {
+	if slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
+		client.Mkdirp(remoteSlugDir)
+		if sftpErr := client.SyncDirUpMapped(slugDir, remoteSlugDir); sftpErr != nil {
 			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话上行失败（将无 resume 启动新会话）: " + sftpErr.Error()})
 		}
 	} else if slugErr != nil {
@@ -3486,8 +3777,33 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// --settings JSON (buildSettingsArg), so the remote launch carries the
 	// pins exactly the way the local path does.
 	ignoreLocal := true
+	// The -p prompt built upstream (StartCoding / AdjustCoding /
+	// ContinueCoding / tryAutoOrchestrate) bakes the LOCAL worktree path
+	// into the persona header via agentDirectPrompt / developerDecomposePrompt:
+	//
+	//   "现在切换到「Agent 开发者」角色，正在执行需求（需求：<title>，工作目录：<workDir>）"
+	//
+	// On the local path that's correct — the agent is sitting in <workDir>.
+	// On the remote path <workDir> is a /Users/f1/.novaworkbench/...
+	// worktree that doesn't exist on the agent host (the remote cwd is
+	// /tmp/nova-agent/<projectID>/<reqID>). Handing the original prompt
+	// through verbatim confuses the agent's "先读取项目中的相关文件" step —
+	// it tries to read a path that's not on its filesystem and either
+	// errors or falls back to its own cwd, which defeats the "based on
+	// workdir" intent the header expresses.
+	//
+	// Rewrite the persona header's workDir to the remote cwd before
+	// posting to the worker. The substitution locates the "工作目录："
+	// label in the persona header (a fixed string the prompt builders
+	// always emit right before the path) and replaces from there through
+	// the next "）" full-width closing paren. This way the requirement
+	// title and any other tokens between the opening "（" and the label
+	// are preserved verbatim — only the workDir segment is swapped.
+	// Embedded file content from collectProjectContext is left untouched.
+	// No-op when in.workDir is empty or doesn't appear in the prompt.
+	remotePrompt := rewritePersonaWorkDir(in.prompt, in.workDir, wtPath)
 	opts := llm.StreamOpts{
-		Prompt:                 in.prompt,
+		Prompt:                 remotePrompt,
 		WorkDir:                wtPath,
 		SystemPrompt:           "",
 		Model:                  cliModelArg(in.model),
@@ -3575,10 +3891,12 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 
 	// Step 6: session sync (down) — copy any new session jsonl the remote
 	// run created back to local so adjust/continue on the next round find
-	// it. Same forward-only semantics as Step 3.
+	// it. Same forward-only semantics as Step 3, and routed via the same
+	// remote-slug → local-slug mapping so the jsonl lands in the directory
+	// whose slug matches the local cwd.
 	in.job.Append(store.LogLine{Type: "phase", Content: "📥 同步会话结果回本地..."})
-	if slugDir, slugErr := claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
-		if sftpErr := client.SyncDirDown(remoteClaudeHome, slugDir); sftpErr != nil {
+	if slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
+		if sftpErr := client.SyncDirDownMapped(remoteSlugDir, slugDir); sftpErr != nil {
 			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话下行失败: " + sftpErr.Error()})
 		}
 	}
@@ -3752,12 +4070,21 @@ func errString(err error) string {
 
 // claudeProjectsSlugDir locates the on-disk directory where claude stores
 // session jsonls for the given requirement's project. The slug is derived
-// from the project's local_path; we read the cached value on the project row
-// when available, otherwise fall back to scanning the parent dir for a
-// matching basename.
-func claudeProjectsSlugDir(reqRow *model.Requirement) (string, error) {
+// from the project's local_path; we read the cached value on the project
+// row when available, otherwise fall back to scanning the parent dir for
+// a matching basename.
+//
+// The previous implementation always returned the first subdir of the
+// projects root — fine for a single-project setup but wrong when multiple
+// projects share ~/.claude/projects/. This implementation is precise: the
+// cached claude_project_slug (or the freshly-discovered one) is used
+// verbatim so the Agent Server sync path can map it to the remote slug.
+func (h *WizardHandler) claudeProjectsSlugDir(reqRow *model.Requirement) (string, error) {
 	if reqRow == nil {
 		return "", fmt.Errorf("no requirement")
+	}
+	if h.projectSvc == nil {
+		return "", fmt.Errorf("projectSvc not wired")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -3768,28 +4095,41 @@ func claudeProjectsSlugDir(reqRow *model.Requirement) (string, error) {
 		claudeHome = filepath.Join(home, ".novaworkbench", "claude")
 	}
 	root := filepath.Join(claudeHome, "projects")
-	// Prefer an exact-match lookup: the first subdir of root whose
-	// decoded path ends with the project's basename. claude CLI's slug
-	// is an internal encoding — there's no public mapping, so this
-	// best-effort scan is good enough.
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
+	proj, err := h.projectSvc.Get(reqRow.ProjectID)
+	if err != nil || proj == nil {
+		// Project row missing (e.g. soft-deleted) — degrade to the
+		// legacy "first subdir" behaviour so a misconfigured caller
+		// still gets a best-effort path rather than nothing. The Agent
+		// Server sync is best-effort anyway.
+		entries, rerr := os.ReadDir(root)
+		if rerr != nil {
+			if os.IsNotExist(rerr) {
+				return "", nil
+			}
+			return "", rerr
 		}
-		return "", err
-	}
-	// The cached slug (when present) is the canonical answer. We don't
-	// have it in this scope — the project row is loaded by the caller —
-	// so we always scan here. Most setups have a single project
-	// subdir under ~/.claude/projects/, so this stays cheap.
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			return filepath.Join(root, e.Name()), nil
 		}
-		return filepath.Join(root, e.Name()), nil
+		return "", nil
 	}
-	return "", nil
+	// 1) Cache hit — use the persisted slug verbatim.
+	if proj.ClaudeProjectSlug != "" {
+		if _, statErr := os.Stat(filepath.Join(root, proj.ClaudeProjectSlug)); statErr == nil {
+			return filepath.Join(root, proj.ClaudeProjectSlug), nil
+		}
+		// Stale slug (project moved / dir deleted). Fall through to
+		// re-discovery so we don't keep returning a dead path.
+	}
+	// 2) Cache miss / stale — scan and persist.
+	slug, derr := h.projectSvc.DiscoverAndCacheClaudeProjectSlug(proj.ID, proj.LocalPath)
+	if derr != nil || slug == "" {
+		return "", derr
+	}
+	return filepath.Join(root, slug), nil
 }
 
 // parseStreamJSONFromReader is the io.Reader-only counterpart of
@@ -4730,6 +5070,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 	// job id immediately. Claude runs in a goroutine writing progress into the
 	// job store.
 	job := h.jobs.Create(req.RequirementID)
+	job.SetType("apply_doc")
 	if perr := h.reqSvc.UpdateApplyJob(req.RequirementID, job.ID); perr != nil {
 		log.Printf("[apply-doc] failed to persist apply_job_id for %s: %v", req.RequirementID, perr)
 	}
@@ -5204,6 +5545,10 @@ func (h *WizardHandler) runSubTask(
 		return
 	}
 	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, adjust)
+	// (The agent-server routing branch previously inlined here moved to
+	// SubTaskRunner.Run so that every sub-task path — manual children,
+	// orchestrated children, and push/PR sub-tasks — shares the same
+	// req.AgentServerID plumbing.)
 }
 
 // computeSubTaskCostCents resolves the run's USD-equivalent cost in cents
@@ -5921,7 +6266,53 @@ func agentDirectPrompt(title, leadIn, workDir string) string {
 		title, workDir)
 }
 
-// extractSubtasksPayload pulls the {"subtasks":[…]} JSON block out of
+// rewritePersonaWorkDir rewrites the workDir path inside the persona
+// header of a coding prompt. The agentDirectPrompt / developerDecomposePrompt
+// builders emit a header of the form:
+//
+//	现在切换到「Agent 开发者」角色，正在执行需求（需求：<title>，工作目录：<workDir>）
+//
+// When the prompt is sent to the Agent Server, the local workDir is wrong —
+// the remote cwd is /tmp/nova-agent/<projectID>/<reqID> — so the agent on
+// the remote host would otherwise see a path that doesn't exist on its
+// filesystem. This helper finds the "工作目录：" label in the persona
+// header and replaces from there through the next "）" full-width closing
+// paren with the new path, leaving the requirement title and any other
+// tokens between "（" and the label untouched.
+//
+// Returns the prompt unchanged when the label isn't present (e.g. a
+// pre-built prompt without the persona header) or when localWorkDir is
+// empty (no-op). Only the FIRST match is rewritten — the persona header
+// is emitted exactly once per prompt, and looping would risk false
+// positives on file content that happens to mention the label.
+func rewritePersonaWorkDir(prompt, localWorkDir, remoteWorkDir string) string {
+	if prompt == "" || localWorkDir == "" || localWorkDir == remoteWorkDir {
+		return prompt
+	}
+	const label = "工作目录："
+	const closeParen = "）"
+	idx := strings.Index(prompt, label)
+	if idx < 0 {
+		return prompt
+	}
+	// Find the closing paren after the label. If absent, bail out
+	// and leave the prompt alone — the label showed up but the
+	// header structure we expect wasn't there.
+	end := strings.Index(prompt[idx+len(label):], closeParen)
+	if end < 0 {
+		return prompt
+	}
+	end += idx + len(label)
+	// Verify the slice between the label and the closing paren
+	// actually equals localWorkDir. If it doesn't match (e.g. the
+	// label appears in some unrelated text), return the prompt
+	// unchanged rather than corrupting it.
+	between := prompt[idx+len(label) : end]
+	if between != localWorkDir {
+		return prompt
+	}
+	return prompt[:idx+len(label)] + remoteWorkDir + prompt[end:]
+}
 // finalResult and verifies the [SUBTASKS_READY] sentinel is present. Returns
 // nil when either is missing — caller treats that as "main agent answered a
 // normal question, not a decompose request" and just renders the chat reply.
@@ -6502,7 +6893,32 @@ func (h *WizardHandler) dispatchOneChild(
 	job.SetModel(modelName)
 
 	childUsage := h.usageCtxFor("sub_task", reqID, req.ProjectID, job.ID, modelName, "", t.Prompt)
-	out := runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage)
+	// Route orchestrated children to the parent requirement's Agent server
+	// when it has one — same reasoning as runSubTask: the working tree lives
+	// on that host, so a locally-spawned child would edit the wrong checkout.
+	var out claudeStreamOutcome
+	if req.AgentServerID != "" && h.agentSvrSvc != nil {
+		out = h.runRemoteCoding(&remoteCodingInput{
+			job:      job,
+			serverID: req.AgentServerID,
+			req: startCodingReq{
+				RequirementTitle: req.Title + " / " + t.Title,
+				RequirementID:    req.ID,
+				BranchName:       req.BranchName,
+				AgentServerID:    req.AgentServerID,
+			},
+			reqRow:        req,
+			prompt:        executorPrompt,
+			sourceSID:     parentSID,
+			fork:          true,
+			sessionArg:    parentSID,
+			forkSessionID: childSID,
+			model:         modelName,
+			usage:         childUsage,
+		})
+	} else {
+		out = runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage)
+	}
 
 	status := model.SubTaskStatusDone
 	artifactBody := out.finalResult

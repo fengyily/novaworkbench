@@ -438,6 +438,15 @@ var alterColumns = []string{
 	`ALTER TABLE requirements ADD COLUMN architect_model TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN developer_model TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN reviewer_model TEXT NOT NULL DEFAULT ''`,
+	// Agent-server binding for the developer stage: the agent_servers.id chosen
+	// in the start-coding modal (or re-bound by adjust-coding / continue-coding).
+	// Persisted only on the success path of the developer job so a failed run
+	// never clobbers the last good binding — same semantics as analyst_model /
+	// developer_model above. Empty = 本地 (no remote agent). Plain TEXT pointer
+	// with no declared FK so the column never blocks migration; the human-
+	// readable name is resolved at read time via a LEFT JOIN against
+	// agent_servers (see service.RequirementService.List/Get).
+	`ALTER TABLE requirements ADD COLUMN agent_server_id TEXT NOT NULL DEFAULT ''`,
 	// Per-role Claude-config binding: lets a role carry its own ANTHROPIC_BASE_URL
 	// + ANTHROPIC_AUTH_TOKEN pair (via claude_configs.id) so the role's chosen
 	// model runs against the role's chosen gateway, not just the global active
@@ -517,6 +526,23 @@ var alterColumns = []string{
 	// from; persisted on completion so a server restart / JobStore eviction
 	// doesn't lose the breakdown.
 	`ALTER TABLE requirements ADD COLUMN coding_plan TEXT NOT NULL DEFAULT ''`,
+	// Development-environment provenance, stamped once when the coding stage
+	// starts (StartCoding). dev_source is "agent" (the requirement was coded
+	// on a remote Agent server) or "local" (coded on the NovaWorkbench host);
+	// empty = the coding stage never ran / predates this column.
+	// agent_server_id points at the agent_servers row used, so every FOLLOW-UP
+	// action that touches the working tree (推送并发起 PR / 清理开发环境 /
+	// 子任务派发) can be routed back to the SAME server the code lives on
+	// instead of silently falling back to the local checkout.
+	`ALTER TABLE requirements ADD COLUMN dev_source TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN agent_server_id TEXT NOT NULL DEFAULT ''`,
+	// Development-mode provenance for the coding stage. Stamped once when
+	// StartCoding runs so the UI can show "本次开发基于会话/方案" and so a
+	// follow-up run that omits the field can default to the persisted value.
+	// Values: "session" = fork/resume the design session (legacy default),
+	// "design"  = fresh session, hand the stored design doc to the agent
+	// via the -p prompt; empty = never ran / predates this column.
+	`ALTER TABLE requirements ADD COLUMN dev_mode TEXT NOT NULL DEFAULT ''`,
 	// Per-sub-task token usage (mirrors token_usage per-row columns but stays
 	// inline so a child agent's cost lives next to its artifact without a
 	// second SELECT against token_usage). input_tokens / output_tokens are the
