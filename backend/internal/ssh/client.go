@@ -450,6 +450,57 @@ func (c *Client) SyncDirDown(remoteDir, localDir string) error {
 	return walkAndDownload(sftpCli, remoteDir, localDir)
 }
 
+// SyncDirUpMapped is the slug-aware variant of SyncDirUp used by the Agent
+// Server remote-coding path. The local side reads
+// ~/.claude/projects/<local-slug>/ (one specific project), and the remote
+// side writes to a FULLY-QUALIFIED remote directory — typically
+// ~/.claude/projects/<remote-slug>/ — so the remote Claude CLI's session
+// lookup at --resume time finds the jsonl files in the directory matching
+// the remote cwd.
+//
+// Behavior mirrors SyncDirUp (forward sync, missing localDir = nil,
+// shouldSync filter on .jsonl / .md). The split into a separate method
+// rather than overloading SyncDirUp keeps the older "scan-and-upload-to-
+// projects-root" semantics intact for any caller that still wants them.
+func (c *Client) SyncDirUpMapped(localDir, remoteDir string) error {
+	if _, err := os.Stat(localDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("ssh: stat local dir %s: %w", localDir, err)
+	}
+	sftpCli, err := c.sftp()
+	if err != nil {
+		return err
+	}
+	defer sftpCli.Close()
+
+	if err := sftpCli.MkdirAll(remoteDir); err != nil {
+		return fmt.Errorf("ssh: sftp mkdir %s: %w", remoteDir, err)
+	}
+	return walkAndUpload(sftpCli, localDir, remoteDir)
+}
+
+// SyncDirDownMapped is the slug-aware counterpart of SyncDirDownMapped.
+// Reads from a fully-qualified remote directory (typically
+// ~/.claude/projects/<remote-slug>/) and writes the .jsonl / .md files to
+// the local slug directory so subsequent Agent Server runs (or local runs)
+// can --resume against the same session id.
+//
+// Mirrors SyncDirDown's missing-remote tolerance: an unreadable remote dir
+// returns nil rather than failing the whole coding job.
+func (c *Client) SyncDirDownMapped(remoteDir, localDir string) error {
+	if err := os.MkdirAll(localDir, 0755); err != nil {
+		return fmt.Errorf("ssh: mkdir local %s: %w", localDir, err)
+	}
+	sftpCli, err := c.sftp()
+	if err != nil {
+		return err
+	}
+	defer sftpCli.Close()
+	return walkAndDownload(sftpCli, remoteDir, localDir)
+}
+
 // sftp opens a new SFTP session on the underlying SSH connection. The caller
 // must Close it. Returns nil + error on transport failure.
 func (c *Client) sftp() (*sftp.Client, error) {
