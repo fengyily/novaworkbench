@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -30,6 +32,8 @@ func main() {
 		"one-shot data migration: copy all data from a SQLite file into the configured target database (NOVA_DB_DRIVER/NOVA_DB_DSN or dbconfig.json), then exit")
 	fromFlag := flag.String("from", db.DefaultSQLitePath,
 		"SQLite source path for -migrate")
+	portFlag := flag.String("port", "",
+		"HTTP listen port (overrides NOVA_PORT; default 9527). Example: -port 9000")
 	flag.Parse()
 
 	if *migrateFlag {
@@ -96,6 +100,23 @@ func main() {
 		log.Printf("[main] developer role write-channel migrate: %v", err)
 	} else if migrated {
 		log.Println("[main] developer role prompt 已升级到「Write 工具提交拆分」版本")
+	}
+	// Upgrade the executor role prompt to the "直接落地实现" persona. Same
+	// substring-fingerprint + idempotent pattern as MigrateDeveloperRole: the
+	// existing row's prompt is rewritten only when it still carries the old
+	// "严禁拆任务" signature; user-customized prompts are left alone (settings
+	// page reset button is the supported opt-in for those).
+	if migrated, err := roleSvc.MigrateExecutorRole(); err != nil {
+		log.Printf("[main] executor role migrate: %v", err)
+	} else if migrated {
+		log.Println("[main] executor role prompt 已升级到「直接落地实现」版本")
+	}
+	// Upgrade the architect role prompt to the template-driven persona (需求/
+	// 项目上下文/输出要求/工作方式约束). Same fingerprint + idempotent pattern.
+	if migrated, err := roleSvc.MigrateArchitectRole(); err != nil {
+		log.Printf("[main] architect role migrate: %v", err)
+	} else if migrated {
+		log.Println("[main] architect role prompt 已升级到「模板驱动」版本")
 	}
 
 	// Sub-task execution is driven by in-memory goroutines — a restart leaves
@@ -171,9 +192,31 @@ func main() {
 	// SubTaskRunner is the shared executor for child-agent rows: both the
 	// wizard (manual sub-tasks + auto-orchestrated children) and the merge
 	// handler (push + PR sub-task) delegate to it. Constructed once so the
-	// ring-buffer of live jobs is shared across handlers.
-	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc)
+	// ring-buffer of live jobs is shared across handlers. The wizard handler
+	// is built first and its remote-coding entrypoint is injected below —
+	// the runner needs it to dispatch children to an Agent server, while the
+	// wizard needs the runner for sub-task rows, so neither can be a pure
+	// constructor argument of the other.
+	//
+	// sub-task concurrency cap (env NOVA_SUBTASK_CONCURRENCY) prevents the
+	// "make run → SIGKILL on parent" symptom: too many parallel claude Node.js
+	// children trip macOS jetsam / Linux OOM killer on the parent nova process
+	// — a SIGKILL Go cannot intercept. Default 4 ≈ leaves ~1 GB headroom on a
+	// 4 GB jetsam threshold. See plan-ancient-snail.md.
+	subTaskConcurrency := handler.DefaultSubTaskConcurrency
+	if env := os.Getenv("NOVA_SUBTASK_CONCURRENCY"); env != "" {
+		if n, perr := strconv.Atoi(env); perr == nil && n > 0 {
+			subTaskConcurrency = n
+		} else {
+			log.Printf("[startup] ignoring invalid NOVA_SUBTASK_CONCURRENCY=%q (want positive int), falling back to %d", env, subTaskConcurrency)
+		}
+	}
+	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, agentSvrSvc, nil, subTaskConcurrency)
 	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, subTaskSvc, subTaskRunner)
+	// Wire the remote-coding entrypoint AFTER both are built: children of an
+	// Agent-server-developed requirement run on that server, so every sub-task
+	// dispatch (manual / orchestrated / push+PR) routes through it.
+	subTaskRunner.SetRemoteCoding(wizardH.RunRemoteCoding)
 	// Scheduled-task executor (wizard bridge) and HTTP handler. The
 	// scheduler package polls scheduled_tasks rows and dispatches through
 	// the executor; both live in main.go so the lifecycle is the same as
@@ -188,7 +231,7 @@ func main() {
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
-	mergeH := handler.NewMergeHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner)
+	mergeH := handler.NewMergeHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)
 	roleH := handler.NewRoleHandler(roleSvc, claudeCfgSvc)
 	settingH := handler.NewSettingHandler(settingSvc)
@@ -390,6 +433,7 @@ func main() {
 	mux.HandleFunc("POST /api/wizard/continue-coding", wizardH.ContinueCoding)
 	mux.HandleFunc("GET /api/wizard/jobs/{id}", wizardH.GetJob)
 	mux.HandleFunc("GET /api/wizard/jobs/{id}/stream", wizardH.StreamJob)
+	mux.HandleFunc("GET /api/wizard/active-jobs", wizardH.GetActiveJobs)
 	mux.HandleFunc("POST /api/wizard/refine-doc", wizardH.RefineDoc)
 	mux.HandleFunc("POST /api/wizard/apply-doc", wizardH.ApplyDoc)
 
@@ -496,7 +540,10 @@ func main() {
 		spaMux.ServeHTTP(w, r)
 	})
 
-	port := os.Getenv("NOVA_PORT")
+	port := *portFlag
+	if port == "" {
+		port = os.Getenv("NOVA_PORT")
+	}
 	if port == "" {
 		port = "9527"
 	}
@@ -509,13 +556,27 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// Graceful shutdown
+	// Startup banner: capture pid / ppid / GOMAXPROCS so post-mortem logs of an
+	// unexpected exit (SIGKILL we cannot catch) at least pin down whether the
+	// process tree was sane. "make run" + "go run" wrappers strip some env, so
+	// the parent pid is the most useful single value here.
+	log.Printf("[startup] pid=%d ppid=%d GOMAXPROCS=%d subTaskConcurrency=%d", os.Getpid(), os.Getppid(), runtime.GOMAXPROCS(0), subTaskConcurrency)
+
+	// Graceful shutdown. SIGINT / SIGTERM get the full 30s drain so in-flight
+	// claude child processes can flush their session jsonl (StreamCmd sets
+	// WaitDelay to give them 5s soft-exit). SIGHUP (e.g. terminal disconnect
+	// under "make run") gets only 2s — terminal detachment is almost always
+	// the user walking away, not a planned stop, so we shouldn't block.
 	go func() {
 		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		<-sigCh
-		log.Println("Shutting down...")
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		sig := <-sigCh
+		shutdownTimeout := 30 * time.Second
+		if sig == syscall.SIGHUP {
+			shutdownTimeout = 2 * time.Second
+		}
+		log.Printf("[shutdown] received signal=%v, draining (timeout=%s)...", sig, shutdownTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		srv.Shutdown(ctx)
 		// Stop the scheduled-task poller after the HTTP server is down so

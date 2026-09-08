@@ -45,9 +45,13 @@ type MergeHandler struct {
 	usageSvc      usageRecorder
 	subTaskSvc    *service.SubTaskService
 	subTaskRunner *SubTaskRunner
+	// agentSvrSvc resolves the Agent server a requirement was developed on.
+	// Non-nil enables the remote push / cleanup paths (see merge_agent.go);
+	// nil keeps every requirement on the local git path.
+	agentSvrSvc *service.AgentServerService
 }
 
-func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner) *MergeHandler {
+func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, agentSvrSvc *service.AgentServerService) *MergeHandler {
 	return &MergeHandler{
 		projectSvc:    projectSvc,
 		reqSvc:        reqSvc,
@@ -60,6 +64,7 @@ func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.Require
 		usageSvc:      usageSvc,
 		subTaskSvc:    subTaskSvc,
 		subTaskRunner: subTaskRunner,
+		agentSvrSvc:   agentSvrSvc,
 	}
 }
 
@@ -460,6 +465,16 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
 	dev, devDir := devBranchAndDir(reqRow, dir)
+	// A requirement developed on an Agent server has its commits on that host
+	// (and on origin once pushed) — never in the local checkout. Merging
+	// locally would silently produce an empty merge, or fail on a missing
+	// branch, and either way the user would think the work was integrated.
+	// Point them at the push+PR path, which IS routed to the agent server.
+	if h.usesAgentServer(reqRow) {
+		writeError(w, http.StatusConflict, "AGENT_SERVER_REQUIRED",
+			"该需求由 Agent 服务器开发，代码位于远端工作区，无法在本地直接合入。请使用「推送并发起 PR」（将在同一台 Agent 服务器上执行）。")
+		return
+	}
 	if dev == "" || dev == "HEAD" {
 		writeError(w, http.StatusBadRequest, "NO_BRANCH", "当前处于 detached HEAD，无法合并")
 		return
@@ -773,7 +788,12 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	// the requirement's isolated worktree via SubTaskRunner.Run; we only need
 	// the branch name here (used by the prompt the child agent runs against).
 	dev, _ := devBranchAndDir(reqRow, dir)
-	if dev == "" || dev == "HEAD" {
+	// Agent-server requirements have no local dev branch (the code lives on
+	// the agent host), so the detached-HEAD guard below must not apply. The
+	// branch name is resolved from the requirement row instead.
+	if h.usesAgentServer(reqRow) {
+		dev = remoteBranchFor(reqRow)
+	} else if dev == "" || dev == "HEAD" {
 		writeError(w, http.StatusBadRequest, "NO_BRANCH", "当前处于 detached HEAD，无法推送")
 		return
 	}
@@ -862,7 +882,15 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 // (no token / no automated PR).
 func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage string) string {
 	var b strings.Builder
-	b.WriteString("请完成「提交 → 合并主分支 → 推送 → 创建 PR」全流程。当前任务所有 git 操作都在当前工作目录（worktree / 项目目录）中执行；请避免在工作目录以外执行任何写操作。\n\n")
+	b.WriteString("请完成「提交 → 合并主分支 → 推送 → 创建 PR」全流程。当前任务所有 git 操作都在当前工作目录（worktree / 项目目录）中执行；请避免在工作目录以外执行任何写操作。\n")
+	// Agent-server dispatch: the child runs inside the requirement's remote
+	// worktree on the agent host (same /tmp/nova-agent/<proj>/<req> layout the
+	// coding pass used), so the "当前工作目录" wording above stays true — the
+	// note just tells the user where that directory physically is.
+	if reqRow.AgentServerID != "" {
+		b.WriteString("> 本需求由 Agent 服务器开发：本子任务会在该服务器的远端工作区中执行，提交与推送均发生在远端，本地仓库无需（也无法）参与。\n")
+	}
+	b.WriteString("\n")
 
 	b.WriteString("## 上下文\n")
 	b.WriteString("- 需求 ID: ")
@@ -1260,14 +1288,51 @@ func (h *MergeHandler) Cleanup(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if reqRow.WorktreePath == "" {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "message": "无 worktree 需要清理"})
-		return
-	}
 	var body struct {
 		Force bool `json:"force"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	// Agent-server requirements: the dev environment to clean is the worktree
+	// on the agent host, not a local one (start-coding never created a local
+	// worktree for them). Run the remote cleanup FIRST, then fall through to
+	// the local block so any stale local worktree from an earlier local run of
+	// the same requirement is reclaimed too.
+	if h.usesAgentServer(reqRow) {
+		res := h.remoteCleanup(reqRow, body.Force)
+		if len(res.dirty) > 0 {
+			filesJSON, _ := json.Marshal(res.dirty)
+			writeError(w, http.StatusConflict, "WORKTREE_DIRTY",
+				"Agent 服务器上的 worktree 存在未提交改动，请先提交或勾选 force 强制清理: "+string(filesJSON))
+			return
+		}
+		if res.errMsg != "" {
+			writeError(w, http.StatusInternalServerError, "WORKTREE_REMOVE_FAILED", res.errMsg)
+			return
+		}
+		// Clear the provenance along with the worktree fields: the environment
+		// is gone, so later stages must not keep routing to that server.
+		if perr := h.reqSvc.UpdateDevSource(reqRow.ID, service.DevSourceLocal, ""); perr != nil {
+			log.Printf("[worktree-cleanup] clear dev_source for %s: %v", reqRow.ID, perr)
+		}
+		if reqRow.WorktreePath == "" {
+			if perr := h.reqSvc.UpdateWorktree(reqRow.ID, "", ""); perr != nil {
+				log.Printf("[worktree-cleanup] clear DB fields for %s: %v", reqRow.ID, perr)
+			}
+			msg := "已清理 Agent 服务器上的开发环境"
+			if res.skipped {
+				msg = "Agent 服务器上无 worktree 需要清理"
+			}
+			writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "message": msg, "remote": true})
+			return
+		}
+		// else: keep going and clean the local leftovers too.
+	}
+
+	if reqRow.WorktreePath == "" {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "message": "无 worktree 需要清理"})
+		return
+	}
 
 	wtPath := reqRow.WorktreePath
 	// The worktree directory still exists → remove it via git. A dirty worktree
@@ -1301,6 +1366,11 @@ func (h *MergeHandler) Cleanup(w http.ResponseWriter, r *http.Request) {
 	}
 	if perr := h.reqSvc.UpdateWorktree(reqRow.ID, "", ""); perr != nil {
 		log.Printf("[worktree-cleanup] clear DB fields for %s: %v", reqRow.ID, perr)
+	}
+	// The local dev environment is gone too — drop the provenance so the next
+	// stage picks its execution target fresh instead of inheriting a stale one.
+	if perr := h.reqSvc.UpdateDevSource(reqRow.ID, service.DevSourceLocal, ""); perr != nil {
+		log.Printf("[worktree-cleanup] clear dev_source for %s: %v", reqRow.ID, perr)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})

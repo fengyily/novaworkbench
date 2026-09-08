@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   projectsApi, runnerApi, reviewApi, platformApi, requirementsApi, knowledgeApi,
-  usageApi, usageTotalInput, fmtCost,
+  usageApi, usageTotalInput, fmtCost, wizardApi,
   type Project, type RunStatus, type PR, type PRListResponse, type PlatformToken,
   type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage, statusLabels,
   kindLabels, kindOf,
@@ -102,6 +102,16 @@ export default function ProjectDetail() {
   const [showCreateReq, setShowCreateReq] = useState(false);
   // Requirements tab pagination — first page by default ("默认加载第一页").
   const [reqPage, setReqPage] = useState(1);
+
+  // Requirement ids currently running a wizard job (across the whole
+  // backend process). Populated by polling GET /api/wizard/active-jobs
+  // every 5s. The renderRequirementRows helper checks this set per row
+  // and appends a small amber breathing dot next to the status badge
+  // whenever the requirement has an in-flight job — covers coding /
+  // design / apply / analyst without requiring the backend to add a
+  // `coding_job_id` column to the requirements table. List page only:
+  // detail page has its own richer aggregation in RequirementDetail.
+  const [activeReqIds, setActiveReqIds] = useState<Set<string>>(new Set());
 
   // Per-requirement token totals (excl review) — drives the Tokens column in
   // the requirements list + overview. Loaded alongside reqs and refetched when
@@ -247,6 +257,31 @@ export default function ProjectDetail() {
   // replaced (initial load, post-create refresh), so a previously selected page
   // can never land past the new last page and "默认加载第一页" holds after refresh.
   useEffect(() => { setReqPage(1); }, [reqs]);
+
+  // 5s poll of /api/wizard/active-jobs. Drives the small amber breathing
+  // dot rendered next to each requirement's status badge in
+  // renderRequirementRows. Independent of `tab` so the dot stays accurate
+  // even when the user has the requirements tab collapsed on overview
+  // (re-entering the tab shows up-to-date state without a refresh). The
+  // `cancelled` flag guards against a late tick leaking into a different
+  // project (we'd otherwise see the previous project's requirements get
+  // a stale dot set after navigation).
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const { jobs } = await wizardApi.listActiveJobs();
+        if (cancelled) return;
+        setActiveReqIds(new Set(jobs.map((j) => j.requirement_id).filter(Boolean)));
+      } catch {
+        /* transient network blip — keep previous set until the next tick */
+      }
+    };
+    tick();
+    const handle = setInterval(tick, 5000);
+    return () => { cancelled = true; clearInterval(handle); };
+  }, [id]);
 
   // Overview: adapt the visible row count to the viewport's remaining space
   // below the section's top. Measuring the section's own height would
@@ -451,6 +486,10 @@ export default function ProjectDetail() {
 
   // Shared table rows for the requirements list (used by both the overview
   // "recent requirements" and the requirements tab — single source of truth).
+  // The "Agent 服务器" column mirrors the cross-project RequirementsList so
+  // users can see at a glance which remote execution target the requirement
+  // was developed on (or 本地 if it ran locally). Stays consistent with the
+  // `agent-server-tag` styling on the global list page.
   const renderRequirementRows = (items: Requirement[]) => items.map(req => (
     <tr
       key={req.id}
@@ -461,7 +500,34 @@ export default function ProjectDetail() {
       <td data-label="类型"><span className={`kind-badge kind-${kindOf(req)}`}>{kindLabels[kindOf(req)]}</span></td>
       <td data-label="标题" className="pr-title">{req.title}</td>
       <td data-label="优先级"><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
-      <td data-label="状态"><span className={`status-badge status-${req.status}`}>{statusLabels[req.status] ?? req.status}</span></td>
+      <td data-label="状态">
+        <span className={`status-badge status-${req.status}`}>{statusLabels[req.status] ?? req.status}</span>
+        {/* Breathing dot for any wizard job in flight on this requirement
+            (analyst/design/apply/coding). Set is populated by the 5s poll
+            of /api/wizard/active-jobs above. aria-label + title so screen
+            readers + hover explain the indicator (the dot has no text). */}
+        {activeReqIds.has(req.id) && (
+          <span
+            className="claude-pulse-dot is-work"
+            aria-label="Claude 处理中"
+            title="Claude 正在处理此需求"
+          />
+        )}
+      </td>
+      {/* Agent server column: which remote execution target the requirement
+          was developed on. Empty = 本地. The joined name comes from the
+          backend's LEFT JOIN; a deleted server falls back to 本地 so stale
+          ids never render as raw hex. Identical to the column on the
+          cross-project RequirementsList. */}
+      <td data-label="Agent 服务器">
+        {req.agent_server_name ? (
+          <span className="agent-server-tag" title={req.agent_server_name}>
+            🖥️ {req.agent_server_name}
+          </span>
+        ) : (
+          <span style={{ color: 'var(--color-text-muted)' }}>本地</span>
+        )}
+      </td>
       <td data-label="Tokens (入/出)" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
         {(() => {
           const u = reqUsageMap.get(req.id);
@@ -860,6 +926,7 @@ export default function ProjectDetail() {
                       <th>标题</th>
                       <th style={{ width: 90 }}>优先级</th>
                       <th style={{ width: 130 }}>状态</th>
+                      <th style={{ width: 140 }}>Agent 服务器</th>
                       <th style={{ width: 130 }}>Tokens (入/出)</th>
                       <th style={{ width: 110 }}>成本</th>
                       <th style={{ width: 110 }}>创建时间</th>
@@ -997,6 +1064,7 @@ export default function ProjectDetail() {
                     <th>标题</th>
                     <th style={{ width: 90 }}>优先级</th>
                     <th style={{ width: 130 }}>状态</th>
+                    <th style={{ width: 140 }}>Agent 服务器</th>
                     <th style={{ width: 130 }}>Tokens (入/出)</th>
                       <th style={{ width: 110 }}>成本</th>
                     <th style={{ width: 110 }}>创建时间</th>
