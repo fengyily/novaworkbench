@@ -60,6 +60,13 @@ interface Props {
   // `label` prop shows verbatim.
   stage?: ModelStage;
   style?: CSSProperties;
+  // Controlled claude_configs row id from the "配置" dropdown. Optional —
+  // when omitted the component manages its own state (legacy behavior,
+  // kept so existing call sites don't need to be migrated at the same
+  // time). When provided the parent owns the state and is responsible
+  // for sending `claude_config_id` alongside `model` in the request body.
+  configId?: string;
+  onConfigChange?: (configId: string) => void;
 }
 
 const STAGE_META: Record<ModelStage, { chip: string; chipShort: string }> = {
@@ -78,12 +85,17 @@ export default function ModelSelect({
   working,
   stage,
   style,
+  configId,
+  onConfigChange,
 }: Props) {
   const [configs, setConfigs] = useState<ClaudeConfigItem[]>([]);
-  // The config the user has currently picked in the "type" dropdown.
-  // Falls back to "" = "no specific config" once we know there are zero
-  // configs.
-  const [selectedConfigId, setSelectedConfigId] = useState<string>('');
+  // Internal fallback state for the "type" dropdown. When `configId` prop is
+  // provided we defer to it (controlled mode); otherwise we self-manage
+  // (legacy mode, defaulting to the active config on mount). The bug fix
+  // for "选择模型开发时 BASE URL 不对" requires lifting this state up so the
+  // parent can send `claude_config_id` in the request body — but we keep
+  // the uncontrolled fallback so old call sites stay valid.
+  const [internalConfigId, setInternalConfigId] = useState<string>('');
 
   useEffect(() => {
     claudeApi.list()
@@ -91,13 +103,34 @@ export default function ModelSelect({
         const list = res ?? [];
         setConfigs(list);
         const active = list.find(c => c.is_active);
-        setSelectedConfigId(active?.id ?? list[0]?.id ?? '');
+        const initial = active?.id ?? list[0]?.id ?? '';
+        // Only seed the internal state when uncontrolled. Controlled mode
+        // is the parent's responsibility — overwriting it here would fight
+        // with the parent's chosen value.
+        if (configId === undefined) {
+          setInternalConfigId(initial);
+        }
       })
       .catch(() => {
         setConfigs([]);
-        setSelectedConfigId('');
+        if (configId === undefined) {
+          setInternalConfigId('');
+        }
       });
+    // configId is intentionally not in the dep array — we only seed once
+    // on mount; controlled updates flow through the prop directly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Resolved "type" id: controlled prop wins, fallback to internal state.
+  const selectedConfigId = configId ?? internalConfigId;
+  const setSelectedConfigId = (id: string) => {
+    if (onConfigChange) {
+      onConfigChange(id);
+    } else {
+      setInternalConfigId(id);
+    }
+  };
 
   // Normalize the persisted "默认模型" sentinel to the dropdown's empty
   // value; anything else is a concrete model id kept verbatim.

@@ -621,6 +621,36 @@ export interface ContextSummary {
  * to the requirements row, while `getContextSummary` reads the persisted
  * summary back for the preview modal and the requirement-detail badge.
  */
+
+/**
+ * Request shape for POST /api/wizard/start-coding. The frontend's call
+ * sites currently inline this body (RequirementDetail, WizardPage), but
+ * keeping a typed shape here documents the contract and lets the type
+ * checker flag drift. `claude_config_id` is the user-picked claude_configs
+ * row id from the ModelSelect "配置" dropdown; sending it explicitly fixes
+ * the "BASE URL doesn't match selected model" bug.
+ */
+export interface StartCodingReq {
+  project_path: string;
+  requirement_title: string;
+  requirement_desc: string;
+  requirement_id?: string;
+  branch_name?: string;
+  base_branch?: string;
+  /** Per-request model override; empty = role's configured model. */
+  model?: string;
+  /**
+   * Per-request claude_configs row id; empty = backend resolves via
+   * resolveConfigIDForRun (model owner > role binding > global active).
+   */
+  claude_config_id?: string;
+  read_knowledge?: boolean;
+  /** Empty = local execution; non-empty = route through that Agent server. */
+  agent_server_id?: string;
+  /** false = developer persona direct implementation; true = sub-task split. */
+  split_tasks?: boolean;
+}
+
 export const wizardApi = {
   /**
    * Trigger claude to compress the current stage's conversation into a short

@@ -544,6 +544,11 @@ export default function RequirementDetail() {
   const [analystModel, setAnalystModel] = useState('');
   const [architectModel, setArchitectModel] = useState('');
   const [developerModel, setDeveloperModel] = useState('');
+  // The user-picked claude_configs row id from the developer-stage
+  // ModelSelect. Forwarded to /api/wizard/start-coding as `claude_config_id`
+  // so the backend resolves gateway auth + base URL from the SAME row the
+  // model came from (fixes the "BASE URL doesn't match selected model" bug).
+  const [developerConfigId, setDeveloperConfigId] = useState('');
   // Agent-server selector for the developer stage. Empty string = local
   // execution (the historical default); non-empty = run claude on the chosen
   // remote target. Only `ready` servers are listed — the wizard refuses to
@@ -1407,11 +1412,15 @@ export default function RequirementDetail() {
           split_tasks: splitTasks,
           // Per-request model override — empty means the role's configured model.
           ...(developerModel ? { model: developerModel } : {}),
+          // Per-request claude_config id (the user-picked "配置" from
+          // ModelSelect). When empty the backend resolves gateway via
+          // resolveConfigIDForRun (model owner > role binding > global active).
+          // Sending this explicitly fixes the "BASE URL doesn't match selected
+          // model" bug — without it the gateway routes the picked model to
+          // the active config's ANTHROPIC_BASE_URL.
+          ...(developerConfigId ? { claude_config_id: developerConfigId } : {}),
           // Remote Agent-server execution. Empty string = local execution (the
           // wizardH.StartCoding default branch handles the legacy path).
-          ...(agentServerId ? { agent_server_id: agentServerId } : {}),
-          // Remote Agent-server execution: empty string = local (legacy); a
-          // server id routes the coding job through SSH instead.
           ...(agentServerId ? { agent_server_id: agentServerId } : {}),
         }),
       });
@@ -1471,6 +1480,8 @@ export default function RequirementDetail() {
           message: msg,
           // Per-request model override — empty means the role's configured model.
           ...(developerModel ? { model: developerModel } : {}),
+          // Per-request claude_config id — see doStartCoding for the rationale.
+          ...(developerConfigId ? { claude_config_id: developerConfigId } : {}),
         }),
       });
       const json = await res.json();
@@ -1960,6 +1971,8 @@ export default function RequirementDetail() {
                       label="开发模型"
                       defaultModelName={developerDefaultModel}
                       title={coding ? 'Claude 正在开发中，暂不能切换模型' : '开发实现阶段使用的模型，开始前即可选择'}
+                      configId={developerConfigId}
+                      onConfigChange={setDeveloperConfigId}
                     />
                   </div>
                 </div>
@@ -2936,6 +2949,8 @@ export default function RequirementDetail() {
                   label="开发模型"
                   defaultModelName={developerDefaultModel}
                   title={coding ? 'Claude 正在开发中，暂不能切换模型' : '开发实现阶段使用的模型，开始前即可选择'}
+                  configId={developerConfigId}
+                  onConfigChange={setDeveloperConfigId}
                 />
                 {/* Agent-server selector. Empty = local execution (the default
                     and the only path before this feature); non-empty routes the
@@ -3040,6 +3055,8 @@ export default function RequirementDetail() {
                     working={coding}
                     stage="developer"
                     defaultModelName={developerDefaultModel}
+                    configId={developerConfigId}
+                    onConfigChange={setDeveloperConfigId}
                   />
                 </div>
               </div>
