@@ -189,7 +189,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
-			&r.CreatedBy, &r.SourceRequirementID, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
+			&r.CreatedBy, &r.SourceRequirementID, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.AgentServerID, &r.AgentServerName,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
@@ -375,6 +375,17 @@ func (s *RequirementService) UpdateAnalysisJob(id, jobID string) error {
 // doesn't try to reconnect to a finished job.
 func (s *RequirementService) UpdateApplyJob(id, jobID string) error {
 	_, err := s.db.Exec("UPDATE requirements SET apply_job_id=?, updated_at=? WHERE id=?",
+		jobID, time.Now(), id)
+	return err
+}
+
+// UpdateCodingJob persists the active coding JobStore job id so a page refresh
+// (or a fresh tab opened while a scheduled task is mid-run) can reconnect to
+// the SSE stream and replay history. Pass "" to clear it on terminal Finish
+// so the UI stops showing the "executing" state and a refresh doesn't try to
+// reconnect to a finished job. Mirrors UpdateDesignJob for the design stage.
+func (s *RequirementService) UpdateCodingJob(id, jobID string) error {
+	_, err := s.db.Exec("UPDATE requirements SET coding_job_id=?, updated_at=? WHERE id=?",
 		jobID, time.Now(), id)
 	return err
 }

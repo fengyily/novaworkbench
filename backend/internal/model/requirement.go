@@ -26,6 +26,7 @@ type Requirement struct {
 	DesignJobID        string `json:"design_job_id"`   // active architect-design JobStore job id; empty when no design job is running
 	AnalysisJobID      string `json:"analysis_job_id"` // active analyst-chat JobStore job id; empty when no analyst turn is running
 	ApplyJobID         string `json:"apply_job_id"`    // active apply-doc JobStore job id; empty when no apply is running
+	CodingJobID        string `json:"coding_job_id"`   // active coding JobStore job id; empty when no coding job is running
 	CodingSessionID    string `json:"coding_session_id"`
 	SkipAnalysis       bool   `json:"skip_analysis"` // when true, architect-design runs a fresh session instead of forking the analyst session
 	SkipDesign         bool   `json:"skip_design"`   // when true, skip analyst+architect stages and go straight to coding ("直接开发")

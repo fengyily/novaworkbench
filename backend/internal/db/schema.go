@@ -412,6 +412,14 @@ var alterColumns = []string{
 	`ALTER TABLE requirements ADD COLUMN coding_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN analysis_job_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN apply_job_id TEXT NOT NULL DEFAULT ''`,
+	// coding_job_id: active developer-stage JobStore job id, so a page refresh
+	// (or a fresh tab opened while a scheduled task is mid-run) can reconnect
+	// to the SSE stream and replay history. Mirrors design_job_id /
+	// analysis_job_id / apply_job_id. Cleared by execStartCoding's defer on
+	// Finish so a stale id never lingers after the job is gone (matters
+	// because JobStore is in-memory and can evict the job on backend
+	// restart while the DB column still holds it).
+	`ALTER TABLE requirements ADD COLUMN coding_job_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN skip_analysis INTEGER NOT NULL DEFAULT 1`,
 	// skip_design: "直接开发" — when true, the requirement skips the analyst AND
 	// architect stages entirely and goes straight to coding (draft → developing).
