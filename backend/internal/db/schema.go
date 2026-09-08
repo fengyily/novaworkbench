@@ -536,6 +536,13 @@ var alterColumns = []string{
 	// instead of silently falling back to the local checkout.
 	`ALTER TABLE requirements ADD COLUMN dev_source TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN agent_server_id TEXT NOT NULL DEFAULT ''`,
+	// Development-mode provenance for the coding stage. Stamped once when
+	// StartCoding runs so the UI can show "本次开发基于会话/方案" and so a
+	// follow-up run that omits the field can default to the persisted value.
+	// Values: "session" = fork/resume the design session (legacy default),
+	// "design"  = fresh session, hand the stored design doc to the agent
+	// via the -p prompt; empty = never ran / predates this column.
+	`ALTER TABLE requirements ADD COLUMN dev_mode TEXT NOT NULL DEFAULT ''`,
 	// Per-sub-task token usage (mirrors token_usage per-row columns but stays
 	// inline so a child agent's cost lives next to its artifact without a
 	// second SELECT against token_usage). input_tokens / output_tokens are the

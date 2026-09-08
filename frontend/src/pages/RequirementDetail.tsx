@@ -578,6 +578,21 @@ export default function RequirementDetail() {
     }
   }, [req?.agent_server_id]);
 
+  // Development-mode selector for the coding stage. '' = the UI hasn't
+  // picked yet (the StartCoding request omits dev_mode and the backend
+  // falls back to the persisted value, or 'session' on rows that predate
+  // the column); 'session' = 基于会话开发 (fork the design session,
+  // legacy default); 'design' = 基于方案开发 (fresh session, hand the
+  // stored design doc to the agent via the -p prompt). Persisted in
+  // requirements.dev_mode and seeded from the row so a 重新开发 preserves
+  // the previous choice by default.
+  const [devMode, setDevMode] = useState<'' | 'session' | 'design'>('');
+  useEffect(() => {
+    if (req?.dev_mode) {
+      setDevMode((cur) => (cur === '' ? req.dev_mode! : cur));
+    }
+  }, [req?.dev_mode]);
+
   // ── Scheduled-task state ──
   // pendingByType[taskType] holds the pending row (if any) so the detail
   // page can render "已定时 HH:MM ... [取消]" hints and disable the
@@ -1454,6 +1469,13 @@ export default function RequirementDetail() {
           // Remote Agent-server execution. Empty string = local execution (the
           // wizardH.StartCoding default branch handles the legacy path).
           ...(agentServerId ? { agent_server_id: agentServerId } : {}),
+          // Development-mode: 'session' (default when not set — fork the
+          // design session) or 'design' (fresh session, hand the stored
+          // design doc to the agent via the -p prompt). Sent only when the
+          // user explicitly picked one; otherwise the backend falls back to
+          // the persisted requirements.dev_mode (or 'session' on legacy
+          // rows), which keeps 重新开发 consistent with the previous run.
+          ...(devMode ? { dev_mode: devMode } : {}),
         }),
       });
       const json = await res.json();
@@ -2041,6 +2063,53 @@ export default function RequirementDetail() {
                       </div>
                     </div>
                   </label>
+                  {/* Development-mode radio: 基于会话开发（默认）= fork 方案
+                      会话继续；基于方案开发 = 创建新会话，把方案作为唯一依据
+                      交给 Agent。Seed 与 dev_source/dev_mode 保持一致；本
+                      地选项在确认启动前可改。 */}
+                  <div className="preflight-toggle" style={{ display: 'block' }}>
+                    <div className="preflight-toggle-body">
+                      <div className="preflight-toggle-title">开发模式</div>
+                      <div className="preflight-toggle-desc" style={{ marginBottom: 8 }}>
+                        选择如何把方案交给开发 Agent。默认沿用上次设置。
+                      </div>
+                      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                          <input
+                            type="radio"
+                            name="devModeModal"
+                            value="session"
+                            checked={devMode === 'session'}
+                            onChange={() => setDevMode('session')}
+                            disabled={coding}
+                          />
+                          基于会话开发
+                        </label>
+                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                          <input
+                            type="radio"
+                            name="devModeModal"
+                            value="design"
+                            checked={devMode === 'design'}
+                            onChange={() => setDevMode('design')}
+                            disabled={coding}
+                          />
+                          基于方案开发
+                        </label>
+                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer', color: 'var(--color-text-muted)' }}>
+                          <input
+                            type="radio"
+                            name="devModeModal"
+                            value=""
+                            checked={devMode === ''}
+                            onChange={() => setDevMode('')}
+                            disabled={coding}
+                          />
+                          沿用上次设置
+                        </label>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -2218,6 +2287,16 @@ export default function RequirementDetail() {
         {/* 开发来源：Agent Server（含服务器名 + 模型）或本地开发。coding 阶段
             启动时写入，未开发过的需求不渲染。 */}
         <DevSourceBadge req={req} />
+        {/* 开发模式：基于会话开发（在原方案会话中继续）vs 基于方案开发
+            （创建新会话，把方案作为唯一依据交给 Agent）。仅在 coding 阶
+            段启动过后渲染，badge 文案区分两种模式以便用户一眼看出上次
+            选了哪种。 */}
+        {req.dev_mode === 'session' && (
+          <span className="dev-mode-badge dev-mode-session" title="上次基于会话开发：fork 方案会话继续">基于会话开发</span>
+        )}
+        {req.dev_mode === 'design' && (
+          <span className="dev-mode-badge dev-mode-design" title="上次基于方案开发：创建新会话并把方案交给 Agent">基于方案开发</span>
+        )}
         {req.source_requirement_id && (
           <Link
             to={`/requirements/${req.source_requirement_id}`}
@@ -3015,6 +3094,30 @@ export default function RequirementDetail() {
                     {agentServers.map((s) => (
                       <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
                     ))}
+                  </select>
+                </label>
+                {/* Development-mode selector. Empty = 沿用上次设置（首次
+                    默认 session）; 'session' = 基于会话开发（在原方案会话
+                    中继续，legacy 行为）; 'design' = 基于方案开发（创建新
+                    会话，把方案作为唯一依据交给 Agent）。Seed 与 dev_source
+                    一致：首次进入从 req.dev_mode 取值。 */}
+                <label style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  开发模式
+                  <select
+                    className="form-input"
+                    style={{ minWidth: 150 }}
+                    value={devMode}
+                    onChange={(e) => setDevMode(e.target.value as '' | 'session' | 'design')}
+                    disabled={coding}
+                    title={devMode === 'design'
+                      ? '创建新会话并把方案作为唯一依据交给开发 Agent'
+                      : devMode === 'session'
+                      ? '沿用原方案会话继续开发（继承需求分析与方案讨论）'
+                      : '未选择，将使用上次保存的模式（首次默认为基于会话开发）'}
+                  >
+                    <option value="">沿用上次设置</option>
+                    <option value="session">基于会话开发</option>
+                    <option value="design">基于方案开发</option>
                   </select>
                 </label>
                 {agentServers.length === 0 && (

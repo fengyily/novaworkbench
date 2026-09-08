@@ -78,6 +78,14 @@ type Requirement struct {
 	// the environment the code actually lives in.
 	DevSource     string `json:"dev_source"`
 	AgentServerID string `json:"agent_server_id"`
+	// DevMode records HOW the coding stage was launched: "session" forks the
+	// design session (legacy default — Claude inherits the full analysis+design
+	// conversation), "design" starts a fresh session and hands the stored
+	// design doc to the agent via the -p prompt. Stamped once when the coding
+	// stage starts so the UI can show "本次开发基于会话/方案" and a follow-up
+	// StartCoding that omits the field can default to the persisted value.
+	// Empty = never coded / predates this column.
+	DevMode string `json:"dev_mode"`
 	// AgentServerName is a display-only join of agent_servers.name; it is NOT
 	// a requirements column. Populated by RequirementService.List/Get so the
 	// requirement list and detail pages can render "Agent Server 开发 · <名称>"
