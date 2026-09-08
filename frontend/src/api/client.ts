@@ -713,7 +713,30 @@ export const wizardApi = {
    * StreamJob SSE uses the same handler internally for live progress.
    */
   getJob: (jobId: string) => api.get<RunJob>(`/api/wizard/jobs/${jobId}`),
+  /**
+   * Snapshot of all currently-running wizard jobs (across every project in
+   * this backend process). Used by the requirement list / detail pages to
+   * badge "Claude 工作中" on rows whose requirement_id appears in the
+   * returned set. Backed by GET /api/wizard/active-jobs which walks the
+   * in-memory JobStore ring buffer (cap 50). 5s polling cadence on the
+   * frontend — see RequirementDetail / ProjectDetail useEffect.
+   */
+  listActiveJobs: () => api.get<{ jobs: ActiveJob[] }>('/api/wizard/active-jobs'),
 };
+
+/**
+ * Per-job projection returned by GET /api/wizard/active-jobs. Intentionally
+ * minimal — the frontend only needs to know "is requirement X being worked
+ * on right now?" so we surface only id + requirement_id + status + the
+ * free-form type label. `status` is always "running" while the job is in
+ * the ring buffer (finished jobs are filtered out server-side).
+ */
+export interface ActiveJob {
+  job_id: string;
+  requirement_id: string;
+  status: 'running';
+  type: string;
+}
 
 export interface RunStatus {
   status: 'running' | 'done' | 'error' | 'stopped';

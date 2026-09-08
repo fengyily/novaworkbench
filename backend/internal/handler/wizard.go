@@ -619,6 +619,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	// job id immediately. The claude turn runs in a goroutine writing progress
 	// into the job store.
 	job := h.jobs.Create(req.RequirementID)
+	job.SetType("analyst_chat")
 	job.SetModel(model)
 	if perr := h.reqSvc.UpdateAnalysisJob(req.RequirementID, job.ID); perr != nil {
 		log.Printf("[analyst-chat] failed to persist analysis_job_id for %s: %v", req.RequirementID, perr)
@@ -1193,6 +1194,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := h.jobs.Create(p.RequirementID)
+	job.SetType("start_coding")
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	go h.execStartCoding(&p, job, nil)
@@ -1206,6 +1208,7 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 // finishes. Returns the JobStore job id.
 func (h *WizardHandler) RunScheduledCoding(p *codingRunParams, cb *runCallbacks) (string, error) {
 	job := h.jobs.Create(p.RequirementID)
+	job.SetType("start_coding")
 	go h.execStartCoding(p, job, cb)
 	return job.ID, nil
 }
@@ -1958,6 +1961,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := h.jobs.Create(body.RequirementID)
+	job.SetType("adjust_coding")
 	job.SetModel(model)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
@@ -2176,6 +2180,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 	_, model, claudeConfigID := h.roleConfig("developer")
 
 	job := h.jobs.Create(body.RequirementID)
+	job.SetType("continue_coding")
 	job.SetModel(model)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
@@ -2479,6 +2484,7 @@ func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride, cla
 	// the job id immediately. The plan-mode claude run happens in a goroutine
 	// writing progress into the job store.
 	job := h.jobs.Create(id)
+	job.SetType("architect_design")
 	if perr := h.reqSvc.UpdateDesignJob(id, job.ID); perr != nil {
 		log.Printf("[architect-design] failed to persist design_job_id for %s: %v", id, perr)
 	}
@@ -2757,6 +2763,18 @@ func (h *WizardHandler) GetJob(w http.ResponseWriter, r *http.Request) {
 		"started_at":  job.StartedAt,
 		"finished_at": job.FinishedAt,
 	})
+}
+
+// GetActiveJobs returns all currently-running wizard jobs across the process.
+// Used by list / detail pages to badge "Claude 工作中" without N+1 polling
+// each requirement's *_job_id columns. Returns an empty array (not null) when
+// no jobs are running so the JSON shape stays stable for the frontend.
+func (h *WizardHandler) GetActiveJobs(w http.ResponseWriter, r *http.Request) {
+	jobs := h.jobs.ActiveJobs()
+	if jobs == nil {
+		jobs = []store.ActiveJob{}
+	}
+	writeJSON(w, 200, map[string]any{"jobs": jobs})
 }
 
 // toolResultContent extracts and truncates the content of a tool_result block.
@@ -4940,6 +4958,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 	// job id immediately. Claude runs in a goroutine writing progress into the
 	// job store.
 	job := h.jobs.Create(req.RequirementID)
+	job.SetType("apply_doc")
 	if perr := h.reqSvc.UpdateApplyJob(req.RequirementID, job.ID); perr != nil {
 		log.Printf("[apply-doc] failed to persist apply_job_id for %s: %v", req.RequirementID, perr)
 	}

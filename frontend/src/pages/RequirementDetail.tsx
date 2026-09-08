@@ -537,6 +537,20 @@ export default function RequirementDetail() {
   // Live "analyst turn running" signal lifted from DeepRefineChat, so the
   // header Claude-status badge is accurate during an in-flight turn.
   const [analystWorking, setAnalystWorking] = useState(false);
+  // DocRefineChat (refine-doc / apply-doc) reports its in-flight turns
+  // through onWorkingChange; refine-doc streams straight to the response
+  // without entering JobStore, so this callback is the only signal we
+  // get while a refine turn runs. apply-doc does enter JobStore and is
+  // also picked up by activeReqIds (below), so this state is mostly a
+  // fallback that keeps the badge in sync within the same page.
+  const [refineWorking, setRefineWorking] = useState(false);
+  // Global view of all wizard jobs currently running in this backend
+  // process, projected to just the requirement ids. Populated by polling
+  // GET /api/wizard/active-jobs every 5s. Combined with the local in-page
+  // signals (coding/designing/analystWorking/refineWorking and the
+  // persisted *_job_id columns) to drive the global claudeWorking flag
+  // and the amber pulse animation on the status badge.
+  const [activeReqIds, setActiveReqIds] = useState<Set<string>>(new Set());
 
   // Per-stage model selection (analyst / architect / developer). Seeded once
   // from the server-persisted stage model so each dropdown defaults to 已设置
@@ -577,6 +591,31 @@ export default function RequirementDetail() {
       setAgentServerId((cur) => (cur === '' ? req.agent_server_id! : cur));
     }
   }, [req?.agent_server_id]);
+
+  // Poll /api/wizard/active-jobs every 5s so the status badge + claude-status
+  // row can pulse while a coding/design/apply job is running on this
+  // requirement — even if the persisted *_job_id column hasn't refreshed
+  // yet (it lags until the goroutine finishes). The endpoint walks the
+  // in-memory JobStore ring buffer (cap 50) so it's cheap enough to poll
+  // here plus on the list page simultaneously. The `cancelled` flag prevents
+  // a late tick from stomping on the cleanup after the requirement id
+  // changes (we don't want a stale set lingering into the next requirement).
+  useEffect(() => {
+    if (!req?.id) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const { jobs } = await wizardApi.listActiveJobs();
+        if (cancelled) return;
+        setActiveReqIds(new Set(jobs.map((j) => j.requirement_id).filter(Boolean)));
+      } catch {
+        /* transient network blip — keep the previous set until the next tick */
+      }
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [req?.id]);
 
   // Development-mode selector for the coding stage. '' = the UI hasn't
   // picked yet (the StartCoding request omits dev_mode and the backend
@@ -1858,9 +1897,15 @@ export default function RequirementDetail() {
   // Claude working status. Analysis signal comes from DeepRefineChat's live
   // onWorkingChange (the persisted analysis_job_id is only refreshed after a
   // turn finishes, so it lags during the turn); design/apply use the persisted
-  // active job ids; coding/design add the local streaming states.
-  const claudeWorking = coding || designing || analystWorking ||
-    !!req.analysis_job_id || !!req.design_job_id || !!req.apply_job_id;
+  // active job ids; coding/design add the local streaming states. The global
+  // `activeReqIds` set (populated by the 5s /api/wizard/active-jobs poll)
+// catches jobs that have no per-requirement *_job_id column at all —
+// currently that means start-coding / adjust-coding / continue-coding, but
+// the aggregation also double-covers analyst/design/apply so the pulse stays
+// on even when this page hasn't loaded the latest persisted pointer yet.
+  const claudeWorking = coding || designing || analystWorking || refineWorking ||
+    !!req.analysis_job_id || !!req.design_job_id || !!req.apply_job_id ||
+    activeReqIds.has(req.id);
   // Per-stage working flags drive the model-switch disable (task requirement:
   // Claude 工作状态下禁止切换模型).
   const architectWorking = designing || !!req.design_job_id;
@@ -2278,9 +2323,12 @@ export default function RequirementDetail() {
 
       <div className="detail-meta">
         <span className={`kind-badge kind-${reqKind}`} title={reqKind === 'idea' ? '想法 — 仅讨论方案，不进入开发' : reqKind === 'issue' ? '问题 — 排查根因并修复' : '需求 — 标准 3 阶段实现'}>{kindLabels[reqKind]}</span>
-        <span className={`status-badge status-${req.status}`}>{statusLabels[req.status] || req.status}</span>
+        {/* claude-pulse 叠加在 status-badge + claude-status 上：amber 涟漪 +
+            微缩放 + brightness 提升，1.6s 周期呼吸，详情页头一眼能看出当前
+            是否处于 wizard job 运行中。prefers-reduced-motion 时自动静止。 */}
+        <span className={`status-badge status-${req.status}${claudeWorking ? ' claude-pulse' : ''}`}>{statusLabels[req.status] || req.status}</span>
         <span className={`priority-tag ${req.priority}`}>{req.priority.toUpperCase()}</span>
-        <span className={`claude-status${claudeWorking ? ' working' : ''}`} title={claudeWorking ? 'Claude 正在执行分析/方案/开发任务' : '当前无 Claude 任务在运行'}>
+        <span className={`claude-status${claudeWorking ? ' working claude-pulse' : ''}`} title={claudeWorking ? 'Claude 正在执行分析/方案/开发任务' : '当前无 Claude 任务在运行'}>
           {claudeWorking ? <><IconBotBadge size={12} className="icon-mr" />Claude 工作中</> : <><IconSleep size={12} className="icon-mr" />Claude 空闲</>}
         </span>
         {project && <span className="project-tag"><IconFolder size={12} className="icon-mr" />{project.name}</span>}
@@ -3008,6 +3056,7 @@ export default function RequirementDetail() {
                 defaultModel={architectDefaultModel}
                 applyJobId={req.apply_job_id}
                 onTurnDone={refresh}
+                onWorkingChange={setRefineWorking}
                 usage={designUsage}
                 onUsage={setDesignUsage}
               />

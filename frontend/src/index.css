@@ -772,6 +772,46 @@ body.no-scroll {
   100% { box-shadow: 0 0 0 0 rgba(217, 119, 6, 0); }
 }
 
+/* ── Claude 工作中呼吸提示 ────────────────────────────────────────
+   叠加在 status-badge / status-tag / claude-status 上；当需求处于
+   任何活跃 wizard job（analysis / design / apply / coding / refine
+   / developer-chat 等）即生效。
+   综合：opacity 脉动 + box-shadow 涟漪 + 微缩放 + brightness 提升，
+   amber 色调复用 --color-accent-warm，与 ai-pulse-dot.is-work 同源。
+   1.6s 周期落在人眼 1.6s 呼吸感知阈值内（约等于静息呼吸频率），节奏
+   较 ai-pulse 的 1.4s 略慢一些以避免两处同时脉动时产生共振噪音。 */
+@keyframes claude-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(217, 119, 6, 0.55);
+    transform: scale(1);
+    filter: brightness(1);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(217, 119, 6, 0);
+    transform: scale(1.04);
+    filter: brightness(1.08);
+  }
+}
+.claude-pulse {
+  animation: claude-pulse 1.6s ease-in-out infinite;
+  will-change: transform, box-shadow;
+}
+.claude-pulse-dot {
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent-warm);
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.claude-pulse-dot.is-work {
+  animation: claude-pulse 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .claude-pulse,
+  .claude-pulse-dot.is-work { animation: none; }
+}
+
 /* ── Mobile empty state ───────────────────────────────────────────
    Distinctive empty states for list pages: a centered illustration
    mark + a primary CTA. Parchment surface so the empty area reads
