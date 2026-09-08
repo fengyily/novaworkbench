@@ -107,6 +107,13 @@ func main() {
 	} else if migrated {
 		log.Println("[main] executor role prompt 已升级到「直接落地实现」版本")
 	}
+	// Upgrade the architect role prompt to the template-driven persona (需求/
+	// 项目上下文/输出要求/工作方式约束). Same fingerprint + idempotent pattern.
+	if migrated, err := roleSvc.MigrateArchitectRole(); err != nil {
+		log.Printf("[main] architect role migrate: %v", err)
+	} else if migrated {
+		log.Println("[main] architect role prompt 已升级到「模板驱动」版本")
+	}
 
 	// Sub-task execution is driven by in-memory goroutines — a restart leaves
 	// running/pending rows orphaned (eternal spinner in the UI). Recover them

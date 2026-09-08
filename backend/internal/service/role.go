@@ -239,6 +239,78 @@ func executorMigratedPrompt() string {
 	return ""
 }
 
+// architectOldPromptSignature is the substring we look for in the existing
+// architect role's system_prompt to decide whether the row still carries the
+// pre-模板化 persona (the old short "涵盖：整体实现思路、涉及文件…" version)
+// vs the current template-driven "需求/项目上下文/输出要求/工作方式约束"
+// persona. SeedDefaults already leaves the row alone — but the rewrite is a
+// behavioural change (the new prompt enforces a structured 6-section output
+// + 7 working-style rules that the old one didn't), so on upgrade we must
+// rewrite the existing row when it still carries the old persona.
+//
+// The substring is intentionally a stable, distinctive phrase from the
+// original architect prompt — not just "architect" or a generic marker —
+// so a user who has genuinely customized the prompt is NOT clobbered.
+// If the substring is absent (because the user already customized, OR
+// because a previous release already migrated them), we skip.
+const architectOldPromptSignature = "涵盖：整体实现思路、涉及文件"
+
+// architectNewPromptSignature is the substring that uniquely identifies the
+// current template-driven persona. Used by MigrateArchitectRole to
+// short-circuit when the row already carries the new persona (so the
+// migration is safe to call on every boot without re-applying).
+const architectNewPromptSignature = "需求理解复述"
+
+// MigrateArchitectRole brings the architect role's built-in system_prompt
+// forward to the template-driven persona for databases whose architect role
+// still carries the legacy "涵盖：整体实现思路…" prompt. Idempotent:
+//   - row missing (fresh DB): no-op, SeedDefaults already inserted the new prompt
+//   - row present + old signature: UPDATE system_prompt to the new default,
+//     leave name / model / claude_config_id / enabled untouched
+//   - row present + new signature: no-op (already migrated)
+//   - row present + neither signature: user customized; we can't tell old vs
+//     custom, so NO-OP. The user can hit the settings page → role → Reset to
+//     pick up the new built-in.
+//
+// Returns (migrated bool, err) so callers can log "architect role upgraded"
+// at startup without doing the substring scan themselves.
+func (s *RoleService) MigrateArchitectRole() (bool, error) {
+	r, err := s.GetByKey("architect")
+	if err != nil {
+		// No row yet — SeedDefaults handles the fresh-DB path; nothing to migrate.
+		return false, nil
+	}
+	prompt := r.SystemPrompt
+	if strings.Contains(prompt, architectNewPromptSignature) {
+		return false, nil
+	}
+	if !strings.Contains(prompt, architectOldPromptSignature) {
+		// User-customized prompt that we don't recognize; leave it alone so the
+		// user can keep their wording. The settings UI's reset button is the
+		// supported way to opt into the new built-in.
+		return false, nil
+	}
+	newPrompt := architectMigratedPrompt()
+	if _, err := s.db.Exec("UPDATE roles SET system_prompt=?, updated_at=? WHERE id=?",
+		newPrompt, time.Now(), r.ID); err != nil {
+		return false, fmt.Errorf("migrate architect role: %w", err)
+	}
+	return true, nil
+}
+
+// architectMigratedPrompt returns the current template-driven system_prompt
+// for the architect role. Pulled out so MigrateArchitectRole + Reset can
+// call the same source — adding more lines in the future keeps them in
+// sync without a second copy-paste.
+func architectMigratedPrompt() string {
+	for _, d := range DefaultRoles() {
+		if d.Key == "architect" {
+			return d.SystemPrompt
+		}
+	}
+	return ""
+}
+
 func (s *RoleService) List() ([]model.Role, error) {
 	rows, err := s.db.Query("SELECT " + s.roleColumns() + " FROM roles ORDER BY sort_order ASC, " + s.db.Ident("key") + " ASC")
 	if err != nil {
