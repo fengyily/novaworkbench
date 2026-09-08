@@ -641,6 +641,12 @@ func (h *ReportHandler) runGenerate(job *store.Job, projectID, projectName, proj
 						switch bmap["type"] {
 						case "text":
 							if text, ok := bmap["text"].(string); ok && strings.TrimSpace(text) != "" {
+								// MiniMax-M3 leaked <mm:think ...> wrappers — strip
+								// before they pollute the report job log.
+								text = store.CleanThinkTags(text)
+								if text == "" {
+									continue
+								}
 								job.Append(store.LogLine{Type: "message", Content: text})
 							}
 						case "tool_use":
@@ -653,7 +659,10 @@ func (h *ReportHandler) runGenerate(job *store.Job, projectID, projectName, proj
 		case "result":
 			if sub, _ := evt["subtype"].(string); sub == "success" {
 				if result, ok := evt["result"].(string); ok {
-					finalResult = strings.TrimSpace(result)
+					// MiniMax-M3 think-tag filter on the final-result path that
+					// gets persisted into weekly_reports — must match the
+					// assistant-text path above so the DB stays clean.
+					finalResult = store.CleanThinkTags(strings.TrimSpace(result))
 				}
 			} else if sub == "error" {
 				if errMsg, ok := evt["error"].(string); ok {

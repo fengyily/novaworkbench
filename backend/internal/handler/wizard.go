@@ -3150,6 +3150,13 @@ func (s sseSink) emit(line store.LogLine) {
 	if line.At == 0 {
 		line.At = time.Now().UnixMilli()
 	}
+	// Strip MiniMax-M3 leaked think-tag wrappers before the frame goes out to
+	// the browser. An all-think input becomes "" → we skip the frame so the
+	// UI doesn't render an empty message bubble.
+	line.Content = store.CleanThinkTags(line.Content)
+	if line.Content == "" {
+		return
+	}
 	data, _ := json.Marshal(line)
 	fmt.Fprintf(s.w, "data: %s\n\n", string(data))
 	s.rc.Flush()
@@ -3329,6 +3336,13 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 					if text == "" {
 						continue
 					}
+					// MiniMax-M3 leaks its internal <mm:think ...> wrappers into
+					// the streamed text delta. Strip them so the UI / log don't
+					// get a flood of empty closing tags.
+					text = store.CleanThinkTags(text)
+					if text == "" {
+						continue
+					}
 					out.hadStreamEvents = true
 					sink.emit(store.LogLine{Type: "message", Content: text})
 				case "input_json_delta":
@@ -3410,6 +3424,12 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 					if !out.hadStreamEvents {
 						text, _ := b["text"].(string)
 						if text != "" {
+							// MiniMax-M3 non-streaming fallback: same wrapper
+							// leak as text_delta; filter here too.
+							text = store.CleanThinkTags(text)
+							if text == "" {
+								continue
+							}
 							sink.emit(store.LogLine{Type: "message", Content: text})
 						}
 					}
@@ -3431,7 +3451,12 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 			realSuccess := subtype == "success" && !isErr &&
 				terminalReason != "api_error" && apiErrStatus == 0
 			if realSuccess {
-				out.finalResult, _ = evt["result"].(string)
+				raw, _ := evt["result"].(string)
+				// Strip MiniMax-M3 leaked think-tag wrappers from the final
+				// result text so they don't end up in job_logs / requirements
+				// tables or in the persisted session jsonl (which would then
+				// be re-fed on --resume and bloat cache_read_input_tokens).
+				out.finalResult = store.CleanThinkTags(raw)
 			} else {
 				out.errMsg = claudeResultError(scope, evt)
 				if isStaleSessionError(evt, stderrBuf.String()) {
@@ -4181,6 +4206,12 @@ func parseStreamJSONFromReader(r io.Reader, sink streamSink, scope string, uctx 
 				case "text_delta":
 					text, _ := delta["text"].(string)
 					if text != "" {
+						// MiniMax-M3 text_delta variant on the remote Agent-
+						// server path; mirror the runClaudeStream filter.
+						text = store.CleanThinkTags(text)
+						if text == "" {
+							continue
+						}
 						out.hadStreamEvents = true
 						sink.emit(store.LogLine{Type: "message", Content: text})
 					}
@@ -4223,6 +4254,12 @@ func parseStreamJSONFromReader(r io.Reader, sink streamSink, scope string, uctx 
 				case "text":
 					if !out.hadStreamEvents {
 						if text, _ := b["text"].(string); text != "" {
+							// MiniMax-M3 non-streaming fallback on the remote
+							// Agent-server path; mirror the runClaudeStream filter.
+							text = store.CleanThinkTags(text)
+							if text == "" {
+								continue
+							}
 							sink.emit(store.LogLine{Type: "message", Content: text})
 						}
 					}
@@ -4239,7 +4276,10 @@ func parseStreamJSONFromReader(r io.Reader, sink streamSink, scope string, uctx 
 			realSuccess := subtype == "success" && !isErr &&
 				terminalReason != "api_error" && apiErrStatus == 0
 			if realSuccess {
-				out.finalResult, _ = evt["result"].(string)
+				raw, _ := evt["result"].(string)
+				// Strip MiniMax-M3 leaked think-tag wrappers from the final
+				// result text (remote Agent-server path mirrors runClaudeStream).
+				out.finalResult = store.CleanThinkTags(raw)
 			} else {
 				out.errMsg = claudeResultError(scope, evt)
 				if isStaleSessionError(evt, "") {

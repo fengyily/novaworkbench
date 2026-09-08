@@ -374,8 +374,21 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 		artifactBody = "❌ Claude 未返回结果，请重试"
 		job.Append(store.LogLine{Type: "error", Content: artifactBody})
 	default:
-		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
-		artifactBody = out.finalResult
+		// Belt-and-suspenders: out.finalResult is already cleaned in
+		// runClaudeStream (wizard.go), but apply the same filter here so a
+		// sub-task artifact that lands in sub_tasks.artifact is guaranteed
+		// clean even if the upstream caller was bypassed.
+		cleaned := store.CleanThinkTags(strings.TrimSpace(out.finalResult))
+		if cleaned == "" {
+			// MiniMax-M3 emitted only think-tag wrappers (no real result text).
+			// Treat as an error to mirror the empty-finalResult branch above.
+			finalStatus = model.SubTaskStatusError
+			artifactBody = "❌ Claude 未返回有效结果，请重试"
+			job.Append(store.LogLine{Type: "error", Content: artifactBody})
+		} else {
+			job.Append(store.LogLine{Type: "result", Content: cleaned})
+			artifactBody = cleaned
+		}
 	}
 	job.Append(store.LogLine{Type: "done", Content: "✅ 子任务完成！"})
 
