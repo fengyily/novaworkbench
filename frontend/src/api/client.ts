@@ -471,6 +471,13 @@ export interface Requirement {
   // deleted after the requirement was developed on it.
   agent_server_id?: string;
   agent_server_name?: string;
+  // Development-mode provenance for the coding stage, stamped when StartCoding
+  // runs. 'session' = fork the design/analysis session (legacy default —
+  // Claude inherits the full conversation). 'design' = fresh session, hand
+  // the stored design doc to the agent via the -p prompt. Empty/undefined
+  // = never coded or predates this field; the UI shows no badge in that
+  // case rather than guessing "session".
+  dev_mode?: '' | 'session' | 'design';
   created_at: string; updated_at: string;
   completed_at?: string;
 }
@@ -661,6 +668,14 @@ export interface StartCodingReq {
   agent_server_id?: string;
   /** false = developer persona direct implementation; true = sub-task split. */
   split_tasks?: boolean;
+  /**
+   * Coding session threading strategy. 'session' = fork the design/analysis
+   * session (legacy default, Claude inherits the conversation). 'design' =
+   * fresh session, hand the stored design doc to the agent via the -p
+   * prompt. Empty/undefined = backend falls back to the requirement row's
+   * persisted value (or 'session' on rows that predate dev_mode).
+   */
+  dev_mode?: '' | 'session' | 'design';
 }
 
 export const wizardApi = {
