@@ -8,7 +8,12 @@ SHELL := /bin/bash
 #   make build         - frontend prod build + backend CGO_ENABLED=0 build
 #   make build-backend - backend only (assumes backend/web/dist already exists;
 #                       use this during pure backend dev with NOVA_SKIP_FRONTEND=1)
-#   make run           - dev backend (no embed; vite handles the SPA on :5173)
+#   make run           - dev backend (no embed; vite handles the SPA on :5173).
+#                       Override the listen port with PORT=<n> (default 9527):
+#                         make run                # default 9527
+#                         PORT=9000 make run      # listen on :9000
+#                       The value is forwarded as NOVA_PORT, which the backend
+#                       honors over the default 9527.
 #   make clean         - remove backend/web/dist and the deps-checked sentinel
 #   make doctor        - run scripts/check-build-deps.sh to verify toolchain
 #
@@ -46,7 +51,7 @@ build-backend:
 	@echo "Built: dist/nova"
 
 run:
-	cd backend && go run ./cmd/server
+	cd backend && NOVA_PORT=${PORT:-9527} go run ./cmd/server
 
 clean:
 	rm -rf backend/web/dist dist/nova $(SENTINEL)
