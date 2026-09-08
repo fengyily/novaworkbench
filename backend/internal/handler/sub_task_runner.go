@@ -21,15 +21,15 @@ import (
 // can launch it via Run without re-implementing the goroutine.
 //
 // Lifecycle (the same as the original WizardHandler.runSubTask):
-//   1. Caller inserts a pending sub_tasks row + pre-mints a session id + creates
-//      a JobStore job (see NewPendingSubTask for a one-shot helper that does all
-//      three). The row's source_session_id must already be set so Run can fork
-//      the right parent session.
-//   2. Call Run in a goroutine. Run does MarkRunning, spawns the claude CLI
-//      with full tool use (executor role persona), parses stream-json events
-//      into the job, and on completion writes the Markdown artifact + token
-//      usage + cost into sub_tasks.artifact / token columns and finishes the
-//      job.
+//  1. Caller inserts a pending sub_tasks row + pre-mints a session id + creates
+//     a JobStore job (see NewPendingSubTask for a one-shot helper that does all
+//     three). The row's source_session_id must already be set so Run can fork
+//     the right parent session.
+//  2. Call Run in a goroutine. Run does MarkRunning, spawns the claude CLI
+//     with full tool use (executor role persona), parses stream-json events
+//     into the job, and on completion writes the Markdown artifact + token
+//     usage + cost into sub_tasks.artifact / token columns and finishes the
+//     job.
 //
 // The model is resolved as: explicit modelOverride > developer role's
 // configured model. Pass "" through modelOverride to fall back to the role's
@@ -43,7 +43,18 @@ type SubTaskRunner struct {
 	jobLogSvc  *service.JobLogService
 	claudeCfg  *service.ClaudeConfigService
 	usageSvc   usageRecorder
-	skillSvc   *service.SkillService
+	// remoteCoding is set by the wizard handler at construction time so the
+	// runner can dispatch children to the requirement's Agent server without
+	// importing wizard.go (which would create a circular dep). Nil keeps every
+	// child local; a non-nil value is required to honor dev_source="agent".
+	remoteCoding func(*remoteCodingInput) claudeStreamOutcome
+	skillSvc     *service.SkillService
+	// agentSvrSvc resolves the Agent server a requirement was developed on.
+	// When the parent requirement carries an agent_server_id, Run dispatches
+	// the child to that server instead of spawning a local CLI — the child's
+	// working tree lives on the agent host, so a local run would edit a stale
+	// (or missing) checkout. Nil keeps every child local.
+	agentSvrSvc *service.AgentServerService
 }
 
 // NewSubTaskRunner wires the shared sub-task executor. All dependencies are
@@ -59,18 +70,31 @@ func NewSubTaskRunner(
 	claudeCfg *service.ClaudeConfigService,
 	usageSvc usageRecorder,
 	skillSvc *service.SkillService,
+	agentSvrSvc *service.AgentServerService,
+	remoteCoding func(*remoteCodingInput) claudeStreamOutcome,
 ) *SubTaskRunner {
 	return &SubTaskRunner{
-		projectSvc: projectSvc,
-		subTaskSvc: subTaskSvc,
-		jobs:       jobs,
-		llm:        llm,
-		roleSvc:    roleSvc,
-		jobLogSvc:  jobLogSvc,
-		claudeCfg:  claudeCfg,
-		usageSvc:   usageSvc,
-		skillSvc:   skillSvc,
+		agentSvrSvc:  agentSvrSvc,
+		projectSvc:   projectSvc,
+		subTaskSvc:   subTaskSvc,
+		jobs:         jobs,
+		llm:          llm,
+		roleSvc:      roleSvc,
+		jobLogSvc:    jobLogSvc,
+		claudeCfg:    claudeCfg,
+		usageSvc:     usageSvc,
+		skillSvc:     skillSvc,
+		remoteCoding: remoteCoding,
 	}
+}
+
+// SetRemoteCoding injects WizardHandler.runRemoteCoding after construction.
+// main builds the wizard handler with the runner, and the runner needs the
+// wizard's remote path, so the reference is wired once both exist rather than
+// forcing a constructor cycle. Passing nil disables remote dispatch (children
+// always run locally).
+func (r *SubTaskRunner) SetRemoteCoding(fn func(*remoteCodingInput) claudeStreamOutcome) {
+	r.remoteCoding = fn
 }
 
 // NewPendingSubTask is a convenience that performs the three pre-Run writes
@@ -232,6 +256,43 @@ func (r *SubTaskRunner) Run(
 	default:
 		finalConfigID = executorConfigID
 	}
+
+	// "sub_task" step key — distinct from "coding" / "adjust_coding" so
+	// token-usage rollups don't double-count.
+	subUsage := r.usageCtxFor("sub_task", st.RequirementID, req.ProjectID, job.ID, modelName, "", body)
+
+	// Execution-consistency: when the parent requirement was developed on an
+	// Agent server, its code lives in that host's worktree — a locally-spawned
+	// child would edit a stale (or missing) checkout and its commits would
+	// never reach the branch. Dispatch the child to the SAME server; the
+	// remote helper reuses the per-requirement remote worktree and pushes on
+	// success, so the requirement's branch stays the single source of truth.
+	// This covers every child dispatch that goes through Run: manual sub-tasks,
+	// orchestrated children, and the merge push+PR sub-task.
+	if req.AgentServerID != "" && r.agentSvrSvc != nil && r.remoteCoding != nil {
+		out := r.remoteCoding(&remoteCodingInput{
+			job:      job,
+			serverID: req.AgentServerID,
+			req: startCodingReq{
+				RequirementTitle: req.Title + " / " + st.Title,
+				RequirementID:    req.ID,
+				BranchName:       req.BranchName,
+				AgentServerID:    req.AgentServerID,
+			},
+			reqRow:         req,
+			prompt:         prompt,
+			sourceSID:      sourceSID,
+			fork:           true,
+			sessionArg:     sourceSID,
+			forkSessionID:  newSID,
+			model:          modelName,
+			claudeConfigID: finalConfigID,
+			usage:          subUsage,
+		})
+		r.finishSubTask(st, job, out, modelName, startTime)
+		return
+	}
+
 	cmd, cancel := r.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        workDir,
@@ -247,12 +308,14 @@ func (r *SubTaskRunner) Run(
 		ForkSessionID: newSID,
 	})
 	defer cancel()
-
-	// "sub_task" step key — distinct from "coding" / "adjust_coding" so
-	// token-usage rollups don't double-count.
-	subUsage := r.usageCtxFor("sub_task", st.RequirementID, req.ProjectID, job.ID, modelName, "", body)
 	out := runClaudeStream(jobSink{job}, cmd, "sub-task", subUsage)
+	r.finishSubTask(st, job, out, modelName, startTime)
+}
 
+// finishSubTask persists the terminal state shared by the local and remote
+// sub-task paths: map the three failure shapes onto an error artifact, or
+// record the result + token usage + cost, then finish the job.
+func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out claudeStreamOutcome, modelName string, startTime time.Time) {
 	finalStatus := model.SubTaskStatusDone
 	var artifactBody string
 	switch {

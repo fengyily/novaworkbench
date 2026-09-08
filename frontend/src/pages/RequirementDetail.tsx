@@ -7,6 +7,7 @@ import DocRefineChat from '../components/DocRefineChat';
 import ModelSelect from '../components/ModelSelect';
 import AtMentionTextarea from '../components/AtMentionTextarea';
 import SubTaskPanel from '../components/SubTaskPanel';
+import { DevSourceBadge } from '../components/DevSourceBadge';
 import { SummarizeToRequirementModal } from '../components/SummarizeToRequirementModal';
 import { ScheduleModal } from '../components/ScheduleModal';
 import { schedulesApi, type ScheduledTask } from '../api/client';
@@ -591,6 +592,21 @@ export default function RequirementDetail() {
   useEffect(() => {
     loadPendingSchedules();
   }, [loadPendingSchedules]);
+
+  // Seed the selector from the requirement's persisted development source so
+  // a re-run (重新开发 / 开始开发 after a restart) defaults to the SAME Agent
+  // server the code already lives on, instead of silently dropping back to
+  // 本地执行. Runs once, and only when that server is still in the ready list
+  // (a deleted / unhealthy server falls back to local rather than failing).
+  const agentSeedRef = useRef(false);
+  useEffect(() => {
+    if (!req || agentSeedRef.current || agentServers.length === 0) return;
+    agentSeedRef.current = true;
+    if (req.dev_source === 'agent' && req.agent_server_id &&
+        agentServers.some((s) => s.id === req.agent_server_id)) {
+      setAgentServerId(req.agent_server_id);
+    }
+  }, [req, agentServers]);
 
   const modelSeedRef = useRef(false);
   useEffect(() => {
@@ -2175,6 +2191,9 @@ export default function RequirementDetail() {
           {claudeWorking ? <><IconBotBadge size={12} className="icon-mr" />Claude 工作中</> : <><IconSleep size={12} className="icon-mr" />Claude 空闲</>}
         </span>
         {project && <span className="project-tag"><IconFolder size={12} className="icon-mr" />{project.name}</span>}
+        {/* 开发来源：Agent Server（含服务器名 + 模型）或本地开发。coding 阶段
+            启动时写入，未开发过的需求不渲染。 */}
+        <DevSourceBadge req={req} />
         {req.source_requirement_id && (
           <Link
             to={`/requirements/${req.source_requirement_id}`}

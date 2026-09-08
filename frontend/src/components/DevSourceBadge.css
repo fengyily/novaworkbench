@@ -1,0 +1,67 @@
+/* DevSourceBadge — "Agent Server 开发" / "本地开发" provenance chip.
+   Used inline in the requirement list rows (compact) and the detail header. */
+
+.dev-source-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  vertical-align: middle;
+}
+
+.dev-source-badge .dsb-icon {
+  font-size: 11px;
+}
+
+.dev-source-badge.is-agent {
+  /* Indigo primary — the agent path is the "powered" state. */
+  background: rgba(79, 70, 229, 0.08);
+  border-color: rgba(79, 70, 229, 0.25);
+  color: #4338ca;
+}
+
+.dev-source-badge.is-local {
+  /* Slate — neutral, deliberately quieter than the agent variant. */
+  background: rgba(100, 116, 139, 0.08);
+  border-color: rgba(100, 116, 139, 0.22);
+  color: #475569;
+}
+
+.dev-source-badge .dsb-label {
+  font-weight: 500;
+}
+
+/* Server name / model are secondary detail: dimmer, and truncated in list
+   rows so a long hostname can't push the row layout around. The full value
+   is always available via the badge's title tooltip. */
+.dev-source-badge .dsb-server,
+.dev-source-badge .dsb-model {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.85;
+}
+
+.dev-source-badge .dsb-server::before {
+  content: '·';
+  margin-right: 4px;
+  opacity: 0.6;
+}
+
+.dev-source-badge.is-wide .dsb-server,
+.dev-source-badge.is-wide .dsb-model {
+  max-width: 220px;
+}
+
+.dev-source-badge .dsb-model {
+  padding-left: 6px;
+  margin-left: 2px;
+  border-left: 1px solid rgba(79, 70, 229, 0.25);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}

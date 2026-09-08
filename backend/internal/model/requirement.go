@@ -68,6 +68,21 @@ type Requirement struct {
 	// parent plan every child task forks from; persisted on completion so
 	// a server restart / JobStore eviction doesn't lose the breakdown.
 	CodingPlan         string    `json:"coding_plan"`
+	// DevSource / AgentServerID record WHERE this requirement was developed.
+	// DevSource is DevSourceAgent ("agent") or DevSourceLocal ("local"),
+	// stamped once when the coding stage starts; empty = never coded.
+	// AgentServerID is the agent_servers row id when DevSource == "agent"
+	// (empty otherwise). Every follow-up action that mutates the working tree
+	// (push+PR, worktree cleanup, sub-task dispatch) reads AgentServerID and
+	// routes itself to that same server, so execution stays consistent with
+	// the environment the code actually lives in.
+	DevSource     string `json:"dev_source"`
+	AgentServerID string `json:"agent_server_id"`
+	// AgentServerName is a display-only join of agent_servers.name; it is NOT
+	// a requirements column. Populated by RequirementService.List/Get so the
+	// requirement list and detail pages can render "Agent Server 开发 · <名称>"
+	// without a second round-trip. Empty when the server row was deleted.
+	AgentServerName string `json:"agent_server_name"`
 	// SubTaskCount is the number of sub_tasks rows linked to this requirement.
 	// Populated by RequirementService.Get via a SELECT COUNT(*); used by the
 	// frontend to decide whether to hide the requirement-level "追加调整"
