@@ -285,10 +285,29 @@ app.post('/v1/run', async (req, res) => {
 // without dragging the failure path into the 30s-deep territory a real
 // run exposes. Keep this in sync with the [preflight timeout after Xs]
 // string injected into the stderr below.
+//
+// Fast-fail on classified stderr: the CLI's `unrecognized_model` (and a
+// few other well-known patterns — see classifyError) is emitted to stderr
+// as soon as the CLI rejects a config (model id, auth token, base URL),
+// but the CLI then hangs waiting on something else (catalog refresh,
+// retry) and never exits on its own. Without fast-fail, those errors
+// would surface as `preflight_timeout` after 15s, hiding the real reason
+// behind a misleading "Agent 服务器无法访问 API". classifyError runs on
+// every stderr chunk; any non-`unknown` category resolves the promise
+// immediately and SIGTERMs the hung child. The Go side already has
+// tailored fix hints for those categories (workerCategoryHint), so a
+// sub-second failure is also a much more actionable error message.
 const PREFLIGHT_TIMEOUT_MS = 15000;
 function preflight(workDir, env, settingsArg) {
   return new Promise((resolve) => {
     let proc;
+    let settled = false;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      try { if (proc) proc.kill('SIGTERM'); } catch {}
+      resolve(result);
+    };
     try {
       // The --settings block (built by buildSettingsArg, the same string the
       // real run uses) is the PRIMARY source of auth / base URL / model: it
@@ -314,7 +333,7 @@ function preflight(workDir, env, settingsArg) {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (e) {
-      resolve({
+      settle({
         ok: false,
         errorCategory: 'cli_not_found',
         stderr: String(e && e.message || e),
@@ -325,16 +344,37 @@ function preflight(workDir, env, settingsArg) {
     let stderr = '';
     let stdout = '';
     proc.stdout.on('data', (d) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.stderr.on('data', (d) => {
+      stderr += d.toString();
+      // Fast-fail on classifier-detected errors. The CLI emits
+      // `[claude-code:unrecognized_model]` (and similar tagged errors) on
+      // stderr the moment it rejects the config, then keeps the process
+      // alive doing internal bookkeeping — the next chunk won't come for
+      // seconds. classifyError's regexes match the partial stderr
+      // (e.g. literal "unrecognized_model"), so a single tagged line is
+      // enough. 'unknown' is intentionally skipped: a CLI that just
+      // happens to print something category-shaped shouldn't poison an
+      // otherwise-healthy run.
+      const cat = classifyError(null, stderr);
+      if (cat !== 'unknown') {
+        settle({
+          ok: false,
+          errorCategory: cat,
+          stderr,
+          stdout,
+          code: null,
+        });
+      }
+    });
     proc.on('error', (e) => {
       const cat = (e && e.code === 'ENOENT') ? 'cli_not_found' : classifyError(null, String(e.message || e));
-      resolve({ ok: false, errorCategory: cat, stderr: String(e.message || e), code: e.code });
+      settle({ ok: false, errorCategory: cat, stderr: String(e.message || e), stdout, code: e.code });
     });
     proc.on('close', (code) => {
       if (code === 0) {
-        resolve({ ok: true });
+        settle({ ok: true });
       } else {
-        resolve({
+        settle({
           ok: false,
           errorCategory: classifyError(null, stderr || stdout),
           stderr,
@@ -344,14 +384,14 @@ function preflight(workDir, env, settingsArg) {
       }
     });
     setTimeout(() => {
-      try { proc.kill('SIGTERM'); } catch {}
       // SIGTERM gives the CLI ~1s to flush stderr before our exit
       // resolves; the final stderr we read from above already has the
       // early output and is usually enough to classify the failure.
-      resolve({
+      settle({
         ok: false,
         errorCategory: 'preflight_timeout',
         stderr: (stderr || '') + '\n[preflight timeout after ' + (PREFLIGHT_TIMEOUT_MS / 1000) + 's]',
+        stdout,
         code: 143,
       });
     }, PREFLIGHT_TIMEOUT_MS);
