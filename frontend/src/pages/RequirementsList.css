@@ -184,6 +184,26 @@
 .priority-tag.priority-medium { background: #FEF3C7; color: #B45309; }
 .priority-tag.priority-low    { background: #DCFCE7; color: #047857; }
 
+/* Agent-server tag — which remote execution target the requirement was
+   developed on (desktop table column). Violet-tinted to match the
+   .agent-server-badge on the detail page and the violet preflight
+   field card, so "execution target" reads as one visual family across
+   pages. Local runs render as plain 本地 text (req-row-dim), not this tag. */
+.agent-server-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  background: #F5F3FF;
+  color: #7C3AED;
+  white-space: nowrap;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
 /* Priority dot — small colored bullet used on mobile cards where
    horizontal space is tight. Pairs with the relative-time text so
    priority stays glanceable without adding a full badge. */
@@ -310,6 +330,20 @@
 .req-card-mobile-spacer {
   flex: 0 0 auto;
   width: 4px;
+}
+
+/* Mobile card chip for the Agent Server. Only rendered when the requirement
+   ran on a remote target (local runs render as the absence of the chip so
+   the tight footer row stays uncluttered). Shares the violet palette with
+   the desktop .agent-server-tag. */
+.req-card-mobile-agent {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: #7C3AED;
 }
 
 .req-card-mobile-time {

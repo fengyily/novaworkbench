@@ -44,6 +44,24 @@
   color: var(--color-text-secondary);
 }
 
+/* Header badge for the Agent Server the requirement was developed on.
+   Violet-tinted to match .preflight-field-card--exec (the same "execution
+   target" concept surfaces there as the 执行环境 selector) so the two
+   read as one visual family. Hover shows the full server name via title. */
+.agent-server-badge {
+  padding: 3px 10px;
+  background: #F5F3FF;
+  color: #7C3AED;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: default;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Per-stage "📦 已压缩" badge in the requirement header meta row. Mirrors
    the existing chip/tag patterns (kind-badge / status-tag) but uses a
    neutral surface tint + amber text so it reads as "useful state" rather
@@ -1775,6 +1793,9 @@ allowed so the row collapses cleanly on every viewport. */
     gap: 6px;
   }
   .project-tag { font-size: 11px; padding: 2px 8px; word-break: break-all; max-width: 100%; }
+  /* Same narrow-screen compaction as project-tag: the agent-server badge
+     would otherwise overflow on a 360px viewport. */
+  .agent-server-badge { font-size: 11px; padding: 2px 8px; max-width: 100%; }
   /* Claude status pill is `inline-flex` and never wrapped by default,
      so on a 360px viewport it shoves the project tag off-screen. Let
      it wrap and shrink like the other chips in this row. */

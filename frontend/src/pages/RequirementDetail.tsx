@@ -553,6 +553,13 @@ export default function RequirementDetail() {
   // execution (the historical default); non-empty = run claude on the chosen
   // remote target. Only `ready` servers are listed — the wizard refuses to
   // start coding on a target whose dependencies haven't been verified.
+  //
+  // agentServerId is seeded from the persisted requirements.agent_server_id so
+  // a page refresh / re-entry preselects the server the requirement last ran
+  // on (and so adjust-coding / continue-coding re-send the same target without
+  // the user re-picking it). useState's initial value only applies on first
+  // render — by then the requirement row may not have loaded yet, so we sync
+  // it in an effect below once req.agent_server_id arrives.
   const [agentServerId, setAgentServerId] = useState('');
   const [agentServers, setAgentServers] = useState<AgentServer[]>([]);
   useEffect(() => {
@@ -560,6 +567,15 @@ export default function RequirementDetail() {
       .then((rows) => setAgentServers((rows ?? []).filter((s) => s.status === 'ready')))
       .catch(() => {/* settings tab is the source of truth — silently ignore */});
   }, []);
+  // Preselect the dropdown from the persisted binding once the requirement
+  // loads. Only fills the dropdown when the user hasn't already picked
+  // something locally this session (agentServerId === ''), so switching
+  // selections mid-session is never clobbered by a re-fetch.
+  useEffect(() => {
+    if (req?.agent_server_id) {
+      setAgentServerId((cur) => (cur === '' ? req.agent_server_id! : cur));
+    }
+  }, [req?.agent_server_id]);
 
   // ── Scheduled-task state ──
   // pendingByType[taskType] holds the pending row (if any) so the detail
@@ -1482,6 +1498,12 @@ export default function RequirementDetail() {
           ...(developerModel ? { model: developerModel } : {}),
           // Per-request claude_config id — see doStartCoding for the rationale.
           ...(developerConfigId ? { claude_config_id: developerConfigId } : {}),
+          // Agent Server the requirement is bound to. Re-sent so the backend
+          // re-binds it on the success path (keeps the trace accurate when the
+          // user re-selected a different server in the dropdown before
+          // adjusting). Empty = local run → the backend keeps the existing
+          // binding instead of clearing it.
+          agent_server_id: agentServerId || req.agent_server_id || '',
         }),
       });
       const json = await res.json();
@@ -1509,7 +1531,13 @@ export default function RequirementDetail() {
       const res = await authedFetch(`${API_BASE}/api/wizard/continue-coding`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requirement_id: id }),
+        // agent_server_id re-sent so a continuation on a remote target keeps
+        // the requirement's binding in sync (backend re-binds it on success;
+        // empty = local → binding untouched, mirroring adjust-coding).
+        body: JSON.stringify({
+          requirement_id: id,
+          agent_server_id: agentServerId || req.agent_server_id || '',
+        }),
       });
       const json = await res.json();
       const jobId = json.data?.job_id;
@@ -2175,6 +2203,18 @@ export default function RequirementDetail() {
           {claudeWorking ? <><IconBotBadge size={12} className="icon-mr" />Claude 工作中</> : <><IconSleep size={12} className="icon-mr" />Claude 空闲</>}
         </span>
         {project && <span className="project-tag"><IconFolder size={12} className="icon-mr" />{project.name}</span>}
+        {/* Agent-server badge: which remote target the requirement was developed
+            on. Hidden entirely for local runs (agent_server_id empty) — the
+            absence reads as 本地. Name comes from the backend's LEFT JOIN; a
+            deleted server falls back to the raw id so the trace stays truthful. */}
+        {req.agent_server_id && (
+          <span
+            className="agent-server-badge"
+            title={`该需求由 Agent 服务器「${req.agent_server_name || req.agent_server_id}」实现`}
+          >
+            🖥️ Agent: {req.agent_server_name || req.agent_server_id}
+          </span>
+        )}
         {req.source_requirement_id && (
           <Link
             to={`/requirements/${req.source_requirement_id}`}

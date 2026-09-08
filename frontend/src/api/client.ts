@@ -459,6 +459,15 @@ export interface Requirement {
   // SubTaskPanel composer instead). Defaults to 0 on legacy responses that
   // predate this field.
   sub_task_count?: number;
+  // agent_server_id: the Agent Server the requirement was developed on,
+  // persisted when a start-coding / adjust-coding / continue-coding run
+  // succeeds. Empty/missing = 本地 (no remote agent). Legacy responses from a
+  // backend that predates this column omit both fields.
+  agent_server_id?: string;
+  // agent_server_name: resolved server-side via a LEFT JOIN against
+  // agent_servers when the row is read. Empty when agent_server_id is empty
+  // or the referenced server has been deleted — the UI falls back to 本地.
+  agent_server_name?: string;
   created_at: string; updated_at: string;
   completed_at?: string;
 }

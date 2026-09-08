@@ -438,6 +438,15 @@ var alterColumns = []string{
 	`ALTER TABLE requirements ADD COLUMN architect_model TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN developer_model TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN reviewer_model TEXT NOT NULL DEFAULT ''`,
+	// Agent-server binding for the developer stage: the agent_servers.id chosen
+	// in the start-coding modal (or re-bound by adjust-coding / continue-coding).
+	// Persisted only on the success path of the developer job so a failed run
+	// never clobbers the last good binding — same semantics as analyst_model /
+	// developer_model above. Empty = 本地 (no remote agent). Plain TEXT pointer
+	// with no declared FK so the column never blocks migration; the human-
+	// readable name is resolved at read time via a LEFT JOIN against
+	// agent_servers (see service.RequirementService.List/Get).
+	`ALTER TABLE requirements ADD COLUMN agent_server_id TEXT NOT NULL DEFAULT ''`,
 	// Per-role Claude-config binding: lets a role carry its own ANTHROPIC_BASE_URL
 	// + ANTHROPIC_AUTH_TOKEN pair (via claude_configs.id) so the role's chosen
 	// model runs against the role's chosen gateway, not just the global active

@@ -1717,6 +1717,14 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			if perr := h.reqSvc.UpdateDeveloperModel(p.RequirementID, model); perr != nil {
 				log.Printf("[start-coding] failed to persist developer_model for %s: %v", p.RequirementID, perr)
 			}
+			// Persist which Agent Server actually served this run (success path
+			// only). Guarded so a legacy client that omits agent_server_id never
+			// blanks an existing binding.
+			if p.AgentServerID != "" {
+				if perr := h.reqSvc.UpdateAgentServer(p.RequirementID, p.AgentServerID); perr != nil {
+					log.Printf("[start-coding] failed to persist agent_server_id for %s: %v", p.RequirementID, perr)
+				}
+			}
 		}
 		job.Finish(0, store.JobDone)
 		log.Printf("[start-coding] remote job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
@@ -1776,6 +1784,15 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		if perr := h.reqSvc.UpdateDeveloperModel(p.RequirementID, model); perr != nil {
 			log.Printf("[start-coding] failed to persist developer_model for %s: %v", p.RequirementID, perr)
 		}
+		// Persist which Agent Server actually served this run (success path
+		// only). Guarded so a legacy client that omits agent_server_id never
+		// blanks an existing binding. In local mode p.AgentServerID is empty so
+		// the binding stays whatever it was — 本地 never overwrites a remote run.
+		if p.AgentServerID != "" {
+			if perr := h.reqSvc.UpdateAgentServer(p.RequirementID, p.AgentServerID); perr != nil {
+				log.Printf("[start-coding] failed to persist agent_server_id for %v: %v", p.RequirementID, perr)
+			}
+		}
 	}
 	job.Finish(0, store.JobDone)
 	log.Printf("[start-coding] job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
@@ -1833,6 +1850,11 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		RequirementID string `json:"requirement_id"`
 		Message       string `json:"message"`
 		Model         string `json:"model"`
+		// AgentServerID: when non-empty, re-binds requirements.agent_server_id on
+		// the success path (the adjust ran on that server). Empty = leave the
+		// existing binding untouched so a follow-up turn that forgot to send the
+		// field never un-binds a previously-bound Agent Server.
+		AgentServerID string `json:"agent_server_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		log.Printf("[adjust-coding] JSON decode error: %v", err)
@@ -1964,6 +1986,13 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		if perr := h.reqSvc.UpdateDeveloperModel(body.RequirementID, model); perr != nil {
 			log.Printf("[adjust-coding] failed to persist developer_model for %s: %v", body.RequirementID, perr)
 		}
+		// Re-bind the Agent Server when the adjust turn ran on one. Empty body
+		// field = legacy client / untouched dropdown → keep the existing binding.
+		if body.AgentServerID != "" {
+			if perr := h.reqSvc.UpdateAgentServer(body.RequirementID, body.AgentServerID); perr != nil {
+				log.Printf("[adjust-coding] failed to persist agent_server_id for %s: %v", body.RequirementID, perr)
+			}
+		}
 		job.Finish(0, store.JobDone)
 		log.Printf("[adjust-coding] job %s finished for %s", job.ID, body.RequirementID)
 	}()
@@ -1991,6 +2020,10 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RequirementID string `json:"requirement_id"`
+		// AgentServerID: when non-empty, re-binds requirements.agent_server_id on
+		// the success path (the continuation ran on that server). Empty = leave
+		// the existing binding untouched (same guard as AdjustCoding).
+		AgentServerID string `json:"agent_server_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		log.Printf("[continue-coding] JSON decode error: %v", err)
@@ -2101,6 +2134,14 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		// path only — "most recent successful run" semantics).
 		if perr := h.reqSvc.UpdateDeveloperModel(body.RequirementID, model); perr != nil {
 			log.Printf("[continue-coding] failed to persist developer_model for %s: %v", body.RequirementID, perr)
+		}
+		// Re-bind the Agent Server when the continuation ran on one. Empty body
+		// field = legacy client → keep the existing binding (same guard as
+		// AdjustCoding).
+		if body.AgentServerID != "" {
+			if perr := h.reqSvc.UpdateAgentServer(body.RequirementID, body.AgentServerID); perr != nil {
+				log.Printf("[continue-coding] failed to persist agent_server_id for %s: %v", body.RequirementID, perr)
+			}
 		}
 		job.Finish(0, store.JobDone)
 		log.Printf("[continue-coding] job %s finished for %s", job.ID, body.RequirementID)

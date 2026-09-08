@@ -82,25 +82,29 @@ var validTransitions = map[string][]string{
 }
 
 func (s *RequirementService) List(projectID string, status string, priority string, kind string) ([]model.Requirement, error) {
+	// Every requirements column is qualified with the "r" alias because the
+	// LEFT JOIN against agent_servers (below) introduces same-named columns
+	// (status, created_at, updated_at) — unqualified references would be
+	// ambiguous on MySQL/Postgres and silently wrong on SQLite.
 	where := "WHERE 1=1"
 	args := []interface{}{}
 
 	if projectID != "" {
-		where += " AND project_id = ?"
+		where += " AND r.project_id = ?"
 		args = append(args, projectID)
 	}
 	if status != "" {
 		if status == "active" {
-			where += " AND status IN ('draft','analyzing','designing','designed','developing')"
+			where += " AND r.status IN ('draft','analyzing','designing','designed','developing')"
 		} else if status != "archived" {
-			where += " AND status = ?"
+			where += " AND r.status = ?"
 			args = append(args, status)
 		}
 	} else {
-		where += " AND status != 'archived'"
+		where += " AND r.status != 'archived'"
 	}
 	if priority != "" {
-		where += " AND priority = ?"
+		where += " AND r.priority = ?"
 		args = append(args, priority)
 	}
 	// kind filter — empty (or "all") means no filtering; a comma-separated list
@@ -108,7 +112,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	if kind != "" && kind != "all" {
 		kinds := splitKinds(kind)
 		if len(kinds) == 1 {
-			where += " AND kind = ?"
+			where += " AND r.kind = ?"
 			args = append(args, kinds[0])
 		} else if len(kinds) > 1 {
 			placeholders := make([]string, len(kinds))
@@ -116,12 +120,14 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 				placeholders[i] = "?"
 				args = append(args, k)
 			}
-			where += " AND kind IN (" + strings.Join(placeholders, ",") + ")"
+			where += " AND r.kind IN (" + strings.Join(placeholders, ",") + ")"
 		}
 	}
 
 	rows, err := s.db.Query(
-		"SELECT id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,source_requirement_id,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,skip_design,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,analyst_context_summary,analyst_compressed_at,design_context_summary,design_compressed_at,coding_context_summary,coding_compressed_at,usage_snapshots,coding_plan,created_at,updated_at,completed_at FROM requirements "+where+" ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END ASC, created_at DESC",
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,ags.name,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.created_at,r.updated_at,r.completed_at"+
+			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id"+
+			" "+where+" ORDER BY CASE WHEN r.status = 'done' THEN 1 ELSE 0 END ASC, r.created_at DESC",
 		args...)
 	if err != nil {
 		return nil, err
@@ -135,6 +141,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
 			&r.CreatedBy, &r.SourceRequirementID, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
+			&r.AgentServerID, &r.AgentServerName,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.UsageSnapshots, &r.CodingPlan,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
@@ -170,12 +177,20 @@ func splitKinds(raw string) []string {
 
 func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	var r model.Requirement
+	// LEFT JOIN against agent_servers resolves the human-readable name for the
+	// bound Agent Server (see model.Requirement.AgentServerName). All columns
+	// are aliased with "r" because agent_servers also carries status /
+	// created_at / updated_at — unqualified references would be ambiguous on
+	// MySQL/Postgres.
 	err := s.db.QueryRow(
-		"SELECT id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,assigned_to,created_by,source_requirement_id,analysis_session_id,design_session_id,design_job_id,analysis_job_id,apply_job_id,coding_session_id,skip_analysis,skip_design,branch_name,worktree_path,analyst_model,architect_model,developer_model,reviewer_model,analyst_context_summary,analyst_compressed_at,design_context_summary,design_compressed_at,coding_context_summary,coding_compressed_at,usage_snapshots,coding_plan,created_at,updated_at,completed_at FROM requirements WHERE id = ?", id).
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,ags.name,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.created_at,r.updated_at,r.completed_at"+
+			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id"+
+			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
 			&r.AcceptanceCriteria, &r.DesignDocs, &r.ConversationIDs, &r.AssignedTo,
 			&r.CreatedBy, &r.SourceRequirementID, &r.AnalysisSessionID, &r.DesignSessionID, &r.DesignJobID, &r.AnalysisJobID, &r.ApplyJobID, &r.CodingSessionID, &r.SkipAnalysis, &r.SkipDesign, &r.BranchName, &r.WorktreePath,
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
+			&r.AgentServerID, &r.AgentServerName,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.UsageSnapshots, &r.CodingPlan,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
@@ -364,6 +379,18 @@ func (s *RequirementService) UpdateApplyJob(id, jobID string) error {
 func (s *RequirementService) UpdateCodingSession(id, sessionID string) error {
 	_, err := s.db.Exec("UPDATE requirements SET coding_session_id=?, updated_at=? WHERE id=?",
 		sessionID, time.Now(), id)
+	return err
+}
+
+// UpdateAgentServer persists the agent_servers.id chosen for the developer
+// stage — the Agent Server the requirement was actually developed on. Callers
+// invoke this only on the success path of a coding run (start / adjust /
+// continue), so a failed run never clobbers the last good binding; the same
+// "most recent successful run" semantics apply as UpdateDeveloperModel.
+// Passing "" explicitly clears the binding (a re-run in local mode).
+func (s *RequirementService) UpdateAgentServer(id, agentServerID string) error {
+	_, err := s.db.Exec("UPDATE requirements SET agent_server_id=?, updated_at=? WHERE id=?",
+		agentServerID, time.Now(), id)
 	return err
 }
 

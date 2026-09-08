@@ -39,6 +39,19 @@ type Requirement struct {
 	ArchitectModel string     `json:"architect_model"`
 	DeveloperModel string     `json:"developer_model"`
 	ReviewerModel  string     `json:"reviewer_model"`
+	// AgentServerID is the agent_servers.id chosen at start-coding time (or
+	// re-bound by a later adjust-coding / continue-coding turn). Empty = the
+	// run executed 本地 on the host where the backend runs. Persisted only on
+	// the success path of the developer job — a failed run never overwrites
+	// the last good binding (same semantics as the *_model columns above).
+	// Plain TEXT pointer, no declared FK, so migration never blocks on it.
+	AgentServerID string `json:"agent_server_id"`
+	// AgentServerName is resolved server-side via a LEFT JOIN against
+	// agent_servers when the row is read (List/Get). Empty when agent_server_id
+	// is empty or the referenced server has been deleted; the frontend falls
+	// back to "本地" in that case. omitempty keeps the Create-response JSON
+	// clean (Create does not join).
+	AgentServerName string `json:"agent_server_name,omitempty"`
 	// Context compression artifacts, one set per wizard stage. When the user
 	// clicks "📦 压缩上下文", the wizard handler runs a one-off --resume turn
 	// asking Claude to summarize the current session, stores the Chinese
