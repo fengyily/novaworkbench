@@ -387,18 +387,6 @@ func (s *RequirementService) UpdateCodingSession(id, sessionID string) error {
 	return err
 }
 
-// UpdateAgentServer persists the agent_servers.id chosen for the developer
-// stage — the Agent Server the requirement was actually developed on. Callers
-// invoke this only on the success path of a coding run (start / adjust /
-// continue), so a failed run never clobbers the last good binding; the same
-// "most recent successful run" semantics apply as UpdateDeveloperModel.
-// Passing "" explicitly clears the binding (a re-run in local mode).
-func (s *RequirementService) UpdateAgentServer(id, agentServerID string) error {
-	_, err := s.db.Exec("UPDATE requirements SET agent_server_id=?, updated_at=? WHERE id=?",
-		agentServerID, time.Now(), id)
-	return err
-}
-
 // contextSummaryColumns maps the wizard's step names ("analyst_chat" /
 // "architect_design" / "coding") to the (summary_col, compressed_at_col,
 // session_id_col) triple that the CompressContext wizard handler drives.

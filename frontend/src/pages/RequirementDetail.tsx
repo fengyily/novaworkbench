@@ -1514,12 +1514,11 @@ export default function RequirementDetail() {
           ...(developerModel ? { model: developerModel } : {}),
           // Per-request claude_config id — see doStartCoding for the rationale.
           ...(developerConfigId ? { claude_config_id: developerConfigId } : {}),
-          // Agent Server the requirement is bound to. Re-sent so the backend
-          // re-binds it on the success path (keeps the trace accurate when the
-          // user re-selected a different server in the dropdown before
-          // adjusting). Empty = local run → the backend keeps the existing
-          // binding instead of clearing it.
-          agent_server_id: agentServerId || req.agent_server_id || '',
+          // agent_server_id is intentionally NOT sent here: adjust-coding
+          // resumes the same coding session on the same worktree, so the
+          // dev_source / agent_server_id stamped by the original StartCoding
+          // prologue stays authoritative. To switch servers the user has to
+          // re-run start-coding from scratch.
         }),
       });
       const json = await res.json();
@@ -1547,13 +1546,10 @@ export default function RequirementDetail() {
       const res = await authedFetch(`${API_BASE}/api/wizard/continue-coding`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // agent_server_id re-sent so a continuation on a remote target keeps
-        // the requirement's binding in sync (backend re-binds it on success;
-        // empty = local → binding untouched, mirroring adjust-coding).
-        body: JSON.stringify({
-          requirement_id: id,
-          agent_server_id: agentServerId || req.agent_server_id || '',
-        }),
+        // agent_server_id intentionally NOT sent: continue-coding resumes the same
+        // coding session / worktree as the original StartCoding, so the
+        // existing dev_source / agent_server_id binding stays authoritative.
+        body: JSON.stringify({ requirement_id: id }),
       });
       const json = await res.json();
       const jobId = json.data?.job_id;

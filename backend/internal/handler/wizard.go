@@ -1733,14 +1733,10 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			if perr := h.reqSvc.UpdateDeveloperModel(p.RequirementID, model); perr != nil {
 				log.Printf("[start-coding] failed to persist developer_model for %s: %v", p.RequirementID, perr)
 			}
-			// Persist which Agent Server actually served this run (success path
-			// only). Guarded so a legacy client that omits agent_server_id never
-			// blanks an existing binding.
-			if p.AgentServerID != "" {
-				if perr := h.reqSvc.UpdateAgentServer(p.RequirementID, p.AgentServerID); perr != nil {
-					log.Printf("[start-coding] failed to persist agent_server_id for %s: %v", p.RequirementID, perr)
-				}
-			}
+			// dev_source / agent_server_id were stamped up front by the
+			// execStartCoding prologue (see line ~1246) — no need to re-write on
+			// the success path. The prologue fires before the remote job starts
+			// so the binding is correct even if the run aborts.
 		}
 		job.Finish(0, store.JobDone)
 		log.Printf("[start-coding] remote job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
@@ -1800,15 +1796,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		if perr := h.reqSvc.UpdateDeveloperModel(p.RequirementID, model); perr != nil {
 			log.Printf("[start-coding] failed to persist developer_model for %s: %v", p.RequirementID, perr)
 		}
-		// Persist which Agent Server actually served this run (success path
-		// only). Guarded so a legacy client that omits agent_server_id never
-		// blanks an existing binding. In local mode p.AgentServerID is empty so
-		// the binding stays whatever it was — 本地 never overwrites a remote run.
-		if p.AgentServerID != "" {
-			if perr := h.reqSvc.UpdateAgentServer(p.RequirementID, p.AgentServerID); perr != nil {
-				log.Printf("[start-coding] failed to persist agent_server_id for %v: %v", p.RequirementID, perr)
-			}
-		}
+		// dev_source / agent_server_id were stamped up front by the
+		// execStartCoding prologue (line ~1246) before the claude subprocess
+		// was spawned. Local runs also flow through the prologue (with
+		// AgentServerID=""), which routes dev_source back to "local" so a
+		// previously-remote requirement doesn't keep pointing at the stale
+		// server after a local re-run.
 	}
 	job.Finish(0, store.JobDone)
 	log.Printf("[start-coding] job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
@@ -1866,11 +1859,6 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		RequirementID string `json:"requirement_id"`
 		Message       string `json:"message"`
 		Model         string `json:"model"`
-		// AgentServerID: when non-empty, re-binds requirements.agent_server_id on
-		// the success path (the adjust ran on that server). Empty = leave the
-		// existing binding untouched so a follow-up turn that forgot to send the
-		// field never un-binds a previously-bound Agent Server.
-		AgentServerID string `json:"agent_server_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		log.Printf("[adjust-coding] JSON decode error: %v", err)
@@ -2030,13 +2018,14 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		if perr := h.reqSvc.UpdateDeveloperModel(body.RequirementID, model); perr != nil {
 			log.Printf("[adjust-coding] failed to persist developer_model for %s: %v", body.RequirementID, perr)
 		}
-		// Re-bind the Agent Server when the adjust turn ran on one. Empty body
-		// field = legacy client / untouched dropdown → keep the existing binding.
-		if body.AgentServerID != "" {
-			if perr := h.reqSvc.UpdateAgentServer(body.RequirementID, body.AgentServerID); perr != nil {
-				log.Printf("[adjust-coding] failed to persist agent_server_id for %s: %v", body.RequirementID, perr)
-			}
-		}
+		// agent_server_id re-binding on the success path is intentionally
+		// skipped: dev_source / agent_server_id are already correct from the
+		// original StartCoding prologue. An adjust turn runs on the same
+		// coding session / worktree the requirement was already bound to, so
+		// re-writing the binding here would either no-op (same value) or risk
+		// silently re-pointing a running worktree to a different host. If the
+		// user genuinely wants to switch servers, they should re-run the full
+		// start-coding flow.
 		job.Finish(0, store.JobDone)
 		log.Printf("[adjust-coding] job %s finished for %s", job.ID, body.RequirementID)
 	}()
@@ -2096,10 +2085,6 @@ func (h *WizardHandler) finishRemoteCodingJob(job *store.Job, out claudeStreamOu
 func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RequirementID string `json:"requirement_id"`
-		// AgentServerID: when non-empty, re-binds requirements.agent_server_id on
-		// the success path (the continuation ran on that server). Empty = leave
-		// the existing binding untouched (same guard as AdjustCoding).
-		AgentServerID string `json:"agent_server_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		log.Printf("[continue-coding] JSON decode error: %v", err)
@@ -2236,11 +2221,10 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		// Re-bind the Agent Server when the continuation ran on one. Empty body
 		// field = legacy client → keep the existing binding (same guard as
 		// AdjustCoding).
-		if body.AgentServerID != "" {
-			if perr := h.reqSvc.UpdateAgentServer(body.RequirementID, body.AgentServerID); perr != nil {
-				log.Printf("[continue-coding] failed to persist agent_server_id for %s: %v", body.RequirementID, perr)
-			}
-		}
+		// dev_source / agent_server_id are intentionally NOT re-bound here — see the
+		// rationale in AdjustCoding's success-path comment: the binding is set by
+		// the original StartCoding prologue and a continue turn resumes the
+		// same coding session on the same worktree.
 		job.Finish(0, store.JobDone)
 		log.Printf("[continue-coding] job %s finished for %s", job.ID, body.RequirementID)
 	}()
