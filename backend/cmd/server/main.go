@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -195,7 +197,21 @@ func main() {
 	// the runner needs it to dispatch children to an Agent server, while the
 	// wizard needs the runner for sub-task rows, so neither can be a pure
 	// constructor argument of the other.
-	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, agentSvrSvc, nil)
+	//
+	// sub-task concurrency cap (env NOVA_SUBTASK_CONCURRENCY) prevents the
+	// "make run → SIGKILL on parent" symptom: too many parallel claude Node.js
+	// children trip macOS jetsam / Linux OOM killer on the parent nova process
+	// — a SIGKILL Go cannot intercept. Default 4 ≈ leaves ~1 GB headroom on a
+	// 4 GB jetsam threshold. See plan-ancient-snail.md.
+	subTaskConcurrency := handler.DefaultSubTaskConcurrency
+	if env := os.Getenv("NOVA_SUBTASK_CONCURRENCY"); env != "" {
+		if n, perr := strconv.Atoi(env); perr == nil && n > 0 {
+			subTaskConcurrency = n
+		} else {
+			log.Printf("[startup] ignoring invalid NOVA_SUBTASK_CONCURRENCY=%q (want positive int), falling back to %d", env, subTaskConcurrency)
+		}
+	}
+	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, agentSvrSvc, nil, subTaskConcurrency)
 	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, subTaskSvc, subTaskRunner)
 	// Wire the remote-coding entrypoint AFTER both are built: children of an
 	// Agent-server-developed requirement run on that server, so every sub-task
@@ -540,13 +556,27 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// Graceful shutdown
+	// Startup banner: capture pid / ppid / GOMAXPROCS so post-mortem logs of an
+	// unexpected exit (SIGKILL we cannot catch) at least pin down whether the
+	// process tree was sane. "make run" + "go run" wrappers strip some env, so
+	// the parent pid is the most useful single value here.
+	log.Printf("[startup] pid=%d ppid=%d GOMAXPROCS=%d subTaskConcurrency=%d", os.Getpid(), os.Getppid(), runtime.GOMAXPROCS(0), subTaskConcurrency)
+
+	// Graceful shutdown. SIGINT / SIGTERM get the full 30s drain so in-flight
+	// claude child processes can flush their session jsonl (StreamCmd sets
+	// WaitDelay to give them 5s soft-exit). SIGHUP (e.g. terminal disconnect
+	// under "make run") gets only 2s — terminal detachment is almost always
+	// the user walking away, not a planned stop, so we shouldn't block.
 	go func() {
 		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		<-sigCh
-		log.Println("Shutting down...")
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		sig := <-sigCh
+		shutdownTimeout := 30 * time.Second
+		if sig == syscall.SIGHUP {
+			shutdownTimeout = 2 * time.Second
+		}
+		log.Printf("[shutdown] received signal=%v, draining (timeout=%s)...", sig, shutdownTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		srv.Shutdown(ctx)
 		// Stop the scheduled-task poller after the HTTP server is down so
