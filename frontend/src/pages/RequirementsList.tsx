@@ -115,11 +115,28 @@ export default function RequirementsList() {
     <div className="requirements-list-page">
       <div className="page-header">
         <h2>📋 需求列表</h2>
+        <div className="page-header-actions desktop-only">
+          <button
+            className="btn"
+            onClick={() => navigate('/requirements/calendar')}
+          >
+            📅 日历
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={openCreate}
+          >
+            {showCreate ? '收起' : '➕ 新建需求'}
+          </button>
+        </div>
+        {/* 移动端：把日历入口放到 FAB 旁（通过与新建按钮共存实现） */}
         <button
-          className="btn btn-primary desktop-only"
-          onClick={openCreate}
+          className="btn mobile-only"
+          style={{ marginLeft: 'auto' }}
+          onClick={() => navigate('/requirements/calendar')}
+          aria-label="日历视图"
         >
-          {showCreate ? '收起' : '➕ 新建需求'}
+          📅
         </button>
       </div>
 

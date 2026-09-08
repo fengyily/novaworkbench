@@ -379,10 +379,15 @@ func main() {
 	// Requirements
 	mux.HandleFunc("GET /api/requirements", reqH.List)
 	mux.HandleFunc("POST /api/requirements", reqH.Create)
+	// Calendar slim endpoint. MUST be registered before the {id} literal
+	// route below — Go 1.22 ServeMux prioritizes literal segments over
+	// wildcards, so "calendar" is never captured as an id.
+	mux.HandleFunc("GET /api/requirements/calendar", reqH.Calendar)
 	mux.HandleFunc("GET /api/requirements/{id}", reqH.Get)
 	mux.HandleFunc("PUT /api/requirements/{id}", reqH.Update)
 	mux.HandleFunc("PATCH /api/requirements/{id}/status", reqH.UpdateStatus)
 	mux.HandleFunc("PATCH /api/requirements/{id}/kind", reqH.UpdateKind)
+	mux.HandleFunc("PATCH /api/requirements/{id}/schedule", reqH.UpdateSchedule)
 	// PromoteFromIdea: turns a finished idea-discussion thread into a new
 	// requirement row (kind=requirement, source_requirement_id=idea.id). The
 	// original idea is left fully intact — see service.PromoteFromIdea.

@@ -62,6 +62,12 @@ CREATE TABLE IF NOT EXISTS requirements (
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 	completed_at DATETIME,
+	-- Calendar-view scheduling fields. Both nullable so legacy rows stay on
+	-- the original created_at anchor without a backfill — the frontend treats
+	-- (NULL, NULL) as "未排期" and falls back to created_at. Writes go through
+	-- service.UpdateSchedule which validates end >= start.
+	planned_start_at DATETIME,
+	planned_end_at DATETIME,
 	FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
@@ -499,6 +505,13 @@ var alterColumns = []string{
 	`ALTER TABLE requirements ADD COLUMN design_compressed_at    DATETIME`,
 	`ALTER TABLE requirements ADD COLUMN coding_context_summary  TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN coding_compressed_at    DATETIME`,
+	// Calendar-view scheduling fields: both nullable so a fresh ALTER adds them
+	// to existing DBs without rewriting historical rows. Frontend falls back
+	// to created_at when both are NULL — legacy rows therefore appear on the
+	// day they were created and the calendar is immediately useful without a
+	// backfill pass.
+	`ALTER TABLE requirements ADD COLUMN planned_start_at DATETIME`,
+	`ALTER TABLE requirements ADD COLUMN planned_end_at   DATETIME`,
 	// Session-level context-usage snapshots (analyst / design / coding). The
 	// wizard's runClaudeStream writes a JSON blob here at the end of every
 	// claude turn (same point it emits the `usage` SSE event), keyed by session:

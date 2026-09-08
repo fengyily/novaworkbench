@@ -24,6 +24,7 @@ import {
   type ScheduledTask as ScheduledTaskRow,
 } from '../api/client';
 import ModelSelect from './ModelSelect';
+import { toRFC3339Local } from '../utils/time';
 
 export interface AgentServerOption {
   id: string;
@@ -66,39 +67,10 @@ function minRunAtLocal(): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-// Convert the datetime-local string the picker hands us ("YYYY-MM-DDTHH:MM",
-// user-local, no offset) into an RFC3339 string carrying the user's local
-// timezone offset (e.g. "...T23:30:00+08:00"). This is the only way to ship
-// an unambiguous "wall clock + zone" to the backend; sending the bare
-// datetime-local string makes the backend guess, and that guess is wrong
-// whenever the server's local TZ differs from the user's (the original
-// bug: Docker/UTC server + CST user → "9-7 23:30" came back as "9-8 7:30").
-function toRFC3339Local(local: string): string {
-  // `new Date("YYYY-MM-DDTHH:MM")` (no Z, no offset) is parsed as *local*
-  // time per ECMAScript, so getTime() / getTimezoneOffset() line up with
-  // what the user typed in the picker.
-  const d = new Date(local);
-  if (Number.isNaN(d.getTime())) {
-    // Fall back to the raw input so the backend surfaces a parse error
-    // instead of a silently-empty request body.
-    return local;
-  }
-  const pad = (n: number) => `${n}`.padStart(2, '0');
-  const yyyy = d.getFullYear();
-  const mm = pad(d.getMonth() + 1);
-  const dd = pad(d.getDate());
-  const hh = pad(d.getHours());
-  const mi = pad(d.getMinutes());
-  const ss = pad(d.getSeconds());
-  // getTimezoneOffset() returns minutes WEST of UTC (positive for CST).
-  // Flip the sign so the offset reads the conventional +HH:MM way.
-  const offMin = -d.getTimezoneOffset();
-  const sign = offMin >= 0 ? '+' : '-';
-  const abs = Math.abs(offMin);
-  const offH = pad(Math.floor(abs / 60));
-  const offM = pad(abs % 60);
-  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}${sign}${offH}:${offM}`;
-}
+// Convert the datetime-local string the picker hands us into an RFC3339
+// string carrying the user's local timezone offset. The helper lives in
+// utils/time so both this modal and the calendar RequirementModal reuse it;
+// inline definition removed 2026-09 when the calendar view was added.
 
 export function ScheduleModal({
   open,

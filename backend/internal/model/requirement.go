@@ -95,6 +95,21 @@ type Requirement struct {
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 	CompletedAt           *time.Time `json:"completed_at,omitempty"`
+	// Calendar-view scheduling fields. Both nullable: NULL = "未排期", the
+	// frontend falls back to created_at so legacy rows are immediately usable
+	// in the calendar without a backfill. Writes go through
+	// RequirementService.UpdateSchedule (validates end >= start). Stored as
+	// DATETIME — same as created_at — and serialized as RFC3339 over JSON so
+	// the frontend can `new Date(...)` them directly.
+	PlannedStartAt *time.Time `json:"planned_start_at,omitempty"`
+	PlannedEndAt   *time.Time `json:"planned_end_at,omitempty"`
+	// ScheduledRunAt is the earliest run_at of a pending scheduled_tasks row
+	// pointing at this requirement. NOT a requirements column — populated by
+	// RequirementService.attachScheduledRunAt for the Calendar endpoint so
+	// the frontend can render the clock icon ("🕐") next to requirements that
+	// have a future-dated wizard task waiting. Empty when no pending schedule
+	// exists (and on Create, which does not join).
+	ScheduledRunAt *time.Time `json:"scheduled_run_at,omitempty"`
 }
 
 type CreateRequirementReq struct {
@@ -121,6 +136,16 @@ type CreateRequirementReq struct {
 
 type UpdateStatusReq struct {
 	Status string `json:"status"`
+}
+
+// UpdateScheduleReq is the body for PATCH /api/requirements/{id}/schedule.
+// Both fields are *time.Time (not time.Time) so JSON omitempty + an explicit
+// null lets the caller clear one or both fields (e.g. "reset to created_at
+// anchor"). Validation (end >= start, end not before 1970) lives in the
+// service layer.
+type UpdateScheduleReq struct {
+	PlannedStartAt *time.Time `json:"planned_start_at"`
+	PlannedEndAt   *time.Time `json:"planned_end_at"`
 }
 
 type AnalysisResult struct {
