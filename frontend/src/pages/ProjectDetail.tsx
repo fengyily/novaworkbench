@@ -451,6 +451,10 @@ export default function ProjectDetail() {
 
   // Shared table rows for the requirements list (used by both the overview
   // "recent requirements" and the requirements tab — single source of truth).
+  // The "Agent 服务器" column mirrors the cross-project RequirementsList so
+  // users can see at a glance which remote execution target the requirement
+  // was developed on (or 本地 if it ran locally). Stays consistent with the
+  // `agent-server-tag` styling on the global list page.
   const renderRequirementRows = (items: Requirement[]) => items.map(req => (
     <tr
       key={req.id}
@@ -462,6 +466,20 @@ export default function ProjectDetail() {
       <td data-label="标题" className="pr-title">{req.title}</td>
       <td data-label="优先级"><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
       <td data-label="状态"><span className={`status-badge status-${req.status}`}>{statusLabels[req.status] ?? req.status}</span></td>
+      {/* Agent server column: which remote execution target the requirement
+          was developed on. Empty = 本地. The joined name comes from the
+          backend's LEFT JOIN; a deleted server falls back to 本地 so stale
+          ids never render as raw hex. Identical to the column on the
+          cross-project RequirementsList. */}
+      <td data-label="Agent 服务器">
+        {req.agent_server_name ? (
+          <span className="agent-server-tag" title={req.agent_server_name}>
+            🖥️ {req.agent_server_name}
+          </span>
+        ) : (
+          <span style={{ color: 'var(--color-text-muted)' }}>本地</span>
+        )}
+      </td>
       <td data-label="Tokens (入/出)" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
         {(() => {
           const u = reqUsageMap.get(req.id);
@@ -860,6 +878,7 @@ export default function ProjectDetail() {
                       <th>标题</th>
                       <th style={{ width: 90 }}>优先级</th>
                       <th style={{ width: 130 }}>状态</th>
+                      <th style={{ width: 140 }}>Agent 服务器</th>
                       <th style={{ width: 130 }}>Tokens (入/出)</th>
                       <th style={{ width: 110 }}>成本</th>
                       <th style={{ width: 110 }}>创建时间</th>
@@ -997,6 +1016,7 @@ export default function ProjectDetail() {
                     <th>标题</th>
                     <th style={{ width: 90 }}>优先级</th>
                     <th style={{ width: 130 }}>状态</th>
+                    <th style={{ width: 140 }}>Agent 服务器</th>
                     <th style={{ width: 130 }}>Tokens (入/出)</th>
                       <th style={{ width: 110 }}>成本</th>
                     <th style={{ width: 110 }}>创建时间</th>
