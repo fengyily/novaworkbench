@@ -1136,6 +1136,13 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := h.jobs.Create(p.RequirementID)
+	// Persist the active job id on the requirement row so a page refresh —
+	// or a fresh tab opened while this job is running — can reconnect to
+	// the SSE stream via GET /api/wizard/jobs/{id}/stream. Cleared by
+	// execStartCoding's defer on terminal Finish.
+	if perr := h.reqSvc.UpdateCodingJob(p.RequirementID, job.ID); perr != nil {
+		log.Printf("[start-coding] failed to persist coding_job_id for %s: %v", p.RequirementID, perr)
+	}
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	go h.execStartCoding(&p, job, nil)
@@ -1149,6 +1156,13 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 // finishes. Returns the JobStore job id.
 func (h *WizardHandler) RunScheduledCoding(p *codingRunParams, cb *runCallbacks) (string, error) {
 	job := h.jobs.Create(p.RequirementID)
+	// Same persistence as StartCoding: the requirement row carries the live
+	// job id so the UI can discover a scheduler-launched coding job from
+	// any tab via GET /api/requirements/{id}.coding_job_id, not only the
+	// tab that originally fired the schedule (see RequirementDetail reconnect).
+	if perr := h.reqSvc.UpdateCodingJob(p.RequirementID, job.ID); perr != nil {
+		log.Printf("[scheduler start-coding] failed to persist coding_job_id for %s: %v", p.RequirementID, perr)
+	}
 	go h.execStartCoding(p, job, cb)
 	return job.ID, nil
 }
@@ -1170,6 +1184,13 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		lines, status, exitCode := job.Snapshot()
 		if perr := h.jobLogSvc.Save(job.ID, p.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
 			log.Printf("[start-coding] failed to persist job log %s: %v", job.ID, perr)
+		}
+		// Clear the active coding_job_id pointer so a page refresh doesn't
+		// try to reconnect to a finished job (the in-memory JobStore ring
+		// may still hold the job for a few seconds; the SSE subscribe path
+		// on the frontend is guarded by the snapshot's status field).
+		if p.RequirementID != "" {
+			_ = h.reqSvc.UpdateCodingJob(p.RequirementID, "")
 		}
 		if cb != nil && cb.OnFinish != nil {
 			cb.OnFinish(job.ID, status == store.JobDone)

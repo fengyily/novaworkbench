@@ -1222,6 +1222,37 @@ export default function RequirementDetail() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, req?.design_job_id]);
 
+  // Reconnect to an in-flight coding job — covers both manual "开始开发" and
+  // scheduled tasks. Mirrors the design reconnect above but keyed on
+  // coding_job_id (server truth), so opening the page in a fresh tab while
+  // a scheduled task is mid-run still finds the job and subscribes to its
+  // SSE stream. The old localStorage-based reconnect below stays as a
+  // fallback for jobs started before this column existed.
+  useEffect(() => {
+    if (!id || !req?.coding_job_id) return;
+    const jobId = req.coding_job_id;
+    authedFetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
+      .then(r => r.json())
+      .then(json => {
+        if (!json.success) { return; }
+        const { status, log } = json.data as { status: string; log: LogLine[] };
+        if (!log || log.length === 0) return;
+        // rawCount = backend snapshot's total LogLine count, including
+        // knowledge rows that extractKnowledge filters out of codingLines.
+        // The SSE replay emits exactly `rawCount` events before the first
+        // live one, so we pass this as skipFirst to streamJob — otherwise the
+        // replay would re-append every historical line that the snapshot
+        // already hydrated, doubling the entire history on the panel.
+        const rawCount = log.length;
+        const kb = extractKnowledge(log);
+        if (kb.items.length > 0 || kb.empty) { setKnowledgeItems(kb.items); setKnowledgeEmpty(kb.empty); }
+        if (kb.lines.length > 0) setCodingLines(coalesceLogLines(kb.lines));
+        if (status === 'running') streamJob(jobId, { skipFirst: rawCount });
+      })
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, req?.coding_job_id]);
+
   useEffect(() => {
     if (designRef.current) designRef.current.scrollTop = designRef.current.scrollHeight;
   }, [designLines]);
