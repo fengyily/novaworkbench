@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -12,6 +13,16 @@ import (
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/internal/util"
 )
+
+// DefaultSubTaskConcurrency caps how many claude CLI subprocesses the
+// SubTaskRunner can have alive at once. Without this cap, a user clicking
+// "追加子任务" repeatedly (or the auto-orchestrator fan-out path) can spawn
+// many parallel Node.js children; on macOS this approaches the jetsam
+// threshold and on Linux it triggers the OOM killer — both manifest as an
+// unexpected SIGKILL on the parent nova process with no recoverable signal
+// handler (see plan-ancient-snail.md for the root-cause analysis). Tunable
+// via NOVA_SUBTASK_CONCURRENCY at construction time.
+const DefaultSubTaskConcurrency = 4
 
 // SubTaskRunner is the shared sub-task executor. It holds the dependencies
 // required to spawn a child claude CLI subprocess for a sub_tasks row and
@@ -55,11 +66,22 @@ type SubTaskRunner struct {
 	// working tree lives on the agent host, so a local run would edit a stale
 	// (or missing) checkout. Nil keeps every child local.
 	agentSvrSvc *service.AgentServerService
+	// runSem caps the number of claude CLI subprocesses that may be alive
+	// at once. Buffered channel used as a counting semaphore: every Run
+	// acquires a slot on entry (blocking when full) and releases on return.
+	// Sized by NewSubTaskRunner's runConcurrency argument (env
+	// NOVA_SUBTASK_CONCURRENCY; default DefaultSubTaskConcurrency).
+	runSem chan struct{}
 }
 
 // NewSubTaskRunner wires the shared sub-task executor. All dependencies are
 // required (the runner will panic-via-nil-deref if any is missing — same
 // convention as the handler constructors, which all assume a fully wired main).
+//
+// runConcurrency caps how many concurrent Run invocations can hold a slot.
+// Pass 0 to use DefaultSubTaskConcurrency; pass a positive int to override
+// (env NOVA_SUBTASK_CONCURRENCY is the intended source). Negative values are
+// treated as 0.
 func NewSubTaskRunner(
 	projectSvc *service.ProjectService,
 	subTaskSvc *service.SubTaskService,
@@ -72,7 +94,11 @@ func NewSubTaskRunner(
 	skillSvc *service.SkillService,
 	agentSvrSvc *service.AgentServerService,
 	remoteCoding func(*remoteCodingInput) claudeStreamOutcome,
+	runConcurrency int,
 ) *SubTaskRunner {
+	if runConcurrency <= 0 {
+		runConcurrency = DefaultSubTaskConcurrency
+	}
 	return &SubTaskRunner{
 		agentSvrSvc:  agentSvrSvc,
 		projectSvc:   projectSvc,
@@ -85,6 +111,7 @@ func NewSubTaskRunner(
 		usageSvc:     usageSvc,
 		skillSvc:     skillSvc,
 		remoteCoding: remoteCoding,
+		runSem:       make(chan struct{}, runConcurrency),
 	}
 }
 
@@ -173,6 +200,21 @@ func (r *SubTaskRunner) Run(
 			log.Printf("[sub-task] failed to persist job log %s: %v", job.ID, perr)
 		}
 	}()
+
+	// Concurrency cap: multiple sub-tasks can fan out at once (manual clicks
+	// or auto-orchestrator fan-out), but unlimited concurrency tips the OS OOM /
+	// macOS jetsam killer into SIGKILLing the parent nova process — a signal
+	// Go cannot intercept, which is exactly the "system exits for no reason"
+	// symptom. Block here when over cap; the wait log lands in the job panel
+	// so the user sees the queue, not a frozen UI.
+	select {
+	case r.runSem <- struct{}{}:
+		// slot acquired immediately
+	default:
+		job.Append(store.LogLine{Type: "phase", Content: fmt.Sprintf("⏳ 等待空闲 worker slot（并发上限 %d 已满）...", cap(r.runSem))})
+		r.runSem <- struct{}{}
+	}
+	defer func() { <-r.runSem }()
 
 	role := "🤖 调整子任务启动中..."
 	if !adjust {
