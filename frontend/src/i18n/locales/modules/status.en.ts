@@ -34,6 +34,11 @@ export const status = {
     requirement: 'Describe the feature you want in plain language…',
     idea: 'Write down your idea or inspiration; AI will assess feasibility…',
   },
+  kindCreate: {
+    issue: '🐛 Create issue',
+    requirement: '📋 Create requirement',
+    idea: '💡 Create idea',
+  },
   kindChatPlaceholder: {
     issue: 'Paste URLs, page elements, error screenshots, or extra repro steps... type @ to reference a Skill',
     requirement: 'Paste URLs, describe page elements, or reply to AI questions... type @ to reference a Skill',

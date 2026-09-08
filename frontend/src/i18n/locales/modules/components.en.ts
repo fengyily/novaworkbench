@@ -106,6 +106,15 @@ export const components = {
     viewSummary: 'View the compressed summary',
     compressTitle: 'Have claude summarize the session and clear the context',
   },
+  sessionStrip: {
+    ariaLabel: 'Session context usage',
+    analyst: 'Analyst',
+    design: 'Design',
+    coding: 'Dev',
+    compressedBadge: '📦 Compressed',
+    compressedTitle: '{{stage}} stage was compressed',
+    usageTitle: '{{stage}}: {{used}} / {{window}} tokens (raw {{pct}}%)',
+  },
 } as const;
 
 export default components;

@@ -110,6 +110,15 @@ export const components = {
     viewSummary: '查看已压缩摘要',
     compressTitle: '让 claude 总结当前会话并清空上下文',
   },
+  sessionStrip: {
+    ariaLabel: '会话上下文使用量',
+    analyst: '分析师',
+    design: '方案',
+    coding: '开发',
+    compressedBadge: '📦 已压缩',
+    compressedTitle: '{{stage}}阶段已压缩',
+    usageTitle: '{{stage}}: {{used}} / {{window}} tokens（原始 {{pct}}%）',
+  },
 } as const;
 
 export default components;

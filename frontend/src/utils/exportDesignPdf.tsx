@@ -57,12 +57,12 @@ const STYLES = `
 `;
 
 function sanitizeFilename(name: string): string {
-  return name.replace(/[\\/:*?"<>|]/g, '_').slice(0, 80).trim() || i18next.t('exportDesign.designFallback');
+  return name.replace(/[\\/:*?"<>|]/g, '_').slice(0, 80).trim() || i18next.t('requirements.exportDesign.designFallback');
 }
 
 export async function exportDesignPdf(input: DesignExportInput): Promise<void> {
   const { title, meta, markdown } = input;
-  const filename = `${sanitizeFilename(input.filename || title)}-${i18next.t('exportDesign.pdfSuffix')}.pdf`;
+  const filename = `${sanitizeFilename(input.filename || title)}-${i18next.t('requirements.exportDesign.pdfSuffix')}.pdf`;
 
   const body = renderToStaticMarkup(
     <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>,
@@ -81,7 +81,7 @@ export async function exportDesignPdf(input: DesignExportInput): Promise<void> {
     <div class="pdf-doc">
       <div class="pdf-header">
         <h1>${escapeHtml(title)}</h1>
-        <div class="pdf-meta">${meta ? escapeHtml(meta) + ' · ' : ''}${escapeHtml(i18next.t('exportDesign.generatedAt'))} ${escapeHtml(stamp)}</div>
+        <div class="pdf-meta">${meta ? escapeHtml(meta) + ' · ' : ''}${escapeHtml(i18next.t('requirements.exportDesign.generatedAt'))} ${escapeHtml(stamp)}</div>
       </div>
       <div class="pdf-body">${body}</div>
     </div>
