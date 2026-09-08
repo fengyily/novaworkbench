@@ -459,14 +459,17 @@ export interface Requirement {
   // SubTaskPanel composer instead). Defaults to 0 on legacy responses that
   // predate this field.
   sub_task_count?: number;
-  // agent_server_id: the Agent Server the requirement was developed on,
-  // persisted when a start-coding / adjust-coding / continue-coding run
-  // succeeds. Empty/missing = 本地 (no remote agent). Legacy responses from a
-  // backend that predates this column omit both fields.
+  // Development-environment provenance, stamped when the coding stage starts.
+  // 'agent' = the requirement was developed on a remote Agent server (and all
+  // follow-up actions — 推送并发起 PR / 清理开发环境 / 子任务 — are routed back
+  // to that same server); 'local' = developed on the NovaWorkbench host.
+  // Empty/undefined = the coding stage never ran, or the row predates this
+  // field — the UI shows no badge in that case rather than guessing "local".
+  dev_source?: '' | 'local' | 'agent';
+  // agent_servers row id + its display name (joined server-side). Both empty
+  // for local rows; agent_server_name can also be empty when the server was
+  // deleted after the requirement was developed on it.
   agent_server_id?: string;
-  // agent_server_name: resolved server-side via a LEFT JOIN against
-  // agent_servers when the row is read. Empty when agent_server_id is empty
-  // or the referenced server has been deleted — the UI falls back to 本地.
   agent_server_name?: string;
   created_at: string; updated_at: string;
   completed_at?: string;

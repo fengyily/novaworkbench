@@ -125,7 +125,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	}
 
 	rows, err := s.db.Query(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,ags.name,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.created_at,r.updated_at,r.completed_at"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,ags.name,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.created_at,r.updated_at,r.completed_at"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id"+
 			" "+where+" ORDER BY CASE WHEN r.status = 'done' THEN 1 ELSE 0 END ASC, r.created_at DESC",
 		args...)
@@ -143,7 +143,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.AgentServerID, &r.AgentServerName,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
-			&r.UsageSnapshots, &r.CodingPlan,
+			&r.UsageSnapshots, &r.CodingPlan, &r.DevSource,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
 			return nil, err
 		}
@@ -152,6 +152,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	if items == nil {
 		items = []model.Requirement{}
 	}
+	s.attachAgentServerNames(items)
 	return items, nil
 }
 
@@ -183,7 +184,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	// created_at / updated_at — unqualified references would be ambiguous on
 	// MySQL/Postgres.
 	err := s.db.QueryRow(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,ags.name,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.created_at,r.updated_at,r.completed_at"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,ags.name,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.created_at,r.updated_at,r.completed_at"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id"+
 			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
@@ -192,7 +193,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.AgentServerID, &r.AgentServerName,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
-			&r.UsageSnapshots, &r.CodingPlan,
+			&r.UsageSnapshots, &r.CodingPlan, &r.DevSource,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("requirement not found")
@@ -219,6 +220,10 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	).Scan(&r.SubTaskCount); err != nil {
 		return nil, err
 	}
+	// Resolve the agent server display name (no-op for local rows).
+	one := []model.Requirement{r}
+	s.attachAgentServerNames(one)
+	r.AgentServerName = one[0].AgentServerName
 	return &r, nil
 }
 
@@ -612,6 +617,69 @@ func (s *RequirementService) UpdateDeveloperModel(id, model string) error {
 
 func (s *RequirementService) UpdateReviewerModel(id, model string) error {
 	return s.UpdateStageModel(id, "reviewer_model", model)
+}
+
+// Development-environment provenance values for requirements.dev_source.
+// Stamped once by the coding stage so the UI can render "Agent Server 开发"
+// vs "本地开发", and so every follow-up action that touches the working tree
+// (push+PR / worktree cleanup / sub-task dispatch) can route itself back to
+// the environment the code actually lives in.
+const (
+	DevSourceLocal = "local"
+	DevSourceAgent = "agent"
+)
+
+// UpdateDevSource stamps where this requirement is being developed. serverID
+// is the agent_servers row id when source == DevSourceAgent, and is forced to
+// "" for local runs so a requirement that moves from an Agent server back to
+// local execution doesn't keep routing follow-ups to the stale server.
+//
+// Called at the START of the coding stage (not on success) so the provenance
+// survives a failed/aborted run — the remote worktree exists either way and
+// cleanup still has to happen on that host.
+func (s *RequirementService) UpdateDevSource(id, source, serverID string) error {
+	if source != DevSourceAgent {
+		source, serverID = DevSourceLocal, ""
+	}
+	_, err := s.db.Exec(
+		"UPDATE requirements SET dev_source = ?, agent_server_id = ?, updated_at = ? WHERE id = ?",
+		source, serverID, time.Now(), id)
+	return err
+}
+
+// attachAgentServerNames fills the display-only AgentServerName on every row
+// that carries an AgentServerID, using one grouped SELECT against
+// agent_servers instead of a per-row lookup. Best-effort: on any error the
+// rows are returned unchanged (the UI degrades to "Agent Server 开发" with no
+// name rather than failing the whole list).
+func (s *RequirementService) attachAgentServerNames(items []model.Requirement) {
+	need := false
+	for i := range items {
+		if items[i].AgentServerID != "" {
+			need = true
+			break
+		}
+	}
+	if !need {
+		return
+	}
+	rows, err := s.db.Query("SELECT id, name FROM agent_servers")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	names := map[string]string{}
+	for rows.Next() {
+		var id, name string
+		if rows.Scan(&id, &name) == nil {
+			names[id] = name
+		}
+	}
+	for i := range items {
+		if n, ok := names[items[i].AgentServerID]; ok {
+			items[i].AgentServerName = n
+		}
+	}
 }
 
 // Summarizer is the LLM-side contract used by PromoteFromIdea to convert an
