@@ -1863,6 +1863,18 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		// previously-remote requirement doesn't keep pointing at the stale
 		// server after a local re-run.
 	}
+	// Cache the Claude CLI slug for this project on first successful local
+	// start-coding so future Agent Server runs can map local session files
+	// to the remote cwd's slug. Only runs locally: the Agent Server branch
+	// never creates local jsonl files (they live on the remote host under
+	// a deterministic slug derived from wtPath).
+	if p.AgentServerID == "" && p.RequirementID != "" && reqRow != nil && reqRow.ProjectID != "" {
+		if proj, perr := h.projectSvc.Get(reqRow.ProjectID); perr == nil && proj != nil {
+			if _, derr := h.projectSvc.DiscoverAndCacheClaudeProjectSlug(proj.ID, proj.LocalPath); derr != nil {
+				log.Printf("[start-coding] failed to cache claude_project_slug for %s: %v", proj.ID, derr)
+			}
+		}
+	}
 	job.Finish(0, store.JobDone)
 	log.Printf("[start-coding] job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
 
@@ -3699,11 +3711,22 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// (the small set of jsonl files the CLI uses for session state). A missing
 	// local dir is fine — the project has never been coded on before, and the
 	// CLI on the remote will mint a brand-new session id.
-	remoteClaudeHome := "~/.claude/projects/"
+	//
+	// The remote slug is derived deterministically from the remote cwd
+	// (wtPath, set up in step 1). Mapping local slug → remote slug lets the
+	// remote claude find the jsonl files under the directory matching its
+	// own cwd, which is what `--resume <session_id>` consults. Without this
+	// mapping the local slug (-Users-f1-...-req_xxx) lands at the remote
+	// projects root, while the remote CLI looks for sessions under its own
+	// slug (-tmp-nova-agent-<projectID>-<reqID>), producing "No conversation
+	// found" / "源会话已失效" on every run.
+	remoteProjectsRoot := "~/.claude/projects/"
+	remoteSlug := util.EncodeClaudeSlug(wtPath)
+	remoteSlugDir := remoteProjectsRoot + remoteSlug
 	in.job.Append(store.LogLine{Type: "phase", Content: "📤 同步 Claude 会话历史（SFTP 上行）..."})
-	if slugDir, slugErr := claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
-		client.Mkdirp(remoteClaudeHome)
-		if sftpErr := client.SyncDirUp(slugDir, remoteClaudeHome); sftpErr != nil {
+	if slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
+		client.Mkdirp(remoteSlugDir)
+		if sftpErr := client.SyncDirUpMapped(slugDir, remoteSlugDir); sftpErr != nil {
 			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话上行失败（将无 resume 启动新会话）: " + sftpErr.Error()})
 		}
 	} else if slugErr != nil {
@@ -3818,10 +3841,12 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 
 	// Step 6: session sync (down) — copy any new session jsonl the remote
 	// run created back to local so adjust/continue on the next round find
-	// it. Same forward-only semantics as Step 3.
+	// it. Same forward-only semantics as Step 3, and routed via the same
+	// remote-slug → local-slug mapping so the jsonl lands in the directory
+	// whose slug matches the local cwd.
 	in.job.Append(store.LogLine{Type: "phase", Content: "📥 同步会话结果回本地..."})
-	if slugDir, slugErr := claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
-		if sftpErr := client.SyncDirDown(remoteClaudeHome, slugDir); sftpErr != nil {
+	if slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
+		if sftpErr := client.SyncDirDownMapped(remoteSlugDir, slugDir); sftpErr != nil {
 			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话下行失败: " + sftpErr.Error()})
 		}
 	}
@@ -3995,12 +4020,21 @@ func errString(err error) string {
 
 // claudeProjectsSlugDir locates the on-disk directory where claude stores
 // session jsonls for the given requirement's project. The slug is derived
-// from the project's local_path; we read the cached value on the project row
-// when available, otherwise fall back to scanning the parent dir for a
-// matching basename.
-func claudeProjectsSlugDir(reqRow *model.Requirement) (string, error) {
+// from the project's local_path; we read the cached value on the project
+// row when available, otherwise fall back to scanning the parent dir for
+// a matching basename.
+//
+// The previous implementation always returned the first subdir of the
+// projects root — fine for a single-project setup but wrong when multiple
+// projects share ~/.claude/projects/. This implementation is precise: the
+// cached claude_project_slug (or the freshly-discovered one) is used
+// verbatim so the Agent Server sync path can map it to the remote slug.
+func (h *WizardHandler) claudeProjectsSlugDir(reqRow *model.Requirement) (string, error) {
 	if reqRow == nil {
 		return "", fmt.Errorf("no requirement")
+	}
+	if h.projectSvc == nil {
+		return "", fmt.Errorf("projectSvc not wired")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -4011,28 +4045,41 @@ func claudeProjectsSlugDir(reqRow *model.Requirement) (string, error) {
 		claudeHome = filepath.Join(home, ".novaworkbench", "claude")
 	}
 	root := filepath.Join(claudeHome, "projects")
-	// Prefer an exact-match lookup: the first subdir of root whose
-	// decoded path ends with the project's basename. claude CLI's slug
-	// is an internal encoding — there's no public mapping, so this
-	// best-effort scan is good enough.
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
+	proj, err := h.projectSvc.Get(reqRow.ProjectID)
+	if err != nil || proj == nil {
+		// Project row missing (e.g. soft-deleted) — degrade to the
+		// legacy "first subdir" behaviour so a misconfigured caller
+		// still gets a best-effort path rather than nothing. The Agent
+		// Server sync is best-effort anyway.
+		entries, rerr := os.ReadDir(root)
+		if rerr != nil {
+			if os.IsNotExist(rerr) {
+				return "", nil
+			}
+			return "", rerr
 		}
-		return "", err
-	}
-	// The cached slug (when present) is the canonical answer. We don't
-	// have it in this scope — the project row is loaded by the caller —
-	// so we always scan here. Most setups have a single project
-	// subdir under ~/.claude/projects/, so this stays cheap.
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			return filepath.Join(root, e.Name()), nil
 		}
-		return filepath.Join(root, e.Name()), nil
+		return "", nil
 	}
-	return "", nil
+	// 1) Cache hit — use the persisted slug verbatim.
+	if proj.ClaudeProjectSlug != "" {
+		if _, statErr := os.Stat(filepath.Join(root, proj.ClaudeProjectSlug)); statErr == nil {
+			return filepath.Join(root, proj.ClaudeProjectSlug), nil
+		}
+		// Stale slug (project moved / dir deleted). Fall through to
+		// re-discovery so we don't keep returning a dead path.
+	}
+	// 2) Cache miss / stale — scan and persist.
+	slug, derr := h.projectSvc.DiscoverAndCacheClaudeProjectSlug(proj.ID, proj.LocalPath)
+	if derr != nil || slug == "" {
+		return "", derr
+	}
+	return filepath.Join(root, slug), nil
 }
 
 // parseStreamJSONFromReader is the io.Reader-only counterpart of
