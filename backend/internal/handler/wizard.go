@@ -1863,6 +1863,18 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		// previously-remote requirement doesn't keep pointing at the stale
 		// server after a local re-run.
 	}
+	// Cache the Claude CLI slug for this project on first successful local
+	// start-coding so future Agent Server runs can map local session files
+	// to the remote cwd's slug. Only runs locally: the Agent Server branch
+	// never creates local jsonl files (they live on the remote host under
+	// a deterministic slug derived from wtPath).
+	if p.AgentServerID == "" && p.RequirementID != "" && reqRow != nil && reqRow.ProjectID != "" {
+		if proj, perr := h.projectSvc.Get(reqRow.ProjectID); perr == nil && proj != nil {
+			if _, derr := h.projectSvc.DiscoverAndCacheClaudeProjectSlug(proj.ID, proj.LocalPath); derr != nil {
+				log.Printf("[start-coding] failed to cache claude_project_slug for %s: %v", proj.ID, derr)
+			}
+		}
+	}
 	job.Finish(0, store.JobDone)
 	log.Printf("[start-coding] job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
 
@@ -3699,11 +3711,22 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// (the small set of jsonl files the CLI uses for session state). A missing
 	// local dir is fine — the project has never been coded on before, and the
 	// CLI on the remote will mint a brand-new session id.
-	remoteClaudeHome := "~/.claude/projects/"
+	//
+	// The remote slug is derived deterministically from the remote cwd
+	// (wtPath, set up in step 1). Mapping local slug → remote slug lets the
+	// remote claude find the jsonl files under the directory matching its
+	// own cwd, which is what `--resume <session_id>` consults. Without this
+	// mapping the local slug (-Users-f1-...-req_xxx) lands at the remote
+	// projects root, while the remote CLI looks for sessions under its own
+	// slug (-tmp-nova-agent-<projectID>-<reqID>), producing "No conversation
+	// found" / "源会话已失效" on every run.
+	remoteProjectsRoot := "~/.claude/projects/"
+	remoteSlug := util.EncodeClaudeSlug(wtPath)
+	remoteSlugDir := remoteProjectsRoot + remoteSlug
 	in.job.Append(store.LogLine{Type: "phase", Content: "📤 同步 Claude 会话历史（SFTP 上行）..."})
-	if slugDir, slugErr := claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
-		client.Mkdirp(remoteClaudeHome)
-		if sftpErr := client.SyncDirUp(slugDir, remoteClaudeHome); sftpErr != nil {
+	if slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
+		client.Mkdirp(remoteSlugDir)
+		if sftpErr := client.SyncDirUpMapped(slugDir, remoteSlugDir); sftpErr != nil {
 			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话上行失败（将无 resume 启动新会话）: " + sftpErr.Error()})
 		}
 	} else if slugErr != nil {
@@ -3729,8 +3752,33 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// --settings JSON (buildSettingsArg), so the remote launch carries the
 	// pins exactly the way the local path does.
 	ignoreLocal := true
+	// The -p prompt built upstream (StartCoding / AdjustCoding /
+	// ContinueCoding / tryAutoOrchestrate) bakes the LOCAL worktree path
+	// into the persona header via agentDirectPrompt / developerDecomposePrompt:
+	//
+	//   "现在切换到「Agent 开发者」角色，正在执行需求（需求：<title>，工作目录：<workDir>）"
+	//
+	// On the local path that's correct — the agent is sitting in <workDir>.
+	// On the remote path <workDir> is a /Users/f1/.novaworkbench/...
+	// worktree that doesn't exist on the agent host (the remote cwd is
+	// /tmp/nova-agent/<projectID>/<reqID>). Handing the original prompt
+	// through verbatim confuses the agent's "先读取项目中的相关文件" step —
+	// it tries to read a path that's not on its filesystem and either
+	// errors or falls back to its own cwd, which defeats the "based on
+	// workdir" intent the header expresses.
+	//
+	// Rewrite the persona header's workDir to the remote cwd before
+	// posting to the worker. The substitution locates the "工作目录："
+	// label in the persona header (a fixed string the prompt builders
+	// always emit right before the path) and replaces from there through
+	// the next "）" full-width closing paren. This way the requirement
+	// title and any other tokens between the opening "（" and the label
+	// are preserved verbatim — only the workDir segment is swapped.
+	// Embedded file content from collectProjectContext is left untouched.
+	// No-op when in.workDir is empty or doesn't appear in the prompt.
+	remotePrompt := rewritePersonaWorkDir(in.prompt, in.workDir, wtPath)
 	opts := llm.StreamOpts{
-		Prompt:                 in.prompt,
+		Prompt:                 remotePrompt,
 		WorkDir:                wtPath,
 		SystemPrompt:           "",
 		Model:                  cliModelArg(in.model),
@@ -3818,10 +3866,12 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 
 	// Step 6: session sync (down) — copy any new session jsonl the remote
 	// run created back to local so adjust/continue on the next round find
-	// it. Same forward-only semantics as Step 3.
+	// it. Same forward-only semantics as Step 3, and routed via the same
+	// remote-slug → local-slug mapping so the jsonl lands in the directory
+	// whose slug matches the local cwd.
 	in.job.Append(store.LogLine{Type: "phase", Content: "📥 同步会话结果回本地..."})
-	if slugDir, slugErr := claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
-		if sftpErr := client.SyncDirDown(remoteClaudeHome, slugDir); sftpErr != nil {
+	if slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
+		if sftpErr := client.SyncDirDownMapped(remoteSlugDir, slugDir); sftpErr != nil {
 			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话下行失败: " + sftpErr.Error()})
 		}
 	}
@@ -3995,12 +4045,21 @@ func errString(err error) string {
 
 // claudeProjectsSlugDir locates the on-disk directory where claude stores
 // session jsonls for the given requirement's project. The slug is derived
-// from the project's local_path; we read the cached value on the project row
-// when available, otherwise fall back to scanning the parent dir for a
-// matching basename.
-func claudeProjectsSlugDir(reqRow *model.Requirement) (string, error) {
+// from the project's local_path; we read the cached value on the project
+// row when available, otherwise fall back to scanning the parent dir for
+// a matching basename.
+//
+// The previous implementation always returned the first subdir of the
+// projects root — fine for a single-project setup but wrong when multiple
+// projects share ~/.claude/projects/. This implementation is precise: the
+// cached claude_project_slug (or the freshly-discovered one) is used
+// verbatim so the Agent Server sync path can map it to the remote slug.
+func (h *WizardHandler) claudeProjectsSlugDir(reqRow *model.Requirement) (string, error) {
 	if reqRow == nil {
 		return "", fmt.Errorf("no requirement")
+	}
+	if h.projectSvc == nil {
+		return "", fmt.Errorf("projectSvc not wired")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -4011,28 +4070,41 @@ func claudeProjectsSlugDir(reqRow *model.Requirement) (string, error) {
 		claudeHome = filepath.Join(home, ".novaworkbench", "claude")
 	}
 	root := filepath.Join(claudeHome, "projects")
-	// Prefer an exact-match lookup: the first subdir of root whose
-	// decoded path ends with the project's basename. claude CLI's slug
-	// is an internal encoding — there's no public mapping, so this
-	// best-effort scan is good enough.
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
+	proj, err := h.projectSvc.Get(reqRow.ProjectID)
+	if err != nil || proj == nil {
+		// Project row missing (e.g. soft-deleted) — degrade to the
+		// legacy "first subdir" behaviour so a misconfigured caller
+		// still gets a best-effort path rather than nothing. The Agent
+		// Server sync is best-effort anyway.
+		entries, rerr := os.ReadDir(root)
+		if rerr != nil {
+			if os.IsNotExist(rerr) {
+				return "", nil
+			}
+			return "", rerr
 		}
-		return "", err
-	}
-	// The cached slug (when present) is the canonical answer. We don't
-	// have it in this scope — the project row is loaded by the caller —
-	// so we always scan here. Most setups have a single project
-	// subdir under ~/.claude/projects/, so this stays cheap.
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			return filepath.Join(root, e.Name()), nil
 		}
-		return filepath.Join(root, e.Name()), nil
+		return "", nil
 	}
-	return "", nil
+	// 1) Cache hit — use the persisted slug verbatim.
+	if proj.ClaudeProjectSlug != "" {
+		if _, statErr := os.Stat(filepath.Join(root, proj.ClaudeProjectSlug)); statErr == nil {
+			return filepath.Join(root, proj.ClaudeProjectSlug), nil
+		}
+		// Stale slug (project moved / dir deleted). Fall through to
+		// re-discovery so we don't keep returning a dead path.
+	}
+	// 2) Cache miss / stale — scan and persist.
+	slug, derr := h.projectSvc.DiscoverAndCacheClaudeProjectSlug(proj.ID, proj.LocalPath)
+	if derr != nil || slug == "" {
+		return "", derr
+	}
+	return filepath.Join(root, slug), nil
 }
 
 // parseStreamJSONFromReader is the io.Reader-only counterpart of
@@ -6154,7 +6226,53 @@ func agentDirectPrompt(title, leadIn, workDir string) string {
 		title, workDir)
 }
 
-// extractSubtasksPayload pulls the {"subtasks":[…]} JSON block out of
+// rewritePersonaWorkDir rewrites the workDir path inside the persona
+// header of a coding prompt. The agentDirectPrompt / developerDecomposePrompt
+// builders emit a header of the form:
+//
+//	现在切换到「Agent 开发者」角色，正在执行需求（需求：<title>，工作目录：<workDir>）
+//
+// When the prompt is sent to the Agent Server, the local workDir is wrong —
+// the remote cwd is /tmp/nova-agent/<projectID>/<reqID> — so the agent on
+// the remote host would otherwise see a path that doesn't exist on its
+// filesystem. This helper finds the "工作目录：" label in the persona
+// header and replaces from there through the next "）" full-width closing
+// paren with the new path, leaving the requirement title and any other
+// tokens between "（" and the label untouched.
+//
+// Returns the prompt unchanged when the label isn't present (e.g. a
+// pre-built prompt without the persona header) or when localWorkDir is
+// empty (no-op). Only the FIRST match is rewritten — the persona header
+// is emitted exactly once per prompt, and looping would risk false
+// positives on file content that happens to mention the label.
+func rewritePersonaWorkDir(prompt, localWorkDir, remoteWorkDir string) string {
+	if prompt == "" || localWorkDir == "" || localWorkDir == remoteWorkDir {
+		return prompt
+	}
+	const label = "工作目录："
+	const closeParen = "）"
+	idx := strings.Index(prompt, label)
+	if idx < 0 {
+		return prompt
+	}
+	// Find the closing paren after the label. If absent, bail out
+	// and leave the prompt alone — the label showed up but the
+	// header structure we expect wasn't there.
+	end := strings.Index(prompt[idx+len(label):], closeParen)
+	if end < 0 {
+		return prompt
+	}
+	end += idx + len(label)
+	// Verify the slice between the label and the closing paren
+	// actually equals localWorkDir. If it doesn't match (e.g. the
+	// label appears in some unrelated text), return the prompt
+	// unchanged rather than corrupting it.
+	between := prompt[idx+len(label) : end]
+	if between != localWorkDir {
+		return prompt
+	}
+	return prompt[:idx+len(label)] + remoteWorkDir + prompt[end:]
+}
 // finalResult and verifies the [SUBTASKS_READY] sentinel is present. Returns
 // nil when either is missing — caller treats that as "main agent answered a
 // normal question, not a decompose request" and just renders the chat reply.

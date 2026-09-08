@@ -65,7 +65,18 @@ func (s *ScheduledTaskService) Create(t *model.ScheduledTask) (*model.ScheduledT
 	if t.ID == "" {
 		t.ID = util.NewID("sched")
 	}
-	now := time.Now()
+	// Normalize to UTC before persisting. The modernc SQLite driver stores
+	// time.Time via time.Time.String(), and that layout uses the zone name
+	// in the trailing field; a time in a FixedZone whose name is empty
+	// (which is exactly what time.Parse(RFC3339, "...+08:00") returns)
+	// round-trips as "2026-09-07 23:30:00 +0800 +0800" — a string the
+	// driver can't read back, so Scan into *time.Time fails on List. UTC
+	// is always emitted as "... +0000 UTC", which IS parseable. The
+	// absolute moment is preserved (UTC and the original offset refer to
+	// the same instant); the caller already chose the wall-clock value via
+	// parseRunAt, which preserves the offset in the returned time.Time.
+	t.RunAt = t.RunAt.UTC()
+	now := time.Now().UTC()
 	t.CreatedAt = now
 	t.UpdatedAt = now
 	if t.Status == "" {
@@ -293,20 +304,93 @@ func (s *ScheduledTaskService) HasPending(requirementID, taskType string) (bool,
 
 // scanScheduledTask is the shared row→struct mapper for List / Get / Due.
 // Pulled out so the column order lives in exactly one spot.
+//
+// run_at is scanned as a string rather than *time.Time because the modernc
+// SQLite driver stores Go time.Time via time.Time.String(), which produces
+// formats that aren't always round-trippable: when the time is in a
+// FixedZone with no 3-letter name (which is exactly what
+// time.Parse(time.RFC3339, "+08:00"-suffixed input) produces), the stored
+// text looks like "2026-09-07 23:30:00 +0800 +0800" and the driver's
+// parseTime parser falls through every format it knows about. Direct
+// Scan into *time.Time then fails with
+//
+//	sql: Scan error on column index 5, name "run_at":
+//	unsupported Scan, storing driver.Value type string into type *time.Time
+//
+// — which is what surfaced on the user's prod list. parseRunAtString
+// tries every format the modernc driver uses (plus the standard RFC3339 /
+// datetime-local forms) so legacy rows from before this fix continue to
+// list without erroring the whole request. See
+// service.TestScheduledTask_LegacyRunAtString for the regression pin.
 func scanScheduledTask(rows *sql.Rows) (*model.ScheduledTask, error) {
 	var t model.ScheduledTask
 	var executedAt sql.NullTime
+	var runAtRaw sql.NullString
 	if err := rows.Scan(
 		&t.ID, &t.TaskType, &t.RequirementID, &t.ProjectID, &t.RequirementTitle,
-		&t.RunAt, &t.Model, &t.ReadKnowledge, &t.BranchName, &t.BaseBranch,
+		&runAtRaw, &t.Model, &t.ReadKnowledge, &t.BranchName, &t.BaseBranch,
 		&t.AgentServerID, &t.SplitTasks, &t.Status, &t.JobID, &t.ErrorMessage,
 		&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &executedAt,
 	); err != nil {
 		return nil, err
+	}
+	if runAtRaw.Valid {
+		t.RunAt = parseRunAtString(runAtRaw.String)
 	}
 	if executedAt.Valid {
 		tt := executedAt.Time
 		t.ExecutedAt = &tt
 	}
 	return &t, nil
+}
+
+// runAtParseFormats is the ordered list of layouts parseRunAtString tries.
+// Order matters: more specific / longer layouts come first so the optional
+// fractional-seconds variants aren't matched against the bare datetime-local
+// fallback (which has no offset). The set mirrors what modernc.org/sqlite
+// uses internally plus the wire formats the handler accepts in
+// parseRunAt (RFC3339, datetime-local).
+var runAtParseFormats = []string{
+	// modernc driver output for time.Time.String() — used by writes from
+	// this service until the UTC normalization in Create, and by any pre-fix
+	// rows already in the DB.
+	"2006-01-02 15:04:05.999999999 -0700 MST",
+	// modernc driver output when _time_format=sqlite is set on the DSN.
+	"2006-01-02 15:04:05.999999999-07:00",
+	// Standard wire formats the frontend may post via the API.
+	time.RFC3339Nano,
+	time.RFC3339,
+	// Variants without zone — produced by `time.Time.Format` calls or by
+	// hand-crafted SQL inserts; the user-facing API rejects these but the
+	// DB might still hold one.
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02 15:04:05",
+	"2006-01-02T15:04:05.999999999",
+	"2006-01-02T15:04:05",
+	// datetime-local without seconds — legacy handler-side fallback in
+	// parseRunAt. time.Parse interprets this as UTC (no zone in layout),
+	// which differs from the handler's ParseInLocation semantic but is
+	// still a meaningful absolute moment for the list endpoint to show.
+	"2006-01-02T15:04",
+	"2006-01-02",
+}
+
+// parseRunAtString best-effort parses a run_at cell that came back from
+// SQLite. It returns time.Time{} on total failure rather than an error
+// because the row's other fields are still useful — failing the whole list
+// because one legacy row has a bad run_at is the bug we're fixing.
+//
+// Callers that need to distinguish "unset" from "valid but zero" should
+// check runAtRaw.Valid at the Scan site; this helper never sees that bit.
+func parseRunAtString(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}
+	}
+	for _, layout := range runAtParseFormats {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
