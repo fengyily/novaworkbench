@@ -28,6 +28,8 @@ func main() {
 		"one-shot data migration: copy all data from a SQLite file into the configured target database (NOVA_DB_DRIVER/NOVA_DB_DSN or dbconfig.json), then exit")
 	fromFlag := flag.String("from", db.DefaultSQLitePath,
 		"SQLite source path for -migrate")
+	portFlag := flag.String("port", "",
+		"HTTP listen port (overrides NOVA_PORT; default 9527). Example: -port 9000")
 	flag.Parse()
 
 	if *migrateFlag {
@@ -431,7 +433,10 @@ func main() {
 		spaMux.ServeHTTP(w, r)
 	})
 
-	port := os.Getenv("NOVA_PORT")
+	port := *portFlag
+	if port == "" {
+		port = os.Getenv("NOVA_PORT")
+	}
 	if port == "" {
 		port = "9527"
 	}
