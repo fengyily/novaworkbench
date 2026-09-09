@@ -726,6 +726,40 @@
   font-size: 12px;
   color: var(--color-primary);
 }
+/* Orchestrator banner with the new manual / early-summary CTAs.
+   Layout: a single flex row that keeps the status text on the left and
+   the CTA cluster (button + toast) on the right, wrapping gracefully on
+   narrow viewports. The base `.sub-orchestrator-status` styles above
+   still apply (background / padding / color). */
+.sub-orchestrator-status--with-cta {
+  padding: 10px 14px;
+}
+.sub-orchestrator-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.sub-orchestrator-status-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.sub-orchestrator-status-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.sub-orchestrator-cta {
+  font-size: 12px;
+  padding: 4px 10px;
+}
+.sub-orchestrator-toast {
+  /* Local tweak so the toast sits inline with the button instead of
+     taking its own line — the global `.merge-hint-toast` rule already
+     provides background / border / animation. */
+  white-space: nowrap;
+}
 .sub-orchestrator-reply {
   margin-top: 10px;
   border: 1px solid var(--color-border);

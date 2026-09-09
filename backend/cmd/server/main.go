@@ -212,7 +212,13 @@ func main() {
 		}
 	}
 	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, agentSvrSvc, nil, subTaskConcurrency)
-	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, subTaskSvc, subTaskRunner)
+	batchSvc := service.NewOrchestrationBatchService(database)
+	if n, err := batchSvc.Recover(); err != nil {
+		log.Printf("[main] orchestration batch recovery: %v", err)
+	} else if n > 0 {
+		log.Printf("[main] orchestration batch recovery: reset %d stale summaries", n)
+	}
+	wizardH := handler.NewWizardHandler(database, projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, subTaskSvc, subTaskRunner, batchSvc)
 	// Wire the remote-coding entrypoint AFTER both are built: children of an
 	// Agent-server-developed requirement run on that server, so every sub-task
 	// dispatch (manual / orchestrated / push+PR) routes through it.
@@ -228,6 +234,19 @@ func main() {
 		log.Printf("[main] scheduler recovery: %v", err)
 	}
 	schedulerRunner.Start()
+	// OrchestrationQueue: tick loop that drives auto-orchestrated sub-task
+	// dispatch + summary round for restart-safe batch execution. Independent
+	// of schedulerRunner (scheduled_tasks vs orchestration_batches are
+	// separate concerns). The wizard handler is the SubTaskExecutor; the
+	// queue Kick()s immediately after each batch creation in
+	// tryAutoOrchestrate so the first child doesn't wait the full interval.
+	orchQueue := scheduler.NewOrchestrationQueue(database, batchSvc, subTaskSvc, wizardH, 2 /*concurrency*/, 10*time.Second)
+	if err := orchQueue.Recover(); err != nil {
+		log.Printf("[main] orchestration queue recover: %v", err)
+	}
+	go orchQueue.Start()
+	defer orchQueue.Stop()
+	wizardH.SetOrchQueue(orchQueue)
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
@@ -478,6 +497,7 @@ func main() {
 	// auto-orchestrate. Escape hatch for when auto-orchestration produced
 	// no children (or the user wants a fresh split).
 	mux.HandleFunc("POST /api/requirements/{id}/re-orchestrate", wizardH.ReOrchestrate)
+	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/summary", wizardH.GenerateSubTaskSummary)
 	// NOTE: /api/requirements/{id}/orchestrate is no longer registered —
 	// the old manual "一键编排" endpoint is replaced by StartCoding's auto
 	// dispatch (wizard.tryAutoOrchestrate). The main agent outputs

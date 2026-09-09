@@ -37,11 +37,23 @@ func NewSubTaskService(database *db.DB) *SubTaskService {
 // Create inserts a new sub-task row in the "pending" state. Title defaults to
 // the first 40 characters of prompt (with an ellipsis when truncated) when the
 // caller leaves it blank so the SubTaskPanel always has something to render in
-// its card header. session_id / source_session_id / job_id stay empty — the
-// handler fills them in as it pre-mints the claude session and creates the
-// in-memory JobStore job, so a crash between Create and pre-mint still leaves
-// a recoverable row (the handler can later UpdateSession + UpdateJobID).
-func (s *SubTaskService) Create(reqID, title, prompt string) (*model.SubTask, error) {
+// its card header. session_id / job_id stay empty — the handler fills them in
+// as it pre-mints the claude session and creates the in-memory JobStore job,
+// so a crash between Create and pre-mint still leaves a recoverable row (the
+// handler can later UpdateSession + UpdateJobID).
+//
+// modelDisplay and sourceSID are stamped up-front so the SubTaskPanel renders
+// the model badge from the moment the row appears (mirrors UpdateModel's
+// behavior) and so an auto-orchestrated sub-task's source_session_id is
+// available for the fork-session path before UpdateSession overwrites it with
+// the freshly pre-minted id. Pass "" for both when the caller doesn't know
+// (manual-create path that fills them via UpdateSession/UpdateModel anyway).
+//
+// batchID + batchSeq tag the row for an orchestration_batches run. Pass ""
+// and 0 for manual sub-tasks; pass the batch id and 1..N sequence number for
+// children of tryAutoOrchestrate. OrchestrationQueue's tick uses these to
+// dispatch children in batch_seq order.
+func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int) (*model.SubTask, error) {
 	if reqID == "" {
 		return nil, errors.New("requirement_id is required")
 	}
@@ -57,20 +69,76 @@ func (s *SubTaskService) Create(reqID, title, prompt string) (*model.SubTask, er
 	}
 	id := util.NewID("st")
 	now := time.Now()
-	_, err := s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, reqID, title, prompt, model.SubTaskStatusPending, now, now)
+	_, err := s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
+		model, source_session_id, batch_id, batch_seq,
+		created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, reqID, title, prompt, model.SubTaskStatusPending,
+		modelDisplay, sourceSID, batchID, batchSeq,
+		now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert sub_task: %w", err)
 	}
 	return &model.SubTask{
-		ID:            id,
-		RequirementID: reqID,
-		Title:         title,
-		Prompt:        prompt,
-		Status:        model.SubTaskStatusPending,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:              id,
+		RequirementID:   reqID,
+		Title:           title,
+		Prompt:          prompt,
+		Status:          model.SubTaskStatusPending,
+		Model:           modelDisplay,
+		SourceSessionID: sourceSID,
+		BatchID:         batchID,
+		BatchSeq:        batchSeq,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}, nil
+}
+
+// CreateWithBatchTx is the in-transaction sibling of Create. tryAutoOrchestrate
+// uses it inside a *db.Tx so the N child inserts and the orchestration_batches
+// insert commit atomically — partial state from a mid-transaction failure is
+// rolled back instead of leaving an orphaned batch with no children (or vice
+// versa). The return value is the same as Create; the caller does not need
+// the tx reference again because the caller owns the rollback/commit.
+func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int) (*model.SubTask, error) {
+	if tx == nil {
+		return nil, errors.New("tx is required")
+	}
+	if reqID == "" {
+		return nil, errors.New("requirement_id is required")
+	}
+	if prompt == "" {
+		return nil, errors.New("prompt is required")
+	}
+	if title == "" {
+		title = truncateForTitle(prompt, 40)
+	} else {
+		title = capTitle(title, 80)
+	}
+	id := util.NewID("st")
+	now := time.Now()
+	_, err := tx.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
+		model, source_session_id, batch_id, batch_seq,
+		created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, reqID, title, prompt, model.SubTaskStatusPending,
+		modelDisplay, sourceSID, batchID, batchSeq,
+		now, now)
+	if err != nil {
+		return nil, fmt.Errorf("insert sub_task: %w", err)
+	}
+	return &model.SubTask{
+		ID:              id,
+		RequirementID:   reqID,
+		Title:           title,
+		Prompt:          prompt,
+		Status:          model.SubTaskStatusPending,
+		Model:           modelDisplay,
+		SourceSessionID: sourceSID,
+		BatchID:         batchID,
+		BatchSeq:        batchSeq,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}, nil
 }
 
@@ -83,7 +151,8 @@ func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 		session_id, source_session_id, job_id, artifact, model,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
-		created_at, updated_at, completed_at
+		created_at, updated_at, completed_at,
+		batch_id, batch_seq, batch_id_seq_run
 		FROM sub_tasks WHERE requirement_id = ? ORDER BY created_at ASC, id ASC`, reqID)
 	if err != nil {
 		return nil, err
@@ -109,7 +178,8 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 		session_id, source_session_id, job_id, artifact, model,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
-		created_at, updated_at, completed_at
+		created_at, updated_at, completed_at,
+		batch_id, batch_seq, batch_id_seq_run
 		FROM sub_tasks WHERE id = ?`, id)
 	if err != nil {
 		return nil, err
@@ -119,6 +189,131 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 		return nil, sql.ErrNoRows
 	}
 	return scanSubTask(rows)
+}
+
+// ListByBatch returns every sub-task attached to batchID, ordered by
+// batch_seq ASC (then created_at ASC as a tie-breaker for the legacy
+// batch_seq=0 manual rows). Used by OrchestrationQueue to enumerate a batch's
+// children when computing summary inputs. Returns an empty slice when the
+// batch has no rows — never nil.
+func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
+	rows, err := s.db.Query(`SELECT id, requirement_id, title, prompt, status,
+		session_id, source_session_id, job_id, artifact, model,
+		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+		cost_cents, duration_seconds,
+		created_at, updated_at, completed_at,
+		batch_id, batch_seq, batch_id_seq_run
+		FROM sub_tasks WHERE batch_id = ?
+		ORDER BY batch_seq ASC, created_at ASC, id ASC`, batchID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.SubTask{}
+	for rows.Next() {
+		st, err := scanSubTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *st)
+	}
+	return out, rows.Err()
+}
+
+// CountTerminalByBatch reports the number of children in terminal states
+// (done and error) for batchID. OrchestrationQueue compares this against
+// batch.TotalChildren to decide when to flip a dispatching batch into
+// summarizing. Both counts are returned in a single row scan so the tick
+// goroutine can decide without a second round-trip.
+func (s *SubTaskService) CountTerminalByBatch(batchID string) (done, errored int, err error) {
+	row := s.db.QueryRow(`SELECT
+		COALESCE(SUM(CASE WHEN status=? THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status=? THEN 1 ELSE 0 END), 0)
+		FROM sub_tasks WHERE batch_id=?`,
+		model.SubTaskStatusDone, model.SubTaskStatusError, batchID)
+	var d, e int64
+	if err := row.Scan(&d, &e); err != nil {
+		return 0, 0, fmt.Errorf("count terminal sub_tasks: %w", err)
+	}
+	return int(d), int(e), nil
+}
+
+// ClaimNextPending atomically picks the lowest batch_seq pending row for
+// batchID and flips it to running. Used by OrchestrationQueue's tick loop so
+// the (batch_id, batch_seq) ordering is preserved across crash/restart — only
+// one caller can ever own a given (batch_id, batch_seq) at a time, and
+// ClaimNextPending is the single entry point that grants that ownership.
+//
+// Implementation: an UPDATE with the candidate id resolved by a correlated
+// subquery, evaluated by the database inside the same statement. The
+// `AND status='pending'` clause on the outer WHERE makes the flip
+// conditional — if another writer has already changed status, RowsAffected
+// drops to 0 and the second bool return is false; no row is leaked to a stale
+// caller. On success the batch_id_seq_run column is stamped with the current
+// time as a heartbeat that RecoverInterrupted inspects on boot.
+//
+// On RowsAffected==1 we re-SELECT the row with a WHERE batch_id=? AND
+// status='running' ORDER BY batch_seq ASC LIMIT 1 — there's exactly one
+// running row we just produced under SQLite's single-writer model and READ
+// COMMITTED semantics on MySQL/Postgres, so the re-select is unambiguous.
+func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool, error) {
+	if batchID == "" {
+		return nil, false, errors.New("batch_id is required")
+	}
+	res, err := s.db.Exec(`UPDATE sub_tasks
+		SET status=?, updated_at=CURRENT_TIMESTAMP, batch_id_seq_run=CURRENT_TIMESTAMP
+		WHERE id = (
+			SELECT id FROM sub_tasks
+			 WHERE batch_id=? AND status=?
+			 ORDER BY batch_seq ASC, created_at ASC
+			 LIMIT 1
+		)
+		AND status=?`,
+		model.SubTaskStatusRunning, batchID, model.SubTaskStatusPending, model.SubTaskStatusPending)
+	if err != nil {
+		return nil, false, fmt.Errorf("claim pending sub_task: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return nil, false, nil
+	}
+	rows, err := s.db.Query(`SELECT id, requirement_id, title, prompt, status,
+		session_id, source_session_id, job_id, artifact, model,
+		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+		cost_cents, duration_seconds,
+		created_at, updated_at, completed_at,
+		batch_id, batch_seq, batch_id_seq_run
+		FROM sub_tasks
+		 WHERE batch_id=? AND status=?
+		 ORDER BY batch_seq ASC, created_at ASC
+		 LIMIT 1`,
+		batchID, model.SubTaskStatusRunning)
+	if err != nil {
+		return nil, false, fmt.Errorf("re-select claimed sub_task: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, false, fmt.Errorf("claim succeeded but row vanished for batch %s", batchID)
+	}
+	st, err := scanSubTask(rows)
+	if err != nil {
+		return nil, false, err
+	}
+	return st, true, nil
+}
+
+// MarkHeartbeat refreshes batch_id_seq_run to the current timestamp for a
+// running sub-task. OrchestrationQueue's per-child goroutine calls this every
+// 5s so RecoverInterrupted can distinguish a live running row from one
+// orphaned by a backend crash — a row whose heartbeat is older than 5 minutes
+// at boot time is treated as orphaned and flipped back to pending for
+// re-dispatch. The status='running' guard means a Finish() that races the
+// heartbeat doesn't accidentally reset the heartbeat on a terminal row.
+func (s *SubTaskService) MarkHeartbeat(subTaskID string) error {
+	_, err := s.db.Exec(`UPDATE sub_tasks SET batch_id_seq_run=CURRENT_TIMESTAMP
+		WHERE id=? AND status=?`,
+		subTaskID, model.SubTaskStatusRunning)
+	return err
 }
 
 // UpdateSession stores the pre-minted claude session id and the parent
@@ -140,6 +335,29 @@ func (s *SubTaskService) UpdateSession(id, sessionID, sourceSessionID string) er
 func (s *SubTaskService) UpdateJobID(id, jobID string) error {
 	_, err := s.db.Exec(`UPDATE sub_tasks SET job_id=?, updated_at=? WHERE id=?`,
 		jobID, time.Now(), id)
+	return err
+}
+
+// SetBatchID stamps an existing sub_task row with the given batch_id and
+// batch_seq. Used by the manual-summary path (GenerateSubTaskSummary) to
+// retroactively attach manual children (batch_id='', batch_seq=0) to a
+// freshly-created summarizing batch so RunOrchestratorSummary's
+// ListByBatch picks them up. Idempotent — re-stamping is harmless because
+// the same row already has the same id, and batch_seq follows the user's
+// existing list order.
+//
+// Auto-orchestrated rows (those already carrying a non-empty batch_id) are
+// silently skipped by the caller (GenerateSubTaskSummary filters them
+// first) so this method doesn't need its own guard — but it does require
+// the row to be in a terminal state when stamped, since a running child
+// forked from the wrong session context would corrupt the next dispatch.
+func (s *SubTaskService) SetBatchID(subTaskID, batchID string, batchSeq int) error {
+	if subTaskID == "" || batchID == "" {
+		return errors.New("sub_task_id and batch_id are required")
+	}
+	_, err := s.db.Exec(`UPDATE sub_tasks SET batch_id=?, batch_seq=?, updated_at=CURRENT_TIMESTAMP
+		WHERE id=? AND status IN (?, ?)`,
+		batchID, batchSeq, subTaskID, model.SubTaskStatusDone, model.SubTaskStatusError)
 	return err
 }
 
@@ -290,25 +508,68 @@ func (s *SubTaskService) Finish(id, status, artifact, modelName string, tokens m
 	return err
 }
 
-// RecoverInterrupted marks every sub-task left in running/pending state as
-// error at server startup. Sub-task execution is driven by in-memory
-// goroutines + JobStore jobs, so a restart orphans those rows forever
-// (the UI would otherwise show an eternal spinner — req_9d24ef181a5ad5c4
-// left one stuck for the whole session). The artifact explains the cause so
-// the user knows to re-dispatch (e.g. via 重新拆分). Returns the number of
-// rows recovered.
+// RecoverInterrupted reconciles sub-task state with the freshly-booted
+// backend. It runs in two passes so the manual path keeps its "mark error and
+// tell the user to redo" behavior while the auto-orchestrated path gets the
+// restart-safe behavior the new OrchestrationQueue expects:
+//
+//  1. Manual path (batch_id='' OR NULL): pending/running rows become error
+//     with a recovery artifact, exactly like the pre-batch behavior. The
+//     sub-task was driven by an in-memory JobStore goroutine that died with
+//     the backend, so there's nothing to recover — the user must re-trigger.
+//  2. Orchestrated path (batch_id != ''): running rows whose heartbeat
+//     (batch_id_seq_run) is older than 5 minutes are flipped back to
+//     pending. The owning goroutine died with the backend, but the row
+//     itself is intact in the DB; OrchestrationQueue's next tick will
+//     re-claim it via ClaimNextPending. Rows with a fresh heartbeat (the
+//     queue tick re-claimed them between restart and this call) are left
+//     alone so we don't double-dispatch.
+//
+// pending rows under a batch_id are NOT touched — they're the unclaimed
+// queue for OrchestrationQueue and remain pending for the next tick to pick
+// up.
+//
+// Returns the total number of rows the two passes affected. main.go logs
+// this so an ops dashboard can spot "many orchestrations interrupted at
+// boot" patterns.
 func (s *SubTaskService) RecoverInterrupted() (int64, error) {
 	now := time.Now()
-	res, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?,
-		completed_at=?, updated_at=? WHERE status IN (?, ?)`,
+
+	// Pass 1: manual sub-tasks — preserve the old mark-error behavior.
+	res, err := s.db.Exec(`UPDATE sub_tasks
+		SET status=?, artifact=?,
+		    completed_at=?, updated_at=?
+		WHERE status IN (?, ?)
+		  AND (batch_id = '' OR batch_id IS NULL)`,
 		model.SubTaskStatusError,
 		"❌ 服务在子任务执行期间重启，任务中断。请通过「重新拆分」或手动启动重新执行。",
-		now, now, model.SubTaskStatusRunning, model.SubTaskStatusPending)
+		now, now,
+		model.SubTaskStatusRunning, model.SubTaskStatusPending)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("recover manual sub_tasks: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	return n, nil
+	manualAffected, _ := res.RowsAffected()
+
+	// Pass 2: orchestrated sub-tasks — flip stale running rows back to
+	// pending so OrchestrationQueue re-dispatches them. cutoff is the Go
+	// time threshold; the SQL parameter binding puts it into the dialect's
+	// DATETIME comparison natively (SQLite/MySQL/Postgres all accept
+	// time.Time as a parameter and compare correctly against stored
+	// DATETIME/TIMESTAMP values).
+	cutoff := now.Add(-5 * time.Minute)
+	res2, err := s.db.Exec(`UPDATE sub_tasks
+		SET status=?, batch_id_seq_run=NULL, updated_at=?
+		WHERE status=?
+		  AND batch_id != '' AND batch_id IS NOT NULL
+		  AND batch_id_seq_run IS NOT NULL
+		  AND batch_id_seq_run < ?`,
+		model.SubTaskStatusPending, now,
+		model.SubTaskStatusRunning, cutoff)
+	if err != nil {
+		return manualAffected, fmt.Errorf("recover orchestrated sub_tasks: %w", err)
+	}
+	orchestratedAffected, _ := res2.RowsAffected()
+	return manualAffected + orchestratedAffected, nil
 }
 
 // scanSubTask is a shared row→struct mapper. Pulled out so List / Get can
@@ -316,14 +577,20 @@ func (s *SubTaskService) RecoverInterrupted() (int64, error) {
 func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 	var st model.SubTask
 	var completedAt sql.NullTime
+	var heartbeat sql.NullTime
 	if err := rows.Scan(
 		&st.ID, &st.RequirementID, &st.Title, &st.Prompt, &st.Status,
 		&st.SessionID, &st.SourceSessionID, &st.JobID, &st.Artifact, &st.Model,
 		&st.InputTokens, &st.OutputTokens, &st.CacheCreationTokens, &st.CacheReadTokens,
 		&st.CostCents, &st.DurationSeconds,
 		&st.CreatedAt, &st.UpdatedAt, &completedAt,
+		&st.BatchID, &st.BatchSeq, &heartbeat,
 	); err != nil {
 		return nil, err
+	}
+	if heartbeat.Valid {
+		t := heartbeat.Time
+		st.BatchIDSeqRun = &t
 	}
 	if completedAt.Valid {
 		t := completedAt.Time

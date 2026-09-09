@@ -288,6 +288,13 @@ export interface SubTask {
   created_at: string;
   updated_at: string;
   completed_at?: string;
+  // Orchestration batch membership (restartable orchestration redesign).
+  // batch_id === '' (or omitted) means a manually-created sub-task created
+  // via POST /sub-tasks (no orchestration batch involved). batch_seq is the
+  // 1-based dispatch order within the batch; the panel sorts by it and
+  // the queue ticks children in ascending batch_seq.
+  batch_id?: string;
+  batch_seq?: number;
 }
 
 export const subTasksApi = {
@@ -338,6 +345,28 @@ export const subTasksApi = {
     api.post<SubTaskOrchestrateResponse>(
       `/api/requirements/${requirementId}/orchestrate`, data,
     ),
+  // Manual summary round: kick the orchestration queue to summarize
+  // already-finished sub-tasks (used when the user wants to skip the
+  // pending ones, or when the auto-orchestration path wasn't taken —
+  // e.g. manually-added sub-tasks). The backend creates a
+  // summarizing-only orchestration_batches row and dispatches it through
+  // the same OrchestrationQueue tick path as the auto flow. Returns the
+  // new batch_id so the panel can poll its status. 400 when sub-tasks
+  // are still pending/running; 409 when an orchestration batch is already
+  // active on this requirement.
+  generateSummary: (requirementId: string, data?: { model?: string }) =>
+    api.post<{ job_id: string; batch_id: string }>(
+      `/api/requirements/${requirementId}/sub-tasks/summary`, data ?? {},
+    ),
+  // Poll the current orchestration batch for a requirement. Returns null
+  // when the backend has no batch row for it (no orchestration has run,
+  // or the backend predates the feature). The catch returns plain `null`
+  // so callers can treat any failure as "no batch" without wrapping
+  // every call site in try/catch or unwrapping the envelope by hand.
+  getOrchestrationBatch: (requirementId: string) =>
+    api.get<OrchestrationBatch | null>(
+      `/api/requirements/${requirementId}/orchestration/batch`,
+    ).catch((): OrchestrationBatch | null => null),
 };
 
 // SubTaskOrchestrateResponse is what the backend returns from POST
@@ -351,6 +380,33 @@ export interface SubTaskOrchestrateResponse {
   job_id: string;
   sub_task_ids: string[];
   plan_id?: string;
+  // Orchestration batch that the orchestrator just created (new flow).
+  // The children in sub_task_ids all share this batch_id, and the queue
+  // ticks them in ascending batch_seq order. Older backends that predate
+  // the batch refactor leave these undefined — callers should fall back
+  // to sub_task_ids alone.
+  batch_id?: string;
+  total_children?: number;
+}
+
+// OrchestrationBatch is the persistence-side record of one orchestrator
+// run (auto-decompose or manual summary). The frontend reads it to
+// decide which CTAs to show in SubTaskPanel: while status='dispatching'
+// the "📝 提前生成汇总" CTA is offered; while status='summarizing' all
+// controls are disabled. summary_status independently tracks the
+// post-dispatch summary round (fork-session resume writing the
+// requirements.coding_plan), so a batch in 'completed' status always
+// has summary_status='done' as well.
+export interface OrchestrationBatch {
+  id: string;
+  requirement_id: string;
+  status: 'dispatching' | 'summarizing' | 'completed' | 'errored';
+  summary_status: 'pending' | 'running' | 'done' | 'error';
+  total_children: number;
+  model: string;
+  created_at: string;
+  updated_at?: string;
+  completed_at?: string | null;
 }
 
 // CLI command constructor — renders the `claude ...` invocation the user
