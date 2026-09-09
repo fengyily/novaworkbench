@@ -240,7 +240,15 @@ func main() {
 	// separate concerns). The wizard handler is the SubTaskExecutor; the
 	// queue Kick()s immediately after each batch creation in
 	// tryAutoOrchestrate so the first child doesn't wait the full interval.
-	orchQueue := scheduler.NewOrchestrationQueue(database, batchSvc, subTaskSvc, wizardH, 2 /*concurrency*/, 10*time.Second)
+	// Concurrency=1 keeps each batch strictly sequential: only one child runs
+	// at a time across the whole process, so a long-running child can't have
+	// its worktree / git branch / dev-server contended by a sibling that the
+	// queue claims from the same batch on the next tick. The wizard's
+	// CLAUDE_TIMEOUT floor (30m) is the per-child budget; with cap=1 the
+	// bottleneck is the slowest child, which is exactly what serial
+	// orchestration promises. Bump above 1 only if multiple batches are
+	// expected to overlap AND they target different worktrees.
+	orchQueue := scheduler.NewOrchestrationQueue(database, batchSvc, subTaskSvc, wizardH, 1 /*concurrency*/, 10*time.Second)
 	if err := orchQueue.Recover(); err != nil {
 		log.Printf("[main] orchestration queue recover: %v", err)
 	}
@@ -499,6 +507,12 @@ func main() {
 	// no children (or the user wants a fresh split).
 	mux.HandleFunc("POST /api/requirements/{id}/re-orchestrate", wizardH.ReOrchestrate)
 	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/summary", wizardH.GenerateSubTaskSummary)
+	// Live snapshot of the most recent orchestration_batches row for a
+	// requirement. The SubTaskPanel polls this every 3-5s while children
+	// are alive to drive the summary-CTA banner; returns the latest batch
+	// in any status (dispatching / summarizing / completed / errored) so a
+	// finished run still surfaces as "✅ 已完成" rather than vanishing.
+	mux.HandleFunc("GET /api/requirements/{id}/orchestration/batch", wizardH.GetOrchestrationBatch)
 	// NOTE: /api/requirements/{id}/orchestrate is no longer registered —
 	// the old manual "一键编排" endpoint is replaced by StartCoding's auto
 	// dispatch (wizard.tryAutoOrchestrate). The main agent outputs
