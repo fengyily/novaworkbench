@@ -6,7 +6,7 @@
  * Why this exists separately from the in-panel ContextUsageBar:
  *   - ContextUsageBar lives inside each chat / process panel, which COLLAPSES
  *     on stage completion (design panel) or empties on refresh (coding panel).
- *     So "分析完就不展示了" — the bar vanished the moment the user finished
+ *     once a stage finished the bar vanished with it — the moment the user finished
  *     a stage. The strip is rendered in the detail header, outside any panel,
  *     so it stays put across stage transitions, panel collapse, and refresh.
  *
@@ -20,9 +20,11 @@
  *
  * Visibility per segment: shown when the stage has ever had activity — a live
  * usage snapshot, a non-empty session_id, OR a compressed_at timestamp.
- * "📦 已压缩" replaces the bar when the session was compressed (the session
- * id is cleared on compress, so there's no fill to show — just the badge).
+ * A "compressed" badge replaces the bar when the session was compressed (the
+ * session id is cleared on compress, so there's no fill to show — just the
+ * badge).
  */
+import { useTranslation } from 'react-i18next';
 import type { Requirement } from '../api/client';
 import type { UsageInfo } from '../utils/logLines';
 import { clampPct, bandClass, formatTokens } from '../utils/logLines';
@@ -44,10 +46,12 @@ interface Segment {
 }
 
 export function SessionContextStrip({ analyst, design, coding, req }: SessionContextStripProps) {
+  const { t } = useTranslation();
+  // Labels resolve at render time so a language switch updates the strip.
   const segments: Segment[] = [
-    { key: 'analyst', label: '分析师', usage: analyst, compressedAt: req?.analyst_compressed_at, sessionId: req?.analysis_session_id },
-    { key: 'design', label: '方案', usage: design, compressedAt: req?.design_compressed_at, sessionId: req?.design_session_id },
-    { key: 'coding', label: '开发', usage: coding, compressedAt: req?.coding_compressed_at, sessionId: req?.coding_session_id },
+    { key: 'analyst', label: t('components.sessionStrip.analyst'), usage: analyst, compressedAt: req?.analyst_compressed_at, sessionId: req?.analysis_session_id },
+    { key: 'design', label: t('components.sessionStrip.design'), usage: design, compressedAt: req?.design_compressed_at, sessionId: req?.design_session_id },
+    { key: 'coding', label: t('components.sessionStrip.coding'), usage: coding, compressedAt: req?.coding_compressed_at, sessionId: req?.coding_session_id },
   ];
 
   // Only render segments that have ever seen activity. A stage with no
@@ -59,15 +63,15 @@ export function SessionContextStrip({ analyst, design, coding, req }: SessionCon
   if (visible.length === 0) return null;
 
   return (
-    <div className="session-context-strip" role="group" aria-label="会话上下文使用量">
+    <div className="session-context-strip" role="group" aria-label={t('components.sessionStrip.ariaLabel')}>
       {visible.map(seg => {
         // Compressed → badge only, no bar (the session was cleared, so the
         // fill is meaningless; the badge points the user at the summary).
         if (seg.compressedAt && !seg.usage) {
           return (
-            <div key={seg.key} className="session-context-seg session-context-compressed" title={`${seg.label}阶段已压缩`}>
+            <div key={seg.key} className="session-context-seg session-context-compressed" title={t('components.sessionStrip.compressedTitle', { stage: seg.label })}>
               <span className="session-context-label">{seg.label}</span>
-              <span className="session-context-badge">📦 已压缩</span>
+              <span className="session-context-badge">{t('components.sessionStrip.compressedBadge')}</span>
             </div>
           );
         }
@@ -77,7 +81,7 @@ export function SessionContextStrip({ analyst, design, coding, req }: SessionCon
         const pct = u?.pct ?? 0;
         const widthPct = clampPct(pct);
         return (
-          <div key={seg.key} className="session-context-seg" title={`${seg.label}: ${used} / ${window} tokens(原始 ${pct.toFixed(1)}%)`}>
+          <div key={seg.key} className="session-context-seg" title={t('components.sessionStrip.usageTitle', { stage: seg.label, used, window, pct: pct.toFixed(1) })}>
             <span className="session-context-label">{seg.label}</span>
             <span className="session-context-track" aria-hidden="true">
               <span className={bandClass(pct)} style={{ width: `${widthPct}%` }} />

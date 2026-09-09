@@ -1,0 +1,66 @@
+/* LanguageSwitcher — compact pill in the header, labelled row on the login
+   page. Deliberately styled like .app-header-logout so it reads as part of
+   the same header control cluster. */
+
+.lang-switcher {
+  display: inline-flex;
+  align-items: center;
+}
+
+.lang-switcher-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+
+.lang-switcher-select {
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  padding: 3px 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+  max-width: 110px;
+}
+
+.lang-switcher-select:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.lang-switcher-select:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+.lang-switcher-text {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+/* Login page placement: full-width labelled row matching .login-field. */
+.lang-switcher--block {
+  margin: 8px 0 4px;
+}
+
+.lang-switcher--block .lang-switcher-select {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 14px;
+  border-color: var(--color-border);
+}
+
+@media (max-width: 768px) {
+  .lang-switcher--header {
+    margin-right: 4px;
+  }
+
+  .lang-switcher--header .lang-switcher-select {
+    font-size: 12px;
+    padding: 2px 4px;
+    max-width: 84px;
+  }
+}

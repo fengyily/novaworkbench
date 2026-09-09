@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { API_BASE, authedFetch, projectsApi } from '../api/client';
 import FolderPicker from '../components/FolderPicker';
 import './WizardPage.css';
@@ -8,6 +9,7 @@ type Step = 1 | 2 | 3;
 
 export default function WizardPage() {
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const [step, setStep] = useState<Step>(1);
 
   // Step 1: Project
@@ -35,14 +37,14 @@ export default function WizardPage() {
       setStep(2);
       setTimeout(() => startInitialChat(), 500);
     } catch (err: any) {
-      alert('创建项目失败: ' + err.message);
+      alert(t('wizard.page.errCreateProject') + ": " + err.message);
     }
   };
 
   // Step 2: Start initial AI chat
   const startInitialChat = async () => {
     setChatting(true);
-    setMessages([{ role: 'ai', content: '让我来帮你完善需求。请描述你想实现的功能。' }]);
+    setMessages([{ role: 'ai', content: t('wizard.page.greeting') }]);
     setChatting(false);
   };
 
@@ -120,7 +122,7 @@ export default function WizardPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           project_path: projectPath,
-          requirement_title: messages[0]?.role === 'user' ? messages[0].content : '新需求',
+          requirement_title: messages[0]?.role === 'user' ? messages[0].content : t('wizard.page.defaultRequirementTitle'),
           requirement_desc: finalReq || chatHistory,
         }),
       });
@@ -163,47 +165,47 @@ export default function WizardPage() {
       <div className="wizard-steps">
         <div className={`wizard-step ${step >= 1 ? 'active' : ''} ${step > 1 ? 'done' : ''}`}>
           <span className="step-num">1</span>
-          <span className="step-label">创建项目</span>
+          <span className="step-label">{t('wizard.page.step1Label')}</span>
         </div>
         <div className="step-line" />
         <div className={`wizard-step ${step >= 2 ? 'active' : ''} ${step > 2 ? 'done' : ''}`}>
           <span className="step-num">2</span>
-          <span className="step-label">完善需求</span>
+          <span className="step-label">{t('wizard.page.step2Label')}</span>
         </div>
         <div className="step-line" />
         <div className={`wizard-step ${step >= 3 ? 'active' : ''}`}>
           <span className="step-num">3</span>
-          <span className="step-label">开始编码</span>
+          <span className="step-label">{t('wizard.page.step3Label')}</span>
         </div>
       </div>
 
       {/* Step 1: Create Project */}
       {step === 1 && (
         <div className="wizard-card">
-          <h2>📁 新建项目</h2>
+          <h2>{t('wizard.page.newProjectTitle')}</h2>
           <div className="form-group">
-            <label>项目名称</label>
+            <label>{t('wizard.page.projectNameLabel')}</label>
             <input
               type="text"
               value={projectName}
               onChange={e => setProjectName(e.target.value)}
-              placeholder="例如: nova-workbench"
+              placeholder={t('wizard.page.projectNamePlaceholder')}
               className="form-input"
               autoFocus
             />
           </div>
           <div className="form-group">
-            <label>项目目录</label>
+            <label>{t('wizard.page.projectPathLabel')}</label>
             <FolderPicker value={projectPath} onChange={setProjectPath} />
           </div>
           <div className="form-actions">
-            <button className="btn" onClick={() => navigate('/')}>取消</button>
+            <button className="btn" onClick={() => navigate('/')}>{t('common.actions.cancel')}</button>
             <button
               className="btn btn-primary"
               onClick={handleCreateProject}
               disabled={!projectPath || !projectName}
             >
-              下一步：完善需求 →
+              {t('wizard.page.nextRefine')}
             </button>
           </div>
         </div>
@@ -212,15 +214,15 @@ export default function WizardPage() {
       {/* Step 2: Chat Refine Requirement */}
       {step === 2 && (
         <div className="wizard-card">
-          <h2>💬 完善需求 — {projectName}</h2>
+          <h2>{t('wizard.page.step2Title')} — {projectName}</h2>
           <div className="chat-panel">
             {messages.map((msg, i) => (
               <div key={i} className={`chat-msg ${msg.role}`}>
-                <span className="chat-role">{msg.role === 'ai' ? '🤖 AI' : '👤 你'}</span>
+                <span className="chat-role">{msg.role === 'ai' ? t('wizard.page.roleAI') : t('wizard.page.roleUser')}</span>
                 <div className="chat-content">{msg.content}</div>
               </div>
             ))}
-            {chatting && <div className="chat-msg ai"><span className="chat-role">🤖 AI</span><div className="chat-content">⏳ 思考中...</div></div>}
+            {chatting && <div className="chat-msg ai"><span className="chat-role">{t('wizard.page.roleAI')}</span><div className="chat-content">{t('wizard.page.thinking')}</div></div>}
           </div>
           <div className="chat-input-row composer-sticky">
             <input
@@ -228,18 +230,18 @@ export default function WizardPage() {
               value={userInput}
               onChange={e => setUserInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && handleSendMessage()}
-              placeholder="描述你的需求，AI 会帮你完善..."
+              placeholder={t('wizard.page.inputPlaceholder')}
               className="form-input"
               disabled={chatting}
             />
             <button className="btn btn-primary" onClick={handleSendMessage} disabled={chatting || !userInput.trim()}>
-              发送
+              {t('wizard.page.send')}
             </button>
           </div>
           <div className="form-actions">
-            <button className="btn" onClick={() => setStep(1)}>← 返回</button>
+            <button className="btn" onClick={() => setStep(1)}>{t('wizard.page.back')}</button>
             <button className="btn btn-primary" onClick={handleFinalize} disabled={chatting || messages.length < 2}>
-              确认需求，开始编码 →
+              {t('wizard.page.confirm')}
             </button>
           </div>
         </div>
@@ -248,28 +250,28 @@ export default function WizardPage() {
       {/* Step 3: Start Coding */}
       {step === 3 && (
         <div className="wizard-card">
-          <h2>🚀 开始编码 — {projectName}</h2>
+          <h2>{t('wizard.page.step3TitlePrefix')}{projectName}</h2>
 
           {finalReq && (
             <div className="final-req">
-              <h3>📋 确认的需求</h3>
+              <h3>{t('wizard.page.finalReqTitle')}</h3>
               <pre>{finalReq}</pre>
             </div>
           )}
 
           {!coding && codeOutput.length === 0 && (
             <div className="start-section">
-              <p>项目: <code>{projectPath}</code></p>
-              <p>Claude Code CLI 将读取项目文件并实现上述需求。</p>
+              <p>{t('wizard.page.projectLine')}<code>{projectPath}</code></p>
+              <p>{t('wizard.page.ctaHint')}</p>
               <button className="btn btn-primary btn-lg" onClick={handleStartCoding}>
-                🚀 启动 Claude Code 开始编码
+                {t('wizard.page.startCoding')}
               </button>
             </div>
           )}
 
           {coding && (
             <div className="coding-status">
-              <div className="coding-spinner">🔄 Claude Code 正在执行...</div>
+              <div className="coding-spinner">{t('wizard.page.coding')}</div>
             </div>
           )}
 
@@ -284,9 +286,9 @@ export default function WizardPage() {
           )}
 
           <div className="form-actions">
-            {!coding && <button className="btn" onClick={() => setStep(2)}>← 修改需求</button>}
+            {!coding && <button className="btn" onClick={() => setStep(2)}>{t('wizard.page.editReq')}</button>}
             {!coding && codeOutput.length > 0 && (
-              <button className="btn btn-primary" onClick={() => navigate('/')}>完成，返回仪表盘</button>
+              <button className="btn btn-primary" onClick={() => navigate('/')}>{t('wizard.page.doneBack')}</button>
             )}
           </div>
         </div>

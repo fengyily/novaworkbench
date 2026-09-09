@@ -1,17 +1,15 @@
-// 定时任务列表（/schedules）
+// SchedulesPage (/schedules) — every scheduled_tasks row across projects.
 //
-// 跨需求查看所有 scheduled_tasks 行：状态 / 类型筛选；操作列提供
-// 取消 / 删除 / 查看日志（succeeded/failed 且有 job_id 时）。运行中行
-// （status=running）的日志入口也在，因为 wizard exec body 写完
-// job_logs 后服务端就立刻把 scheduled_tasks 翻到终态——所以"running + 有日志"
-// 的窗口很短，UI 仍渲染入口以防后端延迟落库。
+// Status / type filters; the action column offers cancel / delete / view log
+// (for succeeded/failed rows with a job_id — and for running rows too,
+// because the backend flips the row to its terminal state as soon as the
+// wizard writes job_logs, so the "running + has log" window is short).
 //
-// 15s 自动轮询，仅在标签可见时进行（document.visibilityState==='visible'）。
+// 15s auto-refresh, only while the tab is visible.
 //
-// 视觉：每个任务卡片左侧有一条 4px 的"状态轨"（status rail），颜色编码
-// 当前状态——这是与卡片网格区分的关键签名，让用户在长列表里不读徽章
-// 也能扫到哪些任务在运行 / 失败。过滤器从裸下拉框改成横向药丸行
-// （schedules-pill），匹配 kind-chip 的视觉语言。
+// Visual: each row has a 4px status rail on the left colour-coding its
+// state, so a long list is scannable without reading the badges. Filters are
+// horizontal pill rows matching the kind-chip vocabulary.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -23,61 +21,67 @@ import {
   type ScheduledTaskType,
   type RunJob,
 } from '../api/client';
-import { relativeTime, formatDateTime } from '../utils/time';
+import { useTranslation } from 'react-i18next';
+import i18next from 'i18next';
+import { fmtDateTime, fmtRelative } from '../utils/intl';
+import { errorMessage } from '../utils/errMsg';
 import { IconClock, IconClose, IconAlert, IconHourglass, IconRocket } from '../components/icons';
 import './SchedulesPage.css';
 
-const STATUS_OPTIONS: { value: ScheduledTaskStatus; label: string }[] = [
-  { value: 'pending', label: '待执行' },
-  { value: 'running', label: '执行中' },
-  { value: 'succeeded', label: '成功' },
-  { value: 'failed', label: '失败' },
-  { value: 'canceled', label: '已取消' },
+// Filter options + row labels hold translation KEYS, resolved during render.
+const STATUS_OPTIONS: { value: ScheduledTaskStatus; labelKey: string }[] = [
+  { value: 'pending', labelKey: 'schedules.status.pending' },
+  { value: 'running', labelKey: 'schedules.status.running' },
+  { value: 'succeeded', labelKey: 'schedules.status.succeeded' },
+  { value: 'failed', labelKey: 'schedules.status.failed' },
+  { value: 'canceled', labelKey: 'schedules.status.canceled' },
 ];
 
-const TYPE_OPTIONS: { value: ScheduledTaskType; label: string }[] = [
-  { value: 'design', label: '方案' },
-  { value: 'coding', label: '开发' },
+const TYPE_OPTIONS: { value: ScheduledTaskType; labelKey: string }[] = [
+  { value: 'design', labelKey: 'schedules.type.design' },
+  { value: 'coding', labelKey: 'schedules.type.coding' },
 ];
 
-const statusLabels: Record<ScheduledTaskStatus, string> = {
-  pending: '待执行',
-  running: '执行中',
-  succeeded: '成功',
-  failed: '失败',
-  canceled: '已取消',
+const statusLabelKeys: Record<ScheduledTaskStatus, string> = {
+  pending: 'schedules.status.pending',
+  running: 'schedules.status.running',
+  succeeded: 'schedules.status.succeeded',
+  failed: 'schedules.status.failed',
+  canceled: 'schedules.status.canceled',
 };
-const typeLabels: Record<ScheduledTaskType, string> = {
-  design: '方案',
-  coding: '开发',
+const typeLabelKeys: Record<ScheduledTaskType, string> = {
+  design: 'schedules.type.design',
+  coding: 'schedules.type.coding',
 };
 
-// Compact "xx 小时后 / 3 天前" formatter for the run_at column. Picks the
-// two most-significant units so a 1y-old log reads as "11 个月前" instead
-// of "11 个月 13 天 4 小时...". Locale-agnostic on purpose — these strings
-// end up in a tight cell and a long humanized form blows the column width.
+// Compact "in 3 h / 3 d ago" formatter for the run_at column — picks the two
+// most significant units so a year-old log still fits its tight cell.
+// Phrasing comes from the time.* keys, read at call time so a language
+// switch updates it on the next render.
 function relativeRunAt(iso: string, nowMs: number): string {
   const diff = new Date(iso).getTime() - nowMs;
   const abs = Math.abs(diff);
   const min = 60_000;
   const hour = 60 * min;
   const day = 24 * hour;
-  if (abs < min) return diff >= 0 ? '即将' : '刚刚';
+  const tt = i18next.t as unknown as (k: string, o?: Record<string, unknown>) => string;
+  if (abs < min) return diff >= 0 ? tt('time.soon') : tt('time.justNow');
   if (abs < hour) {
     const m = Math.round(abs / min);
-    return diff >= 0 ? `${m} 分钟后` : `${m} 分钟前`;
+    return diff >= 0 ? tt('time.inMinutes', { n: m }) : tt('time.minutesAgo', { n: m });
   }
   if (abs < day) {
     const h = Math.round(abs / hour);
-    return diff >= 0 ? `${h} 小时后` : `${h} 小时前`;
+    return diff >= 0 ? tt('time.inHours', { n: h }) : tt('time.hoursAgo', { n: h });
   }
   const d = Math.round(abs / day);
-  if (d < 30) return diff >= 0 ? `${d} 天后` : `${d} 天前`;
+  if (d < 30) return diff >= 0 ? tt('time.inDays', { n: d }) : tt('time.daysAgo', { n: d });
   const months = Math.round(d / 30);
-  return diff >= 0 ? `${months} 个月后` : `${months} 个月前`;
+  return diff >= 0 ? tt('time.inMonths', { n: months }) : tt('time.monthsAgo', { n: months });
 }
 
 export default function SchedulesPage() {
+  const { t } = useTranslation();
   const [rows, setRows] = useState<ScheduledTask[]>([]);
   const [loading, setLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState<'' | ScheduledTaskStatus>('');
@@ -119,7 +123,7 @@ export default function SchedulesPage() {
     return () => window.clearInterval(id);
   }, [load]);
 
-  // Re-render every 30s so the relative "X 小时后" labels stay fresh
+  // Re-render every 30s so the relative "in X h" labels stay fresh
   // (we don't refetch, just bump a counter).
   useEffect(() => {
     const id = window.setInterval(() => setTick(t => t + 1), 30_000);
@@ -162,29 +166,25 @@ export default function SchedulesPage() {
   const isOverdue = nextPending != null && nextPending < now;
 
   const handleCancel = async (id: string) => {
-    if (!confirm('确认取消该定时任务？')) return;
+    if (!confirm(t('schedules.cancelConfirm'))) return;
     try {
       await schedulesApi.cancel(id);
     } catch (err) {
       // Mirror handleDelete's error surfacing — silent failure on cancel
       // looks identical to a stale row and confuses the user about whether
       // the button worked.
-      const msg = err instanceof Error ? err.message : String(err);
-      alert(`取消失败：${msg}`);
+      alert(t('schedules.cancelFailed', { msg: errorMessage(err) }));
     }
     load();
   };
   const handleDelete = async (id: string) => {
-    if (!confirm('确认删除该定时任务？')) return;
+    if (!confirm(t('schedules.deleteConfirm'))) return;
     try {
       await schedulesApi.remove(id);
     } catch (err) {
       // Surface the failure so the user knows the row is still on disk —
-      // otherwise they click 删除, see no visible change, and assume a
-      // bug. The message comes pre-formatted "<code>: <msg>" from the
-      // request wrapper, which is enough to point at the cause.
-      const msg = err instanceof Error ? err.message : String(err);
-      alert(`删除失败：${msg}`);
+      // otherwise they click delete, see no visible change, and assume a bug.
+      alert(t('schedules.deleteFailed', { msg: errorMessage(err) }));
     }
     load();
   };
@@ -209,19 +209,19 @@ export default function SchedulesPage() {
           <span className="schedules-header-title-icon" aria-hidden="true">
             <IconClock size={16} />
           </span>
-          定时任务
+          {t('schedules.title')}
           <span className="schedules-header-meta">
             {rows.length === 0
-              ? '· 暂无任务'
-              : `· ${rows.length} 条`}
+              ? t('schedules.metaNone')
+              : t('schedules.metaCount', { n: rows.length })}
           </span>
         </h1>
         {nextLabel != null && (
           <span className={`schedules-next-fire${isOverdue ? ' overdue' : ''}`}>
             <IconHourglass size={12} />
-            <span className="schedules-next-fire-label">下一次执行</span>
+            <span className="schedules-next-fire-label">{t('schedules.nextFire')}</span>
             <span className="schedules-next-fire-value">
-              {isOverdue ? `${nextLabel} · 已过期` : nextLabel}
+              {isOverdue ? `${nextLabel} · ${t("schedules.overdue")}` : nextLabel}
             </span>
           </span>
         )}
@@ -232,13 +232,13 @@ export default function SchedulesPage() {
           clicking. Matches the .req-kind-chip vocabulary. */}
       <div className="schedules-filter-row">
         <div className="schedules-filter-group">
-          <span className="schedules-filter-label">状态</span>
+          <span className="schedules-filter-label">{t('schedules.filterStatus')}</span>
           <button
             type="button"
             className={`schedules-pill${statusFilter === '' ? ' active' : ''}`}
             onClick={() => setStatusFilter('')}
           >
-            全部
+            {t('schedules.all')}
             <span className="schedules-pill-count">{counts.all}</span>
           </button>
           {STATUS_OPTIONS.map(o => (
@@ -248,19 +248,19 @@ export default function SchedulesPage() {
               className={`schedules-pill schedules-pill-${o.value}${statusFilter === o.value ? ' active' : ''}`}
               onClick={() => setStatusFilter(statusFilter === o.value ? '' : o.value)}
             >
-              {o.label}
+              {t(o.labelKey)}
               <span className="schedules-pill-count">{counts[o.value] ?? 0}</span>
             </button>
           ))}
         </div>
         <div className="schedules-filter-group">
-          <span className="schedules-filter-label">类型</span>
+          <span className="schedules-filter-label">{t('schedules.filterType')}</span>
           <button
             type="button"
             className={`schedules-type-chip${typeFilter === '' ? ' active' : ''}`}
             onClick={() => setTypeFilter('')}
           >
-            全部
+            {t('schedules.all')}
           </button>
           {TYPE_OPTIONS.map(o => (
             <button
@@ -269,7 +269,7 @@ export default function SchedulesPage() {
               className={`schedules-type-chip schedules-type-${o.value}${typeFilter === o.value ? ' active' : ''}`}
               onClick={() => setTypeFilter(typeFilter === o.value ? '' : o.value)}
             >
-              {o.label}
+              {t(o.labelKey)}
             </button>
           ))}
         </div>
@@ -278,16 +278,16 @@ export default function SchedulesPage() {
       {/* List */}
       {loading && rows.length === 0 ? (
         <div className="schedules-loading">
-          <IconHourglass size={14} /> 加载中...
+          <IconHourglass size={14} /> {t('schedules.loading')}
         </div>
       ) : sorted.length === 0 ? (
         <div className="schedules-empty">
           <span className="schedules-empty-mark">
             <IconClock size={28} />
           </span>
-          <div className="schedules-empty-title">暂无定时任务</div>
+          <div className="schedules-empty-title">{t('schedules.emptyTitle')}</div>
           <p className="schedules-empty-desc">
-            可在需求详情页为「方案」或「开发」设置定时执行；任务开启后这里会按计划时间排序显示。
+            {t('schedules.emptyDesc')}
           </p>
         </div>
       ) : (
@@ -333,6 +333,11 @@ function ScheduleRow({
   onDelete: () => void;
   onOpenLog: () => void;
 }) {
+  // The row prop is also called `t` (the ScheduledTask), so the translate
+  // function is aliased `tr` here — `tk` is the loose variant for keys that
+  // come out of the label-key maps.
+  const { t: trStrict } = useTranslation();
+  const tr = trStrict as unknown as (k: string, o?: Record<string, unknown>) => string;
   const runAtMs = new Date(t.run_at).getTime();
   const isPast = runAtMs < now;
   const showOverdue = t.status === 'pending' && isPast;
@@ -345,10 +350,10 @@ function ScheduleRow({
         <div className="schedules-row-top">
           <span
             className={`schedules-type-badge type-${t.task_type}`}
-            title={isDesign ? '定时方案生成' : '定时开发'}
+            title={isDesign ? tr('schedules.typeDesignTitle') : tr('schedules.typeCodingTitle')}
           >
             {isDesign ? '📐' : <IconRocket size={11} />}
-            {typeLabels[t.task_type]}
+            {tr(typeLabelKeys[t.task_type])}
           </span>
           <span className="schedules-row-title">
             {t.requirement_title ? (
@@ -363,21 +368,21 @@ function ScheduleRow({
         <div className="schedules-row-meta">
           <span
             className={`schedules-meta-item${showOverdue ? ' schedules-meta-overdue' : ''}`}
-            title={formatDateTime(t.run_at)}
+            title={fmtDateTime(t.run_at)}
           >
             <span className="schedules-meta-icon">
               <IconClock size={12} />
             </span>
-            {formatDateTime(t.run_at)}
+            {fmtDateTime(t.run_at)}
             <span style={{ color: 'var(--color-text-muted)' }}>·</span>
             <span>{relativeRunAt(t.run_at, now)}</span>
-            {showOverdue && <span>· 已过期</span>}
+            {showOverdue && <span>· {tr('schedules.overdue')}</span>}
           </span>
-          <span className="schedules-meta-item" title="模型">
-            <span className="schedules-meta-model">{t.model || '默认模型'}</span>
+          <span className="schedules-meta-item" title={tr('schedules.modelTitle')}>
+            <span className="schedules-meta-model">{t.model || tr('schedules.defaultModel')}</span>
           </span>
-          <span className="schedules-meta-item" title="创建时间">
-            创建于 {relativeTime(t.created_at)}
+          <span className="schedules-meta-item" title={tr('schedules.createdTitle')}>
+            {tr('schedules.createdPrefix')} {fmtRelative(t.created_at)}
           </span>
         </div>
         {t.error_message && (
@@ -388,21 +393,21 @@ function ScheduleRow({
       </div>
       <div className="schedules-row-side">
         <span className={`status-badge status-${t.status}`}>
-          {statusLabels[t.status]}
+          {tr(statusLabelKeys[t.status])}
         </span>
         <div className="schedules-row-actions">
           {t.status === 'pending' && (
-            <button className="btn btn-sm" onClick={onCancel}>取消</button>
+            <button className="btn btn-sm" onClick={onCancel}>{tr('schedules.cancel')}</button>
           )}
           {canLog && (
-            <button className="btn btn-sm" onClick={onOpenLog}>查看日志</button>
+            <button className="btn btn-sm" onClick={onOpenLog}>{tr('schedules.viewLog')}</button>
           )}
           <button
             className="btn btn-sm schedules-btn-danger"
             onClick={onDelete}
-            title="删除该定时任务"
+            title={tr('schedules.deleteTitle')}
           >
-            删除
+            {tr('schedules.delete')}
           </button>
         </div>
       </div>
@@ -427,6 +432,8 @@ function ScheduleLogModal({
   loading: boolean;
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
+  const tk = t as unknown as (k: string, o?: Record<string, unknown>) => string;
   const lines = job?.log ?? [];
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -435,12 +442,12 @@ function ScheduleLogModal({
         onClick={e => e.stopPropagation()}
       >
         <div className="modal-header">
-          <h3>📜 执行日志</h3>
+          <h3>{t('schedules.log.title')}</h3>
           <button
             className="btn btn-sm"
             onClick={onClose}
-            aria-label="关闭"
-            title="关闭"
+            aria-label={t('schedules.log.close')}
+            title={t('schedules.log.close')}
           >
             <IconClose size={14} />
           </button>
@@ -448,16 +455,16 @@ function ScheduleLogModal({
         <div className="modal-body">
           {loading ? (
             <div className="schedules-loading">
-              <IconHourglass size={14} /> 加载中...
+              <IconHourglass size={14} /> {t('schedules.loading')}
             </div>
           ) : !job ? (
             <div className="schedules-empty">
               <span className="schedules-empty-mark">
                 <IconAlert size={26} />
               </span>
-              <div className="schedules-empty-title">未能加载日志</div>
+              <div className="schedules-empty-title">{t('schedules.log.loadFailedTitle')}</div>
               <p className="schedules-empty-desc">
-                任务可能仍在执行且未落库，稍后重试。
+                {t('schedules.log.loadFailedDesc')}
               </p>
             </div>
           ) : (
@@ -469,20 +476,20 @@ function ScheduleLogModal({
                 </span>
                 <span className="schedules-log-meta-spacer" />
                 <span className="schedules-log-meta-item">
-                  状态: <strong>{statusLabels[job.status as ScheduledTaskStatus] || job.status}</strong>
+                  {t('schedules.log.statusLabel')}: <strong>{tk(statusLabelKeys[(job.status || 'pending') as ScheduledTaskStatus] || job.status)}</strong>
                 </span>
                 {job.model && (
                   <span className="schedules-log-meta-item">
-                    模型: <strong>{job.model}</strong>
+                    {t('schedules.log.modelLabel')}: <strong>{job.model}</strong>
                   </span>
                 )}
                 <span className={`status-badge status-${(job.status || 'pending') as ScheduledTaskStatus}`}>
-                  {statusLabels[(job.status || 'pending') as ScheduledTaskStatus] || job.status}
+                  {tk(statusLabelKeys[(job.status || 'pending') as ScheduledTaskStatus] || job.status)}
                 </span>
               </div>
               <div className="schedules-log-body">
                 {lines.length === 0 ? (
-                  <div className="schedules-log-empty">（暂无日志）</div>
+                  <div className="schedules-log-empty">{t('schedules.log.empty')}</div>
                 ) : (
                   lines.map((line, i) => (
                     <div key={i} className={`schedules-log-line schedules-log-${line.type}`}>
@@ -495,14 +502,14 @@ function ScheduleLogModal({
               {job.status === 'running' && (
                 <div className="schedules-log-running-hint">
                   <span className="schedules-log-running-dot" />
-                  任务仍在执行，日志将持续追加。
+                  {t('schedules.log.runningHint')}
                 </div>
               )}
             </>
           )}
         </div>
         <div className="modal-actions">
-          <button className="btn" onClick={onClose}>关闭</button>
+          <button className="btn" onClick={onClose}>{t('schedules.log.close')}</button>
         </div>
       </div>
     </div>

@@ -1,5 +1,8 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { aclApi, projectsApi, type User, type ACLRole, type Project } from '../api/client';
+import { errorMessage } from '../utils/errMsg';
+import { fmtDateTime } from '../utils/intl';
 
 interface UserForm {
   username: string;
@@ -22,6 +25,7 @@ const emptyForm: UserForm = {
 };
 
 export default function SettingsUsers() {
+  const { t } = useTranslation();
   const [users, setUsers] = useState<User[]>([]);
   const [roles, setRoles] = useState<ACLRole[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -84,7 +88,7 @@ export default function SettingsUsers() {
 
   const handleSave = async () => {
     if (!form.username || (!editingId && !form.password)) {
-      setError('用户名和密码不能为空（编辑时密码留空表示不修改）');
+      setError(t('settings.users.errMissing'))
       return;
     }
     setSaving(true);
@@ -120,13 +124,13 @@ export default function SettingsUsers() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('确认删除该用户？此操作不可撤销。')) return;
+    if (!confirm(t('settings.users.deleteConfirm'))) return;
     setBusyId(id);
     try {
       await aclApi.deleteUser(id);
       await load();
     } catch (err) {
-      alert(err instanceof Error ? err.message : String(err));
+      alert(errorMessage(err))
     } finally {
       setBusyId('');
     }
@@ -136,30 +140,30 @@ export default function SettingsUsers() {
     <div className="settings-section">
       <div className="section-header">
         <div>
-          <h3 className="settings-section-title">用户管理</h3>
+          <h3 className="settings-section-title">{t('settings.users.title')}</h3>
           <p className="settings-section-desc">
-            管理登录账号、为用户分配角色（决定权限范围）与项目（决定可见项目）。多角色权限取并集。
+            {t('settings.users.desc')}
           </p>
         </div>
-        <button className="btn btn-primary" onClick={openCreate}>+ 添加用户</button>
+        <button className="btn btn-primary" onClick={openCreate}>{t('settings.users.addButton')}</button>
       </div>
 
-      {loading && <div className="settings-empty">加载中...</div>}
+      {loading && <div className="settings-empty">{t('settings.users.loading')}</div>}
 
       {!loading && users.length === 0 && (
-        <div className="settings-empty"><p>暂无用户。</p></div>
+        <div className="settings-empty"><p>{t('settings.users.empty')}</p></div>
       )}
 
       {users.length > 0 && (
         <table className="project-table">
           <thead>
             <tr>
-              <th>用户名</th>
-              <th>显示名</th>
-              <th>角色</th>
-              <th>项目数</th>
-              <th>状态</th>
-              <th>最近登录</th>
+              <th>{t('settings.users.table.username')}</th>
+              <th>{t('settings.users.table.displayName')}</th>
+              <th>{t('settings.users.table.roles')}</th>
+              <th>{t('settings.users.table.projectCount')}</th>
+              <th>{t('settings.users.table.status')}</th>
+              <th>{t('settings.users.table.lastLogin')}</th>
               <th></th>
             </tr>
           </thead>
@@ -172,25 +176,25 @@ export default function SettingsUsers() {
                 <tr key={u.id}>
                   <td className="project-name">
                     {u.username}
-                    {u.is_admin && <span className="admin-badge">管理员</span>}
+                    {u.is_admin && <span className="admin-badge">{t('settings.users.adminBadge')}</span>}
                   </td>
                   <td>{u.display_name || '—'}</td>
                   <td className="path-cell">{roleNames.length ? roleNames.join('、') : '—'}</td>
                   <td>{u.project_ids?.length ?? 0}</td>
                   <td>
                     <span className={`status-badge ${u.status === 'active' ? 'status-active' : 'status-disabled'}`}>
-                      {u.status === 'active' ? '启用' : '禁用'}
+                      {u.status === 'active' ? t('settings.users.statusActive') : t('settings.users.statusDisabled')}
                     </span>
                   </td>
-                  <td>{u.last_login_at ? new Date(u.last_login_at).toLocaleString('zh-CN') : '—'}</td>
+                  <td>{u.last_login_at ? fmtDateTime(u.last_login_at) : '—'}</td>
                   <td>
-                    <button className="btn-link" onClick={() => openEdit(u)}>编辑</button>
+                    <button className="btn-link" onClick={() => openEdit(u)}>{t('settings.users.edit')}</button>
                     <button
                       className="btn-link btn-danger-link"
                       onClick={() => handleDelete(u.id)}
                       disabled={busyId === u.id}
                     >
-                      {busyId === u.id ? '删除中...' : '删除'}
+                      {busyId === u.id ? t('settings.users.deleteBusy') : t('settings.users.delete')}
                     </button>
                   </td>
                 </tr>
@@ -203,38 +207,38 @@ export default function SettingsUsers() {
       {showModal && (
         <div className="modal-overlay" onClick={() => setShowModal(false)}>
           <div className="modal-box" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
-            <h3>{editingId ? '编辑用户' : '添加用户'}</h3>
+            <h3>{editingId ? t('settings.users.modal.edit') : t('settings.users.modal.add')}</h3>
             {error && <div className="form-error">{error}</div>}
 
             <div className="form-group">
-              <label>用户名</label>
+              <label>{t('settings.users.modal.usernameLabel')}</label>
               <input
                 className="form-input"
                 value={form.username}
                 onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))}
                 disabled={!!editingId}
-                placeholder="登录用户名"
+                placeholder={t('settings.users.modal.usernamePlaceholder')}
               />
             </div>
 
             <div className="form-group">
-              <label>显示名</label>
+              <label>{t('settings.users.modal.displayLabel')}</label>
               <input
                 className="form-input"
                 value={form.display_name}
                 onChange={(e) => setForm((f) => ({ ...f, display_name: e.target.value }))}
-                placeholder="可选"
+                placeholder={t('settings.users.modal.displayPlaceholder')}
               />
             </div>
 
             <div className="form-group">
-              <label>密码 {editingId && <span className="form-hint">（留空表示不修改）</span>}</label>
+              <label>{t('settings.users.modal.passwordLabel')} {editingId && <span className="form-hint">{t('settings.users.modal.passwordKeepHint')}</span>}</label>
               <input
                 className="form-input"
                 type="password"
                 value={form.password}
                 onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
-                placeholder={editingId ? '不修改则留空' : '设置初始密码'}
+                placeholder={editingId ? t('settings.users.modal.passwordEditPlaceholder') : t('settings.users.modal.passwordNewPlaceholder')}
               />
             </div>
 
@@ -245,14 +249,14 @@ export default function SettingsUsers() {
                   checked={form.is_admin}
                   onChange={(e) => setForm((f) => ({ ...f, is_admin: e.target.checked }))}
                 />
-                <span>管理员（绕过所有权限检查，可访问全部项目）</span>
+                <span>{t('settings.users.modal.adminCheckbox')}</span>
               </label>
             </div>
 
             {!form.is_admin && (
               <>
                 <div className="form-group">
-                  <label>分配角色（多选，权限取并集）</label>
+                  <label>{t('settings.users.modal.rolesLabel')}</label>
                   <div className="checkbox-grid">
                     {roles.map((r) => (
                       <label key={r.id} className="checkbox-row">
@@ -261,15 +265,15 @@ export default function SettingsUsers() {
                           checked={form.role_ids.includes(r.id)}
                           onChange={() => toggle('role_ids', r.id)}
                         />
-                        <span>{r.name}{r.is_builtin ? '（内置）' : ''}</span>
+                        <span>{r.name}{r.is_builtin ? t('settings.users.modal.rolesBuiltin') : ''}</span>
                       </label>
                     ))}
-                    {roles.length === 0 && <span className="form-hint">无可用角色</span>}
+                    {roles.length === 0 && <span className="form-hint">{t('settings.users.modal.rolesEmpty')}</span>}
                   </div>
                 </div>
 
                 <div className="form-group">
-                  <label>分配项目（多选，用户仅可见被分配项目）</label>
+                  <label>{t('settings.users.modal.projectsLabel')}</label>
                   <div className="checkbox-grid">
                     {projects.map((p) => (
                       <label key={p.id} className="checkbox-row">
@@ -281,16 +285,16 @@ export default function SettingsUsers() {
                         <span>{p.name}</span>
                       </label>
                     ))}
-                    {projects.length === 0 && <span className="form-hint">暂无项目</span>}
+                    {projects.length === 0 && <span className="form-hint">{t('settings.users.modal.projectsEmpty')}</span>}
                   </div>
                 </div>
               </>
             )}
 
             <div className="form-actions">
-              <button className="btn btn-secondary" onClick={() => setShowModal(false)}>取消</button>
+              <button className="btn btn-secondary" onClick={() => setShowModal(false)}>{t('settings.users.modal.cancel')}</button>
               <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-                {saving ? '保存中...' : '保存'}
+                {saving ? t('settings.users.modal.saving') : t('settings.users.modal.save')}
               </button>
             </div>
           </div>

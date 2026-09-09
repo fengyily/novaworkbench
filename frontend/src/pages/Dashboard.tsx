@@ -1,9 +1,13 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { dashboardApi, type DashboardData } from '../api/client';
+import { errorMessage } from '../utils/errMsg';
+import { fmtDate } from '../utils/intl';
 import './Dashboard.css';
 
 export default function Dashboard() {
+  const { t } = useTranslation();
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -12,69 +16,69 @@ export default function Dashboard() {
   useEffect(() => {
     dashboardApi.get()
       .then(setData)
-      .catch(err => setError(err.message))
+      .catch(err => setError(errorMessage(err)))
       .finally(() => setLoading(false));
   }, []);
 
-  if (loading) return <div className="loading">⏳ 加载中...</div>;
+  if (loading) return <div className="loading">{t('dashboard.loading')}</div>;
   if (error) return <div className="error-toast">❌ {error}</div>;
 
   const statusBadge = (status: string) => {
     const map: Record<string, string> = {
-      active: '🟢 active',
-      archived: '📦 archived',
-      missing: '⚠️ missing',
+      active: t('dashboard.status.active'),
+      archived: t('dashboard.status.archived'),
+      missing: t('dashboard.status.missing'),
     };
     return map[status] || status;
   };
 
   return (
     <div className="dashboard">
-      <h1 className="page-title">📊 仪表盘</h1>
+      <h1 className="page-title">{t('dashboard.title')}</h1>
 
       <div className="stats-grid">
         <div className="stat-card">
           <div className="stat-value">{data?.total_projects || 0}</div>
-          <div className="stat-label">项目数</div>
+          <div className="stat-label">{t('dashboard.statProjects')}</div>
         </div>
         <div className="stat-card">
           <div className="stat-value">{data?.active_requirements || 0}</div>
-          <div className="stat-label">活跃需求</div>
+          <div className="stat-label">{t('dashboard.statActiveReqs')}</div>
         </div>
         <div className="stat-card">
           <div className="stat-value">{data?.pending_reviews || 0}</div>
-          <div className="stat-label">待 Review 知识</div>
+          <div className="stat-label">{t('dashboard.statPendingReviews')}</div>
         </div>
         <div className="stat-card">
           <div className="stat-value">{data?.weekly_commits || 0}</div>
-          <div className="stat-label">本周提交</div>
+          <div className="stat-label">{t('dashboard.statWeeklyCommits')}</div>
         </div>
       </div>
 
       <div className="projects-section">
         <div className="section-header">
-          <h2>项目列表</h2>
+          <h2>{t('dashboard.projectList')}</h2>
           <button className="btn btn-primary desktop-only" onClick={() => navigate('/projects/add')}>
-            + 添加
+            {t('dashboard.add')}
           </button>
         </div>
 
         {(!data?.projects || data.projects.length === 0) ? (
           <>
             <div className="empty-state desktop-only">
-              <p>还没有添加项目</p>
+              <p>{t('dashboard.emptyTitle')}</p>
               <button className="btn btn-primary" onClick={() => navigate('/projects/add')}>
-                添加你的第一个项目
+                {t('dashboard.emptyCta')}
               </button>
             </div>
             <div className="mobile-empty">
               <span className="mobile-empty-mark">📁</span>
-              <div className="mobile-empty-title">还没有添加项目</div>
+              <div className="mobile-empty-title">{t('dashboard.emptyTitle')}</div>
               <p className="mobile-empty-desc">
-                从本地一个 git 仓库开始，或新建一个项目目录。
+                {t('dashboard.mobileEmptyDesc')}
               </p>
               <button className="btn btn-primary" onClick={() => navigate('/projects/add')}>
-                + 添加项目
+                {t('dashboard.addProject')}
               </button>
             </div>
           </>
@@ -83,21 +87,21 @@ export default function Dashboard() {
             <table className="project-table table-cards">
               <thead>
                 <tr>
-                  <th>名称</th>
-                  <th>类型</th>
-                  <th>路径</th>
-                  <th>状态</th>
-                  <th>更新时间</th>
+                  <th>{t('dashboard.colName')}</th>
+                  <th>{t('dashboard.colType')}</th>
+                  <th>{t('dashboard.colPath')}</th>
+                  <th>{t('dashboard.colStatus')}</th>
+                  <th>{t('dashboard.colUpdated')}</th>
                 </tr>
               </thead>
               <tbody>
                 {data?.projects.map(p => (
                   <tr key={p.id} onClick={() => navigate(`/projects/${p.id}`)} className="clickable-row">
-                    <td className="project-name" data-label="名称">{p.name}</td>
-                    <td data-label="类型"><span className="type-tag">{p.project_type || 'Unknown'}</span></td>
-                    <td className="path-cell" data-label="路径">{p.local_path}</td>
-                    <td data-label="状态"><span className={`status-badge status-${p.status}`}>{statusBadge(p.status)}</span></td>
-                    <td data-label="更新">{new Date(p.updated_at).toLocaleDateString()}</td>
+                    <td className="project-name" data-label={t('dashboard.colName')}>{p.name}</td>
+                    <td data-label={t('dashboard.colType')}><span className="type-tag">{p.project_type || 'Unknown'}</span></td>
+                    <td className="path-cell" data-label={t('dashboard.colPath')}>{p.local_path}</td>
+                    <td data-label={t('dashboard.colStatus')}><span className={`status-badge status-${p.status}`}>{statusBadge(p.status)}</span></td>
+                    <td data-label={t('dashboard.colUpdatedShort')}>{fmtDate(p.updated_at)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -107,25 +111,25 @@ export default function Dashboard() {
       </div>
 
       <div className="quick-actions btn-row-2col">
-        <button className="btn btn-primary" onClick={() => navigate('/wizard')}>🪄 新建项目向导</button>
-        <button className="btn" onClick={() => navigate('/projects/add')}>添加项目</button>
-        <button className="btn" onClick={() => navigate('/requirements')}>需求列表</button>
-        <button className="btn" onClick={() => navigate('/chat')}>开始对话</button>
-        <button className="btn" onClick={() => navigate('/reports')}>生成周报</button>
-        <button className="btn" onClick={() => navigate('/knowledge')}>知识审查</button>
+        <button className="btn btn-primary" onClick={() => navigate('/wizard')}>{t('dashboard.wizard')}</button>
+        <button className="btn" onClick={() => navigate('/projects/add')}>{t('dashboard.addProjectShort')}</button>
+        <button className="btn" onClick={() => navigate('/requirements')}>{t('dashboard.requirements')}</button>
+        <button className="btn" onClick={() => navigate('/chat')}>{t('dashboard.startChat')}</button>
+        <button className="btn" onClick={() => navigate('/reports')}>{t('dashboard.weeklyReport')}</button>
+        <button className="btn" onClick={() => navigate('/knowledge')}>{t('dashboard.knowledgeReview')}</button>
       </div>
 
       {/* Mobile FAB: a single primary CTA pinned above the tab bar. On
           desktop this button is hidden by .fab's display:none rule. The
-          label is the page's primary action — "新建项目向导" for the
+          label is the page's primary action — the new-project wizard for
           dashboard, since wizard is the entry point for new work. */}
       <button
         className="fab fab-extended"
-        aria-label="新建项目向导"
+        aria-label={t('dashboard.wizard')}
         onClick={() => navigate('/wizard')}
       >
         <span>＋</span>
-        <span>新建项目</span>
+        <span>{t('dashboard.newProject')}</span>
       </button>
     </div>
   );
