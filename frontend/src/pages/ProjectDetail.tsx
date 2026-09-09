@@ -58,7 +58,7 @@ export default function ProjectDetail() {
 
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<Tab>('overview');
+  const [tab, setTab] = useState<Tab>('requirements');
 
   // Run tab
   const [runStatus, setRunStatus] = useState<RunStatus | null>(null);
@@ -628,13 +628,12 @@ export default function ProjectDetail() {
       <p className="detail-path"><code>{project.local_path}</code></p>
 
       <div className="detail-tabs">
-        <button className={`tab-btn${tab === 'overview' ? ' active' : ''}`} onClick={() => setTab('overview')}>概览</button>
+        <button className={`tab-btn${tab === 'requirements' ? ' active' : ''}`} onClick={() => { setTab('requirements'); setReqPage(1); }}>
+          需求
+        </button>
         <button className={`tab-btn${tab === 'knowledge' ? ' active' : ''}`} onClick={() => setTab('knowledge')}>知识库</button>
         <button className={`tab-btn${tab === 'run' ? ' active' : ''}`} onClick={() => setTab('run')}>
           运行{isRunning ? ' ●' : ''}
-        </button>
-        <button className={`tab-btn${tab === 'requirements' ? ' active' : ''}`} onClick={() => { setTab('requirements'); setReqPage(1); }}>
-          需求
         </button>
         <button className={`tab-btn${tab === 'review' ? ' active' : ''}`} onClick={() => setTab('review')}>
           代码 Review{reviewingPR ? ' ●' : ''}
@@ -645,6 +644,7 @@ export default function ProjectDetail() {
         <button className={`tab-btn${tab === 'weekly' ? ' active' : ''}`} onClick={() => setTab('weekly')}>
           周报
         </button>
+        <button className={`tab-btn${tab === 'overview' ? ' active' : ''}`} onClick={() => setTab('overview')}>概览</button>
       </div>
 
       {/* ── Overview ── */}
