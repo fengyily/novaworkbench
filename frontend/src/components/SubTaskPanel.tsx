@@ -9,7 +9,6 @@ import {
   subTaskAdjustCommand,
   claudeApi,
   claudeSettingsPrefix,
-  fmtNum,
   DefaultModelLabel,
   type SubTask,
   type SubTaskStatus,
@@ -17,15 +16,20 @@ import {
   type OrchestrationBatch,
 } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
-import { appendLogLine, type LogLine } from '../utils/logLines';
+import { appendLogLine, computeUsage, type LogLine, type UsageInfo } from '../utils/logLines';
+import { modelContextWindow } from '../utils/modelWindow';
 import AtMentionTextarea from './AtMentionTextarea';
 import ModelSelect from './ModelSelect';
+import ContextUsageBar from './ContextUsageBar';
 import { IconRobot, IconDashboard, IconSparkles } from './icons';
 import './SubTaskPanel.css';
 
-// fmtCost / fmtNum are imported from the shared API client. TokenStrip
-// was retired; the header-right quickstats block (🪙 + cost + ⏱) reads
-// the persisted sub_tasks fields directly without a usageApi round-trip.
+// The header-right quickstats block (cost + ⏱) reads the persisted
+// sub_tasks fields directly without a usageApi round-trip. The live
+// context-usage bar lives in its own row just under the header (see
+// `<div className="sub-card-usage">` below) and is fed by:
+//   - SSE `usage` frames (step="sub_task") during a live run,
+//   - a client-side recompute from sub_tasks.*_tokens columns otherwise.
 
 interface Props {
   requirementId: string;
@@ -342,6 +346,11 @@ function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '',
     const t = setInterval(() => setLiveSeconds((v) => v + 1), 1000);
     return () => clearInterval(t);
   }, [st.status]);
+  // Live usage snapshot — driven by SSE `usage` frames (step="sub_task")
+  // OR computed client-side from the persisted sub_tasks.*_tokens columns
+  // when the card has finished and SSE has gone quiet. We display
+  // `live ?? fallback` so refresh-after-finish still shows the same bar.
+  const [usage, setUsage] = useState<UsageInfo | undefined>(undefined);
   const esRef = useRef<EventStream | null>(null);
   const chipLabel = t(statusLabelKeys[st.status]);
 
@@ -355,6 +364,16 @@ function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '',
       (evt) => {
         if (!evt || typeof evt !== 'object') return;
         const t = evt.type as string;
+        if (t === 'usage') {
+          try {
+            const raw = typeof evt.content === 'string' ? JSON.parse(evt.content) : null;
+            if (raw) setUsage(computeUsage(raw, 'sub_task'));
+          } catch { /* malformed payload — ignore */ }
+          // usage frames do NOT go into lines[] — SubTaskLogView treats
+          // unknown types as plain log rows, which would render the JSON
+          // payload as terminal scrollback and confuse the user.
+          return;
+        }
         if (t === 'job_done') {
           setStreaming(false);
           subTasksApi.get(st.requirement_id, st.id)
@@ -436,15 +455,13 @@ function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '',
     }
   }, [redoBusy, redoModel, st.id, st.requirement_id, onCreated, t]);
 
-  // The header-right summary block surfaces the four quick-glance signals
-  // the user always wants at a glance without expanding the card:
-  // 🪙 token + cost · ⏱ duration · ⏳ relative-time. Each is independently
-  // null-safe — the badge only renders the cells that have a value, so a
-  // pre-finish row shows only ⏱ (live ticker) + ⏳, a finished row shows
-  // 🪙 + ⏱ (persisted) + ⏳.
-  const tokenCell = (st.input_tokens || st.output_tokens || st.cache_creation_tokens || st.cache_read_tokens)
-    ? `${fmtNum((st.input_tokens || 0) + (st.cache_creation_tokens || 0) + (st.cache_read_tokens || 0))}↓ / ${fmtNum(st.output_tokens)}↑`
-    : '';
+  // The header-right summary block surfaces two quick-glance signals the
+  // user always wants at a glance without expanding the card:
+  // cost · ⏱ duration · ⏳ relative-time. Each is independently null-safe —
+  // the badge only renders the cells that have a value, so a pre-finish
+  // row shows only ⏱ (live ticker) + ⏳, a finished row shows ⏱ (persisted)
+  // + ⏳. The detailed token breakdown now lives on its own line right
+  // below the header — see `<div className="sub-card-usage">` below.
   const costCell = st.cost_cents > 0
     ? (st.cost_cents >= 100 ? `$${(st.cost_cents / 100).toFixed(2)}` : `$${(st.cost_cents / 100).toFixed(3)}`)
     : '';
@@ -473,17 +490,12 @@ function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '',
           {st.created_at && (
             <span className="sub-card-time">{timeAgo(st.created_at)}</span>
           )}
-          {/* Header-right quick-glance summary: token / cost / duration.
-              TokenStrip (in the body) carries the same data + cache details
-              when the card is expanded; the header badge is the always-
-              visible variant. */}
+          {/* Header-right quick-glance summary: cost / duration. The
+              detailed context-usage bar lives in its own row below the
+              header (`.sub-card-usage`); the header stays compact so a
+              stack of concurrent cards doesn't push the body off-screen. */}
           <span className="sub-card-quickstats">
             {durationCell && <span className="sub-card-stat sub-card-stat-time">{durationCell}</span>}
-            {tokenCell && (
-              <span className="sub-card-stat sub-card-stat-tokens" title={t('components.subTaskCard.tokenTitle')}>
-                {t('components.subTaskCard.tokenBadge', { cell: tokenCell })}
-              </span>
-            )}
             {costCell && (
               <span className="sub-card-stat sub-card-stat-cost" title={t('components.subTaskCard.costTitle')}>{costCell}</span>
             )}
@@ -494,6 +506,29 @@ function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '',
             Wraps freely so long titles stay fully visible. */}
         <h4 className="sub-card-title">{st.title || t('components.subTaskCard.noTitle')}</h4>
       </header>
+
+      {/* Per-card ContextUsageBar — mirrors the bar shown on the parent
+          CodingChat. Sits between the header and the collapsible body so
+          it's visible whether the card is expanded or collapsed. Drives
+          off (live SSE `usage` frames) ?? (client-side recompute from
+          the persisted sub_tasks.*_tokens columns). compressible={false}
+          hides the "compress context" button — sub-tasks don't expose
+          compression to the user. */}
+      <div className="sub-card-usage">
+        <ContextUsageBar
+          usage={usage ?? computeUsage({
+            input_tokens: st.input_tokens,
+            output_tokens: st.output_tokens,
+            cache_creation_tokens: st.cache_creation_tokens,
+            cache_read_tokens: st.cache_read_tokens,
+            model: st.model,
+            context_window: modelContextWindow(st.model),
+          }, 'sub_task')}
+          onCompress={() => {}}
+          compressible={false}
+          stepLabel={t('components.subTaskCard.usageLabel')}
+        />
+      </div>
 
       {expanded && (
         <div className="sub-card-body">
