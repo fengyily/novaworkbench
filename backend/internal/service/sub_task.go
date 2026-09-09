@@ -70,11 +70,11 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 	id := util.NewID("st")
 	now := time.Now()
 	_, err := s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
-		model, source_session_id, batch_id, batch_seq,
+		model, source_session_id, batch_id, batch_seq, source,
 		created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, title, prompt, model.SubTaskStatusPending,
-		modelDisplay, sourceSID, batchID, batchSeq,
+		modelDisplay, sourceSID, batchID, batchSeq, model.SubTaskSourceManual,
 		now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert sub_task: %w", err)
@@ -89,6 +89,7 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 		SourceSessionID: sourceSID,
 		BatchID:         batchID,
 		BatchSeq:        batchSeq,
+		Source:          model.SubTaskSourceManual,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}, nil
@@ -118,11 +119,11 @@ func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, mode
 	id := util.NewID("st")
 	now := time.Now()
 	_, err := tx.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
-		model, source_session_id, batch_id, batch_seq,
+		model, source_session_id, batch_id, batch_seq, source,
 		created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, title, prompt, model.SubTaskStatusPending,
-		modelDisplay, sourceSID, batchID, batchSeq,
+		modelDisplay, sourceSID, batchID, batchSeq, model.SubTaskSourceAuto,
 		now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert sub_task: %w", err)
@@ -137,23 +138,25 @@ func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, mode
 		SourceSessionID: sourceSID,
 		BatchID:         batchID,
 		BatchSeq:        batchSeq,
+		Source:          model.SubTaskSourceAuto,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}, nil
 }
 
-// List returns every sub-task attached to reqID, oldest first (matching the
-// order the wizard fires them and the order the UI renders the cards).
-// Returns an empty slice when the requirement has none — never nil, so the
-// frontend can map directly without a guard.
+// List returns every sub-task attached to reqID, **newest first** —
+// matching the SubTaskPanel sort and the user's expectation that the most
+// recently created card sits at the top. id DESC is the tie-breaker so
+// rows with the same created_at (millisecond ties possible across DBs)
+// keep a stable order.
 func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 	rows, err := s.db.Query(`SELECT id, requirement_id, title, prompt, status,
 		session_id, source_session_id, job_id, artifact, model,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
 		created_at, updated_at, completed_at,
-		batch_id, batch_seq, batch_id_seq_run
-		FROM sub_tasks WHERE requirement_id = ? ORDER BY created_at ASC, id ASC`, reqID)
+		batch_id, batch_seq, batch_id_seq_run, source
+		FROM sub_tasks WHERE requirement_id = ? ORDER BY created_at DESC, id DESC`, reqID)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +182,7 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
 		created_at, updated_at, completed_at,
-		batch_id, batch_seq, batch_id_seq_run
+		batch_id, batch_seq, batch_id_seq_run, source
 		FROM sub_tasks WHERE id = ?`, id)
 	if err != nil {
 		return nil, err
@@ -282,7 +285,7 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
 		created_at, updated_at, completed_at,
-		batch_id, batch_seq, batch_id_seq_run
+		batch_id, batch_seq, batch_id_seq_run, source
 		FROM sub_tasks
 		 WHERE batch_id=? AND status=?
 		 ORDER BY batch_seq ASC, created_at ASC
@@ -414,10 +417,10 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 	now := time.Now()
 	adjustTitle := capTitle("调整: "+parent.Title, 80)
 	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
-		source_session_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		source_session_id, source, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, adjustTitle, prompt, model.SubTaskStatusPending,
-		parent.SessionID, now, now)
+		parent.SessionID, model.SubTaskSourceManual, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert adjustment sub_task: %w", err)
 	}
@@ -428,6 +431,7 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 		Prompt:          prompt,
 		Status:          model.SubTaskStatusPending,
 		SourceSessionID: parent.SessionID,
+		Source:          model.SubTaskSourceManual,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}, nil
@@ -459,10 +463,10 @@ func (s *SubTaskService) Redo(reqID, parentID string) (*model.SubTask, error) {
 	now := time.Now()
 	redoTitle := capTitle("重做: "+parent.Title, 80)
 	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
-		source_session_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		source_session_id, source, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, redoTitle, parent.Prompt, model.SubTaskStatusPending,
-		parent.SourceSessionID, now, now)
+		parent.SourceSessionID, model.SubTaskSourceManual, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert redo sub_task: %w", err)
 	}
@@ -473,6 +477,7 @@ func (s *SubTaskService) Redo(reqID, parentID string) (*model.SubTask, error) {
 		Prompt:          parent.Prompt,
 		Status:          model.SubTaskStatusPending,
 		SourceSessionID: parent.SourceSessionID,
+		Source:          model.SubTaskSourceManual,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}, nil
@@ -574,6 +579,7 @@ func (s *SubTaskService) RecoverInterrupted() (int64, error) {
 
 // scanSubTask is a shared row→struct mapper. Pulled out so List / Get can
 // share the column order without each method carrying its own Scan list.
+// The SELECT must include `source` as the last column.
 func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 	var st model.SubTask
 	var completedAt sql.NullTime
@@ -585,6 +591,7 @@ func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 		&st.CostCents, &st.DurationSeconds,
 		&st.CreatedAt, &st.UpdatedAt, &completedAt,
 		&st.BatchID, &st.BatchSeq, &heartbeat,
+		&st.Source,
 	); err != nil {
 		return nil, err
 	}

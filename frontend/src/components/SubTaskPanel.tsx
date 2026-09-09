@@ -478,11 +478,24 @@ function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '',
         tabIndex={0}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(v => !v); } }}
       >
-        {/* Meta line: status chip + counter + model + time. Sits ABOVE the
-            title so a long user-supplied title never competes for horizontal
-            space with the metadata row. */}
+        {/* Meta line: status chip + source badge + counter + model + time.
+            Sits ABOVE the title so a long user-supplied title never
+            competes for horizontal space with the metadata row. */}
         <div className="sub-card-meta">
           <span className={statusChipClass[st.status]}>{chipLabel}</span>
+          {/* Source badge: 🪄 Auto (auto-orchestrated) vs 👤 Manual (manual).
+              Drives off `source` first; falls back to the legacy `batch_id`
+              heuristic so older backends (no source column) still render. */}
+          {(st.source === 'auto' || (!st.source && st.batch_id)) && (
+            <span className="sub-card-source sub-card-source-auto" title={t('components.subTaskCard.sourceAutoTitle')}>
+              🪄 {t('components.subTaskCard.sourceAuto')}
+            </span>
+          )}
+          {(st.source === 'manual' || (!st.source && !st.batch_id)) && (
+            <span className="sub-card-source sub-card-source-manual" title={t('components.subTaskCard.sourceManualTitle')}>
+              👤 {t('components.subTaskCard.sourceManual')}
+            </span>
+          )}
           <span className="sub-card-counter">{String(index + 1).padStart(2, '0')} / {String(total).padStart(2, '0')}</span>
           {st.model && st.model !== DefaultModelLabel && (
             <span className="sub-card-model">{st.model}</span>
@@ -763,25 +776,18 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     setSummaryExpanded(false);
   }, [requirement?.id, summaryReport]);
 
-  // Sort children for display. The orchestration queue dispatches in
-  // batch_seq ASC, so showing cards in that order is what the user
-  // perceives as the "execution order". Manual children carry
-  // batch_seq=0 (or undefined), so they cluster at the front — then
-  // fall back to created_at so the manual path stays stable. The sort
-  // runs on every render; the items array is bounded (<100 in practice)
-  // so the cost is negligible and a stable memoisable sort would just
-  // hide the obvious intent.
+  // Sort children newest-first. The requirement explicitly asks for
+  // "按创建时间排倒序" (newest first). This replaces the previous
+  // batch_seq ASC sort so that a freshly-created manual card immediately
+  // floats to the top. The id DESC tie-breaker keeps rows with identical
+  // created_at timestamps in a stable order.
   const sortedItems = (() => {
     if (!items) return items;
     return [...items].sort((a, b) => {
-      const aSeq = a.batch_seq ?? 0;
-      const bSeq = b.batch_seq ?? 0;
-      if (aSeq !== bSeq) return aSeq - bSeq;
-      // Both at the same batch_seq tier (manual or batch_seq=0): fall
-      // back to created_at ASC so insertion order is preserved.
       const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
       const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
-      return aTime - bTime;
+      if (aTime !== bTime) return bTime - aTime;
+      return (b.id || '').localeCompare(a.id || '');
     });
   })();
 

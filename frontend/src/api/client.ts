@@ -317,12 +317,14 @@ export interface SubTask {
   updated_at: string;
   completed_at?: string;
   // Orchestration batch membership (restartable orchestration redesign).
-  // batch_id === '' (or omitted) means a manually-created sub-task created
-  // via POST /sub-tasks (no orchestration batch involved). batch_seq is the
-  // 1-based dispatch order within the batch; the panel sorts by it and
-  // the queue ticks children in ascending batch_seq.
+  // batch_id is the parent orchestration_batches.id for auto-dispatched children;
+  // empty for both manually-created sub-tasks AND legacy rows predating the
+  // source column. batch_seq is the 1-based dispatch order within the batch.
   batch_id?: string;
   batch_seq?: number;
+  // Provenance marker: 'auto' = tryAutoOrchestrate 派发；'manual' = 手动创建。
+  // 只读字段，后端写入后前端仅展示，不修改。向后兼容：旧后端不返回此字段时为 undefined。
+  source?: 'manual' | 'auto';
 }
 
 export const subTasksApi = {

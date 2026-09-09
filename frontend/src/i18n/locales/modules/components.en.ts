@@ -133,6 +133,10 @@ export const components = {
     redoSubmit: '🚀 Start redo',
     errAdjust: 'Failed to send follow-up',
     errRedo: 'Failed to redo',
+    sourceAuto: 'Auto',
+    sourceAutoTitle: 'Auto-dispatched by main Agent',
+    sourceManual: 'Manual',
+    sourceManualTitle: 'Manually created by user',
   },
   createRequirement: {
     title: 'New requirement',

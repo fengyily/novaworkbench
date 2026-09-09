@@ -620,6 +620,12 @@ var alterColumns = []string{
 	// bootstrapped before the table itself shipped — fixup is idempotent
 	// because migrate() ignores "duplicate column" errors.
 	`ALTER TABLE orchestration_batches ADD COLUMN summary_heartbeat_at DATETIME`,
+	// Provenance marker distinguishing auto-orchestrated sub-tasks (created by
+	// tryAutoOrchestrate) from manually-triggered ones (StartSubTask / Adjust /
+	// Redo). Set at insert time and never mutated by SetBatchID, so manual
+	// children stay marked "manual" even after GenerateSubTaskSummary groups
+	// them under a summary batch_id.
+	`ALTER TABLE sub_tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'`,
 }
 
 var (
