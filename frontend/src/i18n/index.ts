@@ -107,3 +107,11 @@ export function applyUserLocale(locale: string | null | undefined): void {
 }
 
 export default i18next;
+
+// Run the initializer as a module-level side effect so main.tsx's
+// `import './i18n'` actually wires up i18next before any component renders.
+// (Without this top-level call, the function below would only fire when
+// something explicitly invoked initI18n() — which nothing does — and every
+// t() call would fall back to returning its raw key string.) The `ready`
+// guard above makes a duplicate invocation harmless.
+initI18n();
