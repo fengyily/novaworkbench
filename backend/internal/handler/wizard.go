@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
@@ -6090,6 +6091,37 @@ var (
 	codingPlanHead  = regexp.MustCompile(`(?m)^#{1,3}\s*任务分解\s*$`)
 )
 
+// orchestrateLocks is the per-requirement serialize guard for the
+// auto-orchestrate pipeline. dispatchChildrenSequential is already a
+// strict blocking for-loop (no `go`; each dispatchOneChild invokes
+// runClaudeStream synchronously), but the mutex is the belt-and-braces
+// guarantee that no future refactor can accidentally fan children out
+// into goroutines. The summary round kicked off by summaryKickoff also
+// takes the same lock so a second StartCoding for the same requirement
+// can never overlap with an in-flight summary.
+//
+// Per-requirement partitioning means different requirements stay free to
+// orchestrate concurrently; only the same reqID is serialized.
+//
+// Lifecycle: entries are created on first use and never deleted (a
+// detached sync.Mutex is 8 bytes; this map grows monotonically with the
+// number of requirements the server has ever orchestrated, which is
+// bounded by the requirements table size — well within an in-memory
+// ceiling for any realistic deployment).
+var orchestrateLocks sync.Map // map[string]*sync.Mutex
+
+// orchestrateLockFor returns the per-requirement mutex, allocating it on
+// first use. LoadOrStore keeps the lock acquisition race-free even when
+// two callers race for the same reqID at the same instant.
+func orchestrateLockFor(reqID string) *sync.Mutex {
+	if v, ok := orchestrateLocks.Load(reqID); ok {
+		return v.(*sync.Mutex)
+	}
+	mu := &sync.Mutex{}
+	actual, _ := orchestrateLocks.LoadOrStore(reqID, mu)
+	return actual.(*sync.Mutex)
+}
+
 // extractCodingPlan pulls the main agent's task breakdown section out of a
 // freeform claude response. Tries sentinel-wrapped first (more robust against
 // nested ## sections), falls back to a "## 任务分解" heading scan. Returns ""
@@ -6626,7 +6658,18 @@ func summaryKickoff(
 	workDir, modelName, claudeConfigID string,
 	subTaskIDs []string,
 ) {
-	go h.runOrchestratorSummary(reqID, orchestratorSID, req, workDir, modelName, claudeConfigID, subTaskIDs)
+	// The summary goroutine takes the same per-requirement orchestrateMu
+	// as tryAutoOrchestrate, so its start is bounded by the dispatch
+	// finishing (the mutex is released as tryAutoOrchestrate returns). A
+	// quick re-StartCoding for the same requirement can no longer race
+	// past an in-flight summary — both the dispatch and the summary round
+	// contend for the same lock, in order.
+	mu := orchestrateLockFor(reqID)
+	go func() {
+		mu.Lock()
+		defer mu.Unlock()
+		h.runOrchestratorSummary(reqID, orchestratorSID, req, workDir, modelName, claudeConfigID, subTaskIDs)
+	}()
 }
 
 // tryAutoOrchestrate is the auto-dispatch path called by StartCoding right
@@ -6664,6 +6707,17 @@ func (h *WizardHandler) tryAutoOrchestrate(
 		log.Printf("[auto-orchestrate] %s: requirement row missing, skipping dispatch", reqID)
 		return
 	}
+	// Serialize the entire dispatch→summarize chain for this requirement.
+	// dispatchChildrenSequential is already a blocking for-loop (each
+	// dispatchOneChild invokes runClaudeStream synchronously and only
+	// returns once the claude subprocess has fully finished), but the
+	// mutex is the belt-and-braces guarantee against any future refactor
+	// that might wrap dispatchOneChild in `go` and silently fan children
+	// out. Per-requirement partitioning keeps different requirements free
+	// to orchestrate concurrently — only same-reqID batches are serialized.
+	mu := orchestrateLockFor(reqID)
+	mu.Lock()
+	defer mu.Unlock()
 	payload := h.resolveSubtasksPayload(reqID, finalResult, capturedJSON, req)
 	// The subtasks.json the main agent Wrote into the worktree has been
 	// consumed (or rejected) — remove it so it never pollutes the dev branch
