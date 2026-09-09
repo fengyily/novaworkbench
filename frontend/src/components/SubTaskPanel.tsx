@@ -307,6 +307,19 @@ function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '',
   const [streaming, setStreaming] = useState<boolean>(st.status === 'running' || st.status === 'pending');
   const [lines, setLines] = useState<LogLine[]>([]);
   const [artifact, setArtifact] = useState<string>(st.artifact);
+  // Mirror the parent's st.artifact into local state on every prop
+  // change. useState alone only captures the mount-time value, so a
+  // list-poll that refreshes the row (e.g. after SSE job_done causes
+  // the parent to re-fetch /sub-tasks) wouldn't update the rendered
+  // artifact unless the SSE-driven subTasksApi.get also completes.
+  // This effect closes that gap: any newer artifact coming through
+  // props wins, and we deliberately skip the SSE-derived setArtifact
+  // callback that fights with this — see the job_done branch below
+  // (it still sets local state when SSE arrives faster than the next
+  // list poll, which is the common path).
+  useEffect(() => {
+    setArtifact(st.artifact);
+  }, [st.artifact]);
   const [adjusting, setAdjusting] = useState(false);
   const [adjustInput, setAdjustInput] = useState('');
   const [adjustBusy, setAdjustBusy] = useState(false);
@@ -494,7 +507,15 @@ function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '',
             </div>
           )}
 
-          {!streaming && !artifact && (
+          {/* Only show "no artifact" once the row is actually terminal —
+              between the SSE job_done frame and the next /sub-tasks list
+              poll, the local `artifact` state is still the empty string
+              captured at mount (before claude finished) while `streaming`
+              has already flipped to false. Showing "无产物" in that
+              window is misleading: the row IS done, we just haven't
+              fetched the artifact Markdown yet. The guard below matches
+              the one above so the two branches stay symmetric. */}
+          {!streaming && (st.status === 'done' || st.status === 'error') && !artifact && (
             <div className="sub-card-empty">{t('components.subTaskCard.noArtifact')}</div>
           )}
 

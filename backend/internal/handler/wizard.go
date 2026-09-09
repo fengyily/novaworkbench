@@ -6246,6 +6246,71 @@ func (h *WizardHandler) ListSubTasks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, items)
 }
 
+// orchestrationBatchResponse is the wire-shape the frontend's
+// OrchestrationBatch interface expects. Defined inline (not on the model)
+// because model.OrchestrationBatch intentionally has no JSON tags — it's
+// shared with the wizard-internal services that read fields directly, and
+// adding tags would change the persistence-side serialization too. The
+// front-end only needs a small subset (status, summary_status, counters,
+// timestamps), so a focused projection is safer than a wide tag-soup.
+type orchestrationBatchResponse struct {
+	ID            string     `json:"id"`
+	RequirementID string     `json:"requirement_id"`
+	Status        string     `json:"status"`
+	SummaryStatus string     `json:"summary_status"`
+	TotalChildren int        `json:"total_children"`
+	Model         string     `json:"model"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	CompletedAt   *time.Time `json:"completed_at,omitempty"`
+}
+
+// GetOrchestrationBatch handles GET /api/requirements/{id}/orchestration/batch.
+//
+// Returns the most recently created orchestration_batches row for the
+// requirement (any status: dispatching / summarizing / completed /
+// errored) — the SubTaskPanel uses this to drive the summary-CTA banner
+// and the page-level orchestration status hint. When no batch has ever
+// been committed for the requirement we return 200 with a `null` payload
+// so the front-end's existing `.catch(() => null)` fallback isn't needed
+// and a missing batch is treated as a normal terminal state instead of
+// an error.
+//
+// Note: this intentionally differs from `batchSvc.GetActiveByRequirement`
+// (which only returns dispatching / summarizing). The front-end wants to
+// see a finished batch as "✅ 已完成" rather than have it vanish the moment
+// the status flips to 'completed' or 'errored'.
+func (h *WizardHandler) GetOrchestrationBatch(w http.ResponseWriter, r *http.Request) {
+	if !h.requireSubTaskSvc(w) {
+		return
+	}
+	id := r.PathValue("id")
+	if _, err := h.reqSvc.Get(id); err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "requirement not found")
+		return
+	}
+	batch, err := h.batchSvc.GetLatestByRequirement(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	if batch == nil {
+		writeJSON(w, http.StatusOK, (*orchestrationBatchResponse)(nil))
+		return
+	}
+	writeJSON(w, http.StatusOK, orchestrationBatchResponse{
+		ID:            batch.ID,
+		RequirementID: batch.RequirementID,
+		Status:        batch.Status,
+		SummaryStatus: batch.SummaryStatus,
+		TotalChildren: batch.TotalChildren,
+		Model:         batch.Model,
+		CreatedAt:     batch.CreatedAt,
+		UpdatedAt:     batch.UpdatedAt,
+		CompletedAt:   batch.CompletedAt,
+	})
+}
+
 // GetSubTask handles GET /api/requirements/{id}/sub-tasks/{sid}.
 // Verifies the row's requirement_id matches the URL {id} so a forged URL
 // can't be used to fetch a sub-task that belongs to another requirement —
@@ -7048,12 +7113,49 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	}
 	reqID := st.RequirementID
 
+	// Early-exit tracking. Every return path before the runClaudeStream
+	// boundary sets earlyExitReason so the deferred guard below can persist
+	// a clean error Finish. Without this, a panic / DB error / nil-dep early
+	// return would leave the row stuck at status='running' forever — the
+	// OrchestrationQueue's next tick would see it as in-flight and skip it,
+	// while the sibling rows behind it would never be claimed.
+	var earlyExitReason string
+	var hbDone chan struct{}
+	var job *store.Job
+	var modelName string
+	defer func() {
+		if earlyExitReason == "" {
+			return
+		}
+		// Close heartbeat if it was started (hbDone is initialized only
+		// after roleConfig + the first two pre-mint writes succeed, so a
+		// nil channel here means we exited even earlier).
+		if hbDone != nil {
+			close(hbDone)
+		}
+		if h.subTaskSvc == nil {
+			return
+		}
+		log.Printf("[orchestrate] child %s (batch %s seq %d) early exit: %s",
+			st.ID, batch.ID, st.BatchSeq, earlyExitReason)
+		artifact := buildSubTaskArtifact(st, modelName, "❌ "+earlyExitReason, time.Now())
+		if perr := h.subTaskSvc.Finish(st.ID, model.SubTaskStatusError, artifact, modelName,
+			model.SubTaskTokens{}, 0, time.Time{}); perr != nil {
+			log.Printf("[orchestrate] early-exit Finish %s failed: %v", st.ID, perr)
+		}
+		if job != nil {
+			job.Append(store.LogLine{Type: "error", Content: "❌ " + earlyExitReason})
+			job.Append(store.LogLine{Type: "done", Content: "❌ 子任务早退"})
+			job.Finish(1, store.JobError)
+		}
+	}()
+
 	// Pre-mint child session id (forked from the orchestrator/main session).
 	childSID := util.NewUUID()
 	if perr := h.subTaskSvc.UpdateSession(st.ID, childSID, batch.OrchestratorSessionID); perr != nil {
 		log.Printf("[orchestrate] failed to persist child session for %s: %v", st.ID, perr)
 	}
-	job := h.jobs.Create(reqID)
+	job = h.jobs.Create(reqID)
 	if perr := h.subTaskSvc.UpdateJobID(st.ID, job.ID); perr != nil {
 		log.Printf("[orchestrate] failed to persist child job_id for %s: %v", st.ID, perr)
 	}
@@ -7062,7 +7164,7 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	// pre-batch dispatchOneChild: explicit batch config > model lookup >
 	// executor-role fallback.
 	execSystemPrompt, _, executorConfigID := h.roleConfig(executorRoleKey)
-	modelName := batch.Model
+	modelName = batch.Model
 	devCfgID := batch.ClaudeConfigID
 	var finalConfigID string
 	switch {
@@ -7091,7 +7193,7 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	if hbInterval <= 0 {
 		hbInterval = 5 * time.Second
 	}
-	hbDone := make(chan struct{})
+	hbDone = make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(hbInterval)
 		defer ticker.Stop()
@@ -7112,11 +7214,8 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	// path SubTaskRunner.Run uses applies here.
 	req, rerr := h.reqSvc.Get(reqID)
 	if rerr != nil || req == nil {
+		earlyExitReason = "无法加载需求行: " + errString(rerr)
 		log.Printf("[orchestrate] requirement %s missing for child %s: %v", reqID, st.ID, rerr)
-		close(hbDone)
-		if perr := h.subTaskSvc.Finish(st.ID, model.SubTaskStatusError, "❌ 无法加载需求行（"+rerr.Error()+")", modelName, model.SubTaskTokens{}, 0, time.Time{}); perr != nil {
-			log.Printf("[orchestrate] finish %s: %v", st.ID, perr)
-		}
 		return
 	}
 
@@ -7131,6 +7230,11 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 		Fork:           true,
 		ForkSessionID:  childSID,
 	})
+	if cmd == nil {
+		earlyExitReason = "GenerateCode 返回空 cmd"
+		log.Printf("[orchestrate] child %s GenerateCode returned nil cmd", st.ID)
+		return
+	}
 	defer cancel()
 
 	job.Append(store.LogLine{Type: "phase", Content: "🤖 [编排] 子任务启动: " + st.Title})
@@ -7170,6 +7274,7 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	// post-Finish heartbeat is a no-op anyway, but closing the channel keeps
 	// logs tidy.
 	close(hbDone)
+	hbDone = nil // signal "happy path" to the deferred guard
 
 	status := model.SubTaskStatusDone
 	artifactBody := out.finalResult

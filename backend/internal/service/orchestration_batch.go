@@ -138,6 +138,35 @@ func (s *OrchestrationBatchService) GetActiveByRequirement(reqID string) (*model
 	return scanBatch(rows)
 }
 
+// GetLatestByRequirement returns the most recently created batch for a
+// requirement regardless of status (active OR terminal), or (nil, nil) when
+// no batch has ever been committed. Powers the
+// GET /api/requirements/{id}/orchestration/batch endpoint — the
+// SubTaskPanel reads the result to render summary CTAs and the
+// page-level banner (status='completed' should still surface as "✅
+// 已完成" so the user knows the run finished, not vanish).
+func (s *OrchestrationBatchService) GetLatestByRequirement(reqID string) (*model.OrchestrationBatch, error) {
+	if reqID == "" {
+		return nil, errors.New("requirement_id is required")
+	}
+	rows, err := s.db.Query(batchSelectColumns+`
+		WHERE requirement_id=?
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`,
+		reqID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	return scanBatch(rows)
+}
+
 // ListActive returns the active (dispatching or summarizing) batches,
 // oldest-updated first so a tick that drains work doesn't starve batches
 // that have been waiting longest. The limit caps per-tick work; the caller
