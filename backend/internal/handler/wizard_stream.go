@@ -356,6 +356,55 @@ type lastUsageSnapshot struct {
 	CacheReadTokens     int
 }
 
+// usagePayload builds the {step?, model, 4 tokens, context_window, used, pct}
+// map that the wizard's `usage` SSE frame and the requirements.usage_snapshots
+// blob both consume. Centralizes the "cache_read excluded from used" semantics
+// so the frontend never has to derive it from raw fields.
+//
+// Why cache_read is excluded:
+//   cache_read_tokens = tokens the model READ from an existing prompt cache
+//   (i.e. content already counted as cache_creation in a previous turn).
+//   Anthropic charges for it (cheap reuse) but it does NOT add to the
+//   context window's fresh fill. Including it in `used` produces pct > 100
+//   in two ways:
+//     (a) per-turn: a prompt with multiple large cache breakpoints can
+//         report cr alone approaching the window;
+//     (b) cumulative: SubTaskService.Finish SUMMED cache_read across turns,
+//         so a sub-task with N cache-hit turns double-counts the same
+//         cached prefix N times. The SubTaskPanel persistent fallback
+//         used to render pct ≫ 100% on any multi-turn sub-task that hit
+//         cache.
+//
+// used = input_tokens + cache_creation_tokens
+// pct  = used / context_window * 100 (0 when window is unknown so the UI
+//        can still render a 0% placeholder).
+//
+// `step` is omitted when empty so the same builder can serve both the SSE
+// payload (which carries step) and the persisted snapshot blob (which is
+// keyed by session, not by step — step lives one level up).
+func usagePayload(step, modelName string, inTok, outTok, cc, cr int) map[string]any {
+	window := service.ModelContextWindow(modelName)
+	used := inTok + cc // see docstring — cache_read excluded
+	pct := 0.0
+	if window > 0 {
+		pct = float64(used) / float64(window) * 100
+	}
+	p := map[string]any{
+		"model":                 modelName,
+		"input_tokens":          inTok,
+		"output_tokens":         outTok,
+		"cache_creation_tokens": cc,
+		"cache_read_tokens":     cr,
+		"context_window":        window,
+		"used":                  used,
+		"pct":                   pct,
+	}
+	if step != "" {
+		p["step"] = step
+	}
+	return p
+}
+
 // isStaleSessionError reports whether a non-success result event (optionally
 // combined with stderr) indicates the --resume target conversation doesn't exist
 // on disk. The claude CLI surfaces this as an "errors" array entry of the form
@@ -739,15 +788,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 					if modelName == "" {
 						modelName = out.actualModel
 					}
-					payload := map[string]any{
-						"step":                  uctx.Step,
-						"model":                 modelName,
-						"input_tokens":          inTok,
-						"output_tokens":         outTok,
-						"cache_creation_tokens": cc,
-						"cache_read_tokens":     cr,
-						"context_window":        service.ModelContextWindow(modelName),
-					}
+					payload := usagePayload(uctx.Step, modelName, inTok, outTok, cc, cr)
 					if b, mErr := json.Marshal(payload); mErr == nil {
 						sink.emit(store.LogLine{Type: "usage", Content: string(b)})
 						// Same payload, second outlet: persist into the
@@ -762,14 +803,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 						// rebuild the snapshot value without `step`.
 						if uctx.PersistSnapshot != nil {
 							if key := snapshotStep(uctx.Step); key != "" {
-								snap := map[string]any{
-									"model":                 modelName,
-									"input_tokens":          inTok,
-									"output_tokens":         outTok,
-									"cache_creation_tokens": cc,
-									"cache_read_tokens":     cr,
-									"context_window":        service.ModelContextWindow(modelName),
-								}
+								snap := usagePayload("", modelName, inTok, outTok, cc, cr)
 								if sb, sErr := json.Marshal(snap); sErr == nil {
 									uctx.PersistSnapshot(key, string(sb))
 								}
@@ -984,27 +1018,12 @@ func parseStreamJSONFromReader(r io.Reader, sink streamSink, scope string, uctx 
 					if modelName == "" {
 						modelName = out.actualModel
 					}
-					payload := map[string]any{
-						"step":                  uctx.Step,
-						"model":                 modelName,
-						"input_tokens":          inTok,
-						"output_tokens":         outTok,
-						"cache_creation_tokens": cc,
-						"cache_read_tokens":     cr,
-						"context_window":        service.ModelContextWindow(modelName),
-					}
+					payload := usagePayload(uctx.Step, modelName, inTok, outTok, cc, cr)
 					if b, mErr := json.Marshal(payload); mErr == nil {
 						sink.emit(store.LogLine{Type: "usage", Content: string(b)})
 						if uctx.PersistSnapshot != nil {
 							if key := snapshotStep(uctx.Step); key != "" {
-								snap := map[string]any{
-									"model":                 modelName,
-									"input_tokens":          inTok,
-									"output_tokens":         outTok,
-									"cache_creation_tokens": cc,
-									"cache_read_tokens":     cr,
-									"context_window":        service.ModelContextWindow(modelName),
-								}
+								snap := usagePayload("", modelName, inTok, outTok, cc, cr)
 								if sb, sErr := json.Marshal(snap); sErr == nil {
 									uctx.PersistSnapshot(key, string(sb))
 								}
