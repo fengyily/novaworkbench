@@ -44,11 +44,17 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout tag
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Push → the tag ref itself; dispatch → the tag given as input.
-          ref: ${{ github.event_name == 'push' && github.ref || format('refs/tags/{0}', inputs.tag) }}
+          # Push → the tag ref itself (must exist by definition of the trigger).
+          # Dispatch → the tag often does not exist yet (workflow_dispatch is
+          # the supported way to pre-stamp a future version); fall back to the
+          # default branch HEAD. The metadata step still stamps inputs.tag as
+          # the version, so the produced binaries / GHCR tags / GitHub Release
+          # carry the requested version string regardless of which commit was
+          # checked out.
+          ref: ${{ github.event_name == 'push' && github.ref || '' }}
           fetch-depth: 0
 
       - name: Set up Go
