@@ -139,7 +139,7 @@ func (r *SubTaskRunner) SetRemoteCoding(fn func(*remoteCodingInput) claudeStream
 // badge from the moment the row is visible (before MarkRunning stamps anything
 // else). Pass "" when the model is unspecified.
 func (r *SubTaskRunner) NewPendingSubTask(reqID, title, prompt, modelDisplay, sourceSID string) (*model.SubTask, *store.Job, string, error) {
-	st, err := r.subTaskSvc.Create(reqID, title, prompt)
+	st, err := r.subTaskSvc.Create(reqID, title, prompt, modelDisplay, sourceSID, "", 0)
 	if err != nil {
 		return nil, nil, "", err
 	}

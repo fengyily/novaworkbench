@@ -1,8 +1,11 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { rolesApi, claudeApi, type Role, type ClaudeConfigItem } from '../api/client';
+import { errorMessage } from '../utils/errMsg';
 import './SettingsRoles.css';
 
 export default function SettingsRoles() {
+  const { t } = useTranslation();
   const [roles, setRoles] = useState<Role[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -30,7 +33,7 @@ export default function SettingsRoles() {
     // Fetch roles and configs in parallel — we need both before we can
     // backfill each role's selected config (default by default).
     Promise.all([
-      rolesApi.list().catch(err => { setError(err instanceof Error ? err.message : String(err)); return [] as Role[]; }),
+      rolesApi.list().catch(err => { setError(errorMessage(err)); return [] as Role[]; }),
       claudeApi.list().catch(() => [] as ClaudeConfigItem[]),
     ])
       .then(([roleList, configList]) => {
@@ -111,7 +114,7 @@ export default function SettingsRoles() {
       setDrafts(prev => ({ ...prev, [roleId]: { ...prev[roleId], model: '' } }));
     }
     // Persist the picked config as the role's binding so the saved role
-    // runs against that config's gateway. "默认" (empty) clears the
+    // runs against that config's gateway. The default entry (empty) clears
     // binding so the role falls back to the global default config.
     update(roleId, { claude_config_id: configId });
   };
@@ -133,9 +136,9 @@ export default function SettingsRoles() {
         },
       }));
       if (res.warning) showToast(res.warning);
-      else showToast('已保存');
+      else showToast(t('settings.roles.saved'));
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setSavingId('');
     }
@@ -160,25 +163,22 @@ export default function SettingsRoles() {
         },
       }));
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setResettingId('');
     }
   };
 
-  if (loading) return <div className="settings-empty">加载中...</div>;
+  if (loading) return <div className="settings-empty">{t('settings.roles.loading')}</div>;
 
   return (
     <div className="settings-roles">
       <div className="section-header">
         <div>
-          <h3 className="settings-section-title">角色管理</h3>
+          <h3 className="settings-section-title">{t('settings.roles.title')}</h3>
           <p className="settings-section-desc">
-            为每个角色编辑系统提示词（通过 <code>--system-prompt</code> 注入）并选择模型（模型与所选配置的 Base URL/Token 一并通过 <code>--settings</code> 注入）。
-            先选择 Claude 配置（默认 = 全局默认配置），再从该配置的模型列表中选择模型。所选配置会一并保存为该角色的绑定，
-            后续方案设计、开发实现、推送/创建 PR 等场景均使用该绑定的 Base URL/Token 执行 —— 不再回退到全局默认。
-            留空则回退到全局默认配置 + claude CLI 默认模型。
-            {configs.length === 0 && '（尚未配置任何 Claude 配置，请先在「Claude 配置」中维护。）'}
+            {t('settings.roles.desc')}
+            {configs.length === 0 && t('settings.roles.descNoConfigs')}
           </p>
         </div>
       </div>
@@ -208,13 +208,13 @@ export default function SettingsRoles() {
                   {(() => {
                     const boundId = d.claude_config_id ?? '';
                     if (!boundId) {
-                      return <span className="role-binding-default">绑定：默认配置</span>;
+                      return <span className="role-binding-default">{t('settings.roles.bindingDefault')}</span>;
                     }
                     const boundCfg = configs.find(c => c.id === boundId);
-                    const boundName = boundCfg?.name ?? '(已删除的配置)';
+                    const boundName = boundCfg?.name ?? t('settings.roles.bindingDeleted');
                     return (
                       <span className="role-binding-bound">
-                        绑定：{boundName}{boundCfg?.is_active ? '（默认）' : ''}
+                        {t('settings.roles.bindingPrefix')}{boundName}{boundCfg?.is_active ? t('settings.roles.activeSuffix') : ''}
                       </span>
                     );
                   })()}
@@ -222,22 +222,22 @@ export default function SettingsRoles() {
               </div>
               <div className="role-model-field">
                 <div className="role-model-row">
-                  <label>配置</label>
+                  <label>{t('settings.roles.configLabel')}</label>
                   <select
                     className="form-input role-model-input"
                     value={cfgId}
                     onChange={e => pickConfig(r.id, e.target.value)}
                   >
-                    <option value="">默认（不指定）</option>
+                    <option value="">{t('settings.roles.configUnspecified')}</option>
                     {configs.map(c => (
                       <option key={c.id} value={c.id}>
-                        {c.name}{c.is_active ? '（默认）' : ''}
+                        {c.name}{c.is_active ? t('settings.roles.activeSuffix') : ''}
                       </option>
                     ))}
                   </select>
                 </div>
                 <div className="role-model-row">
-                  <label>模型</label>
+                  <label>{t('settings.roles.modelLabel')}</label>
                   <select
                     className="form-input role-model-input"
                     value={outOfList ? `__legacy:${d.model}` : d.model}
@@ -247,26 +247,26 @@ export default function SettingsRoles() {
                     }}
                     disabled={!cfgId || cfgModels.length === 0}
                   >
-                    <option value="">默认（不指定）</option>
+                    <option value="">{t('settings.roles.configUnspecified')}</option>
                     {cfgModels.map(m => <option key={m} value={m}>{m}</option>)}
                     {outOfList && (
                       <option value={`__legacy:${d.model}`} disabled>
-                        当前值：{d.model}（不在当前配置列表中）
+                        {t('settings.roles.outOfList', { model: d.model })}
                       </option>
                     )}
                   </select>
                   {!cfgId && (
-                    <small className="form-hint">先选择一个 Claude 配置</small>
+                    <small className="form-hint">{t('settings.roles.needConfigHint')}</small>
                   )}
                   {cfgId && cfgModels.length === 0 && (
-                    <small className="form-hint">该配置未配置模型列表，可先在「Claude 配置」中维护</small>
+                    <small className="form-hint">{t('settings.roles.noModelsHint')}</small>
                   )}
                 </div>
               </div>
             </div>
 
             <div className="role-prompt-field">
-              <label>系统提示词</label>
+              <label>{t('settings.roles.promptLabel')}</label>
               <textarea
                 className="form-input role-prompt-input"
                 rows={10}
@@ -281,14 +281,14 @@ export default function SettingsRoles() {
                 onClick={() => reset(r)}
                 disabled={!!resettingId}
               >
-                {resettingId === r.id ? '恢复中...' : '恢复默认提示词'}
+                {resettingId === r.id ? t('settings.roles.resetting') : t('settings.roles.resetPrompt')}
               </button>
               <button
                 className="btn btn-primary"
                 onClick={() => save(r)}
                 disabled={!dirty || !!savingId}
               >
-                {savingId === r.id ? '保存中...' : '保存'}
+                {savingId === r.id ? t('settings.roles.saving') : t('settings.roles.save')}
               </button>
             </div>
           </div>

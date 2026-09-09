@@ -1,0 +1,31 @@
+// dashboard — the dashboard page (stats, project table, quick actions).
+export const dashboard = {
+  title: '📊 仪表盘',
+  loading: '⏳ 加载中...',
+  statProjects: '项目数',
+  statActiveReqs: '活跃需求',
+  statPendingReviews: '待 Review 知识',
+  statWeeklyCommits: '本周提交',
+  projectList: '项目列表',
+  add: '+ 添加',
+  emptyTitle: '还没有添加项目',
+  emptyCta: '添加你的第一个项目',
+  mobileEmptyDesc: '从本地一个 git 仓库开始，或新建一个项目目录。',
+  addProject: '+ 添加项目',
+  colName: '名称',
+  colType: '类型',
+  colPath: '路径',
+  colStatus: '状态',
+  colUpdated: '更新时间',
+  colUpdatedShort: '更新',
+  wizard: '🪄 新建项目向导',
+  addProjectShort: '添加项目',
+  requirements: '需求列表',
+  startChat: '开始对话',
+  weeklyReport: '生成周报',
+  knowledgeReview: '知识审查',
+  newProject: '新建项目',
+  status: { active: '🟢 active', archived: '📦 archived', missing: '⚠️ missing' },
+} as const;
+
+export default dashboard;

@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { reportsApi, type WeeklyReport, type ReportGitInfo, type GenerateReportBody } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import MarkdownViewer from '../components/MarkdownViewer';
+import { errorMessage } from '../utils/errMsg';
 import './ProjectWeeklyReport.css';
 
 // This week's Monday through today, formatted as YYYY-MM-DD (display only —
@@ -20,6 +22,7 @@ function thisWeekRange(): { start: string; end: string } {
 }
 
 export default function ProjectWeeklyReport({ projectId }: { projectId: string }) {
+  const { t } = useTranslation();
   // Rule template
   const [rule, setRule] = useState('');
   const [savedRule, setSavedRule] = useState('');
@@ -138,19 +141,19 @@ export default function ProjectWeeklyReport({ projectId }: { projectId: string }
           }
         },
         () => {
-          setGenLines(prev => [...prev, { type: 'error', content: 'SSE 连接中断' }]);
+          setGenLines(prev => [...prev, { type: 'error', content: t('reports.sseInterrupted') }]);
           setGenerating(false);
           esRef.current = null;
         },
       );
     } catch (err: unknown) {
-      setGenError(err instanceof Error ? err.message : String(err));
+      setGenError(errorMessage(err));
       setGenerating(false);
     }
   };
 
   const handleDelete = async (report: WeeklyReport) => {
-    if (!window.confirm(`删除 ${report.period_start} ~ ${report.period_end} 的周报？`)) return;
+    if (!window.confirm(t('reports.deleteConfirm', { start: report.period_start, end: report.period_end }))) return;
     setDeletingId(report.id);
     try {
       await reportsApi.remove(projectId, report.id);
@@ -166,11 +169,11 @@ export default function ProjectWeeklyReport({ projectId }: { projectId: string }
       {/* ── Generation controls ── */}
       <div className="detail-section">
         <div className="section-header" style={{ marginBottom: 12 }}>
-          <span style={{ fontWeight: 600, fontSize: 14 }}>生成周报</span>
+          <span style={{ fontWeight: 600, fontSize: 14 }}>{t('reports.generate')}</span>
         </div>
 
         <div className="weekly-period-row">
-          <span className="weekly-period-label">统计周期</span>
+          <span className="weekly-period-label">{t('reports.periodLabel')}</span>
           <input
             type="date"
             className="form-input weekly-date-input"
@@ -189,18 +192,18 @@ export default function ProjectWeeklyReport({ projectId }: { projectId: string }
             disabled={generating}
           />
           {!periodStart && !periodEnd && (
-            <span className="weekly-period-hint">留空默认为本周（{week.start} ~ {week.end}）</span>
+            <span className="weekly-period-hint">{t('reports.periodHint', { start: week.start, end: week.end })}</span>
           )}
           {(periodStart || periodEnd) && (
             <button className="btn btn-sm" onClick={() => { setPeriodStart(''); setPeriodEnd(''); }} disabled={generating}>
-              重置
+              {t('reports.reset')}
             </button>
           )}
         </div>
 
         {/* Git scope: which branch(es) and whose commits to summarize */}
         <div className="weekly-period-row" style={{ marginTop: 8 }}>
-          <span className="weekly-period-label">分支</span>
+          <span className="weekly-period-label">{t('reports.branch')}</span>
           <select
             className="form-input weekly-branch-select"
             value={branchChoice}
@@ -208,19 +211,19 @@ export default function ProjectWeeklyReport({ projectId }: { projectId: string }
             disabled={generating || gitInfo?.is_git === false}
           >
             <option value="current">
-              当前分支{gitInfo?.current_branch ? `（${gitInfo.current_branch}）` : ''}
+              {t('reports.branchCurrent', { name: gitInfo?.current_branch ? `（${gitInfo.current_branch}）` : '' })}
             </option>
-            <option value="all">全部分支</option>
+            <option value="all">{t('reports.branchAll')}</option>
             {(gitInfo?.branches ?? [])
               .filter(b => b !== gitInfo?.current_branch)
               .map(b => <option key={b} value={b}>{b}</option>)}
           </select>
 
-          <span className="weekly-period-label" style={{ marginLeft: 8 }}>作者</span>
+          <span className="weekly-period-label" style={{ marginLeft: 8 }}>{t('reports.author')}</span>
           <input
             className="form-input weekly-author-input"
             list="weekly-report-authors"
-            placeholder="留空 = 全部作者"
+            placeholder={t('reports.authorPlaceholder')}
             value={author}
             onChange={e => setAuthor(e.target.value)}
             disabled={generating || gitInfo?.is_git === false}
@@ -230,45 +233,45 @@ export default function ProjectWeeklyReport({ projectId }: { projectId: string }
           </datalist>
 
           {gitInfo?.is_git === false && (
-            <span className="weekly-period-hint">该项目不是 git 仓库，将仅基于需求数据生成</span>
+            <span className="weekly-period-hint">{t('reports.notGit')}</span>
           )}
         </div>
 
         {/* Diff analysis: summarize from actual code changes, not just messages */}
         <div className="weekly-period-row" style={{ marginTop: 8 }}>
-          <label className="weekly-diff-toggle" title="逐条读取提交的代码 diff 交给 AI 总结">
+          <label className="weekly-diff-toggle" title={t('reports.diffTitle')}>
             <input
               type="checkbox"
               checked={diffAnalysis}
               onChange={e => setDiffAnalysis(e.target.checked)}
               disabled={generating || gitInfo?.is_git === false}
             />
-            <span>深度分析代码改动</span>
+            <span>{t('reports.diffToggle')}</span>
           </label>
           <span className="weekly-period-hint">
-            squash merge 的提交描述经常不全；勾选后基于逐条提交的代码 diff 总结，可补全未提及的功能（生成更慢）
+            {t('reports.diffHint')}
           </span>
         </div>
 
         <div className="form-group" style={{ marginTop: 12 }}>
           <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
-            生成规则（自定义周报的结构、语气与侧重点，生成时注入 AI 提示词）
+            {t('reports.ruleLabel')}
           </label>
           <div className="weekly-preset-row">
-            <span className="weekly-period-label">内置模板</span>
+            <span className="weekly-period-label">{t('reports.presetLabel')}</span>
             <select
               className="form-input weekly-preset-select"
               value={presetChoice}
               onChange={e => setPresetChoice(e.target.value)}
               disabled={generating}
             >
-              <option value="standard">标准（进展 + 需求 + 统计 + 计划 + 风险）</option>
-              <option value="compact">简洁（仅本周进展）</option>
+              <option value="standard">{t('reports.presetStandard')}</option>
+              <option value="compact">{t('reports.presetCompact')}</option>
             </select>
             <button className="btn btn-sm" onClick={applyPreset} disabled={generating || !rulePresets[presetChoice]}>
-              填入
+              {t('reports.applyPreset')}
             </button>
-            {ruleDirty && <span className="weekly-period-hint">已修改，点「保存规则」生效</span>}
+            {ruleDirty && <span className="weekly-period-hint">{t('reports.ruleDirty')}</span>}
           </div>
           <textarea
             className="form-input weekly-rule-input"
@@ -285,14 +288,14 @@ export default function ProjectWeeklyReport({ projectId }: { projectId: string }
             onClick={handleSaveRule}
             disabled={!ruleDirty || ruleSaving || generating}
           >
-            {ruleSaving ? '保存中...' : ruleSaved ? '已保存 ✓' : '保存规则'}
+            {ruleSaving ? t('reports.saving') : ruleSaved ? t('reports.savedOk') : t('reports.saveRule')}
           </button>
           <button
             className="btn btn-primary"
             onClick={handleGenerate}
             disabled={generating}
           >
-            {generating ? '生成中...' : '🚀 生成周报'}
+            {generating ? t('reports.generating') : t('reports.generateCta')}
           </button>
           {genError && <span className="weekly-gen-error">{genError}</span>}
         </div>
@@ -302,16 +305,16 @@ export default function ProjectWeeklyReport({ projectId }: { projectId: string }
       {(genLines.length > 0 || generating) && (
         <div className="detail-section" style={{ marginTop: 16 }}>
           <div className="section-header" style={{ marginBottom: 8 }}>
-            <span style={{ fontWeight: 600, fontSize: 14 }}>生成过程</span>
+            <span style={{ fontWeight: 600, fontSize: 14 }}>{t('reports.processTitle')}</span>
             {!generating && (
-              <button className="btn btn-secondary btn-sm" onClick={() => setGenLines([])}>清除</button>
+              <button className="btn btn-secondary btn-sm" onClick={() => setGenLines([])}>{t('reports.clear')}</button>
             )}
           </div>
           <div className="coding-panel" ref={panelRef} style={{ maxHeight: 320 }}>
             {genLines.map((line, i) => (
               <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
             ))}
-            {generating && <div className="coding-line coding-line-tool_call">● Claude 正在撰写周报...</div>}
+            {generating && <div className="coding-line coding-line-tool_call">{t('reports.writing')}</div>}
           </div>
         </div>
       )}
@@ -319,23 +322,23 @@ export default function ProjectWeeklyReport({ projectId }: { projectId: string }
       {/* ── History ── */}
       <div className="detail-section" style={{ marginTop: 16 }}>
         <div className="section-header" style={{ marginBottom: 12 }}>
-          <span style={{ fontWeight: 600, fontSize: 14 }}>历史周报（{reports.length}）</span>
+          <span style={{ fontWeight: 600, fontSize: 14 }}>{t('reports.historyTitle', { n: reports.length })}</span>
         </div>
 
-        {listLoading && <div className="tab-empty">⏳ 加载中...</div>}
+        {listLoading && <div className="tab-empty">{t('reports.loading')}</div>}
 
         {!listLoading && reports.length === 0 && (
-          <div className="tab-empty"><p>还没有生成过周报，点击上方「生成周报」试试。</p></div>
+          <div className="tab-empty"><p>{t('reports.historyEmpty')}</p></div>
         )}
 
         {!listLoading && reports.length > 0 && (
           <table className="pr-table">
             <thead>
               <tr>
-                <th style={{ width: 210 }}>统计周期</th>
-                <th style={{ width: 190 }}>范围</th>
-                <th style={{ width: 160 }}>生成时间</th>
-                <th style={{ width: 90 }}>状态</th>
+                <th style={{ width: 210 }}>{t('reports.colPeriod')}</th>
+                <th style={{ width: 190 }}>{t('reports.colScope')}</th>
+                <th style={{ width: 160 }}>{t('reports.colGeneratedAt')}</th>
+                <th style={{ width: 90 }}>{t('reports.colStatus')}</th>
                 <th></th>
               </tr>
             </thead>
@@ -344,11 +347,11 @@ export default function ProjectWeeklyReport({ projectId }: { projectId: string }
                 <tr key={r.id}>
                   <td><code className="pr-branch">{r.period_start} ~ {r.period_end}</code></td>
                   <td style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
-                    <code className="pr-branch">{r.git_branch || '全部分支'}</code>
+                    <code className="pr-branch">{r.git_branch || t('reports.scopeAllBranches')}</code>
                     {' / '}
-                    {r.git_author || '全部作者'}
+                    {r.git_author || t('reports.scopeAllAuthors')}
                     {rulePresets.compact && r.rule === rulePresets.compact && (
-                      <span className="weekly-compact-tag">简洁</span>
+                      <span className="weekly-compact-tag">{t('reports.compactTag')}</span>
                     )}
                   </td>
                   <td style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
@@ -356,18 +359,18 @@ export default function ProjectWeeklyReport({ projectId }: { projectId: string }
                   </td>
                   <td>
                     <span className={`status-badge ${r.status === 'done' ? 'status-done' : 'status-error'}`}>
-                      {r.status === 'done' ? '✅ 完成' : '❌ 失败'}
+                      {r.status === 'done' ? t('reports.statusDone') : t('reports.statusFailed')}
                     </span>
                   </td>
                   <td style={{ textAlign: 'right' }}>
-                    <button className="btn btn-primary btn-sm" onClick={() => setViewing(r)}>查看</button>
+                    <button className="btn btn-primary btn-sm" onClick={() => setViewing(r)}>{t('reports.view')}</button>
                     <button
                       className="btn btn-danger btn-sm"
                       style={{ marginLeft: 8 }}
                       onClick={() => handleDelete(r)}
                       disabled={deletingId === r.id}
                     >
-                      {deletingId === r.id ? '删除中...' : '删除'}
+                      {deletingId === r.id ? t('reports.deleting') : t('reports.delete')}
                     </button>
                   </td>
                 </tr>
@@ -379,7 +382,7 @@ export default function ProjectWeeklyReport({ projectId }: { projectId: string }
 
       {viewing && (
         <MarkdownViewer
-          title={`周报 ${viewing.period_start} ~ ${viewing.period_end}`}
+          title={t('reports.viewerTitle', { start: viewing.period_start, end: viewing.period_end })}
           content={viewing.content}
           onClose={() => setViewing(null)}
         />

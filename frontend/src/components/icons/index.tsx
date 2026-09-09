@@ -17,7 +17,7 @@
  *      Pass `title` to surface a tooltip / accessible name.
  *   5. New icons go in the `paths` object below; never inline an <svg>
  *      elsewhere in the app. That single rule is what keeps the system
- *      "整体一致".
+ *      visually consistent.
  */
 import type { CSSProperties, ReactElement, SVGProps } from 'react';
 
@@ -255,7 +255,7 @@ export const IconChevronRight = makeIcon('M9 5l7 7-7 7');
 /** Arrow left */
 export const IconArrowLeft = makeIcon('M14 6l-6 6 6 6');
 
-/** Horizontal ellipsis — "更多" overflow menu affordance */
+/** Horizontal ellipsis — the "more" overflow menu affordance */
 export const IconMore = makeRichIcon(() => [
   <circle key="a" cx="5" cy="12" r="1.25" fill="currentColor" stroke="none" />,
   <circle key="b" cx="12" cy="12" r="1.25" fill="currentColor" stroke="none" />,
@@ -394,7 +394,7 @@ export const IconListOrdered = makeRichIcon(() => [
   <path key="b" d="M5 4v6M5 16l2-1.5V19M4 19h2" />,
 ]);
 
-/** Send / paper-plane — used for 追问 composer submit */
+/** Send / paper-plane — used for the follow-up composer submit */
 export const IconSend = makeRichIcon(() => [
   <path key="a" d="M21 4 11 14" />,
   <path key="b" d="M21 4 14 21l-3-7-7-3 17-7Z" />,
@@ -416,7 +416,7 @@ export const IconTriangle = makeIcon(
 );
 
 /** Clock — replaces ⏰ for "schedule a future action" affordances
- *  (定时生成方案 / 定时开发 / scheduled-tasks page nav). */
+ *  (scheduled design / scheduled coding / scheduled-tasks page nav). */
 export const IconClock = makeIcon(
   'M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z',
 );
@@ -459,7 +459,7 @@ export const IconBriefcase = makeRichIcon(() => [
 /** Robot — alias used in chat panels */
 export const IconBot = IconRobot;
 
-/** Robot / sub-agent in the "Claude 工作中" badge — keeps the analyst/chat
+/** Robot / sub-agent in the Claude-working badge — keeps the analyst/chat
  *  the same outline family while remaining distinguishable from the generic
  *  IconRobot used in the wizard stepper */
 export const IconBotBadge = makeRichIcon(() => [
@@ -471,7 +471,7 @@ export const IconBotBadge = makeRichIcon(() => [
   <path key="f" d="M16.5 17h4M18.5 15v4" />,
 ]);
 
-/** Sleep / idle — used by the "Claude 空闲" badge (replace 😴) */
+/** Sleep / idle — used by the Claude-idle badge (replaces 😴) */
 export const IconSleep = makeRichIcon(() => [
   <path key="a" d="M20 14.5a8 8 0 1 1-9.5-9.5 6.5 6.5 0 0 0 9.5 9.5Z" />,
   <path key="b" d="M16 4h4M16 4v4M16 4l4 4" />,

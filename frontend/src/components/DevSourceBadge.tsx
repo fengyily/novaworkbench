@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import type { Requirement } from '../api/client';
 import './DevSourceBadge.css';
 
@@ -7,7 +8,7 @@ import './DevSourceBadge.css';
  * or the local NovaWorkbench host.
  *
  * Nothing is rendered when dev_source is empty: that means the coding stage
- * has never run (or the row predates the field), and showing "本地开发" there
+ * has never run (or the row predates the field), and showing a local-dev label there
  * would be a guess rather than a fact.
  *
  * Two densities:
@@ -26,24 +27,27 @@ export function DevSourceBadge({
   req: Pick<Requirement, 'dev_source' | 'agent_server_id' | 'agent_server_name' | 'developer_model'>;
   compact?: boolean;
 }) {
+  const { t } = useTranslation();
   const source = req.dev_source;
   if (source !== 'agent' && source !== 'local') return null;
 
   if (source === 'local') {
     return (
-      <span className="dev-source-badge is-local" title="该需求在本机 NovaWorkbench 上开发">
+      <span className="dev-source-badge is-local" title={t('components.devSource.localTitle')}>
         <span className="dsb-icon">💻</span>
-        <span className="dsb-label">本地开发</span>
+        <span className="dsb-label">{t('components.devSource.local')}</span>
       </span>
     );
   }
 
   // A deleted agent_servers row leaves the name empty — fall back to the id so
   // the user still has something to correlate against the settings page.
-  const serverName = req.agent_server_name || req.agent_server_id || '未知服务器';
+  // Resolved at render time so a language switch re-translates the tooltip.
+  const serverName = req.agent_server_name || req.agent_server_id || t('components.devSource.unknownServer');
   const model = req.developer_model || '';
   const tip =
-    `由 Agent Server「${serverName}」开发` + (model ? `\n模型: ${model}` : '\n模型: 默认模型');
+    t('components.devSource.agentTip', { server: serverName }) +
+    '\n' + t('components.devSource.modelLine', { model: model || t('components.modelSelect.default') });
 
   if (compact) {
     return (
@@ -58,7 +62,7 @@ export function DevSourceBadge({
   return (
     <span className="dev-source-badge is-agent is-wide" title={tip}>
       <span className="dsb-icon">🛰️</span>
-      <span className="dsb-label">Agent Server 开发</span>
+      <span className="dsb-label">{t('components.devSource.agentLabel')}</span>
       <span className="dsb-server">{serverName}</span>
       {model && <span className="dsb-model">{model}</span>}
     </span>

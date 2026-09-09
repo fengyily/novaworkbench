@@ -1,7 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { API_BASE, authedFetch, kindChatPlaceholders, kindOf, requirementsApi, wizardApi, type Kind } from '../api/client';
+import { useTranslation } from 'react-i18next';
+
+import { API_BASE, authedFetch, DefaultModelLabel, kindChatPlaceholderKeys, kindOf, requirementsApi, wizardApi, type Kind } from '../api/client';
+import { tLabel } from '../i18n/label';
 import { createEventStream, type EventStream } from '../api/stream';
 import AtMentionTextarea from './AtMentionTextarea';
 import { appendLogLine, type LogLine, type UsageInfo, computeUsage } from '../utils/logLines';
@@ -19,18 +22,20 @@ interface Props {
   currentAnalysis: string;
   analysisJobId: string;
   // Kind of the requirement — drives header title, input placeholder, default
-  // first-turn prompt, and whether the "生成技术方案" CTA is hidden (kind=idea
-  // is a discussion-only entry and never reaches the architect stage).
+  // first-turn prompt, and whether the "Generate design" CTA is hidden
+  // (kind=idea is a discussion-only entry and never reaches the architect
+  // stage).
   kind?: Kind | string;
   // Last-persisted model for the analyst stage (req.analyst_model); empty =
   // never run. Used as the dropdown's default selection.
   model?: string;
-  // Actual model that the empty "默认模型" selection resolves to for this stage
-  // (角色模型 > 生效配置默认), shown next to "默认模型" before the stage runs.
+  // Actual model that the empty DefaultModelLabel selection resolves to for
+  // this stage (role default > active config default), shown next to
+  // DefaultModelLabel before the stage runs.
   defaultModel?: string;
   onTurnDone?: () => void; // refresh req (sync status / clear analysis_job_id) after a turn
   // Reports the live turn state upward so the detail header can show an
-  // accurate global "Claude 工作中" badge while an analyst turn runs (the
+  // accurate global "Claude working" badge while an analyst turn runs (the
   // persisted analysis_job_id is only refreshed after the turn finishes).
   onWorkingChange?: (working: boolean) => void;
   // Controlled context-usage for the analyst session. The parent
@@ -52,6 +57,7 @@ export default function DeepRefineChat({
 }: Props) {
   const [expanded, setExpanded] = useState(true);
   const { isFullscreen, toggle: toggleFullscreen, exit: exitFullscreen } = useFullscreen();
+  const { t } = useTranslation();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [chatting, setChatting] = useState(false);
@@ -64,27 +70,27 @@ export default function DeepRefineChat({
   // requirements.usage_snapshots blob. We report each `usage` SSE event upward
   // via onUsage and read the value back from the `usage` prop below.
   // True while POST /api/wizard/compress-context is in flight. Disables the
-  // compress button and shows the "⏳ 压缩中…" label to prevent duplicate
+  // compress button and shows the compressing label to prevent duplicate
   // requests during the (potentially long) claude summarization run.
   const [compressing, setCompressing] = useState(false);
   // compressedAt: ISO timestamp persisted on requirements.analyst_compressed_at
-  // after a successful compression. Drives the "📦 已压缩" badge in the bar.
-  // summaryModal: when non-null, shows a modal with the persisted Chinese
-  // summary text so the user can review what claude distilled.
+  // after a successful compression. Drives the compressed badge in the bar.
+  // summaryModal: when non-null, shows a modal with the persisted summary
+  // text so the user can review what claude distilled.
   const [compressedAt, setCompressedAt] = useState<string | null>(null);
   const [summaryModal, setSummaryModal] = useState<string | null>(null);
   // Guard against auto-start firing twice (StrictMode / concurrent renders).
   const bootedRef = useRef(false);
 
-  // Per-turn analyst model. Seeded from the server-persisted model (default
-  // selection = 已设置的模型); once the user switches it stays local and is
-  // sent with the next analyst-chat POST. Disabled while a turn is running.
+  // Per-turn analyst model. Seeded from the server-persisted model; once
+  // the user switches it stays local and is sent with the next analyst-chat
+  // POST. Disabled while a turn is running.
   const [selectedModel, setSelectedModel] = useState('');
   const modelTouchedRef = useRef(false);
   useEffect(() => {
     if (!modelTouchedRef.current) {
       const v = model || '';
-      setSelectedModel(v === '默认模型' ? '' : v);
+      setSelectedModel(v === DefaultModelLabel ? '' : v);
     }
   }, [model]);
 
@@ -127,7 +133,7 @@ export default function DeepRefineChat({
   }, [reqId]);
 
   const handleClear = async () => {
-    if (!confirm('确定要清除对话记录吗？需求将回到草稿状态，可手动重新触发分析。')) return;
+    if (!confirm(t('wizard.analyst.clearConfirm'))) return;
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
     setMessages([]);
     setRetryMsg('');
@@ -183,7 +189,7 @@ export default function DeepRefineChat({
             const next = [...prev];
             const idx = next.length - 1;
             if (idx >= 0 && next[idx]?.isStreaming) {
-              next[idx] = { role: 'ai', content: finalText || '(无回复)' };
+              next[idx] = { role: 'ai', content: finalText || t('wizard.analyst.emptyResponse') };
             }
             const saved = next.filter(m => !m.isError && !m.isStreaming);
             saveMessages(saved);
@@ -201,18 +207,19 @@ export default function DeepRefineChat({
             const next = [...prev];
             const idx = next.length - 1;
             if (idx >= 0 && next[idx]?.isStreaming) {
-              next[idx] = { role: 'ai', content: '❌ ' + (evt.content || 'Claude 执行出错'), isError: true };
+              next[idx] = { role: 'ai', content: '❌ ' + (evt.content || t('wizard.analyst.execError')), isError: true };
             }
             return next;
           });
           return;
         }
         if (evt.type === 'tool_call' || evt.type === 'phase') {
-          // Coalesce consecutive "模型思考中… (N tokens)" phase lines into a
-          // single updatable row instead of stacking one per heartbeat. Use
-          // the backend-stamped `at` (or Date.now() as a client-side fallback
-          // if the server didn't send one) so phaseGroups can compute
-          // accurate per-phase + per-tool-call durations.
+          // Coalesce consecutive "model thinking… (N tokens)" phase lines
+          // into a single updatable row instead of stacking one per
+          // heartbeat. Use the backend-stamped `at` (or Date.now() as a
+          // client-side fallback if the server didn't send one) so
+          // phaseGroups can compute accurate per-phase + per-tool-call
+          // durations.
           const at = typeof evt.at === 'number' ? evt.at : Date.now();
           setToolLog(prev => appendLogLine(prev.slice(-60), { type: evt.type, content: evt.content ?? '', at }));
           return;
@@ -256,7 +263,7 @@ export default function DeepRefineChat({
                 const next = [...prev];
                 const idx = next.length - 1;
                 if (idx >= 0 && next[idx]?.isStreaming) {
-                  next[idx] = { role: 'ai', content: '⚠️ 任务已丢失（服务可能重启）。点击重试重新开始。', isError: true };
+                  next[idx] = { role: 'ai', content: t('wizard.analyst.jobLost'), isError: true };
                 }
                 return next;
               });
@@ -285,7 +292,7 @@ export default function DeepRefineChat({
                 const next = [...prev];
                 const idx = next.length - 1;
                 if (idx >= 0 && next[idx]?.isStreaming) {
-                  next[idx] = { role: 'ai', content: finalText || '(无回复)' };
+                  next[idx] = { role: 'ai', content: finalText || t('wizard.analyst.emptyResponse') };
                 }
                 const saved = next.filter(m => !m.isError && !m.isStreaming);
                 saveMessages(saved);
@@ -297,7 +304,7 @@ export default function DeepRefineChat({
           .catch(() => { setChatting(false); });
       },
     );
-  }, [ensureStreamingPlaceholder, saveMessages, onTurnDone]);
+  }, [ensureStreamingPlaceholder, saveMessages, onTurnDone, t]);
 
   // Start a new analyst turn: POST to create the job, then stream it. The
   // user message (+ a streaming placeholder) is persisted BEFORE the POST so a
@@ -332,7 +339,7 @@ export default function DeepRefineChat({
       });
       const json = await res.json();
       const jobId = json.data?.job_id;
-      if (!jobId) throw new Error(json.error?.message || '未获取到任务 ID');
+      if (!jobId) throw new Error(json.error?.message || t('wizard.analyst.errNoJobId'));
       streamAnalystJob(jobId);
     } catch (err: any) {
       setChatting(false);
@@ -346,7 +353,7 @@ export default function DeepRefineChat({
         return next;
       });
     }
-  }, [projectPath, reqId, requirementTitle, currentAnalysis, selectedModel, saveMessages, streamAnalystJob]);
+  }, [projectPath, reqId, requirementTitle, currentAnalysis, selectedModel, saveMessages, streamAnalystJob, t]);
 
   const handleSend = async () => {
     if (!input.trim() || chatting) return;
@@ -369,10 +376,11 @@ export default function DeepRefineChat({
     await runTurn(msg);
   };
 
-  // Boot-time fetch of the persisted compression record. Drives the "📦 已压缩"
-  // badge on the usage bar so a page refresh still shows the user that this
-  // stage has been summarized — and lets the bar's "查看摘要" link open the
-  // modal without a second round-trip after the user clicks the button.
+  // Boot-time fetch of the persisted compression record. Drives the
+  // compressed badge on the usage bar so a page refresh still shows the user
+  // that this stage has been summarized — and lets the bar's "view summary"
+  // link open the modal without a second round-trip after the user clicks
+  // the button.
   useEffect(() => {
     if (!reqId) return;
     let cancelled = false;
@@ -383,16 +391,16 @@ export default function DeepRefineChat({
   }, [reqId]);
 
   // Trigger claude to summarize the current analyst conversation. The backend
-  // runs a one-shot `--resume` turn with a fixed Chinese prompt, then writes
-  // the summary into requirements.analyst_context_summary + stamps
-  // analyst_compressed_at + clears analysis_session_id. On success we
-  // refresh the requirement (so the detail header badge updates) and reload
-  // the compressedAt so the bar switches to "已压缩" state.
+  // runs a one-shot `--resume` turn with a fixed prompt, then writes the
+  // summary into requirements.analyst_context_summary + stamps
+  // analyst_compressed_at + clears analysis_session_id. On success we refresh
+  // the requirement (so the detail header badge updates) and reload
+  // compressedAt so the bar switches to the compressed state.
   // request<T> throws on a non-2xx response; alert on the caught error
   // instead of checking a success field.
   const handleCompress = useCallback(async () => {
     if (!reqId || compressing) return;
-    if (!confirm('让 Claude 总结当前对话并压缩上下文？\n\n该操作会清空当前会话 ID,下次对话将看到压缩摘要而不是完整历史。')) return;
+    if (!confirm(t('wizard.analyst.compressConfirm'))) return;
     setCompressing(true);
     try {
       const data = await wizardApi.compressContext(reqId, 'analyst_chat');
@@ -402,24 +410,24 @@ export default function DeepRefineChat({
       onUsage?.(undefined);
       onTurnDone?.();
     } catch (err: any) {
-      alert('压缩失败:' + (err?.message || String(err)));
+      alert(t('wizard.analyst.compressFailPrefix') + (err?.message || String(err)));
     } finally {
       setCompressing(false);
     }
-  }, [reqId, compressing, onTurnDone]);
+  }, [reqId, compressing, onTurnDone, t]);
 
   // Open the summary preview modal. Lazily fetches the persisted summary so
   // the boot-time fetch stays cheap — the modal is the only place that needs
-  // the full Chinese text, not the bar itself.
+  // the full text, not the bar itself.
   const handleShowSummary = useCallback(async () => {
     if (!reqId) return;
     try {
       const data = await wizardApi.getContextSummary(reqId, 'analyst_chat');
-      setSummaryModal(data.summary || '(暂无压缩摘要)');
+      setSummaryModal(data.summary || t('wizard.analyst.summaryFallback'));
     } catch {
-      setSummaryModal('(加载摘要失败)');
+      setSummaryModal(t('wizard.analyst.summaryLoadFail'));
     }
-  }, [reqId]);
+  }, [reqId, t]);
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
@@ -441,7 +449,14 @@ export default function DeepRefineChat({
         // goroutine decoupled from this request.
         streamAnalystJob(analysisJobId);
       } else if (!saved || saved.length === 0) {
-        runTurn(defaultInitMessage);
+        // Kind-aware first-turn kickoff message.
+        const k: Kind = kindOf({ kind } as any);
+        const kickoff = k === 'idea'
+          ? t('wizard.analyst.kickoffIdea')
+          : k === 'issue'
+            ? t('wizard.analyst.kickoffIssue')
+            : t('wizard.analyst.kickoffRequirement');
+        runTurn(kickoff);
       }
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -459,7 +474,7 @@ export default function DeepRefineChat({
     return (
       <div className="deep-refine-toggle">
         <button className="btn btn-sm" onClick={() => setExpanded(true)}>
-          <IconChat size={14} /> 展开对话
+          <IconChat size={14} /> {t('wizard.analyst.expandBtn')}
         </button>
       </div>
     );
@@ -469,12 +484,12 @@ export default function DeepRefineChat({
   // Block advancing to the architect stage when the last analyst turn ended in
   // an error — advancing would fork an empty/failed analysis session and leave
   // the requirement stuck in "designing" with no design and no way back. The
-  // user must retry (and succeed) before 生成技术方案 is allowed.
+  // user must retry (and succeed) before "Generate design" is allowed.
   const lastIsError = messages.length > 0 && messages[messages.length - 1]?.isError === true;
   // The streaming placeholder carries empty content until the first
   // "message" event arrives. While it's empty, the standalone spinner
   // block below represents the "starting" state — so we must not also
-  // render the empty placeholder (that would produce two "🤖 AI" rows).
+  // render the empty placeholder (that would produce two "AI" rows).
   const lastMsg = messages[messages.length - 1];
   const placeholderEmpty = !!lastMsg?.isStreaming && !lastMsg?.content;
   const showSpinner = isWorking && toolLog.length === 0 && placeholderEmpty;
@@ -484,24 +499,16 @@ export default function DeepRefineChat({
   const reqKind: Kind = kindOf({ kind } as any);
   const isIdea = reqKind === 'idea';
   const chatHeaderTitle = isIdea
-    ? '想法讨论 — 探索可行方案'
+    ? t('wizard.analyst.titleIdea')
     : reqKind === 'issue'
-      ? '问题分析 — 排查根因并修复'
-      : '深入分析 — 确认具体改动点';
+      ? t('wizard.analyst.titleIssue')
+      : t('wizard.analyst.titleRequirement');
   const ChatHeaderIcon = isIdea
     ? IconSparkles
     : reqKind === 'issue'
       ? IconAnalyst
       : IconAnalyst;
-  const chatPlaceholder = kindChatPlaceholders[reqKind];
-  // First-turn kickoff prompt tailored per kind. The backend's prompt blocks
-  // (analyst-tail) carry the detailed instructions; this is just the user-
-  // facing seed message so the AI has context to react to.
-  const defaultInitMessage = isIdea
-    ? '请阅读相关代码并和我一起讨论这个想法的可行方案（不进入开发）。'
-    : reqKind === 'issue'
-      ? '请阅读相关代码，帮我定位这个问题的根因并提出修复方案。'
-      : '';
+  const chatPlaceholder = tLabel(t, kindChatPlaceholderKeys as Record<string, string>, reqKind);
 
   return (
     <div className="detail-section deep-refine-panel">
@@ -514,20 +521,20 @@ export default function DeepRefineChat({
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
           {/* Per-turn analyst model; disabled while a turn is running. The
-              model list comes from the active claude config; default = 已设置模型. */}
+              model list comes from the active claude config. */}
           <ModelSelect
             value={selectedModel}
             onChange={m => { modelTouchedRef.current = true; setSelectedModel(m); }}
             disabled={isWorking}
             working={isWorking}
-            label="分析模型"
+            label={t('wizard.analyst.modelLabel')}
             defaultModelName={defaultModel}
-            title={isWorking ? 'Claude 工作中，暂不能切换模型' : '需求分析使用的模型'}
+            title={isWorking ? t('wizard.analyst.modelTitleBusy') : t('wizard.analyst.modelTitle')}
           />
           {messages.length > 0 && !isWorking && (
-            <button className="btn btn-sm" onClick={handleClear} title="清除对话记录">🗑</button>
+            <button className="btn btn-sm" onClick={handleClear} title={t('wizard.analyst.clearTitle')}>🗑</button>
           )}
-          <button className="btn btn-sm" onClick={() => setExpanded(false)}>收起</button>
+          <button className="btn btn-sm" onClick={() => setExpanded(false)}>{t('wizard.analyst.collapseBtn')}</button>
           <FullscreenButton isFullscreen={isFullscreen} onClick={toggleFullscreen} />
         </div>
       </div>
@@ -546,7 +553,7 @@ export default function DeepRefineChat({
             <span className="chat-role">
               {msg.role === 'ai'
                 ? (<><IconBot size={13} /> AI</>)
-                : (<><span className="chat-role-dot" aria-hidden="true" /> 你</>)}
+                : (<><span className="chat-role-dot" aria-hidden="true" /> {t('wizard.page.roleUser').replace('👤 ', '')}</>)}
             </span>
             {msg.role === 'ai' && !msg.isError
               ? <div className="chat-content chat-content-md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown></div>
@@ -565,7 +572,7 @@ export default function DeepRefineChat({
         {showSpinner && (
           <div className="chat-msg ai">
             <span className="chat-role"><IconBot size={13} /> AI</span>
-            <div className="chat-content">⏳ Claude 正在启动...</div>
+            <div className="chat-content">{t('wizard.analyst.spinner')}</div>
           </div>
         )}
 
@@ -573,7 +580,7 @@ export default function DeepRefineChat({
         {retryMsg && !isWorking && (
           <div style={{ display: 'flex', justifyContent: 'center', padding: '8px 0' }}>
             <button className="btn btn-primary" onClick={handleRetry}>
-              🔄 重试
+              {t('wizard.analyst.retryBtn')}
             </button>
           </div>
         )}
@@ -589,16 +596,16 @@ export default function DeepRefineChat({
               handleSend();
             }
           }}
-          placeholder={chatPlaceholder + '\nEnter 发送  ·  Shift+Enter 换行'}
+          placeholder={chatPlaceholder + t('wizard.analyst.composerHint')}
           className="form-input chat-textarea"
           disabled={isWorking}
           rows={2}
         />
-        <button className="btn btn-primary" onClick={handleSend} disabled={isWorking || !input.trim()}>发送</button>
+        <button className="btn btn-primary" onClick={handleSend} disabled={isWorking || !input.trim()}>{t('wizard.analyst.send')}</button>
       </div>
 
-      {/* Live token-usage bar + 压缩上下文 entry point. Sits between the
-          composer and the action row so it stays visible while typing.
+      {/* Live token-usage bar + compress-context entry point. Sits between
+          the composer and the action row so it stays visible while typing.
           Disabled while no session has been started yet (chatting is false,
           usage is undefined, and no compressedAt); the button is still
           tappable once a turn has produced a usage snapshot. */}
@@ -607,7 +614,7 @@ export default function DeepRefineChat({
         onCompress={handleCompress}
         compressing={compressing}
         disabled={isWorking || compressing}
-        stepLabel="需求分析师"
+        stepLabel={t('wizard.analyst.sessionStepLabel')}
         compressedAt={compressedAt}
         onShowSummary={handleShowSummary}
       />
@@ -628,8 +635,8 @@ export default function DeepRefineChat({
             style={{ maxWidth: 640 }}
           >
             <div className="modal-header">
-              <h3>📦 已压缩上下文摘要</h3>
-              <button className="btn btn-sm" onClick={() => setSummaryModal(null)}>关闭</button>
+              <h3>{t('wizard.analyst.summaryTitle')}</h3>
+              <button className="btn btn-sm" onClick={() => setSummaryModal(null)}>{t('wizard.analyst.closeBtn')}</button>
             </div>
             <div
               className="modal-body"
@@ -647,13 +654,13 @@ export default function DeepRefineChat({
             className="btn btn-primary"
             onClick={onGenerateDesign}
             disabled={isWorking || messages.length === 0 || lastIsError}
-            title={lastIsError ? '当前分析回合已出错，请先重试成功后再生成技术方案' : undefined}
+            title={lastIsError ? t('wizard.analyst.generateDesignTitleErr') : undefined}
           >
-            <IconArchitect size={14} /> 生成技术方案
+            <IconArchitect size={14} /> {t('wizard.analyst.generateDesign')}
           </button>
         )}
         {lastIsError && !isWorking && (
-          <span style={{ color: '#B91C1C', fontSize: 12 }}>⚠ 上一次分析出错，请先重试</span>
+          <span style={{ color: '#B91C1C', fontSize: 12 }}>{t('wizard.analyst.lastTurnError')}</span>
         )}
       </div>
     </div>
@@ -684,6 +691,7 @@ function buildReplyTemplate(content: string): string {
 // rows with per-phase and per-tool-call elapsed time. The active (trailing)
 // phase ticks live via useTick; finished phases show their frozen duration.
 function ToolLogPhases({ toolLog, isWorking }: { toolLog: LogLine[]; isWorking: boolean }) {
+  const { t } = useTranslation();
   // Re-render every 500ms while working so the active phase's elapsed time
   // updates in place. The counter value is unused.
   useTick(isWorking);
@@ -696,7 +704,7 @@ function ToolLogPhases({ toolLog, isWorking }: { toolLog: LogLine[]; isWorking: 
   return (
     <div className="tool-log">
       <div className="tool-log-summary">
-        工具调用 · {phases.length} 个阶段 · 总计 {formatDuration(totalMs)}
+        {t('wizard.analyst.toolLogSummary', { n: phases.length, total: formatDuration(totalMs) })}
       </div>
       {phases.map((p, i) => {
         const active = p.isActive && isWorking;
@@ -706,7 +714,9 @@ function ToolLogPhases({ toolLog, isWorking }: { toolLog: LogLine[]; isWorking: 
             <div className="tool-log-phase-header">
               <span className="tool-log-phase-label">{p.label}</span>
               <span className="tool-log-phase-time">
-                {active ? `已用 ${formatDuration(displayMs)}` : formatDuration(displayMs)}
+                {active
+                  ? t('wizard.analyst.toolLogPhaseActive', { t: formatDuration(displayMs) })
+                  : t('wizard.analyst.toolLogPhaseDone', { t: formatDuration(displayMs) })}
               </span>
             </div>
             {p.thinking && (
