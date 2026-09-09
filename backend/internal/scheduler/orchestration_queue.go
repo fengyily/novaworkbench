@@ -229,14 +229,50 @@ func (q *OrchestrationQueue) tick() {
 }
 
 // tickDispatching handles a single batch whose status is "dispatching".
-// Atomically claims the next pending child via ClaimNextPending and, on
-// success, spawns the wizard's ExecuteOrchestratedChild goroutine gated by
-// the semaphore. On "no pending rows" it checks whether all children have
-// reached a terminal state and, if so, flips the batch into summarizing.
+//
+// Lifecycle (must stay in this order):
+//
+//  1. Try to grab the global runSem (non-blocking select-default). The
+//     semaphore caps in-flight claude children at the configured
+//     concurrency; if it's full we MUST return without claiming any
+//     row, otherwise ClaimNextPending would flip the next pending child
+//     to status='running' and the wizard's UI would show it as "运行中"
+//     even though its goroutine is just sitting on `q.runSem <- {}`
+//     waiting for the previous child to finish. Without this guard
+//     every 10s tick would advance one row past the semaphore's
+//     capacity, leaving a growing backlog of zombie "running" rows
+//     whose goroutines never started a claude process.
+//  2. With the semaphore held, call ClaimNextPending to atomically
+//     promote the lowest-seq pending row to status='running'. If the
+//     claim fails (DB error) or no row was claimable (the previous
+//     tick already promoted this batch's next row), release the
+//     semaphore before returning so we don't leak a slot.
+//  3. On a successful claim, spawn the wizard's ExecuteOrchestratedChild
+//     goroutine; its deferred `<-q.runSem` releases the slot when the
+//     child finishes.
+//
+// On "no pending rows AND sem was released" the existing terminal-count
+// path checks whether every child has reached a terminal state and, if
+// so, flips the batch into summarizing.
 func (q *OrchestrationQueue) tickDispatching(batch *model.OrchestrationBatch) {
+	// (1) Non-blocking semaphore grab. If full, defer until the next tick —
+	// the DB row stays 'pending' so the UI shows "排队中" instead of a
+	// misleading "运行中".
+	select {
+	case q.runSem <- struct{}{}:
+		// got a slot — proceed to claim below.
+	default:
+		log.Printf("[orch] tick %s: runSem full, deferring next claim", batch.ID)
+		return
+	}
+
+	// (2) Promote the next pending row. The semaphore slot is held across
+	// this DB write so a parallel queue instance (or this queue's own
+	// earlier goroutine that's still draining) can't race past us.
 	st, ok, err := q.subTaskSvc.ClaimNextPending(batch.ID)
 	if err != nil {
 		log.Printf("[orch] claim %s: %v", batch.ID, err)
+		<-q.runSem
 		return
 	}
 	if ok {
@@ -244,11 +280,15 @@ func (q *OrchestrationQueue) tickDispatching(batch *model.OrchestrationBatch) {
 		go func(b *model.OrchestrationBatch, s *model.SubTask) {
 			defer q.running.Done()
 			defer func() { <-q.runSem }()
-			q.runSem <- struct{}{}
 			q.wizardH.ExecuteOrchestratedChild(b, s)
 		}(batch, st)
 		return
 	}
+	// No row to claim — release the slot we grabbed above so the next
+	// tick can try again. (Common when another tick already flipped the
+	// row between our select and our SELECT.)
+	<-q.runSem
+
 	// No pending row claimed — every child must have hit a terminal status.
 	// Count and flip the batch to summarizing if so.
 	done, errored, err := q.subTaskSvc.CountTerminalByBatch(batch.ID)
