@@ -133,6 +133,10 @@ export const components = {
     redoSubmit: '🚀 开始重做',
     errAdjust: '追加调整失败',
     errRedo: '重做失败',
+    sourceAuto: '自动',
+    sourceAutoTitle: '由主 Agent 自动派发',
+    sourceManual: '手动',
+    sourceManualTitle: '由用户手动创建',
   },
   createRequirement: {
     title: '新需求',

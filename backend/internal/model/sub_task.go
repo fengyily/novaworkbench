@@ -78,6 +78,12 @@ type SubTask struct {
 	// clients — the tick goroutine owns it; external code only reads it
 	// inside the service layer.
 	BatchIDSeqRun  *time.Time `json:"-"`
+	// Source records the provenance of this sub-task row: "auto" when created
+	// by tryAutoOrchestrate, "manual" when created by StartSubTask / Adjust /
+	// Redo. Set at insert time and never mutated, so manual rows stay marked
+	// "manual" even after GenerateSubTaskSummary stamps them with a
+	// summarizing batch_id. Drives the SubTaskCard source badge.
+	Source       string  `json:"source,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`
@@ -90,6 +96,15 @@ const (
 	SubTaskStatusRunning = "running"
 	SubTaskStatusDone    = "done"
 	SubTaskStatusError   = "error"
+)
+
+// SubTaskSource values; "auto" means created by tryAutoOrchestrate,
+// "manual" means created by StartSubTask / Adjust / Redo. Set at insert
+// and never mutated, so it stays a reliable provenance marker even after
+// SetBatchID groups a manual child under a summary batch.
+const (
+	SubTaskSourceManual = "manual"
+	SubTaskSourceAuto   = "auto"
 )
 
 // SubTaskTokens is the four-field token view the wizard handler hands the

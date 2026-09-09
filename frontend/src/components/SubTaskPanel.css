@@ -295,6 +295,32 @@
   background: var(--color-hover);
   color: var(--color-text-muted);
 }
+
+/* Source badge: 🪄 Auto (indigo) vs 👤 Manual (emerald).
+   Distinguishes auto-orchestrated sub-tasks from manually-created ones.
+   Follows the same size/padding/radius as the status chip above. */
+.sub-card-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+  margin-left: 4px;
+}
+.sub-card-source-auto {
+  background: rgba(79, 70, 229, 0.10);  /* Indigo 50 */
+  border: 1px solid rgba(79, 70, 229, 0.30);
+  color: #4338CA;  /* Indigo 700 */
+}
+.sub-card-source-manual {
+  background: rgba(16, 185, 129, 0.10);  /* Emerald 50 */
+  border: 1px solid rgba(16, 185, 129, 0.30);
+  color: #047857;  /* Emerald 700 */
+}
+
 .sub-card-counter {
   font-family: var(--font-mono);
   font-size: 11px;
