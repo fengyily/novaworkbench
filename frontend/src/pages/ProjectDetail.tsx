@@ -68,7 +68,7 @@ export default function ProjectDetail() {
 
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<Tab>('overview');
+  const [tab, setTab] = useState<Tab>('requirements');
 
   // Run tab
   const [runStatus, setRunStatus] = useState<RunStatus | null>(null);
