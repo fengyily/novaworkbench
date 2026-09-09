@@ -197,6 +197,10 @@ export const components = {
     rawPct: '原始使用率 {{pct}}%',
     viewSummary: '查看已压缩摘要',
     compressTitle: '让 claude 总结当前会话并清空上下文',
+    overLimit: '99%+',
+    overLimitTitle: '上下文已满或溢出（原始 {{pct}}%；缓存命中不计为新增）',
+    breakdown: '输入 {{input}} · 缓存创建 {{cc}} · 缓存命中 {{cr}} · 窗口 {{window}}',
+    breakdownNote: '百分比仅计净新增（输入 + 缓存创建）；缓存命中视为复用，不计入已用。',
   },
   sessionStrip: {
     ariaLabel: '会话上下文使用量',

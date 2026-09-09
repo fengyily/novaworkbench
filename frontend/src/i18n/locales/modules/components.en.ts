@@ -193,6 +193,10 @@ export const components = {
     rawPct: 'Raw usage {{pct}}%',
     viewSummary: 'View the compressed summary',
     compressTitle: 'Have claude summarize the session and clear the context',
+    overLimit: '99%+',
+    overLimitTitle: 'Context at/over limit (raw {{pct}}%; cache hits not counted as new fill)',
+    breakdown: 'input {{input}} · cache create {{cc}} · cache hit {{cr}} · window {{window}}',
+    breakdownNote: 'Percentage counts net new fill only (input + cache creation); cache hits are reused content, not new fill.',
   },
   sessionStrip: {
     ariaLabel: 'Session context usage',
