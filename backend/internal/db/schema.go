@@ -226,7 +226,7 @@ CREATE TABLE IF NOT EXISTS users (
 	-- locale: the user's preferred UI language (BCP-47, e.g. "zh-CN" /
 	-- "en-US"). Empty = no explicit preference — the frontend falls back to
 	-- the browser-level choice (localStorage nova_lang / navigator.language).
-	-- Written by PUT /api/auth/locale; must match the i18n whitelist.
+	-- Written by PUT /api/auth/locale, must match the i18n whitelist.
 	locale         TEXT NOT NULL DEFAULT '',
 	last_login_at  DATETIME,
 	created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
