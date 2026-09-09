@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/novaworkbench/backend/internal/preflight"
+	"github.com/novaworkbench/backend/internal/version"
 )
 
 // HealthHandler now also reports a dependency snapshot so a docker-compose
@@ -31,9 +32,11 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":  "ok",
-		"version": "0.1.0",
-		"ready":   ready,
-		"deps":    deps,
+		"status":     "ok",
+		"version":    version.Version,
+		"commit":     version.Commit,
+		"build_date": version.BuildDate,
+		"ready":      ready,
+		"deps":       deps,
 	})
 }

@@ -1,5 +1,16 @@
 SHELL := /bin/bash
 
+# Build identity — injected via -ldflags into backend/internal/version so
+# /api/health reflects the actual build. Override on the command line:
+#   VERSION=v0.2.0 make build
+VERSION ?= dev
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -s -w \
+	-X github.com/novaworkbench/backend/internal/version.Version=$(VERSION) \
+	-X github.com/novaworkbench/backend/internal/version.Commit=$(COMMIT) \
+	-X github.com/novaworkbench/backend/internal/version.BuildDate=$(BUILD_DATE)
+
 # Embed the frontend SPA into the Go binary (single-binary deployment).
 # The frontend builds to frontend/dist/ (Vite default); we copy that into
 # backend/web/dist/ where `//go:embed all:dist` picks it up at compile time.
@@ -42,8 +53,8 @@ build-frontend:
 	cp -r frontend/dist/. backend/web/dist/
 
 build-backend:
-	cd backend && CGO_ENABLED=0 go build -o ../dist/nova ./cmd/server
-	@echo "Built: dist/nova"
+	cd backend && CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o ../dist/nova ./cmd/server
+	@echo "Built: dist/nova (version=$(VERSION) commit=$(COMMIT))"
 
 run:
 	cd backend && go run ./cmd/server

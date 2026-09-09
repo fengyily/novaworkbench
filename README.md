@@ -17,6 +17,7 @@ NovaWorkbench 把"本地代码仓库 + AI 协作"装进一个单二进制应用�
 - [背景：解决什么问题](#背景解决什么问题)
 - [核心功能](#核心功能)
 - [技术架构](#技术架构)
+- [下载预编译二进制](#下载预编译二进制)
 - [快速启动](#快速启动)
 - [使用指南](#使用指南)
 - [配置说明](#配置说明)
@@ -145,6 +146,40 @@ NovaWorkbench 把"本地代码仓库 + AI 协作"装进一个单二进制应用�
 - **SSE 全双工流**：所有 AI 长任务（wizard / review / runner / report）都走 `text/event-stream`，前端用 `ReadableStream` 手动解析。
 - **JobStore 共享**：三类后台任务（Wizard coding / Runner / Review）共用一个 `store.NewJobStore(50)`，SSE 形状统一。
 - **三角色 stage-gate**：analyst / architect / developer 各自独立会话（`--resume --fork-session`），状态由用户手动推进，不让 AI 自己宣布完成。
+
+---
+
+## 下载预编译二进制
+
+无需克隆源码编译，直接从 [GitHub Releases](https://github.com/novaworkbench/novaworkbench/releases) 下载与系统匹配的压缩包（每个 `v*` tag 都会由 [Release 流水线](.github/workflows/release.yml) 自动构建）：
+
+| 平台 | 架构 | 文件 |
+|------|------|------|
+| macOS | Apple Silicon (M1/M2/M3) | `novaworkbench-<ver>-darwin-arm64.tar.gz` |
+| macOS | Intel | `novaworkbench-<ver>-darwin-amd64.tar.gz` |
+| Linux | x86_64 | `novaworkbench-<ver>-linux-amd64.tar.gz` |
+| Linux | arm64 | `novaworkbench-<ver>-linux-arm64.tar.gz` |
+| Windows | x86_64 | `novaworkbench-<ver>-windows-amd64.zip` |
+
+压缩包内是单个二进制（前端 UI 已经 `//go:embed` 嵌入），解压后直接运行：
+
+```bash
+# 校验下载完整性（可选）
+sha256sum -c novaworkbench-<ver>-checksums.txt
+
+# macOS / Linux：解压后赋予可执行权限即可运行
+tar -xzf novaworkbench-<ver>-<os>-<arch>.tar.gz
+./novaworkbench-<os>-<arch>             # 监听 :9527，打开 http://localhost:9527/
+
+# Windows：从 zip 解压出 novaworkbench-windows-amd64.exe，双击或
+novaworkbench-windows-amd64.exe
+```
+
+或拉取多架构 Docker 镜像：`docker pull ghcr.io/<owner>/nova:<ver>`（amd64 / arm64 自动匹配）。
+
+> 提示：AI 能力依赖本地 [`claude` CLI](https://www.npmjs.com/package/@anthropic-ai/claude-code)；二进制启动时会自动探测并在缺失时提供安装引导（见设置 → 依赖）。
+>
+> 如何发一个新版本见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 ---
 
@@ -402,7 +437,7 @@ terraform init
 terraform apply
 ```
 
-CI 工作流：`.github/workflows/deploy.yml`（镜像构建 + 部署）与 `terraform.yml`（plan / apply）。
+CI 工作流：`.github/workflows/deploy.yml`（镜像构建 + 部署）、`.github/workflows/release.yml`（多平台二进制 Release，详见 [docs/RELEASE.md](docs/RELEASE.md)）与 `terraform.yml`（plan / apply）。
 
 ---
 
