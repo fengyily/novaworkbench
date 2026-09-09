@@ -820,3 +820,20 @@
   line-height: 1.6;
   color: var(--color-text);
 }
+
+/* ─── Per-card context-usage bar ───
+ * Slim wrapper around the shared ContextUsageBar so each sub-task card
+ * can show the same usage metrics the parent CodingChat does. Sits
+ * between the header and the collapsible body so the bar is visible
+ * whether the card is expanded or collapsed. Reuses the global
+ * `.usage-bar-band-ok|warn|critical` color classes defined in index.css
+ * — no new design tokens introduced here.
+ */
+.sub-card-usage {
+  padding: 6px 16px 10px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+.sub-card-usage .usage-bar { margin-bottom: 0; }
+.sub-card-usage .usage-bar-header { font-size: 11px; }
+.sub-card-usage .usage-bar-track { height: 3px; }
