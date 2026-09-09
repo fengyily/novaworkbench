@@ -21,7 +21,7 @@ import { modelContextWindow } from '../utils/modelWindow';
 import AtMentionTextarea from './AtMentionTextarea';
 import ModelSelect from './ModelSelect';
 import ContextUsageBar from './ContextUsageBar';
-import { IconRobot, IconDashboard, IconSparkles } from './icons';
+import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck } from './icons';
 import './SubTaskPanel.css';
 
 // The header-right quickstats block (cost + ⏱) reads the persisted
@@ -656,6 +656,16 @@ function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '',
   );
 }
 
+// Kept outside the component so it isn't recreated on every render.
+// Threshold mirrors RequirementDetail.tsx:isLongDesignDoc (lines > 12 || chars > 1200)
+// so the two long-doc surfaces fold at the same density.
+function isLongSummary(raw: string | undefined): boolean {
+  if (!raw || !raw.trim()) return false;
+  const lines = raw.split('\n').length;
+  const chars = raw.length;
+  return lines > 12 || chars > 1200;
+}
+
 export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange, developerDefaultModel = '', batch, onBatchChange }: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<SubTask[] | null>(null);
@@ -710,6 +720,48 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   useEffect(() => () => {
     if (summaryToastTimerRef.current) window.clearTimeout(summaryToastTimerRef.current);
   }, []);
+
+  // The orchestration summary Markdown lives on the requirement row
+  // (`requirements.coding_plan`, written by the developer's main agent at
+  // the end of every orchestrated batch via RequirementService.UpdateCodingPlan).
+  // Computed BEFORE the summary-related hooks below so handleSummaryCopy
+  // and the [requirement?.id, summaryReport] effect can reference it without
+  // hitting a TDZ. Type-safe now that Requirement.coding_plan is declared
+  // in the API client (see client.ts:coding_plan).
+  const summaryReport = requirement?.coding_plan;
+  const hasSummary = typeof summaryReport === 'string' && summaryReport.trim() !== '';
+
+  // Summary markdown expand/collapse + copy state. Long reports
+  // (per isLongSummary, mirrors isLongDesignDoc) collapse by default with a
+  // fade-out mask; the toggle button un/folds. `summaryCopied` is the
+  // transient 1.5s "✓ Copied" feedback on the header copy button.
+  const [isLongSummaryState, setIsLongSummaryState] = useState(false);
+  const [summaryExpanded, setSummaryExpanded] = useState(false);
+  const [summaryCopied, setSummaryCopied] = useState(false);
+  const summaryCopyTimerRef = useRef<number | null>(null);
+
+  const handleSummaryCopy = () => {
+    if (!summaryReport) return;
+    void writeClipboard(summaryReport);
+    setSummaryCopied(true);
+    if (summaryCopyTimerRef.current) window.clearTimeout(summaryCopyTimerRef.current);
+    summaryCopyTimerRef.current = window.setTimeout(() => setSummaryCopied(false), 1500);
+  };
+
+  // Unmount cleanup for the copy timer — mirrors the summaryToast cleanup
+  // above so a stale timer can't fire setState after the component is gone.
+  useEffect(() => () => {
+    if (summaryCopyTimerRef.current) window.clearTimeout(summaryCopyTimerRef.current);
+  }, []);
+
+  // Reset the collapse state when the underlying requirement / coding_plan
+  // changes. Mirrors RequirementDetail.tsx:897-902 (design doc surface):
+  // switching requirements or the main agent regenerating the summary
+  // should not leave the UI stranded in a stale "expanded" state.
+  useEffect(() => {
+    setIsLongSummaryState(isLongSummary(summaryReport));
+    setSummaryExpanded(false);
+  }, [requirement?.id, summaryReport]);
 
   // Sort children for display. The orchestration queue dispatches in
   // batch_seq ASC, so showing cards in that order is what the user
@@ -958,12 +1010,10 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     );
   }
 
-  // summaryReport renders the Markdown the main agent produced after the
-  // last orchestrated batch finished. Lives ABOVE the children list so
-  // the user reads the high-level picture first, then drills into any
-  // child whose artifact they want to verify.
-  const summaryReport = (requirement as any).coding_plan as string | undefined;
-  const hasSummary = typeof summaryReport === 'string' && summaryReport.trim() !== '';
+  // summaryReport / hasSummary are declared earlier (above the summary
+  // hooks block) so handleSummaryCopy and the [requirement?.id,
+  // summaryReport] effect can read them. See the declaration near the top
+  // of the component body for the JSDoc explaining the data source.
   const activeChildCount = activeBatch?.childIds.length ?? 0;
 
   return (
@@ -1075,10 +1125,41 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           <header className="sub-summary-header">
             <span className="sub-summary-icon" aria-hidden="true"><IconDashboard size={14} /></span>
             <span className="sub-summary-title">{t('components.subTaskPanel.summaryTitle')}</span>
+            <span className="sub-summary-actions">
+              <button
+                type="button"
+                className="sub-summary-action-btn"
+                onClick={handleSummaryCopy}
+                title={t('components.subTaskPanel.summaryCopyBtn')}
+                aria-label={t('components.subTaskPanel.summaryCopyBtn')}
+                data-copied={summaryCopied ? 'true' : 'false'}
+              >
+                {summaryCopied ? <IconCheck size={13} /> : <IconCopy size={13} />}
+              </button>
+            </span>
           </header>
-          <div className="sub-summary-body">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{summaryReport!}</ReactMarkdown>
+          <div
+            className={
+              'sub-summary-body-wrap' +
+              (isLongSummaryState && !summaryExpanded ? ' is-collapsed' : '')
+            }
+          >
+            <div className="sub-summary-body">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{summaryReport!}</ReactMarkdown>
+            </div>
           </div>
+          {isLongSummaryState && (
+            <button
+              type="button"
+              className="sub-summary-toggle-btn"
+              onClick={() => setSummaryExpanded(v => !v)}
+              aria-expanded={summaryExpanded}
+            >
+              {summaryExpanded
+                ? t('components.subTaskPanel.summaryExpandCollapse')
+                : t('components.subTaskPanel.summaryExpandShow')}
+            </button>
+          )}
         </div>
       )}
 
