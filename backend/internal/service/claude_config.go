@@ -274,8 +274,13 @@ func (s *ClaudeConfigService) Update(id, name, baseURL, authToken string, clearT
 }
 
 // Activate marks id as the single active config and, in the same transaction,
-// pushes its default_model into every role so the next AI task uses it. An
-// empty default_model clears all role models (fall back to the CLI default).
+// pushes its default_model into every role that has NOT been bound to a
+// specific Claude config. Bound roles keep their own model + config so
+// per-role overrides survive a global activate (the requirement for
+// req_0f2a842cd5096c52: the user can pick a non-active config's model and
+// it must keep running against that config even after the global activate
+// moves on). An empty default_model clears the unbound roles' models (so they
+// fall back to the CLI default).
 func (s *ClaudeConfigService) Activate(id string) (appliedModel string, err error) {
 	target, err := s.Get(id)
 	if err != nil {
@@ -298,8 +303,13 @@ func (s *ClaudeConfigService) Activate(id string) (appliedModel string, err erro
 	if _, err = tx.Exec("UPDATE claude_configs SET is_active = 1, updated_at = ? WHERE id = ?", time.Now(), id); err != nil {
 		return "", err
 	}
-	// Push the default model into every role (empty = clear, i.e. CLI default).
-	if _, err = tx.Exec("UPDATE roles SET model = ?", target.DefaultModel); err != nil {
+	// Push the default model into every UNBOUND role. Roles with a non-empty
+	// claude_config_id keep their own model + config — that's exactly what the
+	// "自由选择模型并固定为该模型配置" feature requires.
+	if _, err = tx.Exec(
+		"UPDATE roles SET model = ? WHERE "+s.db.Ident("claude_config_id")+" = ''",
+		target.DefaultModel,
+	); err != nil {
 		return "", err
 	}
 	if err = tx.Commit(); err != nil {
@@ -367,6 +377,82 @@ func (s *ClaudeConfigService) ClaudeEnvVars() (authToken, baseURL string, err er
 	return s.ActiveEnvVars()
 }
 
+// ClaudeEnvForConfigID resolves the auth token + base URL for a SPECIFIC
+// Claude config (the per-role binding lookup). An empty id falls back to the
+// global active config so legacy call sites keep working. Returns
+// ErrConfigNotFound when the requested id doesn't exist — callers treat that
+// as "fall back to the global active config" so a stale binding never
+// silently kills a run.
+func (s *ClaudeConfigService) ClaudeEnvForConfigID(id string) (authToken, baseURL string, err error) {
+	if id == "" {
+		return s.ActiveEnvVars()
+	}
+	c, err := s.Get(id)
+	if err != nil {
+		return "", "", err
+	}
+	return c.AuthToken, c.BaseURL, nil
+}
+
+// ResolveRoleConfig returns the Claude configuration a role should run
+// against. The role's own ClaudeConfigID wins; empty / unknown falls back to
+// the global active config (so legacy unbound roles keep their old behavior).
+// Returns nil + nil when no config is available at all (fresh DB / nothing
+// configured) so callers can render a "no model available" state cleanly.
+func (s *ClaudeConfigService) ResolveRoleConfig(role *model.Role) (*model.ClaudeConfig, error) {
+	if role != nil && role.ClaudeConfigID != "" {
+		c, err := s.Get(role.ClaudeConfigID)
+		if err == nil {
+			return c, nil
+		}
+		// Stale binding (config was deleted): fall back to the active one.
+		// ErrConfigNotFound is the only path that triggers the fallback; any
+		// other DB error is propagated so we don't hide real failures.
+		if !errors.Is(err, ErrConfigNotFound) {
+			return nil, err
+		}
+	}
+	return s.ActiveConfig()
+}
+
+// ResolveConfigForModel returns the id of the claude_configs row whose
+// models list contains modelName. Returns "" when no config claims it
+// (or on an empty modelName) so callers can fall back to a role binding
+// or the global active config without "no config" being treated as an
+// error. Multiple configs may list the same model id; the first match
+// (by created_at ASC, id ASC — matching List's order) wins so the lookup
+// is deterministic.
+//
+// Used by the wizard's sub-task dispatch paths (sub_task_runner.Run and
+// dispatchOneChild) so the resolved model always lands on the same gateway
+// as the model name. Fixes the "model and Base URL mismatch" bug where
+// modelName came from the developer role but ClaudeConfigID came from the
+// executor role — when the two roles were bound to different claude_configs
+// rows the request was sent to the wrong gateway.
+func (s *ClaudeConfigService) ResolveConfigForModel(modelName string) (configID string, err error) {
+	modelName = trimSpace(modelName)
+	if modelName == "" {
+		return "", nil
+	}
+	rows, err := s.db.Query("SELECT id, models FROM claude_configs ORDER BY created_at ASC, id ASC")
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, modelsJSON string
+		if serr := rows.Scan(&id, &modelsJSON); serr != nil {
+			return "", serr
+		}
+		for _, e := range DecodeModels(modelsJSON) {
+			if e.Model == modelName {
+				return id, nil
+			}
+		}
+	}
+	return "", rows.Err()
+}
+
 // ActiveModels returns the active config's model list + default model for the
 // role-settings UI. Returns nil, "", nil when no config is active.
 func (s *ClaudeConfigService) ActiveModels() (models []string, defaultModel string, err error) {
@@ -375,6 +461,21 @@ func (s *ClaudeConfigService) ActiveModels() (models []string, defaultModel stri
 		return nil, "", err
 	}
 	return modelEntryIDs(c.Models), c.DefaultModel, nil
+}
+
+// ActiveLaunchInfo returns the active config's base URL + default model for
+// rendering the copy-paste `claude --settings '{"env":{...}}'` prefix the UI
+// shows next to session ids. The auth token is deliberately NOT returned —
+// tokens never leave the backend in full (same rule as the config list API);
+// the pasted command works because the user's own ~/.claude auth or an
+// interactive `claude /login` supplies it, while --settings pins the model +
+// base URL exactly as Nova's own launches do.
+func (s *ClaudeConfigService) ActiveLaunchInfo() (baseURL, defaultModel string, err error) {
+	c, err := s.ActiveConfig()
+	if err != nil || c == nil {
+		return "", "", err
+	}
+	return c.BaseURL, c.DefaultModel, nil
 }
 
 // ModelInActiveList reports whether m is among the active config's models.
@@ -394,6 +495,39 @@ func (s *ClaudeConfigService) ModelInActiveList(m string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// ModelInAnyList reports whether m appears in the models list of ANY
+// claude_configs row. An empty m is treated as "no opinion" and accepted.
+// When no configs exist yet, every value is accepted (returns true).
+//
+// This loosens the role-model save gate so the user can pick a model from a
+// non-active config in the settings UI. The CLI subprocess still receives
+// env vars from the active config (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN),
+// so the caller is responsible for ensuring the chosen model is served by
+// the active gateway — the soft warning in handler/role.go communicates
+// that to the UI.
+func (s *ClaudeConfigService) ModelInAnyList(m string) (bool, error) {
+	if m == "" {
+		return true, nil
+	}
+	rows, err := s.db.Query("SELECT models FROM claude_configs")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var modelsJSON string
+		if err := rows.Scan(&modelsJSON); err != nil {
+			return false, err
+		}
+		for _, e := range DecodeModels(modelsJSON) {
+			if e.Model == m {
+				return true, nil
+			}
+		}
+	}
+	return true, rows.Err()
 }
 
 // MigrateLegacy is a one-way, idempotent migration: if claude_configs is empty

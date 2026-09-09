@@ -39,6 +39,7 @@ var copyOrder = []string{
 	"user_projects",
 	"sessions",
 	"sub_tasks",
+	"scheduled_tasks",
 }
 
 // Migrate copies all data from src into dst (which must already be migrated —

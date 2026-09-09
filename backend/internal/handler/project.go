@@ -178,6 +178,71 @@ func (h *ProjectHandler) Purge(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"id": id, "status": "purged"})
 }
 
+// UpdateBasicInfo edits the user-editable core fields of a project: display
+// name, remote URL, project type, and local filesystem path. All four are
+// optional in the request body — omitted fields are left unchanged, so the
+// caller can send a partial edit without re-uploading the rest. Whitespace
+// is trimmed server-side; an empty name or path is rejected with 400.
+//
+// PATCH /api/projects/{id}  body: {name?, remote_url?, project_type?, local_path?}
+func (h *ProjectHandler) UpdateBasicInfo(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		Name        *string `json:"name"`
+		RemoteURL   *string `json:"remote_url"`
+		ProjectType *string `json:"project_type"`
+		LocalPath   *string `json:"local_path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid JSON body")
+		return
+	}
+
+	// Read the current row so partial patches can reuse unchanged fields.
+	current, err := h.svc.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", err.Error())
+		return
+	}
+
+	name := current.Name
+	if req.Name != nil {
+		name = *req.Name
+	}
+	remoteURL := current.RemoteURL
+	if req.RemoteURL != nil {
+		remoteURL = *req.RemoteURL
+	}
+	projectType := current.ProjectType
+	if req.ProjectType != nil {
+		projectType = *req.ProjectType
+	}
+	localPath := current.LocalPath
+	if req.LocalPath != nil {
+		localPath = *req.LocalPath
+	}
+
+	if err := h.svc.UpdateBasicInfo(id, name, remoteURL, projectType, localPath); err != nil {
+		msg := err.Error()
+		switch {
+		case strings.HasPrefix(msg, "PROJECT_NOT_FOUND"):
+			writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", msg)
+		case strings.HasPrefix(msg, "INVALID_NAME"):
+			writeError(w, http.StatusBadRequest, "INVALID_NAME", msg)
+		case strings.HasPrefix(msg, "INVALID_LOCAL_PATH"):
+			writeError(w, http.StatusBadRequest, "INVALID_LOCAL_PATH", msg)
+		case strings.HasPrefix(msg, "DUPLICATE_LOCAL_PATH"):
+			writeError(w, http.StatusConflict, "DUPLICATE_LOCAL_PATH", msg)
+		default:
+			writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", msg)
+		}
+		return
+	}
+
+	p, _ := h.svc.Get(id)
+	writeJSON(w, http.StatusOK, p)
+}
+
 // UpdatePlatform binds a platform token to a project.
 // PATCH /api/projects/{id}/platform  body: {platform_type, platform_token_id}
 func (h *ProjectHandler) UpdatePlatform(w http.ResponseWriter, r *http.Request) {

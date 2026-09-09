@@ -142,7 +142,7 @@ export default function SettingsClaude() {
       const res = await claudeApi.activate(c.id);
       setConfigs(res.configs ?? []);
       const modelDesc = res.applied_model ? `「${res.applied_model}」` : 'CLI 默认';
-      showToast(`已切换为生效配置，各角色模型已重置为 ${modelDesc}`);
+      showToast(`已切换为默认配置，未绑定角色的模型已重置为 ${modelDesc}`);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -174,7 +174,7 @@ export default function SettingsClaude() {
           <h3 className="settings-section-title">Claude CLI 配置</h3>
           <p className="settings-section-desc">
             管理多套 Claude 配置（名称 + Base URL + Auth Token + 模型列表）。
-            切换生效配置后，<b>新发起的 AI 任务立即使用新配置</b>（进行中的任务不受影响），
+            切换默认配置后，<b>新发起的 AI 任务立即使用新配置</b>（进行中的任务不受影响），
             同时<b>所有角色的模型将重置为该配置的默认模型</b>。
           </p>
         </div>
@@ -215,7 +215,7 @@ export default function SettingsClaude() {
                 </td>
                 <td>{c.default_model || <span className="claude-token-unset">CLI 默认</span>}</td>
                 <td>{c.currency || '—'}</td>
-                <td>{c.is_active && <span className="claude-active-badge">当前生效</span>}</td>
+                <td>{c.is_active && <span className="claude-active-badge">默认</span>}</td>
                 <td className="claude-row-actions">
                   {!c.is_active && (
                     <button
@@ -223,7 +223,7 @@ export default function SettingsClaude() {
                       onClick={() => handleActivate(c)}
                       disabled={!!busyId}
                     >
-                      {busyId === c.id ? '切换中...' : '设为生效'}
+                      {busyId === c.id ? '切换中...' : '设为默认'}
                     </button>
                   )}
                   <button className="btn btn-sm btn-secondary" onClick={() => openEdit(c)} disabled={!!busyId}>
@@ -233,7 +233,7 @@ export default function SettingsClaude() {
                     className="btn-link btn-danger-link"
                     onClick={() => handleDelete(c)}
                     disabled={!!busyId || c.is_active}
-                    title={c.is_active ? '不能删除当前生效的配置' : ''}
+                    title={c.is_active ? '不能删除默认配置' : ''}
                   >
                     {busyId === c.id ? '删除中...' : '删除'}
                   </button>
@@ -247,7 +247,7 @@ export default function SettingsClaude() {
       {showModal && (
         <div className="modal-overlay" onClick={() => setShowModal(false)}>
           <div className="modal-box claude-config-modal" onClick={e => e.stopPropagation()}>
-            <h3 className="modal-title">{editingId ? '编辑配置' : '添加配置'}</h3>
+            <h3>{editingId ? '编辑配置' : '添加配置'}</h3>
 
             {error && <div className="form-error">{error}</div>}
 
@@ -361,7 +361,7 @@ export default function SettingsClaude() {
                 <option value="">不指定（CLI 默认）</option>
                 {form.models.map(m => <option key={m.model} value={m.model}>{m.model}</option>)}
               </select>
-              <small className="form-hint">切换为生效配置时，所有角色的模型会重置为此项。</small>
+              <small className="form-hint">切换默认配置时，未绑定配置的角色模型会重置为此项；已绑定其他配置的角色不受影响。</small>
             </div>
 
             <div className="form-actions stack-mobile">

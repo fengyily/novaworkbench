@@ -4,13 +4,14 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   projectsApi, runnerApi, reviewApi, platformApi, requirementsApi, knowledgeApi,
-  usageApi, usageTotalInput, fmtCost,
+  usageApi, usageTotalInput, fmtCost, wizardApi,
   type Project, type RunStatus, type PR, type PRListResponse, type PlatformToken,
   type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage, statusLabels,
   kindLabels, kindOf,
 } from '../api/client';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
+import { IconPlug, IconRobot } from '../components/icons';
 import { stripMarkdownPreview } from '../utils/preview';
 import { createEventStream, type EventStream } from '../api/stream';
 import './RequirementDetail.css';
@@ -57,7 +58,7 @@ export default function ProjectDetail() {
 
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<Tab>('overview');
+  const [tab, setTab] = useState<Tab>('requirements');
 
   // Run tab
   const [runStatus, setRunStatus] = useState<RunStatus | null>(null);
@@ -78,6 +79,14 @@ export default function ProjectDetail() {
   const [platformSaving, setPlatformSaving] = useState(false);
   const [platformSaved, setPlatformSaved] = useState(false);
 
+  // Overview: basic info (name / remote_url / project_type / local_path)
+  const [basicEditing, setBasicEditing] = useState(false);
+  const [basicDraft, setBasicDraft] = useState({
+    name: '', remote_url: '', project_type: '', local_path: '',
+  });
+  const [basicSaving, setBasicSaving] = useState(false);
+  const [basicMsg, setBasicMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
   // Overview: project description (AI-generated, manually editable)
   const [descEditing, setDescEditing] = useState(false);
   const [descDraft, setDescDraft] = useState('');
@@ -93,6 +102,16 @@ export default function ProjectDetail() {
   const [showCreateReq, setShowCreateReq] = useState(false);
   // Requirements tab pagination — first page by default ("默认加载第一页").
   const [reqPage, setReqPage] = useState(1);
+
+  // Requirement ids currently running a wizard job (across the whole
+  // backend process). Populated by polling GET /api/wizard/active-jobs
+  // every 5s. The renderRequirementRows helper checks this set per row
+  // and appends a small amber breathing dot next to the status badge
+  // whenever the requirement has an in-flight job — covers coding /
+  // design / apply / analyst without requiring the backend to add a
+  // `coding_job_id` column to the requirements table. List page only:
+  // detail page has its own richer aggregation in RequirementDetail.
+  const [activeReqIds, setActiveReqIds] = useState<Set<string>>(new Set());
 
   // Per-requirement token totals (excl review) — drives the Tokens column in
   // the requirements list + overview. Loaded alongside reqs and refetched when
@@ -239,6 +258,31 @@ export default function ProjectDetail() {
   // can never land past the new last page and "默认加载第一页" holds after refresh.
   useEffect(() => { setReqPage(1); }, [reqs]);
 
+  // 5s poll of /api/wizard/active-jobs. Drives the small amber breathing
+  // dot rendered next to each requirement's status badge in
+  // renderRequirementRows. Independent of `tab` so the dot stays accurate
+  // even when the user has the requirements tab collapsed on overview
+  // (re-entering the tab shows up-to-date state without a refresh). The
+  // `cancelled` flag guards against a late tick leaking into a different
+  // project (we'd otherwise see the previous project's requirements get
+  // a stale dot set after navigation).
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const { jobs } = await wizardApi.listActiveJobs();
+        if (cancelled) return;
+        setActiveReqIds(new Set(jobs.map((j) => j.requirement_id).filter(Boolean)));
+      } catch {
+        /* transient network blip — keep previous set until the next tick */
+      }
+    };
+    tick();
+    const handle = setInterval(tick, 5000);
+    return () => { cancelled = true; clearInterval(handle); };
+  }, [id]);
+
   // Overview: adapt the visible row count to the viewport's remaining space
   // below the section's top. Measuring the section's own height would
   // self-shrink (height drives count, count drives height), so we use the
@@ -316,6 +360,28 @@ export default function ProjectDetail() {
       setPlatformSaved(true);
       setTimeout(() => setPlatformSaved(false), 2000);
     } catch { /* ignore */ } finally { setPlatformSaving(false); }
+  };
+
+  // ── Overview: basic info edit (name / remote_url / project_type / local_path) ─
+  const handleSaveBasic = async () => {
+    if (!id) return;
+    setBasicSaving(true);
+    setBasicMsg(null);
+    try {
+      const updated = await projectsApi.updateBasicInfo(id, {
+        name: basicDraft.name.trim() ? basicDraft.name : undefined,
+        remote_url: basicDraft.remote_url,
+        project_type: basicDraft.project_type,
+        local_path: basicDraft.local_path.trim() ? basicDraft.local_path : undefined,
+      });
+      setProject(updated);
+      setBasicEditing(false);
+      setBasicMsg({ ok: true, text: '已保存' });
+    } catch (e: unknown) {
+      setBasicMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBasicSaving(false);
+    }
   };
 
   // ── Overview: project description ───────────────────────────────────────────
@@ -420,6 +486,10 @@ export default function ProjectDetail() {
 
   // Shared table rows for the requirements list (used by both the overview
   // "recent requirements" and the requirements tab — single source of truth).
+  // The "Agent 服务器" column mirrors the cross-project RequirementsList so
+  // users can see at a glance which remote execution target the requirement
+  // was developed on (or 本地 if it ran locally). Stays consistent with the
+  // `agent-server-tag` styling on the global list page.
   const renderRequirementRows = (items: Requirement[]) => items.map(req => (
     <tr
       key={req.id}
@@ -430,7 +500,34 @@ export default function ProjectDetail() {
       <td data-label="类型"><span className={`kind-badge kind-${kindOf(req)}`}>{kindLabels[kindOf(req)]}</span></td>
       <td data-label="标题" className="pr-title">{req.title}</td>
       <td data-label="优先级"><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
-      <td data-label="状态"><span className={`status-badge status-${req.status}`}>{statusLabels[req.status] ?? req.status}</span></td>
+      <td data-label="状态">
+        <span className={`status-badge status-${req.status}`}>{statusLabels[req.status] ?? req.status}</span>
+        {/* Breathing dot for any wizard job in flight on this requirement
+            (analyst/design/apply/coding). Set is populated by the 5s poll
+            of /api/wizard/active-jobs above. aria-label + title so screen
+            readers + hover explain the indicator (the dot has no text). */}
+        {activeReqIds.has(req.id) && (
+          <span
+            className="claude-pulse-dot is-work"
+            aria-label="Claude 处理中"
+            title="Claude 正在处理此需求"
+          />
+        )}
+      </td>
+      {/* Agent server column: which remote execution target the requirement
+          was developed on. Empty = 本地. The joined name comes from the
+          backend's LEFT JOIN; a deleted server falls back to 本地 so stale
+          ids never render as raw hex. Identical to the column on the
+          cross-project RequirementsList. */}
+      <td data-label="Agent 服务器">
+        {req.agent_server_name ? (
+          <span className="agent-server-tag" title={req.agent_server_name}>
+            🖥️ {req.agent_server_name}
+          </span>
+        ) : (
+          <span style={{ color: 'var(--color-text-muted)' }}>本地</span>
+        )}
+      </td>
       <td data-label="Tokens (入/出)" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
         {(() => {
           const u = reqUsageMap.get(req.id);
@@ -531,13 +628,12 @@ export default function ProjectDetail() {
       <p className="detail-path"><code>{project.local_path}</code></p>
 
       <div className="detail-tabs">
-        <button className={`tab-btn${tab === 'overview' ? ' active' : ''}`} onClick={() => setTab('overview')}>概览</button>
+        <button className={`tab-btn${tab === 'requirements' ? ' active' : ''}`} onClick={() => { setTab('requirements'); setReqPage(1); }}>
+          需求
+        </button>
         <button className={`tab-btn${tab === 'knowledge' ? ' active' : ''}`} onClick={() => setTab('knowledge')}>知识库</button>
         <button className={`tab-btn${tab === 'run' ? ' active' : ''}`} onClick={() => setTab('run')}>
           运行{isRunning ? ' ●' : ''}
-        </button>
-        <button className={`tab-btn${tab === 'requirements' ? ' active' : ''}`} onClick={() => { setTab('requirements'); setReqPage(1); }}>
-          需求
         </button>
         <button className={`tab-btn${tab === 'review' ? ' active' : ''}`} onClick={() => setTab('review')}>
           代码 Review{reviewingPR ? ' ●' : ''}
@@ -548,26 +644,126 @@ export default function ProjectDetail() {
         <button className={`tab-btn${tab === 'weekly' ? ' active' : ''}`} onClick={() => setTab('weekly')}>
           周报
         </button>
+        <button className={`tab-btn${tab === 'overview' ? ' active' : ''}`} onClick={() => setTab('overview')}>概览</button>
       </div>
 
       {/* ── Overview ── */}
       {tab === 'overview' && (
         <div className="tab-content">
           <div className="detail-section">
-            <div className="info-row"><span className="info-label">名称</span><span>{project.name}</span></div>
-            <div className="info-row">
-              <span className="info-label">路径</span>
-              <code className="info-code">{project.local_path}</code>
+            <div className="section-header" style={{ marginBottom: 12 }}>
+              <span style={{ fontWeight: 600, fontSize: 14 }}>基本信息</span>
+              {!basicEditing && (
+                <button
+                  className="btn btn-sm"
+                  onClick={() => {
+                    setBasicDraft({
+                      name: project.name,
+                      remote_url: project.remote_url ?? '',
+                      project_type: project.project_type ?? '',
+                      local_path: project.local_path,
+                    });
+                    setBasicEditing(true);
+                    setBasicMsg(null);
+                  }}
+                >
+                  编辑
+                </button>
+              )}
             </div>
-            <div className="info-row"><span className="info-label">类型</span><span>{project.project_type || 'Unknown'}</span></div>
-            <div className="info-row">
-              <span className="info-label">状态</span>
-              <span className={`status-badge status-${project.status}`}>{project.status}</span>
-            </div>
-            {project.remote_url && (
-              <div className="info-row">
-                <span className="info-label">仓库</span>
-                <code className="info-code">{project.remote_url}</code>
+
+            {basicEditing ? (
+              <div style={{ display: 'grid', gap: 12 }}>
+                <div className="form-group" style={{ margin: 0 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
+                    名称
+                  </label>
+                  <input
+                    className="form-input"
+                    value={basicDraft.name}
+                    onChange={e => setBasicDraft(d => ({ ...d, name: e.target.value }))}
+                    placeholder="项目名称"
+                    autoFocus
+                  />
+                </div>
+                <div className="form-group" style={{ margin: 0 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
+                    仓库地址
+                  </label>
+                  <input
+                    className="form-input"
+                    value={basicDraft.remote_url}
+                    onChange={e => setBasicDraft(d => ({ ...d, remote_url: e.target.value }))}
+                    placeholder="https://github.com/user/repo.git  或  git@github.com:user/repo.git"
+                  />
+                </div>
+                <div className="form-group" style={{ margin: 0 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
+                    类型
+                  </label>
+                  <select
+                    className="form-input"
+                    value={basicDraft.project_type}
+                    onChange={e => setBasicDraft(d => ({ ...d, project_type: e.target.value }))}
+                  >
+                    <option value="">— 自动检测 —</option>
+                    <option value="Go">Go</option>
+                    <option value="Node.js">Node.js</option>
+                    <option value="Python">Python</option>
+                    <option value="Rust">Rust</option>
+                    <option value="Java/Maven">Java/Maven</option>
+                    <option value="Java/Gradle">Java/Gradle</option>
+                    <option value="Unknown">Unknown</option>
+                  </select>
+                </div>
+                <div className="form-group" style={{ margin: 0 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
+                    路径
+                  </label>
+                  <input
+                    className="form-input"
+                    value={basicDraft.local_path}
+                    onChange={e => setBasicDraft(d => ({ ...d, local_path: e.target.value }))}
+                    placeholder="/absolute/path/to/project"
+                  />
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="btn btn-primary btn-sm" onClick={handleSaveBasic} disabled={basicSaving}>
+                    {basicSaving ? '保存中...' : '保存'}
+                  </button>
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => { setBasicEditing(false); setBasicMsg(null); }}
+                    disabled={basicSaving}
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="info-row"><span className="info-label">名称</span><span>{project.name}</span></div>
+                <div className="info-row">
+                  <span className="info-label">路径</span>
+                  <code className="info-code">{project.local_path}</code>
+                </div>
+                <div className="info-row"><span className="info-label">类型</span><span>{project.project_type || 'Unknown'}</span></div>
+                <div className="info-row">
+                  <span className="info-label">状态</span>
+                  <span className={`status-badge status-${project.status}`}>{project.status}</span>
+                </div>
+                {project.remote_url && (
+                  <div className="info-row">
+                    <span className="info-label">仓库</span>
+                    <code className="info-code">{project.remote_url}</code>
+                  </div>
+                )}
+              </>
+            )}
+
+            {basicMsg && (
+              <div style={{ marginTop: 8, fontSize: 12, color: basicMsg.ok ? 'var(--color-success)' : 'var(--color-error)' }}>
+                {basicMsg.ok ? '✅ ' : '❌ '}{basicMsg.text}
               </div>
             )}
           </div>
@@ -647,11 +843,9 @@ export default function ProjectDetail() {
               )}
             </div>
 
-            <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-              <div className="form-group" style={{ margin: 0, flex: '0 0 160px' }}>
-                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
-                  平台
-                </label>
+            <div className="platform-form-row">
+              <div className="form-group platform-form-field">
+                <label>平台</label>
                 <select
                   className="form-input"
                   value={platformForm.platform_type}
@@ -664,10 +858,8 @@ export default function ProjectDetail() {
                 </select>
               </div>
 
-              <div className="form-group" style={{ margin: 0, flex: '1 1 200px' }}>
-                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
-                  Token
-                </label>
+              <div className="form-group platform-form-field platform-form-field-grow">
+                <label>Token</label>
                 <select
                   className="form-input"
                   value={platformForm.platform_token_id}
@@ -684,8 +876,7 @@ export default function ProjectDetail() {
               </div>
 
               <button
-                className="btn btn-primary"
-                style={{ height: 38 }}
+                className="btn btn-primary platform-form-save"
                 onClick={handleSavePlatform}
                 disabled={platformSaving}
               >
@@ -735,6 +926,7 @@ export default function ProjectDetail() {
                       <th>标题</th>
                       <th style={{ width: 90 }}>优先级</th>
                       <th style={{ width: 130 }}>状态</th>
+                      <th style={{ width: 140 }}>Agent 服务器</th>
                       <th style={{ width: 130 }}>Tokens (入/出)</th>
                       <th style={{ width: 110 }}>成本</th>
                       <th style={{ width: 110 }}>创建时间</th>
@@ -872,6 +1064,7 @@ export default function ProjectDetail() {
                     <th>标题</th>
                     <th style={{ width: 90 }}>优先级</th>
                     <th style={{ width: 130 }}>状态</th>
+                    <th style={{ width: 140 }}>Agent 服务器</th>
                     <th style={{ width: 130 }}>Tokens (入/出)</th>
                       <th style={{ width: 110 }}>成本</th>
                     <th style={{ width: 110 }}>创建时间</th>
@@ -923,7 +1116,7 @@ export default function ProjectDetail() {
           {/* Not configured */}
           {!prsLoading && prData && !prData.configured && (
             <div className="review-unconfigured">
-              <div className="review-unconfigured-icon">🔌</div>
+              <div className="review-unconfigured-icon"><IconPlug size={28} /></div>
               <p>项目未配置平台 Token，无法拉取 PR 列表。</p>
               <p>
                 请先到
@@ -1031,7 +1224,7 @@ export default function ProjectDetail() {
                 <span>PR Comment 草稿 — #{lastReviewedPRRef.current}</span>
               </div>
               <div className="review-model-line">
-                🤖 本次 review 使用模型：{reviewModel || '默认模型'}
+                <IconRobot size={13} /> 本次 review 使用模型：{reviewModel || '默认模型'}
               </div>
               <textarea
                 className="review-comment-editor"

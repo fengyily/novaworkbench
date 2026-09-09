@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -16,6 +18,8 @@ import (
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/middleware"
 	"github.com/novaworkbench/backend/internal/preflight"
+	"github.com/novaworkbench/backend/internal/scheduler"
+	"github.com/novaworkbench/backend/internal/secret"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/web"
@@ -28,6 +32,8 @@ func main() {
 		"one-shot data migration: copy all data from a SQLite file into the configured target database (NOVA_DB_DRIVER/NOVA_DB_DSN or dbconfig.json), then exit")
 	fromFlag := flag.String("from", db.DefaultSQLitePath,
 		"SQLite source path for -migrate")
+	portFlag := flag.String("port", "",
+		"HTTP listen port (overrides NOVA_PORT; default 9527). Example: -port 9000")
 	flag.Parse()
 
 	if *migrateFlag {
@@ -45,6 +51,15 @@ func main() {
 	}
 	defer database.Close()
 
+	// Load (or generate) the master encryption key used by internal/secret to
+	// seal Agent-server credentials. Failure here is fatal — there is no
+	// recoverable mode for a missing master key, and silently degrading to
+	// plaintext storage would defeat the whole feature.
+	if err := secret.Init(); err != nil {
+		log.Fatalf("Failed to initialize secret store: %v", err)
+	}
+	log.Printf("[secret] master key loaded from %s", secret.KeyPath())
+
 	// Services
 	platformSvc := service.NewPlatformTokenService(database)
 	projectSvc := service.NewProjectService(database, platformSvc)
@@ -58,7 +73,9 @@ func main() {
 	usageSvc := service.NewUsageService(database)
 	aclSvc := service.NewACLService(database)
 	skillSvc := service.NewSkillService(database)
+	agentSvrSvc := service.NewAgentServerService(database)
 	subTaskSvc := service.NewSubTaskService(database)
+	schedSvc := service.NewScheduledTaskService(database)
 
 	// Seed built-in roles on first run (idempotent).
 	if err := roleSvc.SeedDefaults(); err != nil {
@@ -83,6 +100,23 @@ func main() {
 		log.Printf("[main] developer role write-channel migrate: %v", err)
 	} else if migrated {
 		log.Println("[main] developer role prompt 已升级到「Write 工具提交拆分」版本")
+	}
+	// Upgrade the executor role prompt to the "直接落地实现" persona. Same
+	// substring-fingerprint + idempotent pattern as MigrateDeveloperRole: the
+	// existing row's prompt is rewritten only when it still carries the old
+	// "严禁拆任务" signature; user-customized prompts are left alone (settings
+	// page reset button is the supported opt-in for those).
+	if migrated, err := roleSvc.MigrateExecutorRole(); err != nil {
+		log.Printf("[main] executor role migrate: %v", err)
+	} else if migrated {
+		log.Println("[main] executor role prompt 已升级到「直接落地实现」版本")
+	}
+	// Upgrade the architect role prompt to the template-driven persona (需求/
+	// 项目上下文/输出要求/工作方式约束). Same fingerprint + idempotent pattern.
+	if migrated, err := roleSvc.MigrateArchitectRole(); err != nil {
+		log.Printf("[main] architect role migrate: %v", err)
+	} else if migrated {
+		log.Println("[main] architect role prompt 已升级到「模板驱动」版本")
 	}
 
 	// Sub-task execution is driven by in-memory goroutines — a restart leaves
@@ -155,11 +189,49 @@ func main() {
 	sharedJobs := store.NewJobStore(50)
 	preflightH := handler.NewPreflightHandler(pfRegistry, sharedJobs)
 	reqH := handler.NewRequirementHandler(reqSvc, llmGateway, sharedJobs, usageSvc)
-	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, subTaskSvc)
+	// SubTaskRunner is the shared executor for child-agent rows: both the
+	// wizard (manual sub-tasks + auto-orchestrated children) and the merge
+	// handler (push + PR sub-task) delegate to it. Constructed once so the
+	// ring-buffer of live jobs is shared across handlers. The wizard handler
+	// is built first and its remote-coding entrypoint is injected below —
+	// the runner needs it to dispatch children to an Agent server, while the
+	// wizard needs the runner for sub-task rows, so neither can be a pure
+	// constructor argument of the other.
+	//
+	// sub-task concurrency cap (env NOVA_SUBTASK_CONCURRENCY) prevents the
+	// "make run → SIGKILL on parent" symptom: too many parallel claude Node.js
+	// children trip macOS jetsam / Linux OOM killer on the parent nova process
+	// — a SIGKILL Go cannot intercept. Default 4 ≈ leaves ~1 GB headroom on a
+	// 4 GB jetsam threshold. See plan-ancient-snail.md.
+	subTaskConcurrency := handler.DefaultSubTaskConcurrency
+	if env := os.Getenv("NOVA_SUBTASK_CONCURRENCY"); env != "" {
+		if n, perr := strconv.Atoi(env); perr == nil && n > 0 {
+			subTaskConcurrency = n
+		} else {
+			log.Printf("[startup] ignoring invalid NOVA_SUBTASK_CONCURRENCY=%q (want positive int), falling back to %d", env, subTaskConcurrency)
+		}
+	}
+	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, agentSvrSvc, nil, subTaskConcurrency)
+	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, subTaskSvc, subTaskRunner)
+	// Wire the remote-coding entrypoint AFTER both are built: children of an
+	// Agent-server-developed requirement run on that server, so every sub-task
+	// dispatch (manual / orchestrated / push+PR) routes through it.
+	subTaskRunner.SetRemoteCoding(wizardH.RunRemoteCoding)
+	// Scheduled-task executor (wizard bridge) and HTTP handler. The
+	// scheduler package polls scheduled_tasks rows and dispatches through
+	// the executor; both live in main.go so the lifecycle is the same as
+	// the rest of the wiring.
+	schedExec := handler.NewScheduledExecutor(wizardH, schedSvc)
+	schedH := handler.NewScheduleHandler(schedSvc, reqSvc)
+	schedulerRunner := scheduler.New(database, schedExec)
+	if _, err := schedulerRunner.Recover(); err != nil {
+		log.Printf("[main] scheduler recovery: %v", err)
+	}
+	schedulerRunner.Start()
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
-	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs)
-	mergeH := handler.NewMergeHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc)
+	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
+	mergeH := handler.NewMergeHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)
 	roleH := handler.NewRoleHandler(roleSvc, claudeCfgSvc)
 	settingH := handler.NewSettingHandler(settingSvc)
@@ -169,6 +241,12 @@ func main() {
 	authH := handler.NewAuthHandler(aclSvc)
 	aclH := handler.NewACLHandler(aclSvc)
 	skillH := handler.NewSkillHandler(skillSvc)
+
+	// Agent-server resource: SSH targets for remote claude execution. The
+	// credential is sealed by internal/secret (AES-256-GCM); the wizard's
+	// StartCoding remote branch consumes this service when a request carries
+	// agent_server_id.
+	agentSvrH := handler.NewAgentServerHandler(agentSvrSvc, sharedJobs)
 
 	// Router
 	mux := http.NewServeMux()
@@ -233,6 +311,7 @@ func main() {
 	mux.HandleFunc("POST /api/projects/{id}/prs/{pr_number}/comment", reviewH.SubmitComment)
 
 	// Project platform config
+	mux.HandleFunc("PATCH /api/projects/{id}", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.UpdateBasicInfo)).ServeHTTP)
 	mux.HandleFunc("PATCH /api/projects/{id}/platform", projectH.UpdatePlatform)
 
 	// Project description (AI-generated from CLAUDE.md, manual-edit lockable)
@@ -256,6 +335,19 @@ func main() {
 	mux.HandleFunc("POST /api/settings/tokens", platformH.Create)
 	mux.HandleFunc("PUT /api/settings/tokens/{id}", platformH.Update)
 	mux.HandleFunc("DELETE /api/settings/tokens/{id}", platformH.Delete)
+
+	// Agent servers (settings) — remote Linux/macOS execution targets with
+	// AES-256-GCM-encrypted credentials. CRUD + Check/Install (background
+	// JobStore jobs streamed over SSE, same shape as wizard/preflight).
+	mux.HandleFunc("GET /api/settings/agent-servers", agentSvrH.List)
+	mux.HandleFunc("POST /api/settings/agent-servers", agentSvrH.Create)
+	mux.HandleFunc("GET /api/settings/agent-servers/{id}", agentSvrH.Get)
+	mux.HandleFunc("PUT /api/settings/agent-servers/{id}", agentSvrH.Update)
+	mux.HandleFunc("DELETE /api/settings/agent-servers/{id}", agentSvrH.Delete)
+	mux.HandleFunc("POST /api/settings/agent-servers/{id}/check", agentSvrH.Check)
+	mux.HandleFunc("POST /api/settings/agent-servers/{id}/install", agentSvrH.Install)
+	mux.HandleFunc("GET /api/settings/agent-servers/jobs/{id}", agentSvrH.GetJob)
+	mux.HandleFunc("GET /api/settings/agent-servers/jobs/{id}/stream", agentSvrH.StreamJob)
 
 	// Roles (settings) — per-role system prompt + model, drives claude CLI flags
 	mux.HandleFunc("GET /api/settings/roles", roleH.List)
@@ -341,6 +433,7 @@ func main() {
 	mux.HandleFunc("POST /api/wizard/continue-coding", wizardH.ContinueCoding)
 	mux.HandleFunc("GET /api/wizard/jobs/{id}", wizardH.GetJob)
 	mux.HandleFunc("GET /api/wizard/jobs/{id}/stream", wizardH.StreamJob)
+	mux.HandleFunc("GET /api/wizard/active-jobs", wizardH.GetActiveJobs)
 	mux.HandleFunc("POST /api/wizard/refine-doc", wizardH.RefineDoc)
 	mux.HandleFunc("POST /api/wizard/apply-doc", wizardH.ApplyDoc)
 
@@ -350,6 +443,19 @@ func main() {
 	// compressed_at timestamp for the "📦 已压缩" badge.
 	mux.HandleFunc("POST /api/wizard/compress-context", wizardH.CompressContext)
 	mux.HandleFunc("GET /api/wizard/requirement/{id}/context-summary", wizardH.GetContextSummary)
+
+	// Scheduled tasks (定时任务) — one-shot, future-dated wizard actions
+	// (architect-design / start-coding) with a pre-selected model. Five
+	// routes: create / list / get / cancel / delete. Shares the wizard's
+	// JobStore for execution logs (scheduled_tasks.job_id references
+	// /api/wizard/jobs/{id}); execution semantics handled by the
+	// internal/scheduler package.
+	schedulePerm := middleware.RequirePermission(aclSvc, "menu.projects")
+	mux.HandleFunc("POST /api/schedules", schedulePerm(http.HandlerFunc(schedH.Create)).ServeHTTP)
+	mux.HandleFunc("GET /api/schedules", schedulePerm(http.HandlerFunc(schedH.List)).ServeHTTP)
+	mux.HandleFunc("GET /api/schedules/{id}", schedulePerm(http.HandlerFunc(schedH.Get)).ServeHTTP)
+	mux.HandleFunc("POST /api/schedules/{id}/cancel", schedulePerm(http.HandlerFunc(schedH.Cancel)).ServeHTTP)
+	mux.HandleFunc("DELETE /api/schedules/{id}", schedulePerm(http.HandlerFunc(schedH.Delete)).ServeHTTP)
 
 	// Sub-task (子任务) endpoints — manually-triggered child agents that
 	// fork the requirement's coding_session_id so they share the main
@@ -364,6 +470,9 @@ func main() {
 	// parent's claude session via --fork-session). Same scope as
 	// AdjustCoding — reuses the spawn helper in wizard.go.
 	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/{sid}/adjust", wizardH.AdjustSubTask)
+	// Re-run a FAILED sub-task with its original prompt (optionally switching
+	// models). Forks the failed run's source session for a clean retry.
+	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/{sid}/redo", wizardH.RedoSubTask)
 	// Manual re-split: resumes the coding session with the decomposition
 	// trigger and runs the same parse+dispatch pipeline as StartCoding's
 	// auto-orchestrate. Escape hatch for when auto-orchestration produced
@@ -431,7 +540,10 @@ func main() {
 		spaMux.ServeHTTP(w, r)
 	})
 
-	port := os.Getenv("NOVA_PORT")
+	port := *portFlag
+	if port == "" {
+		port = os.Getenv("NOVA_PORT")
+	}
 	if port == "" {
 		port = "9527"
 	}
@@ -444,15 +556,33 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// Graceful shutdown
+	// Startup banner: capture pid / ppid / GOMAXPROCS so post-mortem logs of an
+	// unexpected exit (SIGKILL we cannot catch) at least pin down whether the
+	// process tree was sane. "make run" + "go run" wrappers strip some env, so
+	// the parent pid is the most useful single value here.
+	log.Printf("[startup] pid=%d ppid=%d GOMAXPROCS=%d subTaskConcurrency=%d", os.Getpid(), os.Getppid(), runtime.GOMAXPROCS(0), subTaskConcurrency)
+
+	// Graceful shutdown. SIGINT / SIGTERM get the full 30s drain so in-flight
+	// claude child processes can flush their session jsonl (StreamCmd sets
+	// WaitDelay to give them 5s soft-exit). SIGHUP (e.g. terminal disconnect
+	// under "make run") gets only 2s — terminal detachment is almost always
+	// the user walking away, not a planned stop, so we shouldn't block.
 	go func() {
 		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		<-sigCh
-		log.Println("Shutting down...")
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		sig := <-sigCh
+		shutdownTimeout := 30 * time.Second
+		if sig == syscall.SIGHUP {
+			shutdownTimeout = 2 * time.Second
+		}
+		log.Printf("[shutdown] received signal=%v, draining (timeout=%s)...", sig, shutdownTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		srv.Shutdown(ctx)
+		// Stop the scheduled-task poller after the HTTP server is down so
+		// any in-flight dispatcher finishes writing its job_log before we
+		// tear everything down. Stop() waits up to 2s for the loop to exit.
+		schedulerRunner.Stop()
 	}()
 
 	log.Printf("Server listening on http://localhost:%s", port)

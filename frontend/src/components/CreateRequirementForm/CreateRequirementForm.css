@@ -1,70 +1,307 @@
 /* CreateRequirementForm
    ------------------------------------------------------------------
-   Stays consistent with the legacy inline form (`.create-req-form` /
-   `.create-req-form-header` / `.create-req-anchor`) so existing project
-   detail tab styling continues to apply, while adding a 3-card kind
-   picker at the top with a selected/hover/disabled state. */
+   Keeps the outer shell classes (`.create-req-form` /
+   `.create-req-form-header` / `.create-req-anchor`) defined in
+   ProjectDetail.css so the panel still sits correctly in both the
+   project detail tab and the cross-project requirements list.
 
-.create-req-form .kind-card-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 6px;
-}
+   Layout intent: classify (one row) → write (the hero) → configure
+   (quiet controls). Two segmented controls share the `.create-req-kind`
+   visual treatment — 类型切换 (problem/requirement/idea) and 开发流程
+   (full/skip-analysis/direct) — so the panel reads as one family of
+   selections instead of two competing patterns. The flow selector's
+   helper note lives BELOW the control, not on every chip, since the
+   chips have to stay short enough to fit one row at any width. */
 
-.create-req-form .kind-card {
-  position: relative;
-  text-align: left;
-  background: var(--color-surface, #fff);
-  border: 1px solid var(--color-border, #E2E8F0);
-  border-radius: 8px;
-  padding: 12px 12px 14px;
-  cursor: pointer;
-  transition: border-color 120ms ease, background-color 120ms ease, transform 120ms ease;
-  font: inherit;
-  color: inherit;
-}
+/* --- Segmented control (shared by 类型 + 流程) -------------------- */
 
-.create-req-form .kind-card:hover:not(:disabled) {
-  border-color: var(--color-primary, #4F46E5);
+.create-req-form .create-req-kind,
+.create-req-form .create-req-flow {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
   background: var(--color-hover, #F1F5F9);
-  transform: translateY(-1px);
+  border-radius: 8px;
+  max-width: 100%;
 }
 
-.create-req-form .kind-card.selected {
-  border-color: var(--color-primary, #4F46E5);
-  background: var(--color-active, #EEF2FF);
-  box-shadow: 0 0 0 1px var(--color-primary, #4F46E5) inset;
+.create-req-form .create-req-flow {
+  display: flex;
+  width: 100%;
 }
 
-.create-req-form .kind-card:disabled {
-  opacity: 0.5;
+/* --- Kind switcher ----------------------------------------------- */
+
+.create-req-form .create-req-kind-tab {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary, #64748B);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.create-req-form .create-req-kind-tab:hover:not(:disabled):not(.selected) {
+  color: var(--color-text, #1E293B);
+}
+
+.create-req-form .create-req-kind-tab.selected {
+  background: var(--color-surface, #fff);
+  color: var(--color-primary, #4F46E5);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1);
+}
+
+.create-req-form .create-req-kind-tab:disabled {
+  opacity: 0.55;
   cursor: not-allowed;
 }
 
-.create-req-form .kind-card-title {
-  font-weight: 600;
-  font-size: 14px;
-  margin-bottom: 6px;
-}
-
-.create-req-form .kind-card-hint {
+.create-req-form .create-req-kind-hint {
+  margin: 8px 0 12px;
   font-size: 12px;
-  color: var(--color-text-secondary, #64748B);
-  line-height: 1.45;
+  line-height: 1.5;
+  color: var(--color-text-muted, #94A3B8);
 }
 
-.create-req-form .kind-card-check {
+/* --- Description ------------------------------------------------ */
+
+.create-req-form .create-req-desc textarea.form-input {
+  font-size: 14px;
+  padding: 12px;
+  min-height: 132px;
+}
+
+.create-req-form .create-req-desc-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.create-req-form .create-req-desc-meta .form-hint { margin-top: 0; }
+
+.create-req-form .create-req-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+/* --- Skip-AI-organize toggle ------------------------------------ */
+
+/* The toggle is a <label>, and it sits inside `.form-group` — which means
+   BOTH `.form-group label` (index.css) and `.create-req-form .form-group label`
+   (ProjectDetail.css) try to restyle it as a plain field caption
+   (`display: block`, tiny type, bottom margin). Those selectors win on
+   specificity over a bare `.create-req-toggle`, which flattened the whole
+   row: pill on one line, text stacked below. Re-declaring the control at
+   (0,3,1) puts it permanently out of their reach — no dependency on CSS
+   import order between the two stylesheets. Every property the caption
+   rules set is reset explicitly, so the row survives future edits to them. */
+.create-req-form .form-group label.create-req-toggle,
+.create-req-form label.create-req-toggle {
+  /* Layout */
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+  position: relative; /* contains the visually-hidden checkbox */
+  /* Reset the field-caption rules this element also matches */
+  margin: 12px 0 0;
+  font-size: 13px;
+  font-weight: 400;
+  color: inherit;
+  /* Surface */
+  padding: 9px 12px;
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 8px;
+  background: var(--color-surface, #fff);
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.create-req-form .form-group label.create-req-toggle:hover,
+.create-req-form label.create-req-toggle:hover {
+  border-color: var(--color-primary, #4F46E5);
+}
+
+.create-req-form .form-group label.create-req-toggle.on,
+.create-req-form label.create-req-toggle.on {
+  border-color: var(--color-primary, #4F46E5);
+  background: var(--color-active, #EEF2FF);
+}
+
+/* Screen-reader-only checkbox: it stays in the tab order and carries the
+   space/enter toggling for keyboard users, while the pill below is pure
+   decoration painted from the label's `.on` class. */
+.create-req-form .create-req-toggle input[type='checkbox'] {
   position: absolute;
-  top: 8px;
-  right: 10px;
-  color: var(--color-primary, #4F46E5);
-  font-weight: 700;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
-/* Mobile: collapse to single-column stack so cards don't get squashed. */
+.create-req-form .create-req-toggle-track {
+  position: relative;
+  flex-shrink: 0;
+  width: 32px;
+  height: 18px;
+  border-radius: 999px;
+  background: #CBD5E1;
+  transition: background-color 160ms ease;
+}
+
+.create-req-form .create-req-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.25);
+  transition: transform 160ms ease;
+}
+
+.create-req-form .create-req-toggle.on .create-req-toggle-track {
+  background: var(--color-primary, #4F46E5);
+}
+
+.create-req-form .create-req-toggle.on .create-req-toggle-thumb {
+  transform: translateX(14px);
+}
+
+/* The text block takes the remaining width; `min-width: 0` is what lets a
+   long note wrap inside a flex row instead of pushing the pill out. */
+.create-req-form .create-req-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.create-req-form .create-req-toggle-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text, #1E293B);
+  line-height: 1.3;
+}
+
+.create-req-form .create-req-toggle-note {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+.create-req-form .create-req-toggle:focus-within {
+  outline: 2px solid var(--color-primary, #4F46E5);
+  outline-offset: 2px;
+}
+
+/* --- Secondary settings ---------------------------------------- */
+
+.create-req-form .create-req-meta-row {
+  display: flex;
+  gap: 12px;
+}
+
+.create-req-form .create-req-meta-row .form-group {
+  flex: 1;
+  min-width: 0;
+}
+
+/* --- Flow segmented control ------------------------------------ */
+
+.create-req-form .create-req-flow {
+  margin-top: 2px;
+}
+
+.create-req-form .create-req-flow .create-req-kind-tab {
+  font-size: 13px;
+  padding: 7px 12px;
+}
+
+.create-req-form .create-req-flow-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+/* --- Error + actions -------------------------------------------- */
+
+.create-req-form .create-req-error {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border-left: 3px solid var(--color-error, #EF4444);
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--color-error, #EF4444);
+  font-size: 13px;
+}
+
+.create-req-form .form-actions { align-items: center; }
+
+.create-req-form .create-req-shortcut {
+  margin-right: auto;
+  font-size: 11px;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+/* Keyboard users must be able to see where they are. */
+.create-req-form .create-req-kind-tab:focus-visible,
+.create-req-form .create-req-toggle:focus-within {
+  outline: 2px solid var(--color-primary, #4F46E5);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .create-req-form .create-req-kind-tab,
+  .create-req-form .create-req-toggle-track,
+  .create-req-form .create-req-toggle-thumb { transition: none; }
+}
+
+/* Mobile: stack the meta row; hide the desktop-only keyboard shortcut hint.
+   Both segmented controls already wrap their tabs into a column on
+   narrow screens via the .create-req-flow { width: 100% } rule and the
+   `flex: 1` on each tab. */
 @media (max-width: 640px) {
-  .create-req-form .kind-card-grid {
-    grid-template-columns: 1fr;
+  .create-req-form .create-req-meta-row { flex-direction: column; gap: 14px; }
+  .create-req-form .create-req-kind { display: flex; }
+  .create-req-form .create-req-shortcut { display: none; }
+
+  /* Touch target: the toggle is the only control in the panel without a
+     native 44px hit area, and it is the easiest one to fat-finger because
+     its ON state is the default. Same (0,3,1) selector as the base rule —
+     the media query wins on order, not on specificity. */
+  .create-req-form .form-group label.create-req-toggle,
+  .create-req-form label.create-req-toggle {
+    min-height: 44px;
+    padding: 10px 12px;
+    align-items: flex-start;
   }
+
+  /* When the note wraps onto two lines on a narrow phone, a centred pill
+     floats mid-row and looks accidental; pinning it to the first text line
+     keeps the control anchored. 1px down offsets the pill's own border so
+     it optically centres against the 13px label. */
+  .create-req-form .create-req-toggle-track { margin-top: 1px; }
 }

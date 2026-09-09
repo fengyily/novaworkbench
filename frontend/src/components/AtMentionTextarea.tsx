@@ -86,7 +86,7 @@ export default function AtMentionTextarea({ value, onChange, onKeyDown, placehol
   };
 
   return (
-    <div style={{ position: 'relative' }}>
+    <div className="at-mention-wrapper">
       <textarea
         ref={textareaRef}
         value={value}
@@ -100,38 +100,16 @@ export default function AtMentionTextarea({ value, onChange, onKeyDown, placehol
         disabled={disabled}
       />
       {atQuery && filtered.length > 0 && (
-        <div style={{
-          position: 'absolute',
-          left: 0,
-          bottom: '100%',
-          marginBottom: 4,
-          background: '#fff',
-          border: '1px solid #E2E8F0',
-          borderRadius: 8,
-          boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
-          zIndex: 100,
-          minWidth: 240,
-          maxWidth: 360,
-          overflow: 'hidden',
-        }}>
+        <div className="at-mention-popover">
           {filtered.map((sk, idx) => (
             <div
               key={sk.slug}
               onMouseDown={(e) => { e.preventDefault(); insertSkill(sk); }}
-              style={{
-                padding: '8px 12px',
-                cursor: 'pointer',
-                background: idx === activeIdx ? '#EEF2FF' : '#fff',
-                borderBottom: idx < filtered.length - 1 ? '1px solid #F1F5F9' : 'none',
-              }}
+              className={`at-mention-item${idx === activeIdx ? ' active' : ''}`}
             >
-              <span style={{ fontWeight: 600, color: '#4F46E5', fontFamily: 'monospace', fontSize: 13 }}>
-                @{sk.slug}
-              </span>
+              <span className="at-mention-slug">@{sk.slug}</span>
               {sk.description && (
-                <span style={{ color: '#64748B', fontSize: 12, marginLeft: 8 }}>
-                  {sk.description}
-                </span>
+                <span className="at-mention-desc">{sk.description}</span>
               )}
             </div>
           ))}

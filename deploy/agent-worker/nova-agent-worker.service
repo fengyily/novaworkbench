@@ -1,0 +1,31 @@
+[Unit]
+Description=NovaWorkbench Agent Worker
+After=network-online.target
+Wants=network-online.target
+# Rate-limit the Restart=always loop (systemd 230+ reads these from [Unit]).
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+# @HOST@/@PORT@/@INSTALL_DIR@ are substituted by install.sh.
+Environment=NOVA_AGENT_WORKER_HOST=@HOST@
+Environment=NOVA_AGENT_WORKER_PORT=@PORT@
+# Pin TMPDIR=/tmp so the worker process itself starts with a writable
+# tmpdir even when the SSH user inherited a macOS-shaped TMPDIR
+# (e.g. /var/folders/...) via SendEnv from the dev box. The worker
+# also overrides TMPDIR again per-spawn for the claude child (see
+# server.mjs:resolveTmpdir), but this belt-and-braces ensures Node's
+# own os.tmpdir() is sane before any user code runs.
+Environment=TMPDIR=/tmp
+# @INSTALL_DIR@ is substituted by install.sh with the target directory.
+WorkingDirectory=@INSTALL_DIR@
+ExecStart=/usr/bin/env node server.mjs
+Restart=always
+RestartSec=3
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -50,10 +50,10 @@ func (s *SubTaskService) Create(reqID, title, prompt string) (*model.SubTask, er
 	}
 	if title == "" {
 		title = truncateForTitle(prompt, 40)
-	} else if len(title) > 80 {
+	} else {
 		// Hard cap so a runaway input can't produce a card header wider than
 		// the panel — the rest still lives on the prompt.
-		title = title[:80]
+		title = capTitle(title, 80)
 	}
 	id := util.NewID("st")
 	now := time.Now()
@@ -143,6 +143,18 @@ func (s *SubTaskService) UpdateJobID(id, jobID string) error {
 	return err
 }
 
+// UpdateModel records the effective model that will be (or was) dispatched to
+// the child agent. The runner persists it up-front (before MarkRunning) so
+// the SubTaskPanel can render the "🪙 claude-sonnet" badge from the moment
+// the row appears, even if Run never runs (e.g. pre-flight error). Finish
+// also stamps this column on terminal success — keeping them in sync is the
+// runner's responsibility.
+func (s *SubTaskService) UpdateModel(id, modelName string) error {
+	_, err := s.db.Exec(`UPDATE sub_tasks SET model=?, updated_at=? WHERE id=?`,
+		modelName, time.Now(), id)
+	return err
+}
+
 // MarkRunning transitions pending → running when the goroutine actually
 // spawns the claude CLI. Kept separate from Create so a Create that fails to
 // ever spawn (e.g. pre-flight error) doesn't leave the row visible as
@@ -182,10 +194,7 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 	}
 	id := util.NewID("st")
 	now := time.Now()
-	adjustTitle := "调整: " + parent.Title
-	if len(adjustTitle) > 80 {
-		adjustTitle = adjustTitle[:80]
-	}
+	adjustTitle := capTitle("调整: "+parent.Title, 80)
 	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
 		source_session_id, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -201,6 +210,51 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 		Prompt:          prompt,
 		Status:          model.SubTaskStatusPending,
 		SourceSessionID: parent.SessionID,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}, nil
+}
+
+// Redo creates a NEW sub-task row that re-runs a failed parent sub-task with
+// its original prompt. Unlike CreateAdjustment — which forks the parent's own
+// session to inherit its edits — a redo forks the parent's SOURCE session
+// (the session the failed run originally forked from), so the child re-executes
+// the original task from a clean starting point rather than inheriting a
+// broken/partial attempt. The redo row carries the parent's source_session_id
+// in its own source_session_id; the handler fills in a fallback when empty.
+//
+// Title defaults to "重做: <parent title>". The model is NOT persisted here —
+// the handler passes the chosen model into runSubTask, which stamps it via
+// Finish (mirrors Create/CreateAdjustment).
+func (s *SubTaskService) Redo(reqID, parentID string) (*model.SubTask, error) {
+	if reqID == "" || parentID == "" {
+		return nil, errors.New("requirement_id and parent sub_task id are required")
+	}
+	parent, err := s.Get(parentID)
+	if err != nil {
+		return nil, fmt.Errorf("load parent sub_task: %w", err)
+	}
+	if parent.RequirementID != reqID {
+		return nil, fmt.Errorf("parent sub_task belongs to requirement %s, not %s", parent.RequirementID, reqID)
+	}
+	id := util.NewID("st")
+	now := time.Now()
+	redoTitle := capTitle("重做: "+parent.Title, 80)
+	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
+		source_session_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, reqID, redoTitle, parent.Prompt, model.SubTaskStatusPending,
+		parent.SourceSessionID, now, now)
+	if err != nil {
+		return nil, fmt.Errorf("insert redo sub_task: %w", err)
+	}
+	return &model.SubTask{
+		ID:              id,
+		RequirementID:   reqID,
+		Title:           redoTitle,
+		Prompt:          parent.Prompt,
+		Status:          model.SubTaskStatusPending,
+		SourceSessionID: parent.SourceSessionID,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}, nil
@@ -276,6 +330,20 @@ func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 		st.CompletedAt = &t
 	}
 	return &st, nil
+}
+
+// capTitle hard-caps a title at max runes. Byte-slicing here would split a
+// multi-byte rune and hand PostgreSQL an invalid UTF-8 sequence
+// (SQLSTATE 22021) when the result is INSERTed — CJK titles hit this
+// immediately when the rune boundary doesn't fall on the byte boundary.
+// Inputs are presumed already-valid UTF-8 (the DB round-trips would have
+// rejected invalid bytes at write time).
+func capTitle(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
 }
 
 // truncateForTitle renders a single-line title preview from prompt. Replaces

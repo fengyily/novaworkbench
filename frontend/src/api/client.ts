@@ -9,8 +9,8 @@ export const API_BASE = import.meta.env.VITE_API_BASE || '';
 
 // Display + persistence literal for "no specific model was selected for a
 // stage" — mirrors backend handler.DefaultModelLabel. The backend treats it as
-// "no --model flag" (CLI default), and the UI normalizes it to the empty
-// option label "默认模型".
+// "no model pinned in the --settings env block" (CLI default), and the UI
+// normalizes it to the empty option label "默认模型".
 export const DefaultModelLabel = '默认模型';
 
 // Token storage for the bearer auth layer. login() stores the token here; the
@@ -164,6 +164,12 @@ export const projectsApi = {
   purge: (id: string) => api.delete<{ id: string; status: string }>(`/api/projects/${id}/purge`),
   updatePlatform: (id: string, platform_type: string, platform_token_id: string) =>
     api.patch<Project>(`/api/projects/${id}/platform`, { platform_type, platform_token_id }),
+  // Edit the project name / remote URL / type / local path. All four
+  // fields are optional — omit any field to leave it unchanged.
+  // The backend rejects blank name/path with 400 INVALID_NAME /
+  // INVALID_LOCAL_PATH and a duplicate path with 409 DUPLICATE_LOCAL_PATH.
+  updateBasicInfo: (id: string, data: { name?: string; remote_url?: string; project_type?: string; local_path?: string }) =>
+    api.patch<Project>(`/api/projects/${id}`, data),
   // Save a manually-edited description; locks it from auto-regeneration.
   updateDescription: (id: string, description: string) =>
     api.put<Project>(`/api/projects/${id}/description`, { description }),
@@ -313,6 +319,15 @@ export const subTasksApi = {
       `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/adjust`,
       data,
     ),
+  // Redo a failed sub-task: re-runs the SAME prompt (the backend reuses the
+  // original prompt) forking the original source session, optionally with a
+  // different model. Returns a new job_id/sub_task_id (the redo itself is a
+  // new sub-task row).
+  redo: (requirementId: string, subTaskId: string, data: { model?: string }) =>
+    api.post<{ job_id: string; sub_task_id: string }>(
+      `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/redo`,
+      data,
+    ),
   // Auto-orchestrate: ask the developer main agent to decompose + dispatch.
   // Returns the main-agent's reply (sentinel-stripped) + ids of the
   // children it just spawned. Each child's progress streams via the
@@ -342,33 +357,36 @@ export interface SubTaskOrchestrateResponse {
 // can paste into an external terminal to continue a sub-task's session
 // outside Nova. The exact command depends on whether the session has been
 // forked yet: a fresh sub-task that already ran needs --resume <sid> (not
-// --fork-session) so the user continues *that* session verbatim. The
-// command is a UI hint, not executed by Nova — the user copies and runs
-// it in their own shell.
-export function subTaskCliCommand(st: SubTask): string {
+// --fork-session) so the user continues *that* session verbatim. settings
+// (from claudeSettingsPrefix) is prepended so the pasted command hits the
+// same model + base URL Nova launches with. The command is a UI hint, not
+// executed by Nova — the user copies and runs it in their own shell.
+export function subTaskCliCommand(st: SubTask, settings = ''): string {
+  const prefix = settings ? `${settings} ` : '';
   const sid = (st.session_id || '').trim();
   if (!sid) {
     // Sub-task never spawned yet — show the placeholder command the user
     // would issue from the parent's session to fork a new one.
     const parent = (st.source_session_id || '').trim();
     if (parent) {
-      return `claude --resume ${parent} --fork-session --session-id <new-uuid> -p "${escapeForShell(st.prompt)}"`;
+      return `claude ${prefix}--resume ${parent} --fork-session --session-id <new-uuid> -p "${escapeForShell(st.prompt)}"`;
     }
     return `# 等待主 Agent 会话就绪 (需求未启动 coding)`;
   }
   // Standard continue command — matches the canonical "claude -r"
   // short-flag the CLI accepts.
-  return `claude --resume ${sid}`;
+  return `claude ${prefix}--resume ${sid}`;
 }
 
 // subTaskAdjustCommand: paste-able --fork-session resume that continues
 // this sub-task's session with a new instruction. Useful after the user
 // applies an AdjustSubTask round inside Nova and wants to keep iterating
 // from their own terminal.
-export function subTaskAdjustCommand(st: SubTask, nextPrompt: string): string {
+export function subTaskAdjustCommand(st: SubTask, nextPrompt: string, settings = ''): string {
+  const prefix = settings ? `${settings} ` : '';
   const sid = (st.session_id || '').trim();
-  if (!sid) return subTaskCliCommand(st);
-  return `claude --resume ${sid} --fork-session --session-id <new-uuid> -p "${escapeForShell(nextPrompt)}"`;
+  if (!sid) return subTaskCliCommand(st, settings);
+  return `claude ${prefix}--resume ${sid} --fork-session --session-id <new-uuid> -p "${escapeForShell(nextPrompt)}"`;
 }
 
 // escapeForShell quotes the prompt for inclusion in a bash/zsh single
@@ -399,8 +417,9 @@ export interface Requirement {
   branch_name?: string;
   worktree_path?: string;
   // Effective model actually dispatched to the claude CLI for each stage
-  // (the --model value, or the "默认模型" literal when none was specified).
-  // Empty = the stage hasn't run yet (or predates this feature).
+  // (the model pinned in the --settings env block, or the "默认模型" literal
+  // when none was specified). Empty = the stage hasn't run yet (or predates
+  // this feature).
   analyst_model?: string;
   architect_model?: string;
   developer_model?: string;
@@ -432,6 +451,33 @@ export interface Requirement {
   // main agent emits its structured plan. Rendered by SubTaskPanel as the
   // "建议子任务" preview.
   coding_plan?: string;
+  // sub_task_count: number of rows in sub_tasks linked to this requirement.
+  // Populated by the backend on GET /api/requirements/{id} via a
+  // SELECT COUNT(*); used by RequirementDetail to hide the requirement-
+  // level "追加调整" composer once the requirement has been decomposed
+  // into sub-tasks (further adjustments must then flow through the
+  // SubTaskPanel composer instead). Defaults to 0 on legacy responses that
+  // predate this field.
+  sub_task_count?: number;
+  // Development-environment provenance, stamped when the coding stage starts.
+  // 'agent' = the requirement was developed on a remote Agent server (and all
+  // follow-up actions — 推送并发起 PR / 清理开发环境 / 子任务 — are routed back
+  // to that same server); 'local' = developed on the NovaWorkbench host.
+  // Empty/undefined = the coding stage never ran, or the row predates this
+  // field — the UI shows no badge in that case rather than guessing "local".
+  dev_source?: '' | 'local' | 'agent';
+  // agent_servers row id + its display name (joined server-side). Both empty
+  // for local rows; agent_server_name can also be empty when the server was
+  // deleted after the requirement was developed on it.
+  agent_server_id?: string;
+  agent_server_name?: string;
+  // Development-mode provenance for the coding stage, stamped when StartCoding
+  // runs. 'session' = fork the design/analysis session (legacy default —
+  // Claude inherits the full conversation). 'design' = fresh session, hand
+  // the stored design doc to the agent via the -p prompt. Empty/undefined
+  // = never coded or predates this field; the UI shows no badge in that
+  // case rather than guessing "session".
+  dev_mode?: '' | 'session' | 'design';
   created_at: string; updated_at: string;
   completed_at?: string;
 }
@@ -532,6 +578,11 @@ export const requirementsApi = {
     kind?: Kind;
     skip_analysis?: boolean;
     skip_design?: boolean;
+    // skip_organize: when true, the backend skips the LLM-organized markdown
+    // pass that normally distills a title + structured body from the raw
+    // description. The raw text is stored verbatim and a fallback title
+    // (first line, capped) is used. UI default = true (skip).
+    skip_organize?: boolean;
   }) => api.post<Requirement>('/api/requirements', data),
   get: (id: string) => api.get<Requirement>(`/api/requirements/${id}`),
   update: (id: string, data: { title: string; description: string; priority: string; skip_analysis?: boolean }) =>
@@ -589,6 +640,44 @@ export interface ContextSummary {
  * to the requirements row, while `getContextSummary` reads the persisted
  * summary back for the preview modal and the requirement-detail badge.
  */
+
+/**
+ * Request shape for POST /api/wizard/start-coding. The frontend's call
+ * sites currently inline this body (RequirementDetail, WizardPage), but
+ * keeping a typed shape here documents the contract and lets the type
+ * checker flag drift. `claude_config_id` is the user-picked claude_configs
+ * row id from the ModelSelect "配置" dropdown; sending it explicitly fixes
+ * the "BASE URL doesn't match selected model" bug.
+ */
+export interface StartCodingReq {
+  project_path: string;
+  requirement_title: string;
+  requirement_desc: string;
+  requirement_id?: string;
+  branch_name?: string;
+  base_branch?: string;
+  /** Per-request model override; empty = role's configured model. */
+  model?: string;
+  /**
+   * Per-request claude_configs row id; empty = backend resolves via
+   * resolveConfigIDForRun (model owner > role binding > global active).
+   */
+  claude_config_id?: string;
+  read_knowledge?: boolean;
+  /** Empty = local execution; non-empty = route through that Agent server. */
+  agent_server_id?: string;
+  /** false = developer persona direct implementation; true = sub-task split. */
+  split_tasks?: boolean;
+  /**
+   * Coding session threading strategy. 'session' = fork the design/analysis
+   * session (legacy default, Claude inherits the conversation). 'design' =
+   * fresh session, hand the stored design doc to the agent via the -p
+   * prompt. Empty/undefined = backend falls back to the requirement row's
+   * persisted value (or 'session' on rows that predate dev_mode).
+   */
+  dev_mode?: '' | 'session' | 'design';
+}
+
 export const wizardApi = {
   /**
    * Trigger claude to compress the current stage's conversation into a short
@@ -616,7 +705,38 @@ export const wizardApi = {
     api.get<ContextSummary>(
       `/api/wizard/requirement/${requirementId}/context-summary?step=${encodeURIComponent(step)}`,
     ),
+  /**
+   * Snapshot of a finished background wizard job. Backs the schedule log
+   * popup — when a scheduled design/coding run finishes, the SchedulesPage
+   * "查看日志" button fetches this and renders the log lines inline (the
+   * durable job_logs row persists across backend restarts). The wizard's
+   * StreamJob SSE uses the same handler internally for live progress.
+   */
+  getJob: (jobId: string) => api.get<RunJob>(`/api/wizard/jobs/${jobId}`),
+  /**
+   * Snapshot of all currently-running wizard jobs (across every project in
+   * this backend process). Used by the requirement list / detail pages to
+   * badge "Claude 工作中" on rows whose requirement_id appears in the
+   * returned set. Backed by GET /api/wizard/active-jobs which walks the
+   * in-memory JobStore ring buffer (cap 50). 5s polling cadence on the
+   * frontend — see RequirementDetail / ProjectDetail useEffect.
+   */
+  listActiveJobs: () => api.get<{ jobs: ActiveJob[] }>('/api/wizard/active-jobs'),
 };
+
+/**
+ * Per-job projection returned by GET /api/wizard/active-jobs. Intentionally
+ * minimal — the frontend only needs to know "is requirement X being worked
+ * on right now?" so we surface only id + requirement_id + status + the
+ * free-form type label. `status` is always "running" while the job is in
+ * the ring buffer (finished jobs are filtered out server-side).
+ */
+export interface ActiveJob {
+  job_id: string;
+  requirement_id: string;
+  status: 'running';
+  type: string;
+}
 
 export interface RunStatus {
   status: 'running' | 'done' | 'error' | 'stopped';
@@ -679,8 +799,14 @@ export const mergeApi = {
   abort: (reqId: string) => api.post<{ ok: boolean }>(`/api/requirements/${reqId}/merge/abort`, {}),
   cont: (reqId: string) => api.post<{ job_id: string }>(`/api/requirements/${reqId}/merge/continue`, {}),
   resolve: (reqId: string) => api.post<{ job_id: string }>(`/api/requirements/${reqId}/merge/resolve`, {}),
-  push: (reqId: string, body: { commit_message?: string }) =>
-    api.post<{ job_id: string }>(`/api/requirements/${reqId}/merge/push`, body),
+  // Push + create PR is now delegated to a sub-task. The backend returns the
+  // usual job_id (for the live SSE stream of the child agent) PLUS the
+  // sub_task_id so the SubTaskPanel can pick the row up via its periodic
+  // poll and render the artifact Markdown / model badge after completion.
+  // Existing callers can still use job_id directly; sub_task_id is read by
+  // RequirementDetail so the panel refreshes the moment the row appears.
+  push: (reqId: string, body: { commit_message?: string; model?: string }) =>
+    api.post<{ job_id: string; sub_task_id: string }>(`/api/requirements/${reqId}/merge/push`, body),
   cleanup: (reqId: string, body: { force?: boolean }) =>
     api.post<{ ok: boolean }>(`/api/requirements/${reqId}/worktree/cleanup`, body),
   jobStreamUrl: (jobId: string) => `${API_BASE}/api/wizard/jobs/${jobId}/stream`,
@@ -789,6 +915,32 @@ export interface ClaudeConfigItem {
 export interface ClaudeActiveModels {
   models: string[];
   default_model: string;
+  // Active config's base URL ("" = Anthropic default). Used to render the
+  // `--settings '{"env":{...}}'` prefix on copy-paste launch commands so they
+  // hit the same gateway + model Nova itself uses. The auth token is never
+  // sent to the frontend — the pasted command relies on the user's own
+  // `claude` login/auth, while --settings pins model + base URL.
+  base_url?: string;
+}
+
+// claudeSettingsPrefix renders the `--settings '{"env":{...}}'` argument that
+// every Nova-launched claude process carries (mirrors the backend gateway's
+// settingsArg and the agent-worker's buildSettingsArg — one launch shape
+// everywhere). baseURL / defaultModel come from the active claude config;
+// empty values are omitted so the CLI's own defaults apply. The auth token
+// is deliberately not part of it: tokens never leave the backend, and the
+// user's own claude auth takes over in their terminal.
+export function claudeSettingsPrefix(baseURL?: string, defaultModel?: string): string {
+  const env: Record<string, string> = {};
+  if (baseURL) env.ANTHROPIC_BASE_URL = baseURL;
+  if (defaultModel) {
+    env.ANTHROPIC_MODEL = defaultModel;
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = defaultModel;
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL = defaultModel;
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL = defaultModel;
+  }
+  if (Object.keys(env).length === 0) return '';
+  return `--settings '${JSON.stringify({ env })}'`;
 }
 export interface ClaudeActivateResult {
   configs: ClaudeConfigItem[];
@@ -855,7 +1007,12 @@ export const databaseApi = {
   migrate: () => api.post<MigrateResult>('/api/settings/database/migrate', {}),
 };
 
-// Roles (per-role system prompt + model)
+// Roles (per-role system prompt + model + Claude config binding)
+//
+// claude_config_id pins the role to a specific Claude configuration: the
+// role's chosen model then runs against that config's base URL + auth
+// token, not just the global active config. Empty = "use the global
+// active config" so old rows keep their pre-binding behavior.
 export interface Role {
   id: string;
   key: string;
@@ -863,6 +1020,7 @@ export interface Role {
   description: string;
   system_prompt: string;
   model: string;
+  claude_config_id: string;
   sort_order: number;
   enabled: boolean;
   created_at: string;
@@ -876,7 +1034,10 @@ export interface RoleUpdateResult {
 export const rolesApi = {
   list: () => api.get<Role[]>('/api/settings/roles'),
   get: (id: string) => api.get<Role>(`/api/settings/roles/${id}`),
-  update: (id: string, data: { system_prompt: string; model: string }) =>
+  update: (
+    id: string,
+    data: { system_prompt: string; model: string; claude_config_id?: string },
+  ) =>
     api.put<RoleUpdateResult>(`/api/settings/roles/${id}`, data),
   reset: (id: string) => api.post<Role>(`/api/settings/roles/${id}/reset`, {}),
 };
@@ -1259,4 +1420,131 @@ export const preflightApi = {
   snapshot: () => api.get<PreflightSnapshot>('/api/preflight'),
   install: (key: string) => api.post<{ job_id: string }>('/api/preflight/install', { key }),
   installStreamUrl: (jobId: string) => `${API_BASE}/api/preflight/jobs/${jobId}/stream`,
+};
+
+// Agent servers — remote Linux/macOS execution targets with AES-256-GCM
+// encrypted credentials (the plaintext auth_value never leaves the backend).
+// auth_value_set on the read shape tells the UI whether a credential is
+// configured without exposing it; create/update accepts the plaintext once
+// and the service encrypts before INSERT/UPDATE.
+export type AgentServerStatus = 'unknown' | 'checking' | 'installing' | 'ready' | 'error';
+export interface AgentServer {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  auth_type: 'key' | 'password';
+  auth_value_set: boolean;
+  auth_value_algo: string;
+  status: AgentServerStatus;
+  last_check_at: string | null;
+  check_result: string;
+  // Active install JobStore job id; empty when no install is running.
+  // Persisted server-side so a page refresh can reconnect to the SSE
+  // stream and replay history — see SettingsAgentServers mount effect.
+  install_job_id: string;
+  // nova-agent-worker version the last successful install deployed; empty
+  // until the first install that stamps it (see backend agentWorkerVersion).
+  worker_version: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface CreateAgentServerReq {
+  name: string;
+  host: string;
+  port?: number;
+  username?: string;
+  auth_type: 'key' | 'password';
+  auth_value: string;
+}
+export interface UpdateAgentServerReq {
+  name?: string;
+  host?: string;
+  port?: number;
+  username?: string;
+  auth_type?: 'key' | 'password';
+  auth_value?: string;
+}
+
+export const agentServersApi = {
+  list: () => api.get<AgentServer[]>('/api/settings/agent-servers'),
+  get: (id: string) => api.get<AgentServer>(`/api/settings/agent-servers/${id}`),
+  create: (data: CreateAgentServerReq) =>
+    api.post<AgentServer>('/api/settings/agent-servers', data),
+  update: (id: string, data: UpdateAgentServerReq) =>
+    api.put<AgentServer>(`/api/settings/agent-servers/${id}`, data),
+  remove: (id: string) =>
+    api.delete<void>(`/api/settings/agent-servers/${id}`),
+  check: (id: string) =>
+    api.post<{ job_id: string }>(`/api/settings/agent-servers/${id}/check`, {}),
+  install: (id: string) =>
+    api.post<{ job_id: string }>(`/api/settings/agent-servers/${id}/install`, {}),
+  jobUrl: (jobId: string) => `${API_BASE}/api/settings/agent-servers/jobs/${jobId}`,
+  jobStreamUrl: (jobId: string) => `${API_BASE}/api/settings/agent-servers/jobs/${jobId}/stream`,
+};
+
+// ────────────────────────────────────────────────────────────────────────
+// Scheduled tasks (定时任务) — one-shot future-dated wizard actions.
+// See backend internal/service/scheduled_task.go for the persistence layer
+// and internal/scheduler for the polling loop.
+// ────────────────────────────────────────────────────────────────────────
+
+export type ScheduledTaskType = 'design' | 'coding';
+export type ScheduledTaskStatus =
+  | 'pending'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'canceled';
+
+export interface ScheduledTask {
+  id: string;
+  task_type: ScheduledTaskType;
+  requirement_id: string;
+  project_id: string;
+  requirement_title: string;
+  run_at: string; // RFC3339 from server, preserves the offset the client sent so the moment round-trips correctly even when server TZ ≠ client TZ
+  model: string; // '' = 角色默认
+  read_knowledge: boolean;
+  branch_name: string; // coding only
+  base_branch: string; // coding only
+  agent_server_id: string; // coding only
+  split_tasks: boolean; // coding only
+  status: ScheduledTaskStatus;
+  job_id: string;
+  error_message: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  executed_at: string | null;
+}
+
+export interface CreateScheduleReq {
+  requirement_id: string;
+  task_type: ScheduledTaskType;
+  run_at: string; // RFC3339 with timezone offset (e.g. "2026-09-07T23:30:00+08:00"); the frontend converts the datetime-local picker value to this so the absolute moment is unambiguous regardless of the server's local TZ.
+  model?: string;
+  read_knowledge?: boolean;
+  branch_name?: string;
+  base_branch?: string;
+  agent_server_id?: string;
+  split_tasks?: boolean;
+}
+
+export const schedulesApi = {
+  list: (params?: { status?: string; task_type?: string; requirement_id?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.status) q.set('status', params.status);
+    if (params?.task_type) q.set('task_type', params.task_type);
+    if (params?.requirement_id) q.set('requirement_id', params.requirement_id);
+    const qs = q.toString();
+    return api.get<ScheduledTask[]>(`/api/schedules${qs ? `?${qs}` : ''}`);
+  },
+  get: (id: string) => api.get<ScheduledTask>(`/api/schedules/${id}`),
+  create: (data: CreateScheduleReq) =>
+    api.post<ScheduledTask>('/api/schedules', data),
+  cancel: (id: string) =>
+    api.post<ScheduledTask>(`/api/schedules/${id}/cancel`, {}),
+  remove: (id: string) => api.delete<{ id: string; status: string }>(`/api/schedules/${id}`),
 };

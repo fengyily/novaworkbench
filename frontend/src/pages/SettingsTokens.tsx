@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { platformApi, type PlatformToken } from '../api/client';
+import './Settings.css';
 
 const platformLabels: Record<string, string> = {
   github: 'GitHub',
@@ -223,11 +224,11 @@ export default function SettingsTokens() {
       {showModal && (
         <div className="modal-overlay" onClick={closeModal}>
           <div className="modal-box" onClick={e => e.stopPropagation()}>
-            <h3 className="modal-title">{isEdit ? '编辑平台 Token' : '添加平台 Token'}</h3>
+            <h3>{isEdit ? '编辑平台 Token' : '添加平台 Token'}</h3>
 
             {error && <div className="form-error">{error}</div>}
 
-            <div className="form-group">
+            <div className="modal-field">
               <label>名称</label>
               <input
                 className="form-input"
@@ -239,7 +240,7 @@ export default function SettingsTokens() {
 
             {!isEdit && (
               <>
-                <div className="form-group">
+                <div className="modal-field">
                   <label>平台</label>
                   <select
                     className="form-input"
@@ -253,7 +254,7 @@ export default function SettingsTokens() {
                 </div>
 
                 {needsBaseUrl && (
-                  <div className="form-group">
+                  <div className="modal-field">
                     <label>Base URL</label>
                     <input
                       className="form-input"
@@ -267,7 +268,7 @@ export default function SettingsTokens() {
             )}
 
             {isEdit && form.base_url && (
-              <div className="form-group">
+              <div className="modal-field">
                 <label>Base URL</label>
                 <input
                   className="form-input"
@@ -277,7 +278,7 @@ export default function SettingsTokens() {
               </div>
             )}
 
-            <div className="form-group">
+            <div className="modal-field">
               <label>{isEdit ? '新 Token（留空保持原值）' : 'Token'}</label>
               <input
                 className="form-input"
@@ -288,7 +289,7 @@ export default function SettingsTokens() {
               />
             </div>
 
-            <div className="form-group">
+            <div className="modal-field">
               <label>Git 用户名（提交者姓名）</label>
               <input
                 className="form-input"
@@ -298,7 +299,7 @@ export default function SettingsTokens() {
               />
             </div>
 
-            <div className="form-group">
+            <div className="modal-field">
               <label>Git 邮箱（提交者邮箱）</label>
               <input
                 className="form-input"
@@ -306,13 +307,13 @@ export default function SettingsTokens() {
                 value={form.git_user_email}
                 onChange={e => setForm(f => ({ ...f, git_user_email: e.target.value }))}
               />
-              <small className="form-hint">
+              <div className="form-hint">
                 Docker 环境下没有挂载宿主机的 ~/.gitconfig 时，提交会使用这里填写的身份。可与平台账号的姓名/邮箱保持一致。
-              </small>
+              </div>
             </div>
 
-            <div className="form-actions">
-              <button className="btn btn-secondary" onClick={closeModal}>取消</button>
+            <div className="modal-actions btn-row-2col">
+              <button className="btn" onClick={closeModal}>取消</button>
               <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
                 {saving ? '保存中...' : '保存'}
               </button>

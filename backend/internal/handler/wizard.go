@@ -21,6 +21,7 @@ import (
 	"github.com/novaworkbench/backend/internal/model"
 	promptpkg "github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/service"
+	gossh "github.com/novaworkbench/backend/internal/ssh"
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/internal/util"
 )
@@ -42,22 +43,34 @@ type WizardHandler struct {
 	// nil the sub-task endpoints are not registered (legacy / standalone
 	// deployments without the feature).
 	subTaskSvc *service.SubTaskService
+	// agentSvrSvc exposes remote Linux/macOS SSH targets whose sealed
+	// credentials are used when StartCoding runs against agent_server_id.
+	// nil in standalone / non-distributed deployments.
+	agentSvrSvc *service.AgentServerService
+	// subTaskRunner is the shared executor for sub-task rows. Both the wizard
+	// (manual sub-tasks + auto-orchestrated children) and the merge handler
+	// (push + PR sub-task) delegate to it so the runtime semantics — session
+	// fork, executor role persona, artifact + token persistence — stay in one
+	// place.
+	subTaskRunner *SubTaskRunner
 }
 
-func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, subTaskSvc *service.SubTaskService) *WizardHandler {
+func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, agentSvrSvc *service.AgentServerService, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner) *WizardHandler {
 	return &WizardHandler{
-		projectSvc:   projectSvc,
-		reqSvc:       reqSvc,
-		knowledgeSvc: knowledgeSvc,
-		llm:          llmGateway,
-		jobs:         jobs,
-		roleSvc:      roleSvc,
-		jobLogSvc:    jobLogSvc,
-		claudeCfg:    claudeCfg,
-		usageSvc:     usageSvc,
-		skillSvc:     skillSvc,
-		platformSvc:  platformSvc,
-		subTaskSvc:   subTaskSvc,
+		projectSvc:    projectSvc,
+		reqSvc:        reqSvc,
+		knowledgeSvc:  knowledgeSvc,
+		llm:           llmGateway,
+		jobs:          jobs,
+		roleSvc:       roleSvc,
+		jobLogSvc:     jobLogSvc,
+		claudeCfg:     claudeCfg,
+		usageSvc:      usageSvc,
+		skillSvc:      skillSvc,
+		platformSvc:   platformSvc,
+		subTaskSvc:    subTaskSvc,
+		agentSvrSvc:   agentSvrSvc,
+		subTaskRunner: subTaskRunner,
 	}
 }
 
@@ -236,6 +249,12 @@ func emitKnowledgeResultEvent(job *store.Job, items []knowledgeUseItem, usedCoun
 // user "no specific model was selected for this stage".
 const DefaultModelLabel = "默认模型"
 
+// executorRoleKey is the roles-table key for the sub-task executor persona.
+// Child agents fork the orchestrator session (developer role = 统筹协调, which
+// decomposes and emits [SUBTASKS_READY]), so every child launch must override
+// the system prompt with this role or it re-decomposes instead of coding.
+const executorRoleKey = "executor"
+
 // effectiveModelFromValues resolves the effective model from its two sources:
 // the role's explicit per-role override (roleModel) and the active claude
 // config's default model (configDefaultModel). Precedence: role override >
@@ -263,27 +282,72 @@ func cliModelArg(effModel string) string {
 	return effModel
 }
 
-// roleConfig loads a role's system prompt + effective model by key. The
-// returned model is the EFFECTIVE model (role override, else active config
-// default, else the "默认模型" literal) — pass it through cliModelArg before
-// handing it to StreamOpts.Model so the sentinel never reaches the CLI. On
-// error it returns empty system prompt + the resolved default model (and logs)
-// so a missing/broken role config never blocks the wizard pipeline.
-func (h *WizardHandler) roleConfig(key string) (systemPrompt, model string) {
+// roleConfig loads a role's system prompt + effective model + the
+// Claude config the role is bound to. The returned model is the EFFECTIVE
+// model (role override → role's bound config's default → global active
+// config's default → "默认模型" literal). The configID is non-empty whenever
+// the role has its own binding or a global active config exists; it must be
+// threaded into StreamOpts.ClaudeConfigID so the gateway injects the right
+// auth + base URL into the claude subprocess. Pass the model through
+// cliModelArg before handing it to StreamOpts.Model so the sentinel never
+// reaches the CLI.
+//
+// A missing/broken role config never blocks the wizard pipeline: we return
+// empty system prompt + the resolved default model + the active config id
+// (or "" when no config exists), and log a one-line warning.
+func (h *WizardHandler) roleConfig(key string) (systemPrompt, model, configID string) {
 	r, err := h.roleSvc.GetByKey(key)
 	if err != nil {
 		log.Printf("[wizard] role %q not found, using CLI defaults: %v", key, err)
-		return "", h.effectiveModel("")
+		return "", h.effectiveModelFromConfig("", nil), h.activeConfigID()
 	}
-	return r.SystemPrompt, h.effectiveModel(r.Model)
+	cfg, _ := h.claudeCfg.ResolveRoleConfig(r)
+	if cfg != nil {
+		return r.SystemPrompt, effectiveModelFromValues(r.Model, cfg.DefaultModel), cfg.ID
+	}
+	return r.SystemPrompt, h.effectiveModelFromConfig(r.Model, r), h.activeConfigID()
+}
+
+// resolveConfigIDForRun returns the claude_config_id the wizard should pass
+// into llm.StreamOpts for a stage run, honouring the user-picked config and
+// aligning it with the user-picked model.
+//
+// Priority:
+//  1. requestCl — explicit per-request override from the UI picker
+//     (frontend ModelSelect lifts the picked config id into the request body)
+//  2. ResolveConfigForModel(model) — the config whose models list owns the
+//     picked model id; covers the case where the user picks a model from a
+//     non-active config without explicitly choosing the config (e.g. the
+//     legacy wizard page that has no ModelSelect)
+//  3. devCfgID — role binding resolved by roleConfig (covers developer-
+//     default model + role-bound gateway)
+//  4. h.activeConfigID() — legacy global fallback
+//
+// Any empty/error step falls through; the chain never errors out so a broken
+// picker state cannot block a run. Mirrors the same priority chain used by
+// sub_task_runner.go for sub-task dispatch (see f10e1cc).
+func (h *WizardHandler) resolveConfigIDForRun(requestCl, model, devCfgID string) string {
+	if requestCl != "" {
+		return requestCl
+	}
+	if model != "" {
+		if cid, err := h.claudeCfg.ResolveConfigForModel(model); err == nil && cid != "" {
+			return cid
+		}
+	}
+	if devCfgID != "" {
+		return devCfgID
+	}
+	return h.activeConfigID()
 }
 
 // effectiveModel resolves the model that will actually be dispatched to the
-// claude CLI for a role. roleModel is the role's explicit override (pass the
-// already-loaded role.Model to avoid a second DB hit, or "" to look it up by
-// key — though roleConfig always loads the role first, so callers normally
-// pass r.Model directly). Falls back to the active claude config's default
-// model, then to the "默认模型" literal. See effectiveModelFromValues.
+// claude CLI for a role. roleModel is the role's explicit override. Falls
+// back to the role's bound config's default, then the global active
+// config's default, then the "默认模型" literal. See effectiveModelFromValues.
+//
+// This helper is the legacy "no role row in hand" path — prefer
+// effectiveModelFromConfig for the modern role binding resolution.
 func (h *WizardHandler) effectiveModel(roleModel string) string {
 	configDefault := ""
 	if h.claudeCfg != nil {
@@ -292,6 +356,34 @@ func (h *WizardHandler) effectiveModel(roleModel string) string {
 		}
 	}
 	return effectiveModelFromValues(roleModel, configDefault)
+}
+
+// effectiveModelFromConfig is the per-role variant: it uses the role's bound
+// Claude config (when present) instead of the global active config. A nil
+// role → the legacy global-active path so the caller doesn't have to special
+// case "no role row" before calling.
+func (h *WizardHandler) effectiveModelFromConfig(roleModel string, role *model.Role) string {
+	configDefault := ""
+	if h.claudeCfg != nil {
+		if cfg, _ := h.claudeCfg.ResolveRoleConfig(role); cfg != nil {
+			configDefault = cfg.DefaultModel
+		}
+	}
+	return effectiveModelFromValues(roleModel, configDefault)
+}
+
+// activeConfigID returns the active claude_configs row's id (or "" when no
+// config is active). Used as the StreamOpts.ClaudeConfigID fallback when a
+// role has no binding of its own.
+func (h *WizardHandler) activeConfigID() string {
+	if h.claudeCfg == nil {
+		return ""
+	}
+	c, err := h.claudeCfg.ActiveConfig()
+	if err != nil || c == nil {
+		return ""
+	}
+	return c.ID
 }
 
 // usageCtxFor builds a usageCtx for one claude invocation. The returned ctx
@@ -478,6 +570,10 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		CurrentAnalysis  string `json:"current_analysis"`
 		UserMessage      string `json:"user_message"`
 		Model            string `json:"model"`
+		// ClaudeConfigID — user-picked claude_configs row id (UI ModelSelect);
+		// empty = backend resolves via the priority chain in
+		// resolveConfigIDForRun.
+		ClaudeConfigID string `json:"claude_config_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("[analyst-chat] JSON decode error: %v", err)
@@ -511,16 +607,19 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	}
 	resumePrompt := req.UserMessage
 
-	systemPrompt, model := h.roleConfig("analyst")
+	systemPrompt, model, claudeConfigID := h.roleConfig("analyst")
 	// Per-request model override (highest precedence); empty means role default.
 	if req.Model != "" {
 		model = req.Model
 	}
+	// Align the gateway config with the picked model. See resolveConfigIDForRun.
+	claudeConfigID = h.resolveConfigIDForRun(req.ClaudeConfigID, model, claudeConfigID)
 
 	// Create the job, persist its id so a refresh can reconnect, and return the
 	// job id immediately. The claude turn runs in a goroutine writing progress
 	// into the job store.
 	job := h.jobs.Create(req.RequirementID)
+	job.SetType("analyst_chat")
 	job.SetModel(model)
 	if perr := h.reqSvc.UpdateAnalysisJob(req.RequirementID, job.ID); perr != nil {
 		log.Printf("[analyst-chat] failed to persist analysis_job_id for %s: %v", req.RequirementID, perr)
@@ -598,7 +697,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 			resumePrompt = skillsBlock + resumePrompt
 		}
 		analystUsage := h.usageCtxFor("analyst_chat", req.RequirementID, requirement.ProjectID, job.ID, model, "", "")
-		finalResult, newSessionID, err := h.runAnalystTurn(context.Background(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, sessionID, !isFirstRound, sink, analystUsage)
+		finalResult, newSessionID, err := h.runAnalystTurn(context.Background(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sessionID, !isFirstRound, sink, analystUsage)
 		if err != nil {
 			log.Printf("[analyst-chat] turn failed: %v", err)
 			job.Append(store.LogLine{Type: "error", Content: err.Error()})
@@ -655,6 +754,10 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		RequirementTitle string `json:"requirement_title"`
 		UserMessage      string `json:"user_message"`
 		Model            string `json:"model"`
+		// ClaudeConfigID — user-picked claude_configs row id (UI ModelSelect);
+		// empty = backend resolves via the priority chain in
+		// resolveConfigIDForRun.
+		ClaudeConfigID string `json:"claude_config_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("[developer-chat] JSON decode error: %v", err)
@@ -747,11 +850,13 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	systemPrompt, model := h.roleConfig("developer")
+	systemPrompt, model, claudeConfigID := h.roleConfig("developer")
 	// Per-request model override (highest precedence); empty means role default.
 	if req.Model != "" {
 		model = req.Model
 	}
+	// Align the gateway config with the picked model. See resolveConfigIDForRun.
+	claudeConfigID = h.resolveConfigIDForRun(req.ClaudeConfigID, model, claudeConfigID)
 
 	// The resumed coding conversation already carries the requirement, analysis,
 	// and design, so a resume turn only sends the framed adjustment message. The
@@ -809,7 +914,7 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 		developerProjectID = requirement.ProjectID
 	}
 	developerUsage := h.usageCtxFor("developer_chat", req.RequirementID, developerProjectID, "", model, "", req.UserMessage)
-	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, sourceSID, fork, newSID, w, rc, developerUsage)
+	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sourceSID, fork, newSID, w, rc, developerUsage)
 	if err != nil {
 		log.Printf("[developer-chat] turn failed: %v", err)
 		sendStatus(w, rc, "error", err.Error())
@@ -1048,432 +1153,625 @@ func truncateStr(s string, n int) string {
 // job store, so the coding panel shows live progress instead of a frozen blank
 // until the turn's batched assistant event. Subscribe via
 // GET /api/wizard/jobs/{id}/stream; snapshot via GET /api/wizard/jobs/{id}.
+//
+// codingRunParams is the named request-body shape used by StartCoding (HTTP)
+// and RunScheduledCoding (scheduler). The HTTP path decodes the body into
+// this struct and passes it directly; the scheduler path constructs one with
+// the fields the requirement's current state requires (title/desc/branch
+// defaulted). Pulling the anonymous struct to a named type is what lets the
+// scheduler reuse the exec body without re-deriving any of the request-
+// shape semantics.
+type codingRunParams struct {
+	ProjectPath      string `json:"project_path"`
+	RequirementTitle string `json:"requirement_title"`
+	RequirementDesc  string `json:"requirement_desc"`
+	RequirementID    string `json:"requirement_id"`
+	BranchName       string `json:"branch_name"`
+	BaseBranch       string `json:"base_branch"`
+	Model            string `json:"model"`
+	// ClaudeConfigID is the user-picked claude_configs row id from the UI
+	// ModelSelect picker (frontend lifts selectedConfigId alongside the model).
+	// Empty = backend resolves it from the priority chain (explicit > model
+	// owner > role binding > global active) inside resolveConfigIDForRun.
+	ClaudeConfigID string `json:"claude_config_id"`
+	ReadKnowledge  bool   `json:"read_knowledge"`
+	AgentServerID  string `json:"agent_server_id"` // empty = local execution; otherwise remote Agent server
+	SplitTasks     bool   `json:"split_tasks"`     // false (default) = developer persona implements directly; true = current decomposition + auto-orchestrate flow
+	// DevMode picks the coding session threading strategy: "" / "session" =
+	// fork the design (or analysis) session (legacy default, Claude
+	// inherits the full conversation); "design" = fresh session, hand the
+	// stored design doc to the agent via the -p prompt. When empty, the
+	// handler falls back to the requirement row's persisted dev_mode so a
+	// re-run that omits the field stays consistent with the previous run.
+	DevMode string `json:"dev_mode"`
+}
+
 func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		ProjectPath      string `json:"project_path"`
-		RequirementTitle string `json:"requirement_title"`
-		RequirementDesc  string `json:"requirement_desc"`
-		RequirementID    string `json:"requirement_id"`
-		BranchName       string `json:"branch_name"`
-		BaseBranch       string `json:"base_branch"`
-		Model            string `json:"model"`
-		ReadKnowledge    bool   `json:"read_knowledge"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var p codingRunParams
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		writeError(w, 400, "INVALID", "Invalid JSON")
 		return
 	}
 
-	// Optional "读取项目知识库" switch: when true, the project's knowledge
-	// relevant to this requirement is injected into the claude prompt and a
-	// "knowledge" SSE event is emitted before the coding job starts.
-	readKnowledge := req.ReadKnowledge
-
-	job := h.jobs.Create(req.RequirementID)
+	job := h.jobs.Create(p.RequirementID)
+	job.SetType("start_coding")
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
-	go func() {
-		defer func() {
-			// Persist the finished job's full log so a backend restart doesn't
-			// wipe the development record. All exit paths above call job.Finish,
-			// so by the time this defer runs the snapshot is terminal. The
-			// effective model is read back from job.Model (set by SetModel
-			// below once roleConfig resolves it) so the defer doesn't capture a
-			// `model` local that would shadow the model package.
-			lines, status, exitCode := job.Snapshot()
-			if perr := h.jobLogSvc.Save(job.ID, req.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
-				log.Printf("[start-coding] failed to persist job log %s: %v", job.ID, perr)
-			}
-		}()
-		log.Printf("[start-coding] job %s started for %q in %s", job.ID, req.RequirementTitle, req.ProjectPath)
+	go h.execStartCoding(&p, job, nil)
+}
 
-		// Load the requirement row up front so we can (a) detect whether the
-		// source session was created in an isolated worktree, and (b) reuse it for
-		// the fork resolution below without a second Get.
-		var reqRow *model.Requirement
-		if req.RequirementID != "" {
-			if r, err := h.reqSvc.Get(req.RequirementID); err == nil {
-				reqRow = r
+// RunScheduledCoding is the scheduler-facing entry point. It mirrors
+// StartCoding: JSON-body → struct → jobs.Create → go execStartCoding, but
+// the caller hands us a fully populated codingRunParams (the scheduler
+// adapter fills title/desc/branch from the current requirement row) and
+// the optional cb lets us flip the scheduled_tasks row when the job
+// finishes. Returns the JobStore job id.
+func (h *WizardHandler) RunScheduledCoding(p *codingRunParams, cb *runCallbacks) (string, error) {
+	job := h.jobs.Create(p.RequirementID)
+	job.SetType("start_coding")
+	go h.execStartCoding(p, job, cb)
+	return job.ID, nil
+}
+
+// execStartCoding is the goroutine body extracted from StartCoding. Same
+// line-for-line as the original anonymous goroutine: the JSON decode +
+// jobs.Create step was already synchronous, so this is a pure extraction
+// (body.X → p.X everywhere). The deferred jobLogSvc.Save that the original
+// already had is preserved verbatim; the cb.OnFinish hook is new and only
+// fires when a scheduler callback is provided (nil for the HTTP path).
+func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *runCallbacks) {
+	defer func() {
+		// Persist the finished job's full log so a backend restart doesn't
+		// wipe the development record. All exit paths above call job.Finish,
+		// so by the time this defer runs the snapshot is terminal. The
+		// effective model is read back from job.Model (set by SetModel
+		// below once roleConfig resolves it) so the defer doesn't capture a
+		// `model` local that would shadow the model package.
+		lines, status, exitCode := job.Snapshot()
+		if perr := h.jobLogSvc.Save(job.ID, p.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
+			log.Printf("[start-coding] failed to persist job log %s: %v", job.ID, perr)
+		}
+	}()
+	// Load the requirement row up front so we can (a) detect whether the
+	// source session was created in an isolated worktree, and (b) reuse it for
+	// the fork resolution below without a second Get.
+	var reqRow *model.Requirement
+	if p.RequirementID != "" {
+		if r, err := h.reqSvc.Get(p.RequirementID); err == nil {
+			reqRow = r
+		}
+	}
+	// Stamp the development-environment provenance BEFORE the run starts.
+	// Doing it up front (rather than on the success path) means a failed or
+	// aborted remote run still leaves a record of WHICH Agent server holds
+	// the worktree — which is exactly the state where "清理开发环境" has to
+	// know where to go. UpdateDevSource forces server_id back to "" for
+	// local runs, so switching a requirement from remote to local execution
+	// stops routing follow-ups to the old server.
+	if p.RequirementID != "" {
+		devSource := service.DevSourceLocal
+		if p.AgentServerID != "" {
+			devSource = service.DevSourceAgent
+		}
+		if perr := h.reqSvc.UpdateDevSource(p.RequirementID, devSource, p.AgentServerID); perr != nil {
+			log.Printf("[start-coding] failed to persist dev_source for %s: %v", p.RequirementID, perr)
+		} else if reqRow != nil {
+			reqRow.DevSource, reqRow.AgentServerID = devSource, p.AgentServerID
+			if devSource == service.DevSourceLocal {
+				reqRow.AgentServerID = ""
 			}
 		}
-		// hadWorktree records whether the upstream stage had already persisted a
-		// worktree before THIS coding run — false means the design/analysis session
-		// we're about to fork was created in-place (un-isolated).
-		hadWorktree := reqRow != nil && reqRow.WorktreePath != ""
+		// Stamp the dev-mode provenance alongside dev_source. Empty request
+		// field → fall back to the previously persisted value (so 重新开发
+		// keeps the original mode) or to "session" (legacy default for rows
+		// that predate the column). UpdateDevMode normalizes invalid values
+		// to "" so a bad client never corrupts the column.
+		devMode := p.DevMode
+		if devMode == "" && reqRow != nil {
+			devMode = reqRow.DevMode
+		}
+		if devMode == "" {
+			devMode = service.DevModeSession
+		}
+		if perr := h.reqSvc.UpdateDevMode(p.RequirementID, devMode); perr != nil {
+			log.Printf("[start-coding] failed to persist dev_mode for %s: %v", p.RequirementID, perr)
+		} else if reqRow != nil {
+			reqRow.DevMode = devMode
+		}
+	}
+	// hadWorktree records whether the upstream stage had already persisted a
+	// worktree before THIS coding run — false means the design/analysis session
+	// we're about to fork was created in-place (un-isolated).
+	hadWorktree := reqRow != nil && reqRow.WorktreePath != ""
 
-		// Recover the project directory if a Docker rebuild / fresh workspace
-		// mount left it absent. Without this, EnsureWorktree below returns
-		// ErrNotAGitRepo and the in-place checkout fails with the user-facing
-		// "git checkout 失败" error. Re-clone uses the project's stored
-		// remote_url + platform token; when there is no remote to restore from
-		// EnsureCloned returns a clear error naming the missing path.
-		if reqRow != nil {
-			if cerr := h.projectSvc.EnsureCloned(reqRow.ProjectID); cerr != nil {
-				job.Append(store.LogLine{Type: "error", Content: "❌ " + cerr.Error()})
+	// Recover the project directory if a Docker rebuild / fresh workspace
+	// mount left it absent. Without this, EnsureWorktree below returns
+	// ErrNotAGitRepo and the in-place checkout fails with the user-facing
+	// "git checkout 失败" error. Re-clone uses the project's stored
+	// remote_url + platform token; when there is no remote to restore from
+	// EnsureCloned returns a clear error naming the missing path.
+	if reqRow != nil {
+		if cerr := h.projectSvc.EnsureCloned(reqRow.ProjectID); cerr != nil {
+			job.Append(store.LogLine{Type: "error", Content: "❌ " + cerr.Error()})
+			job.Finish(1, store.JobError)
+			return
+		}
+	}
+	// Defensive guard: an Idea must not reach the coding stage. The
+	// frontend hides the "🚀 开始开发" CTA when kind=idea and only Idea
+	// rows promoted via "📋 转为需求" can move on, but a stray API call
+	// (curl, the legacy /wizard quick-start path, or a future caller) must
+	// not silently start coding on a not-yet-defined requirement. Reject
+	// with a clear message before any claude subprocess is spawned.
+	if reqRow != nil && reqRow.Kind == "idea" {
+		job.Append(store.LogLine{Type: "error", Content: "❌ 「想法」类需求暂不支持进入开发阶段，请先在详情页点击「📋 转为需求」升级。"})
+		job.Finish(1, store.JobError)
+		return
+	}
+
+	// Resolve the working directory for coding. When a branch is requested
+	// AND the project is a git repo with a requirement id to key on, develop
+	// in an isolated git worktree per requirement so parallel requirements
+	// don't stomp each other's checkout or edit the same files. The legacy
+	// path (no branch, non-git project, or no requirement_id) falls back to
+	// coding directly in the project directory as before.
+	workDir := p.ProjectPath
+	branchDir := p.ProjectPath // where git checkout/pull run
+	useWorktree := false
+	baseBranch := p.BaseBranch
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	if p.BranchName != "" && p.RequirementID != "" {
+		wtPath, wtErr := EnsureWorktree(p.ProjectPath, p.RequirementID, p.BranchName, baseBranch)
+		switch {
+		case wtErr == nil && wtPath != "":
+			workDir = wtPath
+			branchDir = wtPath
+			useWorktree = true
+			job.Append(store.LogLine{Type: "message", Content: "🌿 已创建/复用隔离 worktree: " + wtPath})
+		case errors.Is(wtErr, ErrNotAGitRepo):
+			// Fall through to the legacy in-place checkout below.
+			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，在项目目录直接开发"})
+		default:
+			job.Append(store.LogLine{Type: "error", Content: "❌ 创建 worktree 失败: " + wtErr.Error()})
+			job.Finish(1, store.JobError)
+			return
+		}
+	}
+
+	// Checkout the development branch before coding. Skipped for worktrees
+	// (`git worktree add` already checked the branch out) and skipped for
+	// non-git repos (nothing to check out — proceed in place rather than
+	// failing with the misleading "git checkout 失败"). For git repos we
+	// mirror EnsureWorktree's robust strategy: create off the base, switch
+	// to an already-existing branch, or branch off HEAD so a missing base
+	// ref never produces a cryptic error.
+	if p.BranchName != "" && !useWorktree {
+		if _, gerr := gitRun(branchDir, "rev-parse", "--is-inside-work-tree"); gerr != nil {
+			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，跳过分支切换，在项目目录直接开发"})
+		} else {
+			checkoutOK := false
+			var lastErrOut string
+			attempt := func(args ...string) (string, bool) {
+				c := exec.Command("git", args...)
+				c.Dir = branchDir
+				out, err := c.CombinedOutput()
+				trimmed := strings.TrimSpace(string(out))
+				if err == nil {
+					return trimmed, true
+				}
+				lastErrOut = trimmed
+				return "", false
+			}
+			// 1. Create the branch off the requested base (typical happy path).
+			if out, ok := attempt("checkout", "-b", p.BranchName, baseBranch); ok {
+				job.Append(store.LogLine{Type: "message", Content: "🌿 " + out})
+				checkoutOK = true
+			} else if _, ok := attempt("checkout", p.BranchName); ok {
+				// 2. Branch already exists locally — switch to it.
+				job.Append(store.LogLine{Type: "message", Content: "🌿 切换到已有分支: " + p.BranchName})
+				checkoutOK = true
+			} else if out, ok := attempt("checkout", "-b", p.BranchName); ok {
+				// 3. Base ref missing locally — fall back to branching off HEAD
+				//    (matches EnsureWorktree's strategy).
+				job.Append(store.LogLine{Type: "message", Content: "🌿 " + out})
+				checkoutOK = true
+			}
+			if !checkoutOK {
+				job.Append(store.LogLine{Type: "error", Content: "❌ git checkout 失败: " + lastErrOut})
 				job.Finish(1, store.JobError)
 				return
 			}
 		}
-		// Defensive guard: an Idea must not reach the coding stage. The
-		// frontend hides the "🚀 开始开发" CTA when kind=idea and only Idea
-		// rows promoted via "📋 转为需求" can move on, but a stray API call
-		// (curl, the legacy /wizard quick-start path, or a future caller) must
-		// not silently start coding on a not-yet-defined requirement. Reject
-		// with a clear message before any claude subprocess is spawned.
-		if reqRow != nil && reqRow.Kind == "idea" {
-			job.Append(store.LogLine{Type: "error", Content: "❌ 「想法」类需求暂不支持进入开发阶段，请先在详情页点击「📋 转为需求」升级。"})
-			job.Finish(1, store.JobError)
-			return
-		}
+	}
 
-		// Resolve the working directory for coding. When a branch is requested
-		// AND the project is a git repo with a requirement id to key on, develop
-		// in an isolated git worktree per requirement so parallel requirements
-		// don't stomp each other's checkout or edit the same files. The legacy
-		// path (no branch, non-git project, or no requirement_id) falls back to
-		// coding directly in the project directory as before.
-		workDir := req.ProjectPath
-		branchDir := req.ProjectPath // where git checkout/pull run
-		useWorktree := false
-		baseBranch := req.BaseBranch
-		if baseBranch == "" {
-			baseBranch = "main"
-		}
-		if req.BranchName != "" && req.RequirementID != "" {
-			wtPath, wtErr := EnsureWorktree(req.ProjectPath, req.RequirementID, req.BranchName, baseBranch)
-			switch {
-			case wtErr == nil && wtPath != "":
-				workDir = wtPath
-				branchDir = wtPath
-				useWorktree = true
-				job.Append(store.LogLine{Type: "message", Content: "🌿 已创建/复用隔离 worktree: " + wtPath})
-			case errors.Is(wtErr, ErrNotAGitRepo):
-				// Fall through to the legacy in-place checkout below.
-				job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，在项目目录直接开发"})
-			default:
-				job.Append(store.LogLine{Type: "error", Content: "❌ 创建 worktree 失败: " + wtErr.Error()})
-				job.Finish(1, store.JobError)
-				return
-			}
-		}
-
-		// Checkout the development branch before coding. Skipped for worktrees
-		// (`git worktree add` already checked the branch out) and skipped for
-		// non-git repos (nothing to check out — proceed in place rather than
-		// failing with the misleading "git checkout 失败"). For git repos we
-		// mirror EnsureWorktree's robust strategy: create off the base, switch
-		// to an already-existing branch, or branch off HEAD so a missing base
-		// ref never produces a cryptic error.
-		if req.BranchName != "" && !useWorktree {
-			if _, gerr := gitRun(branchDir, "rev-parse", "--is-inside-work-tree"); gerr != nil {
-				job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，跳过分支切换，在项目目录直接开发"})
+	// Best-effort pull: try to update the dev branch from its upstream so
+	// coding starts from the remote HEAD. This must NOT abort the coding
+	// job — the repo may have no remote at all, or the branch may have no
+	// upstream tracking info, in which case there is simply nothing to
+	// pull and we proceed on the already-checked-out branch.
+	if p.BranchName != "" {
+		pullCmd := exec.Command("git", "pull", "--ff-only")
+		pullCmd.Dir = branchDir
+		pullOut, pullErr := pullCmd.CombinedOutput()
+		if pullErr != nil {
+			// No upstream on the current branch — retry against origin/<base>
+			// if a remote exists. Missing remote / diverged history just means
+			// "nothing to pull"; log it and keep going.
+			fallbackCmd := exec.Command("git", "pull", "--ff-only", "origin", baseBranch)
+			fallbackCmd.Dir = branchDir
+			fbOut, fbErr := fallbackCmd.CombinedOutput()
+			if fbErr != nil {
+				job.Append(store.LogLine{Type: "message", Content: "ℹ️ 跳过 git pull（无远程跟踪或已分叉），继续在当前分支开发: " + strings.TrimSpace(string(append(pullOut, fbOut...)))})
 			} else {
-				checkoutOK := false
-				var lastErrOut string
-				attempt := func(args ...string) (string, bool) {
-					c := exec.Command("git", args...)
-					c.Dir = branchDir
-					out, err := c.CombinedOutput()
-					trimmed := strings.TrimSpace(string(out))
-					if err == nil {
-						return trimmed, true
-					}
-					lastErrOut = trimmed
-					return "", false
-				}
-				// 1. Create the branch off the requested base (typical happy path).
-				if out, ok := attempt("checkout", "-b", req.BranchName, baseBranch); ok {
-					job.Append(store.LogLine{Type: "message", Content: "🌿 " + out})
-					checkoutOK = true
-				} else if _, ok := attempt("checkout", req.BranchName); ok {
-					// 2. Branch already exists locally — switch to it.
-					job.Append(store.LogLine{Type: "message", Content: "🌿 切换到已有分支: " + req.BranchName})
-					checkoutOK = true
-				} else if out, ok := attempt("checkout", "-b", req.BranchName); ok {
-					// 3. Base ref missing locally — fall back to branching off HEAD
-					//    (matches EnsureWorktree's strategy).
-					job.Append(store.LogLine{Type: "message", Content: "🌿 " + out})
-					checkoutOK = true
-				}
-				if !checkoutOK {
-					job.Append(store.LogLine{Type: "error", Content: "❌ git checkout 失败: " + lastErrOut})
-					job.Finish(1, store.JobError)
-					return
-				}
-			}
-		}
-
-		// Best-effort pull: try to update the dev branch from its upstream so
-		// coding starts from the remote HEAD. This must NOT abort the coding
-		// job — the repo may have no remote at all, or the branch may have no
-		// upstream tracking info, in which case there is simply nothing to
-		// pull and we proceed on the already-checked-out branch.
-		if req.BranchName != "" {
-			pullCmd := exec.Command("git", "pull", "--ff-only")
-			pullCmd.Dir = branchDir
-			pullOut, pullErr := pullCmd.CombinedOutput()
-			if pullErr != nil {
-				// No upstream on the current branch — retry against origin/<base>
-				// if a remote exists. Missing remote / diverged history just means
-				// "nothing to pull"; log it and keep going.
-				fallbackCmd := exec.Command("git", "pull", "--ff-only", "origin", baseBranch)
-				fallbackCmd.Dir = branchDir
-				fbOut, fbErr := fallbackCmd.CombinedOutput()
-				if fbErr != nil {
-					job.Append(store.LogLine{Type: "message", Content: "ℹ️ 跳过 git pull（无远程跟踪或已分叉），继续在当前分支开发: " + strings.TrimSpace(string(append(pullOut, fbOut...)))})
-				} else {
-					job.Append(store.LogLine{Type: "message", Content: "⬇️ " + strings.TrimSpace(string(fbOut))})
-				}
-			} else {
-				job.Append(store.LogLine{Type: "message", Content: "⬇️ " + strings.TrimSpace(string(pullOut))})
-			}
-		}
-
-		// Persist the worktree location + branch so adjust-coding and the merge
-		// step can find the isolated working tree (jobs are in-memory; the path
-		// must live in the DB to survive a restart).
-		if useWorktree && req.RequirementID != "" {
-			if perr := h.reqSvc.UpdateWorktree(req.RequirementID, req.BranchName, workDir); perr != nil {
-				log.Printf("[start-coding] failed to persist worktree for %s: %v", req.RequirementID, perr)
-			}
-		}
-
-		// Session threading: the developer stage forks off the design session
-		// (--resume <design_sid> --fork-session) so the developer inherits the
-		// full analysis+design discussion and swaps in the developer persona; the
-		// forked session gets a new id we read from the stream and persist as
-		// coding_session_id. We do NOT re-feed the requirement desc / design JSON
-		// — the resumed conversation already has them.
-		//
-		// "重新开发"语义: when a coding_session_id already exists (a prior
-		// coding pass ran) we STILL fork off the design session instead of
-		// --resume'ing the prior coding session. Forking mints a NEW session that
-		// inherits only the requirement+design conversation, so leftover tool_use
-		// / half-written code / mid-run errors from the last coding pass cannot
-		// pollute the new round. The forked id overwrites coding_session_id
-		// below (fork && out.sessionID != "" guard), realizing "重新开发 = 新会话".
-		// First-ever coding (coding_session_id == "") takes the same path, so
-		// behavior is unchanged for the genuine first pass.
-		//
-		// Graceful fallback: the legacy /wizard quick-start page has no
-		// Requirement row (no requirement_id / session ids), so it can't join
-		// the session chain. When no source session exists we fall back to a
-		// fresh session and feed the full desc — i.e. the pre-chain behavior —
-		// so that path keeps working.
-		sourceSID := ""
-		fork := false
-		if reqRow != nil {
-			if reqRow.DesignSessionID != "" {
-				// 重新开发 / 首次开发: fork from the design session so the new
-				// coding session carries only requirement+design, never the prior
-				// coding pass's history.
-				sourceSID = reqRow.DesignSessionID
-				fork = true
-			} else if reqRow.AnalysisSessionID != "" {
-				// No design session yet but an analyst session exists — keep
-				// forking off the analyst session (skip-analysis-first path).
-				sourceSID = reqRow.AnalysisSessionID
-				fork = true
-			} else if reqRow.CodingSessionID != "" && !reqRow.SkipDesign {
-				// Legacy fallback: no design / analysis session at all AND not a
-				// skip-design ("直接开发") row. Resume the prior coding session
-				// rather than losing threading for old data rows that predate
-				// session chaining. skip-design rows fall through to the fresh
-				// path below so "重新开发" mints a brand-new session instead of
-				// resuming the prior one.
-				sourceSID = reqRow.CodingSessionID
-			}
-		}
-
-		// Pre-mint + persist the coding session id BEFORE spawning claude so it
-		// survives a mid-run restart. This happens for BOTH a fork off the
-		// design/analysis session (--resume <src> --fork-session --session-id
-		// <new>) AND a fresh session (--session-id <new>) — the latter covers
-		// skip-design "直接开发" (no analysis/design session to fork, but a
-		// requirement row exists), so an interrupted direct-development run can
-		// still be resumed via 继续开发 instead of redoing everything. Only the
-		// legacy quick-start path (no requirement row) keeps a CLI-generated id
-		// and never persists it.
-		newCodingSID := ""
-		if req.RequirementID != "" && (fork || sourceSID == "") {
-			newCodingSID = util.NewUUID()
-			if perr := h.reqSvc.UpdateCodingSession(req.RequirementID, newCodingSID); perr != nil {
-				log.Printf("[start-coding] failed to persist coding session for %s: %v", req.RequirementID, perr)
-			}
-		}
-
-		// Forking a source session created in-place (no persisted worktree)
-		// leaks its original-dir absolute paths into the coding session, so
-		// Claude edits the shared checkout instead of the worktree. Guard only
-		// when we actually established a worktree this run (useWorktree=true),
-		// which also excludes non-git projects (legacy in-place coding).
-		if fork && useWorktree && !hadWorktree {
-			job.Append(store.LogLine{Type: "error", Content: "❌ 上游会话未在隔离 worktree 中生成，请重新执行「生成技术方案」后再开始开发。"})
-			job.Finish(1, store.JobError)
-			return
-		}
-
-		systemPrompt, model := h.roleConfig("developer")
-		// Per-request model override (highest precedence); empty means role default.
-		if req.Model != "" {
-			model = req.Model
-		}
-		job.SetModel(model)
-		var prompt string
-		if sourceSID == "" {
-			// Fresh-session path: no design/analysis session to fork (skip-design
-			// "直接开发" rows, or legacy rows without session chaining). This
-			// branch used to feed a bare "## title\n\n desc" which is a generic
-			// "请实现该需求" prompt — and the developer role's system prompt
-			// only emits the [SUBTASKS_READY] sentinel when the -p message
-			// carries an explicit "开始开发/进入执行实现阶段" trigger. Without
-			// that trigger the agent did the work itself and auto-orchestration
-			// never fired (see req_04acb22d06fe3525). So we now send the SAME
-			// decomposition trigger as the fork branch — the only difference is
-			// wording: there is no "已完成的需求分析与技术方案" to reference, so we
-			// ask the agent to read the relevant files first to build context.
-			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未关联需求会话，使用独立会话开始开发。"})
-			// Same decomposition trigger as the fork branch — the developer
-			// role only emits [SUBTASKS_READY] when the -p message carries an
-			// explicit "开始开发" trigger. The fresh path has no prior design
-			// to reference, so it asks the agent to read files first.
-			prompt = developerDecomposePrompt(req.RequirementTitle,
-				"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后立即完成**任务拆分**：\n", workDir)
-			if desc := strings.TrimSpace(req.RequirementDesc); desc != "" {
-				prompt += "\n\n用户在开发前的追加说明：\n" + desc
-			}
-			// Context-compression handoff (legacy fresh-session path): when
-			// the coding stage was previously compressed we still want the
-			// summary prepended so the new coding session inherits the
-			// compressed history. This branch covers pre-existing rows that
-			// never had a design_session_id (and the rare user who hits
-			// "重新开发" after a design session was already compressed and
-			// invalidated). The summary goes at the TOP so the developer
-			// treats it as ground truth; the parenthetical tells the model
-			// not to act on it as if it were a fresh instruction.
-			if reqRow != nil && reqRow.CodingContextSummary != "" {
-				prompt = "## 上下文压缩摘要（之前的开发对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
-					reqRow.CodingContextSummary + "\n\n" + prompt
+				job.Append(store.LogLine{Type: "message", Content: "⬇️ " + strings.TrimSpace(string(fbOut))})
 			}
 		} else {
-			// The resumed conversation carries the requirement, analysis, and
-			// design. The developer role is now a coordinator (统筹协调者) that
-			// does NOT write code itself — it decomposes the work into sub-tasks
-			// and emits a [SUBTASKS_READY] sentinel so tryAutoOrchestrate (called
-			// at the end of this job) dispatches each child agent. The -p prompt
-			// MUST carry the explicit "进入执行实现阶段" trigger that the
-			// developer system prompt keys its JSON+sentinel emission on — a
-			// generic "请实现该需求" does NOT hit that branch, so the agent hedges
-			// into a prose plan + "等待确认" and auto-orchestration never fires.
-			// The per-turn -p instruction also overrides the system prompt's
-			// "always ask for confirmation" guidance so the agent emits the
-			// sentinel immediately instead of waiting on the user.
-			prompt = developerDecomposePrompt(req.RequirementTitle,
+			job.Append(store.LogLine{Type: "message", Content: "⬇️ " + strings.TrimSpace(string(pullOut))})
+		}
+	}
+
+	// Persist the worktree location + branch so adjust-coding and the merge
+	// step can find the isolated working tree (jobs are in-memory; the path
+	// must live in the DB to survive a restart).
+	if useWorktree && p.RequirementID != "" {
+		if perr := h.reqSvc.UpdateWorktree(p.RequirementID, p.BranchName, workDir); perr != nil {
+			log.Printf("[start-coding] failed to persist worktree for %s: %v", p.RequirementID, perr)
+		}
+	}
+
+	// Session threading: the developer stage forks off the design session
+	// (--resume <design_sid> --fork-session) so the developer inherits the
+	// full analysis+design discussion and swaps in the developer persona; the
+	// forked session gets a new id we read from the stream and persist as
+	// coding_session_id. We do NOT re-feed the requirement desc / design JSON
+	// — the resumed conversation already has them.
+	//
+	// "重新开发"语义: when a coding_session_id already exists (a prior
+	// coding pass ran) we STILL fork off the design session instead of
+	// --resume'ing the prior coding session. Forking mints a NEW session that
+	// inherits only the requirement+design conversation, so leftover tool_use
+	// / half-written code / mid-run errors from the last coding pass cannot
+	// pollute the new round. The forked id overwrites coding_session_id
+	// below (fork && out.sessionID != "" guard), realizing "重新开发 = 新会话".
+	// First-ever coding (coding_session_id == "") takes the same path, so
+	// behavior is unchanged for the genuine first pass.
+	//
+	// "基于方案开发" (dev_mode == "design"): deliberately ignore the design
+	// / analysis / coding session chain. The new session starts fresh, and
+	// the stored design doc is fed to the agent via the -p prompt further
+	// down (see designDoc block). This is what the user picked when they
+	// want a clean slate that still has the plan in hand.
+	//
+	// Graceful fallback: the legacy /wizard quick-start page has no
+	// Requirement row (no requirement_id / session ids), so it can't join
+	// the session chain. When no source session exists we fall back to a
+	// fresh session and feed the full desc — i.e. the pre-chain behavior —
+	// so that path keeps working.
+	sourceSID := ""
+	fork := false
+	if reqRow != nil && reqRow.DevMode != service.DevModeDesign {
+		if reqRow.DesignSessionID != "" {
+			// 重新开发 / 首次开发: fork from the design session so the new
+			// coding session carries only requirement+design, never the prior
+			// coding pass's history.
+			sourceSID = reqRow.DesignSessionID
+			fork = true
+		} else if reqRow.AnalysisSessionID != "" {
+			// No design session yet but an analyst session exists — keep
+			// forking off the analyst session (skip-analysis-first path).
+			sourceSID = reqRow.AnalysisSessionID
+			fork = true
+		} else if reqRow.CodingSessionID != "" && !reqRow.SkipDesign {
+			// Legacy fallback: no design / analysis session at all AND not a
+			// skip-design ("直接开发") row. Resume the prior coding session
+			// rather than losing threading for old data rows that predate
+			// session chaining. skip-design rows fall through to the fresh
+			// path below so "重新开发" mints a brand-new session instead of
+			// resuming the prior one.
+			sourceSID = reqRow.CodingSessionID
+		}
+	}
+
+	// Pre-mint + persist the coding session id BEFORE spawning claude so it
+	// survives a mid-run restart. This happens for BOTH a fork off the
+	// design/analysis session (--resume <src> --fork-session --session-id
+	// <new>) AND a fresh session (--session-id <new>) — the latter covers
+	// skip-design "直接开发" (no analysis/design session to fork, but a
+	// requirement row exists), so an interrupted direct-development run can
+	// still be resumed via 继续开发 instead of redoing everything. Only the
+	// legacy quick-start path (no requirement row) keeps a CLI-generated id
+	// and never persists it.
+	newCodingSID := ""
+	if p.RequirementID != "" && (fork || sourceSID == "") {
+		newCodingSID = util.NewUUID()
+		if perr := h.reqSvc.UpdateCodingSession(p.RequirementID, newCodingSID); perr != nil {
+			log.Printf("[start-coding] failed to persist coding session for %s: %v", p.RequirementID, perr)
+		}
+	}
+
+	// Forking a source session created in-place (no persisted worktree)
+	// leaks its original-dir absolute paths into the coding session, so
+	// Claude edits the shared checkout instead of the worktree. Guard only
+	// when we actually established a worktree this run (useWorktree=true),
+	// which also excludes non-git projects (legacy in-place coding).
+	if fork && useWorktree && !hadWorktree {
+		job.Append(store.LogLine{Type: "error", Content: "❌ 上游会话未在隔离 worktree 中生成，请重新执行「生成技术方案」后再开始开发。"})
+		job.Finish(1, store.JobError)
+		return
+	}
+
+	// Role selection:
+	//   • "agent" — Agent-Server execution (remote) OR local with split_tasks=false
+	//     (the user explicitly chose "不拆分任务"). The agent persona's system
+	//     prompt says "不要先拆分子任务" + "一次会话内完成端到端开发", which is
+	//     exactly the behavior we want when the main agent is supposed to
+	//     implement the requirement itself.
+	//   • "developer" — local execution with split_tasks=true (default = true
+	//     for legacy / no-split-switch callers). The developer persona is the
+	//     统筹协调者 that decomposes into sub-tasks + emits [SUBTASKS_READY]
+	//     so tryAutoOrchestrate dispatches children.
+	//
+	// Why not "developer" + a "直接实现" -p override when split_tasks=false?
+	// The developer system prompt explicitly says "**不要直接编写项目代码**——
+	// 所有具体实现工作由子Agent完成" and has the "## 何时拆分任务" block keyed
+	// on "进入执行实现阶段"-style triggers; even with the prompt rewritten to
+	// "直接实现需求", models reflexively follow the system prompt and split
+	// anyway, defeating the user's "不拆分" choice. Routing through the agent
+	// role is the only reliable fix: its persona + system prompt consistently
+	// say "don't decompose, implement end-to-end" (see role_defaults.go).
+	roleKey := "developer"
+	if p.AgentServerID != "" || !p.SplitTasks {
+		roleKey = "agent"
+	}
+	systemPrompt, model, claudeConfigID := h.roleConfig(roleKey)
+	// Per-request model override (highest precedence); empty means role default.
+	if p.Model != "" {
+		model = p.Model
+	}
+	// Align the gateway config with the picked model: when the user picked a
+	// model from a non-active config (or explicitly named a config), prefer
+	// those over the role's binding so ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN
+	// match ANTHROPIC_MODEL. See resolveConfigIDForRun for the priority chain.
+	claudeConfigID = h.resolveConfigIDForRun(p.ClaudeConfigID, model, claudeConfigID)
+	job.SetModel(model)
+	var prompt string
+	if sourceSID == "" {
+		// Fresh-session path: no design/analysis session to fork (skip-design
+		// "直接开发" rows, "基于方案开发" mode, or legacy rows without session
+		// chaining). This branch used to feed a bare "## title\n\n desc" which
+		// is a generic "请实现该需求" prompt — and the developer role's system
+		// prompt only emits the [SUBTASKS_READY] sentinel when the -p message
+		// carries an explicit "开始开发/进入执行实现阶段" trigger. Without that
+		// trigger the agent did the work itself and auto-orchestration never
+		// fired (see req_04acb22d06fe3525). So we now send the SAME
+		// decomposition trigger as the fork branch — the only difference is
+		// wording: there is no "已完成的需求分析与技术方案" to reference, so we
+		// ask the agent to read the relevant files first to build context.
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未关联需求会话，使用独立会话开始开发。"})
+		// "基于方案开发" (dev_mode == "design") hand-feeds the stored design
+		// doc to the agent in the -p prompt so the new session has the plan
+		// even though it never joined the design/analysis conversation.
+		// designMarkdown is sourced from reqRow.DesignDocs (raw — plan Markdown
+		// or legacy JSON, both formats are appended verbatim and the
+		// leadIn tells the agent to treat it as the implementation plan).
+		designMarkdown := ""
+		if reqRow != nil && reqRow.DevMode == service.DevModeDesign {
+			designMarkdown = strings.TrimSpace(reqRow.DesignDocs)
+		}
+		if roleKey == "agent" {
+			// agent persona (Agent-Server remote OR local split_tasks=false):
+			// implement the requirement directly end-to-end. No decomposition
+			// trigger in the -p message, no [SUBTASKS_READY] expected, no
+			// .novaworkbench/subtasks.json Write. The agent system prompt says
+			// "不要先拆分子任务" and "一次会话内完成端到端开发", so the model
+			// consistently implements instead of splitting.
+			leadIn := "请先读取项目中的相关文件理解现有代码结构与需求上下文，然后直接实现需求：\n"
+			if designMarkdown != "" {
+				leadIn = "用户选择「基于方案开发」：不会接续原方案会话，而是把下面的方案作为唯一依据创建新会话直接实现。\n" +
+					"请先读取项目中的相关文件理解现有代码结构，再依据方案直接实现：\n"
+			}
+			prompt = agentDirectPrompt(p.RequirementTitle, leadIn, workDir)
+		} else {
+			// developer persona + fresh-session path + split_tasks=true.
+			// Keep the original decomposition trigger so the developer role
+			// emits [SUBTASKS_READY] + writes .novaworkbench/subtasks.json
+			// and tryAutoOrchestrate dispatches children. The split_tasks=false
+			// fresh-session case is handled by the roleKey=="agent" branch
+			// above (we route those requests through the agent role entirely).
+			leadIn := "请先读取项目中的相关文件理解现有代码结构与需求上下文，然后立即完成**任务拆分**：\n"
+			if designMarkdown != "" {
+				leadIn = "用户选择「基于方案开发」：不会接续原方案会话，而是把下面的方案作为唯一依据创建新会话。\n" +
+					"请先读取项目中的相关文件理解现有代码结构，然后依据方案立即完成**任务拆分**：\n"
+			}
+			prompt = developerDecomposePrompt(p.RequirementTitle, leadIn, workDir)
+		}
+		// Append the stored design doc to the prompt when dev_mode is
+		// "design". Both plan Markdown and legacy JSON formats are passed
+		// verbatim — the agent's tools will surface them. The block goes
+		// AFTER the leadIn so the developer persona's "开始开发/进入执行实
+		// 现阶段" trigger (preserved inside developerDecomposePrompt) stays
+		// at the top and the [SUBTASKS_READY] orchestration path still fires.
+		if designMarkdown != "" {
+			prompt += "\n\n## 技术方案（来自 requirements.design_docs，原方案会话的最终产物）\n\n" + designMarkdown
+		}
+		if desc := strings.TrimSpace(p.RequirementDesc); desc != "" {
+			if roleKey == "agent" {
+				prompt += "\n\n用户在开发前的追加说明：\n" + desc
+			} else {
+				prompt += "\n\n用户在开发前的追加说明：\n" + desc
+			}
+		}
+		// Context-compression handoff (legacy fresh-session path): when
+		// the coding stage was previously compressed we still want the
+		// summary prepended so the new coding session inherits the
+		// compressed history. This branch covers pre-existing rows that
+		// never had a design_session_id (and the rare user who hits
+		// "重新开发" after a design session was already compressed and
+		// invalidated). The summary goes at the TOP so the developer
+		// treats it as ground truth; the parenthetical tells the model
+		// not to act on it as if it were a fresh instruction.
+		if reqRow != nil && reqRow.CodingContextSummary != "" {
+			prompt = "## 上下文压缩摘要（之前的开发对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
+				reqRow.CodingContextSummary + "\n\n" + prompt
+		}
+	} else {
+		// The resumed conversation carries the requirement, analysis, and
+		// design. The developer role is now a coordinator (统筹协调者) that
+		// does NOT write code itself — it decomposes the work into sub-tasks
+		// and emits a [SUBTASKS_READY] sentinel so tryAutoOrchestrate (called
+		// at the end of this job) dispatches each child agent. The -p prompt
+		// MUST carry the explicit "进入执行实现阶段" trigger that the
+		// developer system prompt keys its JSON+sentinel emission on — a
+		// generic "请实现该需求" does NOT hit that branch, so the agent hedges
+		// into a prose plan + "等待确认" and auto-orchestration never fires.
+		// The per-turn -p instruction also overrides the system prompt's
+		// "always ask for confirmation" guidance so the agent emits the
+		// sentinel immediately instead of waiting on the user.
+		if roleKey == "agent" {
+			// agent persona (Agent-Server remote OR local split_tasks=false):
+			// fork/resume variant — the conversation already carries the
+			// requirement + analysis + design, so the leadIn references that
+			// history instead of asking the agent to re-read files.
+			prompt = agentDirectPrompt(p.RequirementTitle,
+				"基于已完成的需求分析与技术方案，请直接实现需求：\n", workDir)
+		} else {
+			// developer persona + fork/resume path + split_tasks=true.
+			// Decompose the work into sub-tasks so tryAutoOrchestrate (called
+			// below, gated on splitTasks) can dispatch children. The
+			// split_tasks=false fork/resume case is handled by roleKey=="agent"
+			// above — we route those requests through the agent role entirely.
+			prompt = developerDecomposePrompt(p.RequirementTitle,
 				"基于已完成的需求分析与技术方案，请立即完成**任务拆分**：\n", workDir)
-			if desc := strings.TrimSpace(req.RequirementDesc); desc != "" {
+		}
+		if desc := strings.TrimSpace(p.RequirementDesc); desc != "" {
+			if roleKey == "agent" {
+				prompt += "\n\n用户在开发前的追加调整说明：\n" + desc
+			} else {
 				prompt += "\n\n用户在开发前的追加调整说明：\n" + desc
 			}
-			// Coding-stage compression handoff: even when resuming the design
-			// session, the prior coding turns may have been compressed. The
-			// summary goes at the TOP so the developer treats it as ground
-			// truth; the parenthetical tells the model not to act on it as if
-			// it were a fresh instruction.
-			if reqRow != nil && reqRow.CodingContextSummary != "" {
-				prompt = "## 上下文压缩摘要（之前的开发对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
-					reqRow.CodingContextSummary + "\n\n" + prompt
-			}
 		}
-		// Kind-specific developer tail (currently only fires for kind=issue).
-		// Idea never reaches here — the frontend hides the "开始开发" CTA and
-		// we double-protect by checking reqRow.Kind below.
-		if reqRow != nil {
-			if block := promptpkg.DeveloperBlock(reqRow.Kind, reqRow); block != "" {
-				prompt += "\n\n" + block
-			}
+		// Coding-stage compression handoff: even when resuming the design
+		// session, the prior coding turns may have been compressed. The
+		// summary goes at the TOP so the developer treats it as ground
+		// truth; the parenthetical tells the model not to act on it as if
+		// it were a fresh instruction.
+		if reqRow != nil && reqRow.CodingContextSummary != "" {
+			prompt = "## 上下文压缩摘要（之前的开发对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
+				reqRow.CodingContextSummary + "\n\n" + prompt
 		}
+	}
+	// Kind-specific developer tail (currently only fires for kind=issue).
+	// Idea never reaches here — the frontend hides the "开始开发" CTA and
+	// we double-protect by checking reqRow.Kind below.
+	if reqRow != nil {
+		if block := promptpkg.DeveloperBlock(reqRow.Kind, reqRow); block != "" {
+			prompt += "\n\n" + block
+		}
+	}
 
-		// Optional knowledge pre-read: inject the project knowledge relevant to
-		// this requirement and surface what was read via a "knowledge" SSE event.
-		// Default off (read_knowledge=false) keeps the legacy behavior untouched.
-		var kbReadTitles []string
-		if readKnowledge {
-			codingProjID := ""
-			if reqRow != nil {
-				codingProjID = reqRow.ProjectID
-			}
-			kbBlock, kbTitles := h.buildKnowledgeBlock(codingProjID, req.RequirementTitle)
-			if kbBlock != "" {
-				prompt = kbBlock + "\n" + prompt
-			}
-			emitKnowledgeEvent(job, kbTitles)
-			kbReadTitles = kbTitles
-		}
-		sessionArg := sourceSID
-		forkSessionID := ""
-		if fork {
-			forkSessionID = newCodingSID
-		} else if sourceSID == "" {
-			sessionArg = newCodingSID // fresh (skip-design 直接开发): --session-id <new>
-		}
-		skillText := ""
+	// Optional knowledge pre-read: inject the project knowledge relevant to
+	// this requirement and surface what was read via a "knowledge" SSE event.
+	// Default off (read_knowledge=false) keeps the legacy behavior untouched.
+	var kbReadTitles []string
+	if p.ReadKnowledge {
+		codingProjID := ""
 		if reqRow != nil {
-			skillText = reqRow.Title + " " + reqRow.Description
+			codingProjID = reqRow.ProjectID
 		}
-		if block := llm.BuildSkillsBlock(h.mentionedSkills(skillText)); block != "" {
-			prompt = block + prompt
+		kbBlock, kbTitles := h.buildKnowledgeBlock(codingProjID, p.RequirementTitle)
+		if kbBlock != "" {
+			prompt = kbBlock + "\n" + prompt
 		}
-		// Inject the project's git committer identity (from its platform
-		// token) as GIT_AUTHOR_*/GIT_COMMITTER_* env into the claude
-		// subprocess. git reads these env vars over any config, so when the
-		// developer role runs `git commit` via its Bash tool it carries a
-		// real identity on hosts without ~/.gitconfig (e.g. the Docker
-		// container). Empty on miss → no injection, git falls back to its
-		// own config lookup (preserves dev-machine behaviour). Mirrors
-		// MergeHandler.gitIdentityForReq via the shared lookupGitIdentity.
-		var codingExtraEnv []string
-		if name, email := lookupGitIdentity(h.projectSvc, h.platformSvc, reqRow); name != "" || email != "" {
-			if name != "" {
-				codingExtraEnv = append(codingExtraEnv, "GIT_AUTHOR_NAME="+name, "GIT_COMMITTER_NAME="+name)
-			}
-			if email != "" {
-				codingExtraEnv = append(codingExtraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
-			}
+		emitKnowledgeEvent(job, kbTitles)
+		kbReadTitles = kbTitles
+	}
+	sessionArg := sourceSID
+	forkSessionID := ""
+	if fork {
+		forkSessionID = newCodingSID
+	} else if sourceSID == "" {
+		sessionArg = newCodingSID // fresh (skip-design 直接开发): --session-id <new>
+	}
+	skillText := ""
+	if reqRow != nil {
+		skillText = reqRow.Title + " " + reqRow.Description
+	}
+	if block := llm.BuildSkillsBlock(h.mentionedSkills(skillText)); block != "" {
+		prompt = block + prompt
+	}
+	// Inject the project's git committer identity (from its platform
+	// token) as GIT_AUTHOR_*/GIT_COMMITTER_* env into the claude
+	// subprocess. git reads these env vars over any config, so when the
+	// developer role runs `git commit` via its Bash tool it carries a
+	// real identity on hosts without ~/.gitconfig (e.g. the Docker
+	// container). Empty on miss → no injection, git falls back to its
+	// own config lookup (preserves dev-machine behaviour). Mirrors
+	// MergeHandler.gitIdentityForReq via the shared lookupGitIdentity.
+	var codingExtraEnv []string
+	if name, email := lookupGitIdentity(h.projectSvc, h.platformSvc, reqRow); name != "" || email != "" {
+		if name != "" {
+			codingExtraEnv = append(codingExtraEnv, "GIT_AUTHOR_NAME="+name, "GIT_COMMITTER_NAME="+name)
 		}
-		cmd := h.llm.GenerateCode(llm.StreamOpts{
-			Prompt:        prompt,
-			WorkDir:       workDir,
-			SystemPrompt:  systemPrompt,
-			Model:         cliModelArg(model),
-			SessionID:     sessionArg,
-			Resume:        sourceSID != "",
-			Fork:          fork,
-			ForkSessionID: forkSessionID,
-			ExtraEnv:      codingExtraEnv,
+		if email != "" {
+			codingExtraEnv = append(codingExtraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
+		}
+	}
+	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
+		Prompt:         prompt,
+		WorkDir:        workDir,
+		SystemPrompt:   systemPrompt,
+		Model:          cliModelArg(model),
+		ClaudeConfigID: claudeConfigID,
+		SessionID:      sessionArg,
+		Resume:         sourceSID != "",
+		Fork:           fork,
+		ForkSessionID:  forkSessionID,
+		ExtraEnv:       codingExtraEnv,
+	})
+	// Release the 30-minute context timer the moment runClaudeStream
+	// finishes (cmd.Wait returns) — the goroutine may then stay alive
+	// for tryAutoOrchestrate + log emission, but the claude subprocess
+	// itself is already done.
+	defer cancel()
+	codingProjectID := ""
+	if reqRow != nil {
+		codingProjectID = reqRow.ProjectID
+	}
+	codingUsage := h.usageCtxFor("coding", p.RequirementID, codingProjectID, job.ID, model, "", "")
+
+	// Remote Agent-server branch: SSHs into the target, syncs the claude
+	// session dir so --resume works, executes the same claude flag list on
+	// the remote worktree, parses the stream-json output, and pushes the
+	// code back to origin. The job log + final result semantics match the
+	// local path so the frontend doesn't have to special-case anything.
+	if p.AgentServerID != "" && h.agentSvrSvc != nil {
+		out := h.runRemoteCoding(&remoteCodingInput{
+			job:      job,
+			serverID: p.AgentServerID,
+			req: startCodingReq{
+				ProjectPath:      p.ProjectPath,
+				RequirementTitle: p.RequirementTitle,
+				RequirementDesc:  p.RequirementDesc,
+				RequirementID:    p.RequirementID,
+				BranchName:       p.BranchName,
+				BaseBranch:       p.BaseBranch,
+				Model:            p.Model,
+				ReadKnowledge:    p.ReadKnowledge,
+				AgentServerID:    p.AgentServerID,
+			},
+			reqRow:         reqRow,
+			prompt:         prompt,
+			workDir:        workDir,
+			sourceSID:      sourceSID,
+			fork:           fork,
+			sessionArg:     sessionArg,
+			forkSessionID:  forkSessionID,
+			model:          model,
+			claudeConfigID: claudeConfigID,
+			usage:          codingUsage,
 		})
-
-		// runClaudeStream owns the subprocess lifecycle (Start/Wait) and parses
-		// stream-json events into job log lines via jobSink — including the
-		// stream_event/content_block_delta increments the hand-written parser
-		// used here previously dropped, which made the coding panel look frozen
-		// until the turn's batched assistant event arrived. It also surfaces an
-		// immediate "🤖 Claude 已连接" phase on the system/init event and a
-		// tool_call label on content_block_start, giving live progress.
-		codingProjectID := ""
-		if reqRow != nil {
-			codingProjectID = reqRow.ProjectID
-		}
-		codingUsage := h.usageCtxFor("coding", req.RequirementID, codingProjectID, job.ID, model, "", "")
-		out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage)
-
-		// The coding session id is already persisted upfront. Correct it only if
-		// the CLI reported a different id than the one we pre-minted (a safety
-		// net in case the --session-id override semantics ever change).
-		if newCodingSID != "" && out.sessionID != "" && out.sessionID != newCodingSID {
-			if perr := h.reqSvc.UpdateCodingSession(req.RequirementID, out.sessionID); perr != nil {
-				log.Printf("[start-coding] Failed to persist coding session for %s: %v", req.RequirementID, perr)
-			}
-		}
-
 		if out.staleSession {
 			job.Append(store.LogLine{Type: "error", Content: "❌ 源会话已失效，请重新发起对应阶段后再开发。"})
 			job.Finish(1, store.JobError)
@@ -1490,60 +1788,135 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
-		// Close the knowledge loop: mark which read entries the run actually used.
-		if len(kbReadTitles) > 0 {
-			items, used := evaluateKnowledgeUsage(kbReadTitles, out.toolFiles, out.finalResult)
-			emitKnowledgeResultEvent(job, items, used)
-		}
 		job.Append(store.LogLine{Type: "done", Content: "✅ 开发完成！"})
-		// Capture the main agent's task breakdown (if any) into coding_plan
-		// so SubTaskPanel can show it as the suggested sub-task list. The
-		// helper accepts both sentinel-wrapped and "## 任务分解"-heading
-		// forms; empty result leaves coding_plan unchanged (we don't want
-		// to wipe a previously-persisted plan when the agent happens to
-		// re-run without emitting one).
-		if req.RequirementID != "" {
-			if plan := extractCodingPlan(out.finalResult); plan != "" {
-				if perr := h.reqSvc.UpdateCodingPlan(req.RequirementID, plan); perr != nil {
-					log.Printf("[start-coding] failed to persist coding_plan for %s: %v", req.RequirementID, perr)
-				} else {
-					job.Append(store.LogLine{Type: "message", Content: "📋 已捕获主Agent任务分解，存入 coding_plan"})
-				}
+		if p.RequirementID != "" {
+			if perr := h.reqSvc.UpdateDeveloperModel(p.RequirementID, model); perr != nil {
+				log.Printf("[start-coding] failed to persist developer_model for %s: %v", p.RequirementID, perr)
 			}
-		}
-		// Record the effective developer model (success path only).
-		if req.RequirementID != "" {
-			if perr := h.reqSvc.UpdateDeveloperModel(req.RequirementID, model); perr != nil {
-				log.Printf("[start-coding] failed to persist developer_model for %s: %v", req.RequirementID, perr)
-			}
+			// dev_source / agent_server_id were stamped up front by the
+			// execStartCoding prologue (see line ~1246) — no need to re-write on
+			// the success path. The prologue fires before the remote job starts
+			// so the binding is correct even if the run aborts.
 		}
 		job.Finish(0, store.JobDone)
-		log.Printf("[start-coding] job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
+		log.Printf("[start-coding] remote job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
+		return
+	}
 
-		// === AUTO-ORCHESTRATE ============================================
-		// 主 Agent 在 start-coding 阶段已经掌握需求 / 设计 / 项目上下文。
-		// 用户希望"一键编排 = 主 Agent 自动派发"——main agent 一返回
-		// finalResult，立刻交给 tryAutoOrchestrate：有 [SUBTASKS_READY]
-		// sentinel + JSON 时串行派发子 Agent + 异步汇总；没命中就把
-		// coding_plan 当作普通任务分解展示，但不派发（保持现有行为）。
-		//
-		// 该调用改用独立 goroutine，不阻塞 start-coding 自身的 job_done
-		// 信号，用户的开发启动 SSE 立即结束；子任务的进度仍由
-		// dispatchOneChild 的 JobStore job 推流。
-		if req.RequirementID != "" && newCodingSID != "" && h.subTaskSvc != nil {
-			go h.tryAutoOrchestrate(req.RequirementID, newCodingSID, out.finalResult, out.subTasksJSON, reqRow, workDir, model)
+	out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage)
+
+	// The coding session id is already persisted upfront. Correct it only if
+	// the CLI reported a different id than the one we pre-minted (a safety
+	// net in case the --session-id override semantics ever change).
+	if newCodingSID != "" && out.sessionID != "" && out.sessionID != newCodingSID {
+		if perr := h.reqSvc.UpdateCodingSession(p.RequirementID, out.sessionID); perr != nil {
+			log.Printf("[start-coding] Failed to persist coding session for %s: %v", p.RequirementID, perr)
 		}
-	}()
+	}
+
+	if out.staleSession {
+		job.Append(store.LogLine{Type: "error", Content: "❌ 源会话已失效，请重新发起对应阶段后再开发。"})
+		job.Finish(1, store.JobError)
+		return
+	}
+	if out.errMsg != "" {
+		job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+		job.Finish(1, store.JobError)
+		return
+	}
+	if out.finalResult == "" {
+		job.Append(store.LogLine{Type: "error", Content: "❌ Claude 未返回结果，请重试"})
+		job.Finish(1, store.JobError)
+		return
+	}
+	job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	// Close the knowledge loop: mark which read entries the run actually used.
+	if len(kbReadTitles) > 0 {
+		items, used := evaluateKnowledgeUsage(kbReadTitles, out.toolFiles, out.finalResult)
+		emitKnowledgeResultEvent(job, items, used)
+	}
+	job.Append(store.LogLine{Type: "done", Content: "✅ 开发完成！"})
+	// Capture the main agent's task breakdown (if any) into coding_plan
+	// so SubTaskPanel can show it as the suggested sub-task list. The
+	// helper accepts both sentinel-wrapped and "## 任务分解"-heading
+	// forms; empty result leaves coding_plan unchanged (we don't want
+	// to wipe a previously-persisted plan when the agent happens to
+	// re-run without emitting one).
+	if p.RequirementID != "" {
+		if plan := extractCodingPlan(out.finalResult); plan != "" {
+			if perr := h.reqSvc.UpdateCodingPlan(p.RequirementID, plan); perr != nil {
+				log.Printf("[start-coding] failed to persist coding_plan for %s: %v", p.RequirementID, perr)
+			} else {
+				job.Append(store.LogLine{Type: "message", Content: "📋 已捕获主Agent任务分解，存入 coding_plan"})
+			}
+		}
+	}
+	// Record the effective developer model (success path only).
+	if p.RequirementID != "" {
+		if perr := h.reqSvc.UpdateDeveloperModel(p.RequirementID, model); perr != nil {
+			log.Printf("[start-coding] failed to persist developer_model for %s: %v", p.RequirementID, perr)
+		}
+		// dev_source / agent_server_id were stamped up front by the
+		// execStartCoding prologue (line ~1246) before the claude subprocess
+		// was spawned. Local runs also flow through the prologue (with
+		// AgentServerID=""), which routes dev_source back to "local" so a
+		// previously-remote requirement doesn't keep pointing at the stale
+		// server after a local re-run.
+	}
+	// Cache the Claude CLI slug for this project on first successful local
+	// start-coding so future Agent Server runs can map local session files
+	// to the remote cwd's slug. Only runs locally: the Agent Server branch
+	// never creates local jsonl files (they live on the remote host under
+	// a deterministic slug derived from wtPath).
+	if p.AgentServerID == "" && p.RequirementID != "" && reqRow != nil && reqRow.ProjectID != "" {
+		if proj, perr := h.projectSvc.Get(reqRow.ProjectID); perr == nil && proj != nil {
+			if _, derr := h.projectSvc.DiscoverAndCacheClaudeProjectSlug(proj.ID, proj.LocalPath); derr != nil {
+				log.Printf("[start-coding] failed to cache claude_project_slug for %s: %v", proj.ID, derr)
+			}
+		}
+	}
+	job.Finish(0, store.JobDone)
+	log.Printf("[start-coding] job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
+
+	// === AUTO-ORCHESTRATE ============================================
+	// 主 Agent 在 start-coding 阶段已经掌握需求 / 设计 / 项目上下文。
+	// 用户希望"一键编排 = 主 Agent 自动派发"——main agent 一返回
+	// finalResult，立刻交给 tryAutoOrchestrate：有 [SUBTASKS_READY]
+	// sentinel + JSON 时串行派发子 Agent + 异步汇总；没命中就把
+	// coding_plan 当作普通任务分解展示，但不派发（保持现有行为）。
+	//
+	// Agent-Server 路径走 "agent" 角色，该角色的 system prompt 与 -p 指令
+	// 都不要求 [SUBTASKS_READY] 哨兵 / subtasks.json；为了一致性直接跳过
+	// orchestrator（不调用，即便没有 sentinel 也会安全 no-op，但调用
+	// 本身会引入无谓的 goroutine + 日志噪音）。
+	//
+	// 当 split_tasks=false（用户选择"不拆分任务"）时，StartCoding 已经把
+	// roleKey 切到 "agent" 并使用 agentDirectPrompt，-p 消息不携带任何触发
+	// 语、agent 的 system prompt 也明确"不要拆分子任务"；此时再调
+	// tryAutoOrchestrate 只会扫到空 payload 然后空转派发 0 个子任务，
+	// 等价于一次 no-op，但仍然多开一个 goroutine + 一段 resolveSubtasksPayload
+	// 的日志噪音，所以一并短路。split_tasks=true + 本地 = roleKey=="developer"，
+	// 走原 developerDecomposePrompt + 派发链路，行为与改动前一致。
+	//
+	// 该调用改用独立 goroutine，不阻塞 start-coding 自身的 job_done
+	// 信号，用户的开发启动 SSE 立即结束；子任务的进度仍由
+	// dispatchOneChild 的 JobStore job 推流。
+	if roleKey != "agent" && p.RequirementID != "" && newCodingSID != "" && h.subTaskSvc != nil && p.SplitTasks {
+		go h.tryAutoOrchestrate(p.RequirementID, newCodingSID, out.finalResult, out.subTasksJSON, reqRow, workDir, model, claudeConfigID)
+	}
 }
 
 // AdjustCoding starts a background JobStore job that resumes the prior coding
 // session (--resume coding_session_id) to apply a follow-up adjustment to
 // already-implemented code. Because the resumed session already carries the
-// requirement, analysis, design, and the developer persona, we send ONLY the
-// user's follow-up message as -p and inject NEITHER the role system prompt NOR
-// the readProjectContext project context — re-feeding them would be redundant
-// and could distort the resumed conversation. The developer role's current model
-// is still honored (--model) so the user's latest model setting applies.
+// requirement, analysis, design, and the persona set by StartCoding
+// (developer for local execution; agent for Agent-Server execution), we send
+// ONLY the user's follow-up message as -p and inject NEITHER the role system
+// prompt NOR the readProjectContext project context — re-feeding them would be
+// redundant and could distort the resumed conversation. The model field is
+// honored (--model) so the user's latest setting applies; we keep the lookup
+// against the developer role for backward compat (the resumed session's
+// persona is what determines behaviour — model only affects token routing).
 //
 // Only requirements with status in {"done","developing"} and a non-empty
 // coding_session_id may adjust (developing = first coding pass just finished;
@@ -1593,13 +1966,14 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 	// setting applies to follow-up turns). The system prompt is deliberately
 	// omitted: the resumed coding session already carries the developer
 	// persona, and re-injecting --system-prompt would replace it.
-	_, model := h.roleConfig("developer")
+	_, model, claudeConfigID := h.roleConfig("developer")
 	// Per-request model override (highest precedence); empty means role default.
 	if body.Model != "" {
 		model = body.Model
 	}
 
 	job := h.jobs.Create(body.RequirementID)
+	job.SetType("adjust_coding")
 	job.SetModel(model)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
@@ -1647,15 +2021,45 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		if block := promptpkg.DeveloperBlock(req.Kind, req); block != "" {
 			adjustPrompt += "\n\n" + block
 		}
-		cmd := h.llm.GenerateCode(llm.StreamOpts{
-			Prompt:       adjustPrompt,
-			WorkDir:      workDir,
-			SystemPrompt: "", // resume 已携带 developer persona，不再注入
-			Model:        cliModelArg(model),
-			SessionID:    req.CodingSessionID,
-			Resume:       true,
-			Fork:         false,
+		// Execution-consistency: a requirement that was coded on an Agent
+		// server has its working tree on THAT host, not here — the local
+		// worktree either doesn't exist or lags behind origin. Route the
+		// follow-up turn back to the same server so the adjustment applies to
+		// the real code (and gets committed + pushed from there). Falls
+		// through to local execution when the requirement was developed
+		// locally, or when the agent-server service isn't wired.
+		if req.AgentServerID != "" && h.agentSvrSvc != nil {
+			out := h.runRemoteCoding(&remoteCodingInput{
+				job:      job,
+				serverID: req.AgentServerID,
+				req: startCodingReq{
+					RequirementTitle: req.Title,
+					RequirementDesc:  body.Message,
+					RequirementID:    req.ID,
+					BranchName:       req.BranchName,
+					AgentServerID:    req.AgentServerID,
+				},
+				reqRow:     req,
+				prompt:     adjustPrompt,
+				sourceSID:  req.CodingSessionID,
+				sessionArg: req.CodingSessionID,
+				model:      model,
+				usage:      h.usageCtxFor("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message),
+			})
+			h.finishRemoteCodingJob(job, out, body.RequirementID, model, "adjust-coding", "✅ 追加调整完成！")
+			return
+		}
+		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
+			Prompt:         adjustPrompt,
+			WorkDir:        workDir,
+			SystemPrompt:   "", // resume 已携带 developer persona，不再注入
+			Model:          cliModelArg(model),
+			ClaudeConfigID: claudeConfigID,
+			SessionID:      req.CodingSessionID,
+			Resume:         true,
+			Fork:           false,
 		})
+		defer cancel()
 		adjustUsage := h.usageCtxFor("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message)
 		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding", adjustUsage)
 
@@ -1687,9 +2091,49 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		if perr := h.reqSvc.UpdateDeveloperModel(body.RequirementID, model); perr != nil {
 			log.Printf("[adjust-coding] failed to persist developer_model for %s: %v", body.RequirementID, perr)
 		}
+		// agent_server_id re-binding on the success path is intentionally
+		// skipped: dev_source / agent_server_id are already correct from the
+		// original StartCoding prologue. An adjust turn runs on the same
+		// coding session / worktree the requirement was already bound to, so
+		// re-writing the binding here would either no-op (same value) or risk
+		// silently re-pointing a running worktree to a different host. If the
+		// user genuinely wants to switch servers, they should re-run the full
+		// start-coding flow.
 		job.Finish(0, store.JobDone)
 		log.Printf("[adjust-coding] job %s finished for %s", job.ID, body.RequirementID)
 	}()
+}
+
+// finishRemoteCodingJob applies the shared terminal-state handling for a
+// runRemoteCoding outcome: map the three failure shapes (stale session /
+// explicit error / empty result) onto job error frames, otherwise append the
+// result + a done frame and stamp developer_model. Factored out so
+// StartCoding / AdjustCoding / ContinueCoding all report remote runs
+// identically — the frontend can't tell a remote job from a local one.
+func (h *WizardHandler) finishRemoteCodingJob(job *store.Job, out claudeStreamOutcome, reqID, model, tag, doneMsg string) {
+	switch {
+	case out.staleSession:
+		job.Append(store.LogLine{Type: "error", Content: "❌ 原 coding 会话已失效（session 文件不存在），请重新发起 coding。"})
+		job.Finish(1, store.JobError)
+		return
+	case out.errMsg != "":
+		job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+		job.Finish(1, store.JobError)
+		return
+	case out.finalResult == "":
+		job.Append(store.LogLine{Type: "error", Content: "❌ Claude 未返回结果，请重试"})
+		job.Finish(1, store.JobError)
+		return
+	}
+	job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+	job.Append(store.LogLine{Type: "done", Content: doneMsg})
+	if reqID != "" {
+		if perr := h.reqSvc.UpdateDeveloperModel(reqID, model); perr != nil {
+			log.Printf("[%s] failed to persist developer_model for %s: %v", tag, reqID, perr)
+		}
+	}
+	job.Finish(0, store.JobDone)
+	log.Printf("[%s] remote job %s finished for %s", tag, job.ID, reqID)
 }
 
 // ContinueCoding resumes an interrupted/cleared coding task by --resume'ing the
@@ -1745,9 +2189,10 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 	// setting applies to the continuation). The system prompt is deliberately
 	// omitted: the resumed coding session already carries the developer persona,
 	// and re-injecting --system-prompt would replace it (same as AdjustCoding).
-	_, model := h.roleConfig("developer")
+	_, model, claudeConfigID := h.roleConfig("developer")
 
 	job := h.jobs.Create(body.RequirementID)
+	job.SetType("continue_coding")
 	job.SetModel(model)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
@@ -1783,15 +2228,39 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		if block := promptpkg.DeveloperBlock(req.Kind, req); block != "" {
 			prompt += "\n\n" + block
 		}
-		cmd := h.llm.GenerateCode(llm.StreamOpts{
-			Prompt:       prompt,
-			WorkDir:      workDir,
-			SystemPrompt: "", // resume 已携带 developer persona，不再注入
-			Model:        cliModelArg(model),
-			SessionID:    req.CodingSessionID,
-			Resume:       true,
-			Fork:         false,
+		// Same execution-consistency rule as AdjustCoding: continue the work
+		// where the working tree actually lives.
+		if req.AgentServerID != "" && h.agentSvrSvc != nil {
+			out := h.runRemoteCoding(&remoteCodingInput{
+				job:      job,
+				serverID: req.AgentServerID,
+				req: startCodingReq{
+					RequirementTitle: req.Title,
+					RequirementID:    req.ID,
+					BranchName:       req.BranchName,
+					AgentServerID:    req.AgentServerID,
+				},
+				reqRow:     req,
+				prompt:     prompt,
+				sourceSID:  req.CodingSessionID,
+				sessionArg: req.CodingSessionID,
+				model:      model,
+				usage:      h.usageCtxFor("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", ""),
+			})
+			h.finishRemoteCodingJob(job, out, body.RequirementID, model, "continue-coding", "✅ 续接开发完成！")
+			return
+		}
+		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
+			Prompt:         prompt,
+			WorkDir:        workDir,
+			SystemPrompt:   "", // resume 已携带 developer persona，不再注入
+			Model:          cliModelArg(model),
+			ClaudeConfigID: claudeConfigID,
+			SessionID:      req.CodingSessionID,
+			Resume:         true,
+			Fork:           false,
 		})
+		defer cancel()
 		continueUsage := h.usageCtxFor("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "")
 		out := runClaudeStream(jobSink{job}, cmd, "continue-coding", continueUsage)
 
@@ -1823,6 +2292,13 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		if perr := h.reqSvc.UpdateDeveloperModel(body.RequirementID, model); perr != nil {
 			log.Printf("[continue-coding] failed to persist developer_model for %s: %v", body.RequirementID, perr)
 		}
+		// Re-bind the Agent Server when the continuation ran on one. Empty body
+		// field = legacy client → keep the existing binding (same guard as
+		// AdjustCoding).
+		// dev_source / agent_server_id are intentionally NOT re-bound here — see the
+		// rationale in AdjustCoding's success-path comment: the binding is set by
+		// the original StartCoding prologue and a continue turn resumes the
+		// same coding session on the same worktree.
 		job.Finish(0, store.JobDone)
 		log.Printf("[continue-coding] job %s finished for %s", job.ID, body.RequirementID)
 	}()
@@ -1866,23 +2342,91 @@ func (h *WizardHandler) StreamJob(w http.ResponseWriter, r *http.Request) {
 // Subscribe to the live stream via GET /api/wizard/jobs/{job_id}/stream and
 // poll the snapshot via GET /api/wizard/jobs/{job_id} (same pattern as
 // start-coding).
+// designRunParams is the prepared-shape output of prepareArchitectDesign —
+// every input the goroutine body needs after the synchronous validation +
+// job creation + prompt build has succeeded. Splitting it out lets the
+// scheduler path reuse the exact same exec body via RunScheduledDesign, so
+// HTTP-driven and time-driven dispatches share one implementation of the
+// architect stage (no parallel maintenance).
+type designRunParams struct {
+	Req            *model.Requirement
+	ProjectPath    string
+	DefaultBranch  string
+	SourceSID      string
+	Fork           bool
+	SkipAnalysis   bool
+	NewDesignSID   string
+	WorkDir        string
+	Prompt         string
+	SystemPrompt   string
+	Model          string // 已经应用请求体覆盖
+	ClaudeConfigID string
+	ReadKnowledge  bool
+}
+
+// runCallbacks lets the scheduler hook into a job's terminal Finish so it
+// can flip the scheduled_tasks row from running → succeeded/failed. The
+// HTTP path passes nil; the scheduler path passes a closure built from
+// ScheduledExecutor.
+type runCallbacks struct {
+	OnFinish func(jobID string, ok bool)
+}
+
 func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RequirementID string `json:"requirement_id"`
 		Model         string `json:"model"`
-		ReadKnowledge bool   `json:"read_knowledge"`
+		// ClaudeConfigID — user-picked claude_configs row id (UI ModelSelect);
+		// empty = backend resolves via the priority chain in
+		// resolveConfigIDForRun.
+		ClaudeConfigID string `json:"claude_config_id"`
+		ReadKnowledge  bool   `json:"read_knowledge"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	id := body.RequirementID
-	if id == "" {
-		writeError(w, 400, "INVALID", "missing requirement id")
+	p, job, af := h.prepareArchitectDesign(body.RequirementID, body.Model, body.ClaudeConfigID, body.ReadKnowledge)
+	if writeIfAPIError(w, af) {
 		return
+	}
+	writeJSON(w, 200, map[string]string{"job_id": job.ID})
+	go h.execArchitectDesign(p, job, nil)
+}
+
+// RunScheduledDesign is the scheduler-facing entry point. It performs the
+// same prepare step as ArchitectDesign (the validation is shared) and
+// dispatches the exec body in a goroutine tagged with the scheduler's
+// callback. Returns the JobStore job id (the scheduler records this in
+// scheduled_tasks.job_id so /api/wizard/jobs/{id} can replay the log).
+func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnowledge bool, cb *runCallbacks) (string, error) {
+	p, job, af := h.prepareArchitectDesign(requirementID, model, "", readKnowledge)
+	if af != nil {
+		return "", af
+	}
+	go h.execArchitectDesign(p, job, cb)
+	return job.ID, nil
+}
+
+// prepareArchitectDesign runs the synchronous portion of the architect-design
+// stage: requirement lookup, project path / default branch resolution,
+// session-thread resolution (design→analyst fallback), anchor check,
+// session-id pre-mint, worktree creation, JobStore creation, and prompt
+// construction. Returns (*designRunParams, *store.Job, *apiFailure); any
+// non-nil apiFailure is a 4xx/5xx the HTTP path writes verbatim. The exec
+// body (execArchitectDesign) consumes the params + job and writes progress
+// into JobStore.
+//
+// NOTE: this is a refactor of the original ArchitectDesign — the body is
+// line-for-line the same as the original synchronous section; only the
+// writeError calls have been replaced with returning *apiFailure so the
+// scheduler can reuse the same validation outcomes.
+func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride, claudeConfigIDOverride string, readKnowledge bool) (*designRunParams, *store.Job, *apiFailure) {
+	id := requirementID
+	if id == "" {
+		return nil, nil, fail(400, "INVALID", "missing requirement id")
 	}
 
 	req, err := h.reqSvc.Get(id)
 	if err != nil {
-		writeError(w, 404, "NOT_FOUND", "requirement not found")
-		return
+		return nil, nil, fail(404, "NOT_FOUND", "requirement not found")
 	}
 	project, _ := h.projectSvc.Get(req.ProjectID)
 	projectPath := ""
@@ -1914,8 +2458,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	// description + collectProjectContext. This bypasses the analyst stage.
 	skipAnalysis := req.SkipAnalysis
 	if sourceSID == "" && !skipAnalysis {
-		writeError(w, 400, "NO_SESSION", "尚未找到需求分析会话，请先完成「需求分析」再生成技术方案。")
-		return
+		return nil, nil, fail(400, "NO_SESSION", "尚未找到需求分析会话，请先完成「需求分析」再生成技术方案。")
 	}
 
 	// Forking the analyst session requires it to have been anchored to the
@@ -1923,8 +2466,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	// forks the design) inherits original-dir absolute paths.
 	if fork {
 		if gerr := h.requireAnchoredFork(req, projectPath); gerr != nil {
-			writeError(w, 409, "UNANCHORED_SESSION", gerr.Error())
-			return
+			return nil, nil, fail(409, "UNANCHORED_SESSION", gerr.Error())
 		}
 	}
 
@@ -1947,18 +2489,17 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	// original-dir absolute paths back to the shared checkout.
 	workDir, wdErr := h.resolveWorkDir(req, projectPath, defaultBranch)
 	if wdErr != nil {
-		writeError(w, 500, "WORKTREE_FAILED", "worktree 创建失败："+wdErr.Error())
-		return
+		return nil, nil, fail(500, "WORKTREE_FAILED", "worktree 创建失败："+wdErr.Error())
 	}
 
 	// Create the job, persist its id so a refresh can reconnect, and return
 	// the job id immediately. The plan-mode claude run happens in a goroutine
 	// writing progress into the job store.
 	job := h.jobs.Create(id)
+	job.SetType("architect_design")
 	if perr := h.reqSvc.UpdateDesignJob(id, job.ID); perr != nil {
 		log.Printf("[architect-design] failed to persist design_job_id for %s: %v", id, perr)
 	}
-	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	// Plan-mode task prompt. When resuming/forking an existing conversation
 	// (analyst session present), the resumed thread already carries the
@@ -2002,150 +2543,199 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		prompt += "\n\n" + block
 	}
 
-	systemPrompt, model := h.roleConfig("architect")
+	systemPrompt, model, claudeConfigID := h.roleConfig("architect")
 	// Per-request model override (highest precedence); empty means role default.
-	if body.Model != "" {
-		model = body.Model
+	if modelOverride != "" {
+		model = modelOverride
 	}
+	// Align the gateway config with the picked model. See resolveConfigIDForRun.
+	claudeConfigID = h.resolveConfigIDForRun(claudeConfigIDOverride, model, claudeConfigID)
 	job.SetModel(model)
 
-	go func() {
-		log.Printf("[architect-design] job %s started for %s (fork=%v skip=%v)", job.ID, id, fork, skipAnalysis && sourceSID == "")
+	return &designRunParams{
+		Req:            req,
+		ProjectPath:    projectPath,
+		DefaultBranch:  defaultBranch,
+		SourceSID:      sourceSID,
+		Fork:           fork,
+		SkipAnalysis:   skipAnalysis,
+		NewDesignSID:   newDesignSID,
+		WorkDir:        workDir,
+		Prompt:         prompt,
+		SystemPrompt:   systemPrompt,
+		Model:          model,
+		ClaudeConfigID: claudeConfigID,
+		ReadKnowledge:  readKnowledge,
+	}, job, nil
+}
 
-		// Optional knowledge pre-read: inject the project knowledge relevant to
-		// this requirement and surface what was read via a "knowledge" SSE event.
-		// Default off (read_knowledge=false) keeps the legacy behavior untouched.
-		var kbReadTitles []string
-		if body.ReadKnowledge {
-			kbBlock, kbTitles := h.buildKnowledgeBlock(req.ProjectID, req.Title)
-			if kbBlock != "" {
-				prompt = kbBlock + "\n" + prompt
-			}
-			emitKnowledgeEvent(job, kbTitles)
-			kbReadTitles = kbTitles
+// execArchitectDesign runs the goroutine body of the architect-design stage.
+// Same line-for-line as the original anonymous goroutine in ArchitectDesign,
+// except `body.X` references are now `p.X`. Two additions:
+//   - A deferred persist of the finished job log (jobLogSvc.Save) so the
+//     architect-design execution log survives a backend restart — same
+//     pattern StartCoding already had, now extended here to close the
+//     existing data-loss gap noted in plan-stateful-stardust.md (fact 1).
+//   - The OnFinish callback fires after Save so the scheduler can flip
+//     scheduled_tasks.running → succeeded/failed with the same job_id.
+func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, cb *runCallbacks) {
+	defer func() {
+		lines, status, exitCode := job.Snapshot()
+		if perr := h.jobLogSvc.Save(job.ID, p.Req.ID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
+			log.Printf("[architect-design] failed to persist job log %s: %v", job.ID, perr)
 		}
+		if cb != nil && cb.OnFinish != nil {
+			cb.OnFinish(job.ID, status == store.JobDone)
+		}
+	}()
 
-		job.Append(store.LogLine{Type: "phase", Content: "📐 Claude 正在 plan 模式下探索代码并制定技术方案..."})
+	id := p.Req.ID
+	fork := p.Fork
+	sourceSID := p.SourceSID
+	newDesignSID := p.NewDesignSID
+	workDir := p.WorkDir
+	model := p.Model
+	claudeConfigID := p.ClaudeConfigID
+	prompt := p.Prompt
+	skipAnalysis := p.SkipAnalysis
+	req := p.Req
 
-		// context.Background(): the HTTP request has already returned, so we
-		// must not tie the claude subprocess's lifetime to r.Context() (which
-		// is cancelled the moment the handler returns).
-		sessionArg := sourceSID
-		forkSessionID := ""
-		if fork {
-			forkSessionID = newDesignSID
-		} else if sourceSID == "" {
-			sessionArg = newDesignSID // skip-analysis fresh session
-		}
-		if block := llm.BuildSkillsBlock(h.mentionedSkills(req.Title + " " + req.Description)); block != "" {
-			prompt = block + prompt
-		}
-		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-			Prompt:         prompt,
-			WorkDir:        workDir,
-			SystemPrompt:   systemPrompt,
-			Model:          cliModelArg(model),
-			SessionID:      sessionArg,
-			Resume:         sourceSID != "",
-			Fork:           fork,
-			ForkSessionID:  forkSessionID,
-			PermissionMode: "plan",
-		})
-		out := runClaudeStream(jobSink{job}, cmd, "architect-design", h.usageCtxFor("architect_design", id, req.ProjectID, job.ID, model, "", ""))
+	log.Printf("[architect-design] job %s started for %s (fork=%v skip=%v)", job.ID, id, fork, skipAnalysis && sourceSID == "")
 
-		if out.staleSession {
-			// The source conversation is gone. Clear whichever session id was
-			// stale so the user can redo the prior stage, surface a recovery
-			// hint, and clear the active job pointer. On the skip-analysis path
-			// there is no source session to be stale, so this branch is a
-			// no-op guard; we still surface a generic recovery hint.
-			if sourceSID == "" {
-				job.Append(store.LogLine{Type: "error", Content: "会话异常，请重试生成技术方案。"})
-			} else if fork {
-				_ = h.reqSvc.UpdateAnalysisSession(id, "")
-				job.Append(store.LogLine{Type: "error", Content: "需求分析会话已过期。请重新进行「需求分析」后再生成技术方案。"})
-			} else {
-				_ = h.reqSvc.UpdateDesignSession(id, "")
-				job.Append(store.LogLine{Type: "error", Content: "技术方案会话已过期。请重新生成技术方案。"})
-			}
-			_ = h.reqSvc.UpdateDesignJob(id, "")
-			job.Finish(1, store.JobError)
-			return
+	// Optional knowledge pre-read: inject the project knowledge relevant to
+	// this requirement and surface what was read via a "knowledge" SSE event.
+	// Default off (read_knowledge=false) keeps the legacy behavior untouched.
+	var kbReadTitles []string
+	if p.ReadKnowledge {
+		kbBlock, kbTitles := h.buildKnowledgeBlock(req.ProjectID, req.Title)
+		if kbBlock != "" {
+			prompt = kbBlock + "\n" + prompt
 		}
+		emitKnowledgeEvent(job, kbTitles)
+		kbReadTitles = kbTitles
+	}
 
-		// The design session id is already persisted upfront. Correct it only if
-		// the CLI reported a different id than the one we pre-minted (a safety
-		// net in case the --session-id override semantics ever change).
-		if out.sessionID != "" && out.sessionID != newDesignSID && out.sessionID != sourceSID {
-			if perr := h.reqSvc.UpdateDesignSession(id, out.sessionID); perr != nil {
-				log.Printf("[architect-design] failed to persist design session for %s: %v", id, perr)
-			}
-		}
+	job.Append(store.LogLine{Type: "phase", Content: "📐 Claude 正在 plan 模式下探索代码并制定技术方案..."})
 
-		// In plan mode, the full plan markdown is captured from the Write
-		// tool_use event that lands in ~/.claude/plans/*.md (runClaudeStream
-		// stores it in out.planContent). Fall back to the result text if
-		// capture missed it (e.g. a proxy that doesn't emit tool_use blocks in
-		// the assistant event).
-		planMarkdown := out.planContent
-		if planMarkdown == "" {
-			planMarkdown = out.finalResult
-		}
-		// The run ended with an error (upstream proxy 504, api_error result
-		// event, or non-zero exit). The Write tool_use that populates
-		// planContent fires BEFORE the model's final API call, so a 504 on that
-		// trailing call leaves planMarkdown non-empty while the run actually
-		// failed. Treating that as success appends a green ✅ and the user has
-		// no idea the run was interrupted (and the captured plan may be
-		// partial). Surface the error instead: save the captured plan as a
-		// fallback so the exploration work isn't lost, but mark the job errored
-		// so the UI shows the failure and the user can retry.
-		if out.errMsg != "" {
-			if planMarkdown != "" {
-				if _, err := h.reqSvc.UpdateDesign(id, planMarkdown); err != nil {
-					log.Printf("[architect-design] failed to save partial design for %s: %v", id, err)
-				}
-			}
-			_ = h.reqSvc.UpdateDesignJob(id, "")
-			job.Append(store.LogLine{Type: "error", Content: out.errMsg})
-			job.Finish(1, store.JobError)
-			return
-		}
-		if planMarkdown == "" {
-			errMsg := out.errMsg
-			if errMsg == "" {
-				errMsg = "Claude 未返回结果，请重试"
-			}
-			job.Append(store.LogLine{Type: "error", Content: errMsg})
-			_ = h.reqSvc.UpdateDesignJob(id, "")
-			job.Finish(1, store.JobError)
-			return
-		}
+	// context.Background(): the HTTP request has already returned, so we
+	// must not tie the claude subprocess's lifetime to r.Context() (which
+	// is cancelled the moment the handler returns).
+	sessionArg := sourceSID
+	forkSessionID := ""
+	if fork {
+		forkSessionID = newDesignSID
+	} else if sourceSID == "" {
+		sessionArg = newDesignSID // skip-analysis fresh session
+	}
+	if block := llm.BuildSkillsBlock(h.mentionedSkills(req.Title + " " + req.Description)); block != "" {
+		prompt = block + prompt
+	}
+	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+		Prompt:         prompt,
+		WorkDir:        workDir,
+		SystemPrompt:   p.SystemPrompt,
+		Model:          cliModelArg(model),
+		ClaudeConfigID: claudeConfigID,
+		SessionID:      sessionArg,
+		Resume:         sourceSID != "",
+		Fork:           fork,
+		ForkSessionID:  forkSessionID,
+		PermissionMode: "plan",
+	})
+	out := runClaudeStream(jobSink{job}, cmd, "architect-design", h.usageCtxFor("architect_design", id, req.ProjectID, job.ID, model, "", ""))
 
-		// Persist the design (sets status=designing) and clear the active job
-		// pointer so a refresh shows the finished design instead of "executing".
-		if _, err := h.reqSvc.UpdateDesign(id, planMarkdown); err != nil {
-			log.Printf("[architect-design] failed to save design for %s: %v", id, err)
-			job.Append(store.LogLine{Type: "error", Content: "保存技术方案失败: " + err.Error()})
-			_ = h.reqSvc.UpdateDesignJob(id, "")
-			job.Finish(1, store.JobError)
-			return
+	if out.staleSession {
+		// The source conversation is gone. Clear whichever session id was
+		// stale so the user can redo the prior stage, surface a recovery
+		// hint, and clear the active job pointer. On the skip-analysis path
+		// there is no source session to be stale, so this branch is a
+		// no-op guard; we still surface a generic recovery hint.
+		if sourceSID == "" {
+			job.Append(store.LogLine{Type: "error", Content: "会话异常，请重试生成技术方案。"})
+		} else if fork {
+			_ = h.reqSvc.UpdateAnalysisSession(id, "")
+			job.Append(store.LogLine{Type: "error", Content: "需求分析会话已过期。请重新进行「需求分析」后再生成技术方案。"})
+		} else {
+			_ = h.reqSvc.UpdateDesignSession(id, "")
+			job.Append(store.LogLine{Type: "error", Content: "技术方案会话已过期。请重新生成技术方案。"})
 		}
 		_ = h.reqSvc.UpdateDesignJob(id, "")
+		job.Finish(1, store.JobError)
+		return
+	}
 
-		// Record the effective model for the architect stage (success path only).
-		if perr := h.reqSvc.UpdateArchitectModel(id, model); perr != nil {
-			log.Printf("[architect-design] failed to persist architect_model for %s: %v", id, perr)
+	// The design session id is already persisted upfront. Correct it only if
+	// the CLI reported a different id than the one we pre-minted (a safety
+	// net in case the --session-id override semantics ever change).
+	if out.sessionID != "" && out.sessionID != newDesignSID && out.sessionID != sourceSID {
+		if perr := h.reqSvc.UpdateDesignSession(id, out.sessionID); perr != nil {
+			log.Printf("[architect-design] failed to persist design session for %s: %v", id, perr)
 		}
-		// Close the knowledge loop: mark which read entries the run actually used.
-		if len(kbReadTitles) > 0 {
-			items, used := evaluateKnowledgeUsage(kbReadTitles, out.toolFiles, planMarkdown)
-			emitKnowledgeResultEvent(job, items, used)
+	}
+
+	// In plan mode, the full plan markdown is captured from the Write
+	// tool_use event that lands in ~/.claude/plans/*.md (runClaudeStream
+	// stores it in out.planContent). Fall back to the result text if
+	// capture missed it (e.g. a proxy that doesn't emit tool_use blocks in
+	// the assistant event).
+	planMarkdown := out.planContent
+	if planMarkdown == "" {
+		planMarkdown = out.finalResult
+	}
+	// The run ended with an error (upstream proxy 504, api_error result
+	// event, or non-zero exit). The Write tool_use that populates
+	// planContent fires BEFORE the model's final API call, so a 504 on that
+	// trailing call leaves planMarkdown non-empty while the run actually
+	// failed. Treating that as success appends a green ✅ and the user has
+	// no idea the run was interrupted (and the captured plan may be
+	// partial). Surface the error instead: save the captured plan as a
+	// fallback so the exploration work isn't lost, but mark the job errored
+	// so the UI shows the failure and the user can retry.
+	if out.errMsg != "" {
+		if planMarkdown != "" {
+			if _, err := h.reqSvc.UpdateDesign(id, planMarkdown); err != nil {
+				log.Printf("[architect-design] failed to save partial design for %s: %v", id, err)
+			}
 		}
-		job.Append(store.LogLine{Type: "done", Content: "✅ 技术方案已生成！"})
-		job.Finish(0, store.JobDone)
-		log.Printf("[architect-design] job %s finished for %s", job.ID, id)
-	}()
+		_ = h.reqSvc.UpdateDesignJob(id, "")
+		job.Append(store.LogLine{Type: "error", Content: out.errMsg})
+		job.Finish(1, store.JobError)
+		return
+	}
+	if planMarkdown == "" {
+		errMsg := out.errMsg
+		if errMsg == "" {
+			errMsg = "Claude 未返回结果，请重试"
+		}
+		job.Append(store.LogLine{Type: "error", Content: errMsg})
+		_ = h.reqSvc.UpdateDesignJob(id, "")
+		job.Finish(1, store.JobError)
+		return
+	}
+
+	// Persist the design (sets status=designing) and clear the active job
+	// pointer so a refresh shows the finished design instead of "executing".
+	if _, err := h.reqSvc.UpdateDesign(id, planMarkdown); err != nil {
+		log.Printf("[architect-design] failed to save design for %s: %v", id, err)
+		job.Append(store.LogLine{Type: "error", Content: "保存技术方案失败: " + err.Error()})
+		_ = h.reqSvc.UpdateDesignJob(id, "")
+		job.Finish(1, store.JobError)
+		return
+	}
+	_ = h.reqSvc.UpdateDesignJob(id, "")
+
+	// Record the effective model for the architect stage (success path only).
+	if perr := h.reqSvc.UpdateArchitectModel(id, model); perr != nil {
+		log.Printf("[architect-design] failed to persist architect_model for %s: %v", id, perr)
+	}
+	// Close the knowledge loop: mark which read entries the run actually used.
+	if len(kbReadTitles) > 0 {
+		items, used := evaluateKnowledgeUsage(kbReadTitles, out.toolFiles, planMarkdown)
+		emitKnowledgeResultEvent(job, items, used)
+	}
+	job.Append(store.LogLine{Type: "done", Content: "✅ 技术方案已生成！"})
+	job.Finish(0, store.JobDone)
+	log.Printf("[architect-design] job %s finished for %s", job.ID, id)
 }
 
 // GetJob returns the current state and full log of a background coding job.
@@ -2185,6 +2775,18 @@ func (h *WizardHandler) GetJob(w http.ResponseWriter, r *http.Request) {
 		"started_at":  job.StartedAt,
 		"finished_at": job.FinishedAt,
 	})
+}
+
+// GetActiveJobs returns all currently-running wizard jobs across the process.
+// Used by list / detail pages to badge "Claude 工作中" without N+1 polling
+// each requirement's *_job_id columns. Returns an empty array (not null) when
+// no jobs are running so the JSON shape stays stable for the frontend.
+func (h *WizardHandler) GetActiveJobs(w http.ResponseWriter, r *http.Request) {
+	jobs := h.jobs.ActiveJobs()
+	if jobs == nil {
+		jobs = []store.ActiveJob{}
+	}
+	writeJSON(w, 200, map[string]any{"jobs": jobs})
 }
 
 // toolResultContent extracts and truncates the content of a tool_result block.
@@ -2281,6 +2883,179 @@ func claudeResultError(scope string, evt map[string]interface{}) string {
 	return msg
 }
 
+// extractStreamError pulls every diagnostic field we can out of a top-level
+// {"type":"error",...} NDJSON event. The Claude CLI and upstream proxies
+// each use their own conventions for the message:
+//   - claude CLI: {"type":"error","error":"<string>"} or
+//     {"type":"error","error":{"message":"<string>", ...}}
+//   - third-party relays sometimes nest as {"type":"error","message":"..."}
+//   - some payloads carry a sibling "api_error_status" / "error_type" hint
+//
+// nova-agent-worker additionally serializes a few extra fields from the
+// non-zero child-process exit: code / signal / stderr. The CLI's actual
+// error line ("401 Unauthorized", "ENOTFOUND api.anthropic.com", "model
+// not found") lives in `stderr` and is by far the most useful diagnostic —
+// we surface it after the top-level message, capped to ~1.5KB so a chatty
+// CLI can't blow up the SSE envelope. When the message / stderr hint at an
+// upstream 400 / not found, append the same proxy-config guidance
+// claudeResultError does.
+//
+// The worker also attaches an `errorCategory` (computed via its
+// classifyError) — auth_failed / network_unreachable / model_not_found /
+// unrecognized_model / etc. — that we map to a tailored Chinese fix hint
+// appended after stderr. This is what turns the previously opaque
+// "Claude Code process exited with code 1" into actionable guidance.
+func extractStreamError(evt map[string]interface{}) string {
+	var msg string
+	switch v := evt["error"].(type) {
+	case string:
+		msg = v
+	case map[string]interface{}:
+		if s, ok := v["message"].(string); ok && s != "" {
+			msg = s
+		}
+	}
+	if msg == "" {
+		if s, ok := evt["message"].(string); ok && s != "" {
+			msg = s
+		}
+	}
+	if msg == "" {
+		return ""
+	}
+
+	// Append the CLI's stderr (if the worker captured it) — this is where
+	// the actionable diagnostic usually is. Truncate to 1.5KB to keep the
+	// SSE message readable; the full text is also available in the backend
+	// log via the raw json.Marshal below.
+	if stderr, ok := evt["stderr"].(string); ok && strings.TrimSpace(stderr) != "" {
+		stderr = strings.TrimSpace(stderr)
+		if len(stderr) > 1500 {
+			stderr = stderr[:1500] + "\n…[truncated]"
+		}
+		msg += "\n[stderr]\n" + stderr
+	}
+
+	// Append the exit code if present, for quick scanning.
+	if code, ok := evt["code"]; ok {
+		msg += fmt.Sprintf("\n[exit_code] %v", code)
+	} else if code, ok := evt["exitCode"]; ok {
+		msg += fmt.Sprintf("\n[exit_code] %v", code)
+	}
+
+	// Append nested cause (one level) — sometimes an upstream relay wraps
+	// a transport error inside a higher-level Error and only the inner
+	// one names the host. Kept for forward-compat with the previous
+	// SDK-shaped payloads an older worker may still emit.
+	if cause, ok := evt["cause"].(string); ok && cause != "" {
+		msg += "\n[cause] " + cause
+	}
+
+	// Worker-classified category → tailored fix hint. When the worker emits
+	// a preflight failure we hoist the hint above the generic 400 check so
+	// the user sees the actionable reason first. Categories must match the
+	// strings nova-agent-worker/server.mjs:classifyError emits; if a new
+	// category is added there, add a hint here too.
+	if cat, _ := evt["errorCategory"].(string); cat != "" {
+		if hint := workerCategoryHint(cat, msg); hint != "" {
+			msg += "\n[诊断] " + hint
+		}
+	}
+
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "400") &&
+		(strings.Contains(lower, "bad request") || strings.Contains(lower, "not found")) {
+		msg += "\n（这是上游代理返回的 400，通常是 BASE_URL / Token / 模型 配置有误或额度耗尽，请在「设置」里检查 Claude 配置）"
+	}
+	if raw, err := json.Marshal(evt); err == nil {
+		log.Printf("[stream-error] %s", truncateStr(string(raw), 1200))
+	}
+	return msg
+}
+
+// workerCategoryHint maps nova-agent-worker's errorCategory to a Chinese
+// fix hint. Keep the categories in sync with classifyError in server.mjs
+// (the worker writes the strings verbatim — a typo here silently breaks
+// the hint without surfacing).
+//
+// Hint scope: actionable and bounded. We deliberately do NOT explain every
+// possible root cause (the stderr already does that); we tell the user
+// what knob to turn next.
+func workerCategoryHint(cat, msg string) string {
+	switch cat {
+	case "cli_not_found":
+		return "Claude CLI 未找到。请在 Agent 服务器上确认 `claude --version` 可执行，或重新「安装依赖」。"
+	case "auth_failed":
+		return "鉴权失败（401）。请在「设置 → Claude 配置」检查 ANTHROPIC_AUTH_TOKEN 是否已填写并生效。"
+	case "auth_forbidden":
+		return "权限不足（403）。Token 可能有效但缺少调用该模型的权限，或 base URL 指向了无权访问的端点。"
+	case "model_not_found":
+		return "上游 API 不认识这个 model（404）。请检查「设置 → Claude 配置」里的 model 与 base URL，或确认模型名拼写正确。"
+	case "unrecognized_model":
+		// We pin MiniMax-M3 (or a similar custom id) via the --settings env
+		// block together with CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_
+		// ENFORCEMENT=1, which suppresses Claude Code's "model isn't in my
+		// local catalog, I'll assume 200k context and might fail" warning —
+		// see gateway.go: settingsEnvOverrides. If the warning still surfaces
+		// here, either the env block didn't reach the worker (stale
+		// server.mjs) or the CLI version on the agent server doesn't honor
+		// that knob.
+		//
+		// The `[1m]` / `[0m]` markers in the stderr are Claude Code's
+		// own ANSI color escapes leaking into the JSON it emits — a CLI
+		// bug, not our model name. The actual id is whatever's set in
+		// 「设置 → Claude 配置」.
+		return "Claude Code 不在本地 model 目录里认识这个 model（自定义 model 走私有 base URL 时常见）。gateway.go 已自动注入 CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1 让 CLI 跳过 catalog 检查，但本机仍报此错通常意味着：(1) worker 还在跑旧版 server.mjs，没拿到新的 env（请在「设置 → Agent 服务器」点「安装依赖」）；(2) Agent 服务器上的 Claude Code 版本过旧不识别该 env 变量（请运行 `claude --version` 升级）。详细：stderr 里的 `[1m]`/`[0m` 是 Claude Code CLI 自带的 ANSI 颜色控制符泄漏进 JSON，不是 model 名真的带这些字符。"
+	case "rate_limited":
+		return "上游限流（429）。请稍候几分钟重试，或降低并发。"
+	case "quota_exceeded":
+		return "账户额度耗尽。请充值或换用其他 Claude 配置后重试。"
+	case "network_unreachable":
+		return "Agent 服务器无法访问到上游 API。请检查出口网络/防火墙/代理。"
+	case "dns_unresolved":
+		return "Agent 服务器 DNS 解析失败。请检查 /etc/resolv.conf 或上游 base URL 域名拼写。"
+	case "connection_refused":
+		return "上游连接被拒（ECONNREFUSED）。通常是 base URL 端口错，或上游服务未启动。"
+	case "connection_reset":
+		return "上游连接被重置（ECONNRESET）。通常是代理或防火墙打断了长连接，重试即可。"
+	case "permission_denied":
+		// When the EACCES path is /var/folders the real cause is almost
+		// always that $TMPDIR was inherited from a macOS dev box and
+		// forwarded into the SSH session on a Linux/Windows agent host
+		// where /var/folders doesn't exist. claude's internal tmpdir
+		// setup then EACCESes on the missing parent before --print ping
+		// even starts. nova-agent-worker now auto-overrides TMPDIR
+		// (existing → $HOME → /tmp → cwd → bare /tmp) before each
+		// spawn, and the systemd/launchd unit + nohup launcher all pin
+		// TMPDIR=/tmp so the worker process itself starts with a sane
+		// tmpdir. This hint therefore usually points at the worker not
+		// having picked up the new server.mjs yet (i.e. re-Install is
+		// the missing step), or at a stale node process holding the
+		// old in-memory code after a partial install.
+		if strings.Contains(msg, "/var/folders") {
+			return "Claude 进程的 $TMPDIR 指向 /var/folders，但该路径在 Agent 服务器上不存在（开发机是 macOS，$TMPDIR 跟随 SSH 会话转发到了 Linux 远端）。worker 已自动覆盖 TMPDIR（现有 → $HOME → /tmp → 兜底 /tmp），仍报错通常是 worker 还没拉到新版 server.mjs 或 systemd 未重启。请 SSH 到 Agent 服务器执行 `systemctl --user restart nova-agent-worker.service`（或在「设置 → Agent 服务器」点一次「安装依赖」），然后查看 ~/nova-agent-worker/worker.log 中 `[nova-agent-worker] resolved TMPDIR via …` 那行确认 TMPDIR 已切到 /home/<user>/.nova-agent-worker-XXXX 或 /tmp/.nova-agent-worker-XXXX。若日志显示 `/tmp` 兜底分支，说明 $HOME 不可写，请检查 Agent 服务器上 nova-agent-worker 进程对 $HOME 目录是否有写权限。"
+		}
+		return "本地文件系统权限不足（EACCES）。请检查 worktree 路径对当前 SSH 用户是否可写。"
+	case "session_not_found":
+		return "找不到要 resume 的会话。本地会话 jsonl 未上传到 Agent 服务器，或 slug 不匹配，建议重新分析或开新会话。"
+	case "max_turns":
+		return "Claude 达到单轮最大工具调用次数。请把需求拆小，或在提示词里限制工具调用总数。"
+	case "preflight_timeout":
+		return "preflight 5 秒内未完成（`claude --print ping` 卡住）。通常是 Agent 服务器无法访问 API，请检查网络。"
+	case "running_as_root":
+		// Claude CLI refuses --dangerously-skip-permissions when the current
+		// uid is root (or sudo is in effect) for security reasons. The CLI
+		// surfaces this as a non-zero exit before any tool/API call, so the
+		// wizard sees an opaque "exit 1" without this classification. The
+		// install flow now auto-provisions a non-root user and switches the
+		// stored SSH username (see agent_server.go:runInstall), so the first
+		// piece of advice is "re-run 安装依赖"; the manual steps stay as the
+		// password-auth / already-provisioned fallback.
+		return "Claude CLI 出于安全考虑拒绝以 root/sudo 身份执行 --dangerously-skip-permissions。如果这台服务器使用 SSH 私钥认证，回到「设置 → Agent 服务器」重新点「安装依赖」即可自动创建普通用户（nova）并把 SSH 用户名切换过去，无需手动操作；如果使用密码认证，请在服务器上手动创建普通用户并把 NovaWorkbench 所在机器的 SSH 公钥写入其 `~/.ssh/authorized_keys`，然后把该服务器的 SSH 用户名改为该普通用户后再重试。"
+	}
+	return ""
+}
+
 // claudeStreamOutcome is the result of running one claude stream-json command to
 // completion. finalResult holds the "result" event text on success. On failure
 // errMsg is a human-readable message; staleSession is true when the failure was
@@ -2288,12 +3063,15 @@ func claudeResultError(scope string, evt map[string]interface{}) string {
 // so the caller can transparently fall back to a fresh session instead of
 // surfacing a hard error.
 type claudeStreamOutcome struct {
-	finalResult     string
-	sessionID       string // session_id of this run, read from the system/init event. For a --fork-session run this is the NEW forked id.
-	staleSession    bool
-	errMsg          string
-	hadStreamEvents bool     // true if any stream_event/content_block_delta arrived
-	planContent     string   // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
+	finalResult      string
+	sessionID        string // session_id of this run, read from the system/init event. For a --fork-session run this is the NEW forked id.
+	staleSession     bool
+	errMsg           string
+	hadStreamEvents  bool   // true if any stream_event/content_block_delta arrived
+	eventCount       int    // total NDJSON events parsed (any type)
+	streamEventCount int    // subset that are stream_event
+	lastEventType    string // type field of the most recent event, used for EOF postmortem
+	planContent      string // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
 	// subTasksJSON is the authoritative sub-task decomposition payload,
 	// captured from a Write tool_use whose target path ends with
 	// /.novaworkbench/subtasks.json. Unlike the free-text JSON block +
@@ -2302,8 +3080,8 @@ type claudeStreamOutcome struct {
 	// markdown mangling (req_9d24ef181a5ad5c4). tryAutoOrchestrate prefers
 	// this over every text-parsing fallback.
 	subTasksJSON string
-	actualModel     string   // model id returned by the API, captured from the assistant event's message.model
-	toolFiles       []string // file paths / patterns touched by Read/Write/Edit/Grep/Glob tool calls (for knowledge-usage evaluation)
+	actualModel  string   // model id returned by the API, captured from the assistant event's message.model
+	toolFiles    []string // file paths / patterns touched by Read/Write/Edit/Grep/Glob tool calls (for knowledge-usage evaluation)
 	// lastUsage captures the four token counts from the terminal result event
 	// (or zero values when the stream ended before reaching a result). The
 	// compress-context handler reads this to populate the `done` payload's
@@ -2420,6 +3198,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	// time a sub-task forks. The full diagnostic only fires when Start()
 	// fails — that's the case that actually needs the snapshot to pinpoint
 	// the cause (ENOENT alone is ambiguous).
+
 	log.Printf("[%s] claude 启动中 (binary=%s args=%d)", scope, filepath.Base(cmd.Path), len(cmd.Args))
 	if err := cmd.Start(); err != nil {
 		logClaudeExecDiag(scope, cmd)
@@ -2735,6 +3514,23 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 				}
 			}
 			gotResult = true
+		case "error":
+			// stream-json sometimes emits a top-level error event before any
+			// result/system (e.g. claude CLI exited non-zero on startup, auth
+			// rejected at the proxy, model rejected, network DNS failure).
+			// Without this case the error body is silently dropped and the
+			// EOF branch only knows lastEventType="error" — leaving the user
+			// guessing among "API hung", "401", "OOM", "argv truncated". The
+			// CLI and any relay both use a string `error` field; some
+			// payloads nest it as an object with a `message` sub-field, so
+			// accept both shapes.
+			msg := extractStreamError(evt)
+			if msg != "" {
+				if out.errMsg == "" {
+					out.errMsg = msg
+				}
+				sink.emit(store.LogLine{Type: "error", Content: msg})
+			}
 		}
 		if gotResult {
 			break
@@ -2777,6 +3573,771 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 // wizard_proc_windows.go — process groups are a POSIX concept, so the
 // Windows build falls back to signaling just the direct process.
 
+// ---- Remote Agent-server execution -----------------------------------------
+
+// remoteCodingInput is the bag of pre-computed values the StartCoding
+// goroutine hands to runRemoteCoding. Pulling these into a struct keeps the
+// signature readable and forces callers to acknowledge the same dependencies
+// the local branch already resolved (prompt, workDir, session threading).
+type remoteCodingInput struct {
+	job            *store.Job
+	serverID       string
+	req            startCodingReq
+	reqRow         *model.Requirement
+	prompt         string
+	workDir        string // local worktree path (used only for SFTP upload source)
+	sourceSID      string
+	fork           bool
+	sessionArg     string
+	forkSessionID  string
+	model          string
+	claudeConfigID string // role-bound claude config; empty = global active
+	usage          *usageCtx
+}
+
+// startCodingReq mirrors the anonymous struct StartCoding decodes so the
+// remote helper doesn't have to redefine field tags. Keeping this as a named
+// type keeps runRemoteCoding self-documenting.
+type startCodingReq struct {
+	ProjectPath      string
+	RequirementTitle string
+	RequirementDesc  string
+	RequirementID    string
+	BranchName       string
+	BaseBranch       string
+	Model            string
+	ReadKnowledge    bool
+	AgentServerID    string
+}
+
+// RunRemoteCoding exposes runRemoteCoding as a func value for SubTaskRunner.
+// main injects it via SubTaskRunner.SetRemoteCoding so every child dispatch
+// (manual sub-task / orchestrated child / merge push+PR sub-task) can run on
+// the Agent server the parent requirement was developed on without the runner
+// depending on the wizard handler's full dependency set.
+func (h *WizardHandler) RunRemoteCoding(in *remoteCodingInput) claudeStreamOutcome {
+	return h.runRemoteCoding(in)
+}
+
+// runRemoteCoding is the Agent-server equivalent of the local runClaudeStream
+// block in StartCoding. It opens an SSH session, ensures the project lives in
+// a per-requirement git worktree under /tmp/nova-agent/<projectID>/<reqID>,
+// uploads the local claude session dir so --resume picks up the right jsonl,
+// runs the same claude CLI invocation, parses the stream-json output, then
+// pushes the resulting commits back to origin and re-syncs the session dir
+// back to local. Returns the same claudeStreamOutcome shape as the local
+// path so the caller can reuse its terminal-state handling.
+func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutcome {
+	if h.agentSvrSvc == nil {
+		return claudeStreamOutcome{errMsg: "Agent 服务器服务未初始化"}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Minute)
+	defer cancel()
+
+	// Load the (decrypted) credential before anything else — a missing master
+	// key surfaces here as a clear error instead of a generic SSH failure.
+	srv, plain, err := h.agentSvrSvc.GetWithCredential(in.serverID)
+	if err != nil {
+		return claudeStreamOutcome{errMsg: "无法读取 Agent 服务器凭据: " + err.Error()}
+	}
+	in.job.Append(store.LogLine{Type: "phase", Content: "🔌 连接到 Agent 服务器 " + srv.Name + " (" + srv.Host + ")"})
+
+	client, err := gossh.Dial(ctx, srv.Host, srv.Port, srv.Username, srv.AuthType, plain)
+	if err != nil {
+		return claudeStreamOutcome{errMsg: "SSH 连接失败: " + err.Error()}
+	}
+	defer client.Close()
+
+	// Step 2: code sync via git. baseRepo hosts a single origin clone for the
+	// project; wtPath is the per-requirement worktree that mirrors the local
+	// branch isolation model. Without a remote_url on the project the entire
+	// remote path is dead — fail early with a clear message instead of an
+	// opaque "git clone exit 128".
+	if in.reqRow == nil {
+		return claudeStreamOutcome{errMsg: "远程执行需要已保存的需求记录（缺 Requirement）"}
+	}
+	originURL, err := h.projectSvc.OriginURL(in.reqRow.ProjectID)
+	if err != nil || originURL == "" {
+		return claudeStreamOutcome{errMsg: "项目未配置 git 远程仓库，无法在 Agent 服务器执行。请先在项目设置中配置 origin。" + errString(err)}
+	}
+	baseRepo := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/base"
+	wtPath := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID
+	branch := in.req.BranchName
+	if branch == "" {
+		branch = "requirement-" + in.reqRow.ID
+	}
+	baseBranch := in.req.BaseBranch
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+
+	in.job.Append(store.LogLine{Type: "phase", Content: "📥 准备 Agent 服务器代码（git worktree 隔离）..."})
+	if !client.Exists(baseRepo) {
+		in.job.Append(store.LogLine{Type: "message", Content: "📦 首次 clone " + redactOriginForLog(originURL)})
+		if exit, _ := client.Exec(ctx, "git clone "+shellQuoteSingle(originURL)+" "+shellQuoteSingle(baseRepo), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
+			return claudeStreamOutcome{errMsg: "git clone 失败（exit=" + fmtInt(exit) + "），请检查 origin 凭据"}
+		}
+	} else {
+		client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin --prune", "", nil, &jobWriter{job: in.job}, nil)
+	}
+	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree prune", "", nil, &jobWriter{job: in.job}, nil)
+
+	if !client.Exists(wtPath) {
+		// Strategy 1: branch off HEAD (always valid; matches EnsureWorktree).
+		// Strategy 2: off origin/<base> when strategy 1 fails. Strategy 3:
+		// attach to an already-existing branch (adjust/continue reuse case).
+		exit, _ := client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath), "", nil, &jobWriter{job: in.job}, nil)
+		if exit != 0 {
+			exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath)+" origin/"+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
+			if exit != 0 {
+				if exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add "+shellQuoteSingle(wtPath)+" "+shellQuoteSingle(branch), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
+					return claudeStreamOutcome{errMsg: "git worktree 创建失败（exit=" + fmtInt(exit) + "），请检查仓库状态"}
+				}
+			}
+		}
+	} else {
+		// adjust-coding / continue-coding: pull the latest remote commits
+		// onto the existing branch. --ff-only protects against silent
+		// divergence; on failure we log a hint and proceed with the local
+		// copy (the user can resolve the divergence manually).
+		client.Exec(ctx,
+			"cd "+shellQuoteSingle(wtPath)+" && (git checkout "+shellQuoteSingle(branch)+" 2>/dev/null || true) && (git pull --ff-only origin "+shellQuoteSingle(branch)+" 2>&1 || echo \"[nova-agent] pull 跳过（无跟踪或已分叉）\")",
+			"", nil, &jobWriter{job: in.job}, nil)
+	}
+
+	// Step 3: session sync (up) so the remote claude can --resume the same
+	// session. We push the project-level ~/.claude/projects/<slug>/ contents
+	// (the small set of jsonl files the CLI uses for session state). A missing
+	// local dir is fine — the project has never been coded on before, and the
+	// CLI on the remote will mint a brand-new session id.
+	//
+	// The remote slug is derived deterministically from the remote cwd
+	// (wtPath, set up in step 1). Mapping local slug → remote slug lets the
+	// remote claude find the jsonl files under the directory matching its
+	// own cwd, which is what `--resume <session_id>` consults. Without this
+	// mapping the local slug (-Users-f1-...-req_xxx) lands at the remote
+	// projects root, while the remote CLI looks for sessions under its own
+	// slug (-tmp-nova-agent-<projectID>-<reqID>), producing "No conversation
+	// found" / "源会话已失效" on every run.
+	remoteProjectsRoot := "~/.claude/projects/"
+	remoteSlug := util.EncodeClaudeSlug(wtPath)
+	remoteSlugDir := remoteProjectsRoot + remoteSlug
+	in.job.Append(store.LogLine{Type: "phase", Content: "📤 同步 Claude 会话历史（SFTP 上行）..."})
+	if slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
+		client.Mkdirp(remoteSlugDir)
+		if sftpErr := client.SyncDirUpMapped(slugDir, remoteSlugDir); sftpErr != nil {
+			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话上行失败（将无 resume 启动新会话）: " + sftpErr.Error()})
+		}
+	} else if slugErr != nil {
+		in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 无法定位本地 claude session 目录（" + slugErr.Error() + "），将无 resume 启动新会话"})
+	}
+
+	// Step 4: build the worker POST body. The mapping (NovaWorkbench
+	// StreamOpts → worker RunRequest) lives here so the wire format and the
+	// CLI invocation shape stay in one place; the worker mirrors the field
+	// names in its buildRunRequest helper and translates them to the
+	// matching `claude` CLI flags.
+	//
+	// Auth precedence on the remote path: the platform's active
+	// claude_configs row is the ONLY source of ANTHROPIC_AUTH_TOKEN /
+	// ANTHROPIC_BASE_URL / model pinning. We pass it via `env` (built by
+	// BuildRemoteEnvPairsWithConfig below) AND we set IgnoreLocalSettings=true
+	// so the worker invokes claude with --setting-sources "" (load no settings
+	// files at all — user / project / local). The agent host's
+	// ~/.claude/settings.json — which the install script seeds with a
+	// placeholder token — must not be able to shadow the platform config,
+	// and any project / local settings left in the worktree by accident
+	// shouldn't either. The worker folds the `env` map into its inline
+	// --settings JSON (buildSettingsArg), so the remote launch carries the
+	// pins exactly the way the local path does.
+	ignoreLocal := true
+	// The -p prompt built upstream (StartCoding / AdjustCoding /
+	// ContinueCoding / tryAutoOrchestrate) bakes the LOCAL worktree path
+	// into the persona header via agentDirectPrompt / developerDecomposePrompt:
+	//
+	//   "现在切换到「Agent 开发者」角色，正在执行需求（需求：<title>，工作目录：<workDir>）"
+	//
+	// On the local path that's correct — the agent is sitting in <workDir>.
+	// On the remote path <workDir> is a /Users/f1/.novaworkbench/...
+	// worktree that doesn't exist on the agent host (the remote cwd is
+	// /tmp/nova-agent/<projectID>/<reqID>). Handing the original prompt
+	// through verbatim confuses the agent's "先读取项目中的相关文件" step —
+	// it tries to read a path that's not on its filesystem and either
+	// errors or falls back to its own cwd, which defeats the "based on
+	// workdir" intent the header expresses.
+	//
+	// Rewrite the persona header's workDir to the remote cwd before
+	// posting to the worker. The substitution locates the "工作目录："
+	// label in the persona header (a fixed string the prompt builders
+	// always emit right before the path) and replaces from there through
+	// the next "）" full-width closing paren. This way the requirement
+	// title and any other tokens between the opening "（" and the label
+	// are preserved verbatim — only the workDir segment is swapped.
+	// Embedded file content from collectProjectContext is left untouched.
+	// No-op when in.workDir is empty or doesn't appear in the prompt.
+	remotePrompt := rewritePersonaWorkDir(in.prompt, in.workDir, wtPath)
+	opts := llm.StreamOpts{
+		Prompt:                 remotePrompt,
+		WorkDir:                wtPath,
+		SystemPrompt:           "",
+		Model:                  cliModelArg(in.model),
+		ClaudeConfigID:         in.claudeConfigID,
+		SessionID:              in.sessionArg,
+		Resume:                 in.sourceSID != "",
+		Fork:                   in.fork,
+		ForkSessionID:          in.forkSessionID,
+		PermissionMode:         "",
+		OverrideSettingSources: &ignoreLocal, // legacy flag, kept true
+	}
+	// Use BuildRemoteEnvPairs (NOT a plain env inheritance): the remote worker
+	// spawns claude inside the agent host's own environment, so we must only
+	// send the platform-pinned keys (auth token / base URL / model pins).
+	// Inheriting os.Environ() of the NovaWorkbench host would leak macOS
+	// HOME=/Users/... + TMPDIR=/var/folders/... into the Linux agent, making
+	// `claude --print ping` hang and fail the preflight (preflight_timeout).
+	// The pairs come from the SAME settingsEnvOverrides map the local path
+	// serializes into its --settings JSON, so the two surfaces cannot drift.
+	envPairs := h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, in.claudeConfigID)
+	runBody := workerRunRequest(opts, envPairs, in)
+
+	// Step 5: POST to nova-agent-worker via SSH direct-tcpip channel. The
+	// HTTPTransport opens one channel per request through the existing SSH
+	// connection — no new TCP port on the network, and the worker is bound
+	// to 127.0.0.1 on the remote host, so even on the remote side it's not
+	// exposed. The response is a streaming NDJSON body (one JSON event per
+	// line, same shape as the old `claude --output-format stream-json`
+	// output) that the existing parseStreamJSONFromReader consumes directly.
+	in.job.Append(store.LogLine{Type: "phase", Content: "🤖 Agent 服务器开始执行（nova-agent-worker）..."})
+
+	workerAddr := "127.0.0.1:7000"
+	httpClient := &http.Client{Transport: client.HTTPTransport(workerAddr)}
+
+	// Pre-flight: GET /v1/health. The previous direct-CLI path had a
+	// `command -v claude` probe that surfaced "ENOENT" up front; this is
+	// its worker equivalent. A failed health probe is the most likely cause
+	// of "stream interrupted, 0 events" right now (the worker is new and
+	// a pre-existing Agent server without it would otherwise look like an
+	// opaque failure).
+	healthCtx, healthCancel := context.WithTimeout(ctx, 10*time.Second)
+	healthReq, hReqErr := http.NewRequestWithContext(healthCtx, http.MethodGet, "http://"+workerAddr+"/v1/health", nil)
+	if hReqErr != nil {
+		healthCancel()
+		return claudeStreamOutcome{errMsg: "构造健康检查请求失败: " + hReqErr.Error()}
+	}
+	healthResp, healthErr := httpClient.Do(healthReq)
+	if healthErr != nil {
+		healthCancel()
+		return claudeStreamOutcome{errMsg: "无法连接 nova-agent-worker（" + workerAddr + "）。请在「设置 → Agent 服务器」对该服务器点「安装依赖」后再试。详细: " + healthErr.Error()}
+	}
+	healthResp.Body.Close()
+	healthCancel()
+	if healthResp.StatusCode != http.StatusOK {
+		return claudeStreamOutcome{errMsg: fmt.Sprintf("nova-agent-worker 健康检查失败: HTTP %d", healthResp.StatusCode)}
+	}
+
+	// POST /v1/run with the JSON body. No overall http.Client timeout —
+	// the per-request ctx carries the 35-minute coding deadline.
+	bodyBytes, mErr := json.Marshal(runBody)
+	if mErr != nil {
+		return claudeStreamOutcome{errMsg: "序列化 worker 请求失败: " + mErr.Error()}
+	}
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+workerAddr+"/v1/run", bytes.NewReader(bodyBytes))
+	if reqErr != nil {
+		return claudeStreamOutcome{errMsg: "构造 worker 请求失败: " + reqErr.Error()}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, doErr := httpClient.Do(req)
+	if doErr != nil {
+		return claudeStreamOutcome{errMsg: "POST /v1/run 失败: " + doErr.Error()}
+	}
+	defer resp.Body.Close()
+
+	// Non-200 before the stream starts = worker rejected the request
+	// outright (bad JSON, missing fields, SDK query() threw on startup).
+	// Read the full body and surface it verbatim — usually a JSON message
+	// with the actual reason.
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(resp.Body)
+		return claudeStreamOutcome{errMsg: fmt.Sprintf("worker 返回 HTTP %d: %s", resp.StatusCode, truncateStr(string(errBody), 600))}
+	}
+
+	out := parseStreamJSONFromReader(resp.Body, jobSink{in.job}, "start-coding", in.usage)
+
+	// Step 6: session sync (down) — copy any new session jsonl the remote
+	// run created back to local so adjust/continue on the next round find
+	// it. Same forward-only semantics as Step 3, and routed via the same
+	// remote-slug → local-slug mapping so the jsonl lands in the directory
+	// whose slug matches the local cwd.
+	in.job.Append(store.LogLine{Type: "phase", Content: "📥 同步会话结果回本地..."})
+	if slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
+		if sftpErr := client.SyncDirDownMapped(remoteSlugDir, slugDir); sftpErr != nil {
+			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话下行失败: " + sftpErr.Error()})
+		}
+	}
+
+	// Step 7: git commit + push back to origin. Skip when the run errored out
+	// (no real result) so we don't propagate half-broken state. The user can
+	// always retry adjust-coding on the remote worktree via ContinueCoding.
+	if out.errMsg == "" && out.finalResult != "" {
+		in.job.Append(store.LogLine{Type: "phase", Content: "📤 推送代码变更到 origin..."})
+		title := "nova-agent: " + in.req.RequirementTitle
+		if title == "nova-agent: " {
+			title = "nova-agent: " + in.reqRow.Title
+		}
+		// git commit -F - reads the message from stdin; we pipe via heredoc to
+		// sidestep the SSH argv limit on long titles.
+		commitScript := "cd " + shellQuoteSingle(wtPath) +
+			" && git add -A" +
+			" && git diff --cached --quiet || git commit -m " + shellQuoteSingle(title) +
+			" && git push origin " + shellQuoteSingle(branch)
+		if exit, _ := client.Exec(ctx, commitScript, "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
+			in.job.Append(store.LogLine{Type: "error", Content: "❌ 推送失败（exit=" + fmtInt(exit) + "），请在远程 worktree 手动处理冲突"})
+			// Non-fatal: the user can still see the work locally via the
+			// pushed-back session dir + the captured result text. Don't
+			// override out.errMsg — let the run's own result stand.
+		} else {
+			in.job.Append(store.LogLine{Type: "message", Content: "✅ 已推送到 origin/" + branch})
+		}
+	}
+
+	return out
+}
+
+// jobWriter adapts *store.Job to io.Writer so remote Exec output can land
+// directly in the job's log (one message line per non-empty stdout/stderr
+// chunk). Empty lines are dropped to avoid spamming the SSE panel.
+type jobWriter struct{ job *store.Job }
+
+func (w *jobWriter) Write(p []byte) (int, error) {
+	for _, line := range strings.Split(string(p), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		w.job.Append(store.LogLine{Type: "message", Content: line})
+	}
+	return len(p), nil
+}
+
+// workerRunBody is the JSON body sent to nova-agent-worker's POST /v1/run.
+// It mirrors the worker's buildRunRequest helper (see agent-worker/server.mjs):
+// every field here corresponds to one CLI flag the worker assembles. Keeping
+// the shape on the Go side means wire-format changes require only one update.
+//
+// Why a typed struct (instead of `map[string]any`): the worker validates
+// required fields at startup, and unknown fields would be silently dropped.
+// A struct makes typos like `OverrideSettingSoures` a compile error rather
+// than a "worker returns 400 with no detail" at runtime.
+type workerRunBody struct {
+	WorkDir         string            `json:"workDir"`
+	Prompt          string            `json:"prompt"`
+	Model           string            `json:"model,omitempty"`
+	SystemPrompt    string            `json:"systemPrompt,omitempty"`
+	SessionID       string            `json:"sessionId,omitempty"`
+	Resume          bool              `json:"resume,omitempty"`
+	Fork            bool              `json:"fork,omitempty"`
+	ForkSessionID   string            `json:"forkSessionId,omitempty"`
+	Env             map[string]string `json:"env,omitempty"`
+	AllowedTools    []string          `json:"allowedTools,omitempty"`
+	DisallowedTools []string          `json:"disallowedTools,omitempty"`
+	// ClaudeConfigID records which claude_configs row was used to source the
+	// auth token + base URL carried in Env. The worker mirrors it into the
+	// inline --settings JSON's "env" block as ANTHROPIC_MODEL so the CLI's
+	// own env precedence can't be shadowed by a stale project / local
+	// settings file. Empty when the global active config was used.
+	ClaudeConfigID string `json:"claudeConfigId,omitempty"`
+	// OverrideSettingSources is the legacy "drop the user source" flag —
+	// when true, the worker invokes claude with --setting-sources project,local.
+	// Kept for callers that still want project-level hooks etc.
+	OverrideSettingSources bool `json:"overrideSettingSources,omitempty"`
+	// IgnoreLocalSettings, when true, is the strict "drop EVERY settings
+	// source" flag — the worker invokes claude with --setting-sources ""
+	// so the platform's claude_configs row (delivered via `env`) is the
+	// only source of ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / model
+	// pinning. The remote Agent-server path always sets this true: the
+	// install script seeds ~/.claude/settings.json with a placeholder
+	// token, and any stale value there would silently shadow the active row.
+	IgnoreLocalSettings bool `json:"ignoreLocalSettings,omitempty"`
+}
+
+// workerRunRequest builds the POST body for /v1/run from the NovaWorkbench
+// shape (llm.StreamOpts + remoteCodingInput). The env map is parsed from
+// envPairs (each entry is "KEY=VALUE"); the worker hands this map to the
+// claude subprocess's process env, so we don't need to strip the
+// ANTHROPIC_* keys — the worker passes the map straight to the child.
+//
+// systemPrompt is intentionally left empty for the wizard remote path: the
+// developer's persona is passed in the prompt itself (the -p payload
+// includes the role system prompt as a preamble), matching the previous
+// CLI invocation's behavior. If a future caller wants to pass it via
+// --system-prompt, set opts.SystemPrompt before this is called.
+func workerRunRequest(opts llm.StreamOpts, envPairs []string, in *remoteCodingInput) workerRunBody {
+	envMap := make(map[string]string, len(envPairs))
+	for _, kv := range envPairs {
+		eq := strings.IndexByte(kv, '=')
+		if eq <= 0 {
+			continue
+		}
+		envMap[kv[:eq]] = kv[eq+1:]
+	}
+	override := false
+	if opts.OverrideSettingSources != nil {
+		override = *opts.OverrideSettingSources
+	}
+	return workerRunBody{
+		WorkDir:       opts.WorkDir,
+		Prompt:        opts.Prompt,
+		Model:         opts.Model,
+		SessionID:     opts.SessionID,
+		Resume:        opts.Resume,
+		Fork:          opts.Fork,
+		ForkSessionID: opts.ForkSessionID,
+		Env:           envMap,
+		// Pass the config id so the worker can mirror ANTHROPIC_MODEL into
+		// the inline --settings JSON (the worker's buildSettingsArg already
+		// does this for opts.model; claudeConfigId is informational today but
+		// keeps the wire format ready for future per-config settings tweaks).
+		ClaudeConfigID:         opts.ClaudeConfigID,
+		OverrideSettingSources: override,
+		// Always drop local settings on the remote Agent-server path. The
+		// wizard remote-coding call site passes OverrideSettingSources=true
+		// (kept for backward compat with the legacy "drop user source"
+		// semantics) and now also gets IgnoreLocalSettings=true so the
+		// worker invokes claude with --setting-sources "" (load NO
+		// settings files). The platform env passed via `env` above is the
+		// sole source of auth / base URL / model pinning.
+		IgnoreLocalSettings: true,
+	}
+}
+
+// shellQuoteSingle mirrors the local ssh client's quoting: single-quoted
+// strings with embedded single quotes escaped via close-quote / escape /
+// open-quote. Empty strings become ”.
+func shellQuoteSingle(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// redactOriginForLog strips userinfo (the embedded token) from the origin
+// URL before showing it in the job log — same helper exists in
+// service/project.go but we keep a local copy so the handler doesn't have to
+// grow its dependency surface.
+func redactOriginForLog(raw string) string {
+	if i := strings.Index(raw, "@"); i > 0 {
+		if j := strings.Index(raw[:i], "://"); j > 0 {
+			return raw[:j+3] + "<redacted>@" + raw[i+1:]
+		}
+	}
+	return raw
+}
+
+// fmtInt returns the decimal string for an int (kept as a tiny shim so
+// the failure-path error messages read naturally without pulling in fmt
+// solely for Sprintf("%d", x)).
+func fmtInt(n int) string { return fmt.Sprintf("%d", n) }
+
+// errString returns err.Error() or "" when err is nil.
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return " (" + err.Error() + ")"
+}
+
+// claudeProjectsSlugDir locates the on-disk directory where claude stores
+// session jsonls for the given requirement's project. The slug is derived
+// from the project's local_path; we read the cached value on the project
+// row when available, otherwise fall back to scanning the parent dir for
+// a matching basename.
+//
+// The previous implementation always returned the first subdir of the
+// projects root — fine for a single-project setup but wrong when multiple
+// projects share ~/.claude/projects/. This implementation is precise: the
+// cached claude_project_slug (or the freshly-discovered one) is used
+// verbatim so the Agent Server sync path can map it to the remote slug.
+func (h *WizardHandler) claudeProjectsSlugDir(reqRow *model.Requirement) (string, error) {
+	if reqRow == nil {
+		return "", fmt.Errorf("no requirement")
+	}
+	if h.projectSvc == nil {
+		return "", fmt.Errorf("projectSvc not wired")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	claudeHome := os.Getenv("NOVA_CLAUDE_HOME")
+	if claudeHome == "" {
+		claudeHome = filepath.Join(home, ".novaworkbench", "claude")
+	}
+	root := filepath.Join(claudeHome, "projects")
+	proj, err := h.projectSvc.Get(reqRow.ProjectID)
+	if err != nil || proj == nil {
+		// Project row missing (e.g. soft-deleted) — degrade to the
+		// legacy "first subdir" behaviour so a misconfigured caller
+		// still gets a best-effort path rather than nothing. The Agent
+		// Server sync is best-effort anyway.
+		entries, rerr := os.ReadDir(root)
+		if rerr != nil {
+			if os.IsNotExist(rerr) {
+				return "", nil
+			}
+			return "", rerr
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			return filepath.Join(root, e.Name()), nil
+		}
+		return "", nil
+	}
+	// 1) Cache hit — use the persisted slug verbatim.
+	if proj.ClaudeProjectSlug != "" {
+		if _, statErr := os.Stat(filepath.Join(root, proj.ClaudeProjectSlug)); statErr == nil {
+			return filepath.Join(root, proj.ClaudeProjectSlug), nil
+		}
+		// Stale slug (project moved / dir deleted). Fall through to
+		// re-discovery so we don't keep returning a dead path.
+	}
+	// 2) Cache miss / stale — scan and persist.
+	slug, derr := h.projectSvc.DiscoverAndCacheClaudeProjectSlug(proj.ID, proj.LocalPath)
+	if derr != nil || slug == "" {
+		return "", derr
+	}
+	return filepath.Join(root, slug), nil
+}
+
+// parseStreamJSONFromReader is the io.Reader-only counterpart of
+// runClaudeStream. It scans NDJSON events off the supplied reader and emits
+// the same LogLine shape the local path uses (phase / tool_call / message /
+// usage / knowledge_result). It does NOT own a subprocess; the caller is
+// responsible for piping the remote claude's stdout into r and closing it
+// after the remote command exits.
+//
+// All heavy lifting (event dispatch, model pinning, token recording, usage
+// persistence) is mirrored from runClaudeStream so the resulting
+// claudeStreamOutcome is interchangeable. The differences are:
+//   - no process group / killProcessGroup — the remote shell is the parent's
+//     equivalent and we don't have access to its pgid over SSH
+//   - no stall watchdog — a stuck remote claude is killed by closing the
+//     SSH session from the caller's defer (client.Close kills the channel)
+//   - no stderr fallback for staleness detection (we never see the remote
+//     stderr in this scope)
+func parseStreamJSONFromReader(r io.Reader, sink streamSink, scope string, uctx *usageCtx) claudeStreamOutcome {
+	var out claudeStreamOutcome
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+	// Track the first few non-JSON lines so the postmortem in runRemoteCoding
+	// can show what claude actually printed before the EOF (claude CLI often
+	// emits a warning or an error message on stdout/stderr that isn't valid
+	// NDJSON — e.g. "NotLoggedIn", "SyntaxError", or proxy banner lines).
+	var firstNonJSON []string
+	for scanner.Scan() {
+		out.eventCount++
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		var evt map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			if strings.TrimSpace(line) != "" {
+				log.Printf("[%s] non-json line: %s", scope, truncateStr(line, 500))
+				if len(firstNonJSON) < 3 {
+					firstNonJSON = append(firstNonJSON, truncateStr(line, 240))
+				}
+			}
+			continue
+		}
+		evtType, _ := evt["type"].(string)
+		out.lastEventType = evtType
+		switch evtType {
+		case "system":
+			sub, _ := evt["subtype"].(string)
+			switch sub {
+			case "init":
+				if sid, ok := evt["session_id"].(string); ok && sid != "" {
+					out.sessionID = sid
+				}
+				sink.emit(store.LogLine{Type: "phase", Content: "🤖 Claude 已连接（远程），正在思考…"})
+			case "thinking_tokens":
+				if tokens, ok := evt["estimated_tokens"].(float64); ok {
+					sink.emit(store.LogLine{Type: "phase", Content: fmt.Sprintf("🤔 模型思考中… (%d tokens)", int(tokens))})
+				}
+			}
+		case "stream_event":
+			out.streamEventCount++
+			out.lastEventType = "stream_event"
+			inner, _ := evt["event"].(map[string]interface{})
+			if inner == nil {
+				continue
+			}
+			switch inner["type"] {
+			case "content_block_delta":
+				delta, _ := inner["delta"].(map[string]interface{})
+				if delta == nil {
+					continue
+				}
+				switch delta["type"] {
+				case "text_delta":
+					text, _ := delta["text"].(string)
+					if text != "" {
+						out.hadStreamEvents = true
+						sink.emit(store.LogLine{Type: "message", Content: text})
+					}
+				}
+			case "content_block_start":
+				block, _ := inner["content_block"].(map[string]interface{})
+				if block != nil && block["type"] == "tool_use" {
+					if name, _ := block["name"].(string); name != "" {
+						sink.emit(store.LogLine{Type: "tool_call", Content: toolCallLabel(name, nil)})
+					}
+				}
+			}
+		case "assistant":
+			msg, _ := evt["message"].(map[string]interface{})
+			if m, ok := msg["model"].(string); ok {
+				out.actualModel = m
+			}
+			content, _ := msg["content"].([]interface{})
+			for _, block := range content {
+				b, _ := block.(map[string]interface{})
+				switch b["type"] {
+				case "tool_use":
+					toolName, _ := b["name"].(string)
+					input, _ := b["input"].(map[string]interface{})
+					if toolName == "Write" && input != nil {
+						if fp, ok := input["file_path"].(string); ok {
+							if strings.Contains(filepath.ToSlash(fp), "/.claude/plans/") && strings.HasSuffix(fp, ".md") {
+								if c, ok := input["content"].(string); ok && c != "" {
+									out.planContent = c
+								}
+							}
+						}
+					}
+					if p := inputToolPath(toolName, input); p != "" {
+						out.toolFiles = append(out.toolFiles, p)
+					}
+					if !out.hadStreamEvents {
+						sink.emit(store.LogLine{Type: "tool_call", Content: toolCallLabel(toolName, input)})
+					}
+				case "text":
+					if !out.hadStreamEvents {
+						if text, _ := b["text"].(string); text != "" {
+							sink.emit(store.LogLine{Type: "message", Content: text})
+						}
+					}
+				}
+			}
+		case "result":
+			subtype, _ := evt["subtype"].(string)
+			apiErrStatus := 0.0
+			if v, ok := evt["api_error_status"].(float64); ok {
+				apiErrStatus = v
+			}
+			isErr, _ := evt["is_error"].(bool)
+			terminalReason, _ := evt["terminal_reason"].(string)
+			realSuccess := subtype == "success" && !isErr &&
+				terminalReason != "api_error" && apiErrStatus == 0
+			if realSuccess {
+				out.finalResult, _ = evt["result"].(string)
+			} else {
+				out.errMsg = claudeResultError(scope, evt)
+				if isStaleSessionError(evt, "") {
+					out.staleSession = true
+				}
+			}
+			if out.actualModel != "" && uctx != nil {
+				uctx.Model = out.actualModel
+			}
+			uctx.recordFrom(evt)
+			if inTok, outTok, cc, cr, ok := llm.ParseStreamUsage(evt); ok {
+				out.lastUsage = lastUsageSnapshot{InputTokens: inTok, OutputTokens: outTok, CacheCreationTokens: cc, CacheReadTokens: cr}
+				if uctx != nil && (inTok+outTok+cc+cr) > 0 {
+					modelName := uctx.Model
+					if modelName == "" {
+						modelName = out.actualModel
+					}
+					payload := map[string]any{
+						"step":                  uctx.Step,
+						"model":                 modelName,
+						"input_tokens":          inTok,
+						"output_tokens":         outTok,
+						"cache_creation_tokens": cc,
+						"cache_read_tokens":     cr,
+						"context_window":        service.ModelContextWindow(modelName),
+					}
+					if b, mErr := json.Marshal(payload); mErr == nil {
+						sink.emit(store.LogLine{Type: "usage", Content: string(b)})
+						if uctx.PersistSnapshot != nil {
+							if key := snapshotStep(uctx.Step); key != "" {
+								snap := map[string]any{
+									"model":                 modelName,
+									"input_tokens":          inTok,
+									"output_tokens":         outTok,
+									"cache_creation_tokens": cc,
+									"cache_read_tokens":     cr,
+									"context_window":        service.ModelContextWindow(modelName),
+								}
+								if sb, sErr := json.Marshal(snap); sErr == nil {
+									uctx.PersistSnapshot(key, string(sb))
+								}
+							}
+						}
+					}
+				}
+			}
+			return out
+		case "error":
+			// nova-agent-worker emits {type:"error", error:"..."} when the
+			// spawned claude CLI exits non-zero during initialization (auth
+			// rejected at the proxy, DNS to api.anthropic.com failed, model
+			// rejected, etc.). Without this case the body is dropped and
+			// the EOF branch only knows lastEventType="error" — surfacing
+			// the generic hint about API unreachable / OOM / argv
+			// truncation, none of which pinpoints the actual cause. Accept
+			// both string and object {message:...} shapes since the CLI
+			// and any relay disagree.
+			msg := extractStreamError(evt)
+			if msg != "" {
+				if out.errMsg == "" {
+					out.errMsg = msg
+				}
+				sink.emit(store.LogLine{Type: "error", Content: msg})
+			}
+		case "log":
+			// nova-agent-worker emits {type:"log", content:"..."} right before
+			// spawning claude, carrying the exact command (auth token already
+			// redacted) so a remote coding run is debuggable from the job panel
+			// without SSHing into the agent host. Show it as a plain message.
+			if content, _ := evt["content"].(string); content != "" {
+				sink.emit(store.LogLine{Type: "message", Content: content})
+			}
+		}
+	}
+	// EOF without a result event — the remote claude exited before
+	// completing the turn (network drop, etc.). The diagnostic now includes
+	// stream-event count + last event type + any non-JSON preamble so the
+	// user can tell "API hung silently after init" from "claude crashed
+	// before producing anything".
+	scanErr := scanner.Err()
+	if out.finalResult == "" && out.errMsg == "" {
+		var summary string
+		if out.streamEventCount == 0 {
+			summary = fmt.Sprintf("已收到 %d 个 NDJSON 事件（system/init 也未出现），最后类型=%q", out.eventCount, out.lastEventType)
+		} else {
+			summary = fmt.Sprintf("已收到 %d 个 NDJSON 事件，含 %d 个 stream_event（Claude 在输出文本/工具过程中断），最后类型=%q", out.eventCount, out.streamEventCount, out.lastEventType)
+		}
+		if len(firstNonJSON) > 0 {
+			summary += "；非 JSON 前导输出: " + strings.Join(firstNonJSON, " | ")
+		}
+		if scanErr != nil {
+			summary += "；scanner 错误: " + scanErr.Error()
+		}
+		out.errMsg = "远程 Claude 未返回结果（流中断 — " + summary + "）。最常见原因：Agent 服务器无法访问 api.anthropic.com（超时/DNS/防火墙），或 claude 进程崩溃/被 OOM kill，或 sshd exec argv 限制触发命令字符串被截断。"
+	}
+	return out
+}
+
 // analystFirstTurnDisallowedTools blocks file/code tools on the analyst first
 // turn so Claude answers from the pre-read context without tool use. The
 // atlascloud proxy mangles multi-turn tool-use streaming ("Content block not
@@ -2797,7 +4358,7 @@ var analystFirstTurnDisallowedTools = []string{"Read", "Glob", "Grep", "Bash", "
 // JobStore flow it is a jobSink so the lines survive a page refresh via the job's
 // replay buffer. Returns the final result text and the session id that actually
 // landed on disk (which the caller persists).
-func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, sessionID string, resume bool, sink streamSink, uctx *usageCtx) (finalResult, newSessionID string, err error) {
+func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, claudeConfigID, sessionID string, resume bool, sink streamSink, uctx *usageCtx) (finalResult, newSessionID string, err error) {
 	prompt := resumePrompt
 	if !resume {
 		prompt = firstTurnPrompt()
@@ -2819,6 +4380,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 		WorkDir:         projectPath,
 		SystemPrompt:    systemPrompt,
 		Model:           cliModelArg(model),
+		ClaudeConfigID:  claudeConfigID,
 		SessionID:       sessionID,
 		Resume:          resume,
 		DisallowedTools: disallowed,
@@ -2839,6 +4401,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 			WorkDir:         projectPath,
 			SystemPrompt:    systemPrompt,
 			Model:           cliModelArg(model),
+			ClaudeConfigID:  claudeConfigID,
 			SessionID:       freshID,
 			DisallowedTools: analystFirstTurnDisallowedTools,
 		})
@@ -2871,7 +4434,7 @@ var developerChatDisallowedTools = []string{"Write", "Edit"}
 // (--session-id); it is "" on a plain resume. Returns the final result text and
 // the session id that actually landed on disk (a forked or fresh id differs
 // from the input; the caller persists it).
-func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, sessionID string, fork bool, newSID string, w http.ResponseWriter, rc *http.ResponseController, uctx *usageCtx) (finalResult, newSessionID string, err error) {
+func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, claudeConfigID, sessionID string, fork bool, newSID string, w http.ResponseWriter, rc *http.ResponseController, uctx *usageCtx) (finalResult, newSessionID string, err error) {
 	resume := sessionID != ""
 	prompt := resumePrompt
 	if !resume {
@@ -2896,6 +4459,7 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 		WorkDir:         projectPath,
 		SystemPrompt:    systemPrompt,
 		Model:           cliModelArg(model),
+		ClaudeConfigID:  claudeConfigID,
 		SessionID:       sessionArg,
 		Resume:          resume,
 		Fork:            fork,
@@ -2918,6 +4482,7 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 			WorkDir:         projectPath,
 			SystemPrompt:    systemPrompt,
 			Model:           cliModelArg(model),
+			ClaudeConfigID:  claudeConfigID,
 			SessionID:       freshID,
 			DisallowedTools: developerChatDisallowedTools,
 		})
@@ -2991,10 +4556,11 @@ func buildAnalystFirstPrompt(req *model.Requirement, description, currentAnalysi
 	return b.String()
 }
 
-// logClaudeEnvConfig logs which auth-related env vars are present on the claude
-// subprocess (presence only — never values, so secrets stay out of the logs).
-// Use it to confirm the configured ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL are
-// applied and that a conflicting inherited ANTHROPIC_API_KEY has been stripped.
+// logClaudeEnvConfig logs where the claude run's auth/config travels: the
+// --settings JSON flag (values redacted — see logClaudeCmd) plus the presence
+// of any auth keys left on the process env, which should be ABSENT when a
+// pin is configured (localEnv strips them so --settings is the single source).
+// Never logs values, only presence, so secrets stay out of the logs.
 func logClaudeEnvConfig(scope string, cmd *exec.Cmd) {
 	has := func(k string) bool {
 		for _, kv := range cmd.Env {
@@ -3004,8 +4570,15 @@ func logClaudeEnvConfig(scope string, cmd *exec.Cmd) {
 		}
 		return false
 	}
-	log.Printf("[%s] claude env present: ANTHROPIC_AUTH_TOKEN=%v ANTHROPIC_BASE_URL=%v ANTHROPIC_API_KEY=%v",
-		scope, has("ANTHROPIC_AUTH_TOKEN"), has("ANTHROPIC_BASE_URL"), has("ANTHROPIC_API_KEY"))
+	hasSettingsFlag := false
+	for _, a := range cmd.Args {
+		if a == "--settings" {
+			hasSettingsFlag = true
+			break
+		}
+	}
+	log.Printf("[%s] claude config: --settings flag=%v env ANTHROPIC_AUTH_TOKEN=%v ANTHROPIC_BASE_URL=%v ANTHROPIC_API_KEY=%v",
+		scope, hasSettingsFlag, has("ANTHROPIC_AUTH_TOKEN"), has("ANTHROPIC_BASE_URL"), has("ANTHROPIC_API_KEY"))
 }
 
 // logClaudeExecDiag dumps a diagnostic snapshot of the binary Go is about to
@@ -3104,10 +4677,17 @@ func logClaudeExecDiag(scope string, cmd *exec.Cmd) {
 }
 
 // logClaudeCmd logs the actual claude CLI invocation as a shell command that
-// can be copied and run directly in a terminal.
+// can be copied and run directly in a terminal. The --settings JSON value is
+// the one exception to "verbatim": it carries the configured auth token, so it
+// is re-serialized with ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY blanked (the
+// remote worker's renderCommand applies the same rule, keeping the local and
+// remote logs diffable on auth / base URL / model).
 func logClaudeCmd(scope string, cmd *exec.Cmd) {
 	parts := make([]string, 0, len(cmd.Args))
-	for _, a := range cmd.Args {
+	for i, a := range cmd.Args {
+		if i > 0 && cmd.Args[i-1] == "--settings" {
+			a = llm.RedactSettings(a)
+		}
 		if len(a) > 200 {
 			a = a[:200] + fmt.Sprintf("…(%d bytes total)", len(a))
 		}
@@ -3210,7 +4790,7 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	systemPrompt, model := h.roleConfig(roleKey)
+	systemPrompt, model, claudeConfigID := h.roleConfig(roleKey)
 	// Per-request model override (highest precedence); empty means role default.
 	if req.Model != "" {
 		model = req.Model
@@ -3282,12 +4862,13 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
-		Prompt:       prompt,
-		WorkDir:      workDir,
-		SystemPrompt: systemPrompt,
-		Model:        cliModelArg(model),
-		SessionID:    sourceSID,
-		Resume:       !freshSession,
+		Prompt:         prompt,
+		WorkDir:        workDir,
+		SystemPrompt:   systemPrompt,
+		Model:          cliModelArg(model),
+		ClaudeConfigID: claudeConfigID,
+		SessionID:      sourceSID,
+		Resume:         !freshSession,
 	})
 
 	// Reuse runClaudeStream so this path gets live content_block_delta text
@@ -3439,7 +5020,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	systemPrompt, model := h.roleConfig(roleKey)
+	systemPrompt, model, claudeConfigID := h.roleConfig(roleKey)
 	// Per-request model override (highest precedence); empty means role default.
 	if req.Model != "" {
 		model = req.Model
@@ -3449,6 +5030,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 	// job id immediately. Claude runs in a goroutine writing progress into the
 	// job store.
 	job := h.jobs.Create(req.RequirementID)
+	job.SetType("apply_doc")
 	if perr := h.reqSvc.UpdateApplyJob(req.RequirementID, job.ID); perr != nil {
 		log.Printf("[apply-doc] failed to persist apply_job_id for %s: %v", req.RequirementID, perr)
 	}
@@ -3470,12 +5052,13 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		}
 
 		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-			Prompt:       applyPrompt,
-			WorkDir:      workDir,
-			SystemPrompt: systemPrompt,
-			Model:        cliModelArg(model),
-			SessionID:    sourceSID,
-			Resume:       true,
+			Prompt:         applyPrompt,
+			WorkDir:        workDir,
+			SystemPrompt:   systemPrompt,
+			Model:          cliModelArg(model),
+			ClaudeConfigID: claudeConfigID,
+			SessionID:      sourceSID,
+			Resume:         true,
 		})
 		applyUsage := h.usageCtxFor("apply_doc", reqID, requirement.ProjectID, job.ID, model, fmt.Sprintf("{\"doc_type\":%q}", docType), "")
 		out := runClaudeStream(jobSink{job}, cmd, "apply-doc", applyUsage)
@@ -3616,11 +5199,12 @@ type compressContextDone struct {
 // in this stage starts fresh and sees the summary as a prompt prefix.
 //
 // Stream protocol (SSE under text/event-stream):
-//   phase       — human-readable status line
-//   message     — Claude's summary text as it streams in
-//   usage       — mirror of the result.usage block (powers the live usage bar)
-//   error       — terminal failure (no DB write happens)
-//   done        — terminal success; carries {step, summary, tokens_used, model}
+//
+//	phase       — human-readable status line
+//	message     — Claude's summary text as it streams in
+//	usage       — mirror of the result.usage block (powers the live usage bar)
+//	error       — terminal failure (no DB write happens)
+//	done        — terminal success; carries {step, summary, tokens_used, model}
 //
 // Failure policy: on any error path (stream failure, stale session, missing
 // [COMPRESS_COMPLETE] marker) we emit `error` + `done{success:false}` and
@@ -3695,7 +5279,7 @@ func (h *WizardHandler) CompressContext(w http.ResponseWriter, r *http.Request) 
 	// summary-extraction skill, and reusing the analyst persona keeps the
 	// output style consistent with the other analytical turns. The model
 	// override follows the same precedence as other wizard handlers.
-	systemPrompt, model := h.roleConfig("analyst")
+	systemPrompt, model, claudeConfigID := h.roleConfig("analyst")
 
 	// Compression prompt (Chinese, fixed). The [COMPRESS_COMPLETE] sentinel
 	// is parsed by this handler to know when Claude has finished writing —
@@ -3723,6 +5307,7 @@ func (h *WizardHandler) CompressContext(w http.ResponseWriter, r *http.Request) 
 		Resume:          true,
 		SystemPrompt:    systemPrompt,
 		Model:           cliModelArg(model),
+		ClaudeConfigID:  claudeConfigID,
 		DisallowedTools: noTools,
 	})
 
@@ -3891,22 +5476,17 @@ func subTaskSourceSID(req *model.Requirement, explicit string) string {
 	return ""
 }
 
-// runSubTask spawns the claude CLI subprocess for a sub-task row and writes
-// the final artifact to sub_tasks.artifact on completion. shared by
-// StartSubTask and AdjustSubTask so the only thing callers vary is the
-// source session id.
+// runSubTask is a thin adapter that delegates to the shared SubTaskRunner.
+// Kept as a method (instead of inlining the call) so the existing call sites
+// in StartSubTask / AdjustSubTask / dispatchChildrenSequential stay unchanged
+// when the runner takes over the heavy lifting.
 //
-// Side effects on success:
-//   - sub_tasks.status transitions to running (via MarkRunning)
-//   - the spawned JobStore job is appended with live phase/message lines
-//   - on completion, sub_tasks.artifact is filled with a Markdown report
-//     wrapping the claude finalResult, and job.Finish is called
+// configIDOverride mirrors the body.Model override: empty lets the runner
+// resolve from the executor role's binding, non-empty pins the executor to
+// a specific Claude config so a per-run model override stays coherent with
+// the per-run config override the caller wants to honor.
 //
-// Pre: the sub_tasks row is already created with status=pending and has
-// its source_session_id populated. Pre-minting a session id via
-// subTaskSvc.UpdateSession + a JobStore job via jobs.Create should happen
-// in the caller before invoking this function — see StartSubTask for the
-// canonical ordering.
+// See SubTaskRunner.Run for the full lifecycle.
 func (h *WizardHandler) runSubTask(
 	req *model.Requirement,
 	st *model.SubTask,
@@ -3915,130 +5495,20 @@ func (h *WizardHandler) runSubTask(
 	sourceSID string,
 	body string,
 	modelOverride string,
+	configIDOverride string,
 	adjust bool,
 ) {
-	startTime, mErr := h.subTaskSvc.MarkRunning(st.ID)
-	if mErr != nil {
-		log.Printf("[sub-task] failed to mark running for %s: %v", st.ID, mErr)
-	}
-	// Best-effort persistence: backend restart mid-run won't lose the log.
-	defer func() {
-		lines, status, exitCode := job.Snapshot()
-		if perr := h.jobLogSvc.Save(job.ID, st.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
-			log.Printf("[sub-task] failed to persist job log %s: %v", job.ID, perr)
-		}
-	}()
-
-	role := "🤖 调整子任务启动中..."
-	if !adjust {
-		role = "🤖 子任务启动中..."
-	}
-	job.Append(store.LogLine{Type: "phase", Content: role})
-	job.Append(store.LogLine{Type: "message", Content: "📝 提示词: " + truncateForLog(body, 240)})
-
-	// Resolve developer role for system prompt + model. The child agent is
-	// an executor, not the coordinator; we override the role's default
-	// system prompt inline below.
-	_, modelName := h.roleConfig("developer")
-	if modelOverride != "" {
-		modelName = modelOverride
-	}
-	job.SetModel(modelName)
-
-	// Workdir: prefer the requirement's isolated worktree. Fallback to
-	// project checkout for legacy rows.
-	workDir := ""
-	if proj, perr := h.projectSvc.Get(req.ProjectID); perr == nil {
-		workDir = proj.LocalPath
-	}
-	if req.WorktreePath != "" {
-		if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
-			workDir = req.WorktreePath
-		}
-	}
-	if workDir == "" {
-		job.Append(store.LogLine{Type: "error", Content: "❌ 无法解析工作目录"})
+	if h.subTaskRunner == nil {
+		log.Printf("[sub-task] runner not wired, cannot run %s", st.ID)
+		job.Append(store.LogLine{Type: "error", Content: "❌ 子任务执行器未初始化"})
 		job.Finish(1, store.JobError)
-		h.subTaskSvc.Finish(st.ID, model.SubTaskStatusError, buildSubTaskArtifact(st, modelName, "无法解析工作目录", time.Now()), modelName, model.SubTaskTokens{}, 0, startTime)
 		return
 	}
-
-	systemPrompt := "你是一位资深软件工程师，正在执行一个由主 Agent 派发的子任务。\n" +
-		"工作方式：\n" +
-		"- 主 Agent 已与用户完成需求分析和技术方案设计，你的工作是基于当前项目上下文完成指定的子任务。\n" +
-		"- 主动读取项目相关文件，理解现有代码结构后，再开始编写代码。\n" +
-		"- 遵循现有代码风格，编写清晰的代码。\n" +
-		"- 如有测试文件则同步更新。\n" +
-		"- 用中文沟通。\n\n" +
-		"工作完成后，必须用 Markdown 输出一份完整的工作报告（作为子任务的产物），包含以下章节：\n" +
-		"1. 任务摘要：简要说明你完成了什么\n" +
-		"2. 修改文件：列出所有修改/创建的文件路径\n" +
-		"3. 关键决策：列出重要的实现选择及理由\n" +
-		"4. 遗留问题：如有任何未完成或需要后续处理的事项，请明确列出\n"
-
-	var prompt string
-	if adjust {
-		prompt = "## 追加调整\n\n" + body + "\n"
-	} else {
-		prompt = "## 子任务\n\n" + body + "\n"
-	}
-	if block := llm.BuildSkillsBlock(h.mentionedSkills(req.Title + " " + body)); block != "" {
-		prompt = block + prompt
-	}
-
-	cmd := h.llm.GenerateCode(llm.StreamOpts{
-		Prompt:       prompt,
-		WorkDir:      workDir,
-		SystemPrompt: systemPrompt,
-		Model:        cliModelArg(modelName),
-		// --resume <sourceSID> --fork-session --session-id <newSID>:
-		// child agent inherits the parent's conversation context but
-		// executes in its own session.
-		SessionID:     sourceSID,
-		Resume:        true,
-		Fork:          true,
-		ForkSessionID: newSID,
-	})
-
-	// "sub_task" step key — distinct from "coding" / "adjust_coding" so
-	// token-usage rollups don't double-count.
-	subUsage := h.usageCtxFor("sub_task", st.RequirementID, req.ProjectID, job.ID, modelName, "", body)
-	out := runClaudeStream(jobSink{job}, cmd, "sub-task", subUsage)
-
-	finalStatus := model.SubTaskStatusDone
-	var artifactBody string
-	switch {
-	case out.staleSession:
-		finalStatus = model.SubTaskStatusError
-		artifactBody = "❌ 源会话已失效（session 文件不存在），请重新发起 coding 后再试。"
-		job.Append(store.LogLine{Type: "error", Content: artifactBody})
-	case out.errMsg != "":
-		finalStatus = model.SubTaskStatusError
-		artifactBody = "❌ " + out.errMsg
-		job.Append(store.LogLine{Type: "error", Content: artifactBody})
-	case out.finalResult == "":
-		finalStatus = model.SubTaskStatusError
-		artifactBody = "❌ Claude 未返回结果，请重试"
-		job.Append(store.LogLine{Type: "error", Content: artifactBody})
-	default:
-		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
-		artifactBody = out.finalResult
-	}
-	job.Append(store.LogLine{Type: "done", Content: "✅ 子任务完成！"})
-
-	artifact := buildSubTaskArtifact(st, modelName, artifactBody, time.Now())
-	tokens := model.SubTaskTokens{
-		Input:         out.lastUsage.InputTokens,
-		Output:        out.lastUsage.OutputTokens,
-		CacheCreation: out.lastUsage.CacheCreationTokens,
-		CacheRead:     out.lastUsage.CacheReadTokens,
-	}
-	costCents := computeSubTaskCostCents(modelName, tokens, h.claudeCfg)
-	if perr := h.subTaskSvc.Finish(st.ID, finalStatus, artifact, modelName, tokens, costCents, startTime); perr != nil {
-		log.Printf("[sub-task] failed to persist finish for %s: %v", st.ID, perr)
-	}
-	job.Finish(0, store.JobDone)
-	log.Printf("[sub-task] job %s finished for %s status=%s", job.ID, st.ID, finalStatus)
+	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, adjust)
+	// (The agent-server routing branch previously inlined here moved to
+	// SubTaskRunner.Run so that every sub-task path — manual children,
+	// orchestrated children, and push/PR sub-tasks — shares the same
+	// req.AgentServerID plumbing.)
 }
 
 // computeSubTaskCostCents resolves the run's USD-equivalent cost in cents
@@ -4087,9 +5557,11 @@ func computeSubTaskCostCents(modelName string, tokens model.SubTaskTokens, claud
 //
 // Creates a fresh sub_task row that forks the requirement's main-agent
 // session (coding_session_id, with design_session_id as fallback). The
-// orchestration work (validate, persist session/job ids) happens inline;
-// the actual claude subprocess spawn is delegated to runSubTask so it can
-// be shared with AdjustSubTask.
+// orchestration work (validate, persist session/job ids) happens inline via
+// the shared SubTaskRunner so the pre-Run state matches what every other
+// caller (push/PR, auto-orchestrate, adjust, redo) does; the actual claude
+// subprocess spawn is delegated to runner.Run so the runtime stays in one
+// place.
 func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 	if !h.requireSubTaskSvc(w) {
 		return
@@ -4120,25 +5592,25 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	st, err := h.subTaskSvc.Create(id, strings.TrimSpace(body.Title), body.Prompt)
+	// subTaskRunner is required to spawn the child process; refuse cleanly
+	// (503) instead of nil-deref if the runner wasn't wired (legacy / non-
+	// distributed deployment).
+	if h.subTaskRunner == nil {
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "子任务执行器未初始化")
+		return
+	}
+
+	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(id, strings.TrimSpace(body.Title), body.Prompt, body.Model, sourceSID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
-	}
-	newSID := util.NewUUID()
-	if perr := h.subTaskSvc.UpdateSession(st.ID, newSID, sourceSID); perr != nil {
-		log.Printf("[sub-task] failed to persist session for %s: %v", st.ID, perr)
-	}
-	job := h.jobs.Create(id)
-	if perr := h.subTaskSvc.UpdateJobID(st.ID, job.ID); perr != nil {
-		log.Printf("[sub-task] failed to persist job_id for %s: %v", st.ID, perr)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"job_id":      job.ID,
 		"sub_task_id": st.ID,
 	})
 
-	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, false)
+	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, "", false)
 }
 
 // ReOrchestrate handles POST /api/requirements/{id}/re-orchestrate — the
@@ -4217,7 +5689,7 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		_, modelName := h.roleConfig("developer")
+		systemPrompt, modelName, claudeConfigID := h.roleConfig("developer")
 		if body.Model != "" {
 			modelName = body.Model
 		}
@@ -4226,7 +5698,6 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 		// Session threading: resume the existing coding session so the main
 		// agent re-decomposes with full context. No coding session yet →
 		// fresh session carrying the requirement title + description.
-		systemPrompt, _ := h.roleConfig("developer")
 		sessionID := req.CodingSessionID
 		resume := sessionID != ""
 		var prompt string
@@ -4246,14 +5717,16 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 		}
 
 		job.Append(store.LogLine{Type: "phase", Content: "🔄 主 Agent 重新拆分任务中…"})
-		cmd := h.llm.GenerateCode(llm.StreamOpts{
-			Prompt:       prompt,
-			WorkDir:      workDir,
-			SystemPrompt: systemPrompt,
-			Model:        cliModelArg(modelName),
-			SessionID:    sessionID,
-			Resume:       resume,
+		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
+			Prompt:         prompt,
+			WorkDir:        workDir,
+			SystemPrompt:   systemPrompt,
+			Model:          cliModelArg(modelName),
+			ClaudeConfigID: claudeConfigID,
+			SessionID:      sessionID,
+			Resume:         resume,
 		})
+		defer cancel()
 		usage := h.usageCtxFor("re_orchestrate", id, req.ProjectID, job.ID, modelName, "", "")
 		out := runClaudeStream(jobSink{job}, cmd, "re-orchestrate", usage)
 
@@ -4300,13 +5773,13 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 
 		// Dispatch runs after job.Finish so the re-split SSE closes promptly;
 		// each child's own job streams its progress like the auto path.
-		subTaskIDs := dispatchChildrenSequential(id, sessionID, req, h, payload.Subtasks, workDir, modelName)
+		subTaskIDs := dispatchChildrenSequential(id, sessionID, req, h, payload.Subtasks, workDir, modelName, claudeConfigID)
 		if len(subTaskIDs) == 0 {
 			log.Printf("[re-orchestrate] %s: dispatch produced 0 children", id)
 			return
 		}
 		log.Printf("[re-orchestrate] %s: dispatched %d children, scheduling summary", id, len(subTaskIDs))
-		summaryKickoff(id, sessionID, req, h, workDir, modelName, subTaskIDs)
+		summaryKickoff(id, sessionID, req, h, workDir, modelName, claudeConfigID, subTaskIDs)
 	}()
 }
 
@@ -4385,6 +5858,15 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 	// Adjusting a failed sub-task is allowed but its session file may have
 	// rolled back to a state before the failure — surfaced via staleSession
 	// at run time, same UX as the main adjust-coding path.
+	if h.subTaskRunner == nil {
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "子任务执行器未初始化")
+		return
+	}
+	// CreateAdjustment creates the row with source_session_id already
+	// populated (= parent's session id), so we just need to fill in the
+	// session id / job id / model fields via the runner helper. We don't
+	// call runner.NewPendingSubTask because that creates a fresh row
+	// (CreateAdjustment sets the parent-fork relationship Create wouldn't).
 	st, err := h.subTaskSvc.CreateAdjustment(id, sid, body.Prompt)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
@@ -4398,6 +5880,11 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 	if perr := h.subTaskSvc.UpdateJobID(st.ID, job.ID); perr != nil {
 		log.Printf("[sub-task adjust] failed to persist job_id for %s: %v", st.ID, perr)
 	}
+	if body.Model != "" {
+		if perr := h.subTaskSvc.UpdateModel(st.ID, body.Model); perr != nil {
+			log.Printf("[sub-task adjust] failed to persist model for %s: %v", st.ID, perr)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"job_id":      job.ID,
 		"sub_task_id": st.ID,
@@ -4407,7 +5894,92 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 	// prompt prefix + system prompt as a fresh sub-task, but the
 	// source_session_id is the parent's session id (not the main agent),
 	// so the conversation inherits the parent's edits.
-	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, true)
+	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, "", true)
+}
+
+// RedoSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/redo.
+//
+// Body: { "model"?: "..." }
+//
+// Re-runs a FAILED sub-task with its original prompt. Unlike AdjustSubTask —
+// which forks the failed sub-task's own session to inherit partial edits — a
+// redo forks the parent's SOURCE session (the session it originally forked
+// from), so the child re-executes the original task from a clean starting
+// point. The optional model override lets the user switch models on the retry;
+// empty falls back to the developer role default inside runSubTask.
+func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
+	if !h.requireSubTaskSvc(w) {
+		return
+	}
+	var body struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	req, err := h.reqSvc.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "requirement not found")
+		return
+	}
+
+	// Look up the parent to validate ownership + capture the source session
+	// the failed run originally forked from (the clean redo starting point).
+	parent, err := h.subTaskSvc.Get(sid)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task not found")
+		return
+	}
+	if parent.RequirementID != id {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task does not belong to this requirement")
+		return
+	}
+	// Redo is scoped to failures — a done/pending/running row has nothing to
+	// recover; the UI only offers the button on error cards.
+	if parent.Status != model.SubTaskStatusError {
+		writeError(w, http.StatusConflict, "NOT_FAILED", "该子任务未失败，无需重做")
+		return
+	}
+
+	sourceSID := parent.SourceSessionID
+	if sourceSID == "" {
+		sourceSID = subTaskSourceSID(req, "")
+	}
+	if sourceSID == "" {
+		writeError(w, http.StatusConflict, "NO_SESSION",
+			"无法解析可复用的源会话，请重新发起 coding 后再试")
+		return
+	}
+
+	st, err := h.subTaskSvc.Redo(id, sid)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	newSID := util.NewUUID()
+	if perr := h.subTaskSvc.UpdateSession(st.ID, newSID, sourceSID); perr != nil {
+		log.Printf("[sub-task redo] failed to persist session for %s: %v", st.ID, perr)
+	}
+	job := h.jobs.Create(id)
+	if perr := h.subTaskSvc.UpdateJobID(st.ID, job.ID); perr != nil {
+		log.Printf("[sub-task redo] failed to persist job_id for %s: %v", st.ID, perr)
+	}
+	if body.Model != "" {
+		if perr := h.subTaskSvc.UpdateModel(st.ID, body.Model); perr != nil {
+			log.Printf("[sub-task redo] failed to persist model for %s: %v", st.ID, perr)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"job_id":      job.ID,
+		"sub_task_id": st.ID,
+	})
+
+	// Re-use the shared spawn helper with adjust=false and the ORIGINAL prompt
+	// (st.Prompt) so the child re-executes the same task from a clean fork.
+	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false)
 }
 
 // ListSubTasks handles GET /api/requirements/{id}/sub-tasks.
@@ -4632,7 +6204,75 @@ func developerDecomposePrompt(title, leadIn, workDir string) string {
 		title, subTasksFilePath(workDir))
 }
 
-// extractSubtasksPayload pulls the {"subtasks":[…]} JSON block out of
+// agentDirectPrompt builds the -p prompt for the "agent" role on Agent-Server
+// execution. It deliberately omits the "开始开发/进入执行实现阶段" trigger that
+// the developer role keys its sub-task orchestration emission on — the agent
+// persona implements the requirement directly on the remote server in a single
+// session (no sub-task orchestration, no sentinel). leadIn mirrors
+// developerDecomposePrompt's wording so the two paths share intent.
+//
+// NB: the literal sentinel string is intentionally NOT mentioned anywhere in
+// this prompt — past experience shows models occasionally honor an explicit
+// "do not emit X" instruction by emitting X anyway (req_9d24ef181a5ad5c4).
+// Routing this prompt through the wizard is what guarantees no sentinel: the
+// orchestrator is short-circuited (see StartCoding) and the -p message
+// contains no trigger phrase.
+func agentDirectPrompt(title, leadIn, workDir string) string {
+	return fmt.Sprintf(
+		"现在切换到「Agent 开发者」角色，正在执行需求（需求：%s，工作目录：%s）。\n"+
+			leadIn+
+			"直接使用 Read / Edit / Write / Bash 工具完成代码实现、构建与基础验证，并在结束时进行 git commit。\n"+
+			"完成后在最终回复里简要说明：做了什么、关键文件、验证方式。",
+		title, workDir)
+}
+
+// rewritePersonaWorkDir rewrites the workDir path inside the persona
+// header of a coding prompt. The agentDirectPrompt / developerDecomposePrompt
+// builders emit a header of the form:
+//
+//	现在切换到「Agent 开发者」角色，正在执行需求（需求：<title>，工作目录：<workDir>）
+//
+// When the prompt is sent to the Agent Server, the local workDir is wrong —
+// the remote cwd is /tmp/nova-agent/<projectID>/<reqID> — so the agent on
+// the remote host would otherwise see a path that doesn't exist on its
+// filesystem. This helper finds the "工作目录：" label in the persona
+// header and replaces from there through the next "）" full-width closing
+// paren with the new path, leaving the requirement title and any other
+// tokens between "（" and the label untouched.
+//
+// Returns the prompt unchanged when the label isn't present (e.g. a
+// pre-built prompt without the persona header) or when localWorkDir is
+// empty (no-op). Only the FIRST match is rewritten — the persona header
+// is emitted exactly once per prompt, and looping would risk false
+// positives on file content that happens to mention the label.
+func rewritePersonaWorkDir(prompt, localWorkDir, remoteWorkDir string) string {
+	if prompt == "" || localWorkDir == "" || localWorkDir == remoteWorkDir {
+		return prompt
+	}
+	const label = "工作目录："
+	const closeParen = "）"
+	idx := strings.Index(prompt, label)
+	if idx < 0 {
+		return prompt
+	}
+	// Find the closing paren after the label. If absent, bail out
+	// and leave the prompt alone — the label showed up but the
+	// header structure we expect wasn't there.
+	end := strings.Index(prompt[idx+len(label):], closeParen)
+	if end < 0 {
+		return prompt
+	}
+	end += idx + len(label)
+	// Verify the slice between the label and the closing paren
+	// actually equals localWorkDir. If it doesn't match (e.g. the
+	// label appears in some unrelated text), return the prompt
+	// unchanged rather than corrupting it.
+	between := prompt[idx+len(label) : end]
+	if between != localWorkDir {
+		return prompt
+	}
+	return prompt[:idx+len(label)] + remoteWorkDir + prompt[end:]
+}
 // finalResult and verifies the [SUBTASKS_READY] sentinel is present. Returns
 // nil when either is missing — caller treats that as "main agent answered a
 // normal question, not a decompose request" and just renders the chat reply.
@@ -4705,14 +6345,14 @@ func decodeSubtasksPayload(raw string) *orchestratorPayload {
 // gracefully instead of leaving the user staring at a "未派发" panel.
 //
 // Heuristic (matches what the developer role prompt asks the agent to write):
-//   1. Locate the "## 任务分解" / "## 子任务" / "## 子任务清单" / "## 任务清单"
-//      heading (case-insensitive, trimmed).
-//   2. From the heading line onward, grab consecutive list items:
-//      - "- " or "* " or numbered "1. " markdown items
-//      - "**N. 标题**：提示词" — the agent's compressed form, separated by "：" / ":"
-//      - "| 列 | 列 |" table rows starting from the 2nd data row
-//   3. Skip blank lines; require at least 2 items to consider it a real plan
-//      (one-liner instructions are usually prose, not a decomposition).
+//  1. Locate the "## 任务分解" / "## 子任务" / "## 子任务清单" / "## 任务清单"
+//     heading (case-insensitive, trimmed).
+//  2. From the heading line onward, grab consecutive list items:
+//     - "- " or "* " or numbered "1. " markdown items
+//     - "**N. 标题**：提示词" — the agent's compressed form, separated by "：" / ":"
+//     - "| 列 | 列 |" table rows starting from the 2nd data row
+//  3. Skip blank lines; require at least 2 items to consider it a real plan
+//     (one-liner instructions are usually prose, not a decomposition).
 //
 // Returns nil when nothing usable is found; caller logs + skips dispatch.
 func extractSubtasksFromMarkdown(text string) *orchestratorPayload {
@@ -4962,11 +6602,11 @@ func dispatchChildrenSequential(
 	req *model.Requirement,
 	h *WizardHandler,
 	subtasks []orchestratedSubtask,
-	workDir, modelName string,
+	workDir, modelName, devCfgID string,
 ) []string {
 	subTaskIDs := make([]string, 0, len(subtasks))
 	for _, t := range subtasks {
-		st, err := h.dispatchOneChild(reqID, orchestratorSID, t, req, workDir, modelName)
+		st, err := h.dispatchOneChild(reqID, orchestratorSID, t, req, workDir, modelName, devCfgID)
 		if err != nil {
 			log.Printf("[orchestrate] failed to dispatch child %q: %v", t.Title, err)
 			continue
@@ -4983,10 +6623,10 @@ func summaryKickoff(
 	reqID, orchestratorSID string,
 	req *model.Requirement,
 	h *WizardHandler,
-	workDir, modelName string,
+	workDir, modelName, claudeConfigID string,
 	subTaskIDs []string,
 ) {
-	go h.runOrchestratorSummary(reqID, orchestratorSID, req, workDir, modelName, subTaskIDs)
+	go h.runOrchestratorSummary(reqID, orchestratorSID, req, workDir, modelName, claudeConfigID, subTaskIDs)
 }
 
 // tryAutoOrchestrate is the auto-dispatch path called by StartCoding right
@@ -5013,7 +6653,7 @@ func (h *WizardHandler) tryAutoOrchestrate(
 	finalResult string,
 	capturedJSON string,
 	req *model.Requirement,
-	workDir, modelName string,
+	workDir, modelName, claudeConfigID string,
 ) {
 	if h.subTaskSvc == nil {
 		return
@@ -5041,13 +6681,13 @@ func (h *WizardHandler) tryAutoOrchestrate(
 	// StartCoding) so they inherit the main agent's project / design /
 	// conversation context. Sequential dispatch keeps file edits safe in
 	// the shared worktree.
-	subTaskIDs := dispatchChildrenSequential(reqID, orchestratorSID, req, h, payload.Subtasks, workDir, modelName)
+	subTaskIDs := dispatchChildrenSequential(reqID, orchestratorSID, req, h, payload.Subtasks, workDir, modelName, claudeConfigID)
 	if len(subTaskIDs) == 0 {
 		log.Printf("[auto-orchestrate] %s: dispatch produced 0 children; ending", reqID)
 		return
 	}
 	log.Printf("[auto-orchestrate] %s: dispatched %d children, scheduling summary", reqID, len(subTaskIDs))
-	summaryKickoff(reqID, orchestratorSID, req, h, workDir, modelName, subTaskIDs)
+	summaryKickoff(reqID, orchestratorSID, req, h, workDir, modelName, claudeConfigID, subTaskIDs)
 }
 
 // resolveSubtasksPayload turns the main agent's turn output into a concrete
@@ -5141,7 +6781,7 @@ func (h *WizardHandler) dispatchOneChild(
 	reqID, parentSID string,
 	t orchestratedSubtask,
 	req *model.Requirement,
-	workDir, modelName string,
+	workDir, modelName, devCfgID string,
 ) (*model.SubTask, error) {
 	st, err := h.subTaskSvc.Create(reqID, t.Title, t.Prompt)
 	if err != nil {
@@ -5157,22 +6797,52 @@ func (h *WizardHandler) dispatchOneChild(
 		log.Printf("[orchestrate] failed to persist child job_id for %s: %v", st.ID, perr)
 	}
 
-	// Start the child agent (same code path as StartSubTask — system prompt
-	// overrides role default to "executor" framing).
+	// Start the child agent (same code path as StartSubTask). The "executor"
+	// role system prompt MUST be injected: the child forks the orchestrator
+	// session, which carries the developer (统筹协调) persona telling it to
+	// decompose and emit [SUBTASKS_READY]. Without an explicit override the
+	// child inherits that persona and re-emits the sentinel instead of
+	// writing any code.
+	execSystemPrompt, _, executorConfigID := h.roleConfig(executorRoleKey)
+	// Pick the Claude config the resolved model actually belongs to. Priority:
+	//   1. devCfgID — the developer-role binding passed in from the call site
+	//      (StartCoding / ReOrchestrateSubTask both have it on hand; without
+	//      it we used to silently fall through to the executor role, which
+	//      could be bound to a different claude_configs row and send the
+	//      request to the wrong gateway)
+	//   2. reverse-lookup modelName in claude_configs.models (covers the case
+	//      where the caller passed a model from a non-developer-bound config)
+	//   3. executor role binding (legacy fallback; matches SubTaskRunner.Run
+	//      and the merge-push path semantics)
+	var finalConfigID string
+	switch {
+	case devCfgID != "":
+		finalConfigID = devCfgID
+	case modelName != "":
+		if cid, cerr := h.claudeCfg.ResolveConfigForModel(modelName); cerr == nil && cid != "" {
+			finalConfigID = cid
+		} else {
+			finalConfigID = executorConfigID
+		}
+	default:
+		finalConfigID = executorConfigID
+	}
 	executorPrompt := "## 子任务\n\n" + t.Prompt + "\n\n" +
 		"> 本任务通过 --fork-session 继承了主 Agent 的项目上下文与代码库访问权限。\n" +
-		"> 如需补充信息，可正常读取项目文件或调用工具。\n"
-	childSystemPrompt := subTaskExecutorSystemPrompt()
-	cmd := h.llm.GenerateCode(llm.StreamOpts{
-		Prompt:        executorPrompt,
-		WorkDir:       workDir,
-		SystemPrompt:  childSystemPrompt,
-		Model:         cliModelArg(modelName),
-		SessionID:     parentSID,
-		Resume:        true,
-		Fork:          true,
-		ForkSessionID: childSID,
+		"> 如需补充信息，可正常读取项目文件或调用工具。\n" +
+		"> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
+	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
+		Prompt:         executorPrompt,
+		WorkDir:        workDir,
+		SystemPrompt:   execSystemPrompt,
+		Model:          cliModelArg(modelName),
+		ClaudeConfigID: finalConfigID,
+		SessionID:      parentSID,
+		Resume:         true,
+		Fork:           true,
+		ForkSessionID:  childSID,
 	})
+	defer cancel()
 	startTime, err := h.subTaskSvc.MarkRunning(st.ID)
 	if err != nil {
 		log.Printf("[orchestrate] failed to mark running for %s: %v", st.ID, err)
@@ -5183,7 +6853,32 @@ func (h *WizardHandler) dispatchOneChild(
 	job.SetModel(modelName)
 
 	childUsage := h.usageCtxFor("sub_task", reqID, req.ProjectID, job.ID, modelName, "", t.Prompt)
-	out := runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage)
+	// Route orchestrated children to the parent requirement's Agent server
+	// when it has one — same reasoning as runSubTask: the working tree lives
+	// on that host, so a locally-spawned child would edit the wrong checkout.
+	var out claudeStreamOutcome
+	if req.AgentServerID != "" && h.agentSvrSvc != nil {
+		out = h.runRemoteCoding(&remoteCodingInput{
+			job:      job,
+			serverID: req.AgentServerID,
+			req: startCodingReq{
+				RequirementTitle: req.Title + " / " + t.Title,
+				RequirementID:    req.ID,
+				BranchName:       req.BranchName,
+				AgentServerID:    req.AgentServerID,
+			},
+			reqRow:        req,
+			prompt:        executorPrompt,
+			sourceSID:     parentSID,
+			fork:          true,
+			sessionArg:    parentSID,
+			forkSessionID: childSID,
+			model:         modelName,
+			usage:         childUsage,
+		})
+	} else {
+		out = runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage)
+	}
 
 	status := model.SubTaskStatusDone
 	artifactBody := out.finalResult
@@ -5237,7 +6932,7 @@ func (h *WizardHandler) dispatchOneChild(
 func (h *WizardHandler) runOrchestratorSummary(
 	reqID, orchestratorSID string,
 	req *model.Requirement,
-	workDir, modelName string,
+	workDir, modelName, claudeConfigID string,
 	subTaskIDs []string,
 ) {
 	// Collect each child's artifact + status. Sort by created_at so the
@@ -5281,15 +6976,17 @@ func (h *WizardHandler) runOrchestratorSummary(
 	job.Append(store.LogLine{Type: "phase", Content: "📊 主 Agent 正在汇总子任务产物..."})
 	job.SetModel(modelName)
 
-	cmd := h.llm.GenerateCode(llm.StreamOpts{
-		Prompt:       summaryB.String(),
-		WorkDir:      workDir,
-		SystemPrompt: "", // resumed session already has developer persona
-		Model:        cliModelArg(modelName),
-		SessionID:    orchestratorSID,
-		Resume:       true,
-		Fork:         false,
+	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
+		Prompt:         summaryB.String(),
+		WorkDir:        workDir,
+		SystemPrompt:   "", // resumed session already has developer persona
+		Model:          cliModelArg(modelName),
+		ClaudeConfigID: claudeConfigID,
+		SessionID:      orchestratorSID,
+		Resume:         true,
+		Fork:           false,
 	})
+	defer cancel()
 
 	summaryUsage := h.usageCtxFor("orchestrate_summary", reqID, req.ProjectID, job.ID, modelName, "", "auto-summary")
 	out := runClaudeStream(jobSink{job}, cmd, "orchestrate-summary", summaryUsage)
@@ -5309,24 +7006,6 @@ func (h *WizardHandler) runOrchestratorSummary(
 	job.Append(store.LogLine{Type: "done", Content: "✅ 汇总完成！"})
 	job.Finish(0, store.JobDone)
 	log.Printf("[orchestrate] summary saved to requirements.coding_plan for %s", reqID)
-}
-
-// subTaskExecutorSystemPrompt is the executor persona override passed to
-// forked sub-task children. Distinct from the developer role default (now
-// "统筹协调") so a child writes code instead of yet another decomposition.
-func subTaskExecutorSystemPrompt() string {
-	return "你是一位资深软件工程师，正在执行一个由主 Agent 派发的子任务。\n" +
-		"工作方式：\n" +
-		"- 主 Agent 已与用户完成需求分析和技术方案设计，你的工作是基于当前项目上下文完成指定的子任务。\n" +
-		"- 主动读取项目相关文件，理解现有代码结构后，再开始编写代码。\n" +
-		"- 遵循现有代码风格，编写清晰的代码。\n" +
-		"- 如有测试文件则同步更新。\n" +
-		"- 用中文沟通。\n\n" +
-		"工作完成后，必须用 Markdown 输出一份完整的工作报告（作为子任务的产物），包含以下章节：\n" +
-		"1. 任务摘要：简要说明你完成了什么\n" +
-		"2. 修改文件：列出所有修改/创建的文件路径\n" +
-		"3. 关键决策：列出重要的实现选择及理由\n" +
-		"4. 遗留问题：如有任何未完成或需要后续处理的事项，请明确列出\n"
 }
 
 // silentSink is a streamSink that discards log output. AutoOrchestrate runs

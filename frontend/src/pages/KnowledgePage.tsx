@@ -277,7 +277,7 @@ function MemoryDialog({ projects, selectedProject, memory, onClose, onSaved }: {
 
   return (
     <div className="modal-overlay modal-fullscreen-overlay" onClick={onClose}>
-      <div className="modal modal-fullscreen" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
+      <div className="modal-box modal-fullscreen" onClick={e => e.stopPropagation()} style={{ maxWidth: 520 }}>
         <h3>{memory ? '编辑记忆' : '新增记忆'}</h3>
         <div className="form-group">
           <label>项目</label>
