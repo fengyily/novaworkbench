@@ -39,11 +39,11 @@ NovaWorkbench 的 Release 由 [`.github/workflows/release.yml`](../.github/workf
 
 ## 不打 tag 的演练（workflow_dispatch）
 
-在 GitHub 仓库 → **Actions → Release → Run workflow**，输入一个**已存在**的 tag（例如先 `git tag v0.0.0-test && git push origin v0.0.0-test`）：
+在 GitHub 仓库 → **Actions → Release → Run workflow**，输入任意 tag 名（例如 `v0.0.0-test`）：
 
-- 用于端到端验证流水线而不发正式版；
-- `-test` 后缀保证 `latest` 指针不动；
-- 同一 tag 重复运行受 `concurrency` 锁串行化；已存在的 Release 会被删除重建（tag 本身保留，仍指向原 commit）。
+- 用于端到端验证流水线而不发正式版——tag **不需要**预先创建，workflow 会 checkout 默认分支 HEAD，把输入值当作版本号 stamp 到二进制 / 镜像 / Release。
+- `-test` / `-rc1` 等带 `-` 后缀的版本**不会**移动 Docker `latest` 指针。
+- 同一 tag 重复运行受 `concurrency` 锁串行化；已存在的 Release 会被删除重建（不修改 tag 本身）。
 
 ## 回滚 / 清理
 
