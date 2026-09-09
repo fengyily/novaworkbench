@@ -578,7 +578,11 @@ var alterColumns = []string{
 	// 子任务派发) can be routed back to the SAME server the code lives on
 	// instead of silently falling back to the local checkout.
 	`ALTER TABLE requirements ADD COLUMN dev_source TEXT NOT NULL DEFAULT ''`,
-	`ALTER TABLE requirements ADD COLUMN agent_server_id TEXT NOT NULL DEFAULT ''`,
+	// NOTE: agent_server_id is also added above (line 449, the developer-stage
+	// binding introduced by commit 99242ae). This dev_source ALTER is from
+	// commit f230269 and used to add a duplicate of agent_server_id by mistake
+	// — keep only the canonical ALTER above so the duplicate "already exists"
+	// noise in the Postgres log goes away.
 	// Development-mode provenance for the coding stage. Stamped once when
 	// StartCoding runs so the UI can show "本次开发基于会话/方案" and so a
 	// follow-up run that omits the field can default to the persisted value.
