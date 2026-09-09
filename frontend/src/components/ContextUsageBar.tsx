@@ -26,7 +26,13 @@
 
 import { useTranslation } from 'react-i18next';
 import type { UsageInfo } from '../utils/logLines';
-import { clampPct, bandClass, formatTokens } from '../utils/logLines';
+import {
+  clampPct,
+  bandClass,
+  formatTokens,
+  isPctOverLimit,
+  usageBreakdown,
+} from '../utils/logLines';
 
 export interface ContextUsageBarProps {
   /** Latest result-event snapshot; undefined until the first result lands
@@ -75,15 +81,37 @@ export function ContextUsageBar({
 }: ContextUsageBarProps) {
   // When no usage event has fired yet (this turn is unfinished) render a
   // stable 0% placeholder so the bar does not flicker.
+  const { t } = useTranslation();
   const used = usage?.used ?? 0;
   const window = usage?.context_window ?? 0;
   const pct = usage?.pct ?? 0;
   const widthPct = clampPct(pct);
+  const overLimit = isPctOverLimit(pct);
+  // Display cap: never show the user a percentage above 100. With the new
+  // computeUsage formula (cache_read excluded from used) raw pct should
+  // never reach 100 in normal operation; this is a defensive guard for
+  // legacy persisted blobs / upstream callers that may still surface pct>100.
+  // Tooltip still exposes the raw pct via the breakdown.
+  const displayPctLabel = overLimit
+    ? t('components.contextUsage.overLimit')
+    : `${pct.toFixed(0)}%`;
   const modelLabel = usage?.model || '—';
   const usedLabel = `${formatTokens(used)} / ${window ? formatTokens(window) : '?'}`;
   const showCompressed = !!compressedAt && !compressing;
 
-  const { t } = useTranslation();
+  // Tooltip breakdown: line 1 is the four token buckets + window, line 2
+  // explains why "percentage" can stay under 100 even when the prompt is
+  // clearly hitting the cache hard. Skip when we have no usage yet (avoids
+  // showing a noisy "0 · 0 · 0 · ?" tooltip while the bar is still hidden).
+  // i18next's TOptions requires an index signature; cast through Record for
+  // structural compatibility.
+  const breakdown = usageBreakdown(usage);
+  const breakdownOpts = breakdown as unknown as Record<string, unknown>;
+  const breakdownTitle = breakdown
+    ? overLimit
+      ? `${t('components.contextUsage.overLimitTitle', { pct: pct.toFixed(1) })}\n${t('components.contextUsage.breakdown', breakdownOpts)}\n${t('components.contextUsage.breakdownNote')}`
+      : `${t('components.contextUsage.rawPct', { pct: pct.toFixed(1) })}\n${t('components.contextUsage.breakdown', breakdownOpts)}\n${t('components.contextUsage.breakdownNote')}`
+    : undefined;
 
   // Button label + behaviour: show "view summary" once we have one, otherwise
   // "compress context"; show a spinner while compressing.
@@ -115,9 +143,9 @@ export function ContextUsageBar({
         </span>
         <span
           className={`usage-bar-pct ${pct >= 95 ? 'usage-bar-pct-critical' : pct >= 80 ? 'usage-bar-pct-warn' : ''}`}
-          title={t('components.contextUsage.rawPct', { pct: pct.toFixed(1) })}
+          title={breakdownTitle}
         >
-          {pct.toFixed(0)}%
+          {displayPctLabel}
         </span>
         {compressible && (
           <button
