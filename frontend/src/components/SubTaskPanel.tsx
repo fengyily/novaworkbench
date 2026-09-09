@@ -721,6 +721,16 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     if (summaryToastTimerRef.current) window.clearTimeout(summaryToastTimerRef.current);
   }, []);
 
+  // The orchestration summary Markdown lives on the requirement row
+  // (`requirements.coding_plan`, written by the developer's main agent at
+  // the end of every orchestrated batch via RequirementService.UpdateCodingPlan).
+  // Computed BEFORE the summary-related hooks below so handleSummaryCopy
+  // and the [requirement?.id, summaryReport] effect can reference it without
+  // hitting a TDZ. Type-safe now that Requirement.coding_plan is declared
+  // in the API client (see client.ts:coding_plan).
+  const summaryReport = requirement?.coding_plan;
+  const hasSummary = typeof summaryReport === 'string' && summaryReport.trim() !== '';
+
   // Summary markdown expand/collapse + copy state. Long reports
   // (per isLongSummary, mirrors isLongDesignDoc) collapse by default with a
   // fade-out mask; the toggle button un/folds. `summaryCopied` is the
@@ -1000,12 +1010,10 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     );
   }
 
-  // summaryReport renders the Markdown the main agent produced after the
-  // last orchestrated batch finished. Lives ABOVE the children list so
-  // the user reads the high-level picture first, then drills into any
-  // child whose artifact they want to verify.
-  const summaryReport = requirement?.coding_plan;
-  const hasSummary = typeof summaryReport === 'string' && summaryReport.trim() !== '';
+  // summaryReport / hasSummary are declared earlier (above the summary
+  // hooks block) so handleSummaryCopy and the [requirement?.id,
+  // summaryReport] effect can read them. See the declaration near the top
+  // of the component body for the JSDoc explaining the data source.
   const activeChildCount = activeBatch?.childIds.length ?? 0;
 
   return (
