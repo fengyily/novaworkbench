@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode, type CSSProperties } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabels, kindOf, STAGE_VISIBILITY, type Kind, type CostItem } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabels, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabels, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabels, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
@@ -758,6 +758,60 @@ export default function RequirementDetail() {
   // for the next refetch.
   const [liveSubTaskCount, setLiveSubTaskCount] = useState(0);
 
+  // Orchestration batch snapshot for this requirement (the new
+  // restartable-orchestration flow). null when the backend has no batch
+  // row yet — before StartCoding, or for a requirement that never went
+  // through the auto-orchestrator. Drives the summary CTAs in
+  // SubTaskPanel ("📝 提前生成汇总" / "📝 生成汇总" / "汇总中…"). The
+  // polling interval shortens while children are alive (3s) so the
+  // banner transitions surface within one frame of the queue tick.
+  const [orchBatch, setOrchBatch] = useState<OrchestrationBatch | null>(null);
+  const fetchOrchBatch = useCallback(async () => {
+    if (!id) return;
+    try {
+      const data = await subTasksApi.getOrchestrationBatch(id);
+      // subTasksApi.getOrchestrationBatch wraps a 404-or-not-implemented
+      // backend as `null` (see client.ts catch fallback) so callers don't
+      // need try/catch — a missing batch is a normal terminal state.
+      setOrchBatch(data ?? null);
+    } catch {
+      setOrchBatch(null);
+    }
+  }, [id]);
+  useEffect(() => {
+    fetchOrchBatch();
+  }, [fetchOrchBatch]);
+  useEffect(() => {
+    const intervalMs = liveSubTaskCount > 0 ? 3000 : 5000;
+    const t = setInterval(fetchOrchBatch, intervalMs);
+    return () => clearInterval(t);
+  }, [fetchOrchBatch, liveSubTaskCount]);
+
+  // Page-level summary-done toast. The server-pushed job_done frame may carry
+  // `batch_id` + `summary_status === 'done'` whenever the OrchestrationQueue
+  // finishes a summary round (auto path OR manual flow triggered from
+  // SubTaskPanel). The user is on this page; the brief inline hint confirms
+  // the round landed without forcing them to inspect `orchBatch`. Mirrors the
+  // WorktreePathHint toast: local state, 1.8s auto-dismiss, reuses the global
+  // `.merge-hint-toast` styling so no new CSS is needed.
+  const [summaryDoneToast, setSummaryDoneToast] = useState<string | null>(null);
+  const summaryDoneToastTimerRef = useRef<number | null>(null);
+  const showSummaryDoneToast = useCallback((text: string) => {
+    setSummaryDoneToast(text);
+    if (summaryDoneToastTimerRef.current !== null) {
+      window.clearTimeout(summaryDoneToastTimerRef.current);
+    }
+    summaryDoneToastTimerRef.current = window.setTimeout(() => {
+      setSummaryDoneToast(null);
+      summaryDoneToastTimerRef.current = null;
+    }, 1800);
+  }, []);
+  useEffect(() => () => {
+    if (summaryDoneToastTimerRef.current !== null) {
+      window.clearTimeout(summaryDoneToastTimerRef.current);
+    }
+  }, []);
+
   // Branch modal state
   const [showBranchModal, setShowBranchModal] = useState(false);
   const [branchName, setBranchName] = useState('');
@@ -1434,6 +1488,19 @@ export default function RequirementDetail() {
           } else {
             localStorage.removeItem(`coding_job_${id}`);
           }
+          // Server-pushed orchestration summary completion. The
+          // OrchestrationQueue marks the batch via runOrchestratorSummary
+          // (success → MarkSummary('done') + MarkCompleted); when the summary
+          // round's JobStore job_done frame lands here we surface a brief
+          // inline hint and refresh the page-level batch snapshot so the
+          // SubTaskPanel banner transitions out of "汇总中…". Guarded so
+          // unrelated job_done frames (a single sub-task finish, a coding
+          // round) don't trigger the toast.
+          if (ok && evt.batch_id && evt.summary_status === 'done') {
+            showSummaryDoneToast('✅ 汇总已生成');
+            fetchOrchBatch();
+            refresh();
+          }
           return;
         }
         // Coalesce consecutive "模型思考中… (N tokens)" phase lines into one
@@ -1447,7 +1514,7 @@ export default function RequirementDetail() {
         setCoding(false);
       },
     );
-  }, [id, refresh]);
+  }, [id, refresh, fetchOrchBatch, showSummaryDoneToast]);
 
   const doStartCoding = async (bName: string, bBase: string, useKnowledge: boolean, splitTasks: boolean) => {
     if (!req || !project || !id) return;
@@ -1933,6 +2000,13 @@ export default function RequirementDetail() {
 
   return (
     <div className="req-detail">
+      {/* Page-level summary-done toast — mirrors WorktreePathHint's toast
+          pattern (`.merge-hint-toast` style, 1.8s auto-dismiss). Fired when
+          a server-pushed job_done frame carries batch_id + summary_status
+          'done', confirming an OrchestrationQueue summary round landed. */}
+      {summaryDoneToast && (
+        <span className="merge-hint-toast" role="status">{summaryDoneToast}</span>
+      )}
       {/* Optional "read project knowledge" confirm modal for the design stage */}
       {showDesignKnowledgeModal && (
         <div className="modal-overlay" onClick={() => setShowDesignKnowledgeModal(false)}>
@@ -3317,6 +3391,8 @@ export default function RequirementDetail() {
                   requirement={req}
                   onSubTasksChange={setLiveSubTaskCount}
                   developerDefaultModel={developerDefaultModel}
+                  batch={orchBatch}
+                  onBatchChange={fetchOrchBatch}
                 />
               )}
 
@@ -3401,6 +3477,8 @@ export default function RequirementDetail() {
                   requirement={req}
                   onSubTasksChange={setLiveSubTaskCount}
                   developerDefaultModel={developerDefaultModel}
+                  batch={orchBatch}
+                  onBatchChange={fetchOrchBatch}
                 />
               )}
               <div className="merge-actions stack-mobile" style={{ marginTop: 8 }}>
