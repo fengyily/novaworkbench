@@ -1,0 +1,220 @@
+# Release pipeline — fully decoupled from deploy.yml (which keeps handling
+# main/feat-* image pushes + SSH deploys). This workflow only fires on `v*`
+# tag pushes (and manual dispatch) and produces:
+#
+#   1. Cross-compiled binaries for 5 platforms via scripts/build-all.sh
+#      (frontend embedded into each binary), version stamped via ldflags.
+#   2. tar.gz (Unix) / zip (Windows) archives + a sha256 checksums file.
+#   3. A multi-arch (linux/amd64 + linux/arm64) Docker image on GHCR, tagged
+#      with the release version, the commit SHA, and `latest` (stable only).
+#   4. A GitHub Release with the archives attached.
+#
+# Everything runs on a single ubuntu runner: CGO_ENABLED=0 cross-compilation
+# needs no per-OS matrix. Tags should be cut from main only — a tag pushed
+# from a feat/* branch would additionally trigger deploy.yml's preview job,
+# which is allowed but not recommended (see docs/RELEASE.md).
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (e.g. v0.2.0; must already exist in the repo)'
+        required: true
+        default: 'v0.0.0-test'
+        type: string
+
+# Serialize per tag: a re-pushed tag or a dispatch replay must never run
+# concurrently with a live release for the same version.
+concurrency:
+  group: release-${{ github.event_name == 'push' && github.ref || format('tag-{0}', inputs.tag) }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # create the GitHub Release
+  packages: write    # push the multi-arch image to GHCR
+
+env:
+  NAMESPACE: ${{ vars.GHCR_NAMESPACE || github.repository_owner }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          # Push → the tag ref itself; dispatch → the tag given as input.
+          ref: ${{ github.event_name == 'push' && github.ref || format('refs/tags/{0}', inputs.tag) }}
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # zip is not guaranteed on ubuntu runners; needed for the Windows
+      # archive below.
+      - name: Install zip
+        run: sudo apt-get update -q && sudo apt-get install -y -q zip
+
+      - name: Resolve version metadata
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="${{ inputs.tag }}"
+          fi
+          # ldflags values must not carry spaces/quotes — keep [A-Za-z0-9._-]
+          VERSION="$(printf '%s' "$VERSION" | tr -cd '[:alnum:]._-' | cut -c1-32)"
+          COMMIT="$(git rev-parse HEAD)"
+          # GHCR image names must be all-lowercase; the owner may not be.
+          echo "namespace=$(printf '%s' "${NAMESPACE}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${VERSION} @ ${COMMIT}"
+
+      - name: Build all platform binaries
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          COMMIT: ${{ steps.meta.outputs.commit }}
+          BUILD_DATE: ${{ steps.meta.outputs.date }}
+        run: scripts/build-all.sh --with-frontend --skip-deps-check
+
+      # Boot the freshly built linux/amd64 binary and assert /api/health
+      # reports the injected version — catches ldflags regressions before
+      # anything is published.
+      - name: Verify version stamp
+        env:
+          NOVA_PORT: '19527'
+          NOVA_AUTOINSTALL: '0'   # skip the background claude-CLI install probe
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          ./dist/novaworkbench-linux-amd64 > /tmp/nova-verify.log 2>&1 &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:19527/api/health > /tmp/health.json 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          echo "--- /api/health ---"
+          cat /tmp/health.json; echo
+          grep -q "\"version\":\"${VERSION}\"" /tmp/health.json
+
+      - name: Package archives + checksums
+        run: |
+          cd dist
+          V="${{ steps.meta.outputs.version }}"
+          for target in darwin-arm64 darwin-amd64 linux-amd64 linux-arm64; do
+            tar -czf "novaworkbench-${V}-${target}.tar.gz" "novaworkbench-${target}"
+          done
+          zip -q "novaworkbench-${V}-windows-amd64.zip" "novaworkbench-windows-amd64.exe"
+          sha256sum "novaworkbench-${V}-"*.tar.gz "novaworkbench-${V}-"*.zip > "novaworkbench-${V}-checksums.txt"
+          ls -lh
+
+      - name: Compute image tags
+        id: imgtags
+        run: |
+          IMAGE="ghcr.io/${{ steps.meta.outputs.namespace }}/nova"
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE}:${{ steps.meta.outputs.version }}"
+            echo "${IMAGE}:sha-${{ steps.meta.outputs.commit }}"
+            # Pre-release suffixes (v0.0.0-test, v0.2.0-rc1) must NOT move
+            # the stable `latest` pointer.
+            case "${{ steps.meta.outputs.version }}" in
+              *-*) ;;
+              *) echo "${IMAGE}:latest" ;;
+            esac
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # QEMU is required to execute the arm64 build stages (npm/go RUN
+      # commands) on the amd64 hosted runner.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push release image (multi-arch)
+        uses: docker/build-push-action@v5
+        with:
+          # Same root context as deploy.yml — the Dockerfile's COPY paths
+          # reference both frontend/... and backend/....
+          context: .
+          file: backend/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ steps.meta.outputs.commit }}
+            BUILD_DATE=${{ steps.meta.outputs.date }}
+          tags: ${{ steps.imgtags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          NS: ${{ steps.meta.outputs.namespace }}
+        run: |
+          # Re-run safety: drop a previous release for this tag but keep the
+          # tag itself, so `gh release create` re-attaches to the same commit.
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "::warning::Release ${VERSION} already exists — recreating it"
+            gh release delete "$VERSION" --yes
+          fi
+          gh release create "$VERSION" \
+            dist/novaworkbench-*.tar.gz \
+            dist/novaworkbench-*.zip \
+            dist/novaworkbench-*-checksums.txt \
+            --title "$VERSION" \
+            --generate-notes \
+            --notes "### 下载二进制
+
+          | 平台 | 架构 | 文件 |
+          |------|------|------|
+          | macOS | Apple Silicon | \`novaworkbench-${VERSION}-darwin-arm64.tar.gz\` |
+          | macOS | Intel | \`novaworkbench-${VERSION}-darwin-amd64.tar.gz\` |
+          | Linux | x86_64 | \`novaworkbench-${VERSION}-linux-amd64.tar.gz\` |
+          | Linux | arm64 | \`novaworkbench-${VERSION}-linux-arm64.tar.gz\` |
+          | Windows | x86_64 | \`novaworkbench-${VERSION}-windows-amd64.zip\` |
+
+          解压后直接运行（macOS / Linux）：
+          \`\`\`bash
+          tar -xzf novaworkbench-${VERSION}-<os>-<arch>.tar.gz
+          ./novaworkbench-<os>-<arch>   # 监听 :9527
+          \`\`\`
+
+          Docker 镜像（amd64 / arm64 自动匹配）：
+          \`\`\`bash
+          docker pull ghcr.io/${NS}/nova:${VERSION}
+          \`\`\`
+
+          校验下载：\`sha256sum -c novaworkbench-${VERSION}-checksums.txt\`
+          完整使用说明见 [README](https://github.com/${GITHUB_REPOSITORY}#readme)。"
+          gh release view "$VERSION" --json url --jq '.url'
