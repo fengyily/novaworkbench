@@ -270,3 +270,54 @@ func newScheduledTaskTestDB(t *testing.T) *db.DB {
 	t.Cleanup(func() { _ = d.Close() })
 	return d
 }
+
+// TestScheduledTask_DueRespectsUTCNow locks the scheduler-side half of the
+// early-fire bug: Due() must compare run_at against a UTC-normalized now.
+// Writes (service Create) already normalize RunAt to UTC before the INSERT,
+// so a non-UTC now on the read path made the string-wise comparison treat
+// pending rows scheduled up to <server UTC offset> in the future as already
+// due — on a UTC+8 host that fired tasks up to 8 hours early (reported for
+// req_1769913026939908).
+func TestScheduledTask_DueRespectsUTCNow(t *testing.T) {
+	d := newScheduledTaskTestDB(t)
+	seedScheduledTaskRequirement(t, d)
+	svc := NewScheduledTaskService(d)
+
+	// 模拟用户(UTC+8)在 picker 中选了 10 分钟后
+	cst := time.FixedZone("CST", 8*3600)
+	userPick := time.Now().In(cst).Add(10 * time.Minute)
+
+	if _, err := d.Exec(`INSERT INTO requirements (id, project_id, title) VALUES (?, ?, ?)`,
+		"req_due_utc", "proj_due_utc", "Due-UTC"); err != nil {
+		t.Fatalf("seed requirement: %v", err)
+	}
+	if _, err := svc.Create(&model.ScheduledTask{
+		TaskType: model.SchedTypeDesign, RequirementID: "req_due_utc",
+		ProjectID: "proj_due_utc", RunAt: userPick,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// CASE 1 - UTC now，行 10 分钟后才到期：必须返回空 (修复前 bug 在 UTC+8 主机上会返回 1)
+	utcNow := time.Now().UTC()
+	due, err := svc.Due(utcNow, 50)
+	if err != nil {
+		t.Fatalf("Due utcNow: %v", err)
+	}
+	if len(due) != 0 {
+		t.Fatalf("Due(utcNow) matched %d rows; pre-fix on UTC+8 host this was 1 (the bug)", len(due))
+	}
+
+	// CASE 2 - UTC now，行已过期 (把 run_at 回拨 1 分钟)：必须返回 1
+	if _, err := d.Exec(`UPDATE scheduled_tasks SET run_at = ? WHERE requirement_id = ?`,
+		time.Now().UTC().Add(-1*time.Minute), "req_due_utc"); err != nil {
+		t.Fatal(err)
+	}
+	due, err = svc.Due(utcNow, 50)
+	if err != nil {
+		t.Fatalf("Due utcNow after backdate: %v", err)
+	}
+	if len(due) != 1 {
+		t.Fatalf("Due(utcNow) after backdate matched %d; want 1", len(due))
+	}
+}
