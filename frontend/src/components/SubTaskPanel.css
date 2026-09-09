@@ -695,6 +695,7 @@
   .sub-list { padding: 12px 16px 16px; }
   .sub-composer-toolbar { flex-wrap: wrap; }
   .sub-composer-hint { flex-basis: 100%; }
+  .sub-summary { margin: 12px; padding: 12px 14px; }
 }
 
 /* ─── Orchestrator (主 Agent 自动编排) ───
@@ -841,10 +842,110 @@
 .sub-summary-title {
   color: var(--color-text);
 }
-.sub-summary-body {
+.sub-summary-body { font-size: 13px; line-height: 1.65; color: var(--color-text); }
+.sub-summary-body > :first-child { margin-top: 0; }
+.sub-summary-body > :last-child  { margin-bottom: 0; }
+.sub-summary-body h1, .sub-summary-body h2,
+.sub-summary-body h3, .sub-summary-body h4 {
+  margin: 1.1em 0 0.4em; font-weight: 600; line-height: 1.3; color: #0F172A;
+}
+.sub-summary-body h1 { font-size: 18px; }
+.sub-summary-body h2 { font-size: 15px; border-bottom: 1px solid var(--color-border); padding-bottom: 4px; }
+.sub-summary-body h3 { font-size: 14px; }
+.sub-summary-body h4 { font-size: 13px; color: var(--color-text); }
+.sub-summary-body p  { margin: 6px 0; }
+.sub-summary-body ul, .sub-summary-body ol { padding-left: 20px; margin: 6px 0; }
+.sub-summary-body li { margin: 2px 0; }
+.sub-summary-body strong { font-weight: 600; color: #0F172A; }
+.sub-summary-body code {
+  background: var(--color-active); color: var(--color-primary);
+  padding: 1px 5px; border-radius: 4px;
+  font-size: 12px; font-family: var(--font-mono);
+}
+.sub-summary-body pre {
+  background: #0F172A; color: #E2E8F0;
+  padding: 12px 14px; border-radius: 8px;
+  overflow-x: auto; max-width: 100%;
+  margin: 0.8em 0; font-size: 12px; line-height: 1.5;
+}
+.sub-summary-body pre code { background: transparent; padding: 0; color: inherit; font-size: 12px; }
+.sub-summary-body blockquote {
+  border-left: 3px solid var(--color-primary);
+  margin: 0.8em 0; padding: 4px 14px;
+  color: var(--color-text-secondary); background: var(--color-active);
+  border-radius: 0 6px 6px 0;
+}
+.sub-summary-body table { border-collapse: collapse; margin: 0.8em 0; width: 100%; font-size: 12px; }
+.sub-summary-body th, .sub-summary-body td { border: 1px solid var(--color-border); padding: 6px 10px; text-align: left; }
+.sub-summary-body th { background: var(--color-hover); font-weight: 600; }
+.sub-summary-body a    { color: var(--color-primary); text-decoration: underline; text-underline-offset: 2px; }
+.sub-summary-body hr   { border: none; border-top: 1px solid var(--color-border); margin: 1.2em 0; }
+
+/* Collapsed preview: cap height + fade-out mask so the eye knows there's more.
+   Mirrors RequirementDetail.css:2605-2621 (.design-content-collapsed). */
+.sub-summary-body-wrap {
+  position: relative;
+  overflow: hidden;
+  max-height: none;
+  transition: max-height 0.25s ease;
+}
+.sub-summary-body-wrap.is-collapsed { max-height: 320px; }
+.sub-summary-body-wrap.is-collapsed::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 80px;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0), var(--color-surface, #ffffff));
+  pointer-events: none;
+}
+/* Defensive: keep the fade mask from clipping the last child's text.
+   Mirrors RequirementDetail.css:2621. */
+.sub-summary-body-wrap.is-collapsed .sub-summary-body > :last-child { padding-bottom: 16px; }
+
+/* Toggle button — mirrors RequirementDetail.css:2623-2636 (.design-toggle-btn). */
+.sub-summary-toggle-btn {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--color-primary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 4px 10px;
   font-size: 13px;
-  line-height: 1.6;
+  cursor: pointer;
+}
+.sub-summary-toggle-btn:hover {
+  background: var(--color-hover);
+  border-color: var(--color-primary);
+}
+
+/* Action cluster in the summary header. */
+.sub-summary-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.sub-summary-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.sub-summary-action-btn:hover {
+  background: var(--color-hover);
+  border-color: var(--color-border);
   color: var(--color-text);
+}
+.sub-summary-action-btn[data-copied='true'] {
+  color: var(--color-success);
 }
 
 /* ─── Per-card context-usage bar ───
