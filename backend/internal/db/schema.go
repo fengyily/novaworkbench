@@ -359,6 +359,39 @@ CREATE TABLE IF NOT EXISTS sub_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_sub_tasks_req ON sub_tasks(requirement_id);
 
+-- Orchestration batch: a coordinator row for one auto-orchestrated dispatch
+-- run. tryAutoOrchestrate INSERTs N sub_tasks + 1 orchestration_batches in a
+-- single Tx, then OrchestrationQueue's tick loop walks the batch by batch_seq
+-- and atomically claims each child via ClaimNextPending. When every child
+-- reaches a terminal status the batch flips dispatching -> summarizing and
+-- the summary round (also driven by the tick) forks the orchestrator session
+-- to produce requirements.coding_plan.
+--
+-- summary_heartbeat_at is the 5s tick the RunOrchestratorSummary goroutine
+-- writes while the summary round is in flight. A stale heartbeat (>5min) is
+-- the recovery signal that re-arms summary_status='pending' on the next tick.
+-- batch_id + batch_seq on sub_tasks keep each child's batch membership and
+-- ordering — empty batch_id means a manual sub_task (legacy path).
+CREATE TABLE IF NOT EXISTS orchestration_batches (
+	id                      TEXT PRIMARY KEY,
+	requirement_id          TEXT NOT NULL,
+	orchestrator_session_id TEXT NOT NULL DEFAULT '',
+	model                   TEXT NOT NULL DEFAULT '',
+	work_dir                TEXT NOT NULL DEFAULT '',
+	claude_config_id        TEXT NOT NULL DEFAULT '',
+	total_children          INTEGER NOT NULL DEFAULT 0,
+	status                  TEXT NOT NULL DEFAULT 'dispatching',
+	summary_status          TEXT NOT NULL DEFAULT 'pending',
+	summary_job_id          TEXT NOT NULL DEFAULT '',
+	summary_heartbeat_at    DATETIME,
+	created_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
+	completed_at            DATETIME,
+	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_orch_batches_req    ON orchestration_batches(requirement_id);
+CREATE INDEX IF NOT EXISTS idx_orch_batches_active ON orchestration_batches(status, updated_at);
+
 -- Scheduled one-shot task: fires architect-design or start-coding at a future
 -- time with a pre-selected model. Lifecycle (no retry):
 --   pending → running → succeeded | failed
@@ -568,6 +601,21 @@ var alterColumns = []string{
 	`ALTER TABLE sub_tasks ADD COLUMN cache_read_tokens     INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE sub_tasks ADD COLUMN cost_cents            INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE sub_tasks ADD COLUMN duration_seconds      INTEGER NOT NULL DEFAULT 0`,
+	// Orchestration batch linkage: every child row stamped by tryAutoOrchestrate
+	// carries the parent orchestration_batches.id so the tick loop can claim
+	// them in batch_seq order. batch_id='' means a manual sub_task (legacy
+	// path) — RecoverInterrupted treats those differently from batched ones.
+	// batch_id_seq_run is the 5s heartbeat ClaimNextPending / MarkHeartbeat
+	// writes while the child is running; a stale value (>5min) is the signal
+	// RecoverInterrupted uses to flip a crashed "running" row back to "pending"
+	// so the next tick re-dispatches it instead of leaving it stuck.
+	`ALTER TABLE sub_tasks ADD COLUMN batch_id          TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE sub_tasks ADD COLUMN batch_seq         INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE sub_tasks ADD COLUMN batch_id_seq_run  DATETIME`,
+	// Mirrors the orchestration_batches column above for older DBs that
+	// bootstrapped before the table itself shipped — fixup is idempotent
+	// because migrate() ignores "duplicate column" errors.
+	`ALTER TABLE orchestration_batches ADD COLUMN summary_heartbeat_at DATETIME`,
 }
 
 var (

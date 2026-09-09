@@ -14,6 +14,7 @@ import {
   type SubTask,
   type SubTaskStatus,
   type Requirement,
+  type OrchestrationBatch,
 } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, type LogLine } from '../utils/logLines';
@@ -48,6 +49,17 @@ interface Props {
   // the new create / adjust / re-split pickers; the panel falls back to
   // "" if omitted (legacy callers / tests).
   developerDefaultModel?: string;
+  // Current orchestration batch for this requirement (new restartable
+  // orchestration flow). null when the backend has no batch row yet —
+  // e.g. before StartCoding, or after a manual-only flow that never
+  // went through the auto-orchestrator. Drives which summary CTAs the
+  // banner surfaces (see sub-orchestrator-status block).
+  batch: OrchestrationBatch | null;
+  // Optional callback fired after a manual or early-summary round trip
+  // completes (success or failure). The parent uses it to refresh the
+  // batch snapshot so the banner's disabled state updates without
+  // waiting for the next periodic list-poll cycle.
+  onBatchChange?: () => void;
 }
 
 // Status vocabulary — labels hold i18n KEYS (resolved at render) so the
@@ -588,7 +600,7 @@ function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '',
   );
 }
 
-export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange, developerDefaultModel = '' }: Props) {
+export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange, developerDefaultModel = '', batch, onBatchChange }: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<SubTask[] | null>(null);
   const [prompt, setPrompt] = useState('');
@@ -623,6 +635,83 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // re-runs on periodic poll + after every create / adjust) doesn't fire
   // onSubTasksChange on every tick. Only emit on actual transitions.
   const lastReportedCountRef = useRef<number>(-1);
+  // Manual / early-summary round-trip state. Distinct from the per-card
+  // `adjustBusy` so the composer submit lock doesn't accidentally disable
+  // the orchestrator banner's summary CTA. `summaryToast` mirrors the
+  // toast pattern from WorktreePathHint — reuses the global
+  // `.merge-hint-toast` style for a 1.8s auto-dismiss.
+  const [summaryBusy, setSummaryBusy] = useState(false);
+  const [summaryToast, setSummaryToast] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const summaryToastTimerRef = useRef<number | null>(null);
+  const showSummaryToast = useCallback((kind: 'ok' | 'err', text: string) => {
+    setSummaryToast({ kind, text });
+    if (summaryToastTimerRef.current) window.clearTimeout(summaryToastTimerRef.current);
+    summaryToastTimerRef.current = window.setTimeout(() => {
+      setSummaryToast(null);
+      summaryToastTimerRef.current = null;
+    }, 1800);
+  }, []);
+  useEffect(() => () => {
+    if (summaryToastTimerRef.current) window.clearTimeout(summaryToastTimerRef.current);
+  }, []);
+
+  // Sort children for display. The orchestration queue dispatches in
+  // batch_seq ASC, so showing cards in that order is what the user
+  // perceives as the "execution order". Manual children carry
+  // batch_seq=0 (or undefined), so they cluster at the front — then
+  // fall back to created_at so the manual path stays stable. The sort
+  // runs on every render; the items array is bounded (<100 in practice)
+  // so the cost is negligible and a stable memoisable sort would just
+  // hide the obvious intent.
+  const sortedItems = (() => {
+    if (!items) return items;
+    return [...items].sort((a, b) => {
+      const aSeq = a.batch_seq ?? 0;
+      const bSeq = b.batch_seq ?? 0;
+      if (aSeq !== bSeq) return aSeq - bSeq;
+      // Both at the same batch_seq tier (manual or batch_seq=0): fall
+      // back to created_at ASC so insertion order is preserved.
+      const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return aTime - bTime;
+    });
+  })();
+
+  // Decide which summary CTA (if any) the banner should show. Kept as
+  // a pure derivation so the JSX below stays declarative and easy to
+  // review against the plan's three-state rule (early / manual / progress).
+  const summaryCta: { mode: 'early' | 'manual' | 'progress' | null } = (() => {
+    if (batch?.status === 'summarizing') return { mode: 'progress' };
+    if (batch?.status === 'dispatching') return { mode: 'early' };
+    if (batch && (batch.status === 'completed' || batch.status === 'errored')) return { mode: null };
+    if (batch) return { mode: null }; // unknown status — no CTA
+    // batch === null — manual flow. Offer the CTA only when there's at
+    // least one terminal sub-task; a fully-empty list shows the empty
+    // state instead and a still-running list shows the "wait for completion"
+    // pattern implicitly (no CTA → user can't fire prematurely).
+    if (!items || items.length === 0) return { mode: null };
+    const allTerminal = items.every((s) => s.status === 'done' || s.status === 'error');
+    return allTerminal ? { mode: 'manual' } : { mode: null };
+  })();
+
+  const onGenerateSummary = useCallback(async (mode: 'early' | 'manual') => {
+    if (summaryBusy) return;
+    if (mode === 'early') {
+      const ok = window.confirm(t('components.subTaskPanel.summaryConfirmEarly'));
+      if (!ok) return;
+    }
+    setSummaryBusy(true);
+    try {
+      await subTasksApi.generateSummary(requirementId, {});
+      showSummaryToast('ok', t('components.subTaskPanel.summaryToastOk'));
+      onBatchChange?.();
+    } catch (e: any) {
+      const msg = e?.message || t('components.subTaskPanel.summaryToastErrFallback');
+      showSummaryToast('err', `${t('components.subTaskPanel.summaryToastErrPrefix')} ${msg}`);
+    } finally {
+      setSummaryBusy(false);
+    }
+  }, [summaryBusy, requirementId, onBatchChange, showSummaryToast, t]);
 
   const loadList = useCallback(async () => {
     try {
@@ -844,10 +933,66 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           dispatch automatically when the user kicks off development.
           What remains is the in-flight badge (so the user knows the
           main agent is dispatching children) and the summary report
-          surface (each completed batch refreshes requirements.coding_plan). */}
-      {activeChildCount > 0 && (
-        <div className="sub-orchestrator-status">
-          {t('components.subTaskPanel.autoOrchestrateRunning', { n: activeChildCount })}
+          surface (each completed batch refreshes requirements.coding_plan).
+          The CTA cluster on the right drives the manual / early-summary
+          round-trips against /api/requirements/{id}/sub-tasks/summary
+          (creating summarizing batches → OrchestrationQueue tick handoff). */}
+      {(activeChildCount > 0 || summaryCta.mode !== null || (batch && (batch.status === 'summarizing' || batch.status === 'dispatching'))) && (
+        <div className="sub-orchestrator-status sub-orchestrator-status--with-cta">
+          <div className="sub-orchestrator-status-row">
+            <span className="sub-orchestrator-status-text">
+              {activeChildCount > 0
+                ? t('components.subTaskPanel.autoOrchestrateRunning', { n: activeChildCount })
+                : batch?.status === 'summarizing'
+                  ? t('components.subTaskPanel.bannerSummarizing')
+                  : batch?.status === 'dispatching'
+                    ? t('components.subTaskPanel.bannerDispatchingStatus')
+                    : t('components.subTaskPanel.bannerAllDoneManual')}
+            </span>
+            <span className="sub-orchestrator-status-actions">
+              {summaryCta.mode === 'early' && (
+                <button
+                  type="button"
+                  className="btn btn-sm sub-orchestrator-cta"
+                  onClick={() => onGenerateSummary('early')}
+                  disabled={summaryBusy}
+                  title={t('components.subTaskPanel.summaryCtaEarlyTitle')}
+                >
+                  {summaryBusy ? t('components.subTaskPanel.summarySending') : t('components.subTaskPanel.summaryCtaEarlyBtn')}
+                </button>
+              )}
+              {summaryCta.mode === 'manual' && (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary sub-orchestrator-cta"
+                  onClick={() => onGenerateSummary('manual')}
+                  disabled={summaryBusy}
+                  title={t('components.subTaskPanel.summaryCtaManualTitle')}
+                >
+                  {summaryBusy ? t('components.subTaskPanel.summarySending') : t('components.subTaskPanel.summaryCtaManualBtn')}
+                </button>
+              )}
+              {summaryCta.mode === 'progress' && (
+                <button
+                  type="button"
+                  className="btn btn-sm sub-orchestrator-cta"
+                  disabled
+                  title={t('components.subTaskPanel.summaryCtaProgressTitle')}
+                >
+                  {t('components.subTaskPanel.summaryCtaProgressBtn')}
+                </button>
+              )}
+              {summaryToast && (
+                <span
+                  className="merge-hint-toast sub-orchestrator-toast"
+                  role="status"
+                  data-kind={summaryToast.kind}
+                >
+                  {summaryToast.text}
+                </span>
+              )}
+            </span>
+          </div>
         </div>
       )}
 
@@ -949,12 +1094,12 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             <div>{t('components.subTaskPanel.empty')}</div>
           </div>
         )}
-        {items && items.length > 0 && items.map((st, i) => (
+        {sortedItems && sortedItems.length > 0 && sortedItems.map((st, i) => (
           <SubTaskCard
             key={st.id}
             st={st}
             index={i}
-            total={items.length}
+            total={sortedItems.length}
             onChanged={onItemChanged}
             onCreated={loadList}
             adjustModel={adjustModel}

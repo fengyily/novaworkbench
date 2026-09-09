@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/novaworkbench/backend/internal/db"
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	promptpkg "github.com/novaworkbench/backend/internal/prompt"
@@ -27,6 +28,7 @@ import (
 )
 
 type WizardHandler struct {
+	db           *db.DB
 	projectSvc   *service.ProjectService
 	reqSvc       *service.RequirementService
 	knowledgeSvc *service.KnowledgeService
@@ -53,25 +55,59 @@ type WizardHandler struct {
 	// fork, executor role persona, artifact + token persistence — stay in one
 	// place.
 	subTaskRunner *SubTaskRunner
+	// batchSvc is the persistence layer for orchestration_batches — the
+	// coordinator row that groups N sub_tasks into one restart-safe dispatch
+	// run. tryAutoOrchestrate writes one alongside N sub_tasks in a single
+	// transaction; RunOrchestratorSummary advances summary_status; the queue
+	// (below) reads active batches every tick. Nil-safe: a missing batchSvc
+	// disables both the auto-orchestrate path and the manual summary handler.
+	batchSvc *service.OrchestrationBatchService
+	// orchQueue is the scheduler tick loop that drives restart-safe dispatch
+	// for auto-orchestrated sub-tasks. Injected AFTER construction via
+	// SetOrchQueue so we don't import the scheduler package here (avoids the
+	// wizard→scheduler cycle through model/JobStore). The interface is the
+	// narrowest surface the wizard needs (just Kick). Nil before main.go wires
+	// it; handlers must nil-check before calling.
+	orchQueue interface {
+		Kick()
+	}
+	// summaryKickIntervalSec is the period of the summary-round heartbeat
+	// (MarkSummaryHeartbeat) the RunOrchestratorSummary goroutine issues while
+	// the summary is in flight. Default 5s matches the batch-recovery cutoff
+	// in OrchestrationBatchService.Recover so a backend crash surfaces within
+	// one heartbeat cycle.
+	summaryKickIntervalSec int
 }
 
-func NewWizardHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, agentSvrSvc *service.AgentServerService, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner) *WizardHandler {
+func NewWizardHandler(database *db.DB, projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, agentSvrSvc *service.AgentServerService, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, batchSvc *service.OrchestrationBatchService) *WizardHandler {
 	return &WizardHandler{
-		projectSvc:    projectSvc,
-		reqSvc:        reqSvc,
-		knowledgeSvc:  knowledgeSvc,
-		llm:           llmGateway,
-		jobs:          jobs,
-		roleSvc:       roleSvc,
-		jobLogSvc:     jobLogSvc,
-		claudeCfg:     claudeCfg,
-		usageSvc:      usageSvc,
-		skillSvc:      skillSvc,
-		platformSvc:   platformSvc,
-		subTaskSvc:    subTaskSvc,
-		agentSvrSvc:   agentSvrSvc,
-		subTaskRunner: subTaskRunner,
+		db:                     database,
+		projectSvc:             projectSvc,
+		reqSvc:                 reqSvc,
+		knowledgeSvc:           knowledgeSvc,
+		llm:                    llmGateway,
+		jobs:                   jobs,
+		roleSvc:                roleSvc,
+		jobLogSvc:              jobLogSvc,
+		claudeCfg:              claudeCfg,
+		usageSvc:               usageSvc,
+		skillSvc:               skillSvc,
+		platformSvc:            platformSvc,
+		subTaskSvc:             subTaskSvc,
+		agentSvrSvc:            agentSvrSvc,
+		subTaskRunner:          subTaskRunner,
+		batchSvc:               batchSvc,
+		summaryKickIntervalSec: 5,
 	}
+}
+
+// SetOrchQueue injects the scheduler.OrchestrationQueue after construction.
+// main.go wires the queue AFTER the wizard handler is built (the queue holds
+// a SubTaskExecutor reference to the wizard), so the wizard needs a setter
+// rather than a constructor argument. Passing nil disables auto-kick — the
+// scheduler tick still picks the batch up on its next interval.
+func (h *WizardHandler) SetOrchQueue(q interface{ Kick() }) {
+	h.orchQueue = q
 }
 
 // buildKnowledgeBlock loads the project knowledge most relevant to a
@@ -5649,6 +5685,16 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "IDEA", "「想法」类需求不支持任务拆分，请先转为需求")
 		return
 	}
+	// Double-fire guard: refuse to re-split while an orchestration batch is
+	// still running for this requirement. ReOrchestrate and the auto path
+	// (tryAutoOrchestrate) would otherwise both create competing batches —
+	// the queue only services one at a time, and the loser leaks children.
+	if h.batchSvc != nil {
+		if existing, gerr := h.batchSvc.GetActiveByRequirement(id); gerr == nil && existing != nil {
+			writeError(w, http.StatusConflict, "orchestration_in_progress", "正在自动编排中，请等待完成后重试")
+			return
+		}
+	}
 	// Refuse to re-split while any child is alive — the children fork the
 	// coding session, and a concurrent decomposition turn would race them.
 	if existing, lerr := h.subTaskSvc.List(id); lerr == nil {
@@ -5771,16 +5817,72 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 		job.Append(store.LogLine{Type: "done", Content: "✅ 重新拆分完成，子任务派发中"})
 		job.Finish(0, store.JobDone)
 
-		// Dispatch runs after job.Finish so the re-split SSE closes promptly;
-		// each child's own job streams its progress like the auto path.
-		subTaskIDs := dispatchChildrenSequential(id, sessionID, req, h, payload.Subtasks, workDir, modelName, claudeConfigID)
-		if len(subTaskIDs) == 0 {
-			log.Printf("[re-orchestrate] %s: dispatch produced 0 children", id)
+		// Dispatch: hand off to the same restart-safe path as the auto
+		// orchestrate. tryAutoOrchestrate re-parses the payload, re-checks
+		// the active-batch gate (a no-op since we just checked above), then
+		// commits N sub_tasks + 1 orchestration_batches in a single Tx and
+		// kicks the queue. Running it here keeps the manual and auto paths
+		// on one code path so behavior stays consistent.
+		// We pass empty finalResult + capturedJSON so tryAutoOrchestrate's
+		// parser falls through to resolveManualReSplit's logic — but since
+		// the parse channels have already been exhausted above (the
+		// payload check), it will return the single fallback child only if
+		// the input is empty. To preserve the manual path's "no fallback"
+		// behavior we instead drive the commit directly.
+		h.commitOrchestrationBatch(id, sessionID, payload, workDir, modelName, claudeConfigID)
+	}()
+}
+
+// commitOrchestrationBatch is the manual re-split's commit primitive: it
+// inserts N sub_tasks (status=pending, batch_id, batch_seq=1..N) and 1
+// orchestration_batches row in a single Tx, then kicks the queue. Shared
+// shape with tryAutoOrchestrate's commit block, but takes a pre-parsed
+// payload so the manual path's "no fallback child" contract holds.
+//
+// Errors are logged + swallowed; the user-facing job has already finished
+// by the time we reach here, so a tx failure surfaces as "no children
+// appeared" on the next UI refresh (the user can manually retry).
+func (h *WizardHandler) commitOrchestrationBatch(
+	reqID, orchestratorSID string,
+	payload *orchestratorPayload,
+	workDir, modelName, claudeConfigID string,
+) {
+	if h.subTaskSvc == nil || h.batchSvc == nil || payload == nil || len(payload.Subtasks) == 0 {
+		log.Printf("[re-orchestrate] %s: missing deps or empty payload; skip commit", reqID)
+		return
+	}
+	tx, terr := h.db.Begin()
+	if terr != nil {
+		log.Printf("[re-orchestrate] %s: begin tx: %v", reqID, terr)
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	obID, berr := h.batchSvc.CreateWithTx(tx, reqID, orchestratorSID, modelName, workDir, claudeConfigID, len(payload.Subtasks))
+	if berr != nil {
+		log.Printf("[re-orchestrate] %s: create batch: %v", reqID, berr)
+		return
+	}
+	for i, t := range payload.Subtasks {
+		if _, cerr := h.subTaskSvc.CreateWithBatchTx(tx, reqID, t.Title, t.Prompt, modelName, orchestratorSID, obID, i+1); cerr != nil {
+			log.Printf("[re-orchestrate] %s: create child %d (%s): %v", reqID, i+1, t.Title, cerr)
 			return
 		}
-		log.Printf("[re-orchestrate] %s: dispatched %d children, scheduling summary", id, len(subTaskIDs))
-		summaryKickoff(id, sessionID, req, h, workDir, modelName, claudeConfigID, subTaskIDs)
-	}()
+	}
+	if cerr := tx.Commit(); cerr != nil {
+		log.Printf("[re-orchestrate] %s: commit: %v", reqID, cerr)
+		return
+	}
+	committed = true
+	log.Printf("[re-orchestrate] %s: committed batch %s with %d children", reqID, obID, len(payload.Subtasks))
+	if h.orchQueue != nil {
+		h.orchQueue.Kick()
+	}
 }
 
 // resolveManualReSplit is the manual re-split's parse chain: identical to
@@ -5980,6 +6082,146 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 	// Re-use the shared spawn helper with adjust=false and the ORIGINAL prompt
 	// (st.Prompt) so the child re-executes the same task from a clean fork.
 	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false)
+}
+
+// GenerateSubTaskSummary handles POST /api/requirements/{id}/sub-tasks/summary
+// — the manual summary trigger for requirements whose sub-tasks were created
+// by hand (no auto batch ever ran) but are now all terminal. It synthesizes
+// the same effect as the auto summary round without needing an
+// orchestration_batches row to seed from:
+//
+//  1. Sub-task list gate: empty → 400; any pending/running → 400.
+//  2. Active batch gate: an existing dispatching/summarizing batch on this
+//     requirement → 409 (the queue already has a round in flight).
+//  3. Create a fresh orchestration_batches row in 'summarizing' state with
+//     total_children=0 (no children — they're manual and not batch-scoped).
+//  4. Kick the OrchestrationQueue so the next tick fires the summary.
+//
+// The summary goroutine (RunOrchestratorSummary) reads children via
+// subTaskSvc.List(reqID) when batch.TotalChildren==0 — but the current
+// implementation pulls children only via ListByBatch(batchID), which would
+// skip manual sub-tasks. To keep the manual summary meaningful we copy the
+// manual children into the new batch by stamping their batch_id retroactively.
+//
+// Returns { batch_id, job_id: "" } so the frontend can poll batch state via
+// the existing endpoints.
+//
+// Body: { "model"?: "..." } — currently informational; the batch inherits the
+// developer's role-bound model like tryAutoOrchestrate does.
+func (h *WizardHandler) GenerateSubTaskSummary(w http.ResponseWriter, r *http.Request) {
+	if !h.requireSubTaskSvc(w) {
+		return
+	}
+	if h.batchSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "批次服务未初始化")
+		return
+	}
+	var body struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	id := r.PathValue("id")
+	req, err := h.reqSvc.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "requirement not found")
+		return
+	}
+
+	// Gate 1: requirement must have at least one sub-task.
+	existing, lerr := h.subTaskSvc.List(id)
+	if lerr != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", lerr.Error())
+		return
+	}
+	if len(existing) == 0 {
+		writeError(w, http.StatusBadRequest, "no_subtasks", "无子任务可汇总")
+		return
+	}
+	// Gate 2: refuse to summarize while a child is still in flight; the
+	// summary reads final artifacts only.
+	for _, st := range existing {
+		if st.Status == model.SubTaskStatusPending || st.Status == model.SubTaskStatusRunning {
+			writeError(w, http.StatusBadRequest, "subtasks_in_flight", "请等待子任务执行完成后再汇总")
+			return
+		}
+	}
+	// Gate 3: an active batch means the queue already has a round in flight.
+	if active, gerr := h.batchSvc.GetActiveByRequirement(id); gerr == nil && active != nil {
+		writeError(w, http.StatusConflict, "orchestration_in_progress", "已有正在进行的批次，请等待完成后重试")
+		return
+	}
+
+	// Resolve the same runtime params tryAutoOrchestrate uses: developer role's
+	// model + claude config, plus the requirement's worktree path so the
+	// summary agent edits the right tree.
+	_, modelName, claudeConfigID := h.roleConfig("developer")
+	if body.Model != "" {
+		modelName = body.Model
+	}
+	workDir := ""
+	if proj, perr := h.projectSvc.Get(req.ProjectID); perr == nil {
+		workDir = proj.LocalPath
+	}
+	if req.WorktreePath != "" {
+		if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
+			workDir = req.WorktreePath
+		}
+	}
+	if workDir == "" {
+		writeError(w, http.StatusBadRequest, "no_workdir", "无法解析工作目录，请先完成 start-coding")
+		return
+	}
+	// Pull the orchestrator session id (the coding session main agent forked).
+	orchestratorSID := req.CodingSessionID
+	if orchestratorSID == "" {
+		orchestratorSID = req.DesignSessionID
+	}
+	if orchestratorSID == "" {
+		writeError(w, http.StatusBadRequest, "no_session", "需求尚未启动 coding 或 design session，无法生成汇总")
+		return
+	}
+
+	// Create the batch row directly (not via TryAutoOrchestrate, which would
+	// also try to parse payload.Subtasks — we have no payload here, we want
+	// to summarize the EXISTING manual sub-tasks). status='summarizing'
+	// signals the queue to run a summary round without re-dispatching any
+	// children.
+	batch, berr := h.batchSvc.Create(id, orchestratorSID, modelName, workDir, claudeConfigID, 0)
+	if berr != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", berr.Error())
+		return
+	}
+	// Manually flip to summarizing since Create() defaults to dispatching.
+	if serr := h.batchSvc.MarkSummarizing(batch.ID); serr != nil {
+		log.Printf("[summary] %s: mark summarizing: %v", batch.ID, serr)
+	}
+
+	// Wake the queue so the next tick fires RunOrchestratorSummary. The
+	// summary goroutine pulls children via subTaskSvc.List(id) — we want
+	// manual children (batch_id='') too, so stamp them onto this batch
+	// first. Each manual child gets batch_seq = its position + 1 so the
+	// summary prompt reads them in user-defined order.
+	for i, st := range existing {
+		if st.BatchID != "" {
+			continue
+		}
+		if perr := h.subTaskSvc.SetBatchID(st.ID, batch.ID, i+1); perr != nil {
+			log.Printf("[summary] %s: stamp child %s: %v", batch.ID, st.ID, perr)
+		}
+	}
+	// Bump total_children so CountTerminalByBatch gating stays consistent.
+	_ = h.batchSvc.UpdateTotalChildren(batch.ID, len(existing))
+
+	if h.orchQueue != nil {
+		h.orchQueue.Kick()
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"job_id":   "",
+		"batch_id": batch.ID,
+	})
 }
 
 // ListSubTasks handles GET /api/requirements/{id}/sub-tasks.
@@ -6592,61 +6834,35 @@ func normalizePayload(p *orchestratorPayload) *orchestratorPayload {
 	return p
 }
 
-// dispatchChildrenSequential is a small free function that runs dispatchOneChild
-// in a strict loop. Shared by StartCoding's auto-orchestrate path (the new
-// behavior; see tryAutoOrchestrate) — kept free-standing so each call site
-// stays one-liner clean. Errors per-child are logged and skipped; the returned
-// slice is whatever ids survived — empty means the entire batch failed.
-func dispatchChildrenSequential(
-	reqID, orchestratorSID string,
-	req *model.Requirement,
-	h *WizardHandler,
-	subtasks []orchestratedSubtask,
-	workDir, modelName, devCfgID string,
-) []string {
-	subTaskIDs := make([]string, 0, len(subtasks))
-	for _, t := range subtasks {
-		st, err := h.dispatchOneChild(reqID, orchestratorSID, t, req, workDir, modelName, devCfgID)
-		if err != nil {
-			log.Printf("[orchestrate] failed to dispatch child %q: %v", t.Title, err)
-			continue
-		}
-		subTaskIDs = append(subTaskIDs, st.ID)
-	}
-	return subTaskIDs
-}
-
-// summaryKickoff launches the orchestrator summary round in its own goroutine.
-// Used by both AutoOrchestrate and tryAutoOrchestrate so the trigger sites stay
-// symmetric.
-func summaryKickoff(
-	reqID, orchestratorSID string,
-	req *model.Requirement,
-	h *WizardHandler,
-	workDir, modelName, claudeConfigID string,
-	subTaskIDs []string,
-) {
-	go h.runOrchestratorSummary(reqID, orchestratorSID, req, workDir, modelName, claudeConfigID, subTaskIDs)
-}
-
 // tryAutoOrchestrate is the auto-dispatch path called by StartCoding right
 // after the main agent turn finishes. It resolves the main agent's
 // decomposition via resolveSubtasksPayload (Write-captured JSON → sentinel
 // text → markdown table → LLM extractor → single fallback child) and
-// dispatches each sub-task SEQUENTIALLY through the same dispatchOneChild
-// path the manual orchestrator uses, then schedules an orchestrator summary
-// round.
+// commits N sub_tasks + 1 orchestration_batches inside a single transaction,
+// then returns immediately — dispatch is no longer this function's job.
 //
-// This is the entry point for the new "一键编排 = 主 Agent 自动派发" UX:
-// StartCoding returns its job_id immediately, and the orchestrator-side
-// progress (parse → dispatch N children → write summary) runs as a separate
-// background goroutine. Frontend progress is fully observable via:
-//   - /api/requirements/{id}/sub-tasks          → live status of each child
-//   - /api/wizard/jobs/{child_job_id}/stream    → live tool calls of each
-//     child
-//   - requirements.coding_plan refresh          → final summary Markdown
-//   - /api/requirements/{id}                    → requirements.coding_plan
-//     surfaces the summary on the next GET.
+// The new flow:
+//
+//  1. Resolve the payload (unchanged parse chain).
+//  2. Insert N sub_tasks (status=pending, batch_id, batch_seq=1..N) and 1
+//     orchestration_batches row in a single Tx. Either everything commits or
+//     everything rolls back, so a mid-Tx failure never leaves an orphan
+//     batch with zero children.
+//  3. Kick the OrchestrationQueue so the first child doesn't wait the full
+//     tick interval. The queue then drives sub-task dispatch in batch_seq
+//     order and triggers the summary round when every child has reached a
+//     terminal state.
+//
+// Restart-safety is handled by OrchestrationQueue.tick() (which calls
+// ClaimNextPending / CountTerminalByBatch / MarkSummarizing) and
+// OrchestrationBatchService.Recover() on boot — see those for details. This
+// function does not own any goroutine after the Tx commits.
+//
+// Frontend progress remains observable through:
+//   - /api/requirements/{id}/sub-tasks                 → live status of each child
+//   - /api/wizard/jobs/{child_job_id}/stream           → live tool calls of each child
+//   - /api/requirements/{id}                           → requirements.coding_plan surfaces the summary
+//   - /api/requirements/{id}/orchestration/batch       → batch status (live)
 func (h *WizardHandler) tryAutoOrchestrate(
 	reqID string,
 	orchestratorSID string,
@@ -6655,7 +6871,7 @@ func (h *WizardHandler) tryAutoOrchestrate(
 	req *model.Requirement,
 	workDir, modelName, claudeConfigID string,
 ) {
-	if h.subTaskSvc == nil {
+	if h.subTaskSvc == nil || h.batchSvc == nil {
 		return
 	}
 	if req == nil {
@@ -6664,6 +6880,16 @@ func (h *WizardHandler) tryAutoOrchestrate(
 		log.Printf("[auto-orchestrate] %s: requirement row missing, skipping dispatch", reqID)
 		return
 	}
+	// Double-fire guard: refuse to start a new batch while one is already
+	// dispatching or summarizing for this requirement. The user clicking
+	// StartCoding twice (or the manual re-orchestrate path racing this) would
+	// otherwise create two competing batches — the second one would silently
+	// leak children that the first batch's summary ignores.
+	if existing, gerr := h.batchSvc.GetActiveByRequirement(reqID); gerr == nil && existing != nil {
+		log.Printf("[auto-orchestrate] %s: active batch %s already in %s — skip", reqID, existing.ID, existing.Status)
+		return
+	}
+
 	payload := h.resolveSubtasksPayload(reqID, finalResult, capturedJSON, req)
 	// The subtasks.json the main agent Wrote into the worktree has been
 	// consumed (or rejected) — remove it so it never pollutes the dev branch
@@ -6677,17 +6903,46 @@ func (h *WizardHandler) tryAutoOrchestrate(
 		return
 	}
 
-	// Children share orchestratorSID (the coding session forked in
-	// StartCoding) so they inherit the main agent's project / design /
-	// conversation context. Sequential dispatch keeps file edits safe in
-	// the shared worktree.
-	subTaskIDs := dispatchChildrenSequential(reqID, orchestratorSID, req, h, payload.Subtasks, workDir, modelName, claudeConfigID)
-	if len(subTaskIDs) == 0 {
-		log.Printf("[auto-orchestrate] %s: dispatch produced 0 children; ending", reqID)
+	// Single Tx: batch + N sub_tasks commit atomically. A mid-Tx failure
+	// rolls back everything; the user can safely retry by clicking StartCoding
+	// again (the GetActiveByRequirement gate above will then be empty).
+	tx, terr := h.db.Begin()
+	if terr != nil {
+		log.Printf("[auto-orchestrate] %s: begin tx: %v", reqID, terr)
 		return
 	}
-	log.Printf("[auto-orchestrate] %s: dispatched %d children, scheduling summary", reqID, len(subTaskIDs))
-	summaryKickoff(reqID, orchestratorSID, req, h, workDir, modelName, claudeConfigID, subTaskIDs)
+	// Defer Rollback on every error path; Commit clears it via the named return.
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	obID, berr := h.batchSvc.CreateWithTx(tx, reqID, orchestratorSID, modelName, workDir, claudeConfigID, len(payload.Subtasks))
+	if berr != nil {
+		log.Printf("[auto-orchestrate] %s: create batch: %v", reqID, berr)
+		return
+	}
+	for i, t := range payload.Subtasks {
+		if _, cerr := h.subTaskSvc.CreateWithBatchTx(tx, reqID, t.Title, t.Prompt, modelName, orchestratorSID, obID, i+1); cerr != nil {
+			log.Printf("[auto-orchestrate] %s: create child %d (%s): %v", reqID, i+1, t.Title, cerr)
+			return
+		}
+	}
+	if cerr := tx.Commit(); cerr != nil {
+		log.Printf("[auto-orchestrate] %s: commit: %v", reqID, cerr)
+		return
+	}
+	committed = true
+	log.Printf("[auto-orchestrate] %s: committed batch %s with %d children — scheduler tick will dispatch", reqID, obID, len(payload.Subtasks))
+
+	// Wake the queue immediately so the first child doesn't wait the full
+	// tick interval. Kick is non-blocking; nil-check because main.go may
+	// wire the queue AFTER the first batch has been created in tests.
+	if h.orchQueue != nil {
+		h.orchQueue.Kick()
+	}
 }
 
 // resolveSubtasksPayload turns the main agent's turn output into a concrete
@@ -6773,23 +7028,29 @@ func (h *WizardHandler) extractSubtasksWithLLM(reqID, finalResult string) *orche
 	return nil
 }
 
-// dispatchOneChild is the inner loop of AutoOrchestrate: persists a
-// sub_tasks row, spawns the claude process, blocks until it finishes, and
-// returns the final sub-task record. Errors are non-fatal — the caller
-// skips and continues with remaining children.
-func (h *WizardHandler) dispatchOneChild(
-	reqID, parentSID string,
-	t orchestratedSubtask,
-	req *model.Requirement,
-	workDir, modelName, devCfgID string,
-) (*model.SubTask, error) {
-	st, err := h.subTaskSvc.Create(reqID, t.Title, t.Prompt)
-	if err != nil {
-		return nil, fmt.Errorf("create sub_task: %w", err)
+// ExecuteOrchestratedChild is the per-child execution entry point invoked
+// from scheduler.OrchestrationQueue.tick. The sub-task row has ALREADY been
+// claimed (status=running) by ClaimNextPending before this method is called,
+// so this function only:
+//   1. Resolves session/job pre-mint identifiers (UpdateSession / UpdateJobID)
+//   2. Spawns the claude CLI with the executor-role persona, forking the
+//      orchestrator session
+//   3. Writes the terminal artifact via Finish
+//
+// The 5s heartbeat ticker keeps batch_id_seq_run fresh so a backend crash
+// surfaces within one recovery interval (RecoverInterrupted's 5min cutoff).
+// Workdir / model / claude-config are pulled from the batch row so manual
+// (batch_id='') and orchestrated children both produce identical runtime
+// behavior; the only difference is how they were entered into the table.
+func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch, st *model.SubTask) {
+	if h.subTaskSvc == nil {
+		return
 	}
+	reqID := st.RequirementID
+
 	// Pre-mint child session id (forked from the orchestrator/main session).
 	childSID := util.NewUUID()
-	if perr := h.subTaskSvc.UpdateSession(st.ID, childSID, parentSID); perr != nil {
+	if perr := h.subTaskSvc.UpdateSession(st.ID, childSID, batch.OrchestratorSessionID); perr != nil {
 		log.Printf("[orchestrate] failed to persist child session for %s: %v", st.ID, perr)
 	}
 	job := h.jobs.Create(reqID)
@@ -6797,23 +7058,12 @@ func (h *WizardHandler) dispatchOneChild(
 		log.Printf("[orchestrate] failed to persist child job_id for %s: %v", st.ID, perr)
 	}
 
-	// Start the child agent (same code path as StartSubTask). The "executor"
-	// role system prompt MUST be injected: the child forks the orchestrator
-	// session, which carries the developer (统筹协调) persona telling it to
-	// decompose and emit [SUBTASKS_READY]. Without an explicit override the
-	// child inherits that persona and re-emits the sentinel instead of
-	// writing any code.
+	// Resolve executor role + claude config binding. Same priority as the
+	// pre-batch dispatchOneChild: explicit batch config > model lookup >
+	// executor-role fallback.
 	execSystemPrompt, _, executorConfigID := h.roleConfig(executorRoleKey)
-	// Pick the Claude config the resolved model actually belongs to. Priority:
-	//   1. devCfgID — the developer-role binding passed in from the call site
-	//      (StartCoding / ReOrchestrateSubTask both have it on hand; without
-	//      it we used to silently fall through to the executor role, which
-	//      could be bound to a different claude_configs row and send the
-	//      request to the wrong gateway)
-	//   2. reverse-lookup modelName in claude_configs.models (covers the case
-	//      where the caller passed a model from a non-developer-bound config)
-	//   3. executor role binding (legacy fallback; matches SubTaskRunner.Run
-	//      and the merge-push path semantics)
+	modelName := batch.Model
+	devCfgID := batch.ClaudeConfigID
 	var finalConfigID string
 	switch {
 	case devCfgID != "":
@@ -6827,32 +7077,67 @@ func (h *WizardHandler) dispatchOneChild(
 	default:
 		finalConfigID = executorConfigID
 	}
-	executorPrompt := "## 子任务\n\n" + t.Prompt + "\n\n" +
+
+	executorPrompt := "## 子任务\n\n" + st.Prompt + "\n\n" +
 		"> 本任务通过 --fork-session 继承了主 Agent 的项目上下文与代码库访问权限。\n" +
 		"> 如需补充信息，可正常读取项目文件或调用工具。\n" +
 		"> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
+
+	// Heartbeat ticker: keeps batch_id_seq_run fresh for boot recovery. Capped
+	// at the configured interval so a stuck Finish() can't leak past one
+	// recovery cycle. Errors are best-effort — a failed heartbeat is logged
+	// but doesn't stop execution.
+	hbInterval := time.Duration(h.summaryKickIntervalSec) * time.Second
+	if hbInterval <= 0 {
+		hbInterval = 5 * time.Second
+	}
+	hbDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(hbInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hbDone:
+				return
+			case <-ticker.C:
+				if herr := h.subTaskSvc.MarkHeartbeat(st.ID); herr != nil {
+					log.Printf("[orchestrate] heartbeat %s: %v", st.ID, herr)
+				}
+			}
+		}
+	}()
+
+	// Load the requirement row for AgentServerID + ProjectID. Done at the
+	// call site (rather than passing through the batch) so the same lookup
+	// path SubTaskRunner.Run uses applies here.
+	req, rerr := h.reqSvc.Get(reqID)
+	if rerr != nil || req == nil {
+		log.Printf("[orchestrate] requirement %s missing for child %s: %v", reqID, st.ID, rerr)
+		close(hbDone)
+		if perr := h.subTaskSvc.Finish(st.ID, model.SubTaskStatusError, "❌ 无法加载需求行（"+rerr.Error()+")", modelName, model.SubTaskTokens{}, 0, time.Time{}); perr != nil {
+			log.Printf("[orchestrate] finish %s: %v", st.ID, perr)
+		}
+		return
+	}
+
 	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         executorPrompt,
-		WorkDir:        workDir,
+		WorkDir:        batch.WorkDir,
 		SystemPrompt:   execSystemPrompt,
 		Model:          cliModelArg(modelName),
 		ClaudeConfigID: finalConfigID,
-		SessionID:      parentSID,
+		SessionID:      batch.OrchestratorSessionID,
 		Resume:         true,
 		Fork:           true,
 		ForkSessionID:  childSID,
 	})
 	defer cancel()
-	startTime, err := h.subTaskSvc.MarkRunning(st.ID)
-	if err != nil {
-		log.Printf("[orchestrate] failed to mark running for %s: %v", st.ID, err)
-	}
 
-	job.Append(store.LogLine{Type: "phase", Content: "🤖 [编排] 子任务启动: " + t.Title})
-	job.Append(store.LogLine{Type: "message", Content: "📝 提示词: " + truncateForLog(t.Prompt, 240)})
+	job.Append(store.LogLine{Type: "phase", Content: "🤖 [编排] 子任务启动: " + st.Title})
+	job.Append(store.LogLine{Type: "message", Content: "📝 提示词: " + truncateForLog(st.Prompt, 240)})
 	job.SetModel(modelName)
 
-	childUsage := h.usageCtxFor("sub_task", reqID, req.ProjectID, job.ID, modelName, "", t.Prompt)
+	childUsage := h.usageCtxFor("sub_task", reqID, req.ProjectID, job.ID, modelName, "", st.Prompt)
 	// Route orchestrated children to the parent requirement's Agent server
 	// when it has one — same reasoning as runSubTask: the working tree lives
 	// on that host, so a locally-spawned child would edit the wrong checkout.
@@ -6862,16 +7147,16 @@ func (h *WizardHandler) dispatchOneChild(
 			job:      job,
 			serverID: req.AgentServerID,
 			req: startCodingReq{
-				RequirementTitle: req.Title + " / " + t.Title,
+				RequirementTitle: req.Title + " / " + st.Title,
 				RequirementID:    req.ID,
 				BranchName:       req.BranchName,
 				AgentServerID:    req.AgentServerID,
 			},
 			reqRow:        req,
 			prompt:        executorPrompt,
-			sourceSID:     parentSID,
+			sourceSID:     batch.OrchestratorSessionID,
 			fork:          true,
-			sessionArg:    parentSID,
+			sessionArg:    batch.OrchestratorSessionID,
 			forkSessionID: childSID,
 			model:         modelName,
 			usage:         childUsage,
@@ -6879,6 +7164,12 @@ func (h *WizardHandler) dispatchOneChild(
 	} else {
 		out = runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage)
 	}
+
+	// Stop the heartbeat BEFORE Finish so a slow MarkHeartbeat can't race
+	// the Finish write. Finish flips status out of 'running', so any
+	// post-Finish heartbeat is a no-op anyway, but closing the channel keeps
+	// logs tidy.
+	close(hbDone)
 
 	status := model.SubTaskStatusDone
 	artifactBody := out.finalResult
@@ -6906,7 +7197,7 @@ func (h *WizardHandler) dispatchOneChild(
 		CacheCreation: out.lastUsage.CacheCreationTokens,
 		CacheRead:     out.lastUsage.CacheReadTokens,
 	}
-	if perr := h.subTaskSvc.Finish(st.ID, status, artifact, modelName, tokens, 0, startTime); perr != nil {
+	if perr := h.subTaskSvc.Finish(st.ID, status, artifact, modelName, tokens, 0, time.Time{}); perr != nil {
 		log.Printf("[orchestrate] failed to persist finish for %s: %v", st.ID, perr)
 	}
 	// Persist job log too (mirrors StartSubTask's defer — survives restart).
@@ -6915,37 +7206,77 @@ func (h *WizardHandler) dispatchOneChild(
 		log.Printf("[orchestrate] failed to persist job log %s: %v", job.ID, perr)
 	}
 	job.Finish(0, store.JobDone)
-	log.Printf("[orchestrate] child %s finished status=%s", st.ID, status)
-
-	// Return a fresh read of the row (Finish updated artifact / status).
-	return h.subTaskSvc.Get(st.ID)
+	log.Printf("[orchestrate] child %s (batch %s seq %d) finished status=%s", st.ID, batch.ID, st.BatchSeq, status)
 }
 
-// runOrchestratorSummary forks the orchestrator (or main) session and asks
-// the agent to summarize all completed children. The summary is the final
-// user-facing report the SubTaskPanel surfaces under the children's cards.
+// RunOrchestratorSummary is the summary-round entry point invoked from
+// scheduler.OrchestrationQueue.tick when a batch is in 'summarizing' state
+// with summary_status='pending'. Responsibilities:
 //
-// Invoked from AutoOrchestrate as a goroutine so the HTTP response can
-// return child ids immediately. Errors are logged, never returned — a failed
-// summary just leaves coding_plan empty (the user can manually inspect
-// each child's artifact).
-func (h *WizardHandler) runOrchestratorSummary(
-	reqID, orchestratorSID string,
-	req *model.Requirement,
-	workDir, modelName, claudeConfigID string,
-	subTaskIDs []string,
-) {
-	// Collect each child's artifact + status. Sort by created_at so the
-	// summary reads in execution order.
-	children := make([]model.SubTask, 0, len(subTaskIDs))
-	for _, sid := range subTaskIDs {
-		st, err := h.subTaskSvc.Get(sid)
-		if err != nil {
-			continue
+//  1. MarkSummary('running') at entry.
+//  2. Issue MarkSummaryHeartbeat every 5s so boot recovery can detect a
+//     crashed summary goroutine.
+//  3. Run the orchestrator summary turn (same code path as the pre-batch
+//     runOrchestratorSummary).
+//  4. On success: MarkSummary('done') + MarkCompleted(batchID).
+//  5. On failure: MarkSummary('error'); batch.status stays 'summarizing' so
+//     the next tick re-arms the summary.
+//
+// The function is intentionally best-effort — it never panics, never blocks
+// longer than the underlying claude subprocess, and tolerates DB errors by
+// logging + bailing so the queue's next tick can retry.
+func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
+	if h.batchSvc == nil {
+		return
+	}
+	batch, err := h.batchSvc.Get(batchID)
+	if err != nil || batch == nil {
+		log.Printf("[orchestrate] summary: batch %s not found: %v", batchID, err)
+		return
+	}
+	// Reserve the summary round. MarkSummary is unconditional so a stale
+	// 'running' from a crashed goroutine is correctly overwritten.
+	if serr := h.batchSvc.MarkSummary(batchID, model.SummaryRunning); serr != nil {
+		log.Printf("[orchestrate] summary %s mark running: %v", batchID, serr)
+		return
+	}
+
+	// Heartbeat so boot recovery can distinguish a live summary from an
+	// orphaned one. Stops when summary work completes (deferred).
+	hbInterval := time.Duration(h.summaryKickIntervalSec) * time.Second
+	if hbInterval <= 0 {
+		hbInterval = 5 * time.Second
+	}
+	hbDone := make(chan struct{})
+	defer close(hbDone)
+	go func() {
+		ticker := time.NewTicker(hbInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hbDone:
+				return
+			case <-ticker.C:
+				if herr := h.batchSvc.MarkSummaryHeartbeat(batchID); herr != nil {
+					log.Printf("[orchestrate] summary heartbeat %s: %v", batchID, herr)
+				}
+			}
 		}
-		children = append(children, *st)
+	}()
+
+	// Children of this batch, in dispatch order. Use ListByBatch so manual
+	// rows (batch_id='', batch_seq=0) are NOT pulled in — only the children
+	// this batch actually owns.
+	children, lerr := h.subTaskSvc.ListByBatch(batchID)
+	if lerr != nil {
+		log.Printf("[orchestrate] summary %s list children: %v", batchID, lerr)
+		_ = h.batchSvc.MarkSummary(batchID, model.SummaryError)
+		return
 	}
 	if len(children) == 0 {
+		log.Printf("[orchestrate] summary %s: no children found; mark done", batchID)
+		_ = h.batchSvc.MarkSummary(batchID, model.SummaryDone)
+		_ = h.batchSvc.MarkCompleted(batchID)
 		return
 	}
 
@@ -6967,45 +7298,66 @@ func (h *WizardHandler) runOrchestratorSummary(
 	}
 	summaryB.WriteString("---\n请直接输出汇总报告 Markdown。")
 
+	req, rerr := h.reqSvc.Get(batch.RequirementID)
+	if rerr != nil || req == nil {
+		log.Printf("[orchestrate] summary %s: requirement load: %v", batchID, rerr)
+		_ = h.batchSvc.MarkSummary(batchID, model.SummaryError)
+		return
+	}
+
 	// Resume the orchestrator session — it's the main-agent thread that
 	// already saw the decompose prompt, so re-resuming lets it carry
 	// forward the requirements/design context plus its own decompose
 	// reasoning. ForkSession=false: we want a continuation, not a new
 	// session (the summary is a follow-up message in the same thread).
-	job := h.jobs.Create(reqID)
+	job := h.jobs.Create(batch.RequirementID)
 	job.Append(store.LogLine{Type: "phase", Content: "📊 主 Agent 正在汇总子任务产物..."})
-	job.SetModel(modelName)
+	job.SetModel(batch.Model)
 
 	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         summaryB.String(),
-		WorkDir:        workDir,
+		WorkDir:        batch.WorkDir,
 		SystemPrompt:   "", // resumed session already has developer persona
-		Model:          cliModelArg(modelName),
-		ClaudeConfigID: claudeConfigID,
-		SessionID:      orchestratorSID,
+		Model:          cliModelArg(batch.Model),
+		ClaudeConfigID: batch.ClaudeConfigID,
+		SessionID:      batch.OrchestratorSessionID,
 		Resume:         true,
 		Fork:           false,
 	})
 	defer cancel()
 
-	summaryUsage := h.usageCtxFor("orchestrate_summary", reqID, req.ProjectID, job.ID, modelName, "", "auto-summary")
+	summaryUsage := h.usageCtxFor("orchestrate_summary", batch.RequirementID, req.ProjectID, job.ID, batch.Model, "", "auto-summary")
 	out := runClaudeStream(jobSink{job}, cmd, "orchestrate-summary", summaryUsage)
 
 	if out.errMsg != "" || out.finalResult == "" {
-		log.Printf("[orchestrate] summary turn failed: %s / empty=%v", out.errMsg, out.finalResult == "")
+		log.Printf("[orchestrate] summary %s turn failed: %s / empty=%v", batchID, out.errMsg, out.finalResult == "")
 		job.Finish(1, store.JobError)
+		// Keep batch.status='summarizing' so the next tick re-arms a fresh
+		// summary attempt. summary_status='error' tells the UI to surface
+		// the failure without flipping the whole batch to 'errored'.
+		_ = h.batchSvc.MarkSummary(batchID, model.SummaryError)
 		return
 	}
 
 	// Persist the Markdown summary on the requirement. The SubTaskPanel
 	// reads it on the next GET and renders it above the children.
-	if perr := h.reqSvc.UpdateCodingPlan(reqID, out.finalResult); perr != nil {
-		log.Printf("[orchestrate] failed to persist coding_plan for %s: %v", reqID, perr)
+	if perr := h.reqSvc.UpdateCodingPlan(batch.RequirementID, out.finalResult); perr != nil {
+		log.Printf("[orchestrate] summary %s persist coding_plan: %v", batchID, perr)
 	}
 	job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
 	job.Append(store.LogLine{Type: "done", Content: "✅ 汇总完成！"})
 	job.Finish(0, store.JobDone)
-	log.Printf("[orchestrate] summary saved to requirements.coding_plan for %s", reqID)
+
+	// Terminal: mark summary done + batch completed in order. A failure on
+	// either is logged but does not undo the coding_plan write — the user
+	// still gets the summary even if the bookkeeping lags one tick.
+	if serr := h.batchSvc.MarkSummary(batchID, model.SummaryDone); serr != nil {
+		log.Printf("[orchestrate] summary %s mark done: %v", batchID, serr)
+	}
+	if cerr := h.batchSvc.MarkCompleted(batchID); cerr != nil {
+		log.Printf("[orchestrate] summary %s mark completed: %v", batchID, cerr)
+	}
+	log.Printf("[orchestrate] summary saved to requirements.coding_plan for %s (batch %s)", batch.RequirementID, batchID)
 }
 
 // silentSink is a streamSink that discards log output. AutoOrchestrate runs

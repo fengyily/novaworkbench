@@ -131,6 +131,8 @@ export const requirements = {
     worktreeCleanBusy: '清理中…',
     worktreeConfirm: '将删除该需求的隔离 worktree 目录与开发分支，确认清理？',
     worktreeConfirmForce: 'worktree 存在未提交改动，是否强制清理（将丢失这些改动）？',
+    // Orchestration summary completion toast (server-pushed job_done).
+    summaryDone: '✅ 汇总已生成',
     // Stage schedule badge.
     scheduledHint: '已定时 HH:MM ... [取消]',
     // Coding compress confirmations.

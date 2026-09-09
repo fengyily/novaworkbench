@@ -75,6 +75,22 @@ export const components = {
     errLoad: '加载子任务失败',
     errCreate: '启动子任务失败',
     errReSplit: '重新拆分失败',
+    // Banner status texts (batch state machine — see summaryCta derivation).
+    bannerSummarizing: '📝 主 Agent 正在生成汇总报告…',
+    bannerDispatchingStatus: '🪄 主 Agent 正在派发子任务…',
+    bannerAllDoneManual: '✅ 所有子任务已结束，可手动生成汇总报告。',
+    // Summary CTA cluster (early / manual / progress).
+    summaryCtaEarlyTitle: '跳过未完成的子任务直接生成汇总',
+    summaryCtaEarlyBtn: '📝 提前生成汇总',
+    summaryCtaManualTitle: '对已完成的子任务生成汇总报告',
+    summaryCtaManualBtn: '📝 生成汇总',
+    summaryCtaProgressTitle: '汇总进行中',
+    summaryCtaProgressBtn: '汇总中…',
+    summarySending: '发起中…',
+    summaryConfirmEarly: '将跳过未完成的子任务直接生成汇总，是否继续？',
+    summaryToastOk: '✅ 汇总已发起',
+    summaryToastErrPrefix: '❌',
+    summaryToastErrFallback: '汇总发起失败',
   },
   subTaskCard: {
     statusPending: '排队中',

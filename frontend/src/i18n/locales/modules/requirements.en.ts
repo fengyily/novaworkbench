@@ -129,6 +129,8 @@ export const requirements = {
     worktreeCleanBusy: 'Cleaning…',
     worktreeConfirm: 'Delete this requirement\'s isolated worktree directory and dev branch. Proceed with cleanup?',
     worktreeConfirmForce: 'The worktree has uncommitted changes. Force cleanup (those changes will be lost)?',
+    // Orchestration summary completion toast (server-pushed job_done).
+    summaryDone: '✅ Summary generated',
     scheduledHint: 'Scheduled HH:MM ... [Cancel]',
     codingCompressConfirm: 'Have Claude summarize the current dev session and compress context?\n\nThis clears the current session id; the next dev round will see the compressed summary instead of the full history.',
     codingCompressFailPrefix: 'Compression failed:',

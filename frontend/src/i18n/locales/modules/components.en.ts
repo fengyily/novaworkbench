@@ -71,6 +71,22 @@ export const components = {
     errLoad: 'Failed to load sub-tasks',
     errCreate: 'Failed to start sub-task',
     errReSplit: 'Failed to re-split',
+    // Banner status texts (batch state machine — see summaryCta derivation).
+    bannerSummarizing: '📝 Main agent is generating the summary…',
+    bannerDispatchingStatus: '🪄 Main agent is dispatching sub-tasks…',
+    bannerAllDoneManual: '✅ All sub-tasks finished — you can generate the summary manually.',
+    // Summary CTA cluster (early / manual / progress).
+    summaryCtaEarlyTitle: 'Skip unfinished sub-tasks and generate the summary directly',
+    summaryCtaEarlyBtn: '📝 Generate summary early',
+    summaryCtaManualTitle: 'Generate the summary for the completed sub-tasks',
+    summaryCtaManualBtn: '📝 Generate summary',
+    summaryCtaProgressTitle: 'Summary in progress',
+    summaryCtaProgressBtn: 'Summarizing…',
+    summarySending: 'Submitting…',
+    summaryConfirmEarly: 'Skip unfinished sub-tasks and generate the summary directly. Continue?',
+    summaryToastOk: '✅ Summary submitted',
+    summaryToastErrPrefix: '❌',
+    summaryToastErrFallback: 'Failed to submit summary',
   },
   subTaskCard: {
     statusPending: 'Queued',
