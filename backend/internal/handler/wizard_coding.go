@@ -591,12 +591,87 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// own config lookup (preserves dev-machine behaviour). Mirrors
 	// MergeHandler.gitIdentityForReq via the shared lookupGitIdentity.
 	var codingExtraEnv []string
-	if name, email := lookupGitIdentity(h.projectSvc, h.platformSvc, reqRow); name != "" || email != "" {
+	name, email := lookupGitIdentity(h.projectSvc, h.platformSvc, reqRow)
+	if name != "" || email != "" {
 		if name != "" {
 			codingExtraEnv = append(codingExtraEnv, "GIT_AUTHOR_NAME="+name, "GIT_COMMITTER_NAME="+name)
 		}
 		if email != "" {
 			codingExtraEnv = append(codingExtraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
+		}
+	}
+	// GPG signing: when the project's platform token has GPG enabled and
+	// carries key material, lay down a per-run GNUPGHOME under the OS
+	// temp dir, import the armored key, and write user.name / user.email
+	// / commit.gpgsign / gpg.program into the worktree's per-worktree
+	// git config. Mirrors the remote path in spirit (handler/gpg_remote.go
+	// Step 2.5) but uses the local os.* helpers instead of SSH — see
+	// handler/gpg_local.go for the rationale.
+	//
+	// Failure policy differs from the remote path: the local branch is
+	// interactive dev on the developer's own machine, where silently
+	// dropping the signing requirement is far less costly than refusing
+	// to start. We log a precise warning (via classifyGitSignFailure)
+	// so the user can fix the token in 「设置 → 平台 Token」 and retry,
+	// then proceed without signing. The remote branch aborts because an
+	// unsigned push on a "Require signed commits" branch is strictly
+	// worse than no push at all.
+	//
+	// Skip entirely when:
+	//   - no requirement row (legacy quick-start path, no token to bind to)
+	//   - no platform token attached to the project
+	//   - the project's projectSvc lookup fails (treat as "no identity, no signing")
+	//   - GPGSigningMaterial returns enabled=false or an empty armored key
+	//     (configured-off path; identical to today's behavior)
+	if reqRow != nil {
+		if project, pErr := h.projectSvc.Get(reqRow.ProjectID); pErr == nil && project != nil && project.PlatformTokenID != "" {
+			enabled, _, armored, passphrase, gpgErr := h.platformSvc.GPGSigningMaterial(project.PlatformTokenID)
+			switch {
+			case gpgErr != nil:
+				// Decrypt failure usually means the master key went
+				// missing or was rotated — not something a retry fixes.
+				// Surface a precise warning so the user knows to check
+				// the token's stored private key.
+				job.Append(store.LogLine{Type: "message", Content: "⚠️ 读取 GPG 配置失败：" + gpgErr.Error() + "，本次提交将不签名"})
+			case enabled && armored != "":
+				job.Append(store.LogLine{Type: "phase", Content: "🔐 配置本地 GPG 签名..."})
+				// baseRepo is the project's main checkout — worktrees
+				// (when useWorktree=true) live under worktreeRoot(p.ProjectPath)
+				// but share p.ProjectPath's .git directory via `git
+				// worktree add`. buildGPGProvisionScript needs the main
+				// repo path to enable extensions.worktreeConfig. When
+				// useWorktree=false, workDir == p.ProjectPath and the
+				// script just writes user.name / commit.gpgsign / etc.
+				// to the main checkout's per-worktree config — same
+				// effect, the commits in workDir pick them up.
+				gnupgHome, keyID, cleanup, provErr := provisionLocalGPG(workDir, p.ProjectPath, armored, passphrase, name, email)
+				if provErr != nil {
+					if cleanup != nil {
+						cleanup()
+					}
+					// Local path: warn but DO NOT abort. The user can
+					// fix the GPG config and re-run; in the meantime a
+					// working local coding session is more valuable
+					// than a signed-but-not-runnable one. The remote
+					// branch aborts on the same error.
+					job.Append(store.LogLine{Type: "message", Content: "⚠️ " + provErr.Error() + "，本次提交将不签名"})
+				} else {
+					defer cleanup()
+					job.Append(store.LogLine{Type: "message", Content: "✅ 本地 GPG 已就绪（keyid=" + keyID + "）"})
+					// Back-fill the keyid so the UI shows it on the
+					// next list reload. Ignore errors — the key is
+					// already usable locally; a stale empty keyid is a
+					// UI-only nit (matches the remote branch's policy).
+					_ = h.platformSvc.UpdateGPGKeyID(project.PlatformTokenID, keyID)
+					_ = gnupgHome // path isn't needed after provisioning; cleanup() handles teardown
+				}
+			case enabled:
+				// Enabled but no key material — the user toggled the
+				// checkbox without uploading a private key. Continue
+				// without signing and warn loudly so the resulting
+				// unsigned push (if any) doesn't come as a surprise.
+				job.Append(store.LogLine{Type: "message", Content: "⚠️ 已启用 GPG 签名但未保存私钥，本次提交未签名"})
+			}
 		}
 	}
 	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{

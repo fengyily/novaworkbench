@@ -152,6 +152,72 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 			"", nil, &jobWriter{job: in.job}, nil)
 	}
 
+	// Step 2.5: configure git identity + (optionally) GPG signing in the
+	// remote worktree. This must run BEFORE Step 3 (session sync) and
+	// before any `git commit` — Claude's Bash-tool commits inside Step 5
+	// inherit the worktree-level config and will go through the same
+	// `gpg.program` wrapper as Nova's Step 7 commit. Signing is driven by
+	// repo config (commit.gpgsign=true + user.signingkey + gpg.program)
+	// rather than per-invocation `-S`, because `-S` would only catch
+	// commits we explicitly make — it would not catch Claude's own
+	// commits, which is exactly the failure mode this requirement
+	// addresses.
+	//
+	// Failure policy: GPG enabled + key material present + provision
+	// fails → abort the whole run (return errMsg). Returning an unsigned
+	// commit under "Require signed commits" branch protection would be
+	// strictly worse than failing. GPG disabled → write identity only;
+	// failure there is a warning (we already have the existing
+	// GitHub-side fallback for an unsigned push).
+	gitName, gitEmail := lookupGitIdentity(h.projectSvc, h.platformSvc, in.reqRow)
+	gnupgHome := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".gnupg"
+	if project, pErr := h.projectSvc.Get(in.reqRow.ProjectID); pErr == nil && project != nil && project.PlatformTokenID != "" {
+		enabled, _, armored, passphrase, gpgErr := h.platformSvc.GPGSigningMaterial(project.PlatformTokenID)
+		switch {
+		case gpgErr != nil:
+			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 读取 GPG 配置失败：" + gpgErr.Error() + "，按未启用处理"})
+		case enabled && armored != "":
+			in.job.Append(store.LogLine{Type: "phase", Content: "🔐 在 Agent 服务器上配置 GPG 签名..."})
+			keyID, cleanup, provErr := provisionRemoteGPG(ctx, client, in.job, gnupgHome, wtPath, baseRepo, armored, passphrase, gitName, gitEmail)
+			if provErr != nil {
+				// Best-effort cleanup before we bail.
+				if cleanup != nil {
+					cleanup()
+				}
+				return claudeStreamOutcome{errMsg: provErr.Error()}
+			}
+			defer cleanup()
+			// ctx.Done() fallback cleanup. The run can outlive the
+			// ctx (job goroutine continues after the handler returns)
+			// but cleanup itself is bounded: it issues a single SSH
+			// exec and returns. If the SSH conn is already torn down
+			// by then, cleanup silently fails and logs a warning.
+			go func() {
+				<-ctx.Done()
+				cleanup()
+			}()
+			in.job.Append(store.LogLine{Type: "message", Content: "✅ GPG 已就绪（keyid=" + keyID + "）"})
+			// Back-fill the keyid so the UI shows it on the next list
+			// reload. Ignore errors — the key is already usable on the
+			// remote host; a stale empty keyid is a UI-only nit.
+			_ = h.platformSvc.UpdateGPGKeyID(project.PlatformTokenID, keyID)
+		case enabled:
+			// Enabled but no key material — the user toggled the
+			// checkbox without uploading a private key. Continue
+			// without signing and warn loudly so the resulting
+			// unsigned push (if any) doesn't come as a surprise.
+			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 已启用 GPG 签名但未保存私钥，本次提交未签名"})
+		}
+	}
+	// GPG-disabled case: still bake the committer identity into the
+	// worktree. The remote path used to skip identity injection entirely
+	// (only the local path injected GIT_AUTHOR_*); on hosts without a
+	// global ~/.gitconfig (e.g. minimal Docker) the resulting commits
+	// would have an empty committer and GitHub would reject the push.
+	if idErr := provisionRemoteGitIdentity(ctx, client, in.job, wtPath, baseRepo, gitName, gitEmail); idErr != nil {
+		in.job.Append(store.LogLine{Type: "message", Content: "⚠️ " + idErr.Error()})
+	}
+
 	// Step 3: session sync (up) so the remote claude can --resume the same
 	// session. We push the project-level ~/.claude/projects/<slug>/ contents
 	// (the small set of jsonl files the CLI uses for session state). A missing
@@ -325,8 +391,15 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// Step 7: git commit + push back to origin. Skip when the run errored out
 	// (no real result) so we don't propagate half-broken state. The user can
 	// always retry adjust-coding on the remote worktree via ContinueCoding.
+	//
+	// No `-S` here on purpose: signing is driven by the worktree config set
+	// up in Step 2.5 (commit.gpgsign=true + user.signingkey + gpg.program).
+	// Doing it via config — instead of per-invocation `-S` — also covers
+	// any `git commit` Claude issues from its own Bash tool during Step 5,
+	// which is the exact failure mode this requirement addresses.
 	if out.errMsg == "" && out.finalResult != "" {
 		in.job.Append(store.LogLine{Type: "phase", Content: "📤 推送代码变更到 origin..."})
+		var pushStderr bytes.Buffer
 		title := "nova-agent: " + in.req.RequirementTitle
 		if title == "nova-agent: " {
 			title = "nova-agent: " + in.reqRow.Title
@@ -337,8 +410,20 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 			" && git add -A" +
 			" && git diff --cached --quiet || git commit -m " + shellQuoteSingle(title) +
 			" && git push origin " + shellQuoteSingle(branch)
-		if exit, _ := client.Exec(ctx, commitScript, "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
-			in.job.Append(store.LogLine{Type: "error", Content: "❌ 推送失败（exit=" + fmtInt(exit) + "），请在远程 worktree 手动处理冲突"})
+		if exit, _ := client.Exec(ctx, commitScript, "", nil, &jobWriter{job: in.job}, &pushStderr); exit != 0 {
+			// GPG signing failures show up here with very specific
+			// stderr patterns (wrong passphrase, expired key, GH006,
+			// …) — classify them into a precise Chinese message so
+			// the user knows whether to fix the GPG token, rotate
+			// the key, or re-check the branch protection. Falls
+			// back to the generic wording when stderr is empty or
+			// doesn't match any bucket (e.g. plain merge conflict
+			// on push).
+			msg := classifyGitSignFailure(pushStderr.String())
+			if msg == "" {
+				msg = "❌ 推送失败（exit=" + fmtInt(exit) + "），请在远程 worktree 手动处理冲突"
+			}
+			in.job.Append(store.LogLine{Type: "error", Content: msg})
 			// Non-fatal: the user can still see the work locally via the
 			// pushed-back session dir + the captured result text. Don't
 			// override out.errMsg — let the run's own result stand.

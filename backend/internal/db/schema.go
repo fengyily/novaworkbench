@@ -514,6 +514,19 @@ var alterColumns = []string{
 	// fall back to git's normal config lookup (host ~/.gitconfig etc.).
 	`ALTER TABLE platform_tokens ADD COLUMN git_user_name  TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE platform_tokens ADD COLUMN git_user_email TEXT NOT NULL DEFAULT ''`,
+	// GPG signing material bound to each platform token, so the UID email of
+	// the signing key matches the committer identity on the same row (see
+	// merge.go:lookupGitIdentity). gpg_private_key and gpg_passphrase store
+	// AES-256-GCM ciphertext produced by internal/secret (master key at
+	// ~/.novaworkbench/secret.key, 0600). gpg_key_id is the 16-hex key id
+	// backfilled after the runtime provision step imports the key into a
+	// per-request GNUPGHOME; empty until then. gpg_enabled is the user-
+	// controlled toggle — when 0 the ciphertexts are retained but signing is
+	// skipped, so flipping the switch never silently re-enables an old key.
+	`ALTER TABLE platform_tokens ADD COLUMN gpg_key_id      TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE platform_tokens ADD COLUMN gpg_private_key TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE platform_tokens ADD COLUMN gpg_passphrase  TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE platform_tokens ADD COLUMN gpg_enabled     INTEGER NOT NULL DEFAULT 0`,
 	// Requirement kind: broadens "需求" into three top-level categories — issue
 	// (a defect/bug report), requirement (a planned feature, the legacy default),
 	// idea (an exploratory note). The wizard uses it to inject kind-specific
