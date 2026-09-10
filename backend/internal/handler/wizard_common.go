@@ -239,29 +239,24 @@ func (h *WizardHandler) activeConfigMeta() (id, currency string) {
 	return c.ID, c.Currency
 }
 
-// resolveWorkDir returns the directory the current claude stage should run in:
-// the requirement's isolated git worktree when it exists (or can be created),
-// else the project checkout. Anchoring the WHOLE pipeline (analysis → design →
-// coding) to the same worktree means the forked/resumed conversation never
-// carries absolute paths back to the shared project checkout — without this the
-// coding stage inherits the analyst/architect's original-dir absolute paths and
-// edits the original files instead of the worktree.
-//
-// Non-git projects (and empty paths) return the project checkout with a nil
-// error (legacy in-place behavior). A git repo whose worktree can't be created
-// returns a non-nil error so the caller fails loudly instead of silently coding
-// in-place and poisoning the session chain with original-dir paths.
-func (h *WizardHandler) resolveWorkDir(req *model.Requirement, projectPath, defaultBranch string) (string, error) {
+// resolveWorkDirLogged is the log-echoing variant of resolveWorkDir. See the
+// doc comment on resolveWorkDir for the anchoring rationale — the only
+// difference is that the worktree-creation step funnels its diagnostic lines
+// (e.g. "🔄 已同步 origin/main", "⬆️ 已从 origin/main 更新") through logf when
+// the caller (typically a wizard Job) wants to surface them in the SSE panel.
+// logf may be nil; nil disables log echoing silently so the legacy callers
+// keep working unchanged.
+func (h *WizardHandler) resolveWorkDirLogged(req *model.Requirement, projectPath, defaultBranch string, logf func(string)) (string, error) {
 	if req == nil || projectPath == "" {
 		return projectPath, nil
 	}
 	// Validate the project path exists before any git operations. A missing
 	// directory normally causes gitRun to fail with a generic error that
-	// EnsureWorktree maps to ErrNotAGitRepo, and exec.Cmd.Start() then chdirs
-	// to a non-existent path and fails with an opaque ENOENT. In Docker
+	// EnsureWorktreeLogged maps to ErrNotAGitRepo, and exec.Cmd.Start() then
+	// chdirs to a non-existent path and fails with an opaque ENOENT. In Docker
 	// deployments the workspace bind-mount may be empty after a container
-	// rebuild, so auto-restore from the project's stored remote before
-	// giving up.
+	// rebuild, so auto-restore from the project's stored remote before giving
+	// up.
 	if _, err := os.Stat(projectPath); err != nil {
 		if restoreErr := h.projectSvc.EnsureCloned(req.ProjectID); restoreErr != nil {
 			return "", fmt.Errorf("project directory not found on this host: %s — %w", projectPath, restoreErr)
@@ -280,7 +275,7 @@ func (h *WizardHandler) resolveWorkDir(req *model.Requirement, projectPath, defa
 		defaultBranch = "main"
 	}
 	branch := "feat/" + req.ID
-	wtPath, err := EnsureWorktree(projectPath, req.ID, branch, defaultBranch)
+	wtPath, err := EnsureWorktreeLogged(projectPath, req.ID, branch, defaultBranch, logf)
 	if err != nil {
 		if errors.Is(err, ErrNotAGitRepo) {
 			return projectPath, nil // non-git repo → legacy in-place
@@ -294,6 +289,25 @@ func (h *WizardHandler) resolveWorkDir(req *model.Requirement, projectPath, defa
 		log.Printf("[wizard] persist worktree for %s: %v", req.ID, perr)
 	}
 	return wtPath, nil
+}
+
+// resolveWorkDir returns the directory the current claude stage should run in:
+// the requirement's isolated git worktree when it exists (or can be created),
+// else the project checkout. Anchoring the WHOLE pipeline (analysis → design →
+// coding) to the same worktree means the forked/resumed conversation never
+// carries absolute paths back to the shared project checkout — without this the
+// coding stage inherits the analyst/architect's original-dir absolute paths and
+// edits the original files instead of the worktree.
+//
+// Non-git projects (and empty paths) return the project checkout with a nil
+// error (legacy in-place behavior). A git repo whose worktree can't be created
+// returns a non-nil error so the caller fails loudly instead of silently coding
+// in-place and poisoning the session chain with original-dir paths.
+//
+// This is the log-silent variant; pass resolveWorkDirLogged directly when the
+// caller has a Job and wants the sync lines to surface in the SSE panel.
+func (h *WizardHandler) resolveWorkDir(req *model.Requirement, projectPath, defaultBranch string) (string, error) {
+	return h.resolveWorkDirLogged(req, projectPath, defaultBranch, nil)
 }
 
 // requireAnchoredFork guards against forking a source session that was created

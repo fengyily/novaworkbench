@@ -167,22 +167,38 @@ func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride, cla
 		}
 	}
 
-	// Anchor the architect stage to the isolated worktree (created here if the
-	// analyst stage was skipped) so the plan and its session are rooted in the
-	// worktree — otherwise the coding stage forks this session and follows the
-	// original-dir absolute paths back to the shared checkout.
-	workDir, wdErr := h.resolveWorkDir(req, projectPath, defaultBranch)
-	if wdErr != nil {
-		return nil, nil, fail(500, "WORKTREE_FAILED", "worktree 创建失败："+wdErr.Error())
-	}
-
-	// Create the job, persist its id so a refresh can reconnect, and return
-	// the job id immediately. The plan-mode claude run happens in a goroutine
-	// writing progress into the job store.
+	// Create the job BEFORE resolveWorkDirLogged so the log echo closure can
+	// fan the worktree sync lines ("🔄 已同步 origin/<base>" etc.) into the SSE
+	// panel. We persist design_job_id now and clear it on terminal failure
+	// paths below; any fail(...) above (req not found, no source session,
+	// unanchored fork) returns before reaching here so a "stuck" design_job_id
+	// never leaks across runs.
 	job := h.jobs.Create(id)
 	job.SetType("architect_design")
 	if perr := h.reqSvc.UpdateDesignJob(id, job.ID); perr != nil {
 		log.Printf("[architect-design] failed to persist design_job_id for %s: %v", id, perr)
+	}
+
+	// Anchor the architect stage to the isolated worktree (created here if the
+	// analyst stage was skipped) so the plan and its session are rooted in the
+	// worktree — otherwise the coding stage forks this session and follows the
+	// original-dir absolute paths back to the shared checkout.
+	//
+	// The plan-mode claude run happens in a goroutine writing progress into the
+	// job store (execArchitectDesign). Using resolveWorkDirLogged (instead of
+	// the log-silent resolveWorkDir) means the user sees the worktree sync
+	// lines in the Job panel as soon as the architect stage starts — the
+	// alternative (deferred to coding) would leave them blind during the design
+	// pass.
+	workDir, wdErr := h.resolveWorkDirLogged(req, projectPath, defaultBranch, func(s string) {
+		job.Append(store.LogLine{Type: "message", Content: s})
+	})
+	if wdErr != nil {
+		// Roll back the design_job_id so the next attempt can mint a fresh
+		// job; the user shouldn't see a dead "executing" pointer after the
+		// worktree stage failed.
+		_ = h.reqSvc.UpdateDesignJob(id, "")
+		return nil, nil, fail(500, "WORKTREE_FAILED", "worktree 创建失败："+wdErr.Error())
 	}
 
 	// Plan-mode task prompt. When resuming/forking an existing conversation

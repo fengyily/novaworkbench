@@ -179,19 +179,21 @@ func (h *ProjectHandler) Purge(w http.ResponseWriter, r *http.Request) {
 }
 
 // UpdateBasicInfo edits the user-editable core fields of a project: display
-// name, remote URL, project type, and local filesystem path. All four are
-// optional in the request body — omitted fields are left unchanged, so the
-// caller can send a partial edit without re-uploading the rest. Whitespace
-// is trimmed server-side; an empty name or path is rejected with 400.
+// name, remote URL, project type, local filesystem path, and the project's
+// configured main branch. All five are optional in the request body —
+// omitted fields are left unchanged, so the caller can send a partial edit
+// without re-uploading the rest. Whitespace is trimmed server-side; an
+// empty name or path is rejected with 400.
 //
-// PATCH /api/projects/{id}  body: {name?, remote_url?, project_type?, local_path?}
+// PATCH /api/projects/{id}  body: {name?, remote_url?, project_type?, local_path?, default_branch?}
 func (h *ProjectHandler) UpdateBasicInfo(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req struct {
-		Name        *string `json:"name"`
-		RemoteURL   *string `json:"remote_url"`
-		ProjectType *string `json:"project_type"`
-		LocalPath   *string `json:"local_path"`
+		Name         *string `json:"name"`
+		RemoteURL    *string `json:"remote_url"`
+		ProjectType  *string `json:"project_type"`
+		LocalPath    *string `json:"local_path"`
+		DefaultBranch *string `json:"default_branch"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid JSON body")
@@ -221,8 +223,12 @@ func (h *ProjectHandler) UpdateBasicInfo(w http.ResponseWriter, r *http.Request)
 	if req.LocalPath != nil {
 		localPath = *req.LocalPath
 	}
+	defaultBranch := current.DefaultBranch
+	if req.DefaultBranch != nil {
+		defaultBranch = *req.DefaultBranch
+	}
 
-	if err := h.svc.UpdateBasicInfo(id, name, remoteURL, projectType, localPath); err != nil {
+	if err := h.svc.UpdateBasicInfo(id, name, remoteURL, projectType, localPath, defaultBranch); err != nil {
 		msg := err.Error()
 		switch {
 		case strings.HasPrefix(msg, "PROJECT_NOT_FOUND"):

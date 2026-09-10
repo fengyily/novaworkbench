@@ -9,7 +9,7 @@ import {
   usageApi, usageTotalInput, fmtCost, wizardApi,
   type Project, type RunStatus, type PR, type PRListResponse, type PlatformToken,
   type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage, statusLabelKeys,
-  kindLabelKeys, kindOf,
+  kindLabelKeys, kindOf, API_BASE, authedFetch,
 } from '../api/client';
 import { tLabel } from '../i18n/label';
 import { fmtDate, fmtDateTime } from '../utils/intl';
@@ -89,13 +89,48 @@ export default function ProjectDetail() {
   const [platformSaving, setPlatformSaving] = useState(false);
   const [platformSaved, setPlatformSaved] = useState(false);
 
-  // Overview: basic info (name / remote_url / project_type / local_path)
+  // Overview: basic info (name / remote_url / default_branch / project_type / local_path)
   const [basicEditing, setBasicEditing] = useState(false);
   const [basicDraft, setBasicDraft] = useState({
-    name: '', remote_url: '', project_type: '', local_path: '',
+    name: '', remote_url: '', default_branch: '', project_type: '', local_path: '',
   });
   const [basicSaving, setBasicSaving] = useState(false);
   const [basicMsg, setBasicMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // Branch candidates for the default-branch datalist — populated when the
+  // user enters edit mode and project.local_path points at a git checkout.
+  // Mirrors RequirementDetail.tsx's fetchGitBranches pattern: a best-effort
+  // GET /api/fs/git-branches?path=<local_path> so the user can pick from a
+  // typed list instead of guessing the main branch name.
+  const [availableBranches, setAvailableBranches] = useState<string[]>([]);
+
+  // Fetch the project's branch list whenever the user opens the basic-info
+  // editor and the project has a local path. Errors are swallowed — the
+  // datalist simply stays empty, the user can still type any branch name
+  // manually, and the wizard pipeline falls back to "main" when blank.
+  useEffect(() => {
+    if (!basicEditing) {
+      setAvailableBranches([]);
+      return;
+    }
+    const localPath = project?.local_path;
+    if (!localPath) {
+      setAvailableBranches([]);
+      return;
+    }
+    let cancelled = false;
+    authedFetch(`${API_BASE}/api/fs/git-branches?path=${encodeURIComponent(localPath)}`)
+      .then(r => r.json())
+      .then(json => {
+        if (cancelled) return;
+        if (json?.success && Array.isArray(json.data?.branches)) {
+          setAvailableBranches(json.data.branches);
+        } else {
+          setAvailableBranches([]);
+        }
+      })
+      .catch(() => { if (!cancelled) setAvailableBranches([]); });
+    return () => { cancelled = true; };
+  }, [basicEditing, project?.local_path]);
 
   // Overview: project description (AI-generated, manually editable)
   const [descEditing, setDescEditing] = useState(false);
@@ -372,7 +407,7 @@ export default function ProjectDetail() {
     } catch { /* ignore */ } finally { setPlatformSaving(false); }
   };
 
-  // ── Overview: basic info edit (name / remote_url / project_type / local_path) ─
+  // ── Overview: basic info edit (name / remote_url / default_branch / project_type / local_path) ─
   const handleSaveBasic = async () => {
     if (!id) return;
     setBasicSaving(true);
@@ -381,6 +416,9 @@ export default function ProjectDetail() {
       const updated = await projectsApi.updateBasicInfo(id, {
         name: basicDraft.name.trim() ? basicDraft.name : undefined,
         remote_url: basicDraft.remote_url,
+        // default_branch is sent as-is (including "") so the user can clear
+        // it back to "use the platform default" by deleting the field.
+        default_branch: basicDraft.default_branch,
         project_type: basicDraft.project_type,
         local_path: basicDraft.local_path.trim() ? basicDraft.local_path : undefined,
       });
@@ -671,6 +709,7 @@ export default function ProjectDetail() {
                     setBasicDraft({
                       name: project.name,
                       remote_url: project.remote_url ?? '',
+                      default_branch: project.default_branch ?? '',
                       project_type: project.project_type ?? '',
                       local_path: project.local_path,
                     });
@@ -707,6 +746,27 @@ export default function ProjectDetail() {
                     onChange={e => setBasicDraft(d => ({ ...d, remote_url: e.target.value }))}
                     placeholder={t('projects.detail.basicRemoteUrlPlaceholder')}
                   />
+                </div>
+                <div className="form-group" style={{ margin: 0 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
+                    {t('projects.detail.basicDefaultBranch')}
+                  </label>
+                  {/* datalist + free-text input: lets the user pick from the
+                      project's known branches OR type any other ref. A blank
+                      value means "use the platform default" — the backend
+                      accepts "" and the wizard pipeline falls back to "main". */}
+                  <input
+                    className="form-input"
+                    list="project-default-branch-options"
+                    value={basicDraft.default_branch}
+                    onChange={e => setBasicDraft(d => ({ ...d, default_branch: e.target.value }))}
+                    placeholder={t('projects.detail.basicDefaultBranchPlaceholder')}
+                  />
+                  <datalist id="project-default-branch-options">
+                    {availableBranches.map((b) => (
+                      <option key={b} value={b} />
+                    ))}
+                  </datalist>
                 </div>
                 <div className="form-group" style={{ margin: 0 }}>
                   <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
@@ -767,6 +827,12 @@ export default function ProjectDetail() {
                   <div className="info-row">
                     <span className="info-label">{t('projects.detail.basicInfoRemote')}</span>
                     <code className="info-code">{project.remote_url}</code>
+                  </div>
+                )}
+                {project.default_branch && (
+                  <div className="info-row">
+                    <span className="info-label">{t('projects.detail.basicInfoDefaultBranch')}</span>
+                    <code className="info-code">{project.default_branch}</code>
                   </div>
                 )}
               </>
