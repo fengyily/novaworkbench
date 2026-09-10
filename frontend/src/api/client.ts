@@ -285,7 +285,7 @@ export const scannerApi = {
 // session (coding_session_id). Shown in the developer stage's SubTaskPanel.
 // The status field mirrors JobStore job status (pending/running/done/error);
 // `artifact` holds the final Markdown report and survives JobStore eviction.
-export type SubTaskStatus = 'pending' | 'running' | 'done' | 'error';
+export type SubTaskStatus = 'pending' | 'running' | 'done' | 'error' | 'stopped';
 
 export interface SubTask {
   id: string;
@@ -356,14 +356,34 @@ export const subTasksApi = {
       `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/adjust`,
       data,
     ),
-  // Redo a failed sub-task: re-runs the SAME prompt (the backend reuses the
-  // original prompt) forking the original source session, optionally with a
-  // different model. Returns a new job_id/sub_task_id (the redo itself is a
-  // new sub-task row).
+  // Redo a failed sub-task IN PLACE: re-runs the SAME prompt on the same
+  // sub_tasks row (no new row created), forking the requirement's main
+  // coding_session_id with a brand-new claude session id, optionally with
+  // a different model. reused_session is always true on the redo path
+  // (the row survives; the session does not).
   redo: (requirementId: string, subTaskId: string, data: { model?: string }) =>
-    api.post<{ job_id: string; sub_task_id: string }>(
+    api.post<{ job_id: string; sub_task_id: string; reused_session: boolean }>(
       `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/redo`,
       data,
+    ),
+  // Continue a sub-task IN PLACE on its existing claude session via
+  // --resume (no fork). Reused for both 'error' and 'stopped' rows; the
+  // original artifact is preserved until the new result lands. Returns
+  // reused_session=false (the existing session is reused end-to-end).
+  continue: (requirementId: string, subTaskId: string, data: { model?: string } = {}) =>
+    api.post<{ job_id: string; sub_task_id: string; reused_session: boolean }>(
+      `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/continue`,
+      data,
+    ),
+  // Stop a running sub-task: triggers a SIGTERM (5s → SIGKILL fallback)
+  // on the underlying claude process and flips the row to status='stopped'
+  // with a "⏹ 用户中止" artifact prefix. Returns immediately with
+  // {status: "stopping", ...}; the actual state flip surfaces via the
+  // SSE job_done frame.
+  stop: (requirementId: string, subTaskId: string) =>
+    api.post<{ status: 'stopping'; sub_task_id: string; job_id: string }>(
+      `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/stop`,
+      {},
     ),
   // Auto-orchestrate: ask the developer main agent to decompose + dispatch.
   // Returns the main-agent's reply (sentinel-stripped) + ids of the

@@ -295,6 +295,38 @@
   background: var(--color-hover);
   color: var(--color-text-muted);
 }
+/* Stopped: user-initiated cancellation. Neutral slate (not the error red
+   so it reads as "intentional" rather than "broken"). */
+.sub-card-status-stopped {
+  background: rgba(100, 116, 139, 0.12);
+  color: var(--color-text-secondary, #475569);
+}
+
+/* Stop button — sits in the header-right next to the quickstats block
+   while a sub-task is running. Uses the existing btn-sm sizing so it
+   stays aligned with the toggle chevron. The header itself is a click
+   target that toggles expand/collapse; the button's stopPropagation
+   handler keeps the two click targets from fighting. */
+.sub-card-stop-btn {
+  margin-left: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  background: var(--color-bg, #fff);
+  color: var(--color-text-secondary, #475569);
+  cursor: pointer;
+}
+.sub-card-stop-btn:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: var(--color-error, #ef4444);
+  color: var(--color-error, #ef4444);
+}
+.sub-card-stop-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
 
 /* Source badge: 🪄 Auto (indigo) vs 👤 Manual (emerald).
    Distinguishes auto-orchestrated sub-tasks from manually-created ones.
