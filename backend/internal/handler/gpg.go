@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -171,35 +172,62 @@ func buildGPGWrapperScript(gnupgHome string) string {
 // the KEYID and FALLBACK markers would never match in the remote
 // provision flow — every line would look like
 // `[gpg-provision] NOVA_GPG_KEYID=…` and `strings.HasPrefix` against
-// the bare marker would silently miss. We strip a leading
-// `[<label>]` token defensively (only when it terminates with `]` and
-// the line starts with `[`), so the local path — which doesn't add
-// the label — keeps behaving exactly as before.
+// the bare marker would silently miss.
+//
+// We use two passes per line:
+//
+//  1. Strip a leading `[<label>]` token when present; this normalises
+//     the remote flow into the same shape the local flow already has
+//     (no label).
+//  2. As a belt-and-braces fallback, also try to find `NOVA_GPG_KEYID=`
+//     anywhere in the (un-stripped) line. This protects against edge
+//     cases where the prefix didn't land cleanly (e.g. a stray leading
+//     whitespace, a future pump change, or a non-standard label) and
+//     was the difference between the original "未输出 keyid" false-
+//     positive and a correct parse on the Agent Server path.
 //
 // worktreeFallback=true means at least one `git config --worktree`
 // call failed and the script fell back to `--local`. Concurrent reqs
 // against the same base repo may then interfere; the caller should
 // surface this as a single warning to the user.
 func parseKeyIDFromScriptOutput(out string) (keyID string, worktreeFallback bool) {
+	// Match `NOVA_GPG_KEYID=` followed by 16+ hex chars. The leading
+	// "NOVA_GPG_KEYID=" prefix is unique to our marker (gpg itself
+	// never emits that string), so we don't risk a false positive.
+	// Anchoring on a word boundary keeps us from accidentally
+	// matching a value that happens to contain the substring
+	// "NOVA_GPG_KEYID=" inside a longer identifier.
+	keyIDRe := regexp.MustCompile(`(?:^|\s|[\[\(])NOVA_GPG_KEYID=([0-9A-Fa-f]{16,})`)
 	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
+		stripped := strings.TrimSpace(line)
 		// Strip a leading `[label]` token when present (remote path
-		// only). Use LastIndex to skip past leading whitespace if any
-		// survives the TrimSpace, then sanity-check that what precedes
-		// is `[` so we don't accidentally trim a literal `[…]`
-		// substring inside the script's own output.
-		if i := strings.LastIndexByte(line, ']'); i > 0 && strings.HasPrefix(line, "[") {
-			line = strings.TrimSpace(line[i+1:])
+		// only). The guard refuses to strip on a line that lacks a
+		// closing `]`, so a stray `[` in the script's own output
+		// cannot mask a real marker.
+		strippedForMatch := stripped
+		if i := strings.LastIndexByte(strippedForMatch, ']'); i > 0 && strings.HasPrefix(strippedForMatch, "[") {
+			strippedForMatch = strings.TrimSpace(strippedForMatch[i+1:])
 		}
-		if strings.HasPrefix(line, "NOVA_GPG_KEYID=") {
-			// The script emits `echo "NOVA_GPG_KEYID=$keyid"` —
-			// the shell collapses the spaces around `$keyid` so we
-			// usually see a clean value, but tolerate leading /
-			// trailing whitespace defensively (the SSH writer may
-			// split a chunk mid-token).
-			keyID = strings.TrimSpace(strings.TrimPrefix(line, "NOVA_GPG_KEYID="))
+		// Pass 1: exact prefix match on the (possibly stripped) line —
+		// the happy path for both local (no prefix) and remote (label
+		// stripped).
+		if strings.HasPrefix(strippedForMatch, "NOVA_GPG_KEYID=") {
+			keyID = strings.TrimSpace(strings.TrimPrefix(strippedForMatch, "NOVA_GPG_KEYID="))
+			continue
 		}
-		if line == "NOVA_GPG_WORKTREE_FALLBACK=1" {
+		// Pass 2: regex fallback so a stray prefix / mid-line marker
+		// still resolves. We search the ORIGINAL line (not the
+		// stripped one) because some hosts prefix with extra noise
+		// before the [label] token.
+		if m := keyIDRe.FindStringSubmatch(line); len(m) == 2 {
+			keyID = m[1]
+			continue
+		}
+		// Fallback marker is a single literal line. After stripping
+		// `[label]` (if present), equality match is enough; we don't
+		// need a regex because the marker has a unique suffix
+		// (`=1`) that nothing else in the script outputs.
+		if strippedForMatch == "NOVA_GPG_WORKTREE_FALLBACK=1" {
 			worktreeFallback = true
 		}
 	}

@@ -276,6 +276,46 @@ func TestParseKeyIDFromScriptOutput(t *testing.T) {
 			wantKey: "DEADBEEFCAFEBABE",
 			wantFall: true,
 		},
+		{
+			// Belt-and-braces: even if [label] stripping were ever
+			// to miss (e.g. the line starts with whitespace or the
+			// label format changes upstream), the regex fallback
+			// still picks up the keyid from inside the line.
+			name:    "remote path: regex fallback, marker mid-line",
+			in:      "prefix noise NOVA_GPG_KEYID=0123ABCD4567EF89 suffix\n",
+			wantKey: "0123ABCD4567EF89",
+			wantFall: false,
+		},
+		{
+			// V5 keyids are 40 hex chars; the regex requires 16+.
+			name:    "remote path: regex fallback, v5 40-char keyid",
+			in:      "[gpg-provision] NOVA_GPG_KEYID=ABCDEF0123456789ABCDEF0123456789ABCDEF01\n",
+			wantKey: "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+			wantFall: false,
+		},
+		{
+			// Regex must NOT match an unrelated substring that just
+			// happens to contain "NOVA_GPG_KEYID=". Without a word
+			// boundary the prefix would greedily match
+			// "FOO_NOVA_GPG_KEYID=..." which is not our marker.
+			// The regex anchors on a non-identifier char before
+			// the marker, so this stays a no-op.
+			name:    "remote path: regex does NOT false-positive on identifier substring",
+			in:      "prefix: SOME_NOVA_GPG_KEYID=DEADBEEFCAFEBABE extra\n",
+			wantKey: "",
+			wantFall: false,
+		},
+		{
+			// Two distinct [label] lines on the same output where
+			// the marker line follows extra noise.
+			name:    "remote path: marker after multi-line noise",
+			in: "[gpg-provision] gpg: keybox created\n" +
+				"[gpg-provision] gpg: ABCDEF...: public key imported\n" +
+				"[gpg-provision] gpg: ABCDEF...: secret key imported\n" +
+				"[gpg-provision] NOVA_GPG_KEYID=ABCDEF0123456789\n",
+			wantKey: "ABCDEF0123456789",
+			wantFall: false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
