@@ -1039,10 +1039,17 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     loadList();
   }, [loadList]);
 
-  // Startup poll: tryAutoOrchestrate runs in a goroutine after job_done, so
-  // the panel may mount before sub-tasks are written. Poll every 2s for up to
-  // 60s when the list is still empty, then give up.
-  const startupDeadlineRef = useRef<number>(Date.now() + 60_000);
+  // Auto-split latency: main agent (30-120s) + tryAutoOrchestrate parse+commit
+  // (5-60s when the LLM extractor fallback channel fires) can legitimately
+  // run past the original 60s mount-time deadline. Once the deadline expires
+  // the startup-poll effect short-circuits and the user has to refresh to
+  // see the new sub_tasks (the regular 5s poll only kicks in once any
+  // child is already running/pending — a chicken-and-egg). 5 minutes
+  // covers the realistic worst case (180s + margin). SubTaskPanel only
+  // mounts in developing/done states and the startup poll only fires
+  // while items.length === 0, so the cost of a longer window is at most
+  // ~150 extra 5ms GETs per requirement.
+  const startupDeadlineRef = useRef<number>(Date.now() + 5 * 60_000);
   useEffect(() => {
     if (items === null) return; // not yet loaded
     if (items.length > 0) return; // already have data, nothing to do
