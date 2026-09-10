@@ -251,7 +251,9 @@ export const scannerApi = {
 // session (coding_session_id). Shown in the developer stage's SubTaskPanel.
 // The status field mirrors JobStore job status (pending/running/done/error);
 // `artifact` holds the final Markdown report and survives JobStore eviction.
-export type SubTaskStatus = 'pending' | 'running' | 'done' | 'error';
+// 'scheduled' is a 定时任务 waiting for its scheduled_at instant; the backend
+// scheduler transitions it scheduled → pending → running → done|error.
+export type SubTaskStatus = 'scheduled' | 'pending' | 'running' | 'done' | 'error';
 
 export interface SubTask {
   id: string;
@@ -279,6 +281,9 @@ export interface SubTask {
   // Wall-clock duration from MarkRunning → Finish. Zero while running;
   // the SubTaskCard renders a live ticker (every second) until then.
   duration_seconds: number;
+  // RFC3339 due time for a 定时任务; only set while status === 'scheduled'
+  // (and preserved after it fires for display). Absent on run-now sub-tasks.
+  scheduled_at?: string;
   created_at: string;
   updated_at: string;
   completed_at?: string;
@@ -286,9 +291,18 @@ export interface SubTask {
 
 export const subTasksApi = {
   // Start a child agent. Returns the JobStore job_id (for SSE stream) and
-  // the sub_task_id (for refetch / list updates).
-  create: (requirementId: string, data: { prompt: string; title?: string; model?: string }) =>
-    api.post<{ job_id: string; sub_task_id: string }>(`/api/requirements/${requirementId}/sub-tasks`, data),
+  // the sub_task_id (for refetch / list updates). When `scheduledAt` (RFC3339)
+  // is set to a future time the task is queued instead: the response carries
+  // { sub_task_id, status: 'scheduled', scheduled_at } and no job_id, since the
+  // backend scheduler creates the job when the time arrives.
+  create: (
+    requirementId: string,
+    data: { prompt: string; title?: string; model?: string; scheduled_at?: string },
+  ) =>
+    api.post<{ job_id?: string; sub_task_id: string; status?: string; scheduled_at?: string }>(
+      `/api/requirements/${requirementId}/sub-tasks`,
+      data,
+    ),
   // List all sub-tasks for a requirement (oldest first).
   list: (requirementId: string) =>
     api.get<SubTask[]>(`/api/requirements/${requirementId}/sub-tasks`),

@@ -2292,8 +2292,8 @@ type claudeStreamOutcome struct {
 	sessionID       string // session_id of this run, read from the system/init event. For a --fork-session run this is the NEW forked id.
 	staleSession    bool
 	errMsg          string
-	hadStreamEvents bool     // true if any stream_event/content_block_delta arrived
-	planContent     string   // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
+	hadStreamEvents bool   // true if any stream_event/content_block_delta arrived
+	planContent     string // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
 	// subTasksJSON is the authoritative sub-task decomposition payload,
 	// captured from a Write tool_use whose target path ends with
 	// /.novaworkbench/subtasks.json. Unlike the free-text JSON block +
@@ -2302,8 +2302,8 @@ type claudeStreamOutcome struct {
 	// markdown mangling (req_9d24ef181a5ad5c4). tryAutoOrchestrate prefers
 	// this over every text-parsing fallback.
 	subTasksJSON string
-	actualModel     string   // model id returned by the API, captured from the assistant event's message.model
-	toolFiles       []string // file paths / patterns touched by Read/Write/Edit/Grep/Glob tool calls (for knowledge-usage evaluation)
+	actualModel  string   // model id returned by the API, captured from the assistant event's message.model
+	toolFiles    []string // file paths / patterns touched by Read/Write/Edit/Grep/Glob tool calls (for knowledge-usage evaluation)
 	// lastUsage captures the four token counts from the terminal result event
 	// (or zero values when the stream ended before reaching a result). The
 	// compress-context handler reads this to populate the `done` payload's
@@ -3616,11 +3616,12 @@ type compressContextDone struct {
 // in this stage starts fresh and sees the summary as a prompt prefix.
 //
 // Stream protocol (SSE under text/event-stream):
-//   phase       — human-readable status line
-//   message     — Claude's summary text as it streams in
-//   usage       — mirror of the result.usage block (powers the live usage bar)
-//   error       — terminal failure (no DB write happens)
-//   done        — terminal success; carries {step, summary, tokens_used, model}
+//
+//	phase       — human-readable status line
+//	message     — Claude's summary text as it streams in
+//	usage       — mirror of the result.usage block (powers the live usage bar)
+//	error       — terminal failure (no DB write happens)
+//	done        — terminal success; carries {step, summary, tokens_used, model}
 //
 // Failure policy: on any error path (stream failure, stale session, missing
 // [COMPRESS_COMPLETE] marker) we emit `error` + `done{success:false}` and
@@ -4098,6 +4099,11 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		Prompt string `json:"prompt"`
 		Title  string `json:"title"`
 		Model  string `json:"model"`
+		// ScheduledAt, when non-empty, turns this into a 定时任务: an RFC3339
+		// timestamp at which the sub-task should run exactly once. A past /
+		// near-now value falls through to immediate execution (the same as
+		// omitting it) so there is no "scheduled but never fires" trap.
+		ScheduledAt string `json:"scheduled_at"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
@@ -4106,6 +4112,15 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(body.Prompt) == "" {
 		writeError(w, http.StatusBadRequest, "INVALID", "prompt 不能为空")
 		return
+	}
+	var scheduledAt time.Time
+	if s := strings.TrimSpace(body.ScheduledAt); s != "" {
+		t, perr := time.Parse(time.RFC3339, s)
+		if perr != nil {
+			writeError(w, http.StatusBadRequest, "INVALID", "scheduled_at 格式无效，需 RFC3339（如 2026-09-10T15:04:05+08:00）")
+			return
+		}
+		scheduledAt = t
 	}
 	id := r.PathValue("id")
 	req, err := h.reqSvc.Get(id)
@@ -4120,25 +4135,115 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 定时任务 path: persist a scheduled row and return immediately. The
+	// background scheduler (StartScheduler) claims and dispatches it once its
+	// time arrives — surviving restarts because the row is durable. Guard with
+	// a small skew so a "now-ish" time still runs promptly instead of waiting a
+	// full scheduler tick.
+	if !scheduledAt.IsZero() && scheduledAt.After(time.Now().Add(2*time.Second)) {
+		st, cerr := h.subTaskSvc.CreateScheduled(id, strings.TrimSpace(body.Title), body.Prompt, body.Model, scheduledAt)
+		if cerr != nil {
+			writeError(w, http.StatusInternalServerError, "DB_ERROR", cerr.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"sub_task_id":  st.ID,
+			"status":       st.Status,
+			"scheduled_at": scheduledAt.Format(time.RFC3339),
+		})
+		return
+	}
+
 	st, err := h.subTaskSvc.Create(id, strings.TrimSpace(body.Title), body.Prompt)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
 	}
-	newSID := util.NewUUID()
-	if perr := h.subTaskSvc.UpdateSession(st.ID, newSID, sourceSID); perr != nil {
-		log.Printf("[sub-task] failed to persist session for %s: %v", st.ID, perr)
-	}
-	job := h.jobs.Create(id)
-	if perr := h.subTaskSvc.UpdateJobID(st.ID, job.ID); perr != nil {
-		log.Printf("[sub-task] failed to persist job_id for %s: %v", st.ID, perr)
-	}
+	job := h.dispatchSubTask(req, st, sourceSID, body.Model)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"job_id":      job.ID,
 		"sub_task_id": st.ID,
 	})
+}
 
-	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, false)
+// dispatchSubTask performs the shared "actually spawn the child agent now"
+// steps: pre-mint a fresh session id, create the in-memory JobStore job,
+// persist both on the row, and kick off runSubTask in a goroutine. Shared by
+// the immediate StartSubTask path and the scheduler's due-task dispatch so both
+// go through identical session/job bookkeeping. Returns the created job so the
+// HTTP caller can hand its id back for the SSE stream.
+func (h *WizardHandler) dispatchSubTask(req *model.Requirement, st *model.SubTask, sourceSID, modelOverride string) *store.Job {
+	newSID := util.NewUUID()
+	if perr := h.subTaskSvc.UpdateSession(st.ID, newSID, sourceSID); perr != nil {
+		log.Printf("[sub-task] failed to persist session for %s: %v", st.ID, perr)
+	}
+	job := h.jobs.Create(st.RequirementID)
+	if perr := h.subTaskSvc.UpdateJobID(st.ID, job.ID); perr != nil {
+		log.Printf("[sub-task] failed to persist job_id for %s: %v", st.ID, perr)
+	}
+	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, modelOverride, false)
+	return job
+}
+
+// StartScheduler runs the 定时任务 dispatcher loop until ctx is cancelled. It
+// does one immediate catch-up pass (for tasks whose time elapsed while the
+// server was down) then polls every 15s. The polling model — not per-task
+// timers — is deliberate: it is the piece that makes scheduling restart-safe,
+// because the durable sub_tasks table is the only source of truth and every
+// boot re-scans it. Safe to call once from main; no-op when the sub-task
+// service was never wired.
+func (h *WizardHandler) StartScheduler(ctx context.Context) {
+	if h.subTaskSvc == nil {
+		return
+	}
+	h.dispatchDueSubTasks()
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			h.dispatchDueSubTasks()
+		}
+	}
+}
+
+// dispatchDueSubTasks claims and fires every scheduled sub-task whose time has
+// come. ClaimScheduled's conditional UPDATE guarantees each row runs at most
+// once even if a slow dispatch overlaps the next tick. A task whose
+// requirement or main session has since disappeared is marked error rather
+// than retried forever.
+func (h *WizardHandler) dispatchDueSubTasks() {
+	due, err := h.subTaskSvc.DueScheduled(time.Now())
+	if err != nil {
+		log.Printf("[scheduler] query due sub-tasks: %v", err)
+		return
+	}
+	for i := range due {
+		st := due[i]
+		claimed, cerr := h.subTaskSvc.ClaimScheduled(st.ID)
+		if cerr != nil {
+			log.Printf("[scheduler] claim %s: %v", st.ID, cerr)
+			continue
+		}
+		if !claimed {
+			continue // another tick / process already took it
+		}
+		req, rerr := h.reqSvc.Get(st.RequirementID)
+		if rerr != nil {
+			h.subTaskSvc.Finish(st.ID, model.SubTaskStatusError, "❌ 定时任务触发失败：所属需求不存在", st.Model, model.SubTaskTokens{}, 0, time.Time{})
+			continue
+		}
+		sourceSID := subTaskSourceSID(req, "")
+		if sourceSID == "" {
+			h.subTaskSvc.Finish(st.ID, model.SubTaskStatusError, "❌ 定时任务触发失败：主会话（coding/design session）不存在，请重新发起 coding 后再排期", st.Model, model.SubTaskTokens{}, 0, time.Time{})
+			continue
+		}
+		stCopy := st
+		log.Printf("[scheduler] 定时任务 %s 到点触发（原定 %v）", st.ID, st.ScheduledAt)
+		h.dispatchSubTask(req, &stCopy, sourceSID, st.Model)
+	}
 }
 
 // ReOrchestrate handles POST /api/requirements/{id}/re-orchestrate — the
@@ -4705,14 +4810,14 @@ func decodeSubtasksPayload(raw string) *orchestratorPayload {
 // gracefully instead of leaving the user staring at a "未派发" panel.
 //
 // Heuristic (matches what the developer role prompt asks the agent to write):
-//   1. Locate the "## 任务分解" / "## 子任务" / "## 子任务清单" / "## 任务清单"
-//      heading (case-insensitive, trimmed).
-//   2. From the heading line onward, grab consecutive list items:
-//      - "- " or "* " or numbered "1. " markdown items
-//      - "**N. 标题**：提示词" — the agent's compressed form, separated by "：" / ":"
-//      - "| 列 | 列 |" table rows starting from the 2nd data row
-//   3. Skip blank lines; require at least 2 items to consider it a real plan
-//      (one-liner instructions are usually prose, not a decomposition).
+//  1. Locate the "## 任务分解" / "## 子任务" / "## 子任务清单" / "## 任务清单"
+//     heading (case-insensitive, trimmed).
+//  2. From the heading line onward, grab consecutive list items:
+//     - "- " or "* " or numbered "1. " markdown items
+//     - "**N. 标题**：提示词" — the agent's compressed form, separated by "：" / ":"
+//     - "| 列 | 列 |" table rows starting from the 2nd data row
+//  3. Skip blank lines; require at least 2 items to consider it a real plan
+//     (one-liner instructions are usually prose, not a decomposition).
 //
 // Returns nil when nothing usable is found; caller logs + skips dispatch.
 func extractSubtasksFromMarkdown(text string) *orchestratorPayload {

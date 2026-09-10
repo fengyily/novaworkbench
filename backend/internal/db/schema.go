@@ -324,12 +324,16 @@ CREATE TABLE IF NOT EXISTS sub_tasks (
 	cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
 	cost_cents         INTEGER NOT NULL DEFAULT 0,
 	duration_seconds   INTEGER NOT NULL DEFAULT 0,
+	scheduled_at       DATETIME,
 	created_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
 	completed_at       DATETIME,
 	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_sub_tasks_req ON sub_tasks(requirement_id);
+-- Scheduler lookup: the background timed-task poller scans for due rows by
+-- (status, scheduled_at); the partial-ish composite keeps that scan cheap.
+CREATE INDEX IF NOT EXISTS idx_sub_tasks_scheduled ON sub_tasks(status, scheduled_at);
 `
 
 // alterColumns adds columns to older databases. ALTER TABLE fails when the
@@ -449,6 +453,10 @@ var alterColumns = []string{
 	`ALTER TABLE sub_tasks ADD COLUMN cache_read_tokens     INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE sub_tasks ADD COLUMN cost_cents            INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE sub_tasks ADD COLUMN duration_seconds      INTEGER NOT NULL DEFAULT 0`,
+	// 定时任务 (scheduled sub-task): the due instant for a task that must run
+	// once at a set future time and survive a restart. NULL on every existing
+	// row (they run immediately), so the additive migration needs no backfill.
+	`ALTER TABLE sub_tasks ADD COLUMN scheduled_at DATETIME`,
 }
 
 var (

@@ -32,6 +32,7 @@ interface Props {
 // use 中文 labels). The glyph gives a glanceable cue; the chip class
 // drives the platform-color treatment.
 const statusMeta: Record<SubTaskStatus, { label: string; chipClass: string }> = {
+  scheduled: { label: '定时中', chipClass: 'sub-card-status-chip sub-card-status-pending' },
   pending: { label: '排队中', chipClass: 'sub-card-status-chip sub-card-status-pending' },
   running: { label: '运行中', chipClass: 'sub-card-status-chip sub-card-status-running' },
   done:    { label: '已完成', chipClass: 'sub-card-status-chip sub-card-status-done' },
@@ -325,9 +326,13 @@ function SubTaskCard({ st, index, total, onChanged }: CardProps) {
           {st.model && st.model !== '默认模型' && (
             <span className="sub-card-model">{st.model}</span>
           )}
-          {st.created_at && (
+          {st.status === 'scheduled' && st.scheduled_at ? (
+            <span className="sub-card-time" title="定时执行时间">
+              ⏰ {new Date(st.scheduled_at).toLocaleString()}
+            </span>
+          ) : st.created_at ? (
             <span className="sub-card-time">{timeAgo(st.created_at)}</span>
-          )}
+          ) : null}
           {/* Header-right quick-glance summary: token / cost / duration.
               TokenStrip (in the body) carries the same data + cache details
               when the card is expanded; the header badge is the always-
@@ -430,6 +435,9 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   const [items, setItems] = useState<SubTask[] | null>(null);
   const [prompt, setPrompt] = useState('');
   const [title, setTitle] = useState('');
+  // 定时任务: a <input type="datetime-local"> value (local time, no tz). Empty
+  // means "run immediately"; a future value queues the task server-side.
+  const [scheduleAt, setScheduleAt] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Track an auto-orchestrate batch (the new "一键编排 = 主 Agent 自动派发"
@@ -495,7 +503,9 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // and the eventual artifact write without having to thread job_done
   // from each card up to the panel root.
   useEffect(() => {
-    if (!items || !items.some((s) => s.status === 'running' || s.status === 'pending')) return;
+    if (!items || !items.some((s) => s.status === 'running' || s.status === 'pending' || s.status === 'scheduled')) return;
+    // Poll faster than the scheduler tick (15s) so a fired 定时任务 flips to
+    // running in the UI shortly after it dispatches.
     const t = setInterval(loadList, 5000);
     return () => clearInterval(t);
   }, [items, loadList]);
@@ -518,19 +528,42 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   const onCreate = useCallback(async () => {
     const p = prompt.trim();
     if (!p || submitting) return;
+    // Resolve the optional schedule time. datetime-local yields a tz-less
+    // "YYYY-MM-DDTHH:mm" in the user's local zone; new Date() parses it as
+    // local, and toISOString() converts to the RFC3339 (UTC) the backend
+    // parses. Reject a past time up front so the user gets immediate feedback
+    // instead of a silently-immediate run.
+    let scheduledIso: string | undefined;
+    if (scheduleAt) {
+      const when = new Date(scheduleAt);
+      if (Number.isNaN(when.getTime())) {
+        setError('定时时间格式无效');
+        return;
+      }
+      if (when.getTime() <= Date.now()) {
+        setError('定时时间必须晚于当前时间');
+        return;
+      }
+      scheduledIso = when.toISOString();
+    }
     setSubmitting(true);
     setError(null);
     try {
-      await subTasksApi.create(requirementId, { prompt: p, title: title.trim() || undefined });
+      await subTasksApi.create(requirementId, {
+        prompt: p,
+        title: title.trim() || undefined,
+        scheduled_at: scheduledIso,
+      });
       setPrompt('');
       setTitle('');
+      setScheduleAt('');
       await loadList();
     } catch (e: any) {
       setError(e?.message || '启动子任务失败');
     } finally {
       setSubmitting(false);
     }
-  }, [prompt, title, submitting, requirementId, loadList]);
+  }, [prompt, title, scheduleAt, submitting, requirementId, loadList]);
 
   // --- Manual re-split (🔄 重新拆分) -------------------------------------
   // Escape hatch for when StartCoding's auto-orchestration produced no
@@ -690,9 +723,21 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           disabled={submitting}
           className="sub-composer-textarea"
         />
+        <label className="sub-composer-title-row">
+          <span className="sub-composer-label">定时执行（可选）</span>
+          <input
+            type="datetime-local"
+            className="sub-composer-input"
+            value={scheduleAt}
+            onChange={(e) => setScheduleAt(e.target.value)}
+            disabled={submitting}
+          />
+        </label>
         <div className="sub-composer-toolbar">
           <span className="sub-composer-hint">
-            启动后子 Agent 将 fork 主会话上下文，所有子任务共享同一项目认知
+            {scheduleAt
+              ? '到点后自动执行一次，仅执行一次，重启不影响'
+              : '启动后子 Agent 将 fork 主会话上下文，所有子任务共享同一项目认知'}
           </span>
           {error && <span className="sub-composer-err">{error}</span>}
           <button
@@ -710,7 +755,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             onClick={onCreate}
             disabled={submitting || reSplitBusy || !prompt.trim()}
           >
-            {submitting ? '启动中…' : '🚀 启动子任务'}
+            {submitting ? '提交中…' : scheduleAt ? '⏰ 定时执行' : '🚀 启动子任务'}
           </button>
         </div>
       </div>

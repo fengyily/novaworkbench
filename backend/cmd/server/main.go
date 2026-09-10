@@ -156,6 +156,9 @@ func main() {
 	preflightH := handler.NewPreflightHandler(pfRegistry, sharedJobs)
 	reqH := handler.NewRequirementHandler(reqSvc, llmGateway, sharedJobs, usageSvc)
 	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, subTaskSvc)
+	// 定时任务调度器：轮询 sub_tasks 表中到点的 scheduled 行并派发。存放在持久化的
+	// 表里，所以重启后仍会按原定时间执行、且只执行一次（见 SubTaskService.ClaimScheduled）。
+	go wizardH.StartScheduler(context.Background())
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs)

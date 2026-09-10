@@ -74,6 +74,98 @@ func (s *SubTaskService) Create(reqID, title, prompt string) (*model.SubTask, er
 	}, nil
 }
 
+// CreateScheduled inserts a "定时任务" — a sub-task that must run once at a set
+// future time (scheduledAt) and survive a server restart. Unlike Create it
+// starts in the "scheduled" state and stores scheduled_at + the requested
+// model (so the background scheduler can dispatch it with the same model the
+// user picked at schedule time). The row is the durable record: the in-memory
+// job is only created when the scheduler claims it at due time, so nothing is
+// lost across a restart — the poller re-scans the table on boot.
+//
+// modelOverride is stored in the model column now (Finish later overwrites it
+// with the effective model); "" means "use the developer role default", the
+// same convention runSubTask already follows.
+func (s *SubTaskService) CreateScheduled(reqID, title, prompt, modelOverride string, scheduledAt time.Time) (*model.SubTask, error) {
+	if reqID == "" {
+		return nil, errors.New("requirement_id is required")
+	}
+	if prompt == "" {
+		return nil, errors.New("prompt is required")
+	}
+	if scheduledAt.IsZero() {
+		return nil, errors.New("scheduled_at is required")
+	}
+	if title == "" {
+		title = truncateForTitle(prompt, 40)
+	} else if len(title) > 80 {
+		title = title[:80]
+	}
+	id := util.NewID("st")
+	now := time.Now()
+	_, err := s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status, model, scheduled_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, reqID, title, prompt, model.SubTaskStatusScheduled, modelOverride, scheduledAt, now, now)
+	if err != nil {
+		return nil, fmt.Errorf("insert scheduled sub_task: %w", err)
+	}
+	sched := scheduledAt
+	return &model.SubTask{
+		ID:            id,
+		RequirementID: reqID,
+		Title:         title,
+		Prompt:        prompt,
+		Status:        model.SubTaskStatusScheduled,
+		Model:         modelOverride,
+		ScheduledAt:   &sched,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}, nil
+}
+
+// DueScheduled returns every scheduled sub-task whose due time has arrived
+// (scheduled_at <= now), oldest-due first. The background scheduler calls this
+// each tick, then ClaimScheduled on each candidate to take ownership. Because
+// the state lives in the durable table, a restart mid-wait simply resumes:
+// the next tick re-selects the same still-due rows.
+func (s *SubTaskService) DueScheduled(now time.Time) ([]model.SubTask, error) {
+	rows, err := s.db.Query(`SELECT id, requirement_id, title, prompt, status,
+		session_id, source_session_id, job_id, artifact, model,
+		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+		cost_cents, duration_seconds, scheduled_at,
+		created_at, updated_at, completed_at
+		FROM sub_tasks
+		WHERE status = ? AND scheduled_at IS NOT NULL AND scheduled_at <= ?
+		ORDER BY scheduled_at ASC, id ASC`, model.SubTaskStatusScheduled, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.SubTask{}
+	for rows.Next() {
+		st, err := scanSubTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *st)
+	}
+	return out, rows.Err()
+}
+
+// ClaimScheduled atomically transitions a scheduled row to pending, returning
+// true only for the caller that actually won the row. The conditional UPDATE
+// (WHERE status='scheduled') is the single-execution guarantee: overlapping
+// scheduler ticks — or two processes — can both see the row in DueScheduled,
+// but exactly one UPDATE affects a row, so the task runs once and never again.
+func (s *SubTaskService) ClaimScheduled(id string) (bool, error) {
+	res, err := s.db.Exec(`UPDATE sub_tasks SET status=?, updated_at=? WHERE id=? AND status=?`,
+		model.SubTaskStatusPending, time.Now(), id, model.SubTaskStatusScheduled)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
 // List returns every sub-task attached to reqID, oldest first (matching the
 // order the wizard fires them and the order the UI renders the cards).
 // Returns an empty slice when the requirement has none — never nil, so the
@@ -82,7 +174,7 @@ func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 	rows, err := s.db.Query(`SELECT id, requirement_id, title, prompt, status,
 		session_id, source_session_id, job_id, artifact, model,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-		cost_cents, duration_seconds,
+		cost_cents, duration_seconds, scheduled_at,
 		created_at, updated_at, completed_at
 		FROM sub_tasks WHERE requirement_id = ? ORDER BY created_at ASC, id ASC`, reqID)
 	if err != nil {
@@ -108,7 +200,7 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 	rows, err := s.db.Query(`SELECT id, requirement_id, title, prompt, status,
 		session_id, source_session_id, job_id, artifact, model,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-		cost_cents, duration_seconds,
+		cost_cents, duration_seconds, scheduled_at,
 		created_at, updated_at, completed_at
 		FROM sub_tasks WHERE id = ?`, id)
 	if err != nil {
@@ -262,14 +354,19 @@ func (s *SubTaskService) RecoverInterrupted() (int64, error) {
 func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 	var st model.SubTask
 	var completedAt sql.NullTime
+	var scheduledAt sql.NullTime
 	if err := rows.Scan(
 		&st.ID, &st.RequirementID, &st.Title, &st.Prompt, &st.Status,
 		&st.SessionID, &st.SourceSessionID, &st.JobID, &st.Artifact, &st.Model,
 		&st.InputTokens, &st.OutputTokens, &st.CacheCreationTokens, &st.CacheReadTokens,
-		&st.CostCents, &st.DurationSeconds,
+		&st.CostCents, &st.DurationSeconds, &scheduledAt,
 		&st.CreatedAt, &st.UpdatedAt, &completedAt,
 	); err != nil {
 		return nil, err
+	}
+	if scheduledAt.Valid {
+		t := scheduledAt.Time
+		st.ScheduledAt = &t
 	}
 	if completedAt.Valid {
 		t := completedAt.Time
