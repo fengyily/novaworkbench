@@ -113,9 +113,19 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	if branch == "" {
 		branch = "requirement-" + in.reqRow.ID
 	}
+	// baseBranch fallback chain: UI-provided BaseBranch > project.DefaultBranch
+	// > literal "main". Mirrors the local execStartCoding chain so the remote
+	// worktree is rooted at the same base the local wizard uses — a divergence
+	// here would mean adjust-coding landed on a different line of history than
+	// what continue-coding (or merge) sees.
 	baseBranch := in.req.BaseBranch
 	if baseBranch == "" {
-		baseBranch = "main"
+		if proj, perr := h.projectSvc.Get(in.reqRow.ProjectID); perr == nil && proj != nil && proj.DefaultBranch != "" {
+			baseBranch = proj.DefaultBranch
+		}
+		if baseBranch == "" {
+			baseBranch = "main"
+		}
 	}
 
 	in.job.Append(store.LogLine{Type: "phase", Content: "📥 准备 Agent 服务器代码（git worktree 隔离）..."})
@@ -127,16 +137,30 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	} else {
 		client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin --prune", "", nil, &jobWriter{job: in.job}, nil)
 	}
+	// Always (re)fetch the project's main branch into origin/<baseBranch> so
+	// the worktree strategies below branch off the latest upstream — without
+	// this line the first-ever clone would skip the `git fetch origin --prune`
+	// branch and leave origin/<baseBranch> stale, defeating the "based on the
+	// freshest main" intent. Best-effort by design: any failure is logged but
+	// does not abort the run (the worktree fallback strategies cover a missing
+	// origin/<baseBranch>).
+	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin "+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
 	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree prune", "", nil, &jobWriter{job: in.job}, nil)
 
 	if !client.Exists(wtPath) {
-		// Strategy 1: branch off HEAD (always valid; matches EnsureWorktree).
-		// Strategy 2: off origin/<base> when strategy 1 fails. Strategy 3:
-		// attach to an already-existing branch (adjust/continue reuse case).
-		exit, _ := client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath), "", nil, &jobWriter{job: in.job}, nil)
+		// Strategy 1: branch off origin/<baseBranch> (the freshly-updated ref
+		// from the fetch above) so the new requirement starts from the
+		// upstream HEAD. Matches the local EnsureWorktreeLogged strategy
+		// order. Strategies 2/3 remain as fallbacks for repos where
+		// origin/<base> doesn't exist (no remote on base, base never pushed).
+		exit, _ := client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath)+" origin/"+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
 		if exit != 0 {
-			exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath)+" origin/"+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
+			// Strategy 2: branch off HEAD (always valid; matches the legacy
+			// EnsureWorktree behaviour).
+			exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath), "", nil, &jobWriter{job: in.job}, nil)
 			if exit != 0 {
+				// Strategy 3: attach to an already-existing branch
+				// (adjust/continue reuse case).
 				if exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add "+shellQuoteSingle(wtPath)+" "+shellQuoteSingle(branch), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
 					return claudeStreamOutcome{errMsg: "git worktree 创建失败（exit=" + fmtInt(exit) + "），请检查仓库状态"}
 				}
@@ -146,9 +170,16 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		// adjust-coding / continue-coding: pull the latest remote commits
 		// onto the existing branch. --ff-only protects against silent
 		// divergence; on failure we log a hint and proceed with the local
-		// copy (the user can resolve the divergence manually).
+		// copy (the user can resolve the divergence manually). The chained
+		// merge --ff-only origin/<baseBranch> step then pulls in any
+		// upstream commits on the project main that landed since this
+		// branch was first created — mirroring the local EnsureWorktree
+		// reuse path. The trailing `|| echo ...` keeps the whole pipeline
+		// non-blocking: a diverged local branch (or missing origin ref)
+		// just logs a hint and lets coding continue from the existing
+		// commit, exactly like the pull step above.
 		client.Exec(ctx,
-			"cd "+shellQuoteSingle(wtPath)+" && (git checkout "+shellQuoteSingle(branch)+" 2>/dev/null || true) && (git pull --ff-only origin "+shellQuoteSingle(branch)+" 2>&1 || echo \"[nova-agent] pull 跳过（无跟踪或已分叉）\")",
+			"cd "+shellQuoteSingle(wtPath)+" && (git checkout "+shellQuoteSingle(branch)+" 2>/dev/null || true) && (git pull --ff-only origin "+shellQuoteSingle(branch)+" 2>&1 || echo \"[nova-agent] pull 跳过（无跟踪或已分叉）\") && (git merge --ff-only origin/"+shellQuoteSingle(baseBranch)+" 2>&1 || echo \"[nova-agent] 主分支快进更新跳过\")",
 			"", nil, &jobWriter{job: in.job}, nil)
 	}
 

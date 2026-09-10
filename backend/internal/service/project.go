@@ -819,9 +819,10 @@ func (s *ProjectService) UpdatePlatformConfig(id, platformType, tokenID string) 
 }
 
 // UpdateBasicInfo updates the user-editable basic fields of a project:
-// display name, remote URL, project type, and local filesystem path.
-// Empty/whitespace-only inputs are normalized to "" before write so the
-// caller can rely on the same canonical form that's stored at Add time.
+// display name, remote URL, project type, local filesystem path, and the
+// project's configured main branch (default_branch). Empty/whitespace-only
+// inputs are normalized to "" before write so the caller can rely on the
+// same canonical form that's stored at Add time.
 //
 // name is required (the unique-by-local_path primary identifier is the
 // path, so name can repeat — but a blank name is rejected to keep the
@@ -834,15 +835,19 @@ func (s *ProjectService) UpdatePlatformConfig(id, platformType, tokenID string) 
 // project (DUPLICATE_LOCAL_PATH) since projects.local_path has a UNIQUE
 // constraint that a hand-edited value must continue to satisfy.
 //
-// project_type and remote_url are free-form strings and accept empty
-// values. Errors are prefixed with stable codes the handler maps to HTTP
-// status codes (PROJECT_NOT_FOUND / INVALID_NAME / INVALID_LOCAL_PATH /
+// project_type, remote_url, and default_branch are free-form strings and
+// accept empty values. An empty default_branch is intentionally allowed:
+// the wizard pipeline falls back to "main" when no branch is configured,
+// so a user who wants the legacy behaviour just clears the field. Errors
+// are prefixed with stable codes the handler maps to HTTP status codes
+// (PROJECT_NOT_FOUND / INVALID_NAME / INVALID_LOCAL_PATH /
 // DUPLICATE_LOCAL_PATH).
-func (s *ProjectService) UpdateBasicInfo(id, name, remoteURL, projectType, localPath string) error {
+func (s *ProjectService) UpdateBasicInfo(id, name, remoteURL, projectType, localPath, defaultBranch string) error {
 	name = strings.TrimSpace(name)
 	remoteURL = strings.TrimSpace(remoteURL)
 	projectType = strings.TrimSpace(projectType)
 	localPath = strings.TrimSpace(localPath)
+	defaultBranch = strings.TrimSpace(defaultBranch)
 
 	if name == "" {
 		return fmt.Errorf("INVALID_NAME: name is required")
@@ -888,9 +893,9 @@ func (s *ProjectService) UpdateBasicInfo(id, name, remoteURL, projectType, local
 	}
 
 	res, err := s.db.Exec(
-		`UPDATE projects SET name = ?, remote_url = ?, project_type = ?, local_path = ?, updated_at = ?
+		`UPDATE projects SET name = ?, remote_url = ?, project_type = ?, local_path = ?, default_branch = ?, updated_at = ?
 		 WHERE id = ?`,
-		name, remoteURL, projectType, abs, time.Now(), id)
+		name, remoteURL, projectType, abs, defaultBranch, time.Now(), id)
 	if err != nil {
 		return err
 	}

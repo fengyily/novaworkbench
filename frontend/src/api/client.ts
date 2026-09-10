@@ -192,11 +192,14 @@ export const projectsApi = {
   purge: (id: string) => api.delete<{ id: string; status: string }>(`/api/projects/${id}/purge`),
   updatePlatform: (id: string, platform_type: string, platform_token_id: string) =>
     api.patch<Project>(`/api/projects/${id}/platform`, { platform_type, platform_token_id }),
-  // Edit the project name / remote URL / type / local path. All four
-  // fields are optional — omit any field to leave it unchanged.
+  // Edit the project name / remote URL / type / local path / default branch.
+  // All five fields are optional — omit any field to leave it unchanged.
   // The backend rejects blank name/path with 400 INVALID_NAME /
   // INVALID_LOCAL_PATH and a duplicate path with 409 DUPLICATE_LOCAL_PATH.
-  updateBasicInfo: (id: string, data: { name?: string; remote_url?: string; project_type?: string; local_path?: string }) =>
+  // default_branch is the project's configured main branch (e.g. "main" /
+  // "master" / "develop"); the wizard pipeline falls back to "main" when
+  // blank, so passing "" is a valid way to reset to the legacy default.
+  updateBasicInfo: (id: string, data: { name?: string; remote_url?: string; project_type?: string; local_path?: string; default_branch?: string }) =>
     api.patch<Project>(`/api/projects/${id}`, data),
   // Save a manually-edited description; locks it from auto-regeneration.
   updateDescription: (id: string, description: string) =>

@@ -117,6 +117,8 @@ export const projects = {
     basicNamePlaceholder: '项目名称',
     basicRemoteUrl: '仓库地址',
     basicRemoteUrlPlaceholder: 'https://github.com/user/repo.git  或  git@github.com:user/repo.git',
+    basicDefaultBranch: '主分支',
+    basicDefaultBranchPlaceholder: '留空使用默认 main',
     basicType: '类型',
     basicTypeAuto: '— 自动检测 —',
     basicLocalPath: '路径',
@@ -130,6 +132,7 @@ export const projects = {
     basicInfoType: '类型',
     basicInfoStatus: '状态',
     basicInfoRemote: '仓库',
+    basicInfoDefaultBranch: '主分支',
     // Overview — description block.
     descTitle: '简介',
     descManualFlag: '✍ 手动修改',

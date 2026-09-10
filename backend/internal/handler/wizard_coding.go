@@ -122,6 +122,31 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			reqRow = r
 		}
 	}
+
+	// Resolve baseBranch early (used by both the worktree and legacy in-place
+	// paths below). Precedence: UI-provided p.BaseBranch > project's stored
+	// default_branch > literal "main". Loading the project here costs one extra
+	// Get that's almost always served by the page-load cache, and it lets us
+	// surface a one-line "本次使用的主分支: <name>" hint in the Job panel so
+	// the user knows exactly which base the worktree was branched off when an
+	// issue shows up later.
+	baseBranch := p.BaseBranch
+	if baseBranch == "" {
+		var projID string
+		if reqRow != nil {
+			projID = reqRow.ProjectID
+		} else {
+			projID = p.RequirementID // best-effort — may fail; falls through to "main"
+		}
+		if projID != "" {
+			if proj, perr := h.projectSvc.Get(projID); perr == nil && proj != nil && proj.DefaultBranch != "" {
+				baseBranch = proj.DefaultBranch
+			}
+		}
+		if baseBranch == "" {
+			baseBranch = "main"
+		}
+	}
 	// Stamp the development-environment provenance BEFORE the run starts.
 	// Doing it up front (rather than on the success path) means a failed or
 	// aborted remote run still leaves a record of WHICH Agent server holds
@@ -166,7 +191,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	hadWorktree := reqRow != nil && reqRow.WorktreePath != ""
 
 	// Recover the project directory if a Docker rebuild / fresh workspace
-	// mount left it absent. Without this, EnsureWorktree below returns
+	// mount left it absent. Without this, EnsureWorktreeLogged below returns
 	// ErrNotAGitRepo and the in-place checkout fails with the user-facing
 	// "git checkout 失败" error. Re-clone uses the project's stored
 	// remote_url + platform token; when there is no remote to restore from
@@ -199,12 +224,14 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	workDir := p.ProjectPath
 	branchDir := p.ProjectPath // where git checkout/pull run
 	useWorktree := false
-	baseBranch := p.BaseBranch
-	if baseBranch == "" {
-		baseBranch = "main"
-	}
+	// baseBranch was already resolved above (UI > project.DefaultBranch > "main");
+	// the declaration here is intentionally omitted to keep the variable in
+	// exactly one scope so a future edit can't accidentally re-introduce the
+	// old hardcoded "main" fallback chain.
 	if p.BranchName != "" && p.RequirementID != "" {
-		wtPath, wtErr := EnsureWorktree(p.ProjectPath, p.RequirementID, p.BranchName, baseBranch)
+		wtPath, wtErr := EnsureWorktreeLogged(p.ProjectPath, p.RequirementID, p.BranchName, baseBranch, func(s string) {
+			job.Append(store.LogLine{Type: "message", Content: s})
+		})
 		switch {
 		case wtErr == nil && wtPath != "":
 			workDir = wtPath
@@ -228,10 +255,21 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// mirror EnsureWorktree's robust strategy: create off the base, switch
 	// to an already-existing branch, or branch off HEAD so a missing base
 	// ref never produces a cryptic error.
+	//
+	// Sync the project's main branch BEFORE attempting any checkout so the
+	// strategy-1 `checkout -b <branch> <base>` call below is branching off
+	// freshly-fetched origin/<base> instead of a stale local <base>. This
+	// mirrors what EnsureWorktreeLogged does for the worktree path.
+	// syncBaseBranch is best-effort by design: no remote / offline / missing
+	// ref just emits one log line and proceeds with whatever the local repo
+	// currently has.
 	if p.BranchName != "" && !useWorktree {
 		if _, gerr := gitRun(branchDir, "rev-parse", "--is-inside-work-tree"); gerr != nil {
 			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，跳过分支切换，在项目目录直接开发"})
 		} else {
+			syncBaseBranch(branchDir, baseBranch, func(s string) {
+				job.Append(store.LogLine{Type: "message", Content: s})
+			})
 			checkoutOK := false
 			var lastErrOut string
 			attempt := func(args ...string) (string, bool) {
