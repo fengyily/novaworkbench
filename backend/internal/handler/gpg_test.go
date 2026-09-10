@@ -249,6 +249,33 @@ func TestParseKeyIDFromScriptOutput(t *testing.T) {
 			wantKey: "0123ABC",
 			wantFall: false,
 		},
+		{
+			// Regression: the SSH `pump` helper prepends `[<label>] `
+			// to every line (see ssh/client.go `pump`). Without
+			// stripping that prefix the remote GPG provision path
+			// silently misses both markers and surfaces as
+			// "GPG provision 脚本未输出 keyid". The remote flow is
+			// what Agent Server users actually exercise.
+			name:    "remote path: [label] prefix on keyid line",
+			in:      "[gpg-provision] NOVA_GPG_KEYID=ABCDEF0123456789\n",
+			wantKey: "ABCDEF0123456789",
+			wantFall: false,
+		},
+		{
+			name:    "remote path: [label] prefix on fallback line",
+			in:      "[gpg-provision] NOVA_GPG_WORKTREE_FALLBACK=1\n",
+			wantKey: "",
+			wantFall: true,
+		},
+		{
+			name:    "remote path: mixed [label] lines, scrambled order",
+			in:      "[gpg-provision] gpg: imported: 1\n" +
+				"[gpg-provision] NOVA_GPG_WORKTREE_FALLBACK=1\n" +
+				"some other host log\n" +
+				"[gpg-provision] NOVA_GPG_KEYID=DEADBEEFCAFEBABE\n",
+			wantKey: "DEADBEEFCAFEBABE",
+			wantFall: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

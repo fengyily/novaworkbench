@@ -166,6 +166,16 @@ func buildGPGWrapperScript(gnupgHome string) string {
 // runner concatenates command stdout/stderr into the writer in
 // arbitrary chunks.
 //
+// Remote path note: the SSH `pump` helper prepends `[<label>]` to every
+// line (see ssh/client.go `pump`). Without stripping that prefix here
+// the KEYID and FALLBACK markers would never match in the remote
+// provision flow — every line would look like
+// `[gpg-provision] NOVA_GPG_KEYID=…` and `strings.HasPrefix` against
+// the bare marker would silently miss. We strip a leading
+// `[<label>]` token defensively (only when it terminates with `]` and
+// the line starts with `[`), so the local path — which doesn't add
+// the label — keeps behaving exactly as before.
+//
 // worktreeFallback=true means at least one `git config --worktree`
 // call failed and the script fell back to `--local`. Concurrent reqs
 // against the same base repo may then interfere; the caller should
@@ -173,6 +183,14 @@ func buildGPGWrapperScript(gnupgHome string) string {
 func parseKeyIDFromScriptOutput(out string) (keyID string, worktreeFallback bool) {
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
+		// Strip a leading `[label]` token when present (remote path
+		// only). Use LastIndex to skip past leading whitespace if any
+		// survives the TrimSpace, then sanity-check that what precedes
+		// is `[` so we don't accidentally trim a literal `[…]`
+		// substring inside the script's own output.
+		if i := strings.LastIndexByte(line, ']'); i > 0 && strings.HasPrefix(line, "[") {
+			line = strings.TrimSpace(line[i+1:])
+		}
 		if strings.HasPrefix(line, "NOVA_GPG_KEYID=") {
 			// The script emits `echo "NOVA_GPG_KEYID=$keyid"` —
 			// the shell collapses the spaces around `$keyid` so we
