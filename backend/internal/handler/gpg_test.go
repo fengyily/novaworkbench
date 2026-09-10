@@ -330,6 +330,75 @@ func TestParseKeyIDFromScriptOutput(t *testing.T) {
 	}
 }
 
+// TestParseKeyIDFromScriptOutputDebug covers the diagnostic twin of
+// parseKeyIDFromScriptOutput. We don't lock down the exact summary
+// text (it can be tightened later) — only the keyID / fallback return
+// values must agree with the pure parser, and the summary must be
+// non-empty for every non-trivial case (so the operator always gets a
+// hint when the provision fails).
+func TestParseKeyIDFromScriptOutputDebug(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        string
+		wantKey   string
+		wantFall  bool
+		summaryHas string
+	}{
+		{
+			name:       "happy path",
+			in:         "[gpg-provision] NOVA_GPG_KEYID=ABCDEF1234567890\n",
+			wantKey:    "ABCDEF1234567890",
+			wantFall:   false,
+			summaryHas: "NOVA_GPG_KEYID=1 次",
+		},
+		{
+			name:       "empty stdout -> pump never received output",
+			in:         "",
+			wantKey:    "",
+			wantFall:   false,
+			summaryHas: "stdout 为空",
+		},
+		{
+			name:       "all [label] lines but no marker",
+			in:         "[gpg-provision] gpg: foo\n[gpg-provision] gpg: bar\n",
+			wantKey:    "",
+			wantFall:   false,
+			summaryHas: "带 [label] 前缀但没有任何一行包含",
+		},
+		{
+			name:       "stray [ without ] (truncated label)",
+			in:         "[unterminated token\n",
+			wantKey:    "",
+			wantFall:   false,
+			summaryHas: "孤立 [ 但缺 ]",
+		},
+		{
+			name:       "fallback detected alongside missing keyid",
+			in:         "[gpg-provision] NOVA_GPG_WORKTREE_FALLBACK=1\ngpg: ok\n",
+			wantKey:    "",
+			wantFall:   true,
+			summaryHas: "脚本输出",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotKey, gotFall, summary := parseKeyIDFromScriptOutputDebug(tc.in)
+			if gotKey != tc.wantKey {
+				t.Errorf("keyID = %q, want %q", gotKey, tc.wantKey)
+			}
+			if gotFall != tc.wantFall {
+				t.Errorf("worktreeFallback = %v, want %v", gotFall, tc.wantFall)
+			}
+			if summary == "" {
+				t.Errorf("summary must be non-empty (operator hint)")
+			}
+			if tc.summaryHas != "" && !strings.Contains(summary, tc.summaryHas) {
+				t.Errorf("summary = %q, want substring %q", summary, tc.summaryHas)
+			}
+		})
+	}
+}
+
 // TestClassifyGitSignFailure covers every bucket in the classifier
 // plus the empty-string fallback (no specific bucket matched).
 func TestClassifyGitSignFailure(t *testing.T) {
