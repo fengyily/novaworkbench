@@ -128,11 +128,33 @@ export const components = {
     cancel: 'Cancel',
     adjustBusy: 'Starting…',
     adjustSubmit: '🚀 Send follow-up',
-    redoHint: 'Re-run this sub-task with its original prompt',
+    redoHint: 'Re-run on top of the original task (no new record)',
     redoModelLabel: 'Redo model',
     redoSubmit: '🚀 Start redo',
     errAdjust: 'Failed to send follow-up',
-    errRedo: 'Failed to redo',
+    errRedo: 'Only failed tasks can be redone',
+    // Continue (▶ Continue): --resume the existing claude session on the
+    // SAME sub_task row, preserving the prior artifact until the new run
+    // lands. Available for stopped and errored rows — a user who hit Stop
+    // and then realised they wanted to keep going picks Continue instead
+    // of Redo.
+    continueToggle: 'Continue',
+    continueHint: '--resume the original session, no new record',
+    continueSubmit: '▶ Continue',
+    continueBusy: 'Continuing…',
+    errContinue: 'This sub-task cannot be continued',
+    // Stop (⏹ Stop): interrupt a running sub-task via the backend's
+    // /stop endpoint. The handler routes SIGTERM → WaitDelay 5s → SIGKILL
+    // through JobStore and flips the row to status='stopped' with a
+    // "⏹ 用户中止" artifact prefix. Disabled when the requirement runs on
+    // a remote Agent Server (the backend returns 501 in this iteration).
+    stopToggle: '⏹ Stop',
+    stopConfirm: 'Stop the currently running sub-task?',
+    stopping: '⏹ Stopping…',
+    stopped: 'Stopped',
+    stopRemoteDisabled: 'Stopping is not yet supported for remote Agent Server execution',
+    errStop: 'Failed to stop',
+    errContinueNoSession: 'This sub-task cannot be continued: the original session id is empty',
     sourceAuto: 'Auto',
     sourceAutoTitle: 'Auto-dispatched by main Agent',
     sourceManual: 'Manual',

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -273,7 +274,11 @@ func remoteURL(dir string) string {
 // no global git config (notably Docker containers without ~/.gitconfig mounted).
 // Either may be empty — the empty side is skipped and git falls back to its
 // own config lookup, which keeps existing behaviour on developer machines.
-func commitAll(dir, msg, gitName, gitEmail string) (committed bool, err error) {
+// signKeyID / gpgProgram, when both non-empty, opt the commit into GPG
+// signing via three extra `-c` flags. When either is empty no signing flag
+// is added — behaviour matches the no-2 signature byte-for-byte so existing
+// callers (and unconfigured users) see no change.
+func commitAll(dir, msg, gitName, gitEmail, signKeyID, gpgProgram string) (committed bool, err error) {
 	if _, err := gitRun(dir, "add", "-A"); err != nil {
 		return false, err
 	}
@@ -289,9 +294,9 @@ func commitAll(dir, msg, gitName, gitEmail string) (committed bool, err error) {
 		return false, nil
 	}
 
-	// Build `git -C <dir> [-c user.name=...] [-c user.email=...] commit -m <msg>`.
-	// Args are passed as a string slice (no shell), so spaces / quotes in the
-	// identity are safe.
+	// Build `git -C <dir> [-c user.name=...] [-c user.email=...] [-c signing...]
+	// commit -m <msg>`. Args are passed as a string slice (no shell), so
+	// spaces / quotes in the identity are safe.
 	gitArgs := []string{"-C", dir}
 	if gitName != "" {
 		gitArgs = append(gitArgs, "-c", "user.name="+gitName)
@@ -299,15 +304,99 @@ func commitAll(dir, msg, gitName, gitEmail string) (committed bool, err error) {
 	if gitEmail != "" {
 		gitArgs = append(gitArgs, "-c", "user.email="+gitEmail)
 	}
+	if signKeyID != "" && gpgProgram != "" {
+		gitArgs = append(gitArgs,
+			"-c", "commit.gpgsign=true",
+			"-c", "user.signingkey="+signKeyID,
+			"-c", "gpg.program="+gpgProgram,
+		)
+	}
 	gitArgs = append(gitArgs, "commit", "-m", msg)
 	cmd := exec.Command("git", gitArgs...)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		// Map gpg-specific stderr into the same Chinese error lines the
+		// remote path uses, so users see actionable hints no matter where
+		// the failure happened. Empty classifier output falls back to the
+		// raw stderr.
+		if hint := classifyGitSignFailure(stderr.String()); hint != "" {
+			return false, fmt.Errorf("%s: %w", hint, err)
+		}
 		return false, fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
 	}
 	return true, nil
+}
+
+// resolveLocalGPGSigning provisions a temp GPG home + wrapper for the given
+// dev directory and returns the (signing keyid, gpg.program wrapper path,
+// idempotent cleanup) the merge flow must thread through commitAll and any
+// Claude-driven git commit.
+//
+// Four non-fatal outcomes all collapse to ( "", "", noopCleanup, nil ):
+//   - requirement / project / token chain is incomplete (no token bound);
+//   - the token exists but has GPG disabled (gpg_enabled = 0);
+//   - GPG is enabled but no private key has been uploaded yet;
+//   - the project platform_token_id is empty.
+//
+// Two outcomes are returned with err != nil so the caller can log them:
+//   - decryption failure (master key lost / ciphertext corruption);
+//   - provisionLocalGPG failure (gpg missing, wrong passphrase, disk full).
+//
+// In every "not configured" branch the function returns a noopCleanup so the
+// caller can `defer cleanup()` unconditionally. This keeps the merge code
+// path identical to the pre-GPG behaviour when the user hasn't opted in:
+// no extra `-c` flags, no extra log lines, no extra filesystem writes.
+//
+// On success, gpgProgram is `<gnupgHome>/git-gpg-wrapper` — the same wrapper
+// the wizard-coding path writes — so any subprocess that picks up the
+// worktree-level `commit.gpgsign=true` config (most importantly Claude's
+// own `git commit --no-edit` in aiResolveConflicts) signs through the same
+// keyring without any further wiring.
+func resolveLocalGPGSigning(h *MergeHandler, reqRow *model.Requirement, devDir string, job *store.Job) (keyID, gpgProgram string, cleanup func(), err error) {
+	noopCleanup := func() {}
+	if reqRow == nil || h.projectSvc == nil || h.platformSvc == nil {
+		return "", "", noopCleanup, nil
+	}
+	project, pErr := h.projectSvc.Get(reqRow.ProjectID)
+	if pErr != nil || project == nil || project.PlatformTokenID == "" {
+		return "", "", noopCleanup, nil
+	}
+	enabled, _, armored, passphrase, matErr := h.platformSvc.GPGSigningMaterial(project.PlatformTokenID)
+	if matErr != nil {
+		return "", "", noopCleanup, fmt.Errorf("读取签名材料失败：%w", matErr)
+	}
+	if !enabled || armored == "" {
+		return "", "", noopCleanup, nil
+	}
+	gitName, gitEmail := h.gitIdentityForReq(reqRow)
+
+	// Resolve the base repository path (parent of the shared git dir). For a
+	// non-worktree checkout this equals devDir; for a worktree-isolated
+	// requirement it points back to the main checkout, which is what
+	// `git config --worktree` is conceptually attached to. rev-parse returns
+	// an absolute path, so the `..` walks the same way in both cases.
+	baseRepo := devDir
+	if common, gErr := gitRun(devDir, "rev-parse", "--git-common-dir"); gErr == nil {
+		common = strings.TrimSpace(common)
+		if common != "" {
+			if abs, absErr := filepath.Abs(common); absErr == nil {
+				baseRepo = filepath.Dir(abs)
+			}
+		}
+	}
+
+	gnupgHome, keyID, signCleanup, provErr := provisionLocalGPG(devDir, baseRepo, armored, passphrase, gitName, gitEmail)
+	if provErr != nil {
+		return "", "", noopCleanup, provErr
+	}
+	if job != nil {
+		// One info line, only when signing actually fires — unconfigured
+		// users see no change from before this feature was added.
+		job.Append(store.LogLine{Type: "message", Content: "🔐 本次提交将带 GPG 签名（keyid=" + keyID + "）"})
+	}
+	return keyID, gnupgHome + "/git-gpg-wrapper", signCleanup, nil
 }
 
 // parseRemote splits a remote URL into platform, webBase, owner, repo.
@@ -502,12 +591,26 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 		// preserved on dev machines).
 		gitName, gitEmail := h.gitIdentityForReq(reqRow)
 
+		// Provision GPG signing material when the platform token has it
+		// enabled. resolveLocalGPGSigning is a no-op (returns empty strings
+		// + a noop cleanup) for unconfigured users, so this block doesn't
+		// add any log noise when GPG isn't in play. Provision failures are
+		// surfaced as a warning and the merge continues unsigned — a GPG
+		// infrastructure issue must not block all local merges.
+		signKeyID, gpgProgram, signingCleanup, gpgErr := resolveLocalGPGSigning(h, reqRow, devDir, job)
+		if gpgErr != nil {
+			job.Append(store.LogLine{Type: "message", Content: "⚠️ GPG 准备失败，本次提交将不签名：" + gpgErr.Error()})
+		}
+		if signingCleanup != nil {
+			defer signingCleanup()
+		}
+
 		// 1. Commit pending dev-branch changes first (in the worktree / checkout
 		//    where dev is actually checked out).
 		if commitMsg == "" {
 			commitMsg = dev
 		}
-		if committed, err := commitAll(devDir, commitMsg, gitName, gitEmail); err != nil {
+		if committed, err := commitAll(devDir, commitMsg, gitName, gitEmail, signKeyID, gpgProgram); err != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ 提交失败: " + err.Error()})
 			job.Finish(1, store.JobError)
 			return
@@ -867,7 +970,7 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 		"sub_task_id": st.ID,
 	})
 
-	go h.subTaskRunner.Run(reqRow, st, job, newSID, sourceSID, prompt, effectiveModel, roleConfigID, false)
+	go h.subTaskRunner.Run(reqRow, st, job, newSID, sourceSID, prompt, effectiveModel, roleConfigID, false, true)
 }
 
 // buildPushSubTaskPrompt composes the task description the push sub-agent
@@ -1021,6 +1124,21 @@ func (h *MergeHandler) mergeAndResolveBase(job *store.Job, devDir, base, dev str
 	// hosts without a mounted ~/.gitconfig.
 	gitName, gitEmail := h.gitIdentityForReq(reqRow)
 
+	// Provision GPG signing material so both (a) the auto-merge commit that
+	// `git merge --no-edit` may produce on a clean merge and (b) the commit
+	// Claude runs in aiResolveConflicts pick up `commit.gpgsign=true` from
+	// the worktree config the provision step writes. Per-invocation -c
+	// flags aren't needed here — git reads its own worktree config. Noop
+	// for unconfigured users; warning-only on provision failure so the
+	// merge itself is never blocked by a GPG infrastructure hiccup.
+	_, _, signingCleanup, gpgErr := resolveLocalGPGSigning(h, reqRow, devDir, job)
+	if gpgErr != nil {
+		job.Append(store.LogLine{Type: "message", Content: "⚠️ GPG 准备失败，本次合并提交将不签名：" + gpgErr.Error()})
+	}
+	if signingCleanup != nil {
+		defer signingCleanup()
+	}
+
 	// 2. fetch origin/base (best-effort; a fetch failure just skips the merge).
 	job.Append(store.LogLine{Type: "phase", Content: "⬇️ 拉取主分支 origin/" + base + " ..."})
 	if out, ferr := gitRun(devDir, "fetch", "origin", base); ferr != nil {
@@ -1092,6 +1210,19 @@ func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflic
 		if email != "" {
 			extraEnv = append(extraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
 		}
+	}
+	// Provision GPG signing material in devDir so Claude's `git commit
+	// --no-edit` picks up commit.gpgsign=true from the worktree config
+	// (the per-invocation -c path used by commitAll doesn't reach a
+	// subprocess Claude spawns from its Bash tool). Conflict resolution
+	// is more important than signing — a GPG provision failure must not
+	// block Claude from finishing the merge, so we warn-and-keep.
+	_, _, gpgCleanup, gpgErr := resolveLocalGPGSigning(h, reqRow, devDir, job)
+	if gpgErr != nil {
+		job.Append(store.LogLine{Type: "message", Content: "⚠️ GPG 准备失败，本次合并提交可能未签名：" + gpgErr.Error()})
+	}
+	if gpgCleanup != nil {
+		defer gpgCleanup()
 	}
 	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
 		Prompt:         prompt,

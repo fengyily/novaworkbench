@@ -192,6 +192,7 @@ func (h *AgentServerHandler) runCheck(job *store.Job, serverID string) {
 		{"node", "node"},
 		{"npm", "npm"},
 		{"git", "git"},
+		{"gpg", "gpg"},
 	}
 	job.Append(store.LogLine{Type: "phase", Content: "🔍 检查依赖..."})
 	missing := []string{}
@@ -1248,9 +1249,9 @@ done
 echo "[nova-agent] PM=$PM"
 install_with_pm() {
   case "$PM" in
-    apt-get) apt-get update -y >/dev/null 2>&1; apt-get install -y nodejs npm ;;
-    dnf) dnf install -y nodejs npm ;;
-    yum) yum install -y nodejs npm ;;
+    apt-get) apt-get update -y >/dev/null 2>&1; apt-get install -y nodejs npm gnupg2 || apt-get install -y nodejs npm gnupg ;;
+    dnf) dnf install -y nodejs npm gnupg2 ;;
+    yum) yum install -y nodejs npm gnupg2 ;;
   esac
 }
 if [ -n "$PM" ]; then
@@ -1260,6 +1261,7 @@ if [ -n "$PM" ]; then
     export NVM_DIR="$HOME/.nvm"
     [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
     nvm install --lts
+    echo "[nova-agent] 注意：nvm 回落只装 node，gpg 仍需手动安装（apt: gnupg2 / gnupg，dnf|yum: gnupg2）"
   fi
 else
   echo "[nova-agent] 未识别包管理器，使用 nvm 用户态安装"
@@ -1267,6 +1269,7 @@ else
   export NVM_DIR="$HOME/.nvm"
   [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
   nvm install --lts
+  echo "[nova-agent] 注意：nvm 回落只装 node，gpg 仍需手动安装（apt: gnupg2 / gnupg，dnf|yum: gnupg2）"
 fi
 echo "[nova-agent] 安装 @anthropic-ai/claude-code..."
 npm install -g @anthropic-ai/claude-code
@@ -1298,6 +1301,8 @@ if ! command -v brew >/dev/null 2>&1; then
 fi
 echo "[nova-agent] 安装 node (含 npm)..."
 brew install node
+echo "[nova-agent] 安装 gnupg..."
+brew install gnupg || true
 echo "[nova-agent] 安装 @anthropic-ai/claude-code..."
 npm install -g @anthropic-ai/claude-code
 echo "[nova-agent] 安装完成"

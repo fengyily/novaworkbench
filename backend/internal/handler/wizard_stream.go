@@ -358,33 +358,37 @@ type lastUsageSnapshot struct {
 
 // usagePayload builds the {step?, model, 4 tokens, context_window, used, pct}
 // map that the wizard's `usage` SSE frame and the requirements.usage_snapshots
-// blob both consume. Centralizes the "cache_read excluded from used" semantics
+// blob both consume. Centralizes the "cache_read included in used" semantics
 // so the frontend never has to derive it from raw fields.
 //
-// Why cache_read is excluded:
-//   cache_read_tokens = tokens the model READ from an existing prompt cache
-//   (i.e. content already counted as cache_creation in a previous turn).
-//   Anthropic charges for it (cheap reuse) but it does NOT add to the
-//   context window's fresh fill. Including it in `used` produces pct > 100
-//   in two ways:
-//     (a) per-turn: a prompt with multiple large cache breakpoints can
-//         report cr alone approaching the window;
-//     (b) cumulative: SubTaskService.Finish SUMMED cache_read across turns,
-//         so a sub-task with N cache-hit turns double-counts the same
-//         cached prefix N times. The SubTaskPanel persistent fallback
-//         used to render pct ≫ 100% on any multi-turn sub-task that hit
-//         cache.
+// Why cache_read IS part of `used`:
+//   The Anthropic API reports the four fields PER TURN. For a single turn,
+//   the prompt sent to the model equals (input_tokens + cache_creation +
+//   cache_read) — every token in the current prompt is one of: fresh input,
+//   just cached, or read from cache. That prompt size equals the current
+//   context window (claude /context reports the same number).
 //
-// used = input_tokens + cache_creation_tokens
+//   A previous iteration excluded cr under the assumption that
+//   SubTaskService.Finish SUMs cache_read across turns (double-counting).
+//   That assumption is wrong: Finish writes `out.lastUsage`, which is
+//   overwritten on every result event (wizard_stream.go: result case), so
+//   sub_tasks.cache_read_tokens is the LAST turn's cr — not cumulative.
+//   With last-turn data, input+cc alone returns "fresh tokens this turn",
+//   which undercounts vs the actual context window by tens of thousands of
+//   tokens once the conversation is long and most of the prompt is cached.
+//   That made the per-card bar show e.g. 5% while /context showed 62%.
+//
+// used = input_tokens + cache_creation_tokens + cache_read_tokens
 // pct  = used / context_window * 100 (0 when window is unknown so the UI
-//        can still render a 0% placeholder).
+//        can still render a 0% placeholder). clampPct on the frontend
+//        caps the rendered bar at 100% so the user never sees >100.
 //
 // `step` is omitted when empty so the same builder can serve both the SSE
 // payload (which carries step) and the persisted snapshot blob (which is
 // keyed by session, not by step — step lives one level up).
 func usagePayload(step, modelName string, inTok, outTok, cc, cr int) map[string]any {
 	window := service.ModelContextWindow(modelName)
-	used := inTok + cc // see docstring — cache_read excluded
+	used := inTok + cc + cr // see docstring — cache_read IS the cached part of the current prompt
 	pct := 0.0
 	if window > 0 {
 		pct = float64(used) / float64(window) * 100

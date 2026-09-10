@@ -501,6 +501,15 @@ func main() {
 	// Re-run a FAILED sub-task with its original prompt (optionally switching
 	// models). Forks the failed run's source session for a clean retry.
 	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/{sid}/redo", wizardH.RedoSubTask)
+	// In-place resume on the SAME session id (--resume parent.SessionID, no
+	// fork). Trigger conditions: parent.status ∈ {error, stopped}. Preserves
+	// the existing artifact on the row until the new Finish writes over it,
+	// so a refresh mid-run still shows the previous report.
+	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/{sid}/continue", wizardH.ContinueSubTask)
+	// Cancel a running sub-task's claude subprocess and flip status to
+	// "stopped". 501 STOP_REMOTE_NOT_SUPPORTED when the requirement was
+	// developed on an Agent server (no kill RPC yet on the worker).
+	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/{sid}/stop", wizardH.StopSubTask)
 	// Manual re-split: resumes the coding session with the decomposition
 	// trigger and runs the same parse+dispatch pipeline as StartCoding's
 	// auto-orchestrate. Escape hatch for when auto-orchestration produced
