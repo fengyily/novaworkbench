@@ -163,6 +163,28 @@ func (r *SubTaskRunner) NewPendingSubTask(reqID, title, prompt, modelDisplay, so
 // Run spawns the claude CLI subprocess for a sub-task row and writes the
 // final artifact to sub_tasks.artifact on completion.
 //
+// body is the user's free-text sub-task description (becomes the prompt body).
+// modelOverride, when non-empty, wins over the developer role's configured
+// model. adjust flips the prompt header between "## 子任务" and "## 追加调整"
+// so the child agent's contextualization stays consistent with the wizard's
+// manual sub-task composer. fork controls the session-derivation strategy:
+//   - fork=true  → mint a brand-new session id and `--fork-session` off the
+//     parent. This is the original Redo / StartSubTask / AdjustSubTask path;
+//     the child inherits the parent's conversation context but executes in
+//     a fresh JSONL session so a previous failure trace doesn't pollute it.
+//   - fork=false → reuse the parent's existing session_id (no fork, no new
+//     JSONL). This is the Continue path: `--resume <parent.SessionID>` runs
+//     the child in the same line of conversation the previous attempt left
+//     off in, appending to the existing artifact log. Used by ContinueSubTask
+//     so the user can pick up an interrupted sub-task without losing the
+//     partial work the previous run had already produced on disk.
+//
+// For the remote-coding branch (Agent server dispatch) the runner still hands
+// the newSID/ForkSessionID to the helper unchanged; the remote worker reads
+// the same flags. Stop is not exposed for remote runs in v1 — StopSubTask
+// short-circuits with 501 STOP_REMOTE_NOT_SUPPORTED before reaching the
+// runner, so the runner's remote branch is allowed to leave SetCmd unset.
+//
 // Side effects on success:
 //   - sub_tasks.status transitions to running (via MarkRunning)
 //   - the spawned JobStore job is appended with live phase/message lines
@@ -188,6 +210,7 @@ func (r *SubTaskRunner) Run(
 	modelOverride string,
 	configIDOverride string,
 	adjust bool,
+	fork bool,
 ) {
 	startTime, mErr := r.subTaskSvc.MarkRunning(st.ID)
 	if mErr != nil {
@@ -219,6 +242,9 @@ func (r *SubTaskRunner) Run(
 	role := "🤖 调整子任务启动中..."
 	if !adjust {
 		role = "🤖 子任务启动中..."
+	}
+	if !fork {
+		role = "🤖 继续子任务执行..."
 	}
 	job.Append(store.LogLine{Type: "phase", Content: role})
 	job.Append(store.LogLine{Type: "message", Content: "📝 提示词: " + truncateForLog(body, 240)})
@@ -257,9 +283,12 @@ func (r *SubTaskRunner) Run(
 	}
 
 	var prompt string
-	if adjust {
+	switch {
+	case !fork:
+		prompt = "## 继续执行\n\n" + body + "\n"
+	case adjust:
 		prompt = "## 追加调整\n\n" + body + "\n"
-	} else {
+	default:
 		prompt = "## 子任务\n\n" + body + "\n"
 	}
 	prompt += "\n> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
@@ -324,7 +353,7 @@ func (r *SubTaskRunner) Run(
 			reqRow:         req,
 			prompt:         prompt,
 			sourceSID:      sourceSID,
-			fork:           true,
+			fork:           fork,
 			sessionArg:     sourceSID,
 			forkSessionID:  newSID,
 			model:          modelName,
@@ -341,14 +370,21 @@ func (r *SubTaskRunner) Run(
 		SystemPrompt:   execSystemPrompt,
 		Model:          cliModelArg(modelName),
 		ClaudeConfigID: finalConfigID,
-		// --resume <sourceSID> --fork-session --session-id <newSID>:
-		// child agent inherits the parent's conversation context but
-		// executes in its own session.
+		// --resume <sourceSID> --session-id <newSID> [--fork-session]:
+		//   - fork=true  → --fork-session on, child executes in a fresh JSONL
+		//     session derived from the parent's conversation
+		//   - fork=false → child reuses parent.SessionID via --resume (no
+		//     --fork-session), continuing the same JSONL in place
 		SessionID:     sourceSID,
 		Resume:        true,
-		Fork:          true,
+		Fork:          fork,
 		ForkSessionID: newSID,
 	})
+	// Hand the subprocess + cancel to the JobStore so StopSubTask can SIGTERM
+	// it (gateway's exec.CommandContext chains SIGTERM → WaitDelay 5s →
+	// SIGKILL). Must happen BEFORE `defer cancel()` so Stop can fire between
+	// here and the deferred cleanup.
+	job.SetCmd(cmd, cancel)
 	defer cancel()
 	out := runClaudeStream(jobSink{job}, cmd, "sub-task", subUsage)
 	r.finishSubTask(st, job, out, modelName, startTime)
@@ -357,7 +393,39 @@ func (r *SubTaskRunner) Run(
 // finishSubTask persists the terminal state shared by the local and remote
 // sub-task paths: map the three failure shapes onto an error artifact, or
 // record the result + token usage + cost, then finish the job.
+//
+// Stop reconciliation: if StopSubTask already flipped this row to
+// SubTaskStatusStopped (e.g. cancel landed while the goroutine was still
+// streaming events), MarkStopped has prepended the "⏹ 用户中止于 …" banner
+// to the artifact. We must NOT clobber that banner with the claude
+// finalResult (or a generic error), and we must NOT reset status away from
+// "stopped". Instead we just stamp token / cost / duration / completed_at /
+// model via UpdateRunStatsOnStop so the dashboard still sees the resolved
+// usage numbers, and finish the JobStore job so SSE subscribers unblock.
 func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out claudeStreamOutcome, modelName string, startTime time.Time) {
+	tokens := model.SubTaskTokens{
+		Input:         out.lastUsage.InputTokens,
+		Output:        out.lastUsage.OutputTokens,
+		CacheCreation: out.lastUsage.CacheCreationTokens,
+		CacheRead:     out.lastUsage.CacheReadTokens,
+	}
+	costCents := computeSubTaskCostCents(modelName, tokens, r.claudeCfg)
+
+	// Stop-reconciliation short-circuit. Re-read the row to catch the
+	// (unlikely) race where StopSubTask's MarkStopped landed AFTER Run's
+	// deferred snapshot but BEFORE we reach this Finish call. Get is the
+	// safest helper here — it doesn't take a connection-pool slot the way a
+	// raw QueryRow would, and SubTaskService already owns the column list.
+	if cur, gerr := r.subTaskSvc.Get(st.ID); gerr == nil && cur.Status == model.SubTaskStatusStopped {
+		job.Append(store.LogLine{Type: "done", Content: "⏹ 子任务已被用户中止，跳过 artifact 写入"})
+		if perr := r.subTaskSvc.UpdateRunStatsOnStop(st.ID, modelName, tokens, costCents, startTime); perr != nil {
+			log.Printf("[sub-task] failed to persist run-stats-on-stop for %s: %v", st.ID, perr)
+		}
+		job.Finish(0, store.JobDone)
+		log.Printf("[sub-task] job %s already stopped for %s, kept stopped artifact", job.ID, st.ID)
+		return
+	}
+
 	finalStatus := model.SubTaskStatusDone
 	var artifactBody string
 	switch {
@@ -380,13 +448,6 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 	job.Append(store.LogLine{Type: "done", Content: "✅ 子任务完成！"})
 
 	artifact := buildSubTaskArtifact(st, modelName, artifactBody, time.Now())
-	tokens := model.SubTaskTokens{
-		Input:         out.lastUsage.InputTokens,
-		Output:        out.lastUsage.OutputTokens,
-		CacheCreation: out.lastUsage.CacheCreationTokens,
-		CacheRead:     out.lastUsage.CacheReadTokens,
-	}
-	costCents := computeSubTaskCostCents(modelName, tokens, r.claudeCfg)
 	if perr := r.subTaskSvc.Finish(st.ID, finalStatus, artifact, modelName, tokens, costCents, startTime); perr != nil {
 		log.Printf("[sub-task] failed to persist finish for %s: %v", st.ID, perr)
 	}

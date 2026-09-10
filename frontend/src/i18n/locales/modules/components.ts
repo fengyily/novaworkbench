@@ -132,11 +132,36 @@ export const components = {
     cancel: '取消',
     adjustBusy: '启动中…',
     adjustSubmit: '🚀 追加调整',
-    redoHint: '将以原提示词重新执行该子任务',
+    // Redo (in-place): re-run the SAME prompt on the SAME sub_tasks row.
+    // forked from the requirement's main coding session with a brand-new
+    // claude session id; the row count never grows on a redo.
+    redoHint: '在原任务基础上重新执行（不创建新记录）',
     redoModelLabel: '重做模型',
     redoSubmit: '🚀 开始重做',
     errAdjust: '追加调整失败',
-    errRedo: '重做失败',
+    errRedo: '仅失败的任务可重做',
+    // Continue (in-place, --resume): pick up the same claude session id
+    // where it left off and finish the work. Available on error AND on
+    // stopped rows (a user who hit Stop and then realised they wanted
+    // more progress hits Continue rather than Redo — Resume is cheaper
+    // and inherits whatever partial edits the previous run made).
+    continueToggle: '继续',
+    continueHint: '在原会话上 --resume 续接，不创建新记录',
+    continueSubmit: '▶ 继续执行',
+    continueBusy: '续接中…',
+    errContinue: '该子任务无法继续',
+    // Stop: interrupt a running sub-task. Sends SIGTERM (5s → SIGKILL)
+    // through JobStore and flips the row to status='stopped' with a
+    // "⏹ 用户中止" artifact prefix; the previous artifact (if any)
+    // is preserved under that banner so the user can still see what was
+    // done before stopping.
+    stopToggle: '⏹ 停止',
+    stopConfirm: '确认停止当前正在执行的子任务？',
+    stopping: '⏹ 停止中…',
+    stopped: '已停止',
+    stopRemoteDisabled: '远程 Agent 服务器执行暂不支持停止',
+    errStop: '停止失败',
+    errContinueNoSession: '该子任务无法续接：原会话 id 为空',
     sourceAuto: '自动',
     sourceAutoTitle: '由主 Agent 自动派发',
     sourceManual: '手动',

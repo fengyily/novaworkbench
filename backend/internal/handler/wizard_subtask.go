@@ -55,6 +55,11 @@ func subTaskSourceSID(req *model.Requirement, explicit string) string {
 // a specific Claude config so a per-run model override stays coherent with
 // the per-run config override the caller wants to honor.
 //
+// fork controls session derivation: fork=true (StartSubTask / AdjustSubTask /
+// RedoSubTask) mints a new session id and `--fork-session`s off the source;
+// fork=false (ContinueSubTask) reuses parent.SessionID via `--resume` so the
+// child continues the previous JSONL in place.
+//
 // See SubTaskRunner.Run for the full lifecycle.
 func (h *WizardHandler) runSubTask(
 	req *model.Requirement,
@@ -66,6 +71,7 @@ func (h *WizardHandler) runSubTask(
 	modelOverride string,
 	configIDOverride string,
 	adjust bool,
+	fork bool,
 ) {
 	if h.subTaskRunner == nil {
 		log.Printf("[sub-task] runner not wired, cannot run %s", st.ID)
@@ -73,7 +79,7 @@ func (h *WizardHandler) runSubTask(
 		job.Finish(1, store.JobError)
 		return
 	}
-	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, adjust)
+	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, adjust, fork)
 	// (The agent-server routing branch previously inlined here moved to
 	// SubTaskRunner.Run so that every sub-task path — manual children,
 	// orchestrated children, and push/PR sub-tasks — shares the same
@@ -179,7 +185,7 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		"sub_task_id": st.ID,
 	})
 
-	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, "", false)
+	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, "", false, true)
 }
 
 // AdjustSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/adjust.
@@ -271,18 +277,26 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 	// prompt prefix + system prompt as a fresh sub-task, but the
 	// source_session_id is the parent's session id (not the main agent),
 	// so the conversation inherits the parent's edits.
-	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, "", true)
+	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, "", true, true)
 }
 
 // RedoSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/redo.
 //
 // Body: { "model"?: "..." }
 //
-// Re-runs a FAILED sub-task with its original prompt. Unlike AdjustSubTask —
-// which forks the failed sub-task's own session to inherit partial edits — a
-// redo forks the parent's SOURCE session (the session it originally forked
-// from), so the child re-executes the original task from a clean starting
-// point. The optional model override lets the user switch models on the retry;
+// Re-runs a FAILED sub-task on its EXISTING row (no new sub_tasks row
+// inserted) with a fresh session id and a fresh JobStore job. The user
+// keeps seeing the same card; only the status flips back to running and
+// the artifact is overwritten when the new run finishes.
+//
+// Session-derivation strategy: the redo forks the requirement's main-agent
+// session (coding_session_id → design_session_id fallback), NOT the
+// parent's own session — so the new run starts from a clean slate, free of
+// the partial / broken state the failed run left behind on the parent's
+// JSONL. This mirrors the original RedoSubTask semantics ("从 source session
+// 干净 fork 再跑") but without INSERTing a child row.
+//
+// The optional model override lets the user switch models on the retry;
 // empty falls back to the developer role default inside runSubTask.
 func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 	if !h.requireSubTaskSvc(w) {
@@ -303,8 +317,6 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Look up the parent to validate ownership + capture the source session
-	// the failed run originally forked from (the clean redo starting point).
 	parent, err := h.subTaskSvc.Get(sid)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task not found")
@@ -314,24 +326,26 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task does not belong to this requirement")
 		return
 	}
-	// Redo is scoped to failures — a done/pending/running row has nothing to
-	// recover; the UI only offers the button on error cards.
+	// Redo is scoped to failures — a done/pending/running/stopped row has
+	// nothing to recover via redo. Stopped rows are explicitly Continue-able
+	// (see ContinueSubTask), not Redo-able; the UI hides Redo on stopped
+	// cards and uses Continue instead.
 	if parent.Status != model.SubTaskStatusError {
-		writeError(w, http.StatusConflict, "NOT_FAILED", "该子任务未失败，无需重做")
+		writeError(w, http.StatusConflict, "NOT_FAILED", "仅失败的任务可重做")
 		return
 	}
 
-	sourceSID := parent.SourceSessionID
-	if sourceSID == "" {
-		sourceSID = subTaskSourceSID(req, "")
-	}
+	sourceSID := subTaskSourceSID(req, parent.SourceSessionID)
 	if sourceSID == "" {
 		writeError(w, http.StatusConflict, "NO_SESSION",
 			"无法解析可复用的源会话，请重新发起 coding 后再试")
 		return
 	}
 
-	st, err := h.subTaskSvc.Redo(id, sid)
+	// In-place reset: clears artifact / job_id / token counters / cost /
+	// duration / completed_at and flips status back to pending. The row id
+	// (and prompt / title / source_session_id / source) are preserved.
+	st, err := h.subTaskSvc.RedoReset(sid, body.Model)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
@@ -350,13 +364,264 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
-		"job_id":      job.ID,
-		"sub_task_id": st.ID,
+		"job_id":         job.ID,
+		"sub_task_id":    st.ID,
+		"reused_session": "true",
 	})
 
-	// Re-use the shared spawn helper with adjust=false and the ORIGINAL prompt
-	// (st.Prompt) so the child re-executes the same task from a clean fork.
-	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false)
+	// Re-use the shared spawn helper with adjust=false, fork=true and the
+	// ORIGINAL prompt (st.Prompt) so the child re-executes the same task
+	// from a clean fork off the requirement's main-agent session.
+	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false, true)
+}
+
+// continueSubTaskPrompt is the fixed Chinese prompt used by ContinueSubTask.
+// Mirrors the wording ContinueCoding (wizard_coding.go) ships to the main
+// coding agent so the sub-task variant stays consistent — the child is asked
+// to first survey the workspace, identify what the previous run left done vs.
+// pending, then resume from the partial state and summarize in Chinese.
+const continueSubTaskPrompt = "继续完成之前的子任务。请先检查当前代码与工作区状态，判断哪些部分已完成、哪些未完成或需要修复；然后基于子任务的原始 prompt 继续完成剩余工作、补齐缺失内容。最后用中文总结本次完成的内容。"
+
+// ContinueSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/continue.
+//
+// Body: { "model"?: "..." }
+//
+// In-place resume of an interrupted / failed / stopped sub-task on the SAME
+// session id (no fork, no new JSONL). Compared to RedoSubTask:
+//
+//   - Redo forks the requirement's main-agent session (clean start, new
+//     session id, --fork-session).
+//   - Continue reuses parent.SessionID and runs --resume <parent.SessionID>
+//     so the child continues the same JSONL the previous attempt left off in,
+//     inheriting the conversation history it had built up. The previous
+//     artifact stays visible on the row until the new run's Finish overwrites
+//     it, so a user who refreshes mid-run sees the partial report instead of
+//     a blank card.
+//
+// Trigger conditions: parent.Status must be one of {error, stopped}.
+// running/pending/done are NOT continue-eligible:
+//   - running → clickable action is Stop, not Continue.
+//   - pending → the existing run hasn't started yet; user should wait or
+//     STOP+continue.
+//   - done → already terminal; user should Redo if they want a re-run, or
+//     Adjust if they want to push more instructions.
+//
+// parent.SessionID == "" → 409 NO_SESSION. This happens when the sub-task
+// was created before the dev branch had a coding_session_id stamped on it,
+// or after a clean re-init. The only recovery is Redo (which doesn't need a
+// parent session id — it forks the main agent's session instead).
+func (h *WizardHandler) ContinueSubTask(w http.ResponseWriter, r *http.Request) {
+	if !h.requireSubTaskSvc(w) {
+		return
+	}
+	var body struct {
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	req, err := h.reqSvc.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "requirement not found")
+		return
+	}
+	parent, err := h.subTaskSvc.Get(sid)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task not found")
+		return
+	}
+	if parent.RequirementID != id {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task does not belong to this requirement")
+		return
+	}
+	if parent.Status != model.SubTaskStatusError && parent.Status != model.SubTaskStatusStopped {
+		writeError(w, http.StatusConflict, "NOT_CONTINUABLE", "该子任务无法继续")
+		return
+	}
+	if parent.SessionID == "" {
+		writeError(w, http.StatusConflict, "NO_SESSION", "无法续接：原会话 id 为空，请改用「重做」")
+		return
+	}
+
+	// In-place reset that PRESERVES the existing artifact (so a refresh mid-
+	// run still shows the previous report). Token / cost / duration /
+	// completed_at / job_id are cleared so the SubTaskCard header re-renders
+	// from zero; model is updated only when the caller passed a non-empty
+	// override.
+	st, err := h.subTaskSvc.ContinueReset(sid, body.Model)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	newSID := parent.SessionID
+	sourceSID := parent.SessionID
+	job := h.jobs.Create(id)
+	if perr := h.subTaskSvc.UpdateJobID(st.ID, job.ID); perr != nil {
+		log.Printf("[sub-task continue] failed to persist job_id for %s: %v", st.ID, perr)
+	}
+	if perr := h.subTaskSvc.UpdateSession(st.ID, newSID, sourceSID); perr != nil {
+		log.Printf("[sub-task continue] failed to persist session for %s: %v", st.ID, perr)
+	}
+	if body.Model != "" {
+		if perr := h.subTaskSvc.UpdateModel(st.ID, body.Model); perr != nil {
+			log.Printf("[sub-task continue] failed to persist model for %s: %v", st.ID, perr)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"job_id":         job.ID,
+		"sub_task_id":    st.ID,
+		"reused_session": "false",
+	})
+
+	// Continue reuses the parent's session id; --resume <parent.SessionID>
+	// runs the child in the same JSONL the previous attempt appended to.
+	// Run() with fork=false picks "## 继续执行" as the prompt header so the
+	// child's contextualization stays consistent with the wizard's coding
+	// ContinueCoding path.
+	go h.runSubTask(req, st, job, newSID, sourceSID, continueSubTaskPrompt, body.Model, "", false, false)
+}
+
+// StopSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/stop.
+//
+// Cancels a running sub-task's underlying claude subprocess and flips the row
+// to SubTaskStatusStopped. The artifact is preserved (with the prior report
+// prepended by a "⏹ 用户中止于 <RFC3339>" banner) so the user can still read
+// what the run had produced before they pulled the plug — and a follow-up
+// ContinueSubTask can pick up from the same JSONL.
+//
+// Mechanism:
+//  1. Look up the JobStore job by sub_tasks.job_id.
+//  2. job.Cancel() invokes the cancel func captured in SubTaskRunner.Run's
+//     job.SetCmd(cmd, cancel). The gateway's exec.CommandContext chains
+//     SIGTERM → WaitDelay 5s → SIGKILL automatically, so the goroutine
+//     should always unwind within ~6s.
+//  3. MarkStopped prepends the stop banner to artifact and flips status to
+//     "stopped". Concurrent with MarkStopped, the runner's deferred
+//     finishSubTask may still run; it re-reads sub_tasks.status and, if it
+//     sees "stopped", writes only token/cost/duration via
+//     UpdateRunStatsOnStop (preserving the banner).
+//
+// Guard rails:
+//   - parent.Status must be "running" — clicking Stop on an already-terminal
+//     row is a no-op and returns 409 NOT_RUNNING.
+//   - req.AgentServerID != "" → 501 STOP_REMOTE_NOT_SUPPORTED. The remote
+//     worker (Agent server) doesn't yet ship a kill RPC; rolling it out is
+//     future work.
+//   - If the JobStore has already evicted the job (ring buffer cap=50) OR
+//     the job is in a terminal state (the goroutine finished after our
+//     status check but before Cancel), return 409 JOB_GONE — user should
+//     Continue or Redo.
+//
+// 6-second watchdog goroutine: in theory gateway's CommandContext chain
+// always finishes the subprocess within 5s + the job.Finish path. If for
+// any reason the JobStore job is still "running" after 6s (e.g. a stuck
+// runClaudeStream), we re-call MarkStopped with the latest artifact to
+// make sure the row is durable and the user sees a stopped state even if
+// the SSE eventually fails to deliver a terminal frame.
+func (h *WizardHandler) StopSubTask(w http.ResponseWriter, r *http.Request) {
+	if !h.requireSubTaskSvc(w) {
+		return
+	}
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	req, err := h.reqSvc.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "requirement not found")
+		return
+	}
+	parent, err := h.subTaskSvc.Get(sid)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task not found")
+		return
+	}
+	if parent.RequirementID != id {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task does not belong to this requirement")
+		return
+	}
+	if parent.Status != model.SubTaskStatusRunning {
+		writeError(w, http.StatusConflict, "NOT_RUNNING", "该子任务未运行，无需停止")
+		return
+	}
+	// Remote runs (Agent server dispatch) are not stoppable in v1 — the
+	// worker process lives on a different host and would need a kill RPC
+	// that the worker doesn't ship yet. Surface the limitation explicitly
+	// (501, not 404) so the client can render a "stop is coming" hint.
+	if req.AgentServerID != "" {
+		writeError(w, http.StatusNotImplemented, "STOP_REMOTE_NOT_SUPPORTED",
+			"远程 Agent 服务器执行暂不支持停止")
+		return
+	}
+	job, ok := h.jobs.Get(parent.JobID)
+	if !ok || job == nil {
+		writeError(w, http.StatusConflict, "JOB_GONE",
+			"任务已被回收，请用「继续」或「重做」重新发起")
+		return
+	}
+	// RLock-snapshot the status to avoid racing the goroutine that may be
+	// finishing the job concurrently.
+	_, _, _ = job.Snapshot()
+	_, jobStatus, _ := job.Snapshot()
+	if jobStatus != store.JobRunning {
+		writeError(w, http.StatusConflict, "JOB_GONE",
+			"任务已被回收，请用「继续」或「重做」重新发起")
+		return
+	}
+
+	// Snapshot the prior artifact BEFORE MarkStopped (which prepends the
+	// banner). Used both for the immediate write and the watchdog retry.
+	priorArtifact := parent.Artifact
+
+	// Cancel the subprocess. Cancel itself returns immediately — the gateway
+	// chains SIGTERM → WaitDelay 5s → SIGKILL in the background.
+	job.Cancel()
+
+	// Flip status to "stopped" + prepend the banner. This is the
+	// authoritative write: even if the runner's deferred finishSubTask lerks
+	// in afterwards, it observes status=stopped and skips the artifact
+	// overwrite.
+	if perr := h.subTaskSvc.MarkStopped(parent.ID, priorArtifact); perr != nil {
+		log.Printf("[sub-task stop] failed to mark stopped for %s: %v", parent.ID, perr)
+	}
+
+	// 6-second watchdog: in case gateway's CommandContext doesn't unwind
+	// the goroutine (stuck stream consumer, etc.), re-mark the row and
+	// force-finish the job after a 6s grace period so SSE subscribers
+	// always see a terminal frame.
+	go func(parentID, parentJobID, prior string) {
+		deadline := time.Now().Add(6 * time.Second)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for time.Now().Before(deadline) {
+			<-ticker.C
+			j, found := h.jobs.Get(parentJobID)
+			if !found || j == nil {
+				// Job already evicted from ring buffer → terminal.
+				return
+			}
+			_, status, _ := j.Snapshot()
+			if status != store.JobRunning {
+				return
+			}
+		}
+		// Still running after 6s — force-finish the JobStore job so SSE
+		// subscribers unblock, and idempotently re-mark the row stopped.
+		if j, found := h.jobs.Get(parentJobID); found && j != nil {
+			j.Finish(0, store.JobDone)
+		}
+		if perr := h.subTaskSvc.MarkStopped(parentID, prior); perr != nil {
+			log.Printf("[sub-task stop watchdog] failed to re-mark stopped for %s: %v", parentID, perr)
+		}
+		log.Printf("[sub-task stop] watchdog forced finish for %s", parentID)
+	}(parent.ID, parent.JobID, priorArtifact)
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":      "stopping",
+		"sub_task_id": parent.ID,
+		"job_id":      parent.JobID,
+	})
 }
 
 // GenerateSubTaskSummary handles POST /api/requirements/{id}/sub-tasks/summary
