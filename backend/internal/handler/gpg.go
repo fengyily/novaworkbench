@@ -1,0 +1,253 @@
+package handler
+
+import (
+	"fmt"
+	"strings"
+)
+
+// gpg.go is the shared kernel for the GPG-signing provision path used by
+// both the remote Agent Server branch (handler/gpg_remote.go) and the
+// local coding branch (handler/gpg_local.go). It is deliberately I/O
+// free: every public function returns either a shell script string for
+// the caller to feed into a RunScript / sh -c, or a parsed value out of
+// that script's stdout. That keeps the function unit-testable without
+// touching the filesystem or the SSH client, and it forces a single
+// source of truth for the script body — so a bug fix in the script
+// applies to both provision paths in lock-step.
+//
+// Two non-obvious invariants the script enforces:
+//
+//  1. **Repo config goes to `--worktree`, never `--local`.** In a git
+//     linked worktree, `git config --local` writes the *base* repo's
+//     shared .git/config. With per-project concurrency on a single
+//     Agent Server host that means a later req's `gpg.program`
+//     overwrites an earlier req's, and the first req's cleanup of its
+//     GNUPGHOME makes the other req's commits suddenly fail. Writing
+//     `extensions.worktreeConfig = true` on the base repo + then
+//     `git config --worktree ...` on the wt puts each key into the
+//     per-worktree .git/worktrees/<id>/config.worktree file. If git
+//     < 2.20 rejects `--worktree`, we fall back to `--local` and emit
+//     NOVA_GPG_WORKTREE_FALLBACK=1 so the caller can warn that
+//     concurrent reqs on the same project may interfere.
+//
+//  2. **No password on `gpg --import`.** The armored private-key block
+//     is encrypted *inside* itself; the passphrase is only consulted
+//     at use time (via gpg-agent / loopback). So the provision script
+//     never touches the passphrase file — the wrapper script
+//     (buildGPGWrapperScript) reads it at signature time only, and
+//     even then only if the file is non-empty (an unprotected key
+//     must not see `--passphrase-file <empty>`).
+
+// buildGPGProvisionScript emits the shell script that, on the target
+// host (local or remote), imports the previously-uploaded armored
+// private key into a per-run GNUPGHOME and wires the given worktree's
+// git config to use it for every commit/tag.
+//
+// Parameters:
+//   - gnupgHome: directory where gpg.conf / gpg-agent.conf /
+//     passphrase / git-gpg-wrapper / key.asc live. Must already
+//     contain the key.asc (written by the caller) and be 0700. The
+//     script will chmod 0700 anyway as a belt-and-braces measure.
+//   - wtPath: the linked worktree path where the dev branch lives.
+//     `git config --worktree` writes here.
+//   - baseRepo: the shared base repo on the Agent Server
+//     (`/tmp/nova-agent/<projectID>/base`). Needed for
+//     `extensions.worktreeConfig = true`.
+//   - gitName / gitEmail: the committer identity to bake into the
+//     worktree's user.name / user.email. Either or both may be empty;
+//     empty fields are not written at all so git falls back to its own
+//     config lookup, preserving dev-machine behavior.
+//
+// The script never embeds the private key or the passphrase — only
+// file paths under GNUPGHOME.
+func buildGPGProvisionScript(gnupgHome, wtPath, baseRepo, gitName, gitEmail string) string {
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString("set -eu\n")
+	b.WriteString("export GNUPGHOME=" + shellQuoteSingle(gnupgHome) + "\n")
+	b.WriteString("mkdir -p \"$GNUPGHOME\" && chmod 0700 \"$GNUPGHOME\"\n")
+	b.WriteString("printf 'pinentry-mode loopback\\n' > \"$GNUPGHOME/gpg.conf\"\n")
+	b.WriteString("printf 'allow-loopback-pinentry\\n' > \"$GNUPGHOME/gpg-agent.conf\"\n")
+	// Import is non-interactive; --pinentry-mode loopback + --batch is
+	// the documented way to skip the pinentry prompt entirely on
+	// ancient gpg 2.0.x.
+	b.WriteString("gpg --batch --no-tty --yes --pinentry-mode loopback --import \"$GNUPGHOME/key.asc\"\n")
+	// Wipe the armored key from disk ASAP so a stray `git add -A`
+	// against GNUPGHOME can't commit it. The keyring copy inside
+	// ~/.gnupg/private-keys-v1.d/ is what matters from now on.
+	b.WriteString("rm -f \"$GNUPGHOME/key.asc\"\n")
+	// Extract the 16-hex key id from `gpg --list-secret-keys --with-colons`,
+	// which prints lines like: sec:u:4096:1:ABCDEF...:...:...
+	b.WriteString("keyid=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/{print $5; exit}')\n")
+	b.WriteString("if [ -z \"$keyid\" ]; then\n")
+	b.WriteString("  echo \"[nova-gpg] 未在导入结果中找到私钥，请确认上传的 armored 私钥块完整且未损坏\" >&2\n")
+	b.WriteString("  exit 1\n")
+	b.WriteString("fi\n")
+	// Enable per-worktree config on the base repo. Required for
+	// `git config --worktree` to actually land in
+	// .git/worktrees/<id>/config.worktree instead of being rejected.
+	b.WriteString("git -C " + shellQuoteSingle(baseRepo) + " config extensions.worktreeConfig true || true\n")
+
+	// writeWt emits `git -C <wt> config --worktree <key> <val>` with a
+	// fallback to `--local` if --worktree is unsupported. The caller
+	// reports the situation as a single warning line.
+	//
+	// `key` is always a hard-coded literal (user.name, commit.gpgsign,
+	// etc.) so it gets shellQuoteSingle. `val` may be either a literal
+	// (true, user@example.com) or a shell variable reference
+	// (`$keyid`, `$GNUPGHOME/git-gpg-wrapper`) — when it starts with
+	// `$` we leave it unquoted-double-quoted so shell expansion
+	// happens at run time. shellQuoteSingle on `$keyid` would emit
+	// `'$keyid'` and break the substitution.
+	writeWt := func(key, val string) {
+		keyQ := shellQuoteSingle(key)
+		var valRendered string
+		if strings.HasPrefix(val, "$") {
+			valRendered = `"` + val + `"`
+		} else {
+			valRendered = shellQuoteSingle(val)
+		}
+		wtQ := shellQuoteSingle(wtPath)
+		b.WriteString("if ! git -C " + wtQ + " config --worktree " + keyQ + " " + valRendered + " 2>/dev/null; then\n")
+		b.WriteString("  echo \"[nova-gpg] --worktree config 失败，回落到 --local（key=" + key + "）\" >&2\n")
+		b.WriteString("  echo \"NOVA_GPG_WORKTREE_FALLBACK=1\"\n")
+		b.WriteString("  git -C " + wtQ + " config --local " + keyQ + " " + valRendered + "\n")
+		b.WriteString("fi\n")
+	}
+
+	if gitName != "" {
+		writeWt("user.name", gitName)
+	}
+	if gitEmail != "" {
+		writeWt("user.email", gitEmail)
+	}
+	writeWt("user.signingkey", "$keyid")
+	writeWt("commit.gpgsign", "true")
+	writeWt("tag.gpgsign", "true")
+	writeWt("gpg.program", "$GNUPGHOME/git-gpg-wrapper")
+
+	// Marker line: parseKeyIDFromScriptOutput greps this out of the
+	// combined stdout. Putting it last means a non-zero exit anywhere
+	// above skips the marker, which the caller can detect as "did not
+	// succeed".
+	b.WriteString("echo \"NOVA_GPG_KEYID=$keyid\"\n")
+	return b.String()
+}
+
+// buildGPGWrapperScript emits the executable that `git` invokes when
+// it needs a signature (git calls `gpg.program` with arguments like
+// `--status-fd=2 -bsau <keyid>`). The wrapper's job is to:
+//
+//   - Pin GNUPGHOME so the wrapper works regardless of which directory
+//     git was invoked from (git does not propagate env into the
+//     gpg.program subprocess in a way we can rely on across hosts).
+//   - Suppress pinentry prompts so non-interactive commits don't hang.
+//   - Pass the passphrase file *only* if it is non-empty. An
+//     unprotected key must not see `--passphrase-file ""` — gpg 2.4.x
+//     treats that as a hard failure ("no passphrase given") rather
+//     than "no passphrase wanted".
+func buildGPGWrapperScript(gnupgHome string) string {
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString("set -eu\n")
+	b.WriteString("export GNUPGHOME=" + shellQuoteSingle(gnupgHome) + "\n")
+	b.WriteString("if [ -s \"$GNUPGHOME/passphrase\" ]; then\n")
+	b.WriteString("  exec gpg --batch --no-tty --pinentry-mode loopback --passphrase-file \"$GNUPGHOME/passphrase\" \"$@\"\n")
+	b.WriteString("fi\n")
+	b.WriteString("exec gpg --batch --no-tty --pinentry-mode loopback \"$@\"\n")
+	return b.String()
+}
+
+// parseKeyIDFromScriptOutput extracts the key id and the worktree
+// fallback marker from the combined stdout of buildGPGProvisionScript.
+// Returns ("", false) when neither marker is present (caller treats
+// that as "script did not reach the success path"). Multi-line output
+// is supported — line ordering does not matter — because the SSH
+// runner concatenates command stdout/stderr into the writer in
+// arbitrary chunks.
+//
+// worktreeFallback=true means at least one `git config --worktree`
+// call failed and the script fell back to `--local`. Concurrent reqs
+// against the same base repo may then interfere; the caller should
+// surface this as a single warning to the user.
+func parseKeyIDFromScriptOutput(out string) (keyID string, worktreeFallback bool) {
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "NOVA_GPG_KEYID=") {
+			// The script emits `echo "NOVA_GPG_KEYID=$keyid"` —
+			// the shell collapses the spaces around `$keyid` so we
+			// usually see a clean value, but tolerate leading /
+			// trailing whitespace defensively (the SSH writer may
+			// split a chunk mid-token).
+			keyID = strings.TrimSpace(strings.TrimPrefix(line, "NOVA_GPG_KEYID="))
+		}
+		if line == "NOVA_GPG_WORKTREE_FALLBACK=1" {
+			worktreeFallback = true
+		}
+	}
+	return keyID, worktreeFallback
+}
+
+// classifyGitSignFailure maps the stderr of a failed `git commit` (or
+// `git push`) into a user-facing Chinese message. Returns the empty
+// string when no specific bucket matches, so the caller can fall back
+// to the existing generic "exit=N" wording without double-reporting.
+//
+// Order matters: `bad passphrase` strings are a substring of several
+// unrelated errors (`Inappropriate ioctl` shows up in any program that
+// tries to read from a closed tty, including the "no passphrase given"
+// path), so we test the most specific phrases first.
+func classifyGitSignFailure(stderr string) string {
+	s := strings.ToLower(stderr)
+	switch {
+	// Wrong passphrase typed, or wrong passphrase file contents. We
+	// only flag the unambiguous "the passphrase was tried and gpg
+	// rejected it" wording — `Inappropriate ioctl` alone is too
+	// generic (it can also mean "no tty available", which we surface
+	// via the "no secret key" bucket below).
+	case strings.Contains(s, "bad passphrase"),
+		strings.Contains(s, "decryption failed"):
+		return "❌ GPG 私钥密码错误，请到「设置 → 平台 Token」更正后重试"
+
+	case strings.Contains(s, "expired"), strings.Contains(s, "key expired"):
+		return "❌ GPG 密钥已过期，请更新密钥后重新上传"
+
+	case strings.Contains(s, "secret key not available"),
+		strings.Contains(s, "no secret key"),
+		strings.Contains(s, "skipped: no public key"), // unusable subkey
+		strings.Contains(s, "inappropriate ioctl for device"):
+		return "❌ 未找到可用的 GPG 私钥，请确认已在「设置 → 平台 Token」保存正确的私钥"
+
+	case strings.Contains(s, "gpg: not found"),
+		strings.Contains(s, "executable file not found"),
+		strings.Contains(s, "no such file or directory") && strings.Contains(s, "gpg"):
+		return "❌ Agent 服务器缺少 gpg，请到「设置 → Agent 服务器」点「安装依赖」"
+
+	case strings.Contains(s, "gh006"),
+		strings.Contains(s, "protected branch"),
+		strings.Contains(s, "commits must be signed"),
+		// Narrowing to "verified email" avoids false positives on
+		// unrelated log lines like gpg's own "Good signature from
+		// …" output (which contains the word "verified" but is the
+		// success path, not the failure path).
+		strings.Contains(s, "verified email"):
+		return "❌ 推送失败：GitHub 拒绝未验证提交。请确认 GPG 密钥 UID 邮箱与 Token 的 Git 邮箱一致，且该邮箱已在 GitHub 验证"
+	}
+	return ""
+}
+
+// gpgImportErrorMessage formats a Chinese "private-key import failed"
+// message. Stderr is truncated to 500 runes so a verbose gpg error
+// (which can include the entire failed packet) doesn't blow up the
+// job log panel.
+func gpgImportErrorMessage(stderr string) string {
+	const max = 500
+	trimmed := strings.TrimSpace(stderr)
+	if trimmed == "" {
+		return "❌ GPG 私钥导入失败：未知错误（gpg 无 stderr 输出）"
+	}
+	if len([]rune(trimmed)) > max {
+		trimmed = string([]rune(trimmed)[:max]) + "…"
+	}
+	return fmt.Sprintf("❌ GPG 私钥导入失败：%s", trimmed)
+}

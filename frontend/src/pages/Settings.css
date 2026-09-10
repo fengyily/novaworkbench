@@ -142,6 +142,74 @@
   margin-top: 4px;
 }
 
+/* Shared by SettingsTokens + SettingsAgentServers — keeps the AES-256-GCM
+   notice visually consistent across settings pages. */
+.settings-section .security-banner {
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--color-text);
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+
+.settings-section .security-banner code {
+  background: var(--color-hover);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+}
+
+/* GPG badge in the token list — visual flag for which rows sign commits. */
+.gpg-badge {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(16, 185, 129, 0.12);
+  color: #047857;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  letter-spacing: 0.02;
+}
+.gpg-badge--pending {
+  background: rgba(100, 116, 139, 0.12);
+  color: var(--color-text-muted);
+}
+
+/* Mono font + min height for the GPG private-key textarea so the armored
+   block stays readable without wrapping mid-line. */
+.gpg-key-input {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+  white-space: pre;
+  min-height: 140px;
+}
+
+/* Inline "hint" span next to a label, matching the keep-hint style used
+   by SettingsAgentServers (e.g. "(leave blank to keep)"). */
+.modal-field .hint {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  font-weight: normal;
+}
+
+/* Inline checkbox + label, no separate row of its own. */
+.modal-field .checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.modal-field .checkbox-label input[type="checkbox"] {
+  margin: 0;
+}
+
 .form-group {
   margin-bottom: 18px;
 }

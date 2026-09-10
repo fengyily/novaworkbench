@@ -54,7 +54,7 @@ LABEL org.opencontainers.image.version="${VERSION}" \
 # and HOME /home/node — we reuse it instead of creating a new user (which
 # would collide on UID 1000). Host bind-mounts can be chowned to the same
 # number via `chown -R 1000:1000 ~/.novaworkbench`.
-RUN apk add --no-cache git ca-certificates openssh-client su-exec tini bash
+RUN apk add --no-cache git ca-certificates openssh-client su-exec tini bash gnupg
 # tini forwards signals and reaps zombies — Claude spawns subagents that
 # `claude -p` waits on; without tini the bash tool calls can leak zombies.
 #

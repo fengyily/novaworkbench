@@ -970,12 +970,23 @@ export interface PlatformToken {
   // ~/.gitconfig. Empty values fall back to git's normal config lookup.
   git_user_name: string;
   git_user_email: string;
+  // GPG signing config. `gpg_key_id` is the 16-hex key id that was last
+  // imported on the Agent host (filled in after a successful provision, so
+  // the UI can echo "Verified with 0xDEAD…BEEF" without ever echoing the
+  // private key itself). The encrypted gpg_private_key / gpg_passphrase
+  // columns live server-side and are NEVER returned here.
+  gpg_enabled: boolean;
+  gpg_key_id: string;
   created_at: string;
   updated_at: string;
 }
 
 export const platformApi = {
   list: () => api.get<PlatformToken[]>('/api/settings/tokens'),
+  // Create a new token. GPG private key + passphrase are encrypted on the
+  // server with AES-256-GCM before they land in the DB, and never leave the
+  // server again; passing them here only matters on the create / rotate
+  // request, and only the backend ever sees the plaintext.
   create: (data: {
     name: string;
     platform: string;
@@ -983,16 +994,28 @@ export const platformApi = {
     token: string;
     git_user_name?: string;
     git_user_email?: string;
+    gpg_enabled?: boolean;
+    gpg_private_key?: string;
+    gpg_passphrase?: string;
   }) => api.post<PlatformToken>('/api/settings/tokens', data),
   // Edit the editable fields of an existing token. Token secret is left alone
   // by default (use new_token to rotate it). Updates immediately become the
   // commit identity used by the wizard's merge push.
+  //
+  // GPG mirrors the secret semantics: gpg_private_key / gpg_passphrase left
+  // empty = keep the existing ciphertext. Set `clear_gpg: true` to wipe the
+  // stored key + key id and turn gpg_enabled off (used by the UI when the
+  // user un-checks the toggle on an already-enabled row).
   update: (id: string, data: {
     name: string;
     base_url: string;
     git_user_name?: string;
     git_user_email?: string;
     new_token?: string;
+    gpg_enabled?: boolean;
+    gpg_private_key?: string;
+    gpg_passphrase?: string;
+    clear_gpg?: boolean;
   }) => api.put<PlatformToken>(`/api/settings/tokens/${id}`, data),
   delete: (id: string) => api.delete<{ status: string }>(`/api/settings/tokens/${id}`),
 };
