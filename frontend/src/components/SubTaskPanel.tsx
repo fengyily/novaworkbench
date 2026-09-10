@@ -74,12 +74,14 @@ const statusLabelKeys: Record<SubTaskStatus, string> = {
   running: 'components.subTaskCard.statusRunning',
   done:    'components.subTaskCard.statusDone',
   error:   'components.subTaskCard.statusError',
+  stopped: 'components.subTaskCard.statusStopped',
 };
 const statusChipClass: Record<SubTaskStatus, string> = {
   pending: 'sub-card-status-chip sub-card-status-pending',
   running: 'sub-card-status-chip sub-card-status-running',
   done:    'sub-card-status-chip sub-card-status-done',
   error:   'sub-card-status-chip sub-card-status-error',
+  stopped: 'sub-card-status-chip sub-card-status-stopped',
 };
 
 // truncate keeps the monospace header line at a predictable width — a
@@ -279,6 +281,18 @@ interface CardProps {
   // a child is alive, so a redo of an otherwise-terminal list would never
   // refresh without this.
   onCreated?: () => void;
+  // Fires after a successful in-place restart (Redo or Continue). The
+  // parent uses this to (a) flip the row to status='running' with the new
+  // job_id and (b) subscribe the SSE stream for live progress. Kept
+  // separate from onCreated because a restart mutates the SAME row (no
+  // new entry to refresh), and we don't want to loadList a parent list
+  // that already contains this row.
+  onRestarted?: (subTaskId: string, newJobId: string) => void;
+  // False when the requirement runs on a remote Agent Server — Stop is
+  // disabled there in this iteration (returns 501 STOP_REMOTE_NOT_SUPPORTED).
+  // The parent (RequirementDetail) decides; the default is true so legacy
+  // call sites / tests don't accidentally disable Stop.
+  canStop?: boolean;
   // Panel-level model selection — applies to the next "Follow-up" turn so
   // the user picks the model once at the panel header and every card
   // uses it without owning its own copy. Distinct from the per-card
@@ -291,7 +305,51 @@ interface CardProps {
   onAdjustModelChange?: (model: string) => void;
 }
 
-function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '', onAdjustModelChange }: CardProps) {
+// useRestartSubTask encapsulates the "原地翻转" semantics shared by the
+// Redo and Continue buttons: flip the row to running immediately, kick
+// the API call, and let the parent pick up the new job_id via onRestarted.
+// On any error we revert the optimistic update and re-throw so the caller
+// can surface a localized toast.
+//
+// We deliberately do NOT close the SSE here: the parent owns SSE lifetime
+// via the onRestarted hook (it re-subscribes when the new job_id lands).
+// The card's local `streaming` state is flipped back to true so the live
+// log panel reopens while waiting for the new frames.
+function useRestartSubTask(args: {
+  st: SubTask;
+  requirementId: string;
+  onChanged: (next: SubTask) => void;
+  onRestarted?: (subTaskId: string, newJobId: string) => void;
+  setStreaming: (b: boolean) => void;
+  setLines: (l: LogLine[]) => void;
+}) {
+  const { st, requirementId, onChanged, onRestarted, setStreaming, setLines } = args;
+  return useCallback(async (kind: 'redo' | 'continue', model?: string) => {
+    // Snapshot for rollback on error.
+    const snapshot = { ...st };
+    // Optimistic: card flips to running UI + parent gets a synthetic
+    // running row. The empty job_id keeps the SSE effect gated until
+    // onRestarted lands with the real one.
+    setStreaming(true);
+    setLines([]);
+    onChanged({ ...st, status: 'running', job_id: '', artifact: '' });
+    try {
+      const resp = kind === 'redo'
+        ? await subTasksApi.redo(requirementId, st.id, model ? { model } : {})
+        : await subTasksApi.continue(requirementId, st.id, model ? { model } : {});
+      // Hand off to the parent: it stamps job_id on the row and
+      // subscribes the SSE stream for the new job.
+      onRestarted?.(st.id, resp.job_id);
+    } catch (e) {
+      // Rollback: revert parent state + close the live log panel.
+      onChanged(snapshot);
+      setStreaming(false);
+      throw e;
+    }
+  }, [st, requirementId, onChanged, onRestarted, setStreaming, setLines]);
+}
+
+function SubTaskCard({ st, index, total, onChanged, onCreated: _onCreated, onRestarted, canStop = true, adjustModel = '', onAdjustModelChange }: CardProps) {
   const { t } = useTranslation();
   // The card uses a layout that mirrors an issue tracker detail view:
   //   ┌─ terminal-style header line ────────────────────────────────┐
@@ -346,6 +404,17 @@ function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '',
     const t = setInterval(() => setLiveSeconds((v) => v + 1), 1000);
     return () => clearInterval(t);
   }, [st.status]);
+  // Stop optimistic state: shown as "⏹ 停止中…" on the button while we
+  // wait for the SSE job_done frame. Cleared automatically once the row
+  // leaves 'running' (the same frame that flips it to 'stopped').
+  const [stopping, setStopping] = useState(false);
+  useEffect(() => {
+    if (st.status !== 'running' && stopping) setStopping(false);
+  }, [st.status, stopping]);
+  // Continue optimistic state — disabled on the button while the
+  // --resume call is in flight. Mirror of stopping/redoing; kept
+  // separate so the drawer-style `adjusting` state isn't affected.
+  const [continueBusy, setContinueBusy] = useState(false);
   // Live usage snapshot — driven by SSE `usage` frames (step="sub_task")
   // OR computed client-side from the persisted sub_tasks.*_tokens columns
   // when the card has finished and SSE has gone quiet. We display
@@ -353,6 +422,19 @@ function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '',
   const [usage, setUsage] = useState<UsageInfo | undefined>(undefined);
   const esRef = useRef<EventStream | null>(null);
   const chipLabel = t(statusLabelKeys[st.status]);
+
+  // Shared Redo/Continue driver. Lives at the top of the component so
+  // both submitRedo and submitContinue close over the same function and
+  // any future entry point (e.g. a bulk action on the panel header) can
+  // call it without duplicating the optimistic-flip / rollback dance.
+  const restartSubTask = useRestartSubTask({
+    st,
+    requirementId: st.requirement_id,
+    onChanged,
+    onRestarted,
+    setStreaming,
+    setLines,
+  });
 
   // Open / close the SSE stream. Re-subscribes on each status flip; the
   // createEventStream handle is kept in a ref so we can close on unmount
@@ -440,20 +522,63 @@ function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '',
       // backend as an explicit model id — the backend then falls back to
       // the role default.
       const model = redoModel && redoModel !== DefaultModelLabel ? redoModel : undefined;
-      await subTasksApi.redo(st.requirement_id, st.id, { model });
+      await restartSubTask('redo', model);
       setRedoing(false);
       setRedoError(null);
-      // The redo creates a brand-new sub-task row. Fire the parent's refresh
-      // callback so it appears immediately; the periodic poll only runs while
-      // a child is alive, so a redo of an otherwise-terminal list would never
-      // surface without this.
-      onCreated?.();
+      // The optimistic flip + parent's onRestarted callback (invoked by
+      // the hook) handles the row mutation; no parent list refresh needed
+      // since the row stays in place. onCreated is intentionally NOT
+      // called here — the row already exists, no new entry to surface.
     } catch (e: any) {
+      // The hook already rolled back the optimistic update; surface a
+      // localized message. The backend's 409 NOT_FAILED gets translated
+      // to the local "errRedo" string regardless of the message text.
       setRedoError(e?.message || t('components.subTaskCard.errRedo'));
     } finally {
       setRedoBusy(false);
     }
-  }, [redoBusy, redoModel, st.id, st.requirement_id, onCreated, t]);
+  }, [redoBusy, redoModel, restartSubTask, t]);
+
+  // Continue (▶ 继续执行): --resume the existing claude session on the
+  // SAME sub_tasks row. Available on error AND on stopped — the row
+  // count never grows. No drawer, no model picker (Continue inherits the
+  // model from the row's last run; users who want a model switch can
+  // fall back to Redo).
+  const submitContinue = useCallback(async () => {
+    if (continueBusy) return;
+    if (st.status !== 'error' && st.status !== 'stopped') return;
+    setContinueBusy(true);
+    try {
+      await restartSubTask('continue');
+    } catch (e: any) {
+      // Rollback already done by the hook; surface a localized message.
+      window.alert(t('components.subTaskCard.errContinue'));
+    } finally {
+      setContinueBusy(false);
+    }
+  }, [continueBusy, st.status, restartSubTask, t]);
+
+  // Stop (⏹ 停止): interrupt a running sub-task via the backend's
+  // /stop endpoint. The endpoint cancels the underlying JobStore job
+  // (SIGTERM → 5s → SIGKILL) and flips the row to 'stopped' with a
+  // "⏹ 用户中止" artifact prefix. The actual state flip surfaces via
+  // the existing SSE job_done frame → subTasksApi.get → onChanged, so
+  // this card just needs the optimistic "stopping" UI while we wait.
+  const submitStop = useCallback(async () => {
+    if (stopping || st.status !== 'running' || !canStop) return;
+    if (!window.confirm(t('components.subTaskCard.stopConfirm'))) return;
+    setStopping(true);
+    try {
+      await subTasksApi.stop(st.requirement_id, st.id);
+      // Backend returns immediately with {status: 'stopping', ...}; the
+      // row state will arrive via SSE → onChanged. Don't manually flip
+      // status here — the row-level MarkStopped write happens on the
+      // backend, and the SSE pipeline will pick it up.
+    } catch (e: any) {
+      setStopping(false);
+      window.alert(e?.message || t('components.subTaskCard.errStop'));
+    }
+  }, [stopping, st.status, canStop, st.requirement_id, st.id, t]);
 
   // The header-right summary block surfaces two quick-glance signals the
   // user always wants at a glance without expanding the card:
@@ -513,6 +638,25 @@ function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '',
               <span className="sub-card-stat sub-card-stat-cost" title={t('components.subTaskCard.costTitle')}>{costCell}</span>
             )}
           </span>
+          {/* Stop button — visible only while the sub-task is running.
+              Sits next to the quickstats block; the header's click
+              target toggles expand/collapse so we stopPropagation here
+              to keep the two click targets independent. Disabled (with
+              a localized title) when canStop=false — the parent flips
+              that for Agent-Server executions where the backend rejects
+              /stop with 501 STOP_REMOTE_NOT_SUPPORTED. */}
+          {st.status === 'running' && (
+            <button
+              type="button"
+              className="sub-card-stop-btn"
+              onClick={(e) => { e.stopPropagation(); submitStop(); }}
+              disabled={stopping || !canStop}
+              title={!canStop ? t('components.subTaskCard.stopRemoteDisabled') : t('components.subTaskCard.stopConfirm')}
+              aria-label={t('components.subTaskCard.stopToggle')}
+            >
+              {stopping ? t('components.subTaskCard.stopping') : t('components.subTaskCard.stopToggle')}
+            </button>
+          )}
           <span className="sub-card-toggle" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
         </div>
         {/* Title line: the user-supplied sub-task title in display weight.
@@ -589,12 +733,21 @@ function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '',
           )}
 
           {/* Append-adjustment: only available on a finished sub-task
-              (done or error). Adjusts resume the parent's session via
-              --fork-session so the child inherits prior edits. */}
-          {!streaming && (st.status === 'done' || st.status === 'error') && st.session_id && (
+              (done, error, or stopped). Adjusts resume the parent's
+              session via --fork-session so the child inherits prior edits.
+              Continue and Redo are both in-place restarts — Redo forks
+              a brand-new claude session from the requirement's main
+              coding_session_id; Continue --resume's the row's own
+              existing session id (cheaper, preserves partial work). */}
+          {!streaming && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && st.session_id && (
             <div className="sub-card-adjust">
-              {/* Toggle row: both actions collapse to a single row when no
-                  pane is open. Redo is only offered on a FAILED sub-task. */}
+              {/* Toggle row: Adjust / Continue / Redo collapse to a single
+                  row when no drawer is open. Continue sits before Redo so
+                  the "接着干" affordance is more prominent than "重新做".
+                  Redo is only offered on a FAILED sub-task (the backend
+                  enforces the same guard). Continue is offered on error
+                  AND stopped — a user who hit Stop and now wants more
+                  progress hits Continue rather than Redo. */}
               {!adjusting && !redoing && (
                 <div className="sub-adjust-actions">
                   <button
@@ -602,6 +755,17 @@ function SubTaskCard({ st, index, total, onChanged, onCreated, adjustModel = '',
                     className="sub-adjust-toggle"
                     onClick={() => setAdjusting(true)}
                   >{t('components.subTaskCard.adjustToggle')}</button>
+                  {(st.status === 'error' || st.status === 'stopped') && (
+                    <button
+                      type="button"
+                      className="sub-adjust-toggle"
+                      onClick={submitContinue}
+                      disabled={continueBusy}
+                      title={t('components.subTaskCard.continueHint')}
+                    >
+                      {continueBusy ? t('components.subTaskCard.continueBusy') : t('components.subTaskCard.continueToggle')}
+                    </button>
+                  )}
                   {st.status === 'error' && (
                     <button
                       type="button"
@@ -914,6 +1078,24 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   const onItemChanged = useCallback((next: SubTask) => {
     setItems((prev) => prev ? prev.map((p) => p.id === next.id ? next : p) : prev);
   }, []);
+
+  // onRestarted: fired after a successful in-place Redo/Continue. We
+  // stamp the row with the new job_id so the card's SSE effect re-opens
+  // on the new stream. We deliberately do NOT touch items with a
+  // full-list reload — the row already exists; we just point it at the
+  // new JobStore job and let the SSE push carry subsequent state
+  // transitions (job_done → onChanged flips to terminal status + the
+  // MarkStopped-prefixed artifact).
+  const handleSubTaskRestarted = useCallback((subTaskId: string, newJobId: string) => {
+    setItems((prev) => prev ? prev.map((p) => p.id === subTaskId
+      ? { ...p, status: 'running', job_id: newJobId, artifact: '' }
+      : p) : prev);
+  }, []);
+
+  // Stop is disabled when the requirement is being executed on a remote
+  // Agent Server — the backend rejects /stop with 501 STOP_REMOTE_NOT_SUPPORTED
+  // in this iteration (worker-side kill message lands in a follow-up PR).
+  const canStop = !requirement?.agent_server_id;
 
   const onCreate = useCallback(async () => {
     const p = prompt.trim();
@@ -1245,6 +1427,8 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             total={sortedItems.length}
             onChanged={onItemChanged}
             onCreated={loadList}
+            onRestarted={handleSubTaskRestarted}
+            canStop={canStop}
             adjustModel={adjustModel}
             onAdjustModelChange={setAdjustModel}
           />

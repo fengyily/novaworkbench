@@ -96,6 +96,14 @@ const (
 	SubTaskStatusRunning = "running"
 	SubTaskStatusDone    = "done"
 	SubTaskStatusError   = "error"
+	// SubTaskStatusStopped marks a row that the user explicitly halted via
+	// StopSubTask (handler triggers cmd.Cancel on the JobStore job + flips
+	// status). Distinct from error: the underlying subprocess didn't fail,
+	// it was killed by the user. RecoverInterrupted does NOT touch stopped
+	// rows in its manual branch — a stopped row stays stopped across backend
+	// restarts so the Continue button in the UI keeps showing the user the
+	// same "you stopped this earlier" affordance.
+	SubTaskStatusStopped = "stopped"
 )
 
 // SubTaskSource values; "auto" means created by tryAutoOrchestrate,

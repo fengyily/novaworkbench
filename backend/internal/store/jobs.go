@@ -1,8 +1,10 @@
 package store
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +47,15 @@ type Job struct {
 	Type string `json:"type,omitempty"`
 	mu    sync.RWMutex
 	subs  []chan LogLine
+	// cmd / cancel wire the running subprocess into the job so a handler-side
+	// Stop path can interrupt it (exec.CommandContext串起 SIGTERM → WaitDelay
+	// → SIGKILL — see gateway.go around GenerateCode). Both fields stay
+	// nil for jobs that never spawned a claude process (e.g. recovered
+	// jobs that had their subprocess killed by a backend restart); in
+	// that case Cancel() is a no-op and the Stop handler returns 409
+	// JOB_GONE so the caller can fall back to Continue/Redo.
+	cmd    *exec.Cmd          `json:"-"`
+	cancel context.CancelFunc `json:"-"`
 	// lineCarry holds an unfinished line between successive Write calls so a
 	// streamed stdout doesn't get split mid-line. Access only via Write/finish.
 	lineCarry string
@@ -67,6 +78,39 @@ func (j *Job) SetType(t string) {
 	j.mu.Lock()
 	j.Type = t
 	j.mu.Unlock()
+}
+
+// SetCmd stores the running subprocess's *exec.Cmd and its cancellation
+// function on the job so a later Stop path can interrupt it. Safe to call
+// once after Create; overwrites silently if called twice (the second spawn
+// wins, which matches the SubTaskRunner's "cmd is the live one" invariant).
+//
+// Both args may be nil — Cancel() then becomes a no-op. The wizard runner
+// always passes non-nil once GenerateCode has returned, so the no-op branch
+// only matters for recovered jobs whose process was already reaped.
+func (j *Job) SetCmd(cmd *exec.Cmd, cancel context.CancelFunc) {
+	j.mu.Lock()
+	j.cmd = cmd
+	j.cancel = cancel
+	j.mu.Unlock()
+}
+
+// Cancel triggers the stored cancel func (typically backed by an
+// exec.CommandContext whose WaitDelay already chains SIGTERM → 5s → SIGKILL)
+// so the running subprocess gets interrupted. Idempotent: nil cancel is
+// silently skipped so callers don't have to nil-check before invoking.
+//
+// Reads cancel under RLock and releases before invoking the func to avoid
+// re-entering the mutex — CancelFunc implementations themselves may end up
+// touching the job (via the deferred Finish call in the runner), and holding
+// j.mu across cancel() would deadlock.
+func (j *Job) Cancel() {
+	j.mu.RLock()
+	cancel := j.cancel
+	j.mu.RUnlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func (j *Job) Append(line LogLine) {

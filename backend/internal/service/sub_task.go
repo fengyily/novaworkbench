@@ -437,50 +437,122 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 	}, nil
 }
 
-// Redo creates a NEW sub-task row that re-runs a failed parent sub-task with
-// its original prompt. Unlike CreateAdjustment — which forks the parent's own
-// session to inherit its edits — a redo forks the parent's SOURCE session
-// (the session the failed run originally forked from), so the child re-executes
-// the original task from a clean starting point rather than inheriting a
-// broken/partial attempt. The redo row carries the parent's source_session_id
-// in its own source_session_id; the handler fills in a fallback when empty.
+// RedoReset re-arms an existing sub_task row in place for a fresh
+// "redo" run — replaces the previous "create new row on redo" behavior
+// (see git history for the deleted SubTaskService.Redo). Keeps the same
+// row id so the SubTaskPanel never grows a "重做: 重做: …" list explosion;
+// the handler then mints a new claude session id (util.NewUUID) and the
+// runner forks the parent's source session for a clean retry.
 //
-// Title defaults to "重做: <parent title>". The model is NOT persisted here —
-// the handler passes the chosen model into runSubTask, which stamps it via
-// Finish (mirrors Create/CreateAdjustment).
-func (s *SubTaskService) Redo(reqID, parentID string) (*model.SubTask, error) {
-	if reqID == "" || parentID == "" {
-		return nil, errors.New("requirement_id and parent sub_task id are required")
+// Cleared on reset: status (→ pending), job_id, artifact, completed_at,
+// and all four token counters / cost / duration columns. Kept on reset:
+// id, requirement_id, title, prompt, source, batch_id, batch_seq,
+// session_id, source_session_id (handler overwrites these right after via
+// UpdateSession), and created_at. modelOverride, when non-empty, overrides
+// the model column so the user can switch models on retry; the empty
+// string keeps whatever model the row already carries.
+//
+// Returns the row as a freshly-read *model.SubTask so the handler can
+// pass it straight into the spawn helper without a second Get call.
+func (s *SubTaskService) RedoReset(subTaskID, modelOverride string) (*model.SubTask, error) {
+	if subTaskID == "" {
+		return nil, errors.New("sub_task_id is required")
 	}
-	parent, err := s.Get(parentID)
-	if err != nil {
-		return nil, fmt.Errorf("load parent sub_task: %w", err)
+	if _, err := s.Get(subTaskID); err != nil {
+		return nil, fmt.Errorf("load sub_task: %w", err)
 	}
-	if parent.RequirementID != reqID {
-		return nil, fmt.Errorf("parent sub_task belongs to requirement %s, not %s", parent.RequirementID, reqID)
-	}
-	id := util.NewID("st")
 	now := time.Now()
-	redoTitle := capTitle("重做: "+parent.Title, 80)
-	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
-		source_session_id, source, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, reqID, redoTitle, parent.Prompt, model.SubTaskStatusPending,
-		parent.SourceSessionID, model.SubTaskSourceManual, now, now)
-	if err != nil {
-		return nil, fmt.Errorf("insert redo sub_task: %w", err)
+	if modelOverride != "" {
+		if _, err := s.db.Exec(`UPDATE sub_tasks SET
+			status=?, job_id='', artifact='', completed_at=NULL,
+			input_tokens=0, output_tokens=0,
+			cache_creation_tokens=0, cache_read_tokens=0,
+			cost_cents=0, duration_seconds=0,
+			model=?, updated_at=? WHERE id=?`,
+			model.SubTaskStatusPending, modelOverride, now, subTaskID); err != nil {
+			return nil, fmt.Errorf("reset sub_task: %w", err)
+		}
+	} else {
+		if _, err := s.db.Exec(`UPDATE sub_tasks SET
+			status=?, job_id='', artifact='', completed_at=NULL,
+			input_tokens=0, output_tokens=0,
+			cache_creation_tokens=0, cache_read_tokens=0,
+			cost_cents=0, duration_seconds=0,
+			updated_at=? WHERE id=?`,
+			model.SubTaskStatusPending, now, subTaskID); err != nil {
+			return nil, fmt.Errorf("reset sub_task: %w", err)
+		}
 	}
-	return &model.SubTask{
-		ID:              id,
-		RequirementID:   reqID,
-		Title:           redoTitle,
-		Prompt:          parent.Prompt,
-		Status:          model.SubTaskStatusPending,
-		SourceSessionID: parent.SourceSessionID,
-		Source:          model.SubTaskSourceManual,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-	}, nil
+	return s.Get(subTaskID)
+}
+
+// ContinueReset is the Continue-path twin of RedoReset: it re-arms the row
+// in place, but preserves the existing Artifact (the previous run's
+// report stays visible until the new run lands its terminal artifact).
+// session_id and source_session_id are NOT touched — Continue reuses the
+// parent's session via --resume <parent.session_id> --fork-session=false,
+// so the new run inherits the full conversation context from where the
+// old run stopped (whether that was a mid-run crash, a manual Stop, or a
+// graceful error exit).
+//
+// Like RedoReset, this returns the freshly-read row so the handler can
+// hand it to the spawn helper without a second Get call.
+func (s *SubTaskService) ContinueReset(subTaskID, modelOverride string) (*model.SubTask, error) {
+	if subTaskID == "" {
+		return nil, errors.New("sub_task_id is required")
+	}
+	if _, err := s.Get(subTaskID); err != nil {
+		return nil, fmt.Errorf("load sub_task: %w", err)
+	}
+	now := time.Now()
+	if modelOverride != "" {
+		if _, err := s.db.Exec(`UPDATE sub_tasks SET
+			status=?, job_id='', completed_at=NULL,
+			input_tokens=0, output_tokens=0,
+			cache_creation_tokens=0, cache_read_tokens=0,
+			cost_cents=0, duration_seconds=0,
+			model=?, updated_at=? WHERE id=?`,
+			model.SubTaskStatusPending, modelOverride, now, subTaskID); err != nil {
+			return nil, fmt.Errorf("reset sub_task for continue: %w", err)
+		}
+	} else {
+		if _, err := s.db.Exec(`UPDATE sub_tasks SET
+			status=?, job_id='', completed_at=NULL,
+			input_tokens=0, output_tokens=0,
+			cache_creation_tokens=0, cache_read_tokens=0,
+			cost_cents=0, duration_seconds=0,
+			updated_at=? WHERE id=?`,
+			model.SubTaskStatusPending, now, subTaskID); err != nil {
+			return nil, fmt.Errorf("reset sub_task for continue: %w", err)
+		}
+	}
+	return s.Get(subTaskID)
+}
+
+// MarkStopped flips a running sub_task into the "stopped" terminal state
+// and prepends a banner to the artifact so the UI can show "you stopped
+// this earlier, here is what was on screen" without losing the prior
+// report. The banner format is:
+//
+//	⏹ 用户中止于 <RFC3339 timestamp>
+//
+//	原结果：
+//	<priorArtifact verbatim>
+//
+// session_id / source_session_id / prompt / token counters / cost /
+// duration are deliberately NOT touched — the row stays semantically
+// "the same sub_task, just halted by the user", and a follow-up
+// Continue or Redo will overwrite or keep these as appropriate.
+func (s *SubTaskService) MarkStopped(subTaskID, priorArtifact string) error {
+	if subTaskID == "" {
+		return errors.New("sub_task_id is required")
+	}
+	now := time.Now()
+	banner := "⏹ 用户中止于 " + now.Format(time.RFC3339) + "\n\n原结果：\n"
+	newArtifact := banner + priorArtifact
+	_, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, completed_at=?, updated_at=? WHERE id=?`,
+		model.SubTaskStatusStopped, newArtifact, now, now, subTaskID)
+	return err
 }
 
 // Finish is the terminal write: status (done | error), artifact Markdown, the
@@ -507,6 +579,38 @@ func (s *SubTaskService) Finish(id, status, artifact, modelName string, tokens m
 		cost_cents=?, duration_seconds=?,
 		completed_at=?, updated_at=? WHERE id=?`,
 		status, artifact, modelName,
+		tokens.Input, tokens.Output, tokens.CacheCreation, tokens.CacheRead,
+		costCents, duration,
+		now, now, id)
+	return err
+}
+
+// UpdateRunStatsOnStop is the post-stop reconciliation write: it stamps the
+// final token usage / cost / duration / model / completed_at WITHOUT touching
+// status or artifact. Called from SubTaskRunner.finishSubTask when it observes
+// that the row was already flipped to SubTaskStatusStopped by StopSubTask —
+// that handler has already prepended the "⏹ 用户中止于 …" banner to artifact,
+// so overwriting it with the claude finalResult here would clobber the user-
+// initiated stop signal and the partial report it was meant to preserve.
+//
+// Without this helper the only choice would be to skip the whole Finish call
+// for stopped rows, but then token usage / cost / duration would stay at zero
+// forever (and the dashboard / SubTaskCard header would show "—" instead of
+// the resolved amount).
+func (s *SubTaskService) UpdateRunStatsOnStop(id, modelName string, tokens model.SubTaskTokens, costCents int, startTime time.Time) error {
+	now := time.Now()
+	duration := 0
+	if !startTime.IsZero() {
+		duration = int(now.Sub(startTime).Round(time.Second).Seconds())
+		if duration < 0 {
+			duration = 0
+		}
+	}
+	_, err := s.db.Exec(`UPDATE sub_tasks SET model=?,
+		input_tokens=?, output_tokens=?, cache_creation_tokens=?, cache_read_tokens=?,
+		cost_cents=?, duration_seconds=?, completed_at=?, updated_at=?
+		WHERE id=?`,
+		modelName,
 		tokens.Input, tokens.Output, tokens.CacheCreation, tokens.CacheRead,
 		costCents, duration,
 		now, now, id)
@@ -540,9 +644,19 @@ func (s *SubTaskService) Finish(id, status, artifact, modelName string, tokens m
 func (s *SubTaskService) RecoverInterrupted() (int64, error) {
 	now := time.Now()
 
-	// Pass 1: manual sub-tasks — preserve the old mark-error behavior.
+	// Pass 1: manual sub-tasks — preserve the old mark-error behavior, BUT
+	// never overwrite an artifact the row already carries. The previous
+	// behavior unconditionally set artifact="❌ 服务在子任务执行期间重启…"
+	// which clobbered any partial report a previous MarkStopped / Finish
+	// had already persisted. The new CASE keeps existing content intact
+	// (e.g. a Stopped row carries the "⏹ 用户中止" banner) and only
+	// stamps the recovery message when the column is still empty.
+	//
+	// Note: stopped rows don't match the WHERE clause (status IN
+	// running/pending), so a stopped row stays stopped — the user pressed
+	// Stop on purpose, that's not a backend-restart signal.
 	res, err := s.db.Exec(`UPDATE sub_tasks
-		SET status=?, artifact=?,
+		SET status=?, artifact=CASE WHEN artifact != '' THEN artifact ELSE ? END,
 		    completed_at=?, updated_at=?
 		WHERE status IN (?, ?)
 		  AND (batch_id = '' OR batch_id IS NULL)`,
