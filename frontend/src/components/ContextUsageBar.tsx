@@ -87,10 +87,12 @@ export function ContextUsageBar({
   const pct = usage?.pct ?? 0;
   const widthPct = clampPct(pct);
   const overLimit = isPctOverLimit(pct);
-  // Display cap: never show the user a percentage above 100. With the new
-  // computeUsage formula (cache_read excluded from used) raw pct should
-  // never reach 100 in normal operation; this is a defensive guard for
-  // legacy persisted blobs / upstream callers that may still surface pct>100.
+  // Display cap: never show the user a percentage above 100. With the
+  // corrected computeUsage formula (`used = input + cache_creation +
+  // cache_read` matches the current prompt size, which equals the
+  // context window) the raw pct tracks claude /context within rounding
+  // and only approaches 100 in a healthy long conversation. The clamp is
+  // a defensive guard for transient overflow / legacy persisted blobs.
   // Tooltip still exposes the raw pct via the breakdown.
   const displayPctLabel = overLimit
     ? t('components.contextUsage.overLimit')

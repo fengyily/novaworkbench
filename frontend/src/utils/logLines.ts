@@ -28,24 +28,29 @@ export interface LogLine {
 /**
  * Live token-usage snapshot for one wizard turn, emitted by the backend via
  * the `usage` SSE event. The percentage (`pct`) and absolute used-token count
- * (`used`) are pre-computed server-side from input_tokens + cache_creation
- * against `context_window`, so the UI doesn't need to know the denominator —
- * just clamp `pct` to 0..100 and pick a color band.
+ * (`used`) are pre-computed server-side from input_tokens + cache_creation +
+ * cache_read against `context_window`, so the UI doesn't need to know the
+ * denominator — just clamp `pct` to 0..100 and pick a color band.
  *
- * Why cache_read_tokens is NOT part of `used`:
- *   `cache_read_tokens` represents tokens the model READ from an existing
- *   prompt cache — i.e. content that was already counted as `cache_creation`
- *   in a previous turn. Anthropic charges for it (cheap reuse) but it does
- *   NOT add to the context window's fresh fill. Including it in `used`
- *   produces pct > 100% in two ways:
- *     (a) per-turn: a prompt with multiple large cache breakpoints can
- *         report cr alone approaching the window, pushing cc + cr past it;
- *     (b) cumulative: SubTaskService.Finish SUMs cache_read across turns,
- *         so a sub-task with N cache-hit turns double-counts the same
- *         cached prefix N times. The SubTaskPanel persistent fallback
- *         would render pct ≫ 100% on any multi-turn sub-task that hit cache.
- *   Hence `used = input + cache_creation`. cache_read is still surfaced in
- *   the breakdown tooltip for transparency.
+ * Why cache_read_tokens IS part of `used`:
+ *   The Anthropic API reports the four fields PER TURN. For a single turn,
+ *   the prompt sent to the model equals (input_tokens + cache_creation +
+ *   cache_read) — every token in the current prompt is one of: fresh input,
+ *   just cached, or read from cache. That prompt size equals the current
+ *   context window (claude /context reports the same number).
+ *
+ *   A previous iteration excluded cr under the assumption that
+ *   SubTaskService.Finish SUMs cache_read across turns (double-counting).
+ *   That assumption is wrong: Finish writes `out.lastUsage`, which is
+ *   overwritten on every result event, so sub_tasks.cache_read_tokens is the
+ *   LAST turn's cr — not cumulative. With last-turn data, input+cc alone
+ *   returns "fresh tokens this turn", which undercounts vs the actual context
+ *   window by tens of thousands of tokens once the conversation is long and
+ *   most of the prompt is cached. That made the per-card bar show e.g. 5%
+ *   while /context showed 62%.
+ *
+ *   Hence `used = input + cache_creation + cache_read`. The breakdown is
+ *   still surfaced in the tooltip for transparency.
  */
 export interface UsageInfo {
   step: 'analyst_chat' | 'architect_design' | 'coding' | 'adjust_coding' | string;
@@ -55,13 +60,13 @@ export interface UsageInfo {
   cache_creation_tokens: number;
   cache_read_tokens: number;
   context_window: number;
-  /** input + cache_creation — the net new context fill (cache read excluded,
-   *  see interface docstring). */
+  /** input + cache_creation + cache_read — the current prompt size, which
+   *  equals the current context window (see interface docstring). */
   used: number;
-  /** used / context_window * 100. Mathematically ≤ 100 in normal use; capped
-   *  at 99% by the display layer when raw pct reaches/exceeds 100 to avoid
-   *  showing the user "150%" (which would read as a bug). The raw pct is
-   *  still exposed in tooltips. */
+  /** used / context_window * 100. May briefly exceed 100 if a single turn's
+   *  prompt alone overflows the window (Anthropic would reject that — the
+   *  display layer clamps at 100). For a healthy sub-task the value tracks
+   *  claude /context's percentage within rounding. */
   pct: number;
 }
 
@@ -76,10 +81,11 @@ export function isThinkingPhase(line: LogLine | undefined): boolean {
 // Used by ContextUsageBar (in-panel bars) and the SessionContextStrip (top
 // always-on strip) so both render the same color thresholds / number format.
 
-/** Clamp a raw pct into [0, 100] for bar width. With the new computeUsage
- *  formula (cache_read excluded from used) the raw pct should never reach
- *  100 in normal operation; the clamp is a defensive belt-and-braces for
- *  any legacy persisted blob or upstream caller that still produces pct>100.
+/** Clamp a raw pct into [0, 100] for bar width. With the corrected
+ *  computeUsage formula (`used = input + cache_creation + cache_read` —
+ *  matches the current prompt size) the raw pct should never exceed 100
+ *  for a healthy session that Anthropic accepted. The clamp is a defensive
+ *  belt-and-braces for any legacy persisted blob or transient overflow.
  *  Original pct (which could still exceed 100 on legacy data) is shown in
  *  the breakdown tooltip. */
 export function clampPct(pct: number): number {
@@ -139,15 +145,15 @@ export function bandClass(pct: number): string {
 
 /** A raw usage snapshot as stored in requirements.usage_snapshots, OR as
  *  received from the backend's `usage` SSE payload. The backend (handler/
- *  wizard_stream.go::usagePayload) is now the single source of truth for
- *  the "cache_read excluded from used" semantics, so it pre-fills `used`
- *  and `pct` on the wire. Legacy blobs persisted before that change (and
- *  the sub_tasks-column fallback path, which doesn't go through the SSE
+ *  wizard_stream.go::usagePayload) is the single source of truth for the
+ *  "cache_read included in used" semantics, so it pre-fills `used` and
+ *  `pct` on the wire. Legacy blobs persisted before this change (and the
+ *  sub_tasks-column fallback path, which doesn't go through the SSE
  *  pipeline) lack these fields — computeUsage() will recompute them
  *  client-side using the same formula as the backend.
  *
  *  Mirroring rule: when present, `used` and `pct` MUST equal
- *      used = input + cache_creation
+ *      used = input + cache_creation + cache_read
  *      pct  = used / context_window * 100
  *  Any divergence here vs. backend's usagePayload is a bug — keep them in
  *  sync when the formula evolves. */
@@ -170,7 +176,7 @@ export type SessionKey = 'analyst_chat' | 'architect_design' | 'coding';
 /** Turn a raw snapshot (from the persisted blob OR a `usage` SSE payload)
  *  into a full UsageInfo. When the backend has pre-filled `used` and `pct`
  *  (the live SSE path) we trust those values verbatim — they're the single
- *  source of truth for "cache_read excluded from used". When the raw input
+ *  source of truth for "cache_read included in used". When the raw input
  *  is a legacy blob or a sub_tasks-column fallback (no `used`/`pct`), we
  *  recompute using the same formula as the backend.
  *
@@ -186,13 +192,15 @@ export function computeUsage(
   const out = raw.output_tokens ?? 0;
   const cw = raw.context_window || 200000;
   // Prefer server-computed values when present — the backend has already
-  // applied the "cache_read excluded" rule and is the single source of
-  // truth for the percentage formula. Recomputing client-side would risk
-  // drift if the formula evolves.
+  // applied the formula and is the single source of truth for the
+  // percentage. Recomputing client-side would risk drift if the formula
+  // evolves. The fallback formula matches usagePayload() exactly so the
+  // sub_tasks-column persistence path produces the same percentage as the
+  // live SSE path.
   const used =
     typeof raw.used === 'number'
       ? raw.used
-      : input + cc; // see UsageSnapshot docstring — matches usagePayload()
+      : input + cc + cr; // see UsageSnapshot docstring — matches usagePayload()
   const pct =
     typeof raw.pct === 'number'
       ? raw.pct
