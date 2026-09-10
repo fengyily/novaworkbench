@@ -108,6 +108,33 @@ app.post('/v1/run', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders?.();
 
+  // Defense-in-depth: verify workDir is strictly inside
+  // /tmp/nova-agent/<projectID>/<reqID> before any spawn. NovaWorkbench's
+  // runRemoteCoding already does this on the Go side via
+  // RequireRemoteDevWorkDir; this worker-side check is the last gate against
+  // any path escaping the per-requirement isolation. Fail fast with an
+  // explicit 4xx so a misconfigured request doesn't spend 5s on preflight
+  // before being rejected. Wire format matches the rest of /v1/run: a
+  // single NDJSON error event then res.end() — Go-side parseStreamJSONFromReader
+  // already handles `type:"error"` and surfaces `error` to the user.
+  const reqBody = req.body ?? {};
+  const workDirReqId = (typeof reqBody.reqId === 'string' && reqBody.reqId)
+    || (typeof opts.workDir === 'string' ? opts.workDir.split('/').filter(Boolean).pop() : '');
+  try {
+    assertWorkDirInScope(opts.workDir, workDirReqId);
+  } catch (e) {
+    const status = e.status || 500;
+    res.status(status);
+    res.write(JSON.stringify({
+      type: 'error',
+      errorCategory: 'workdir_out_of_scope',
+      error: e.message,
+      code: status,
+    }) + '\n');
+    res.end();
+    return;
+  }
+
   // Early bailout: if the worker itself is running as root (uid 0), the
   // Claude CLI refuses --dangerously-skip-permissions with a hard error
   // before doing any work. We don't want to wait through the 5s preflight
@@ -877,6 +904,49 @@ function buildClaudeArgs(opts, settingsArg) {
   }
 
   return args;
+}
+
+// assertWorkDirInScope: NovaWorkbench 后端的 runRemoteCoding 严格把 wtPath 锁在
+// /tmp/nova-agent/<projectID>/<reqID> 下；本 worker 端做 defense-in-depth 校验，
+// 防止任何路径错误在远端被放大。即便 Go 侧所有校验都被绕过，worker 也会拒绝。
+//
+// 校验三层：
+//   1. workDir 必须是非空字符串
+//   2. realpathSync 必须成功（路径必须真实存在，否则抛 ENOENT → 400）
+//   3. 解析后的真实路径必须在 /tmp/nova-agent/ 下，且 reqId 必须出现在路径段中
+//
+// 任何一层失败抛出带 status 的 Error，handler 转成对应 4xx + JSON {error}。
+function assertWorkDirInScope(workDir, reqId) {
+  if (!workDir || typeof workDir !== 'string') {
+    throw httpError(400, 'workDir is required');
+  }
+  const fs = require('fs');
+  const path = require('path');
+  // 路径必须存在；realpathSync 不存在则抛 ENOENT
+  let real;
+  try {
+    real = fs.realpathSync(workDir);
+  } catch (e) {
+    throw httpError(400, `workDir ${workDir} cannot be resolved: ${e.message}`);
+  }
+  // reqId 必须出现在路径中（防止跨需求路径串台）
+  const segs = real.split(path.sep);
+  if (!reqId || !segs.includes(reqId)) {
+    throw httpError(403, `workDir ${real} does not contain reqId ${reqId}`);
+  }
+  // 强约束：必须在 /tmp/nova-agent/ 下
+  if (!real.startsWith('/tmp/nova-agent/')) {
+    throw httpError(403, `workDir ${real} is outside /tmp/nova-agent/`);
+  }
+  return real;
+}
+
+// httpError attaches an HTTP status to an Error so the /v1/run handler can
+// emit the right status code when an assertWorkDirInScope check fails.
+function httpError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
 }
 
 // Bind 127.0.0.1 only — the worker is reached via SSH direct-tcpip channel
