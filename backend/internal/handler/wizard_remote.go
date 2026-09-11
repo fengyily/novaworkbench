@@ -510,6 +510,17 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		return claudeStreamOutcome{errMsg: "构造 worker 请求失败: " + reqErr.Error()}
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// parseStreamJSONFromReader returns as soon as it sees the `result` event
+	// (see wizard_stream.go), so this response body is routinely left unread.
+	// HTTPTransport uses DisableKeepAlives:false, which means Body.Close()
+	// then DRAINS the remainder — and the worker only calls res.end() once the
+	// child process exits. If a plan-mode claude lingers after emitting
+	// `result`, that drain blocks indefinitely, wedging the run right after
+	// the "📥 同步会话结果回本地..." phase line with no error and no
+	// completion. Connection: close makes net/http take the early-close path
+	// (tear the channel down) instead of draining. Cost is one extra SSH
+	// channel setup per run — negligible against a 5–15 minute plan pass.
+	req.Close = true
 	resp, doErr := httpClient.Do(req)
 	if doErr != nil {
 		return claudeStreamOutcome{errMsg: "POST /v1/run 失败: " + doErr.Error()}
@@ -539,11 +550,13 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// remote-slug → local-slug mapping so the jsonl lands in the directory
 	// whose slug matches the local cwd.
 	in.job.Append(store.LogLine{Type: "phase", Content: "📥 同步会话结果回本地..."})
-	if slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
-		if sftpErr := client.SyncDirDownMapped(remoteSlugDir, slugDir); sftpErr != nil {
-			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话下行失败: " + sftpErr.Error()})
-		}
-	}
+	// Routed through the timeout-hardened helper (same one the architect chain
+	// has used since cec11ce). The bare client.SyncDirDownMapped below took
+	// neither a context nor a deadline, so an unusable SSH connection or an
+	// exhausted channel budget blocked forever and the coding job never
+	// reached its terminal state — the remote claude had already finished,
+	// while Nova stayed pinned to this phase line.
+	h.syncSessionDownWithTimeout(ctx, client, in.job, in.reqRow, remoteSlugDir)
 
 	// Step 7: git commit + push back to origin. Skip when the run errored out
 	// (no real result) so we don't propagate half-broken state. The user can
@@ -879,7 +892,7 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 
 	// Step 6: session sync (down) — copy any new session jsonl back to local.
 	in.job.Append(store.LogLine{Type: "phase", Content: "📥 同步会话结果回本地..."})
-	h.syncSessionDownWithTimeout(ctx, client, in, remoteSlugDir)
+	h.syncSessionDownWithTimeout(ctx, client, in.job, in.reqRow, remoteSlugDir)
 
 	return out, cleanup, nil
 }
@@ -904,7 +917,7 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 // background after the timeout has already been reported. That is acceptable
 // here — the download is forward-only and idempotent, so a late-completing
 // transfer just lands the same files.
-func (h *WizardHandler) syncSessionDownWithTimeout(ctx context.Context, client *gossh.Client, in *remoteRunInput, remoteSlugDir string) {
+func (h *WizardHandler) syncSessionDownWithTimeout(ctx context.Context, client *gossh.Client, job *store.Job, reqRow *model.Requirement, remoteSlugDir string) {
 	done := make(chan string, 1)
 	sctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
@@ -914,7 +927,7 @@ func (h *WizardHandler) syncSessionDownWithTimeout(ctx context.Context, client *
 				done <- "⚠️ 会话下行异常: " + fmt.Sprint(r)
 			}
 		}()
-		slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow)
+		slugDir, slugErr := h.claudeProjectsSlugDir(reqRow)
 		if slugErr != nil || slugDir == "" {
 			// No local slug directory to write into — nothing to sync. This is
 			// the pre-existing "best effort" semantics (see claudeProjectsSlugDir).
@@ -932,10 +945,10 @@ func (h *WizardHandler) syncSessionDownWithTimeout(ctx context.Context, client *
 	select {
 	case msg := <-done:
 		if msg != "" {
-			in.job.Append(store.LogLine{Type: "message", Content: msg})
+			job.Append(store.LogLine{Type: "message", Content: msg})
 		}
 	case <-sctx.Done():
-		in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话下行超时（60s），已跳过。远端会话文件仍在，可稍后重试或手工同步。"})
+		job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话下行超时（60s），已跳过。远端会话文件仍在，可稍后重试或手工同步。"})
 	}
 }
 

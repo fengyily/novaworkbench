@@ -14,10 +14,12 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"strings"
 
 	"github.com/novaworkbench/backend/internal/llm"
@@ -111,6 +113,35 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		lines, status, exitCode := job.Snapshot()
 		if perr := h.jobLogSvc.Save(job.ID, p.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
 			log.Printf("[start-coding] failed to persist job log %s: %v", job.ID, perr)
+		}
+	}()
+	// Terminal-state fallback. Every exit path is *supposed* to call
+	// job.Finish, but nothing enforces it: an early return or a panic left the
+	// job running forever, so the SSE pump never flushed its job_done frame and
+	// the coding panel stayed on "Claude 正在工作..." with no way out (the
+	// refresh-time snapshot is not terminal-aware either). Turning any such exit
+	// into a visible error + a finished job is the difference between a stuck
+	// screen and an actionable message.
+	//
+	// Registered AFTER the Save defer above on purpose: defer is LIFO, so this
+	// one runs FIRST and the persisted snapshot is always terminal.
+	//
+	// Scope note: this covers panics and early returns only. It cannot help a
+	// goroutine that never returns at all (an unbounded SFTP/HTTP call) — those
+	// are handled by the timeout guards in wizard_remote.go.
+	defer func() {
+		if rec := recover(); rec != nil {
+			// Job.Append is safe post-terminal (it drops the line), so the
+			// recovery path can log regardless of which state we died in.
+			log.Printf("[start-coding] panic recovered in job %s: %v\n%s", job.ID, rec, debug.Stack())
+			job.Append(store.LogLine{Type: "error", Content: "❌ 内部异常，任务已中止: " + fmt.Sprint(rec)})
+		}
+		// Never leave the job in JobRunning: any exit path that forgot to
+		// Finish now converges to a visible error instead of a silent hang.
+		// Job.Finish is idempotent, so the happy path (already finished) is a
+		// no-op here.
+		if _, status, _ := job.Snapshot(); status == store.JobRunning {
+			job.Finish(1, store.JobError)
 		}
 	}()
 	// Load the requirement row up front so we can (a) detect whether the

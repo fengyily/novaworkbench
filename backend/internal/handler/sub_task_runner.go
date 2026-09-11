@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -222,6 +223,32 @@ func (r *SubTaskRunner) Run(
 		lines, status, exitCode := job.Snapshot()
 		if perr := r.jobLogSvc.Save(job.ID, st.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
 			log.Printf("[sub-task] failed to persist job log %s: %v", job.ID, perr)
+		}
+	}()
+	// Terminal-state fallback (same rationale as the coding goroutine in
+	// wizard_coding.go): a panic in this goroutine used to take the whole nova
+	// process down (unrecovered), and any early return left the job running
+	// forever, so the sub-task card spun on "streaming" with no way out.
+	//
+	// Ordering: registered AFTER the Save defer above and BEFORE the runSem
+	// release below. LIFO therefore gives runSem release → this fallback → Save,
+	// which is what we want on both counts: the semaphore is freed before the
+	// (possibly verbose) fallback runs, and Save is last so the persisted
+	// snapshot is always terminal.
+	//
+	// Scope note: covers panics and early returns only — a goroutine blocked in
+	// an unbounded SFTP/HTTP call never reaches its defers. Those call sites are
+	// guarded by timeouts (see wizard_remote.go).
+	defer func() {
+		if rec := recover(); rec != nil {
+			// Named `rec`, not `r`: `r` is this method's receiver.
+			log.Printf("[sub-task] panic recovered in job %s (sub_task %s): %v\n%s", job.ID, st.ID, rec, debug.Stack())
+			job.Append(store.LogLine{Type: "error", Content: "❌ 内部异常，任务已中止: " + fmt.Sprint(rec)})
+		}
+		// Never leave the job in JobRunning. Idempotent Finish makes the happy
+		// path (the run already Finished) a no-op here.
+		if _, status, _ := job.Snapshot(); status == store.JobRunning {
+			job.Finish(1, store.JobError)
 		}
 	}()
 

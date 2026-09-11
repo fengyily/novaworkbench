@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -1091,6 +1092,34 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	var hbDone chan struct{}
 	var job *store.Job
 	var modelName string
+	// Terminal-state fallback (same rationale as the coding goroutine in
+	// wizard_coding.go): a panic here would otherwise leave this child's job
+	// running forever — its card spins on "Claude 正在工作..." with no recovery
+	// path, and only a backend restart clears it.
+	//
+	// Registered BEFORE the early-exit guard below, deliberately: defer is LIFO,
+	// so the early-exit guard runs first and keeps ownership of its early-exit
+	// artifact + "❌ 子任务早退" log lines (its Appends must land before the job
+	// goes terminal — Append drops post-terminal lines). This fallback then only
+	// ever acts on the panic path, where earlyExitReason is still "" and the
+	// guard above returns early. job is assigned further down the function,
+	// hence the nil check throughout.
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[orchestrate] panic recovered for child %s (batch %s seq %d): %v\n%s",
+				st.ID, batch.ID, st.BatchSeq, rec, debug.Stack())
+			if job != nil {
+				job.Append(store.LogLine{Type: "error", Content: "❌ 内部异常，任务已中止: " + fmt.Sprint(rec)})
+			}
+		}
+		// Never leave the job in JobRunning. Idempotent Finish makes the two
+		// normal exits (early-exit guard, happy path) no-ops here.
+		if job != nil {
+			if _, status, _ := job.Snapshot(); status == store.JobRunning {
+				job.Finish(1, store.JobError)
+			}
+		}
+	}()
 	defer func() {
 		if earlyExitReason == "" {
 			return
