@@ -15,9 +15,10 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   requirementsApi,
-  priorityLabels,
+  priorityLabelKeys,
   type Requirement,
 } from '../../api/client';
+import { useTranslation } from 'react-i18next';
 import { formatDateTime, fromLocalDateTime, toRFC3339Local } from '../../utils/time';
 
 interface Props {
@@ -29,6 +30,7 @@ interface Props {
 
 export default function RequirementModal({ open, requirement, onClose, onSaved }: Props) {
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const [title, setTitle] = useState(requirement.title);
   const [description, setDescription] = useState(requirement.description || '');
   const [priority, setPriority] = useState(requirement.priority || 'medium');
@@ -146,8 +148,8 @@ export default function RequirementModal({ open, requirement, onClose, onSaved }
               onChange={e => setPriority(e.target.value)}
               disabled={busy}
             >
-              {Object.entries(priorityLabels).map(([k, label]) => (
-                <option key={k} value={k}>{label}</option>
+              {Object.keys(priorityLabelKeys).map(k => (
+                <option key={k} value={k}>{t(k)}</option>
               ))}
             </select>
           </label>
