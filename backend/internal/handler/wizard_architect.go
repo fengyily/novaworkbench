@@ -54,6 +54,12 @@ type designRunParams struct {
 	Model          string // 已经应用请求体覆盖
 	ClaudeConfigID string
 	ReadKnowledge  bool
+	// AgentServerID — agent_servers.id chosen in the design toolbar
+	// dropdown (mirrors the dev-stage picker). Empty means the local
+	// branch stays in effect; non-empty routes the run through
+	// runRemoteArchitectDesign which dispatches the plan-mode claude
+	// invocation to that Agent server over SSH.
+	AgentServerID string
 }
 
 func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) {
@@ -64,10 +70,15 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		// empty = backend resolves via the priority chain in
 		// resolveConfigIDForRun.
 		ClaudeConfigID string `json:"claude_config_id"`
-		ReadKnowledge  bool   `json:"read_knowledge"`
+		// AgentServerID — agent_servers.id for the remote plan-mode run;
+		// empty = backend stays on the local claude CLI invocation. Placed
+		// adjacent to ClaudeConfigID so the JSON wire format stays grouped
+		// (model / config / runtime env).
+		AgentServerID string `json:"agent_server_id"`
+		ReadKnowledge bool   `json:"read_knowledge"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	p, job, af := h.prepareArchitectDesign(body.RequirementID, body.Model, body.ClaudeConfigID, body.ReadKnowledge)
+	p, job, af := h.prepareArchitectDesign(body.RequirementID, body.Model, body.ClaudeConfigID, body.AgentServerID, body.ReadKnowledge)
 	if writeIfAPIError(w, af) {
 		return
 	}
@@ -80,8 +91,13 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 // dispatches the exec body in a goroutine tagged with the scheduler's
 // callback. Returns the JobStore job id (the scheduler records this in
 // scheduled_tasks.job_id so /api/wizard/jobs/{id} can replay the log).
-func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnowledge bool, cb *runCallbacks) (string, error) {
-	p, job, af := h.prepareArchitectDesign(requirementID, model, "", readKnowledge)
+//
+// agentServerID is the scheduled_tasks.agent_server_id value the scheduler
+// already extracted at dispatch time (the scheduled task stores it on its
+// own row); empty = local execution. Empty today is the common case —
+// schedule_executor.go forwards p.AgentServerID directly.
+func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnowledge bool, agentServerID string, cb *runCallbacks) (string, error) {
+	p, job, af := h.prepareArchitectDesign(requirementID, model, "", agentServerID, readKnowledge)
 	if af != nil {
 		return "", af
 	}
@@ -102,7 +118,7 @@ func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnow
 // line-for-line the same as the original synchronous section; only the
 // writeError calls have been replaced with returning *apiFailure so the
 // scheduler can reuse the same validation outcomes.
-func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride, claudeConfigIDOverride string, readKnowledge bool) (*designRunParams, *store.Job, *apiFailure) {
+func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride, claudeConfigIDOverride string, agentServerID string, readKnowledge bool) (*designRunParams, *store.Job, *apiFailure) {
 	id := requirementID
 	if id == "" {
 		return nil, nil, fail(400, "INVALID", "missing requirement id")
@@ -118,6 +134,16 @@ func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride, cla
 	if project != nil {
 		projectPath = project.LocalPath
 		defaultBranch = project.DefaultBranch
+	}
+
+	// Prologue: persist the design-stage agent-server binding BEFORE any
+	// SSH / worktree work so a later failure still leaves a record of what
+	// the user picked. Mirrors execStartCoding's UpdateDevSource prologue
+	// (wizard_coding.go:157-187). Empty input clears the column so a
+	// requirement that flips back to local execution doesn't keep
+	// routing follow-up "继续设计" actions to a stale server.
+	if uerr := h.reqSvc.UpdateDesignAgentServer(id, agentServerID); uerr != nil {
+		log.Printf("[architect-design] failed to persist design_agent_server_id for %s: %v", id, uerr)
 	}
 
 	// Session threading: the architect stage continues the SAME conversation
@@ -266,18 +292,24 @@ func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride, cla
 		Model:          model,
 		ClaudeConfigID: claudeConfigID,
 		ReadKnowledge:  readKnowledge,
+		AgentServerID:  agentServerID,
 	}, job, nil
 }
 
 // execArchitectDesign runs the goroutine body of the architect-design stage.
 // Same line-for-line as the original anonymous goroutine in ArchitectDesign,
-// except `body.X` references are now `p.X`. Two additions:
+// except `body.X` references are now `p.X`. Additions:
 //   - A deferred persist of the finished job log (jobLogSvc.Save) so the
 //     architect-design execution log survives a backend restart — same
 //     pattern StartCoding already had, now extended here to close the
 //     existing data-loss gap noted in plan-stateful-stardust.md (fact 1).
 //   - The OnFinish callback fires after Save so the scheduler can flip
 //     scheduled_tasks.running → succeeded/failed with the same job_id.
+//   - A remote branch: when designRunParams.AgentServerID is set the run
+//     dispatches to an Agent server via runRemoteArchitectDesign, mirroring
+//     the dev-stage local/remote split in StartCoding. The terminal-state
+//     handling is identical between branches so any future change only
+//     needs to land in one place.
 func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, cb *runCallbacks) {
 	defer func() {
 		lines, status, exitCode := job.Snapshot()
@@ -300,7 +332,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 	skipAnalysis := p.SkipAnalysis
 	req := p.Req
 
-	log.Printf("[architect-design] job %s started for %s (fork=%v skip=%v)", job.ID, id, fork, skipAnalysis && sourceSID == "")
+	log.Printf("[architect-design] job %s started for %s (fork=%v skip=%v agent=%q)", job.ID, id, fork, skipAnalysis && sourceSID == "", p.AgentServerID)
 
 	// Optional knowledge pre-read: inject the project knowledge relevant to
 	// this requirement and surface what was read via a "knowledge" SSE event.
@@ -315,11 +347,11 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 		kbReadTitles = kbTitles
 	}
 
-	job.Append(store.LogLine{Type: "phase", Content: "📐 Claude 正在 plan 模式下探索代码并制定技术方案..."})
-
-	// context.Background(): the HTTP request has already returned, so we
-	// must not tie the claude subprocess's lifetime to r.Context() (which
-	// is cancelled the moment the handler returns).
+	// Session threading is shared between local and remote — both branches
+	// invoke claude with the same --resume / --fork-session / --session-id
+	// flags, so a user who picked the same requirement's previous analyst
+	// session to resume sees the same behavior regardless of execution
+	// surface.
 	sessionArg := sourceSID
 	forkSessionID := ""
 	if fork {
@@ -330,20 +362,73 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 	if block := llm.BuildSkillsBlock(h.mentionedSkills(req.Title + " " + req.Description)); block != "" {
 		prompt = block + prompt
 	}
-	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-		Prompt:         prompt,
-		WorkDir:        workDir,
-		SystemPrompt:   p.SystemPrompt,
-		Model:          cliModelArg(model),
-		ClaudeConfigID: claudeConfigID,
-		SessionID:      sessionArg,
-		Resume:         sourceSID != "",
-		Fork:           fork,
-		ForkSessionID:  forkSessionID,
-		PermissionMode: "plan",
-	})
-	out := runClaudeStream(jobSink{job}, cmd, "architect-design", h.usageCtxFor("architect_design", id, req.ProjectID, job.ID, model, "", ""))
 
+	var out claudeStreamOutcome
+	if p.AgentServerID != "" && h.agentSvrSvc != nil {
+		// Remote branch — plan-mode claude on the picked Agent server.
+		// runRemoteArchitectDesign owns SSH dial / git worktree / session
+		// sync / worker invocation / NDJSON parse; this exec body only
+		// owns the post-run persistence (UpdateDesign / UpdateArchitectModel
+		// / knowledge result event), same as the local branch below.
+		job.Append(store.LogLine{Type: "phase", Content: "📐 Agent 服务器 plan 模式下探索代码并制定技术方案..."})
+		out = h.runRemoteArchitectDesign(&remoteArchitectInput{
+			remoteRunInput: &remoteRunInput{
+				job:            job,
+				serverID:       p.AgentServerID,
+				reqRow:         req,
+				prompt:         prompt,
+				workDir:        workDir,
+				sourceSID:      sessionArg,
+				fork:           fork,
+				sessionArg:     sessionArg,
+				forkSessionID:  forkSessionID,
+				model:          model,
+				claudeConfigID: claudeConfigID,
+				usage:          h.usageCtxFor("architect_design", id, req.ProjectID, job.ID, model, "", ""),
+				PermissionMode: "plan",
+			},
+		})
+	} else {
+		// Local branch — direct claude CLI invocation on the NovaWorkbench host.
+		// context.Background(): the HTTP request has already returned, so we
+		// must not tie the claude subprocess's lifetime to r.Context() (which
+		// is cancelled the moment the handler returns).
+		job.Append(store.LogLine{Type: "phase", Content: "📐 Claude 正在 plan 模式下探索代码并制定技术方案..."})
+		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+			Prompt:         prompt,
+			WorkDir:        workDir,
+			SystemPrompt:   p.SystemPrompt,
+			Model:          cliModelArg(model),
+			ClaudeConfigID: claudeConfigID,
+			SessionID:      sessionArg,
+			Resume:         sourceSID != "",
+			Fork:           fork,
+			ForkSessionID:  forkSessionID,
+			PermissionMode: "plan",
+		})
+		out = runClaudeStream(jobSink{job}, cmd, "architect-design", h.usageCtxFor("architect_design", id, req.ProjectID, job.ID, model, "", ""))
+	}
+
+	h.finalizeArchitectRun(out, p, job, kbReadTitles, sourceSID, newDesignSID, id, model)
+}
+
+// finalizeArchitectRun is the shared terminal-state handler for both the local
+// and the remote branch of execArchitectDesign. Extracted so the
+// stale-session / partial-result / success paths exist in exactly one place —
+// any future tweak to error wording or persistence order lands here and
+// automatically applies to both execution surfaces. Returns nothing; the
+// caller already set up the deferred job-log / OnFinish hook.
+//
+// Sibling of the dev-stage inline terminal-state code in StartCoding (which
+// can't be shared because it has to commit + push). architect-design has
+// no commit / push step so a single helper covers both branches cleanly.
+func (h *WizardHandler) finalizeArchitectRun(
+	out claudeStreamOutcome,
+	p *designRunParams,
+	job *store.Job,
+	kbReadTitles []string,
+	sourceSID, newDesignSID, id, model string,
+) {
 	if out.staleSession {
 		// The source conversation is gone. Clear whichever session id was
 		// stale so the user can redo the prior stage, surface a recovery
@@ -352,7 +437,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 		// no-op guard; we still surface a generic recovery hint.
 		if sourceSID == "" {
 			job.Append(store.LogLine{Type: "error", Content: "会话异常，请重试生成技术方案。"})
-		} else if fork {
+		} else if p.Fork {
 			_ = h.reqSvc.UpdateAnalysisSession(id, "")
 			job.Append(store.LogLine{Type: "error", Content: "需求分析会话已过期。请重新进行「需求分析」后再生成技术方案。"})
 		} else {
@@ -366,7 +451,10 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 
 	// The design session id is already persisted upfront. Correct it only if
 	// the CLI reported a different id than the one we pre-minted (a safety
-	// net in case the --session-id override semantics ever change).
+	// net in case the --session-id override semantics ever change). The
+	// remote branch's parseStreamJSONFromReader emits session_id on the same
+	// `--session-id` events as the local CLI, so the correction path applies
+	// to both surfaces uniformly.
 	if out.sessionID != "" && out.sessionID != newDesignSID && out.sessionID != sourceSID {
 		if perr := h.reqSvc.UpdateDesignSession(id, out.sessionID); perr != nil {
 			log.Printf("[architect-design] failed to persist design session for %s: %v", id, perr)
@@ -375,9 +463,10 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 
 	// In plan mode, the full plan markdown is captured from the Write
 	// tool_use event that lands in ~/.claude/plans/*.md (runClaudeStream
-	// stores it in out.planContent). Fall back to the result text if
-	// capture missed it (e.g. a proxy that doesn't emit tool_use blocks in
-	// the assistant event).
+	// stores it in out.planContent; the remote branch's
+	// parseStreamJSONFromReader does the same). Fall back to the result text
+	// if capture missed it (e.g. a proxy that doesn't emit tool_use blocks
+	// in the assistant event).
 	planMarkdown := out.planContent
 	if planMarkdown == "" {
 		planMarkdown = out.finalResult

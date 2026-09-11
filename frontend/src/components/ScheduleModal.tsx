@@ -121,10 +121,16 @@ export function ScheduleModal({
         model: model || undefined,
         read_knowledge: readKnowledge,
       };
+      // agent_server_id is shared between design and coding (design-stage
+      // remote execution was added in 2026-09; coding has had it longer).
+      // Empty string means "local execution" on the backend side, so we
+      // only set the field when the user picked something.
+      if (agentServerId) {
+        body.agent_server_id = agentServerId;
+      }
       if (taskType === 'coding') {
         body.branch_name = branchName;
         body.base_branch = baseBranch;
-        body.agent_server_id = agentServerId;
         body.split_tasks = splitTasks;
       }
       const created = await schedulesApi.create(body);
@@ -213,6 +219,54 @@ export function ScheduleModal({
             </label>
           </div>
 
+          {/* Agent-server picker is shared between design (remote plan-mode
+              execution) and coding (remote CLI execution). The two stages
+              share the same server list — only the label/default-text
+              wording diverges, so we render the same <select> for both and
+              branch on taskType for the i18n strings. The option list is
+              the same in both cases; the design-stage task only uses the
+              selection when the user picks one, otherwise the scheduler
+              falls back to local execution. */}
+          {(taskType === 'coding' || taskType === 'design') && (
+            <div className="modal-field">
+              <label htmlFor="sched-agent">
+                {taskType === 'design'
+                  ? t('schedules.modal.designAgentServerLabel')
+                  : t('schedules.modal.agentLabel')}
+              </label>
+              <select
+                id="sched-agent"
+                className="form-input"
+                value={agentServerId}
+                onChange={e => setAgentServerId(e.target.value)}
+                disabled={submitting}
+                title={
+                  agentServers.length === 0
+                    ? t('schedules.modal.designAgentServerEmptyTitle')
+                    : ''
+                }
+              >
+                <option value="">
+                  {taskType === 'design'
+                    ? t('schedules.modal.designAgentServerDefault')
+                    : t('schedules.modal.agentLocal')}
+                </option>
+                {agentServers.map(s => (
+                  <option key={s.id} value={s.id}>
+                    {taskType === 'design'
+                      ? `${s.name} (${t('schedules.modal.designAgentServerRemote')})`
+                      : `${s.name} (${s.host})`}
+                  </option>
+                ))}
+              </select>
+              {agentServers.length === 0 && (
+                <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
+                  {t('schedules.modal.designAgentServerNoHint')}
+                </small>
+              )}
+            </div>
+          )}
+
           {taskType === 'coding' && (
             <>
               <div className="modal-field">
@@ -236,23 +290,6 @@ export function ScheduleModal({
                   placeholder="main"
                   disabled={submitting}
                 />
-              </div>
-              <div className="modal-field">
-                <label htmlFor="sched-agent">{t('schedules.modal.agentLabel')}</label>
-                <select
-                  id="sched-agent"
-                  className="form-input"
-                  value={agentServerId}
-                  onChange={e => setAgentServerId(e.target.value)}
-                  disabled={submitting}
-                >
-                  <option value="">{t('schedules.modal.agentLocal')}</option>
-                  {agentServers.map(s => (
-                    <option key={s.id} value={s.id}>
-                      {s.name} ({s.host})
-                    </option>
-                  ))}
-                </select>
               </div>
               <div className="modal-field modal-check-row">
                 <label>

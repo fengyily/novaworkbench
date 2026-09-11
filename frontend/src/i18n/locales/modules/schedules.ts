@@ -65,6 +65,15 @@ export const schedules = {
     baseBranchLabel: '基础分支',
     agentLabel: '执行环境',
     agentLocal: '本地执行',
+    // Design-stage Agent server picker. The picker itself is shared with
+    // coding (same select markup), but the wording diverges so the design
+    // flow reads "Agent 服务器" rather than the coding-only "执行环境".
+    // Coding keeps using agentLabel/agentLocal to preserve its existing UX.
+    designAgentServerLabel: 'Agent 服务器',
+    designAgentServerDefault: '默认（本地）',
+    designAgentServerRemote: '远端 Agent Server',
+    designAgentServerEmptyTitle: '暂无可用的 Agent 服务器，请先在「设置 → Agent 服务器」中添加并完成环境检查。',
+    designAgentServerNoHint: '未配置就绪的 Agent 服务器，请前往「设置 → Agent 服务器」添加并检查环境。',
     splitTasks: '拆分任务（与手动按钮一致；Agent-Server 模式下被忽略）',
     failTitle: '⚠️ 创建失败',
     cancel: '取消',

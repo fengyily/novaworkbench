@@ -78,6 +78,14 @@ type Requirement struct {
 	// the environment the code actually lives in.
 	DevSource     string `json:"dev_source"`
 	AgentServerID string `json:"agent_server_id"`
+	// DesignAgentServerID records WHERE this requirement's architect-design
+	// stage was run. Stamped by the design stage prologue (mirror of
+	// AgentServerID for the dev stage). Empty = 本地 (no remote agent). On a
+	// re-run of the design stage with no override this stays empty so the
+	// persisted badge accurately reflects what the user last chose — and
+	// follow-up "继续设计" actions don't accidentally inherit a stale server
+	// binding that the user has since cleared.
+	DesignAgentServerID string `json:"design_agent_server_id"`
 	// DevMode records HOW the coding stage was launched: "session" forks the
 	// design session (legacy default — Claude inherits the full analysis+design
 	// conversation), "design" starts a fresh session and hands the stored

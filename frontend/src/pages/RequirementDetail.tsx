@@ -602,6 +602,21 @@ export default function RequirementDetail() {
       setAgentServerId((cur) => (cur === '' ? req.agent_server_id! : cur));
     }
   }, [req?.agent_server_id]);
+  // Design-stage binding: the architect stage writes its own column
+  // (requirements.design_agent_server_id), independent of the dev-stage
+  // binding above. If the two bindings differ, prefer the design binding
+  // whenever the user hasn't already picked something this session — that
+  // way an "I've designed on A but haven't coded yet" requirement lands in
+  // the design section's selector pre-pointed at A without losing the dev
+  // binding when the developer stage later runs (the dev modal already
+  // reseeds itself from req.agent_server_id). The `cur === ''` guard
+  // preserves any in-session user choice, matching the dev-stage policy.
+  useEffect(() => {
+    const designID = req?.design_agent_server_id;
+    if (!designID) return;
+    if (designID === req?.agent_server_id) return; // dev seed already covers it
+    setAgentServerId((cur) => (cur === '' ? designID : cur));
+  }, [req?.design_agent_server_id, req?.agent_server_id]);
 
   // Poll /api/wizard/active-jobs every 5s so the status badge + claude-status
   // row can pulse while a coding/design/apply job is running on this
@@ -1293,6 +1308,11 @@ export default function RequirementDetail() {
           read_knowledge: useKnowledge,
           // Per-request model override — empty means the role's configured model.
           ...(architectModel ? { model: architectModel } : {}),
+          // Route the architect stage to a remote Agent server. Empty =
+          // local execution (legacy default). The wizard remote branch
+          // refuses servers that aren't in `ready` status, so an empty /
+          // stale value here silently degrades to local without erroring.
+          ...(agentServerId ? { agent_server_id: agentServerId } : {}),
         }),
       });
       const json = await res.json();
@@ -3015,6 +3035,42 @@ export default function RequirementDetail() {
               defaultModelName={architectDefaultModel}
               title={architectWorking ? t('requirements.detail2.architectModelBusyTitle') : t('requirements.detail2.architectModelTitle')}
             />
+            {/* Design-stage Agent server selector. Mirrors the dev-stage
+                picker in the coding modal: empty = local execution (default),
+                non-empty = route the architect run through that Agent server
+                (plan mode on the remote worker, see
+                backend/internal/handler/wizard_architect.go execArchitectDesign).
+                The same shared `agentServerId` state is reused — it covers
+                design + dev within a single requirement so a page refresh
+                doesn't drop the user's choice between stages. The seed
+                effect above prefers req.design_agent_server_id when it
+                differs from req.agent_server_id. Only `ready` servers are
+                populated (server-side guard mirrors this in the handler). */}
+            <label className="design-agent-server" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                {t('requirements.detail2.designAgentServerLabel')}
+              </span>
+              <select
+                className="form-input"
+                value={agentServerId}
+                onChange={e => setAgentServerId(e.target.value)}
+                disabled={architectWorking}
+                title={architectWorking
+                  ? t('requirements.detail2.designAgentServerBusyTitle')
+                  : (agentServers.length === 0 ? t('requirements.detail2.designAgentServerEmptyTitle') : '')}
+                style={{ minWidth: 160 }}
+              >
+                <option value="">{t('requirements.detail2.preflightLocalExec')}</option>
+                {agentServers.map(s => (
+                  <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
+                ))}
+              </select>
+            </label>
+            {agentServers.length === 0 && (
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                {t('requirements.detail2.designAgentServerNoHint')}
+              </div>
+            )}
             {showDesignToggle && (
               <button
                 className="btn btn-sm process-toggle"

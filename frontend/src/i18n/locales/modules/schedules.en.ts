@@ -65,6 +65,14 @@ export const schedules = {
     baseBranchLabel: 'Base branch',
     agentLabel: 'Environment',
     agentLocal: 'This NovaWorkbench host',
+    // Design-stage Agent server picker. See the zh-CN module for the full
+    // rationale. Mirror the keys key-for-key so the en-US bundle doesn't
+    // silently fall back to Chinese.
+    designAgentServerLabel: 'Agent server',
+    designAgentServerDefault: 'Default (local)',
+    designAgentServerRemote: 'Remote Agent server',
+    designAgentServerEmptyTitle: 'No ready Agent server is available — add one in Settings → Agent servers and finish the environment check first.',
+    designAgentServerNoHint: 'No ready Agent server is configured. Open Settings → Agent servers to add one.',
     splitTasks: 'Split into sub-tasks (same as the manual buttons; ignored in Agent-Server mode)',
     failTitle: '⚠️ Could not create',
     cancel: 'Cancel',

@@ -496,6 +496,14 @@ var alterColumns = []string{
 	// readable name is resolved at read time via a LEFT JOIN against
 	// agent_servers (see service.RequirementService.List/Get).
 	`ALTER TABLE requirements ADD COLUMN agent_server_id TEXT NOT NULL DEFAULT ''`,
+	// Agent-server binding for the architect-design stage: the agent_servers.id
+	// chosen in the design toolbar dropdown. Mirrors agent_server_id above but
+	// stamped by the design stage prologue so a failed coding run doesn't
+	// overwrite a successful design-stage binding (and vice-versa). Empty =
+	// 本地. The existing alterColumns machinery swallows "duplicate column"
+	// errors on already-migrated DBs (sqlite/mysql/pg), so this is safe to
+	// ship before all deployments have caught up.
+	`ALTER TABLE requirements ADD COLUMN design_agent_server_id TEXT NOT NULL DEFAULT ''`,
 	// Per-role Claude-config binding: lets a role carry its own ANTHROPIC_BASE_URL
 	// + ANTHROPIC_AUTH_TOKEN pair (via claude_configs.id) so the role's chosen
 	// model runs against the role's chosen gateway, not just the global active
