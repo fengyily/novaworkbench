@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/novaworkbench/backend/internal/db"
+	"regexp"
 	"strings"
 	"time"
 
@@ -1093,10 +1094,13 @@ func (s *RequirementService) SaveCodingChat(reqID, messages string) error {
 
 // UpdateDesign persists the generated technical design and marks the architect
 // phase as in-progress (designing). The "design complete" gate is a separate
-// status transition driven by the user.
+// status transition driven by the user. The payload is run through
+// sanitizeDesignDoc to strip a single outer ```markdown``` fence that Claude
+// sometimes wraps its final plan in (see sanitizeDesignDoc).
 func (s *RequirementService) UpdateDesign(id, designJSON string) (*model.Requirement, error) {
 	now := time.Now()
-	_, err := s.db.Exec("UPDATE requirements SET design_docs=?, status='designing', updated_at=? WHERE id=?", designJSON, now, id)
+	cleaned := sanitizeDesignDoc(designJSON)
+	_, err := s.db.Exec("UPDATE requirements SET design_docs=?, status='designing', updated_at=? WHERE id=?", cleaned, now, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1203,4 +1207,70 @@ func (s *RequirementService) Unarchive(id string) (*model.Requirement, error) {
 	}
 
 	return s.Get(id)
+}
+
+// sanitizeDesignDoc normalises the value that gets persisted into
+// requirements.design_docs so downstream rendering can rely on a clean
+// Markdown payload. Two cases are handled:
+//
+//  1. Claude sometimes wraps a plan in a single outer markdown fence:
+//     ```markdown\n# ...\n```. When the whole trimmed input matches that
+//     pattern the fence is stripped — ReactMarkdown would otherwise render
+//     the inner # / ## / - markers as literal text inside a code block.
+//  2. Claude occasionally prefixes the fenced block with prose such as
+//     "Here's the updated plan:" or "Updated plan:". When the input
+//     contains exactly one fenced code block and a leading prose prefix
+//     before it, only the fence content is kept (the prose is dropped —
+//     it is never useful in the stored doc and would render verbatim).
+//
+// Legacy JSON shapes ({overview, files, ...} or ["..."]) and well-formed
+// plain Markdown are returned unchanged. The detection mirrors the
+// frontend's parseDesign whitelist so any change here must be kept in
+// sync with frontend/src/pages/RequirementDetail.tsx parseDesign.
+func sanitizeDesignDoc(raw string) string {
+	if raw == "" {
+		return raw
+	}
+	trimmed := strings.TrimSpace(raw)
+	// Strict outer-fence match: ``` optional lang tag, newline, body, newline, ```.
+	outer := regexp.MustCompile("^```[^\\n]*\\n([\\s\\S]*?)\\n```\\s*$")
+	// First: whole input is one fence → strip directly.
+	if m := outer.FindStringSubmatch(trimmed); m != nil {
+		body := strings.TrimSpace(m[1])
+		// Allow up to 2 levels of nesting (rare double-wrapped output).
+		for i := 0; i < 2; i++ {
+			mm := outer.FindStringSubmatch(body)
+			if mm == nil {
+				break
+			}
+			body = strings.TrimSpace(mm[1])
+		}
+		return body + "\n"
+	}
+	// Second: leading prose + a single trailing fence. Common Claude pattern
+	// is "Here's the updated plan:\n```markdown\n...\n```". We require exactly
+	// one fence pair (no inner fences that would also count as separate pairs),
+	// and the prose must precede the opening fence.
+	openRe := regexp.MustCompile("(?m)^```[^\\n]*\\n")
+	closeRe := regexp.MustCompile("(?m)\\n```\\s*$")
+	opens := openRe.FindAllStringIndex(trimmed, -1)
+	closes := closeRe.FindAllStringIndex(trimmed, -1)
+	if len(opens) == 1 && len(closes) == 1 && opens[0][0] < closes[0][0] {
+		// The opening must be at the start of a line and the closing at the end.
+		body := trimmed[opens[0][1]:closes[0][0]]
+		// Drop the leading prose (everything before the fence open).
+		_ = body // body already excludes the prose prefix via slice
+		body = strings.TrimSpace(body)
+		for i := 0; i < 2; i++ {
+			mm := outer.FindStringSubmatch(body)
+			if mm == nil {
+				break
+			}
+			body = strings.TrimSpace(mm[1])
+		}
+		if body != "" {
+			return body + "\n"
+		}
+	}
+	return raw
 }
