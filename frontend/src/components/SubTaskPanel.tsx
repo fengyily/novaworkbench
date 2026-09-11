@@ -955,6 +955,21 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     });
   })();
 
+  // latestArtifactStale: derived from the freshest sub-task's artifact.
+  // Used to (a) auto-select the 「新会话」 radio and (b) render the
+  // short explanation under the radio. We only flag the original legacy
+  // wording "❌ 源会话已失效（session 文件不存在）" — the new side-specific
+  // variants still match this substring so they ALSO trip the auto-
+  // promote, which is the right UX (any of the three means the user's
+  // last sub-task hit the bug).
+  const latestArtifactStale = (() => {
+    if (!sortedItems || sortedItems.length === 0) return null;
+    const latest = sortedItems[0];
+    const txt = latest?.artifact || '';
+    const isStale = txt.includes('源会话已失效') && txt.includes('session 文件不存在');
+    return { latest, isStale, side: txt };
+  })();
+
   // Decide which summary CTA (if any) the banner should show. Kept as
   // a pure derivation so the JSX below stays declarative and easy to
   // review against the plan's three-state rule (early / manual / progress).
@@ -1104,6 +1119,25 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // in this iteration (worker-side kill message lands in a follow-up PR).
   const canStop = !requirement?.agent_server_id;
 
+  // 「新会话（含需求上下文）」 mode. The radio surfaces when (a) the
+  // requirement was developed on an Agent server (so the source-session-
+  // missing bug can hit) OR (b) the latest sub-task artifact starts with
+  // the legacy generic "❌ 源会话已失效" wording (which means the user
+  // has already hit the bug and we should pre-select the recovery path).
+  // Default remains "继续上一会话" (freshSession=false) to preserve the
+  // legacy behavior on every happy path.
+  const showFreshOption =
+    !!requirement?.agent_server_id ||
+    (latestArtifactStale && latestArtifactStale.isStale);
+  const [sessionMode, setSessionMode] = useState<'resume' | 'fresh'>('resume');
+  useEffect(() => {
+    // When the user just saw a stale-session failure, auto-promote to
+    // 「新会话」 so a follow-up click "just works".
+    if (latestArtifactStale && latestArtifactStale.isStale) {
+      setSessionMode('fresh');
+    }
+  }, [latestArtifactStale]);
+
   const onCreate = useCallback(async () => {
     const p = prompt.trim();
     if (!p || submitting) return;
@@ -1116,9 +1150,12 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       // `model` is optional; empty selection lets the backend fall back to
       // the developer-role effective model. Sending the literal DefaultModelLabel
       // sentinel would never happen here — ModelSelect normalises it to "".
+      // `freshSession` is the 「新会话（含需求上下文）」 opt-in (see the
+      // radio above). Defaults to false (= legacy --fork-session path).
       await subTasksApi.create(requirementId, {
         prompt: p,
         ...(createModel ? { model: createModel } : {}),
+        ...(sessionMode === 'fresh' ? { freshSession: true } : {}),
       });
       setPrompt('');
       await loadList();
@@ -1127,7 +1164,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     } finally {
       setSubmitting(false);
     }
-  }, [prompt, submitting, createModel, requirementId, loadList, t]);
+  }, [prompt, submitting, createModel, sessionMode, requirementId, loadList, t]);
 
   // --- Manual re-split (🔄 Re-split) ------------------------------------
   // Escape hatch for when StartCoding's auto-orchestration produced no
@@ -1391,6 +1428,43 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         {!createModel && !developerDefaultModel && (
           <div className="sub-model-warning" role="note">
             {t('components.subTaskPanel.modelEmptyWarning')}
+          </div>
+        )}
+        {/* Session-mode radio: surfaces only when the bug is in scope
+            (Agent server requirement OR the last sub-task artifact
+            indicates a stale-session failure). Default stays "继续上一
+            会话" on every happy path so we don't accidentally switch
+            existing users over. */}
+        {showFreshOption && (
+          <div className="sub-session-mode" role="radiogroup" aria-label={t('components.subTaskPanel.sessionMode.label')}>
+            <span className="sub-session-mode-label">{t('components.subTaskPanel.sessionMode.label')}</span>
+            <label className="sub-session-mode-option">
+              <input
+                type="radio"
+                name="sessionMode"
+                value="resume"
+                checked={sessionMode === 'resume'}
+                onChange={() => setSessionMode('resume')}
+                disabled={submitting || reSplitBusy}
+              />
+              <span>{t('components.subTaskPanel.sessionMode.resume')}</span>
+            </label>
+            <label className="sub-session-mode-option">
+              <input
+                type="radio"
+                name="sessionMode"
+                value="fresh"
+                checked={sessionMode === 'fresh'}
+                onChange={() => setSessionMode('fresh')}
+                disabled={submitting || reSplitBusy}
+              />
+              <span>{t('components.subTaskPanel.sessionMode.fresh')}</span>
+            </label>
+            {latestArtifactStale && latestArtifactStale.isStale && (
+              <div className="sub-session-mode-hint" role="note">
+                {t('components.subTaskPanel.sessionMode.freshHint')}
+              </div>
+            )}
           </div>
         )}
         <div className="sub-composer-toolbar">

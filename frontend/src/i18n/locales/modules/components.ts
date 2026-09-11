@@ -95,6 +95,16 @@ export const components = {
     summaryToastOk: '✅ 汇总已发起',
     summaryToastErrPrefix: '❌',
     summaryToastErrFallback: '汇总发起失败',
+    // 「新会话（含需求上下文）」 mode (P2 fallback for the source-session-
+    // missing bug on Agent Server runs). The radio only renders when the
+    // requirement has agent_server_id OR the latest sub-task artifact
+    // indicates a stale-session failure. Default stays "继续上一会话".
+    sessionMode: {
+      label: '会话模式',
+      resume: '继续上一会话',
+      fresh: '新会话（含需求上下文）',
+      freshHint: '上次会话在 Agent 服务器上找不到，建议用「新会话」模式（会自动带上需求 + 设计文档 + 上一会话最近 10 轮作为上下文）',
+    },
   },
   subTaskCard: {
     statusPending: '排队中',

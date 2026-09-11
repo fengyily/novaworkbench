@@ -153,6 +153,43 @@
 .sub-composer-resplit {
   flex-shrink: 0;
 }
+
+/* 「新会话（含需求上下文）」 mode selector. Only renders on Agent
+   server requirements OR after a stale-session failure. Matches the
+   model-warning tone so it reads as the same family of "needs attention
+   before submit" UI. */
+.sub-session-mode {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: rgba(245, 158, 11, 0.06);
+}
+.sub-session-mode-label {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  font-weight: 500;
+}
+.sub-session-mode-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--color-text);
+  cursor: pointer;
+}
+.sub-session-mode-option input {
+  margin: 0;
+}
+.sub-session-mode-hint {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: #b45309;
+  line-height: 1.5;
+}
 /* Inline model picker inside the composer toolbar — kept compact so it
    shares the row with the "重新拆分" button without forcing a vertical
    break on desktop widths. The inline style={flex: '0 0 auto'} on the
