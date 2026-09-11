@@ -614,6 +614,13 @@ export interface Requirement {
   // = never coded or predates this field; the UI shows no badge in that
   // case rather than guessing "session".
   dev_mode?: '' | 'session' | 'design';
+  // Agent-server code-transport (sync) mode, stamped when the coding stage
+  // starts on an Agent server. '' = 远程 Git 仓库同步 (origin clone/push,
+  // legacy default). 'local' = 本地仓库同步 (git-bundle over SFTP for a
+  // self-hosted repo with no reachable remote; code is synced back to the
+  // local isolated worktree and integrated via 本地合并). Empty/undefined for
+  // local (non-agent) rows or rows that predate this field.
+  sync_mode?: '' | 'local';
   created_at: string; updated_at: string;
   completed_at?: string;
   // 日历视图排期字段。NULL = 未排期，前端回退到 created_at；拖拽或编辑
@@ -839,6 +846,14 @@ export interface StartCodingReq {
    * persisted value (or 'session' on rows that predate dev_mode).
    */
   dev_mode?: '' | 'session' | 'design';
+  /**
+   * Agent-server code-transport strategy (only meaningful when
+   * agent_server_id is set). 'remote'/'' = origin clone/push (legacy). 'local'
+   * = git-bundle over SFTP for a self-hosted repo with no reachable remote.
+   * Empty/undefined = backend infers it from the project's remote_url (empty
+   * remote_url → local). Persisted so follow-up actions reuse it.
+   */
+  sync_mode?: '' | 'local' | 'remote';
 }
 
 export const wizardApi = {

@@ -123,11 +123,11 @@ func (c *Client) Close() error {
 // new port on the network.
 //
 // Why a custom DialContext instead of `ssh -L` style local-port forwarding:
-//   * No actual local TCP listener is created (cleaner, no port collisions
+//   - No actual local TCP listener is created (cleaner, no port collisions
 //     across concurrent calls, no firewall prompts).
-//   * The SSH connection is reused end-to-end: we don't need a separate
+//   - The SSH connection is reused end-to-end: we don't need a separate
 //     tunnel process or its lifecycle.
-//   * Each request gets its own channel, so concurrent calls are safe and
+//   - Each request gets its own channel, so concurrent calls are safe and
 //     the transport's per-host connection pooling works through the SSH
 //     multiplex layer.
 //
@@ -172,7 +172,8 @@ func (c *Client) HTTPTransport(remoteAddr string) *http.Transport {
 // HTTPClient returns a one-off *http.Client using HTTPTransport. Use this
 // for short-lived requests (health probes). For long-running SSE streams
 // where you want to set a custom timeout, build the Client yourself:
-//   httpClient := &http.Client{Transport: sshCli.HTTPTransport("127.0.0.1:7000")}
+//
+//	httpClient := &http.Client{Transport: sshCli.HTTPTransport("127.0.0.1:7000")}
 func (c *Client) HTTPClient(remoteAddr string) *http.Client {
 	return &http.Client{Transport: c.HTTPTransport(remoteAddr)}
 }
@@ -441,6 +442,65 @@ func (c *Client) WriteFile(remotePath string, data []byte, mode os.FileMode) err
 	return nil
 }
 
+// PutFile uploads a single local file to remotePath with the given mode,
+// creating the remote parent directory as needed. Unlike SyncDirUp*, it does
+// NOT apply the .jsonl/.md filter — it copies exactly the one file it is
+// given, which is what the git-bundle transport (local-sync mode) needs to
+// ship a *.up.bundle to the agent host. A leading "~" / "~/" in remotePath is
+// expanded against the remote user's $HOME (pkg/sftp does not understand "~").
+func (c *Client) PutFile(local, remote string, mode os.FileMode) error {
+	if c == nil || c.conn == nil {
+		return errors.New("ssh: client not connected")
+	}
+	if local == "" || remote == "" {
+		return errors.New("ssh: empty put path")
+	}
+	expanded, err := c.expandHome(remote)
+	if err != nil {
+		return err
+	}
+	sftpCli, err := c.sftp()
+	if err != nil {
+		return err
+	}
+	defer sftpCli.Close()
+	if dir := path.Dir(expanded); dir != "" && dir != "." {
+		if err := sftpCli.MkdirAll(dir); err != nil {
+			return fmt.Errorf("ssh: sftp mkdir %s: %w", dir, err)
+		}
+	}
+	return uploadFile(sftpCli, local, expanded, mode)
+}
+
+// GetFile downloads a single remote file to local, creating the local parent
+// directory as needed. The .jsonl/.md filter used by SyncDirDown* is NOT
+// applied — it copies exactly the one file it is given (the *.down.bundle the
+// git-bundle transport pulls back from the agent host). A leading "~" / "~/"
+// in remote is expanded against the remote user's $HOME.
+func (c *Client) GetFile(remote, local string) error {
+	if c == nil || c.conn == nil {
+		return errors.New("ssh: client not connected")
+	}
+	if remote == "" || local == "" {
+		return errors.New("ssh: empty get path")
+	}
+	expanded, err := c.expandHome(remote)
+	if err != nil {
+		return err
+	}
+	if dir := filepath.Dir(local); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("ssh: mkdir local %s: %w", dir, err)
+		}
+	}
+	sftpCli, err := c.sftp()
+	if err != nil {
+		return err
+	}
+	defer sftpCli.Close()
+	return downloadFile(sftpCli, expanded, local)
+}
+
 // ExpandHome rewrites a leading "~" or "~/" in remotePath to the remote
 // user's absolute $HOME path, caching the resolved home on the Client.
 // Non-"~" paths (absolute or relative) are returned unchanged, so callers can
@@ -701,7 +761,7 @@ func downloadFile(sftpCli *sftp.Client, remotePath, localPath string) error {
 }
 
 // shellQuote returns a single-quoted shell-safe representation of s. Empty
-// strings are quoted as ''; embedded single quotes are escaped via the
+// strings are quoted as ”; embedded single quotes are escaped via the
 // standard close-quote / escape / open-quote trick.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"

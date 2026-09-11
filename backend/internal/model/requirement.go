@@ -9,7 +9,7 @@ type Requirement struct {
 	Description        string `json:"description"`
 	Status             string `json:"status"`
 	Priority           string `json:"priority"`
-	Kind               string `json:"kind"` // "issue" | "requirement" | "idea"; defaults to "requirement" for legacy rows
+	Kind               string `json:"kind"`                // "issue" | "requirement" | "idea"; defaults to "requirement" for legacy rows
 	AcceptanceCriteria string `json:"acceptance_criteria"` // JSON array
 	DesignDocs         string `json:"design_docs"`         // JSON array
 	ConversationIDs    string `json:"conversation_ids"`    // JSON array
@@ -22,23 +22,23 @@ type Requirement struct {
 	// created directly (no parent) or that predate this column. The original
 	// row is left untouched so the discussion thread stays intact.
 	SourceRequirementID string `json:"source_requirement_id"`
-	DesignSessionID    string `json:"design_session_id"`
-	DesignJobID        string `json:"design_job_id"`   // active architect-design JobStore job id; empty when no design job is running
-	AnalysisJobID      string `json:"analysis_job_id"` // active analyst-chat JobStore job id; empty when no analyst turn is running
-	ApplyJobID         string `json:"apply_job_id"`    // active apply-doc JobStore job id; empty when no apply is running
-	CodingSessionID    string `json:"coding_session_id"`
-	SkipAnalysis       bool   `json:"skip_analysis"` // when true, architect-design runs a fresh session instead of forking the analyst session
-	SkipDesign         bool   `json:"skip_design"`   // when true, skip analyst+architect stages and go straight to coding ("直接开发")
-	BranchName         string `json:"branch_name"`   // dev branch checked out in the worktree; empty = legacy in-place checkout
-	WorktreePath       string `json:"worktree_path"` // absolute path of the isolated git worktree; empty = no worktree (legacy)
+	DesignSessionID     string `json:"design_session_id"`
+	DesignJobID         string `json:"design_job_id"`   // active architect-design JobStore job id; empty when no design job is running
+	AnalysisJobID       string `json:"analysis_job_id"` // active analyst-chat JobStore job id; empty when no analyst turn is running
+	ApplyJobID          string `json:"apply_job_id"`    // active apply-doc JobStore job id; empty when no apply is running
+	CodingSessionID     string `json:"coding_session_id"`
+	SkipAnalysis        bool   `json:"skip_analysis"` // when true, architect-design runs a fresh session instead of forking the analyst session
+	SkipDesign          bool   `json:"skip_design"`   // when true, skip analyst+architect stages and go straight to coding ("直接开发")
+	BranchName          string `json:"branch_name"`   // dev branch checked out in the worktree; empty = legacy in-place checkout
+	WorktreePath        string `json:"worktree_path"` // absolute path of the isolated git worktree; empty = no worktree (legacy)
 	// Effective model actually dispatched to the claude CLI for each stage
 	// (the --model value, or the display literal "默认模型" when neither the
 	// role nor the active claude config specified one). Written only on the
 	// success path; empty = the stage hasn't run yet (or predates this column).
-	AnalystModel   string     `json:"analyst_model"`
-	ArchitectModel string     `json:"architect_model"`
-	DeveloperModel string     `json:"developer_model"`
-	ReviewerModel  string     `json:"reviewer_model"`
+	AnalystModel   string `json:"analyst_model"`
+	ArchitectModel string `json:"architect_model"`
+	DeveloperModel string `json:"developer_model"`
+	ReviewerModel  string `json:"reviewer_model"`
 	// Context compression artifacts, one set per wizard stage. When the user
 	// clicks "📦 压缩上下文", the wizard handler runs a one-off --resume turn
 	// asking Claude to summarize the current session, stores the Chinese
@@ -60,14 +60,14 @@ type Requirement struct {
 	// page refresh / panel collapse instead of dropping to 0%. Empty = no
 	// snapshot recorded yet. Best-effort: write failures are logged, not
 	// surfaced, so they never break a claude turn.
-	UsageSnapshots string    `json:"usage_snapshots"`
+	UsageSnapshots string `json:"usage_snapshots"`
 	// CodingPlan: the auto-orchestrate summary Markdown produced by the
 	// developer main agent after every child sub-task in a batch has
 	// finished. Empty = no orchestrated batch has produced a summary yet
 	// (legacy rows / manual-only flow). Surfaced by SubTaskPanel as the
 	// parent plan every child task forks from; persisted on completion so
 	// a server restart / JobStore eviction doesn't lose the breakdown.
-	CodingPlan         string    `json:"coding_plan"`
+	CodingPlan string `json:"coding_plan"`
 	// DevSource / AgentServerID record WHERE this requirement was developed.
 	// DevSource is DevSourceAgent ("agent") or DevSourceLocal ("local"),
 	// stamped once when the coding stage starts; empty = never coded.
@@ -78,6 +78,14 @@ type Requirement struct {
 	// the environment the code actually lives in.
 	DevSource     string `json:"dev_source"`
 	AgentServerID string `json:"agent_server_id"`
+	// SyncMode records HOW code is shipped to / from the Agent server for this
+	// requirement. "" == 远程/origin 传输 (legacy default: remote host clones
+	// origin and pushes back to origin); "local" == git-bundle 传输 for local
+	// self-hosted repos with no reachable remote (code rides SFTP bundle files
+	// and is integrated locally via 本地合并). Stamped once by the coding stage
+	// prologue and read by every follow-up action so the lifecycle stays
+	// consistent. Empty for local (non-agent) execution and legacy rows.
+	SyncMode string `json:"sync_mode"`
 	// DesignAgentServerID records WHERE this requirement's architect-design
 	// stage was run. Stamped by the design stage prologue (mirror of
 	// AgentServerID for the dev stage). Empty = 本地 (no remote agent). On a
@@ -113,10 +121,10 @@ type Requirement struct {
 	// further adjustments must go through the sub-task flow instead). Not
 	// stored on the requirements row itself — it's a derived aggregate so
 	// the count stays in sync without an extra migration.
-	SubTaskCount   int       `json:"sub_task_count"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt             time.Time  `json:"updated_at"`
-	CompletedAt           *time.Time `json:"completed_at,omitempty"`
+	SubTaskCount int        `json:"sub_task_count"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 	// Calendar-view scheduling fields. Both nullable: NULL = "未排期", the
 	// frontend falls back to created_at so legacy rows are immediately usable
 	// in the calendar without a backfill. Writes go through
@@ -139,7 +147,7 @@ type CreateRequirementReq struct {
 	Title        string `json:"title"`
 	Description  string `json:"description"`
 	Priority     string `json:"priority"`
-	Kind         string `json:"kind"` // "issue" | "requirement" | "idea"; empty → defaults to "requirement"
+	Kind         string `json:"kind"`          // "issue" | "requirement" | "idea"; empty → defaults to "requirement"
 	SkipAnalysis *bool  `json:"skip_analysis"` // pointer: nil omits the field so Create defaults to true (skip) and Update preserves the existing value
 	SkipDesign   *bool  `json:"skip_design"`   // pointer: nil → Create defaults to false; Update never references this column so it is preserved automatically
 	// SkipOrganize: when true, the handler skips the LLM-organized description
@@ -148,7 +156,7 @@ type CreateRequirementReq struct {
 	// is used. Pointer so the absence of the field keeps the previous default
 	// (false = run the organizer) — older clients / scripts that don't send
 	// this continue to get the structured output. UI default = true.
-	SkipOrganize        *bool  `json:"skip_organize"`
+	SkipOrganize *bool `json:"skip_organize"`
 	// SourceRequirementID: optional parent reference. Set by the "总结转需求"
 	// action when an idea's discussion is summarized into a new requirement.
 	// Validated in service.RequirementService (must point to an existing row in

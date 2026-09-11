@@ -126,7 +126,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	}
 
 	rows, err := s.db.Query(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.created_at,r.updated_at,r.completed_at"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.created_at,r.updated_at,r.completed_at"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" "+where+" ORDER BY CASE WHEN r.status = 'done' THEN 1 ELSE 0 END ASC, r.created_at DESC",
 		args...)
@@ -144,7 +144,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
-			&r.UsageSnapshots, &r.CodingPlan, &r.DevSource, &r.DevMode,
+			&r.UsageSnapshots, &r.CodingPlan, &r.DevSource, &r.DevMode, &r.SyncMode,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
 			return nil, err
 		}
@@ -158,7 +158,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 }
 
 // Calendar returns a slim slice of requirements overlapping the [from, to)
-//// window (half-open, day-granular: from=00:00 of the first day, to=00:00 of
+// // window (half-open, day-granular: from=00:00 of the first day, to=00:00 of
 // the day AFTER the last day) for the calendar view. Only the columns the
 // month/day/year grids need are read — chat history, design docs, usage
 // snapshots and the per-stage model columns are intentionally skipped to keep
@@ -301,7 +301,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	// created_at / updated_at — unqualified references would be ambiguous on
 	// MySQL/Postgres.
 	err := s.db.QueryRow(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.created_at,r.updated_at,r.completed_at"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.created_at,r.updated_at,r.completed_at"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
@@ -310,7 +310,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
-			&r.UsageSnapshots, &r.CodingPlan, &r.DevSource, &r.DevMode,
+			&r.UsageSnapshots, &r.CodingPlan, &r.DevSource, &r.DevMode, &r.SyncMode,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("requirement not found")
@@ -804,6 +804,32 @@ func (s *RequirementService) UpdateDevMode(id, mode string) error {
 	}
 	_, err := s.db.Exec(
 		"UPDATE requirements SET dev_mode = ?, updated_at = ? WHERE id = ?",
+		mode, time.Now(), id)
+	return err
+}
+
+// Code-transport modes for Agent-server execution (requirements.sync_mode).
+// SyncModeRemote ("") is the legacy default: the remote host clones origin and
+// pushes commits back to origin, so a reachable git remote is required.
+// SyncModeLocal ("local") ships code to / from the agent host as git-bundle
+// files over SFTP and integrates locally via 本地合并 — the path for local
+// self-hosted repos that have no remote reachable from the agent server.
+const (
+	SyncModeRemote = ""
+	SyncModeLocal  = "local"
+)
+
+// UpdateSyncMode stamps how code is shipped to / from the Agent server for
+// this requirement. Any value other than SyncModeLocal is normalized to
+// SyncModeRemote ("") so a bad client can never corrupt the column. Kept as a
+// standalone updater (rather than extending UpdateDevSource's signature) so
+// the two provenance stamps stay independently writable.
+func (s *RequirementService) UpdateSyncMode(id, mode string) error {
+	if mode != SyncModeLocal {
+		mode = SyncModeRemote
+	}
+	_, err := s.db.Exec(
+		"UPDATE requirements SET sync_mode = ?, updated_at = ? WHERE id = ?",
 		mode, time.Now(), id)
 	return err
 }
