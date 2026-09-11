@@ -35,6 +35,7 @@ type OrchestrationBatch struct {
 	SummaryStatus         string
 	SummaryJobID          string
 	SummaryHeartbeatAt    *time.Time
+	SummaryAttempts       int
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
 	CompletedAt           *time.Time
@@ -52,4 +53,11 @@ const (
 	SummaryRunning = "running"
 	SummaryDone    = "done"
 	SummaryError   = "error"
+
+	// SummaryMaxAttempts caps how many times the tick loop will re-arm a
+	// failed summary before flipping the batch to BatchErrored. Mirrors the
+	// boot-recovery pattern: a stale run is always recoverable, but a
+	// chronically-failing batch should surface as terminal instead of
+	// burning CPU + log lines forever.
+	SummaryMaxAttempts = 3
 )

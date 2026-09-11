@@ -1316,6 +1316,13 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 		log.Printf("[orchestrate] summary %s mark running: %v", batchID, serr)
 		return
 	}
+	// Bump attempts atomically so tickSummarizing's case SummaryError arm
+	// can stop re-arming once we hit model.SummaryMaxAttempts (3).
+	// Best-effort: a bump failure logs and proceeds — the cap is a guard
+	// rail, not a correctness invariant.
+	if _, aerr := h.batchSvc.BumpAndFetchSummaryAttempts(batchID); aerr != nil {
+		log.Printf("[orchestrate] summary %s bump attempts: %v", batchID, aerr)
+	}
 
 	// Heartbeat so boot recovery can distinguish a live summary from an
 	// orphaned one. Stops when summary work completes (deferred).
@@ -1404,6 +1411,34 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 
 	summaryUsage := h.usageCtxFor("orchestrate_summary", batch.RequirementID, req.ProjectID, job.ID, batch.Model, "", "auto-summary")
 	out := runClaudeStream(jobSink{job}, cmd, "orchestrate-summary", summaryUsage)
+
+	// Stale-session recovery：会话文件可能已被清理/失效。镜像 re-orchestrate
+	// 的 134-142：清空 OrchestratorSessionID、铸新 SID、用 Resume=false 再来一次。
+	if out.staleSession {
+		log.Printf("[orchestrate] summary %s: orchestrator session stale, retrying fresh", batchID)
+		job.Append(store.LogLine{Type: "phase", Content: "🔄 主 Agent 会话已失效，正在用全新会话重试汇总..."})
+		if cerr := h.batchSvc.ClearOrchestratorSession(batchID); cerr != nil {
+			log.Printf("[orchestrate] summary %s clear session: %v", batchID, cerr)
+		}
+		freshSID := util.NewUUID()
+		if uerr := h.batchSvc.UpdateOrchestratorSession(batchID, freshSID); uerr != nil {
+			log.Printf("[orchestrate] summary %s persist fresh sid: %v", batchID, uerr)
+		}
+		cmd2, cancel2 := h.llm.GenerateCode(llm.StreamOpts{
+			Prompt:         summaryB.String(),
+			WorkDir:        batch.WorkDir,
+			SystemPrompt:   "",
+			Model:          cliModelArg(batch.Model),
+			ClaudeConfigID: batch.ClaudeConfigID,
+			SessionID:      freshSID,
+			Resume:         false,
+			Fork:           false,
+		})
+		if cmd2 != nil {
+			defer cancel2()
+			out = runClaudeStream(jobSink{job}, cmd2, "orchestrate-summary-retry", summaryUsage)
+		}
+	}
 
 	if out.errMsg != "" || out.finalResult == "" {
 		log.Printf("[orchestrate] summary %s turn failed: %s / empty=%v", batchID, out.errMsg, out.finalResult == "")
