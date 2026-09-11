@@ -117,11 +117,26 @@ func (j *Job) Append(line LogLine) {
 	if line.At == 0 {
 		line.At = time.Now().UnixMilli()
 	}
+	// Everything below stays inside a single critical section — including the
+	// fan-out to subscribers. Sending outside the lock (the previous shape)
+	// raced Finish: a late writer could take its subs snapshot just before
+	// Finish closed those channels, then send into a closed one and panic. The
+	// coding goroutines have no recover, so that panic took the whole nova
+	// process down. The sends are non-blocking (select/default), so holding the
+	// lock across them costs microseconds.
 	j.mu.Lock()
+	defer j.mu.Unlock()
+	// Terminal guard. Once the job finished, its subscriber channels are closed;
+	// dropping the line is the deliberate trade-off here — silently losing a
+	// post-terminal log line (a lingering SSH/SFTP writer goroutine, say) is far
+	// better than panicking the process. Nothing a user needs is lost: every
+	// terminal done/result line is appended BEFORE Finish (see wizard_coding.go,
+	// sub_task_runner.go).
+	if j.Status != JobRunning {
+		return
+	}
 	j.Log = append(j.Log, line)
-	subs := j.subs
-	j.mu.Unlock()
-	for _, ch := range subs {
+	for _, ch := range j.subs {
 		select {
 		case ch <- line:
 		default:
@@ -157,13 +172,27 @@ func (j *Job) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// Finish moves the job to a terminal state and closes every subscriber channel
+// so waiting SSE pumps flush their final job_done frame.
+//
+// Idempotent: a second call is a no-op. Callers can legitimately race to finish
+// the same job — the sub-task stop watchdog (wizard_subtask.go) force-finishes a
+// job the runner may finish moments later, and the coding goroutines' terminal-
+// state fallback finishes after an early return. Re-closing the same channels
+// panicked, so the first terminal state wins and later calls change nothing.
 func (j *Job) Finish(exitCode int, status JobStatus) {
 	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.Status != JobRunning {
+		return
+	}
 	j.ExitCode = exitCode
 	j.Status = status
 	j.FinishedAt = time.Now()
 	subs := j.subs
-	j.mu.Unlock()
+	// Clear the slice as well: Append's terminal guard is the primary defence
+	// against sending into a closed channel, this is the belt-and-braces one.
+	j.subs = nil
 	for _, ch := range subs {
 		close(ch)
 	}
@@ -177,7 +206,14 @@ func (j *Job) Subscribe() (<-chan LogLine, int) {
 	defer j.mu.Unlock()
 	existing := make([]LogLine, len(j.Log))
 	copy(existing, j.Log)
-	ch := make(chan LogLine, 256)
+	// Buffer the full replay, not a fixed 256: the pre-seed loop below runs
+	// while j.mu is held, so a fixed-size channel deadlocked the instant a
+	// subscriber attached to a job that had already logged more than 256 lines.
+	// Because the blocked send held the write lock, every Append / Finish /
+	// Snapshot for that job (and, via JobStore.mu, for every other job) queued
+	// behind it — the live SSE stream AND the refresh-time snapshot both hung,
+	// with no error anywhere.
+	ch := make(chan LogLine, len(existing)+256)
 	if j.Status == JobRunning {
 		j.subs = append(j.subs, ch)
 	}
