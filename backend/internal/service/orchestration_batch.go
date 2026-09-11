@@ -248,6 +248,80 @@ func (s *OrchestrationBatchService) MarkSummary(id, summaryStatus string) error 
 	return err
 }
 
+// ResetErrorToPending flips a batch whose summary round failed
+// (summary_status='error') back to 'pending' so the next OrchestrationQueue
+// tick re-arms a fresh summary goroutine. Mirrors Recover()'s SQL shape
+// (line 317-329) — clears summary_heartbeat_at so the same tick can't
+// immediately flip it back to pending via the stale-heartbeat arm, and
+// bumps updated_at so ListActive orders it eagerly next pass. Caller is
+// expected to guard on attempts < SummaryMaxAttempts before calling;
+// this method does not enforce that on its own (the cap is enforced
+// by the tick loop in scheduler/orchestration_queue.go).
+func (s *OrchestrationBatchService) ResetErrorToPending(id string) error {
+	if id == "" {
+		return errors.New("batch id is required")
+	}
+	_, err := s.db.Exec(`UPDATE orchestration_batches
+		SET summary_status=?, summary_heartbeat_at=NULL, updated_at=CURRENT_TIMESTAMP
+		WHERE id=?`,
+		model.SummaryPending, id)
+	return err
+}
+
+// ClearOrchestratorSession wipes the orchestrator_session_id so the next
+// summary attempt takes the fresh-session path (Resume:false) instead of
+// retrying against a session file that's been deleted or rotated out.
+// Used by RunOrchestratorSummary's stale-session recovery branch — mirror
+// of how wizard_orchestration.go:134-142 clears CodingSessionID for the
+// re-orchestrate path. No guard on prior state: clearing an empty SID is
+// a harmless no-op.
+func (s *OrchestrationBatchService) ClearOrchestratorSession(id string) error {
+	if id == "" {
+		return errors.New("batch id is required")
+	}
+	_, err := s.db.Exec(`UPDATE orchestration_batches
+		SET orchestrator_session_id='', updated_at=CURRENT_TIMESTAMP
+		WHERE id=?`, id)
+	return err
+}
+
+// UpdateOrchestratorSession persists a freshly-minted orchestrator session
+// id on the batch. Paired with ClearOrchestratorSession when
+// RunOrchestratorSummary recovers from a stale-session failure: clear the
+// old SID, mint a new one via util.NewUUID, then write it back so the
+// retry pass runs against a known session file.
+func (s *OrchestrationBatchService) UpdateOrchestratorSession(id, sid string) error {
+	if id == "" {
+		return errors.New("batch id is required")
+	}
+	_, err := s.db.Exec(`UPDATE orchestration_batches
+		SET orchestrator_session_id=?, updated_at=CURRENT_TIMESTAMP
+		WHERE id=?`, sid, id)
+	return err
+}
+
+// BumpAndFetchSummaryAttempts atomically increments summary_attempts and
+// returns the new value. Called by RunOrchestratorSummary right after a
+// successful MarkSummary('running') so a crash mid-round still counts the
+// attempt toward SummaryMaxAttempts (3). Two-step (UPDATE then SELECT)
+// instead of UPDATE ... RETURNING so the SQL stays dialect-portable
+// (the backend has no RETURNING usage anywhere else).
+func (s *OrchestrationBatchService) BumpAndFetchSummaryAttempts(id string) (int, error) {
+	if id == "" {
+		return 0, errors.New("batch id is required")
+	}
+	if _, err := s.db.Exec(`UPDATE orchestration_batches
+		SET summary_attempts = summary_attempts + 1, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`, id); err != nil {
+		return 0, fmt.Errorf("bump summary_attempts: %w", err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT summary_attempts FROM orchestration_batches WHERE id=?`, id).Scan(&n); err != nil {
+		return 0, fmt.Errorf("read summary_attempts: %w", err)
+	}
+	return n, nil
+}
+
 // MarkSummaryHeartbeat is the 5s-tick companion to RunOrchestratorSummary —
 // the goroutine running the summary round calls this periodically so boot
 // recovery and the live tick can distinguish a live summary from one
@@ -335,6 +409,7 @@ func (s *OrchestrationBatchService) Recover() (int, error) {
 const batchSelectColumns = `SELECT id, requirement_id, orchestrator_session_id,
 	model, work_dir, claude_config_id, total_children,
 	status, summary_status, summary_job_id, summary_heartbeat_at,
+	summary_attempts,
 	created_at, updated_at, completed_at
 	FROM orchestration_batches`
 
@@ -350,6 +425,7 @@ func scanBatch(rows *sql.Rows) (*model.OrchestrationBatch, error) {
 		&b.ID, &b.RequirementID, &b.OrchestratorSessionID,
 		&b.Model, &b.WorkDir, &b.ClaudeConfigID, &b.TotalChildren,
 		&b.Status, &b.SummaryStatus, &b.SummaryJobID, &heartbeat,
+		&b.SummaryAttempts,
 		&b.CreatedAt, &b.UpdatedAt, &completedAt,
 	); err != nil {
 		return nil, err

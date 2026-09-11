@@ -639,6 +639,12 @@ var alterColumns = []string{
 	// children stay marked "manual" even after GenerateSubTaskSummary groups
 	// them under a summary batch_id.
 	`ALTER TABLE sub_tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'`,
+	// Orchestration summary retry cap: the tick loop's case SummaryError branch
+	// consults this column to decide whether to re-arm a fresh summary goroutine
+	// (attempts < SummaryMaxAttempts) or flip the whole batch to BatchErrored
+	// (attempts >= SummaryMaxAttempts). Bumped atomically by RunOrchestratorSummary
+	// right after MarkSummary('running'), so a crash mid-round still counts.
+	`ALTER TABLE orchestration_batches ADD COLUMN summary_attempts INTEGER NOT NULL DEFAULT 0`,
 }
 
 var (

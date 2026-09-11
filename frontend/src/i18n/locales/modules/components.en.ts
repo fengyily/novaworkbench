@@ -76,7 +76,8 @@ export const components = {
     errCreate: 'Failed to start sub-task',
     errReSplit: 'Failed to re-split',
     // Banner status texts (batch state machine — see summaryCta derivation).
-    bannerSummarizing: '📝 Main agent is generating the summary…',
+    bannerSummarizing: '📝 Main agent is generating the summary report…',
+    bannerSummaryFailed: '❌ Summary report generation failed — click to retry',
     bannerDispatchingStatus: '🪄 Main agent is dispatching sub-tasks…',
     bannerAllDoneManual: '✅ All sub-tasks finished — you can generate the summary manually.',
     // Summary CTA cluster (early / manual / progress).
@@ -84,6 +85,7 @@ export const components = {
     summaryCtaEarlyBtn: '📝 Generate summary early',
     summaryCtaManualTitle: 'Generate the summary for the completed sub-tasks',
     summaryCtaManualBtn: '📝 Generate summary',
+    summaryRetryBtn: '🔄 Retry summary',
     summaryCtaProgressTitle: 'Summary in progress',
     summaryCtaProgressBtn: 'Summarizing…',
     summarySending: 'Submitting…',

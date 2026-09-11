@@ -1282,7 +1282,9 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
               {activeChildCount > 0
                 ? t('components.subTaskPanel.autoOrchestrateRunning', { n: activeChildCount })
                 : batch?.status === 'summarizing'
-                  ? t('components.subTaskPanel.bannerSummarizing')
+                  ? (batch?.summary_status === 'error'
+                      ? t('components.subTaskPanel.bannerSummaryFailed')
+                      : t('components.subTaskPanel.bannerSummarizing'))
                   : batch?.status === 'dispatching'
                     ? t('components.subTaskPanel.bannerDispatchingStatus')
                     : t('components.subTaskPanel.bannerAllDoneManual')}
@@ -1318,6 +1320,19 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
                   title={t('components.subTaskPanel.summaryCtaProgressTitle')}
                 >
                   {t('components.subTaskPanel.summaryCtaProgressBtn')}
+                </button>
+              )}
+              {batch?.status === 'summarizing' && batch?.summary_status === 'error' && (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary sub-orchestrator-cta"
+                  onClick={() => onGenerateSummary('manual')}
+                  disabled={summaryBusy}
+                  title={t('components.subTaskPanel.summaryCtaManualTitle')}
+                >
+                  {summaryBusy
+                    ? t('components.subTaskPanel.summarySending')
+                    : t('components.subTaskPanel.summaryRetryBtn')}
                 </button>
               )}
               {summaryToast && (

@@ -81,6 +81,7 @@ export const components = {
     errReSplit: '重新拆分失败',
     // Banner status texts (batch state machine — see summaryCta derivation).
     bannerSummarizing: '📝 主 Agent 正在生成汇总报告…',
+    bannerSummaryFailed: '❌ 汇总报告生成失败，请点击重试',
     bannerDispatchingStatus: '🪄 主 Agent 正在派发子任务…',
     bannerAllDoneManual: '✅ 所有子任务已结束，可手动生成汇总报告。',
     // Summary CTA cluster (early / manual / progress).
@@ -88,6 +89,7 @@ export const components = {
     summaryCtaEarlyBtn: '📝 提前生成汇总',
     summaryCtaManualTitle: '对已完成的子任务生成汇总报告',
     summaryCtaManualBtn: '📝 生成汇总',
+    summaryRetryBtn: '🔄 重试汇总',
     summaryCtaProgressTitle: '汇总进行中',
     summaryCtaProgressBtn: '汇总中…',
     summarySending: '发起中…',

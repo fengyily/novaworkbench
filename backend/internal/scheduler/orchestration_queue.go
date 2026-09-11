@@ -332,5 +332,22 @@ func (q *OrchestrationQueue) tickSummarizing(batch *model.OrchestrationBatch) {
 			}
 			log.Printf("[orch] batch %s summary heartbeat stale, reset pending", batch.ID)
 		}
+	case model.SummaryError:
+		// 失败超过上限 → 翻 BatchErrored，避免无限重试
+		if batch.SummaryAttempts >= model.SummaryMaxAttempts {
+			if err := q.batchSvc.MarkStatus(batch.ID, model.BatchErrored); err != nil {
+				log.Printf("[orch] markErrored %s: %v", batch.ID, err)
+				return
+			}
+			log.Printf("[orch] batch %s summary exhausted %d attempts, flipped to errored",
+				batch.ID, batch.SummaryAttempts)
+			return
+		}
+		if err := q.batchSvc.ResetErrorToPending(batch.ID); err != nil {
+			log.Printf("[orch] resetSummaryError %s: %v", batch.ID, err)
+			return
+		}
+		log.Printf("[orch] batch %s summary_status=error, re-armed pending (attempt %d/%d)",
+			batch.ID, batch.SummaryAttempts+1, model.SummaryMaxAttempts)
 	}
 }
