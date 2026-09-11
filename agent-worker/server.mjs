@@ -54,8 +54,8 @@
 //      fix hint (see backend/internal/handler/wizard.go:workerCategoryHint).
 import express from 'express';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, accessSync, constants as fsConstants } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, accessSync, realpathSync, constants as fsConstants } from 'node:fs';
+import { join, sep as pathSep } from 'node:path';
 
 // WORKER_VERSION is a placeholder that NovaWorkbench's install flow stamps
 // with the binary's own agentWorkerVersion before uploading this file to a
@@ -920,17 +920,15 @@ function assertWorkDirInScope(workDir, reqId) {
   if (!workDir || typeof workDir !== 'string') {
     throw httpError(400, 'workDir is required');
   }
-  const fs = require('fs');
-  const path = require('path');
   // 路径必须存在；realpathSync 不存在则抛 ENOENT
   let real;
   try {
-    real = fs.realpathSync(workDir);
+    real = realpathSync(workDir);
   } catch (e) {
     throw httpError(400, `workDir ${workDir} cannot be resolved: ${e.message}`);
   }
   // reqId 必须出现在路径中（防止跨需求路径串台）
-  const segs = real.split(path.sep);
+  const segs = real.split(pathSep);
   if (!reqId || !segs.includes(reqId)) {
     throw httpError(403, `workDir ${real} does not contain reqId ${reqId}`);
   }

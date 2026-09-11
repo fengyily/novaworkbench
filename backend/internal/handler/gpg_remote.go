@@ -81,10 +81,35 @@ func provisionRemoteGPG(
 	//    We never tee the key.asc / passphrase file contents — only the
 	//    script's stdout, which is just `gpg` status output and our own
 	//    NOVA_GPG_* marker.
+	script := buildGPGProvisionScript(gnupgHome, wtPath, baseRepo, gitName, gitEmail)
+	// Debug breadcrumb #1: log a hash + length of the script body so
+	// we can confirm the binary actually shipped the new marker / set
+	// -eu rules. A different hash than the one in `make build`'s
+	// git-tracked source means the running server is stale.
+	if job != nil {
+		job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("🛠 [nova-gpg-debug] script body len=%d sha256=%s", len(script), shortSHA256(script))})
+		// Also echo the LAST few lines (where the KEYID marker lives)
+		// so an operator can spot a corrupted / truncated upload at a
+		// glance without scrolling the SSE panel.
+		tail := tailLines(script, 6)
+		job.Append(store.LogLine{Type: "message", Content: "🛠 [nova-gpg-debug] script tail (last 6 lines):\n" + tail})
+	}
 	var stdoutBuf bytes.Buffer
 	out := io.MultiWriter(&stdoutBuf, &jobWriter{job: job})
 
-	exit, runErr := client.RunScript(ctx, buildGPGProvisionScript(gnupgHome, wtPath, baseRepo, gitName, gitEmail), "gpg-provision", nil, out)
+	exit, runErr := client.RunScript(ctx, script, "gpg-provision", nil, out)
+	// Debug breadcrumb #2: surface the exit code + runErr + captured
+	// output size up-front. A non-zero exit here explains why the
+	// marker would never appear; an empty stdoutBuf on exit=0
+	// explains why the marker is in the script but not in our buffer.
+	if job != nil {
+		job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("🛠 [nova-gpg-debug] RunScript exit=%d runErr=%v stdoutBuf.Len=%d", exit, runErr, stdoutBuf.Len())})
+		if stdoutBuf.Len() > 0 {
+			job.Append(store.LogLine{Type: "message", Content: "🛠 [nova-gpg-debug] captured stdout/stderr (truncated to 4 KiB):\n" + truncateStr(stdoutBuf.String(), 4096)})
+		} else {
+			job.Append(store.LogLine{Type: "message", Content: "🛠 [nova-gpg-debug] stdoutBuf is EMPTY — pump did not receive any output. Possible causes: (1) SSH exec failed before Start(), (2) sh exited before printing anything, (3) the script's stdout was redirected away by a shell rc file (e.g. ~/.bashrc on the agent host, which only matters if /bin/sh is bash)."})
+		}
+	}
 	if exit != 0 || runErr != nil {
 		// Prefer the import-failure message (which truncates gpg's
 		// verbose packet dump to a readable size), fall back to the
@@ -101,7 +126,11 @@ func provisionRemoteGPG(
 	}
 
 	// 4. Parse the marker line out of the script output.
-	parsedKeyID, worktreeFallback := parseKeyIDFromScriptOutput(stdoutBuf.String())
+	captured := stdoutBuf.String()
+	parsedKeyID, worktreeFallback, parseSummary := parseKeyIDFromScriptOutputDebug(captured)
+	if job != nil {
+		job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("🛠 [nova-gpg-debug] parser: keyID=%q worktreeFallback=%v summary=%s", parsedKeyID, worktreeFallback, parseSummary)})
+	}
 	if parsedKeyID == "" {
 		return "", noopCleanup, &gpgProvisionError{msg: "GPG provision 脚本未输出 keyid，请检查 Agent 服务器 gpg 是否能正常运行"}
 	}

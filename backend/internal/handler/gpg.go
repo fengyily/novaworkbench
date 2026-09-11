@@ -1,7 +1,10 @@
 package handler
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -166,26 +169,160 @@ func buildGPGWrapperScript(gnupgHome string) string {
 // runner concatenates command stdout/stderr into the writer in
 // arbitrary chunks.
 //
+// Remote path note: the SSH `pump` helper prepends `[<label>]` to every
+// line (see ssh/client.go `pump`). Without stripping that prefix here
+// the KEYID and FALLBACK markers would never match in the remote
+// provision flow — every line would look like
+// `[gpg-provision] NOVA_GPG_KEYID=…` and `strings.HasPrefix` against
+// the bare marker would silently miss.
+//
+// We use two passes per line:
+//
+//  1. Strip a leading `[<label>]` token when present; this normalises
+//     the remote flow into the same shape the local flow already has
+//     (no label).
+//  2. As a belt-and-braces fallback, also try to find `NOVA_GPG_KEYID=`
+//     anywhere in the (un-stripped) line. This protects against edge
+//     cases where the prefix didn't land cleanly (e.g. a stray leading
+//     whitespace, a future pump change, or a non-standard label) and
+//     was the difference between the original "未输出 keyid" false-
+//     positive and a correct parse on the Agent Server path.
+//
 // worktreeFallback=true means at least one `git config --worktree`
 // call failed and the script fell back to `--local`. Concurrent reqs
 // against the same base repo may then interfere; the caller should
 // surface this as a single warning to the user.
 func parseKeyIDFromScriptOutput(out string) (keyID string, worktreeFallback bool) {
+	// Match `NOVA_GPG_KEYID=` followed by 16+ hex chars. The leading
+	// "NOVA_GPG_KEYID=" prefix is unique to our marker (gpg itself
+	// never emits that string), so we don't risk a false positive.
+	// Anchoring on a word boundary keeps us from accidentally
+	// matching a value that happens to contain the substring
+	// "NOVA_GPG_KEYID=" inside a longer identifier.
+	keyIDRe := regexp.MustCompile(`(?:^|\s|[\[\(])NOVA_GPG_KEYID=([0-9A-Fa-f]{16,})`)
 	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "NOVA_GPG_KEYID=") {
-			// The script emits `echo "NOVA_GPG_KEYID=$keyid"` —
-			// the shell collapses the spaces around `$keyid` so we
-			// usually see a clean value, but tolerate leading /
-			// trailing whitespace defensively (the SSH writer may
-			// split a chunk mid-token).
-			keyID = strings.TrimSpace(strings.TrimPrefix(line, "NOVA_GPG_KEYID="))
+		stripped := strings.TrimSpace(line)
+		// Strip a leading `[label]` token when present (remote path
+		// only). The guard refuses to strip on a line that lacks a
+		// closing `]`, so a stray `[` in the script's own output
+		// cannot mask a real marker.
+		strippedForMatch := stripped
+		if i := strings.LastIndexByte(strippedForMatch, ']'); i > 0 && strings.HasPrefix(strippedForMatch, "[") {
+			strippedForMatch = strings.TrimSpace(strippedForMatch[i+1:])
 		}
-		if line == "NOVA_GPG_WORKTREE_FALLBACK=1" {
+		// Pass 1: exact prefix match on the (possibly stripped) line —
+		// the happy path for both local (no prefix) and remote (label
+		// stripped).
+		if strings.HasPrefix(strippedForMatch, "NOVA_GPG_KEYID=") {
+			keyID = strings.TrimSpace(strings.TrimPrefix(strippedForMatch, "NOVA_GPG_KEYID="))
+			continue
+		}
+		// Pass 2: regex fallback so a stray prefix / mid-line marker
+		// still resolves. We search the ORIGINAL line (not the
+		// stripped one) because some hosts prefix with extra noise
+		// before the [label] token.
+		if m := keyIDRe.FindStringSubmatch(line); len(m) == 2 {
+			keyID = m[1]
+			continue
+		}
+		// Fallback marker is a single literal line. After stripping
+		// `[label]` (if present), equality match is enough; we don't
+		// need a regex because the marker has a unique suffix
+		// (`=1`) that nothing else in the script outputs.
+		if strippedForMatch == "NOVA_GPG_WORKTREE_FALLBACK=1" {
 			worktreeFallback = true
 		}
 	}
 	return keyID, worktreeFallback
+}
+
+// parseKeyIDFromScriptOutputDebug is the diagnostic twin of
+// parseKeyIDFromScriptOutput. Same parsing rules; the extra return
+// value is a short Chinese summary describing WHY the keyid ended
+// up empty (no stdout at all? every line had a [label] prefix but
+// no marker? a stray `[` without `]`?) so the caller can log a
+// targeted hint when the provision fails. Keep this in lock-step
+// with the pure function above — both must agree on every input.
+func parseKeyIDFromScriptOutputDebug(out string) (keyID string, worktreeFallback bool, summary string) {
+	keyIDRe := regexp.MustCompile(`(?:^|\s|[\[\(])NOVA_GPG_KEYID=([0-9A-Fa-f]{16,})`)
+	var (
+		nonEmptyLines int
+		strippedLines int
+		keyidHits     int
+		fallbackHits  int
+		oddLabels     int
+		lastNonEmpty  string
+	)
+	for _, line := range strings.Split(out, "\n") {
+		raw := line
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		nonEmptyLines++
+		lastNonEmpty = raw
+		stripped := trimmed
+		if i := strings.LastIndexByte(stripped, ']'); i > 0 && strings.HasPrefix(stripped, "[") {
+			strippedLines++
+			stripped = strings.TrimSpace(stripped[i+1:])
+		} else if strings.HasPrefix(trimmed, "[") {
+			// Stray `[` without closing `]` — the strip rule refused
+			// to touch this line. Worth flagging because that's
+			// exactly the shape that hides a real marker behind a
+			// half-formed label.
+			oddLabels++
+		}
+		if strings.HasPrefix(stripped, "NOVA_GPG_KEYID=") {
+			keyidHits++
+			keyID = strings.TrimSpace(strings.TrimPrefix(stripped, "NOVA_GPG_KEYID="))
+		} else if m := keyIDRe.FindStringSubmatch(trimmed); len(m) == 2 {
+			keyidHits++
+			keyID = m[1]
+		}
+		if stripped == "NOVA_GPG_WORKTREE_FALLBACK=1" {
+			fallbackHits++
+			worktreeFallback = true
+		}
+	}
+	switch {
+	case nonEmptyLines == 0:
+		summary = "stdout 为空（pump 没有收到任何输出；可能 SSH exec 在 Start 之前就失败了，或脚本 stdout 被 shell rc 重定向走了）"
+	case keyidHits == 0 && strippedLines == nonEmptyLines:
+		summary = fmt.Sprintf("全部 %d 行都带 [label] 前缀但没有任何一行包含 NOVA_GPG_KEYID= 标记（脚本可能未到达末尾的 echo 行）", strippedLines)
+	case keyidHits == 0 && oddLabels > 0:
+		summary = fmt.Sprintf("发现 %d 行带孤立 [ 但缺 ]（label 前缀异常，可能是 SSH 通道截断或 pump 把多行粘成一行）", oddLabels)
+	case keyidHits == 0:
+		summary = fmt.Sprintf("脚本输出 %d 行但均不含 NOVA_GPG_KEYID=；最后一行: %q", nonEmptyLines, truncateForLog(lastNonEmpty, 120))
+	default:
+		summary = fmt.Sprintf("命中 NOVA_GPG_KEYID=%d 次", keyidHits)
+	}
+	return keyID, worktreeFallback, summary
+}
+
+// shortSHA256 returns the first 12 hex chars of the SHA-256 of s —
+// enough to fingerprint a script body in a single log line without
+// making the operator read a full 64-char hash. Used by the GPG
+// provision debug breadcrumb so we can tell at a glance whether the
+// running server shipped the same script body as the source tree
+// (a stale binary that didn't get rebuilt would diverge here).
+func shortSHA256(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:6])
+}
+
+// tailLines returns the last n lines of s. Used for the GPG provision
+// debug breadcrumb so an operator can confirm the script's trailing
+// `echo "NOVA_GPG_KEYID=$keyid"` survived the SFTP upload without
+// scrolling through the whole script body.
+func tailLines(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return s
+	}
+	return strings.Join(lines[len(lines)-n:], "\n")
 }
 
 // classifyGitSignFailure maps the stderr of a failed `git commit` (or

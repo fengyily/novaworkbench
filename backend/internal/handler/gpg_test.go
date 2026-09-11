@@ -249,6 +249,73 @@ func TestParseKeyIDFromScriptOutput(t *testing.T) {
 			wantKey: "0123ABC",
 			wantFall: false,
 		},
+		{
+			// Regression: the SSH `pump` helper prepends `[<label>] `
+			// to every line (see ssh/client.go `pump`). Without
+			// stripping that prefix the remote GPG provision path
+			// silently misses both markers and surfaces as
+			// "GPG provision 脚本未输出 keyid". The remote flow is
+			// what Agent Server users actually exercise.
+			name:    "remote path: [label] prefix on keyid line",
+			in:      "[gpg-provision] NOVA_GPG_KEYID=ABCDEF0123456789\n",
+			wantKey: "ABCDEF0123456789",
+			wantFall: false,
+		},
+		{
+			name:    "remote path: [label] prefix on fallback line",
+			in:      "[gpg-provision] NOVA_GPG_WORKTREE_FALLBACK=1\n",
+			wantKey: "",
+			wantFall: true,
+		},
+		{
+			name:    "remote path: mixed [label] lines, scrambled order",
+			in:      "[gpg-provision] gpg: imported: 1\n" +
+				"[gpg-provision] NOVA_GPG_WORKTREE_FALLBACK=1\n" +
+				"some other host log\n" +
+				"[gpg-provision] NOVA_GPG_KEYID=DEADBEEFCAFEBABE\n",
+			wantKey: "DEADBEEFCAFEBABE",
+			wantFall: true,
+		},
+		{
+			// Belt-and-braces: even if [label] stripping were ever
+			// to miss (e.g. the line starts with whitespace or the
+			// label format changes upstream), the regex fallback
+			// still picks up the keyid from inside the line.
+			name:    "remote path: regex fallback, marker mid-line",
+			in:      "prefix noise NOVA_GPG_KEYID=0123ABCD4567EF89 suffix\n",
+			wantKey: "0123ABCD4567EF89",
+			wantFall: false,
+		},
+		{
+			// V5 keyids are 40 hex chars; the regex requires 16+.
+			name:    "remote path: regex fallback, v5 40-char keyid",
+			in:      "[gpg-provision] NOVA_GPG_KEYID=ABCDEF0123456789ABCDEF0123456789ABCDEF01\n",
+			wantKey: "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+			wantFall: false,
+		},
+		{
+			// Regex must NOT match an unrelated substring that just
+			// happens to contain "NOVA_GPG_KEYID=". Without a word
+			// boundary the prefix would greedily match
+			// "FOO_NOVA_GPG_KEYID=..." which is not our marker.
+			// The regex anchors on a non-identifier char before
+			// the marker, so this stays a no-op.
+			name:    "remote path: regex does NOT false-positive on identifier substring",
+			in:      "prefix: SOME_NOVA_GPG_KEYID=DEADBEEFCAFEBABE extra\n",
+			wantKey: "",
+			wantFall: false,
+		},
+		{
+			// Two distinct [label] lines on the same output where
+			// the marker line follows extra noise.
+			name:    "remote path: marker after multi-line noise",
+			in: "[gpg-provision] gpg: keybox created\n" +
+				"[gpg-provision] gpg: ABCDEF...: public key imported\n" +
+				"[gpg-provision] gpg: ABCDEF...: secret key imported\n" +
+				"[gpg-provision] NOVA_GPG_KEYID=ABCDEF0123456789\n",
+			wantKey: "ABCDEF0123456789",
+			wantFall: false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -258,6 +325,75 @@ func TestParseKeyIDFromScriptOutput(t *testing.T) {
 			}
 			if gotFall != tc.wantFall {
 				t.Errorf("worktreeFallback = %v, want %v", gotFall, tc.wantFall)
+			}
+		})
+	}
+}
+
+// TestParseKeyIDFromScriptOutputDebug covers the diagnostic twin of
+// parseKeyIDFromScriptOutput. We don't lock down the exact summary
+// text (it can be tightened later) — only the keyID / fallback return
+// values must agree with the pure parser, and the summary must be
+// non-empty for every non-trivial case (so the operator always gets a
+// hint when the provision fails).
+func TestParseKeyIDFromScriptOutputDebug(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        string
+		wantKey   string
+		wantFall  bool
+		summaryHas string
+	}{
+		{
+			name:       "happy path",
+			in:         "[gpg-provision] NOVA_GPG_KEYID=ABCDEF1234567890\n",
+			wantKey:    "ABCDEF1234567890",
+			wantFall:   false,
+			summaryHas: "NOVA_GPG_KEYID=1 次",
+		},
+		{
+			name:       "empty stdout -> pump never received output",
+			in:         "",
+			wantKey:    "",
+			wantFall:   false,
+			summaryHas: "stdout 为空",
+		},
+		{
+			name:       "all [label] lines but no marker",
+			in:         "[gpg-provision] gpg: foo\n[gpg-provision] gpg: bar\n",
+			wantKey:    "",
+			wantFall:   false,
+			summaryHas: "带 [label] 前缀但没有任何一行包含",
+		},
+		{
+			name:       "stray [ without ] (truncated label)",
+			in:         "[unterminated token\n",
+			wantKey:    "",
+			wantFall:   false,
+			summaryHas: "孤立 [ 但缺 ]",
+		},
+		{
+			name:       "fallback detected alongside missing keyid",
+			in:         "[gpg-provision] NOVA_GPG_WORKTREE_FALLBACK=1\ngpg: ok\n",
+			wantKey:    "",
+			wantFall:   true,
+			summaryHas: "脚本输出",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotKey, gotFall, summary := parseKeyIDFromScriptOutputDebug(tc.in)
+			if gotKey != tc.wantKey {
+				t.Errorf("keyID = %q, want %q", gotKey, tc.wantKey)
+			}
+			if gotFall != tc.wantFall {
+				t.Errorf("worktreeFallback = %v, want %v", gotFall, tc.wantFall)
+			}
+			if summary == "" {
+				t.Errorf("summary must be non-empty (operator hint)")
+			}
+			if tc.summaryHas != "" && !strings.Contains(summary, tc.summaryHas) {
+				t.Errorf("summary = %q, want substring %q", summary, tc.summaryHas)
 			}
 		})
 	}
