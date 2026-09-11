@@ -328,6 +328,11 @@ export interface SubTask {
   // Provenance marker: 'auto' = tryAutoOrchestrate 派发；'manual' = 手动创建。
   // 只读字段，后端写入后前端仅展示，不修改。向后兼容：旧后端不返回此字段时为 undefined。
   source?: 'manual' | 'auto';
+  // Execution environment for this sub-task: '' (or undefined on legacy
+  // backends) = 本地; a non-empty agent_servers.id = runs on that Agent
+  // Server. agent_server_name is the resolved display name (join, read-only).
+  agent_server_id?: string;
+  agent_server_name?: string;
 }
 
 export const subTasksApi = {
@@ -341,9 +346,12 @@ export const subTasksApi = {
   // instruction without the parent's JSONL. Used when the user saw
   // "源会话已失效" and chose the radio opt-in. The default (false)
   // preserves the legacy --fork-session path.
+  // agent_server_id selects the execution environment. Omit the field to
+  // inherit the parent requirement's environment (default); pass '' to force
+  // 本地, or an agent_servers.id to run on that server.
   create: (
     requirementId: string,
-    data: { prompt: string; title?: string; model?: string; freshSession?: boolean },
+    data: { prompt: string; title?: string; model?: string; freshSession?: boolean; agent_server_id?: string },
   ) => api.post<{ job_id: string; sub_task_id: string }>(`/api/requirements/${requirementId}/sub-tasks`, data),
   // List all sub-tasks for a requirement (oldest first).
   list: (requirementId: string) =>

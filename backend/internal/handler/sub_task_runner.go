@@ -138,8 +138,8 @@ func (r *SubTaskRunner) SetRemoteCoding(fn func(*remoteCodingInput) claudeStream
 // modelDisplay is persisted up-front so the SubTaskPanel can show the model
 // badge from the moment the row is visible (before MarkRunning stamps anything
 // else). Pass "" when the model is unspecified.
-func (r *SubTaskRunner) NewPendingSubTask(reqID, title, prompt, modelDisplay, sourceSID string) (*model.SubTask, *store.Job, string, error) {
-	st, err := r.subTaskSvc.Create(reqID, title, prompt, modelDisplay, sourceSID, "", 0)
+func (r *SubTaskRunner) NewPendingSubTask(reqID, title, prompt, modelDisplay, sourceSID, agentServerID string) (*model.SubTask, *store.Job, string, error) {
+	st, err := r.subTaskSvc.Create(reqID, title, prompt, modelDisplay, sourceSID, "", 0, agentServerID)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -249,6 +249,29 @@ func (r *SubTaskRunner) Run(
 	}
 	job.Append(store.LogLine{Type: "phase", Content: role})
 	job.Append(store.LogLine{Type: "message", Content: "📝 提示词: " + truncateForLog(body, 240)})
+
+	// Resolve the effective execution environment for this sub-task. Prefer
+	// the row's own agent_server_id (a manual choice or the value inherited at
+	// creation by the auto-orchestrator); fall back to the parent
+	// requirement's agent_server_id only for legacy rows that predate the
+	// column (AgentServerIDSet == false). A non-NULL empty string means the
+	// user deliberately picked 本地 and must NOT fall back to a remote parent.
+	effectiveServerID := st.AgentServerID
+	if !st.AgentServerIDSet {
+		effectiveServerID = req.AgentServerID
+	}
+	// UX note: when the sub-task runs on a different environment than the
+	// main task, the remote/local worker checks out the requirement branch
+	// fresh from origin — unpushed local changes won't come along. Surface
+	// this so the user understands why cross-env runs see only pushed code.
+	if effectiveServerID != req.AgentServerID {
+		switch {
+		case effectiveServerID == "":
+			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 本子任务在「本地」执行（与主任务环境不同），仅能看到本地工作区/已推送到该需求分支的代码，主任务环境中未推送的改动不会带过来。"})
+		default:
+			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 本子任务在 Agent Server 执行（与主任务环境不同），将从 origin 检出该需求分支，未推送的改动不会带过来。"})
+		}
+	}
 
 	// Resolve the developer role's model + its bound config id. The model
 	// drives which base URL the child should hit: when the user picks a
@@ -363,7 +386,7 @@ func (r *SubTaskRunner) Run(
 	// success, so the requirement's branch stays the single source of truth.
 	// This covers every child dispatch that goes through Run: manual sub-tasks,
 	// orchestrated children, and the merge push+PR sub-task.
-	if req.AgentServerID != "" && r.agentSvrSvc != nil && r.remoteCoding != nil {
+	if effectiveServerID != "" && r.agentSvrSvc != nil && r.remoteCoding != nil {
 		// Fresh-session path on the remote: pass freshSession=true so
 		// wizard_remote skips SFTP upload entirely and drops --resume
 		// / --fork-session from the worker argv. The session id we
@@ -371,12 +394,12 @@ func (r *SubTaskRunner) Run(
 		// is named correctly on disk.
 		out := r.remoteCoding(&remoteCodingInput{
 			job:      job,
-			serverID: req.AgentServerID,
+			serverID: effectiveServerID,
 			req: startCodingReq{
 				RequirementTitle: req.Title + " / " + st.Title,
 				RequirementID:    req.ID,
 				BranchName:       req.BranchName,
-				AgentServerID:    req.AgentServerID,
+				AgentServerID:    effectiveServerID,
 			},
 			reqRow:         req,
 			prompt:         prompt,

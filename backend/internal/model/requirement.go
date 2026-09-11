@@ -86,6 +86,12 @@ type Requirement struct {
 	// follow-up "继续设计" actions don't accidentally inherit a stale server
 	// binding that the user has since cleared.
 	DesignAgentServerID string `json:"design_agent_server_id"`
+	// DesignAgentServerName is a display-only join of agent_servers.name for
+	// DesignAgentServerID (NOT a requirements column). Populated by
+	// RequirementService.List/Get so the design toolbar can render "🛰️ Agent
+	// Server「<名称>」" without a second round-trip. Empty for local design runs
+	// or when the server row was deleted. omitempty keeps Create responses clean.
+	DesignAgentServerName string `json:"design_agent_server_name,omitempty"`
 	// DevMode records HOW the coding stage was launched: "session" forks the
 	// design session (legacy default — Claude inherits the full analysis+design
 	// conversation), "design" starts a fresh session and hands the stored

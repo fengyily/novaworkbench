@@ -84,6 +84,25 @@ type SubTask struct {
 	// "manual" even after GenerateSubTaskSummary stamps them with a
 	// summarizing batch_id. Drives the SubTaskCard source badge.
 	Source       string  `json:"source,omitempty"`
+	// AgentServerID is the execution environment this sub-task runs on: empty
+	// = 本地执行; non-empty = the agent_servers.id. Persisted per-row so an
+	// auto-orchestrated child inherits the parent requirement's environment and
+	// a manually-created child can override it. SubTaskRunner.Run falls back to
+	// the parent requirement's agent_server_id when this is empty (legacy rows).
+	AgentServerID string `json:"agent_server_id"`
+	// AgentServerIDSet reports whether the agent_server_id column was non-NULL
+	// when the row was read. Rows inserted before the column existed scan as
+	// NULL → false, and SubTaskRunner.Run falls back to the parent
+	// requirement's agent_server_id for them. Rows inserted after the feature
+	// always carry an explicit value (empty = 本地) → true, used verbatim so a
+	// deliberate 本地 choice under a remote parent is honored. Not serialized —
+	// it's an internal resolution signal, not part of the API contract.
+	AgentServerIDSet bool `json:"-"`
+	// AgentServerName is a display-only join of agent_servers.name (NOT a
+	// column). Populated by SubTaskService.List/Get so the SubTaskCard can show
+	// "由 Agent Server「<名称>」开发" without a second round-trip. Empty when the
+	// sub-task runs locally or the server row was deleted.
+	AgentServerName string `json:"agent_server_name,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`

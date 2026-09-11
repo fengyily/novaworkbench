@@ -53,7 +53,7 @@ func NewSubTaskService(database *db.DB) *SubTaskService {
 // and 0 for manual sub-tasks; pass the batch id and 1..N sequence number for
 // children of tryAutoOrchestrate. OrchestrationQueue's tick uses these to
 // dispatch children in batch_seq order.
-func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int) (*model.SubTask, error) {
+func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID string) (*model.SubTask, error) {
 	if reqID == "" {
 		return nil, errors.New("requirement_id is required")
 	}
@@ -70,11 +70,11 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 	id := util.NewID("st")
 	now := time.Now()
 	_, err := s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
-		model, source_session_id, batch_id, batch_seq, source,
+		model, source_session_id, batch_id, batch_seq, source, agent_server_id,
 		created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, title, prompt, model.SubTaskStatusPending,
-		modelDisplay, sourceSID, batchID, batchSeq, model.SubTaskSourceManual,
+		modelDisplay, sourceSID, batchID, batchSeq, model.SubTaskSourceManual, agentServerID,
 		now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert sub_task: %w", err)
@@ -90,6 +90,8 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 		BatchID:         batchID,
 		BatchSeq:        batchSeq,
 		Source:          model.SubTaskSourceManual,
+		AgentServerID:   agentServerID,
+		AgentServerIDSet: true,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}, nil
@@ -101,7 +103,7 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 // rolled back instead of leaving an orphaned batch with no children (or vice
 // versa). The return value is the same as Create; the caller does not need
 // the tx reference again because the caller owns the rollback/commit.
-func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int) (*model.SubTask, error) {
+func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID string) (*model.SubTask, error) {
 	if tx == nil {
 		return nil, errors.New("tx is required")
 	}
@@ -119,11 +121,11 @@ func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, mode
 	id := util.NewID("st")
 	now := time.Now()
 	_, err := tx.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
-		model, source_session_id, batch_id, batch_seq, source,
+		model, source_session_id, batch_id, batch_seq, source, agent_server_id,
 		created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, title, prompt, model.SubTaskStatusPending,
-		modelDisplay, sourceSID, batchID, batchSeq, model.SubTaskSourceAuto,
+		modelDisplay, sourceSID, batchID, batchSeq, model.SubTaskSourceAuto, agentServerID,
 		now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert sub_task: %w", err)
@@ -139,6 +141,8 @@ func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, mode
 		BatchID:         batchID,
 		BatchSeq:        batchSeq,
 		Source:          model.SubTaskSourceAuto,
+		AgentServerID:   agentServerID,
+		AgentServerIDSet: true,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}, nil
@@ -155,7 +159,8 @@ func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
 		created_at, updated_at, completed_at,
-		batch_id, batch_seq, batch_id_seq_run, source
+		batch_id, batch_seq, batch_id_seq_run, source,
+		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), '')
 		FROM sub_tasks WHERE requirement_id = ? ORDER BY created_at DESC, id DESC`, reqID)
 	if err != nil {
 		return nil, err
@@ -182,7 +187,8 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
 		created_at, updated_at, completed_at,
-		batch_id, batch_seq, batch_id_seq_run, source
+		batch_id, batch_seq, batch_id_seq_run, source,
+		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), '')
 		FROM sub_tasks WHERE id = ?`, id)
 	if err != nil {
 		return nil, err
@@ -205,7 +211,8 @@ func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
 		created_at, updated_at, completed_at,
-		batch_id, batch_seq, batch_id_seq_run, source
+		batch_id, batch_seq, batch_id_seq_run, source,
+		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), '')
 		FROM sub_tasks WHERE batch_id = ?
 		ORDER BY batch_seq ASC, created_at ASC, id ASC`, batchID)
 	if err != nil {
@@ -285,7 +292,8 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
 		created_at, updated_at, completed_at,
-		batch_id, batch_seq, batch_id_seq_run, source
+		batch_id, batch_seq, batch_id_seq_run, source,
+		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), '')
 		FROM sub_tasks
 		 WHERE batch_id=? AND status=?
 		 ORDER BY batch_seq ASC, created_at ASC
@@ -416,11 +424,15 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 	id := util.NewID("st")
 	now := time.Now()
 	adjustTitle := capTitle("调整: "+parent.Title, 80)
+	// The adjustment stays in the SAME execution environment as the sub-task
+	// it forks from — its edits build on the parent's worktree, so inheriting
+	// parent.AgentServerID keeps the follow-up run coherent with where the
+	// parent's code lives.
 	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
-		source_session_id, source, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		source_session_id, source, agent_server_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, adjustTitle, prompt, model.SubTaskStatusPending,
-		parent.SessionID, model.SubTaskSourceManual, now, now)
+		parent.SessionID, model.SubTaskSourceManual, parent.AgentServerID, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert adjustment sub_task: %w", err)
 	}
@@ -432,6 +444,8 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 		Status:          model.SubTaskStatusPending,
 		SourceSessionID: parent.SessionID,
 		Source:          model.SubTaskSourceManual,
+		AgentServerID:   parent.AgentServerID,
+		AgentServerIDSet: true,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}, nil
@@ -693,11 +707,13 @@ func (s *SubTaskService) RecoverInterrupted() (int64, error) {
 
 // scanSubTask is a shared row→struct mapper. Pulled out so List / Get can
 // share the column order without each method carrying its own Scan list.
-// The SELECT must include `source` as the last column.
+// The SELECT must end with `source, agent_server_id, <server name>` — the
+// last being a correlated subquery / join resolving agent_servers.name.
 func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 	var st model.SubTask
 	var completedAt sql.NullTime
 	var heartbeat sql.NullTime
+	var agentServerID sql.NullString
 	if err := rows.Scan(
 		&st.ID, &st.RequirementID, &st.Title, &st.Prompt, &st.Status,
 		&st.SessionID, &st.SourceSessionID, &st.JobID, &st.Artifact, &st.Model,
@@ -706,9 +722,15 @@ func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 		&st.CreatedAt, &st.UpdatedAt, &completedAt,
 		&st.BatchID, &st.BatchSeq, &heartbeat,
 		&st.Source,
+		&agentServerID, &st.AgentServerName,
 	); err != nil {
 		return nil, err
 	}
+	// NULL agent_server_id = a legacy row (pre-column); the runner falls back
+	// to the parent requirement's environment. A non-NULL empty string = the
+	// user explicitly chose 本地 and must NOT fall back.
+	st.AgentServerID = agentServerID.String
+	st.AgentServerIDSet = agentServerID.Valid
 	if heartbeat.Valid {
 		t := heartbeat.Time
 		st.BatchIDSeqRun = &t

@@ -10,6 +10,8 @@ import ModelSelect from '../components/ModelSelect';
 import AtMentionTextarea from '../components/AtMentionTextarea';
 import SubTaskPanel from '../components/SubTaskPanel';
 import { DevSourceBadge } from '../components/DevSourceBadge';
+import { ExecEnvBadge } from '../components/ExecEnvBadge';
+import { ExecEnvSelect } from '../components/ExecEnvSelect';
 import { SummarizeToRequirementModal } from '../components/SummarizeToRequirementModal';
 import { ScheduleModal } from '../components/ScheduleModal';
 import { schedulesApi, type ScheduledTask } from '../api/client';
@@ -2209,18 +2211,15 @@ export default function RequirementDetail() {
                     <label>{t('requirements.detail2.preflightExecEnvLabel')}</label>
                     <div className="preflight-field-card preflight-field-card--exec">
                       <span className="preflight-field-chip" aria-hidden="true">ENV</span>
-                      <select
+                      <ExecEnvSelect
                         className="form-input preflight-field-input"
+                        servers={agentServers}
                         value={agentServerId}
-                        onChange={e => setAgentServerId(e.target.value)}
+                        onChange={setAgentServerId}
                         disabled={coding}
                         title={agentServers.length === 0 ? t('requirements.detail2.preflightAgentEmptyTitle') : ''}
-                      >
-                        <option value="">{t('requirements.detail2.preflightLocalExec')}</option>
-                        {agentServers.map(s => (
-                          <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
-                        ))}
-                      </select>
+                        localOptionLabel={t('requirements.detail2.preflightLocalExec')}
+                      />
                     </div>
                     {agentServers.length === 0 && (
                       <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
@@ -3099,22 +3098,30 @@ export default function RequirementDetail() {
               <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                 {t('requirements.detail2.designAgentServerLabel')}
               </span>
-              <select
-                className="form-input"
+              <ExecEnvSelect
+                servers={agentServers}
                 value={agentServerId}
-                onChange={e => setAgentServerId(e.target.value)}
+                onChange={setAgentServerId}
                 disabled={architectWorking}
                 title={architectWorking
                   ? t('requirements.detail2.designAgentServerBusyTitle')
                   : (agentServers.length === 0 ? t('requirements.detail2.designAgentServerEmptyTitle') : '')}
+                localOptionLabel={t('requirements.detail2.preflightLocalExec')}
                 style={{ minWidth: 160 }}
-              >
-                <option value="">{t('requirements.detail2.preflightLocalExec')}</option>
-                {agentServers.map(s => (
-                  <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
-                ))}
-              </select>
+              />
             </label>
+            {/* Persisted design environment: shows which Agent Server (or 本地)
+                the architect stage last ran on, read back from
+                requirements.design_agent_server_id. Only rendered once a design
+                has actually run on a remote server so the toolbar stays clean
+                for local-only requirements. */}
+            {req.design_agent_server_id && (
+              <ExecEnvBadge
+                serverId={req.design_agent_server_id}
+                serverName={req.design_agent_server_name}
+                compact
+              />
+            )}
             {agentServers.length === 0 && (
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                 {t('requirements.detail2.designAgentServerNoHint')}
@@ -3344,21 +3351,17 @@ export default function RequirementDetail() {
                     listed — Check must succeed before coding can target them. */}
                 <label style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                   {t('requirements.detail2.devEnvLabel')}
-                  <select
-                    className="form-input"
-                    style={{ minWidth: 140 }}
+                  <ExecEnvSelect
+                    servers={agentServers}
                     value={agentServerId}
-                    onChange={(e) => setAgentServerId(e.target.value)}
+                    onChange={setAgentServerId}
                     disabled={coding}
                     title={agentServerId
                       ? t('requirements.detail2.devEnvOnTitle', { name: agentServers.find((s) => s.id === agentServerId)?.name ?? '' })
                       : t('requirements.detail2.devEnvLocalTitle')}
-                  >
-                    <option value="">{t('requirements.detail2.devEnvLocalOption')}</option>
-                    {agentServers.map((s) => (
-                      <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
-                    ))}
-                  </select>
+                    localOptionLabel={t('requirements.detail2.devEnvLocalOption')}
+                    style={{ minWidth: 140 }}
+                  />
                 </label>
                 {/* Development-mode selector. Empty = reuse previous setting
                     (first-run default = session); 'session' = session-based
@@ -3547,6 +3550,7 @@ export default function RequirementDetail() {
                   developerDefaultModel={developerDefaultModel}
                   batch={orchBatch}
                   onBatchChange={fetchOrchBatch}
+                  agentServers={agentServers}
                 />
               )}
 
@@ -3635,6 +3639,7 @@ export default function RequirementDetail() {
                   developerDefaultModel={developerDefaultModel}
                   batch={orchBatch}
                   onBatchChange={fetchOrchBatch}
+                  agentServers={agentServers}
                 />
               )}
               <div className="merge-actions stack-mobile" style={{ marginTop: 8 }}>

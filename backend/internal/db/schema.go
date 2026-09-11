@@ -660,6 +660,21 @@ var alterColumns = []string{
 	// children stay marked "manual" even after GenerateSubTaskSummary groups
 	// them under a summary batch_id.
 	`ALTER TABLE sub_tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'`,
+	// Per-sub-task execution environment. Empty string = 本地执行; non-empty =
+	// the agent_servers.id the child should run on. Auto-orchestrated children
+	// inherit the parent requirement's agent_server_id (continuity with the
+	// environment the code lives in); manually-created children default to the
+	// parent's value but the user may override (including down to 本地).
+	//
+	// Deliberately NULLABLE (no DEFAULT): existing rows created before this
+	// column scan as NULL, and SubTaskRunner.Run falls back to the parent
+	// requirement's agent_server_id for them (preserving the pre-feature
+	// behavior where every child ran on req.AgentServerID). Rows inserted
+	// after this migration always carry an explicit value — an empty string
+	// there means the user deliberately chose 本地, which must NOT fall back
+	// to a remote parent. NULL vs '' is the only signal that distinguishes
+	// "legacy / unspecified" from "explicitly local".
+	`ALTER TABLE sub_tasks ADD COLUMN agent_server_id TEXT`,
 	// Orchestration summary retry cap: the tick loop's case SummaryError branch
 	// consults this column to decide whether to re-arm a fresh summary goroutine
 	// (attempts < SummaryMaxAttempts) or flip the whole batch to BatchErrored
