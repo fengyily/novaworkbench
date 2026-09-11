@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -45,6 +46,225 @@ func subTaskSourceSID(req *model.Requirement, explicit string) string {
 	return ""
 }
 
+// buildParentContext composes a Markdown block the runner prepends to a
+// fresh-session sub-task's prompt, so the new session can answer the
+// user's instruction without --resume-ing the (missing) parent jsonl.
+//
+// Source priority, with 32 KB hard cap matching readProjectContext's
+// heuristic (wizard.go:135):
+//
+//  1. Requirement title + description (always included, top of block).
+//  2. Requirement.DesignDocs — the architect-stage plan, when non-empty.
+//     Truncated to fit the budget.
+//  3. Recent turns from the parent's claude jsonl (if the local
+//     Claude session file exists). Capped to last 10 user/assistant
+//     turns, each entry capped to 400 chars, to fit the budget.
+//  4. Recent sub-task artifact digests (top 5, first 200 chars each) so
+//    the new session knows what siblings already did.
+//  5. requirements.usage_snapshots — fallback for the recent-turns
+//     block when no jsonl is on disk (mirrors what the wizard chat
+//     renders when the user can't load the session).
+//
+// When the assembled text exceeds 32 KB, lower-priority sections are
+// truncated in reverse-priority order (5 → 4 → 3 → 2 → 1) until the
+// result fits. This guarantees the requirement title / description
+// always survive — they're the most important context for any sub-task.
+func buildParentContext(req *model.Requirement, subTaskSvc *service.SubTaskService, sourceSID string) string {
+	if req == nil {
+		return ""
+	}
+	const hardCap = 32 * 1024
+	// 1) Title + description
+	head := "## 父任务上下文\n\n"
+	title := strings.TrimSpace(req.Title)
+	desc := strings.TrimSpace(req.Description)
+	if title != "" || desc != "" {
+		head += "### 需求\n\n"
+		if title != "" {
+			head += "- 标题: " + title + "\n"
+		}
+		if desc != "" {
+			head += "- 描述:\n\n" + desc + "\n"
+		}
+	}
+	// 2) Design docs (may be JSON array; surface as plain Markdown if so).
+	var designBlock string
+	if d := strings.TrimSpace(req.DesignDocs); d != "" {
+		designBlock = "\n### 设计方案\n\n" + truncateForContext(d, hardCap) + "\n"
+	}
+	// 3) Recent turns from jsonl (best-effort; missing file = empty block).
+	var turnsBlock string
+	if sourceSID != "" && req.WorktreePath != "" {
+		if body := readParentJsonlTurns(req.WorktreePath, sourceSID); body != "" {
+			turnsBlock = "\n### 父会话近期对话\n\n" + body + "\n"
+		}
+	}
+	// 4) Sub-task artifact digests (top 5, first 200 chars each).
+	var digestsBlock string
+	if subTaskSvc != nil {
+		if rows, err := subTaskSvc.List(req.ID); err == nil && len(rows) > 0 {
+			count := 5
+			if len(rows) < count {
+				count = len(rows)
+			}
+			start := len(rows) - count
+			digestsBlock = "\n### 已执行子任务摘要\n\n"
+			for _, row := range rows[start:] {
+				if row.Status != "done" && row.Status != "error" && row.Status != "stopped" {
+					continue
+				}
+				digest := row.Artifact
+				if len(digest) > 200 {
+					digest = digest[:200] + "…"
+				}
+				digestsBlock += "- " + row.Title + " (" + row.Status + "): " + strings.TrimSpace(digest) + "\n"
+			}
+		}
+	}
+	// 5) Usage snapshots fallback (always included as a one-liner; cheap).
+	var usageBlock string
+	if req.UsageSnapshots != "" {
+		usageBlock = "\n### 父任务用量快照\n\n" + truncateForContext(req.UsageSnapshots, 1024) + "\n"
+	}
+	// Assemble and trim down to cap.
+	out := head + designBlock + turnsBlock + digestsBlock + usageBlock
+	if len(out) <= hardCap {
+		return out
+	}
+	// Reverse-priority trim. Drop digests first, then turns, then design,
+	// then collapse the head's "描述" to 256 chars. The title + 标题 line
+	// is always preserved.
+	out = head
+	if len(out) > hardCap {
+		// Drop description body if even the title line doesn't fit.
+		out = head[:0]
+		out += "### 需求\n\n"
+		if title != "" {
+			out += "- 标题: " + title + "\n"
+		}
+		return out
+	}
+	if designBlock != "" && len(out)+len(designBlock) <= hardCap {
+		out += designBlock
+	}
+	if turnsBlock != "" && len(out)+len(turnsBlock) <= hardCap {
+		out += turnsBlock
+	}
+	if digestsBlock != "" && len(out)+len(digestsBlock) <= hardCap {
+		out += digestsBlock
+	}
+	if usageBlock != "" && len(out)+len(usageBlock) <= hardCap {
+		out += usageBlock
+	}
+	return out
+}
+
+// truncateForContext truncates a string to fit a soft byte budget. Used by
+// buildParentContext's individual sections before they are summed.
+func truncateForContext(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "\n…[truncated]"
+}
+
+// readParentJsonlTurns walks <worktree>/.claude/projects/<slug>/<sid>.jsonl
+// (using claudeSessionHome() + EncodeClaudeSlug) and returns up to 10
+// recent user/assistant turns as a Markdown block. Returns "" on any error
+// or when the file isn't on disk; callers always treat "" as "no recent
+// turns available, fall back to usage_snapshots".
+//
+// The implementation reads the whole file once and walks it backwards —
+// jsonl files are append-only so the last lines are the most recent, and a
+// 10-turn extract is small enough that a full read is cheaper than a
+// streaming reverse walk. Each turn's text is capped to 400 chars to keep
+// the budget honest.
+func readParentJsonlTurns(worktreePath, sourceSID string) string {
+	if worktreePath == "" || sourceSID == "" {
+		return ""
+	}
+	slug := util.EncodeClaudeSlug(worktreePath)
+	jsonlPath := filepath.Join(claudeSessionHome(), "projects", slug, sourceSID+".jsonl")
+	data, err := os.ReadFile(jsonlPath)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(data), "\n")
+	// Walk backwards collecting user/assistant messages.
+	type turn struct {
+		role, text string
+	}
+	var turns []turn
+	for i := len(lines) - 1; i >= 0 && len(turns) < 10; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		var evt map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			continue
+		}
+		etype, _ := evt["type"].(string)
+		role := ""
+		var text string
+		switch etype {
+		case "user":
+			role = "用户"
+			if msg, ok := evt["message"].(map[string]interface{}); ok {
+				if content, ok := msg["content"].([]interface{}); ok {
+					for _, block := range content {
+						if b, ok := block.(map[string]interface{}); ok {
+							if b["type"] == "text" {
+								if s, ok := b["text"].(string); ok {
+									text += s
+								}
+							}
+						}
+					}
+				}
+			}
+		case "assistant":
+			role = "助手"
+			if msg, ok := evt["message"].(map[string]interface{}); ok {
+				if content, ok := msg["content"].([]interface{}); ok {
+					for _, block := range content {
+						if b, ok := block.(map[string]interface{}); ok {
+							if b["type"] == "text" {
+								if s, ok := b["text"].(string); ok {
+									text += s
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		if role == "" || text == "" {
+			continue
+		}
+		if len(text) > 400 {
+			text = text[:400] + "…"
+		}
+		turns = append(turns, turn{role, strings.TrimSpace(text)})
+	}
+	// Reverse to chronological order.
+	for i, j := 0, len(turns)-1; i < j; i, j = i+1, j-1 {
+		turns[i], turns[j] = turns[j], turns[i]
+	}
+	var b strings.Builder
+	for _, t := range turns {
+		b.WriteString("- ")
+		b.WriteString(t.role)
+		b.WriteString(": ")
+		b.WriteString(t.text)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // runSubTask is a thin adapter that delegates to the shared SubTaskRunner.
 // Kept as a method (instead of inlining the call) so the existing call sites
 // in StartSubTask / AdjustSubTask / dispatchChildrenSequential stay unchanged
@@ -60,6 +280,14 @@ func subTaskSourceSID(req *model.Requirement, explicit string) string {
 // fork=false (ContinueSubTask) reuses parent.SessionID via `--resume` so the
 // child continues the previous JSONL in place.
 //
+// freshSession is the 「新会话（含需求上下文）」 mode: skip --resume, inject
+// a ## 父任务上下文 block at the top of the prompt, and stamp the row with
+// an empty source_session_id (the column is preserved, the row just no
+// longer claims to derive from any specific parent session). Currently
+// only StartSubTask honors it; AdjustSubTask / RedoSubTask / ContinueSubTask
+// keep their existing semantics because they explicitly fork off a known
+// parent's session.
+//
 // See SubTaskRunner.Run for the full lifecycle.
 func (h *WizardHandler) runSubTask(
 	req *model.Requirement,
@@ -72,6 +300,7 @@ func (h *WizardHandler) runSubTask(
 	configIDOverride string,
 	adjust bool,
 	fork bool,
+	freshSession bool,
 ) {
 	if h.subTaskRunner == nil {
 		log.Printf("[sub-task] runner not wired, cannot run %s", st.ID)
@@ -79,7 +308,7 @@ func (h *WizardHandler) runSubTask(
 		job.Finish(1, store.JobError)
 		return
 	}
-	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, adjust, fork)
+	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, adjust, fork, freshSession)
 	// (The agent-server routing branch previously inlined here moved to
 	// SubTaskRunner.Run so that every sub-task path — manual children,
 	// orchestrated children, and push/PR sub-tasks — shares the same
@@ -126,7 +355,7 @@ func computeSubTaskCostCents(modelName string, tokens model.SubTaskTokens, claud
 
 // StartSubTask handles POST /api/requirements/{id}/sub-tasks.
 //
-// Body: { "prompt": "...", "title": "..." }  (title optional)
+// Body: { "prompt": "...", "title": "...", "freshSession"?: bool }  (title / freshSession optional)
 //
 // Response: 200 { "job_id": "...", "sub_task_id": "..." }
 //
@@ -137,14 +366,22 @@ func computeSubTaskCostCents(modelName string, tokens model.SubTaskTokens, claud
 // caller (push/PR, auto-orchestrate, adjust, redo) does; the actual claude
 // subprocess spawn is delegated to runner.Run so the runtime stays in one
 // place.
+//
+// freshSession == true opts out of the --resume path entirely (the user
+// saw the 「源会话已失效」 error and chose the 「新会话（含需求上下文）」
+// recovery). The row is still inserted with the parent SID recorded so
+// audit logs stay readable, but the runner overwrites source_session_id
+// to "" when persisting via NewPendingSubTask (the column is not used at
+// run time) — see SubTaskRunner.Run.
 func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 	if !h.requireSubTaskSvc(w) {
 		return
 	}
 	var body struct {
-		Prompt string `json:"prompt"`
-		Title  string `json:"title"`
-		Model  string `json:"model"`
+		Prompt       string `json:"prompt"`
+		Title        string `json:"title"`
+		Model        string `json:"model"`
+		FreshSession bool   `json:"freshSession"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
@@ -161,7 +398,12 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sourceSID := subTaskSourceSID(req, "")
-	if sourceSID == "" {
+	// Fresh-session path is the explicit "no parent session needed"
+	// override: even when the requirement has no main-agent session
+	// yet, the user can still start a sub-task with an injected parent
+	// context. The legacy non-fresh path still 409s on missing parent
+	// session so the contract there is unchanged.
+	if sourceSID == "" && !body.FreshSession {
 		writeError(w, http.StatusConflict, "NO_SESSION",
 			"需求尚未启动 coding 或 design session，无法创建子任务")
 		return
@@ -175,6 +417,10 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Persist the row with sourceSID resolved as usual. When freshSession
+	// is true, we still record the parent SID on the row (audit-trail
+	// integrity), but the runner drops --resume and writes back an empty
+	// source_session_id — see SubTaskRunner.Run for the runtime side.
 	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(id, strings.TrimSpace(body.Title), body.Prompt, body.Model, sourceSID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
@@ -185,7 +431,7 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		"sub_task_id": st.ID,
 	})
 
-	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, "", false, true)
+	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, "", false, true, body.FreshSession)
 }
 
 // AdjustSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/adjust.
@@ -277,7 +523,7 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 	// prompt prefix + system prompt as a fresh sub-task, but the
 	// source_session_id is the parent's session id (not the main agent),
 	// so the conversation inherits the parent's edits.
-	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, "", true, true)
+	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, "", true, true, false)
 }
 
 // RedoSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/redo.
@@ -372,7 +618,7 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 	// Re-use the shared spawn helper with adjust=false, fork=true and the
 	// ORIGINAL prompt (st.Prompt) so the child re-executes the same task
 	// from a clean fork off the requirement's main-agent session.
-	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false, true)
+	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false, true, false)
 }
 
 // continueSubTaskPrompt is the fixed Chinese prompt used by ContinueSubTask.
@@ -481,7 +727,7 @@ func (h *WizardHandler) ContinueSubTask(w http.ResponseWriter, r *http.Request) 
 	// Run() with fork=false picks "## 继续执行" as the prompt header so the
 	// child's contextualization stays consistent with the wizard's coding
 	// ContinueCoding path.
-	go h.runSubTask(req, st, job, newSID, sourceSID, continueSubTaskPrompt, body.Model, "", false, false)
+	go h.runSubTask(req, st, job, newSID, sourceSID, continueSubTaskPrompt, body.Model, "", false, false, false)
 }
 
 // StopSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/stop.

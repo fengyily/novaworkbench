@@ -333,8 +333,18 @@ export interface SubTask {
 export const subTasksApi = {
   // Start a child agent. Returns the JobStore job_id (for SSE stream) and
   // the sub_task_id (for refetch / list updates).
-  create: (requirementId: string, data: { prompt: string; title?: string; model?: string }) =>
-    api.post<{ job_id: string; sub_task_id: string }>(`/api/requirements/${requirementId}/sub-tasks`, data),
+  //
+  // freshSession opts into the 「新会话（含需求上下文）」 recovery path:
+  // the backend skips --resume, mints a new claude session id, and
+  // prepends a ## 父任务上下文 block (requirement title / design /
+  // recent turns / sibling digests) so the new session can answer the
+  // instruction without the parent's JSONL. Used when the user saw
+  // "源会话已失效" and chose the radio opt-in. The default (false)
+  // preserves the legacy --fork-session path.
+  create: (
+    requirementId: string,
+    data: { prompt: string; title?: string; model?: string; freshSession?: boolean },
+  ) => api.post<{ job_id: string; sub_task_id: string }>(`/api/requirements/${requirementId}/sub-tasks`, data),
   // List all sub-tasks for a requirement (oldest first).
   list: (requirementId: string) =>
     api.get<SubTask[]>(`/api/requirements/${requirementId}/sub-tasks`),

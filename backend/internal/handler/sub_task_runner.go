@@ -211,6 +211,7 @@ func (r *SubTaskRunner) Run(
 	configIDOverride string,
 	adjust bool,
 	fork bool,
+	freshSession bool,
 ) {
 	startTime, mErr := r.subTaskSvc.MarkRunning(st.ID)
 	if mErr != nil {
@@ -292,6 +293,28 @@ func (r *SubTaskRunner) Run(
 		prompt = "## 子任务\n\n" + body + "\n"
 	}
 	prompt += "\n> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
+	// Fresh-session path: prepend the parent context block so the new
+	// claude session knows enough to act on the user's instruction even
+	// without --resume. The block (built by buildParentContext) is bounded
+	// to 32 KB and follows a strict priority order — requirement title
+	// / description always survive, lower-priority sections truncate as
+	// the budget tightens. See wizard_subtask.go for the full policy.
+	if freshSession {
+		if ctx := buildParentContext(req, r.subTaskSvc, sourceSID); ctx != "" {
+			prompt = ctx + "\n" + prompt
+			job.Append(store.LogLine{Type: "message", Content: "🧩 已注入父任务上下文（前 200 字预览：" + truncateForLog(ctx, 200) + "）"})
+			// Clear the row's source_session_id so audit readers don't
+			// mistake this row for a forked child of a session that
+			// doesn't exist on the remote. NewPendingSubTask already
+			// persisted the parent SID; we overwrite it here in the
+			// goroutine (after the API has returned) so the response is
+			// never blocked on this write.
+			if perr := r.subTaskSvc.UpdateSession(st.ID, newSID, ""); perr != nil {
+				log.Printf("[sub-task] failed to clear source_session_id for fresh-session %s: %v", st.ID, perr)
+			}
+			sourceSID = ""
+		}
+	}
 	if r.skillSvc != nil {
 		if block := llm.BuildSkillsBlock(r.mentionedSkills(req.Title + " " + body)); block != "" {
 			prompt = block + prompt
@@ -341,6 +364,11 @@ func (r *SubTaskRunner) Run(
 	// This covers every child dispatch that goes through Run: manual sub-tasks,
 	// orchestrated children, and the merge push+PR sub-task.
 	if req.AgentServerID != "" && r.agentSvrSvc != nil && r.remoteCoding != nil {
+		// Fresh-session path on the remote: pass freshSession=true so
+		// wizard_remote skips SFTP upload entirely and drops --resume
+		// / --fork-session from the worker argv. The session id we
+		// mint here still flows through to --session-id so the JSONL
+		// is named correctly on disk.
 		out := r.remoteCoding(&remoteCodingInput{
 			job:      job,
 			serverID: req.AgentServerID,
@@ -359,11 +387,19 @@ func (r *SubTaskRunner) Run(
 			model:          modelName,
 			claudeConfigID: finalConfigID,
 			usage:          subUsage,
+			FreshSession:   freshSession,
 		})
 		r.finishSubTask(st, job, out, modelName, startTime)
 		return
 	}
 
+	// Local execution: resolve resume / fork into the right CLI argv.
+	resumeFlag := true
+	forkFor := fork
+	if freshSession {
+		resumeFlag = false
+		forkFor = false
+	}
 	cmd, cancel := r.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        workDir,
@@ -375,9 +411,12 @@ func (r *SubTaskRunner) Run(
 		//     session derived from the parent's conversation
 		//   - fork=false → child reuses parent.SessionID via --resume (no
 		//     --fork-session), continuing the same JSONL in place
+		//   - freshSession=true → no --resume at all; the newSID is sent
+		//     as --session-id only so the JSONL is keyed correctly for
+		//     subsequent runs.
 		SessionID:     sourceSID,
-		Resume:        true,
-		Fork:          fork,
+		Resume:        resumeFlag,
+		Fork:          forkFor,
 		ForkSessionID: newSID,
 	})
 	// Hand the subprocess + cancel to the JobStore so StopSubTask can SIGTERM
@@ -431,7 +470,22 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 	switch {
 	case out.staleSession:
 		finalStatus = model.SubTaskStatusError
-		artifactBody = "❌ 源会话已失效（session 文件不存在），请重新发起 coding 后再试。"
+		// Three-way diagnostic split for "源会话已失效". The legacy
+		// generic wording stays the default fallback (and keeps the
+		// literal substring "session 文件不存在" that existing log-grep
+		// alerts key off). The three side-specific messages are
+		// strictly additions — a downstream monitor that only greps
+		// for the substring still matches.
+		switch out.SessionFileMissingSide {
+		case "remote":
+			artifactBody = "❌ 远端 Agent 服务器上找不到源会话文件（上行失败 / 文件被清理）。建议：1) 重新发起 coding；2) 勾选「新会话（含需求上下文）」；3) 到「设置 → Agent 服务器 → 安装依赖」复检。"
+		case "local":
+			artifactBody = "❌ 本地 Claude 会话目录中找不到源会话文件。建议：1) 重新发起 coding；2) 勾选「新会话（含需求上下文）」。"
+		case "sync-failed":
+			artifactBody = "❌ 会话文件 SFTP 同步失败。建议：1) 重试；2) 检查 Agent 服务器磁盘与 ~/.claude/projects/ 写权限；3) 勾选「新会话（含需求上下文）」。"
+		default:
+			artifactBody = "❌ 源会话已失效（session 文件不存在），请重新发起 coding 后再试。"
+		}
 		job.Append(store.LogLine{Type: "error", Content: artifactBody})
 	case out.errMsg != "":
 		finalStatus = model.SubTaskStatusError

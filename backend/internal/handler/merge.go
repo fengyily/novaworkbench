@@ -970,7 +970,7 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 		"sub_task_id": st.ID,
 	})
 
-	go h.subTaskRunner.Run(reqRow, st, job, newSID, sourceSID, prompt, effectiveModel, roleConfigID, false, true)
+	go h.subTaskRunner.Run(reqRow, st, job, newSID, sourceSID, prompt, effectiveModel, roleConfigID, false, true, false)
 }
 
 // buildPushSubTaskPrompt composes the task description the push sub-agent

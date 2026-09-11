@@ -39,6 +39,16 @@ type remoteCodingInput struct {
 	model          string
 	claudeConfigID string // role-bound claude config; empty = global active
 	usage          *usageCtx
+	// FreshSession skips the --resume path entirely: when true, no
+	// `--resume <sourceSID>` flag is sent to the worker (a brand-new
+	// session id is still minted and passed as `--session-id` so the
+	// outcome records are coherent), Step 3 SFTP upload is skipped
+	// (nothing to resume → no jsonl to push), and the wizard_remote
+	// caller's --fork-session flag is also dropped (a pure "new
+	// session" run shouldn't fork anything). The runner injects a
+	// ## 父任务上下文 block at the top of the prompt so the new session
+	// still knows the requirement title / design / parent context.
+	FreshSession bool
 }
 
 // startCodingReq mirrors the anonymous struct StartCoding decodes so the
@@ -263,17 +273,59 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// projects root, while the remote CLI looks for sessions under its own
 	// slug (-tmp-nova-agent-<projectID>-<reqID>), producing "No conversation
 	// found" / "源会话已失效" on every run.
+	//
+	// FreshSession skips this whole step — there's nothing to resume, no
+	// jsonl to push. Step 4 below also drops --resume / --fork-session.
 	remoteProjectsRoot := "~/.claude/projects/"
 	remoteSlug := util.EncodeClaudeSlug(wtPath)
 	remoteSlugDir := remoteProjectsRoot + remoteSlug
-	in.job.Append(store.LogLine{Type: "phase", Content: "📤 同步 Claude 会话历史（SFTP 上行）..."})
-	if slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
-		client.Mkdirp(remoteSlugDir)
-		if sftpErr := client.SyncDirUpMapped(slugDir, remoteSlugDir); sftpErr != nil {
-			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话上行失败（将无 resume 启动新会话）: " + sftpErr.Error()})
+	var sessionMissingSide string
+	if in.FreshSession {
+		in.job.Append(store.LogLine{Type: "phase", Content: "🆕 跳过会话上行：本次走「新会话」模式（不续接父会话）"})
+	} else {
+		in.job.Append(store.LogLine{Type: "phase", Content: "📤 同步 Claude 会话历史（SFTP 上行）..."})
+		slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow)
+		switch {
+		case slugErr != nil:
+			// "local" side: we could not locate the local session dir at
+			// all. Surface a precise message — most often this is the
+			// known mismatch where the local CLI wrote to ~/.claude/ but
+			// the backend looked under ~/.novaworkbench/claude/ (see
+			// claudeSessionHome()).
+			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 无法定位本地 claude session 目录（" + slugErr.Error() + "），将无 resume 启动新会话"})
+			sessionMissingSide = "local"
+		case slugDir == "":
+			// Both branches that USED to return ("", nil) silently. Now
+			// we treat that as "local missing" so the user gets a
+			// targeted hint instead of an opaque failure downstream.
+			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 本地未找到匹配的 claude session 目录（project slug 未缓存），将无 resume 启动新会话"})
+			sessionMissingSide = "local"
+		default:
+			client.Mkdirp(remoteSlugDir)
+			if sftpErr := client.SyncDirUpMapped(slugDir, remoteSlugDir); sftpErr != nil {
+				// "sync-failed" side: SFTP itself errored. The remote
+				// CLI will look for a jsonl we never landed.
+				in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话上行失败（将无 resume 启动新会话）: " + sftpErr.Error()})
+				sessionMissingSide = "sync-failed"
+			} else if in.sourceSID != "" {
+				// Pre-flight: confirm the jsonl actually landed under
+				// the remote slug dir. Catches the "0 files uploaded
+				// because slug mismatch is silent" case that
+				// historically surfaced as a generic "No conversation
+				// found" downstream.
+				remoteSidPath := remoteSlugDir + "/" + in.sourceSID + ".jsonl"
+				exists, statErr := client.RemoteFileExists(remoteSidPath)
+				if statErr != nil {
+					in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 远端 session 文件探测失败（" + statErr.Error() + "），将按「sync-failed」分类"})
+					sessionMissingSide = "sync-failed"
+				} else if !exists {
+					in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 远端未找到 session 文件 " + remoteSidPath + "（上行 0 文件或 slug 不匹配），将按「remote」分类"})
+					sessionMissingSide = "remote"
+				} else {
+					in.job.Append(store.LogLine{Type: "message", Content: "✅ 远端 session 文件就绪: " + remoteSidPath})
+				}
+			}
 		}
-	} else if slugErr != nil {
-		in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 无法定位本地 claude session 目录（" + slugErr.Error() + "），将无 resume 启动新会话"})
 	}
 
 	// Step 4: build the worker POST body. The mapping (NovaWorkbench
@@ -320,6 +372,17 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// Embedded file content from collectProjectContext is left untouched.
 	// No-op when in.workDir is empty or doesn't appear in the prompt.
 	remotePrompt := rewritePersonaWorkDir(in.prompt, in.workDir, wtPath)
+	// FreshSession: skip --resume / --fork-session entirely. The worker
+	// still gets --session-id <newSID> (so the resulting JSONL is keyed
+	// correctly for downstream resume), but no parent JSONL is consulted
+	// at startup. Combined with Step 3 skipping SFTP, this is the "新会话
+	// （含需求上下文）" recovery path for the source-session-missing bug.
+	resume := in.sourceSID != ""
+	fork := in.fork
+	if in.FreshSession {
+		resume = false
+		fork = false
+	}
 	opts := llm.StreamOpts{
 		Prompt:                 remotePrompt,
 		WorkDir:                wtPath,
@@ -327,8 +390,8 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		Model:                  cliModelArg(in.model),
 		ClaudeConfigID:         in.claudeConfigID,
 		SessionID:              in.sessionArg,
-		Resume:                 in.sourceSID != "",
-		Fork:                   in.fork,
+		Resume:                 resume,
+		Fork:                   fork,
 		ForkSessionID:          in.forkSessionID,
 		PermissionMode:         "",
 		OverrideSettingSources: &ignoreLocal, // legacy flag, kept true
@@ -406,6 +469,12 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	}
 
 	out := parseStreamJSONFromReader(resp.Body, jobSink{in.job}, "start-coding", in.usage)
+	// Stamp the pre-flight session-missing classification onto the
+	// outcome so finishSubTask / ExecuteOrchestratedChild can pick the
+	// right artifact text. Only meaningful when staleSession is true
+	// (i.e. the remote CLI actually returned a "No conversation found"
+	// error). On the happy path it stays empty and is ignored.
+	out.SessionFileMissingSide = sessionMissingSide
 
 	// Step 6: session sync (down) — copy any new session jsonl the remote
 	// run created back to local so adjust/continue on the next round find
@@ -605,6 +674,35 @@ func errString(err error) string {
 	return " (" + err.Error() + ")"
 }
 
+// claudeSessionHome resolves the directory Claude CLI uses as its config
+// home (where the projects/ subdir with session jsonls lives). Priority:
+//
+//  1. CLAUDE_CONFIG_DIR — what the local `claude` subprocess writes to when
+//     we (or the docker-entrypoint script) have asked it to use a non-default
+//     location. Highest priority because the CLI's actual write path is what
+//     matters; the upload below must read from the same dir the CLI writes to.
+//  2. NOVA_CLAUDE_HOME — historical NovaWorkbench override. Kept for
+//     backward compatibility with deployments where CLAUDE_CONFIG_DIR is not
+//     set (legacy env contract).
+//  3. ~/.claude — the Claude CLI's built-in default. This is what the local
+//     CLI uses today, since the backend has never set either env var.
+//
+// Returning an absolute path keeps the JSONL upload (Step 3 of
+// runRemoteCoding) pointing at the dir the CLI actually wrote to — without
+// this alignment, SFTP SyncDirUpMapped silently uploads 0 files and the
+// remote `claude --resume <sid>` immediately fails with "No conversation
+// found" / "源会话已失效" (the bug this helper was extracted to fix).
+func claudeSessionHome() string {
+	if v := os.Getenv("CLAUDE_CONFIG_DIR"); v != "" {
+		return v
+	}
+	if v := os.Getenv("NOVA_CLAUDE_HOME"); v != "" {
+		return v
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude")
+}
+
 // claudeProjectsSlugDir locates the on-disk directory where claude stores
 // session jsonls for the given requirement's project. The slug is derived
 // from the project's local_path; we read the cached value on the project
@@ -623,15 +721,7 @@ func (h *WizardHandler) claudeProjectsSlugDir(reqRow *model.Requirement) (string
 	if h.projectSvc == nil {
 		return "", fmt.Errorf("projectSvc not wired")
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	claudeHome := os.Getenv("NOVA_CLAUDE_HOME")
-	if claudeHome == "" {
-		claudeHome = filepath.Join(home, ".novaworkbench", "claude")
-	}
-	root := filepath.Join(claudeHome, "projects")
+	root := filepath.Join(claudeSessionHome(), "projects")
 	proj, err := h.projectSvc.Get(reqRow.ProjectID)
 	if err != nil || proj == nil {
 		// Project row missing (e.g. soft-deleted) — degrade to the
@@ -653,6 +743,16 @@ func (h *WizardHandler) claudeProjectsSlugDir(reqRow *model.Requirement) (string
 		}
 		return "", nil
 	}
+	// Prefer the requirement's worktree path when present: coding actually
+	// runs with cwd == worktree_path (a per-requirement git worktree under
+	// ~/.novaworkbench/worktrees/<basename>/<reqID>), and the Claude CLI
+	// derives its slug from THAT cwd, not from the project root. Without
+	// this preference the wizard's project-local slug (root) and the CLI's
+	// actual slug (worktree) diverge and SyncDirUpMapped uploads 0 files.
+	probePaths := []string{proj.LocalPath}
+	if reqRow.WorktreePath != "" {
+		probePaths = append([]string{reqRow.WorktreePath}, probePaths...)
+	}
 	// 1) Cache hit — use the persisted slug verbatim.
 	if proj.ClaudeProjectSlug != "" {
 		if _, statErr := os.Stat(filepath.Join(root, proj.ClaudeProjectSlug)); statErr == nil {
@@ -661,10 +761,22 @@ func (h *WizardHandler) claudeProjectsSlugDir(reqRow *model.Requirement) (string
 		// Stale slug (project moved / dir deleted). Fall through to
 		// re-discovery so we don't keep returning a dead path.
 	}
-	// 2) Cache miss / stale — scan and persist.
-	slug, derr := h.projectSvc.DiscoverAndCacheClaudeProjectSlug(proj.ID, proj.LocalPath)
-	if derr != nil || slug == "" {
-		return "", derr
+	// 2) Cache miss / stale — scan and persist. We probe each candidate
+	// path in priority order (worktree > project root) so the discovered
+	// slug matches the cwd the CLI actually used.
+	var lastErr error
+	for _, p := range probePaths {
+		slug, derr := h.projectSvc.DiscoverAndCacheClaudeProjectSlug(proj.ID, p)
+		if derr != nil {
+			lastErr = derr
+			continue
+		}
+		if slug != "" {
+			return filepath.Join(root, slug), nil
+		}
 	}
-	return filepath.Join(root, slug), nil
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", nil
 }

@@ -91,6 +91,16 @@ export const components = {
     summaryToastOk: '✅ Summary submitted',
     summaryToastErrPrefix: '❌',
     summaryToastErrFallback: 'Failed to submit summary',
+    // 「新会话（含需求上下文）」 mode (P2 fallback for the source-session-
+    // missing bug on Agent Server runs). The radio only renders when the
+    // requirement has agent_server_id OR the latest sub-task artifact
+    // indicates a stale-session failure. Default stays "继续上一会话".
+    sessionMode: {
+      label: 'Session mode',
+      resume: 'Resume previous session',
+      fresh: 'New session (with requirement context)',
+      freshHint: 'The previous session was not found on the Agent Server. We recommend the "New session" mode — it auto-injects the requirement title, design docs, and the last 10 turns of the previous session as context.',
+    },
   },
   subTaskCard: {
     statusPending: 'Queued',

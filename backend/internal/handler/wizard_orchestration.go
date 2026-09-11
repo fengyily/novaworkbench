@@ -1238,7 +1238,20 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	artifactBody := out.finalResult
 	if out.staleSession {
 		status = model.SubTaskStatusError
-		artifactBody = "❌ 源会话已失效（session 文件不存在），请重新发起 coding 后再试。"
+		// Same three-way diagnostic split as SubTaskRunner.finishSubTask
+		// — orchestrated children run through the same wizard_remote
+		// path and encounter the same root cause when the parent's
+		// jsonl is missing on the remote agent host.
+		switch out.SessionFileMissingSide {
+		case "remote":
+			artifactBody = "❌ 远端 Agent 服务器上找不到源会话文件（上行失败 / 文件被清理）。建议：1) 重新发起 coding；2) 勾选「新会话（含需求上下文）」；3) 到「设置 → Agent 服务器 → 安装依赖」复检。"
+		case "local":
+			artifactBody = "❌ 本地 Claude 会话目录中找不到源会话文件。建议：1) 重新发起 coding；2) 勾选「新会话（含需求上下文）」。"
+		case "sync-failed":
+			artifactBody = "❌ 会话文件 SFTP 同步失败。建议：1) 重试；2) 检查 Agent 服务器磁盘与 ~/.claude/projects/ 写权限；3) 勾选「新会话（含需求上下文）」。"
+		default:
+			artifactBody = "❌ 源会话已失效（session 文件不存在），请重新发起 coding 后再试。"
+		}
 	} else if out.errMsg != "" {
 		status = model.SubTaskStatusError
 		artifactBody = "❌ " + out.errMsg
