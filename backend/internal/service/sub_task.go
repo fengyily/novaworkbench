@@ -205,7 +205,7 @@ func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
 		created_at, updated_at, completed_at,
-		batch_id, batch_seq, batch_id_seq_run
+		batch_id, batch_seq, batch_id_seq_run, source
 		FROM sub_tasks WHERE batch_id = ?
 		ORDER BY batch_seq ASC, created_at ASC, id ASC`, batchID)
 	if err != nil {
