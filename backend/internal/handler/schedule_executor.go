@@ -58,7 +58,7 @@ func (e *ScheduledExecutor) RunScheduledDesign(ctx context.Context, p scheduler.
 	if err != nil {
 		return "", err
 	}
-	_, err = e.h.RunScheduledDesign(p.RequirementID, p.Model, p.ReadKnowledge, e.callbackFor(schedID))
+	_, err = e.h.RunScheduledDesign(p.RequirementID, p.Model, p.ReadKnowledge, p.AgentServerID, e.callbackFor(schedID))
 	if err != nil {
 		return "", err
 	}

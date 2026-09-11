@@ -36,11 +36,13 @@ import (
 // DesignParams is the wizard-facing shape for a scheduled architect-design.
 // Model == "" means "use the role default" — the wizard resolves it via
 // roleConfig at execution time so a config switch after the row was
-// scheduled still applies.
+// scheduled still applies. AgentServerID == "" means local execution
+// (mirrors CodingParams.AgentServerID below).
 type DesignParams struct {
 	RequirementID string
 	Model         string
 	ReadKnowledge bool
+	AgentServerID string
 }
 
 // CodingParams is the wizard-facing shape for a scheduled start-coding.
@@ -258,6 +260,7 @@ func (s *Scheduler) dispatch(t model.ScheduledTask) {
 			RequirementID: t.RequirementID,
 			Model:         t.Model,
 			ReadKnowledge: t.ReadKnowledge,
+			AgentServerID: t.AgentServerID,
 		})
 	case model.SchedTypeCoding:
 		jobID, err = s.exec.RunScheduledCoding(ctx, CodingParams{

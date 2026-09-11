@@ -734,6 +734,17 @@ const (
 	DevSourceAgent = "agent"
 )
 
+// Design-environment provenance values for requirements.design_agent_server_id.
+// Mirrors DevSourceLocal / DevSourceAgent but for the architect-design stage:
+// the dropdown on the design toolbar picks the Agent server that will run the
+// plan-mode claude invocation. Empty / DesignSourceLocal means the run stays
+// on the NovaWorkbench host; DesignSourceAgent + a server id means
+// runRemoteArchitectDesign will dispatch the work to that server via SSH.
+const (
+	DesignSourceLocal = "local"
+	DesignSourceAgent = "agent"
+)
+
 // UpdateDevSource stamps where this requirement is being developed. serverID
 // is the agent_servers row id when source == DevSourceAgent, and is forced to
 // "" for local runs so a requirement that moves from an Agent server back to
@@ -749,6 +760,22 @@ func (s *RequirementService) UpdateDevSource(id, source, serverID string) error 
 	_, err := s.db.Exec(
 		"UPDATE requirements SET dev_source = ?, agent_server_id = ?, updated_at = ? WHERE id = ?",
 		source, serverID, time.Now(), id)
+	return err
+}
+
+// UpdateDesignAgentServer stamps WHERE the architect-design stage was run.
+// serverID is the agent_servers row id when an Agent server was picked, and
+// the wizard handler forces it to "" when no server was picked so a
+// requirement that flips back to local execution doesn't keep routing
+// follow-up "继续设计" actions to the stale server.
+//
+// Called at the START of the design stage (mirroring UpdateDevSource) so
+// the binding survives a failed/aborted run — the user can still inspect
+// "this requirement tried server X" on a retry.
+func (s *RequirementService) UpdateDesignAgentServer(id, serverID string) error {
+	_, err := s.db.Exec(
+		"UPDATE requirements SET design_agent_server_id = ?, updated_at = ? WHERE id = ?",
+		serverID, time.Now(), id)
 	return err
 }
 
