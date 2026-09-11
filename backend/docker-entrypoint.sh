@@ -24,7 +24,17 @@ WORK_DIR="${NOVA_WORK:-/home/node}/workspace"
 # the container (rebuilding the image, recreating the container) keeps
 # in-progress wizard/codegen sessions alive for --resume. Mirrors DATA_DIR
 # / WORK_DIR — host bind-mount + entrypoint chown handles ownership.
-CLAUDE_DIR="${NOVA_CLAUDE_HOME:-/home/node}/.claude"
+#
+# CLAUDE_DIR is the Claude config root, i.e. the directory the CLI writes
+# ~/.claude/projects/<slug>/<sid>.jsonl into. We export CLAUDE_CONFIG_DIR
+# pointing at it so the local `claude` subprocess (spawned by the Nova
+# backend inside the container) writes to the same path the backend later
+# reads via claudeSessionHome() / DiscoverAndCacheClaudeProjectSlug(). The
+# historical "NOVA_CLAUDE_HOME" env was interpreted differently inside Go
+# (it pointed at <NOVA_CLAUDE_HOME>/projects) — that two-layer indirection
+# silently broke SFTP uploads. The new contract is: NOVA_CLAUDE_HOME / CLAUDE_CONFIG_DIR
+# BOTH mean "the Claude config root", full stop.
+CLAUDE_DIR="${NOVA_CLAUDE_HOME:-/home/node/.claude}"
 
 mkdir -p "$DATA_DIR" "$WORK_DIR" "$CLAUDE_DIR"
 
@@ -61,4 +71,11 @@ chown -R node:node "$DATA_DIR" "$WORK_DIR" "$CLAUDE_DIR"
 # run git, falling back to telling the user to copy-paste commands.
 export HOME="${NOVA_HOME:-/home/node}"
 export SHELL="/bin/bash"
-exec su-exec node env "HOME=$HOME" "SHELL=$SHELL" "$@"
+# Make the local `claude` subprocess write session jsonls under the same
+# directory the backend reads from (see CLAUDE_DIR comment above). Without
+# this the backend's claudeSessionHome() reads ~/.claude/projects/... while
+# the CLI writes to /home/node/.claude/projects/... (or whatever CLAUDE_DIR
+# resolved to) — the SFTP uploader then finds nothing to upload and the
+# remote Agent server's --resume <sid> silently fails.
+export CLAUDE_CONFIG_DIR="$CLAUDE_DIR"
+exec su-exec node env "HOME=$HOME" "SHELL=$SHELL" "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR" "$@"

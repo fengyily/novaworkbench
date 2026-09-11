@@ -978,11 +978,20 @@ func (s *ProjectService) UpdateClaudeProjectSlug(id, slug string) error {
 	return err
 }
 
-// DiscoverAndCacheClaudeProjectSlug scans NOVA_CLAUDE_HOME/projects/ for a
-// subdirectory whose decoded slug matches localPath. Returns ("", nil) when
-// no match is found — that is normal for a brand-new project that has never
-// been run through Claude locally yet (the Agent Server path would also be
-// in this state until the first start-coding locally).
+// DiscoverAndCacheClaudeProjectSlug scans <claudeSessionHome>/projects/ for
+// a subdirectory whose decoded slug matches localPath. Returns ("", nil)
+// when no match is found — that is normal for a brand-new project that has
+// never been run through Claude locally yet (the Agent Server path would
+// also be in this state until the first start-coding locally).
+//
+// Fallback semantics: when NO slug on disk matches localPath (e.g. the
+// project was never coded locally so the directory never existed), the
+// function falls back to EncodeClaudeSlug(localPath). The SFTP upload step
+// in runRemoteCoding creates the remote dir under this slug; if the local
+// CLI later writes to that slug too, the next upload picks it up
+// transparently. We persist the fallback slug via UpdateClaudeProjectSlug
+// only when we found a real on-disk match — caching a never-written slug
+// would just guarantee a stale row on the next read.
 //
 // On a match the slug is persisted to projects.claude_project_slug via
 // UpdateClaudeProjectSlug. A write error is logged but does not fail the
@@ -995,15 +1004,18 @@ func (s *ProjectService) DiscoverAndCacheClaudeProjectSlug(id, localPath string)
 	if err != nil {
 		return "", nil
 	}
-	claudeHome := os.Getenv("NOVA_CLAUDE_HOME")
+	claudeHome := os.Getenv("CLAUDE_CONFIG_DIR")
 	if claudeHome == "" {
-		claudeHome = filepath.Join(home, ".novaworkbench", "claude")
+		claudeHome = os.Getenv("NOVA_CLAUDE_HOME")
+	}
+	if claudeHome == "" {
+		claudeHome = filepath.Join(home, ".claude")
 	}
 	root := filepath.Join(claudeHome, "projects")
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", nil
+			return util.EncodeClaudeSlug(localPath), nil
 		}
 		return "", err
 	}
@@ -1018,7 +1030,11 @@ func (s *ProjectService) DiscoverAndCacheClaudeProjectSlug(id, localPath string)
 			return e.Name(), nil
 		}
 	}
-	return "", nil
+	// No on-disk match: return the encoded slug as a best-effort fallback so
+	// the SFTP uploader has a directory name to write to. We deliberately do
+	// NOT persist this fallback — it might never exist on disk, and caching
+	// it would just guarantee a stale row.
+	return util.EncodeClaudeSlug(localPath), nil
 }
 
 // ListProjectsNeedingDescription returns projects whose description is empty
