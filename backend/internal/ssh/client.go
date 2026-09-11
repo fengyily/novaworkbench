@@ -342,6 +342,12 @@ func (c *Client) Exists(remotePath string) bool {
 //
 // Returns (false, nil) on a literal os.IsNotExist from SFTP — the caller is
 // the one who decides whether "file is missing" is fatal.
+//
+// A leading "~" / "~/" in remotePath is expanded against the remote user's
+// $HOME before the stat. SFTP (pkg/sftp) does not understand "~", so passing
+// a literal "~/.claude/projects/<slug>/<sid>.jsonl" would stat a path under a
+// directory named "~" in the session's CWD — never the file the remote claude
+// CLI actually wrote. Non-"~" paths pass through unchanged.
 func (c *Client) RemoteFileExists(remotePath string) (bool, error) {
 	if c == nil || c.conn == nil {
 		return false, errors.New("ssh: client not connected")
@@ -349,12 +355,16 @@ func (c *Client) RemoteFileExists(remotePath string) (bool, error) {
 	if remotePath == "" {
 		return false, errors.New("ssh: empty remote path")
 	}
+	expanded, xerr := c.expandHome(remotePath)
+	if xerr != nil {
+		return false, xerr
+	}
 	sftpCli, err := c.sftp()
 	if err != nil {
 		return false, err
 	}
 	defer sftpCli.Close()
-	if _, err := sftpCli.Stat(remotePath); err != nil {
+	if _, err := sftpCli.Stat(expanded); err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
@@ -364,11 +374,22 @@ func (c *Client) RemoteFileExists(remotePath string) (bool, error) {
 }
 
 // Mkdirp creates remotePath (and any missing parents) with mode 0755.
+//
+// A leading "~" / "~/" is expanded against the remote user's $HOME before the
+// mkdir. The command is built with single quotes (shellQuote), and a tilde
+// inside single quotes is NOT expanded by the shell — so a literal
+// "mkdir -p '~/.claude/projects/<slug>'" silently creates a directory named
+// "~" under the SSH session's CWD instead of under the user's home. Non-"~"
+// paths pass through unchanged.
 func (c *Client) Mkdirp(remotePath string) error {
 	if remotePath == "" {
 		return errors.New("ssh: empty remote path")
 	}
-	_, err := c.Exec(context.Background(), "mkdir -p "+shellQuote(remotePath), "", nil, io.Discard, nil)
+	expanded, err := c.expandHome(remotePath)
+	if err != nil {
+		return err
+	}
+	_, err = c.Exec(context.Background(), "mkdir -p "+shellQuote(expanded), "", nil, io.Discard, nil)
 	return err
 }
 
@@ -419,6 +440,18 @@ func (c *Client) WriteFile(remotePath string, data []byte, mode os.FileMode) err
 	}
 	return nil
 }
+
+// ExpandHome rewrites a leading "~" or "~/" in remotePath to the remote
+// user's absolute $HOME path, caching the resolved home on the Client.
+// Non-"~" paths (absolute or relative) are returned unchanged, so callers can
+// invoke it unconditionally. Returns an error only when $HOME cannot be
+// resolved over SSH.
+//
+// Callers must use this whenever a "~"-prefixed path is about to be handed to
+// SFTP or to a single-quoted shell command, because neither expands a tilde:
+// a literal "~/.claude/projects/<slug>" would silently address a directory
+// named "~" instead of the remote user's home.
+func (c *Client) ExpandHome(remotePath string) (string, error) { return c.expandHome(remotePath) }
 
 // expandHome rewrites a leading "~" or "~/" in path to the remote user's
 // absolute home directory. Absolute paths and relative paths without a
@@ -492,6 +525,12 @@ func (c *Client) SyncDirDown(remoteDir, localDir string) error {
 // shouldSync filter on .jsonl / .md). The split into a separate method
 // rather than overloading SyncDirUp keeps the older "scan-and-upload-to-
 // projects-root" semantics intact for any caller that still wants them.
+//
+// A leading "~" / "~/" in remoteDir is expanded against the remote user's
+// $HOME, because pkg/sftp does not understand it: an unexpanded
+// "~/.claude/projects/<slug>" lands the upload under a directory literally
+// named "~", where the remote claude CLI (which resolves its own slug dir
+// under $HOME) will never look.
 func (c *Client) SyncDirUpMapped(localDir, remoteDir string) error {
 	if _, err := os.Stat(localDir); err != nil {
 		if os.IsNotExist(err) {
@@ -499,16 +538,20 @@ func (c *Client) SyncDirUpMapped(localDir, remoteDir string) error {
 		}
 		return fmt.Errorf("ssh: stat local dir %s: %w", localDir, err)
 	}
+	expandedRemote, xerr := c.expandHome(remoteDir)
+	if xerr != nil {
+		return xerr
+	}
 	sftpCli, err := c.sftp()
 	if err != nil {
 		return err
 	}
 	defer sftpCli.Close()
 
-	if err := sftpCli.MkdirAll(remoteDir); err != nil {
-		return fmt.Errorf("ssh: sftp mkdir %s: %w", remoteDir, err)
+	if err := sftpCli.MkdirAll(expandedRemote); err != nil {
+		return fmt.Errorf("ssh: sftp mkdir %s: %w", expandedRemote, err)
 	}
-	return walkAndUpload(sftpCli, localDir, remoteDir)
+	return walkAndUpload(sftpCli, localDir, expandedRemote)
 }
 
 // SyncDirDownMapped is the slug-aware counterpart of SyncDirDownMapped.
@@ -519,16 +562,26 @@ func (c *Client) SyncDirUpMapped(localDir, remoteDir string) error {
 //
 // Mirrors SyncDirDown's missing-remote tolerance: an unreadable remote dir
 // returns nil rather than failing the whole coding job.
+//
+// A leading "~" / "~/" in remoteDir is expanded against the remote user's
+// $HOME for the same reason as SyncDirUpMapped: without the expansion the
+// download reads from the "~"-named directory the upload created, never from
+// the $HOME/.claude/projects/<slug>/ directory the remote claude CLI actually
+// writes its session jsonl into — making this step a structural no-op.
 func (c *Client) SyncDirDownMapped(remoteDir, localDir string) error {
 	if err := os.MkdirAll(localDir, 0755); err != nil {
 		return fmt.Errorf("ssh: mkdir local %s: %w", localDir, err)
+	}
+	expandedRemote, xerr := c.expandHome(remoteDir)
+	if xerr != nil {
+		return xerr
 	}
 	sftpCli, err := c.sftp()
 	if err != nil {
 		return err
 	}
 	defer sftpCli.Close()
-	return walkAndDownload(sftpCli, remoteDir, localDir)
+	return walkAndDownload(sftpCli, expandedRemote, localDir)
 }
 
 // sftp opens a new SFTP session on the underlying SSH connection. The caller
