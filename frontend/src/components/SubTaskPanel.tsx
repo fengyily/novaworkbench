@@ -1,23 +1,35 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { useTranslation } from 'react-i18next';
+import i18next from 'i18next';
 import {
   subTasksApi,
   subTaskCliCommand,
   subTaskAdjustCommand,
-  fmtNum,
+  claudeApi,
+  claudeSettingsPrefix,
+  DefaultModelLabel,
   type SubTask,
   type SubTaskStatus,
   type Requirement,
+  type OrchestrationBatch,
 } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
-import { appendLogLine, type LogLine } from '../utils/logLines';
+import { appendLogLine, computeUsage, type LogLine, type UsageInfo } from '../utils/logLines';
+import { modelContextWindow } from '../utils/modelWindow';
 import AtMentionTextarea from './AtMentionTextarea';
+import ModelSelect from './ModelSelect';
+import ContextUsageBar from './ContextUsageBar';
+import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck } from './icons';
 import './SubTaskPanel.css';
 
-// fmtCost / fmtNum are imported from the shared API client. TokenStrip
-// was retired; the header-right quickstats block (🪙 + cost + ⏱) reads
-// the persisted sub_tasks fields directly without a usageApi round-trip.
+// The header-right quickstats block (cost + ⏱) reads the persisted
+// sub_tasks fields directly without a usageApi round-trip. The live
+// context-usage bar lives in its own row just under the header (see
+// `<div className="sub-card-usage">` below) and is fed by:
+//   - SSE `usage` frames (step="sub_task") during a live run,
+//   - a client-side recompute from sub_tasks.*_tokens columns otherwise.
 
 interface Props {
   requirementId: string;
@@ -25,18 +37,51 @@ interface Props {
   // pre-flight hint instead of the create form.
   codingSessionId: string;
   requirement: Requirement;
+  // Optional callback fired after each successful list fetch with the
+  // current item count. Lets the parent hide the requirement-level
+  // "Follow-up" composer the moment this panel shows at least one child,
+  // without waiting for the next refetch. The parent should pass a
+  // stable setter (useState's setState) so this callback reference is
+  // stable across re-renders — otherwise the panel's useEffect would
+  // re-fire and cause an infinite loop. The panel only re-emits when
+  // the count changes, so the parent never sees a redundant call.
+  onSubTasksChange?: (count: number) => void;
+  // Effective developer-stage model id (role default → active config
+  // default). Shown beside the DefaultModelLabel sentinel in every
+  // per-stage picker so the user sees the model that will actually be
+  // dispatched when they leave the picker on the default. Required for
+  // the new create / adjust / re-split pickers; the panel falls back to
+  // "" if omitted (legacy callers / tests).
+  developerDefaultModel?: string;
+  // Current orchestration batch for this requirement (new restartable
+  // orchestration flow). null when the backend has no batch row yet —
+  // e.g. before StartCoding, or after a manual-only flow that never
+  // went through the auto-orchestrator. Drives which summary CTAs the
+  // banner surfaces (see sub-orchestrator-status block).
+  batch: OrchestrationBatch | null;
+  // Optional callback fired after a manual or early-summary round trip
+  // completes (success or failure). The parent uses it to refresh the
+  // batch snapshot so the banner's disabled state updates without
+  // waiting for the next periodic list-poll cycle.
+  onBatchChange?: () => void;
 }
 
-// Status vocabulary. The label stays in plain Chinese so the chip reads
-// the same as the other developer-stage UI (CodingChat / AdjustCoding
-// use 中文 labels). The glyph gives a glanceable cue; the chip class
-// drives the platform-color treatment.
-const statusMeta: Record<SubTaskStatus, { label: string; chipClass: string }> = {
-  scheduled: { label: '定时中', chipClass: 'sub-card-status-chip sub-card-status-pending' },
-  pending: { label: '排队中', chipClass: 'sub-card-status-chip sub-card-status-pending' },
-  running: { label: '运行中', chipClass: 'sub-card-status-chip sub-card-status-running' },
-  done:    { label: '已完成', chipClass: 'sub-card-status-chip sub-card-status-done' },
-  error:   { label: '出错',   chipClass: 'sub-card-status-chip sub-card-status-error' },
+// Status vocabulary — labels hold i18n KEYS (resolved at render) so the
+// chip text follows the active language. The glyph gives a glanceable
+// cue; the chip class drives the platform-color treatment.
+const statusLabelKeys: Record<SubTaskStatus, string> = {
+  pending: 'components.subTaskCard.statusPending',
+  running: 'components.subTaskCard.statusRunning',
+  done:    'components.subTaskCard.statusDone',
+  error:   'components.subTaskCard.statusError',
+  stopped: 'components.subTaskCard.statusStopped',
+};
+const statusChipClass: Record<SubTaskStatus, string> = {
+  pending: 'sub-card-status-chip sub-card-status-pending',
+  running: 'sub-card-status-chip sub-card-status-running',
+  done:    'sub-card-status-chip sub-card-status-done',
+  error:   'sub-card-status-chip sub-card-status-error',
+  stopped: 'sub-card-status-chip sub-card-status-stopped',
 };
 
 // truncate keeps the monospace header line at a predictable width — a
@@ -46,6 +91,10 @@ function truncate(s: string, max: number): string {
   return s.slice(0, max) + '…';
 }
 
+// timeAgo renders a small "N seconds ago / N minutes ago / N hours ago"
+// label, falling back to a full localized timestamp for very old rows.
+// Plain i18next call (not a hook) so it can be reused from non-React
+// helpers; the panel re-renders on language change anyway.
 function timeAgo(iso: string): string {
   if (!iso) return '';
   // Backend serializes time.Time as RFC3339Nano with a numeric tz offset
@@ -63,27 +112,37 @@ function timeAgo(iso: string): string {
   }
   const delta = Math.max(0, Date.now() - d2);
   const s = Math.floor(delta / 1000);
-  if (s < 60) return `${s}秒前`;
+  const t4 = (key: string, opts: Record<string, unknown>) =>
+    i18next.t(key, opts) as string;
+  if (s < 60) return t4('components.subTaskCard.secondsAgo', { n: s });
   const mn = Math.floor(s / 60);
-  if (mn < 60) return `${mn}分钟前`;
+  if (mn < 60) return t4('components.subTaskCard.minutesAgo', { n: mn });
   const h = Math.floor(mn / 60);
-  if (h < 24) return `${h}小时前`;
+  if (h < 24) return t4('components.subTaskCard.hoursAgo', { n: h });
   return new Date(d2).toLocaleString();
 }
 
 // formatDuration renders a sub-task's wall-clock duration (seconds) the
-// same way the dashboard renders token-cost durations: "42秒" / "2分15秒"
-// / "1小时03分". Pass 0 / undefined for unfinished runs so callers can
-// render a live ticker instead.
+// same way the dashboard renders token-cost durations:
+// "42s / 2m 15s / 1h 3m". Pass 0 / undefined for unfinished runs so
+// callers can render a live ticker instead.
 function fmtDuration(seconds: number | undefined): string {
   if (!seconds || seconds <= 0) return '';
-  if (seconds < 60) return `${seconds}秒`;
+  const tt = (key: string, opts: Record<string, unknown>) =>
+    i18next.t(key, opts) as string;
+  if (seconds < 60) return tt('components.subTaskCard.secondsOnly', { n: seconds });
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
-  if (m < 60) return s > 0 ? `${m}分${s}秒` : `${m}分`;
+  if (m < 60) {
+    return s > 0
+      ? tt('components.subTaskCard.minutesSeconds', { m, s })
+      : tt('components.subTaskCard.minutesOnly', { m });
+  }
   const h = Math.floor(m / 60);
   const mm = m % 60;
-  return mm > 0 ? `${h}小时${mm}分` : `${h}小时`;
+  return mm > 0
+    ? tt('components.subTaskCard.hoursMinutes', { h, m: mm })
+    : tt('components.subTaskCard.hoursOnly', { h });
 }
 
 // A persistent clipboard utility that falls back to a textarea when
@@ -113,8 +172,9 @@ async function writeClipboard(text: string): Promise<boolean> {
 // component) so this is a stripped-down equivalent that renders the same
 // {type, content} event shape the SSE pipeline emits.
 function SubTaskLogView({ lines }: { lines: LogLine[] }) {
+  const { t } = useTranslation();
   if (lines.length === 0) {
-    return <div className="sub-log-empty">⏳ 等待 Claude 输出…</div>;
+    return <div className="sub-log-empty">{t('components.subTaskCard.logEmpty')}</div>;
   }
   const rendered: React.ReactNode[] = [];
   let phaseBucket: LogLine[] = [];
@@ -165,11 +225,33 @@ function SubTaskLogView({ lines }: { lines: LogLine[] }) {
   return <div className="sub-log">{rendered}</div>;
 }
 
+// launchSettingsRef caches the --settings prefix for the copy-paste CLI
+// commands (one /active fetch per page load). Empty string = nothing to pin
+// (no active config with base URL / model) → commands render without the flag.
+let launchSettingsRef: string | null = null;
+async function launchSettings(): Promise<string> {
+  if (launchSettingsRef !== null) return launchSettingsRef;
+  try {
+    const active = await claudeApi.active();
+    launchSettingsRef = claudeSettingsPrefix(active?.base_url, active?.default_model);
+  } catch {
+    launchSettingsRef = '';
+  }
+  return launchSettingsRef;
+}
+
 function CopyCliBlock({ st, variant }: { st: SubTask; variant: 'continue' | 'adjust' }) {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
+  const [settings, setSettings] = useState(launchSettingsRef ?? '');
+  useEffect(() => {
+    let cancelled = false;
+    launchSettings().then((s) => { if (!cancelled) setSettings(s); });
+    return () => { cancelled = true; };
+  }, []);
   const cmd = variant === 'continue'
-    ? subTaskCliCommand(st)
-    : subTaskAdjustCommand(st, '');
+    ? subTaskCliCommand(st, settings)
+    : subTaskAdjustCommand(st, '', settings);
   const onCopy = useCallback(async () => {
     const ok = await writeClipboard(cmd);
     if (ok) {
@@ -182,7 +264,7 @@ function CopyCliBlock({ st, variant }: { st: SubTask; variant: 'continue' | 'adj
       <span className="sub-cli-prompt">$</span>
       <code className="sub-cli-cmd">{cmd}</code>
       <button type="button" className="sub-cli-copy" onClick={onCopy}>
-        {copied ? '✓ 已复制' : '复制'}
+        {copied ? t('components.subTaskCard.copied') : t('components.subTaskCard.copyBtn')}
       </button>
     </div>
   );
@@ -193,9 +275,82 @@ interface CardProps {
   index: number;
   total: number;
   onChanged: (next: SubTask) => void;
+  // Optional callback fired after a redo (or any action that adds a NEW
+  // sub-task row) succeeds. The panel root passes loadList so the freshly
+  // created redo row appears immediately — the periodic poll only runs while
+  // a child is alive, so a redo of an otherwise-terminal list would never
+  // refresh without this.
+  onCreated?: () => void;
+  // Fires after a successful in-place restart (Redo or Continue). The
+  // parent uses this to (a) flip the row to status='running' with the new
+  // job_id and (b) subscribe the SSE stream for live progress. Kept
+  // separate from onCreated because a restart mutates the SAME row (no
+  // new entry to refresh), and we don't want to loadList a parent list
+  // that already contains this row.
+  onRestarted?: (subTaskId: string, newJobId: string) => void;
+  // False when the requirement runs on a remote Agent Server — Stop is
+  // disabled there in this iteration (returns 501 STOP_REMOTE_NOT_SUPPORTED).
+  // The parent (RequirementDetail) decides; the default is true so legacy
+  // call sites / tests don't accidentally disable Stop.
+  canStop?: boolean;
+  // Panel-level model selection — applies to the next "Follow-up" turn so
+  // the user picks the model once at the panel header and every card
+  // uses it without owning its own copy. Distinct from the per-card
+  // `redoModel` (re-runs a failed sub-task with a possibly different
+  // model).
+  adjustModel?: string;
+  // Mirror setter so the per-card ModelSelect in the adjust drawer can
+  // write back to the panel-level adjustModel state. Without this each
+  // card would need its own picker copy.
+  onAdjustModelChange?: (model: string) => void;
 }
 
-function SubTaskCard({ st, index, total, onChanged }: CardProps) {
+// useRestartSubTask encapsulates the "原地翻转" semantics shared by the
+// Redo and Continue buttons: flip the row to running immediately, kick
+// the API call, and let the parent pick up the new job_id via onRestarted.
+// On any error we revert the optimistic update and re-throw so the caller
+// can surface a localized toast.
+//
+// We deliberately do NOT close the SSE here: the parent owns SSE lifetime
+// via the onRestarted hook (it re-subscribes when the new job_id lands).
+// The card's local `streaming` state is flipped back to true so the live
+// log panel reopens while waiting for the new frames.
+function useRestartSubTask(args: {
+  st: SubTask;
+  requirementId: string;
+  onChanged: (next: SubTask) => void;
+  onRestarted?: (subTaskId: string, newJobId: string) => void;
+  setStreaming: (b: boolean) => void;
+  setLines: (l: LogLine[]) => void;
+}) {
+  const { st, requirementId, onChanged, onRestarted, setStreaming, setLines } = args;
+  return useCallback(async (kind: 'redo' | 'continue', model?: string) => {
+    // Snapshot for rollback on error.
+    const snapshot = { ...st };
+    // Optimistic: card flips to running UI + parent gets a synthetic
+    // running row. The empty job_id keeps the SSE effect gated until
+    // onRestarted lands with the real one.
+    setStreaming(true);
+    setLines([]);
+    onChanged({ ...st, status: 'running', job_id: '', artifact: '' });
+    try {
+      const resp = kind === 'redo'
+        ? await subTasksApi.redo(requirementId, st.id, model ? { model } : {})
+        : await subTasksApi.continue(requirementId, st.id, model ? { model } : {});
+      // Hand off to the parent: it stamps job_id on the row and
+      // subscribes the SSE stream for the new job.
+      onRestarted?.(st.id, resp.job_id);
+    } catch (e) {
+      // Rollback: revert parent state + close the live log panel.
+      onChanged(snapshot);
+      setStreaming(false);
+      throw e;
+    }
+  }, [st, requirementId, onChanged, onRestarted, setStreaming, setLines]);
+}
+
+function SubTaskCard({ st, index, total, onChanged, onCreated: _onCreated, onRestarted, canStop = true, adjustModel = '', onAdjustModelChange }: CardProps) {
+  const { t } = useTranslation();
   // The card uses a layout that mirrors an issue tracker detail view:
   //   ┌─ terminal-style header line ────────────────────────────────┐
   //   │  ▶ $ sub-task [01/03] · claude-sonnet · 12s ago         ⌄  │
@@ -214,10 +369,30 @@ function SubTaskCard({ st, index, total, onChanged }: CardProps) {
   const [streaming, setStreaming] = useState<boolean>(st.status === 'running' || st.status === 'pending');
   const [lines, setLines] = useState<LogLine[]>([]);
   const [artifact, setArtifact] = useState<string>(st.artifact);
+  // Mirror the parent's st.artifact into local state on every prop
+  // change. useState alone only captures the mount-time value, so a
+  // list-poll that refreshes the row (e.g. after SSE job_done causes
+  // the parent to re-fetch /sub-tasks) wouldn't update the rendered
+  // artifact unless the SSE-driven subTasksApi.get also completes.
+  // This effect closes that gap: any newer artifact coming through
+  // props wins, and we deliberately skip the SSE-derived setArtifact
+  // callback that fights with this — see the job_done branch below
+  // (it still sets local state when SSE arrives faster than the next
+  // list poll, which is the common path).
+  useEffect(() => {
+    setArtifact(st.artifact);
+  }, [st.artifact]);
   const [adjusting, setAdjusting] = useState(false);
   const [adjustInput, setAdjustInput] = useState('');
   const [adjustBusy, setAdjustBusy] = useState(false);
   const [adjustError, setAdjustError] = useState<string | null>(null);
+  // Redo (🔄 Redo): re-run a failed sub-task with the original prompt. The
+  // user may switch the model before re-dispatching. Defaults to the failed
+  // run's model so a plain "Redo" re-runs with the same model.
+  const [redoing, setRedoing] = useState(false);
+  const [redoModel, setRedoModel] = useState<string>(st.model);
+  const [redoBusy, setRedoBusy] = useState(false);
+  const [redoError, setRedoError] = useState<string | null>(null);
   // Live ticker for the header-right "⏱ 0:42" badge: starts when the card
   // mounts in "running" status and stops on terminal status. Replaced by
   // the persisted duration_seconds once the row finishes, so the badge
@@ -229,8 +404,37 @@ function SubTaskCard({ st, index, total, onChanged }: CardProps) {
     const t = setInterval(() => setLiveSeconds((v) => v + 1), 1000);
     return () => clearInterval(t);
   }, [st.status]);
+  // Stop optimistic state: shown as "⏹ 停止中…" on the button while we
+  // wait for the SSE job_done frame. Cleared automatically once the row
+  // leaves 'running' (the same frame that flips it to 'stopped').
+  const [stopping, setStopping] = useState(false);
+  useEffect(() => {
+    if (st.status !== 'running' && stopping) setStopping(false);
+  }, [st.status, stopping]);
+  // Continue optimistic state — disabled on the button while the
+  // --resume call is in flight. Mirror of stopping/redoing; kept
+  // separate so the drawer-style `adjusting` state isn't affected.
+  const [continueBusy, setContinueBusy] = useState(false);
+  // Live usage snapshot — driven by SSE `usage` frames (step="sub_task")
+  // OR computed client-side from the persisted sub_tasks.*_tokens columns
+  // when the card has finished and SSE has gone quiet. We display
+  // `live ?? fallback` so refresh-after-finish still shows the same bar.
+  const [usage, setUsage] = useState<UsageInfo | undefined>(undefined);
   const esRef = useRef<EventStream | null>(null);
-  const meta = statusMeta[st.status];
+  const chipLabel = t(statusLabelKeys[st.status]);
+
+  // Shared Redo/Continue driver. Lives at the top of the component so
+  // both submitRedo and submitContinue close over the same function and
+  // any future entry point (e.g. a bulk action on the panel header) can
+  // call it without duplicating the optimistic-flip / rollback dance.
+  const restartSubTask = useRestartSubTask({
+    st,
+    requirementId: st.requirement_id,
+    onChanged,
+    onRestarted,
+    setStreaming,
+    setLines,
+  });
 
   // Open / close the SSE stream. Re-subscribes on each status flip; the
   // createEventStream handle is kept in a ref so we can close on unmount
@@ -242,6 +446,16 @@ function SubTaskCard({ st, index, total, onChanged }: CardProps) {
       (evt) => {
         if (!evt || typeof evt !== 'object') return;
         const t = evt.type as string;
+        if (t === 'usage') {
+          try {
+            const raw = typeof evt.content === 'string' ? JSON.parse(evt.content) : null;
+            if (raw) setUsage(computeUsage(raw, 'sub_task'));
+          } catch { /* malformed payload — ignore */ }
+          // usage frames do NOT go into lines[] — SubTaskLogView treats
+          // unknown types as plain log rows, which would render the JSON
+          // payload as terminal scrollback and confuse the user.
+          return;
+        }
         if (t === 'job_done') {
           setStreaming(false);
           subTasksApi.get(st.requirement_id, st.id)
@@ -274,7 +488,14 @@ function SubTaskCard({ st, index, total, onChanged }: CardProps) {
     setAdjustBusy(true);
     setAdjustError(null);
     try {
-      const resp = await subTasksApi.adjust(st.requirement_id, st.id, { prompt: p });
+      // The panel-level adjustModel flows through here so the user can
+      // change model between adjust rounds without re-picking on every
+      // card. Empty selection means "let the backend pick the developer
+      // role's effective model".
+      const resp = await subTasksApi.adjust(st.requirement_id, st.id, {
+        prompt: p,
+        ...(adjustModel ? { model: adjustModel } : {}),
+      });
       // Replace this card with a brand-new one driven by the new
       // sub_task_id via the parent's onChanged; for now, drop the
       // adjustment composer and let the next list-poll show the new row.
@@ -286,27 +507,92 @@ function SubTaskCard({ st, index, total, onChanged }: CardProps) {
       // by the periodic refresh in the panel root.
       void resp;
     } catch (e: any) {
-      setAdjustError(e?.message || '追加调整失败');
+      setAdjustError(e?.message || t('components.subTaskCard.errAdjust'));
     } finally {
       setAdjustBusy(false);
     }
-  }, [adjustInput, adjustBusy, st.id, st.requirement_id]);
+  }, [adjustInput, adjustBusy, adjustModel, st.id, st.requirement_id, t]);
 
-  // The header-right summary block surfaces the four quick-glance signals
-  // the user always wants at a glance without expanding the card:
-  // 🪙 token + cost · ⏱ duration · ⏳ relative-time. Each is independently
-  // null-safe — the badge only renders the cells that have a value, so a
-  // pre-finish row shows only ⏱ (live ticker) + ⏳, a finished row shows
-  // 🪙 + ⏱ (persisted) + ⏳.
-  const tokenCell = (st.input_tokens || st.output_tokens || st.cache_creation_tokens || st.cache_read_tokens)
-    ? `${fmtNum((st.input_tokens || 0) + (st.cache_creation_tokens || 0) + (st.cache_read_tokens || 0))}↓ / ${fmtNum(st.output_tokens)}↑`
-    : '';
+  const submitRedo = useCallback(async () => {
+    if (redoBusy) return;
+    setRedoBusy(true);
+    setRedoError(null);
+    try {
+      // Normalize the DefaultModelLabel sentinel so it never reaches the
+      // backend as an explicit model id — the backend then falls back to
+      // the role default.
+      const model = redoModel && redoModel !== DefaultModelLabel ? redoModel : undefined;
+      await restartSubTask('redo', model);
+      setRedoing(false);
+      setRedoError(null);
+      // The optimistic flip + parent's onRestarted callback (invoked by
+      // the hook) handles the row mutation; no parent list refresh needed
+      // since the row stays in place. onCreated is intentionally NOT
+      // called here — the row already exists, no new entry to surface.
+    } catch (e: any) {
+      // The hook already rolled back the optimistic update; surface a
+      // localized message. The backend's 409 NOT_FAILED gets translated
+      // to the local "errRedo" string regardless of the message text.
+      setRedoError(e?.message || t('components.subTaskCard.errRedo'));
+    } finally {
+      setRedoBusy(false);
+    }
+  }, [redoBusy, redoModel, restartSubTask, t]);
+
+  // Continue (▶ 继续执行): --resume the existing claude session on the
+  // SAME sub_tasks row. Available on error AND on stopped — the row
+  // count never grows. No drawer, no model picker (Continue inherits the
+  // model from the row's last run; users who want a model switch can
+  // fall back to Redo).
+  const submitContinue = useCallback(async () => {
+    if (continueBusy) return;
+    if (st.status !== 'error' && st.status !== 'stopped') return;
+    setContinueBusy(true);
+    try {
+      await restartSubTask('continue');
+    } catch (e: any) {
+      // Rollback already done by the hook; surface a localized message.
+      window.alert(t('components.subTaskCard.errContinue'));
+    } finally {
+      setContinueBusy(false);
+    }
+  }, [continueBusy, st.status, restartSubTask, t]);
+
+  // Stop (⏹ 停止): interrupt a running sub-task via the backend's
+  // /stop endpoint. The endpoint cancels the underlying JobStore job
+  // (SIGTERM → 5s → SIGKILL) and flips the row to 'stopped' with a
+  // "⏹ 用户中止" artifact prefix. The actual state flip surfaces via
+  // the existing SSE job_done frame → subTasksApi.get → onChanged, so
+  // this card just needs the optimistic "stopping" UI while we wait.
+  const submitStop = useCallback(async () => {
+    if (stopping || st.status !== 'running' || !canStop) return;
+    if (!window.confirm(t('components.subTaskCard.stopConfirm'))) return;
+    setStopping(true);
+    try {
+      await subTasksApi.stop(st.requirement_id, st.id);
+      // Backend returns immediately with {status: 'stopping', ...}; the
+      // row state will arrive via SSE → onChanged. Don't manually flip
+      // status here — the row-level MarkStopped write happens on the
+      // backend, and the SSE pipeline will pick it up.
+    } catch (e: any) {
+      setStopping(false);
+      window.alert(e?.message || t('components.subTaskCard.errStop'));
+    }
+  }, [stopping, st.status, canStop, st.requirement_id, st.id, t]);
+
+  // The header-right summary block surfaces two quick-glance signals the
+  // user always wants at a glance without expanding the card:
+  // cost · ⏱ duration · ⏳ relative-time. Each is independently null-safe —
+  // the badge only renders the cells that have a value, so a pre-finish
+  // row shows only ⏱ (live ticker) + ⏳, a finished row shows ⏱ (persisted)
+  // + ⏳. The detailed token breakdown now lives on its own line right
+  // below the header — see `<div className="sub-card-usage">` below.
   const costCell = st.cost_cents > 0
     ? (st.cost_cents >= 100 ? `$${(st.cost_cents / 100).toFixed(2)}` : `$${(st.cost_cents / 100).toFixed(3)}`)
     : '';
   const durationCell = (st.status === 'running' || st.status === 'pending')
-    ? `⏱ ${fmtDuration(liveSeconds)}`
-    : (st.duration_seconds > 0 ? `⏱ ${fmtDuration(st.duration_seconds)}` : '');
+    ? t('components.subTaskCard.liveTicker', { duration: fmtDuration(liveSeconds) })
+    : (st.duration_seconds > 0 ? t('components.subTaskCard.liveTicker', { duration: fmtDuration(st.duration_seconds) }) : '');
 
   return (
     <article className={`sub-card sub-card-${st.status}`}>
@@ -317,43 +603,89 @@ function SubTaskCard({ st, index, total, onChanged }: CardProps) {
         tabIndex={0}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(v => !v); } }}
       >
-        {/* Meta line: status chip + counter + model + time. Sits ABOVE the
-            title so a long user-supplied title never competes for horizontal
-            space with the metadata row. */}
+        {/* Meta line: status chip + source badge + counter + model + time.
+            Sits ABOVE the title so a long user-supplied title never
+            competes for horizontal space with the metadata row. */}
         <div className="sub-card-meta">
-          <span className={meta.chipClass}>{meta.label}</span>
+          <span className={statusChipClass[st.status]}>{chipLabel}</span>
+          {/* Source badge: 🪄 Auto (auto-orchestrated) vs 👤 Manual (manual).
+              Drives off `source` first; falls back to the legacy `batch_id`
+              heuristic so older backends (no source column) still render. */}
+          {(st.source === 'auto' || (!st.source && st.batch_id)) && (
+            <span className="sub-card-source sub-card-source-auto" title={t('components.subTaskCard.sourceAutoTitle')}>
+              🪄 {t('components.subTaskCard.sourceAuto')}
+            </span>
+          )}
+          {(st.source === 'manual' || (!st.source && !st.batch_id)) && (
+            <span className="sub-card-source sub-card-source-manual" title={t('components.subTaskCard.sourceManualTitle')}>
+              👤 {t('components.subTaskCard.sourceManual')}
+            </span>
+          )}
           <span className="sub-card-counter">{String(index + 1).padStart(2, '0')} / {String(total).padStart(2, '0')}</span>
-          {st.model && st.model !== '默认模型' && (
+          {st.model && st.model !== DefaultModelLabel && (
             <span className="sub-card-model">{st.model}</span>
           )}
-          {st.status === 'scheduled' && st.scheduled_at ? (
-            <span className="sub-card-time" title="定时执行时间">
-              ⏰ {new Date(st.scheduled_at).toLocaleString()}
-            </span>
-          ) : st.created_at ? (
+          {st.created_at && (
             <span className="sub-card-time">{timeAgo(st.created_at)}</span>
-          ) : null}
-          {/* Header-right quick-glance summary: token / cost / duration.
-              TokenStrip (in the body) carries the same data + cache details
-              when the card is expanded; the header badge is the always-
-              visible variant. */}
+          )}
+          {/* Header-right quick-glance summary: cost / duration. The
+              detailed context-usage bar lives in its own row below the
+              header (`.sub-card-usage`); the header stays compact so a
+              stack of concurrent cards doesn't push the body off-screen. */}
           <span className="sub-card-quickstats">
             {durationCell && <span className="sub-card-stat sub-card-stat-time">{durationCell}</span>}
-            {tokenCell && (
-              <span className="sub-card-stat sub-card-stat-tokens" title="输入 / 输出 tokens（含缓存）">
-                🪙 {tokenCell}
-              </span>
-            )}
             {costCell && (
-              <span className="sub-card-stat sub-card-stat-cost" title="本次子任务费用">{costCell}</span>
+              <span className="sub-card-stat sub-card-stat-cost" title={t('components.subTaskCard.costTitle')}>{costCell}</span>
             )}
           </span>
+          {/* Stop button — visible only while the sub-task is running.
+              Sits next to the quickstats block; the header's click
+              target toggles expand/collapse so we stopPropagation here
+              to keep the two click targets independent. Disabled (with
+              a localized title) when canStop=false — the parent flips
+              that for Agent-Server executions where the backend rejects
+              /stop with 501 STOP_REMOTE_NOT_SUPPORTED. */}
+          {st.status === 'running' && (
+            <button
+              type="button"
+              className="sub-card-stop-btn"
+              onClick={(e) => { e.stopPropagation(); submitStop(); }}
+              disabled={stopping || !canStop}
+              title={!canStop ? t('components.subTaskCard.stopRemoteDisabled') : t('components.subTaskCard.stopConfirm')}
+              aria-label={t('components.subTaskCard.stopToggle')}
+            >
+              {stopping ? t('components.subTaskCard.stopping') : t('components.subTaskCard.stopToggle')}
+            </button>
+          )}
           <span className="sub-card-toggle" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
         </div>
         {/* Title line: the user-supplied sub-task title in display weight.
             Wraps freely so long titles stay fully visible. */}
-        <h4 className="sub-card-title">{st.title || '(无标题)'}</h4>
+        <h4 className="sub-card-title">{st.title || t('components.subTaskCard.noTitle')}</h4>
       </header>
+
+      {/* Per-card ContextUsageBar — mirrors the bar shown on the parent
+          CodingChat. Sits between the header and the collapsible body so
+          it's visible whether the card is expanded or collapsed. Drives
+          off (live SSE `usage` frames) ?? (client-side recompute from
+          the persisted sub_tasks.*_tokens columns). compressible={false}
+          hides the "compress context" button — sub-tasks don't expose
+          compression to the user. */}
+      <div className="sub-card-usage">
+        <ContextUsageBar
+          usage={usage ?? computeUsage({
+            input_tokens: st.input_tokens,
+            output_tokens: st.output_tokens,
+            cache_creation_tokens: st.cache_creation_tokens,
+            cache_read_tokens: st.cache_read_tokens,
+            model: st.model,
+            context_window: modelContextWindow(st.model),
+          }, 'sub_task')}
+          onCompress={() => {}}
+          compressible={false}
+          stepLabel={t('components.subTaskCard.usageLabel')}
+        />
+      </div>
 
       {expanded && (
         <div className="sub-card-body">
@@ -367,8 +699,16 @@ function SubTaskCard({ st, index, total, onChanged }: CardProps) {
             </div>
           )}
 
-          {!streaming && !artifact && (
-            <div className="sub-card-empty">无产物。</div>
+          {/* Only show "no artifact" once the row is actually terminal —
+              between the SSE job_done frame and the next /sub-tasks list
+              poll, the local `artifact` state is still the empty string
+              captured at mount (before claude finished) while `streaming`
+              has already flipped to false. Showing "无产物" in that
+              window is misleading: the row IS done, we just haven't
+              fetched the artifact Markdown yet. The guard below matches
+              the one above so the two branches stay symmetric. */}
+          {!streaming && (st.status === 'done' || st.status === 'error') && !artifact && (
+            <div className="sub-card-empty">{t('components.subTaskCard.noArtifact')}</div>
           )}
 
           {/* 🪙 Token + cost strip — moved to the header-right quickstats
@@ -380,45 +720,107 @@ function SubTaskCard({ st, index, total, onChanged }: CardProps) {
               or can suggest a fork-session variant from the source. */}
           {!streaming && st.session_id && (
             <div className="sub-card-cli">
-              <div className="sub-card-cli-label">复制到终端继续：</div>
+              <div className="sub-card-cli-label">{t('components.subTaskCard.copyCliContinue')}</div>
               <CopyCliBlock st={st} variant="continue" />
             </div>
           )}
 
           {!streaming && !st.session_id && st.source_session_id && (
             <div className="sub-card-cli">
-              <div className="sub-card-cli-label">从源会话 fork（仅在子任务未启动时）：</div>
+              <div className="sub-card-cli-label">{t('components.subTaskCard.copyCliAdjust')}</div>
               <CopyCliBlock st={st} variant="adjust" />
             </div>
           )}
 
           {/* Append-adjustment: only available on a finished sub-task
-              (done or error). Adjusts resume the parent's session via
-              --fork-session so the child inherits prior edits. */}
-          {!streaming && (st.status === 'done' || st.status === 'error') && st.session_id && (
+              (done, error, or stopped). Adjusts resume the parent's
+              session via --fork-session so the child inherits prior edits.
+              Continue and Redo are both in-place restarts — Redo forks
+              a brand-new claude session from the requirement's main
+              coding_session_id; Continue --resume's the row's own
+              existing session id (cheaper, preserves partial work). */}
+          {!streaming && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && st.session_id && (
             <div className="sub-card-adjust">
-              {!adjusting ? (
-                <button
-                  type="button"
-                  className="sub-adjust-toggle"
-                  onClick={() => setAdjusting(true)}
-                >+ 追加调整</button>
-              ) : (
+              {/* Toggle row: Adjust / Continue / Redo collapse to a single
+                  row when no drawer is open. Continue sits before Redo so
+                  the "接着干" affordance is more prominent than "重新做".
+                  Redo is only offered on a FAILED sub-task (the backend
+                  enforces the same guard). Continue is offered on error
+                  AND stopped — a user who hit Stop and now wants more
+                  progress hits Continue rather than Redo. */}
+              {!adjusting && !redoing && (
+                <div className="sub-adjust-actions">
+                  <button
+                    type="button"
+                    className="sub-adjust-toggle"
+                    onClick={() => setAdjusting(true)}
+                  >{t('components.subTaskCard.adjustToggle')}</button>
+                  {(st.status === 'error' || st.status === 'stopped') && (
+                    <button
+                      type="button"
+                      className="sub-adjust-toggle"
+                      onClick={submitContinue}
+                      disabled={continueBusy}
+                      title={t('components.subTaskCard.continueHint')}
+                    >
+                      {continueBusy ? t('components.subTaskCard.continueBusy') : t('components.subTaskCard.continueToggle')}
+                    </button>
+                  )}
+                  {st.status === 'error' && (
+                    <button
+                      type="button"
+                      className="sub-adjust-toggle"
+                      onClick={() => setRedoing(true)}
+                    >{t('components.subTaskCard.redoToggle')}</button>
+                  )}
+                </div>
+              )}
+
+              {adjusting && (
                 <div className="sub-adjust-pane">
                   <AtMentionTextarea
                     value={adjustInput}
                     onChange={setAdjustInput}
                     rows={3}
-                    placeholder="追加的指令…输入 @ 引用 Skill"
+                    placeholder={t('components.subTaskCard.adjustPlaceholder')}
                     disabled={adjustBusy}
                     className="sub-adjust-textarea"
                   />
+                  <ModelSelect
+                    value={adjustModel}
+                    onChange={onAdjustModelChange || (() => {})}
+                    label={t('components.subTaskCard.adjustModelLabel')}
+                    defaultModelName={adjustModel}
+                    disabled={adjustBusy}
+                  />
                   <div className="sub-adjust-toolbar">
-                    <span className="sub-adjust-hint">Enter 发送 · Shift+Enter 换行</span>
+                    <span className="sub-adjust-hint">{t('components.subTaskCard.adjustSubmitHint')}</span>
                     {adjustError && <span className="sub-adjust-err">{adjustError}</span>}
-                    <button type="button" className="btn" onClick={() => { setAdjusting(false); setAdjustInput(''); setAdjustError(null); }} disabled={adjustBusy}>取消</button>
+                    <button type="button" className="btn" onClick={() => { setAdjusting(false); setAdjustInput(''); setAdjustError(null); }} disabled={adjustBusy}>{t('components.subTaskCard.cancel')}</button>
                     <button type="button" className="btn btn-primary" onClick={submitAdjust} disabled={!adjustInput.trim() || adjustBusy}>
-                      {adjustBusy ? '启动中…' : '🚀 追加调整'}
+                      {adjustBusy ? t('components.subTaskCard.adjustBusy') : t('components.subTaskCard.adjustSubmit')}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Redo: re-run the SAME prompt with an optional model switch.
+                  No textarea — the original prompt is reused verbatim. */}
+              {!adjusting && redoing && (
+                <div className="sub-adjust-pane">
+                  <div className="sub-adjust-hint">{t('components.subTaskCard.redoHint')}</div>
+                  <ModelSelect
+                    value={redoModel}
+                    onChange={setRedoModel}
+                    label={t('components.subTaskCard.redoModelLabel')}
+                    defaultModelName={st.model && st.model !== DefaultModelLabel ? st.model : ''}
+                    disabled={redoBusy}
+                  />
+                  <div className="sub-adjust-toolbar">
+                    {redoError && <span className="sub-adjust-err">{redoError}</span>}
+                    <button type="button" className="btn" onClick={() => { setRedoing(false); setRedoError(null); }} disabled={redoBusy}>{t('components.subTaskCard.cancel')}</button>
+                    <button type="button" className="btn btn-primary" onClick={submitRedo} disabled={redoBusy}>
+                      {redoBusy ? t('components.subTaskCard.adjustBusy') : t('components.subTaskCard.redoSubmit')}
                     </button>
                   </div>
                 </div>
@@ -431,29 +833,183 @@ function SubTaskCard({ st, index, total, onChanged }: CardProps) {
   );
 }
 
-export default function SubTaskPanel({ requirementId, codingSessionId, requirement }: Props) {
+// Kept outside the component so it isn't recreated on every render.
+// Threshold mirrors RequirementDetail.tsx:isLongDesignDoc (lines > 12 || chars > 1200)
+// so the two long-doc surfaces fold at the same density.
+function isLongSummary(raw: string | undefined): boolean {
+  if (!raw || !raw.trim()) return false;
+  const lines = raw.split('\n').length;
+  const chars = raw.length;
+  return lines > 12 || chars > 1200;
+}
+
+export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange, developerDefaultModel = '', batch, onBatchChange }: Props) {
+  const { t } = useTranslation();
   const [items, setItems] = useState<SubTask[] | null>(null);
   const [prompt, setPrompt] = useState('');
-  const [title, setTitle] = useState('');
-  // 定时任务: a <input type="datetime-local"> value (local time, no tz). Empty
-  // means "run immediately"; a future value queues the task server-side.
-  const [scheduleAt, setScheduleAt] = useState('');
+  // Title input was removed: opening a sub-task now only needs a description.
+  // The backend auto-derives a card-header title from the prompt (first 40
+  // chars via truncateForTitle) when the caller leaves the title blank, so
+  // downstream rendering still has something to show in the card header.
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Track an auto-orchestrate batch (the new "一键编排 = 主 Agent 自动派发"
-  // path in StartCoding). Children may still be running so the panel shows
-  // "auto-orchestrate in flight" status.
+  // Per-stage model selection for the sub-task entry points. Empty
+  // string means "leave it to the backend's role default" — the same
+  // convention the main-task path uses (RequirementDetail.doStartCoding
+  // spreads model only when truthy). Naming deliberately avoids the
+  // per-card `redoModel` so each entry point owns its own picker without
+  // coupling.
+  //
+  // `createModel` is the SINGLE composer picker shared by BOTH the
+  // "Start sub-task" and "Re-split" buttons — they live in the same
+  // toolbar so one selection covers both actions. (An earlier iteration
+  // had a second picker beside Re-split, which read as duplicate UI.)
+  // `adjustModel` is panel-level (shared across all cards' "Follow-up"
+  // composers) — picking once applies to the next adjustment round,
+  // mirroring how a user thinks about model choice on the main
+  // requirement.
+  const [createModel, setCreateModel] = useState<string>('');
+  const [adjustModel, setAdjustModel] = useState<string>('');
+  // Track an auto-orchestrate batch (the new "one-click orchestrate =
+  // main agent auto-dispatches" path in StartCoding). Children may still
+  // be running so the panel shows the "auto-orchestrate in flight" status.
   const [activeBatch, setActiveBatch] = useState<{ childIds: string[]; startedAt: number } | null>(null);
+  // Remember the count we last reported to the parent so loadList (which
+  // re-runs on periodic poll + after every create / adjust) doesn't fire
+  // onSubTasksChange on every tick. Only emit on actual transitions.
+  const lastReportedCountRef = useRef<number>(-1);
+  // Manual / early-summary round-trip state. Distinct from the per-card
+  // `adjustBusy` so the composer submit lock doesn't accidentally disable
+  // the orchestrator banner's summary CTA. `summaryToast` mirrors the
+  // toast pattern from WorktreePathHint — reuses the global
+  // `.merge-hint-toast` style for a 1.8s auto-dismiss.
+  const [summaryBusy, setSummaryBusy] = useState(false);
+  const [summaryToast, setSummaryToast] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const summaryToastTimerRef = useRef<number | null>(null);
+  const showSummaryToast = useCallback((kind: 'ok' | 'err', text: string) => {
+    setSummaryToast({ kind, text });
+    if (summaryToastTimerRef.current) window.clearTimeout(summaryToastTimerRef.current);
+    summaryToastTimerRef.current = window.setTimeout(() => {
+      setSummaryToast(null);
+      summaryToastTimerRef.current = null;
+    }, 1800);
+  }, []);
+  useEffect(() => () => {
+    if (summaryToastTimerRef.current) window.clearTimeout(summaryToastTimerRef.current);
+  }, []);
+
+  // The orchestration summary Markdown lives on the requirement row
+  // (`requirements.coding_plan`, written by the developer's main agent at
+  // the end of every orchestrated batch via RequirementService.UpdateCodingPlan).
+  // Computed BEFORE the summary-related hooks below so handleSummaryCopy
+  // and the [requirement?.id, summaryReport] effect can reference it without
+  // hitting a TDZ. Type-safe now that Requirement.coding_plan is declared
+  // in the API client (see client.ts:coding_plan).
+  const summaryReport = requirement?.coding_plan;
+  const hasSummary = typeof summaryReport === 'string' && summaryReport.trim() !== '';
+
+  // Summary markdown expand/collapse + copy state. Long reports
+  // (per isLongSummary, mirrors isLongDesignDoc) collapse by default with a
+  // fade-out mask; the toggle button un/folds. `summaryCopied` is the
+  // transient 1.5s "✓ Copied" feedback on the header copy button.
+  const [isLongSummaryState, setIsLongSummaryState] = useState(false);
+  const [summaryExpanded, setSummaryExpanded] = useState(false);
+  const [summaryCopied, setSummaryCopied] = useState(false);
+  const summaryCopyTimerRef = useRef<number | null>(null);
+
+  const handleSummaryCopy = () => {
+    if (!summaryReport) return;
+    void writeClipboard(summaryReport);
+    setSummaryCopied(true);
+    if (summaryCopyTimerRef.current) window.clearTimeout(summaryCopyTimerRef.current);
+    summaryCopyTimerRef.current = window.setTimeout(() => setSummaryCopied(false), 1500);
+  };
+
+  // Unmount cleanup for the copy timer — mirrors the summaryToast cleanup
+  // above so a stale timer can't fire setState after the component is gone.
+  useEffect(() => () => {
+    if (summaryCopyTimerRef.current) window.clearTimeout(summaryCopyTimerRef.current);
+  }, []);
+
+  // Reset the collapse state when the underlying requirement / coding_plan
+  // changes. Mirrors RequirementDetail.tsx:897-902 (design doc surface):
+  // switching requirements or the main agent regenerating the summary
+  // should not leave the UI stranded in a stale "expanded" state.
+  useEffect(() => {
+    setIsLongSummaryState(isLongSummary(summaryReport));
+    setSummaryExpanded(false);
+  }, [requirement?.id, summaryReport]);
+
+  // Sort children newest-first. The requirement explicitly asks for
+  // "按创建时间排倒序" (newest first). This replaces the previous
+  // batch_seq ASC sort so that a freshly-created manual card immediately
+  // floats to the top. The id DESC tie-breaker keeps rows with identical
+  // created_at timestamps in a stable order.
+  const sortedItems = (() => {
+    if (!items) return items;
+    return [...items].sort((a, b) => {
+      const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
+      if (aTime !== bTime) return bTime - aTime;
+      return (b.id || '').localeCompare(a.id || '');
+    });
+  })();
+
+  // Decide which summary CTA (if any) the banner should show. Kept as
+  // a pure derivation so the JSX below stays declarative and easy to
+  // review against the plan's three-state rule (early / manual / progress).
+  const summaryCta: { mode: 'early' | 'manual' | 'progress' | null } = (() => {
+    if (batch?.status === 'summarizing') return { mode: 'progress' };
+    if (batch?.status === 'dispatching') return { mode: 'early' };
+    if (batch && (batch.status === 'completed' || batch.status === 'errored')) return { mode: null };
+    if (batch) return { mode: null }; // unknown status — no CTA
+    // batch === null — manual flow. Offer the CTA only when there's at
+    // least one terminal sub-task; a fully-empty list shows the empty
+    // state instead and a still-running list shows the "wait for completion"
+    // pattern implicitly (no CTA → user can't fire prematurely).
+    if (!items || items.length === 0) return { mode: null };
+    const allTerminal = items.every((s) => s.status === 'done' || s.status === 'error');
+    return allTerminal ? { mode: 'manual' } : { mode: null };
+  })();
+
+  const onGenerateSummary = useCallback(async (mode: 'early' | 'manual') => {
+    if (summaryBusy) return;
+    if (mode === 'early') {
+      const ok = window.confirm(t('components.subTaskPanel.summaryConfirmEarly'));
+      if (!ok) return;
+    }
+    setSummaryBusy(true);
+    try {
+      await subTasksApi.generateSummary(requirementId, {});
+      showSummaryToast('ok', t('components.subTaskPanel.summaryToastOk'));
+      onBatchChange?.();
+    } catch (e: any) {
+      const msg = e?.message || t('components.subTaskPanel.summaryToastErrFallback');
+      showSummaryToast('err', `${t('components.subTaskPanel.summaryToastErrPrefix')} ${msg}`);
+    } finally {
+      setSummaryBusy(false);
+    }
+  }, [summaryBusy, requirementId, onBatchChange, showSummaryToast, t]);
 
   const loadList = useCallback(async () => {
     try {
       const list = await subTasksApi.list(requirementId);
       setItems(list);
+      // Forward the new count to the parent so the page can flip
+      // hasSubTasks and hide the requirement-level "Follow-up" composer.
+      // The ref guard avoids redundant parent re-renders — the panel
+      // polls every 5s while children are alive and we don't want a
+      // fresh onChange call each tick.
+      if (onSubTasksChange && list.length !== lastReportedCountRef.current) {
+        lastReportedCountRef.current = list.length;
+        onSubTasksChange(list.length);
+      }
       // Detect a brand-new auto-orchestrate batch: any "running" child
       // whose created_at is within the last 10 minutes AND that we don't
       // yet have a local activeBatch marker for gets folded into the
-      // tracked set. This lets StartCoding's auto-dispatch show a "主 Agent
-      // 正在派生子任务..." banner without any explicit orchestrate click.
+      // tracked set. This lets StartCoding's auto-dispatch show a
+      // "main agent dispatching children..." banner without any explicit
+      // orchestrate click.
       const running = list.filter((s) => s.status === 'running' || s.status === 'pending');
       if (running.length > 0) {
         const recent = running.filter((s) => {
@@ -475,18 +1031,25 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         }
       }
     } catch (e: any) {
-      setError(e?.message || '加载子任务失败');
+      setError(e?.message || t('components.subTaskPanel.errLoad'));
     }
-  }, [requirementId, activeBatch]);
+  }, [requirementId, activeBatch, onSubTasksChange, t]);
 
   useEffect(() => {
     loadList();
   }, [loadList]);
 
-  // Startup poll: tryAutoOrchestrate runs in a goroutine after job_done, so
-  // the panel may mount before sub-tasks are written. Poll every 2s for up to
-  // 60s when the list is still empty, then give up.
-  const startupDeadlineRef = useRef<number>(Date.now() + 60_000);
+  // Auto-split latency: main agent (30-120s) + tryAutoOrchestrate parse+commit
+  // (5-60s when the LLM extractor fallback channel fires) can legitimately
+  // run past the original 60s mount-time deadline. Once the deadline expires
+  // the startup-poll effect short-circuits and the user has to refresh to
+  // see the new sub_tasks (the regular 5s poll only kicks in once any
+  // child is already running/pending — a chicken-and-egg). 5 minutes
+  // covers the realistic worst case (180s + margin). SubTaskPanel only
+  // mounts in developing/done states and the startup poll only fires
+  // while items.length === 0, so the cost of a longer window is at most
+  // ~150 extra 5ms GETs per requirement.
+  const startupDeadlineRef = useRef<number>(Date.now() + 5 * 60_000);
   useEffect(() => {
     if (items === null) return; // not yet loaded
     if (items.length > 0) return; // already have data, nothing to do
@@ -503,9 +1066,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // and the eventual artifact write without having to thread job_done
   // from each card up to the panel root.
   useEffect(() => {
-    if (!items || !items.some((s) => s.status === 'running' || s.status === 'pending' || s.status === 'scheduled')) return;
-    // Poll faster than the scheduler tick (15s) so a fired 定时任务 flips to
-    // running in the UI shortly after it dispatches.
+    if (!items || !items.some((s) => s.status === 'running' || s.status === 'pending')) return;
     const t = setInterval(loadList, 5000);
     return () => clearInterval(t);
   }, [items, loadList]);
@@ -525,51 +1086,54 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     setItems((prev) => prev ? prev.map((p) => p.id === next.id ? next : p) : prev);
   }, []);
 
+  // onRestarted: fired after a successful in-place Redo/Continue. We
+  // stamp the row with the new job_id so the card's SSE effect re-opens
+  // on the new stream. We deliberately do NOT touch items with a
+  // full-list reload — the row already exists; we just point it at the
+  // new JobStore job and let the SSE push carry subsequent state
+  // transitions (job_done → onChanged flips to terminal status + the
+  // MarkStopped-prefixed artifact).
+  const handleSubTaskRestarted = useCallback((subTaskId: string, newJobId: string) => {
+    setItems((prev) => prev ? prev.map((p) => p.id === subTaskId
+      ? { ...p, status: 'running', job_id: newJobId, artifact: '' }
+      : p) : prev);
+  }, []);
+
+  // Stop is disabled when the requirement is being executed on a remote
+  // Agent Server — the backend rejects /stop with 501 STOP_REMOTE_NOT_SUPPORTED
+  // in this iteration (worker-side kill message lands in a follow-up PR).
+  const canStop = !requirement?.agent_server_id;
+
   const onCreate = useCallback(async () => {
     const p = prompt.trim();
     if (!p || submitting) return;
-    // Resolve the optional schedule time. datetime-local yields a tz-less
-    // "YYYY-MM-DDTHH:mm" in the user's local zone; new Date() parses it as
-    // local, and toISOString() converts to the RFC3339 (UTC) the backend
-    // parses. Reject a past time up front so the user gets immediate feedback
-    // instead of a silently-immediate run.
-    let scheduledIso: string | undefined;
-    if (scheduleAt) {
-      const when = new Date(scheduleAt);
-      if (Number.isNaN(when.getTime())) {
-        setError('定时时间格式无效');
-        return;
-      }
-      if (when.getTime() <= Date.now()) {
-        setError('定时时间必须晚于当前时间');
-        return;
-      }
-      scheduledIso = when.toISOString();
-    }
     setSubmitting(true);
     setError(null);
     try {
+      // No title field on the composer — the backend derives a card-header
+      // title from the prompt's first 40 chars when title is omitted, so
+      // the sub-task row still has a human-readable header downstream.
+      // `model` is optional; empty selection lets the backend fall back to
+      // the developer-role effective model. Sending the literal DefaultModelLabel
+      // sentinel would never happen here — ModelSelect normalises it to "".
       await subTasksApi.create(requirementId, {
         prompt: p,
-        title: title.trim() || undefined,
-        scheduled_at: scheduledIso,
+        ...(createModel ? { model: createModel } : {}),
       });
       setPrompt('');
-      setTitle('');
-      setScheduleAt('');
       await loadList();
     } catch (e: any) {
-      setError(e?.message || '启动子任务失败');
+      setError(e?.message || t('components.subTaskPanel.errCreate'));
     } finally {
       setSubmitting(false);
     }
-  }, [prompt, title, scheduleAt, submitting, requirementId, loadList]);
+  }, [prompt, submitting, createModel, requirementId, loadList, t]);
 
-  // --- Manual re-split (🔄 重新拆分) -------------------------------------
+  // --- Manual re-split (🔄 Re-split) ------------------------------------
   // Escape hatch for when StartCoding's auto-orchestration produced no
   // children (main agent didn't decompose) or the user wants a fresh split.
   // POSTs re-orchestrate, then streams the main agent's progress from the
-  // returned job so the user sees "重新拆分中…" instead of a dead click.
+  // returned job so the user sees "Re-splitting…" instead of a dead click.
   const [reSplitBusy, setReSplitBusy] = useState(false);
   const [reSplitLines, setReSplitLines] = useState<LogLine[]>([]);
   const reSplitEsRef = useRef<EventStream | null>(null);
@@ -582,7 +1146,14 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     setReSplitLines([]);
     setError(null);
     try {
-      const { job_id } = await subTasksApi.reOrchestrate(requirementId);
+      // model is optional — empty selection lets the backend fall back to
+      // the developer-role effective model. Shares the composer's
+      // createModel picker (there's only ONE model picker in the panel,
+      // beside the textarea) so the user doesn't pick the model twice.
+      const { job_id } = await subTasksApi.reOrchestrate(
+        requirementId,
+        { ...(createModel ? { model: createModel } : {}) },
+      );
       reSplitEsRef.current?.close();
       reSplitEsRef.current = createEventStream(
         `/api/wizard/jobs/${job_id}/stream`,
@@ -609,10 +1180,10 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         },
       );
     } catch (e: any) {
-      setError(e?.message || '重新拆分失败');
+      setError(e?.message || t('components.subTaskPanel.errReSplit'));
       setReSplitBusy(false);
     }
-  }, [reSplitBusy, requirementId, loadList]);
+  }, [reSplitBusy, createModel, requirementId, loadList, t]);
 
   // Close the re-split stream on unmount.
   useEffect(() => () => { reSplitEsRef.current?.close(); reSplitEsRef.current = null; }, []);
@@ -622,37 +1193,35 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       <section className="sub-panel" aria-labelledby="sub-panel-title">
         <header className="sub-panel-header">
           <h3 id="sub-panel-title" className="sub-panel-title">
-            <span className="sub-panel-title-icon" aria-hidden="true">🤖</span>
-            <span>子任务协作</span>
+            <span className="sub-panel-title-icon" aria-hidden="true"><IconRobot size={16} /></span>
+            <span>{t('components.subTaskPanel.title')}</span>
           </h3>
         </header>
         <div className="sub-panel-hint">
-          请先在主 Agent 中执行「开始开发」，主 Agent 完成会自动派发第一批子任务。
-          {requirement?.title && <em>（当前需求：{requirement.title}）</em>}
+          {t('components.subTaskPanel.preFlightHint')}
+          {requirement?.title && <em>{t('components.subTaskPanel.preFlightCurrent', { title: requirement.title })}</em>}
         </div>
       </section>
     );
   }
 
-  // summaryReport renders the Markdown the main agent produced after the
-  // last orchestrated batch finished. Lives ABOVE the children list so
-  // the user reads the high-level picture first, then drills into any
-  // child whose artifact they want to verify.
-  const summaryReport = (requirement as any).coding_plan as string | undefined;
-  const hasSummary = typeof summaryReport === 'string' && summaryReport.trim() !== '';
+  // summaryReport / hasSummary are declared earlier (above the summary
+  // hooks block) so handleSummaryCopy and the [requirement?.id,
+  // summaryReport] effect can read them. See the declaration near the top
+  // of the component body for the JSDoc explaining the data source.
   const activeChildCount = activeBatch?.childIds.length ?? 0;
 
   return (
     <section className="sub-panel" aria-labelledby="sub-panel-title">
       <header className="sub-panel-header">
         <h3 id="sub-panel-title" className="sub-panel-title">
-          <span className="sub-panel-title-icon" aria-hidden="true">🤖</span>
-          <span>子任务协作</span>
+          <span className="sub-panel-title-icon" aria-hidden="true"><IconRobot size={16} /></span>
+          <span>{t('components.subTaskPanel.title')}</span>
         </h3>
         <span className="sub-panel-meta">
-          共享主 Agent 会话 <code>{truncate(codingSessionId, 12)}</code>
+          {t('components.subTaskPanel.shareSession')} <code>{truncate(codingSessionId, 12)}</code>
           {' · '}
-          <span className="sub-panel-count">{items?.length ?? 0}</span> 个子任务
+          <span className="sub-panel-count">{items?.length ?? 0}</span> {t('components.subTaskPanel.countSuffix')}
         </span>
       </header>
 
@@ -660,15 +1229,71 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           Distinct from the manual composer below — orchestrate is a SINGLE click
           that creates N children AND a summary report, while the composer is for
           ad-hoc one-off children. */}
-      {/* Auto-orchestrate status: the manual "🎯 开始执行" button was
+      {/* Auto-orchestrate status: the manual "Start execution" button was
           removed — StartCoding's main agent now does the decomposition +
           dispatch automatically when the user kicks off development.
           What remains is the in-flight badge (so the user knows the
           main agent is dispatching children) and the summary report
-          surface (each completed batch refreshes requirements.coding_plan). */}
-      {activeChildCount > 0 && (
-        <div className="sub-orchestrator-status">
-          🪄 主 Agent 自动派发了 {activeChildCount} 个子任务，等待执行完成并生成汇总报告…
+          surface (each completed batch refreshes requirements.coding_plan).
+          The CTA cluster on the right drives the manual / early-summary
+          round-trips against /api/requirements/{id}/sub-tasks/summary
+          (creating summarizing batches → OrchestrationQueue tick handoff). */}
+      {(activeChildCount > 0 || summaryCta.mode !== null || (batch && (batch.status === 'summarizing' || batch.status === 'dispatching'))) && (
+        <div className="sub-orchestrator-status sub-orchestrator-status--with-cta">
+          <div className="sub-orchestrator-status-row">
+            <span className="sub-orchestrator-status-text">
+              {activeChildCount > 0
+                ? t('components.subTaskPanel.autoOrchestrateRunning', { n: activeChildCount })
+                : batch?.status === 'summarizing'
+                  ? t('components.subTaskPanel.bannerSummarizing')
+                  : batch?.status === 'dispatching'
+                    ? t('components.subTaskPanel.bannerDispatchingStatus')
+                    : t('components.subTaskPanel.bannerAllDoneManual')}
+            </span>
+            <span className="sub-orchestrator-status-actions">
+              {summaryCta.mode === 'early' && (
+                <button
+                  type="button"
+                  className="btn btn-sm sub-orchestrator-cta"
+                  onClick={() => onGenerateSummary('early')}
+                  disabled={summaryBusy}
+                  title={t('components.subTaskPanel.summaryCtaEarlyTitle')}
+                >
+                  {summaryBusy ? t('components.subTaskPanel.summarySending') : t('components.subTaskPanel.summaryCtaEarlyBtn')}
+                </button>
+              )}
+              {summaryCta.mode === 'manual' && (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary sub-orchestrator-cta"
+                  onClick={() => onGenerateSummary('manual')}
+                  disabled={summaryBusy}
+                  title={t('components.subTaskPanel.summaryCtaManualTitle')}
+                >
+                  {summaryBusy ? t('components.subTaskPanel.summarySending') : t('components.subTaskPanel.summaryCtaManualBtn')}
+                </button>
+              )}
+              {summaryCta.mode === 'progress' && (
+                <button
+                  type="button"
+                  className="btn btn-sm sub-orchestrator-cta"
+                  disabled
+                  title={t('components.subTaskPanel.summaryCtaProgressTitle')}
+                >
+                  {t('components.subTaskPanel.summaryCtaProgressBtn')}
+                </button>
+              )}
+              {summaryToast && (
+                <span
+                  className="merge-hint-toast sub-orchestrator-toast"
+                  role="status"
+                  data-kind={summaryToast.kind}
+                >
+                  {summaryToast.text}
+                </span>
+              )}
+            </span>
+          </div>
         </div>
       )}
 
@@ -676,7 +1301,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           turn so a click never looks dead. */}
       {(reSplitBusy || reSplitLines.length > 0) && (
         <div className="sub-orchestrator-status sub-resplit-status">
-          {reSplitBusy ? '🔄 主 Agent 重新拆分任务中…' : '重新拆分结束'}
+          {reSplitBusy ? t('components.subTaskPanel.reSplitRunning') : t('components.subTaskPanel.reSplitDone')}
           {reSplitLines.length > 0 && (
             <div className="sub-resplit-log">
               {reSplitLines.slice(-4).map((l, i) => (
@@ -693,51 +1318,84 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       {hasSummary && (
         <div className="sub-summary">
           <header className="sub-summary-header">
-            <span className="sub-summary-icon" aria-hidden="true">📊</span>
-            <span className="sub-summary-title">主 Agent 汇总报告</span>
+            <span className="sub-summary-icon" aria-hidden="true"><IconDashboard size={14} /></span>
+            <span className="sub-summary-title">{t('components.subTaskPanel.summaryTitle')}</span>
+            <span className="sub-summary-actions">
+              <button
+                type="button"
+                className="sub-summary-action-btn"
+                onClick={handleSummaryCopy}
+                title={t('components.subTaskPanel.summaryCopyBtn')}
+                aria-label={t('components.subTaskPanel.summaryCopyBtn')}
+                data-copied={summaryCopied ? 'true' : 'false'}
+              >
+                {summaryCopied ? <IconCheck size={13} /> : <IconCopy size={13} />}
+              </button>
+            </span>
           </header>
-          <div className="sub-summary-body">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{summaryReport!}</ReactMarkdown>
+          <div
+            className={
+              'sub-summary-body-wrap' +
+              (isLongSummaryState && !summaryExpanded ? ' is-collapsed' : '')
+            }
+          >
+            <div className="sub-summary-body">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{summaryReport!}</ReactMarkdown>
+            </div>
           </div>
+          {isLongSummaryState && (
+            <button
+              type="button"
+              className="sub-summary-toggle-btn"
+              onClick={() => setSummaryExpanded(v => !v)}
+              aria-expanded={summaryExpanded}
+            >
+              {summaryExpanded
+                ? t('components.subTaskPanel.summaryExpandCollapse')
+                : t('components.subTaskPanel.summaryExpandShow')}
+            </button>
+          )}
         </div>
       )}
 
       <div className="sub-composer">
-        <label className="sub-composer-title-row">
-          <span className="sub-composer-label">标题（可选）</span>
-          <input
-            type="text"
-            className="sub-composer-input"
-            placeholder="给这个子任务起个名字，方便事后回看"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            disabled={submitting}
-            maxLength={80}
-          />
-        </label>
+        {/* Composer textarea — title field removed; opening a sub-task
+            only needs a description. The backend auto-derives a card-header
+            title from the prompt's first 40 chars when title is omitted. */}
         <AtMentionTextarea
           value={prompt}
           onChange={setPrompt}
-          placeholder="描述这个子任务要做什么…输入 @ 引用 Skill"
+          placeholder={t('components.subTaskPanel.composerPlaceholder')}
           rows={4}
           disabled={submitting}
           className="sub-composer-textarea"
         />
-        <label className="sub-composer-title-row">
-          <span className="sub-composer-label">定时执行（可选）</span>
-          <input
-            type="datetime-local"
-            className="sub-composer-input"
-            value={scheduleAt}
-            onChange={(e) => setScheduleAt(e.target.value)}
-            disabled={submitting}
-          />
-        </label>
+        {/* Sub-task model picker — the SINGLE picker for the panel's
+            composer row. It applies to BOTH the "Start sub-task" and
+            "Re-split" buttons (they share the same claude_configs
+            list, and dispatching a re-split with a different model
+            would just create a confusing mixed batch). Per-stage
+            (developer) so the dropdown shows the same model list as the
+            main "Start coding" picker on RequirementDetail. Empty selection
+            = let the backend fall back to the developer-role effective
+            model; "Default model (X)" shows what that fallback actually is. */}
+        <ModelSelect
+          value={createModel}
+          onChange={setCreateModel}
+          label={t('components.subTaskPanel.modelLabel')}
+          stage="developer"
+          defaultModelName={developerDefaultModel}
+          disabled={submitting || reSplitBusy}
+          working={submitting || reSplitBusy}
+        />
+        {!createModel && !developerDefaultModel && (
+          <div className="sub-model-warning" role="note">
+            {t('components.subTaskPanel.modelEmptyWarning')}
+          </div>
+        )}
         <div className="sub-composer-toolbar">
           <span className="sub-composer-hint">
-            {scheduleAt
-              ? '到点后自动执行一次，仅执行一次，重启不影响'
-              : '启动后子 Agent 将 fork 主会话上下文，所有子任务共享同一项目认知'}
+            {t('components.subTaskPanel.composerHint')}
           </span>
           {error && <span className="sub-composer-err">{error}</span>}
           <button
@@ -745,9 +1403,9 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             className="btn btn-secondary sub-composer-resplit"
             onClick={onReSplit}
             disabled={reSplitBusy || submitting || anyAlive}
-            title={anyAlive ? '有子任务正在执行，完成后才能重新拆分' : '让主 Agent 重新进行任务拆分并自动派发子任务'}
+            title={anyAlive ? t('components.subTaskPanel.reSplitTitleBusy') : t('components.subTaskPanel.reSplitTitle')}
           >
-            {reSplitBusy ? '拆分中…' : '🔄 重新拆分'}
+            {reSplitBusy ? t('components.subTaskPanel.reSplitBusy') : t('components.subTaskPanel.reSplitBtn')}
           </button>
           <button
             type="button"
@@ -755,26 +1413,31 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             onClick={onCreate}
             disabled={submitting || reSplitBusy || !prompt.trim()}
           >
-            {submitting ? '提交中…' : scheduleAt ? '⏰ 定时执行' : '🚀 启动子任务'}
+            {submitting ? t('components.subTaskPanel.submitBusy') : t('components.subTaskPanel.submitBtn')}
           </button>
         </div>
       </div>
 
       <div className="sub-list">
-        {items === null && <div className="sub-list-loading">加载中…</div>}
+        {items === null && <div className="sub-list-loading">{t('components.subTaskPanel.loading')}</div>}
         {items && items.length === 0 && (
           <div className="sub-list-empty">
-            <div className="sub-list-empty-icon" aria-hidden="true">✨</div>
-            <div>暂无子任务。可点击「🔄 重新拆分」让主 Agent 拆分并自动派发，或在上方手动创建。</div>
+            <div className="sub-list-empty-icon" aria-hidden="true"><IconSparkles size={28} /></div>
+            <div>{t('components.subTaskPanel.empty')}</div>
           </div>
         )}
-        {items && items.length > 0 && items.map((st, i) => (
+        {sortedItems && sortedItems.length > 0 && sortedItems.map((st, i) => (
           <SubTaskCard
             key={st.id}
             st={st}
             index={i}
-            total={items.length}
+            total={sortedItems.length}
             onChanged={onItemChanged}
+            onCreated={loadList}
+            onRestarted={handleSubTaskRestarted}
+            canStop={canStop}
+            adjustModel={adjustModel}
+            onAdjustModelChange={setAdjustModel}
           />
         ))}
       </div>

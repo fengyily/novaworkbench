@@ -223,6 +223,11 @@ CREATE TABLE IF NOT EXISTS users (
 	password_hash  TEXT NOT NULL DEFAULT '',
 	status         TEXT NOT NULL DEFAULT 'active',
 	is_admin       INTEGER NOT NULL DEFAULT 0,
+	-- locale: the user's preferred UI language (BCP-47, e.g. "zh-CN" /
+	-- "en-US"). Empty = no explicit preference — the frontend falls back to
+	-- the browser-level choice (localStorage nova_lang / navigator.language).
+	-- Written by PUT /api/auth/locale, must match the i18n whitelist.
+	locale         TEXT NOT NULL DEFAULT '',
 	last_login_at  DATETIME,
 	created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -298,6 +303,29 @@ CREATE TABLE IF NOT EXISTS skills (
 	updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Agent servers: remote Linux/macOS execution targets. The credential
+-- (auth_value) is stored as an AES-256-GCM ciphertext (base64, nonce embedded)
+-- by internal/secret and never returned in API responses. status is updated
+-- by the Check goroutine and check_result holds the last human-readable summary.
+-- Schema added 2026-09 by Agent-Server feature.
+CREATE TABLE IF NOT EXISTS agent_servers (
+	id              TEXT PRIMARY KEY,
+	name            TEXT NOT NULL,
+	host            TEXT NOT NULL,
+	port            INTEGER NOT NULL DEFAULT 22,
+	username        TEXT NOT NULL DEFAULT 'root',
+	auth_type       TEXT NOT NULL DEFAULT 'key',
+	auth_value      TEXT NOT NULL DEFAULT '',
+	auth_value_algo TEXT NOT NULL DEFAULT 'aes-gcm',
+	status          TEXT NOT NULL DEFAULT 'unknown',
+	last_check_at   DATETIME,
+	check_result    TEXT NOT NULL DEFAULT '',
+	worker_version  TEXT NOT NULL DEFAULT '',
+	created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_agent_servers_status ON agent_servers(status);
+
 -- Sub-task: a manually-triggered child agent under a requirement's developing
 -- stage. Each sub-task forks the requirement's coding_session_id (or
 -- design_session_id as fallback) so every child agent shares the main agent's
@@ -324,24 +352,103 @@ CREATE TABLE IF NOT EXISTS sub_tasks (
 	cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
 	cost_cents         INTEGER NOT NULL DEFAULT 0,
 	duration_seconds   INTEGER NOT NULL DEFAULT 0,
-	scheduled_at       DATETIME,
 	created_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at         DATETIME DEFAULT CURRENT_TIMESTAMP,
 	completed_at       DATETIME,
 	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_sub_tasks_req ON sub_tasks(requirement_id);
--- Scheduler lookup: the background timed-task poller scans for due rows by
--- (status, scheduled_at); the partial-ish composite keeps that scan cheap.
-CREATE INDEX IF NOT EXISTS idx_sub_tasks_scheduled ON sub_tasks(status, scheduled_at);
+
+-- Orchestration batch: a coordinator row for one auto-orchestrated dispatch
+-- run. tryAutoOrchestrate INSERTs N sub_tasks + 1 orchestration_batches in a
+-- single Tx, then OrchestrationQueue's tick loop walks the batch by batch_seq
+-- and atomically claims each child via ClaimNextPending. When every child
+-- reaches a terminal status the batch flips dispatching -> summarizing and
+-- the summary round (also driven by the tick) forks the orchestrator session
+-- to produce requirements.coding_plan.
+--
+-- summary_heartbeat_at is the 5s tick the RunOrchestratorSummary goroutine
+-- writes while the summary round is in flight. A stale heartbeat (>5min) is
+-- the recovery signal that re-arms summary_status='pending' on the next tick.
+-- batch_id + batch_seq on sub_tasks keep each child's batch membership and
+-- ordering — empty batch_id means a manual sub_task (legacy path).
+CREATE TABLE IF NOT EXISTS orchestration_batches (
+	id                      TEXT PRIMARY KEY,
+	requirement_id          TEXT NOT NULL,
+	orchestrator_session_id TEXT NOT NULL DEFAULT '',
+	model                   TEXT NOT NULL DEFAULT '',
+	work_dir                TEXT NOT NULL DEFAULT '',
+	claude_config_id        TEXT NOT NULL DEFAULT '',
+	total_children          INTEGER NOT NULL DEFAULT 0,
+	status                  TEXT NOT NULL DEFAULT 'dispatching',
+	summary_status          TEXT NOT NULL DEFAULT 'pending',
+	summary_job_id          TEXT NOT NULL DEFAULT '',
+	summary_heartbeat_at    DATETIME,
+	created_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
+	completed_at            DATETIME,
+	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_orch_batches_req    ON orchestration_batches(requirement_id);
+CREATE INDEX IF NOT EXISTS idx_orch_batches_active ON orchestration_batches(status, updated_at);
+
+-- Scheduled one-shot task: fires architect-design or start-coding at a future
+-- time with a pre-selected model. Lifecycle (no retry):
+--   pending → running → succeeded | failed
+--   pending → canceled                (user cancel)
+--   running → failed                  (boot recovery)
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+	id                TEXT PRIMARY KEY,
+	task_type         TEXT NOT NULL DEFAULT 'design',   -- 'design' | 'coding'
+	requirement_id    TEXT NOT NULL,
+	project_id        TEXT NOT NULL DEFAULT '',
+	requirement_title TEXT NOT NULL DEFAULT '',
+	run_at            DATETIME NOT NULL,
+	model             TEXT NOT NULL DEFAULT '',         -- '' = 角色默认（执行时再解析）
+	read_knowledge    INTEGER NOT NULL DEFAULT 0,
+	branch_name       TEXT NOT NULL DEFAULT '',         -- coding only
+	base_branch       TEXT NOT NULL DEFAULT '',         -- coding only
+	agent_server_id   TEXT NOT NULL DEFAULT '',         -- coding only ('' = 本地)
+	split_tasks       INTEGER NOT NULL DEFAULT 0,       -- coding only
+	status            TEXT NOT NULL DEFAULT 'pending',
+	job_id            TEXT NOT NULL DEFAULT '',         -- 关联 JobStore / job_logs
+	error_message     TEXT NOT NULL DEFAULT '',
+	created_by        TEXT NOT NULL DEFAULT '',         -- username
+	created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+	executed_at       DATETIME,                         -- 认领时间；pending 时 NULL
+	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_sched_status  ON scheduled_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_sched_req     ON scheduled_tasks(requirement_id);
+CREATE INDEX IF NOT EXISTS idx_sched_run_at  ON scheduled_tasks(run_at);
+-- NOTE: idx_sched_task_type intentionally omitted — task_type 不在
+-- mysqlIndexedCol 白名单，MySQL 下索引 TEXT 会失败。List 端 Go 侧过滤即可。
 `
 
 // alterColumns adds columns to older databases. ALTER TABLE fails when the
 // column already exists — migrate ignores the dialect-specific "duplicate
 // column" error.
 var alterColumns = []string{
+	// locale: per-user UI language preference (BCP-47 tag, e.g. "zh-CN").
+	// Empty = follow the browser-level setting. See handler/auth.go
+	// UpdateLocale — the value is validated against the frontend's supported
+	// language whitelist before it is written.
+	`ALTER TABLE users ADD COLUMN locale TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN platform_type TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN platform_token_id TEXT NOT NULL DEFAULT ''`,
+	// install_job_id: persisted JobStore job id for the running install on an
+	// agent server, so a page refresh can reconnect to its SSE stream and
+	// replay history (same pattern as requirements.analysis_job_id / apply_job_id).
+	// Cleared by runInstall's defer on Finish so a stale id never lingers
+	// after the job is gone (matters because JobStore is in-memory and can
+	// evict the job on backend restart while the DB column still holds it).
+	`ALTER TABLE agent_servers ADD COLUMN install_job_id TEXT NOT NULL DEFAULT ''`,
+	// worker_version: the nova-agent-worker version the last successful install
+	// stamped into the uploaded server.mjs (see handler/agent_worker_files.go
+	// agentWorkerVersion). The check flow compares the running worker's reported
+	// version against this to detect a stale process that survived a restart.
+	`ALTER TABLE agent_servers ADD COLUMN worker_version TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN analysis_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN design_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN design_job_id TEXT NOT NULL DEFAULT ''`,
@@ -374,6 +481,21 @@ var alterColumns = []string{
 	`ALTER TABLE requirements ADD COLUMN architect_model TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN developer_model TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN reviewer_model TEXT NOT NULL DEFAULT ''`,
+	// Agent-server binding for the developer stage: the agent_servers.id chosen
+	// in the start-coding modal (or re-bound by adjust-coding / continue-coding).
+	// Persisted only on the success path of the developer job so a failed run
+	// never clobbers the last good binding — same semantics as analyst_model /
+	// developer_model above. Empty = 本地 (no remote agent). Plain TEXT pointer
+	// with no declared FK so the column never blocks migration; the human-
+	// readable name is resolved at read time via a LEFT JOIN against
+	// agent_servers (see service.RequirementService.List/Get).
+	`ALTER TABLE requirements ADD COLUMN agent_server_id TEXT NOT NULL DEFAULT ''`,
+	// Per-role Claude-config binding: lets a role carry its own ANTHROPIC_BASE_URL
+	// + ANTHROPIC_AUTH_TOKEN pair (via claude_configs.id) so the role's chosen
+	// model runs against the role's chosen gateway, not just the global active
+	// config. Empty = "no binding → use the global default (active) config" so
+	// existing rows keep their current behavior.
+	`ALTER TABLE roles ADD COLUMN claude_config_id TEXT NOT NULL DEFAULT ''`,
 	// Review jobs are project-level (not bound to a requirement), so the review
 	// model is persisted on the durable job log instead of the requirement row.
 	`ALTER TABLE job_logs ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
@@ -392,6 +514,19 @@ var alterColumns = []string{
 	// fall back to git's normal config lookup (host ~/.gitconfig etc.).
 	`ALTER TABLE platform_tokens ADD COLUMN git_user_name  TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE platform_tokens ADD COLUMN git_user_email TEXT NOT NULL DEFAULT ''`,
+	// GPG signing material bound to each platform token, so the UID email of
+	// the signing key matches the committer identity on the same row (see
+	// merge.go:lookupGitIdentity). gpg_private_key and gpg_passphrase store
+	// AES-256-GCM ciphertext produced by internal/secret (master key at
+	// ~/.novaworkbench/secret.key, 0600). gpg_key_id is the 16-hex key id
+	// backfilled after the runtime provision step imports the key into a
+	// per-request GNUPGHOME; empty until then. gpg_enabled is the user-
+	// controlled toggle — when 0 the ciphertexts are retained but signing is
+	// skipped, so flipping the switch never silently re-enables an old key.
+	`ALTER TABLE platform_tokens ADD COLUMN gpg_key_id      TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE platform_tokens ADD COLUMN gpg_private_key TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE platform_tokens ADD COLUMN gpg_passphrase  TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE platform_tokens ADD COLUMN gpg_enabled     INTEGER NOT NULL DEFAULT 0`,
 	// Requirement kind: broadens "需求" into three top-level categories — issue
 	// (a defect/bug report), requirement (a planned feature, the legacy default),
 	// idea (an exploratory note). The wizard uses it to inject kind-specific
@@ -430,6 +565,15 @@ var alterColumns = []string{
 	// telemetry out of the compression-summary columns above. Empty = no
 	// snapshot yet.
 	`ALTER TABLE requirements ADD COLUMN usage_snapshots TEXT NOT NULL DEFAULT ''`,
+	// Agent server table: covered in canonicalSchema; nothing further to alter.
+	// Project ↔ Claude session slug: claude CLI stores per-session JSONL under
+	// $NOVA_CLAUDE_HOME/projects/<slug>/, where <slug> is an encoding of the
+	// working directory path. The remote-coding path (handler/wizard.go
+	// runRemoteCoding) needs the same slug on the remote server so SFTP
+	// session sync lands in the right directory and `--resume <session_id>`
+	// finds the jsonl. Cached here on first local execution by scanning the
+	// local projects dir; empty = not yet discovered.
+	`ALTER TABLE projects ADD COLUMN claude_project_slug TEXT NOT NULL DEFAULT ''`,
 	// coding_plan: the developer main-agent's "task breakdown" Markdown,
 	// produced on the start-coding turn and refreshed whenever the user asks
 	// the main agent to re-plan. Empty = main agent hasn't emitted one yet, or
@@ -438,6 +582,27 @@ var alterColumns = []string{
 	// from; persisted on completion so a server restart / JobStore eviction
 	// doesn't lose the breakdown.
 	`ALTER TABLE requirements ADD COLUMN coding_plan TEXT NOT NULL DEFAULT ''`,
+	// Development-environment provenance, stamped once when the coding stage
+	// starts (StartCoding). dev_source is "agent" (the requirement was coded
+	// on a remote Agent server) or "local" (coded on the NovaWorkbench host);
+	// empty = the coding stage never ran / predates this column.
+	// agent_server_id points at the agent_servers row used, so every FOLLOW-UP
+	// action that touches the working tree (推送并发起 PR / 清理开发环境 /
+	// 子任务派发) can be routed back to the SAME server the code lives on
+	// instead of silently falling back to the local checkout.
+	`ALTER TABLE requirements ADD COLUMN dev_source TEXT NOT NULL DEFAULT ''`,
+	// NOTE: agent_server_id is also added above (line 449, the developer-stage
+	// binding introduced by commit 99242ae). This dev_source ALTER is from
+	// commit f230269 and used to add a duplicate of agent_server_id by mistake
+	// — keep only the canonical ALTER above so the duplicate "already exists"
+	// noise in the Postgres log goes away.
+	// Development-mode provenance for the coding stage. Stamped once when
+	// StartCoding runs so the UI can show "本次开发基于会话/方案" and so a
+	// follow-up run that omits the field can default to the persisted value.
+	// Values: "session" = fork/resume the design session (legacy default),
+	// "design"  = fresh session, hand the stored design doc to the agent
+	// via the -p prompt; empty = never ran / predates this column.
+	`ALTER TABLE requirements ADD COLUMN dev_mode TEXT NOT NULL DEFAULT ''`,
 	// Per-sub-task token usage (mirrors token_usage per-row columns but stays
 	// inline so a child agent's cost lives next to its artifact without a
 	// second SELECT against token_usage). input_tokens / output_tokens are the
@@ -453,10 +618,27 @@ var alterColumns = []string{
 	`ALTER TABLE sub_tasks ADD COLUMN cache_read_tokens     INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE sub_tasks ADD COLUMN cost_cents            INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE sub_tasks ADD COLUMN duration_seconds      INTEGER NOT NULL DEFAULT 0`,
-	// 定时任务 (scheduled sub-task): the due instant for a task that must run
-	// once at a set future time and survive a restart. NULL on every existing
-	// row (they run immediately), so the additive migration needs no backfill.
-	`ALTER TABLE sub_tasks ADD COLUMN scheduled_at DATETIME`,
+	// Orchestration batch linkage: every child row stamped by tryAutoOrchestrate
+	// carries the parent orchestration_batches.id so the tick loop can claim
+	// them in batch_seq order. batch_id='' means a manual sub_task (legacy
+	// path) — RecoverInterrupted treats those differently from batched ones.
+	// batch_id_seq_run is the 5s heartbeat ClaimNextPending / MarkHeartbeat
+	// writes while the child is running; a stale value (>5min) is the signal
+	// RecoverInterrupted uses to flip a crashed "running" row back to "pending"
+	// so the next tick re-dispatches it instead of leaving it stuck.
+	`ALTER TABLE sub_tasks ADD COLUMN batch_id          TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE sub_tasks ADD COLUMN batch_seq         INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE sub_tasks ADD COLUMN batch_id_seq_run  DATETIME`,
+	// Mirrors the orchestration_batches column above for older DBs that
+	// bootstrapped before the table itself shipped — fixup is idempotent
+	// because migrate() ignores "duplicate column" errors.
+	`ALTER TABLE orchestration_batches ADD COLUMN summary_heartbeat_at DATETIME`,
+	// Provenance marker distinguishing auto-orchestrated sub-tasks (created by
+	// tryAutoOrchestrate) from manually-triggered ones (StartSubTask / Adjust /
+	// Redo). Set at insert time and never mutated by SetBatchID, so manual
+	// children stay marked "manual" even after GenerateSubTaskSummary groups
+	// them under a summary batch_id.
+	`ALTER TABLE sub_tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'`,
 }
 
 var (
@@ -509,8 +691,79 @@ func isIgnorableDDLError(stmt string, err error) bool {
 	return false
 }
 
+// commentOnlyLine matches strings that contain nothing but `-- ...` or
+// `/* ... */` comments (possibly on multiple lines). Used by execStatements
+// to skip chunks the schema string leaves between the last `;` and the
+// closing backtick — those would otherwise be sent to the driver as an
+// empty statement and rejected by PostgreSQL with "syntax error at end of
+// input".
+func commentOnlyLine(s string) bool {
+	stripped := s
+	for {
+		start := strings.Index(stripped, "/*")
+		end := strings.Index(stripped, "*/")
+		if start >= 0 && end > start {
+			stripped = stripped[:start] + stripped[end+2:]
+			continue
+		}
+		break
+	}
+	for _, line := range strings.Split(stripped, "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" {
+			continue
+		}
+		if !strings.HasPrefix(t, "--") {
+			return false
+		}
+	}
+	return true
+}
+
+// stripLeadingComments drops any lines at the top of a DDL chunk that are
+// purely `-- ...` or `/* ... */`. The pgx / Postgres extended-query
+// protocol that database/sql uses by default rejects chunks that have
+// comment-only prefixes (the lexer hands the comment to the server but the
+// parser complains "syntax error at end of input" once it strips them and
+// finds nothing DDL-shaped on the first non-comment line — this happens
+// when the chunk ALSO contains a CREATE statement later, but the
+// tokenizer apparently only inspects a prefix window). SQLite + MySQL are
+// tolerant; Postgres is strict. Stripping the comment lines client-side
+// keeps every chunk purely DDL.
+func stripLeadingComments(s string) string {
+	for {
+		trimmed := strings.TrimLeft(s, " \t\r\n")
+		if strings.HasPrefix(trimmed, "--") {
+			nl := strings.Index(trimmed, "\n")
+			if nl < 0 {
+				return ""
+			}
+			s = trimmed[nl+1:]
+			continue
+		}
+		if strings.HasPrefix(trimmed, "/*") {
+			end := strings.Index(trimmed, "*/")
+			if end < 0 {
+				return ""
+			}
+			s = trimmed[end+2:]
+			continue
+		}
+		break
+	}
+	return s
+}
+
 func execStatements(d *DB, stmts []string) error {
 	for _, stmt := range stmts {
+		stmt = strings.TrimSpace(stmt)
+		if stmt == "" {
+			continue
+		}
+		if commentOnlyLine(stmt) {
+			continue
+		}
+		stmt = stripLeadingComments(stmt)
 		stmt = strings.TrimSpace(stmt)
 		if stmt == "" {
 			continue

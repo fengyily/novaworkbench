@@ -68,6 +68,38 @@ type Requirement struct {
 	// parent plan every child task forks from; persisted on completion so
 	// a server restart / JobStore eviction doesn't lose the breakdown.
 	CodingPlan         string    `json:"coding_plan"`
+	// DevSource / AgentServerID record WHERE this requirement was developed.
+	// DevSource is DevSourceAgent ("agent") or DevSourceLocal ("local"),
+	// stamped once when the coding stage starts; empty = never coded.
+	// AgentServerID is the agent_servers row id when DevSource == "agent"
+	// (empty otherwise). Every follow-up action that mutates the working tree
+	// (push+PR, worktree cleanup, sub-task dispatch) reads AgentServerID and
+	// routes itself to that same server, so execution stays consistent with
+	// the environment the code actually lives in.
+	DevSource     string `json:"dev_source"`
+	AgentServerID string `json:"agent_server_id"`
+	// DevMode records HOW the coding stage was launched: "session" forks the
+	// design session (legacy default — Claude inherits the full analysis+design
+	// conversation), "design" starts a fresh session and hands the stored
+	// design doc to the agent via the -p prompt. Stamped once when the coding
+	// stage starts so the UI can show "本次开发基于会话/方案" and a follow-up
+	// StartCoding that omits the field can default to the persisted value.
+	// Empty = never coded / predates this column.
+	DevMode string `json:"dev_mode"`
+	// AgentServerName is a display-only join of agent_servers.name; it is NOT
+	// a requirements column. Populated by RequirementService.List/Get so the
+	// requirement list and detail pages can render "Agent Server 开发 · <名称>"
+	// without a second round-trip. Empty when the server row was deleted.
+	// omitempty keeps the Create-response JSON clean (Create does not join).
+	AgentServerName string `json:"agent_server_name,omitempty"`
+	// SubTaskCount is the number of sub_tasks rows linked to this requirement.
+	// Populated by RequirementService.Get via a SELECT COUNT(*); used by the
+	// frontend to decide whether to hide the requirement-level "追加调整"
+	// entry (when the requirement has been decomposed into sub-tasks, all
+	// further adjustments must go through the sub-task flow instead). Not
+	// stored on the requirements row itself — it's a derived aggregate so
+	// the count stays in sync without an extra migration.
+	SubTaskCount   int       `json:"sub_task_count"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 	CompletedAt           *time.Time `json:"completed_at,omitempty"`
@@ -81,6 +113,13 @@ type CreateRequirementReq struct {
 	Kind         string `json:"kind"` // "issue" | "requirement" | "idea"; empty → defaults to "requirement"
 	SkipAnalysis *bool  `json:"skip_analysis"` // pointer: nil omits the field so Create defaults to true (skip) and Update preserves the existing value
 	SkipDesign   *bool  `json:"skip_design"`   // pointer: nil → Create defaults to false; Update never references this column so it is preserved automatically
+	// SkipOrganize: when true, the handler skips the LLM-organized description
+	// pass that normally distills a title + structured Markdown body. Raw
+	// description is stored verbatim and a fallback title (first line, capped)
+	// is used. Pointer so the absence of the field keeps the previous default
+	// (false = run the organizer) — older clients / scripts that don't send
+	// this continue to get the structured output. UI default = true.
+	SkipOrganize        *bool  `json:"skip_organize"`
 	// SourceRequirementID: optional parent reference. Set by the "总结转需求"
 	// action when an idea's discussion is summarized into a new requirement.
 	// Validated in service.RequirementService (must point to an existing row in

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -34,28 +35,37 @@ import (
 // branch, mid-merge MERGE_HEAD) lives on disk, so a backend restart between
 // steps is recoverable: /merge/state reads the real git state.
 type MergeHandler struct {
-	projectSvc  *service.ProjectService
-	reqSvc      *service.RequirementService
-	llm         *llm.Gateway
-	jobs        *store.JobStore
-	roleSvc     *service.RoleService
-	platformSvc *service.PlatformTokenService
-	jobLogSvc   *service.JobLogService
-	claudeCfg   *service.ClaudeConfigService
-	usageSvc    usageRecorder
+	projectSvc    *service.ProjectService
+	reqSvc        *service.RequirementService
+	llm           *llm.Gateway
+	jobs          *store.JobStore
+	roleSvc       *service.RoleService
+	platformSvc   *service.PlatformTokenService
+	jobLogSvc     *service.JobLogService
+	claudeCfg     *service.ClaudeConfigService
+	usageSvc      usageRecorder
+	subTaskSvc    *service.SubTaskService
+	subTaskRunner *SubTaskRunner
+	// agentSvrSvc resolves the Agent server a requirement was developed on.
+	// Non-nil enables the remote push / cleanup paths (see merge_agent.go);
+	// nil keeps every requirement on the local git path.
+	agentSvrSvc *service.AgentServerService
 }
 
-func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder) *MergeHandler {
+func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, agentSvrSvc *service.AgentServerService) *MergeHandler {
 	return &MergeHandler{
-		projectSvc:  projectSvc,
-		reqSvc:      reqSvc,
-		llm:         llmGateway,
-		jobs:        jobs,
-		roleSvc:     roleSvc,
-		platformSvc: platformSvc,
-		jobLogSvc:   jobLogSvc,
-		claudeCfg:   claudeCfg,
-		usageSvc:    usageSvc,
+		projectSvc:    projectSvc,
+		reqSvc:        reqSvc,
+		llm:           llmGateway,
+		jobs:          jobs,
+		roleSvc:       roleSvc,
+		platformSvc:   platformSvc,
+		jobLogSvc:     jobLogSvc,
+		claudeCfg:     claudeCfg,
+		usageSvc:      usageSvc,
+		subTaskSvc:    subTaskSvc,
+		subTaskRunner: subTaskRunner,
+		agentSvrSvc:   agentSvrSvc,
 	}
 }
 
@@ -88,16 +98,22 @@ func (h *MergeHandler) persistJob(job *store.Job, reqID, model string) {
 	}
 }
 
-// roleConfig loads a role's system prompt + model by key (developer for
-// conflict resolution, pr_author for PR summary). On miss it returns empty
-// strings so a broken role config never blocks the merge/PR flow.
-func (h *MergeHandler) roleConfig(key string) (systemPrompt, model string) {
+// roleConfig loads a role's system prompt + model + the Claude config the
+// role is bound to (developer for conflict resolution, pr_author for PR
+// summary). On miss it returns empty strings so a broken role config never
+// blocks the merge/PR flow.
+func (h *MergeHandler) roleConfig(key string) (systemPrompt, model, configID string) {
 	r, err := h.roleSvc.GetByKey(key)
 	if err != nil {
 		log.Printf("[merge] role %q not found, using CLI defaults: %v", key, err)
-		return "", ""
+		return "", "", ""
 	}
-	return r.SystemPrompt, r.Model
+	cfg, _ := h.claudeCfg.ResolveRoleConfig(r)
+	cid := ""
+	if cfg != nil {
+		cid = cfg.ID
+	}
+	return r.SystemPrompt, r.Model, cid
 }
 
 // loadReqProject resolves the requirement + its project (LocalPath /
@@ -258,7 +274,11 @@ func remoteURL(dir string) string {
 // no global git config (notably Docker containers without ~/.gitconfig mounted).
 // Either may be empty — the empty side is skipped and git falls back to its
 // own config lookup, which keeps existing behaviour on developer machines.
-func commitAll(dir, msg, gitName, gitEmail string) (committed bool, err error) {
+// signKeyID / gpgProgram, when both non-empty, opt the commit into GPG
+// signing via three extra `-c` flags. When either is empty no signing flag
+// is added — behaviour matches the no-2 signature byte-for-byte so existing
+// callers (and unconfigured users) see no change.
+func commitAll(dir, msg, gitName, gitEmail, signKeyID, gpgProgram string) (committed bool, err error) {
 	if _, err := gitRun(dir, "add", "-A"); err != nil {
 		return false, err
 	}
@@ -274,9 +294,9 @@ func commitAll(dir, msg, gitName, gitEmail string) (committed bool, err error) {
 		return false, nil
 	}
 
-	// Build `git -C <dir> [-c user.name=...] [-c user.email=...] commit -m <msg>`.
-	// Args are passed as a string slice (no shell), so spaces / quotes in the
-	// identity are safe.
+	// Build `git -C <dir> [-c user.name=...] [-c user.email=...] [-c signing...]
+	// commit -m <msg>`. Args are passed as a string slice (no shell), so
+	// spaces / quotes in the identity are safe.
 	gitArgs := []string{"-C", dir}
 	if gitName != "" {
 		gitArgs = append(gitArgs, "-c", "user.name="+gitName)
@@ -284,15 +304,99 @@ func commitAll(dir, msg, gitName, gitEmail string) (committed bool, err error) {
 	if gitEmail != "" {
 		gitArgs = append(gitArgs, "-c", "user.email="+gitEmail)
 	}
+	if signKeyID != "" && gpgProgram != "" {
+		gitArgs = append(gitArgs,
+			"-c", "commit.gpgsign=true",
+			"-c", "user.signingkey="+signKeyID,
+			"-c", "gpg.program="+gpgProgram,
+		)
+	}
 	gitArgs = append(gitArgs, "commit", "-m", msg)
 	cmd := exec.Command("git", gitArgs...)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		// Map gpg-specific stderr into the same Chinese error lines the
+		// remote path uses, so users see actionable hints no matter where
+		// the failure happened. Empty classifier output falls back to the
+		// raw stderr.
+		if hint := classifyGitSignFailure(stderr.String()); hint != "" {
+			return false, fmt.Errorf("%s: %w", hint, err)
+		}
 		return false, fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
 	}
 	return true, nil
+}
+
+// resolveLocalGPGSigning provisions a temp GPG home + wrapper for the given
+// dev directory and returns the (signing keyid, gpg.program wrapper path,
+// idempotent cleanup) the merge flow must thread through commitAll and any
+// Claude-driven git commit.
+//
+// Four non-fatal outcomes all collapse to ( "", "", noopCleanup, nil ):
+//   - requirement / project / token chain is incomplete (no token bound);
+//   - the token exists but has GPG disabled (gpg_enabled = 0);
+//   - GPG is enabled but no private key has been uploaded yet;
+//   - the project platform_token_id is empty.
+//
+// Two outcomes are returned with err != nil so the caller can log them:
+//   - decryption failure (master key lost / ciphertext corruption);
+//   - provisionLocalGPG failure (gpg missing, wrong passphrase, disk full).
+//
+// In every "not configured" branch the function returns a noopCleanup so the
+// caller can `defer cleanup()` unconditionally. This keeps the merge code
+// path identical to the pre-GPG behaviour when the user hasn't opted in:
+// no extra `-c` flags, no extra log lines, no extra filesystem writes.
+//
+// On success, gpgProgram is `<gnupgHome>/git-gpg-wrapper` — the same wrapper
+// the wizard-coding path writes — so any subprocess that picks up the
+// worktree-level `commit.gpgsign=true` config (most importantly Claude's
+// own `git commit --no-edit` in aiResolveConflicts) signs through the same
+// keyring without any further wiring.
+func resolveLocalGPGSigning(h *MergeHandler, reqRow *model.Requirement, devDir string, job *store.Job) (keyID, gpgProgram string, cleanup func(), err error) {
+	noopCleanup := func() {}
+	if reqRow == nil || h.projectSvc == nil || h.platformSvc == nil {
+		return "", "", noopCleanup, nil
+	}
+	project, pErr := h.projectSvc.Get(reqRow.ProjectID)
+	if pErr != nil || project == nil || project.PlatformTokenID == "" {
+		return "", "", noopCleanup, nil
+	}
+	enabled, _, armored, passphrase, matErr := h.platformSvc.GPGSigningMaterial(project.PlatformTokenID)
+	if matErr != nil {
+		return "", "", noopCleanup, fmt.Errorf("读取签名材料失败：%w", matErr)
+	}
+	if !enabled || armored == "" {
+		return "", "", noopCleanup, nil
+	}
+	gitName, gitEmail := h.gitIdentityForReq(reqRow)
+
+	// Resolve the base repository path (parent of the shared git dir). For a
+	// non-worktree checkout this equals devDir; for a worktree-isolated
+	// requirement it points back to the main checkout, which is what
+	// `git config --worktree` is conceptually attached to. rev-parse returns
+	// an absolute path, so the `..` walks the same way in both cases.
+	baseRepo := devDir
+	if common, gErr := gitRun(devDir, "rev-parse", "--git-common-dir"); gErr == nil {
+		common = strings.TrimSpace(common)
+		if common != "" {
+			if abs, absErr := filepath.Abs(common); absErr == nil {
+				baseRepo = filepath.Dir(abs)
+			}
+		}
+	}
+
+	gnupgHome, keyID, signCleanup, provErr := provisionLocalGPG(devDir, baseRepo, armored, passphrase, gitName, gitEmail)
+	if provErr != nil {
+		return "", "", noopCleanup, provErr
+	}
+	if job != nil {
+		// One info line, only when signing actually fires — unconfigured
+		// users see no change from before this feature was added.
+		job.Append(store.LogLine{Type: "message", Content: "🔐 本次提交将带 GPG 签名（keyid=" + keyID + "）"})
+	}
+	return keyID, gnupgHome + "/git-gpg-wrapper", signCleanup, nil
 }
 
 // parseRemote splits a remote URL into platform, webBase, owner, repo.
@@ -450,6 +554,16 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
 	dev, devDir := devBranchAndDir(reqRow, dir)
+	// A requirement developed on an Agent server has its commits on that host
+	// (and on origin once pushed) — never in the local checkout. Merging
+	// locally would silently produce an empty merge, or fail on a missing
+	// branch, and either way the user would think the work was integrated.
+	// Point them at the push+PR path, which IS routed to the agent server.
+	if h.usesAgentServer(reqRow) {
+		writeError(w, http.StatusConflict, "AGENT_SERVER_REQUIRED",
+			"该需求由 Agent 服务器开发，代码位于远端工作区，无法在本地直接合入。请使用「推送并发起 PR」（将在同一台 Agent 服务器上执行）。")
+		return
+	}
 	if dev == "" || dev == "HEAD" {
 		writeError(w, http.StatusBadRequest, "NO_BRANCH", "当前处于 detached HEAD，无法合并")
 		return
@@ -477,12 +591,26 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 		// preserved on dev machines).
 		gitName, gitEmail := h.gitIdentityForReq(reqRow)
 
+		// Provision GPG signing material when the platform token has it
+		// enabled. resolveLocalGPGSigning is a no-op (returns empty strings
+		// + a noop cleanup) for unconfigured users, so this block doesn't
+		// add any log noise when GPG isn't in play. Provision failures are
+		// surfaced as a warning and the merge continues unsigned — a GPG
+		// infrastructure issue must not block all local merges.
+		signKeyID, gpgProgram, signingCleanup, gpgErr := resolveLocalGPGSigning(h, reqRow, devDir, job)
+		if gpgErr != nil {
+			job.Append(store.LogLine{Type: "message", Content: "⚠️ GPG 准备失败，本次提交将不签名：" + gpgErr.Error()})
+		}
+		if signingCleanup != nil {
+			defer signingCleanup()
+		}
+
 		// 1. Commit pending dev-branch changes first (in the worktree / checkout
 		//    where dev is actually checked out).
 		if commitMsg == "" {
 			commitMsg = dev
 		}
-		if committed, err := commitAll(devDir, commitMsg, gitName, gitEmail); err != nil {
+		if committed, err := commitAll(devDir, commitMsg, gitName, gitEmail, signKeyID, gpgProgram); err != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ 提交失败: " + err.Error()})
 			job.Finish(1, store.JobError)
 			return
@@ -666,7 +794,7 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 	job := h.jobs.Create(reqRow.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
 
-	systemPrompt, model := h.roleConfig("developer")
+	systemPrompt, model, claudeConfigID := h.roleConfig("developer")
 
 	go func() {
 		defer h.persistJob(job, reqRow.ID, model)
@@ -691,11 +819,12 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 		}
 
 		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-			Prompt:       prompt,
-			WorkDir:      dir,
-			SystemPrompt: systemPrompt,
-			Model:        model,
-			ExtraEnv:     extraEnv,
+			Prompt:         prompt,
+			WorkDir:        dir,
+			SystemPrompt:   systemPrompt,
+			Model:          model,
+			ClaudeConfigID: claudeConfigID,
+			ExtraEnv:       extraEnv,
 			// empty PermissionMode → --dangerously-skip-permissions (full tool use)
 		})
 		configID, currency := h.activeConfigMeta()
@@ -727,17 +856,25 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// Push orchestrates the end-to-end "推送发起 PR" flow as a background job:
+// Push orchestrates the "推送并发起 PR" flow by triggering a sub-task:
 // commit pending dev-branch changes → fetch+merge the main (base) branch into
-// dev to surface conflicts with main → AI-resolve any conflicts (Claude, full
-// tool use) → AI-organize a PR Summary (title + body) from the diff → push the
-// dev branch to origin → CreatePR via the platform API with the AI summary.
+// dev (AI-resolving conflicts if needed) → push the dev branch to origin →
+// CreatePR via the platform API. All work is delegated to a Claude sub-agent
+// (sharing the requirement's main-agent session context) so the configured
+// model drives the entire flow. The previous inline implementation did the
+// same work in goroutines owned by this handler — the requirement (req_xxx)
+// moved the work into a sub-task so the user gets the same model-aware
+// execution path as the other post-development flows.
 //
-// When the merge hits conflicts Claude can't resolve, the merge is aborted
-// (restoring dev to a clean tree), a "conflict" frame is surfaced for human
-// intervention, and the job STOPS — no push, no PR — so the user can resolve
-// manually and retry. Re-running is idempotent: a re-push after a PR already
-// exists surfaces the existing PR link (multi-push fine-tuning).
+// The sub-task is recorded as a row in sub_tasks and surfaces in the
+// SubTaskPanel like any other child agent — its artifact Markdown carries the
+// PR link + push status so the user can revisit it after the JobStore ring
+// buffer evicts the live job. The streaming experience is unchanged: the
+// handler returns { job_id, sub_task_id } immediately and the frontend
+// subscribes to /api/wizard/jobs/{job_id}/stream exactly like the old path.
+//
+// Re-running is idempotent: a re-push after a PR already exists surfaces the
+// existing PR link (multi-push fine-tuning).
 // POST /api/requirements/{id}/merge/push
 func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	reqRow, dir, _, platformType, ok := h.loadReqProject(w, r)
@@ -746,13 +883,20 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		CommitMessage string `json:"commit_message"`
+		Model         string `json:"model"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	// dev branch + the worktree/checkout where it lives. commit + push run
-	// there so the push carries the dev-branch work, not the main checkout.
-	dev, devDir := devBranchAndDir(reqRow, dir)
-	if dev == "" || dev == "HEAD" {
+	// dev branch + the worktree/checkout where it lives. The sub-task inherits
+	// the requirement's isolated worktree via SubTaskRunner.Run; we only need
+	// the branch name here (used by the prompt the child agent runs against).
+	dev, _ := devBranchAndDir(reqRow, dir)
+	// Agent-server requirements have no local dev branch (the code lives on
+	// the agent host), so the detached-HEAD guard below must not apply. The
+	// branch name is resolved from the requirement row instead.
+	if h.usesAgentServer(reqRow) {
+		dev = remoteBranchFor(reqRow)
+	} else if dev == "" || dev == "HEAD" {
 		writeError(w, http.StatusBadRequest, "NO_BRANCH", "当前处于 detached HEAD，无法推送")
 		return
 	}
@@ -762,83 +906,208 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job := h.jobs.Create(reqRow.ID)
-	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
+	// Refuse when the sub-task runner / service isn't wired (legacy / non-
+	// distributed deployment). Surfacing 503 lets the frontend fall back to a
+	// clear "功能不可用" message instead of an opaque 500.
+	if h.subTaskSvc == nil || h.subTaskRunner == nil {
+		writeError(w, http.StatusServiceUnavailable, "UNAVAILABLE", "推送子任务功能未启用")
+		return
+	}
 
-	go func() {
-		var effModel string
-		defer func() { h.persistJob(job, reqRow.ID, effModel) }()
-		log.Printf("[merge/push] job %s req %s: branch=%s", job.ID, reqRow.ID, dev)
+	// base = the main branch to merge into dev + the PR base target.
+	project, _ := h.loadProjectNoWrite(reqRow.ID)
+	base := "main"
+	if project != nil && project.DefaultBranch != "" {
+		base = project.DefaultBranch
+	}
 
-		// base = the main branch to merge into dev + the PR base target.
-		project, _ := h.loadProjectNoWrite(reqRow.ID)
-		base := "main"
-		if project != nil && project.DefaultBranch != "" {
-			base = project.DefaultBranch
-		}
+	// Resolve the effective model up-front so the SubTaskPanel can render the
+	// badge from the moment the row appears. Precedence: explicit body.Model >
+	// developer role's configured model. The runner will resolve the same way
+	// when it actually spawns the CLI, so the persisted value matches the
+	// dispatched value.
+	effectiveModel := body.Model
+	roleConfigID := ""
+	if effectiveModel == "" {
+		_, roleModel, cfgID := h.roleConfig("pr_author")
+		effectiveModel = roleModel
+		roleConfigID = cfgID
+	}
 
-		// Pull the project's git identity from its platform token (best-effort;
-		// empty values fall back to host git config so existing behaviour is
-		// preserved on dev machines).
-		gitName, gitEmail := h.gitIdentityForReq(reqRow)
+	// Build the prompt that drives the sub-agent. The body lays out the
+	// step-by-step work plan (commit → merge main → push → create PR) so the
+	// child has the same plan the previous inline goroutine executed. The
+	// execution-role persona is appended by SubTaskRunner.Run; this prompt is
+	// just the task description.
+	prompt := buildPushSubTaskPrompt(reqRow, dev, base, remote, platformType, body.CommitMessage)
 
-		// 1. Commit pending dev-branch changes.
-		commitMsg := body.CommitMessage
-		if commitMsg == "" {
-			commitMsg = dev
-		}
-		if committed, err := commitAll(devDir, commitMsg, gitName, gitEmail); err != nil {
-			job.Append(store.LogLine{Type: "error", Content: "❌ 提交失败: " + err.Error()})
-			job.Finish(1, store.JobError)
-			return
-		} else if committed {
-			job.Append(store.LogLine{Type: "message", Content: "💾 已提交未提交改动: " + commitMsg})
-		}
+	// 尝试不用主任务的 session 了，直接用子任务的 session 来做推送和创建 PR 的操作。因为主任务的 session 可能已经结束或者不适合继续使用，所以我们需要为子任务创建一个新的 session。
+	sourceSID := ""
+	// The sub-task forks the requirement's main-agent session (coding session
+	// with design session as fallback) so the child inherits the project's
+	// full context — same pattern as the wizard's manual sub-tasks. Empty
+	// sourceSID is treated as "no main session yet" and rejected with 409 to
+	// match StartSubTask's contract.
+	// sourceSID := subTaskSourceSID(reqRow, "")
+	// if sourceSID == "" {
+	// 	writeError(w, http.StatusConflict, "NO_SESSION",
+	// 		"需求尚未启动 coding 或 design session，无法触发推送子任务。请先开始开发。")
+	// 	return
+	// }
 
-		// 2-3. Merge main into dev (conflict pre-check) + AI-resolve if needed.
-		// On an unrecoverable conflict the helper aborts the merge and surfaces
-		// a "conflict" frame; we STOP (no push, no PR) for human intervention.
-		resolveModel, stop := h.mergeAndResolveBase(job, devDir, base, dev, reqRow)
-		effModel = resolveModel
-		if stop {
-			job.Finish(1, store.JobError)
-			return
-		}
+	title := "推送并创建 PR"
+	if body.CommitMessage != "" {
+		title = "推送并创建 PR: " + truncateMergePrompt(body.CommitMessage, 40)
+	}
+	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(reqRow.ID, title, prompt, effectiveModel, sourceSID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	log.Printf("[merge/push] sub-task %s job %s req %s: branch=%s", st.ID, job.ID, reqRow.ID, dev)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"job_id":      job.ID,
+		"sub_task_id": st.ID,
+	})
 
-		// 4. AI-organized PR Summary (title + body) from the dev...base diff.
-		prTitle, prBody, summaryModel := h.generatePRSummary(job, devDir, base, dev, reqRow)
-		if summaryModel != "" {
-			effModel = summaryModel
-		}
+	go h.subTaskRunner.Run(reqRow, st, job, newSID, sourceSID, prompt, effectiveModel, roleConfigID, false, true)
+}
 
-		// 5. Push the dev branch to origin. CombinedOutput is used instead of an
-		// io.Pipe — a pipe write end closed before the reader drains it fails.
-		job.Append(store.LogLine{Type: "phase", Content: "🌐 正在推送 " + dev + " 到 origin..."})
-		out, err := exec.Command("git", "-C", devDir, "push", "-u", "origin", dev).CombinedOutput()
-		for _, line := range strings.Split(string(out), "\n") {
-			if line = strings.TrimSpace(line); line != "" {
-				job.Append(store.LogLine{Type: "message", Content: line})
-			}
-		}
-		if err != nil {
-			job.Append(store.LogLine{Type: "error", Content: "❌ 推送失败: " + strings.TrimSpace(err.Error())})
-			job.Finish(1, store.JobError)
-			return
-		}
+// buildPushSubTaskPrompt composes the task description the push sub-agent
+// runs against. The child uses its Bash tool to execute each step verbatim;
+// Claude is responsible for surfacing progress / errors through the same
+// store.LogLine stream the wizard's coding/adjust paths use.
+//
+// commitMessage is the user's preferred commit message; empty falls back to
+// the dev branch name inside the agent (matches the previous inline path).
+// platformType is the project's configured platform ("github" / "gitlab" /
+// "gitea") — empty tells the child to surface a compare URL via git
+// (no token / no automated PR).
+func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage string) string {
+	var b strings.Builder
+	b.WriteString("请完成「提交 → 合并主分支 → 推送 → 创建 PR」全流程。当前任务所有 git 操作都在当前工作目录（worktree / 项目目录）中执行；请避免在工作目录以外执行任何写操作。\n")
+	// Agent-server dispatch: the child runs inside the requirement's remote
+	// worktree on the agent host (same /tmp/nova-agent/<proj>/<req> layout the
+	// coding pass used), so the "当前工作目录" wording above stays true — the
+	// note just tells the user where that directory physically is.
+	if reqRow.AgentServerID != "" {
+		b.WriteString("> 本需求由 Agent 服务器开发：本子任务会在该服务器的远端工作区中执行，提交与推送均发生在远端，本地仓库无需（也无法）参与。\n")
+	}
+	b.WriteString("\n")
 
-		// 6. Create the PR via the platform API with the AI summary; fall back to
-		// a compare link when there's no token or creation fails.
-		prURL, created := h.createPRWithFallback(job, project, remote, platformType, base, dev, prTitle, prBody, reqRow)
-		if prURL != "" {
-			job.Append(store.LogLine{Type: "pr_link", Content: prURL})
+	b.WriteString("## 上下文\n")
+	b.WriteString("- 需求 ID: ")
+	b.WriteString(reqRow.ID)
+	b.WriteString("\n- 需求标题: ")
+	b.WriteString(reqRow.Title)
+	b.WriteString("\n- 需求描述: ")
+	b.WriteString(strings.TrimSpace(reqRow.Description))
+	b.WriteString("\n- 开发分支: ")
+	b.WriteString(dev)
+	b.WriteString("\n- 主分支（base）: ")
+	b.WriteString(base)
+	b.WriteString("\n- 远程仓库: ")
+	b.WriteString(remote)
+	b.WriteString("\n- 平台类型: ")
+	if platformType == "" {
+		b.WriteString("（未配置，将仅推送到 origin，不自动创建 PR）")
+	} else {
+		b.WriteString(platformType)
+	}
+	b.WriteString("\n- 提交信息: ")
+	if commitMessage == "" {
+		b.WriteString("(为空，使用「")
+		b.WriteString(dev)
+		b.WriteString("」作为默认提交信息)")
+	} else {
+		b.WriteString(commitMessage)
+	}
+	b.WriteString("\n\n")
+
+	b.WriteString("## 执行步骤\n")
+	b.WriteString("1. **提交工作区改动**：先 `git status` 检查工作区是否有未提交改动。如果有，运行 `git add -A` 然后用上面的提交信息（或默认信息）`git commit -m \"<提交信息>\"` 完成提交。干净的工作区跳过此步。\n")
+	b.WriteString("2. **同步主分支**：运行 `git fetch origin ")
+	b.WriteString(base)
+	b.WriteString("` 拉取主分支最新代码。\n")
+	b.WriteString("3. **合并主分支到开发分支**：运行 `git merge origin/")
+	b.WriteString(base)
+	b.WriteString(" --no-edit`。如果出现冲突：\n")
+	b.WriteString("   - 逐个读取冲突文件，理解 `<<<<<<<`（当前开发分支）与 `>>>>>>>`（主分支）双方的意图。\n")
+	b.WriteString("   - 整合双方改动、消除冲突标记后写回文件。\n")
+	b.WriteString("   - 运行 `git add -A` 暂存已解决的文件，再运行 `git commit --no-edit` 完成合并提交。\n")
+	b.WriteString("   - 不要留下任何冲突标记。\n")
+	b.WriteString("4. **推送分支**：运行 `git push -u origin ")
+	b.WriteString(dev)
+	b.WriteString("` 推送开发分支到 origin。如果推送失败（例如需要先 pull），请尝试 `git pull --rebase origin ")
+	b.WriteString(dev)
+	b.WriteString("` 后再推送，仍失败则报告错误并停止。\n")
+	b.WriteString("5. **创建 PR**（如平台支持）：\n")
+	switch platformType {
+	case "github":
+		b.WriteString("   - 使用 `gh pr create --base ")
+		b.WriteString(base)
+		b.WriteString(" --head ")
+		b.WriteString(dev)
+		b.WriteString(" --title \"<PR 标题>\" --body \"<PR 正文>\"` 创建 PR（gh CLI 已自动认证）。\n")
+		b.WriteString("   - 如果 `gh` 不可用，改用项目配置的 PlatformToken（通过环境变量或 backend API 调用），或告知用户手动访问 ")
+		b.WriteString(remote)
+		b.WriteString(" 上的 compare 链接创建。\n")
+	case "gitlab":
+		b.WriteString("   - 使用 `glab mr create --target-branch ")
+		b.WriteString(base)
+		b.WriteString(" --source-branch ")
+		b.WriteString(dev)
+		b.WriteString(" --title \"<PR 标题>\" --description \"<PR 正文>\"` 创建 Merge Request。\n")
+		b.WriteString("   - 如 `glab` 不可用，告知用户手动通过 GitLab Web UI 创建。\n")
+	case "gitea":
+		b.WriteString("   - 使用 `tea pr create --base ")
+		b.WriteString(base)
+		b.WriteString(" --head ")
+		b.WriteString(dev)
+		b.WriteString(" --title \"<PR 标题>\" --description \"<PR 正文>\"` 创建 PR。\n")
+		b.WriteString("   - 如 `tea` 不可用，告知用户手动通过 Gitea Web UI 创建。\n")
+	default:
+		b.WriteString("   - 项目未配置平台 Token / 平台类型。请推送到 origin 后，告知用户手动访问 ")
+		b.WriteString(remote)
+		b.WriteString(" 上的 compare 链接创建 PR。\n")
+	}
+	b.WriteString("\n## PR 摘要要求\n")
+	b.WriteString("- PR 标题使用中文，一句话概括本次改动（不超过 40 字，不要以 `feat:` 等前缀开头）。\n")
+	b.WriteString("- PR 正文使用 Markdown，按「改动概述 / 主要变更 / 关键文件 / 验证方式」组织，简洁有重点。\n")
+	b.WriteString("- 可执行 `git log origin/")
+	b.WriteString(base)
+	b.WriteString("..")
+	b.WriteString(dev)
+	b.WriteString("` 和 `git diff origin/")
+	b.WriteString(base)
+	b.WriteString("...")
+	b.WriteString(dev)
+	b.WriteString(" --stat` 查看本次改动，再撰写摘要。\n\n")
+
+	b.WriteString("## 重要约束\n")
+	b.WriteString("- 所有 git 操作必须显式 `git -C <dir>` 或先 `cd` 到工作目录再执行。\n")
+	b.WriteString("- 如遇网络 / 凭据 / 远端权限错误，请明确报告并停止后续步骤。\n")
+	b.WriteString("- 完成后请简要输出：执行了哪些步骤、最终状态（成功 / 失败）、PR 链接（如有），方便作为子任务产物落盘。\n")
+	return b.String()
+}
+
+// truncateMergePrompt renders a short preview of a user-supplied commit
+// message for the sub-task card title. Mirrors the existing
+// service.truncateForTitle behavior so the card header reads cleanly even
+// when the user pastes a multi-line commit template.
+func truncateMergePrompt(s string, max int) string {
+	cleaned := make([]rune, 0, len(s))
+	for _, r := range s {
+		if r == '\n' || r == '\r' || r == '\t' {
+			cleaned = append(cleaned, ' ')
+			continue
 		}
-		if created {
-			job.Append(store.LogLine{Type: "done", Content: "✅ 已推送并创建 PR: " + dev})
-		} else {
-			job.Append(store.LogLine{Type: "done", Content: "✅ 已推送到 origin/" + dev})
-		}
-		job.Finish(0, store.JobDone)
-	}()
+		cleaned = append(cleaned, r)
+	}
+	if len(cleaned) <= max {
+		return string(cleaned)
+	}
+	return string(cleaned[:max]) + "..."
 }
 
 // mergeAndResolveBase fetches origin/base and merges it into the dev branch
@@ -849,11 +1118,26 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 // frame was appended for human intervention. stop=false means the merge is
 // clean (or was resolved) and the flow may continue.
 func (h *MergeHandler) mergeAndResolveBase(job *store.Job, devDir, base, dev string, reqRow *model.Requirement) (string, bool) {
-	systemPrompt, model := h.roleConfig("developer")
+	systemPrompt, model, claudeConfigID := h.roleConfig("developer")
 	// Pull the project's commit identity so the merge commit (created by
 	// `git merge --no-edit`) carries the right author/committer on Docker
 	// hosts without a mounted ~/.gitconfig.
 	gitName, gitEmail := h.gitIdentityForReq(reqRow)
+
+	// Provision GPG signing material so both (a) the auto-merge commit that
+	// `git merge --no-edit` may produce on a clean merge and (b) the commit
+	// Claude runs in aiResolveConflicts pick up `commit.gpgsign=true` from
+	// the worktree config the provision step writes. Per-invocation -c
+	// flags aren't needed here — git reads its own worktree config. Noop
+	// for unconfigured users; warning-only on provision failure so the
+	// merge itself is never blocked by a GPG infrastructure hiccup.
+	_, _, signingCleanup, gpgErr := resolveLocalGPGSigning(h, reqRow, devDir, job)
+	if gpgErr != nil {
+		job.Append(store.LogLine{Type: "message", Content: "⚠️ GPG 准备失败，本次合并提交将不签名：" + gpgErr.Error()})
+	}
+	if signingCleanup != nil {
+		defer signingCleanup()
+	}
 
 	// 2. fetch origin/base (best-effort; a fetch failure just skips the merge).
 	job.Append(store.LogLine{Type: "phase", Content: "⬇️ 拉取主分支 origin/" + base + " ..."})
@@ -888,7 +1172,7 @@ func (h *MergeHandler) mergeAndResolveBase(job *store.Job, devDir, base, dev str
 	}
 
 	// AI resolve the conflicts (developer role, full tool use).
-	resolved := h.aiResolveConflicts(job, devDir, conflicts, systemPrompt, model, reqRow)
+	resolved := h.aiResolveConflicts(job, devDir, conflicts, systemPrompt, model, claudeConfigID, reqRow)
 	if resolved {
 		return model, false
 	}
@@ -907,7 +1191,7 @@ func (h *MergeHandler) mergeAndResolveBase(job *store.Job, devDir, base, dev str
 // conflict markers in devDir and conclude the merge. Returns true when the
 // merge is concluded (MERGE_HEAD gone, no conflict files left); the repo stays
 // mid-merge on failure so the caller can abort.
-func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflicts []string, systemPrompt, model string, reqRow *model.Requirement) bool {
+func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflicts []string, systemPrompt, model, claudeConfigID string, reqRow *model.Requirement) bool {
 	job.Append(store.LogLine{Type: "phase", Content: "🤖 Claude 正在解决与主分支的合并冲突..."})
 	fileList := strings.Join(conflicts, "\n")
 	prompt := fmt.Sprintf("当前开发分支正在与主分支合并，以下文件存在冲突标记（<<<<<<< / ======= / >>>>>>>）：\n%s\n\n"+
@@ -927,12 +1211,26 @@ func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflic
 			extraEnv = append(extraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
 		}
 	}
+	// Provision GPG signing material in devDir so Claude's `git commit
+	// --no-edit` picks up commit.gpgsign=true from the worktree config
+	// (the per-invocation -c path used by commitAll doesn't reach a
+	// subprocess Claude spawns from its Bash tool). Conflict resolution
+	// is more important than signing — a GPG provision failure must not
+	// block Claude from finishing the merge, so we warn-and-keep.
+	_, _, gpgCleanup, gpgErr := resolveLocalGPGSigning(h, reqRow, devDir, job)
+	if gpgErr != nil {
+		job.Append(store.LogLine{Type: "message", Content: "⚠️ GPG 准备失败，本次合并提交可能未签名：" + gpgErr.Error()})
+	}
+	if gpgCleanup != nil {
+		defer gpgCleanup()
+	}
 	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-		Prompt:       prompt,
-		WorkDir:      devDir,
-		SystemPrompt: systemPrompt,
-		Model:        model,
-		ExtraEnv:     extraEnv,
+		Prompt:         prompt,
+		WorkDir:        devDir,
+		SystemPrompt:   systemPrompt,
+		Model:          model,
+		ClaudeConfigID: claudeConfigID,
+		ExtraEnv:       extraEnv,
 	})
 	configID, currency := h.activeConfigMeta()
 	runClaudeStream(jobSink{job}, cmd, "push-pr-resolve", &usageCtx{
@@ -952,7 +1250,7 @@ func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflic
 // from the dev...base diff. Falls back to ("", "", model) on failure so the
 // caller degrades to reqRow.Title / reqRow.Description without blocking.
 func (h *MergeHandler) generatePRSummary(job *store.Job, devDir, base, dev string, reqRow *model.Requirement) (title, body, modelOut string) {
-	systemPrompt, model := h.roleConfig("pr_author")
+	systemPrompt, model, claudeConfigID := h.roleConfig("pr_author")
 	modelOut = model
 	job.Append(store.LogLine{Type: "phase", Content: "📝 Claude 正在生成 PR 摘要..."})
 	prompt := fmt.Sprintf("请为本次开发分支的改动撰写 PR 描述。\n\n开发分支：%s\n主分支（base）：%s\n需求标题：%s\n需求描述：\n%s\n\n"+
@@ -960,10 +1258,11 @@ func (h *MergeHandler) generatePRSummary(job *store.Job, devDir, base, dev strin
 		"3. 结合需求理解改动意图\n4. 按 system prompt 要求的 JSON 格式输出 PR 标题与正文",
 		dev, base, reqRow.Title, reqRow.Description, base, dev)
 	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-		Prompt:       prompt,
-		WorkDir:      devDir,
-		SystemPrompt: systemPrompt,
-		Model:        model,
+		Prompt:         prompt,
+		WorkDir:        devDir,
+		SystemPrompt:   systemPrompt,
+		Model:          model,
+		ClaudeConfigID: claudeConfigID,
 	})
 	configID, currency := h.activeConfigMeta()
 	out := runClaudeStream(jobSink{job}, cmd, "push-pr-summary", &usageCtx{
@@ -1120,14 +1419,51 @@ func (h *MergeHandler) Cleanup(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if reqRow.WorktreePath == "" {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "message": "无 worktree 需要清理"})
-		return
-	}
 	var body struct {
 		Force bool `json:"force"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	// Agent-server requirements: the dev environment to clean is the worktree
+	// on the agent host, not a local one (start-coding never created a local
+	// worktree for them). Run the remote cleanup FIRST, then fall through to
+	// the local block so any stale local worktree from an earlier local run of
+	// the same requirement is reclaimed too.
+	if h.usesAgentServer(reqRow) {
+		res := h.remoteCleanup(reqRow, body.Force)
+		if len(res.dirty) > 0 {
+			filesJSON, _ := json.Marshal(res.dirty)
+			writeError(w, http.StatusConflict, "WORKTREE_DIRTY",
+				"Agent 服务器上的 worktree 存在未提交改动，请先提交或勾选 force 强制清理: "+string(filesJSON))
+			return
+		}
+		if res.errMsg != "" {
+			writeError(w, http.StatusInternalServerError, "WORKTREE_REMOVE_FAILED", res.errMsg)
+			return
+		}
+		// Clear the provenance along with the worktree fields: the environment
+		// is gone, so later stages must not keep routing to that server.
+		if perr := h.reqSvc.UpdateDevSource(reqRow.ID, service.DevSourceLocal, ""); perr != nil {
+			log.Printf("[worktree-cleanup] clear dev_source for %s: %v", reqRow.ID, perr)
+		}
+		if reqRow.WorktreePath == "" {
+			if perr := h.reqSvc.UpdateWorktree(reqRow.ID, "", ""); perr != nil {
+				log.Printf("[worktree-cleanup] clear DB fields for %s: %v", reqRow.ID, perr)
+			}
+			msg := "已清理 Agent 服务器上的开发环境"
+			if res.skipped {
+				msg = "Agent 服务器上无 worktree 需要清理"
+			}
+			writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "message": msg, "remote": true})
+			return
+		}
+		// else: keep going and clean the local leftovers too.
+	}
+
+	if reqRow.WorktreePath == "" {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "message": "无 worktree 需要清理"})
+		return
+	}
 
 	wtPath := reqRow.WorktreePath
 	// The worktree directory still exists → remove it via git. A dirty worktree
@@ -1161,6 +1497,11 @@ func (h *MergeHandler) Cleanup(w http.ResponseWriter, r *http.Request) {
 	}
 	if perr := h.reqSvc.UpdateWorktree(reqRow.ID, "", ""); perr != nil {
 		log.Printf("[worktree-cleanup] clear DB fields for %s: %v", reqRow.ID, perr)
+	}
+	// The local dev environment is gone too — drop the provenance so the next
+	// stage picks its execution target fresh instead of inheriting a stale one.
+	if perr := h.reqSvc.UpdateDevSource(reqRow.ID, service.DevSourceLocal, ""); perr != nil {
+		log.Printf("[worktree-cleanup] clear dev_source for %s: %v", reqRow.ID, perr)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})

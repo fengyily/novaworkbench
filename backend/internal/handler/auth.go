@@ -77,6 +77,32 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// UpdateLocale persists the current user's preferred UI language.
+// PUT /api/auth/locale  body: {locale} — BCP-47 tag ("" clears the
+// preference). Returns the refreshed user so the client can keep its local
+// copy in sync. The value is validated against the same whitelist the
+// frontend's language switcher offers; anything else is INVALID_LOCALE.
+func (h *AuthHandler) UpdateLocale(w http.ResponseWriter, r *http.Request) {
+	u := middleware.CurrentUser(r)
+	if u == nil {
+		writeError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "未登录")
+		return
+	}
+	var req struct {
+		Locale string `json:"locale"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
+		return
+	}
+	user, err := h.svc.UpdateLocale(u.UserID, req.Locale)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_LOCALE", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
 // bearerTokenFromRequest extracts the Bearer token. Kept here (not exported
 // from middleware) to avoid exposing it as a public helper.
 func bearerTokenFromRequest(r *http.Request) string {

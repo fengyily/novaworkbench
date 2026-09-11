@@ -90,48 +90,14 @@
 }
 
 /* ─── Composer ───
- * Same shape as CodingChat's input area: label + input + textarea +
- * hint + primary button. Spacing reads as one form, not three controls.
+ * The composer is now description-only (the title input was removed):
+ * just the textarea + hint + primary button. Spacing reads as one form,
+ * not three controls.
  */
 .sub-composer {
   padding: 16px 20px;
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface);
-}
-.sub-composer-title-row {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 12px;
-}
-.sub-composer-label {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--color-text-secondary);
-}
-.sub-composer-input {
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-surface);
-  color: var(--color-text);
-  font-family: var(--font-sans);
-  font-size: 13px;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-.sub-composer-input:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
-}
-.sub-composer-input:disabled {
-  background: var(--color-hover);
-  color: var(--color-text-muted);
-  cursor: not-allowed;
-}
-.sub-composer-input::placeholder {
-  color: var(--color-text-muted);
 }
 
 .sub-composer-textarea {
@@ -186,6 +152,28 @@
 }
 .sub-composer-resplit {
   flex-shrink: 0;
+}
+/* Inline model picker inside the composer toolbar — kept compact so it
+   shares the row with the "重新拆分" button without forcing a vertical
+   break on desktop widths. The inline style={flex: '0 0 auto'} on the
+   JSX side prevents the card from stretching to fill the row. */
+.sub-composer-toolbar .model-select {
+  flex: 0 0 auto;
+}
+
+/* Soft warning when no Claude config / model is available — keeps the
+   composer usable (CLI default still works) but points the user at the
+   settings page so they understand why "默认模型" can't show a concrete
+   model name. Amber tone matches the .is-work accent used elsewhere. */
+.sub-model-warning {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: rgba(245, 158, 11, 0.08);
+  color: #b45309;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid rgba(245, 158, 11, 0.25);
 }
 
 /* Manual re-split (🔄 重新拆分) live progress — rides on the orchestrator
@@ -307,6 +295,64 @@
   background: var(--color-hover);
   color: var(--color-text-muted);
 }
+/* Stopped: user-initiated cancellation. Neutral slate (not the error red
+   so it reads as "intentional" rather than "broken"). */
+.sub-card-status-stopped {
+  background: rgba(100, 116, 139, 0.12);
+  color: var(--color-text-secondary, #475569);
+}
+
+/* Stop button — sits in the header-right next to the quickstats block
+   while a sub-task is running. Uses the existing btn-sm sizing so it
+   stays aligned with the toggle chevron. The header itself is a click
+   target that toggles expand/collapse; the button's stopPropagation
+   handler keeps the two click targets from fighting. */
+.sub-card-stop-btn {
+  margin-left: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  background: var(--color-bg, #fff);
+  color: var(--color-text-secondary, #475569);
+  cursor: pointer;
+}
+.sub-card-stop-btn:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: var(--color-error, #ef4444);
+  color: var(--color-error, #ef4444);
+}
+.sub-card-stop-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* Source badge: 🪄 Auto (indigo) vs 👤 Manual (emerald).
+   Distinguishes auto-orchestrated sub-tasks from manually-created ones.
+   Follows the same size/padding/radius as the status chip above. */
+.sub-card-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+  margin-left: 4px;
+}
+.sub-card-source-auto {
+  background: rgba(79, 70, 229, 0.10);  /* Indigo 50 */
+  border: 1px solid rgba(79, 70, 229, 0.30);
+  color: #4338CA;  /* Indigo 700 */
+}
+.sub-card-source-manual {
+  background: rgba(16, 185, 129, 0.10);  /* Emerald 50 */
+  border: 1px solid rgba(16, 185, 129, 0.30);
+  color: #047857;  /* Emerald 700 */
+}
+
 .sub-card-counter {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -562,6 +608,12 @@
   border-color: var(--color-primary);
   background: var(--color-active);
 }
+.sub-adjust-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .sub-adjust-pane {
   display: flex;
   flex-direction: column;
@@ -659,7 +711,6 @@
 
 /* Reduced-motion users — drop transitions. */
 @media (prefers-reduced-motion: reduce) {
-  .sub-composer-input,
   .sub-composer-textarea,
   .sub-card,
   .sub-cli-copy,
@@ -676,6 +727,7 @@
   .sub-list { padding: 12px 16px 16px; }
   .sub-composer-toolbar { flex-wrap: wrap; }
   .sub-composer-hint { flex-basis: 100%; }
+  .sub-summary { margin: 12px; padding: 12px 14px; }
 }
 
 /* ─── Orchestrator (主 Agent 自动编排) ───
@@ -733,6 +785,40 @@
   font-size: 12px;
   color: var(--color-primary);
 }
+/* Orchestrator banner with the new manual / early-summary CTAs.
+   Layout: a single flex row that keeps the status text on the left and
+   the CTA cluster (button + toast) on the right, wrapping gracefully on
+   narrow viewports. The base `.sub-orchestrator-status` styles above
+   still apply (background / padding / color). */
+.sub-orchestrator-status--with-cta {
+  padding: 10px 14px;
+}
+.sub-orchestrator-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.sub-orchestrator-status-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.sub-orchestrator-status-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.sub-orchestrator-cta {
+  font-size: 12px;
+  padding: 4px 10px;
+}
+.sub-orchestrator-toast {
+  /* Local tweak so the toast sits inline with the button instead of
+     taking its own line — the global `.merge-hint-toast` rule already
+     provides background / border / animation. */
+  white-space: nowrap;
+}
 .sub-orchestrator-reply {
   margin-top: 10px;
   border: 1px solid var(--color-border);
@@ -788,8 +874,125 @@
 .sub-summary-title {
   color: var(--color-text);
 }
-.sub-summary-body {
+.sub-summary-body { font-size: 13px; line-height: 1.65; color: var(--color-text); }
+.sub-summary-body > :first-child { margin-top: 0; }
+.sub-summary-body > :last-child  { margin-bottom: 0; }
+.sub-summary-body h1, .sub-summary-body h2,
+.sub-summary-body h3, .sub-summary-body h4 {
+  margin: 1.1em 0 0.4em; font-weight: 600; line-height: 1.3; color: #0F172A;
+}
+.sub-summary-body h1 { font-size: 18px; }
+.sub-summary-body h2 { font-size: 15px; border-bottom: 1px solid var(--color-border); padding-bottom: 4px; }
+.sub-summary-body h3 { font-size: 14px; }
+.sub-summary-body h4 { font-size: 13px; color: var(--color-text); }
+.sub-summary-body p  { margin: 6px 0; }
+.sub-summary-body ul, .sub-summary-body ol { padding-left: 20px; margin: 6px 0; }
+.sub-summary-body li { margin: 2px 0; }
+.sub-summary-body strong { font-weight: 600; color: #0F172A; }
+.sub-summary-body code {
+  background: var(--color-active); color: var(--color-primary);
+  padding: 1px 5px; border-radius: 4px;
+  font-size: 12px; font-family: var(--font-mono);
+}
+.sub-summary-body pre {
+  background: #0F172A; color: #E2E8F0;
+  padding: 12px 14px; border-radius: 8px;
+  overflow-x: auto; max-width: 100%;
+  margin: 0.8em 0; font-size: 12px; line-height: 1.5;
+}
+.sub-summary-body pre code { background: transparent; padding: 0; color: inherit; font-size: 12px; }
+.sub-summary-body blockquote {
+  border-left: 3px solid var(--color-primary);
+  margin: 0.8em 0; padding: 4px 14px;
+  color: var(--color-text-secondary); background: var(--color-active);
+  border-radius: 0 6px 6px 0;
+}
+.sub-summary-body table { border-collapse: collapse; margin: 0.8em 0; width: 100%; font-size: 12px; }
+.sub-summary-body th, .sub-summary-body td { border: 1px solid var(--color-border); padding: 6px 10px; text-align: left; }
+.sub-summary-body th { background: var(--color-hover); font-weight: 600; }
+.sub-summary-body a    { color: var(--color-primary); text-decoration: underline; text-underline-offset: 2px; }
+.sub-summary-body hr   { border: none; border-top: 1px solid var(--color-border); margin: 1.2em 0; }
+
+/* Collapsed preview: cap height + fade-out mask so the eye knows there's more.
+   Mirrors RequirementDetail.css:2605-2621 (.design-content-collapsed). */
+.sub-summary-body-wrap {
+  position: relative;
+  overflow: hidden;
+  max-height: none;
+  transition: max-height 0.25s ease;
+}
+.sub-summary-body-wrap.is-collapsed { max-height: 320px; }
+.sub-summary-body-wrap.is-collapsed::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 80px;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0), var(--color-surface, #ffffff));
+  pointer-events: none;
+}
+/* Defensive: keep the fade mask from clipping the last child's text.
+   Mirrors RequirementDetail.css:2621. */
+.sub-summary-body-wrap.is-collapsed .sub-summary-body > :last-child { padding-bottom: 16px; }
+
+/* Toggle button — mirrors RequirementDetail.css:2623-2636 (.design-toggle-btn). */
+.sub-summary-toggle-btn {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--color-primary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 4px 10px;
   font-size: 13px;
-  line-height: 1.6;
+  cursor: pointer;
+}
+.sub-summary-toggle-btn:hover {
+  background: var(--color-hover);
+  border-color: var(--color-primary);
+}
+
+/* Action cluster in the summary header. */
+.sub-summary-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.sub-summary-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.sub-summary-action-btn:hover {
+  background: var(--color-hover);
+  border-color: var(--color-border);
   color: var(--color-text);
 }
+.sub-summary-action-btn[data-copied='true'] {
+  color: var(--color-success);
+}
+
+/* ─── Per-card context-usage bar ───
+ * Slim wrapper around the shared ContextUsageBar so each sub-task card
+ * can show the same usage metrics the parent CodingChat does. Sits
+ * between the header and the collapsible body so the bar is visible
+ * whether the card is expanded or collapsed. Reuses the global
+ * `.usage-bar-band-ok|warn|critical` color classes defined in index.css
+ * — no new design tokens introduced here.
+ */
+.sub-card-usage {
+  padding: 6px 16px 10px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+.sub-card-usage .usage-bar { margin-bottom: 0; }
+.sub-card-usage .usage-bar-header { font-size: 11px; }
+.sub-card-usage .usage-bar-track { height: 3px; }

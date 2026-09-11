@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { claudeApi, type ClaudeConfigItem, type ModelEntry } from '../api/client';
+import { errorMessage } from '../utils/errMsg';
 import './SettingsClaude.css';
 
 interface ConfigForm {
@@ -21,6 +23,7 @@ const emptyForm: ConfigForm = {
 };
 
 export default function SettingsClaude() {
+  const { t } = useTranslation();
   const [configs, setConfigs] = useState<ClaudeConfigItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -38,7 +41,7 @@ export default function SettingsClaude() {
     setLoading(true);
     claudeApi.list()
       .then(data => setConfigs(data ?? []))
-      .catch(err => setError(err instanceof Error ? err.message : String(err)))
+      .catch(err => setError(errorMessage(err)))
       .finally(() => setLoading(false));
   }, []);
 
@@ -98,9 +101,9 @@ export default function SettingsClaude() {
   };
 
   const handleSave = async () => {
-    if (!form.name.trim()) { setError('名称不能为空'); return; }
+    if (!form.name.trim()) { setError(t('settings.claude.errNameRequired')); return; }
     if (form.default_model && !form.models.some(x => x.model === form.default_model)) {
-      setError('默认模型必须在模型列表中'); return;
+      setError(t('settings.claude.errDefaultModelMissing')); return;
     }
     setSaving(true);
     setError('');
@@ -114,7 +117,7 @@ export default function SettingsClaude() {
           default_model: form.default_model,
           currency: form.currency,
         });
-        showToast('配置已更新');
+        showToast(t('settings.claude.toastUpdated'));
       } else {
         await claudeApi.create({
           name: form.name.trim(),
@@ -124,12 +127,12 @@ export default function SettingsClaude() {
           default_model: form.default_model,
           currency: form.currency,
         });
-        showToast('配置已创建');
+        showToast(t('settings.claude.toastCreated'));
       }
       setShowModal(false);
       load();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -141,44 +144,43 @@ export default function SettingsClaude() {
     try {
       const res = await claudeApi.activate(c.id);
       setConfigs(res.configs ?? []);
-      const modelDesc = res.applied_model ? `「${res.applied_model}」` : 'CLI 默认';
-      showToast(`已切换为生效配置，各角色模型已重置为 ${modelDesc}`);
+      const modelDesc = res.applied_model ? `「${res.applied_model}」` : t('settings.claude.cliDefault');
+      showToast(t('settings.claude.activateToast', { model: modelDesc }));
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setBusyId('');
     }
   };
 
   const handleDelete = async (c: ClaudeConfigItem) => {
-    if (!confirm(`确定删除配置「${c.name}」吗？`)) return;
+    if (!confirm(t('settings.claude.deleteConfirm', { name: c.name }))) return;
     setBusyId(c.id);
     setError('');
     try {
       await claudeApi.remove(c.id);
       setConfigs(prev => prev.filter(x => x.id !== c.id));
-      showToast('配置已删除');
+      showToast(t('settings.claude.toastDeleted'));
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setBusyId('');
     }
   };
 
-  if (loading) return <div className="settings-empty">加载中...</div>;
+  if (loading) return <div className="settings-empty">{t('settings.claude.loading')}</div>;
 
   return (
     <div className="settings-section claude-configs">
       <div className="section-header">
         <div>
-          <h3 className="settings-section-title">Claude CLI 配置</h3>
+          <h3 className="settings-section-title">{t('settings.claude.title')}</h3>
           <p className="settings-section-desc">
-            管理多套 Claude 配置（名称 + Base URL + Auth Token + 模型列表）。
-            切换生效配置后，<b>新发起的 AI 任务立即使用新配置</b>（进行中的任务不受影响），
-            同时<b>所有角色的模型将重置为该配置的默认模型</b>。
+            {t('settings.claude.descPrefix')}<b>{t('settings.claude.descBold1')}</b>{t('settings.claude.descMiddle')}
+            <b>{t('settings.claude.descBold2')}</b>{t('settings.claude.descSuffix')}
           </p>
         </div>
-        <button className="btn btn-primary" onClick={openCreate}>+ 添加配置</button>
+        <button className="btn btn-primary" onClick={openCreate}>{t('settings.claude.add')}</button>
       </div>
 
       {error && <div className="form-error">{error}</div>}
@@ -186,7 +188,7 @@ export default function SettingsClaude() {
 
       {configs.length === 0 && !loading && (
         <div className="settings-empty">
-          <p>暂无配置。点击「添加配置」开始。</p>
+          <p>{t('settings.claude.empty')}</p>
         </div>
       )}
 
@@ -194,12 +196,12 @@ export default function SettingsClaude() {
         <table className="project-table claude-config-table">
           <thead>
             <tr>
-              <th>名称</th>
-              <th>Base URL</th>
-              <th>Token</th>
-              <th>默认模型</th>
-              <th>币种</th>
-              <th>状态</th>
+              <th>{t('settings.claude.colName')}</th>
+              <th>{t('settings.claude.colBaseUrl')}</th>
+              <th>{t('settings.claude.colToken')}</th>
+              <th>{t('settings.claude.colDefaultModel')}</th>
+              <th>{t('settings.claude.colCurrency')}</th>
+              <th>{t('settings.claude.colStatus')}</th>
               <th></th>
             </tr>
           </thead>
@@ -210,12 +212,12 @@ export default function SettingsClaude() {
                 <td className="path-cell">{c.base_url || '—'}</td>
                 <td>
                   {c.auth_token_set
-                    ? <span className="claude-token-preview">已设置（{c.auth_token_preview || '****'}）</span>
-                    : <span className="claude-token-unset">未设置</span>}
+                    ? <span className="claude-token-preview">{t('settings.claude.tokenSet', { preview: c.auth_token_preview || '****' })}</span>
+                    : <span className="claude-token-unset">{t('settings.claude.tokenUnset')}</span>}
                 </td>
-                <td>{c.default_model || <span className="claude-token-unset">CLI 默认</span>}</td>
+                <td>{c.default_model || <span className="claude-token-unset">{t('settings.claude.cliDefault')}</span>}</td>
                 <td>{c.currency || '—'}</td>
-                <td>{c.is_active && <span className="claude-active-badge">当前生效</span>}</td>
+                <td>{c.is_active && <span className="claude-active-badge">{t('settings.claude.activeBadge')}</span>}</td>
                 <td className="claude-row-actions">
                   {!c.is_active && (
                     <button
@@ -223,19 +225,19 @@ export default function SettingsClaude() {
                       onClick={() => handleActivate(c)}
                       disabled={!!busyId}
                     >
-                      {busyId === c.id ? '切换中...' : '设为生效'}
+                      {busyId === c.id ? t('settings.claude.activating') : t('settings.claude.activate')}
                     </button>
                   )}
                   <button className="btn btn-sm btn-secondary" onClick={() => openEdit(c)} disabled={!!busyId}>
-                    编辑
+                    {t('settings.claude.edit')}
                   </button>
                   <button
                     className="btn-link btn-danger-link"
                     onClick={() => handleDelete(c)}
                     disabled={!!busyId || c.is_active}
-                    title={c.is_active ? '不能删除当前生效的配置' : ''}
+                    title={c.is_active ? t('settings.claude.cannotDeleteActive') : ''}
                   >
-                    {busyId === c.id ? '删除中...' : '删除'}
+                    {busyId === c.id ? t('settings.claude.deleting') : t('settings.claude.delete')}
                   </button>
                 </td>
               </tr>
@@ -247,53 +249,53 @@ export default function SettingsClaude() {
       {showModal && (
         <div className="modal-overlay" onClick={() => setShowModal(false)}>
           <div className="modal-box claude-config-modal" onClick={e => e.stopPropagation()}>
-            <h3 className="modal-title">{editingId ? '编辑配置' : '添加配置'}</h3>
+            <h3>{editingId ? t('settings.claude.modal.editTitle') : t('settings.claude.modal.createTitle')}</h3>
 
             {error && <div className="form-error">{error}</div>}
 
             <div className="form-group">
-              <label>名称</label>
+              <label>{t('settings.claude.modal.nameLabel')}</label>
               <input
                 className="form-input"
-                placeholder="如：官方 API / 自建网关 / 代理"
+                placeholder={t('settings.claude.modal.namePlaceholder')}
                 value={form.name}
                 onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
               />
             </div>
 
             <div className="form-group">
-              <label>ANTHROPIC_BASE_URL</label>
+              <label>{t('settings.claude.modal.baseUrlLabel')}</label>
               <input
                 className="form-input"
                 type="text"
-                placeholder="如 https://api.anthropic.com（留空使用默认）"
+                placeholder={t('settings.claude.modal.baseUrlPlaceholder')}
                 value={form.base_url}
                 onChange={e => setForm(f => ({ ...f, base_url: e.target.value }))}
                 autoComplete="off"
               />
-              <small className="form-hint">指向自建/第三方 Anthropic 兼容网关时填写。</small>
+              <small className="form-hint">{t('settings.claude.modal.baseUrlHint')}</small>
             </div>
 
             <div className="form-group">
-              <label>ANTHROPIC_AUTH_TOKEN</label>
+              <label>{t('settings.claude.modal.tokenLabel')}</label>
               <input
                 className="form-input"
                 type="password"
-                placeholder={editingId ? '留空保持不变' : '输入 Auth Token（可选）'}
+                placeholder={editingId ? t('settings.claude.modal.tokenPlaceholderEdit') : t('settings.claude.modal.tokenPlaceholderNew')}
                 value={form.auth_token}
                 onChange={e => setForm(f => ({ ...f, auth_token: e.target.value }))}
                 autoComplete="off"
               />
-              <small className="form-hint">留空保存时不会修改已存在的 Token。</small>
+              <small className="form-hint">{t('settings.claude.modal.tokenHint')}</small>
             </div>
 
             <div className="form-group">
-              <label>模型列表（单价：¥ 或 $ / 百万 tokens）</label>
+              <label>{t('settings.claude.modal.modelsLabel')}</label>
               {form.models.map((m, idx) => (
                 <div className="model-price-row" key={`${m.model}-${idx}`}>
                   <input
                     className="form-input model-name-input"
-                    placeholder="模型名，如 claude-sonnet-4-5"
+                    placeholder={t('settings.claude.modal.modelNamePlaceholder')}
                     value={m.model}
                     onChange={e => updateModel(idx, { ...m, model: e.target.value })}
                   />
@@ -302,7 +304,7 @@ export default function SettingsClaude() {
                     type="number"
                     min="0"
                     step="0.01"
-                    placeholder="输入价"
+                    placeholder={t('settings.claude.modal.inputPricePlaceholder')}
                     value={m.input_price}
                     onChange={e => updateModel(idx, { ...m, input_price: Number(e.target.value) || 0 })}
                   />
@@ -311,7 +313,7 @@ export default function SettingsClaude() {
                     type="number"
                     min="0"
                     step="0.01"
-                    placeholder="输出价"
+                    placeholder={t('settings.claude.modal.outputPricePlaceholder')}
                     value={m.output_price}
                     onChange={e => updateModel(idx, { ...m, output_price: Number(e.target.value) || 0 })}
                   />
@@ -319,55 +321,52 @@ export default function SettingsClaude() {
                 </div>
               ))}
               {form.models.length === 0 && (
-                <div className="claude-token-unset" style={{ margin: '4px 0 8px' }}>尚未添加模型</div>
+                <div className="claude-token-unset" style={{ margin: '4px 0 8px' }}>{t('settings.claude.modal.noModels')}</div>
               )}
               <div className="model-input-row">
                 <input
                   className="form-input"
-                  placeholder="输入模型名，如 claude-sonnet-4-5"
+                  placeholder={t('settings.claude.modal.modelInputPlaceholder')}
                   value={modelInput}
                   onChange={e => setModelInput(e.target.value)}
                   onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addModel(); } }}
                 />
-                <button type="button" className="btn btn-secondary" onClick={addModel}>添加</button>
+                <button type="button" className="btn btn-secondary" onClick={addModel}>{t('settings.claude.modal.addModel')}</button>
               </div>
-              <small className="form-hint">
-                该配置可用的模型（角色将从这里下拉选择）；单价留 0 表示该模型不参与成本核算，
-                成本按「每百万 tokens」计算，改价后历史用量立即按新价重算。
-              </small>
+              <small className="form-hint">{t('settings.claude.modal.modelsHint')}</small>
             </div>
 
             <div className="form-group">
-              <label>计价币种</label>
+              <label>{t('settings.claude.modal.currencyLabel')}</label>
               <select
                 className="form-input"
                 value={form.currency}
                 onChange={e => setForm(f => ({ ...f, currency: e.target.value }))}
               >
-                <option value="">未设置</option>
-                <option value="CNY">CNY（人民币 ¥）</option>
-                <option value="USD">USD（美元 $）</option>
+                <option value="">{t('settings.claude.modal.currencyUnset')}</option>
+                <option value="CNY">{t('settings.claude.modal.currencyCNY')}</option>
+                <option value="USD">{t('settings.claude.modal.currencyUSD')}</option>
               </select>
-              <small className="form-hint">不同平台（配置）的价格与币种可能不同，成本统计按币种分组展示。</small>
+              <small className="form-hint">{t('settings.claude.modal.currencyHint')}</small>
             </div>
 
             <div className="form-group">
-              <label>默认模型</label>
+              <label>{t('settings.claude.modal.defaultModelLabel')}</label>
               <select
                 className="form-input"
                 value={form.default_model}
                 onChange={e => setForm(f => ({ ...f, default_model: e.target.value }))}
               >
-                <option value="">不指定（CLI 默认）</option>
+                <option value="">{t('settings.claude.modal.defaultModelUnspecified')}</option>
                 {form.models.map(m => <option key={m.model} value={m.model}>{m.model}</option>)}
               </select>
-              <small className="form-hint">切换为生效配置时，所有角色的模型会重置为此项。</small>
+              <small className="form-hint">{t('settings.claude.modal.defaultModelHint')}</small>
             </div>
 
             <div className="form-actions stack-mobile">
-              <button className="btn btn-secondary" onClick={() => setShowModal(false)}>取消</button>
+              <button className="btn btn-secondary" onClick={() => setShowModal(false)}>{t('settings.claude.modal.cancel')}</button>
               <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-                {saving ? '保存中...' : '💾 保存'}
+                {saving ? t('settings.claude.modal.saving') : t('settings.claude.modal.save')}
               </button>
             </div>
           </div>

@@ -17,7 +17,7 @@ func NewRoleService(db *db.DB) *RoleService { return &RoleService{db: db} }
 // roleColumns is the SELECT column list for roles, with `key` quoted for the
 // active dialect (reserved word in MySQL).
 func (s *RoleService) roleColumns() string {
-	return "id, " + s.db.Ident("key") + ", name, description, system_prompt, model, sort_order, enabled, created_at, updated_at"
+	return "id, " + s.db.Ident("key") + ", name, description, system_prompt, model, claude_config_id, sort_order, enabled, created_at, updated_at"
 }
 
 // SeedDefaults inserts any built-in role whose key is not yet present.
@@ -42,11 +42,14 @@ func (s *RoleService) SeedDefaults() error {
 		if count > 0 {
 			continue
 		}
+		// claude_config_id is left empty so a freshly-seeded role inherits the
+		// global active config (matches pre-binding behavior). The user can
+		// attach a specific config from Settings → Roles.
 		if _, err := s.db.Exec(
 			`INSERT INTO roles
 			(`+s.roleColumns()+`)
-			VALUES (?,?,?,?,?,?,?,?,?,?)`,
-			r.ID, r.Key, r.Name, r.Description, r.SystemPrompt, r.Model, r.SortOrder, r.Enabled, now, now,
+			VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			r.ID, r.Key, r.Name, r.Description, r.SystemPrompt, r.Model, r.ClaudeConfigID, r.SortOrder, r.Enabled, now, now,
 		); err != nil {
 			return fmt.Errorf("seed role %s: %w", r.Key, err)
 		}
@@ -164,6 +167,150 @@ func developerMigratedPrompt() string {
 	return ""
 }
 
+// executorOldPromptSignature is the substring we look for in the existing
+// executor role's system_prompt to decide whether the row still carries the
+// pre-"直接落地实现" persona (the short "严禁拆任务" version) vs the current
+// "直接落地实现" persona. SeedDefaults already leaves the row alone — but
+// the rewrite is a behavioural change (the new prompt drops the explicit
+// "严禁再拆任务 / 不要输出 [SUBTASKS_READY]" prohibition from the system
+// level and substitutes a fuller engineering checklist), so on upgrade we
+// must rewrite the existing row when it still carries the old persona.
+//
+// The substring is intentionally a stable, distinctive phrase from the
+// original executor prompt — not just "executor" or a generic marker —
+// so a user who has genuinely customized the prompt is NOT clobbered.
+// If the substring is absent (because the user already customized, OR
+// because a previous release already migrated them), we skip.
+const executorOldPromptSignature = "不要再做任务拆分"
+
+// executorNewPromptSignature is the substring that uniquely identifies the
+// current "直接落地实现" persona. Used by MigrateExecutorRole to short-circuit
+// when the row already carries the new persona (so the migration is safe to
+// call on every boot without re-applying).
+const executorNewPromptSignature = "前置调研"
+
+// MigrateExecutorRole brings the executor role's built-in system_prompt
+// forward to the "直接落地实现" persona for databases whose executor role
+// still carries the legacy "严禁拆任务" prompt. Idempotent:
+//   - row missing (fresh DB): no-op, SeedDefaults already inserted the new prompt
+//   - row present + old signature: UPDATE system_prompt to the new default,
+//     leave name / model / claude_config_id / enabled untouched
+//   - row present + new signature: no-op (already migrated)
+//   - row present + neither signature: user customized; we can't tell old vs
+//     custom, so NO-OP. The user can hit the settings page → role → Reset to
+//     pick up the new built-in.
+//
+// Returns (migrated bool, err) so callers can log "executor role upgraded"
+// at startup without doing the substring scan themselves.
+func (s *RoleService) MigrateExecutorRole() (bool, error) {
+	r, err := s.GetByKey("executor")
+	if err != nil {
+		// No row yet — SeedDefaults handles the fresh-DB path; nothing to migrate.
+		return false, nil
+	}
+	prompt := r.SystemPrompt
+	if strings.Contains(prompt, executorNewPromptSignature) {
+		return false, nil
+	}
+	if !strings.Contains(prompt, executorOldPromptSignature) {
+		// User-customized prompt that we don't recognize; leave it alone so the
+		// user can keep their wording. The settings UI's reset button is the
+		// supported way to opt into the new built-in.
+		return false, nil
+	}
+	newPrompt := executorMigratedPrompt()
+	if _, err := s.db.Exec("UPDATE roles SET system_prompt=?, updated_at=? WHERE id=?",
+		newPrompt, time.Now(), r.ID); err != nil {
+		return false, fmt.Errorf("migrate executor role: %w", err)
+	}
+	return true, nil
+}
+
+// executorMigratedPrompt returns the current "直接落地实现" system_prompt
+// for the executor role. Pulled out so MigrateExecutorRole + Reset can call
+// the same source — adding more lines in the future keeps them in sync
+// without a second copy-paste.
+func executorMigratedPrompt() string {
+	for _, d := range DefaultRoles() {
+		if d.Key == "executor" {
+			return d.SystemPrompt
+		}
+	}
+	return ""
+}
+
+// architectOldPromptSignature is the substring we look for in the existing
+// architect role's system_prompt to decide whether the row still carries the
+// pre-模板化 persona (the old short "涵盖：整体实现思路、涉及文件…" version)
+// vs the current template-driven "需求/项目上下文/输出要求/工作方式约束"
+// persona. SeedDefaults already leaves the row alone — but the rewrite is a
+// behavioural change (the new prompt enforces a structured 6-section output
+// + 7 working-style rules that the old one didn't), so on upgrade we must
+// rewrite the existing row when it still carries the old persona.
+//
+// The substring is intentionally a stable, distinctive phrase from the
+// original architect prompt — not just "architect" or a generic marker —
+// so a user who has genuinely customized the prompt is NOT clobbered.
+// If the substring is absent (because the user already customized, OR
+// because a previous release already migrated them), we skip.
+const architectOldPromptSignature = "涵盖：整体实现思路、涉及文件"
+
+// architectNewPromptSignature is the substring that uniquely identifies the
+// current template-driven persona. Used by MigrateArchitectRole to
+// short-circuit when the row already carries the new persona (so the
+// migration is safe to call on every boot without re-applying).
+const architectNewPromptSignature = "需求理解复述"
+
+// MigrateArchitectRole brings the architect role's built-in system_prompt
+// forward to the template-driven persona for databases whose architect role
+// still carries the legacy "涵盖：整体实现思路…" prompt. Idempotent:
+//   - row missing (fresh DB): no-op, SeedDefaults already inserted the new prompt
+//   - row present + old signature: UPDATE system_prompt to the new default,
+//     leave name / model / claude_config_id / enabled untouched
+//   - row present + new signature: no-op (already migrated)
+//   - row present + neither signature: user customized; we can't tell old vs
+//     custom, so NO-OP. The user can hit the settings page → role → Reset to
+//     pick up the new built-in.
+//
+// Returns (migrated bool, err) so callers can log "architect role upgraded"
+// at startup without doing the substring scan themselves.
+func (s *RoleService) MigrateArchitectRole() (bool, error) {
+	r, err := s.GetByKey("architect")
+	if err != nil {
+		// No row yet — SeedDefaults handles the fresh-DB path; nothing to migrate.
+		return false, nil
+	}
+	prompt := r.SystemPrompt
+	if strings.Contains(prompt, architectNewPromptSignature) {
+		return false, nil
+	}
+	if !strings.Contains(prompt, architectOldPromptSignature) {
+		// User-customized prompt that we don't recognize; leave it alone so the
+		// user can keep their wording. The settings UI's reset button is the
+		// supported way to opt into the new built-in.
+		return false, nil
+	}
+	newPrompt := architectMigratedPrompt()
+	if _, err := s.db.Exec("UPDATE roles SET system_prompt=?, updated_at=? WHERE id=?",
+		newPrompt, time.Now(), r.ID); err != nil {
+		return false, fmt.Errorf("migrate architect role: %w", err)
+	}
+	return true, nil
+}
+
+// architectMigratedPrompt returns the current template-driven system_prompt
+// for the architect role. Pulled out so MigrateArchitectRole + Reset can
+// call the same source — adding more lines in the future keeps them in
+// sync without a second copy-paste.
+func architectMigratedPrompt() string {
+	for _, d := range DefaultRoles() {
+		if d.Key == "architect" {
+			return d.SystemPrompt
+		}
+	}
+	return ""
+}
+
 func (s *RoleService) List() ([]model.Role, error) {
 	rows, err := s.db.Query("SELECT " + s.roleColumns() + " FROM roles ORDER BY sort_order ASC, " + s.db.Ident("key") + " ASC")
 	if err != nil {
@@ -174,7 +321,7 @@ func (s *RoleService) List() ([]model.Role, error) {
 	var roles []model.Role
 	for rows.Next() {
 		var r model.Role
-		if err := rows.Scan(&r.ID, &r.Key, &r.Name, &r.Description, &r.SystemPrompt, &r.Model, &r.SortOrder, &r.Enabled, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Key, &r.Name, &r.Description, &r.SystemPrompt, &r.Model, &r.ClaudeConfigID, &r.SortOrder, &r.Enabled, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
 		roles = append(roles, r)
@@ -188,7 +335,7 @@ func (s *RoleService) List() ([]model.Role, error) {
 func (s *RoleService) Get(id string) (*model.Role, error) {
 	var r model.Role
 	err := s.db.QueryRow("SELECT "+s.roleColumns()+" FROM roles WHERE id = ?", id).
-		Scan(&r.ID, &r.Key, &r.Name, &r.Description, &r.SystemPrompt, &r.Model, &r.SortOrder, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
+		Scan(&r.ID, &r.Key, &r.Name, &r.Description, &r.SystemPrompt, &r.Model, &r.ClaudeConfigID, &r.SortOrder, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("role not found")
 	}
@@ -203,7 +350,7 @@ func (s *RoleService) Get(id string) (*model.Role, error) {
 func (s *RoleService) GetByKey(key string) (*model.Role, error) {
 	var r model.Role
 	err := s.db.QueryRow("SELECT "+s.roleColumns()+" FROM roles WHERE "+s.db.Ident("key")+" = ?", key).
-		Scan(&r.ID, &r.Key, &r.Name, &r.Description, &r.SystemPrompt, &r.Model, &r.SortOrder, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
+		Scan(&r.ID, &r.Key, &r.Name, &r.Description, &r.SystemPrompt, &r.Model, &r.ClaudeConfigID, &r.SortOrder, &r.Enabled, &r.CreatedAt, &r.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("role not found: %s", key)
 	}
@@ -214,7 +361,14 @@ func (s *RoleService) GetByKey(key string) (*model.Role, error) {
 }
 
 func (s *RoleService) Update(id string, req model.UpdateRoleReq) (*model.Role, error) {
-	if _, err := s.db.Exec("UPDATE roles SET system_prompt=?, model=?, updated_at=? WHERE id=?", req.SystemPrompt, req.Model, time.Now(), id); err != nil {
+	// claude_config_id is intentionally always written (including as the
+	// empty string), so a user can "unbind" by saving with no config
+	// selected. The previous single-active-config behavior is preserved
+	// because empty falls through to the global active config.
+	if _, err := s.db.Exec(
+		"UPDATE roles SET system_prompt=?, model=?, claude_config_id=?, updated_at=? WHERE id=?",
+		req.SystemPrompt, req.Model, req.ClaudeConfigID, time.Now(), id,
+	); err != nil {
 		return nil, err
 	}
 	return s.Get(id)

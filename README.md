@@ -17,8 +17,11 @@ NovaWorkbench 把"本地代码仓库 + AI 协作"装进一个单二进制应用�
 - [背景：解决什么问题](#背景解决什么问题)
 - [核心功能](#核心功能)
 - [技术架构](#技术架构)
+- [下载预编译二进制](#下载预编译二进制)
 - [快速启动](#快速启动)
 - [使用指南](#使用指南)
+  - [5. 设置 Claude / 角色 / 数据库](#5-设置-claude--角色--数据库)
+  - [6. 配置 Agent 服务器](#6-配置-agent-服务器)
 - [配置说明](#配置说明)
 - [开发](#开发)
 - [部署](#部署)
@@ -106,6 +109,12 @@ NovaWorkbench 把"本地代码仓库 + AI 协作"装进一个单二进制应用�
 - **角色配置**：analyst / architect / developer / reviewer 各自独立的 system prompt + model，可在 UI 修改并 `reset` 回默认值。
 - **数据库切换**：SQLite / MySQL / PostgreSQL 三选一，env 优先 / `dbconfig.json` 兜底；提供一次性迁移工具 `go run ./cmd/server -migrate`。
 
+### 🛰️ Agent 服务器资源
+- **远端执行资源**：把"本机"换成一台或多台 Linux / macOS 远端服务器，Claude CLI 任务在远端运行；需求代码仍由本地数据库统一管理（git worktree 需求隔离、`--resume` 多轮开发）。
+- **凭据 AES-256-GCM 加密存储**：SSH Key / 密码明文经 AES-256-GCM 落盘，API 永不返回密文，master key 在 `~/.novaworkbench/secret.key` (0600)。
+- **环境自动检查与安装**：Check 阶段探测 `claude` / `node` / `npm` / `git`，缺什么自动装什么（Linux 走 apt/yum/dnf/nvm，macOS 走 Homebrew）。
+- **执行选择**：在「开始开发」/「追加调整」/「继续开发」下拉中切换「本地」/「Agent 服务器」，选项每次都生效。
+
 ### 🛠 Preflight & 自安装
 - 启动时探测 `claude` / `node` / `npm` / `git` / `docker`。
 - 缺啥自动装啥（apt / brew / winget），安装过程通过 JobStore + SSE 实时回显。
@@ -145,6 +154,40 @@ NovaWorkbench 把"本地代码仓库 + AI 协作"装进一个单二进制应用�
 - **SSE 全双工流**：所有 AI 长任务（wizard / review / runner / report）都走 `text/event-stream`，前端用 `ReadableStream` 手动解析。
 - **JobStore 共享**：三类后台任务（Wizard coding / Runner / Review）共用一个 `store.NewJobStore(50)`，SSE 形状统一。
 - **三角色 stage-gate**：analyst / architect / developer 各自独立会话（`--resume --fork-session`），状态由用户手动推进，不让 AI 自己宣布完成。
+
+---
+
+## 下载预编译二进制
+
+无需克隆源码编译，直接从 [GitHub Releases](https://github.com/novaworkbench/novaworkbench/releases) 下载与系统匹配的压缩包（每个 `v*` tag 都会由 [Release 流水线](.github/workflows/release.yml) 自动构建）：
+
+| 平台 | 架构 | 文件 |
+|------|------|------|
+| macOS | Apple Silicon (M1/M2/M3) | `novaworkbench-<ver>-darwin-arm64.tar.gz` |
+| macOS | Intel | `novaworkbench-<ver>-darwin-amd64.tar.gz` |
+| Linux | x86_64 | `novaworkbench-<ver>-linux-amd64.tar.gz` |
+| Linux | arm64 | `novaworkbench-<ver>-linux-arm64.tar.gz` |
+| Windows | x86_64 | `novaworkbench-<ver>-windows-amd64.zip` |
+
+压缩包内是单个二进制（前端 UI 已经 `//go:embed` 嵌入），解压后直接运行：
+
+```bash
+# 校验下载完整性（可选）
+sha256sum -c novaworkbench-<ver>-checksums.txt
+
+# macOS / Linux：解压后赋予可执行权限即可运行
+tar -xzf novaworkbench-<ver>-<os>-<arch>.tar.gz
+./novaworkbench-<os>-<arch>             # 监听 :9527，打开 http://localhost:9527/
+
+# Windows：从 zip 解压出 novaworkbench-windows-amd64.exe，双击或
+novaworkbench-windows-amd64.exe
+```
+
+或拉取多架构 Docker 镜像：`docker pull ghcr.io/<owner>/nova:<ver>`（amd64 / arm64 自动匹配）。
+
+> 提示：AI 能力依赖本地 [`claude` CLI](https://www.npmjs.com/package/@anthropic-ai/claude-code)；二进制启动时会自动探测并在缺失时提供安装引导（见设置 → 依赖）。
+>
+> 如何发一个新版本见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 ---
 
@@ -271,6 +314,69 @@ npm run dev
 - **依赖 (Preflight)**：探测并安装 CLI 工具。
 - **Skills**：管理 `.claude/agents/` 中的 skill 文件。
 - **用户 / 角色 / 权限**：完整的 ACL 管理面板。
+
+### 6. 配置 Agent 服务器
+
+Agent 服务器是一台远程 Linux / macOS 主机，作为 Claude CLI 的远端执行资源。所有 Claude 任务仍在平台统一调度（流式输出与本地一致），但 `claude` 子进程跑在 Agent 上，代码改动通过 git 在本地与远端之间同步。
+
+#### 6.1 添加一台 Agent 服务器
+
+1. 进入 **设置 → Agent 服务器** 页（与"平台 Token"同级）。
+2. 点击 **新建**，填写表单：
+   - **名称**（必填）：便于在列表中识别，例如 `prod-mac-01`
+   - **IP**（必填）：Agent 服务器的 hostname 或 IP
+   - **端口**：默认 `22`
+   - **用户名**：默认 `root`，按需改为 `ec2-user` / `ubuntu` 等
+   - **认证方式**：SSH Key（PEM 明文）或密码
+   - **凭据**：粘贴 SSH 私钥全文（含 `BEGIN/END` 行），或输入密码
+3. 点击 **保存**。新服务器状态为 `unknown`。
+5. 点击 **检查环境**：平台 SSH 到目标主机探测 `claude` / `node` / `npm` / `git`，结果以 SSE 流式回显在卡片内。检查通过后状态变为 `ready`。
+6. 若环境不满足，点击 **安装依赖**：按平台自动安装（Linux: apt/yum/dnf + nvm，macOS: Homebrew + node），实时日志显示。
+
+#### 6.2 凭据加密机制
+
+- 凭据字段（`auth_value`）保存到数据库时，使用 **AES-256-GCM**（12 字节随机 nonce，密文 + auth tag 拼接后 base64）加密。
+- **Master key** 首次启动时随机生成在 `~/.novaworkbench/secret.key`（文件权限 0600），由平台进程加载；丢失则旧凭据不可恢复，需重新配置服务器。
+- API 响应中 `auth_value` 字段被 `json:"-"` 屏蔽，UI 只能看到 `auth_value_set: true/false`。
+- 可通过环境变量 `NOVA_SECRET_KEY_PATH` 覆盖 master key 路径（测试场景）。
+
+> macOS 前置提示：若 Agent 服务器是 macOS 且未安装 Homebrew，安装脚本会引导执行 `curl Homebrew install.sh`（5 分钟超时）。若网络受限请先在目标 Mac 上手动安装 Homebrew。
+
+#### 6.3 在需求开发时选择 Agent 服务器执行
+
+进入需求详情 → 推进到 **开始开发** 阶段：
+
+1. **选择执行环境**下拉位于「Model 选择」旁：
+   - **本地执行**（默认）：Claude 在本机跑，与改动前行为完全一致
+   - **Agent 服务器列表**：仅显示 `status === 'ready'` 的服务器（按 `name (host)` 展示）
+2. 选择目标服务器后，点击 **开始开发**。Job 日志将依次出现：
+   - `📥 准备 Agent 服务器工作目录（git worktree 隔离）...`
+   - `📤 同步 Claude 会话历史（SFTP 上行）...`
+   - `🤖 Agent 服务器开始执行...`
+   - 工具调用 / 文本流（与本地一致）
+   - `📥 同步会话结果回本地...`
+   - `📤 推送代码变更到 origin...`
+3. 每次执行都生成远端独立 worktree：`/tmp/nova-agent/<projectID>/<reqID>`，与本地的 `~/.novaworkbench/worktrees/<basename>/<reqID>` 一一对应，**多个需求互不干扰**。
+4. **多轮开发（`adjust-coding` / `continue-coding`）**：`--resume <session_id>` 在远端同样生效——本地 `~/.claude/projects/<slug>/` 会话文件上行同步到远端对应目录，claude CLI 在远端读取 session jsonl；执行后下行同步回本地，形成闭环。
+
+#### 6.4 常见故障
+
+| 现象 | 原因 | 解决 |
+|------|------|------|
+| `SSH 连接失败: ...` | 22 端口未开放 / 防火墙 / 私钥格式错误 | 在 Agent 服务器本地测试 `ssh -i <key> user@host`；确认私钥为 PEM (RSA/ED25519/OpenSSH) 格式 |
+| `项目未配置 git 远程仓库，无法在 Agent 服务器执行` | 项目没有 origin URL | 在 **项目详情** 中配置 Platform Token 与 remote_url，或在本地为项目添加 `git remote add origin ...` |
+| `git push 失败（exit=...），请在远程 worktree 手动处理冲突` | 远端已有同名分支且分叉 | 在 Agent 服务器上 `cd /tmp/nova-agent/<projectID>/<reqID> && git pull origin <branch>` 解决冲突后再试 |
+| `❌ 不支持的平台: Windows...` | Agent 服务器 OS 不是 Linux / macOS | 切换到 Linux/macOS 主机；Windows 暂不支持（无 Bash + sshd 标准环境） |
+| macOS: `curl Homebrew install.sh` 失败 | 网络受限 | 手动在目标 Mac 安装 Homebrew，再重试 **安装依赖** |
+| `环境检查` 后状态仍为 `error` | claude 旧版本缺失 `output-format stream-json` | 重新点击 **安装依赖**；若失败则手动在目标主机执行 `npm install -g @anthropic-ai/claude-code` |
+| `secret.Init 失败 / master key has invalid length` | `~/.novaworkbench/secret.key` 损坏或被替换 | 删除该文件后重启后端（会重新生成）；注意旧凭据会失效，需重新配置服务器 |
+| 切换到「Agent 服务器」执行后本地的需求代码没变化 | 远端 commit 未 push 或 push 失败 | 检查 Job 日志最后是否有 `推送失败`；必要时在 Agent 服务器上手动 `git push origin <branch>`，再在本地 `git pull` |
+
+#### 6.5 安全提示
+
+- **不要**把生产环境的 Agent 服务器与开发 Agent 混用同一份 secret key；建议每个部署用独立 master key。
+- 在多人协作环境，把 `~/.novaworkbench/secret.key` 加入备份策略（与数据库一同备份）。
+- API 仅返回 `auth_value_set` 布尔值与加密算法标识，不返回凭据任何片段；前端无法展示或导出凭据明文。
 
 ---
 
@@ -402,7 +508,7 @@ terraform init
 terraform apply
 ```
 
-CI 工作流：`.github/workflows/deploy.yml`（镜像构建 + 部署）与 `terraform.yml`（plan / apply）。
+CI 工作流：`.github/workflows/deploy.yml`（镜像构建 + 部署）、`.github/workflows/release.yml`（多平台二进制 Release，详见 [docs/RELEASE.md](docs/RELEASE.md)）与 `terraform.yml`（plan / apply）。
 
 ---
 

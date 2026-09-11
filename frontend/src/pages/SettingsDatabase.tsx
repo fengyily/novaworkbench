@@ -1,19 +1,23 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { databaseApi, type DatabaseInfo, type MigrateResult } from '../api/client';
+import { errorMessage } from '../utils/errMsg';
 
+// Driver/source labels are translation KEYS resolved at render time.
 const DRIVER_LABELS: Record<string, string> = {
-  sqlite: 'SQLite（本地文件）',
-  mysql: 'MySQL',
-  postgres: 'PostgreSQL',
+  sqlite: 'settings.database.driver.sqlite',
+  mysql: 'settings.database.driver.mysql',
+  postgres: 'settings.database.driver.postgres',
 };
 
 const SOURCE_LABELS: Record<string, string> = {
-  env: '环境变量（NOVA_DB_DRIVER / NOVA_DB_DSN）',
-  file: '设置页保存（~/.novaworkbench/dbconfig.json）',
-  default: '默认（未配置）',
+  env: 'settings.database.source.env',
+  file: 'settings.database.source.file',
+  default: 'settings.database.source.default',
 };
 
 export default function SettingsDatabase() {
+  const { t } = useTranslation();
   const [loading, setLoading] = useState(true);
   const [info, setInfo] = useState<DatabaseInfo | null>(null);
   const [error, setError] = useState('');
@@ -34,7 +38,7 @@ export default function SettingsDatabase() {
   useEffect(() => {
     databaseApi.get()
       .then(setInfo)
-      .catch(err => setError(err instanceof Error ? err.message : String(err)))
+      .catch(err => setError(errorMessage(err)))
       .finally(() => setLoading(false));
   }, []);
 
@@ -55,9 +59,9 @@ export default function SettingsDatabase() {
     setNotice('');
     try {
       const res = await databaseApi.test(connReq());
-      setNotice(`✅ 连接成功，服务端版本：${res.version}`);
+      setNotice(t('settings.database.testOk', { version: res.version }));
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setTesting(false);
     }
@@ -69,18 +73,18 @@ export default function SettingsDatabase() {
     setNotice('');
     try {
       await databaseApi.save(connReq());
-      setNotice('✅ 配置已保存。重启后端服务后生效。可先在下方执行"从 SQLite 迁移数据"。');
+      setNotice(t('settings.database.saved'));
       const fresh = await databaseApi.get();
       setInfo(fresh);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setSaving(false);
     }
   };
 
   const handleMigrate = async () => {
-    if (!confirm('将把当前 SQLite 数据库的全部数据复制到已配置的目标库（已存在的行会跳过）。继续吗？')) return;
+    if (!confirm(t('settings.database.migrateConfirm'))) return;
     setMigrating(true);
     setError('');
     setNotice('');
@@ -88,43 +92,41 @@ export default function SettingsDatabase() {
     try {
       const res = await databaseApi.migrate();
       setMigrateResult(res);
-      setNotice('✅ 迁移完成。重启后端服务后切换到新数据库。');
+      setNotice(t('settings.database.migrated'));
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setMigrating(false);
     }
   };
 
-  if (loading) return <div className="settings-empty">加载中...</div>;
+  if (loading) return <div className="settings-empty">{t('settings.database.loading')}</div>;
 
   return (
     <div className="settings-section">
       <div className="section-header">
         <div>
-          <h3 className="settings-section-title">数据库</h3>
-          <p className="settings-section-desc">
-            NovaWorkbench 默认使用本地 SQLite 文件，无需任何配置。需要多人共享或集中管理数据时，可切换为 MySQL / PostgreSQL：先在下方测试并保存连接，再把现有数据一键迁移过去，最后重启后端生效。
-          </p>
+          <h3 className="settings-section-title">{t('settings.database.title')}</h3>
+          <p className="settings-section-desc">{t('settings.database.desc')}</p>
         </div>
       </div>
 
       {info && (
         <div className="form-group">
-          <label>当前数据库</label>
+          <label>{t('settings.database.currentLabel')}</label>
           <div className="form-hint" style={{ fontSize: 14, lineHeight: 1.9 }}>
-            <div>驱动：{DRIVER_LABELS[info.driver] || info.driver}</div>
-            <div>来源：{SOURCE_LABELS[info.source] || info.source}</div>
+            <div>{t('settings.database.driverLabel')}{t(DRIVER_LABELS[info.driver]) || info.driver}</div>
+            <div>{t('settings.database.sourceLabel')}{t(SOURCE_LABELS[info.source]) || info.source}</div>
             {info.driver === 'sqlite'
-              ? <div>文件：{info.sqlite_path}</div>
-              : <div>连接：{info.dsn_masked}</div>}
+              ? <div>{t('settings.database.fileLabel')}{info.sqlite_path}</div>
+              : <div>{t('settings.database.connLabel')}{info.dsn_masked}</div>}
           </div>
         </div>
       )}
 
       {envManaged && (
         <div className="form-hint" style={{ marginBottom: 16 }}>
-          当前数据库由环境变量指定，下方表单不可用。如需修改请调整 NOVA_DB_DRIVER / NOVA_DB_DSN 后重启。
+          {t('settings.database.envManaged')}
         </div>
       )}
 
@@ -133,7 +135,7 @@ export default function SettingsDatabase() {
 
       <fieldset disabled={envManaged} style={{ border: 'none', padding: 0, margin: 0 }}>
         <div className="form-group">
-          <label>目标数据库类型</label>
+          <label>{t('settings.database.targetLabel')}</label>
           <select className="form-input" value={driver} onChange={e => setDriver(e.target.value)}>
             <option value="mysql">MySQL</option>
             <option value="postgres">PostgreSQL</option>
@@ -141,13 +143,13 @@ export default function SettingsDatabase() {
         </div>
 
         <div className="form-group">
-          <label>主机 / 端口</label>
+          <label>{t('settings.database.hostPortLabel')}</label>
           <div style={{ display: 'flex', gap: 8 }}>
             <input
               className="form-input"
               style={{ flex: 2 }}
               type="text"
-              placeholder="如 127.0.0.1"
+              placeholder={t('settings.database.hostPlaceholder')}
               value={host}
               onChange={e => setHost(e.target.value)}
               autoComplete="off"
@@ -165,13 +167,13 @@ export default function SettingsDatabase() {
         </div>
 
         <div className="form-group">
-          <label>用户名 / 密码</label>
+          <label>{t('settings.database.userPassLabel')}</label>
           <div style={{ display: 'flex', gap: 8 }}>
             <input
               className="form-input"
               style={{ flex: 1 }}
               type="text"
-              placeholder="用户名"
+              placeholder={t('settings.database.userPlaceholder')}
               value={user}
               onChange={e => setUser(e.target.value)}
               autoComplete="off"
@@ -180,7 +182,7 @@ export default function SettingsDatabase() {
               className="form-input"
               style={{ flex: 1 }}
               type="password"
-              placeholder="密码"
+              placeholder={t('settings.database.passwordPlaceholder')}
               value={password}
               onChange={e => setPassword(e.target.value)}
               autoComplete="new-password"
@@ -189,7 +191,7 @@ export default function SettingsDatabase() {
         </div>
 
         <div className="form-group">
-          <label>数据库名</label>
+          <label>{t('settings.database.dbNameLabel')}</label>
           <input
             className="form-input"
             type="text"
@@ -198,19 +200,19 @@ export default function SettingsDatabase() {
             onChange={e => setDbname(e.target.value)}
             autoComplete="off"
           />
-          <small className="form-hint">数据库需提前创建好（建表由本服务自动完成）。MySQL 建议 utf8mb4 字符集。</small>
+          <small className="form-hint">{t('settings.database.dbNameHint')}</small>
         </div>
 
         <div className="form-actions">
           <button className="btn btn-secondary" onClick={handleTest} disabled={testing || saving || migrating}>
-            {testing ? '测试中...' : '🔌 测试连接'}
+            {testing ? t('settings.database.testing') : t('settings.database.test')}
           </button>
           <button className="btn btn-primary" onClick={handleSave} disabled={testing || saving || migrating}>
-            {saving ? '保存中...' : '💾 保存配置'}
+            {saving ? t('settings.database.saving') : t('settings.database.save')}
           </button>
           {info?.driver === 'sqlite' && (
             <button className="btn btn-secondary" onClick={handleMigrate} disabled={testing || saving || migrating}>
-              {migrating ? '迁移中...' : '🚚 从 SQLite 迁移数据'}
+              {migrating ? t('settings.database.migrating') : t('settings.database.migrate')}
             </button>
           )}
         </div>
@@ -218,13 +220,13 @@ export default function SettingsDatabase() {
 
       {migrateResult && (
         <div className="form-group" style={{ marginTop: 16 }}>
-          <label>迁移结果（目标：{DRIVER_LABELS[migrateResult.target_driver] || migrateResult.target_driver}）</label>
+          <label>{t('settings.database.migrateResultLabel', { target: t(DRIVER_LABELS[migrateResult.target_driver]) || migrateResult.target_driver })}</label>
           <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ textAlign: 'left' }}>
-                <th style={{ padding: '4px 8px' }}>表</th>
-                <th style={{ padding: '4px 8px' }}>已写入</th>
-                <th style={{ padding: '4px 8px' }}>已跳过（已存在）</th>
+                <th style={{ padding: '4px 8px' }}>{t('settings.database.colTable')}</th>
+                <th style={{ padding: '4px 8px' }}>{t('settings.database.colInserted')}</th>
+                <th style={{ padding: '4px 8px' }}>{t('settings.database.colSkipped')}</th>
               </tr>
             </thead>
             <tbody>

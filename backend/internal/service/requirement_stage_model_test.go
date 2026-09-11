@@ -65,7 +65,7 @@ func TestStageModelPersistRoundTrip(t *testing.T) {
 	}
 
 	// List must return the same values (the SELECT column list is shared).
-	list, err := reqSvc.List("proj_1", "", "")
+	list, err := reqSvc.List("proj_1", "", "", "")
 	if err != nil || len(list) != 1 {
 		t.Fatalf("list: %v len=%d", err, len(list))
 	}

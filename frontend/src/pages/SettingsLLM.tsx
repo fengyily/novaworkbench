@@ -1,7 +1,11 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { llmApi } from '../api/client';
+import { errorMessage } from '../utils/errMsg';
+import { fmtTime } from '../utils/intl';
 
 export default function SettingsLLM() {
+  const { t } = useTranslation();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -21,7 +25,7 @@ export default function SettingsLLM() {
         setBaseURL(cfg.base_url || '');
         setModel(cfg.model || '');
       })
-      .catch(err => setError(err instanceof Error ? err.message : String(err)))
+      .catch(err => setError(errorMessage(err)))
       .finally(() => setLoading(false));
   }, []);
 
@@ -39,16 +43,16 @@ export default function SettingsLLM() {
       setKeySet(cfg.api_key_set);
       setKeyPreview(cfg.api_key_preview);
       setApiKey('');
-      setSavedAt(new Date().toLocaleTimeString('zh-CN'));
+      setSavedAt(fmtTime(new Date()));
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setSaving(false);
     }
   };
 
   const handleClearKey = async () => {
-    if (!confirm('确定清除已保存的 API Key 吗？清除后 LLM 通道将不可用，需求标题将回退为内容首行截断。')) return;
+    if (!confirm(t('settings.llm.clearConfirm'))) return;
     setSaving(true);
     setError('');
     try {
@@ -60,84 +64,82 @@ export default function SettingsLLM() {
       setKeySet(cfg.api_key_set);
       setKeyPreview(cfg.api_key_preview);
       setApiKey('');
-      setSavedAt(new Date().toLocaleTimeString('zh-CN'));
+      setSavedAt(fmtTime(new Date()));
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setSaving(false);
     }
   };
 
-  if (loading) return <div className="settings-empty">加载中...</div>;
+  if (loading) return <div className="settings-empty">{t('settings.llm.loading')}</div>;
 
   return (
     <div className="settings-section">
       <div className="section-header">
         <div>
-          <h3 className="settings-section-title">直连 LLM 配置</h3>
-          <p className="settings-section-desc">
-            配置 OpenAI 兼容的直连 LLM 通道（如 DeepSeek）。仅用于需求标题提炼，不经 Claude CLI，响应更快。Base URL 与 API Key 均填写后通道才激活；调用失败时回退为需求内容首行截断，不影响需求创建。
-          </p>
+          <h3 className="settings-section-title">{t('settings.llm.title')}</h3>
+          <p className="settings-section-desc">{t('settings.llm.desc')}</p>
         </div>
       </div>
 
       {error && <div className="form-error">{error}</div>}
 
       <div className="form-group">
-        <label>API Key</label>
+        <label>{t('settings.llm.keyLabel')}</label>
         <input
           className="form-input"
           type="password"
-          placeholder={keySet ? `已设置（${keyPreview}）— 留空保持不变` : '输入 API Key（留空则不修改）'}
+          placeholder={keySet ? t('settings.llm.keyPlaceholderSet', { preview: keyPreview }) : t('settings.llm.keyPlaceholderNew')}
           value={apiKey}
           onChange={e => setApiKey(e.target.value)}
           autoComplete="off"
         />
         <small className="form-hint">
           {keySet
-            ? `当前已保存 Key：${keyPreview}。留空保存只会更新 Base URL 与模型。`
-            : '尚未设置 Key。留空保存不会写入 Key。'}
+            ? t('settings.llm.keyHintSet', { preview: keyPreview })
+            : t('settings.llm.keyHintUnset')}
         </small>
       </div>
 
       <div className="form-group">
-        <label>Base URL</label>
+        <label>{t('settings.llm.baseUrlLabel')}</label>
         <input
           className="form-input"
           type="text"
-          placeholder='如 https://api.deepseek.com/v1'
+          placeholder={t('settings.llm.baseUrlPlaceholder')}
           value={baseURL}
           onChange={e => setBaseURL(e.target.value)}
           autoComplete="off"
         />
         <small className="form-hint">
-          OpenAI 兼容端点前缀。兼容 DeepSeek 官方与自建网关，代码会自动补全 /chat/completions 路径。
+          {t('settings.llm.baseUrlHint')}
         </small>
       </div>
 
       <div className="form-group">
-        <label>模型名</label>
+        <label>{t('settings.llm.modelLabel')}</label>
         <input
           className="form-input"
           type="text"
-          placeholder='如 deepseek-chat'
+          placeholder={t('settings.llm.modelPlaceholder')}
           value={model}
           onChange={e => setModel(e.target.value)}
           autoComplete="off"
         />
         <small className="form-hint">
-          支持 deepseek-chat、gpt-4o-mini 等 OpenAI 兼容模型名。留空时由服务端决定（DeepSeek 官方要求必填）。
+          {t('settings.llm.modelHint')}
         </small>
       </div>
 
       <div className="form-actions stack-mobile">
         <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-          {saving ? '保存中...' : '💾 保存'}
+          {saving ? t('settings.llm.saving') : t('settings.llm.save')}
         </button>
-        {savedAt && !saving && <span className="form-hint">已保存 · {savedAt}</span>}
+        {savedAt && !saving && <span className="form-hint">{t('settings.llm.savedAt', { time: savedAt })}</span>}
         {keySet && (
           <button className="btn btn-secondary" onClick={handleClearKey} disabled={saving}>
-            清除 Key
+            {t('settings.llm.clearKey')}
           </button>
         )}
       </div>

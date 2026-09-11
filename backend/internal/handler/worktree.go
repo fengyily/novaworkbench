@@ -1,11 +1,14 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // ErrNotAGitRepo is returned by EnsureWorktree when the project path is not a
@@ -57,29 +60,112 @@ func worktreeRegistered(projectPath, wtPath string) (bool, error) {
 	return false, nil
 }
 
-// EnsureWorktree creates (or reuses) an isolated git worktree for the
-// requirement on the given branch, based off baseBranch. Returns the worktree's
-// absolute path. Returns ("", nil) when branch is "" (caller wants the legacy
-// path). ErrNotAGitRepo lets the caller fall back without erroring.
+// gitRunWithTimeout is gitRun with an additional context timeout and an
+// arbitrary extra-env slice ("KEY=VALUE" pairs). Used by syncBaseBranch so the
+// `git fetch` call cannot hang on credential prompts (GIT_TERMINAL_PROMPT=0
+// disables interactive auth) and is bounded by ~30s even when the remote is
+// unreachable. Failures return trimmed stderr so the caller can surface them.
+func gitRunWithTimeout(dir string, timeout time.Duration, env []string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	full := append([]string{"-C", dir}, args...)
+	cmd := exec.CommandContext(ctx, "git", full...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
+	if err := cmd.Run(); err != nil {
+		return stdout.String(), fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// syncBaseBranch fetches the project's configured main branch from origin into
+// the project checkout so any worktree created afterwards starts from the
+// latest upstream code. Best-effort by design: no remote / offline / missing
+// ref / fetch failure must never block the wizard. logf may be nil.
 //
-// baseBranch is a hint (typically the project's default branch such as "main"
-// or "master"). We do NOT trust it blindly — git fails with "invalid reference:
-// <base>" when the supplied ref doesn't exist, and the previous code's fallback
-// `git worktree add <path> <branch>` also failed because the branch never got
-// created in that case. The robust strategy:
-//   1. Try `git worktree add -b <branch> <path>` (no base) → branches off
-//      HEAD, which is always a valid commit.
-//   2. Fall back to `git worktree add -b <branch> <path> <baseBranch>` only
-//      if the user explicitly supplied one.
-//   3. Finally try attaching to the existing branch (`worktree add <path>
-//      <branch>`) — covers the case where the branch already exists locally.
-func EnsureWorktree(projectPath, reqID, branch, baseBranch string) (string, error) {
+// Uses GIT_TERMINAL_PROMPT=0 + a 30s timeout on the fetch itself so private
+// repos with missing/unauthorized credentials can't hang the whole Job
+// waiting for an interactive prompt.
+func syncBaseBranch(projectPath, baseBranch string, logf func(string)) {
+	if projectPath == "" || baseBranch == "" {
+		return
+	}
+	if _, err := gitRun(projectPath, "rev-parse", "--is-inside-work-tree"); err != nil {
+		return
+	}
+	if _, err := gitRun(projectPath, "remote", "get-url", "origin"); err != nil {
+		if logf != nil {
+			logf("ℹ️ 项目未配置 origin 远程，跳过主分支同步")
+		}
+		return
+	}
+	// Do NOT use the refspec form (<base>:<base>) — git refuses to update a
+	// branch that is currently checked out in the project dir or in any
+	// worktree. Plain fetch only moves origin/<base>, which is what we branch
+	// off of, and never touches the working tree.
+	out, err := gitRunWithTimeout(projectPath, 30*time.Second,
+		[]string{"GIT_TERMINAL_PROMPT=0"}, "fetch", "origin", baseBranch)
+	if err != nil {
+		if logf != nil {
+			logf("ℹ️ 主分支同步跳过（fetch 失败）: " + truncateStr(out, 300))
+		}
+		return
+	}
+	if logf != nil {
+		logf("🔄 已同步 origin/" + baseBranch)
+	}
+}
+
+// resolveStartRef returns the ref a fresh requirement branch should be created
+// from, preferring the freshly-fetched remote-tracking ref. Returns "" when no
+// candidate exists — the caller then falls back to its legacy off-HEAD
+// strategy so behaviour on a repo without origin/<base> is unchanged.
+func resolveStartRef(projectPath, baseBranch string) string {
+	if baseBranch == "" {
+		return ""
+	}
+	if _, err := gitRun(projectPath, "rev-parse", "--verify", "--quiet", "origin/"+baseBranch); err == nil {
+		return "origin/" + baseBranch
+	}
+	if _, err := gitRun(projectPath, "rev-parse", "--verify", "--quiet", baseBranch); err == nil {
+		return baseBranch
+	}
+	return ""
+}
+
+// EnsureWorktreeLogged is the log-echoing variant of EnsureWorktree. See
+// EnsureWorktree for the high-level contract; the differences are:
+//
+//  1. Before anything else, syncBaseBranch fetches the project's main branch
+//     from origin into the project checkout so the new worktree starts from
+//     upstream HEAD (not the project's possibly stale local HEAD). Best-effort:
+//     missing remote / offline / fetch failure is logged via logf and ignored.
+//  2. resolveStartRef picks the best start ref (origin/<baseBranch> if present,
+//     else <baseBranch>). The new-worktree strategy order uses this ref as
+//     strategy 1' (was previously off HEAD), so a freshly-fetched upstream
+//     becomes the requirement branch's base. Strategies 2 (off HEAD) and 3
+//     (attach existing branch) are preserved unchanged for repos without a
+//     remote or where the base ref doesn't exist.
+//  3. Reusing an existing worktree tries a best-effort `merge --ff-only
+//     <startRef>` after checking out the target branch. Failure is logged and
+//     the worktree is returned unchanged — local commits are NEVER discarded
+//     by this function (no --force, no reset --hard).
+//
+// logf may be nil; when non-nil it receives one-line Chinese hints that should
+// be surfaced to the user (typically wired to job.Append(store.LogLine{...})).
+func EnsureWorktreeLogged(projectPath, reqID, branch, baseBranch string, logf func(string)) (string, error) {
 	if branch == "" {
 		return "", nil
 	}
 	if _, err := gitRun(projectPath, "rev-parse", "--is-inside-work-tree"); err != nil {
 		return "", ErrNotAGitRepo
 	}
+	syncBaseBranch(projectPath, baseBranch, logf)
+	startRef := resolveStartRef(projectPath, baseBranch)
 	wtPath := WorktreePath(projectPath, reqID)
 
 	// Already registered → reuse it, ensuring the right branch is checked out.
@@ -89,6 +175,20 @@ func EnsureWorktree(projectPath, reqID, branch, baseBranch string) (string, erro
 				return "", fmt.Errorf("checkout %s in worktree: %w", branch, err)
 			}
 		}
+		// Best-effort fast-forward from the freshly-fetched main ref. startRef
+		// may be "" (no remote / no base) — in that case there is nothing to
+		// merge and we simply return the reused worktree as-is. On divergence
+		// (local commits / dirty tree / fork) we log a hint and keep the
+		// user's work intact; never --force / reset --hard here.
+		if startRef != "" {
+			if _, mErr := gitRun(wtPath, "merge", "--ff-only", startRef); mErr == nil {
+				if logf != nil {
+					logf("⬆️ 已从 " + startRef + " 更新")
+				}
+			} else if logf != nil {
+				logf("ℹ️ 已有改动，无法从主分支快进更新，继续在当前分支工作")
+			}
+		}
 		return wtPath, nil
 	}
 
@@ -96,6 +196,23 @@ func EnsureWorktree(projectPath, reqID, branch, baseBranch string) (string, erro
 	// manually copied) would block `git worktree add` — remove it first.
 	if _, err := os.Stat(wtPath); err == nil {
 		_ = os.RemoveAll(wtPath)
+	}
+
+	// 1'. Prefer branching off the freshly-fetched upstream ref. This is the
+	//      core fix for the "stale local HEAD" symptom: a fresh requirement
+	//      now starts from origin/<baseBranch>, not from the project's local
+	//      HEAD. startRef may be "" when no remote was configured / fetch
+	//      failed / base ref doesn't exist; in that case we fall through to
+	//      the legacy strategies below.
+	if startRef != "" {
+		if out, err := gitRun(projectPath, "worktree", "add", "-b", branch, wtPath, startRef); err == nil {
+			return wtPath, nil
+		} else if !strings.Contains(out, "already exists") {
+			if out != "" {
+				return "", fmt.Errorf("git worktree add (%s): %s", startRef, out)
+			}
+			return "", fmt.Errorf("git worktree add (%s): %w", startRef, err)
+		}
 	}
 
 	// 1. Create a new branch off HEAD (always valid). This is the safe default
@@ -141,6 +258,30 @@ func EnsureWorktree(projectPath, reqID, branch, baseBranch string) (string, erro
 		return "", fmt.Errorf("git worktree add: %w", err)
 	}
 	return wtPath, nil
+}
+
+// EnsureWorktree is the log-less thin wrapper that all legacy callers use.
+// New code should prefer EnsureWorktreeLogged so the user sees the sync lines
+// in the Job panel. Signature and behaviour are preserved: this is the same
+// function as before, just routed through the new logged variant with a nil
+// logf. The strategy order is:
+//
+//  1'. origin/<baseBranch> if syncBaseBranch + resolveStartRef produced one,
+//      else skip (legacy callers without a remote never had one).
+//  1.  off HEAD (`worktree add -b <branch> <path>`) — always valid.
+//  2.  off baseBranch if the user supplied one and the branch name conflicts.
+//  3.  attach an existing branch (`worktree add <path> <branch>`).
+//
+// baseBranch is a hint (typically the project's default branch such as "main"
+// or "master"). We do NOT trust it blindly — git fails with "invalid reference:
+// <base>" when the supplied ref doesn't exist, and the previous code's fallback
+// `git worktree add <path> <branch>` also failed because the branch never got
+// created in that case.
+//
+// Returns ("", nil) when branch is "" (caller wants the legacy path).
+// ErrNotAGitRepo lets the caller fall back without erroring.
+func EnsureWorktree(projectPath, reqID, branch, baseBranch string) (string, error) {
+	return EnsureWorktreeLogged(projectPath, reqID, branch, baseBranch, nil)
 }
 
 // RemoveWorktree removes a registered worktree (and prunes stale worktree

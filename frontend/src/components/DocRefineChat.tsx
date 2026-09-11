@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { API_BASE, authedFetch, wizardApi } from '../api/client';
+import { useTranslation } from 'react-i18next';
+import { API_BASE, authedFetch, DefaultModelLabel, wizardApi } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, coalesceLogLines, type LogLine, type UsageInfo, computeUsage } from '../utils/logLines';
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
@@ -8,6 +9,7 @@ import AtMentionTextarea from './AtMentionTextarea';
 import { FullscreenButton } from './FullscreenButton';
 import { useFullscreen } from '../utils/useFullscreen';
 import { ContextUsageBar } from './ContextUsageBar';
+import { IconCheck } from './icons';
 
 interface Props {
   reqId: string;
@@ -17,8 +19,9 @@ interface Props {
   // Effective model for this stage's refine/apply turns (server-persisted
   // stage model), used as the dropdown's default selection.
   model?: string;
-  // Actual model that the empty "默认模型" selection resolves to for this stage
-  // (角色模型 > 生效配置默认), shown next to "默认模型" before the stage runs.
+  // Actual model that the empty DefaultModelLabel selection resolves to for
+  // this stage (role default > active config default), shown next to
+  // DefaultModelLabel before the stage runs.
   defaultModel?: string;
   // Active apply-doc JobStore job id (server truth, req.apply_job_id). When
   // set on mount we reconnect to the running apply so a page refresh mid-apply
@@ -27,11 +30,19 @@ interface Props {
   // Refresh the requirement after an apply completes (design_docs was
   // persisted server-side; refresh renders it and clears apply_job_id).
   onTurnDone?: () => void;
+  // Reports the live turn state upward so the detail header can show an
+  // accurate global "Claude working" badge while a refine / apply turn runs.
+  // The persisted apply_job_id is only refreshed after the turn finishes
+  // and the parent has reloaded the requirement, so it lags during the
+  // turn — we mirror the DeepRefineChat.onWorkingChange pattern and let
+  // the parent aggregate "is any turn in flight?" alongside the global
+  // /api/wizard/active-jobs polling.
+  onWorkingChange?: (working: boolean) => void;
   // Controlled context-usage for this stage's session. Parent owns the live
   // state so it can drive the always-on top strip AND seed from the persisted
   // requirements.usage_snapshots blob. The session key is derived from
   // docType (design→architect_design, coding→coding). We report each `usage`
-  // SSE event upward via onUsage and read the value back from `usage`.
+  // SSE event upward via onUsage and read the value back in `usage`.
   usage?: UsageInfo;
   onUsage?: (u: UsageInfo | undefined) => void;
 }
@@ -42,11 +53,17 @@ interface ChatMessage {
   isError?: boolean;
 }
 
-const LABEL = { design: '技术方案', coding: '开发指令' };
+// docLabelKeys maps docType → wizard.docLabels.* (resolved at render via
+// tLabel so the chip / header follow the active language).
+const docLabelKeys: Record<'design' | 'coding', string> = {
+  design: 'wizard.docLabels.design',
+  coding: 'wizard.docLabels.coding',
+};
 
-export default function DocRefineChat({ reqId, projectPath, docType, currentDoc, model, defaultModel, applyJobId, onTurnDone, usage, onUsage }: Props) {
+export default function DocRefineChat({ reqId, projectPath, docType, currentDoc, model, defaultModel, applyJobId, onTurnDone, onWorkingChange, usage, onUsage }: Props) {
   const [expanded, setExpanded] = useState(false);
   const { isFullscreen, toggle: toggleFullscreen, exit: exitFullscreen } = useFullscreen();
+  const { t } = useTranslation();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [working, setWorking] = useState(false);
@@ -72,26 +89,40 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   // Computed once per render; the resulting string is what we send to
   // wizardApi.compressContext / getContextSummary.
   const compressStep = docType === 'design' ? 'architect_design' : 'coding';
-  // Step label shown in the usage bar header (matches the existing LABEL
-  // map's tone but uses the wizard's stage names rather than the doc name).
-  const stepLabel = docType === 'design' ? '架构师设计' : '开发指令';
-  const label = LABEL[docType];
+  // Step label shown in the usage bar header — resolved through tLabel so it
+  // follows the active language.
+  const stepLabel = t(
+    docType === 'design' ? 'wizard.docRefine.stepLabelDesign' : 'wizard.docRefine.stepLabelCoding',
+  );
+  // label: chip / header / apply-button suffix.
+  const label = t(docLabelKeys[docType]);
 
   // Stage model for refine/apply turns. Seeded from the server-persisted
-  // model (default = 已设置模型); a user switch is sent with the next
-  // refine-doc / apply-doc POST and stays local. Disabled while working.
+  // model; a user switch is sent with the next refine-doc / apply-doc POST
+  // and stays local. Disabled while working.
   const [selectedModel, setSelectedModel] = useState('');
   const modelTouchedRef = useRef(false);
   useEffect(() => {
     if (!modelTouchedRef.current) {
       const v = model || '';
-      setSelectedModel(v === '默认模型' ? '' : v);
+      setSelectedModel(v === DefaultModelLabel ? '' : v);
     }
   }, [model]);
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages, applyLines]);
+
+  // Surface turn progress upward so the parent's claudeWorking aggregation
+  // (RequirementDetail's status badge + claude-status row) can pulse
+  // during a refine or apply turn. Mirrors DeepRefineChat's onWorkingChange
+  // effect — apply runs through JobStore (so the global polling also picks
+  // it up via listActiveJobs), but refine-doc streams straight to the
+  // response without entering JobStore, so this callback is the only path
+  // for the parent to know a refine turn is in flight.
+  useEffect(() => {
+    onWorkingChange?.(working || applying);
+  }, [working, applying, onWorkingChange]);
 
   // Reset when the doc changes externally (e.g. after an apply refresh).
   useEffect(() => {
@@ -119,7 +150,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
     });
 
     const reader = res.body?.getReader();
-    if (!reader) throw new Error('No stream');
+    if (!reader) throw new Error(t('wizard.docRefine.noStream'));
     const decoder = new TextDecoder();
     let buffer = '';
     let aiText = '';
@@ -157,11 +188,11 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
             continue;
           }
           if (evt.type === 'phase' || evt.type === 'tool_call') {
-            // Live activity feed — surfaces "🤖 Claude 已连接" and tool labels
-            // during the (often multi-minute) refine turn so the user has
-            // progress feedback instead of just their echo + a static
-            // "思考中…" line. Use the backend-stamped `at` so phase timings
-            // stay accurate; client-side Date.now() as fallback for old data.
+            // Live activity feed — surfaces connection / tool labels during
+            // the (often multi-minute) refine turn so the user has progress
+            // feedback instead of just their echo + a static "thinking"
+            // line. Use the backend-stamped `at` so phase timings stay
+            // accurate; client-side Date.now() as fallback for old data.
             const at = typeof evt.at === 'number' ? evt.at : Date.now();
             setRefineLines(prev => appendLogLine(prev.slice(-80), { type: evt.type, content: evt.content ?? '', at }));
             continue;
@@ -204,7 +235,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
     });
 
     return complete;
-  }, [reqId, projectPath, docType, selectedModel]);
+  }, [reqId, projectPath, docType, selectedModel, compressStep, onUsage, t]);
 
   const handleSend = async () => {
     const msg = input.trim();
@@ -248,12 +279,12 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           esRef.current = null;
           setApplying(false);
           if (evt.status === 'done' || evt.exit_code === 0) {
-            setApplyLines(prev => [...prev, { type: 'phase', content: `✅ ${label}已更新！` }]);
+            setApplyLines(prev => [...prev, { type: 'phase', content: t('wizard.docRefine.applyOk', { label }) }]);
             // design_docs was persisted server-side; refresh renders it and
             // clears apply_job_id (the doc-change reset effect tears down here).
             onTurnDone?.();
           } else {
-            setApplyLines(prev => [...prev, { type: 'error', content: '❌ 应用失败，请重试' }]);
+            setApplyLines(prev => [...prev, { type: 'error', content: t('wizard.docRefine.applyFail') }]);
           }
           return;
         }
@@ -291,7 +322,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         .then(json => {
           if (!json.success) {
             setApplying(false);
-            setApplyLines(prev => [...prev, { type: 'error', content: '⚠️ 任务已丢失（服务可能重启）' }]);
+            setApplyLines(prev => [...prev, { type: 'error', content: t('wizard.docRefine.applyJobLost') }]);
             return;
           }
           const { status, log } = json.data as { status: string; log: { type: string; content: string; at?: number }[] };
@@ -306,7 +337,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         .catch(() => { setApplying(false); });
       },
     );
-  }, [label, onTurnDone]);
+  }, [label, compressStep, onTurnDone, onUsage, t]);
 
   const handleApply = async () => {
     setApplyLines([]);
@@ -325,7 +356,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
       });
       const json = await res.json();
       const jobId = json.data?.job_id;
-      if (!jobId) throw new Error(json.error?.message || '未获取到任务 ID');
+      if (!jobId) throw new Error(json.error?.message || t('wizard.docRefine.noJobId'));
       streamApplyJob(jobId);
     } catch (err: any) {
       setApplying(false);
@@ -335,8 +366,8 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
 
   // Boot fetch of the persisted compression record. Mirrors DeepRefineChat:
   // loads the badge state once on mount and on reqId change so a refresh
-  // surfaces "📦 已压缩" without waiting for the user to click the bar.
-  // The summary text itself is fetched lazily by handleShowSummary.
+  // surfaces the compressed badge without waiting for the user to click the
+  // bar. The summary text itself is fetched lazily by handleShowSummary.
   useEffect(() => {
     if (!reqId) return;
     let cancelled = false;
@@ -355,7 +386,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   // instead of checking a success field.
   const handleCompress = useCallback(async () => {
     if (!reqId || compressing) return;
-    if (!confirm('让 Claude 总结当前对话并压缩上下文？\n\n该操作会清空当前会话 ID,下次对话将看到压缩摘要而不是完整历史。')) return;
+    if (!confirm(t('wizard.docRefine.compressConfirm'))) return;
     setCompressing(true);
     try {
       const data = await wizardApi.compressContext(reqId, compressStep);
@@ -365,22 +396,22 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
       onUsage?.(undefined);
       onTurnDone?.();
     } catch (err: any) {
-      alert('压缩失败:' + (err?.message || String(err)));
+      alert(t('wizard.docRefine.compressFailPrefix') + (err?.message || String(err)));
     } finally {
       setCompressing(false);
     }
-  }, [reqId, compressing, compressStep, onTurnDone]);
+  }, [reqId, compressing, compressStep, onTurnDone, t]);
 
   // Open the summary preview modal. Lazy fetch keeps the boot-time GET small.
   const handleShowSummary = useCallback(async () => {
     if (!reqId) return;
     try {
       const data = await wizardApi.getContextSummary(reqId, compressStep);
-      setSummaryModal(data.summary || '(暂无压缩摘要)');
+      setSummaryModal(data.summary || t('wizard.docRefine.summaryFallback'));
     } catch {
-      setSummaryModal('(加载摘要失败)');
+      setSummaryModal(t('wizard.docRefine.summaryLoadFail'));
     }
-  }, [reqId, compressStep]);
+  }, [reqId, compressStep, t]);
 
   // Boot: reconnect to an in-flight apply job (page refresh mid-apply). The
   // requirement carries apply_job_id (server truth); if the job is still
@@ -412,7 +443,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   useEffect(() => () => { if (esRef.current) { esRef.current.close(); esRef.current = null; } }, []);
 
   const handleClear = () => {
-    if (!confirm('清除对话记录？')) return;
+    if (!confirm(t('wizard.docRefine.clearConfirm'))) return;
     setMessages([]);
     setRefineComplete(false);
     setApplyLines([]);
@@ -423,7 +454,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
     return (
       <div style={{ marginTop: 16 }}>
         <button className="btn btn-sm" onClick={() => setExpanded(true)}>
-          💬 对话微调{label}
+          {t('wizard.docRefine.expandBtn', { label })}
         </button>
       </div>
     );
@@ -432,21 +463,21 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   return (
     <div className="detail-section doc-refine-panel" style={{ marginTop: 16 }}>
       <div className="deep-refine-header">
-        <h3>💬 微调{label}</h3>
+        <h3>{t('wizard.docRefine.header', { label })}</h3>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
           <ModelSelect
             value={selectedModel}
             onChange={m => { modelTouchedRef.current = true; setSelectedModel(m); }}
             disabled={working || applying}
             working={working || applying}
-            label={`${label}模型`}
+            label={t('wizard.docRefine.modelLabel', { label })}
             defaultModelName={defaultModel}
-            title={(working || applying) ? 'Claude 工作中，暂不能切换模型' : `微调${label}使用的模型`}
+            title={(working || applying) ? t('wizard.docRefine.modelTitleBusy') : t('wizard.docRefine.modelTitle', { label })}
           />
           {messages.length > 0 && !working && (
-            <button className="btn btn-sm" onClick={handleClear} title="清除对话">🗑</button>
+            <button className="btn btn-sm" onClick={handleClear} title={t('wizard.docRefine.clearTitle')}>🗑</button>
           )}
-          <button className="btn btn-sm" onClick={() => setExpanded(false)}>收起</button>
+          <button className="btn btn-sm" onClick={() => setExpanded(false)}>{t('wizard.docRefine.collapse')}</button>
           <FullscreenButton isFullscreen={isFullscreen} onClick={toggleFullscreen} />
         </div>
       </div>
@@ -458,19 +489,19 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         {messages.length === 0 && (
           <div className="chat-msg ai">
             <span className="chat-role">🤖 AI</span>
-            <div className="chat-content">告诉我你想修改或补充的内容，我会结合当前{label}给出建议。</div>
+            <div className="chat-content">{t('wizard.docRefine.aiGreeting', { label })}</div>
           </div>
         )}
         {messages.map((msg, i) => (
           <div key={i} className={`chat-msg ${msg.role}${msg.isError ? ' error' : ''}`}>
-            <span className="chat-role">{msg.role === 'ai' ? '🤖 AI' : '👤 你'}</span>
+            <span className="chat-role">{msg.role === 'ai' ? '🤖 AI' : '👤 ' + t('wizard.page.roleUser').replace('👤 ', '')}</span>
             <div className="chat-content" style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
           </div>
         ))}
         {working && (
           <div className="chat-msg ai">
             <span className="chat-role">🤖 AI</span>
-            <div className="chat-content">⏳ 思考中...</div>
+            <div className="chat-content">{t('wizard.docRefine.aiThinking')}</div>
           </div>
         )}
         {refineLines.length > 0 && (
@@ -488,7 +519,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         <CodingPhasesPanel
           lines={applyLines}
           working={applying}
-          trailingHint={applying ? `⏳ 正在更新${label}，预计需要几分钟…` : ''}
+          trailingHint={applying ? t('wizard.docRefine.trailingHint', { label }) : ''}
           style={{ margin: '8px 0', maxHeight: 160 }}
         />
       )}
@@ -500,27 +531,27 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           onKeyDown={e => {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
           }}
-          placeholder={`描述你想修改或补充的内容... 输入 @ 引用 Skill&#10;Enter 发送  ·  Shift+Enter 换行`}
+          placeholder={t('wizard.docRefine.placeholder')}
           className="form-input chat-textarea"
           disabled={working || applying}
           rows={2}
         />
         <button className="btn btn-primary" onClick={handleSend} disabled={working || applying || !input.trim()}>
-          发送
+          {t('wizard.docRefine.send')}
         </button>
       </div>
 
       {refineComplete && !applying && (
         <div className="confirm-panel" style={{ marginTop: 8 }}>
-          <div className="confirm-panel-icon">✅</div>
+          <div className="confirm-panel-icon"><IconCheck size={22} /></div>
           <div className="confirm-panel-body">
-            <strong>修改内容已确认</strong>
-            <p>点击「应用到{label}」，Claude 将把对话中的修改写入文档并保存。</p>
+            <strong>{t('wizard.docRefine.confirmTitle')}</strong>
+            <p>{t('wizard.docRefine.confirmBody', { label })}</p>
             <div className="confirm-panel-actions btn-row-2col">
               <button className="btn btn-primary" onClick={handleApply} disabled={applying}>
-                {applying ? '⏳ 应用中...' : `📝 应用到${label}`}
+                {applying ? t('wizard.docRefine.applyBusy') : t('wizard.docRefine.applyBtn', { label })}
               </button>
-              <button className="btn" onClick={() => setRefineComplete(false)}>继续对话</button>
+              <button className="btn" onClick={() => setRefineComplete(false)}>{t('wizard.docRefine.continueBtn')}</button>
             </div>
           </div>
         </div>
@@ -529,12 +560,12 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
       {!refineComplete && messages.length > 0 && !working && !applying && (
         <div className="deep-refine-actions">
           <button className="btn" onClick={handleApply} disabled={applying}>
-            📝 直接应用修改到{label}
+            {t('wizard.docRefine.applyDirectBtn', { label })}
           </button>
         </div>
       )}
 
-      {/* Live context-usage bar + 压缩上下文 entry point. Sits at the
+      {/* Live context-usage bar + compress-context entry point. Sits at the
           bottom of the chat panel so it stays visible while the user
           scrolls through messages / phase activity. Mirrors DeepRefineChat:
           disabled while a refine or apply turn is running; tap opens
@@ -547,8 +578,9 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         stepLabel={stepLabel}
         compressedAt={compressedAt}
         onShowSummary={handleShowSummary}
-        // 设计阶段不压缩:方案是 plan-mode 一次性产物,微调对话没有压缩价值,
-        // 只保留上下文用量展示。
+        // The design stage is excluded from compression: the design is a
+        // one-shot plan-mode artifact, the refine chat has no compression
+        // value — keep the usage bar but hide the compress button.
         compressible={docType !== 'design'}
       />
 
@@ -556,19 +588,19 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           modal so the visual treatment is consistent across stages. */}
       {summaryModal !== null && (
         <div
-          className="modal-backdrop"
+          className="modal-overlay"
           onClick={() => setSummaryModal(null)}
           role="dialog"
           aria-modal="true"
         >
           <div
-            className="modal"
+            className="modal-box"
             onClick={e => e.stopPropagation()}
             style={{ maxWidth: 640 }}
           >
             <div className="modal-header">
-              <h3>📦 已压缩上下文摘要</h3>
-              <button className="btn btn-sm" onClick={() => setSummaryModal(null)}>关闭</button>
+              <h3>{t('wizard.docRefine.summaryTitle')}</h3>
+              <button className="btn btn-sm" onClick={() => setSummaryModal(null)}>{t('wizard.docRefine.closeBtn')}</button>
             </div>
             <div
               className="modal-body"
@@ -587,7 +619,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
 // phase/tool_call lines into named phases with per-phase and per-tool-call
 // durations, plus a top summary line.
 function CodingPhasesPanel({
-  lines,
+  lines: logLines,
   working,
   trailingHint,
   style,
@@ -597,8 +629,9 @@ function CodingPhasesPanel({
   trailingHint?: string;
   style?: React.CSSProperties;
 }) {
+  const { t } = useTranslation();
   useTick(working);
-  const phases = buildPhaseGroups(lines);
+  const phases = buildPhaseGroups(logLines);
   const firstAt = phases[0]?.startedAt;
   const lastPhase = phases[phases.length - 1];
   const totalMs =
@@ -608,7 +641,7 @@ function CodingPhasesPanel({
   return (
     <div className="coding-panel" style={style ?? { margin: '8px 0', maxHeight: 160 }}>
       <div className="coding-line-summary">
-        工具调用 · {phases.length} 个阶段 · 总计 {formatDuration(totalMs)}
+        {t('wizard.docRefine.toolLogSummary', { n: phases.length, total: formatDuration(totalMs) })}
       </div>
       {phases.map((p, i) => {
         const active = p.isActive && working;

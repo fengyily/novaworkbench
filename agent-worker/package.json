@@ -1,0 +1,17 @@
+{
+  "name": "nova-agent-worker",
+  "version": "0.1.0",
+  "description": "HTTP/NDJSON bridge between NovaWorkbench and the `claude` CLI on a remote Agent host. Replaces earlier @anthropic-ai/claude-agent-sdk-based flow to avoid opaque SDK error wrapping; spawns claude directly and forwards its stream-json output.",
+  "private": true,
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.19.0"
+  }
+}

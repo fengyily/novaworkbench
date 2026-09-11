@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { AuthProvider, useAuth } from './utils/auth';
 import Layout from './components/Layout';
 import Login from './pages/Login';
@@ -12,6 +13,7 @@ import Settings from './pages/Settings';
 import SettingsTokens from './pages/SettingsTokens';
 import SettingsRoles from './pages/SettingsRoles';
 import SettingsClaude from './pages/SettingsClaude';
+import SettingsAgentServers from './pages/SettingsAgentServers';
 import SettingsLLM from './pages/SettingsLLM';
 import SettingsDatabase from './pages/SettingsDatabase';
 import SettingsPreflight from './pages/SettingsPreflight';
@@ -22,17 +24,19 @@ import KnowledgePage from './pages/KnowledgePage';
 import RequirementDetail from './pages/RequirementDetail';
 import WizardPage from './pages/WizardPage';
 import ProjectDetail from './pages/ProjectDetail';
+import SchedulesPage from './pages/SchedulesPage';
 
 // RequireAuth gates the authenticated app: while the session is being
 // restored it shows a minimal loader; once restored with no user it bounces
 // to /login. /login itself is mounted outside this guard.
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
+  const { t } = useTranslation();
   const location = useLocation();
   if (loading) {
     return (
       <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748B' }}>
-        加载中…
+        {t('common.actions.loading')}
       </div>
     );
   }
@@ -56,6 +60,7 @@ export default function App() {
             <Route path="projects/:id" element={<ProjectDetail />} />
             <Route path="requirements" element={<RequirementsList />} />
             <Route path="requirements/:id" element={<RequirementDetail />} />
+            <Route path="schedules" element={<SchedulesPage />} />
             <Route path="knowledge" element={<KnowledgePage />} />
             <Route path="chat" element={<Chat />} />
             <Route path="reports" element={<Reports />} />
@@ -64,6 +69,7 @@ export default function App() {
               <Route path="users" element={<SettingsUsers />} />
               <Route path="acl" element={<SettingsACLRoles />} />
               <Route path="roles" element={<SettingsRoles />} />
+              <Route path="agent-servers" element={<SettingsAgentServers />} />
               <Route path="skills" element={<SettingsSkills />} />
               <Route path="claude" element={<SettingsClaude />} />
               <Route path="llm" element={<SettingsLLM />} />

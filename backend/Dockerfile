@@ -17,6 +17,12 @@ COPY frontend/. .
 RUN npm run build
 
 FROM golang:1.25-alpine AS builder
+# Build identity — injected via -ldflags into internal/version so
+# /api/health reflects the actual release. Defaults keep local builds
+# working with no build args (reported as "dev").
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
 WORKDIR /app
 COPY backend/go.mod backend/go.sum ./
 RUN go mod download
@@ -24,9 +30,19 @@ COPY backend/. .
 # backend/web/embed.go does `//go:embed all:dist`; the placeholder .gitkeep
 # is overwritten by the COPY below so the embed resolves to the real SPA.
 COPY --from=frontend /app/dist ./web/dist/
-RUN CGO_ENABLED=0 go build -o /app/server ./cmd/server
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w \
+      -X github.com/novaworkbench/backend/internal/version.Version=${VERSION} \
+      -X github.com/novaworkbench/backend/internal/version.Commit=${COMMIT} \
+      -X github.com/novaworkbench/backend/internal/version.BuildDate=${BUILD_DATE}" \
+    -o /app/server ./cmd/server
 
 FROM node:22-alpine
+# OCI standard labels — the version label lets `docker inspect` read the
+# release without starting the container.
+ARG VERSION=dev
+LABEL org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.source="https://github.com/novaworkbench/novaworkbench"
 # Run as a non-root user. The Claude CLI refuses
 # `--dangerously-skip-permissions` when uid==0 regardless of any env
 # override, so the server MUST start as an unprivileged user inside the
@@ -38,7 +54,7 @@ FROM node:22-alpine
 # and HOME /home/node — we reuse it instead of creating a new user (which
 # would collide on UID 1000). Host bind-mounts can be chowned to the same
 # number via `chown -R 1000:1000 ~/.novaworkbench`.
-RUN apk add --no-cache git ca-certificates openssh-client su-exec tini bash
+RUN apk add --no-cache git ca-certificates openssh-client su-exec tini bash gnupg
 # tini forwards signals and reaps zombies — Claude spawns subagents that
 # `claude -p` waits on; without tini the bash tool calls can leak zombies.
 #
