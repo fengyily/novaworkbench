@@ -742,7 +742,25 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 	// session. The remote slug is derived deterministically from wtPath.
 	remoteProjectsRoot := "~/.claude/projects/"
 	remoteSlug := util.EncodeClaudeSlug(wtPath)
+	// Resolve "~" NOW, before any consumer sees this string.
+	//
+	// The remote claude CLI runs with cwd == wtPath and therefore stores its
+	// session jsonl under $HOME/.claude/projects/<slug>/. A literal
+	// "~/.claude/projects/<slug>" is NOT interchangeable: Mkdirp builds a
+	// single-quoted `mkdir -p '~/.claude/...'` (the shell does not expand a
+	// tilde inside quotes) and pkg/sftp does not understand "~" either, so
+	// every op below would address a directory literally named "~" — where the
+	// remote CLI never looks. The observable damage is a permanent no-op on
+	// Step 6 ("📥 同步会话结果回本地...") plus a bogus "远端未找到 session
+	// 文件" pre-flight warning on every run. Resolving once here also makes the
+	// path printed in the job log match the path actually used, which is what
+	// the pre-flight check below logs.
 	remoteSlugDir := remoteProjectsRoot + remoteSlug
+	if expanded, eerr := client.ExpandHome(remoteSlugDir); eerr == nil {
+		remoteSlugDir = expanded
+	} else {
+		in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 无法解析远端 $HOME（" + eerr.Error() + "），会话同步可能失效"})
+	}
 	var sessionMissingSide string
 	if in.sourceSID == "" {
 		// No source session to resume → no jsonl to push. The architect
@@ -834,6 +852,17 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 		return claudeStreamOutcome{errMsg: "构造 worker 请求失败: " + reqErr.Error()}, cleanup, nil
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// parseStreamJSONFromReader returns as soon as it sees the `result` event
+	// (see wizard_stream.go), so this response body is routinely left unread.
+	// HTTPTransport uses DisableKeepAlives:false, which means Body.Close()
+	// then DRAINS the remainder — and the worker only calls res.end() once the
+	// child process exits. If a plan-mode claude lingers after emitting
+	// `result`, that drain blocks indefinitely, wedging the run right after
+	// the "📥 同步会话结果回本地..." phase line with no error and no
+	// completion. Connection: close makes net/http take the early-close path
+	// (tear the channel down) instead of draining. Cost is one extra SSH
+	// channel setup per run — negligible against a 5–15 minute plan pass.
+	req.Close = true
 	resp, doErr := httpClient.Do(req)
 	if doErr != nil {
 		return claudeStreamOutcome{errMsg: "POST /v1/run 失败: " + doErr.Error()}, cleanup, nil
@@ -850,13 +879,64 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 
 	// Step 6: session sync (down) — copy any new session jsonl back to local.
 	in.job.Append(store.LogLine{Type: "phase", Content: "📥 同步会话结果回本地..."})
-	if slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow); slugErr == nil && slugDir != "" {
-		if sftpErr := client.SyncDirDownMapped(remoteSlugDir, slugDir); sftpErr != nil {
-			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话下行失败: " + sftpErr.Error()})
-		}
-	}
+	h.syncSessionDownWithTimeout(ctx, client, in, remoteSlugDir)
 
 	return out, cleanup, nil
+}
+
+// syncSessionDownWithTimeout wraps Step 6's local-slug lookup and SFTP
+// download of the remote session directory.
+//
+// Why a timeout: SyncDirDownMapped bottoms out in Client.sftp() ->
+// sftp.NewClient(conn), which takes neither a context nor a timeout and can
+// block indefinitely when the SSH connection is unusable or the server is out
+// of channels. This step sits AFTER the "📥 同步会话结果回本地..." phase line
+// and BEFORE prepareRemoteAgentRun returns, so a block here means the caller
+// never receives an outcome: the job neither errors nor completes and the UI
+// stays pinned to the last phase line forever.
+//
+// Why every path appends a line: success, failure and timeout all emit a
+// message line, so that phase line can never be the last thing the user sees.
+// A stall becomes a visible conclusion instead of a silent hang.
+//
+// Note: the timeout only stops US waiting. Go cannot safely cancel the SFTP
+// call itself, so the worker goroutine may finish its transfer in the
+// background after the timeout has already been reported. That is acceptable
+// here — the download is forward-only and idempotent, so a late-completing
+// transfer just lands the same files.
+func (h *WizardHandler) syncSessionDownWithTimeout(ctx context.Context, client *gossh.Client, in *remoteRunInput, remoteSlugDir string) {
+	done := make(chan string, 1)
+	sctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- "⚠️ 会话下行异常: " + fmt.Sprint(r)
+			}
+		}()
+		slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow)
+		if slugErr != nil || slugDir == "" {
+			// No local slug directory to write into — nothing to sync. This is
+			// the pre-existing "best effort" semantics (see claudeProjectsSlugDir).
+			// It returns immediately rather than blocking, so it cannot pin the
+			// UI on the phase line; emitting nothing keeps the log quiet.
+			done <- ""
+			return
+		}
+		if sftpErr := client.SyncDirDownMapped(remoteSlugDir, slugDir); sftpErr != nil {
+			done <- "⚠️ 会话下行失败: " + sftpErr.Error()
+			return
+		}
+		done <- "✅ 会话结果已同步回本地"
+	}()
+	select {
+	case msg := <-done:
+		if msg != "" {
+			in.job.Append(store.LogLine{Type: "message", Content: msg})
+		}
+	case <-sctx.Done():
+		in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话下行超时（60s），已跳过。远端会话文件仍在，可稍后重试或手工同步。"})
+	}
 }
 
 // runRemoteArchitectDesign is the architect-stage counterpart of
