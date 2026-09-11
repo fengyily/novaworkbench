@@ -25,6 +25,11 @@ import (
 // goroutine hands to runRemoteCoding. Pulling these into a struct keeps the
 // signature readable and forces callers to acknowledge the same dependencies
 // the local branch already resolved (prompt, workDir, session threading).
+//
+// Dev-stage retains this struct because it carries dev-specific fields
+// (startCodingReq + FreshSession) that the architect stage does not need.
+// The shared SSH / worktree / session-sync / worker-call trunk lives in
+// prepareRemoteAgentRun and is fed by remoteRunInput (below).
 type remoteCodingInput struct {
 	job            *store.Job
 	serverID       string
@@ -64,6 +69,58 @@ type startCodingReq struct {
 	Model            string
 	ReadKnowledge    bool
 	AgentServerID    string
+}
+
+// remoteRunInput is the SHARED parameter struct consumed by
+// prepareRemoteAgentRun. It owns every field the Agent-server side of a
+// Claude CLI task needs up to and including the worker invocation + stream
+// parse — SSH dial, git worktree / base repo / branch strategy, session
+// jsonl up-sync, workerRunBody construction, env pinning, health probe,
+// POST /v1/run, NDJSON parse, session jsonl down-sync. Callers (dev coding,
+// architect design) diverge only AFTER this helper returns — commit + push
+// for coding, design_docs write for architect.
+//
+// Field shape is a subset of remoteCodingInput minus dev-only fields
+// (startCodingReq, FreshSession). PermissionMode is the new one: the
+// architect stage runs in plan mode (Claude is read-only + writes its plan
+// to ~/.claude/plans/<slug>.md); the dev stage leaves it empty so the
+// worker falls back to --dangerously-skip-permissions.
+type remoteRunInput struct {
+	job            *store.Job
+	serverID       string
+	reqRow         *model.Requirement
+	prompt         string
+	workDir        string // local worktree path (used only for SFTP upload source)
+	sourceSID      string
+	fork           bool
+	sessionArg     string
+	forkSessionID  string
+	model          string
+	claudeConfigID string
+	usage          *usageCtx
+	// PermissionMode is forwarded to the worker (see workerRunBody).
+	// Empty = worker uses --dangerously-skip-permissions (dev default).
+	// "plan" = worker uses --permission-mode plan (architect default).
+	PermissionMode string
+	// branch is the feature-branch name the helper should check out /
+	// create on the remote worktree. Only meaningful for dev; architect
+	// sets it to "" since the plan-mode run does not need a branch and
+	// git operations on the remote worktree are reduced to the
+	// worktree creation step.
+	branch string
+	// baseBranch lets the architect caller pin the base branch for
+	// git worktree creation; empty falls back to project.DefaultBranch
+	// then "main". Dev callers already resolve this on their side and
+	// pre-populate it.
+	baseBranch string
+}
+
+// remoteArchitectInput is the architect-stage wrapper around remoteRunInput.
+// Defined as a thin named type so future architect-specific knobs (a
+// post-run design_docs write helper, plan-mode-only logs, etc.) have a place
+// to land without growing the shared struct.
+type remoteArchitectInput struct {
+	*remoteRunInput
 }
 
 // RunRemoteCoding exposes runRemoteCoding as a func value for SubTaskRunner.
@@ -405,7 +462,7 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// The pairs come from the SAME settingsEnvOverrides map the local path
 	// serializes into its --settings JSON, so the two surfaces cannot drift.
 	envPairs := h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, in.claudeConfigID)
-	runBody := workerRunRequest(opts, envPairs, in)
+	runBody := workerRunRequest(opts, envPairs)
 
 	// Step 5: POST to nova-agent-worker via SSH direct-tcpip channel. The
 	// HTTPTransport opens one channel per request through the existing SSH
@@ -535,6 +592,377 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	return out
 }
 
+// prepareRemoteAgentRun owns the Agent-server side of a Claude CLI task
+// up to and including the worker invocation + NDJSON stream parse. It is
+// the SHARED trunk between dev coding and architect design — both stages
+// need the same SSH dial, git worktree / base-repo / branch strategy,
+// local-session jsonl SFTP upload, worker POST body, env pinning,
+// health probe, POST /v1/run, and post-run session jsonl download.
+//
+// Callers (runRemoteCoding, runRemoteArchitectDesign) feed it a
+// remoteRunInput and receive (claudeStreamOutcome, cleanup, error). The
+// cleanup function closes the SSH connection established by this helper;
+// callers MUST defer it (a bare `defer client.Close()` inside the helper
+// would tear the connection down before the helper returns the outcome).
+//
+// This helper does NOT perform post-run persistence (commit + push for
+// coding, design_docs write for architect) — those are stage-specific and
+// live in the caller.
+func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamOutcome, func(), error) {
+	if h.agentSvrSvc == nil {
+		return claudeStreamOutcome{errMsg: "Agent 服务器服务未初始化"}, func() {}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Minute)
+	defer cancel()
+
+	// Step 1: load the (decrypted) credential before anything else — a missing
+	// master key surfaces here as a clear error instead of a generic SSH failure.
+	srv, plain, err := h.agentSvrSvc.GetWithCredential(in.serverID)
+	if err != nil {
+		return claudeStreamOutcome{errMsg: "无法读取 Agent 服务器凭据: " + err.Error()}, func() {}, nil
+	}
+	in.job.Append(store.LogLine{Type: "phase", Content: "🔌 连接到 Agent 服务器 " + srv.Name + " (" + srv.Host + ")"})
+
+	client, err := gossh.Dial(ctx, srv.Host, srv.Port, srv.Username, srv.AuthType, plain)
+	if err != nil {
+		return claudeStreamOutcome{errMsg: "SSH 连接失败: " + err.Error()}, func() {}, nil
+	}
+	// Cleanup closes the SSH connection; the helper defers nothing here so
+	// the connection survives long enough for the caller to read the
+	// outcome and run its own post-run logic (commit/push for dev, plan
+	// capture for architect).
+	cleanup := func() { client.Close() }
+
+	// Step 2: code sync via git. baseRepo hosts a single origin clone for the
+	// project; wtPath is the per-requirement worktree that mirrors the local
+	// branch isolation model. Without a remote_url on the project the entire
+	// remote path is dead — fail early with a clear message instead of an
+	// opaque "git clone exit 128".
+	if in.reqRow == nil {
+		return claudeStreamOutcome{errMsg: "远程执行需要已保存的需求记录（缺 Requirement）"}, cleanup, nil
+	}
+	originURL, err := h.projectSvc.OriginURL(in.reqRow.ProjectID)
+	if err != nil || originURL == "" {
+		return claudeStreamOutcome{errMsg: "项目未配置 git 远程仓库，无法在 Agent 服务器执行。请先在项目设置中配置 origin。" + errString(err)}, cleanup, nil
+	}
+	baseRepo := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/base"
+	wtPath := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID
+	// branch defaults to requirement-<id> when the caller did not pin one.
+	// Architect passes "" → falls back to the default (the branch label is
+	// unused for the plan-mode run; git worktree still needs a name to
+	// attach to).
+	branch := in.branch
+	if branch == "" {
+		branch = "requirement-" + in.reqRow.ID
+	}
+	// baseBranch fallback chain: caller-provided baseBranch > project.DefaultBranch
+	// > literal "main". Mirrors the local execStartCoding chain so the remote
+	// worktree is rooted at the same base the local wizard uses.
+	baseBranch := in.baseBranch
+	if baseBranch == "" {
+		if proj, perr := h.projectSvc.Get(in.reqRow.ProjectID); perr == nil && proj != nil && proj.DefaultBranch != "" {
+			baseBranch = proj.DefaultBranch
+		}
+		if baseBranch == "" {
+			baseBranch = "main"
+		}
+	}
+
+	in.job.Append(store.LogLine{Type: "phase", Content: "📥 准备 Agent 服务器代码（git worktree 隔离）..."})
+	if !client.Exists(baseRepo) {
+		in.job.Append(store.LogLine{Type: "message", Content: "📦 首次 clone " + redactOriginForLog(originURL)})
+		if exit, _ := client.Exec(ctx, "git clone "+shellQuoteSingle(originURL)+" "+shellQuoteSingle(baseRepo), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
+			return claudeStreamOutcome{errMsg: "git clone 失败（exit=" + fmtInt(exit) + "），请检查 origin 凭据"}, cleanup, nil
+		}
+	} else {
+		client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin --prune", "", nil, &jobWriter{job: in.job}, nil)
+	}
+	// Always (re)fetch the project's main branch into origin/<baseBranch> so
+	// the worktree strategies below branch off the latest upstream.
+	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin "+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
+	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree prune", "", nil, &jobWriter{job: in.job}, nil)
+
+	if !client.Exists(wtPath) {
+		// Strategy 1: branch off origin/<baseBranch>.
+		exit, _ := client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath)+" origin/"+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
+		if exit != 0 {
+			// Strategy 2: branch off HEAD.
+			exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath), "", nil, &jobWriter{job: in.job}, nil)
+			if exit != 0 {
+				// Strategy 3: attach to an already-existing branch.
+				if exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add "+shellQuoteSingle(wtPath)+" "+shellQuoteSingle(branch), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
+					return claudeStreamOutcome{errMsg: "git worktree 创建失败（exit=" + fmtInt(exit) + "），请检查仓库状态"}, cleanup, nil
+				}
+			}
+		}
+	} else {
+		// adjust / continue reuse path: pull the latest remote commits onto
+		// the existing branch (--ff-only, best-effort).
+		client.Exec(ctx,
+			"cd "+shellQuoteSingle(wtPath)+" && (git checkout "+shellQuoteSingle(branch)+" 2>/dev/null || true) && (git pull --ff-only origin "+shellQuoteSingle(branch)+" 2>&1 || echo \"[nova-agent] pull 跳过（无跟踪或已分叉）\") && (git merge --ff-only origin/"+shellQuoteSingle(baseBranch)+" 2>&1 || echo \"[nova-agent] 主分支快进更新跳过\")",
+			"", nil, &jobWriter{job: in.job}, nil)
+	}
+
+	// Step 2.5: configure git identity + (optionally) GPG signing in the
+	// remote worktree. Failure policy mirrors runRemoteCoding: GPG enabled +
+	// provision fails → abort the run.
+	gitName, gitEmail := lookupGitIdentity(h.projectSvc, h.platformSvc, in.reqRow)
+	gnupgHome := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".gnupg"
+	if project, pErr := h.projectSvc.Get(in.reqRow.ProjectID); pErr == nil && project != nil && project.PlatformTokenID != "" {
+		enabled, _, armored, passphrase, gpgErr := h.platformSvc.GPGSigningMaterial(project.PlatformTokenID)
+		switch {
+		case gpgErr != nil:
+			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 读取 GPG 配置失败：" + gpgErr.Error() + "，按未启用处理"})
+		case enabled && armored != "":
+			in.job.Append(store.LogLine{Type: "phase", Content: "🔐 在 Agent 服务器上配置 GPG 签名..."})
+			keyID, gpgCleanup, provErr := provisionRemoteGPG(ctx, client, in.job, gnupgHome, wtPath, baseRepo, armored, passphrase, gitName, gitEmail)
+			if provErr != nil {
+				if gpgCleanup != nil {
+					gpgCleanup()
+				}
+				return claudeStreamOutcome{errMsg: provErr.Error()}, cleanup, nil
+			}
+			defer gpgCleanup()
+			go func() {
+				<-ctx.Done()
+				gpgCleanup()
+			}()
+			in.job.Append(store.LogLine{Type: "message", Content: "✅ GPG 已就绪（keyid=" + keyID + "）"})
+			_ = h.platformSvc.UpdateGPGKeyID(project.PlatformTokenID, keyID)
+		case enabled:
+			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 已启用 GPG 签名但未保存私钥，本次提交未签名"})
+		}
+	}
+	if idErr := provisionRemoteGitIdentity(ctx, client, in.job, wtPath, baseRepo, gitName, gitEmail); idErr != nil {
+		in.job.Append(store.LogLine{Type: "message", Content: "⚠️ " + idErr.Error()})
+	}
+
+	// Step 3: session sync (up) so the remote claude can --resume the same
+	// session. The remote slug is derived deterministically from wtPath.
+	remoteProjectsRoot := "~/.claude/projects/"
+	remoteSlug := util.EncodeClaudeSlug(wtPath)
+	// Resolve "~" NOW, before any consumer sees this string.
+	//
+	// The remote claude CLI runs with cwd == wtPath and therefore stores its
+	// session jsonl under $HOME/.claude/projects/<slug>/. A literal
+	// "~/.claude/projects/<slug>" is NOT interchangeable: Mkdirp builds a
+	// single-quoted `mkdir -p '~/.claude/...'` (the shell does not expand a
+	// tilde inside quotes) and pkg/sftp does not understand "~" either, so
+	// every op below would address a directory literally named "~" — where the
+	// remote CLI never looks. The observable damage is a permanent no-op on
+	// Step 6 ("📥 同步会话结果回本地...") plus a bogus "远端未找到 session
+	// 文件" pre-flight warning on every run. Resolving once here also makes the
+	// path printed in the job log match the path actually used, which is what
+	// the pre-flight check below logs.
+	remoteSlugDir := remoteProjectsRoot + remoteSlug
+	if expanded, eerr := client.ExpandHome(remoteSlugDir); eerr == nil {
+		remoteSlugDir = expanded
+	} else {
+		in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 无法解析远端 $HOME（" + eerr.Error() + "），会话同步可能失效"})
+	}
+	var sessionMissingSide string
+	if in.sourceSID == "" {
+		// No source session to resume → no jsonl to push. The architect
+		// fresh-session path (skip-analysis) lands here too. Log a
+		// targeted hint so the user can see WHY we skipped the sync.
+		in.job.Append(store.LogLine{Type: "message", Content: "🆕 跳过会话上行：本次无 source session（fresh run）"})
+	} else {
+		in.job.Append(store.LogLine{Type: "phase", Content: "📤 同步 Claude 会话历史（SFTP 上行）..."})
+		slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow)
+		switch {
+		case slugErr != nil:
+			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 无法定位本地 claude session 目录（" + slugErr.Error() + "），将无 resume 启动新会话"})
+			sessionMissingSide = "local"
+		case slugDir == "":
+			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 本地未找到匹配的 claude session 目录（project slug 未缓存），将无 resume 启动新会话"})
+			sessionMissingSide = "local"
+		default:
+			client.Mkdirp(remoteSlugDir)
+			if sftpErr := client.SyncDirUpMapped(slugDir, remoteSlugDir); sftpErr != nil {
+				in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话上行失败（将无 resume 启动新会话）: " + sftpErr.Error()})
+				sessionMissingSide = "sync-failed"
+			} else {
+				// Pre-flight: confirm the jsonl actually landed under the
+				// remote slug dir.
+				remoteSidPath := remoteSlugDir + "/" + in.sourceSID + ".jsonl"
+				exists, statErr := client.RemoteFileExists(remoteSidPath)
+				if statErr != nil {
+					in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 远端 session 文件探测失败（" + statErr.Error() + "），将按「sync-failed」分类"})
+					sessionMissingSide = "sync-failed"
+				} else if !exists {
+					in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 远端未找到 session 文件 " + remoteSidPath + "（上行 0 文件或 slug 不匹配），将按「remote」分类"})
+					sessionMissingSide = "remote"
+				} else {
+					in.job.Append(store.LogLine{Type: "message", Content: "✅ 远端 session 文件就绪: " + remoteSidPath})
+				}
+			}
+		}
+	}
+
+	// Step 4: build the worker POST body.
+	ignoreLocal := true
+	// Rewrite the persona header's workDir to the remote cwd before posting.
+	remotePrompt := rewritePersonaWorkDir(in.prompt, in.workDir, wtPath)
+	opts := llm.StreamOpts{
+		Prompt:                 remotePrompt,
+		WorkDir:                wtPath,
+		SystemPrompt:           "",
+		Model:                  cliModelArg(in.model),
+		ClaudeConfigID:         in.claudeConfigID,
+		SessionID:              in.sessionArg,
+		Resume:                 in.sourceSID != "",
+		Fork:                   in.fork,
+		ForkSessionID:          in.forkSessionID,
+		PermissionMode:         in.PermissionMode,
+		OverrideSettingSources: &ignoreLocal,
+	}
+	envPairs := h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, in.claudeConfigID)
+	runBody := workerRunRequest(opts, envPairs)
+
+	// Step 5: POST to nova-agent-worker via SSH direct-tcpip channel.
+	in.job.Append(store.LogLine{Type: "phase", Content: "🤖 Agent 服务器开始执行（nova-agent-worker）..."})
+
+	workerAddr := "127.0.0.1:7000"
+	httpClient := &http.Client{Transport: client.HTTPTransport(workerAddr)}
+
+	healthCtx, healthCancel := context.WithTimeout(ctx, 10*time.Second)
+	healthReq, hReqErr := http.NewRequestWithContext(healthCtx, http.MethodGet, "http://"+workerAddr+"/v1/health", nil)
+	if hReqErr != nil {
+		healthCancel()
+		return claudeStreamOutcome{errMsg: "构造健康检查请求失败: " + hReqErr.Error()}, cleanup, nil
+	}
+	healthResp, healthErr := httpClient.Do(healthReq)
+	if healthErr != nil {
+		healthCancel()
+		return claudeStreamOutcome{errMsg: "无法连接 nova-agent-worker（" + workerAddr + "）。请在「设置 → Agent 服务器」对该服务器点「安装依赖」后再试。详细: " + healthErr.Error()}, cleanup, nil
+	}
+	healthResp.Body.Close()
+	healthCancel()
+	if healthResp.StatusCode != http.StatusOK {
+		return claudeStreamOutcome{errMsg: fmt.Sprintf("nova-agent-worker 健康检查失败: HTTP %d", healthResp.StatusCode)}, cleanup, nil
+	}
+
+	bodyBytes, mErr := json.Marshal(runBody)
+	if mErr != nil {
+		return claudeStreamOutcome{errMsg: "序列化 worker 请求失败: " + mErr.Error()}, cleanup, nil
+	}
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+workerAddr+"/v1/run", bytes.NewReader(bodyBytes))
+	if reqErr != nil {
+		return claudeStreamOutcome{errMsg: "构造 worker 请求失败: " + reqErr.Error()}, cleanup, nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// parseStreamJSONFromReader returns as soon as it sees the `result` event
+	// (see wizard_stream.go), so this response body is routinely left unread.
+	// HTTPTransport uses DisableKeepAlives:false, which means Body.Close()
+	// then DRAINS the remainder — and the worker only calls res.end() once the
+	// child process exits. If a plan-mode claude lingers after emitting
+	// `result`, that drain blocks indefinitely, wedging the run right after
+	// the "📥 同步会话结果回本地..." phase line with no error and no
+	// completion. Connection: close makes net/http take the early-close path
+	// (tear the channel down) instead of draining. Cost is one extra SSH
+	// channel setup per run — negligible against a 5–15 minute plan pass.
+	req.Close = true
+	resp, doErr := httpClient.Do(req)
+	if doErr != nil {
+		return claudeStreamOutcome{errMsg: "POST /v1/run 失败: " + doErr.Error()}, cleanup, nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(resp.Body)
+		return claudeStreamOutcome{errMsg: fmt.Sprintf("worker 返回 HTTP %d: %s", resp.StatusCode, truncateStr(string(errBody), 600))}, cleanup, nil
+	}
+
+	out := parseStreamJSONFromReader(resp.Body, jobSink{in.job}, "architect-design", in.usage)
+	out.SessionFileMissingSide = sessionMissingSide
+
+	// Step 6: session sync (down) — copy any new session jsonl back to local.
+	in.job.Append(store.LogLine{Type: "phase", Content: "📥 同步会话结果回本地..."})
+	h.syncSessionDownWithTimeout(ctx, client, in, remoteSlugDir)
+
+	return out, cleanup, nil
+}
+
+// syncSessionDownWithTimeout wraps Step 6's local-slug lookup and SFTP
+// download of the remote session directory.
+//
+// Why a timeout: SyncDirDownMapped bottoms out in Client.sftp() ->
+// sftp.NewClient(conn), which takes neither a context nor a timeout and can
+// block indefinitely when the SSH connection is unusable or the server is out
+// of channels. This step sits AFTER the "📥 同步会话结果回本地..." phase line
+// and BEFORE prepareRemoteAgentRun returns, so a block here means the caller
+// never receives an outcome: the job neither errors nor completes and the UI
+// stays pinned to the last phase line forever.
+//
+// Why every path appends a line: success, failure and timeout all emit a
+// message line, so that phase line can never be the last thing the user sees.
+// A stall becomes a visible conclusion instead of a silent hang.
+//
+// Note: the timeout only stops US waiting. Go cannot safely cancel the SFTP
+// call itself, so the worker goroutine may finish its transfer in the
+// background after the timeout has already been reported. That is acceptable
+// here — the download is forward-only and idempotent, so a late-completing
+// transfer just lands the same files.
+func (h *WizardHandler) syncSessionDownWithTimeout(ctx context.Context, client *gossh.Client, in *remoteRunInput, remoteSlugDir string) {
+	done := make(chan string, 1)
+	sctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- "⚠️ 会话下行异常: " + fmt.Sprint(r)
+			}
+		}()
+		slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow)
+		if slugErr != nil || slugDir == "" {
+			// No local slug directory to write into — nothing to sync. This is
+			// the pre-existing "best effort" semantics (see claudeProjectsSlugDir).
+			// It returns immediately rather than blocking, so it cannot pin the
+			// UI on the phase line; emitting nothing keeps the log quiet.
+			done <- ""
+			return
+		}
+		if sftpErr := client.SyncDirDownMapped(remoteSlugDir, slugDir); sftpErr != nil {
+			done <- "⚠️ 会话下行失败: " + sftpErr.Error()
+			return
+		}
+		done <- "✅ 会话结果已同步回本地"
+	}()
+	select {
+	case msg := <-done:
+		if msg != "" {
+			in.job.Append(store.LogLine{Type: "message", Content: msg})
+		}
+	case <-sctx.Done():
+		in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话下行超时（60s），已跳过。远端会话文件仍在，可稍后重试或手工同步。"})
+	}
+}
+
+// runRemoteArchitectDesign is the architect-stage counterpart of
+// runRemoteCoding: it runs the plan-mode claude invocation on the chosen
+// Agent server and returns the same claudeStreamOutcome shape the local
+// exec body consumes. No commit, no push — plan-mode is read-only and the
+// plan markdown rides back inside the assistant message's Write tool_use
+// input (captured by parseStreamJSONFromReader into out.planContent).
+//
+// Callers (execArchitectDesign) are responsible for the post-run
+// persistence: UpdateDesign(planMarkdown) + UpdateArchitectModel +
+// UpdateDesignJob("") on the success path, stale-session cleanup or
+// partial-result fallback on the error paths — mirroring the local
+// branch's terminal-state handling.
+func (h *WizardHandler) runRemoteArchitectDesign(in *remoteArchitectInput) claudeStreamOutcome {
+	if in == nil || in.remoteRunInput == nil {
+		return claudeStreamOutcome{errMsg: "缺少 remoteArchitectInput"}
+	}
+	out, cleanup, err := h.prepareRemoteAgentRun(in.remoteRunInput)
+	defer cleanup()
+	if err != nil {
+		return claudeStreamOutcome{errMsg: err.Error()}
+	}
+	return out
+}
+
 // jobWriter adapts *store.Job to io.Writer so remote Exec output can land
 // directly in the job's log (one message line per non-empty stdout/stderr
 // chunk). Empty lines are dropped to avoid spamming the SSE panel.
@@ -568,6 +996,7 @@ type workerRunBody struct {
 	Resume          bool              `json:"resume,omitempty"`
 	Fork            bool              `json:"fork,omitempty"`
 	ForkSessionID   string            `json:"forkSessionId,omitempty"`
+	PermissionMode  string            `json:"permissionMode,omitempty"`
 	Env             map[string]string `json:"env,omitempty"`
 	AllowedTools    []string          `json:"allowedTools,omitempty"`
 	DisallowedTools []string          `json:"disallowedTools,omitempty"`
@@ -592,17 +1021,26 @@ type workerRunBody struct {
 }
 
 // workerRunRequest builds the POST body for /v1/run from the NovaWorkbench
-// shape (llm.StreamOpts + remoteCodingInput). The env map is parsed from
-// envPairs (each entry is "KEY=VALUE"); the worker hands this map to the
-// claude subprocess's process env, so we don't need to strip the
-// ANTHROPIC_* keys — the worker passes the map straight to the child.
+// shape (llm.StreamOpts). The env map is parsed from envPairs (each entry
+// is "KEY=VALUE"); the worker hands this map to the claude subprocess's
+// process env, so we don't need to strip the ANTHROPIC_* keys — the worker
+// passes the map straight to the child.
 //
 // systemPrompt is intentionally left empty for the wizard remote path: the
 // developer's persona is passed in the prompt itself (the -p payload
 // includes the role system prompt as a preamble), matching the previous
 // CLI invocation's behavior. If a future caller wants to pass it via
 // --system-prompt, set opts.SystemPrompt before this is called.
-func workerRunRequest(opts llm.StreamOpts, envPairs []string, in *remoteCodingInput) workerRunBody {
+//
+// The PermissionMode field is forwarded verbatim: "plan" → worker emits
+// --permission-mode plan (architect stage), "" → worker emits
+// --dangerously-skip-permissions (dev stage). See agent-worker/server.mjs
+// buildRunRequest / buildClaudeArgs.
+//
+// This helper depends only on opts (not on a stage-specific input struct)
+// so both runRemoteCoding and prepareRemoteAgentRun can call it without
+// each needing to project their input into a different shape.
+func workerRunRequest(opts llm.StreamOpts, envPairs []string) workerRunBody {
 	envMap := make(map[string]string, len(envPairs))
 	for _, kv := range envPairs {
 		eq := strings.IndexByte(kv, '=')
@@ -616,14 +1054,15 @@ func workerRunRequest(opts llm.StreamOpts, envPairs []string, in *remoteCodingIn
 		override = *opts.OverrideSettingSources
 	}
 	return workerRunBody{
-		WorkDir:       opts.WorkDir,
-		Prompt:        opts.Prompt,
-		Model:         opts.Model,
-		SessionID:     opts.SessionID,
-		Resume:        opts.Resume,
-		Fork:          opts.Fork,
-		ForkSessionID: opts.ForkSessionID,
-		Env:           envMap,
+		WorkDir:        opts.WorkDir,
+		Prompt:         opts.Prompt,
+		Model:          opts.Model,
+		SessionID:      opts.SessionID,
+		Resume:         opts.Resume,
+		Fork:           opts.Fork,
+		ForkSessionID:  opts.ForkSessionID,
+		PermissionMode: opts.PermissionMode,
+		Env:            envMap,
 		// Pass the config id so the worker can mirror ANTHROPIC_MODEL into
 		// the inline --settings JSON (the worker's buildSettingsArg already
 		// does this for opts.model; claudeConfigId is informational today but

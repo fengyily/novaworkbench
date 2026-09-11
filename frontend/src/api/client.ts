@@ -591,6 +591,14 @@ export interface Requirement {
   // deleted after the requirement was developed on it.
   agent_server_id?: string;
   agent_server_name?: string;
+  // Design-stage agent server binding (mirrors the dev-stage fields above).
+  // The architect stage is allowed to run on a remote Agent server just like
+  // coding; this column records which one the requirement last designed on
+  // so a page refresh can preselect the dropdown without forcing the user
+  // to re-pick. Empty / undefined = architect stage ran locally (or never
+  // ran); the design section's selector falls back to local.
+  design_agent_server_id?: string;
+  design_agent_server_name?: string;
   // Development-mode provenance for the coding stage, stamped when StartCoding
   // runs. 'session' = fork the design/analysis session (legacy default —
   // Claude inherits the full conversation). 'design' = fresh session, hand
