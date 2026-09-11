@@ -14,7 +14,10 @@ import {
   type SubTaskStatus,
   type Requirement,
   type OrchestrationBatch,
+  type AgentServer,
 } from '../api/client';
+import { ExecEnvSelect } from './ExecEnvSelect';
+import { ExecEnvBadge } from './ExecEnvBadge';
 import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, computeUsage, type LogLine, type UsageInfo } from '../utils/logLines';
 import { modelContextWindow } from '../utils/modelWindow';
@@ -64,6 +67,12 @@ interface Props {
   // batch snapshot so the banner's disabled state updates without
   // waiting for the next periodic list-poll cycle.
   onBatchChange?: () => void;
+  // Ready Agent Servers, used to populate the per-sub-task execution
+  // environment selector. Empty (or omitted) hides the selector — with no
+  // remote target the only option is 本地, so the selector would be noise.
+  // The composer defaults the choice to the parent requirement's
+  // agent_server_id (inheritance) but lets the user override per sub-task.
+  agentServers?: AgentServer[];
 }
 
 // Status vocabulary — labels hold i18n KEYS (resolved at render) so the
@@ -621,6 +630,11 @@ function SubTaskCard({ st, index, total, onChanged, onCreated: _onCreated, onRes
               👤 {t('components.subTaskCard.sourceManual')}
             </span>
           )}
+          {/* Execution environment: 💻 本地 or 🛰️ Agent Server「name」. Shows
+              "由哪个 Agent Server 开发" for every card; auto-orchestrated
+              children inherit the main task's environment so they render the
+              same badge as the parent. */}
+          <ExecEnvBadge serverId={st.agent_server_id} serverName={st.agent_server_name} compact />
           <span className="sub-card-counter">{String(index + 1).padStart(2, '0')} / {String(total).padStart(2, '0')}</span>
           {st.model && st.model !== DefaultModelLabel && (
             <span className="sub-card-model">{st.model}</span>
@@ -843,7 +857,7 @@ function isLongSummary(raw: string | undefined): boolean {
   return lines > 12 || chars > 1200;
 }
 
-export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange, developerDefaultModel = '', batch, onBatchChange }: Props) {
+export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange, developerDefaultModel = '', batch, onBatchChange, agentServers = [] }: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<SubTask[] | null>(null);
   const [prompt, setPrompt] = useState('');
@@ -870,6 +884,21 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // requirement.
   const [createModel, setCreateModel] = useState<string>('');
   const [adjustModel, setAdjustModel] = useState<string>('');
+  // Per-sub-task execution environment for the composer. Seeded to the parent
+  // requirement's agent_server_id so a manually-created sub-task defaults to
+  // "同主任务" (the inheritance rule); the user may switch it (including down
+  // to 本地 = ''). '' means 本地. parentAgentServerId is read directly off the
+  // requirement so a page refresh keeps the seed aligned with where the main
+  // task runs.
+  const parentAgentServerId = requirement?.agent_server_id ?? '';
+  const [createAgentServerId, setCreateAgentServerId] = useState<string>(parentAgentServerId);
+  // Keep the composer default aligned with the parent's environment until the
+  // user has interacted. touchedEnvRef flips true on the first manual change so
+  // a later requirement refresh can't clobber a deliberate choice.
+  const touchedEnvRef = useRef(false);
+  useEffect(() => {
+    if (!touchedEnvRef.current) setCreateAgentServerId(parentAgentServerId);
+  }, [parentAgentServerId]);
   // Track an auto-orchestrate batch (the new "one-click orchestrate =
   // main agent auto-dispatches" path in StartCoding). Children may still
   // be running so the panel shows the "auto-orchestrate in flight" status.
@@ -1156,6 +1185,10 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         prompt: p,
         ...(createModel ? { model: createModel } : {}),
         ...(sessionMode === 'fresh' ? { freshSession: true } : {}),
+        // Always send the resolved environment (even '' for 本地) so the
+        // backend records an explicit choice — an omitted field would fall
+        // back to the parent's env, which is wrong when the user picked 本地.
+        agent_server_id: createAgentServerId,
       });
       setPrompt('');
       await loadList();
@@ -1164,7 +1197,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     } finally {
       setSubmitting(false);
     }
-  }, [prompt, submitting, createModel, sessionMode, requirementId, loadList, t]);
+  }, [prompt, submitting, createModel, sessionMode, createAgentServerId, requirementId, loadList, t]);
 
   // --- Manual re-split (🔄 Re-split) ------------------------------------
   // Escape hatch for when StartCoding's auto-orchestration produced no
@@ -1444,6 +1477,26 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           <div className="sub-model-warning" role="note">
             {t('components.subTaskPanel.modelEmptyWarning')}
           </div>
+        )}
+        {/* Per-sub-task execution environment. Only shown when at least one
+            ready Agent Server exists (otherwise the sole option is 本地).
+            Defaults to the parent requirement's environment; switching to a
+            different one runs the child from a fresh origin checkout of the
+            requirement branch (see execEnvHint). */}
+        {agentServers.length > 0 && (
+          <label className="sub-composer-env" style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--color-text-muted)' }}>
+            <span>{t('components.subTaskPanel.execEnvLabel')}</span>
+            <ExecEnvSelect
+              servers={agentServers}
+              value={createAgentServerId}
+              onChange={(v) => { touchedEnvRef.current = true; setCreateAgentServerId(v); }}
+              disabled={submitting || reSplitBusy}
+              style={{ minWidth: 160 }}
+            />
+            {createAgentServerId !== parentAgentServerId && (
+              <span className="sub-composer-env-hint" role="note">{t('components.subTaskPanel.execEnvHint')}</span>
+            )}
+          </label>
         )}
         {/* Session-mode radio: surfaces only when the bug is in scope
             (Agent server requirement OR the last sub-task artifact

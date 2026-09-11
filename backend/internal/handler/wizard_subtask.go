@@ -46,6 +46,19 @@ func subTaskSourceSID(req *model.Requirement, explicit string) string {
 	return ""
 }
 
+// resolveSubTaskAgentServer picks the execution environment a new sub-task
+// should run on. A nil explicit pointer means the request omitted the field
+// entirely — inherit the parent requirement's environment (the "默认与主任务
+// 一致" rule). A non-nil pointer is the user's deliberate choice and is
+// honored verbatim, including an empty string which means 本地 (and must NOT
+// fall back to a remote parent).
+func resolveSubTaskAgentServer(explicit *string, fallback string) string {
+	if explicit != nil {
+		return *explicit
+	}
+	return fallback
+}
+
 // buildParentContext composes a Markdown block the runner prepends to a
 // fresh-session sub-task's prompt, so the new session can answer the
 // user's instruction without --resume-ing the (missing) parent jsonl.
@@ -382,6 +395,11 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		Title        string `json:"title"`
 		Model        string `json:"model"`
 		FreshSession bool   `json:"freshSession"`
+		// AgentServerID selects the child's execution environment. A pointer so
+		// an omitted field (nil) defaults to the parent requirement's env
+		// (inheritance), while an explicit "" means the user deliberately chose
+		// 本地 and must not fall back to a remote parent.
+		AgentServerID *string `json:"agent_server_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
@@ -421,7 +439,11 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 	// is true, we still record the parent SID on the row (audit-trail
 	// integrity), but the runner drops --resume and writes back an empty
 	// source_session_id — see SubTaskRunner.Run for the runtime side.
-	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(id, strings.TrimSpace(body.Title), body.Prompt, body.Model, sourceSID)
+	// Resolve the execution environment: default to the parent requirement's
+	// (inheritance) when the field is omitted, honor an explicit value
+	// (including "" for 本地) otherwise.
+	agentServerID := resolveSubTaskAgentServer(body.AgentServerID, req.AgentServerID)
+	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(id, strings.TrimSpace(body.Title), body.Prompt, body.Model, sourceSID, agentServerID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
@@ -794,8 +816,15 @@ func (h *WizardHandler) StopSubTask(w http.ResponseWriter, r *http.Request) {
 	// Remote runs (Agent server dispatch) are not stoppable in v1 — the
 	// worker process lives on a different host and would need a kill RPC
 	// that the worker doesn't ship yet. Surface the limitation explicitly
-	// (501, not 404) so the client can render a "stop is coming" hint.
-	if req.AgentServerID != "" {
+	// (501, not 404) so the client can render a "stop is coming" hint. Use
+	// the sub-task's resolved effective environment (its own agent_server_id,
+	// falling back to the requirement's for legacy rows) so a child that
+	// deliberately runs 本地 under a remote main stays stoppable.
+	effectiveServerID := parent.AgentServerID
+	if !parent.AgentServerIDSet {
+		effectiveServerID = req.AgentServerID
+	}
+	if effectiveServerID != "" {
 		writeError(w, http.StatusNotImplemented, "STOP_REMOTE_NOT_SUPPORTED",
 			"远程 Agent 服务器执行暂不支持停止")
 		return

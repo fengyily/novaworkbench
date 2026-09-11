@@ -27,6 +27,16 @@ export const components = {
     agentTip: '由 Agent Server「{{server}}」开发',
     modelLine: '模型: {{model}}',
   },
+  // execEnv — shared "execution environment" selector + badge (design stage,
+  // sub-tasks). Kept separate from devSource so the dev-stage badge can keep
+  // its own richer wording (model chip) while these stay generic.
+  execEnv: {
+    local: '本地',
+    localTitle: '在本机 NovaWorkbench 上执行',
+    localOption: '本地执行',
+    agentLabel: 'Agent Server',
+    agentTip: '由 Agent Server「{{server}}」执行',
+  },
   markdownViewer: {
     preview: '文档预览',
     close: '✕ 关闭',
@@ -66,6 +76,10 @@ export const components = {
     summaryExpandCollapse: '收起',
     composerPlaceholder: '描述这个子任务要做什么…输入 @ 引用 Skill',
     modelLabel: '子任务模型',
+    // Execution-environment selector in the sub-task composer. Defaults to the
+    // main task's environment but can be overridden per sub-task.
+    execEnvLabel: '执行环境',
+    execEnvHint: '默认与主任务一致；切换到不同环境时，将从 origin 检出该需求分支执行（未推送的本地改动不会带过来）。',
     modelEmptyWarning: '⚠️ 当前 Claude 配置中没有可用模型，请前往「设置 → Claude 配置」配置后再开启子任务。',
     composerHint: '启动后子 Agent 将 fork 主会话上下文，所有子任务共享同一项目认知',
     reSplitTitleBusy: '有子任务正在执行，完成后才能重新拆分',

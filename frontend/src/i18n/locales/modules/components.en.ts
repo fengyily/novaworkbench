@@ -25,6 +25,13 @@ export const components = {
     agentTip: 'Developed on Agent Server "{{server}}"',
     modelLine: 'Model: {{model}}',
   },
+  execEnv: {
+    local: 'Local',
+    localTitle: 'Runs on this NovaWorkbench host',
+    localOption: 'Local execution',
+    agentLabel: 'Agent Server',
+    agentTip: 'Runs on Agent Server "{{server}}"',
+  },
   markdownViewer: {
     preview: 'Document preview',
     close: '✕ Close',
@@ -62,6 +69,8 @@ export const components = {
     summaryExpandCollapse: 'Collapse',
     composerPlaceholder: 'Describe what this sub-task should do… type @ to reference a Skill',
     modelLabel: 'Sub-task model',
+    execEnvLabel: 'Environment',
+    execEnvHint: 'Defaults to the main task\'s environment; switching to a different one checks out this requirement\'s branch fresh from origin (unpushed local changes won\'t come along).',
     modelEmptyWarning: '⚠️ No models available in the current Claude config. Configure one under Settings → Claude Configs before starting a sub-task.',
     composerHint: 'Sub-agents fork the main session context — every sub-task shares the same project knowledge',
     reSplitTitleBusy: 'A sub-task is still running — wait until it finishes before re-splitting',

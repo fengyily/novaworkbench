@@ -959,7 +959,10 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	if body.CommitMessage != "" {
 		title = "推送并创建 PR: " + truncateMergePrompt(body.CommitMessage, 40)
 	}
-	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(reqRow.ID, title, prompt, effectiveModel, sourceSID)
+	// The push+PR sub-task must run in the same environment the requirement
+	// was developed on (its worktree / branch lives there); pass the
+	// requirement's agent_server_id so Run routes it consistently.
+	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(reqRow.ID, title, prompt, effectiveModel, sourceSID, reqRow.AgentServerID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
