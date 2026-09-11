@@ -1086,8 +1086,57 @@ export default function RequirementDetail() {
     loadUsage();
   }, [id, loadUsage]);
 
+  // 设计文档存在多种存储形态:
+  //   - 计划模式 (新): 原始 Markdown 字符串
+  //   - legacy JSON 对象: {overview, files, steps, model_changes, risks}
+  //   - legacy JSON 数组: ["# 方案..."]
+  //   - 边缘情形 1: finalResult fallback 可能产出以 { 开头的非设计 JSON
+  //   - 边缘情形 2: Claude 在 apply-doc 输出被 ```markdown ... ``` 围栏包裹,
+  //     ReactMarkdown 会把整段当代码块渲染,需要 strip 外层围栏
+  //
+  // 仅当 JSON 解析结果显式携带 plan_markdown 或任意 legacy 字段,
+  // 才视为 DesignData;否则一律把原始字符串当 Markdown 渲染;
+  // 当作 Markdown 之前先剥掉外层代码围栏。
   const parseDesign = (raw: string): DesignData => {
-    try { return JSON.parse(raw); } catch { return { plan_markdown: raw }; }
+    if (!raw) return {};
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { plan_markdown: stripOuterFence(raw) };
+    }
+    // legacy JSON 数组形态:["# 方案\n## 详情", ...]
+    if (Array.isArray(parsed)) {
+      const first = parsed.find((v) => typeof v === 'string' && v.trim() !== '');
+      return { plan_markdown: typeof first === 'string' ? stripOuterFence(first) : raw };
+    }
+    if (parsed && typeof parsed === 'object') {
+      const obj = parsed as Partial<DesignData>;
+      const objHasShape = typeof obj.plan_markdown === 'string'
+          || obj.overview !== undefined
+          || obj.files !== undefined
+          || obj.steps !== undefined
+          || obj.model_changes !== undefined
+          || obj.risks !== undefined;
+      if (objHasShape) {
+        if (typeof obj.plan_markdown === 'string') {
+          obj.plan_markdown = stripOuterFence(obj.plan_markdown);
+        }
+        return obj;
+      }
+    }
+    // JSON 解析成功但不符合 DesignData 形态 → 原始内容视为 Markdown
+    return { plan_markdown: stripOuterFence(raw) };
+  };
+
+  // 剥离外层 ```lang ... ``` 围栏(以及无 lang 标签的 ``` ... ``` 形式)。
+  // 仅当整段内容首尾恰好是一对完整代码围栏时才剥离,避免误删正文中
+  // 偶然配对的三个反引号对(例如示例代码块)。
+  const FENCE_RE = /^```[^\n]*\n([\s\S]*?)\n```\s*$/;
+  const stripOuterFence = (s: string): string => {
+    if (!s) return s;
+    const m = FENCE_RE.exec(s.trim());
+    return m ? m[1] : s;
   };
 
   // ── Status gate transitions ────────────────────────────────────────────────
