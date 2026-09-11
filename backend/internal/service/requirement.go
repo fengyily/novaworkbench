@@ -156,6 +156,122 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	return items, nil
 }
 
+// Calendar returns a slim slice of requirements overlapping the [from, to)
+//// window (half-open, day-granular: from=00:00 of the first day, to=00:00 of
+// the day AFTER the last day) for the calendar view. Only the columns the
+// month/day/year grids need are read — chat history, design docs, usage
+// snapshots and the per-stage model columns are intentionally skipped to keep
+// the response small (and avoid dragging a few-hundred-KB design_docs JSON
+// across the wire on every grid pan).
+//
+// Visible anchor rules (mirrored on the frontend in eventLayout.normalize):
+//   - PlannedStartAt != NULL → the requirement sits between planned_start_at
+//     and COALESCE(planned_end_at, planned_start_at) on the grid.
+//   - both NULL → the requirement sits at created_at as a zero-duration
+//     event (legacy rows fall into this bucket without a backfill).
+//
+// Archived rows are always excluded — same default as List().
+func (s *RequirementService) Calendar(from, to time.Time, projectID, kind string) ([]model.Requirement, error) {
+	where := "WHERE status != 'archived'"
+	args := []interface{}{}
+
+	// Project filter — same convention as List: empty string = all visible.
+	if projectID != "" {
+		where += " AND project_id = ?"
+		args = append(args, projectID)
+	}
+	// Kind CSV — reuses splitKinds so the calendar filter behaves identically
+	// to the list filter.
+	if kind != "" && kind != "all" {
+		kinds := splitKinds(kind)
+		if len(kinds) == 1 {
+			where += " AND kind = ?"
+			args = append(args, kinds[0])
+		} else if len(kinds) > 1 {
+			placeholders := make([]string, len(kinds))
+			for i, k := range kinds {
+				placeholders[i] = "?"
+				args = append(args, k)
+			}
+			where += " AND kind IN (" + strings.Join(placeholders, ",") + ")"
+		}
+	}
+
+	// Range predicate. SQLite stores DATETIME as TEXT in mixed formats
+	// (CURRENT_TIMESTAMP → "YYYY-MM-DD HH:MM:SS", Go time.Time driver write →
+	// RFC3339), but every value parses to a comparable lexical prefix at the
+	// day boundary. The window is [from, to) on a day-level prefix so a single
+	// substr() expression matches all three dialects (the pattern lives in
+	// usage.dateExpr / usage.DailyByProject). It covers BOTH scheduling modes:
+	//   - legacy (planned_* NULL) → uses created_at at day-level
+	//   - scheduled                → uses planned_start_at COALESCE end date
+	fromKey := from.Format("2006-01-02")
+	toKey := to.Format("2006-01-02")
+	where += " AND ("
+	where += "(planned_start_at IS NULL AND substr(created_at,1,10) >= ? AND substr(created_at,1,10) < ?)"
+	args = append(args, fromKey, toKey)
+	where += " OR (planned_start_at IS NOT NULL AND COALESCE(planned_end_at, planned_start_at) >= ? AND planned_start_at < ?)"
+	// planned_* are only ever written by UpdateSchedule via time.Time params,
+	// so they always serialize to RFC3339 — a direct lexical compare against
+	// the formatted bounds is fine across all dialects (no substr() needed).
+	fromRFC := from.Format(time.RFC3339)
+	toRFC := to.Format(time.RFC3339)
+	args = append(args, fromRFC, toRFC)
+	where += ")"
+
+	// Slim SELECT — only what the grid actually renders. SubTaskCount is not
+	// joined here (calendar doesn't need it); AgentServerName is left empty
+	// (calendar UI shows it on the detail panel, fetched lazily).
+	q := "SELECT id, project_id, title, status, priority, kind, created_at, updated_at, completed_at, planned_start_at, planned_end_at FROM requirements " +
+		where + " ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END ASC, created_at DESC"
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []model.Requirement
+	for rows.Next() {
+		var r model.Requirement
+		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Title, &r.Status, &r.Priority, &r.Kind,
+			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.PlannedStartAt, &r.PlannedEndAt); err != nil {
+			return nil, err
+		}
+		items = append(items, r)
+	}
+	if items == nil {
+		items = []model.Requirement{}
+	}
+	// No agent-server join needed for the calendar grid; just attach the
+	// scheduled-task marker.
+	s.attachScheduledRunAt(items)
+	return items, nil
+}
+
+// UpdateSchedule persists a requirement's calendar scheduling fields.
+// Either field may be nil (caller-supplied or omitted JSON), in which case
+// that column is cleared back to NULL — the frontend uses this to reset a
+// row to the created_at anchor. Validates end >= start; both ends may also
+// both be nil (clear the schedule entirely). updated_at is bumped so the
+// detail page reflects the change on next GET without a refresh.
+func (s *RequirementService) UpdateSchedule(id string, start, end *time.Time) error {
+	if start != nil && end != nil && end.Before(*start) {
+		return fmt.Errorf("planned_end_at must be >= planned_start_at")
+	}
+	// Sanity guard against obviously-broken inputs (epoch zero, year 9999)
+	// which would otherwise poison the calendar with 1970-01-01 cells.
+	check := func(t *time.Time) bool {
+		return t == nil || (t.Year() >= 1970 && t.Year() <= 9998)
+	}
+	if !check(start) || !check(end) {
+		return fmt.Errorf("planned time out of range")
+	}
+	_, err := s.db.Exec(
+		"UPDATE requirements SET planned_start_at = ?, planned_end_at = ?, updated_at = ? WHERE id = ?",
+		start, end, time.Now(), id)
+	return err
+}
+
 // splitKinds parses a comma-separated kind filter (e.g. "issue,idea"), trims
 // whitespace, lowercases, and drops any invalid entries so a malformed value
 // never produces SQL surprises. Always returns at least the single trimmed
@@ -694,6 +810,50 @@ func (s *RequirementService) attachAgentServerNames(items []model.Requirement) {
 	for i := range items {
 		if n, ok := names[items[i].AgentServerID]; ok {
 			items[i].AgentServerName = n
+		}
+	}
+}
+
+// attachScheduledRunAt fills the display-only ScheduledRunAt on every row that
+// has at least one pending scheduled_tasks row. Mirrors attachAgentServerNames
+// (single grouped query, best-effort). Picks MIN(run_at) so the calendar shows
+// the nearest pending dispatch — multiple pending rows collapse to one marker,
+// which matches the "this requirement has a scheduled task waiting" affordance
+// the clock icon conveys.
+func (s *RequirementService) attachScheduledRunAt(items []model.Requirement) {
+	if len(items) == 0 {
+		return
+	}
+	ids := make([]interface{}, 0, len(items))
+	placeholders := make([]string, 0, len(items))
+	for _, r := range items {
+		if r.ID == "" {
+			continue
+		}
+		ids = append(ids, r.ID)
+		placeholders = append(placeholders, "?")
+	}
+	if len(ids) == 0 {
+		return
+	}
+	q := "SELECT requirement_id, MIN(run_at) FROM scheduled_tasks WHERE status = 'pending' AND requirement_id IN (" + strings.Join(placeholders, ",") + ") GROUP BY requirement_id"
+	rows, err := s.db.Query(q, ids...)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	next := map[string]time.Time{}
+	for rows.Next() {
+		var id string
+		var runAt time.Time
+		if rows.Scan(&id, &runAt) == nil {
+			next[id] = runAt
+		}
+	}
+	for i := range items {
+		if t, ok := next[items[i].ID]; ok {
+			tt := t
+			items[i].ScheduledRunAt = &tt
 		}
 	}
 }

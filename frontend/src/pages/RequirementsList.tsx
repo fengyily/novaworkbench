@@ -119,11 +119,28 @@ export default function RequirementsList() {
     <div className="requirements-list-page">
       <div className="page-header">
         <h2>{t('requirements.list.title')}</h2>
+        <div className="page-header-actions desktop-only">
+          <button
+            className="btn"
+            onClick={() => navigate('/requirements/calendar')}
+          >
+            📅 {t('requirements.list.calendar', '日历')}
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={openCreate}
+          >
+            {showCreate ? t('requirements.list.collapse') : t('requirements.list.create')}
+          </button>
+        </div>
+        {/* 移动端：日历入口放在主操作旁 */}
         <button
-          className="btn btn-primary desktop-only"
-          onClick={openCreate}
+          className="btn mobile-only"
+          style={{ marginLeft: 'auto' }}
+          onClick={() => navigate('/requirements/calendar')}
+          aria-label={t('requirements.list.calendar', '日历')}
         >
-          {showCreate ? t('requirements.list.collapse') : t('requirements.list.create')}
+          📅
         </button>
       </div>
 
@@ -162,12 +179,23 @@ export default function RequirementsList() {
           ))}
         </select>
 
-        <input
-          className="form-input req-filter-search"
-          placeholder={t('requirements.list.searchPlaceholder')}
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-        />
+        <div className="search-input req-filter-search">
+          <span className="search-input-icon" aria-hidden>🔍</span>
+          <input
+            placeholder={t('requirements.list.searchPlaceholder')}
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            aria-label={t('requirements.list.searchAriaLabel', '按标题或描述搜索')}
+          />
+          {search && (
+            <button
+              type="button"
+              className="search-input-clear"
+              aria-label={t('requirements.list.clearSearch', '清除搜索')}
+              onClick={() => setSearch('')}
+            >×</button>
+          )}
+        </div>
       </div>
 
       {/* Kind filter chips (multi-select) */}

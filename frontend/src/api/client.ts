@@ -600,6 +600,14 @@ export interface Requirement {
   dev_mode?: '' | 'session' | 'design';
   created_at: string; updated_at: string;
   completed_at?: string;
+  // 日历视图排期字段。NULL = 未排期，前端回退到 created_at；拖拽或编辑
+  // 时通过 PATCH /api/requirements/{id}/schedule 写入。后端序列化为
+  // RFC3339 字符串。
+  planned_start_at?: string;
+  planned_end_at?: string;
+  // 派生字段：最早一条 pending scheduled_tasks.run_at。Calendar 端点附
+  // 带，前端用 🕐 icon 标识。List/Get 不携带。
+  scheduled_run_at?: string;
 }
 
 // Default to "requirement" on the client too, so legacy rows missing the
@@ -739,6 +747,21 @@ export const requirementsApi = {
   // retrying.
   promoteFromIdea: (id: string) =>
     api.post<Requirement>(`/api/requirements/${id}/promote`, {}),
+  // Calendar view: 瘦 SELECT + 日期范围过滤 + scheduled_run_at 派生字段。
+  // from/to 接受 "YYYY-MM-DD" 或 RFC3339；不传则后端默认当月窗口。返回
+  // 数组只包含「与 [from, to) 窗口」有交集的需求（包含跨天条）。
+  calendar: (params: { from: string; to: string; project_id?: string; kind?: string }) => {
+    const q = new URLSearchParams();
+    q.set('from', params.from);
+    q.set('to', params.to);
+    if (params.project_id) q.set('project_id', params.project_id);
+    if (params.kind) q.set('kind', params.kind);
+    return api.get<Requirement[]>(`/api/requirements/calendar?${q.toString()}`);
+  },
+  // 排期写入：拖拽/编辑后调用。传入 null 清除对应字段（全 null = 回到
+  // created_at 锚点）。
+  updateSchedule: (id: string, body: { planned_start_at?: string | null; planned_end_at?: string | null }) =>
+    api.patch<Requirement>(`/api/requirements/${id}/schedule`, body),
 };
 
 /**

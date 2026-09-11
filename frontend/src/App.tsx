@@ -22,6 +22,7 @@ import SettingsACLRoles from './pages/SettingsACLRoles';
 import SettingsSkills from './pages/SettingsSkills';
 import KnowledgePage from './pages/KnowledgePage';
 import RequirementDetail from './pages/RequirementDetail';
+import RequirementsCalendar from './pages/RequirementsCalendar';
 import WizardPage from './pages/WizardPage';
 import ProjectDetail from './pages/ProjectDetail';
 import SchedulesPage from './pages/SchedulesPage';
@@ -59,6 +60,9 @@ export default function App() {
             <Route path="projects" element={<ProjectsList />} />
             <Route path="projects/:id" element={<ProjectDetail />} />
             <Route path="requirements" element={<RequirementsList />} />
+            {/* 字面量段 "calendar" 必须早于 ":id" 通配注册，否则会被
+               路由成 id="calendar" 的详情页。与后端 ServeMux 同款语义。 */}
+            <Route path="requirements/calendar" element={<RequirementsCalendar />} />
             <Route path="requirements/:id" element={<RequirementDetail />} />
             <Route path="schedules" element={<SchedulesPage />} />
             <Route path="knowledge" element={<KnowledgePage />} />

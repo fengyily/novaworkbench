@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
@@ -226,6 +227,80 @@ func (h *RequirementHandler) UpdateStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, 200, item)
+}
+
+// Calendar serves the slim requirements slice the calendar view needs for
+// the visible [from, to) window. Defaults: from = first day of the current
+// month, to = first day of the next month when the caller omits the params
+// (handler-side default; the frontend always sends explicit bounds). Time
+// strings are accepted in either RFC3339 or "YYYY-MM-DD" — the service
+// always normalizes to day boundaries so a tiny calendar tick never lands
+// off-grid.
+func (h *RequirementHandler) Calendar(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	from := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	to := from.AddDate(0, 1, 0)
+	if v := strings.TrimSpace(r.URL.Query().Get("from")); v != "" {
+		if t, err := parseBoundary(v, from); err == nil {
+			from = t
+		}
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("to")); v != "" {
+		if t, err := parseBoundary(v, to); err == nil {
+			to = t
+		}
+	}
+	if !to.After(from) {
+		writeError(w, 400, "BAD_RANGE", "to must be after from")
+		return
+	}
+	q := r.URL.Query()
+	items, err := h.svc.Calendar(from, to, q.Get("project_id"), q.Get("kind"))
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, items)
+}
+
+// UpdateSchedule writes the calendar scheduling fields. Either field may be
+// null (or omitted) to clear that column; both-null resets the row to the
+// created_at anchor. end < start is rejected with INVALID_SCHEDULE.
+func (h *RequirementHandler) UpdateSchedule(w http.ResponseWriter, r *http.Request) {
+	var req model.UpdateScheduleReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON")
+		return
+	}
+	if err := h.svc.UpdateSchedule(r.PathValue("id"), req.PlannedStartAt, req.PlannedEndAt); err != nil {
+		writeError(w, 400, "INVALID_SCHEDULE", err.Error())
+		return
+	}
+	item, err := h.svc.Get(r.PathValue("id"))
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, item)
+}
+
+// parseBoundary accepts "YYYY-MM-DD" (day-boundary, expanded to 00:00 local)
+// or any RFC3339 timestamp the time package can parse. Returns the parsed
+// time and a sentinel error so the handler falls back to its default without
+// failing the whole request.
+func parseBoundary(s string, fallback time.Time) (time.Time, error) {
+	if len(s) == 10 && s[4] == '-' && s[7] == '-' {
+		t, err := time.ParseInLocation("2006-01-02", s, time.Local)
+		if err != nil {
+			return fallback, err
+		}
+		return t, nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return fallback, err
+	}
+	return t, nil
 }
 
 func (h *RequirementHandler) Delete(w http.ResponseWriter, r *http.Request) {
