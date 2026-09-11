@@ -328,6 +328,24 @@ type claudeStreamOutcome struct {
 	streamEventCount int    // subset that are stream_event
 	lastEventType    string // type field of the most recent event, used for EOF postmortem
 	planContent      string // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
+	// SessionFileMissingSide, when non-empty AND staleSession is true,
+	// classifies the "源会话已失效" failure into one of three buckets so
+	// finishSubTask / ExecuteOrchestratedChild can surface a targeted
+	// diagnostic instead of the generic "session 文件不存在" message:
+	//
+	//   "remote"      — the local jsonl was uploaded but the remote CLI
+	//                   can't find it (file was cleaned up, agent-host
+	//                   disk issue, slug mismatch on the remote side).
+	//   "local"       — the local jsonl itself is missing; nothing to
+	//                   upload in the first place.
+	//   "sync-failed" — SFTP upload itself failed (no network, permission
+	//                   on remote, etc.) — log on the job side.
+	//
+	// Empty (the default) means "we didn't pre-flight this run" (local CLI
+	// path, no remote agent) — finishSubTask then keeps the legacy
+	// generic artifact text, which contains the literal substring
+	// "session 文件不存在" that downstream log-grep alerts key off.
+	SessionFileMissingSide string
 	// subTasksJSON is the authoritative sub-task decomposition payload,
 	// captured from a Write tool_use whose target path ends with
 	// /.novaworkbench/subtasks.json. Unlike the free-text JSON block +

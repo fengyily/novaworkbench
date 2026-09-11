@@ -333,6 +333,36 @@ func (c *Client) Exists(remotePath string) bool {
 	return exit == 0
 }
 
+// RemoteFileExists reports whether remotePath exists on the remote host via
+// an SFTP stat call (cheap, no shell fork — used as a post-sync pre-flight
+// in the wizard remote path so we can distinguish "SFTP upload silently
+// missed" from "remote CLI can't find the file"). Mirrors the local-side
+// behaviour of os.Stat: a missing file returns (false, nil); any other
+// stat error (permission denied, transport failure) returns (false, err).
+//
+// Returns (false, nil) on a literal os.IsNotExist from SFTP — the caller is
+// the one who decides whether "file is missing" is fatal.
+func (c *Client) RemoteFileExists(remotePath string) (bool, error) {
+	if c == nil || c.conn == nil {
+		return false, errors.New("ssh: client not connected")
+	}
+	if remotePath == "" {
+		return false, errors.New("ssh: empty remote path")
+	}
+	sftpCli, err := c.sftp()
+	if err != nil {
+		return false, err
+	}
+	defer sftpCli.Close()
+	if _, err := sftpCli.Stat(remotePath); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 // Mkdirp creates remotePath (and any missing parents) with mode 0755.
 func (c *Client) Mkdirp(remotePath string) error {
 	if remotePath == "" {
