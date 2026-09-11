@@ -1603,6 +1603,18 @@ export default function RequirementDetail() {
       () => {
         esRef.current = null;
         setCoding(false);
+        // SSE died (dropped link, backend hang, or a stream that ended without
+        // the job_done frame) — the local `coding` flag alone is not enough:
+        // the requirement row may still read `developing` in the DB, leaving
+        // the UI out of sync with the real state (this was half of the
+        // "stuck forever, refresh does not help" symptom). Reconcile by
+        // re-reading the requirement from the server. Deliberately NOT
+        // writing a status here and NOT touching the `coding_job_<id>`
+        // localStorage marker — this is the error path, so we let the DB
+        // state stand. Fire-and-forget (never await: this callback must stay
+        // synchronous) with a no-op catch so a still-broken network does not
+        // surface an unhandled rejection.
+        refresh().catch(() => {});
       },
     );
   }, [id, refresh, fetchOrchBatch, showSummaryDoneToast, t]);
