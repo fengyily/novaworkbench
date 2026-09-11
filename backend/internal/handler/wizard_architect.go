@@ -233,7 +233,11 @@ func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride, cla
 	// architect role and produce a plan. On the skip-analysis path (no
 	// session) we must seed the fresh conversation with the requirement plus
 	// pre-read project context, since there is no prior discussion to inherit.
-	prompt := "现在切换到「架构师」角色。基于我们刚才完成的需求分析对话，" +
+	// 需求标题始终作为锚点：resume 分支依赖「续接的会话已携带需求」这一假设，
+	// 一旦该假设不成立（会话失效 / 被清理 / 上下文被压缩），模型就完全看不到
+	// 任务内容。带上标题的成本极低，可避免该假设失效时提示词变成空壳。
+	prompt := "## 需求标题\n" + req.Title + "\n\n" +
+		"现在切换到「架构师」角色。基于我们刚才完成的需求分析对话，" +
 		"请阅读项目相关源文件核实技术细节，制定具体可执行的技术实现方案（plan）。" +
 		"方案应涵盖：整体实现思路、需要新增或修改的文件、具体实现步骤、数据模型/数据库变更、实现风险及应对。"
 	if skipAnalysis && sourceSID == "" {
@@ -371,6 +375,11 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 		// owns the post-run persistence (UpdateDesign / UpdateArchitectModel
 		// / knowledge result event), same as the local branch below.
 		job.Append(store.LogLine{Type: "phase", Content: "📐 Agent 服务器 plan 模式下探索代码并制定技术方案..."})
+		// RC-1: sourceSID 必须传「真实的来源会话」（fresh / 跳过分析路径下为空），
+		// 与开发阶段 wizard_coding.go 中 runRemoteCoding 的调用点保持一致。
+		// 若误传 sessionArg，fresh 运行会退化成 `--resume <刚铸的新 id>`（该会话
+		// 并不存在），且 prepareRemoteAgentRun 的 `Resume: in.sourceSID != ""`
+		// 会恒为 true，远端 claude 直接报 "No conversation found"。
 		out = h.runRemoteArchitectDesign(&remoteArchitectInput{
 			remoteRunInput: &remoteRunInput{
 				job:            job,
@@ -378,7 +387,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 				reqRow:         req,
 				prompt:         prompt,
 				workDir:        workDir,
-				sourceSID:      sessionArg,
+				sourceSID:      sourceSID,
 				fork:           fork,
 				sessionArg:     sessionArg,
 				forkSessionID:  forkSessionID,
@@ -410,6 +419,31 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 	}
 
 	h.finalizeArchitectRun(out, p, job, kbReadTitles, sourceSID, newDesignSID, id, model)
+}
+
+// clearUnestablishedDesignSession 回滚本次运行 pre-mint 的 design session id。
+//
+// 只在「本次真的铸了新 id」且「CLI 从未报告过任何 session_id（即 system/init
+// 事件没到，会话根本没建立）」时清除 —— 否则下一次运行会把一个不存在的会话
+// 当成可 resume 的来源，从而跳过带需求内容的提示词分支（见
+// prepareArchitectDesign 里 `if skipAnalysis && sourceSID == ""`），并让远端
+// --resume 永久失败。
+//
+// 两个早退条件的依据：
+//   - p.NewDesignSID == ""：没有铸新 id，本次运行要么 resume 已有会话、要么
+//     沿用 pre-mint 之外的路径，清空会误伤真实会话。
+//   - out.sessionID != ""：CLI 报告过 session_id（其赋值来源是 stream 里的
+//     system/init 事件，见 wizard_stream.go），说明会话确实建立了，不能清。
+//
+// 注意：out.staleSession 分支有自己的清理逻辑（按 fork/design 维度清），
+// 不要在这里或那里重复调用，避免语义重叠。
+func (h *WizardHandler) clearUnestablishedDesignSession(p *designRunParams, out claudeStreamOutcome, id string) {
+	if p.NewDesignSID == "" || out.sessionID != "" {
+		return
+	}
+	if err := h.reqSvc.UpdateDesignSession(id, ""); err != nil {
+		log.Printf("[architect-design] failed to clear unestablished design session for %s: %v", id, err)
+	}
 }
 
 // finalizeArchitectRun is the shared terminal-state handler for both the local
@@ -486,6 +520,7 @@ func (h *WizardHandler) finalizeArchitectRun(
 				log.Printf("[architect-design] failed to save partial design for %s: %v", id, err)
 			}
 		}
+		h.clearUnestablishedDesignSession(p, out, id)
 		_ = h.reqSvc.UpdateDesignJob(id, "")
 		job.Append(store.LogLine{Type: "error", Content: out.errMsg})
 		job.Finish(1, store.JobError)
@@ -496,6 +531,7 @@ func (h *WizardHandler) finalizeArchitectRun(
 		if errMsg == "" {
 			errMsg = "Claude 未返回结果，请重试"
 		}
+		h.clearUnestablishedDesignSession(p, out, id)
 		job.Append(store.LogLine{Type: "error", Content: errMsg})
 		_ = h.reqSvc.UpdateDesignJob(id, "")
 		job.Finish(1, store.JobError)
