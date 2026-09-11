@@ -1,9 +1,13 @@
 import { useState } from 'react';
 import { useNavigate, useLocation, Navigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../utils/auth';
+import { errorMessage } from '../utils/errMsg';
+import LanguageSwitcher from '../i18n/LanguageSwitcher';
 import './Login.css';
 
 export default function Login() {
+  const { t } = useTranslation();
   const { login, user } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -29,7 +33,7 @@ export default function Login() {
       // (defaults to the dashboard).
       navigate(from, { replace: true });
     } catch (err) {
-      setError(err instanceof Error ? err.message : '登录失败');
+      setError(errorMessage(err));
     } finally {
       setSubmitting(false);
     }
@@ -39,11 +43,11 @@ export default function Login() {
     <div className="login-page">
       <form className="login-card" onSubmit={onSubmit}>
         <div className="login-logo">🔷 NovaWorkbench</div>
-        <h1 className="login-title">登录</h1>
-        <p className="login-subtitle">用户角色权限体系已启用，请使用账号登录。</p>
+        <h1 className="login-title">{t('login.title')}</h1>
+        <p className="login-subtitle">{t('login.subtitle')}</p>
 
         <label className="login-field">
-          <span>用户名</span>
+          <span>{t('login.username')}</span>
           <input
             type="text"
             value={username}
@@ -55,7 +59,7 @@ export default function Login() {
         </label>
 
         <label className="login-field">
-          <span>密码</span>
+          <span>{t('login.password')}</span>
           <input
             type="password"
             value={password}
@@ -67,12 +71,17 @@ export default function Login() {
         {error && <div className="login-error">{error}</div>}
 
         <button type="submit" className="login-submit" disabled={submitting || !username || !password}>
-          {submitting ? '登录中…' : '登录'}
+          {submitting ? t('login.submitting') : t('login.submit')}
         </button>
 
         <p className="login-hint">
-          首次启动时管理员账号由系统自动创建，密码打印在后端启动日志中（<code>[acl] default admin account</code>）。
+          {t('login.hintPrefix')}<code>[acl] default admin account</code>{t('login.hintSuffix')}
         </p>
+
+        {/* Anonymous surface: with no session the browser-level choice is the
+            only preference there is, so the switcher here must NOT try to
+            persist to /api/auth/locale (it won't — no user in context). */}
+        <LanguageSwitcher variant="block" />
       </form>
     </div>
   );

@@ -21,6 +21,13 @@ type Project struct {
 	Description      string     `json:"description"`
 	DescriptionManual bool      `json:"description_manual"`
 	DescriptionHash  string     `json:"-"`
+	// ClaudeProjectSlug is the directory name Claude CLI assigned to this
+	// project under ~/.claude/projects/<slug>/. Cached on first local
+	// start-coding (DiscoverAndCacheClaudeProjectSlug); read by the Agent
+	// Server path (handler/wizard.go runRemoteCoding) to map the local
+	// session dir to the remote cwd's slug for SFTP session sync. Empty
+	// until discovered.
+	ClaudeProjectSlug string `json:"claude_project_slug,omitempty"`
 }
 
 // AddProjectRequest is the body of POST /api/projects.

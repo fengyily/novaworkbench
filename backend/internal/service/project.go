@@ -5,6 +5,7 @@ import (
 	"database/sql"
 
 	"fmt"
+	"log"
 	"net/url"
 	"regexp"
 	"github.com/novaworkbench/backend/internal/db"
@@ -45,7 +46,7 @@ func (s *ProjectService) List() ([]model.Project, error) {
 func (s *ProjectService) ListForUser(userID string, isAdmin bool) ([]model.Project, error) {
 	q := `SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
-		deleted_at, deleted_dir, description, description_manual, description_hash
+		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug
 		FROM projects`
 	args := []any{}
 	if !isAdmin || userID == "" {
@@ -70,7 +71,8 @@ func (s *ProjectService) ListForUser(userID string, isAdmin bool) ([]model.Proje
 		var p model.Project
 		err := rows.Scan(&p.ID, &p.Name, &p.LocalPath, &p.RemoteURL, &p.Status,
 			&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
-			&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash)
+			&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
+			&p.ClaudeProjectSlug)
 		if err != nil {
 			return nil, err
 		}
@@ -99,11 +101,12 @@ func (s *ProjectService) Get(id string) (*model.Project, error) {
 	var p model.Project
 	err := s.db.QueryRow(`SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
-		deleted_at, deleted_dir, description, description_manual, description_hash
+		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug
 		FROM projects WHERE id = ? AND deleted_at IS NULL`, id).Scan(
 		&p.ID, &p.Name, &p.LocalPath, &p.RemoteURL, &p.Status,
 		&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
-		&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash)
+		&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
+		&p.ClaudeProjectSlug)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("project not found")
 	}
@@ -118,11 +121,12 @@ func (s *ProjectService) getAny(id string) (*model.Project, error) {
 	var p model.Project
 	err := s.db.QueryRow(`SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
-		deleted_at, deleted_dir, description, description_manual, description_hash
+		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug
 		FROM projects WHERE id = ?`, id).Scan(
 		&p.ID, &p.Name, &p.LocalPath, &p.RemoteURL, &p.Status,
 		&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
-		&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash)
+		&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
+		&p.ClaudeProjectSlug)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("project not found")
 	}
@@ -136,7 +140,7 @@ func (s *ProjectService) getAny(id string) (*model.Project, error) {
 func (s *ProjectService) ListTrash() ([]model.Project, error) {
 	rows, err := s.db.Query(`SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
-		deleted_at, deleted_dir, description, description_manual, description_hash
+		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug
 		FROM projects WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC`)
 	if err != nil {
 		return nil, err
@@ -148,7 +152,8 @@ func (s *ProjectService) ListTrash() ([]model.Project, error) {
 		var p model.Project
 		err := rows.Scan(&p.ID, &p.Name, &p.LocalPath, &p.RemoteURL, &p.Status,
 			&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
-			&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash)
+			&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
+			&p.ClaudeProjectSlug)
 		if err != nil {
 			return nil, err
 		}
@@ -814,9 +819,10 @@ func (s *ProjectService) UpdatePlatformConfig(id, platformType, tokenID string) 
 }
 
 // UpdateBasicInfo updates the user-editable basic fields of a project:
-// display name, remote URL, project type, and local filesystem path.
-// Empty/whitespace-only inputs are normalized to "" before write so the
-// caller can rely on the same canonical form that's stored at Add time.
+// display name, remote URL, project type, local filesystem path, and the
+// project's configured main branch (default_branch). Empty/whitespace-only
+// inputs are normalized to "" before write so the caller can rely on the
+// same canonical form that's stored at Add time.
 //
 // name is required (the unique-by-local_path primary identifier is the
 // path, so name can repeat — but a blank name is rejected to keep the
@@ -829,15 +835,19 @@ func (s *ProjectService) UpdatePlatformConfig(id, platformType, tokenID string) 
 // project (DUPLICATE_LOCAL_PATH) since projects.local_path has a UNIQUE
 // constraint that a hand-edited value must continue to satisfy.
 //
-// project_type and remote_url are free-form strings and accept empty
-// values. Errors are prefixed with stable codes the handler maps to HTTP
-// status codes (PROJECT_NOT_FOUND / INVALID_NAME / INVALID_LOCAL_PATH /
+// project_type, remote_url, and default_branch are free-form strings and
+// accept empty values. An empty default_branch is intentionally allowed:
+// the wizard pipeline falls back to "main" when no branch is configured,
+// so a user who wants the legacy behaviour just clears the field. Errors
+// are prefixed with stable codes the handler maps to HTTP status codes
+// (PROJECT_NOT_FOUND / INVALID_NAME / INVALID_LOCAL_PATH /
 // DUPLICATE_LOCAL_PATH).
-func (s *ProjectService) UpdateBasicInfo(id, name, remoteURL, projectType, localPath string) error {
+func (s *ProjectService) UpdateBasicInfo(id, name, remoteURL, projectType, localPath, defaultBranch string) error {
 	name = strings.TrimSpace(name)
 	remoteURL = strings.TrimSpace(remoteURL)
 	projectType = strings.TrimSpace(projectType)
 	localPath = strings.TrimSpace(localPath)
+	defaultBranch = strings.TrimSpace(defaultBranch)
 
 	if name == "" {
 		return fmt.Errorf("INVALID_NAME: name is required")
@@ -883,9 +893,9 @@ func (s *ProjectService) UpdateBasicInfo(id, name, remoteURL, projectType, local
 	}
 
 	res, err := s.db.Exec(
-		`UPDATE projects SET name = ?, remote_url = ?, project_type = ?, local_path = ?, updated_at = ?
+		`UPDATE projects SET name = ?, remote_url = ?, project_type = ?, local_path = ?, default_branch = ?, updated_at = ?
 		 WHERE id = ?`,
-		name, remoteURL, projectType, abs, time.Now(), id)
+		name, remoteURL, projectType, abs, defaultBranch, time.Now(), id)
 	if err != nil {
 		return err
 	}
@@ -947,6 +957,84 @@ func (s *ProjectService) DescriptionState(id string) (desc string, manual bool, 
 		`SELECT description, description_manual, description_hash FROM projects WHERE id = ?`, id).
 		Scan(&desc, &manual, &hash)
 	return
+}
+
+// UpdateClaudeProjectSlug persists the claude CLI session slug assigned to
+// this project. Called by DiscoverAndCacheClaudeProjectSlug on first
+// discovery so subsequent reads avoid the on-disk scan.
+//
+// The slug is whatever directory name Claude CLI created under
+// ~/.claude/projects/ when it first ran with this project as CWD (e.g.
+// "-Users-f1--novaworkbench-worktrees-novaworkbench-req_xxx"). It is
+// project-scoped: a single repo checked out at multiple paths gets one
+// canonical slug (the first path Claude was invoked from).
+func (s *ProjectService) UpdateClaudeProjectSlug(id, slug string) error {
+	if id == "" || slug == "" {
+		return nil
+	}
+	_, err := s.db.Exec(
+		`UPDATE projects SET claude_project_slug = ?, updated_at = ? WHERE id = ?`,
+		slug, time.Now(), id)
+	return err
+}
+
+// DiscoverAndCacheClaudeProjectSlug scans <claudeSessionHome>/projects/ for
+// a subdirectory whose decoded slug matches localPath. Returns ("", nil)
+// when no match is found — that is normal for a brand-new project that has
+// never been run through Claude locally yet (the Agent Server path would
+// also be in this state until the first start-coding locally).
+//
+// Fallback semantics: when NO slug on disk matches localPath (e.g. the
+// project was never coded locally so the directory never existed), the
+// function falls back to EncodeClaudeSlug(localPath). The SFTP upload step
+// in runRemoteCoding creates the remote dir under this slug; if the local
+// CLI later writes to that slug too, the next upload picks it up
+// transparently. We persist the fallback slug via UpdateClaudeProjectSlug
+// only when we found a real on-disk match — caching a never-written slug
+// would just guarantee a stale row on the next read.
+//
+// On a match the slug is persisted to projects.claude_project_slug via
+// UpdateClaudeProjectSlug. A write error is logged but does not fail the
+// read — the caller can still use the returned slug for this request.
+func (s *ProjectService) DiscoverAndCacheClaudeProjectSlug(id, localPath string) (string, error) {
+	if id == "" || localPath == "" {
+		return "", nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", nil
+	}
+	claudeHome := os.Getenv("CLAUDE_CONFIG_DIR")
+	if claudeHome == "" {
+		claudeHome = os.Getenv("NOVA_CLAUDE_HOME")
+	}
+	if claudeHome == "" {
+		claudeHome = filepath.Join(home, ".claude")
+	}
+	root := filepath.Join(claudeHome, "projects")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return util.EncodeClaudeSlug(localPath), nil
+		}
+		return "", err
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if util.MatchSlugToPath(e.Name(), localPath) {
+			if uerr := s.UpdateClaudeProjectSlug(id, e.Name()); uerr != nil {
+				log.Printf("[project] cache claude_project_slug %s: %v", id, uerr)
+			}
+			return e.Name(), nil
+		}
+	}
+	// No on-disk match: return the encoded slug as a best-effort fallback so
+	// the SFTP uploader has a directory name to write to. We deliberately do
+	// NOT persist this fallback — it might never exist on disk, and caching
+	// it would just guarantee a stale row.
+	return util.EncodeClaudeSlug(localPath), nil
 }
 
 // ListProjectsNeedingDescription returns projects whose description is empty

@@ -177,7 +177,12 @@ func (s *Scheduler) loop() {
 // concurrently (only ever invoked from the loop above, so this is just
 // defensive documentation).
 func (s *Scheduler) tick() {
-	now := time.Now()
+	// now MUST be UTC wall-clock: the write path (service.ScheduledTaskService
+	// Create) normalizes run_at to UTC before INSERT, and SQLite/Postgres both
+	// compare TIMESTAMP columns as wall-clock text. Using local time here made
+	// due-row lookups fire up to a full server UTC-offset early (e.g. +08:00).
+	// If TIMESTAMP is ever switched to TIMESTAMPTZ, re-audit Due/FailExpired.
+	now := time.Now().UTC()
 
 	// 1. Fail any pending rows older than the maxLateness floor so a
 	//    pile-up during a long downtime isn't blindly re-fired. Tasks

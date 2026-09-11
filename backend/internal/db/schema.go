@@ -229,6 +229,11 @@ CREATE TABLE IF NOT EXISTS users (
 	password_hash  TEXT NOT NULL DEFAULT '',
 	status         TEXT NOT NULL DEFAULT 'active',
 	is_admin       INTEGER NOT NULL DEFAULT 0,
+	-- locale: the user's preferred UI language (BCP-47, e.g. "zh-CN" /
+	-- "en-US"). Empty = no explicit preference — the frontend falls back to
+	-- the browser-level choice (localStorage nova_lang / navigator.language).
+	-- Written by PUT /api/auth/locale, must match the i18n whitelist.
+	locale         TEXT NOT NULL DEFAULT '',
 	last_login_at  DATETIME,
 	created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -360,6 +365,39 @@ CREATE TABLE IF NOT EXISTS sub_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_sub_tasks_req ON sub_tasks(requirement_id);
 
+-- Orchestration batch: a coordinator row for one auto-orchestrated dispatch
+-- run. tryAutoOrchestrate INSERTs N sub_tasks + 1 orchestration_batches in a
+-- single Tx, then OrchestrationQueue's tick loop walks the batch by batch_seq
+-- and atomically claims each child via ClaimNextPending. When every child
+-- reaches a terminal status the batch flips dispatching -> summarizing and
+-- the summary round (also driven by the tick) forks the orchestrator session
+-- to produce requirements.coding_plan.
+--
+-- summary_heartbeat_at is the 5s tick the RunOrchestratorSummary goroutine
+-- writes while the summary round is in flight. A stale heartbeat (>5min) is
+-- the recovery signal that re-arms summary_status='pending' on the next tick.
+-- batch_id + batch_seq on sub_tasks keep each child's batch membership and
+-- ordering — empty batch_id means a manual sub_task (legacy path).
+CREATE TABLE IF NOT EXISTS orchestration_batches (
+	id                      TEXT PRIMARY KEY,
+	requirement_id          TEXT NOT NULL,
+	orchestrator_session_id TEXT NOT NULL DEFAULT '',
+	model                   TEXT NOT NULL DEFAULT '',
+	work_dir                TEXT NOT NULL DEFAULT '',
+	claude_config_id        TEXT NOT NULL DEFAULT '',
+	total_children          INTEGER NOT NULL DEFAULT 0,
+	status                  TEXT NOT NULL DEFAULT 'dispatching',
+	summary_status          TEXT NOT NULL DEFAULT 'pending',
+	summary_job_id          TEXT NOT NULL DEFAULT '',
+	summary_heartbeat_at    DATETIME,
+	created_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
+	completed_at            DATETIME,
+	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_orch_batches_req    ON orchestration_batches(requirement_id);
+CREATE INDEX IF NOT EXISTS idx_orch_batches_active ON orchestration_batches(status, updated_at);
+
 -- Scheduled one-shot task: fires architect-design or start-coding at a future
 -- time with a pre-selected model. Lifecycle (no retry):
 --   pending → running → succeeded | failed
@@ -398,6 +436,11 @@ CREATE INDEX IF NOT EXISTS idx_sched_run_at  ON scheduled_tasks(run_at);
 // column already exists — migrate ignores the dialect-specific "duplicate
 // column" error.
 var alterColumns = []string{
+	// locale: per-user UI language preference (BCP-47 tag, e.g. "zh-CN").
+	// Empty = follow the browser-level setting. See handler/auth.go
+	// UpdateLocale — the value is validated against the frontend's supported
+	// language whitelist before it is written.
+	`ALTER TABLE users ADD COLUMN locale TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN platform_type TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN platform_token_id TEXT NOT NULL DEFAULT ''`,
 	// install_job_id: persisted JobStore job id for the running install on an
@@ -477,6 +520,19 @@ var alterColumns = []string{
 	// fall back to git's normal config lookup (host ~/.gitconfig etc.).
 	`ALTER TABLE platform_tokens ADD COLUMN git_user_name  TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE platform_tokens ADD COLUMN git_user_email TEXT NOT NULL DEFAULT ''`,
+	// GPG signing material bound to each platform token, so the UID email of
+	// the signing key matches the committer identity on the same row (see
+	// merge.go:lookupGitIdentity). gpg_private_key and gpg_passphrase store
+	// AES-256-GCM ciphertext produced by internal/secret (master key at
+	// ~/.novaworkbench/secret.key, 0600). gpg_key_id is the 16-hex key id
+	// backfilled after the runtime provision step imports the key into a
+	// per-request GNUPGHOME; empty until then. gpg_enabled is the user-
+	// controlled toggle — when 0 the ciphertexts are retained but signing is
+	// skipped, so flipping the switch never silently re-enables an old key.
+	`ALTER TABLE platform_tokens ADD COLUMN gpg_key_id      TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE platform_tokens ADD COLUMN gpg_private_key TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE platform_tokens ADD COLUMN gpg_passphrase  TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE platform_tokens ADD COLUMN gpg_enabled     INTEGER NOT NULL DEFAULT 0`,
 	// Requirement kind: broadens "需求" into three top-level categories — issue
 	// (a defect/bug report), requirement (a planned feature, the legacy default),
 	// idea (an exploratory note). The wizard uses it to inject kind-specific
@@ -548,7 +604,18 @@ var alterColumns = []string{
 	// 子任务派发) can be routed back to the SAME server the code lives on
 	// instead of silently falling back to the local checkout.
 	`ALTER TABLE requirements ADD COLUMN dev_source TEXT NOT NULL DEFAULT ''`,
-	`ALTER TABLE requirements ADD COLUMN agent_server_id TEXT NOT NULL DEFAULT ''`,
+	// NOTE: agent_server_id is also added above (line 449, the developer-stage
+	// binding introduced by commit 99242ae). This dev_source ALTER is from
+	// commit f230269 and used to add a duplicate of agent_server_id by mistake
+	// — keep only the canonical ALTER above so the duplicate "already exists"
+	// noise in the Postgres log goes away.
+	// Development-mode provenance for the coding stage. Stamped once when
+	// StartCoding runs so the UI can show "本次开发基于会话/方案" and so a
+	// follow-up run that omits the field can default to the persisted value.
+	// Values: "session" = fork/resume the design session (legacy default),
+	// "design"  = fresh session, hand the stored design doc to the agent
+	// via the -p prompt; empty = never ran / predates this column.
+	`ALTER TABLE requirements ADD COLUMN dev_mode TEXT NOT NULL DEFAULT ''`,
 	// Per-sub-task token usage (mirrors token_usage per-row columns but stays
 	// inline so a child agent's cost lives next to its artifact without a
 	// second SELECT against token_usage). input_tokens / output_tokens are the
@@ -564,6 +631,27 @@ var alterColumns = []string{
 	`ALTER TABLE sub_tasks ADD COLUMN cache_read_tokens     INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE sub_tasks ADD COLUMN cost_cents            INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE sub_tasks ADD COLUMN duration_seconds      INTEGER NOT NULL DEFAULT 0`,
+	// Orchestration batch linkage: every child row stamped by tryAutoOrchestrate
+	// carries the parent orchestration_batches.id so the tick loop can claim
+	// them in batch_seq order. batch_id='' means a manual sub_task (legacy
+	// path) — RecoverInterrupted treats those differently from batched ones.
+	// batch_id_seq_run is the 5s heartbeat ClaimNextPending / MarkHeartbeat
+	// writes while the child is running; a stale value (>5min) is the signal
+	// RecoverInterrupted uses to flip a crashed "running" row back to "pending"
+	// so the next tick re-dispatches it instead of leaving it stuck.
+	`ALTER TABLE sub_tasks ADD COLUMN batch_id          TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE sub_tasks ADD COLUMN batch_seq         INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE sub_tasks ADD COLUMN batch_id_seq_run  DATETIME`,
+	// Mirrors the orchestration_batches column above for older DBs that
+	// bootstrapped before the table itself shipped — fixup is idempotent
+	// because migrate() ignores "duplicate column" errors.
+	`ALTER TABLE orchestration_batches ADD COLUMN summary_heartbeat_at DATETIME`,
+	// Provenance marker distinguishing auto-orchestrated sub-tasks (created by
+	// tryAutoOrchestrate) from manually-triggered ones (StartSubTask / Adjust /
+	// Redo). Set at insert time and never mutated by SetBatchID, so manual
+	// children stay marked "manual" even after GenerateSubTaskSummary groups
+	// them under a summary batch_id.
+	`ALTER TABLE sub_tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'`,
 }
 
 var (

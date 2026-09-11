@@ -5,12 +5,17 @@
 // /api proxied to :9527) this also works transparently. To point the UI
 // at a different backend, set VITE_API_BASE=http://other-host:9527 at build
 // time (vite inlines it).
+import i18next from 'i18next';
+
 export const API_BASE = import.meta.env.VITE_API_BASE || '';
 
 // Display + persistence literal for "no specific model was selected for a
 // stage" — mirrors backend handler.DefaultModelLabel. The backend treats it as
 // "no model pinned in the --settings env block" (CLI default), and the UI
-// normalizes it to the empty option label "默认模型".
+// normalizes it to the empty option. This is a PROTOCOL literal, not UI copy:
+// it is round-tripped through the backend and compared with `===`, so it must
+// stay in Chinese regardless of the UI language. Do NOT run it through i18n.
+// i18n: protocol literal
 export const DefaultModelLabel = '默认模型';
 
 // Token storage for the bearer auth layer. login() stores the token here; the
@@ -39,6 +44,27 @@ interface APIResponse<T> {
   error?: APIError;
 }
 
+// ApiError carries the structured envelope error so UI code can translate
+// the stable `code` (see utils/errMsg.ts) instead of showing the raw server
+// message. It still IS an Error whose `message` reads like the old thrown
+// string ("CODE: message (suggestion)"), so any call site that never learned
+// about ApiError keeps rendering exactly what it rendered before.
+export class ApiError extends Error {
+  readonly code: string;
+  // detail is the server's raw message without the code prefix — used as the
+  // fallback when a code has no translation.
+  readonly detail: string;
+  readonly suggestion?: string;
+
+  constructor(code: string, message: string, suggestion?: string) {
+    super(`${code}: ${message}${suggestion ? ` (${suggestion})` : ''}`);
+    this.name = 'ApiError';
+    this.code = code;
+    this.detail = message;
+    this.suggestion = suggestion;
+  }
+}
+
 // authHeaders returns the bearer Authorization header when a session token is
 // present. Use it for any raw fetch() that bypasses request<T> (streaming/SSE,
 // job snapshots) so those calls authenticate too.
@@ -48,13 +74,15 @@ export function authHeaders(): Record<string, string> {
 }
 
 // handleUnauthorized drops the stale token, bounces to /login, then throws so
-// the caller stops. Shared by request<T> and authedFetch().
+// the caller stops. Shared by request<T> and authedFetch(). The thrown
+// ApiError's code (UNAUTHENTICATED) is what the UI translates; the detail
+// here is only the untranslated fallback.
 function handleUnauthorized(): never {
   clearToken();
   if (location.pathname !== '/login') {
     location.replace('/login');
   }
-  throw new Error('UNAUTHENTICATED: 未登录或会话已过期，请重新登录');
+  throw new ApiError('UNAUTHENTICATED', 'Not signed in or the session has expired');
 }
 
 // authedFetch wraps fetch() for call sites that need a raw Response (streaming
@@ -85,7 +113,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
   if (!json.success || json.error) {
     const err = json.error || { code: 'UNKNOWN', message: 'Unknown error' };
-    throw new Error(`${err.code}: ${err.message}${err.suggestion ? ` (${err.suggestion})` : ''}`);
+    throw new ApiError(err.code, err.message, err.suggestion);
   }
 
   return json.data as T;
@@ -164,11 +192,14 @@ export const projectsApi = {
   purge: (id: string) => api.delete<{ id: string; status: string }>(`/api/projects/${id}/purge`),
   updatePlatform: (id: string, platform_type: string, platform_token_id: string) =>
     api.patch<Project>(`/api/projects/${id}/platform`, { platform_type, platform_token_id }),
-  // Edit the project name / remote URL / type / local path. All four
-  // fields are optional — omit any field to leave it unchanged.
+  // Edit the project name / remote URL / type / local path / default branch.
+  // All five fields are optional — omit any field to leave it unchanged.
   // The backend rejects blank name/path with 400 INVALID_NAME /
   // INVALID_LOCAL_PATH and a duplicate path with 409 DUPLICATE_LOCAL_PATH.
-  updateBasicInfo: (id: string, data: { name?: string; remote_url?: string; project_type?: string; local_path?: string }) =>
+  // default_branch is the project's configured main branch (e.g. "main" /
+  // "master" / "develop"); the wizard pipeline falls back to "main" when
+  // blank, so passing "" is a valid way to reset to the legacy default.
+  updateBasicInfo: (id: string, data: { name?: string; remote_url?: string; project_type?: string; local_path?: string; default_branch?: string }) =>
     api.patch<Project>(`/api/projects/${id}`, data),
   // Save a manually-edited description; locks it from auto-regeneration.
   updateDescription: (id: string, description: string) =>
@@ -257,7 +288,7 @@ export const scannerApi = {
 // session (coding_session_id). Shown in the developer stage's SubTaskPanel.
 // The status field mirrors JobStore job status (pending/running/done/error);
 // `artifact` holds the final Markdown report and survives JobStore eviction.
-export type SubTaskStatus = 'pending' | 'running' | 'done' | 'error';
+export type SubTaskStatus = 'pending' | 'running' | 'done' | 'error' | 'stopped';
 
 export interface SubTask {
   id: string;
@@ -288,17 +319,36 @@ export interface SubTask {
   created_at: string;
   updated_at: string;
   completed_at?: string;
+  // Orchestration batch membership (restartable orchestration redesign).
+  // batch_id is the parent orchestration_batches.id for auto-dispatched children;
+  // empty for both manually-created sub-tasks AND legacy rows predating the
+  // source column. batch_seq is the 1-based dispatch order within the batch.
+  batch_id?: string;
+  batch_seq?: number;
+  // Provenance marker: 'auto' = tryAutoOrchestrate 派发；'manual' = 手动创建。
+  // 只读字段，后端写入后前端仅展示，不修改。向后兼容：旧后端不返回此字段时为 undefined。
+  source?: 'manual' | 'auto';
 }
 
 export const subTasksApi = {
   // Start a child agent. Returns the JobStore job_id (for SSE stream) and
   // the sub_task_id (for refetch / list updates).
-  create: (requirementId: string, data: { prompt: string; title?: string; model?: string }) =>
-    api.post<{ job_id: string; sub_task_id: string }>(`/api/requirements/${requirementId}/sub-tasks`, data),
+  //
+  // freshSession opts into the 「新会话（含需求上下文）」 recovery path:
+  // the backend skips --resume, mints a new claude session id, and
+  // prepends a ## 父任务上下文 block (requirement title / design /
+  // recent turns / sibling digests) so the new session can answer the
+  // instruction without the parent's JSONL. Used when the user saw
+  // "源会话已失效" and chose the radio opt-in. The default (false)
+  // preserves the legacy --fork-session path.
+  create: (
+    requirementId: string,
+    data: { prompt: string; title?: string; model?: string; freshSession?: boolean },
+  ) => api.post<{ job_id: string; sub_task_id: string }>(`/api/requirements/${requirementId}/sub-tasks`, data),
   // List all sub-tasks for a requirement (oldest first).
   list: (requirementId: string) =>
     api.get<SubTask[]>(`/api/requirements/${requirementId}/sub-tasks`),
-  // Manual re-split (🔄 重新拆分): resumes the coding session with the
+  // Manual re-split: resumes the coding session with the
   // decomposition trigger and runs the same parse+dispatch pipeline as
   // StartCoding's auto-orchestrate. Returns a job_id — subscribe to
   // /api/wizard/jobs/{job_id}/stream for the main agent's progress; the
@@ -319,14 +369,34 @@ export const subTasksApi = {
       `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/adjust`,
       data,
     ),
-  // Redo a failed sub-task: re-runs the SAME prompt (the backend reuses the
-  // original prompt) forking the original source session, optionally with a
-  // different model. Returns a new job_id/sub_task_id (the redo itself is a
-  // new sub-task row).
+  // Redo a failed sub-task IN PLACE: re-runs the SAME prompt on the same
+  // sub_tasks row (no new row created), forking the requirement's main
+  // coding_session_id with a brand-new claude session id, optionally with
+  // a different model. reused_session is always true on the redo path
+  // (the row survives; the session does not).
   redo: (requirementId: string, subTaskId: string, data: { model?: string }) =>
-    api.post<{ job_id: string; sub_task_id: string }>(
+    api.post<{ job_id: string; sub_task_id: string; reused_session: boolean }>(
       `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/redo`,
       data,
+    ),
+  // Continue a sub-task IN PLACE on its existing claude session via
+  // --resume (no fork). Reused for both 'error' and 'stopped' rows; the
+  // original artifact is preserved until the new result lands. Returns
+  // reused_session=false (the existing session is reused end-to-end).
+  continue: (requirementId: string, subTaskId: string, data: { model?: string } = {}) =>
+    api.post<{ job_id: string; sub_task_id: string; reused_session: boolean }>(
+      `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/continue`,
+      data,
+    ),
+  // Stop a running sub-task: triggers a SIGTERM (5s → SIGKILL fallback)
+  // on the underlying claude process and flips the row to status='stopped'
+  // with a "⏹ 用户中止" artifact prefix. Returns immediately with
+  // {status: "stopping", ...}; the actual state flip surfaces via the
+  // SSE job_done frame.
+  stop: (requirementId: string, subTaskId: string) =>
+    api.post<{ status: 'stopping'; sub_task_id: string; job_id: string }>(
+      `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/stop`,
+      {},
     ),
   // Auto-orchestrate: ask the developer main agent to decompose + dispatch.
   // Returns the main-agent's reply (sentinel-stripped) + ids of the
@@ -338,6 +408,28 @@ export const subTasksApi = {
     api.post<SubTaskOrchestrateResponse>(
       `/api/requirements/${requirementId}/orchestrate`, data,
     ),
+  // Manual summary round: kick the orchestration queue to summarize
+  // already-finished sub-tasks (used when the user wants to skip the
+  // pending ones, or when the auto-orchestration path wasn't taken —
+  // e.g. manually-added sub-tasks). The backend creates a
+  // summarizing-only orchestration_batches row and dispatches it through
+  // the same OrchestrationQueue tick path as the auto flow. Returns the
+  // new batch_id so the panel can poll its status. 400 when sub-tasks
+  // are still pending/running; 409 when an orchestration batch is already
+  // active on this requirement.
+  generateSummary: (requirementId: string, data?: { model?: string }) =>
+    api.post<{ job_id: string; batch_id: string }>(
+      `/api/requirements/${requirementId}/sub-tasks/summary`, data ?? {},
+    ),
+  // Poll the current orchestration batch for a requirement. Returns null
+  // when the backend has no batch row for it (no orchestration has run,
+  // or the backend predates the feature). The catch returns plain `null`
+  // so callers can treat any failure as "no batch" without wrapping
+  // every call site in try/catch or unwrapping the envelope by hand.
+  getOrchestrationBatch: (requirementId: string) =>
+    api.get<OrchestrationBatch | null>(
+      `/api/requirements/${requirementId}/orchestration/batch`,
+    ).catch((): OrchestrationBatch | null => null),
 };
 
 // SubTaskOrchestrateResponse is what the backend returns from POST
@@ -351,6 +443,33 @@ export interface SubTaskOrchestrateResponse {
   job_id: string;
   sub_task_ids: string[];
   plan_id?: string;
+  // Orchestration batch that the orchestrator just created (new flow).
+  // The children in sub_task_ids all share this batch_id, and the queue
+  // ticks them in ascending batch_seq order. Older backends that predate
+  // the batch refactor leave these undefined — callers should fall back
+  // to sub_task_ids alone.
+  batch_id?: string;
+  total_children?: number;
+}
+
+// OrchestrationBatch is the persistence-side record of one orchestrator
+// run (auto-decompose or manual summary). The frontend reads it to
+// decide which CTAs to show in SubTaskPanel: while status='dispatching'
+// the "📝 提前生成汇总" CTA is offered; while status='summarizing' all
+// controls are disabled. summary_status independently tracks the
+// post-dispatch summary round (fork-session resume writing the
+// requirements.coding_plan), so a batch in 'completed' status always
+// has summary_status='done' as well.
+export interface OrchestrationBatch {
+  id: string;
+  requirement_id: string;
+  status: 'dispatching' | 'summarizing' | 'completed' | 'errored';
+  summary_status: 'pending' | 'running' | 'done' | 'error';
+  total_children: number;
+  model: string;
+  created_at: string;
+  updated_at?: string;
+  completed_at?: string | null;
 }
 
 // CLI command constructor — renders the `claude ...` invocation the user
@@ -371,7 +490,8 @@ export function subTaskCliCommand(st: SubTask, settings = ''): string {
     if (parent) {
       return `claude ${prefix}--resume ${parent} --fork-session --session-id <new-uuid> -p "${escapeForShell(st.prompt)}"`;
     }
-    return `# 等待主 Agent 会话就绪 (需求未启动 coding)`;
+    // Resolved at call time (render) so a language switch updates the hint.
+    return i18next.t('components.subTask.waitForSession');
   }
   // Standard continue command — matches the canonical "claude -r"
   // short-flag the CLI accepts.
@@ -408,7 +528,7 @@ export interface Requirement {
   // SourceRequirementID links this row to the requirement it was promoted
   // from (typically an idea whose discussion was summarized into a brand-new
   // requirement). Empty for directly-created rows or rows that predate this
-  // column. Rendered as a "← 来源: <title>" link in the detail header so the
+  // column. Rendered as a "← source: <title>" link in the detail header so the
   // user can jump back to the originating idea.
   source_requirement_id?: string;
   design_session_id: string; design_job_id: string; analysis_job_id: string; apply_job_id: string; coding_session_id: string;
@@ -417,9 +537,9 @@ export interface Requirement {
   branch_name?: string;
   worktree_path?: string;
   // Effective model actually dispatched to the claude CLI for each stage
-  // (the model pinned in the --settings env block, or the "默认模型" literal
-  // when none was specified). Empty = the stage hasn't run yet (or predates
-  // this feature).
+  // (the model pinned in the --settings env block, or the DefaultModelLabel
+  // literal when none was specified). Empty = the stage hasn't run yet (or
+  // predates this feature).
   analyst_model?: string;
   architect_model?: string;
   developer_model?: string;
@@ -427,8 +547,8 @@ export interface Requirement {
   // Per-stage context-compression state. Populated by POST
   // /api/wizard/compress-context (which writes the summary, stamps the time,
   // and clears the matching session_id). Used by the requirement detail
-  // header to render a "📦 已压缩" badge and by the chat components to know
-  // whether to inject the summary into the next prompt's "上下文压缩摘要"
+  // header to render a "compressed" badge and by the chat components to know
+  // whether to inject the summary into the next prompt's compression-summary
   // section. Empty summary + null timestamp = never compressed.
   analyst_context_summary?: string;
   analyst_compressed_at?: string | null;
@@ -446,22 +566,22 @@ export interface Requirement {
   usage_snapshots?: string;
   // coding_plan: the developer main agent's task breakdown Markdown. Set
   // either (a) when StartCoding's mainAgent output contains a
-  // `## 任务分解` (or `<!-- CODING_PLAN_START -->...<!-- CODING_PLAN_END -->`)
+  // task-breakdown heading (or `<!-- CODING_PLAN_START -->...<!-- CODING_PLAN_END -->`)
   // section, or (b) when /api/requirements/{id}/orchestrate runs and the
   // main agent emits its structured plan. Rendered by SubTaskPanel as the
-  // "建议子任务" preview.
+  // suggested-sub-tasks preview.
   coding_plan?: string;
   // sub_task_count: number of rows in sub_tasks linked to this requirement.
   // Populated by the backend on GET /api/requirements/{id} via a
   // SELECT COUNT(*); used by RequirementDetail to hide the requirement-
-  // level "追加调整" composer once the requirement has been decomposed
+  // level follow-up composer once the requirement has been decomposed
   // into sub-tasks (further adjustments must then flow through the
   // SubTaskPanel composer instead). Defaults to 0 on legacy responses that
   // predate this field.
   sub_task_count?: number;
   // Development-environment provenance, stamped when the coding stage starts.
   // 'agent' = the requirement was developed on a remote Agent server (and all
-  // follow-up actions — 推送并发起 PR / 清理开发环境 / 子任务 — are routed back
+  // follow-up actions — push + PR / clean dev env / sub-tasks — are routed back
   // to that same server); 'local' = developed on the NovaWorkbench host.
   // Empty/undefined = the coding stage never ran, or the row predates this
   // field — the UI shows no badge in that case rather than guessing "local".
@@ -471,6 +591,13 @@ export interface Requirement {
   // deleted after the requirement was developed on it.
   agent_server_id?: string;
   agent_server_name?: string;
+  // Development-mode provenance for the coding stage, stamped when StartCoding
+  // runs. 'session' = fork the design/analysis session (legacy default —
+  // Claude inherits the full conversation). 'design' = fresh session, hand
+  // the stored design doc to the agent via the -p prompt. Empty/undefined
+  // = never coded or predates this field; the UI shows no badge in that
+  // case rather than guessing "session".
+  dev_mode?: '' | 'session' | 'design';
   created_at: string; updated_at: string;
   completed_at?: string;
   // 日历视图排期字段。NULL = 未排期，前端回退到 created_at；拖拽或编辑
@@ -488,49 +615,52 @@ export interface Requirement {
 export const kindOf = (r: { kind?: Kind } | null | undefined): Kind =>
   (r && r.kind) || 'requirement';
 
-export const kindLabels: Record<Kind, string> = {
-  issue: '🐛 Issue',
-  requirement: '📋 需求',
-  idea: '💡 想法',
+// ---- i18n label keys ------------------------------------------------------
+// The dictionaries below map backend enum codes onto *translation keys*
+// (resolved at render time via i18n/label.ts tLabel) instead of onto display
+// strings. A module-level string would freeze the language at import time;
+// a key keeps every switcher change live. Unmapped codes fall back to the
+// raw value, exactly like the old `map[code] || code` lookups.
+export const kindLabelKeys: Record<Kind, string> = {
+  issue: 'status.kind.issue',
+  requirement: 'status.kind.requirement',
+  idea: 'status.kind.idea',
 };
 
 // Short plain-text label (no emoji) for chip-style filter buttons on the
 // cross-project RequirementsList page.
-export const kindShortLabels: Record<Kind, string> = {
-  issue: 'Issue',
-  requirement: '需求',
-  idea: '想法',
+export const kindShortLabelKeys: Record<Kind, string> = {
+  issue: 'status.kindShort.issue',
+  requirement: 'status.kindShort.requirement',
+  idea: 'status.kindShort.idea',
 };
 
-// Hint text shown beneath each kind card in the create form. Helps the user
-// pick the right category before they start typing.
-export const kindHints: Record<Kind, string> = {
-  issue: '需要：复现路径 / 报错信息 / 期望行为',
-  requirement: '需要：背景 / 目标 / 功能要点 / 验收标准',
-  idea: '一句话或一段话都行，AI 会帮你评估可行性',
+// Hint text shown beneath each kind card in the create form.
+export const kindHintKeys: Record<Kind, string> = {
+  issue: 'status.kindHint.issue',
+  requirement: 'status.kindHint.requirement',
+  idea: 'status.kindHint.idea',
 };
 
-// Placeholder text for the create-form description textarea, tuned per kind
-// so the user gets an immediate hint about the expected shape.
-export const kindPlaceholders: Record<Kind, string> = {
-  issue: '请描述问题现象 / 复现步骤 / 报错信息……',
-  requirement: '用自然语言描述你想要实现的功能……',
-  idea: '写下你的想法或灵感，AI 会帮你评估可行性……',
+// Placeholder text for the create-form description textarea.
+export const kindPlaceholderKeys: Record<Kind, string> = {
+  issue: 'status.kindPlaceholder.issue',
+  requirement: 'status.kindPlaceholder.requirement',
+  idea: 'status.kindPlaceholder.idea',
 };
 
 // CTA button label for the create form, per kind.
-export const kindCreateLabels: Record<Kind, string> = {
-  issue: '🐛 创建 Issue',
-  requirement: '📋 创建需求',
-  idea: '💡 创建想法',
+export const kindCreateLabelKeys: Record<Kind, string> = {
+  issue: 'status.kindCreate.issue',
+  requirement: 'status.kindCreate.requirement',
+  idea: 'status.kindCreate.idea',
 };
 
-// Placeholder text for the analyst-chat composer textarea, per kind. Idea
-// drops the URL/element wording and steers the user toward exploratory talk.
-export const kindChatPlaceholders: Record<Kind, string> = {
-  issue: '贴 URL、描述页面元素、报错截图，或补充复现步骤... 输入 @ 引用 Skill',
-  requirement: '贴URL、描述页面元素、或回复AI的问题... 输入 @ 引用 Skill',
-  idea: '说说你的疑问、顾虑或备选思路... 输入 @ 引用 Skill',
+// Placeholder text for the analyst-chat composer textarea, per kind.
+export const kindChatPlaceholderKeys: Record<Kind, string> = {
+  issue: 'status.kindChatPlaceholder.issue',
+  requirement: 'status.kindChatPlaceholder.requirement',
+  idea: 'status.kindChatPlaceholder.idea',
 };
 
 // Stages visible in the detail-page stepper, per kind. An Idea only walks the
@@ -547,23 +677,24 @@ export const STAGE_VISIBILITY: Record<Kind, ReadonlyArray<StageKey>> = {
 };
 
 export const requirementStatuses = ['draft', 'analyzing', 'designing', 'designed', 'developing', 'done'] as const;
-export const statusLabels: Record<string, string> = {
-  draft: '📝 草稿',
-  analyzing: '🔍 需求分析中',
-  designing: '📐 方案设计中',
-  designed: '📐 方案完成',
-  developing: '🚀 开发中',
-  done: '✅ 开发完成',
-  archived: '📦 已归档',
+export const statusLabelKeys: Record<string, string> = {
+  draft: 'status.req.draft',
+  analyzing: 'status.req.analyzing',
+  designing: 'status.req.designing',
+  designed: 'status.req.designed',
+  developing: 'status.req.developing',
+  done: 'status.req.done',
+  archived: 'status.req.archived',
 };
 
-// Priority display labels. The DB stores free-form "high"/"medium"/"low" (the
-// create-form only writes those three), but legacy rows can have anything —
-// the lookup falls back to the raw value so we never render undefined.
-export const priorityLabels: Record<string, string> = {
-  high: '🔴 High',
-  medium: '🟡 Medium',
-  low: '🟢 Low',
+// Priority display labels. The DB stores free-form "high"/"medium"/"low"
+// (the create-form only writes those three), but legacy rows can have
+// anything — the lookup falls back to the raw value so we never render
+// undefined. Key map — translated at render time via tLabel.
+export const priorityLabelKeys: Record<string, string> = {
+  high: 'requirements.list.priority.high',
+  medium: 'requirements.list.priority.medium',
+  low: 'requirements.list.priority.low',
 };
 
 export const requirementsApi = {
@@ -612,7 +743,7 @@ export const requirementsApi = {
   // source_requirement_id back to the idea. The backend returns 422 with
   // code "NOT_CONVERGED" when the LLM decides the discussion didn't converge
   // into a concrete feature yet — the modal turns that into a friendlier
-  // "讨论还没有达成共识" message and lets the user keep chatting before
+  // "not converged yet" message and lets the user keep chatting before
   // retrying.
   promoteFromIdea: (id: string) =>
     api.post<Requirement>(`/api/requirements/${id}/promote`, {}),
@@ -651,7 +782,7 @@ export interface ContextSummary {
 /**
  * wizardApi — long-running / SSE wizard operations that aren't covered by
  * the static CRUD endpoints on `requirementsApi`. The two endpoints here
- * back the "📦 压缩上下文" button in each chat component: `compressContext`
+ * back the compress-context button in each chat component: `compressContext`
  * runs a one-shot claude turn that summarizes the session and persists it
  * to the requirements row, while `getContextSummary` reads the persisted
  * summary back for the preview modal and the requirement-detail badge.
@@ -662,7 +793,7 @@ export interface ContextSummary {
  * sites currently inline this body (RequirementDetail, WizardPage), but
  * keeping a typed shape here documents the contract and lets the type
  * checker flag drift. `claude_config_id` is the user-picked claude_configs
- * row id from the ModelSelect "配置" dropdown; sending it explicitly fixes
+ * row id from the ModelSelect config dropdown; sending it explicitly fixes
  * the "BASE URL doesn't match selected model" bug.
  */
 export interface StartCodingReq {
@@ -684,6 +815,14 @@ export interface StartCodingReq {
   agent_server_id?: string;
   /** false = developer persona direct implementation; true = sub-task split. */
   split_tasks?: boolean;
+  /**
+   * Coding session threading strategy. 'session' = fork the design/analysis
+   * session (legacy default, Claude inherits the conversation). 'design' =
+   * fresh session, hand the stored design doc to the agent via the -p
+   * prompt. Empty/undefined = backend falls back to the requirement row's
+   * persisted value (or 'session' on rows that predate dev_mode).
+   */
+  dev_mode?: '' | 'session' | 'design';
 }
 
 export const wizardApi = {
@@ -707,7 +846,7 @@ export const wizardApi = {
    * Fetch the persisted compression summary for one stage. Returns an
    * empty summary + null timestamp when the stage has never been
    * compressed — the chat components check this before showing the
-   * "📦 已压缩" badge.
+   * "compressed" badge.
    */
   getContextSummary: (requirementId: string, step: string) =>
     api.get<ContextSummary>(
@@ -716,12 +855,35 @@ export const wizardApi = {
   /**
    * Snapshot of a finished background wizard job. Backs the schedule log
    * popup — when a scheduled design/coding run finishes, the SchedulesPage
-   * "查看日志" button fetches this and renders the log lines inline (the
+   * view-log button fetches this and renders the log lines inline (the
    * durable job_logs row persists across backend restarts). The wizard's
    * StreamJob SSE uses the same handler internally for live progress.
    */
   getJob: (jobId: string) => api.get<RunJob>(`/api/wizard/jobs/${jobId}`),
+  /**
+   * Snapshot of all currently-running wizard jobs (across every project in
+   * this backend process). Used by the requirement list / detail pages to
+   * a working badge on rows whose requirement_id appears in the
+   * returned set. Backed by GET /api/wizard/active-jobs which walks the
+   * in-memory JobStore ring buffer (cap 50). 5s polling cadence on the
+   * frontend — see RequirementDetail / ProjectDetail useEffect.
+   */
+  listActiveJobs: () => api.get<{ jobs: ActiveJob[] }>('/api/wizard/active-jobs'),
 };
+
+/**
+ * Per-job projection returned by GET /api/wizard/active-jobs. Intentionally
+ * minimal — the frontend only needs to know "is requirement X being worked
+ * on right now?" so we surface only id + requirement_id + status + the
+ * free-form type label. `status` is always "running" while the job is in
+ * the ring buffer (finished jobs are filtered out server-side).
+ */
+export interface ActiveJob {
+  job_id: string;
+  requirement_id: string;
+  status: 'running';
+  type: string;
+}
 
 export interface RunStatus {
   status: 'running' | 'done' | 'error' | 'stopped';
@@ -739,7 +901,7 @@ export interface RunJob {
   exit_code: number;
   log: { type: string; content: string }[];
   // Effective model the claude CLI ran with (display value, may be the
-  // "默认模型" literal). Present for review jobs; empty for wizard jobs that
+  // DefaultModelLabel literal). Present for review jobs; empty for wizard jobs that
   // predate the column or were never given one.
   model?: string;
   started_at: string;
@@ -757,7 +919,7 @@ export const runnerApi = {
     api.get<RunJob>(`/api/wizard/jobs/${jobId}`),
 };
 
-// Merge / PR step (post-coding 合入). Local merge into a target branch with
+// Merge / PR step (post-coding merge). Local merge into a target branch with
 // AI-assisted conflict resolution, or push + create-PR link. Long work runs as
 // a JobStore job streamed via the shared /api/wizard/jobs/{id} endpoints.
 export interface MergeState {
@@ -844,12 +1006,23 @@ export interface PlatformToken {
   // ~/.gitconfig. Empty values fall back to git's normal config lookup.
   git_user_name: string;
   git_user_email: string;
+  // GPG signing config. `gpg_key_id` is the 16-hex key id that was last
+  // imported on the Agent host (filled in after a successful provision, so
+  // the UI can echo "Verified with 0xDEAD…BEEF" without ever echoing the
+  // private key itself). The encrypted gpg_private_key / gpg_passphrase
+  // columns live server-side and are NEVER returned here.
+  gpg_enabled: boolean;
+  gpg_key_id: string;
   created_at: string;
   updated_at: string;
 }
 
 export const platformApi = {
   list: () => api.get<PlatformToken[]>('/api/settings/tokens'),
+  // Create a new token. GPG private key + passphrase are encrypted on the
+  // server with AES-256-GCM before they land in the DB, and never leave the
+  // server again; passing them here only matters on the create / rotate
+  // request, and only the backend ever sees the plaintext.
   create: (data: {
     name: string;
     platform: string;
@@ -857,16 +1030,28 @@ export const platformApi = {
     token: string;
     git_user_name?: string;
     git_user_email?: string;
+    gpg_enabled?: boolean;
+    gpg_private_key?: string;
+    gpg_passphrase?: string;
   }) => api.post<PlatformToken>('/api/settings/tokens', data),
   // Edit the editable fields of an existing token. Token secret is left alone
   // by default (use new_token to rotate it). Updates immediately become the
   // commit identity used by the wizard's merge push.
+  //
+  // GPG mirrors the secret semantics: gpg_private_key / gpg_passphrase left
+  // empty = keep the existing ciphertext. Set `clear_gpg: true` to wipe the
+  // stored key + key id and turn gpg_enabled off (used by the UI when the
+  // user un-checks the toggle on an already-enabled row).
   update: (id: string, data: {
     name: string;
     base_url: string;
     git_user_name?: string;
     git_user_email?: string;
     new_token?: string;
+    gpg_enabled?: boolean;
+    gpg_private_key?: string;
+    gpg_passphrase?: string;
+    clear_gpg?: boolean;
   }) => api.put<PlatformToken>(`/api/settings/tokens/${id}`, data),
   delete: (id: string) => api.delete<{ status: string }>(`/api/settings/tokens/${id}`),
 };
@@ -1151,7 +1336,7 @@ export interface StepUsage {
   cache_read_tokens: number;
   count: number;
   costs: CostItem[];
-  // Per-invocation summaries lifted from token_usage.meta (e.g. each 追加调整
+  // Per-invocation summaries lifted from token_usage.meta (e.g. each follow-up
   // request's first 200 chars). May be absent for steps that don't record a
   // summary — render conditionally.
   summaries?: string[];
@@ -1221,20 +1406,21 @@ export interface ProjectUsage {
   review: ReviewUsage[];
 }
 
-// stepLabels mirrors backend service.StepLabels so the UI shows Chinese step
-// names for any raw step code (e.g. rows recorded before a label was joined).
-export const stepLabels: Record<string, string> = {
-  requirement_create: '需求整理',
-  analyst_chat: '需求分析',
-  architect_design: '技术方案',
-  refine_doc: '方案精炼',
-  apply_doc: '方案应用',
-  coding: '编码开发',
-  adjust_coding: '追加调整',
-  continue_coding: '继续开发',
-  developer_chat: '开发讨论',
-  merge: '合入解决',
-  review: '代码审查',
+// stepLabelKeys mirrors backend service.StepLabels: raw step code →
+// translation key, resolved at render time (i18n/label.ts tLabel) so the
+// usage tables follow the UI language.
+export const stepLabelKeys: Record<string, string> = {
+  requirement_create: 'status.step.requirement_create',
+  analyst_chat: 'status.step.analyst_chat',
+  architect_design: 'status.step.architect_design',
+  refine_doc: 'status.step.refine_doc',
+  apply_doc: 'status.step.apply_doc',
+  coding: 'status.step.coding',
+  adjust_coding: 'status.step.adjust_coding',
+  continue_coding: 'status.step.continue_coding',
+  developer_chat: 'status.step.developer_chat',
+  merge: 'status.step.merge',
+  review: 'status.step.review',
 };
 
 // totalInput counts cache reads/creations as billed input tokens.
@@ -1306,6 +1492,9 @@ export interface User {
   display_name: string;
   status: string; // active | disabled
   is_admin: boolean;
+  // Preferred UI language (BCP-47: "zh-CN" / "en-US"). Empty = no explicit
+  // preference — the client keeps following the browser-level choice.
+  locale?: string;
   last_login_at?: string;
   created_at: string;
   updated_at: string;
@@ -1351,6 +1540,9 @@ export const authApi = {
     api.post<SessionProfile>('/api/auth/login', { username, password }),
   logout: () => api.post<{ status: string }>('/api/auth/logout', {}),
   me: () => api.get<SessionProfile>('/api/auth/me'),
+  // Persist the signed-in user's UI language (BCP-47, "" = clear the
+  // preference and follow the browser setting). Returns the refreshed user.
+  setLocale: (locale: string) => api.put<User>('/api/auth/locale', { locale }),
 };
 
 export const aclApi = {
@@ -1470,7 +1662,7 @@ export const agentServersApi = {
 };
 
 // ────────────────────────────────────────────────────────────────────────
-// Scheduled tasks (定时任务) — one-shot future-dated wizard actions.
+// Scheduled tasks — one-shot future-dated wizard actions.
 // See backend internal/service/scheduled_task.go for the persistence layer
 // and internal/scheduler for the polling loop.
 // ────────────────────────────────────────────────────────────────────────
@@ -1490,7 +1682,7 @@ export interface ScheduledTask {
   project_id: string;
   requirement_title: string;
   run_at: string; // RFC3339 from server, preserves the offset the client sent so the moment round-trips correctly even when server TZ ≠ client TZ
-  model: string; // '' = 角色默认
+  model: string; // '' = role default
   read_knowledge: boolean;
   branch_name: string; // coding only
   base_branch: string; // coding only

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { skillsApi, type Skill, type MarketSkill, type SkillMarket } from '../api/client';
 
 interface SkillForm {
@@ -20,6 +21,7 @@ const emptyForm = (): SkillForm => ({
 });
 
 export default function SettingsSkills() {
+  const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<'installed' | 'market'>('installed');
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loading, setLoading] = useState(true);
@@ -92,7 +94,7 @@ export default function SettingsSkills() {
       );
       setMarketSkills(data ?? []);
     } catch (e: unknown) {
-      setMarketError(e instanceof Error ? e.message : '加载失败');
+      setMarketError(e instanceof Error ? e.message : t('settings.skills.loadFailed'));
     } finally {
       setMarketLoading(false);
     }
@@ -121,7 +123,7 @@ export default function SettingsSkills() {
 
   const handleSave = async () => {
     if (!form.name.trim() || !form.slug.trim() || !form.content.trim()) {
-      setError('名称、Slug、内容不能为空');
+      setError(t('settings.skills.errRequired'));
       return;
     }
     setSaving(true);
@@ -147,14 +149,14 @@ export default function SettingsSkills() {
       setShowModal(false);
       await load();
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : '保存失败');
+      setError(e instanceof Error ? e.message : t('settings.skills.saveFailed'));
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async (sk: Skill) => {
-    if (!confirm(`确认删除 Skill「${sk.name}」？`)) return;
+    if (!confirm(t('settings.skills.deleteConfirm', { name: sk.name }))) return;
     setBusyId(sk.id);
     try {
       await skillsApi.delete(sk.id);
@@ -212,9 +214,9 @@ export default function SettingsSkills() {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <h3 style={{ margin: 0 }}>Skills 管理</h3>
+        <h3 style={{ margin: 0 }}>{t('settings.skills.title')}</h3>
         <button className="btn btn-primary" onClick={openCreate}>
-          + 新建 Skill
+          {t('settings.skills.create')}
         </button>
       </div>
 
@@ -229,9 +231,9 @@ export default function SettingsSkills() {
         color: '#3730A3',
         lineHeight: 1.6,
       }}>
-        <strong>如何使用：</strong>已启用的 Skill 会在调用 AI（分析 / 架构 / 开发阶段）前自动写入项目的
-        {' '}<code style={{ background: '#C7D2FE', padding: '1px 4px', borderRadius: 3 }}>.claude/agents/&lt;slug&gt;.md</code>，
-        Claude 即可通过 <code style={{ background: '#C7D2FE', padding: '1px 4px', borderRadius: 3 }}>/slug</code> 调用该 Skill。调用结束后文件自动清理。
+        <strong>{t('settings.skills.usagePrefix')}</strong>{t('settings.skills.usage1')}
+        {' '}<code style={{ background: '#C7D2FE', padding: '1px 4px', borderRadius: 3 }}>.claude/agents/&lt;slug&gt;.md</code>{t('settings.skills.usage2')}
+        <code style={{ background: '#C7D2FE', padding: '1px 4px', borderRadius: 3 }}>/slug</code>{t('settings.skills.usage3')}
       </div>
 
       {/* Tabs */}
@@ -250,7 +252,7 @@ export default function SettingsSkills() {
               fontWeight: activeTab === tab ? 600 : 400,
             }}
           >
-            {tab === 'installed' ? `已安装 (${skills.length})` : '市场'}
+            {tab === 'installed' ? t('settings.skills.tabInstalled', { n: skills.length }) : t('settings.skills.tabMarket')}
           </button>
         ))}
       </div>
@@ -259,20 +261,20 @@ export default function SettingsSkills() {
       {activeTab === 'installed' && (
         <>
           {loading ? (
-            <div style={{ color: '#64748B' }}>加载中...</div>
+            <div style={{ color: '#64748B' }}>{t('settings.skills.loading')}</div>
           ) : skills.length === 0 ? (
             <div style={{ color: '#64748B', padding: 20, textAlign: 'center' }}>
-              暂无 Skill，点击「新建」或从市场安装
+              {t('settings.skills.empty')}
             </div>
           ) : (
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ background: '#F8FAFC', textAlign: 'left' }}>
-                  <th style={{ padding: '8px 12px', color: '#64748B', fontWeight: 500 }}>名称</th>
+                  <th style={{ padding: '8px 12px', color: '#64748B', fontWeight: 500 }}>{t('settings.skills.colName')}</th>
                   <th style={{ padding: '8px 12px', color: '#64748B', fontWeight: 500 }}>Slug</th>
-                  <th style={{ padding: '8px 12px', color: '#64748B', fontWeight: 500 }}>描述</th>
-                  <th style={{ padding: '8px 12px', color: '#64748B', fontWeight: 500, width: 90 }}>启用</th>
-                  <th style={{ padding: '8px 12px', color: '#64748B', fontWeight: 500 }}>操作</th>
+                  <th style={{ padding: '8px 12px', color: '#64748B', fontWeight: 500 }}>{t('settings.skills.colDesc')}</th>
+                  <th style={{ padding: '8px 12px', color: '#64748B', fontWeight: 500, width: 90 }}>{t('settings.skills.colEnabled')}</th>
+                  <th style={{ padding: '8px 12px', color: '#64748B', fontWeight: 500 }}>{t('settings.skills.colActions')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -310,20 +312,20 @@ export default function SettingsSkills() {
                           }} />
                         </div>
                         <span style={{ fontSize: 13, color: sk.enabled ? '#10B981' : '#94A3B8' }}>
-                          {sk.enabled ? '启用' : '禁用'}
+                          {sk.enabled ? t('settings.skills.enable') : t('settings.skills.disable')}
                         </span>
                       </label>
                     </td>
                     <td style={{ padding: '10px 12px', display: 'flex', gap: 8 }}>
                       <button className="btn btn-sm btn-secondary" onClick={() => openEdit(sk)}>
-                        编辑
+                        {t('settings.skills.edit')}
                       </button>
                       <button
                         className="btn btn-sm btn-danger"
                         disabled={busyId === sk.id}
                         onClick={() => handleDelete(sk)}
                       >
-                        删除
+                        {t('settings.skills.delete')}
                       </button>
                     </td>
                   </tr>
@@ -366,7 +368,7 @@ export default function SettingsSkills() {
               <input
                 className="form-input"
                 style={{ flex: 1, fontSize: 13 }}
-                placeholder="自定义 GitHub 仓库 URL 或 manifest URL"
+                placeholder={t('settings.skills.customRegistryPlaceholder')}
                 value={customRegistry}
                 onChange={(e) => { setCustomRegistry(e.target.value); setSelectedMarket(''); }}
               />
@@ -376,7 +378,7 @@ export default function SettingsSkills() {
                 disabled={!customRegistry.trim() || marketLoading}
                 onClick={() => fetchMarketSkills('', customRegistry.trim())}
               >
-                加载
+                {t('settings.skills.load')}
               </button>
             </div>
           </div>
@@ -388,17 +390,17 @@ export default function SettingsSkills() {
             <input
               className="form-input"
               style={{ marginBottom: 12 }}
-              placeholder="搜索 Skill 名称、描述..."
+              placeholder={t('settings.skills.searchPlaceholder')}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
           )}
 
           {marketLoading ? (
-            <div style={{ color: '#64748B', padding: 20, textAlign: 'center' }}>加载市场中...</div>
+            <div style={{ color: '#64748B', padding: 20, textAlign: 'center' }}>{t('settings.skills.marketLoading')}</div>
           ) : filteredMarketSkills.length === 0 ? (
             <div style={{ color: '#64748B', padding: 20, textAlign: 'center' }}>
-              {q ? `未找到与「${searchQuery}」相关的 Skill` : '暂无可用 Skill'}
+              {q ? t('settings.skills.marketNoMatch', { q: searchQuery }) : t('settings.skills.marketEmpty')}
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -430,7 +432,7 @@ export default function SettingsSkills() {
                       onClick={() => handleInstall(mk)}
                       style={{ flexShrink: 0 }}
                     >
-                      {installingSlug === mk.slug ? '安装中...' : installed ? '已安装' : '安装'}
+                      {installingSlug === mk.slug ? t('settings.skills.installing') : installed ? t('settings.skills.installed') : t('settings.skills.install')}
                     </button>
                   </div>
                 );
@@ -444,11 +446,11 @@ export default function SettingsSkills() {
       {showModal && (
         <div className="modal-overlay" onClick={() => setShowModal(false)}>
           <div className="modal-box" style={{ maxWidth: 640, width: '100%' }} onClick={(e) => e.stopPropagation()}>
-            <h3 style={{ marginTop: 0 }}>{editingId ? '编辑 Skill' : '新建 Skill'}</h3>
+            <h3 style={{ marginTop: 0 }}>{editingId ? t('settings.skills.modal.edit') : t('settings.skills.modal.add')}</h3>
 
             <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
               <div style={{ flex: 1 }}>
-                <label className="form-label">名称</label>
+                <label className="form-label">{t('settings.skills.modal.nameLabel')}</label>
                 <input
                   className="form-input"
                   value={form.name}
@@ -457,7 +459,7 @@ export default function SettingsSkills() {
                 />
               </div>
               <div style={{ flex: 1 }}>
-                <label className="form-label">Slug（文件名）</label>
+                <label className="form-label">{t('settings.skills.modal.slugLabel')}</label>
                 <input
                   className="form-input"
                   value={form.slug}
@@ -469,23 +471,23 @@ export default function SettingsSkills() {
             </div>
 
             <div style={{ marginBottom: 12 }}>
-              <label className="form-label">描述</label>
+              <label className="form-label">{t('settings.skills.modal.descLabel')}</label>
               <input
                 className="form-input"
                 value={form.description}
                 onChange={(e) => setForm({ ...form, description: e.target.value })}
-                placeholder="可选简介"
+                placeholder={t('settings.skills.modal.descPlaceholder')}
               />
             </div>
 
             <div style={{ marginBottom: 12 }}>
-              <label className="form-label">内容（Markdown）</label>
+              <label className="form-label">{t('settings.skills.modal.contentLabel')}</label>
               <textarea
                 className="form-input"
                 rows={12}
                 value={form.content}
                 onChange={(e) => setForm({ ...form, content: e.target.value })}
-                placeholder="# Frontend Expert&#10;&#10;你是一名专业的 React / TypeScript 前端工程师..."
+                placeholder={t('settings.skills.modal.contentPlaceholder')}
                 style={{ fontFamily: 'monospace', fontSize: 13 }}
               />
             </div>
@@ -497,17 +499,17 @@ export default function SettingsSkills() {
                 checked={form.enabled}
                 onChange={(e) => setForm({ ...form, enabled: e.target.checked })}
               />
-              <label htmlFor="skill-enabled">启用</label>
+              <label htmlFor="skill-enabled">{t('settings.skills.modal.enabled')}</label>
             </div>
 
             {error && <div style={{ color: '#EF4444', marginBottom: 12 }}>{error}</div>}
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
               <button className="btn btn-secondary" onClick={() => setShowModal(false)}>
-                取消
+                {t('settings.skills.modal.cancel')}
               </button>
               <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-                {saving ? '保存中...' : '保存'}
+                {saving ? t('settings.skills.modal.saving') : t('settings.skills.modal.save')}
               </button>
             </div>
           </div>

@@ -61,6 +61,29 @@ type SubTask struct {
 	// it sees status=running. Stamped at Finish so a long-finished card
 	// keeps a stable "耗时 4m12s" even after JobStore eviction.
 	DurationSeconds     int        `json:"duration_seconds"`
+	// BatchID links this sub-task to its parent orchestration_batches row when
+	// it was created by tryAutoOrchestrate. Empty for manually-created
+	// sub_tasks (legacy path). OrchestrationQueue's tick loop queries
+	// sub_tasks WHERE batch_id=? ORDER BY batch_seq ASC to dispatch the
+	// children in order.
+	BatchID        string `json:"batch_id,omitempty"`
+	// BatchSeq is the per-batch ordering key (1..N) for the auto-orchestrated
+	// dispatch. Zero for manually-created sub_tasks; the SubTaskPanel sorts
+	// by batch_seq ASC and falls back to created_at for the zero seq.
+	BatchSeq       int    `json:"batch_seq,omitempty"`
+	// BatchIDSeqRun is the 5s heartbeat written by ClaimNextPending /
+	// MarkHeartbeat while the child is running. RecoverInterrupted uses a
+	// stale value (>5min) as the signal to flip a crashed "running" row back
+	// to "pending" so the next tick re-dispatches it. Not serialized to
+	// clients — the tick goroutine owns it; external code only reads it
+	// inside the service layer.
+	BatchIDSeqRun  *time.Time `json:"-"`
+	// Source records the provenance of this sub-task row: "auto" when created
+	// by tryAutoOrchestrate, "manual" when created by StartSubTask / Adjust /
+	// Redo. Set at insert time and never mutated, so manual rows stay marked
+	// "manual" even after GenerateSubTaskSummary stamps them with a
+	// summarizing batch_id. Drives the SubTaskCard source badge.
+	Source       string  `json:"source,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`
@@ -73,6 +96,23 @@ const (
 	SubTaskStatusRunning = "running"
 	SubTaskStatusDone    = "done"
 	SubTaskStatusError   = "error"
+	// SubTaskStatusStopped marks a row that the user explicitly halted via
+	// StopSubTask (handler triggers cmd.Cancel on the JobStore job + flips
+	// status). Distinct from error: the underlying subprocess didn't fail,
+	// it was killed by the user. RecoverInterrupted does NOT touch stopped
+	// rows in its manual branch — a stopped row stays stopped across backend
+	// restarts so the Continue button in the UI keeps showing the user the
+	// same "you stopped this earlier" affordance.
+	SubTaskStatusStopped = "stopped"
+)
+
+// SubTaskSource values; "auto" means created by tryAutoOrchestrate,
+// "manual" means created by StartSubTask / Adjust / Redo. Set at insert
+// and never mutated, so it stays a reliable provenance marker even after
+// SetBatchID groups a manual child under a summary batch.
+const (
+	SubTaskSourceManual = "manual"
+	SubTaskSourceAuto   = "auto"
 )
 
 // SubTaskTokens is the four-field token view the wizard handler hands the

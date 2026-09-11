@@ -1,22 +1,25 @@
-// ⏰ 定时任务创建弹窗（技术方案 / 开始开发）。
+// ScheduleModal — schedules a design / coding run.
 //
-// 父组件（RequirementDetail）传入 taskType、requirementId 与上下文默认值
-// （initialModel / defaultBranchName / defaultBaseBranch / agentServers），用户
-// 填写时间 + 模型后提交到 POST /api/schedules。提交成功 → 父组件刷新
-// "已定时 HH:MM" 提示条并关闭弹层。
+// The parent (RequirementDetail) passes taskType, requirementId and context
+// defaults (initialModel / defaultBranchName / defaultBaseBranch /
+// agentServers). The user picks a time + model and it POSTs to
+// /api/schedules; on success the parent refreshes its "scheduled HH:MM"
+// strip and closes the modal.
 //
-// 时间字段是原生 `<input type="datetime-local">`，它的值是用户本地时间但
-// 不带时区后缀。直接发到后端会被后端当成 *服务器* 本地时间解析——若服务
-// 器跑在 Docker/UTC 而用户在 CST，前后端时差会让原本"9-7 23:30"的任务
-// 落到"9-8 07:30"。为消除歧义，提交时通过 `toRFC3339Local` 把它转成带
-// 用户本地时区偏移的 RFC3339 字符串（例如 `2026-09-07T23:30:00+08:00`），
-// 后端的 `parseRunAt` 直接走 RFC3339 分支，时区无关。下方灰字提示用户
-// "将在你设置的本地时间执行"，把责任说清。
+// The time field is a native `<input type="datetime-local">` whose value is
+// the user's local time without a timezone suffix. Sent raw, the backend
+// would parse it as *server* local time — a Docker/UTC server plus a CST
+// user turns "9-7 23:30" into "9-8 07:30". To remove the ambiguity the
+// submit path converts it with toRFC3339Local into an RFC3339 string carrying
+// the user's own offset (e.g. `2026-09-07T23:30:00+08:00`), which the
+// backend's parseRunAt handles timezone-independently. The hint under the
+// field spells this out for the user.
 //
-// 模型选择复用 `<ModelSelect stage>`——同一个组件同时驱动手动"生成方案/
-// 开始开发"按钮和定时弹窗，UI 行为完全一致。
+// Model picking reuses `<ModelSelect stage>` — the same component drives the
+// manual design/coding buttons and this modal, so the UI behaves identically.
 
 import { useState, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   schedulesApi,
   type CreateScheduleReq,
@@ -38,12 +41,12 @@ interface Props {
   taskType: ScheduledTaskType;
   requirementId: string;
   requirementTitle: string;
-  // Pre-selected model id (display value). '' means "默认模型".
+  // Pre-selected model id (display value). '' = the stage's default model.
   initialModel: string;
   // Coding-only defaults (taken from the requirement's openBranchModal form).
   defaultBranchName?: string;
   defaultBaseBranch?: string;
-  // Coding-only agent server picker. Empty array → only "本地执行" option.
+  // Coding-only agent server picker. Empty array → local execution only.
   agentServers: AgentServerOption[];
   onScheduled: (t: ScheduledTaskRow) => void;
 }
@@ -84,6 +87,7 @@ export function ScheduleModal({
   agentServers,
   onScheduled,
 }: Props) {
+  const { t } = useTranslation();
   const [runAt, setRunAt] = useState(defaultRunAtLocal);
   const [model, setModel] = useState(initialModel || '');
   const [readKnowledge, setReadKnowledge] = useState(false);
@@ -102,7 +106,7 @@ export function ScheduleModal({
     () => (taskType === 'design' ? 'architect' : 'developer'),
     [taskType],
   );
-  const titlePrefix = taskType === 'design' ? '⏰ 定时生成方案' : '⏰ 定时开发';
+  const titlePrefix = taskType === 'design' ? t('schedules.modal.titleDesign') : t('schedules.modal.titleCoding');
 
   if (!open) return null;
 
@@ -126,16 +130,16 @@ export function ScheduleModal({
       const created = await schedulesApi.create(body);
       onScheduled(created);
     } catch (err: any) {
-      // 友好翻译几个常见 4xx
+      // Friendly messages for the common 4xx codes.
       const code = err?.message?.split(':')?.[0] ?? '';
       if (code === 'ALREADY_SCHEDULED') {
-        setErrorMsg('已存在一条 pending 定时任务，请先到「定时任务」页取消或删除。');
+        setErrorMsg(t('schedules.modal.errAlreadyScheduled'));
       } else if (code === 'RUN_AT_TOO_SOON') {
-        setErrorMsg('计划时间距现在太近，请选一个至少 30 秒后的时间。');
+        setErrorMsg(t('schedules.modal.errRunAtTooSoon'));
       } else if (code === 'IDEA_NOT_DEVELOPABLE') {
-        setErrorMsg('「想法」类需求不能直接安排开发，请先转为需求。');
+        setErrorMsg(t('schedules.modal.errIdeaNotDevelopable'));
       } else {
-        setErrorMsg(err?.message || '提交失败');
+        setErrorMsg(err?.message || t('schedules.modal.errSubmit'));
       }
     } finally {
       setSubmitting(false);
@@ -157,7 +161,7 @@ export function ScheduleModal({
             className="btn btn-sm"
             onClick={onClose}
             disabled={submitting}
-            aria-label="关闭"
+            aria-label={t('schedules.modal.close')}
           >
             ×
           </button>
@@ -165,12 +169,12 @@ export function ScheduleModal({
 
         <div className="modal-body">
           <p className="modal-confirm-text">
-            为「<strong>{requirementTitle || '该需求'}</strong>」设置定时
-            {taskType === 'design' ? '生成技术方案' : '开始开发'}。
+            {t('schedules.modal.introPrefix')}<strong>{requirementTitle || t('schedules.modal.sourceFallback')}</strong>{t('schedules.modal.introMiddle')}
+            {taskType === 'design' ? t('schedules.modal.introDesign') : t('schedules.modal.introCoding')}{t('schedules.modal.introSuffix')}
           </p>
 
           <div className="modal-field">
-            <label htmlFor="sched-run-at">计划执行时间</label>
+            <label htmlFor="sched-run-at">{t('schedules.modal.runAtLabel')}</label>
             <input
               id="sched-run-at"
               className="form-input"
@@ -180,12 +184,12 @@ export function ScheduleModal({
               onChange={e => setRunAt(e.target.value)}
             />
             <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
-              将在你设置的本地时间执行（与浏览器时区一致，无需换算）
+              {t('schedules.modal.runAtHint')}
             </small>
           </div>
 
           <div className="modal-field">
-            <label>模型</label>
+            <label>{t('schedules.modal.modelLabel')}</label>
             <ModelSelect
               value={model}
               onChange={setModel}
@@ -193,7 +197,7 @@ export function ScheduleModal({
               working={submitting}
             />
             <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
-              留空 = 该阶段角色默认模型
+              {t('schedules.modal.modelHint')}
             </small>
           </div>
 
@@ -205,14 +209,14 @@ export function ScheduleModal({
                 onChange={e => setReadKnowledge(e.target.checked)}
                 disabled={submitting}
               />
-              读取项目知识库（与手动按钮一致）
+              {t('schedules.modal.readKnowledge')}
             </label>
           </div>
 
           {taskType === 'coding' && (
             <>
               <div className="modal-field">
-                <label htmlFor="sched-branch">开发分支</label>
+                <label htmlFor="sched-branch">{t('schedules.modal.branchLabel')}</label>
                 <input
                   id="sched-branch"
                   className="form-input"
@@ -223,7 +227,7 @@ export function ScheduleModal({
                 />
               </div>
               <div className="modal-field">
-                <label htmlFor="sched-base">基础分支</label>
+                <label htmlFor="sched-base">{t('schedules.modal.baseBranchLabel')}</label>
                 <input
                   id="sched-base"
                   className="form-input"
@@ -234,7 +238,7 @@ export function ScheduleModal({
                 />
               </div>
               <div className="modal-field">
-                <label htmlFor="sched-agent">执行环境</label>
+                <label htmlFor="sched-agent">{t('schedules.modal.agentLabel')}</label>
                 <select
                   id="sched-agent"
                   className="form-input"
@@ -242,7 +246,7 @@ export function ScheduleModal({
                   onChange={e => setAgentServerId(e.target.value)}
                   disabled={submitting}
                 >
-                  <option value="">本地执行</option>
+                  <option value="">{t('schedules.modal.agentLocal')}</option>
                   {agentServers.map(s => (
                     <option key={s.id} value={s.id}>
                       {s.name} ({s.host})
@@ -258,7 +262,7 @@ export function ScheduleModal({
                     onChange={e => setSplitTasks(e.target.checked)}
                     disabled={submitting}
                   />
-                  拆分任务（与手动按钮一致；Agent-Server 模式下被忽略）
+                  {t('schedules.modal.splitTasks')}
                 </label>
               </div>
             </>
@@ -266,7 +270,7 @@ export function ScheduleModal({
 
           {errorMsg && (
             <div className="modal-risk-panel" style={{ marginTop: 12 }}>
-              <div className="modal-risk-title">⚠️ 创建失败</div>
+              <div className="modal-risk-title">{t('schedules.modal.failTitle')}</div>
               <div className="modal-risk-desc">{errorMsg}</div>
             </div>
           )}
@@ -274,10 +278,10 @@ export function ScheduleModal({
 
         <div className="modal-actions">
           <button className="btn" onClick={onClose} disabled={submitting}>
-            取消
+            {t('schedules.modal.cancel')}
           </button>
           <button className="btn btn-primary" onClick={handleSubmit} disabled={submitting}>
-            {submitting ? '提交中…' : '创建定时任务'}
+            {submitting ? t('schedules.modal.submitting') : t('schedules.modal.submit')}
           </button>
         </div>
       </div>

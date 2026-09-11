@@ -1,11 +1,12 @@
 import { useEffect, useState, type CSSProperties } from 'react';
+import { useTranslation } from 'react-i18next';
 import { claudeApi, DefaultModelLabel, type ClaudeConfigItem } from '../api/client';
 
 // ModelSelect is the per-stage model picker for the wizard pipeline.
 //
 // Visual: a compact horizontal "card" with a 4px stage-colored accent rail
-// on the left, a stage chip (分析 / 方案 / 开发), and two selects — "配置"
-// (which claude config to pick from) and "模型" (the model id). The
+// on the left, a stage chip (analysis / design / dev), and two selects —
+// "config" (which claude config to pick from) and "model" (the model id). The
 // horizontal layout keeps the picker from breaking across multiple lines
 // when several ModelSelects sit side by side in a toolbar; the outer flex
 // container handles wrapping as a whole. The accent rail + stage chip make
@@ -14,21 +15,20 @@ import { claudeApi, DefaultModelLabel, type ClaudeConfigItem } from '../api/clie
 //
 // Options come from ALL claude configs (active + inactive); the user picks
 // a config (defaults to the active one) then a model from that config's
-// list. The empty value renders as "默认模型" which the backend interprets
-// as "use the role's configured model" (role override → config default →
-// CLI default). A stored value that is no longer in the currently selected
-// config's list is preserved as a disabled option so it is never silently
-// dropped.
+// list. The empty value renders as the DefaultModelLabel literal, which the
+// backend interprets as "use the role's configured model" (role override →
+// config default → CLI default). A stored value that is no longer in the
+// currently selected config's list is preserved as a disabled option so it
+// is never silently dropped.
 //
 // Note: runtime still uses the active config's ANTHROPIC_BASE_URL /
 // ANTHROPIC_AUTH_TOKEN, so picking a model from a non-active config is
 // fine only when the active gateway actually serves that model id. The
 // wizard pipeline surfaces an error if the CLI rejects the model.
 //
-// When defaultModelName is provided the "默认模型" option shows the model
-// that will actually be used (角色模型 > 生效配置默认模型), so the user
-// sees the real model name before the stage even runs — not just the
-// "默认模型" label.
+// When defaultModelName is provided the default-model option shows the
+// model that will actually be used (role model > active config default), so
+// the user sees the real model name before the stage even runs.
 //
 // When `working` is true the card swaps its neutral border for an amber
 // one and the accent rail turns amber + pulses, telegraphing that Claude
@@ -37,7 +37,7 @@ export type ModelStage = 'analyst' | 'architect' | 'developer';
 
 interface Props {
   // Current selection — the DISPLAY value the backend persists (may be the
-  // "默认模型" literal from DefaultModelLabel, which is mapped to "" here).
+  // DefaultModelLabel literal from the backend, which is mapped to "" here).
   value: string;
   onChange: (model: string) => void;
   disabled?: boolean;
@@ -46,21 +46,21 @@ interface Props {
   // migrated to the stage prop yet.
   label?: string;
   title?: string;
-  // Actual model id that the empty "默认模型" selection maps to for this
+  // Actual model id that the empty default-model selection maps to for this
   // stage (role default >> active claude config default). Shown next to
-  // "默认模型".
+  // default option.
   defaultModelName?: string;
   // Claude working status for this stage; truthy paints the card amber
   // and pulses the accent rail. Falsy leaves the card in its neutral
   // state.
   working?: boolean;
   // Which wizard stage this picker belongs to. Drives the stage chip and
-  // accent rail color so the user can tell 分析师 / 方案 / 开发 apart at a
+  // accent rail color so the user can tell the three stages apart at a
   // glance. When omitted the card uses a neutral rail and the optional
   // `label` prop shows verbatim.
   stage?: ModelStage;
   style?: CSSProperties;
-  // Controlled claude_configs row id from the "配置" dropdown. Optional —
+  // Controlled claude_configs row id from the config dropdown. Optional —
   // when omitted the component manages its own state (legacy behavior,
   // kept so existing call sites don't need to be migrated at the same
   // time). When provided the parent owns the state and is responsible
@@ -69,10 +69,12 @@ interface Props {
   onConfigChange?: (configId: string) => void;
 }
 
-const STAGE_META: Record<ModelStage, { chip: string; chipShort: string }> = {
-  analyst:   { chip: '分析', chipShort: '析' },
-  architect: { chip: '方案', chipShort: '方' },
-  developer: { chip: '开发', chipShort: '开' },
+// Stage chips hold translation KEYS (resolved on render) — a literal here
+// would freeze the chip in whatever language was active at import time.
+const STAGE_META: Record<ModelStage, { chipKey: string; chipShortKey: string }> = {
+  analyst:   { chipKey: 'components.modelSelect.stageAnalyst', chipShortKey: 'components.modelSelect.stageAnalystShort' },
+  architect: { chipKey: 'components.modelSelect.stageArchitect', chipShortKey: 'components.modelSelect.stageArchitectShort' },
+  developer: { chipKey: 'components.modelSelect.stageDeveloper', chipShortKey: 'components.modelSelect.stageDeveloperShort' },
 };
 
 export default function ModelSelect({
@@ -88,12 +90,17 @@ export default function ModelSelect({
   configId,
   onConfigChange,
 }: Props) {
+  const { t: tStrict } = useTranslation();
+  // `tStrict` is keyed against the resource tree; keys built dynamically
+  // (from STAGE_META maps) need the loose overload below.
+  const t = tStrict as unknown as (key: string, opts?: Record<string, unknown>) => string;
   const [configs, setConfigs] = useState<ClaudeConfigItem[]>([]);
   // Internal fallback state for the "type" dropdown. When `configId` prop is
   // provided we defer to it (controlled mode); otherwise we self-manage
   // (legacy mode, defaulting to the active config on mount). The bug fix
-  // for "选择模型开发时 BASE URL 不对" requires lifting this state up so the
-  // parent can send `claude_config_id` in the request body — but we keep
+  // for "wrong BASE URL when coding with a picked model" requires lifting this
+  // state up so the parent can send `claude_config_id` in the request body —
+  // but we keep
   // the uncontrolled fallback so old call sites stay valid.
   const [internalConfigId, setInternalConfigId] = useState<string>('');
 
@@ -132,7 +139,7 @@ export default function ModelSelect({
     }
   };
 
-  // Normalize the persisted "默认模型" sentinel to the dropdown's empty
+  // Normalize the persisted DefaultModelLabel sentinel to the dropdown's empty
   // value; anything else is a concrete model id kept verbatim.
   const normalized = !value || value === DefaultModelLabel ? '' : value;
 
@@ -152,18 +159,18 @@ export default function ModelSelect({
     cfgModels.length > 0 &&
     !cfgModels.includes(normalized);
 
-  // "默认模型" alone, or "默认模型（<实际模型名>）". Active config's
+  // "Default model" alone, or "Default model (<resolved id>)". Active config's
   // default_model is what the empty selection resolves to when role has
   // no override.
   const defaultModelNameResolved =
     defaultModelName ?? activeConfig?.default_model ?? '';
   const defaultLabel = defaultModelNameResolved
-    ? `默认模型（${defaultModelNameResolved}）`
-    : '默认模型';
+    ? t('components.modelSelect.defaultWithModel', { model: defaultModelNameResolved })
+    : t('components.modelSelect.default');
 
   // When there are no configs at all (404 / 500 / empty DB), fall back to
   // the legacy single-dropdown layout so the picker still renders
-  // something sensible. The model select will only contain "默认模型"
+  // something sensible. The model select will only contain the default option
   // + the persisted current value (if any).
   const hasConfigs = configs.length > 0;
 
@@ -173,7 +180,7 @@ export default function ModelSelect({
 
   // Stage chip text — the 3-letter stage name wins over the legacy label
   // prop. When neither is set we hide the chip entirely (neutral card).
-  const chipText = stage ? STAGE_META[stage].chip : (label ?? '');
+  const chipText = stage ? t(STAGE_META[stage].chipKey) : (label ?? '');
 
   return (
     <div className="model-select" style={style} title={title}>
@@ -194,13 +201,13 @@ export default function ModelSelect({
             value={selectedConfigId}
             disabled={disabled}
             onChange={e => setSelectedConfigId(e.target.value)}
-            title="先选择 Claude 配置，再选该配置下的模型"
-            aria-label="配置"
+            title={t('components.modelSelect.configTitle')}
+            aria-label={t('components.modelSelect.configAria')}
           >
-            <option value="">默认（不指定）</option>
+            <option value="">{t('components.modelSelect.configDefault')}</option>
             {configs.map(c => (
               <option key={c.id} value={c.id}>
-                {c.name}{c.is_active ? '（默认）' : ''}
+                {c.name}{c.is_active ? t('components.modelSelect.activeSuffix') : ''}
               </option>
             ))}
           </select>
@@ -213,22 +220,22 @@ export default function ModelSelect({
             const v = e.target.value;
             onChange(v.startsWith('__legacy:') ? v.slice(9) : v);
           }}
-          aria-label="模型"
+          aria-label={t('components.modelSelect.modelAria')}
         >
           <option value="">{defaultLabel}</option>
           {cfgModels.map(m => <option key={m} value={m}>{m}</option>)}
           {outOfList && (
             <option value={`__legacy:${normalized}`} disabled>
-              当前：{normalized}（不在当前配置列表中）
+              {t('components.modelSelect.outOfList', { model: normalized })}
             </option>
           )}
         </select>
         {/* Hint when a config is picked but exposes no models. Keeps the
-            dropdown usable (still renders "默认模型") while telling the
-            user there's nothing to choose from in the active selection. */}
+            dropdown usable (still renders the default option) while telling
+            the user there's nothing to choose from in the active selection. */}
         {selectedConfigId && currentConfig && cfgModels.length === 0 && (
           <span className="model-select-hint" role="note">
-            该配置未配置模型列表
+            {t('components.modelSelect.noModels')}
           </span>
         )}
       </div>

@@ -311,7 +311,7 @@ func HasPermission(perms []string, key string) bool {
 
 func (s *ACLService) ListUsers() ([]model.User, error) {
 	rows, err := s.db.Query(
-		`SELECT id, username, display_name, status, is_admin, last_login_at, created_at, updated_at
+		`SELECT id, username, display_name, status, is_admin, locale, last_login_at, created_at, updated_at
 		 FROM users ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, err
@@ -321,7 +321,7 @@ func (s *ACLService) ListUsers() ([]model.User, error) {
 	for rows.Next() {
 		var u model.User
 		var isAdmin int
-		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Status, &isAdmin, &u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Status, &isAdmin, &u.Locale, &u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
 		u.IsAdmin = isAdmin == 1
@@ -334,9 +334,9 @@ func (s *ACLService) GetUser(id string) (*model.User, error) {
 	var u model.User
 	var isAdmin int
 	err := s.db.QueryRow(
-		`SELECT id, username, display_name, status, is_admin, last_login_at, created_at, updated_at
+		`SELECT id, username, display_name, status, is_admin, locale, last_login_at, created_at, updated_at
 		 FROM users WHERE id = ?`, id).
-		Scan(&u.ID, &u.Username, &u.DisplayName, &u.Status, &isAdmin, &u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt)
+		Scan(&u.ID, &u.Username, &u.DisplayName, &u.Status, &isAdmin, &u.Locale, &u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("user not found")
 	}
@@ -356,6 +356,35 @@ func (s *ACLService) GetUser(id string) (*model.User, error) {
 	}
 	u.ProjectIDs = projectIDs
 	return &u, nil
+}
+
+// supportedLocales is the whitelist of UI languages the frontend ships
+// translations for. It mirrors frontend/src/i18n/constants.ts SUPPORTED_LANGS.
+// An empty locale is always accepted and means "no explicit preference —
+// follow the browser-level setting".
+var supportedLocales = map[string]bool{"zh-CN": true, "en-US": true}
+
+// IsValidLocale reports whether the given BCP-47 tag is a supported UI
+// language. Used by the auth handler to reject unknown values with
+// INVALID_LOCALE before they reach the database.
+func IsValidLocale(locale string) bool {
+	return locale == "" || supportedLocales[locale]
+}
+
+// UpdateLocale persists a user's preferred UI language. The value must be in
+// supportedLocales (or empty to clear the preference). Returns the refreshed
+// user row so the caller can echo the stored state back to the client.
+func (s *ACLService) UpdateLocale(userID, locale string) (*model.User, error) {
+	if !IsValidLocale(locale) {
+		return nil, fmt.Errorf("unsupported locale: %s", locale)
+	}
+	if _, err := s.db.Exec(
+		`UPDATE users SET locale = ?, updated_at = ? WHERE id = ?`,
+		locale, time.Now(), userID,
+	); err != nil {
+		return nil, err
+	}
+	return s.GetUser(userID)
 }
 
 func (s *ACLService) CreateUser(req model.CreateUserRequest) (*model.User, error) {

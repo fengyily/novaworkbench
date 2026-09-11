@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { AuthProvider, useAuth } from './utils/auth';
 import Layout from './components/Layout';
 import Login from './pages/Login';
@@ -31,11 +32,12 @@ import SchedulesPage from './pages/SchedulesPage';
 // to /login. /login itself is mounted outside this guard.
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
+  const { t } = useTranslation();
   const location = useLocation();
   if (loading) {
     return (
       <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748B' }}>
-        加载中…
+        {t('common.actions.loading')}
       </div>
     );
   }

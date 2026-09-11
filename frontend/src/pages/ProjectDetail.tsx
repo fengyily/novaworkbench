@@ -1,14 +1,18 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   projectsApi, runnerApi, reviewApi, platformApi, requirementsApi, knowledgeApi,
-  usageApi, usageTotalInput, fmtCost,
+  usageApi, usageTotalInput, fmtCost, wizardApi,
   type Project, type RunStatus, type PR, type PRListResponse, type PlatformToken,
-  type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage, statusLabels,
-  kindLabels, kindOf,
+  type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage, statusLabelKeys,
+  kindLabelKeys, kindOf, API_BASE, authedFetch,
 } from '../api/client';
+import { tLabel } from '../i18n/label';
+import { fmtDate, fmtDateTime } from '../utils/intl';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
 import { IconPlug, IconRobot } from '../components/icons';
@@ -24,8 +28,13 @@ const priorityDots: Record<string, string> = {
   high: '🔴', medium: '🟡', low: '🟢',
 };
 
-const runStatusLabel: Record<string, string> = {
-  stopped: '未运行', running: '运行中', done: '已停止', error: '错误',
+// Run-status badge labels — keys are resolved at render via tLabel so the
+// chip text follows the active language.
+const runStatusLabelKeys: Record<string, string> = {
+  stopped: 'projects.detail.runStatusStopped',
+  running: 'projects.detail.runStatusRunning',
+  done: 'projects.detail.runStatusDone',
+  error: 'projects.detail.runStatusError',
 };
 
 const platformLabels: Record<string, string> = {
@@ -53,12 +62,13 @@ function reqPageWindow(total: number, current: number): (number | '…')[] {
 }
 
 export default function ProjectDetail() {
+  const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
 
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<Tab>('overview');
+  const [tab, setTab] = useState<Tab>('requirements');
 
   // Run tab
   const [runStatus, setRunStatus] = useState<RunStatus | null>(null);
@@ -69,7 +79,7 @@ export default function ProjectDetail() {
   const pollCountRef = useRef(0);
   const logPanelRef = useRef<HTMLDivElement>(null);
   // Anchor for the inline "new requirement" composer — used by the
-  // "+ 新需求" button to scroll the form into view when the list is
+  // "+ New requirement" button to scroll the form into view when the list is
   // long enough that the form would otherwise open below the fold.
   const createReqFormRef = useRef<HTMLDivElement>(null);
 
@@ -79,13 +89,48 @@ export default function ProjectDetail() {
   const [platformSaving, setPlatformSaving] = useState(false);
   const [platformSaved, setPlatformSaved] = useState(false);
 
-  // Overview: basic info (name / remote_url / project_type / local_path)
+  // Overview: basic info (name / remote_url / default_branch / project_type / local_path)
   const [basicEditing, setBasicEditing] = useState(false);
   const [basicDraft, setBasicDraft] = useState({
-    name: '', remote_url: '', project_type: '', local_path: '',
+    name: '', remote_url: '', default_branch: '', project_type: '', local_path: '',
   });
   const [basicSaving, setBasicSaving] = useState(false);
   const [basicMsg, setBasicMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  // Branch candidates for the default-branch datalist — populated when the
+  // user enters edit mode and project.local_path points at a git checkout.
+  // Mirrors RequirementDetail.tsx's fetchGitBranches pattern: a best-effort
+  // GET /api/fs/git-branches?path=<local_path> so the user can pick from a
+  // typed list instead of guessing the main branch name.
+  const [availableBranches, setAvailableBranches] = useState<string[]>([]);
+
+  // Fetch the project's branch list whenever the user opens the basic-info
+  // editor and the project has a local path. Errors are swallowed — the
+  // datalist simply stays empty, the user can still type any branch name
+  // manually, and the wizard pipeline falls back to "main" when blank.
+  useEffect(() => {
+    if (!basicEditing) {
+      setAvailableBranches([]);
+      return;
+    }
+    const localPath = project?.local_path;
+    if (!localPath) {
+      setAvailableBranches([]);
+      return;
+    }
+    let cancelled = false;
+    authedFetch(`${API_BASE}/api/fs/git-branches?path=${encodeURIComponent(localPath)}`)
+      .then(r => r.json())
+      .then(json => {
+        if (cancelled) return;
+        if (json?.success && Array.isArray(json.data?.branches)) {
+          setAvailableBranches(json.data.branches);
+        } else {
+          setAvailableBranches([]);
+        }
+      })
+      .catch(() => { if (!cancelled) setAvailableBranches([]); });
+    return () => { cancelled = true; };
+  }, [basicEditing, project?.local_path]);
 
   // Overview: project description (AI-generated, manually editable)
   const [descEditing, setDescEditing] = useState(false);
@@ -100,8 +145,18 @@ export default function ProjectDetail() {
   const [reqsError, setReqsError] = useState('');
   const [reqsLoaded, setReqsLoaded] = useState(false);
   const [showCreateReq, setShowCreateReq] = useState(false);
-  // Requirements tab pagination — first page by default ("默认加载第一页").
+  // Requirements tab pagination — first page by default.
   const [reqPage, setReqPage] = useState(1);
+
+  // Requirement ids currently running a wizard job (across the whole
+  // backend process). Populated by polling GET /api/wizard/active-jobs
+  // every 5s. The renderRequirementRows helper checks this set per row
+  // and appends a small amber breathing dot next to the status badge
+  // whenever the requirement has an in-flight job — covers coding /
+  // design / apply / analyst without requiring the backend to add a
+  // `coding_job_id` column to the requirements table. List page only:
+  // detail page has its own richer aggregation in RequirementDetail.
+  const [activeReqIds, setActiveReqIds] = useState<Set<string>>(new Set());
 
   // Per-requirement token totals (excl review) — drives the Tokens column in
   // the requirements list + overview. Loaded alongside reqs and refetched when
@@ -245,8 +300,33 @@ export default function ProjectDetail() {
 
   // Snaps the requirements-tab page back to the first page whenever the list is
   // replaced (initial load, post-create refresh), so a previously selected page
-  // can never land past the new last page and "默认加载第一页" holds after refresh.
+  // can never land past the new last page.
   useEffect(() => { setReqPage(1); }, [reqs]);
+
+  // 5s poll of /api/wizard/active-jobs. Drives the small amber breathing
+  // dot rendered next to each requirement's status badge in
+  // renderRequirementRows. Independent of `tab` so the dot stays accurate
+  // even when the user has the requirements tab collapsed on overview
+  // (re-entering the tab shows up-to-date state without a refresh). The
+  // `cancelled` flag guards against a late tick leaking into a different
+  // project (we'd otherwise see the previous project's requirements get
+  // a stale dot set after navigation).
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const { jobs } = await wizardApi.listActiveJobs();
+        if (cancelled) return;
+        setActiveReqIds(new Set(jobs.map((j) => j.requirement_id).filter(Boolean)));
+      } catch {
+        /* transient network blip — keep previous set until the next tick */
+      }
+    };
+    tick();
+    const handle = setInterval(tick, 5000);
+    return () => { cancelled = true; clearInterval(handle); };
+  }, [id]);
 
   // Overview: adapt the visible row count to the viewport's remaining space
   // below the section's top. Measuring the section's own height would
@@ -308,7 +388,7 @@ export default function ProjectDetail() {
     setStopping(true);
     try { await runnerApi.stop(id); }
     catch (err: unknown) {
-      setLogLines(prev => [...prev, { type: 'error', content: '停止失败: ' + (err instanceof Error ? err.message : String(err)) }]);
+      setLogLines(prev => [...prev, { type: 'error', content: t('projects.detail.runStopFailPrefix') + (err instanceof Error ? err.message : String(err)) }]);
       setStopping(false);
     }
   };
@@ -327,7 +407,7 @@ export default function ProjectDetail() {
     } catch { /* ignore */ } finally { setPlatformSaving(false); }
   };
 
-  // ── Overview: basic info edit (name / remote_url / project_type / local_path) ─
+  // ── Overview: basic info edit (name / remote_url / default_branch / project_type / local_path) ─
   const handleSaveBasic = async () => {
     if (!id) return;
     setBasicSaving(true);
@@ -336,12 +416,15 @@ export default function ProjectDetail() {
       const updated = await projectsApi.updateBasicInfo(id, {
         name: basicDraft.name.trim() ? basicDraft.name : undefined,
         remote_url: basicDraft.remote_url,
+        // default_branch is sent as-is (including "") so the user can clear
+        // it back to "use the platform default" by deleting the field.
+        default_branch: basicDraft.default_branch,
         project_type: basicDraft.project_type,
         local_path: basicDraft.local_path.trim() ? basicDraft.local_path : undefined,
       });
       setProject(updated);
       setBasicEditing(false);
-      setBasicMsg({ ok: true, text: '已保存' });
+      setBasicMsg({ ok: true, text: t('projects.detail.basicSaved') });
     } catch (e: unknown) {
       setBasicMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
     } finally {
@@ -358,7 +441,7 @@ export default function ProjectDetail() {
       const updated = await projectsApi.updateDescription(id, descDraft);
       setProject(updated);
       setDescEditing(false);
-      setDescMsg({ ok: true, text: '已保存' });
+      setDescMsg({ ok: true, text: t('projects.detail.basicSaved') });
     } catch (e: unknown) {
       setDescMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
     } finally {
@@ -373,7 +456,7 @@ export default function ProjectDetail() {
     try {
       const updated = await projectsApi.regenerateDescription(id);
       setProject(updated);
-      setDescMsg({ ok: true, text: '已重新生成' });
+      setDescMsg({ ok: true, text: t('projects.detail.descRegenerated') });
     } catch (e: unknown) {
       setDescMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
     } finally {
@@ -414,7 +497,7 @@ export default function ProjectDetail() {
           }
         },
         () => {
-          setReviewLines(prev => [...prev, { type: 'error', content: 'SSE 连接中断' }]);
+          setReviewLines(prev => [...prev, { type: 'error', content: t('projects.detail.reviewSseDrop') }]);
           setCommentBody(messageLines.join('\n\n'));
           setReviewDone(true);
           setReviewingPR(null);
@@ -425,7 +508,7 @@ export default function ProjectDetail() {
       setReviewLines([{ type: 'error', content: err instanceof Error ? err.message : String(err) }]);
       setReviewingPR(null);
     }
-  }, [id, reviewingPR]);
+  }, [id, reviewingPR, extraRequirements, t]);
 
   const handleSubmitComment = async () => {
     if (!id || !commentBody || lastReviewedPRRef.current === 0) return;
@@ -433,9 +516,9 @@ export default function ProjectDetail() {
     setSubmitMsg('');
     try {
       await reviewApi.submitComment(id, lastReviewedPRRef.current, commentBody);
-      setSubmitMsg('✅ Comment 已提交');
+      setSubmitMsg(t('projects.detail.reviewSubmitOk'));
     } catch (err: unknown) {
-      setSubmitMsg('❌ ' + (err instanceof Error ? err.message : String(err)));
+      setSubmitMsg(t('projects.detail.reviewErrPrefix') + (err instanceof Error ? err.message : String(err)));
     } finally { setSubmitting(false); }
   };
 
@@ -451,9 +534,9 @@ export default function ProjectDetail() {
 
   // Shared table rows for the requirements list (used by both the overview
   // "recent requirements" and the requirements tab — single source of truth).
-  // The "Agent 服务器" column mirrors the cross-project RequirementsList so
+  // The "Agent server" column mirrors the cross-project RequirementsList so
   // users can see at a glance which remote execution target the requirement
-  // was developed on (or 本地 if it ran locally). Stays consistent with the
+  // was developed on (or local if it ran locally). Stays consistent with the
   // `agent-server-tag` styling on the global list page.
   const renderRequirementRows = (items: Requirement[]) => items.map(req => (
     <tr
@@ -461,44 +544,57 @@ export default function ProjectDetail() {
       style={{ cursor: 'pointer' }}
       onClick={() => navigate(`/requirements/${req.id}`)}
     >
-      <td data-label="ID" style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{req.id}</td>
-      <td data-label="类型"><span className={`kind-badge kind-${kindOf(req)}`}>{kindLabels[kindOf(req)]}</span></td>
-      <td data-label="标题" className="pr-title">{req.title}</td>
-      <td data-label="优先级"><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
-      <td data-label="状态"><span className={`status-badge status-${req.status}`}>{statusLabels[req.status] ?? req.status}</span></td>
+      <td data-label={t('projects.detail.colId')} style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{req.id}</td>
+      <td data-label={t('projects.detail.colType')}><span className={`kind-badge kind-${kindOf(req)}`}>{tLabel(t, kindLabelKeys as Record<string, string>, kindOf(req))}</span></td>
+      <td data-label={t('projects.detail.colTitle')} className="pr-title">{req.title}</td>
+      <td data-label={t('projects.detail.colPriority')}><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
+      <td data-label={t('projects.detail.colStatus')}>
+        <span className={`status-badge status-${req.status}`}>{tLabel(t, statusLabelKeys as Record<string, string>, req.status)}</span>
+        {/* Breathing dot for any wizard job in flight on this requirement
+            (analyst/design/apply/coding). Set is populated by the 5s poll
+            of /api/wizard/active-jobs above. aria-label + title so screen
+            readers + hover explain the indicator (the dot has no text). */}
+        {activeReqIds.has(req.id) && (
+          <span
+            className="claude-pulse-dot is-work"
+            aria-label={t('projects.detail.claudePulseAria')}
+            title={t('projects.detail.claudePulseTitle')}
+          />
+        )}
+      </td>
       {/* Agent server column: which remote execution target the requirement
-          was developed on. Empty = 本地. The joined name comes from the
-          backend's LEFT JOIN; a deleted server falls back to 本地 so stale
+          was developed on. Empty = local. The joined name comes from the
+          backend's LEFT JOIN; a deleted server falls back to local so stale
           ids never render as raw hex. Identical to the column on the
           cross-project RequirementsList. */}
-      <td data-label="Agent 服务器">
+      <td data-label={t('projects.detail.colAgentServer')}>
         {req.agent_server_name ? (
           <span className="agent-server-tag" title={req.agent_server_name}>
             🖥️ {req.agent_server_name}
           </span>
         ) : (
-          <span style={{ color: 'var(--color-text-muted)' }}>本地</span>
+          <span style={{ color: 'var(--color-text-muted)' }}>{t('projects.detail.agentServerLocal')}</span>
         )}
       </td>
-      <td data-label="Tokens (入/出)" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
+      <td data-label={t('projects.detail.colTokens')} style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
         {(() => {
           const u = reqUsageMap.get(req.id);
           if (!u) return '—';
           return `${usageTotalInput(u).toLocaleString()} / ${u.output_tokens.toLocaleString()}`;
         })()}
       </td>
-      <td data-label="成本" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
+      <td data-label={t('projects.detail.colCost')} style={{ fontFamily: 'var(--font-mono)', fontSize: 12, whiteSpace: 'nowrap' }}>
         {(() => {
           const u = reqUsageMap.get(req.id);
           if (!u) return '—';
           return fmtCost(u.costs);
         })()}
       </td>
-      <td data-label="创建时间" style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
-        {req.created_at ? new Date(req.created_at).toLocaleDateString('zh-CN') : '—'}
+      <td data-label={t('projects.detail.colCreatedAt')} style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+        {req.created_at ? fmtDate(req.created_at) : '—'}
       </td>
-      <td data-label="更新时间" style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
-        {req.updated_at ? new Date(req.updated_at).toLocaleDateString('zh-CN') : '—'}
+      <td data-label={t('projects.detail.colUpdatedAt')} style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+        {req.updated_at ? fmtDate(req.updated_at) : '—'}
       </td>
     </tr>
   ));
@@ -518,12 +614,13 @@ export default function ProjectDetail() {
   // kb-card styles from KnowledgePage.css. The content preview is stripped of
   // markdown noise (stripMarkdownPreview) and clamped to a fixed number of
   // lines via CSS so cards stay uniform regardless of entry length; a
-  // "查看全文" button on every card opens the full Markdown-rendered modal.
-  const renderKnowledgeGroup = (label: string, items: KnowledgeItem[]) => {
+  // "View full" button on every card opens the full Markdown-rendered modal.
+  const renderKnowledgeGroup = (labelKey: string, items: KnowledgeItem[]) => {
     if (!items.length) return null;
+    const label = t(labelKey);
     return (
-      <div className="detail-section" key={label}>
-        <h3 style={{ marginBottom: 12 }}>{label}（{items.length}）</h3>
+      <div className="detail-section" key={labelKey}>
+        <h3 style={{ marginBottom: 12 }}>{label}{t('projects.detail.knowledgeCountSuffix', { n: items.length })}</h3>
         {items.map(k => (
           <div key={k.id} className="kb-card">
             <div className="kb-card-header">
@@ -531,9 +628,9 @@ export default function ProjectDetail() {
               <span className="kb-card-title">{k.title}</span>
             </div>
             <div className="kb-card-content kb-clamp">{stripMarkdownPreview(k.content)}</div>
-            <button className="kb-view-full" onClick={() => setKnowledgeModal(k)}>查看全文 →</button>
+            <button className="kb-view-full" onClick={() => setKnowledgeModal(k)}>{t('projects.detail.knowledgeViewFull')}</button>
             <div className="kb-card-meta">
-              <span className="kb-source">来源: {k.source_type}</span>
+              <span className="kb-source">{t('projects.detail.knowledgeSource', { type: k.source_type })}</span>
               {k.source_ref && <span className="kb-ref">{k.source_ref}</span>}
               <span className="kb-date">{new Date(k.created_at).toLocaleDateString()}</span>
             </div>
@@ -543,8 +640,8 @@ export default function ProjectDetail() {
     );
   };
 
-  if (loading) return <div className="detail-loading">加载中...</div>;
-  if (!project) return <div className="detail-loading">项目未找到</div>;
+  if (loading) return <div className="detail-loading">{t('projects.detail.loading')}</div>;
+  if (!project) return <div className="detail-loading">{t('projects.detail.notFound')}</div>;
 
   const selectedToken = tokens.find(t => t.id === platformForm.platform_token_id);
 
@@ -558,7 +655,7 @@ export default function ProjectDetail() {
       <div className="detail-header">
         <button className="back-link" onClick={() => navigate('/projects')}>
           <span className="back-arrow" aria-hidden="true">‹</span>
-          <span>返回项目列表</span>
+          <span>{t('projects.detail.backLink')}</span>
         </button>
       </div>
 
@@ -573,29 +670,29 @@ export default function ProjectDetail() {
             rel="noreferrer"
             title={project.remote_url}
           >
-            仓库 ↗
+            {t('projects.detail.repoLink')}
           </a>
         )}
       </div>
       <p className="detail-path"><code>{project.local_path}</code></p>
 
       <div className="detail-tabs">
-        <button className={`tab-btn${tab === 'overview' ? ' active' : ''}`} onClick={() => setTab('overview')}>概览</button>
-        <button className={`tab-btn${tab === 'knowledge' ? ' active' : ''}`} onClick={() => setTab('knowledge')}>知识库</button>
+        <button className={`tab-btn${tab === 'overview' ? ' active' : ''}`} onClick={() => setTab('overview')}>{t('projects.detail.tabs.overview')}</button>
+        <button className={`tab-btn${tab === 'knowledge' ? ' active' : ''}`} onClick={() => setTab('knowledge')}>{t('projects.detail.tabs.knowledge')}</button>
         <button className={`tab-btn${tab === 'run' ? ' active' : ''}`} onClick={() => setTab('run')}>
-          运行{isRunning ? ' ●' : ''}
+          {t('projects.detail.tabs.run')}{isRunning ? t('projects.detail.activeSuffix') : ''}
         </button>
         <button className={`tab-btn${tab === 'requirements' ? ' active' : ''}`} onClick={() => { setTab('requirements'); setReqPage(1); }}>
-          需求
+          {t('projects.detail.tabs.requirements')}
         </button>
         <button className={`tab-btn${tab === 'review' ? ' active' : ''}`} onClick={() => setTab('review')}>
-          代码 Review{reviewingPR ? ' ●' : ''}
+          {t('projects.detail.tabs.review')}{reviewingPR ? t('projects.detail.activeSuffix') : ''}
         </button>
         <button className={`tab-btn${tab === 'usage' ? ' active' : ''}`} onClick={() => setTab('usage')}>
-          Token 用量
+          {t('projects.detail.tabs.usage')}
         </button>
         <button className={`tab-btn${tab === 'weekly' ? ' active' : ''}`} onClick={() => setTab('weekly')}>
-          周报
+          {t('projects.detail.tabs.weekly')}
         </button>
       </div>
 
@@ -604,7 +701,7 @@ export default function ProjectDetail() {
         <div className="tab-content">
           <div className="detail-section">
             <div className="section-header" style={{ marginBottom: 12 }}>
-              <span style={{ fontWeight: 600, fontSize: 14 }}>基本信息</span>
+              <span style={{ fontWeight: 600, fontSize: 14 }}>{t('projects.detail.basicTitle')}</span>
               {!basicEditing && (
                 <button
                   className="btn btn-sm"
@@ -612,6 +709,7 @@ export default function ProjectDetail() {
                     setBasicDraft({
                       name: project.name,
                       remote_url: project.remote_url ?? '',
+                      default_branch: project.default_branch ?? '',
                       project_type: project.project_type ?? '',
                       local_path: project.local_path,
                     });
@@ -619,7 +717,7 @@ export default function ProjectDetail() {
                     setBasicMsg(null);
                   }}
                 >
-                  编辑
+                  {t('projects.detail.editBtn')}
                 </button>
               )}
             </div>
@@ -628,37 +726,58 @@ export default function ProjectDetail() {
               <div style={{ display: 'grid', gap: 12 }}>
                 <div className="form-group" style={{ margin: 0 }}>
                   <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
-                    名称
+                    {t('projects.detail.basicName')}
                   </label>
                   <input
                     className="form-input"
                     value={basicDraft.name}
                     onChange={e => setBasicDraft(d => ({ ...d, name: e.target.value }))}
-                    placeholder="项目名称"
+                    placeholder={t('projects.detail.basicNamePlaceholder')}
                     autoFocus
                   />
                 </div>
                 <div className="form-group" style={{ margin: 0 }}>
                   <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
-                    仓库地址
+                    {t('projects.detail.basicRemoteUrl')}
                   </label>
                   <input
                     className="form-input"
                     value={basicDraft.remote_url}
                     onChange={e => setBasicDraft(d => ({ ...d, remote_url: e.target.value }))}
-                    placeholder="https://github.com/user/repo.git  或  git@github.com:user/repo.git"
+                    placeholder={t('projects.detail.basicRemoteUrlPlaceholder')}
                   />
                 </div>
                 <div className="form-group" style={{ margin: 0 }}>
                   <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
-                    类型
+                    {t('projects.detail.basicDefaultBranch')}
+                  </label>
+                  {/* datalist + free-text input: lets the user pick from the
+                      project's known branches OR type any other ref. A blank
+                      value means "use the platform default" — the backend
+                      accepts "" and the wizard pipeline falls back to "main". */}
+                  <input
+                    className="form-input"
+                    list="project-default-branch-options"
+                    value={basicDraft.default_branch}
+                    onChange={e => setBasicDraft(d => ({ ...d, default_branch: e.target.value }))}
+                    placeholder={t('projects.detail.basicDefaultBranchPlaceholder')}
+                  />
+                  <datalist id="project-default-branch-options">
+                    {availableBranches.map((b) => (
+                      <option key={b} value={b} />
+                    ))}
+                  </datalist>
+                </div>
+                <div className="form-group" style={{ margin: 0 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
+                    {t('projects.detail.basicType')}
                   </label>
                   <select
                     className="form-input"
                     value={basicDraft.project_type}
                     onChange={e => setBasicDraft(d => ({ ...d, project_type: e.target.value }))}
                   >
-                    <option value="">— 自动检测 —</option>
+                    <option value="">{t('projects.detail.basicTypeAuto')}</option>
                     <option value="Go">Go</option>
                     <option value="Node.js">Node.js</option>
                     <option value="Python">Python</option>
@@ -670,44 +789,50 @@ export default function ProjectDetail() {
                 </div>
                 <div className="form-group" style={{ margin: 0 }}>
                   <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', display: 'block', marginBottom: 4 }}>
-                    路径
+                    {t('projects.detail.basicLocalPath')}
                   </label>
                   <input
                     className="form-input"
                     value={basicDraft.local_path}
                     onChange={e => setBasicDraft(d => ({ ...d, local_path: e.target.value }))}
-                    placeholder="/absolute/path/to/project"
+                    placeholder={t('projects.detail.basicLocalPathPlaceholder')}
                   />
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button className="btn btn-primary btn-sm" onClick={handleSaveBasic} disabled={basicSaving}>
-                    {basicSaving ? '保存中...' : '保存'}
+                    {basicSaving ? t('projects.detail.basicSaving') : t('projects.detail.basicSave')}
                   </button>
                   <button
                     className="btn btn-sm"
                     onClick={() => { setBasicEditing(false); setBasicMsg(null); }}
                     disabled={basicSaving}
                   >
-                    取消
+                    {t('projects.detail.basicCancel')}
                   </button>
                 </div>
               </div>
             ) : (
               <>
-                <div className="info-row"><span className="info-label">名称</span><span>{project.name}</span></div>
+                <div className="info-row"><span className="info-label">{t('projects.detail.basicInfoName')}</span><span>{project.name}</span></div>
                 <div className="info-row">
-                  <span className="info-label">路径</span>
+                  <span className="info-label">{t('projects.detail.basicInfoPath')}</span>
                   <code className="info-code">{project.local_path}</code>
                 </div>
-                <div className="info-row"><span className="info-label">类型</span><span>{project.project_type || 'Unknown'}</span></div>
+                <div className="info-row"><span className="info-label">{t('projects.detail.basicInfoType')}</span><span>{project.project_type || 'Unknown'}</span></div>
                 <div className="info-row">
-                  <span className="info-label">状态</span>
+                  <span className="info-label">{t('projects.detail.basicInfoStatus')}</span>
                   <span className={`status-badge status-${project.status}`}>{project.status}</span>
                 </div>
                 {project.remote_url && (
                   <div className="info-row">
-                    <span className="info-label">仓库</span>
+                    <span className="info-label">{t('projects.detail.basicInfoRemote')}</span>
                     <code className="info-code">{project.remote_url}</code>
+                  </div>
+                )}
+                {project.default_branch && (
+                  <div className="info-row">
+                    <span className="info-label">{t('projects.detail.basicInfoDefaultBranch')}</span>
+                    <code className="info-code">{project.default_branch}</code>
                   </div>
                 )}
               </>
@@ -723,9 +848,9 @@ export default function ProjectDetail() {
           {/* Project description (AI-generated from CLAUDE.md, manual-edit lockable) */}
           <div className="detail-section" style={{ marginTop: 16 }}>
             <div className="section-header" style={{ marginBottom: 12 }}>
-              <span style={{ fontWeight: 600, fontSize: 14 }}>简介</span>
+              <span style={{ fontWeight: 600, fontSize: 14 }}>{t('projects.detail.descTitle')}</span>
               <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                {project.description_manual ? '✍ 手动修改' : '🤖 AI 生成'}
+                {project.description_manual ? t('projects.detail.descManualFlag') : t('projects.detail.descAiFlag')}
               </span>
             </div>
 
@@ -736,41 +861,41 @@ export default function ProjectDetail() {
                   rows={3}
                   value={descDraft}
                   onChange={e => setDescDraft(e.target.value)}
-                  placeholder="项目简介，建议 120 字以内..."
+                  placeholder={t('projects.detail.descPlaceholder')}
                   autoFocus
                 />
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                   <button className="btn btn-primary btn-sm" onClick={handleSaveDesc} disabled={descSaving}>
-                    {descSaving ? '保存中...' : '保存'}
+                    {descSaving ? t('projects.detail.basicSaving') : t('projects.detail.basicSave')}
                   </button>
                   <button
                     className="btn btn-sm"
                     onClick={() => { setDescEditing(false); setDescMsg(null); }}
                     disabled={descSaving}
                   >
-                    取消
+                    {t('projects.detail.basicCancel')}
                   </button>
                 </div>
               </div>
             ) : (
               <div>
                 <div style={{ color: 'var(--color-text-secondary)', fontSize: 13, whiteSpace: 'pre-wrap' }}>
-                  {project.description || '暂无简介'}
+                  {project.description || t('projects.detail.descNoDesc')}
                 </div>
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                   <button
                     className="btn btn-sm"
                     onClick={() => { setDescDraft(project.description); setDescEditing(true); setDescMsg(null); }}
                   >
-                    编辑
+                    {t('projects.detail.editBtn')}
                   </button>
                   <button
                     className="btn btn-sm"
                     onClick={handleRegenerateDesc}
                     disabled={regenerating}
-                    title="根据当前 CLAUDE.md 重新由 AI 生成（会清除手动修改标记）"
+                    title={t('projects.detail.descRegenerateTitle')}
                   >
-                    {regenerating ? '生成中...' : '重新生成'}
+                    {regenerating ? t('projects.detail.descRegenerating') : t('projects.detail.descRegenerate')}
                   </button>
                 </div>
               </div>
@@ -786,24 +911,24 @@ export default function ProjectDetail() {
           {/* Platform config */}
           <div className="detail-section" style={{ marginTop: 16 }}>
             <div className="section-header" style={{ marginBottom: 12 }}>
-              <span style={{ fontWeight: 600, fontSize: 14 }}>平台配置</span>
+              <span style={{ fontWeight: 600, fontSize: 14 }}>{t('projects.detail.platformTitle')}</span>
               {project.platform_type && (
                 <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                  当前：{platformLabels[project.platform_type] ?? project.platform_type}
-                  {project.platform_token_id ? '' : ' (未绑定 Token)'}
+                  {t('projects.detail.platformCurrent', { platform: platformLabels[project.platform_type] ?? project.platform_type })}
+                  {project.platform_token_id ? '' : t('projects.detail.platformUnbound')}
                 </span>
               )}
             </div>
 
             <div className="platform-form-row">
               <div className="form-group platform-form-field">
-                <label>平台</label>
+                <label>{t('projects.detail.platformField')}</label>
                 <select
                   className="form-input"
                   value={platformForm.platform_type}
                   onChange={e => setPlatformForm(f => ({ ...f, platform_type: e.target.value, platform_token_id: '' }))}
                 >
-                  <option value="">— 不配置 —</option>
+                  <option value="">{t('projects.detail.platformPlaceholder')}</option>
                   <option value="github">GitHub</option>
                   <option value="gitlab">GitLab</option>
                   <option value="gitea">Gitea</option>
@@ -811,14 +936,14 @@ export default function ProjectDetail() {
               </div>
 
               <div className="form-group platform-form-field platform-form-field-grow">
-                <label>Token</label>
+                <label>{t('projects.detail.platformToken')}</label>
                 <select
                   className="form-input"
                   value={platformForm.platform_token_id}
                   onChange={e => setPlatformForm(f => ({ ...f, platform_token_id: e.target.value }))}
                   disabled={!platformForm.platform_type}
                 >
-                  <option value="">— 选择 Token —</option>
+                  <option value="">{t('projects.detail.platformTokenPlaceholder')}</option>
                   {tokens
                     .filter(t => !platformForm.platform_type || t.platform === platformForm.platform_type)
                     .map(t => (
@@ -832,20 +957,20 @@ export default function ProjectDetail() {
                 onClick={handleSavePlatform}
                 disabled={platformSaving}
               >
-                {platformSaving ? '保存中...' : platformSaved ? '已保存 ✓' : '保存'}
+                {platformSaving ? t('projects.detail.platformSaving') : platformSaved ? t('projects.detail.platformSaved') : t('projects.detail.platformSave')}
               </button>
             </div>
 
             {tokens.length === 0 && (
               <p style={{ margin: '8px 0 0', fontSize: 12, color: 'var(--color-text-muted)' }}>
-                还没有 Token？请先到
-                <a href="/settings" style={{ color: 'var(--color-primary)', margin: '0 4px' }}>设置页</a>
-                添加。
+                {t('projects.detail.platformNoToken')}
+                <a href="/settings" style={{ color: 'var(--color-primary)', margin: '0 4px' }}>{t('projects.detail.platformSettingsLink')}</a>
+                {t('projects.detail.platformAddTail')}
               </p>
             )}
             {selectedToken && (
               <p style={{ margin: '8px 0 0', fontSize: 12, color: 'var(--color-success)' }}>
-                已绑定：{selectedToken.name}
+                {t('projects.detail.platformBound', { name: selectedToken.name })}
                 {selectedToken.base_url ? ` (${selectedToken.base_url})` : ''}
               </p>
             )}
@@ -854,17 +979,17 @@ export default function ProjectDetail() {
           {/* Recent requirements (height-adaptive) */}
           <div className="detail-section recent-reqs-section" style={{ marginTop: 16 }} ref={recentSectionRef}>
             <div className="recent-reqs-header">
-              <span style={{ fontWeight: 600, fontSize: 14 }}>最近需求</span>
-              <button className="recent-reqs-more" onClick={() => { setTab('requirements'); setReqPage(1); }}>查看全部 →</button>
+              <span style={{ fontWeight: 600, fontSize: 14 }}>{t('projects.detail.recentTitle')}</span>
+              <button className="recent-reqs-more" onClick={() => { setTab('requirements'); setReqPage(1); }}>{t('projects.detail.recentViewAll')}</button>
             </div>
 
-            {reqsLoading && <div className="tab-empty">⏳ 加载中...</div>}
+            {reqsLoading && <div className="tab-empty">{t('projects.detail.recentLoading')}</div>}
             {!reqsLoading && overviewReqs.length === 0 && (
               <div className="tab-empty">
                 {reqs.length === 0 ? (
-                  <p>该项目暂无需求，<button className="recent-reqs-link" onClick={() => { setTab('requirements'); setShowCreateReq(true); }}>去创建 →</button></p>
+                  <p>{t('projects.detail.recentEmpty')}<button className="recent-reqs-link" onClick={() => { setTab('requirements'); setShowCreateReq(true); }}>{t('projects.detail.recentCreateLink')}</button></p>
                 ) : (
-                  <p>暂无未完成的需求</p>
+                  <p>{t('projects.detail.recentNoActive')}</p>
                 )}
               </div>
             )}
@@ -873,16 +998,16 @@ export default function ProjectDetail() {
                 <table className="pr-table table-cards">
                   <thead>
                     <tr>
-                      <th style={{ width: 110 }}>ID</th>
-                      <th style={{ width: 70 }}>类型</th>
-                      <th>标题</th>
-                      <th style={{ width: 90 }}>优先级</th>
-                      <th style={{ width: 130 }}>状态</th>
-                      <th style={{ width: 140 }}>Agent 服务器</th>
-                      <th style={{ width: 130 }}>Tokens (入/出)</th>
-                      <th style={{ width: 110 }}>成本</th>
-                      <th style={{ width: 110 }}>创建时间</th>
-                      <th style={{ width: 110 }}>更新时间</th>
+                      <th style={{ width: 110 }}>{t('projects.detail.colId')}</th>
+                      <th style={{ width: 70 }}>{t('projects.detail.colType')}</th>
+                      <th>{t('projects.detail.colTitle')}</th>
+                      <th style={{ width: 90 }}>{t('projects.detail.colPriority')}</th>
+                      <th style={{ width: 130 }}>{t('projects.detail.colStatus')}</th>
+                      <th style={{ width: 140 }}>{t('projects.detail.colAgentServer')}</th>
+                      <th style={{ width: 130 }}>{t('projects.detail.colTokens')}</th>
+                      <th style={{ width: 110 }}>{t('projects.detail.colCost')}</th>
+                      <th style={{ width: 110 }}>{t('projects.detail.colCreatedAt')}</th>
+                      <th style={{ width: 110 }}>{t('projects.detail.colUpdatedAt')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -899,15 +1024,15 @@ export default function ProjectDetail() {
       {tab === 'knowledge' && (
         <div className="tab-content">
           {knowledgeLoading ? (
-            <div className="tab-empty"><p>加载中...</p></div>
+            <div className="tab-empty"><p>{t('projects.detail.knowledgeLoading')}</p></div>
           ) : knowledge.length === 0 ? (
-            <div className="tab-empty"><p>暂无知识库数据。可先扫描项目或归档需求以沉淀知识。</p></div>
+            <div className="tab-empty"><p>{t('projects.detail.knowledgeEmpty')}</p></div>
           ) : (
             <>
-              {renderKnowledgeGroup('需求归档', knowledge.filter(k => k.source_type === 'requirement'))}
-              {renderKnowledgeGroup('项目文档', knowledge.filter(k => k.source_type === 'document'))}
-              {renderKnowledgeGroup('项目结构', knowledge.filter(k => k.source_type === 'code'))}
-              {renderKnowledgeGroup('其他', knowledge.filter(k => !['requirement', 'document', 'code'].includes(k.source_type)))}
+              {renderKnowledgeGroup('projects.detail.knowledgeGroupReq', knowledge.filter(k => k.source_type === 'requirement'))}
+              {renderKnowledgeGroup('projects.detail.knowledgeGroupDoc', knowledge.filter(k => k.source_type === 'document'))}
+              {renderKnowledgeGroup('projects.detail.knowledgeGroupCode', knowledge.filter(k => k.source_type === 'code'))}
+              {renderKnowledgeGroup('projects.detail.knowledgeGroupOther', knowledge.filter(k => !['requirement', 'document', 'code'].includes(k.source_type)))}
             </>
           )}
         </div>
@@ -918,25 +1043,25 @@ export default function ProjectDetail() {
         <div className="tab-content">
           <div className="run-control-bar">
             {runStatus?.compose_file
-              ? <span className="compose-detect">已检测到 {runStatus.compose_file}</span>
-              : <span className="compose-detect compose-missing">未检测到 docker-compose 文件</span>}
+              ? <span className="compose-detect">{t('projects.detail.runDetected', { file: runStatus.compose_file })}</span>
+              : <span className="compose-detect compose-missing">{t('projects.detail.runMissing')}</span>}
             <span className={`run-status-badge run-status-${runStatus?.status ?? 'stopped'}`}>
-              {runStatusLabel[runStatus?.status ?? 'stopped']}
+              {tLabel(t, runStatusLabelKeys, runStatus?.status ?? 'stopped')}
             </span>
             {!isRunning
-              ? <button className="btn btn-primary" onClick={handleStart} disabled={starting || stopping}>{starting ? '启动中...' : '启动'}</button>
-              : <button className="btn btn-danger" onClick={handleStop} disabled={stopping}>{stopping ? '停止中...' : '停止'}</button>}
+              ? <button className="btn btn-primary" onClick={handleStart} disabled={starting || stopping}>{starting ? t('projects.detail.runStarting') : t('projects.detail.runStart')}</button>
+              : <button className="btn btn-danger" onClick={handleStop} disabled={stopping}>{stopping ? t('projects.detail.runStopping') : t('projects.detail.runStop')}</button>}
           </div>
           {(logLines.length > 0 || isRunning) && (
             <div className="coding-panel" ref={logPanelRef}>
               {logLines.map((line, i) => (
                 <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
               ))}
-              {isRunning && <div className="coding-line coding-line-tool_call">● 运行中...</div>}
+              {isRunning && <div className="coding-line coding-line-tool_call">{t('projects.detail.runRunningLine')}</div>}
             </div>
           )}
           {!isRunning && logLines.length === 0 && (
-            <div className="tab-empty"><p>点击启动按钮运行 docker compose up --build</p></div>
+            <div className="tab-empty"><p>{t('projects.detail.runEmpty')}</p></div>
           )}
         </div>
       )}
@@ -945,7 +1070,7 @@ export default function ProjectDetail() {
       {tab === 'requirements' && (
         <div className="tab-content">
           <div className="run-control-bar">
-            <span className="compose-detect">本项目关联的需求（{reqs.length}）</span>
+            <span className="compose-detect">{t('projects.detail.reqCount', { n: reqs.length })}</span>
             <button
               className={`btn btn-primary btn-sm${showCreateReq ? ' is-open' : ''}`}
               onClick={() => {
@@ -962,7 +1087,7 @@ export default function ProjectDetail() {
               aria-expanded={showCreateReq}
               aria-controls="new-requirement-form"
             >
-              {showCreateReq ? '× 收起表单' : '+ 新需求'}
+              {showCreateReq ? t('projects.detail.reqCollapseBtn') : t('projects.detail.reqNewBtn')}
             </button>
           </div>
 
@@ -978,12 +1103,15 @@ export default function ProjectDetail() {
                 onClose={() => setShowCreateReq(false)}
                 onCreated={async (created: Requirement) => {
                   setShowCreateReq(false);
-                  // 跳过需求分析 → 自动进入方案设计阶段：导航到详情页并传递
-                  // autoStartDesign 意图标记，由 RequirementDetail 一次性触发 architect-design，
-                  // 替代用户手动点击「生成技术方案」。
+                  // Skip analysis → auto-enter the design stage: navigate to
+                  // the detail page and pass the autoStartDesign intent flag
+                  // so RequirementDetail auto-triggers architect-design in a
+                  // one-shot, replacing the manual "Generate design" click.
                   if (created.skip_design) {
-                    // 跳过设计 → 直接开发：导航到详情页并传递 autoStartCoding 意图标记，
-                    // 由 RequirementDetail 自动唤起分支选择弹窗，直接进入开发流程。
+                    // Skip design → code directly: navigate to the detail
+                    // page and pass the autoStartCoding intent flag so
+                    // RequirementDetail opens the branch-picker modal and
+                    // jumps straight into coding.
                     navigate(`/requirements/${created.id}`, { state: { autoStartCoding: true } });
                     return;
                   }
@@ -999,11 +1127,11 @@ export default function ProjectDetail() {
             </div>
           )}
 
-          {reqsLoading && <div className="tab-empty">⏳ 加载中...</div>}
+          {reqsLoading && <div className="tab-empty">{t('projects.detail.reqLoading')}</div>}
           {reqsError && <div className="tab-empty" style={{ color: 'var(--color-error)' }}>{reqsError}</div>}
 
           {!reqsLoading && !reqsError && reqs.length === 0 && (
-            <div className="tab-empty"><p>该项目暂无需求，点「+ 新需求」创建一个吧。</p></div>
+            <div className="tab-empty"><p>{t('projects.detail.reqEmpty')}</p></div>
           )}
 
           {!reqsLoading && !reqsError && reqs.length > 0 && (
@@ -1011,16 +1139,16 @@ export default function ProjectDetail() {
               <table className="pr-table table-cards">
                 <thead>
                   <tr>
-                    <th style={{ width: 110 }}>ID</th>
-                    <th style={{ width: 70 }}>类型</th>
-                    <th>标题</th>
-                    <th style={{ width: 90 }}>优先级</th>
-                    <th style={{ width: 130 }}>状态</th>
-                    <th style={{ width: 140 }}>Agent 服务器</th>
-                    <th style={{ width: 130 }}>Tokens (入/出)</th>
-                      <th style={{ width: 110 }}>成本</th>
-                    <th style={{ width: 110 }}>创建时间</th>
-                    <th style={{ width: 110 }}>更新时间</th>
+                    <th style={{ width: 110 }}>{t('projects.detail.colId')}</th>
+                    <th style={{ width: 70 }}>{t('projects.detail.colType')}</th>
+                    <th>{t('projects.detail.colTitle')}</th>
+                    <th style={{ width: 90 }}>{t('projects.detail.colPriority')}</th>
+                    <th style={{ width: 130 }}>{t('projects.detail.colStatus')}</th>
+                    <th style={{ width: 140 }}>{t('projects.detail.colAgentServer')}</th>
+                    <th style={{ width: 130 }}>{t('projects.detail.colTokens')}</th>
+                      <th style={{ width: 110 }}>{t('projects.detail.colCost')}</th>
+                    <th style={{ width: 110 }}>{t('projects.detail.colCreatedAt')}</th>
+                    <th style={{ width: 110 }}>{t('projects.detail.colUpdatedAt')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1035,10 +1163,10 @@ export default function ProjectDetail() {
           {!reqsLoading && !reqsError && totalReqPages > 1 && (
             <div className="pagination">
               <span className="pagination-info">
-                共 {reqs.length} 条 · 第 {curReqPage} / {totalReqPages} 页
+                {t('projects.detail.paginationInfo', { total: reqs.length, cur: curReqPage, totalPages: totalReqPages })}
               </span>
               <button className="btn btn-sm" disabled={curReqPage <= 1} onClick={() => setReqPage(curReqPage - 1)}>
-                ‹ 上一页
+                {t('projects.detail.paginationPrev')}
               </button>
               {reqPageWindow(totalReqPages, curReqPage).map((p, i) =>
                 p === '…' ? (
@@ -1054,7 +1182,7 @@ export default function ProjectDetail() {
                 ),
               )}
               <button className="btn btn-sm" disabled={curReqPage >= totalReqPages} onClick={() => setReqPage(curReqPage + 1)}>
-                下一页 ›
+                {t('projects.detail.paginationNext')}
               </button>
             </div>
           )}
@@ -1069,30 +1197,30 @@ export default function ProjectDetail() {
           {!prsLoading && prData && !prData.configured && (
             <div className="review-unconfigured">
               <div className="review-unconfigured-icon"><IconPlug size={28} /></div>
-              <p>项目未配置平台 Token，无法拉取 PR 列表。</p>
+              <p>{t('projects.detail.reviewUnconfiguredTitle')}</p>
               <p>
-                请先到
-                <a href="/settings" style={{ color: 'var(--color-primary)', margin: '0 4px' }}>设置页</a>
-                添加 Token，再到「概览」tab 绑定到本项目。
+                {t('projects.detail.reviewUnconfiguredHint')}
+                <a href="/settings" style={{ color: 'var(--color-primary)', margin: '0 4px' }}>{t('projects.detail.platformSettingsLink')}</a>
+                {t('projects.detail.reviewUnconfiguredHint2')}
               </p>
             </div>
           )}
 
-          {prsLoading && <div className="tab-empty">拉取 PR 列表中...</div>}
+          {prsLoading && <div className="tab-empty">{t('projects.detail.reviewLoading')}</div>}
           {prsError && <div className="tab-empty" style={{ color: 'var(--color-error)' }}>{prsError}</div>}
 
           {!prsLoading && prData && (prData.configured || prData.prs.length > 0) && (
             <>
               {prData.prs.length === 0 && (
-                <div className="tab-empty"><p>暂无 Open 状态的 PR</p></div>
+                <div className="tab-empty"><p>{t('projects.detail.reviewNoPRs')}</p></div>
               )}
               {prData.prs.length > 0 && (
                 <>
                   <div className="review-requirements-bar">
-                    <label className="review-requirements-label">额外审查要求</label>
+                    <label className="review-requirements-label">{t('projects.detail.reviewExtraLabel')}</label>
                     <input
                       className="form-input review-requirements-input"
-                      placeholder="如：重点关注安全性、检查 SQL 注入风险、确认错误处理是否完善..."
+                      placeholder={t('projects.detail.reviewExtraPlaceholder')}
                       value={extraRequirements}
                       onChange={e => setExtraRequirements(e.target.value)}
                       disabled={!!reviewingPR}
@@ -1102,33 +1230,33 @@ export default function ProjectDetail() {
                   <table className="pr-table table-cards">
                     <thead>
                       <tr>
-                        <th style={{ width: 52 }}>#</th>
-                        <th>标题</th>
-                        <th style={{ width: 260 }}>分支</th>
-                        <th style={{ width: 100 }}>作者</th>
-                        <th style={{ width: 90 }}>更新时间</th>
-                        <th style={{ width: 120 }}></th>
+                        <th style={{ width: 52 }}>{t('projects.detail.reviewColNumber')}</th>
+                        <th>{t('projects.detail.reviewColTitle')}</th>
+                        <th style={{ width: 260 }}>{t('projects.detail.reviewColBranch')}</th>
+                        <th style={{ width: 100 }}>{t('projects.detail.reviewColAuthor')}</th>
+                        <th style={{ width: 90 }}>{t('projects.detail.reviewColUpdatedAt')}</th>
+                        <th style={{ width: 120 }}>{t('projects.detail.reviewColActions')}</th>
                       </tr>
                     </thead>
                     <tbody>
                       {prData.prs.map(pr => (
                         <tr key={pr.number} className={reviewingPR?.number === pr.number ? 'pr-row-active' : ''}>
                           <td data-label="#" style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>#{pr.number}</td>
-                          <td data-label="标题" className="pr-title">
+                          <td data-label={t('projects.detail.reviewColTitle')} className="pr-title">
                             <a href={pr.html_url} target="_blank" rel="noreferrer" style={{ color: 'var(--color-primary)' }}>
                               {pr.title}
                             </a>
                           </td>
-                          <td data-label="分支"><code className="pr-branch">{pr.head_branch}</code> ← <code className="pr-branch">{pr.base_branch}</code></td>
-                          <td data-label="作者">{pr.author}</td>
-                          <td data-label="更新时间">{pr.updated_at ? new Date(pr.updated_at).toLocaleDateString('zh-CN') : '—'}</td>
-                          <td data-label="操作">
+                          <td data-label={t('projects.detail.reviewColBranch')}><code className="pr-branch">{pr.head_branch}</code> ← <code className="pr-branch">{pr.base_branch}</code></td>
+                          <td data-label={t('projects.detail.reviewColAuthor')}>{pr.author}</td>
+                          <td data-label={t('projects.detail.reviewColUpdatedAt')}>{pr.updated_at ? fmtDate(pr.updated_at) : '—'}</td>
+                          <td data-label={t('projects.detail.reviewColActions')}>
                             <button
                               className="btn btn-primary btn-sm"
                               onClick={() => handleReviewWithTracking(pr)}
                               disabled={!!reviewingPR}
                             >
-                              {reviewingPR?.number === pr.number ? '审查中...' : 'Claude Review'}
+                              {reviewingPR?.number === pr.number ? t('projects.detail.reviewBtnActive') : t('projects.detail.reviewBtn')}
                             </button>
                           </td>
                         </tr>
@@ -1146,15 +1274,15 @@ export default function ProjectDetail() {
             <div className="review-panel-wrap">
               <div className="review-panel-header">
                 <span>
-                  Review 输出
+                  {t('projects.detail.reviewHeader')}
                   {reviewingPR ? `：#${reviewingPR.number} ${reviewingPR.title}` : ''}
-                  {reviewDone ? ' — 已完成' : ''}
+                  {reviewDone ? t('projects.detail.reviewHeaderDone') : ''}
                 </span>
                 {reviewDone && (
                   <button className="btn btn-secondary btn-sm" onClick={() => {
                     setReviewLines([]); setReviewDone(false); setCommentBody(''); setSubmitMsg('');
                   }}>
-                    清除
+                    {t('projects.detail.reviewDoneBtn')}
                   </button>
                 )}
               </div>
@@ -1163,7 +1291,7 @@ export default function ProjectDetail() {
                   <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
                 ))}
                 {reviewingPR && !reviewDone && (
-                  <div className="coding-line coding-line-tool_call">● Claude 正在审查代码...</div>
+                  <div className="coding-line coding-line-tool_call">{t('projects.detail.reviewProgress')}</div>
                 )}
               </div>
             </div>
@@ -1173,17 +1301,17 @@ export default function ProjectDetail() {
           {reviewDone && lastReviewedPRRef.current > 0 && (
             <div className="review-comment-wrap">
               <div className="review-panel-header">
-                <span>PR Comment 草稿 — #{lastReviewedPRRef.current}</span>
+                <span>{t('projects.detail.reviewCommentHeader', { n: lastReviewedPRRef.current })}</span>
               </div>
               <div className="review-model-line">
-                <IconRobot size={13} /> 本次 review 使用模型：{reviewModel || '默认模型'}
+                <IconRobot size={13} /> {t('projects.detail.reviewModelLine', { model: reviewModel || t('projects.detail.reviewDefaultModel') })}
               </div>
               <textarea
                 className="review-comment-editor"
                 value={commentBody}
                 onChange={e => setCommentBody(e.target.value)}
                 rows={12}
-                placeholder="Review 内容将自动填入，可在此修改后提交..."
+                placeholder={t('projects.detail.reviewEditorPlaceholder')}
               />
               <div className="review-comment-actions">
                 {submitMsg && (
@@ -1194,7 +1322,7 @@ export default function ProjectDetail() {
                   onClick={handleSubmitComment}
                   disabled={submitting || !commentBody}
                 >
-                  {submitting ? '提交中...' : '一键提交 Comment'}
+                  {submitting ? t('projects.detail.reviewSubmitBusy') : t('projects.detail.reviewSubmit')}
                 </button>
               </div>
             </div>
@@ -1213,44 +1341,44 @@ export default function ProjectDetail() {
       {tab === 'usage' && id && (
         <div className="tab-content">
           {projectUsageLoading ? (
-            <div className="tab-empty"><p>加载中…</p></div>
+            <div className="tab-empty"><p>{t('projects.detail.usageLoading')}</p></div>
           ) : !projectUsage ? (
-            <div className="tab-empty"><p>暂无数据</p></div>
+            <div className="tab-empty"><p>{t('projects.detail.usageEmpty')}</p></div>
           ) : (
             <>
               {/* Project total (excludes review rows) */}
               <div className="detail-section" style={{ marginBottom: 16 }}>
                 <div className="section-header" style={{ marginBottom: 12 }}>
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>项目 Token 消耗</span>
-                  <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>不含代码审查</span>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('projects.detail.usageTitle')}</span>
+                  <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{t('projects.detail.usageExcludeReview')}</span>
                 </div>
                 <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
                   <div>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>输入</div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{t('projects.detail.usageInput')}</div>
                     <div style={{ fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 600 }}>
                       {usageTotalInput(projectUsage.total).toLocaleString()}
                     </div>
                   </div>
                   <div>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>输出</div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{t('projects.detail.usageOutput')}</div>
                     <div style={{ fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 600, color: 'var(--color-primary)' }}>
                       {projectUsage.total.output_tokens.toLocaleString()}
                     </div>
                   </div>
                   <div>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>缓存读</div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{t('projects.detail.usageCacheRead')}</div>
                     <div style={{ fontFamily: 'var(--font-mono)', fontSize: 16 }}>
                       {projectUsage.total.cache_read_tokens.toLocaleString()}
                     </div>
                   </div>
                   <div>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>缓存建</div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{t('projects.detail.usageCacheCreation')}</div>
                     <div style={{ fontFamily: 'var(--font-mono)', fontSize: 16 }}>
                       {projectUsage.total.cache_creation_tokens.toLocaleString()}
                     </div>
                   </div>
                   <div>
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>费用</div>
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{t('projects.detail.usageCost')}</div>
                     <div style={{ fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 600, color: '#10B981' }}>
                       {fmtCost(projectUsage.total.costs)}
                     </div>
@@ -1261,21 +1389,21 @@ export default function ProjectDetail() {
               {/* Per-requirement breakdown */}
               <div className="detail-section" style={{ marginBottom: 16 }}>
                 <div className="section-header" style={{ marginBottom: 12 }}>
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>按需求</span>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('projects.detail.usageByReq')}</span>
                 </div>
                 {projectUsage.by_requirement.length === 0 ? (
-                  <div className="tab-empty"><p>暂无需求 Token 消耗</p></div>
+                  <div className="tab-empty"><p>{t('projects.detail.usageByReqEmpty')}</p></div>
                 ) : (
                   <div className="pr-list">
                     <table className="pr-table table-cards">
                       <thead>
                         <tr>
-                          <th>需求 ID</th>
-                          <th style={{ width: 120 }}>输入</th>
-                          <th style={{ width: 120 }}>输出</th>
-                          <th style={{ width: 120 }}>缓存读</th>
-                          <th style={{ width: 120 }}>缓存建</th>
-                          <th style={{ width: 140 }}>成本</th>
+                          <th>{t('projects.detail.usageColReqId')}</th>
+                          <th style={{ width: 120 }}>{t('projects.detail.usageInput')}</th>
+                          <th style={{ width: 120 }}>{t('projects.detail.usageOutput')}</th>
+                          <th style={{ width: 120 }}>{t('projects.detail.usageCacheRead')}</th>
+                          <th style={{ width: 120 }}>{t('projects.detail.usageCacheCreation')}</th>
+                          <th style={{ width: 140 }}>{t('projects.detail.usageCost')}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1303,28 +1431,28 @@ export default function ProjectDetail() {
               {/* Per-model breakdown */}
               <div className="detail-section" style={{ marginBottom: 16 }}>
                 <div className="section-header" style={{ marginBottom: 12 }}>
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>按模型</span>
-                  <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>成本按配置币种分组（同模型跨平台默认不作合并）</span>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('projects.detail.usageByModel')}</span>
+                  <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{t('projects.detail.usageByModelHint')}</span>
                 </div>
                 {projectUsage.by_model.length === 0 ? (
-                  <div className="tab-empty"><p>暂无按模型统计</p></div>
+                  <div className="tab-empty"><p>{t('projects.detail.usageByModelEmpty')}</p></div>
                 ) : (
                   <div className="pr-list">
                     <table className="pr-table table-cards">
                       <thead>
                         <tr>
-                          <th>模型</th>
-                          <th style={{ width: 120 }}>输入</th>
-                          <th style={{ width: 120 }}>输出</th>
-                          <th style={{ width: 120 }}>缓存读</th>
-                          <th style={{ width: 120 }}>缓存建</th>
-                          <th style={{ width: 150 }}>成本</th>
+                          <th>{t('projects.detail.usageByModel')}</th>
+                          <th style={{ width: 120 }}>{t('projects.detail.usageInput')}</th>
+                          <th style={{ width: 120 }}>{t('projects.detail.usageOutput')}</th>
+                          <th style={{ width: 120 }}>{t('projects.detail.usageCacheRead')}</th>
+                          <th style={{ width: 120 }}>{t('projects.detail.usageCacheCreation')}</th>
+                          <th style={{ width: 150 }}>{t('projects.detail.usageCost')}</th>
                         </tr>
                       </thead>
                       <tbody>
                         {projectUsage.by_model.map(mu => (
                           <tr key={mu.model}>
-                            <td><code className="pr-branch">{mu.model || '未知模型'}</code></td>
+                            <td><code className="pr-branch">{mu.model || t('projects.detail.usageByModelUnknown')}</code></td>
                             <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{usageTotalInput(mu).toLocaleString()}</td>
                             <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{mu.output_tokens.toLocaleString()}</td>
                             <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--color-text-muted)' }}>{mu.cache_read_tokens.toLocaleString()}</td>
@@ -1341,21 +1469,21 @@ export default function ProjectDetail() {
               {/* Per-day breakdown */}
               <div className="detail-section" style={{ marginBottom: 16 }}>
                 <div className="section-header" style={{ marginBottom: 12 }}>
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>按日</span>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('projects.detail.usageByDay')}</span>
                 </div>
                 {projectUsage.by_day.length === 0 ? (
-                  <div className="tab-empty"><p>暂无按日统计</p></div>
+                  <div className="tab-empty"><p>{t('projects.detail.usageByDayEmpty')}</p></div>
                 ) : (
                   <div className="pr-list">
                     <table className="pr-table table-cards">
                       <thead>
                         <tr>
-                          <th>日期</th>
-                          <th style={{ width: 120 }}>输入</th>
-                          <th style={{ width: 120 }}>输出</th>
-                          <th style={{ width: 120 }}>缓存读</th>
-                          <th style={{ width: 120 }}>缓存建</th>
-                          <th style={{ width: 150 }}>成本</th>
+                          <th>{t('projects.detail.usageByDay')}</th>
+                          <th style={{ width: 120 }}>{t('projects.detail.usageInput')}</th>
+                          <th style={{ width: 120 }}>{t('projects.detail.usageOutput')}</th>
+                          <th style={{ width: 120 }}>{t('projects.detail.usageCacheRead')}</th>
+                          <th style={{ width: 120 }}>{t('projects.detail.usageCacheCreation')}</th>
+                          <th style={{ width: 150 }}>{t('projects.detail.usageCost')}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1378,22 +1506,22 @@ export default function ProjectDetail() {
               {/* Review breakdown (recorded, NOT counted in the total above) */}
               <div className="detail-section">
                 <div className="section-header" style={{ marginBottom: 12 }}>
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>代码审查消耗</span>
-                  <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>不计入项目总额</span>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t('projects.detail.usageReviewTitle')}</span>
+                  <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{t('projects.detail.usageReviewNote')}</span>
                 </div>
                 {projectUsage.review.length === 0 ? (
-                  <div className="tab-empty"><p>暂无代码审查记录</p></div>
+                  <div className="tab-empty"><p>{t('projects.detail.usageReviewEmpty')}</p></div>
                 ) : (
                   <div className="pr-list">
                     <table className="pr-table table-cards">
                       <thead>
                         <tr>
-                          <th style={{ width: 70 }}>PR</th>
-                          <th>标题</th>
-                          <th style={{ width: 160 }}>分支</th>
-                          <th style={{ width: 110 }}>输入</th>
-                          <th style={{ width: 110 }}>输出</th>
-                          <th style={{ width: 110 }}>时间</th>
+                          <th style={{ width: 70 }}>{t('projects.detail.usageReviewColPr')}</th>
+                          <th>{t('projects.detail.reviewColTitle')}</th>
+                          <th style={{ width: 160 }}>{t('projects.detail.usageReviewColBranch')}</th>
+                          <th style={{ width: 110 }}>{t('projects.detail.usageInput')}</th>
+                          <th style={{ width: 110 }}>{t('projects.detail.usageOutput')}</th>
+                          <th style={{ width: 110 }}>{t('projects.detail.usageReviewColTime')}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1407,7 +1535,7 @@ export default function ProjectDetail() {
                             <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{rv.input_tokens.toLocaleString()}</td>
                             <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{rv.output_tokens.toLocaleString()}</td>
                             <td style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                              {rv.created_at ? new Date(rv.created_at).toLocaleString('zh-CN') : '—'}
+                              {rv.created_at ? fmtDateTime(rv.created_at) : '—'}
                             </td>
                           </tr>
                         ))}
@@ -1417,7 +1545,7 @@ export default function ProjectDetail() {
                 )}
               </div>
               <small style={{ color: 'var(--color-text-muted)', fontSize: 12, display: 'block', marginTop: 8 }}>
-                输入 = 直接输入 + 缓存读 + 缓存建。仅统计已完成的完整调用。
+                {t('projects.detail.usageInputFootnote')}
               </small>
             </>
           )}
@@ -1430,7 +1558,7 @@ export default function ProjectDetail() {
           <div className="kb-modal modal-fullscreen" onClick={e => e.stopPropagation()}>
             <div className="kb-modal-header">
               <h2>{knowledgeModal.title}</h2>
-              <button className="kb-modal-close" onClick={() => setKnowledgeModal(null)}>×</button>
+              <button className="kb-modal-close" onClick={() => setKnowledgeModal(null)}>{t('projects.detail.modalClose')}</button>
             </div>
             <div className="kb-modal-body">
               <div className="kb-markdown">
@@ -1443,15 +1571,15 @@ export default function ProjectDetail() {
 
       {/* Mobile FAB: shown only on the requirements tab so each tab keeps
           its own primary CTA in the thumb zone. CSS (.fab) hides it on
-          desktop, where the inline "+ 新需求" button is already reachable. */}
+          desktop, where the inline "+ New requirement" button is already reachable. */}
       {tab === 'requirements' && (
         <button
           className="fab fab-extended"
-          aria-label="新建需求"
+          aria-label={t('projects.detail.fabLabel')}
           onClick={() => setShowCreateReq(true)}
         >
           <span>＋</span>
-          <span>新需求</span>
+          <span>{t('projects.detail.fabLabel')}</span>
         </button>
       )}
     </div>

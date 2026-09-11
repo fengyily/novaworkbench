@@ -16,6 +16,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Build identity — injected via -ldflags into internal/version. CI passes
+# these from the release tag; local builds leave them as "dev"/"unknown".
+# Values are sanitized to [A-Za-z0-9._-] so a malformed tag can never break
+# the go build command line (ldflags string values must not contain spaces
+# or quotes).
+VERSION="$(printf '%s' "${VERSION:-dev}" | LC_ALL=C tr -cd '[:alnum:]._-')"
+COMMIT="$(printf '%s' "${COMMIT:-unknown}" | LC_ALL=C tr -cd '[:alnum:]')"
+BUILD_DATE="${BUILD_DATE:-unknown}"
+LDFLAGS="-s -w -X github.com/novaworkbench/backend/internal/version.Version=${VERSION} -X github.com/novaworkbench/backend/internal/version.Commit=${COMMIT} -X github.com/novaworkbench/backend/internal/version.BuildDate=${BUILD_DATE}"
+
 WITH_FRONTEND=false
 INSTALL=false
 SKIP_CHECK=false
@@ -64,9 +74,9 @@ for t in "${TARGETS[@]}"; do
   EXT="${ARCH_AND_EXT#*/}"
 
   OUT="dist/novaworkbench-${GOOS}-${GOARCH}${EXT}"
-  echo ">> building ${OUT}"
+  echo ">> building ${OUT} (version=${VERSION})"
   (cd backend && CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
-    go build -o "../${OUT}" ./cmd/server)
+    go build -trimpath -ldflags "$LDFLAGS" -o "../${OUT}" ./cmd/server)
 done
 
 echo ""

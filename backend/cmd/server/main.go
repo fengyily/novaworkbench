@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -195,8 +197,28 @@ func main() {
 	// the runner needs it to dispatch children to an Agent server, while the
 	// wizard needs the runner for sub-task rows, so neither can be a pure
 	// constructor argument of the other.
-	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, agentSvrSvc, nil)
-	wizardH := handler.NewWizardHandler(projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, subTaskSvc, subTaskRunner)
+	//
+	// sub-task concurrency cap (env NOVA_SUBTASK_CONCURRENCY) prevents the
+	// "make run → SIGKILL on parent" symptom: too many parallel claude Node.js
+	// children trip macOS jetsam / Linux OOM killer on the parent nova process
+	// — a SIGKILL Go cannot intercept. Default 4 ≈ leaves ~1 GB headroom on a
+	// 4 GB jetsam threshold. See plan-ancient-snail.md.
+	subTaskConcurrency := handler.DefaultSubTaskConcurrency
+	if env := os.Getenv("NOVA_SUBTASK_CONCURRENCY"); env != "" {
+		if n, perr := strconv.Atoi(env); perr == nil && n > 0 {
+			subTaskConcurrency = n
+		} else {
+			log.Printf("[startup] ignoring invalid NOVA_SUBTASK_CONCURRENCY=%q (want positive int), falling back to %d", env, subTaskConcurrency)
+		}
+	}
+	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, agentSvrSvc, nil, subTaskConcurrency)
+	batchSvc := service.NewOrchestrationBatchService(database)
+	if n, err := batchSvc.Recover(); err != nil {
+		log.Printf("[main] orchestration batch recovery: %v", err)
+	} else if n > 0 {
+		log.Printf("[main] orchestration batch recovery: reset %d stale summaries", n)
+	}
+	wizardH := handler.NewWizardHandler(database, projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, subTaskSvc, subTaskRunner, batchSvc)
 	// Wire the remote-coding entrypoint AFTER both are built: children of an
 	// Agent-server-developed requirement run on that server, so every sub-task
 	// dispatch (manual / orchestrated / push+PR) routes through it.
@@ -212,6 +234,27 @@ func main() {
 		log.Printf("[main] scheduler recovery: %v", err)
 	}
 	schedulerRunner.Start()
+	// OrchestrationQueue: tick loop that drives auto-orchestrated sub-task
+	// dispatch + summary round for restart-safe batch execution. Independent
+	// of schedulerRunner (scheduled_tasks vs orchestration_batches are
+	// separate concerns). The wizard handler is the SubTaskExecutor; the
+	// queue Kick()s immediately after each batch creation in
+	// tryAutoOrchestrate so the first child doesn't wait the full interval.
+	// Concurrency=1 keeps each batch strictly sequential: only one child runs
+	// at a time across the whole process, so a long-running child can't have
+	// its worktree / git branch / dev-server contended by a sibling that the
+	// queue claims from the same batch on the next tick. The wizard's
+	// CLAUDE_TIMEOUT floor (30m) is the per-child budget; with cap=1 the
+	// bottleneck is the slowest child, which is exactly what serial
+	// orchestration promises. Bump above 1 only if multiple batches are
+	// expected to overlap AND they target different worktrees.
+	orchQueue := scheduler.NewOrchestrationQueue(database, batchSvc, subTaskSvc, wizardH, 1 /*concurrency*/, 10*time.Second)
+	if err := orchQueue.Recover(); err != nil {
+		log.Printf("[main] orchestration queue recover: %v", err)
+	}
+	go orchQueue.Start()
+	defer orchQueue.Stop()
+	wizardH.SetOrchQueue(orchQueue)
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
@@ -251,6 +294,7 @@ func main() {
 	mux.HandleFunc("POST /api/auth/login", authH.Login)
 	mux.HandleFunc("POST /api/auth/logout", authH.Logout)
 	mux.HandleFunc("GET /api/auth/me", authH.Me)
+	mux.HandleFunc("PUT /api/auth/locale", authH.UpdateLocale)
 
 	// ACL — user / role / permission management. Every route is guarded by
 	// the setting.users (user management) or setting.acl (role/permission
@@ -422,6 +466,7 @@ func main() {
 	mux.HandleFunc("POST /api/wizard/continue-coding", wizardH.ContinueCoding)
 	mux.HandleFunc("GET /api/wizard/jobs/{id}", wizardH.GetJob)
 	mux.HandleFunc("GET /api/wizard/jobs/{id}/stream", wizardH.StreamJob)
+	mux.HandleFunc("GET /api/wizard/active-jobs", wizardH.GetActiveJobs)
 	mux.HandleFunc("POST /api/wizard/refine-doc", wizardH.RefineDoc)
 	mux.HandleFunc("POST /api/wizard/apply-doc", wizardH.ApplyDoc)
 
@@ -461,11 +506,27 @@ func main() {
 	// Re-run a FAILED sub-task with its original prompt (optionally switching
 	// models). Forks the failed run's source session for a clean retry.
 	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/{sid}/redo", wizardH.RedoSubTask)
+	// In-place resume on the SAME session id (--resume parent.SessionID, no
+	// fork). Trigger conditions: parent.status ∈ {error, stopped}. Preserves
+	// the existing artifact on the row until the new Finish writes over it,
+	// so a refresh mid-run still shows the previous report.
+	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/{sid}/continue", wizardH.ContinueSubTask)
+	// Cancel a running sub-task's claude subprocess and flip status to
+	// "stopped". 501 STOP_REMOTE_NOT_SUPPORTED when the requirement was
+	// developed on an Agent server (no kill RPC yet on the worker).
+	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/{sid}/stop", wizardH.StopSubTask)
 	// Manual re-split: resumes the coding session with the decomposition
 	// trigger and runs the same parse+dispatch pipeline as StartCoding's
 	// auto-orchestrate. Escape hatch for when auto-orchestration produced
 	// no children (or the user wants a fresh split).
 	mux.HandleFunc("POST /api/requirements/{id}/re-orchestrate", wizardH.ReOrchestrate)
+	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/summary", wizardH.GenerateSubTaskSummary)
+	// Live snapshot of the most recent orchestration_batches row for a
+	// requirement. The SubTaskPanel polls this every 3-5s while children
+	// are alive to drive the summary-CTA banner; returns the latest batch
+	// in any status (dispatching / summarizing / completed / errored) so a
+	// finished run still surfaces as "✅ 已完成" rather than vanishing.
+	mux.HandleFunc("GET /api/requirements/{id}/orchestration/batch", wizardH.GetOrchestrationBatch)
 	// NOTE: /api/requirements/{id}/orchestrate is no longer registered —
 	// the old manual "一键编排" endpoint is replaced by StartCoding's auto
 	// dispatch (wizard.tryAutoOrchestrate). The main agent outputs
@@ -544,13 +605,27 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	// Graceful shutdown
+	// Startup banner: capture pid / ppid / GOMAXPROCS so post-mortem logs of an
+	// unexpected exit (SIGKILL we cannot catch) at least pin down whether the
+	// process tree was sane. "make run" + "go run" wrappers strip some env, so
+	// the parent pid is the most useful single value here.
+	log.Printf("[startup] pid=%d ppid=%d GOMAXPROCS=%d subTaskConcurrency=%d", os.Getpid(), os.Getppid(), runtime.GOMAXPROCS(0), subTaskConcurrency)
+
+	// Graceful shutdown. SIGINT / SIGTERM get the full 30s drain so in-flight
+	// claude child processes can flush their session jsonl (StreamCmd sets
+	// WaitDelay to give them 5s soft-exit). SIGHUP (e.g. terminal disconnect
+	// under "make run") gets only 2s — terminal detachment is almost always
+	// the user walking away, not a planned stop, so we shouldn't block.
 	go func() {
 		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		<-sigCh
-		log.Println("Shutting down...")
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		sig := <-sigCh
+		shutdownTimeout := 30 * time.Second
+		if sig == syscall.SIGHUP {
+			shutdownTimeout = 2 * time.Second
+		}
+		log.Printf("[shutdown] received signal=%v, draining (timeout=%s)...", sig, shutdownTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		srv.Shutdown(ctx)
 		// Stop the scheduled-task poller after the HTTP server is down so

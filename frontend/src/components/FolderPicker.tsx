@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { API_BASE, authedFetch } from '../api/client';
 import './FolderPicker.css';
 
@@ -16,6 +17,7 @@ interface Props {
 }
 
 export default function FolderPicker({ value, onChange }: Props) {
+  const { t } = useTranslation();
   const [currentPath, setCurrentPath] = useState<string>('');
   const [items, setItems] = useState<FileItem[]>([]);
   const [breadcrumb, setBreadcrumb] = useState<FileItem[]>([]);
@@ -88,17 +90,17 @@ export default function FolderPicker({ value, onChange }: Props) {
           className="form-input"
           value={value}
           onChange={handleInputChange}
-          placeholder="路径: ~/workspace/my-project"
+          placeholder={t('components.folderPicker.placeholder')}
         />
       </div>
 
       {/* File list */}
       <div className="fp-list">
-        {loading && <div className="fp-loading">⏳ 加载中...</div>}
+        {loading && <div className="fp-loading">{t('components.folderPicker.loading')}</div>}
         {error && <div className="fp-error">❌ {error}</div>}
 
         {!loading && !error && items.length === 0 && (
-          <div className="fp-empty">目录为空</div>
+          <div className="fp-empty">{t('components.folderPicker.emptyDir')}</div>
         )}
 
         {items.map(item => (
@@ -118,7 +120,7 @@ export default function FolderPicker({ value, onChange }: Props) {
                 className="fp-pick-btn btn btn-primary btn-sm"
                 onClick={(e) => { e.stopPropagation(); handlePick(item); }}
               >
-                选择
+                {t('components.folderPicker.choose')}
               </button>
             )}
           </div>
@@ -127,7 +129,7 @@ export default function FolderPicker({ value, onChange }: Props) {
 
       {value && (
         <div className="fp-selected">
-          已选择: <code>{value}</code>
+          {t('components.folderPicker.selected')}: <code>{value}</code>
         </div>
       )}
     </div>

@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { aclApi, type ACLRole, type Permission } from '../api/client';
+import { errorMessage } from '../utils/errMsg';
 
 interface RoleForm {
   key: string;
@@ -10,6 +12,7 @@ interface RoleForm {
 }
 
 export default function SettingsACLRoles() {
+  const { t } = useTranslation();
   const [roles, setRoles] = useState<ACLRole[]>([]);
   const [permissions, setPermissions] = useState<Permission[]>([]);
   const [loading, setLoading] = useState(true);
@@ -68,11 +71,11 @@ export default function SettingsACLRoles() {
 
   const handleSave = async () => {
     if (!form.name) {
-      setError('角色名称不能为空');
+      setError(t('settings.aclRoles.errNameRequired'));
       return;
     }
     if (!editingId && !form.key) {
-      setError('角色 key 不能为空（如 dev_lead）');
+      setError(t('settings.aclRoles.errKeyRequired'));
       return;
     }
     setSaving(true);
@@ -97,7 +100,7 @@ export default function SettingsACLRoles() {
       setShowModal(false);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -105,13 +108,13 @@ export default function SettingsACLRoles() {
 
   const handleDelete = async (r: ACLRole) => {
     if (r.is_builtin) return;
-    if (!confirm(`确认删除角色「${r.name}」？`)) return;
+    if (!confirm(t('settings.aclRoles.deleteConfirm', { name: r.name }))) return;
     setBusyId(r.id);
     try {
       await aclApi.deleteRole(r.id);
       await load();
     } catch (err) {
-      alert(err instanceof Error ? err.message : String(err));
+      alert(errorMessage(err));
     } finally {
       setBusyId('');
     }
@@ -126,18 +129,18 @@ export default function SettingsACLRoles() {
     <div className="settings-section">
       <div className="section-header">
         <div>
-          <h3 className="settings-section-title">角色权限</h3>
+          <h3 className="settings-section-title">{t('settings.aclRoles.title')}</h3>
           <p className="settings-section-desc">
-            管理用户角色及其权限范围。此处的「角色」是用户权限角色（区别于 AI 角色配置）。多角色用户的权限取并集。
+            {t('settings.aclRoles.desc')}
           </p>
         </div>
-        <button className="btn btn-primary" onClick={openCreate}>+ 添加角色</button>
+        <button className="btn btn-primary" onClick={openCreate}>{t('settings.aclRoles.add')}</button>
       </div>
 
-      {loading && <div className="settings-empty">加载中...</div>}
+      {loading && <div className="settings-empty">{t('settings.aclRoles.loading')}</div>}
 
       {!loading && roles.length === 0 && (
-        <div className="settings-empty"><p>暂无角色。</p></div>
+        <div className="settings-empty"><p>{t('settings.aclRoles.empty')}</p></div>
       )}
 
       {roles.length > 0 && (
@@ -147,19 +150,19 @@ export default function SettingsACLRoles() {
               <div className="role-card-header">
                 <div>
                   <span className="role-name">{r.name}</span>
-                  {r.is_builtin && <span className="builtin-badge">内置</span>}
-                  {!r.enabled && <span className="disabled-badge">已禁用</span>}
+                  {r.is_builtin && <span className="builtin-badge">{t('settings.aclRoles.builtin')}</span>}
+                  {!r.enabled && <span className="disabled-badge">{t('settings.aclRoles.disabled')}</span>}
                   <span className="role-key">{r.key}</span>
                 </div>
                 <div className="role-card-actions">
-                  <button className="btn-link" onClick={() => openEdit(r)}>编辑</button>
+                  <button className="btn-link" onClick={() => openEdit(r)}>{t('settings.aclRoles.edit')}</button>
                   {!r.is_builtin && (
                     <button
                       className="btn-link btn-danger-link"
                       onClick={() => handleDelete(r)}
                       disabled={busyId === r.id}
                     >
-                      {busyId === r.id ? '删除中...' : '删除'}
+                      {busyId === r.id ? t('settings.aclRoles.deleting') : t('settings.aclRoles.delete')}
                     </button>
                   )}
                 </div>
@@ -167,7 +170,7 @@ export default function SettingsACLRoles() {
               <p className="role-desc">{r.description || '—'}</p>
               <div className="role-perms">
                 {(r.permission_keys ?? []).length === 0 ? (
-                  <span className="form-hint">无权限（管理员除外）</span>
+                  <span className="form-hint">{t('settings.aclRoles.noPermissions')}</span>
                 ) : (
                   (r.permission_keys ?? []).map((k) => {
                     const p = permissions.find((pp) => pp.key === k);
@@ -179,7 +182,7 @@ export default function SettingsACLRoles() {
                   })
                 )}
               </div>
-              <div className="role-meta">使用此角色的用户：{r.user_count ?? 0}</div>
+              <div className="role-meta">{t('settings.aclRoles.userCount', { n: r.user_count ?? 0 })}</div>
             </div>
           ))}
         </div>
@@ -188,32 +191,32 @@ export default function SettingsACLRoles() {
       {showModal && (
         <div className="modal-overlay" onClick={() => setShowModal(false)}>
           <div className="modal-box" style={{ maxWidth: 640 }} onClick={(e) => e.stopPropagation()}>
-            <h3>{editingId ? '编辑角色' : '添加角色'}</h3>
+            <h3>{editingId ? t('settings.aclRoles.modal.edit') : t('settings.aclRoles.modal.add')}</h3>
             {error && <div className="form-error">{error}</div>}
 
             <div className="form-group">
-              <label>角色 Key {editingId && <span className="form-hint">（不可修改）</span>}</label>
+              <label>{t('settings.aclRoles.modal.keyLabel')} {editingId && <span className="form-hint">{t('settings.aclRoles.modal.keyLocked')}</span>}</label>
               <input
                 className="form-input"
                 value={form.key}
                 onChange={(e) => setForm((f) => ({ ...f, key: e.target.value }))}
                 disabled={!!editingId}
-                placeholder="如 dev_lead（小写+下划线）"
+                placeholder={t('settings.aclRoles.modal.keyPlaceholder')}
               />
             </div>
 
             <div className="form-group">
-              <label>角色名称</label>
+              <label>{t('settings.aclRoles.modal.nameLabel')}</label>
               <input
                 className="form-input"
                 value={form.name}
                 onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                placeholder="如 开发组长"
+                placeholder={t('settings.aclRoles.modal.namePlaceholder')}
               />
             </div>
 
             <div className="form-group">
-              <label>描述</label>
+              <label>{t('settings.aclRoles.modal.descLabel')}</label>
               <input
                 className="form-input"
                 value={form.description}
@@ -228,15 +231,15 @@ export default function SettingsACLRoles() {
                   checked={form.enabled}
                   onChange={(e) => setForm((f) => ({ ...f, enabled: e.target.checked }))}
                 />
-                <span>启用</span>
+                <span>{t('settings.aclRoles.modal.enabled')}</span>
               </label>
             </div>
 
             <div className="form-group">
-              <label>权限（多选，用户多角色取并集）</label>
+              <label>{t('settings.aclRoles.modal.permissionsLabel')}</label>
               {modules.map((m) => (
                 <div key={m} className="perm-module">
-                  <div className="perm-module-title">{moduleLabel(m)}</div>
+                  <div className="perm-module-title">{moduleLabel(t, m)}</div>
                   <div className="checkbox-grid">
                     {permsByModule[m].map((p) => (
                       <label key={p.id} className="checkbox-row">
@@ -254,9 +257,9 @@ export default function SettingsACLRoles() {
             </div>
 
             <div className="form-actions">
-              <button className="btn btn-secondary" onClick={() => setShowModal(false)}>取消</button>
+              <button className="btn btn-secondary" onClick={() => setShowModal(false)}>{t('settings.aclRoles.modal.cancel')}</button>
               <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-                {saving ? '保存中...' : '保存'}
+                {saving ? t('settings.aclRoles.modal.saving') : t('settings.aclRoles.modal.save')}
               </button>
             </div>
           </div>
@@ -266,12 +269,14 @@ export default function SettingsACLRoles() {
   );
 }
 
-function moduleLabel(m: string): string {
+// moduleLabel resolves the permission-module group heading. It takes the
+// translate function so the label follows the active language at render time.
+function moduleLabel(t: (k: string) => string, m: string): string {
   switch (m) {
-    case 'menu': return '菜单';
-    case 'setting': return '设置';
-    case 'project': return '项目';
-    case 'action': return '操作';
+    case 'menu': return t('settings.aclRoles.module.menu');
+    case 'setting': return t('settings.aclRoles.module.setting');
+    case 'project': return t('settings.aclRoles.module.project');
+    case 'action': return t('settings.aclRoles.module.action');
     default: return m;
   }
 }

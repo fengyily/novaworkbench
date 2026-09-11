@@ -54,8 +54,8 @@
 //      fix hint (see backend/internal/handler/wizard.go:workerCategoryHint).
 import express from 'express';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, accessSync, constants as fsConstants } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, accessSync, realpathSync, constants as fsConstants } from 'node:fs';
+import { join, sep as pathSep } from 'node:path';
 
 // WORKER_VERSION is a placeholder that NovaWorkbench's install flow stamps
 // with the binary's own agentWorkerVersion before uploading this file to a
@@ -107,6 +107,33 @@ app.post('/v1/run', async (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders?.();
+
+  // Defense-in-depth: verify workDir is strictly inside
+  // /tmp/nova-agent/<projectID>/<reqID> before any spawn. NovaWorkbench's
+  // runRemoteCoding already does this on the Go side via
+  // RequireRemoteDevWorkDir; this worker-side check is the last gate against
+  // any path escaping the per-requirement isolation. Fail fast with an
+  // explicit 4xx so a misconfigured request doesn't spend 5s on preflight
+  // before being rejected. Wire format matches the rest of /v1/run: a
+  // single NDJSON error event then res.end() — Go-side parseStreamJSONFromReader
+  // already handles `type:"error"` and surfaces `error` to the user.
+  const reqBody = req.body ?? {};
+  const workDirReqId = (typeof reqBody.reqId === 'string' && reqBody.reqId)
+    || (typeof opts.workDir === 'string' ? opts.workDir.split('/').filter(Boolean).pop() : '');
+  try {
+    assertWorkDirInScope(opts.workDir, workDirReqId);
+  } catch (e) {
+    const status = e.status || 500;
+    res.status(status);
+    res.write(JSON.stringify({
+      type: 'error',
+      errorCategory: 'workdir_out_of_scope',
+      error: e.message,
+      code: status,
+    }) + '\n');
+    res.end();
+    return;
+  }
 
   // Early bailout: if the worker itself is running as root (uid 0), the
   // Claude CLI refuses --dangerously-skip-permissions with a hard error
@@ -285,10 +312,29 @@ app.post('/v1/run', async (req, res) => {
 // without dragging the failure path into the 30s-deep territory a real
 // run exposes. Keep this in sync with the [preflight timeout after Xs]
 // string injected into the stderr below.
+//
+// Fast-fail on classified stderr: the CLI's `unrecognized_model` (and a
+// few other well-known patterns — see classifyError) is emitted to stderr
+// as soon as the CLI rejects a config (model id, auth token, base URL),
+// but the CLI then hangs waiting on something else (catalog refresh,
+// retry) and never exits on its own. Without fast-fail, those errors
+// would surface as `preflight_timeout` after 15s, hiding the real reason
+// behind a misleading "Agent 服务器无法访问 API". classifyError runs on
+// every stderr chunk; any non-`unknown` category resolves the promise
+// immediately and SIGTERMs the hung child. The Go side already has
+// tailored fix hints for those categories (workerCategoryHint), so a
+// sub-second failure is also a much more actionable error message.
 const PREFLIGHT_TIMEOUT_MS = 15000;
 function preflight(workDir, env, settingsArg) {
   return new Promise((resolve) => {
     let proc;
+    let settled = false;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      try { if (proc) proc.kill('SIGTERM'); } catch {}
+      resolve(result);
+    };
     try {
       // The --settings block (built by buildSettingsArg, the same string the
       // real run uses) is the PRIMARY source of auth / base URL / model: it
@@ -314,7 +360,7 @@ function preflight(workDir, env, settingsArg) {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (e) {
-      resolve({
+      settle({
         ok: false,
         errorCategory: 'cli_not_found',
         stderr: String(e && e.message || e),
@@ -325,16 +371,37 @@ function preflight(workDir, env, settingsArg) {
     let stderr = '';
     let stdout = '';
     proc.stdout.on('data', (d) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.stderr.on('data', (d) => {
+      stderr += d.toString();
+      // Fast-fail on classifier-detected errors. The CLI emits
+      // `[claude-code:unrecognized_model]` (and similar tagged errors) on
+      // stderr the moment it rejects the config, then keeps the process
+      // alive doing internal bookkeeping — the next chunk won't come for
+      // seconds. classifyError's regexes match the partial stderr
+      // (e.g. literal "unrecognized_model"), so a single tagged line is
+      // enough. 'unknown' is intentionally skipped: a CLI that just
+      // happens to print something category-shaped shouldn't poison an
+      // otherwise-healthy run.
+      const cat = classifyError(null, stderr);
+      if (cat !== 'unknown') {
+        settle({
+          ok: false,
+          errorCategory: cat,
+          stderr,
+          stdout,
+          code: null,
+        });
+      }
+    });
     proc.on('error', (e) => {
       const cat = (e && e.code === 'ENOENT') ? 'cli_not_found' : classifyError(null, String(e.message || e));
-      resolve({ ok: false, errorCategory: cat, stderr: String(e.message || e), code: e.code });
+      settle({ ok: false, errorCategory: cat, stderr: String(e.message || e), stdout, code: e.code });
     });
     proc.on('close', (code) => {
       if (code === 0) {
-        resolve({ ok: true });
+        settle({ ok: true });
       } else {
-        resolve({
+        settle({
           ok: false,
           errorCategory: classifyError(null, stderr || stdout),
           stderr,
@@ -344,14 +411,14 @@ function preflight(workDir, env, settingsArg) {
       }
     });
     setTimeout(() => {
-      try { proc.kill('SIGTERM'); } catch {}
       // SIGTERM gives the CLI ~1s to flush stderr before our exit
       // resolves; the final stderr we read from above already has the
       // early output and is usually enough to classify the failure.
-      resolve({
+      settle({
         ok: false,
         errorCategory: 'preflight_timeout',
         stderr: (stderr || '') + '\n[preflight timeout after ' + (PREFLIGHT_TIMEOUT_MS / 1000) + 's]',
+        stdout,
         code: 143,
       });
     }, PREFLIGHT_TIMEOUT_MS);
@@ -837,6 +904,47 @@ function buildClaudeArgs(opts, settingsArg) {
   }
 
   return args;
+}
+
+// assertWorkDirInScope: NovaWorkbench 后端的 runRemoteCoding 严格把 wtPath 锁在
+// /tmp/nova-agent/<projectID>/<reqID> 下；本 worker 端做 defense-in-depth 校验，
+// 防止任何路径错误在远端被放大。即便 Go 侧所有校验都被绕过，worker 也会拒绝。
+//
+// 校验三层：
+//   1. workDir 必须是非空字符串
+//   2. realpathSync 必须成功（路径必须真实存在，否则抛 ENOENT → 400）
+//   3. 解析后的真实路径必须在 /tmp/nova-agent/ 下，且 reqId 必须出现在路径段中
+//
+// 任何一层失败抛出带 status 的 Error，handler 转成对应 4xx + JSON {error}。
+function assertWorkDirInScope(workDir, reqId) {
+  if (!workDir || typeof workDir !== 'string') {
+    throw httpError(400, 'workDir is required');
+  }
+  // 路径必须存在；realpathSync 不存在则抛 ENOENT
+  let real;
+  try {
+    real = realpathSync(workDir);
+  } catch (e) {
+    throw httpError(400, `workDir ${workDir} cannot be resolved: ${e.message}`);
+  }
+  // reqId 必须出现在路径中（防止跨需求路径串台）
+  const segs = real.split(pathSep);
+  if (!reqId || !segs.includes(reqId)) {
+    throw httpError(403, `workDir ${real} does not contain reqId ${reqId}`);
+  }
+  // 强约束：必须在 /tmp/nova-agent/ 下
+  if (!real.startsWith('/tmp/nova-agent/')) {
+    throw httpError(403, `workDir ${real} is outside /tmp/nova-agent/`);
+  }
+  return real;
+}
+
+// httpError attaches an HTTP status to an Error so the /v1/run handler can
+// emit the right status code when an assertWorkDirInScope check fails.
+function httpError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
 }
 
 // Bind 127.0.0.1 only — the worker is reached via SSH direct-tcpip channel
