@@ -1002,10 +1002,18 @@ func (t originTransport) CollectResult(ctx context.Context, client *gossh.Client
 	// No `-S` here on purpose: signing is driven by the worktree config set up
 	// in Step 2.5, which also covers commits Claude makes from its own Bash
 	// tool during the run.
+	// Push source refspec is HEAD (not <branch>): the remote worktree's HEAD may
+	// sit on a detached commit or an alias branch — code is committed by Claude's
+	// own Bash tool during the run, not by Nova — so `git push origin <branch>`
+	// can fail with `src refspec ... does not match any` when no local ref named
+	// <branch> resolves. HEAD always resolves; we publish it to the full target
+	// ref refs/heads/<branch>. The `{ diff || commit; }` grouping removes the
+	// &&/|| precedence ambiguity: clean tree skips commit but still pushes; a
+	// dirty tree commits then pushes; a failed commit skips the push.
 	commitScript := "cd " + shellQuoteSingle(wtPath) +
 		" && git add -A" +
-		" && git diff --cached --quiet || git commit -m " + shellQuoteSingle(title) +
-		" && git push origin " + shellQuoteSingle(branch)
+		" && { git diff --cached --quiet || git commit -m " + shellQuoteSingle(title) + "; }" +
+		" && git push origin " + shellQuoteSingle("HEAD:refs/heads/"+branch)
 	if exit, _ := client.Exec(ctx, commitScript, "", nil, &jobWriter{job: in.job}, &pushStderr); exit != 0 {
 		// GPG signing / push failures carry specific stderr patterns; classify
 		// them into a precise Chinese message, falling back to generic wording.
