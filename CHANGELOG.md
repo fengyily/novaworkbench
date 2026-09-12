@@ -5,6 +5,26 @@ All notable changes to NovaWorkbench will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/fengyily/novaworkbench/compare/v0.3.0...v0.4.0) (2026-09-12)
+
+
+### Features
+
+* **agent-server:** add local sync mode (git bundle transport) ([c551ffc](https://github.com/fengyily/novaworkbench/commit/c551ffcc243843df945de669974325b64115f565))
+* **agent-server:** 新增本地同步模式（git bundle 传输） ([33acc48](https://github.com/fengyily/novaworkbench/commit/33acc48fd1491f2079ab7a7c6ee71e47412ac165))
+* **exec-env:** close the first-run picker gap, unify sub-task environment resolution ([5bfedb7](https://github.com/fengyily/novaworkbench/commit/5bfedb767c712d902a73581bbef413c37b211c58))
+* **exec-env:** close the first-run picker gap, unify sub-task environment resolution ([f349c9b](https://github.com/fengyily/novaworkbench/commit/f349c9b73aca8c72993120e35751d451007d7530))
+* **requirements:** 需求方案分析与开发任务耗时统计 ([afe5185](https://github.com/fengyily/novaworkbench/commit/afe51852456cae0192b51662105ae09f2e333943))
+* **requirements:** 需求方案分析与开发任务耗时统计 ([6c089f9](https://github.com/fengyily/novaworkbench/commit/6c089f9d4b912b1600b46b88d616557779a94b73))
+* **wizard:** auto commit/push/create-PR after development finishes ([c3d4a47](https://github.com/fengyily/novaworkbench/commit/c3d4a47c14f1f81e0ff76ba533e9f86c950faed8))
+* **wizard:** richer dev logs — sync branch tip + per-session sync detail ([c6f1d25](https://github.com/fengyily/novaworkbench/commit/c6f1d25a1965aa0e5247b35a454038a413e0bc5d))
+
+
+### Bug Fixes
+
+* **wizard:** 会话历史同步透明化 —— 无 source session 时跳过整目录上行 ([798aa5a](https://github.com/fengyily/novaworkbench/commit/798aa5ab251d7f53c3d90e86e13b10b06f4e8037))
+* **wizard:** 修复 Agent 服务器收尾 push 的 src refspec does not match any 错误 ([68c3132](https://github.com/fengyily/novaworkbench/commit/68c31320125490a74f353901c9416109466fd692))
+
 ## [0.3.0](https://github.com/fengyily/novaworkbench/compare/v0.2.0...v0.3.0) (2026-09-11)
 
 
