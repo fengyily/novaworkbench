@@ -117,6 +117,34 @@ func syncBaseBranch(projectPath, baseBranch string, logf func(string)) {
 	}
 	if logf != nil {
 		logf("🔄 已同步 origin/" + baseBranch)
+		// Surface the freshly-fetched upstream tip so the user can verify the
+		// local checkout is level with the remote. Best-effort: a repo without
+		// origin/<base> (fetch created no ref) simply logs nothing.
+		if tip, terr := gitRun(projectPath, "log", "-1", "origin/"+baseBranch,
+			"--format=%h %s (%an, %ad)", "--date=format:%Y-%m-%d %H:%M"); terr == nil {
+			if tip = strings.TrimSpace(tip); tip != "" {
+				logf("📌 origin/" + baseBranch + " 最新提交: " + tip)
+			}
+		}
+	}
+}
+
+// logLatestCommit emits a one-line "📌 分支最新提交: <hash> <subject> (<author>, <date>)"
+// hint for the HEAD commit of dir, so the user can cross-check which commit the
+// worktree ended up on after a sync/checkout. Best-effort: nil-safe (logf may be
+// nil), and any git error (unborn branch / not a repo) is silently ignored — the
+// commit line is a convenience, never a gate.
+func logLatestCommit(dir string, logf func(string)) {
+	if logf == nil || dir == "" {
+		return
+	}
+	out, err := gitRun(dir, "log", "-1",
+		"--format=%h %s (%an, %ad)", "--date=format:%Y-%m-%d %H:%M")
+	if err != nil {
+		return
+	}
+	if out = strings.TrimSpace(out); out != "" {
+		logf("📌 分支最新提交: " + out)
 	}
 }
 
@@ -189,6 +217,7 @@ func EnsureWorktreeLogged(projectPath, reqID, branch, baseBranch string, logf fu
 				logf("ℹ️ 已有改动，无法从主分支快进更新，继续在当前分支工作")
 			}
 		}
+		logLatestCommit(wtPath, logf)
 		return wtPath, nil
 	}
 
@@ -206,6 +235,7 @@ func EnsureWorktreeLogged(projectPath, reqID, branch, baseBranch string, logf fu
 	//      the legacy strategies below.
 	if startRef != "" {
 		if out, err := gitRun(projectPath, "worktree", "add", "-b", branch, wtPath, startRef); err == nil {
+			logLatestCommit(wtPath, logf)
 			return wtPath, nil
 		} else if !strings.Contains(out, "already exists") {
 			if out != "" {
@@ -218,6 +248,7 @@ func EnsureWorktreeLogged(projectPath, reqID, branch, baseBranch string, logf fu
 	// 1. Create a new branch off HEAD (always valid). This is the safe default
 	//    — works on every repo regardless of whether "main"/"master" exists.
 	if out, err := gitRun(projectPath, "worktree", "add", "-b", branch, wtPath); err == nil {
+		logLatestCommit(wtPath, logf)
 		return wtPath, nil
 	} else {
 		// "fatal: a branch named <name> already exists" is the only expected
@@ -236,6 +267,7 @@ func EnsureWorktreeLogged(projectPath, reqID, branch, baseBranch string, logf fu
 	//    worktree (or was deleted but not pruned) → recreate from the base.
 	if baseBranch != "" {
 		if out, err := gitRun(projectPath, "worktree", "add", "-b", branch, wtPath, baseBranch); err == nil {
+			logLatestCommit(wtPath, logf)
 			return wtPath, nil
 		} else if !strings.Contains(out, "already exists") {
 			if out != "" {
@@ -257,6 +289,7 @@ func EnsureWorktreeLogged(projectPath, reqID, branch, baseBranch string, logf fu
 		}
 		return "", fmt.Errorf("git worktree add: %w", err)
 	}
+	logLatestCommit(wtPath, logf)
 	return wtPath, nil
 }
 
@@ -266,11 +299,11 @@ func EnsureWorktreeLogged(projectPath, reqID, branch, baseBranch string, logf fu
 // function as before, just routed through the new logged variant with a nil
 // logf. The strategy order is:
 //
-//  1'. origin/<baseBranch> if syncBaseBranch + resolveStartRef produced one,
-//      else skip (legacy callers without a remote never had one).
-//  1.  off HEAD (`worktree add -b <branch> <path>`) — always valid.
-//  2.  off baseBranch if the user supplied one and the branch name conflicts.
-//  3.  attach an existing branch (`worktree add <path> <branch>`).
+//	1'. origin/<baseBranch> if syncBaseBranch + resolveStartRef produced one,
+//	    else skip (legacy callers without a remote never had one).
+//	1.  off HEAD (`worktree add -b <branch> <path>`) — always valid.
+//	2.  off baseBranch if the user supplied one and the branch name conflicts.
+//	3.  attach an existing branch (`worktree add <path> <branch>`).
 //
 // baseBranch is a hint (typically the project's default branch such as "main"
 // or "master"). We do NOT trust it blindly — git fails with "invalid reference:
