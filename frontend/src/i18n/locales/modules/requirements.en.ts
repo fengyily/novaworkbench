@@ -187,6 +187,8 @@ export const requirements = {
     preflightReadKnowledgeHint: 'Before coding, scan the project for entries relevant to this requirement and inject them as extra context. Takes a few seconds — very useful for complex requirements.',
     preflightSplitTasks: 'Split tasks and auto-dispatch',
     preflightSplitTasksHint: 'Have the main agent decompose the requirement into sub-tasks and dispatch them in series. Off by default — the developer persona runs directly, which is faster.',
+    preflightAutoPushPR: 'Auto commit / push / create PR when done',
+    preflightAutoPushPRHint: 'After development finishes, automatically dispatch a sub-task that runs the full "commit → merge main → push → create PR" flow. On by default; works for split and non-split runs and Agent-server execution. If the project has no remote or platform token configured, it is skipped or only pushes.',
     preflightDevModeTitle: 'Development mode',
     preflightDevModeHint: 'Choose how to hand the design to the development agent. Defaults to your previous choice.',
     preflightDevModeSession: 'Session-based dev',

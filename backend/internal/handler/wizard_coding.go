@@ -60,6 +60,14 @@ type codingRunParams struct {
 	ReadKnowledge  bool   `json:"read_knowledge"`
 	AgentServerID  string `json:"agent_server_id"` // empty = local execution; otherwise remote Agent server
 	SplitTasks     bool   `json:"split_tasks"`     // false (default) = developer persona implements directly; true = current decomposition + auto-orchestrate flow
+	// AutoPushPR controls whether the coding stage auto-dispatches the
+	// "提交 → 推送 → 创建 PR" sub-task once development finishes. Pointer so an
+	// omitted field (scheduler path, legacy clients) preserves the requirement
+	// row's persisted value (DB default = true / "都自动推送"); a non-nil value
+	// from the preflight-dialog toggle is stamped onto the row so the three
+	// completion points — one of which may run asynchronously after a restart —
+	// all read the same intent.
+	AutoPushPR *bool `json:"auto_push_pr"`
 	// DevMode picks the coding session threading strategy: "" / "session" =
 	// fork the design (or analysis) session (legacy default, Claude
 	// inherits the full conversation); "design" = fresh session, hand the
@@ -243,6 +251,20 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 				log.Printf("[start-coding] failed to persist sync_mode for %s: %v", p.RequirementID, perr)
 			} else if reqRow != nil {
 				reqRow.SyncMode = syncMode // same goroutine → runRemoteCoding sees it immediately
+			}
+		}
+		// Stamp the auto-push intent from the preflight-dialog toggle. Pointer
+		// semantics: nil (omitted by the scheduler / legacy clients) preserves
+		// the row's persisted value — reqRow.AutoPush already carries the DB
+		// default (true) or the last stamped choice — so the "都自动推送"
+		// default is never silently cleared. A non-nil value is persisted so
+		// the split orchestrator summary (which may run after a restart) reads
+		// the same intent the completion points below do.
+		if p.AutoPushPR != nil {
+			if perr := h.reqSvc.UpdateAutoPush(p.RequirementID, *p.AutoPushPR); perr != nil {
+				log.Printf("[start-coding] failed to persist auto_push for %s: %v", p.RequirementID, perr)
+			} else if reqRow != nil {
+				reqRow.AutoPush = *p.AutoPushPR
 			}
 		}
 	}
@@ -855,6 +877,14 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		}
 		job.Finish(0, store.JobDone)
 		log.Printf("[start-coding] remote job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
+		// Auto-push收尾: the Agent-server path always runs the "agent" role
+		// (single-session end-to-end), so it never goes through the split
+		// orchestrator — trigger the push+PR sub-task right here when enabled.
+		// Runs in a goroutine so it doesn't delay this job's job_done frame; the
+		// push progress streams through the new sub-task's own JobStore job.
+		if reqRow != nil && reqRow.AutoPush {
+			go h.autoPushPR(reqRow)
+		}
 		return
 	}
 
@@ -958,6 +988,16 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// dispatchOneChild 的 JobStore job 推流。
 	if roleKey != "agent" && p.RequirementID != "" && newCodingSID != "" && h.subTaskSvc != nil && p.SplitTasks {
 		go h.tryAutoOrchestrate(p.RequirementID, newCodingSID, out.finalResult, out.subTasksJSON, reqRow, workDir, model, claudeConfigID)
+	}
+
+	// Auto-push收尾 (本地非拆分路径): when this run does NOT go through the split
+	// orchestrator (agent role, or split disabled), development is complete
+	// right here — trigger the "提交 → 推送 → 创建 PR" sub-task when enabled.
+	// The split path triggers autoPushPR after RunOrchestratorSummary instead,
+	// so this guard (roleKey == "agent" || !p.SplitTasks) prevents a duplicate
+	// dispatch. Goroutine keeps it off this job's job_done SSE.
+	if reqRow != nil && reqRow.AutoPush && (roleKey == "agent" || !p.SplitTasks) {
+		go h.autoPushPR(reqRow)
 	}
 }
 

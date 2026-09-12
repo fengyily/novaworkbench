@@ -934,46 +934,51 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 		roleConfigID = cfgID
 	}
 
-	// Build the prompt that drives the sub-agent. The body lays out the
-	// step-by-step work plan (commit → merge main → push → create PR) so the
-	// child has the same plan the previous inline goroutine executed. The
-	// execution-role persona is appended by SubTaskRunner.Run; this prompt is
-	// just the task description.
-	prompt := buildPushSubTaskPrompt(reqRow, dev, base, remote, platformType, body.CommitMessage)
-
-	// 尝试不用主任务的 session 了，直接用子任务的 session 来做推送和创建 PR 的操作。因为主任务的 session 可能已经结束或者不适合继续使用，所以我们需要为子任务创建一个新的 session。
-	sourceSID := ""
-	// The sub-task forks the requirement's main-agent session (coding session
-	// with design session as fallback) so the child inherits the project's
-	// full context — same pattern as the wizard's manual sub-tasks. Empty
-	// sourceSID is treated as "no main session yet" and rejected with 409 to
-	// match StartSubTask's contract.
-	// sourceSID := subTaskSourceSID(reqRow, "")
-	// if sourceSID == "" {
-	// 	writeError(w, http.StatusConflict, "NO_SESSION",
-	// 		"需求尚未启动 coding 或 design session，无法触发推送子任务。请先开始开发。")
-	// 	return
-	// }
-
-	title := "推送并创建 PR"
-	if body.CommitMessage != "" {
-		title = "推送并创建 PR: " + truncateMergePrompt(body.CommitMessage, 40)
-	}
-	// The push+PR sub-task must run in the same environment the requirement
-	// was developed on (its worktree / branch lives there); pass the
-	// requirement's agent_server_id so Run routes it consistently.
-	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(reqRow.ID, title, prompt, effectiveModel, sourceSID, reqRow.AgentServerID)
+	// Dispatch the push+PR child agent through the shared core so the manual
+	// path here and the automatic WizardHandler.autoPushPR path never diverge.
+	// The child starts a fresh session (the main-agent session may already be
+	// gone or unsuitable to continue) and runs in the requirement's own
+	// worktree / agent server (resolved inside dispatchPushPRSubTask).
+	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, body.CommitMessage, effectiveModel, roleConfigID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
 	}
-	log.Printf("[merge/push] sub-task %s job %s req %s: branch=%s", st.ID, job.ID, reqRow.ID, dev)
+	log.Printf("[merge/push] sub-task %s job %s req %s: branch=%s", subTaskID, jobID, reqRow.ID, dev)
 	writeJSON(w, http.StatusOK, map[string]string{
-		"job_id":      job.ID,
-		"sub_task_id": st.ID,
+		"job_id":      jobID,
+		"sub_task_id": subTaskID,
 	})
+}
 
-	go h.subTaskRunner.Run(reqRow, st, job, newSID, sourceSID, prompt, effectiveModel, roleConfigID, false, true, false)
+// dispatchPushPRSubTask builds the "提交 → 合并主分支 → 推送 → 创建 PR" prompt
+// and dispatches it as a child agent through the shared SubTaskRunner. It is
+// the single dispatch core behind both MergeHandler.Push (the manual
+// "推送并发起 PR" button) and WizardHandler.autoPushPR (the automatic
+// post-development trigger), so the two paths stay byte-for-byte identical.
+//
+// commitMessage empty → the child falls back to the dev branch name inside the
+// prompt. model / roleConfigID are the caller's pre-resolved effective values
+// (pr_author role by default). sourceSID is deliberately empty: the push child
+// runs a fresh session because the requirement's main-agent session may have
+// ended or be unsuitable to continue. The sub-task inherits the requirement's
+// agent_server_id so Run routes it to the host the code actually lives on.
+//
+// Returns the JobStore job id + sub_tasks row id so an HTTP caller can hand
+// them to the frontend for SSE subscription; the automatic caller ignores them.
+func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, model, roleConfigID string) (jobID, subTaskID string, err error) {
+	prompt := buildPushSubTaskPrompt(reqRow, dev, base, remote, platformType, commitMessage)
+	title := "推送并创建 PR"
+	if commitMessage != "" {
+		title = "推送并创建 PR: " + truncateMergePrompt(commitMessage, 40)
+	}
+	sourceSID := ""
+	st, job, newSID, nerr := runner.NewPendingSubTask(reqRow.ID, title, prompt, model, sourceSID, reqRow.AgentServerID)
+	if nerr != nil {
+		return "", "", nerr
+	}
+	go runner.Run(reqRow, st, job, newSID, sourceSID, prompt, model, roleConfigID, false, true, false)
+	return job.ID, st.ID, nil
 }
 
 // buildPushSubTaskPrompt composes the task description the push sub-agent

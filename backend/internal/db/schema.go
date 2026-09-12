@@ -633,6 +633,14 @@ var alterColumns = []string{
 	// (追加调整 / 继续开发 / 子任务 / 合并 / 清理) reads the persisted value so
 	// the whole lifecycle stays consistent with how the code was first shipped.
 	`ALTER TABLE requirements ADD COLUMN sync_mode TEXT NOT NULL DEFAULT ''`,
+	// Auto-push toggle for the coding stage. When 1 (the default), the three
+	// development-completion points (local non-split, Agent-server, and the
+	// split orchestrator summary) auto-dispatch the "提交 → 推送 → 创建 PR"
+	// sub-task so a finished requirement ships without a manual click. Stored
+	// as INTEGER (same convention as skip_analysis / skip_design) so the Go
+	// bool field scans consistently across SQLite / MySQL / Postgres. The user
+	// can clear it per-requirement from the start-coding preflight dialog.
+	`ALTER TABLE requirements ADD COLUMN auto_push INTEGER NOT NULL DEFAULT 1`,
 	// Per-sub-task token usage (mirrors token_usage per-row columns but stays
 	// inline so a child agent's cost lives next to its artifact without a
 	// second SELECT against token_usage). input_tokens / output_tokens are the

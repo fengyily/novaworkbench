@@ -850,6 +850,13 @@ export interface StartCodingReq {
   /** false = developer persona direct implementation; true = sub-task split. */
   split_tasks?: boolean;
   /**
+   * Whether to auto-dispatch the "提交 → 推送 → 创建 PR" sub-task once
+   * development finishes. Undefined = backend keeps the requirement row's
+   * persisted value (DB default = true); a boolean is stamped onto the row so
+   * the split / non-split / Agent-server completion points all agree.
+   */
+  auto_push_pr?: boolean;
+  /**
    * Coding session threading strategy. 'session' = fork the design/analysis
    * session (legacy default, Claude inherits the conversation). 'design' =
    * fresh session, hand the stored design doc to the agent via the -p

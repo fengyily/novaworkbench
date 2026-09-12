@@ -886,6 +886,10 @@ export default function RequirementDetail() {
   // no auto-orchestration). Reset to false each time the branch modal opens so
   // the default is preserved across coding runs.
   const [splitTasksDev, setSplitTasksDev] = useState(false);
+  // Whether to auto "提交 → 推送 → 创建 PR" once development finishes. Default
+  // true so every run ships its result; reset to true each time the branch
+  // modal opens. The user can turn it off for exploratory runs.
+  const [autoPushPRDev, setAutoPushPRDev] = useState(true);
   const [showDesignKnowledgeModal, setShowDesignKnowledgeModal] = useState(false);
   const [readKnowledgeDesign, setReadKnowledgeDesign] = useState(false);
   const designNeedsTransitionRef = useRef(false);
@@ -1671,7 +1675,7 @@ export default function RequirementDetail() {
     );
   }, [id, refresh, fetchOrchBatch, showSummaryDoneToast, t]);
 
-  const doStartCoding = async (bName: string, bBase: string, useKnowledge: boolean, splitTasks: boolean) => {
+  const doStartCoding = async (bName: string, bBase: string, useKnowledge: boolean, splitTasks: boolean, autoPushPR: boolean) => {
     if (!req || !project || !id) return;
     setCoding(true);
     setCodingLines([]);
@@ -1718,6 +1722,11 @@ export default function RequirementDetail() {
           // branch (mirrors the agent role's behavior). Sent explicitly even
           // when false so the backend never sees a missing field.
           split_tasks: splitTasks,
+          // Whether to auto-dispatch the "提交 → 推送 → 创建 PR" sub-task once
+          // development finishes. Sent explicitly (even when false) so the
+          // backend stamps the requirement's auto_push column with the user's
+          // choice; omitting it would let the backend default (true) stand.
+          auto_push_pr: autoPushPR,
           // Per-request model override — empty means the role's configured model.
           ...(developerModel ? { model: developerModel } : {}),
           // Per-request claude_config id (the user-picked "config" from
@@ -1766,6 +1775,7 @@ export default function RequirementDetail() {
     setBaseBranch(defaultBase);
     setReadKnowledgeDev(false); // default unchecked each time
     setSplitTasksDev(false); // default unchecked each time
+    setAutoPushPRDev(true); // default checked each time (都自动推送)
     setShowBranchModal(true);
     authedFetch(`${API_BASE}/api/fs/git-branches?path=${encodeURIComponent(project.local_path)}`)
       .then(r => r.json())
@@ -1779,7 +1789,7 @@ export default function RequirementDetail() {
 
   const confirmBranchAndStart = () => {
     setShowBranchModal(false);
-    doStartCoding(branchName, baseBranch, readKnowledgeDev, splitTasksDev);
+    doStartCoding(branchName, baseBranch, readKnowledgeDev, splitTasksDev, autoPushPRDev);
   };
 
   // ── Further adjust: resume the prior coding session, output appends to codingLines
@@ -2363,6 +2373,20 @@ export default function RequirementDetail() {
                       <div className="preflight-toggle-title"><IconPin size={14} className="icon-mr" />{t('requirements.detail2.preflightSplitTasks')}</div>
                       <div className="preflight-toggle-desc">
                         {t('requirements.detail2.preflightSplitTasksHint')}
+                      </div>
+                    </div>
+                  </label>
+                  {/* Auto push+PR switch: default checked (= ship the result once
+                      development finishes by dispatching the "提交 → 推送 → 创建 PR"
+                      sub-task). Works for both split and non-split runs and for
+                      Agent-server execution. Reset to true in openBranchModal;
+                      the value is always sent so the backend stamps auto_push. */}
+                  <label className={`preflight-toggle ${autoPushPRDev ? 'is-checked' : ''}`}>
+                    <input type="checkbox" checked={autoPushPRDev} onChange={e => setAutoPushPRDev(e.target.checked)} />
+                    <div className="preflight-toggle-body">
+                      <div className="preflight-toggle-title"><IconRocket size={14} className="icon-mr" />{t('requirements.detail2.preflightAutoPushPR')}</div>
+                      <div className="preflight-toggle-desc">
+                        {t('requirements.detail2.preflightAutoPushPRHint')}
                       </div>
                     </div>
                   </label>
