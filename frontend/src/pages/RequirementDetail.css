@@ -1261,6 +1261,61 @@ select.preflight-field-input {
   margin-top: -1px;
 }
 
+/* Per-stage timing badge — mirrors .stage-model-tag but in a neutral slate so
+   it reads as a metric, not a model. Rendered only when the stage has a
+   measured span. */
+.stage-time-tag {
+  margin-left: 6px;
+  padding: 2px 8px;
+  background: rgba(100, 116, 139, 0.10);
+  color: var(--color-text-muted, #64748b);
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.stage-time-tag svg { margin-top: -1px; }
+
+/* ── Timing summary section ──────────────────────────────────────── */
+.timing-section { margin-top: 16px; }
+.timing-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.timing-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 10px;
+  background: var(--color-surface, #fff);
+}
+.timing-row-label {
+  display: inline-flex;
+  align-items: center;
+  font-weight: 600;
+  color: var(--color-text, #1e293b);
+  min-width: 120px;
+}
+.timing-row-count { font-weight: 400; color: var(--color-text-muted, #64748b); }
+.timing-row-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--color-primary, #4f46e5);
+}
+.timing-row-range {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--color-text-muted, #64748b);
+}
+.timing-row-note { color: var(--color-text-muted, #94a3b8); }
+
 /* ── Merge / PR step ─────────────────────────────────────────────── */
 .merge-section {
   margin-top: 16px;

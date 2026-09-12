@@ -134,6 +134,18 @@ type Requirement struct {
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	// Plan-analysis timing (requirements columns). AnalysisStartedAt is stamped
+	// on entry into "analyzing" (reset on re-entry); AnalysisEndedAt on reaching
+	// "designed". Both nullable; NULL for legacy rows / stages not yet reached.
+	AnalysisStartedAt *time.Time `json:"analysis_started_at,omitempty"`
+	AnalysisEndedAt   *time.Time `json:"analysis_ended_at,omitempty"`
+	// Development-stage span — derived aggregates, NOT stored columns. Populated
+	// by RequirementService.Get from MIN(sub_tasks.created_at) /
+	// MAX(sub_tasks.completed_at): the first sub-task's creation and the last
+	// finished sub-task's completion ("以最后一个任务结束时间为准"). Both NULL when
+	// the requirement has no sub_tasks (e.g. legacy single-shot coding runs).
+	DevStartedAt *time.Time `json:"dev_started_at,omitempty"`
+	DevEndedAt   *time.Time `json:"dev_ended_at,omitempty"`
 	// Calendar-view scheduling fields. Both nullable: NULL = "未排期", the
 	// frontend falls back to created_at so legacy rows are immediately usable
 	// in the calendar without a backfill. Writes go through

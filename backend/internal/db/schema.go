@@ -641,6 +641,20 @@ var alterColumns = []string{
 	// bool field scans consistently across SQLite / MySQL / Postgres. The user
 	// can clear it per-requirement from the start-coding preflight dialog.
 	`ALTER TABLE requirements ADD COLUMN auto_push INTEGER NOT NULL DEFAULT 1`,
+	// Plan-analysis timing. analysis_started_at is stamped when the requirement
+	// enters the "analyzing" stage (and reset — started re-stamped, ended
+	// cleared — on every re-entry so "重新计算" holds); analysis_ended_at is
+	// stamped when the plan is finalized (→ "designed"). Both are backfilled
+	// idempotently via COALESCE on the skip-analysis / skip-design side paths
+	// (UpdateStatus into "designing"/"developing" and UpdateDesign's direct
+	// "designing" write) so a requirement that skips a stage still records a
+	// sensible start/end. Nullable, no default: legacy rows scan as NULL and the
+	// frontend renders "—". The matching development-stage span (dev_started_at /
+	// dev_ended_at) is NOT stored — it is derived in RequirementService.Get from
+	// MIN(sub_tasks.created_at) / MAX(sub_tasks.completed_at) so redo/continue
+	// resets recompute it automatically.
+	`ALTER TABLE requirements ADD COLUMN analysis_started_at DATETIME`,
+	`ALTER TABLE requirements ADD COLUMN analysis_ended_at   DATETIME`,
 	// Per-sub-task token usage (mirrors token_usage per-row columns but stays
 	// inline so a child agent's cost lives next to its artifact without a
 	// second SELECT against token_usage). input_tokens / output_tokens are the
