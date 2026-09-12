@@ -624,6 +624,15 @@ var alterColumns = []string{
 	// "design"  = fresh session, hand the stored design doc to the agent
 	// via the -p prompt; empty = never ran / predates this column.
 	`ALTER TABLE requirements ADD COLUMN dev_mode TEXT NOT NULL DEFAULT ''`,
+	// Code-transport mode for Agent-server execution. Stamped once when the
+	// coding stage starts (StartCoding). "" == 远程/origin 传输 (the legacy
+	// default: remote host clones origin, pushes back to origin); "local" ==
+	// git-bundle 传输 for local self-hosted repos with no reachable remote —
+	// code is shipped to / from the agent host as single bundle files over
+	// SFTP and integrated locally via 本地合并. Every follow-up action
+	// (追加调整 / 继续开发 / 子任务 / 合并 / 清理) reads the persisted value so
+	// the whole lifecycle stays consistent with how the code was first shipped.
+	`ALTER TABLE requirements ADD COLUMN sync_mode TEXT NOT NULL DEFAULT ''`,
 	// Per-sub-task token usage (mirrors token_usage per-row columns but stays
 	// inline so a child agent's cost lives next to its artifact without a
 	// second SELECT against token_usage). input_tokens / output_tokens are the

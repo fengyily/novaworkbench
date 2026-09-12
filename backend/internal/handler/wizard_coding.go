@@ -67,6 +67,13 @@ type codingRunParams struct {
 	// handler falls back to the requirement row's persisted dev_mode so a
 	// re-run that omits the field stays consistent with the previous run.
 	DevMode string `json:"dev_mode"`
+	// SyncMode picks the Agent-server code-transport strategy (only meaningful
+	// when AgentServerID != ""): "" / "remote" = origin clone/push (legacy);
+	// "local" = git-bundle over SFTP for a self-hosted repo with no reachable
+	// remote. When empty the handler infers it from the project's remote_url
+	// (empty remote_url → local). Persisted to the requirement row so all
+	// follow-up actions (追加调整 / 继续开发 / 子任务 / 合并 / 清理) reuse it.
+	SyncMode string `json:"sync_mode"`
 }
 
 func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
@@ -214,6 +221,29 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			log.Printf("[start-coding] failed to persist dev_mode for %s: %v", p.RequirementID, perr)
 		} else if reqRow != nil {
 			reqRow.DevMode = devMode
+		}
+		// Stamp the code-transport (sync) mode alongside dev_source, but ONLY
+		// when this run targets an Agent server — local execution never ships
+		// code over SFTP so sync_mode stays "". Precedence: an explicit UI
+		// choice (p.SyncMode) wins; otherwise infer from the project's
+		// remote_url (empty remote_url = local self-hosted repo → bundle
+		// transport). Persisting it here means every follow-up action
+		// (追加调整 / 继续开发 / 子任务 / 合并 / 清理) reads the same value.
+		if p.AgentServerID != "" && reqRow != nil {
+			syncMode := service.SyncModeRemote
+			switch p.SyncMode {
+			case service.SyncModeLocal:
+				syncMode = service.SyncModeLocal
+			case "", "remote":
+				if proj, _ := h.projectSvc.Get(reqRow.ProjectID); proj != nil && proj.RemoteURL == "" {
+					syncMode = service.SyncModeLocal
+				}
+			}
+			if perr := h.reqSvc.UpdateSyncMode(p.RequirementID, syncMode); perr != nil {
+				log.Printf("[start-coding] failed to persist sync_mode for %s: %v", p.RequirementID, perr)
+			} else if reqRow != nil {
+				reqRow.SyncMode = syncMode // same goroutine → runRemoteCoding sees it immediately
+			}
 		}
 	}
 	// hadWorktree records whether the upstream stage had already persisted a

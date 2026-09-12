@@ -9,8 +9,21 @@ import (
 	"time"
 
 	"github.com/novaworkbench/backend/internal/model"
+	"github.com/novaworkbench/backend/internal/service"
 	gossh "github.com/novaworkbench/backend/internal/ssh"
 )
+
+// codeLivesOnAgent reports whether a requirement's working code physically
+// lives on an Agent server (rather than in a local worktree). This is true
+// only for the origin-transport Agent path: a local-sync requirement
+// (sync_mode == "local") runs on an Agent server for compute but its code is
+// synced back to the LOCAL isolated worktree after every round, so all
+// integration / cleanup happens locally. Every follow-up router that used to
+// branch on AgentServerID alone must use this instead, or a local-sync
+// requirement would be wrongly redirected to the agent host for merge/cleanup.
+func codeLivesOnAgent(r *model.Requirement) bool {
+	return r != nil && r.AgentServerID != "" && r.SyncMode != service.SyncModeLocal
+}
 
 // ── Agent-server execution consistency for worktree cleanup ────────────────
 //
@@ -70,7 +83,7 @@ func (h *MergeHandler) dialAgentForReq(ctx context.Context, reqRow *model.Requir
 // usesAgentServer reports whether follow-up actions for this requirement must
 // be routed to an Agent server.
 func (h *MergeHandler) usesAgentServer(reqRow *model.Requirement) bool {
-	return reqRow != nil && reqRow.AgentServerID != "" && h.agentSvrSvc != nil
+	return codeLivesOnAgent(reqRow) && h.agentSvrSvc != nil
 }
 
 // remoteCapture runs a command on the agent host and returns its combined

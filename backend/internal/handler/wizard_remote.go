@@ -14,6 +14,7 @@ import (
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
+	"github.com/novaworkbench/backend/internal/service"
 	gossh "github.com/novaworkbench/backend/internal/ssh"
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/internal/util"
@@ -162,17 +163,25 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	}
 	defer client.Close()
 
-	// Step 2: code sync via git. baseRepo hosts a single origin clone for the
-	// project; wtPath is the per-requirement worktree that mirrors the local
-	// branch isolation model. Without a remote_url on the project the entire
-	// remote path is dead — fail early with a clear message instead of an
-	// opaque "git clone exit 128".
+	// Step 2: code sync. baseRepo / wtPath give the per-requirement worktree
+	// that mirrors the local branch-isolation model; HOW code gets into that
+	// worktree (and back out) is delegated to a codeTransport so the two
+	// strategies — origin clone/push vs local git-bundle over SFTP — don't
+	// clutter this trunk. See originTransport / bundleTransport below.
 	if in.reqRow == nil {
 		return claudeStreamOutcome{errMsg: "远程执行需要已保存的需求记录（缺 Requirement）"}
 	}
-	originURL, err := h.projectSvc.OriginURL(in.reqRow.ProjectID)
-	if err != nil || originURL == "" {
-		return claudeStreamOutcome{errMsg: "项目未配置 git 远程仓库，无法在 Agent 服务器执行。请先在项目设置中配置 origin。" + errString(err)}
+	// Local-sync mode (self-hosted repo with no reachable remote) is decided by
+	// the persisted sync_mode and completely bypasses the OriginURL check — the
+	// bundle transport never touches origin.
+	localSync := in.reqRow.SyncMode == service.SyncModeLocal
+	var tr codeTransport = originTransport{}
+	if !localSync {
+		originURL, oerr := h.projectSvc.OriginURL(in.reqRow.ProjectID)
+		if oerr != nil || originURL == "" {
+			return claudeStreamOutcome{errMsg: "项目未配置 git 远程仓库，无法在 Agent 服务器执行。请先在项目设置中配置 origin，或在启动开发时选择「本地仓库同步」。" + errString(oerr)}
+		}
+		tr = originTransport{originURL: originURL}
 	}
 	baseRepo := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/base"
 	wtPath := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID
@@ -182,72 +191,33 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	}
 	// baseBranch fallback chain: UI-provided BaseBranch > project.DefaultBranch
 	// > literal "main". Mirrors the local execStartCoding chain so the remote
-	// worktree is rooted at the same base the local wizard uses — a divergence
-	// here would mean adjust-coding landed on a different line of history than
-	// what continue-coding (or merge) sees.
+	// worktree is rooted at the same base the local wizard uses. The project
+	// lookup here also resolves LocalPath for the bundle transport (the local
+	// repo whose object store receives the down-bundle commits).
 	baseBranch := in.req.BaseBranch
-	if baseBranch == "" {
-		if proj, perr := h.projectSvc.Get(in.reqRow.ProjectID); perr == nil && proj != nil && proj.DefaultBranch != "" {
+	localRepoPath := ""
+	if proj, perr := h.projectSvc.Get(in.reqRow.ProjectID); perr == nil && proj != nil {
+		if baseBranch == "" && proj.DefaultBranch != "" {
 			baseBranch = proj.DefaultBranch
 		}
-		if baseBranch == "" {
-			baseBranch = "main"
+		localRepoPath = proj.LocalPath
+	}
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	if localSync {
+		// localWt: this run's isolated worktree. StartCoding passes in.workDir;
+		// adjust/continue/sub-task leave it empty → fall back to the persisted
+		// worktree_path. localRepo is always the project's main checkout.
+		localWt := in.workDir
+		if localWt == "" {
+			localWt = in.reqRow.WorktreePath
 		}
+		tr = bundleTransport{localRepo: localRepoPath, localWt: localWt}
 	}
 
-	in.job.Append(store.LogLine{Type: "phase", Content: "📥 准备 Agent 服务器代码（git worktree 隔离）..."})
-	if !client.Exists(baseRepo) {
-		in.job.Append(store.LogLine{Type: "message", Content: "📦 首次 clone " + redactOriginForLog(originURL)})
-		if exit, _ := client.Exec(ctx, "git clone "+shellQuoteSingle(originURL)+" "+shellQuoteSingle(baseRepo), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
-			return claudeStreamOutcome{errMsg: "git clone 失败（exit=" + fmtInt(exit) + "），请检查 origin 凭据"}
-		}
-	} else {
-		client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin --prune", "", nil, &jobWriter{job: in.job}, nil)
-	}
-	// Always (re)fetch the project's main branch into origin/<baseBranch> so
-	// the worktree strategies below branch off the latest upstream — without
-	// this line the first-ever clone would skip the `git fetch origin --prune`
-	// branch and leave origin/<baseBranch> stale, defeating the "based on the
-	// freshest main" intent. Best-effort by design: any failure is logged but
-	// does not abort the run (the worktree fallback strategies cover a missing
-	// origin/<baseBranch>).
-	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin "+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
-	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree prune", "", nil, &jobWriter{job: in.job}, nil)
-
-	if !client.Exists(wtPath) {
-		// Strategy 1: branch off origin/<baseBranch> (the freshly-updated ref
-		// from the fetch above) so the new requirement starts from the
-		// upstream HEAD. Matches the local EnsureWorktreeLogged strategy
-		// order. Strategies 2/3 remain as fallbacks for repos where
-		// origin/<base> doesn't exist (no remote on base, base never pushed).
-		exit, _ := client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath)+" origin/"+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
-		if exit != 0 {
-			// Strategy 2: branch off HEAD (always valid; matches the legacy
-			// EnsureWorktree behaviour).
-			exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath), "", nil, &jobWriter{job: in.job}, nil)
-			if exit != 0 {
-				// Strategy 3: attach to an already-existing branch
-				// (adjust/continue reuse case).
-				if exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add "+shellQuoteSingle(wtPath)+" "+shellQuoteSingle(branch), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
-					return claudeStreamOutcome{errMsg: "git worktree 创建失败（exit=" + fmtInt(exit) + "），请检查仓库状态"}
-				}
-			}
-		}
-	} else {
-		// adjust-coding / continue-coding: pull the latest remote commits
-		// onto the existing branch. --ff-only protects against silent
-		// divergence; on failure we log a hint and proceed with the local
-		// copy (the user can resolve the divergence manually). The chained
-		// merge --ff-only origin/<baseBranch> step then pulls in any
-		// upstream commits on the project main that landed since this
-		// branch was first created — mirroring the local EnsureWorktree
-		// reuse path. The trailing `|| echo ...` keeps the whole pipeline
-		// non-blocking: a diverged local branch (or missing origin ref)
-		// just logs a hint and lets coding continue from the existing
-		// commit, exactly like the pull step above.
-		client.Exec(ctx,
-			"cd "+shellQuoteSingle(wtPath)+" && (git checkout "+shellQuoteSingle(branch)+" 2>/dev/null || true) && (git pull --ff-only origin "+shellQuoteSingle(branch)+" 2>&1 || echo \"[nova-agent] pull 跳过（无跟踪或已分叉）\") && (git merge --ff-only origin/"+shellQuoteSingle(baseBranch)+" 2>&1 || echo \"[nova-agent] 主分支快进更新跳过\")",
-			"", nil, &jobWriter{job: in.job}, nil)
+	if perr := tr.PrepareRemote(ctx, client, in, baseRepo, wtPath, branch, baseBranch); perr != nil {
+		return claudeStreamOutcome{errMsg: perr.Error()}
 	}
 
 	// Step 2.5: configure git identity + (optionally) GPG signing in the
@@ -269,42 +239,49 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// GitHub-side fallback for an unsigned push).
 	gitName, gitEmail := lookupGitIdentity(h.projectSvc, h.platformSvc, in.reqRow)
 	gnupgHome := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".gnupg"
-	if project, pErr := h.projectSvc.Get(in.reqRow.ProjectID); pErr == nil && project != nil && project.PlatformTokenID != "" {
-		enabled, _, armored, passphrase, gpgErr := h.platformSvc.GPGSigningMaterial(project.PlatformTokenID)
-		switch {
-		case gpgErr != nil:
-			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 读取 GPG 配置失败：" + gpgErr.Error() + "，按未启用处理"})
-		case enabled && armored != "":
-			in.job.Append(store.LogLine{Type: "phase", Content: "🔐 在 Agent 服务器上配置 GPG 签名..."})
-			keyID, cleanup, provErr := provisionRemoteGPG(ctx, client, in.job, gnupgHome, wtPath, baseRepo, armored, passphrase, gitName, gitEmail)
-			if provErr != nil {
-				// Best-effort cleanup before we bail.
-				if cleanup != nil {
-					cleanup()
+	// Local-sync mode skips the remote commit.gpgsign provision: the remote
+	// commits are a transport detail landed back into the LOCAL object store,
+	// and the user-visible integration commit is signed locally by
+	// LocalMerge's resolveLocalGPGSigning. The committer identity below still
+	// runs unconditionally so the remote commits carry a real author.
+	if !localSync {
+		if project, pErr := h.projectSvc.Get(in.reqRow.ProjectID); pErr == nil && project != nil && project.PlatformTokenID != "" {
+			enabled, _, armored, passphrase, gpgErr := h.platformSvc.GPGSigningMaterial(project.PlatformTokenID)
+			switch {
+			case gpgErr != nil:
+				in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 读取 GPG 配置失败：" + gpgErr.Error() + "，按未启用处理"})
+			case enabled && armored != "":
+				in.job.Append(store.LogLine{Type: "phase", Content: "🔐 在 Agent 服务器上配置 GPG 签名..."})
+				keyID, cleanup, provErr := provisionRemoteGPG(ctx, client, in.job, gnupgHome, wtPath, baseRepo, armored, passphrase, gitName, gitEmail)
+				if provErr != nil {
+					// Best-effort cleanup before we bail.
+					if cleanup != nil {
+						cleanup()
+					}
+					return claudeStreamOutcome{errMsg: provErr.Error()}
 				}
-				return claudeStreamOutcome{errMsg: provErr.Error()}
+				defer cleanup()
+				// ctx.Done() fallback cleanup. The run can outlive the
+				// ctx (job goroutine continues after the handler returns)
+				// but cleanup itself is bounded: it issues a single SSH
+				// exec and returns. If the SSH conn is already torn down
+				// by then, cleanup silently fails and logs a warning.
+				go func() {
+					<-ctx.Done()
+					cleanup()
+				}()
+				in.job.Append(store.LogLine{Type: "message", Content: "✅ GPG 已就绪（keyid=" + keyID + "）"})
+				// Back-fill the keyid so the UI shows it on the next list
+				// reload. Ignore errors — the key is already usable on the
+				// remote host; a stale empty keyid is a UI-only nit.
+				_ = h.platformSvc.UpdateGPGKeyID(project.PlatformTokenID, keyID)
+			case enabled:
+				// Enabled but no key material — the user toggled the
+				// checkbox without uploading a private key. Continue
+				// without signing and warn loudly so the resulting
+				// unsigned push (if any) doesn't come as a surprise.
+				in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 已启用 GPG 签名但未保存私钥，本次提交未签名"})
 			}
-			defer cleanup()
-			// ctx.Done() fallback cleanup. The run can outlive the
-			// ctx (job goroutine continues after the handler returns)
-			// but cleanup itself is bounded: it issues a single SSH
-			// exec and returns. If the SSH conn is already torn down
-			// by then, cleanup silently fails and logs a warning.
-			go func() {
-				<-ctx.Done()
-				cleanup()
-			}()
-			in.job.Append(store.LogLine{Type: "message", Content: "✅ GPG 已就绪（keyid=" + keyID + "）"})
-			// Back-fill the keyid so the UI shows it on the next list
-			// reload. Ignore errors — the key is already usable on the
-			// remote host; a stale empty keyid is a UI-only nit.
-			_ = h.platformSvc.UpdateGPGKeyID(project.PlatformTokenID, keyID)
-		case enabled:
-			// Enabled but no key material — the user toggled the
-			// checkbox without uploading a private key. Continue
-			// without signing and warn loudly so the resulting
-			// unsigned push (if any) doesn't come as a surprise.
-			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 已启用 GPG 签名但未保存私钥，本次提交未签名"})
 		}
 	}
 	// GPG-disabled case: still bake the committer identity into the
@@ -558,48 +535,18 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// while Nova stayed pinned to this phase line.
 	h.syncSessionDownWithTimeout(ctx, client, in.job, in.reqRow, remoteSlugDir)
 
-	// Step 7: git commit + push back to origin. Skip when the run errored out
-	// (no real result) so we don't propagate half-broken state. The user can
-	// always retry adjust-coding on the remote worktree via ContinueCoding.
-	//
-	// No `-S` here on purpose: signing is driven by the worktree config set
-	// up in Step 2.5 (commit.gpgsign=true + user.signingkey + gpg.program).
-	// Doing it via config — instead of per-invocation `-S` — also covers
-	// any `git commit` Claude issues from its own Bash tool during Step 5,
-	// which is the exact failure mode this requirement addresses.
+	// Step 7: collect the result. Skip when the run errored out (no real
+	// result) so we don't propagate half-broken state. The user can always
+	// retry adjust-coding on the remote worktree via ContinueCoding. The
+	// transport decides WHERE the committed result goes — origin (push) for
+	// originTransport, the local isolated worktree (bundle down-sync) for
+	// bundleTransport.
 	if out.errMsg == "" && out.finalResult != "" {
-		in.job.Append(store.LogLine{Type: "phase", Content: "📤 推送代码变更到 origin..."})
-		var pushStderr bytes.Buffer
 		title := "nova-agent: " + in.req.RequirementTitle
 		if title == "nova-agent: " {
 			title = "nova-agent: " + in.reqRow.Title
 		}
-		// git commit -F - reads the message from stdin; we pipe via heredoc to
-		// sidestep the SSH argv limit on long titles.
-		commitScript := "cd " + shellQuoteSingle(wtPath) +
-			" && git add -A" +
-			" && git diff --cached --quiet || git commit -m " + shellQuoteSingle(title) +
-			" && git push origin " + shellQuoteSingle(branch)
-		if exit, _ := client.Exec(ctx, commitScript, "", nil, &jobWriter{job: in.job}, &pushStderr); exit != 0 {
-			// GPG signing failures show up here with very specific
-			// stderr patterns (wrong passphrase, expired key, GH006,
-			// …) — classify them into a precise Chinese message so
-			// the user knows whether to fix the GPG token, rotate
-			// the key, or re-check the branch protection. Falls
-			// back to the generic wording when stderr is empty or
-			// doesn't match any bucket (e.g. plain merge conflict
-			// on push).
-			msg := classifyGitSignFailure(pushStderr.String())
-			if msg == "" {
-				msg = "❌ 推送失败（exit=" + fmtInt(exit) + "），请在远程 worktree 手动处理冲突"
-			}
-			in.job.Append(store.LogLine{Type: "error", Content: msg})
-			// Non-fatal: the user can still see the work locally via the
-			// pushed-back session dir + the captured result text. Don't
-			// override out.errMsg — let the run's own result stand.
-		} else {
-			in.job.Append(store.LogLine{Type: "message", Content: "✅ 已推送到 origin/" + branch})
-		}
+		tr.CollectResult(ctx, client, in, baseRepo, wtPath, branch, baseBranch, title)
 	}
 
 	return out
@@ -974,6 +921,234 @@ func (h *WizardHandler) runRemoteArchitectDesign(in *remoteArchitectInput) claud
 		return claudeStreamOutcome{errMsg: err.Error()}
 	}
 	return out
+}
+
+// codeTransport abstracts the two Agent-server code-shipping strategies so
+// runRemoteCoding's main body stays linear. Step 2 (get code onto the remote
+// worktree) maps to PrepareRemote; Step 7 (get the committed result back) maps
+// to CollectResult. originTransport is the legacy origin clone/push path;
+// bundleTransport is the local-sync git-bundle-over-SFTP path.
+type codeTransport interface {
+	// PrepareRemote makes the per-requirement worktree exist on the agent host
+	// at wtPath, checked out on branch and seeded with the code to work on.
+	// Returns a hard error only when the worktree can't be prepared (the run
+	// then aborts before any claude invocation).
+	PrepareRemote(ctx context.Context, client *gossh.Client, in *remoteCodingInput, baseRepo, wtPath, branch, baseBranch string) error
+	// CollectResult ships the remote worktree's committed result to wherever
+	// it belongs — origin for originTransport, the local isolated worktree for
+	// bundleTransport. Called only on the success path
+	// (out.errMsg == "" && out.finalResult != ""). Failures are logged into
+	// the job, never fatal — the user can still see the captured result text.
+	CollectResult(ctx context.Context, client *gossh.Client, in *remoteCodingInput, baseRepo, wtPath, branch, baseBranch, title string)
+}
+
+// originTransport is the legacy Agent-server code path: the remote host holds a
+// single origin clone under baseRepo, adds a per-requirement worktree branched
+// off origin/<baseBranch>, and pushes the resulting commits back to origin.
+// Requires the project to have a git remote reachable from the agent host.
+//
+// PrepareRemote / CollectResult are a verbatim extraction of the previous
+// inline Step 2 / Step 7 — zero behavior change for the origin path.
+type originTransport struct {
+	originURL string // resolved via project.OriginURL before dispatch
+}
+
+func (t originTransport) PrepareRemote(ctx context.Context, client *gossh.Client, in *remoteCodingInput, baseRepo, wtPath, branch, baseBranch string) error {
+	in.job.Append(store.LogLine{Type: "phase", Content: "📥 准备 Agent 服务器代码（git worktree 隔离）..."})
+	if !client.Exists(baseRepo) {
+		in.job.Append(store.LogLine{Type: "message", Content: "📦 首次 clone " + redactOriginForLog(t.originURL)})
+		if exit, _ := client.Exec(ctx, "git clone "+shellQuoteSingle(t.originURL)+" "+shellQuoteSingle(baseRepo), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
+			return fmt.Errorf("git clone 失败（exit=%d），请检查 origin 凭据", exit)
+		}
+	} else {
+		client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin --prune", "", nil, &jobWriter{job: in.job}, nil)
+	}
+	// Always (re)fetch the project's main branch into origin/<baseBranch> so
+	// the worktree strategies below branch off the latest upstream. Best-effort:
+	// any failure is logged but does not abort (the fallback strategies cover a
+	// missing origin/<baseBranch>).
+	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin "+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
+	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree prune", "", nil, &jobWriter{job: in.job}, nil)
+
+	if !client.Exists(wtPath) {
+		// Strategy 1: branch off origin/<baseBranch> (freshly fetched above).
+		exit, _ := client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath)+" origin/"+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
+		if exit != 0 {
+			// Strategy 2: branch off HEAD (always valid).
+			exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath), "", nil, &jobWriter{job: in.job}, nil)
+			if exit != 0 {
+				// Strategy 3: attach to an already-existing branch (reuse case).
+				if exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add "+shellQuoteSingle(wtPath)+" "+shellQuoteSingle(branch), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
+					return fmt.Errorf("git worktree 创建失败（exit=%d），请检查仓库状态", exit)
+				}
+			}
+		}
+	} else {
+		// adjust/continue reuse: pull latest onto the existing branch, then
+		// fast-forward from origin/<baseBranch>. Non-blocking `|| echo` keeps a
+		// diverged branch from aborting the run.
+		client.Exec(ctx,
+			"cd "+shellQuoteSingle(wtPath)+" && (git checkout "+shellQuoteSingle(branch)+" 2>/dev/null || true) && (git pull --ff-only origin "+shellQuoteSingle(branch)+" 2>&1 || echo \"[nova-agent] pull 跳过（无跟踪或已分叉）\") && (git merge --ff-only origin/"+shellQuoteSingle(baseBranch)+" 2>&1 || echo \"[nova-agent] 主分支快进更新跳过\")",
+			"", nil, &jobWriter{job: in.job}, nil)
+	}
+	return nil
+}
+
+func (t originTransport) CollectResult(ctx context.Context, client *gossh.Client, in *remoteCodingInput, baseRepo, wtPath, branch, baseBranch, title string) {
+	in.job.Append(store.LogLine{Type: "phase", Content: "📤 推送代码变更到 origin..."})
+	var pushStderr bytes.Buffer
+	// No `-S` here on purpose: signing is driven by the worktree config set up
+	// in Step 2.5, which also covers commits Claude makes from its own Bash
+	// tool during the run.
+	commitScript := "cd " + shellQuoteSingle(wtPath) +
+		" && git add -A" +
+		" && git diff --cached --quiet || git commit -m " + shellQuoteSingle(title) +
+		" && git push origin " + shellQuoteSingle(branch)
+	if exit, _ := client.Exec(ctx, commitScript, "", nil, &jobWriter{job: in.job}, &pushStderr); exit != 0 {
+		// GPG signing / push failures carry specific stderr patterns; classify
+		// them into a precise Chinese message, falling back to generic wording.
+		msg := classifyGitSignFailure(pushStderr.String())
+		if msg == "" {
+			msg = "❌ 推送失败（exit=" + fmtInt(exit) + "），请在远程 worktree 手动处理冲突"
+		}
+		in.job.Append(store.LogLine{Type: "error", Content: msg})
+		// Non-fatal: the user can still see the work via the result text.
+	} else {
+		in.job.Append(store.LogLine{Type: "message", Content: "✅ 已推送到 origin/" + branch})
+	}
+}
+
+// bundleTransport is the local-sync Agent-server code path for projects with no
+// git remote reachable from the agent host. It ships commits as git bundle
+// files over SFTP: the local isolated worktree is the source of truth each
+// round, so PrepareRemote hard-resets the remote worktree to the just-uploaded
+// local tip, and CollectResult lands the remote's new commits back into the
+// local worktree (later integrated via 本地合并 / LocalMerge).
+//
+// The bundle's heads are fetched into a refs/bundle/* namespace on the agent
+// host so baseRepo's HEAD stays an unborn branch — we never fetch into
+// refs/heads/* (which would fail with exit 128 on a checked-out branch).
+type bundleTransport struct {
+	localRepo string // project.LocalPath (main checkout — object store for down commits)
+	localWt   string // the local isolated worktree (in.workDir, else reqRow.WorktreePath)
+}
+
+func (t bundleTransport) PrepareRemote(ctx context.Context, client *gossh.Client, in *remoteCodingInput, baseRepo, wtPath, branch, baseBranch string) error {
+	if t.localWt == "" {
+		return fmt.Errorf("本地同步模式缺少隔离 worktree 路径（workDir / worktree_path 均为空），请先发起一次开发以创建 worktree")
+	}
+	in.job.Append(store.LogLine{Type: "phase", Content: "📦 准备 Agent 服务器代码（本地仓库同步 · git bundle 上行）..."})
+
+	// 1. Build the up bundle — only the two refs (never --all) so no other
+	//    local branch leaks and each round transfers just base + feature.
+	upLocal, err := os.CreateTemp("", "nova-up-*.bundle")
+	if err != nil {
+		return fmt.Errorf("创建本地 bundle 临时文件失败: %w", err)
+	}
+	upLocalPath := upLocal.Name()
+	_ = upLocal.Close()
+	defer os.Remove(upLocalPath)
+	if out, berr := gitRun(t.localWt, "bundle", "create", upLocalPath, baseBranch, branch); berr != nil {
+		return fmt.Errorf("生成 git bundle 失败（%s）: %v", strings.TrimSpace(out), berr)
+	}
+
+	// 2. Upload to a per-requirement namespaced path on the agent host.
+	upRemote := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".up.bundle"
+	if perr := client.PutFile(upLocalPath, upRemote, 0644); perr != nil {
+		return fmt.Errorf("上传 git bundle 失败: %w", perr)
+	}
+	in.job.Append(store.LogLine{Type: "message", Content: "⬆️ 已上传代码 bundle 到 Agent 服务器"})
+	defer client.Exec(ctx, "rm -f "+shellQuoteSingle(upRemote), "", nil, nil, nil)
+
+	// 3. Idempotent baseRepo init — never clone (the bundle may carry no HEAD).
+	if exit, _ := client.Exec(ctx, "git init "+shellQuoteSingle(baseRepo), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
+		return fmt.Errorf("git init 失败（exit=%d）", exit)
+	}
+	// 4. Fetch the bundle's heads into refs/bundle/* (HEAD stays unborn).
+	if exit, _ := client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch "+shellQuoteSingle(upRemote)+" '+refs/heads/*:refs/bundle/*'", "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
+		return fmt.Errorf("git fetch bundle 失败（exit=%d）", exit)
+	}
+	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree prune", "", nil, &jobWriter{job: in.job}, nil)
+
+	// 5. Create or hard-reset the remote worktree to the just-uploaded tip.
+	//    Local is the per-round source of truth, so a hard reset is correct and
+	//    safe (the /tmp worktree is disposable).
+	bundleRef := shellQuoteSingle("refs/bundle/" + branch)
+	if !client.Exists(wtPath) {
+		if exit, _ := client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath)+" "+bundleRef, "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
+			return fmt.Errorf("git worktree 创建失败（exit=%d）", exit)
+		}
+	} else {
+		if exit, _ := client.Exec(ctx,
+			"cd "+shellQuoteSingle(wtPath)+" && (git checkout "+shellQuoteSingle(branch)+" 2>/dev/null || git switch -c "+shellQuoteSingle(branch)+" "+bundleRef+") && git reset --hard "+bundleRef,
+			"", nil, &jobWriter{job: in.job}, nil); exit != 0 {
+			return fmt.Errorf("重置远端 worktree 失败（exit=%d）", exit)
+		}
+	}
+	return nil
+}
+
+func (t bundleTransport) CollectResult(ctx context.Context, client *gossh.Client, in *remoteCodingInput, baseRepo, wtPath, branch, baseBranch, title string) {
+	in.job.Append(store.LogLine{Type: "phase", Content: "📥 同步代码变更回本地隔离 worktree（git bundle 下行）..."})
+
+	// 1. Commit on the remote (no push).
+	commitScript := "cd " + shellQuoteSingle(wtPath) +
+		" && git add -A && (git diff --cached --quiet || git commit -m " + shellQuoteSingle(title) + ")"
+	if exit, _ := client.Exec(ctx, commitScript, "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
+		in.job.Append(store.LogLine{Type: "error", Content: "❌ 远端提交失败（exit=" + fmtInt(exit) + "）"})
+		return
+	}
+
+	// 2. Empty-range guard: `git bundle create A..B` aborts on 0 commits with
+	//    "Refusing to create empty bundle". Skip the whole down path if the
+	//    remote produced nothing new relative to the uploaded base.
+	baseRef := "refs/bundle/" + baseBranch
+	var countBuf bytes.Buffer
+	client.Exec(ctx, "git -C "+shellQuoteSingle(wtPath)+" rev-list --count "+shellQuoteSingle(baseRef+"..HEAD"), "", nil, &countBuf, nil)
+	if strings.TrimSpace(countBuf.String()) == "0" {
+		in.job.Append(store.LogLine{Type: "message", Content: "ℹ️ 远端无新增提交，跳过代码下行同步"})
+		return
+	}
+
+	// 3. Build the incremental down bundle (range base = refs/bundle/<baseBranch>).
+	downRemote := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".down.bundle"
+	if exit, _ := client.Exec(ctx, "git -C "+shellQuoteSingle(wtPath)+" bundle create "+shellQuoteSingle(downRemote)+" "+shellQuoteSingle(baseRef+".."+branch), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
+		in.job.Append(store.LogLine{Type: "error", Content: "❌ 生成下行 bundle 失败（exit=" + fmtInt(exit) + "）"})
+		return
+	}
+	defer client.Exec(ctx, "rm -f "+shellQuoteSingle(downRemote), "", nil, nil, nil)
+
+	// 4. Download the bundle to a local temp file.
+	downLocal, err := os.CreateTemp("", "nova-down-*.bundle")
+	if err != nil {
+		in.job.Append(store.LogLine{Type: "error", Content: "❌ 创建本地下行 bundle 临时文件失败: " + err.Error()})
+		return
+	}
+	downLocalPath := downLocal.Name()
+	_ = downLocal.Close()
+	defer os.Remove(downLocalPath)
+	if gerr := client.GetFile(downRemote, downLocalPath); gerr != nil {
+		in.job.Append(store.LogLine{Type: "error", Content: "❌ 下载下行 bundle 失败: " + gerr.Error()})
+		return
+	}
+
+	// 5. Land the commits back into the local isolated worktree. The branch tip
+	//    should not have moved during the remote run (Nova-managed), so ff-only
+	//    almost always succeeds; the reset --hard fallback recovers the rare
+	//    divergence by following the remote result (the expected source of
+	//    truth for this branch).
+	if out, ferr := gitRun(t.localWt, "fetch", downLocalPath, branch); ferr != nil {
+		in.job.Append(store.LogLine{Type: "error", Content: "❌ 本地 fetch bundle 失败（" + strings.TrimSpace(out) + "）: " + ferr.Error()})
+		return
+	}
+	if _, merr := gitRun(t.localWt, "merge", "--ff-only", "FETCH_HEAD"); merr != nil {
+		if out, rerr := gitRun(t.localWt, "reset", "--hard", "FETCH_HEAD"); rerr != nil {
+			in.job.Append(store.LogLine{Type: "error", Content: "❌ 落地远端提交失败（" + strings.TrimSpace(out) + "）: " + rerr.Error()})
+			return
+		}
+		in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 本地分支无法快进，已硬重置到远端结果（该分支由 Nova 托管）"})
+	}
+	in.job.Append(store.LogLine{Type: "message", Content: "✅ 远端代码变更已同步回本地 worktree: " + t.localWt})
 }
 
 // jobWriter adapts *store.Job to io.Writer so remote Exec output can land

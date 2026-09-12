@@ -660,6 +660,22 @@ export default function RequirementDetail() {
     }
   }, [req?.dev_mode]);
 
+  // Agent-server code-transport (sync) mode selector, only shown when an Agent
+  // server is picked. 'remote' = 远程 Git 仓库同步 (origin clone/push); 'local'
+  // = 本地仓库同步 (git-bundle over SFTP for a self-hosted repo with no
+  // reachable remote). Default: the requirement's persisted sync_mode, else
+  // inferred from the project (a repo with no remote_url → 'local'). Persisted
+  // in requirements.sync_mode; adjust/continue reuse the stored value.
+  const [syncMode, setSyncMode] = useState<'local' | 'remote'>('remote');
+  useEffect(() => {
+    if (req?.sync_mode === 'local') {
+      setSyncMode('local');
+    } else if (req?.sync_mode === '' && project) {
+      // No persisted choice yet — infer from the project's remote config.
+      setSyncMode(project.remote_url ? 'remote' : 'local');
+    }
+  }, [req?.sync_mode, project?.remote_url]);
+
   // ── Scheduled-task state ──
   // pendingByType[taskType] holds the pending row (if any) so the detail
   // page can render "Scheduled HH:MM ... [Cancel]" hints and disable the
@@ -1678,6 +1694,13 @@ export default function RequirementDetail() {
           // Remote Agent-server execution. Empty string = local execution (the
           // wizardH.StartCoding default branch handles the legacy path).
           ...(agentServerId ? { agent_server_id: agentServerId } : {}),
+          // Agent-server code-transport mode. Only meaningful (and only sent)
+          // when an Agent server is picked: 'remote' = origin clone/push,
+          // 'local' = git-bundle over SFTP for a self-hosted repo with no
+          // reachable remote. The backend persists it and every follow-up
+          // action (adjust / continue / sub-task / merge / cleanup) reuses the
+          // stored value, so adjust/continue below deliberately omit it.
+          ...(agentServerId ? { sync_mode: syncMode } : {}),
           // Development-mode: 'session' (default when not set — fork the
           // design session) or 'design' (fresh session, hand the stored
           // design doc to the agent via the -p prompt). Sent only when the
@@ -2239,6 +2262,31 @@ export default function RequirementDetail() {
                       </div>
                     )}
                   </div>
+                  {/* Sync-mode selector: only meaningful when running on an Agent
+                      server. 'remote' ships code via origin clone/push (needs a
+                      reachable remote); 'local' ships it as a git bundle over
+                      SFTP and syncs back to the local worktree (self-hosted repo
+                      with no reachable remote). Defaults to the project's remote
+                      config; the user can override before launch. */}
+                  {agentServerId && (
+                    <div className="modal-field">
+                      <label>{t('requirements.detail2.syncModeLabel')}</label>
+                      <select
+                        className="form-input"
+                        value={syncMode}
+                        onChange={e => setSyncMode(e.target.value as 'local' | 'remote')}
+                        disabled={coding}
+                      >
+                        <option value="remote">{t('requirements.detail2.syncModeRemote')}</option>
+                        <option value="local">{t('requirements.detail2.syncModeLocal')}</option>
+                      </select>
+                      <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                        {syncMode === 'local'
+                          ? t('requirements.detail2.syncModeLocalHint')
+                          : t('requirements.detail2.syncModeRemoteHint')}
+                      </div>
+                    </div>
+                  )}
                   {/* Developer-stage model selection, visible right before launching
                       the coding job. Disabled while a coding job runs (Claude working —
                       model switch disabled). */}
@@ -2524,6 +2572,12 @@ export default function RequirementDetail() {
         )}
         {req.dev_mode === 'design' && (
           <span className="dev-mode-badge dev-mode-design" title={t('requirements.detail2.devModeDesignTitle')}>{t('requirements.detail2.devModeDesign')}</span>
+        )}
+        {/* Local-sync provenance: shown for Agent-server requirements whose
+            code is transported via git bundle (no git remote). Reuses the
+            dev-mode badge styling. */}
+        {req.sync_mode === 'local' && req.agent_server_id && (
+          <span className="dev-mode-badge dev-mode-session" title={t('requirements.detail2.syncModeLocalBadgeTitle')}>{t('requirements.detail2.syncModeLocalBadge')}</span>
         )}
         {req.source_requirement_id && (
           <Link
