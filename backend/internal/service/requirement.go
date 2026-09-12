@@ -126,7 +126,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	}
 
 	rows, err := s.db.Query(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" "+where+" ORDER BY CASE WHEN r.status = 'done' THEN 1 ELSE 0 END ASC, r.created_at DESC",
 		args...)
@@ -145,7 +145,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.UsageSnapshots, &r.CodingPlan, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush,
-			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt); err != nil {
+			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, r)
@@ -301,7 +301,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	// created_at / updated_at — unqualified references would be ambiguous on
 	// MySQL/Postgres.
 	err := s.db.QueryRow(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
@@ -311,7 +311,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.UsageSnapshots, &r.CodingPlan, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush,
-			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt)
+			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("requirement not found")
 	}
@@ -337,6 +337,22 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	).Scan(&r.SubTaskCount); err != nil {
 		return nil, err
 	}
+	// Derive the development-stage span from the linked sub_tasks: the first
+	// task's creation and the last finished task's completion ("以最后一个任务结束
+	// 时间为准"). Both come back NULL when the requirement has no sub_tasks (a
+	// legacy single-shot coding run) — nullable *time.Time absorbs that, and the
+	// bounds recompute automatically when a redo/continue clears a task's
+	// completed_at. ORDER BY … LIMIT 1 (instead of MIN()/MAX()) is deliberate:
+	// SQLite drops a column's DATETIME affinity through an aggregate, so the
+	// driver hands back an unparseable string; selecting the column value
+	// directly preserves affinity and parses into time.Time on every dialect.
+	// Best-effort: a scan error here must not fail the GET.
+	_ = s.db.QueryRow(
+		"SELECT created_at FROM sub_tasks WHERE requirement_id = ? ORDER BY created_at ASC LIMIT 1", id,
+	).Scan(&r.DevStartedAt)
+	_ = s.db.QueryRow(
+		"SELECT completed_at FROM sub_tasks WHERE requirement_id = ? AND completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT 1", id,
+	).Scan(&r.DevEndedAt)
 	// Resolve the agent server display name (no-op for local rows).
 	one := []model.Requirement{r}
 	s.attachAgentServerNames(one)
@@ -444,7 +460,36 @@ func (s *RequirementService) UpdateStatus(id string, newStatus string) (*model.R
 		completedAt = &now
 	}
 
-	_, err = s.db.Exec("UPDATE requirements SET status=?, updated_at=?, completed_at=? WHERE id=?", newStatus, now, completedAt, id)
+	// Plan-analysis timing. Only the columns relevant to this transition are
+	// touched — an unconditional UPDATE would clobber the other timestamp to
+	// NULL. Side paths (skip-analysis / skip-design) backfill idempotently with
+	// COALESCE so a stage that was skipped still records a sensible bound.
+	setClauses := []string{"status=?", "updated_at=?", "completed_at=?"}
+	setArgs := []interface{}{newStatus, now, completedAt}
+	switch newStatus {
+	case "analyzing":
+		// Every (re-)entry into analysis restarts the clock — start re-stamped,
+		// end cleared — so "重做/重新进入分析" recomputes the analysis duration.
+		setClauses = append(setClauses, "analysis_started_at=?", "analysis_ended_at=NULL")
+		setArgs = append(setArgs, now)
+	case "designing":
+		// Skip-analysis path (draft → designing): the analyst stage never ran, so
+		// stamp the analysis start now if it hasn't been recorded already.
+		setClauses = append(setClauses, "analysis_started_at=COALESCE(analysis_started_at, ?)")
+		setArgs = append(setArgs, now)
+	case "designed":
+		// Plan finalized — the analysis span ends here (analyst + architect).
+		setClauses = append(setClauses, "analysis_ended_at=?")
+		setArgs = append(setArgs, now)
+	case "developing":
+		// Skip-design path (draft/designed → developing without a "designed"
+		// gate): close the analysis span now if it was never stamped.
+		setClauses = append(setClauses, "analysis_ended_at=COALESCE(analysis_ended_at, ?)")
+		setArgs = append(setArgs, now)
+	}
+	setArgs = append(setArgs, id)
+
+	_, err = s.db.Exec("UPDATE requirements SET "+strings.Join(setClauses, ", ")+" WHERE id=?", setArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -1170,7 +1215,11 @@ func (s *RequirementService) SaveCodingChat(reqID, messages string) error {
 func (s *RequirementService) UpdateDesign(id, designJSON string) (*model.Requirement, error) {
 	now := time.Now()
 	cleaned := sanitizeDesignDoc(designJSON)
-	_, err := s.db.Exec("UPDATE requirements SET design_docs=?, status='designing', updated_at=? WHERE id=?", cleaned, now, id)
+	// "生成技术方案" flips status directly to "designing" without going through
+	// UpdateStatus, so backfill analysis_started_at here too (idempotent via
+	// COALESCE) — otherwise the skip-analysis design path would never record an
+	// analysis start.
+	_, err := s.db.Exec("UPDATE requirements SET design_docs=?, status='designing', analysis_started_at=COALESCE(analysis_started_at, ?), updated_at=? WHERE id=?", cleaned, now, now, id)
 	if err != nil {
 		return nil, err
 	}

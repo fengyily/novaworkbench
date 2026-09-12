@@ -176,6 +176,34 @@ function stageFor(status: string, skipDesign?: boolean): Stage {
   }
 }
 
+// spanMs computes the millisecond duration between two ISO timestamps. Returns
+// null when either bound is missing/unparseable or the span is negative — the
+// timing UI renders "—" in that case rather than a bogus value. When `end` is
+// falsy but `start` is present, the span runs to `now` (a still-running stage).
+function spanMs(start?: string | null, end?: string | null, now?: number): number | null {
+  if (!start) return null;
+  const s = Date.parse(start);
+  if (Number.isNaN(s)) return null;
+  const e = end ? Date.parse(end) : (now ?? Date.now());
+  if (Number.isNaN(e)) return null;
+  const ms = e - s;
+  return ms >= 0 ? ms : null;
+}
+
+// formatSpan renders a duration in ms as "1h 2m", "2m 15s" or "12.3s". Unlike
+// formatDuration (phaseGroups) it rolls minutes up into hours so a long
+// analysis/dev span stays readable instead of showing "185m 3s".
+function formatSpan(ms: number): string {
+  if (ms < 0) ms = 0;
+  const totalSec = Math.round(ms / 1000);
+  if (totalSec < 60) return formatDuration(ms);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const sec = totalSec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m ${sec}s`;
+}
+
 // Renders JobStore log lines into a dark coding panel. Consecutive "message"
 // lines (Claude's assistant text, streamed token-by-token as separate LogLines)
 // are joined back into one markdown string and rendered via ReactMarkdown so
@@ -546,6 +574,13 @@ export default function RequirementDetail() {
   const designFs = useFullscreen();
   const codingFs = useFullscreen();
   const mergeFs = useFullscreen();
+  // Live re-render tickers for the timing section: while the plan-analysis span
+  // or the development span is still open, tick so the displayed duration keeps
+  // counting up. Called unconditionally (rules-of-hooks) with a boolean derived
+  // from the current requirement — null-safe via optional chaining before load.
+  useTick(!!req?.analysis_started_at && !req?.analysis_ended_at &&
+    (req?.status === 'analyzing' || req?.status === 'designing'));
+  useTick(!!req?.dev_started_at && !req?.dev_ended_at);
   // Live "analyst turn running" signal lifted from DeepRefineChat, so the
   // header Claude-status badge is accurate during an in-flight turn.
   const [analystWorking, setAnalystWorking] = useState(false);
@@ -2149,6 +2184,17 @@ export default function RequirementDetail() {
   // Claude working — model switch disabled).
   const architectWorking = designing || !!req.design_job_id;
 
+  // Timing metrics. The plan-analysis span runs from analysis_started_at to
+  // analysis_ended_at (or "now" while the plan is still being produced); the
+  // development span is derived server-side from the sub_tasks aggregate
+  // (dev_started_at / dev_ended_at, "以最后一个任务结束时间为准"). A running
+  // analysis span re-renders live via the tick below.
+  const analysisRunning = !!req.analysis_started_at && !req.analysis_ended_at &&
+    (req.status === 'analyzing' || req.status === 'designing');
+  const analysisMs = spanMs(req.analysis_started_at, req.analysis_ended_at, Date.now());
+  const devMs = spanMs(req.dev_started_at, req.dev_ended_at, Date.now());
+  const devRunning = !!req.dev_started_at && !req.dev_ended_at;
+
   const STEPS = [
     { key: 'analyst', label: t('requirements.detail2.stageAnalyst'), stage: 'analyst_chat', doneStatus: 'designing', modelKey: 'analyst_model' as const },
     { key: 'architect', label: t('requirements.detail2.stageArchitect'), stage: 'architect_design', doneStatus: 'designed', modelKey: 'architect_model' as const },
@@ -2706,6 +2752,59 @@ export default function RequirementDetail() {
         </div>
       )}
 
+      {/* Time spent — plan-analysis span + development span. Rendered only when
+          there is at least one metric to show (a fresh draft has neither). */}
+      {(req.analysis_started_at || req.dev_started_at) && (
+        <div className="detail-section timing-section">
+          <div className="section-header" style={{ marginBottom: 10 }}>
+            <span className="ledger-title">
+              <span className="ledger-title-mark" aria-hidden />
+              {t('requirements.detail2.timingTitle')}
+            </span>
+          </div>
+          <div className="timing-grid">
+            <div className="timing-row">
+              <span className="timing-row-label">
+                <IconClock size={14} className="icon-mr" />{t('requirements.detail2.timingAnalysisLabel')}
+              </span>
+              <span className="timing-row-value">
+                {analysisMs != null
+                  ? formatSpan(analysisMs) + (analysisRunning ? ` (${t('requirements.detail2.timingRunning')})` : '')
+                  : t('requirements.detail2.timingNoData')}
+              </span>
+              <span className="timing-row-range">
+                {req.analysis_started_at ? fmtDateTime(req.analysis_started_at) : t('requirements.detail2.timingNoData')}
+                {t('requirements.detail2.timingRangeSep')}
+                {req.analysis_ended_at ? fmtDateTime(req.analysis_ended_at) : t('requirements.detail2.timingRunning')}
+              </span>
+            </div>
+            <div className="timing-row">
+              <span className="timing-row-label">
+                <IconClock size={14} className="icon-mr" />{t('requirements.detail2.timingDevLabel')}
+                {(req.sub_task_count ?? 0) > 0 && (
+                  <span className="timing-row-count">
+                    {' · '}{t('requirements.detail2.timingTaskCount', { n: req.sub_task_count ?? 0 })}
+                  </span>
+                )}
+              </span>
+              <span className="timing-row-value">
+                {devMs != null
+                  ? formatSpan(devMs) + (devRunning ? ` (${t('requirements.detail2.timingRunning')})` : '')
+                  : t('requirements.detail2.timingNoData')}
+              </span>
+              <span className="timing-row-range">
+                {req.dev_started_at ? fmtDateTime(req.dev_started_at) : t('requirements.detail2.timingNoData')}
+                {t('requirements.detail2.timingRangeSep')}
+                {req.dev_ended_at ? fmtDateTime(req.dev_ended_at) : (req.dev_started_at ? t('requirements.detail2.timingRunning') : t('requirements.detail2.timingNoData'))}
+                {req.dev_ended_at && (
+                  <span className="timing-row-note">{' · '}{t('requirements.detail2.timingDevNote')}</span>
+                )}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Token usage — per-step breakdown + total for this requirement.
           input = input_tokens + cache_creation + cache_read (billed input). */}
       <div className="detail-section usage-section ledger">
@@ -2977,6 +3076,15 @@ export default function RequirementDetail() {
           const isDone = stageIndex > i || (stage === 'done');
           const isActive = stageIndex === i;
           const stageModel = req[s.modelKey];
+          // Per-node timing tag. The plan-analysis span (analyst+architect) is
+          // shown on the architect node — or the analyst node when architect is
+          // hidden (Idea). The development span is shown on the developer node.
+          const timingMs = s.key === 'developer'
+            ? devMs
+            : (s.key === 'architect' || !visibleStepKeys.includes('architect'))
+              ? analysisMs
+              : null;
+          const timingRunning = s.key === 'developer' ? devRunning : analysisRunning;
           return (
             <div key={s.key} className={`stage-step${isActive ? ' active' : ''}${isDone ? ' done' : ''}`}>
               <span className="stage-num">
@@ -2988,6 +3096,12 @@ export default function RequirementDetail() {
                   <IconRobot size={13} /> {stageModel === DefaultModelLabel
                     ? (roleDefaultModels[s.key] ? `${DefaultModelLabel}（${roleDefaultModels[s.key]}）` : DefaultModelLabel)
                     : stageModel}
+                </span>
+              )}
+              {timingMs != null && (
+                <span className="stage-time-tag">
+                  <IconClock size={12} /> {t('requirements.detail2.timingStageTag', { d: formatSpan(timingMs) })}
+                  {timingRunning ? ` (${t('requirements.detail2.timingRunning')})` : ''}
                 </span>
               )}
               {i < visibleSteps.length - 1 && <span className="stage-sep">→</span>}

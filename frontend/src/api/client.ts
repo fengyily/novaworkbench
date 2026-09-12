@@ -634,6 +634,17 @@ export interface Requirement {
   sync_mode?: '' | 'local';
   created_at: string; updated_at: string;
   completed_at?: string;
+  // 方案分析计时（requirements 列）。analysis_started_at 在进入「分析中」时打点
+  // （每次重新进入分析都会重置起点、清空终点，实现「重新计算」）；
+  // analysis_ended_at 在方案完成（进入「已设计」）时打点。均为 RFC3339 字符串，
+  // 历史需求 / 未到达阶段为 undefined。
+  analysis_started_at?: string;
+  analysis_ended_at?: string;
+  // 开发阶段整体耗时（派生字段，非数据库列）。后端 Get 从 sub_tasks 聚合：
+  // dev_started_at = MIN(created_at)、dev_ended_at = MAX(completed_at)
+  //（「以最后一个任务结束时间为准」）。无子任务（旧的单次编码流程）时为 undefined。
+  dev_started_at?: string;
+  dev_ended_at?: string;
   // 日历视图排期字段。NULL = 未排期，前端回退到 created_at；拖拽或编辑
   // 时通过 PATCH /api/requirements/{id}/schedule 写入。后端序列化为
   // RFC3339 字符串。
