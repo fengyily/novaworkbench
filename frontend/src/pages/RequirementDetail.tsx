@@ -793,10 +793,19 @@ export default function RequirementDetail() {
   const codingRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventStream | null>(null);
   const extraDescRef = useRef('');
-  // One-shot guard for the "auto-start design after skip-analysis creation"
-  // flow. Set when the autoStartDesign navigation intent triggers the architect
-  // stage so a subsequent refresh / req change doesn't re-fire it.
+  // One-shot guard for the creation-intent flows (autoStartDesign /
+  // autoStartCoding). Set when the matching navigation intent is consumed so a
+  // subsequent refresh / req change doesn't re-fire it. Shared by both intents
+  // because the navigate() call sites are mutually exclusive (skip_design wins
+  // over skip_analysis in ProjectDetail.onCreate), so at most one ever fires.
   const autoStartRef = useRef(false);
+  // Draft-stage plan section (the skip-analysis button group that holds the
+  // architect model + execution-environment pickers). The autoStartDesign
+  // intent used to launch architect-design outright; it now *guides* the user
+  // to this section instead, so it needs a handle to scroll it into view.
+  const draftPlanRef = useRef<HTMLDivElement>(null);
+  const [draftPlanHighlight, setDraftPlanHighlight] = useState(false);
+  const draftPlanHighlightTimerRef = useRef<number | null>(null);
   // Live sub-task count: 0 until SubTaskPanel mounts and reports its current
   // list size via the onSubTasksChange callback, then stays in sync as the
   // panel creates / finishes children. Combined with req.sub_task_count
@@ -1413,13 +1422,19 @@ export default function RequirementDetail() {
     }
   };
 
-  // Auto-start the architect-design flow when the user just created a
-  // requirement with skip_analysis (navigated here with the autoStartDesign
-  // intent flag). This replaces the manual "Generate design" click for the
-  // skip-analysis path. It runs the SAME code path as that button:
-  // transition('designing') then runArchitectDesign(). One-shot guarded so a
-  // later refresh / req change can't re-fire it; if a design job is already
-  // running or a design already exists, we leave it to the reconnect effect.
+  // Guide (but do NOT launch) the architect-design flow when the user just
+  // created a requirement with skip_analysis and was navigated here with the
+  // autoStartDesign intent flag.
+  //
+  // This used to call transition('designing') + runArchitectDesign(false)
+  // directly, which silently started a design run on 本地 the instant the page
+  // loaded — the user had no chance to pick an execution environment, which is
+  // exactly the "UI environment ≠ execution environment" defect this feature
+  // exists to remove. The intent is still useful as guidance, so it now only
+  // scrolls the draft-stage plan section into view and flashes a ring around
+  // it; the user reviews the environment picker (rendered beside the CTA) and
+  // clicks 「生成技术方案」 themselves. One-shot guarded so a later refresh /
+  // req change can't re-scroll.
   useEffect(() => {
     if (!req || autoStartRef.current) return;
     const auto = (location.state as { autoStartDesign?: boolean } | null)?.autoStartDesign;
@@ -1427,10 +1442,31 @@ export default function RequirementDetail() {
     if (req.skip_analysis && req.status === 'draft'
         && !req.design_job_id && !req.design_docs) {
       autoStartRef.current = true;
-      transition('designing', t('requirements.detail2.intentGenerateDesign')).then(() => runArchitectDesign(false));
+      // Defer to the next frame so the draft section has definitely committed
+      // before we measure it.
+      requestAnimationFrame(() => {
+        draftPlanRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+      setDraftPlanHighlight(true);
+      if (draftPlanHighlightTimerRef.current !== null) {
+        window.clearTimeout(draftPlanHighlightTimerRef.current);
+      }
+      draftPlanHighlightTimerRef.current = window.setTimeout(() => {
+        draftPlanHighlightTimerRef.current = null;
+        setDraftPlanHighlight(false);
+      }, 2400);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [req]);
+
+  // Clear the pending highlight timeout on unmount so a navigation away during
+  // the 2.4s flash can't setState on an unmounted component.
+  useEffect(() => () => {
+    if (draftPlanHighlightTimerRef.current !== null) {
+      window.clearTimeout(draftPlanHighlightTimerRef.current);
+      draftPlanHighlightTimerRef.current = null;
+    }
+  }, []);
 
   // Auto-open the branch selection modal when the user just created a
   // requirement with skip_design (navigated here with the autoStartCoding
@@ -2992,11 +3028,21 @@ export default function RequirementDetail() {
           onUsage={setAnalystUsage}
           onGenerateDesign={() => requestDesignKnowledge(true)}
           onReset={() => setReq(prev => prev ? { ...prev, status: 'draft' } : prev)}
+          agentServers={agentServers}
+          agentServerId={agentServerId}
+          onAgentServerChange={setAgentServerId}
         />
       )}
 
       {req.status === 'draft' && (
-        <div className="detail-section analysis-section">
+        <div
+          className="detail-section analysis-section"
+          ref={draftPlanRef}
+          style={{
+            transition: 'box-shadow 0.4s ease',
+            boxShadow: draftPlanHighlight ? '0 0 0 2px var(--color-primary)' : 'none',
+          }}
+        >
           <div className="section-header"><h3><IconMagnifier size={16} className="icon-mr" />{t('requirements.detail2.logSessionStageAnalyst')}</h3></div>
           <div className="tab-empty">
             {req.skip_analysis ? (
@@ -3063,6 +3109,46 @@ export default function RequirementDetail() {
                       defaultModelName={architectDefaultModel}
                       title={t('requirements.detail2.architectModelTitle')}
                     />
+                  )}
+                  {/* Design-stage execution environment, selectable BEFORE the
+                      FIRST plan run. Shared-state note: `agentServerId` is the
+                      exact state runArchitectDesign reads at submit time, and
+                      the architect section renders the same picker bound to it,
+                      so the choice survives the draft → designing transition
+                      with no extra plumbing. Without this control the skip-
+                      analysis path had no way to leave 本地 on the first run —
+                      the architect section (the only other place the picker
+                      lives) isn't rendered until a design has already run.
+                      Hidden for kind=idea (no architect stage; same gating as
+                      the CTA above).
+                      ── Project rule ──
+                      Any entry point that can start work against a specific
+                      execution environment MUST render the environment
+                      selector on the same screen. Adding a new design/coding
+                      CTA? Add its picker here (or beside it) at the same time. */}
+                  {reqKind !== 'idea' && (
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                        {t('requirements.detail2.designAgentServerLabel')}
+                      </span>
+                      <ExecEnvSelect
+                        servers={agentServers}
+                        value={agentServerId}
+                        onChange={setAgentServerId}
+                        disabled={!!busy}
+                        title={agentServers.length === 0 ? t('requirements.detail2.designAgentServerEmptyTitle') : ''}
+                        localOptionLabel={t('requirements.detail2.preflightLocalExec')}
+                        style={{ minWidth: 160 }}
+                      />
+                    </label>
+                  )}
+                  {/* Empty-list hint, mirroring the architect toolbar: with no
+                      `ready` Agent Server the picker collapses to a single
+                      「本地执行」 option, so say why. */}
+                  {reqKind !== 'idea' && agentServers.length === 0 && (
+                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                      {t('requirements.detail2.designAgentServerNoHint')}
+                    </div>
                   )}
                   {/* For kind=idea this is the only CTA — promote it from a
                       muted "run analysis first..." link to a primary button. */}
@@ -3159,7 +3245,15 @@ export default function RequirementDetail() {
                 doesn't drop the user's choice between stages. The seed
                 effect above prefers req.design_agent_server_id when it
                 differs from req.agent_server_id. Only `ready` servers are
-                populated (server-side guard mirrors this in the handler). */}
+                populated (server-side guard mirrors this in the handler).
+                ── Project rule ──
+                Any entry point that can start work against a specific
+                execution environment MUST render the environment selector on
+                the same screen. This toolbar plus the two first-run entry
+                points (the draft-stage button group and the DeepRefineChat
+                design CTA) are the current set; the scheduled-run modal uses
+                the same shared ExecEnvSelect. Adding a new design/coding CTA?
+                Add its picker at the same time. */}
             <label className="design-agent-server" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
               <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
                 {t('requirements.detail2.designAgentServerLabel')}

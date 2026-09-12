@@ -6,9 +6,19 @@ import './DevSourceBadge.css';
  * host, or a named Agent Server. It is the shared display kernel for every
  * "execution environment" surface in the app: the architect-design toolbar
  * (which Agent Server the plan was generated on) and each sub-task card (which
- * Agent Server the child develops on). DevSourceBadge keeps its own richer
- * dev-stage rendering (model chip, dev_source gating), but this badge covers
- * the simpler "server or local" cases uniformly so their look stays identical.
+ * Agent Server the child develops on).
+ *
+ * Division of labour with DevSourceBadge — an intentional, settled decision,
+ * not a pending refactor: the two badges answer different questions and take
+ * different inputs. ExecEnvBadge takes an *environment id* (serverId /
+ * serverName) and renders only "🛰️ Agent Server「name」" or "💻 本地".
+ * DevSourceBadge takes a *dev_source* provenance value and additionally
+ * renders the model chip and gates on the dev stage. They share only the
+ * visual skin (DevSourceBadge.css). Merging them would mean threading a
+ * provenance value + a stage discriminator through this component and
+ * branching on both, which reads worse than two small focused components —
+ * so keep them separate and reuse ExecEnvBadge for pure "where does this run"
+ * questions.
  *
  * serverId '' / undefined → 💻 本地; a non-empty id → 🛰️ Agent Server「name」.
  * serverName falls back to serverId when the join produced no name (deleted

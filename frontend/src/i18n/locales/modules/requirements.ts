@@ -441,13 +441,6 @@ export const requirements = {
     startCodingTitle: '启动主 Claude Agent 完成开发',
     startCodingBtn: '🚀 开始开发',
     startCodingBusy: '启动中…',
-    // Dev agent server dropdown.
-    devAgentServerTitle: '开发阶段执行的 Agent 服务器（默认本机）',
-    devAgentServerLocal: '本机',
-    devAgentServerReadyBadge: '已就绪',
-    devAgentServerBusyBadge: '检查中…',
-    devAgentServerUnknownBadge: '未知',
-    devAgentServerUnreachable: '不可达',
     // Knowledge read checkbox.
     readKnowledgeTitle: '读取项目知识库后开始（推荐）',
     // Split tasks checkbox.

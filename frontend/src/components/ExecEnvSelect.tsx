@@ -1,5 +1,16 @@
 import { useTranslation } from 'react-i18next';
-import type { AgentServer } from '../api/client';
+
+/**
+ * Minimal structural shape this component actually reads. Deliberately not
+ * `AgentServer` — the scheduling modal projects its list down to
+ * {id, name, host} (AgentServerOption) and would otherwise need a cast. A full
+ * `AgentServer` still satisfies this, so every existing call site is unaffected.
+ */
+export interface ExecEnvServer {
+  id: string;
+  name: string;
+  host: string;
+}
 
 /**
  * ExecEnvSelect is the shared "execution environment" dropdown: 本地执行 plus
@@ -23,7 +34,7 @@ export function ExecEnvSelect({
   style,
   localOptionLabel,
 }: {
-  servers: AgentServer[];
+  servers: ExecEnvServer[];
   value: string;
   onChange: (value: string) => void;
   disabled?: boolean;

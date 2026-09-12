@@ -297,11 +297,14 @@ interface CardProps {
   // new entry to refresh), and we don't want to loadList a parent list
   // that already contains this row.
   onRestarted?: (subTaskId: string, newJobId: string) => void;
-  // False when the requirement runs on a remote Agent Server — Stop is
-  // disabled there in this iteration (returns 501 STOP_REMOTE_NOT_SUPPORTED).
-  // The parent (RequirementDetail) decides; the default is true so legacy
-  // call sites / tests don't accidentally disable Stop.
-  canStop?: boolean;
+  // Stop availability is decided PER CARD from the sub-task's OWN effective
+  // environment (st.effective_agent_server_id): a remote child cannot be
+  // stopped in this iteration (the backend rejects /stop with 501
+  // STOP_REMOTE_NOT_SUPPORTED), while a child that deliberately runs 本地
+  // under a remote main task stays stoppable. Computed at the render site —
+  // never hoisted to a panel-level constant, which would silently regress to
+  // "judge by the main task's environment".
+  canStop: boolean;
   // Panel-level model selection — applies to the next "Follow-up" turn so
   // the user picks the model once at the panel header and every card
   // uses it without owning its own copy. Distinct from the per-card
@@ -358,7 +361,7 @@ function useRestartSubTask(args: {
   }, [st, requirementId, onChanged, onRestarted, setStreaming, setLines]);
 }
 
-function SubTaskCard({ st, index, total, onChanged, onCreated: _onCreated, onRestarted, canStop = true, adjustModel = '', onAdjustModelChange }: CardProps) {
+function SubTaskCard({ st, index, total, onChanged, onCreated: _onCreated, onRestarted, canStop, adjustModel = '', onAdjustModelChange }: CardProps) {
   const { t } = useTranslation();
   // The card uses a layout that mirrors an issue tracker detail view:
   //   ┌─ terminal-style header line ────────────────────────────────┐
@@ -634,7 +637,18 @@ function SubTaskCard({ st, index, total, onChanged, onCreated: _onCreated, onRes
               "由哪个 Agent Server 开发" for every card; auto-orchestrated
               children inherit the main task's environment so they render the
               same badge as the parent. */}
-          <ExecEnvBadge serverId={st.agent_server_id} serverName={st.agent_server_name} compact />
+          {/* Effective environment, resolved server-side: reproduces the
+              "legacy NULL row inherits the parent requirement's environment"
+              rule that the raw agent_server_id column cannot express (the
+              distinguishing signal, AgentServerIDSet, is json:"-"). The
+              `?? agent_server_id` fallback covers a frontend-ahead-of-backend
+              rollout so an old response still renders something instead of
+              falling back to a wrong "💻 本地". */}
+          <ExecEnvBadge
+            serverId={st.effective_agent_server_id ?? st.agent_server_id}
+            serverName={st.effective_agent_server_name ?? st.agent_server_name}
+            compact
+          />
           <span className="sub-card-counter">{String(index + 1).padStart(2, '0')} / {String(total).padStart(2, '0')}</span>
           {st.model && st.model !== DefaultModelLabel && (
             <span className="sub-card-model">{st.model}</span>
@@ -1143,10 +1157,11 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       : p) : prev);
   }, []);
 
-  // Stop is disabled when the requirement is being executed on a remote
-  // Agent Server — the backend rejects /stop with 501 STOP_REMOTE_NOT_SUPPORTED
-  // in this iteration (worker-side kill message lands in a follow-up PR).
-  const canStop = !requirement?.agent_server_id;
+  // Stop availability is computed per card at the render site below, from each
+  // sub-task's own effective environment — see CardProps.canStop. It is
+  // deliberately NOT a panel-level constant: the main task's environment says
+  // nothing about where an individual child runs (a manual child can override
+  // it in either direction).
 
   // 「新会话（含需求上下文）」 mode. The radio surfaces when (a) the
   // requirement was developed on an Agent server (so the source-session-
@@ -1577,7 +1592,10 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             onChanged={onItemChanged}
             onCreated={loadList}
             onRestarted={handleSubTaskRestarted}
-            canStop={canStop}
+            // Per-card: this child's OWN effective environment decides whether
+            // Stop is offered. `?? agent_server_id` is the same old-backend
+            // fallback the environment badge above uses.
+            canStop={!(st.effective_agent_server_id ?? st.agent_server_id)}
             adjustModel={adjustModel}
             onAdjustModelChange={setAdjustModel}
           />

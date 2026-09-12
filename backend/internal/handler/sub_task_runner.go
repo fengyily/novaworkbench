@@ -161,6 +161,82 @@ func (r *SubTaskRunner) NewPendingSubTask(reqID, title, prompt, modelDisplay, so
 	return st, job, newSID, nil
 }
 
+// resolveEffectiveAgentServer returns the environment a sub-task actually runs
+// in — the SINGLE source of truth for both dispatch paths (SubTaskRunner.Run
+// for manual / merge children and WizardHandler.ExecuteOrchestratedChild for
+// auto-orchestrated children). Reading it in one place is what keeps the
+// SubTaskPanel card (which renders EffectiveAgentServerID, resolved by
+// SubTaskService.attachEffectiveEnv) and the actual claude dispatch from
+// drifting apart when the requirement's environment changes after the row was
+// created.
+//
+// Resolution order:
+//   - st.EffectiveAgentServerID != ""  → the server-resolved value (already
+//     carries the legacy-NULL fallback applied by attachEffectiveEnv).
+//   - st.AgentServerIDSet              → the row's own raw value. This branch is
+//     load-bearing twice over:
+//     (a) it is the ONLY branch the orchestrated path ever takes, because
+//     OrchestrationQueue reaches us through ClaimNextPending, which re-selects
+//     the row via scanSubTask and never runs attachEffectiveEnv — so
+//     EffectiveAgentServerID is always "" there even for a remote child. Falling
+//     through to the parent lookup on that path would send the child to the
+//     local checkout while its card showed a remote server.
+//     (b) it preserves an explicit 本地 choice: an empty value on a row written
+//     after the column existed means the user deliberately picked 本地 and MUST
+//     NOT fall back to a remote parent, or the override would be silently
+//     redirected back to that remote host.
+//   - otherwise (legacy row read before the column existed, NULL) → fall back
+//     to the parent requirement's agent_server_id.
+func resolveEffectiveAgentServer(st *model.SubTask, req *model.Requirement) string {
+	if st != nil {
+		if st.EffectiveAgentServerID != "" {
+			return st.EffectiveAgentServerID
+		}
+		if st.AgentServerIDSet {
+			return st.AgentServerID
+		}
+	}
+	if req == nil {
+		return ""
+	}
+	return req.AgentServerID
+}
+
+// appendCrossEnvHint surfaces the execution-consistency caveat when a sub-task
+// runs on a different environment than the main task. Shared by Run and
+// ExecuteOrchestratedChild so the wording lives in exactly one place.
+//
+// The wording depends on the requirement's code-transport mode
+// (requirements.sync_mode, see service.SyncModeRemote / SyncModeLocal):
+//   - SyncModeRemote (""): the remote worker clones/reuses a worktree sourced
+//     from origin, so unpushed local changes are NOT visible there.
+//   - SyncModeLocal ("local"): the code travels as a git bundle whose source
+//     (up) and destination (down, after every round) is the LOCAL isolated
+//     worktree. Unpushed local changes DO travel with it, and a locally-run
+//     sub-task sees whatever the last sync-back landed.
+//
+// No-op when the two environments match, or when job is nil (defensive — the
+// orchestrated path assigns job slightly later than the early-exit guards).
+func appendCrossEnvHint(job *store.Job, effectiveServerID, parentServerID, syncMode string) {
+	if job == nil || effectiveServerID == parentServerID {
+		return
+	}
+	localSync := syncMode == service.SyncModeLocal
+	switch {
+	case effectiveServerID == "":
+		// Sub-task runs locally while the main task runs on an Agent server.
+		content := "ℹ️ 本子任务在「本地」执行（与主任务环境不同），仅能看到本地工作区/已推送到该需求分支的代码，主任务环境中未推送的改动不会带过来。"
+		if localSync {
+			content = "ℹ️ 本子任务在「本地」执行（与主任务环境不同）：本需求为本地仓库同步模式，主任务的代码每轮以 git bundle 回落到本地隔离 worktree，本地子任务看到的是最近一次同步后的状态。"
+		}
+		job.Append(store.LogLine{Type: "message", Content: content})
+	case localSync:
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 本子任务在 Agent Server 执行（与主任务环境不同），代码以本地同步方式（git bundle）传输到该服务器，本地工作区未推送的改动会一并带过去。"})
+	default:
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 本子任务在 Agent Server 执行（与主任务环境不同），将从 origin 检出该需求分支，未推送的改动不会带过来。"})
+	}
+}
+
 // Run spawns the claude CLI subprocess for a sub-task row and writes the
 // final artifact to sub_tasks.artifact on completion.
 //
@@ -277,28 +353,12 @@ func (r *SubTaskRunner) Run(
 	job.Append(store.LogLine{Type: "phase", Content: role})
 	job.Append(store.LogLine{Type: "message", Content: "📝 提示词: " + truncateForLog(body, 240)})
 
-	// Resolve the effective execution environment for this sub-task. Prefer
-	// the row's own agent_server_id (a manual choice or the value inherited at
-	// creation by the auto-orchestrator); fall back to the parent
-	// requirement's agent_server_id only for legacy rows that predate the
-	// column (AgentServerIDSet == false). A non-NULL empty string means the
-	// user deliberately picked 本地 and must NOT fall back to a remote parent.
-	effectiveServerID := st.AgentServerID
-	if !st.AgentServerIDSet {
-		effectiveServerID = req.AgentServerID
-	}
-	// UX note: when the sub-task runs on a different environment than the
-	// main task, the remote/local worker checks out the requirement branch
-	// fresh from origin — unpushed local changes won't come along. Surface
-	// this so the user understands why cross-env runs see only pushed code.
-	if effectiveServerID != req.AgentServerID {
-		switch {
-		case effectiveServerID == "":
-			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 本子任务在「本地」执行（与主任务环境不同），仅能看到本地工作区/已推送到该需求分支的代码，主任务环境中未推送的改动不会带过来。"})
-		default:
-			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 本子任务在 Agent Server 执行（与主任务环境不同），将从 origin 检出该需求分支，未推送的改动不会带过来。"})
-		}
-	}
+	// Resolve the effective execution environment for this sub-task through the
+	// single shared resolver — the orchestrated-child path
+	// (ExecuteOrchestratedChild) must produce the exact same answer, otherwise
+	// the card and the actual dispatch diverge. See resolveEffectiveAgentServer.
+	effectiveServerID := resolveEffectiveAgentServer(st, req)
+	appendCrossEnvHint(job, effectiveServerID, req.AgentServerID, req.SyncMode)
 
 	// Resolve the developer role's model + its bound config id. The model
 	// drives which base URL the child should hit: when the user picks a
