@@ -314,8 +314,20 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	remoteSlug := util.EncodeClaudeSlug(wtPath)
 	remoteSlugDir := remoteProjectsRoot + remoteSlug
 	var sessionMissingSide string
-	if in.FreshSession {
-		in.job.Append(store.LogLine{Type: "phase", Content: "🆕 跳过会话上行：本次走「新会话」模式（不续接父会话）"})
+	if in.FreshSession || in.sourceSID == "" {
+		// Nothing to --resume → nothing worth pushing. This covers explicit
+		// FreshSession runs AND every sourceSID=="" case: "基于方案开发"
+		// (dev_mode==design deliberately drops the session chain), skip-design
+		// "直接开发" rows, and legacy rows with no recorded session ids. In all
+		// of these the remote worker starts a brand-new session keyed by
+		// --session-id, so uploading the project's other session jsonl is
+		// useless on the remote (the worker only reads the resumed <sid>.jsonl).
+		// Mirrors the same guard in prepareRemoteAgentRun (Step 3).
+		reason := "本次走「新会话」模式（不续接父会话）"
+		if !in.FreshSession {
+			reason = "本次无 source session（fresh run）"
+		}
+		in.job.Append(store.LogLine{Type: "phase", Content: "🆕 跳过会话上行：" + reason})
 	} else {
 		in.job.Append(store.LogLine{Type: "phase", Content: "📤 同步 Claude 会话历史（SFTP 上行）..."})
 		slugDir, slugErr := h.claudeProjectsSlugDir(in.reqRow)
@@ -1197,7 +1209,8 @@ func logRemoteLatestCommit(ctx context.Context, client *gossh.Client, job *store
 // sourceSID as a fallback so the file that will actually be `--resume`d is
 // always in the set. Returns nil (empty) when the requirement has no recorded
 // session ids and sourceSID is empty, which signals syncRequirementSessionsUp
-// to fall back to the whole-directory sync (legacy behaviour).
+// to upload nothing (the remote starts a fresh session; there is no jsonl to
+// resume).
 func requirementSessionIDs(reqRow *model.Requirement, sourceSID string) []string {
 	var ids []string
 	seen := map[string]bool{}
@@ -1233,17 +1246,23 @@ func humanSize(n int64) string {
 // syncRequirementSessionsUp uploads only the requirement-relevant <sid>.jsonl
 // files (wantSIDs) to the remote slug dir, printing a per-file detail line so
 // the user can see exactly which sessions were synced. When wantSIDs is empty
-// (an old requirement with no recorded session ids) it falls back to the
-// whole-directory SyncDirUpMapped so behaviour is unchanged for those rows.
+// (an old requirement with no recorded session ids) it uploads nothing and
+// returns nil: the remote worker only ever reads the resumed <sid>.jsonl, so
+// blindly pushing the whole project session directory has no effect there —
+// the downstream RemoteFileExists pre-flight then classifies the run as a fresh
+// (no-resume) session, which is the correct outcome for a requirement we can't
+// thread.
+//
+// In practice this empty case is unreachable from the coding / architect paths:
+// both callers now skip session sync entirely when sourceSID == "" (see the
+// guards in runRemoteCoding / prepareRemoteAgentRun), and requirementSessionIDs
+// always includes sourceSID, so a non-empty sourceSID yields a non-empty set.
 //
 // Returning an error keeps the caller on its existing "sync-failed" branch.
-// Because wantSIDs always includes sourceSID, the downstream RemoteFileExists
-// pre-flight (which probes sourceSID) is guaranteed to find its file in the
-// uploaded set on the happy path.
 func (h *WizardHandler) syncRequirementSessionsUp(client *gossh.Client, job *store.Job, slugDir, remoteSlugDir string, wantSIDs []string) error {
 	if len(wantSIDs) == 0 {
-		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未记录需求会话 ID，回退为同步整个项目会话目录"})
-		return client.SyncDirUpMapped(slugDir, remoteSlugDir)
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未记录需求会话 ID，跳过会话上行（远端将以新会话启动，无需同步整个项目会话目录）"})
+		return nil
 	}
 	if merr := client.Mkdirp(remoteSlugDir); merr != nil {
 		return merr
