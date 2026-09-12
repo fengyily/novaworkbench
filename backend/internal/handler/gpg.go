@@ -369,6 +369,19 @@ func classifyGitSignFailure(stderr string) string {
 		// success path, not the failure path).
 		strings.Contains(s, "verified email"):
 		return "❌ 推送失败：GitHub 拒绝未验证提交。请确认 GPG 密钥 UID 邮箱与 Token 的 Git 邮箱一致，且该邮箱已在 GitHub 验证"
+
+	// Source refspec could not be resolved in the remote worktree — HEAD was
+	// detached or on an alias branch when we pushed. This is NOT a merge
+	// conflict, so avoid the misleading "手动处理冲突" fallback.
+	case strings.Contains(s, "src refspec"),
+		strings.Contains(s, "does not match any"):
+		return "❌ 推送失败：远端 worktree 未找到待推送分支（HEAD 可能处于游离态）。请重试开发，或在远程 worktree 手动 git push"
+
+	// Remote branch has diverged — a real conflict the user must resolve.
+	case strings.Contains(s, "non-fast-forward"),
+		strings.Contains(s, "fetch first"),
+		strings.Contains(s, "rejected"):
+		return "❌ 推送失败：远端分支已分叉。请在远程 worktree 执行 git pull 解决后重试"
 	}
 	return ""
 }
