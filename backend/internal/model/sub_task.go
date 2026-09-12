@@ -103,9 +103,28 @@ type SubTask struct {
 	// "由 Agent Server「<名称>」开发" without a second round-trip. Empty when the
 	// sub-task runs locally or the server row was deleted.
 	AgentServerName string `json:"agent_server_name,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+	// EffectiveAgentServerID is the environment this sub-task **actually runs
+	// in**, resolved server-side by SubTaskService.attachEffectiveEnv (a
+	// display-only field, NOT a column). The rule mirrors the runtime
+	// resolution in SubTaskRunner.Run / resolveEffectiveAgentServer exactly:
+	// AgentServerIDSet == true → AgentServerID used verbatim (an explicit ""
+	// means the user deliberately picked 本地, so it must NOT be redirected to
+	// a remote parent); AgentServerIDSet == false → fall back to the parent
+	// requirement's agent_server_id (a legacy row that predates the column).
+	//
+	// Resolving here rather than shipping AgentServerIDSet to the client (it
+	// is json:"-") is what keeps the card badge and the Stop button in
+	// agreement with where the child process is actually spawned — the client
+	// cannot re-derive NULL-vs-'' on its own.
+	EffectiveAgentServerID string `json:"effective_agent_server_id"`
+	// EffectiveAgentServerName is the display name of EffectiveAgentServerID
+	// (same grouped join as AgentServerName, but keyed on the resolved value
+	// rather than the raw column). Empty when the effective environment is 本地
+	// or the server row was deleted — the UI then falls back to the raw id.
+	EffectiveAgentServerName string     `json:"effective_agent_server_name,omitempty"`
+	CreatedAt                time.Time  `json:"created_at"`
+	UpdatedAt                time.Time  `json:"updated_at"`
+	CompletedAt              *time.Time `json:"completed_at,omitempty"`
 }
 
 // Sub-task status values, kept as plain string constants so they line up with

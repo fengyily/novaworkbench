@@ -70,7 +70,6 @@ export const schedules = {
     // silently fall back to Chinese.
     designAgentServerLabel: 'Agent server',
     designAgentServerDefault: 'Default (local)',
-    designAgentServerRemote: 'Remote Agent server',
     designAgentServerEmptyTitle: 'No ready Agent server is available — add one in Settings → Agent servers and finish the environment check first.',
     designAgentServerNoHint: 'No ready Agent server is configured. Open Settings → Agent servers to add one.',
     splitTasks: 'Split into sub-tasks (same as the manual buttons; ignored in Agent-Server mode)',

@@ -331,8 +331,19 @@ export interface SubTask {
   // Execution environment for this sub-task: '' (or undefined on legacy
   // backends) = 本地; a non-empty agent_servers.id = runs on that Agent
   // Server. agent_server_name is the resolved display name (join, read-only).
+  // This is the RAW column value — it records whether the user overrode the
+  // default (see the composer's "已覆盖默认" hint), NOT where the sub-task
+  // will actually run.
   agent_server_id?: string;
   agent_server_name?: string;
+  // Resolved at read time by the server (attachEffectiveEnv): the environment
+  // this sub-task will ACTUALLY run in. It already carries the legacy-NULL
+  // fallback (a row created before the column existed inherits the parent
+  // requirement's agent_server_id), while an explicit 本地 choice stays empty.
+  // 服务端解析后的生效环境，已是最终值，前端不要再自行回退 — render the badge and
+  // derive Stop availability from THESE fields, not from agent_server_id.
+  effective_agent_server_id?: string;
+  effective_agent_server_name?: string;
 }
 
 export const subTasksApi = {

@@ -1206,15 +1206,23 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 		}
 	}()
 
-	// Load the requirement row for AgentServerID + ProjectID. Done at the
-	// call site (rather than passing through the batch) so the same lookup
-	// path SubTaskRunner.Run uses applies here.
+	// Load the requirement row for ProjectID + usage attribution + the legacy
+	// environment fallback. Done at the call site (rather than passing through
+	// the batch) so the same lookup path SubTaskRunner.Run uses applies here.
 	req, rerr := h.reqSvc.Get(reqID)
 	if rerr != nil || req == nil {
 		earlyExitReason = "无法加载需求行: " + errString(rerr)
 		log.Printf("[orchestrate] requirement %s missing for child %s: %v", reqID, st.ID, rerr)
 		return
 	}
+	// The child runs where ITS OWN row says, not where the requirement currently
+	// says: a manual override (or a requirement whose environment was changed
+	// after this row was created) must be honored, and the SubTaskPanel card
+	// renders the same resolution. resolveEffectiveAgentServer is shared with
+	// SubTaskRunner.Run so the two dispatch paths can never drift apart.
+	// NOTE: reqRow / usage below keep using `req` — the ProjectID and the usage
+	// attribution stay with the requirement row, only the dispatch target moves.
+	effectiveServerID := resolveEffectiveAgentServer(st, req)
 
 	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         executorPrompt,
@@ -1237,21 +1245,23 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	job.Append(store.LogLine{Type: "phase", Content: "🤖 [编排] 子任务启动: " + st.Title})
 	job.Append(store.LogLine{Type: "message", Content: "📝 提示词: " + truncateForLog(st.Prompt, 240)})
 	job.SetModel(modelName)
+	// Same cross-environment caveat Run prints, from the same helper.
+	appendCrossEnvHint(job, effectiveServerID, req.AgentServerID, req.SyncMode)
 
 	childUsage := h.usageCtxFor("sub_task", reqID, req.ProjectID, job.ID, modelName, "", st.Prompt)
-	// Route orchestrated children to the parent requirement's Agent server
-	// when it has one — same reasoning as runSubTask: the working tree lives
-	// on that host, so a locally-spawned child would edit the wrong checkout.
+	// Route orchestrated children to the environment resolved above — same
+	// reasoning as runSubTask: the working tree lives on that host, so a
+	// locally-spawned child would edit the wrong checkout.
 	var out claudeStreamOutcome
-	if req.AgentServerID != "" && h.agentSvrSvc != nil {
+	if effectiveServerID != "" && h.agentSvrSvc != nil {
 		out = h.runRemoteCoding(&remoteCodingInput{
 			job:      job,
-			serverID: req.AgentServerID,
+			serverID: effectiveServerID,
 			req: startCodingReq{
 				RequirementTitle: req.Title + " / " + st.Title,
 				RequirementID:    req.ID,
 				BranchName:       req.BranchName,
-				AgentServerID:    req.AgentServerID,
+				AgentServerID:    effectiveServerID,
 			},
 			reqRow:        req,
 			prompt:        executorPrompt,

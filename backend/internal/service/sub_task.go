@@ -174,7 +174,16 @@ func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 		}
 		out = append(out, *st)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Release the cursor BEFORE the follow-up reads inside attachEffectiveEnv:
+	// SQLite runs with MaxOpenConns == 1, so an open rows handle would block
+	// the requirement lookup / name backfill and deadlock. Close is idempotent
+	// (the deferred call above is now a no-op).
+	rows.Close()
+	s.attachEffectiveEnv(out, s.requirementAgentServerID(reqID))
+	return out, nil
 }
 
 // Get loads one sub-task by id. Returns sql.ErrNoRows when the id doesn't
@@ -197,7 +206,18 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 	if !rows.Next() {
 		return nil, sql.ErrNoRows
 	}
-	return scanSubTask(rows)
+	st, err := scanSubTask(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Same ordering constraint as List: close before the follow-up queries.
+	rows.Close()
+	one := []model.SubTask{*st}
+	s.attachEffectiveEnv(one, s.requirementAgentServerID(st.RequirementID))
+	return &one[0], nil
 }
 
 // ListByBatch returns every sub-task attached to batchID, ordered by
@@ -227,7 +247,107 @@ func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
 		}
 		out = append(out, *st)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// A batch's children all belong to one requirement (tryAutoOrchestrate
+	// creates them under a single requirement_id), so the parent environment
+	// is a single lookup keyed off the first row that carries one. Skipped
+	// entirely for the impossible-but-cheap-to-guard empty-requirement case.
+	rows.Close()
+	parentReqID := ""
+	for i := range out {
+		if out[i].RequirementID != "" {
+			parentReqID = out[i].RequirementID
+			break
+		}
+	}
+	if parentReqID != "" {
+		s.attachEffectiveEnv(out, s.requirementAgentServerID(parentReqID))
+	}
+	return out, nil
+}
+
+// requirementAgentServerID reads the parent requirement's execution
+// environment in one primary-key lookup. Returns "" both when the requirement
+// is local (agent_server_id = '') and when the row is missing — the caller
+// cannot tell the two apart and does not need to, since both resolve to 本地.
+// Errors are deliberately swallowed (best-effort, mirroring the name backfill)
+// so a sub-task list never fails to render just because the parent row was
+// archived or purged.
+func (s *SubTaskService) requirementAgentServerID(reqID string) string {
+	if reqID == "" {
+		return ""
+	}
+	var id sql.NullString
+	if err := s.db.QueryRow(
+		"SELECT agent_server_id FROM requirements WHERE id = ?", reqID).Scan(&id); err != nil {
+		return ""
+	}
+	return id.String
+}
+
+// attachEffectiveEnv stamps the two display-only EffectiveAgentServer* fields
+// on items, resolving the environment each sub-task ACTUALLY runs in. The rule
+// is the same one SubTaskRunner.resolveEffectiveAgentServer applies at
+// dispatch time, and the two must stay in lockstep:
+//
+//   - AgentServerIDSet == true  → an explicit choice was made (manual pick or
+//     the auto-orchestrator's inheritance at insert time). Use it verbatim,
+//     including the explicit "" (本地) — a deliberate local pick under a
+//     remote parent must NOT be redirected to the parent's server.
+//   - AgentServerIDSet == false → the row predates the column (NULL); fall
+//     back to the parent requirement's agent_server_id.
+//
+// This is the fix for the client-side divergence: AgentServerIDSet is
+// json:"-", so the frontend cannot re-derive the NULL-vs-'' distinction and
+// used to read the raw column, showing 本地 for a legacy child that actually
+// ran remotely (and gating its Stop button on the MAIN task's environment).
+//
+// Display-only: the resolved value is never written back to the row.
+// reqAgentServerID is the parent requirement's agent_server_id (callers
+// resolve it once; this function never queries per row).
+//
+// Name backfill uses one grouped SELECT against agent_servers (same shape as
+// RequirementService.attachAgentServerNames) and is best-effort: on query
+// failure the rows keep an empty name and the UI degrades to a name-less
+// badge instead of failing the whole list. Rows whose effective environment is
+// 本地 skip the lookup entirely.
+func (s *SubTaskService) attachEffectiveEnv(items []model.SubTask, reqAgentServerID string) {
+	if len(items) == 0 {
+		return
+	}
+	need := false
+	for i := range items {
+		if items[i].AgentServerIDSet {
+			items[i].EffectiveAgentServerID = items[i].AgentServerID
+		} else {
+			items[i].EffectiveAgentServerID = reqAgentServerID
+		}
+		if items[i].EffectiveAgentServerID != "" {
+			need = true
+		}
+	}
+	if !need {
+		return
+	}
+	rows, err := s.db.Query("SELECT id, name FROM agent_servers")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	names := map[string]string{}
+	for rows.Next() {
+		var id, name string
+		if rows.Scan(&id, &name) == nil {
+			names[id] = name
+		}
+	}
+	for i := range items {
+		if n, ok := names[items[i].EffectiveAgentServerID]; ok {
+			items[i].EffectiveAgentServerName = n
+		}
+	}
 }
 
 // CountTerminalByBatch reports the number of children in terminal states

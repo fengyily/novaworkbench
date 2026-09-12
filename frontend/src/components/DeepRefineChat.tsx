@@ -3,13 +3,14 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
 
-import { API_BASE, authedFetch, DefaultModelLabel, kindChatPlaceholderKeys, kindOf, requirementsApi, wizardApi, type Kind } from '../api/client';
+import { API_BASE, authedFetch, DefaultModelLabel, kindChatPlaceholderKeys, kindOf, requirementsApi, wizardApi, type Kind, type AgentServer } from '../api/client';
 import { tLabel } from '../i18n/label';
 import { createEventStream, type EventStream } from '../api/stream';
 import AtMentionTextarea from './AtMentionTextarea';
 import { appendLogLine, type LogLine, type UsageInfo, computeUsage } from '../utils/logLines';
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import ModelSelect from './ModelSelect';
+import { ExecEnvSelect } from './ExecEnvSelect';
 import { FullscreenButton } from './FullscreenButton';
 import { useFullscreen } from '../utils/useFullscreen';
 import { ContextUsageBar } from './ContextUsageBar';
@@ -48,12 +49,26 @@ interface Props {
   onUsage?: (u: UsageInfo | undefined) => void;
   onGenerateDesign: () => void;
   onReset?: () => void;
+  // Execution-environment picker for the "Generate design" CTA. The analyst
+  // stage is one of the two FIRST-RUN entry points into architect-design (the
+  // draft-stage button group is the other), so — per the project-wide rule
+  // "any entry point that can start work against a specific execution
+  // environment must offer the environment selector on the same screen" — the
+  // shared ExecEnvSelect is rendered next to the CTA. All three props are
+  // OPTIONAL and the selector is suppressed entirely when `agentServers` is
+  // empty/omitted, so every existing call site keeps its current UI. Kept as a
+  // controlled trio (value + onChange) because the parent owns the single
+  // shared `agentServerId` state that runArchitectDesign reads at submit time.
+  agentServers?: AgentServer[];
+  agentServerId?: string;
+  onAgentServerChange?: (id: string) => void;
 }
 
 interface ChatMessage { role: string; content: string; isError?: boolean; isStreaming?: boolean; }
 
 export default function DeepRefineChat({
   reqId, projectPath, requirementTitle, currentAnalysis, analysisJobId, kind, model, defaultModel, onTurnDone, onWorkingChange, usage, onUsage, onGenerateDesign, onReset,
+  agentServers = [], agentServerId, onAgentServerChange,
 }: Props) {
   const [expanded, setExpanded] = useState(true);
   const { isFullscreen, toggle: toggleFullscreen, exit: exitFullscreen } = useFullscreen();
@@ -648,7 +663,7 @@ export default function DeepRefineChat({
         </div>
       )}
 
-      <div className="deep-refine-actions">
+      <div className="deep-refine-actions" style={{ gap: 8, alignItems: 'center' }}>
         {!isIdea && (
           <button
             className="btn btn-primary"
@@ -658,6 +673,30 @@ export default function DeepRefineChat({
           >
             <IconArchitect size={14} /> {t('wizard.analyst.generateDesign')}
           </button>
+        )}
+        {/* Execution environment for the design run. Lives beside the CTA (not
+            behind a disclosure) because the "Generate design" click immediately
+            dispatches architect-design to whatever environment is selected —
+            see the "must offer the selector on the same screen" rule in the
+            component props. Renders only when the parent supplied a ready-server
+            list; with no servers the selector would be a single useless
+            "本地执行" option. Rendered for kind=idea only when the CTA itself
+            renders (the CTA is hidden for idea, so this stays hidden too). */}
+        {!isIdea && agentServers.length > 0 && (
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+              {t('requirements.detail2.designAgentServerLabel')}
+            </span>
+            <ExecEnvSelect
+              servers={agentServers}
+              value={agentServerId ?? ''}
+              onChange={onAgentServerChange ?? (() => {})}
+              disabled={isWorking}
+              title={isWorking ? t('requirements.detail2.designAgentServerBusyTitle') : ''}
+              localOptionLabel={t('requirements.detail2.preflightLocalExec')}
+              style={{ minWidth: 160 }}
+            />
+          </label>
         )}
         {lastIsError && !isWorking && (
           <span style={{ color: '#B91C1C', fontSize: 12 }}>{t('wizard.analyst.lastTurnError')}</span>
