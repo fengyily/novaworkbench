@@ -195,6 +195,8 @@ export const requirements = {
     preflightReadKnowledgeHint: '编码前先扫描项目内与本需求相关的知识条目，作为额外上下文注入。耗时约几秒，对复杂需求特别有用。',
     preflightSplitTasks: '拆分任务并自动派发',
     preflightSplitTasksHint: '由主 Agent 把需求拆成子任务，再串行调度子 Agent 执行。默认关闭—— developer persona 会直接实现，更快。',
+    preflightAutoPushPR: '开发完成后自动提交 / 推送 / 创建 PR',
+    preflightAutoPushPRHint: '开发完成后自动派发一个子任务，执行「提交 → 合并主分支 → 推送 → 创建 PR」全流程。默认开启；拆分与非拆分、Agent 服务器开发都适用。若项目未配置远程或平台 Token，会自动跳过或仅推送。',
     preflightDevModeTitle: '开发模式',
     preflightDevModeHint: '选择如何把方案交给开发 Agent。默认沿用上次设置。',
     preflightDevModeSession: '基于会话开发',

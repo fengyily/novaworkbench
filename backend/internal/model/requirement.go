@@ -86,6 +86,15 @@ type Requirement struct {
 	// prologue and read by every follow-up action so the lifecycle stays
 	// consistent. Empty for local (non-agent) execution and legacy rows.
 	SyncMode string `json:"sync_mode"`
+	// AutoPush controls whether the coding stage, once development finishes,
+	// automatically dispatches the "提交 → 推送 → 创建 PR" sub-task (the same
+	// child agent MergeHandler.Push triggers manually). Defaults to true so
+	// every start-coding run ships its result by default; the user can turn it
+	// off per-requirement from the start-coding preflight dialog for
+	// exploratory runs. Stamped by the start-coding prologue and read at the
+	// three development completion points (local non-split, Agent-server, and
+	// the split orchestrator summary).
+	AutoPush bool `json:"auto_push"`
 	// DesignAgentServerID records WHERE this requirement's architect-design
 	// stage was run. Stamped by the design stage prologue (mirror of
 	// AgentServerID for the dev stage). Empty = 本地 (no remote agent). On a

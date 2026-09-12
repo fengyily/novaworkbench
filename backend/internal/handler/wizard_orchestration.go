@@ -1409,6 +1409,12 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 		log.Printf("[orchestrate] summary %s: no children found; mark done", batchID)
 		_ = h.batchSvc.MarkSummary(batchID, model.SummaryDone)
 		_ = h.batchSvc.MarkCompleted(batchID)
+		// Auto-push收尾: even with no children the batch is complete, so honor
+		// the auto_push intent. req is loaded below on the normal path; here we
+		// fetch it directly (best-effort) so this early exit ships too.
+		if r, rerr := h.reqSvc.Get(batch.RequirementID); rerr == nil && r != nil && r.AutoPush {
+			go h.autoPushPR(r)
+		}
 		return
 	}
 
@@ -1518,4 +1524,14 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 		log.Printf("[orchestrate] summary %s mark completed: %v", batchID, cerr)
 	}
 	log.Printf("[orchestrate] summary saved to requirements.coding_plan for %s (batch %s)", batch.RequirementID, batchID)
+
+	// Auto-push收尾 (拆分路径): all children + the summary are done, so
+	// development is complete — trigger the "提交 → 推送 → 创建 PR" sub-task
+	// when the requirement opted in. This is the split counterpart to the
+	// non-split trigger in execStartCoding. Idempotent + goroutine-based, so a
+	// summary re-run after a restart can't corrupt anything (git push -u / PR
+	// creation both no-op when already applied).
+	if req != nil && req.AutoPush {
+		go h.autoPushPR(req)
+	}
 }

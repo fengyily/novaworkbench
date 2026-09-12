@@ -341,6 +341,89 @@ func docStageSession(req *model.Requirement, docType string) (sid, roleKey strin
 	return "", "analyst"
 }
 
+// autoPushPR dispatches the shared "提交 → 推送 → 创建 PR" child agent for a
+// requirement whose development has just finished. It is called (always in a
+// goroutine) from the three development-completion points — local non-split
+// coding, Agent-server coding, and the split orchestrator summary — gated on
+// the requirement's auto_push toggle, so a finished requirement ships its
+// result without a manual "推送并发起 PR" click.
+//
+// Every failure mode is a logged skip, never a hard error: auto-push is a
+// convenience layer on top of an already-completed development run and must
+// never turn a successful run into a visible failure. Guards (each returns
+// after one log line): no sub-task runner wired, project lookup failure,
+// detached HEAD / missing dev branch, or no git remote to push to.
+//
+// Re-running is safe: the push child is idempotent (git push -u repeats
+// cleanly; PR creation returns the existing PR when one already exists), so
+// an overlapping manual + automatic trigger, or a summary goroutine re-run
+// after a restart, cannot corrupt anything.
+func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
+	if reqRow == nil {
+		return
+	}
+	if h.subTaskRunner == nil || h.subTaskSvc == nil {
+		log.Printf("[auto-push] %s: sub-task runner not wired, skip", reqRow.ID)
+		return
+	}
+	proj, perr := h.projectSvc.Get(reqRow.ProjectID)
+	if perr != nil || proj == nil {
+		log.Printf("[auto-push] %s: project load failed (%v), skip", reqRow.ID, perr)
+		return
+	}
+	dir := proj.LocalPath
+	base := proj.DefaultBranch
+	if base == "" {
+		base = "main"
+	}
+	platformType := proj.PlatformType
+
+	// Resolve the dev branch the same way the manual push does. An
+	// origin-transport Agent-server requirement has no local checkout, so the
+	// branch name comes from the requirement row; every other case (local, or
+	// local-sync Agent whose code was synced back to the local worktree) reads
+	// the worktree/checkout HEAD.
+	var dev string
+	if codeLivesOnAgent(reqRow) {
+		dev = remoteBranchFor(reqRow)
+	} else {
+		dev, _ = devBranchAndDir(reqRow, dir)
+	}
+	if dev == "" || dev == "HEAD" {
+		log.Printf("[auto-push] %s: no dev branch (detached HEAD?), skip", reqRow.ID)
+		return
+	}
+
+	// Need a remote to push to. Prefer the checkout's configured origin; fall
+	// back to the project's stored remote_url (Agent-server / freshly-cloned
+	// cases where the local checkout may not have origin set). No remote → skip
+	// silently — a repo with no remote can't be pushed and that's not an error.
+	remote := ""
+	if dir != "" {
+		remote = remoteURL(dir)
+	}
+	if remote == "" {
+		remote = proj.RemoteURL
+	}
+	if remote == "" {
+		log.Printf("[auto-push] %s: no git remote configured, skip", reqRow.ID)
+		return
+	}
+
+	// Effective model: pr_author role (matches the manual push default). The
+	// "默认模型" sentinel collapses to "" via cliModelArg so the runner falls
+	// back to its own resolution instead of persisting the display literal.
+	_, prModel, roleConfigID := h.roleConfig("pr_author")
+	prModel = cliModelArg(prModel)
+
+	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, "", prModel, roleConfigID)
+	if err != nil {
+		log.Printf("[auto-push] %s: dispatch failed: %v", reqRow.ID, err)
+		return
+	}
+	log.Printf("[auto-push] %s: dispatched push+PR sub-task %s job %s branch=%s", reqRow.ID, subTaskID, jobID, dev)
+}
+
 func truncateStr(s string, n int) string {
 	if len(s) <= n {
 		return s
