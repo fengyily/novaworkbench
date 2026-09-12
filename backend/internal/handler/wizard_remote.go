@@ -335,8 +335,8 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 本地未找到匹配的 claude session 目录（project slug 未缓存），将无 resume 启动新会话"})
 			sessionMissingSide = "local"
 		default:
-			client.Mkdirp(remoteSlugDir)
-			if sftpErr := client.SyncDirUpMapped(slugDir, remoteSlugDir); sftpErr != nil {
+			wantSIDs := requirementSessionIDs(in.reqRow, in.sourceSID)
+			if sftpErr := h.syncRequirementSessionsUp(client, in.job, slugDir, remoteSlugDir, wantSIDs); sftpErr != nil {
 				// "sync-failed" side: SFTP itself errored. The remote
 				// CLI will look for a jsonl we never landed.
 				in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话上行失败（将无 resume 启动新会话）: " + sftpErr.Error()})
@@ -663,6 +663,7 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 			"cd "+shellQuoteSingle(wtPath)+" && (git checkout "+shellQuoteSingle(branch)+" 2>/dev/null || true) && (git pull --ff-only origin "+shellQuoteSingle(branch)+" 2>&1 || echo \"[nova-agent] pull 跳过（无跟踪或已分叉）\") && (git merge --ff-only origin/"+shellQuoteSingle(baseBranch)+" 2>&1 || echo \"[nova-agent] 主分支快进更新跳过\")",
 			"", nil, &jobWriter{job: in.job}, nil)
 	}
+	logRemoteLatestCommit(ctx, client, in.job, wtPath)
 
 	// Step 2.5: configure git identity + (optionally) GPG signing in the
 	// remote worktree. Failure policy mirrors runRemoteCoding: GPG enabled +
@@ -738,8 +739,8 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 本地未找到匹配的 claude session 目录（project slug 未缓存），将无 resume 启动新会话"})
 			sessionMissingSide = "local"
 		default:
-			client.Mkdirp(remoteSlugDir)
-			if sftpErr := client.SyncDirUpMapped(slugDir, remoteSlugDir); sftpErr != nil {
+			wantSIDs := requirementSessionIDs(in.reqRow, in.sourceSID)
+			if sftpErr := h.syncRequirementSessionsUp(client, in.job, slugDir, remoteSlugDir, wantSIDs); sftpErr != nil {
 				in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 会话上行失败（将无 resume 启动新会话）: " + sftpErr.Error()})
 				sessionMissingSide = "sync-failed"
 			} else {
@@ -991,6 +992,7 @@ func (t originTransport) PrepareRemote(ctx context.Context, client *gossh.Client
 			"cd "+shellQuoteSingle(wtPath)+" && (git checkout "+shellQuoteSingle(branch)+" 2>/dev/null || true) && (git pull --ff-only origin "+shellQuoteSingle(branch)+" 2>&1 || echo \"[nova-agent] pull 跳过（无跟踪或已分叉）\") && (git merge --ff-only origin/"+shellQuoteSingle(baseBranch)+" 2>&1 || echo \"[nova-agent] 主分支快进更新跳过\")",
 			"", nil, &jobWriter{job: in.job}, nil)
 	}
+	logRemoteLatestCommit(ctx, client, in.job, wtPath)
 	return nil
 }
 
@@ -1085,6 +1087,7 @@ func (t bundleTransport) PrepareRemote(ctx context.Context, client *gossh.Client
 			return fmt.Errorf("重置远端 worktree 失败（exit=%d）", exit)
 		}
 	}
+	logRemoteLatestCommit(ctx, client, in.job, wtPath)
 	return nil
 }
 
@@ -1164,6 +1167,99 @@ func (w *jobWriter) Write(p []byte) (int, error) {
 		w.job.Append(store.LogLine{Type: "message", Content: line})
 	}
 	return len(p), nil
+}
+
+// logRemoteLatestCommit prints the HEAD commit of the remote worktree at wtPath
+// into the job log ("📌 分支最新提交: <hash> <subject> (<author>, <date>)"), so
+// the user can cross-check that the remote checkout landed on the expected
+// commit after the fetch/worktree/reset dance above. Best-effort: the output
+// (including any git stderr on an unborn/empty repo) is streamed through
+// jobWriter; the exit code is ignored so this line can never abort a run.
+func logRemoteLatestCommit(ctx context.Context, client *gossh.Client, job *store.Job, wtPath string) {
+	if client == nil || job == nil || wtPath == "" {
+		return
+	}
+	client.Exec(ctx, "cd "+shellQuoteSingle(wtPath)+
+		" && git log -1 --format='📌 分支最新提交: %h %s (%an, %ad)' --date=format:'%Y-%m-%d %H:%M'",
+		"", nil, &jobWriter{job: job}, nil)
+}
+
+// requirementSessionIDs returns the deduplicated, non-empty set of Claude
+// session ids relevant to this requirement — analysis / design / coding — plus
+// sourceSID as a fallback so the file that will actually be `--resume`d is
+// always in the set. Returns nil (empty) when the requirement has no recorded
+// session ids and sourceSID is empty, which signals syncRequirementSessionsUp
+// to fall back to the whole-directory sync (legacy behaviour).
+func requirementSessionIDs(reqRow *model.Requirement, sourceSID string) []string {
+	var ids []string
+	seen := map[string]bool{}
+	add := func(sid string) {
+		if sid == "" || seen[sid] {
+			return
+		}
+		seen[sid] = true
+		ids = append(ids, sid)
+	}
+	if reqRow != nil {
+		add(reqRow.AnalysisSessionID)
+		add(reqRow.DesignSessionID)
+		add(reqRow.CodingSessionID)
+	}
+	add(sourceSID)
+	return ids
+}
+
+// humanSize renders a byte count as a compact human-readable string
+// (B / KB / MB), used only for the per-session sync detail lines.
+func humanSize(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
+// syncRequirementSessionsUp uploads only the requirement-relevant <sid>.jsonl
+// files (wantSIDs) to the remote slug dir, printing a per-file detail line so
+// the user can see exactly which sessions were synced. When wantSIDs is empty
+// (an old requirement with no recorded session ids) it falls back to the
+// whole-directory SyncDirUpMapped so behaviour is unchanged for those rows.
+//
+// Returning an error keeps the caller on its existing "sync-failed" branch.
+// Because wantSIDs always includes sourceSID, the downstream RemoteFileExists
+// pre-flight (which probes sourceSID) is guaranteed to find its file in the
+// uploaded set on the happy path.
+func (h *WizardHandler) syncRequirementSessionsUp(client *gossh.Client, job *store.Job, slugDir, remoteSlugDir string, wantSIDs []string) error {
+	if len(wantSIDs) == 0 {
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未记录需求会话 ID，回退为同步整个项目会话目录"})
+		return client.SyncDirUpMapped(slugDir, remoteSlugDir)
+	}
+	if merr := client.Mkdirp(remoteSlugDir); merr != nil {
+		return merr
+	}
+	synced := 0
+	for _, sid := range wantSIDs {
+		local := filepath.Join(slugDir, sid+".jsonl")
+		fi, statErr := os.Stat(local)
+		if statErr != nil {
+			job.Append(store.LogLine{Type: "message", Content: "  • 跳过 " + sid + ".jsonl（本地不存在）"})
+			continue
+		}
+		if perr := client.PutFile(local, remoteSlugDir+"/"+sid+".jsonl", 0644); perr != nil {
+			return perr
+		}
+		synced++
+		job.Append(store.LogLine{Type: "message", Content: "  • " + sid + ".jsonl (" + humanSize(fi.Size()) + ")"})
+	}
+	if synced == 0 {
+		job.Append(store.LogLine{Type: "message", Content: "⚠️ 未找到任何需求相关会话文件，将无 resume 启动新会话"})
+	} else {
+		job.Append(store.LogLine{Type: "message", Content: "✅ 已同步 " + fmtInt(synced) + " 个需求相关会话历史"})
+	}
+	return nil
 }
 
 // workerRunBody is the JSON body sent to nova-agent-worker's POST /v1/run.
