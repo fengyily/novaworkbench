@@ -43,7 +43,13 @@ export default function YearView({ year, events, today, onPickDay, onPickMonth }
             ))}
             {matrices[m].flat().map((day, idx) => {
               const inMonth = day.getMonth() === m;
-              const dot: DayDot | undefined = dots[m]?.[day.getDate() - 1];
+              // dots[m] is indexed by day-of-month for month m only. Filler
+              // cells belong to an adjacent month, so looking them up by their
+              // (foreign) day number would surface a count from month m — a
+              // phantom dot on the wrong cell (e.g. an event on Oct 1 leaking a
+              // dot onto the Nov 1 filler shown in October's mini-grid). Gate on
+              // inMonth so only real cells carry a count.
+              const dot: DayDot | undefined = inMonth ? dots[m]?.[day.getDate() - 1] : undefined;
               const count = dot?.count ?? 0;
               const isToday = sameDay(day, today);
               return (
