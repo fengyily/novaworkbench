@@ -3746,13 +3746,13 @@ export default function RequirementDetail() {
               consistent wherever a compression is invoked. */}
           {codingSummaryModal !== null && (
             <div
-              className="modal-backdrop"
+              className="modal-overlay"
               onClick={() => setCodingSummaryModal(null)}
               role="dialog"
               aria-modal="true"
             >
               <div
-                className="modal"
+                className="modal-box"
                 onClick={e => e.stopPropagation()}
                 style={{ maxWidth: 640 }}
               >

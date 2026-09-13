@@ -160,8 +160,8 @@ export function ScheduleModal({
   };
 
   return (
-    <div className="modal-backdrop" onClick={handleBackdropClick}>
-      <div className="modal-card schedule-modal" onClick={e => e.stopPropagation()}>
+    <div className="modal-overlay" onClick={handleBackdropClick}>
+      <div className="modal-box schedule-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <h3>{titlePrefix}</h3>
           <button

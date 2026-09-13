@@ -73,8 +73,8 @@ export function SummarizeToRequirementModal({ sourceId, sourceTitle, onClose, on
   };
 
   return (
-    <div className="modal-backdrop" onClick={handleBackdropClick}>
-      <div className="modal-card summarize-modal" onClick={e => e.stopPropagation()}>
+    <div className="modal-overlay" onClick={handleBackdropClick}>
+      <div className="modal-box summarize-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <h3>{t('requirements.promote.title')}</h3>
           <button className="btn btn-sm" onClick={onClose} disabled={phase === 'running'}>×</button>

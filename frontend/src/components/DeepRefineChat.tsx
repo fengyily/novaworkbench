@@ -639,13 +639,13 @@ export default function DeepRefineChat({
           DeepRefineChat remains self-contained. */}
       {summaryModal !== null && (
         <div
-          className="modal-backdrop"
+          className="modal-overlay"
           onClick={() => setSummaryModal(null)}
           role="dialog"
           aria-modal="true"
         >
           <div
-            className="modal"
+            className="modal-box"
             onClick={e => e.stopPropagation()}
             style={{ maxWidth: 640 }}
           >

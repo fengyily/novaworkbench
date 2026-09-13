@@ -1268,6 +1268,8 @@ select.form-input { cursor: pointer; }
   min-width: 380px;
   max-width: 480px;
   box-shadow: var(--shadow-modal);
+  max-height: 88dvh;   /* cap on short viewports; content scrolls so actions stay reachable */
+  overflow-y: auto;
 }
 .modal-box h3 { margin: 0 0 8px; font-size: 17px; }
 .modal-field { margin-bottom: 14px; }

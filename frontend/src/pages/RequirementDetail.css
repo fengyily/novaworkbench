@@ -750,8 +750,16 @@
   min-width: 480px;
   max-width: 560px;
   padding: 0;
-  overflow: hidden;
+  overflow: hidden;            /* keep — clips the rounded corners */
+  display: flex;
+  flex-direction: column;
+  max-height: 88dvh;           /* cap height so the box never overflows the viewport */
 }
+/* Header / flight strip / launch bar stay pinned; only the body scrolls,
+   keeping the "启动会话" button always visible and clickable. */
+.preflight-header,
+.flight-strip,
+.preflight-launch { flex-shrink: 0; }
 .preflight-header {
   padding: 20px 28px 16px;
   border-bottom: 1px solid var(--color-border);
@@ -853,6 +861,9 @@
 
 .preflight-body {
   padding: 18px 28px 8px;
+  overflow-y: auto;            /* only the content area scrolls */
+  flex: 1 1 auto;
+  min-height: 0;               /* allow the flex child to shrink so scrolling engages */
 }
 .preflight-section { margin-bottom: 20px; }
 .preflight-section:last-child { margin-bottom: 0; }
@@ -1105,11 +1116,14 @@ select.preflight-field-input {
     border-radius: 16px 16px 0 0;
     padding: 0;
     max-height: 90dvh;
-    overflow-y: auto;
+    /* fixed shell (matches desktop): the box itself does not scroll so
+       the launch bar stays pinned to the bottom; .preflight-body scrolls. */
+    overflow: hidden;
   }
   .preflight-box::before {
     content: '';
     display: block;
+    flex-shrink: 0;
     width: 36px;
     height: 4px;
     background: var(--color-border);
@@ -2068,12 +2082,9 @@ allowed so the row collapses cleanly on every viewport. */
   color: var(--color-primary, #4F46E5);
 }
 
-/* `.modal-overlay`, `.modal-box`, `.modal-header`, `.modal-body` now live in
-   index.css — the local `.modal-backdrop` / `.modal-card` /
-   `.summarize-modal` / `.modal-hint` / `.modal-running` / `.modal-error`
-   blocks were orphaned (no TSX referenced them) and have been removed.
-   CodingChat and DocRefineChat's "已压缩上下文摘要" modals now use the
-   canonical `.modal-overlay` + `.modal-box` classes directly. */
+/* All modals use the canonical `.modal-overlay` + `.modal-box` shell (with
+   `.modal-header` / `.modal-body`) from index.css, which caps height at 88dvh
+   and scrolls its content so action buttons stay reachable on short viewports. */
 
 /* ── Mobile token receipt ──────────────────────────────────────────────────
    The desktop `<table class="pr-table table-cards">` is the canonical view;
