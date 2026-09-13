@@ -549,9 +549,14 @@ func (h *WizardHandler) finalizeArchitectRun(
 	}
 	_ = h.reqSvc.UpdateDesignJob(id, "")
 
-	// Record the effective model for the architect stage (success path only).
+	// Record the effective model + resolved Claude config for the architect
+	// stage (success path only) so a refresh re-hydrates both the model and the
+	// config dropdown, and the dev stage can fall back to a persisted config.
 	if perr := h.reqSvc.UpdateArchitectModel(id, model); perr != nil {
 		log.Printf("[architect-design] failed to persist architect_model for %s: %v", id, perr)
+	}
+	if perr := h.reqSvc.UpdateArchitectConfig(id, p.ClaudeConfigID); perr != nil {
+		log.Printf("[architect-design] failed to persist architect_config_id for %s: %v", id, perr)
 	}
 	// Close the knowledge loop: mark which read entries the run actually used.
 	if len(kbReadTitles) > 0 {

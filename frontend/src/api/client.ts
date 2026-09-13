@@ -563,6 +563,11 @@ export interface Requirement {
   architect_model?: string;
   developer_model?: string;
   reviewer_model?: string;
+  // Effective Claude-config (claude_configs.id) selected for the architect /
+  // developer stage, persisted on the success path so the config dropdown
+  // re-hydrates alongside the model on refresh. Empty = stage not yet run.
+  architect_config_id?: string;
+  developer_config_id?: string;
   // Per-stage context-compression state. Populated by POST
   // /api/wizard/compress-context (which writes the summary, stamps the time,
   // and clears the matching session_id). Used by the requirement detail

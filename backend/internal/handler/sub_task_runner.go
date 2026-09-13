@@ -439,10 +439,18 @@ func (r *SubTaskRunner) Run(
 	//      model from another config; without this we'd send the override
 	//      model to the developer/executor role's binding and the wrong
 	//      gateway would 400 on the unknown model id)
-	//   3. the developer role's bound config (covers the developer-default
+	//   3. the parent requirement's persisted developer_config_id — a manual
+	//      sub-task should inherit the same gateway the requirement was
+	//      developed on, matching the main-task behavior (orchestrated
+	//      children already inherit via orchestration_batches.claude_config_id)
+	//   4. the developer role's bound config (covers the developer-default
 	//      model + its role-bound gateway)
-	//   4. the executor role's bound config (legacy fallback for users who
-	//      rely on executor-role binding only; harmless when 1–3 match)
+	//   5. the executor role's bound config (legacy fallback for users who
+	//      rely on executor-role binding only; harmless when 1–4 match)
+	parentDevCfgID := ""
+	if req != nil {
+		parentDevCfgID = req.DeveloperConfigID
+	}
 	var finalConfigID string
 	switch {
 	case configIDOverride != "":
@@ -450,11 +458,15 @@ func (r *SubTaskRunner) Run(
 	case modelOverride != "":
 		if cid, cerr := r.claudeCfg.ResolveConfigForModel(modelOverride); cerr == nil && cid != "" {
 			finalConfigID = cid
+		} else if parentDevCfgID != "" {
+			finalConfigID = parentDevCfgID
 		} else if devCfgID != "" {
 			finalConfigID = devCfgID
 		} else {
 			finalConfigID = executorConfigID
 		}
+	case parentDevCfgID != "":
+		finalConfigID = parentDevCfgID
 	case devCfgID != "":
 		finalConfigID = devCfgID
 	default:

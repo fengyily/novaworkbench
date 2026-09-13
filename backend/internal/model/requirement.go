@@ -39,6 +39,13 @@ type Requirement struct {
 	ArchitectModel string `json:"architect_model"`
 	DeveloperModel string `json:"developer_model"`
 	ReviewerModel  string `json:"reviewer_model"`
+	// Effective Claude-config (claude_configs.id) the user selected for the
+	// architect-design / developer stage, persisted on the success path so the
+	// config dropdown and the model both re-hydrate on refresh, and adjust /
+	// continue runs fall back to the requirement's own config rather than the
+	// global active one. Empty = stage not yet run (or predates this column).
+	ArchitectConfigID string `json:"architect_config_id"`
+	DeveloperConfigID string `json:"developer_config_id"`
 	// Context compression artifacts, one set per wizard stage. When the user
 	// clicks "📦 压缩上下文", the wizard handler runs a one-off --resume turn
 	// asking Claude to summarize the current session, stores the Chinese
