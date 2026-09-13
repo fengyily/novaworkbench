@@ -961,8 +961,9 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 // prompt. model / roleConfigID are the caller's pre-resolved effective values
 // (pr_author role by default). sourceSID is deliberately empty: the push child
 // runs a fresh session because the requirement's main-agent session may have
-// ended or be unsuitable to continue. The sub-task inherits the requirement's
-// agent_server_id so Run routes it to the host the code actually lives on.
+// ended or be unsuitable to continue. The sub-task is routed to where the code
+// physically lives (codeLivesOnAgent): the agent host for remote-sync, or the
+// local worktree for local-sync — where the origin credentials actually live.
 //
 // Returns the JobStore job id + sub_tasks row id so an HTTP caller can hand
 // them to the frontend for SSE subscription; the automatic caller ignores them.
@@ -973,7 +974,15 @@ func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev
 		title = "推送并创建 PR: " + truncateMergePrompt(commitMessage, 40)
 	}
 	sourceSID := ""
-	st, job, newSID, nerr := runner.NewPendingSubTask(reqRow.ID, title, prompt, model, sourceSID, reqRow.AgentServerID)
+	// Route the push/PR child to where the code physically lives: on the agent
+	// host only for origin-transport (remote-sync) requirements. Local-sync
+	// (sync_mode="local") syncs code back to the LOCAL worktree each round, so
+	// commit/push/PR must run locally where the origin credentials live.
+	pushServerID := ""
+	if codeLivesOnAgent(reqRow) {
+		pushServerID = reqRow.AgentServerID
+	}
+	st, job, newSID, nerr := runner.NewPendingSubTask(reqRow.ID, title, prompt, model, sourceSID, pushServerID)
 	if nerr != nil {
 		return "", "", nerr
 	}
@@ -998,8 +1007,10 @@ func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platfo
 	// worktree on the agent host (same /tmp/nova-agent/<proj>/<req> layout the
 	// coding pass used), so the "当前工作目录" wording above stays true — the
 	// note just tells the user where that directory physically is.
-	if reqRow.AgentServerID != "" {
-		b.WriteString("> 本需求由 Agent 服务器开发：本子任务会在该服务器的远端工作区中执行，提交与推送均发生在远端，本地仓库无需（也无法）参与。\n")
+	if codeLivesOnAgent(reqRow) {
+		b.WriteString("> 本需求由 Agent 服务器开发（远程仓库同步）：本子任务会在该服务器的远端工作区中执行，提交与推送均发生在远端，本地仓库无需（也无法）参与。\n")
+	} else if reqRow.AgentServerID != "" {
+		b.WriteString("> 本需求由 Agent 服务器开发（本地仓库同步）：代码已同步回本地隔离 worktree，本子任务在本地执行，提交 / 推送 / 创建 PR 均在本地完成。\n")
 	}
 	b.WriteString("\n")
 
