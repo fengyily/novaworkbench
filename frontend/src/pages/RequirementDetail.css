@@ -2027,6 +2027,14 @@ allowed so the row collapses cleanly on every viewport. */
   color: #1e293b;
 }
 
+/* Completed design body is a light Markdown surface; fullscreen it on a light
+   background so the dark Markdown text stays legible (the default .is-fullscreen
+   dark bg would clash). */
+.design-content.is-fullscreen {
+  background: #ffffff !important;
+  color: #1e293b;
+}
+
 /* Floating "exit fullscreen" affordance rendered inside the panel
    while it is fullscreen — the panel's own toolbar is no longer in
    view once the container goes fixed. */

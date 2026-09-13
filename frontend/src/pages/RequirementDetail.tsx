@@ -2184,6 +2184,11 @@ export default function RequirementDetail() {
   // the error line stays visible instead of collapsing behind the toggle.
   const designPanelOpen = designProcessActive || designError || showDesignProcess;
   const showDesignToggle = designLines.length > 0 && !designProcessActive && !designError;
+  // After the plan finishes (or the page reloads) the process panel is
+  // collapsed, so fullscreen has no live panel to act on. In that case retarget
+  // fullscreen to the completed design body (design-content). The two targets
+  // are mutually exclusive via !designPanelOpen, so they never both fullscreen.
+  const designContentFullscreen = designFs.isFullscreen && !designPanelOpen && hasDesign;
   // Claude working status. Analysis signal comes from DeepRefineChat's live
   // onWorkingChange (the persisted analysis_job_id is only refreshed after a
   // turn finishes, so it lags during the turn); design/apply use the persisted
@@ -3468,7 +3473,9 @@ export default function RequirementDetail() {
                 {exporting ? <><IconHourglass size={13} className="btn-icon" />{t('requirements.detail2.exportingPdf')}</> : <><IconFileText size={13} className="btn-icon" />{t('requirements.detail2.exportPdfBtn')}</>}
               </button>
             )}
-            <FullscreenButton isFullscreen={designFs.isFullscreen} onClick={designFs.toggle} />
+            {(designPanelOpen || hasDesign) && (
+              <FullscreenButton isFullscreen={designFs.isFullscreen} onClick={designFs.toggle} />
+            )}
           </div>
 
           {/* Optional knowledge pre-read display (renders only when the user
@@ -3532,7 +3539,16 @@ export default function RequirementDetail() {
 
           {hasDesign && (
             <>
-              <div className={isLongDesign && !designExpanded ? 'design-content design-content-collapsed' : 'design-content'}>
+              <div
+                className={
+                  'design-content' +
+                  (isLongDesign && !designExpanded && !designContentFullscreen ? ' design-content-collapsed' : '') +
+                  (designContentFullscreen ? ' is-fullscreen' : '')
+                }
+              >
+                {designContentFullscreen && (
+                  <FullscreenButton isFullscreen onClick={designFs.exit} variant="floating" />
+                )}
                 {design.plan_markdown ? (
                   <div className="analysis-summary"><ReactMarkdown remarkPlugins={[remarkGfm]}>{design.plan_markdown}</ReactMarkdown></div>
                 ) : (
@@ -3562,7 +3578,7 @@ export default function RequirementDetail() {
                   </>
                 )}
               </div>
-              {isLongDesign && (
+              {isLongDesign && !designContentFullscreen && (
                 <button
                   type="button"
                   className="btn btn-sm design-toggle-btn"
