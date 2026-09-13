@@ -973,13 +973,25 @@ func (h *WizardHandler) GenerateSubTaskSummary(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Resolve the same runtime params tryAutoOrchestrate uses: developer role's
-	// model + claude config, plus the requirement's worktree path so the
-	// summary agent edits the right tree.
+	// Resolve the same runtime params tryAutoOrchestrate uses — the model +
+	// claude config the requirement was developed with (falling back to the
+	// developer role's), plus the requirement's worktree path so the summary
+	// agent edits the right tree. Inheriting the requirement's own pairing keeps
+	// the summary turn on the same gateway as the children it summarizes
+	// instead of the global active config (see pushPRRuntimeModel /
+	// resolveConfigIDForRun for the chain this mirrors).
 	_, modelName, claudeConfigID := h.roleConfig("developer")
+	if req.DeveloperModel != "" && req.DeveloperModel != DefaultModelLabel {
+		modelName = req.DeveloperModel
+	}
 	if body.Model != "" {
 		modelName = body.Model
 	}
+	fallbackCfgID := claudeConfigID
+	if req.DeveloperConfigID != "" {
+		fallbackCfgID = req.DeveloperConfigID
+	}
+	claudeConfigID = h.resolveConfigIDForRun("", modelName, fallbackCfgID)
 	workDir := ""
 	if proj, perr := h.projectSvc.Get(req.ProjectID); perr == nil {
 		workDir = proj.LocalPath

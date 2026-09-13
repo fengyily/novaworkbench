@@ -531,12 +531,28 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// Per-request model override (highest precedence); empty means role default.
 	if p.Model != "" {
 		model = p.Model
+	} else if reqRow != nil && reqRow.DeveloperModel != "" && reqRow.DeveloperModel != DefaultModelLabel {
+		// No explicit pick for this run → inherit the model the requirement was
+		// last developed with (the UI seeds its dropdown from the same column, so
+		// this only changes behavior for API / scheduler callers). Without it a
+		// re-develop silently reverted to the role / global-active default, and
+		// every auto-orchestrated child inherited that wrong model + config.
+		// The "默认模型" sentinel means "no specific model" — keep the role default.
+		model = reqRow.DeveloperModel
 	}
 	// Align the gateway config with the picked model: when the user picked a
 	// model from a non-active config (or explicitly named a config), prefer
 	// those over the role's binding so ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN
 	// match ANTHROPIC_MODEL. See resolveConfigIDForRun for the priority chain.
-	claudeConfigID = h.resolveConfigIDForRun(p.ClaudeConfigID, model, claudeConfigID)
+	// When the model was inherited from the requirement (no explicit pick), the
+	// requirement's own persisted config is the fallback candidate too — that
+	// keeps the resolved gateway on the config the model actually belongs to
+	// even for a model no claude_configs row lists any more.
+	fallbackCfgID := claudeConfigID
+	if p.Model == "" && reqRow != nil && reqRow.DeveloperConfigID != "" {
+		fallbackCfgID = reqRow.DeveloperConfigID
+	}
+	claudeConfigID = h.resolveConfigIDForRun(p.ClaudeConfigID, model, fallbackCfgID)
 	job.SetModel(model)
 	var prompt string
 	if sourceSID == "" {

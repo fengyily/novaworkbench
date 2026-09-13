@@ -107,3 +107,68 @@ func TestPickConfigForModelFromNoConfigs(t *testing.T) {
 		t.Fatalf("no configs, no candidates: got %q, want \"\"", got)
 	}
 }
+
+// TestPushPRRuntimeModel pins the "提交 → 推送 → 创建 PR" child's model/config
+// inheritance. The reported bug: with the active config being "配置B / b 模型",
+// a requirement developed on "配置A / a 模型" dispatched its auto push+PR child
+// on 配置B — the child inherited the model but not the gateway (and the
+// sub_tasks.model / token_usage.claude_config_id pair recorded the mismatch).
+func TestPushPRRuntimeModel(t *testing.T) {
+	// A requirement last developed on 配置A / a 模型.
+	req := &model.Requirement{ID: "req_1", DeveloperModel: "a 模型", DeveloperConfigID: "ccfg_a"}
+	// A requirement with no recorded developer model (never developed).
+	bare := &model.Requirement{ID: "req_2"}
+	// A legacy row whose developer_model is the "no specific model" sentinel.
+	sentinel := &model.Requirement{ID: "req_3", DeveloperModel: DefaultModelLabel}
+
+	cases := []struct {
+		name         string
+		req          *model.Requirement
+		explicit     string
+		prModel      string
+		prCfgID      string
+		wantModel    string
+		wantConfigID string
+	}{
+		{
+			name: "inherits the parent requirement's model",
+			req:  req, prModel: "b 模型", prCfgID: "ccfg_b",
+			wantModel: "a 模型", wantConfigID: "", // runner resolves 配置A from the model
+		},
+		{
+			name: "explicit pick wins over the parent",
+			req:  req, explicit: "c 模型", prModel: "b 模型", prCfgID: "ccfg_b",
+			wantModel: "c 模型", wantConfigID: "",
+		},
+		{
+			name: "no developer model falls back to the pr_author pair",
+			req:  bare, prModel: "b 模型", prCfgID: "ccfg_b",
+			wantModel: "b 模型", wantConfigID: "ccfg_b",
+		},
+		{
+			name: "sentinel developer model means no inheritance",
+			req:  sentinel, prModel: "b 模型", prCfgID: "ccfg_b",
+			wantModel: "b 模型", wantConfigID: "ccfg_b",
+		},
+		{
+			name: "empty pr_author model drops its config too (runner derives both)",
+			req:  bare, prModel: "", prCfgID: "ccfg_b",
+			wantModel: "", wantConfigID: "",
+		},
+		{
+			name: "nil requirement behaves like a bare row",
+			req:  nil, prModel: "b 模型", prCfgID: "ccfg_b",
+			wantModel: "b 模型", wantConfigID: "ccfg_b",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotModel, gotCfg := pushPRRuntimeModel(c.req, c.explicit, c.prModel, c.prCfgID)
+			if gotModel != c.wantModel || gotCfg != c.wantConfigID {
+				t.Fatalf("pushPRRuntimeModel(req=%v, explicit=%q, pr=(%q,%q)) = (%q,%q), want (%q,%q)",
+					c.req, c.explicit, c.prModel, c.prCfgID, gotModel, gotCfg, c.wantModel, c.wantConfigID)
+			}
+		})
+	}
+}

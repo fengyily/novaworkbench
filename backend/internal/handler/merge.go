@@ -921,18 +921,16 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 		base = project.DefaultBranch
 	}
 
-	// Resolve the effective model up-front so the SubTaskPanel can render the
-	// badge from the moment the row appears. Precedence: explicit body.Model >
-	// developer role's configured model. The runner will resolve the same way
-	// when it actually spawns the CLI, so the persisted value matches the
-	// dispatched value.
-	effectiveModel := body.Model
-	roleConfigID := ""
-	if effectiveModel == "" {
-		_, roleModel, cfgID := h.roleConfig("pr_author")
-		effectiveModel = roleModel
-		roleConfigID = cfgID
-	}
+	// Resolve the effective model + claude config up-front so the SubTaskPanel
+	// can render the badge from the moment the row appears. Precedence:
+	// explicit body.Model > the requirement's own persisted developer model >
+	// the pr_author role's configured model. The runner resolves the gateway
+	// the same way when it spawns the CLI, so the persisted value matches the
+	// dispatched one. See pushPRRuntimeModel for why the requirement's pairing
+	// must beat the pr_author / global-active default — the push/PR child
+	// inherits the main task's model AND gateway.
+	_, prModel, prCfgID := h.roleConfig("pr_author")
+	effectiveModel, roleConfigID := pushPRRuntimeModel(reqRow, body.Model, prModel, prCfgID)
 
 	// Dispatch the push+PR child agent through the shared core so the manual
 	// path here and the automatic WizardHandler.autoPushPR path never diverge.
