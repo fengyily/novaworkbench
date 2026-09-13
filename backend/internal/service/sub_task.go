@@ -155,7 +155,7 @@ func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, mode
 // keep a stable order.
 func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 	rows, err := s.db.Query(`SELECT id, requirement_id, title, prompt, status,
-		session_id, source_session_id, job_id, artifact, model,
+		session_id, source_session_id, job_id, artifact, model, claude_config_id,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
 		created_at, updated_at, completed_at,
@@ -192,7 +192,7 @@ func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 // stays a thin SQL wrapper).
 func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 	rows, err := s.db.Query(`SELECT id, requirement_id, title, prompt, status,
-		session_id, source_session_id, job_id, artifact, model,
+		session_id, source_session_id, job_id, artifact, model, claude_config_id,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
 		created_at, updated_at, completed_at,
@@ -227,7 +227,7 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 // batch has no rows — never nil.
 func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
 	rows, err := s.db.Query(`SELECT id, requirement_id, title, prompt, status,
-		session_id, source_session_id, job_id, artifact, model,
+		session_id, source_session_id, job_id, artifact, model, claude_config_id,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
 		created_at, updated_at, completed_at,
@@ -408,7 +408,7 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 		return nil, false, nil
 	}
 	rows, err := s.db.Query(`SELECT id, requirement_id, title, prompt, status,
-		session_id, source_session_id, job_id, artifact, model,
+		session_id, source_session_id, job_id, artifact, model, claude_config_id,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
 		created_at, updated_at, completed_at,
@@ -501,6 +501,20 @@ func (s *SubTaskService) SetBatchID(subTaskID, batchID string, batchSeq int) err
 func (s *SubTaskService) UpdateModel(id, modelName string) error {
 	_, err := s.db.Exec(`UPDATE sub_tasks SET model=?, updated_at=? WHERE id=?`,
 		modelName, time.Now(), id)
+	return err
+}
+
+// UpdateClaudeConfigID stamps the claude_configs row the child was actually
+// dispatched against. Written by the runner right after resolution (before the
+// claude subprocess spawns) so the audit trail survives an aborted or failed
+// child; an empty id is a no-op guard against clobbering a good binding with
+// "unresolved".
+func (s *SubTaskService) UpdateClaudeConfigID(id, configID string) error {
+	if id == "" || configID == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`UPDATE sub_tasks SET claude_config_id=?, updated_at=? WHERE id=?`,
+		configID, time.Now(), id)
 	return err
 }
 
@@ -836,7 +850,7 @@ func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 	var agentServerID sql.NullString
 	if err := rows.Scan(
 		&st.ID, &st.RequirementID, &st.Title, &st.Prompt, &st.Status,
-		&st.SessionID, &st.SourceSessionID, &st.JobID, &st.Artifact, &st.Model,
+		&st.SessionID, &st.SourceSessionID, &st.JobID, &st.Artifact, &st.Model, &st.ClaudeConfigID,
 		&st.InputTokens, &st.OutputTokens, &st.CacheCreationTokens, &st.CacheReadTokens,
 		&st.CostCents, &st.DurationSeconds,
 		&st.CreatedAt, &st.UpdatedAt, &completedAt,

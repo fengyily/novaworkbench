@@ -176,7 +176,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 			firstTurnPrompt = func() string { return skillsBlock + origFirstTurnPrompt() }
 			resumePrompt = skillsBlock + resumePrompt
 		}
-		analystUsage := h.usageCtxFor("analyst_chat", req.RequirementID, requirement.ProjectID, job.ID, model, "", "")
+		analystUsage := h.usageCtxForConfig("analyst_chat", req.RequirementID, requirement.ProjectID, job.ID, model, "", "", claudeConfigID)
 		finalResult, newSessionID, err := h.runAnalystTurn(context.Background(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sessionID, !isFirstRound, sink, analystUsage)
 		if err != nil {
 			log.Printf("[analyst-chat] turn failed: %v", err)
@@ -393,7 +393,7 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 	if requirement != nil {
 		developerProjectID = requirement.ProjectID
 	}
-	developerUsage := h.usageCtxFor("developer_chat", req.RequirementID, developerProjectID, "", model, "", req.UserMessage)
+	developerUsage := h.usageCtxForConfig("developer_chat", req.RequirementID, developerProjectID, "", model, "", req.UserMessage, claudeConfigID)
 	finalResult, newSessionID, err := h.runDeveloperTurn(r.Context(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sourceSID, fork, newSID, w, rc, developerUsage)
 	if err != nil {
 		log.Printf("[developer-chat] turn failed: %v", err)

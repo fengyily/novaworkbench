@@ -778,6 +778,13 @@ func (s *RequirementService) UpdateReviewerModel(id, model string) error {
 // dropdown re-hydrates alongside the model on refresh, and adjust/continue runs
 // fall back to the requirement's own persisted config.
 func (s *RequirementService) UpdateStageConfig(id, column, cfg string) error {
+	// Empty is "nothing resolved" (no config row at all), never "clear the
+	// binding": overwriting a good value with '' would make the stage fall back
+	// to the global active config on the next refresh — exactly the regression
+	// this column exists to prevent.
+	if cfg == "" {
+		return nil
+	}
 	_, err := s.db.Exec("UPDATE requirements SET "+s.db.Ident(column)+"=?, updated_at=? WHERE id=?",
 		cfg, time.Now(), id)
 	return err

@@ -301,6 +301,12 @@ export interface SubTask {
   job_id: string;
   artifact: string;
   model: string;
+  // claude_configs row this child was actually dispatched against (inherited
+  // from the parent requirement's developer stage, picked in the composer, or
+  // resolved from the model). Empty on legacy rows written before the column
+  // existed. Paired with `model` it records which gateway+model pair the
+  // sub-task inherited from the main task.
+  claude_config_id?: string;
   // Terminal token usage as recorded on Finish (zero until then). The
   // header badge combines these into a single "12.4k↓ / 3.1k↑" readout
   // without a second token_usage SELECT, so the badge stays cheap to

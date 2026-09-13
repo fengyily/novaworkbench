@@ -393,7 +393,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 				forkSessionID:  forkSessionID,
 				model:          model,
 				claudeConfigID: claudeConfigID,
-				usage:          h.usageCtxFor("architect_design", id, req.ProjectID, job.ID, model, "", ""),
+				usage:          h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 				PermissionMode: "plan",
 			},
 		})
@@ -415,7 +415,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 			ForkSessionID:  forkSessionID,
 			PermissionMode: "plan",
 		})
-		out = runClaudeStream(jobSink{job}, cmd, "architect-design", h.usageCtxFor("architect_design", id, req.ProjectID, job.ID, model, "", ""))
+		out = runClaudeStream(jobSink{job}, cmd, "architect-design", h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID))
 	}
 
 	h.finalizeArchitectRun(out, p, job, kbReadTitles, sourceSID, newDesignSID, id, model)

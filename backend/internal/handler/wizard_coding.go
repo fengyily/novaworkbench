@@ -816,7 +816,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	if reqRow != nil {
 		codingProjectID = reqRow.ProjectID
 	}
-	codingUsage := h.usageCtxFor("coding", p.RequirementID, codingProjectID, job.ID, model, "", "")
+	codingUsage := h.usageCtxForConfig("coding", p.RequirementID, codingProjectID, job.ID, model, "", "", claudeConfigID)
 
 	// Remote Agent-server branch: SSHs into the target, syncs the claude
 	// session dir so --resume works, executes the same claude flag list on
@@ -1064,12 +1064,20 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only the developer role's MODEL is honored (so the user's latest model
-	// setting applies to follow-up turns). The system prompt is deliberately
-	// omitted: the resumed coding session already carries the developer
-	// persona, and re-injecting --system-prompt would replace it.
+	// Model for this follow-up turn, in precedence order:
+	//   1. per-request override (the composer's picker)
+	//   2. the requirement's own persisted developer model — the user picked it
+	//      for THIS requirement, and inheriting it is what keeps a follow-up
+	//      turn on the same model + gateway as the original coding pass
+	//      (mirrors the sub-task inheritance rule)
+	//   3. the developer role's current model
+	// The system prompt is deliberately omitted: the resumed coding session
+	// already carries the developer persona, and re-injecting --system-prompt
+	// would replace it.
 	_, model, devCfgID := h.roleConfig("developer")
-	// Per-request model override (highest precedence); empty means role default.
+	if req.DeveloperModel != "" && req.DeveloperModel != DefaultModelLabel {
+		model = req.DeveloperModel
+	}
 	if body.Model != "" {
 		model = body.Model
 	}
@@ -1155,7 +1163,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 				sourceSID:  req.CodingSessionID,
 				sessionArg: req.CodingSessionID,
 				model:      model,
-				usage:      h.usageCtxFor("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message),
+				usage:      h.usageCtxForConfig("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message, claudeConfigID),
 			})
 			h.finishRemoteCodingJob(job, out, body.RequirementID, model, claudeConfigID, "adjust-coding", "✅ 追加调整完成！")
 			return
@@ -1171,7 +1179,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			Fork:           false,
 		})
 		defer cancel()
-		adjustUsage := h.usageCtxFor("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message)
+		adjustUsage := h.usageCtxForConfig("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message, claudeConfigID)
 		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding", adjustUsage)
 
 		// Stale --resume: the coding session file is gone (~/.claude/ cleaned
@@ -1302,15 +1310,22 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only the developer role's MODEL is honored (so the user's latest model
-	// setting applies to the continuation). The system prompt is deliberately
-	// omitted: the resumed coding session already carries the developer persona,
-	// and re-injecting --system-prompt would replace it (same as AdjustCoding).
+	// Model for the resumed turn: the requirement's OWN persisted developer
+	// model wins over the developer role's current setting, mirroring the
+	// sub-task inheritance rule — the user picked that model for this
+	// requirement, and continue-coding carries no per-request override, so
+	// falling back to the role default would silently switch the gateway half
+	// way through a requirement. The system prompt is deliberately omitted: the
+	// resumed coding session already carries the developer persona, and
+	// re-injecting --system-prompt would replace it (same as AdjustCoding).
 	_, model, devCfgID := h.roleConfig("developer")
-	// continue-coding has no per-request model override, so align the config
-	// with the role/persisted model and fall back to the requirement's own
-	// persisted developer config before the role/global one — so the resumed
-	// turn runs against the same gateway the first coding pass used.
+	if req.DeveloperModel != "" && req.DeveloperModel != DefaultModelLabel {
+		model = req.DeveloperModel
+	}
+	// Align the gateway config with that model: the model's owning config is
+	// looked up first (which repairs requirements that persisted the model
+	// before developer_config_id existed), then the requirement's own persisted
+	// config, then the role binding / active config. See resolveConfigIDForRun.
 	fallbackCfgID := devCfgID
 	if req.DeveloperConfigID != "" {
 		fallbackCfgID = req.DeveloperConfigID
@@ -1371,7 +1386,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 				sourceSID:  req.CodingSessionID,
 				sessionArg: req.CodingSessionID,
 				model:      model,
-				usage:      h.usageCtxFor("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", ""),
+				usage:      h.usageCtxForConfig("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 			})
 			h.finishRemoteCodingJob(job, out, body.RequirementID, model, claudeConfigID, "continue-coding", "✅ 续接开发完成！")
 			return
@@ -1387,7 +1402,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 			Fork:           false,
 		})
 		defer cancel()
-		continueUsage := h.usageCtxFor("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "")
+		continueUsage := h.usageCtxForConfig("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "", claudeConfigID)
 		out := runClaudeStream(jobSink{job}, cmd, "continue-coding", continueUsage)
 
 		// Stale --resume: the coding session file is gone. Surface a clear error

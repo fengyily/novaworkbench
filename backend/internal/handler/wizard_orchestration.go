@@ -145,7 +145,7 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 			Resume:         resume,
 		})
 		defer cancel()
-		usage := h.usageCtxFor("re_orchestrate", id, req.ProjectID, job.ID, modelName, "", "")
+		usage := h.usageCtxForConfig("re_orchestrate", id, req.ProjectID, job.ID, modelName, "", "", claudeConfigID)
 		out := runClaudeStream(jobSink{job}, cmd, "re-orchestrate", usage)
 
 		switch {
@@ -1174,24 +1174,18 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 		log.Printf("[orchestrate] failed to persist child job_id for %s: %v", st.ID, perr)
 	}
 
-	// Resolve executor role + claude config binding. Same priority as the
-	// pre-batch dispatchOneChild: explicit batch config > model lookup >
-	// executor-role fallback.
+	// Resolve executor role + claude config binding. The batch carries the
+	// model/config the orchestrator was launched with (inherited from the
+	// developer stage), so the child must run on that same gateway: prefer a
+	// candidate that actually owns the model, else the config that owns it
+	// (repairs batches written before claude_config_id was persisted or when
+	// only the model was recorded), else the executor-role fallback. See
+	// pickConfigForModel.
 	execSystemPrompt, _, executorConfigID := h.roleConfig(executorRoleKey)
 	modelName = batch.Model
-	devCfgID := batch.ClaudeConfigID
-	var finalConfigID string
-	switch {
-	case devCfgID != "":
-		finalConfigID = devCfgID
-	case modelName != "":
-		if cid, cerr := h.claudeCfg.ResolveConfigForModel(modelName); cerr == nil && cid != "" {
-			finalConfigID = cid
-		} else {
-			finalConfigID = executorConfigID
-		}
-	default:
-		finalConfigID = executorConfigID
+	finalConfigID := pickConfigForModel(h.claudeCfg, modelName, batch.ClaudeConfigID, executorConfigID)
+	if perr := h.subTaskSvc.UpdateClaudeConfigID(st.ID, finalConfigID); perr != nil {
+		log.Printf("[orchestrate] failed to persist claude_config_id for %s: %v", st.ID, perr)
 	}
 
 	executorPrompt := "## 子任务\n\n" + st.Prompt + "\n\n" +
@@ -1265,7 +1259,7 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	// Same cross-environment caveat Run prints, from the same helper.
 	appendCrossEnvHint(job, effectiveServerID, req.AgentServerID, req.SyncMode)
 
-	childUsage := h.usageCtxFor("sub_task", reqID, req.ProjectID, job.ID, modelName, "", st.Prompt)
+	childUsage := h.usageCtxForConfig("sub_task", reqID, req.ProjectID, job.ID, modelName, "", st.Prompt, finalConfigID)
 	// Route orchestrated children to the environment resolved above — same
 	// reasoning as runSubTask: the working tree lives on that host, so a
 	// locally-spawned child would edit the wrong checkout.
@@ -1481,7 +1475,7 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 	})
 	defer cancel()
 
-	summaryUsage := h.usageCtxFor("orchestrate_summary", batch.RequirementID, req.ProjectID, job.ID, batch.Model, "", "auto-summary")
+	summaryUsage := h.usageCtxForConfig("orchestrate_summary", batch.RequirementID, req.ProjectID, job.ID, batch.Model, "", "auto-summary", batch.ClaudeConfigID)
 	out := runClaudeStream(jobSink{job}, cmd, "orchestrate-summary", summaryUsage)
 
 	// Stale-session recovery：会话文件可能已被清理/失效。镜像 re-orchestrate

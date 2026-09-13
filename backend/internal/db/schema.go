@@ -352,6 +352,7 @@ CREATE TABLE IF NOT EXISTS sub_tasks (
 	job_id             TEXT NOT NULL DEFAULT '',
 	artifact           TEXT NOT NULL DEFAULT '',
 	model              TEXT NOT NULL DEFAULT '',
+	claude_config_id   TEXT NOT NULL DEFAULT '',
 	input_tokens       INTEGER NOT NULL DEFAULT 0,
 	output_tokens      INTEGER NOT NULL DEFAULT 0,
 	cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
@@ -496,6 +497,14 @@ var alterColumns = []string{
 	// falls back to the active config. Same duplicate-column idempotency as above.
 	`ALTER TABLE requirements ADD COLUMN architect_config_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN developer_config_id TEXT NOT NULL DEFAULT ''`,
+	// Sub-task Claude-config binding: the claude_configs.id the child agent was
+	// actually dispatched against (inherited from the parent requirement's
+	// developer stage, picked in the composer, or resolved from the model).
+	// Written when the child run starts so an aborted/failed child still records
+	// the gateway it used; paired with sub_tasks.model it answers "which
+	// config+model did this child inherit from the main task". Empty = legacy
+	// row (pre-column) or no config resolved.
+	`ALTER TABLE sub_tasks ADD COLUMN claude_config_id TEXT NOT NULL DEFAULT ''`,
 	// Agent-server binding for the developer stage: the agent_servers.id chosen
 	// in the start-coding modal (or re-bound by adjust-coding / continue-coding).
 	// Persisted only on the success path of the developer job so a failed run
