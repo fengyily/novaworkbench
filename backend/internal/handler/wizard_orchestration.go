@@ -24,7 +24,8 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Model string `json:"model"`
+		Model          string `json:"model"`
+		ClaudeConfigID string `json:"claude_config_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
 		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
@@ -90,11 +91,27 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		systemPrompt, modelName, claudeConfigID := h.roleConfig("developer")
+		systemPrompt, modelName, devCfgID := h.roleConfig("developer")
+		// Inherit the parent requirement's persisted developer model (and, below,
+		// its config) so a re-split defaults to the SAME model + gateway the
+		// requirement was developed with — matching the manual sub-task composer.
+		// An explicit per-request override still wins. The batch stores the
+		// resolved model + config (commitOrchestrationBatch), so every dispatched
+		// child inherits them via orchestration_batches.claude_config_id.
 		if body.Model != "" {
 			modelName = body.Model
+		} else if req.DeveloperModel != "" && req.DeveloperModel != DefaultModelLabel {
+			modelName = req.DeveloperModel
 		}
 		job.SetModel(modelName)
+		// Align the gateway config with the resolved model; fall back to the
+		// requirement's own persisted developer config before the role/global
+		// one (same priority chain as resolveConfigIDForRun / sub_task_runner).
+		fallbackCfgID := devCfgID
+		if req.DeveloperConfigID != "" {
+			fallbackCfgID = req.DeveloperConfigID
+		}
+		claudeConfigID := h.resolveConfigIDForRun(body.ClaudeConfigID, modelName, fallbackCfgID)
 
 		// Session threading: resume the existing coding session so the main
 		// agent re-decomposes with full context. No coding session yet →

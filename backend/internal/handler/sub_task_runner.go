@@ -368,6 +368,14 @@ func (r *SubTaskRunner) Run(
 	// matching config below so model and base URL always agree.
 	_, devModel, devCfgID := r.roleConfig("developer")
 	modelName := devModel
+	// Inherit the parent requirement's persisted developer model so a manual
+	// sub-task defaults to the SAME model the requirement was developed with
+	// (not the developer role / active-config default). Skip the '默认模型'
+	// sentinel — it means "no specific model", so we keep the role default.
+	// An explicit modelOverride (composer picker / redo) still wins below.
+	if req != nil && req.DeveloperModel != "" && req.DeveloperModel != DefaultModelLabel {
+		modelName = req.DeveloperModel
+	}
 	if modelOverride != "" {
 		modelName = modelOverride
 	}
