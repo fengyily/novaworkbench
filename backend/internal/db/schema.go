@@ -487,6 +487,15 @@ var alterColumns = []string{
 	`ALTER TABLE requirements ADD COLUMN architect_model TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN developer_model TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN reviewer_model TEXT NOT NULL DEFAULT ''`,
+	// Per-stage Claude-config binding: the claude_configs.id the user actually
+	// selected for the architect-design / developer stage. Persisted alongside
+	// the *_model columns (success path only) so a page refresh / re-entry
+	// restores BOTH the config dropdown and the model, and adjust/continue runs
+	// fall back to the requirement's own persisted config instead of the global
+	// active one. Empty = stage not yet run (or predates this column) → the UI
+	// falls back to the active config. Same duplicate-column idempotency as above.
+	`ALTER TABLE requirements ADD COLUMN architect_config_id TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN developer_config_id TEXT NOT NULL DEFAULT ''`,
 	// Agent-server binding for the developer stage: the agent_servers.id chosen
 	// in the start-coding modal (or re-bound by adjust-coding / continue-coding).
 	// Persisted only on the success path of the developer job so a failed run

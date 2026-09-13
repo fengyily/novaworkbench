@@ -870,6 +870,9 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			if perr := h.reqSvc.UpdateDeveloperModel(p.RequirementID, model); perr != nil {
 				log.Printf("[start-coding] failed to persist developer_model for %s: %v", p.RequirementID, perr)
 			}
+			if perr := h.reqSvc.UpdateDeveloperConfig(p.RequirementID, claudeConfigID); perr != nil {
+				log.Printf("[start-coding] failed to persist developer_config_id for %s: %v", p.RequirementID, perr)
+			}
 			// dev_source / agent_server_id were stamped up front by the
 			// execStartCoding prologue (see line ~1246) — no need to re-write on
 			// the success path. The prologue fires before the remote job starts
@@ -936,10 +939,13 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			}
 		}
 	}
-	// Record the effective developer model (success path only).
+	// Record the effective developer model + resolved config (success path only).
 	if p.RequirementID != "" {
 		if perr := h.reqSvc.UpdateDeveloperModel(p.RequirementID, model); perr != nil {
 			log.Printf("[start-coding] failed to persist developer_model for %s: %v", p.RequirementID, perr)
+		}
+		if perr := h.reqSvc.UpdateDeveloperConfig(p.RequirementID, claudeConfigID); perr != nil {
+			log.Printf("[start-coding] failed to persist developer_config_id for %s: %v", p.RequirementID, perr)
 		}
 		// dev_source / agent_server_id were stamped up front by the
 		// execStartCoding prologue (line ~1246) before the claude subprocess
@@ -1023,9 +1029,10 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 // POST /api/wizard/adjust-coding { requirement_id, message } -> { job_id }
 func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		RequirementID string `json:"requirement_id"`
-		Message       string `json:"message"`
-		Model         string `json:"model"`
+		RequirementID  string `json:"requirement_id"`
+		Message        string `json:"message"`
+		Model          string `json:"model"`
+		ClaudeConfigID string `json:"claude_config_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		log.Printf("[adjust-coding] JSON decode error: %v", err)
@@ -1061,11 +1068,20 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 	// setting applies to follow-up turns). The system prompt is deliberately
 	// omitted: the resumed coding session already carries the developer
 	// persona, and re-injecting --system-prompt would replace it.
-	_, model, claudeConfigID := h.roleConfig("developer")
+	_, model, devCfgID := h.roleConfig("developer")
 	// Per-request model override (highest precedence); empty means role default.
 	if body.Model != "" {
 		model = body.Model
 	}
+	// Align the gateway config with the picked model, and fall back to the
+	// requirement's own persisted developer config before the role/global one —
+	// so a resumed adjust turn runs against the same gateway the first coding
+	// pass used (not the global active config). See resolveConfigIDForRun.
+	fallbackCfgID := devCfgID
+	if req.DeveloperConfigID != "" {
+		fallbackCfgID = req.DeveloperConfigID
+	}
+	claudeConfigID := h.resolveConfigIDForRun(body.ClaudeConfigID, model, fallbackCfgID)
 
 	job := h.jobs.Create(body.RequirementID)
 	job.SetType("adjust_coding")
@@ -1141,7 +1157,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 				model:      model,
 				usage:      h.usageCtxFor("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message),
 			})
-			h.finishRemoteCodingJob(job, out, body.RequirementID, model, "adjust-coding", "✅ 追加调整完成！")
+			h.finishRemoteCodingJob(job, out, body.RequirementID, model, claudeConfigID, "adjust-coding", "✅ 追加调整完成！")
 			return
 		}
 		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
@@ -1186,6 +1202,9 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		if perr := h.reqSvc.UpdateDeveloperModel(body.RequirementID, model); perr != nil {
 			log.Printf("[adjust-coding] failed to persist developer_model for %s: %v", body.RequirementID, perr)
 		}
+		if perr := h.reqSvc.UpdateDeveloperConfig(body.RequirementID, claudeConfigID); perr != nil {
+			log.Printf("[adjust-coding] failed to persist developer_config_id for %s: %v", body.RequirementID, perr)
+		}
 		// agent_server_id re-binding on the success path is intentionally
 		// skipped: dev_source / agent_server_id are already correct from the
 		// original StartCoding prologue. An adjust turn runs on the same
@@ -1205,7 +1224,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 // result + a done frame and stamp developer_model. Factored out so
 // StartCoding / AdjustCoding / ContinueCoding all report remote runs
 // identically — the frontend can't tell a remote job from a local one.
-func (h *WizardHandler) finishRemoteCodingJob(job *store.Job, out claudeStreamOutcome, reqID, model, tag, doneMsg string) {
+func (h *WizardHandler) finishRemoteCodingJob(job *store.Job, out claudeStreamOutcome, reqID, model, claudeConfigID, tag, doneMsg string) {
 	switch {
 	case out.staleSession:
 		job.Append(store.LogLine{Type: "error", Content: "❌ 原 coding 会话已失效（session 文件不存在），请重新发起 coding。"})
@@ -1225,6 +1244,9 @@ func (h *WizardHandler) finishRemoteCodingJob(job *store.Job, out claudeStreamOu
 	if reqID != "" {
 		if perr := h.reqSvc.UpdateDeveloperModel(reqID, model); perr != nil {
 			log.Printf("[%s] failed to persist developer_model for %s: %v", tag, reqID, perr)
+		}
+		if perr := h.reqSvc.UpdateDeveloperConfig(reqID, claudeConfigID); perr != nil {
+			log.Printf("[%s] failed to persist developer_config_id for %s: %v", tag, reqID, perr)
 		}
 	}
 	job.Finish(0, store.JobDone)
@@ -1284,7 +1306,16 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 	// setting applies to the continuation). The system prompt is deliberately
 	// omitted: the resumed coding session already carries the developer persona,
 	// and re-injecting --system-prompt would replace it (same as AdjustCoding).
-	_, model, claudeConfigID := h.roleConfig("developer")
+	_, model, devCfgID := h.roleConfig("developer")
+	// continue-coding has no per-request model override, so align the config
+	// with the role/persisted model and fall back to the requirement's own
+	// persisted developer config before the role/global one — so the resumed
+	// turn runs against the same gateway the first coding pass used.
+	fallbackCfgID := devCfgID
+	if req.DeveloperConfigID != "" {
+		fallbackCfgID = req.DeveloperConfigID
+	}
+	claudeConfigID := h.resolveConfigIDForRun("", model, fallbackCfgID)
 
 	job := h.jobs.Create(body.RequirementID)
 	job.SetType("continue_coding")
@@ -1342,7 +1373,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 				model:      model,
 				usage:      h.usageCtxFor("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", ""),
 			})
-			h.finishRemoteCodingJob(job, out, body.RequirementID, model, "continue-coding", "✅ 续接开发完成！")
+			h.finishRemoteCodingJob(job, out, body.RequirementID, model, claudeConfigID, "continue-coding", "✅ 续接开发完成！")
 			return
 		}
 		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
@@ -1386,6 +1417,9 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		// path only — "most recent successful run" semantics).
 		if perr := h.reqSvc.UpdateDeveloperModel(body.RequirementID, model); perr != nil {
 			log.Printf("[continue-coding] failed to persist developer_model for %s: %v", body.RequirementID, perr)
+		}
+		if perr := h.reqSvc.UpdateDeveloperConfig(body.RequirementID, claudeConfigID); perr != nil {
+			log.Printf("[continue-coding] failed to persist developer_config_id for %s: %v", body.RequirementID, perr)
 		}
 		// Re-bind the Agent Server when the continuation ran on one. Empty body
 		// field = legacy client → keep the existing binding (same guard as

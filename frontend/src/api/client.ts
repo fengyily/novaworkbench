@@ -362,7 +362,7 @@ export const subTasksApi = {
   // 本地, or an agent_servers.id to run on that server.
   create: (
     requirementId: string,
-    data: { prompt: string; title?: string; model?: string; freshSession?: boolean; agent_server_id?: string },
+    data: { prompt: string; title?: string; model?: string; claude_config_id?: string; freshSession?: boolean; agent_server_id?: string },
   ) => api.post<{ job_id: string; sub_task_id: string }>(`/api/requirements/${requirementId}/sub-tasks`, data),
   // List all sub-tasks for a requirement (oldest first).
   list: (requirementId: string) =>
@@ -373,7 +373,7 @@ export const subTasksApi = {
   // /api/wizard/jobs/{job_id}/stream for the main agent's progress; the
   // dispatched children appear in the sub-tasks list afterwards.
   // 409 when a child is still running.
-  reOrchestrate: (requirementId: string, data?: { model?: string }) =>
+  reOrchestrate: (requirementId: string, data?: { model?: string; claude_config_id?: string }) =>
     api.post<{ job_id: string }>(`/api/requirements/${requirementId}/re-orchestrate`, data ?? {}),
   // Fetch one sub-task (incl. artifact Markdown). 404 when the id doesn't
   // belong to the requirement.
@@ -563,6 +563,11 @@ export interface Requirement {
   architect_model?: string;
   developer_model?: string;
   reviewer_model?: string;
+  // Effective Claude-config (claude_configs.id) selected for the architect /
+  // developer stage, persisted on the success path so the config dropdown
+  // re-hydrates alongside the model on refresh. Empty = stage not yet run.
+  architect_config_id?: string;
+  developer_config_id?: string;
   // Per-stage context-compression state. Populated by POST
   // /api/wizard/compress-context (which writes the summary, stamps the time,
   // and clears the matching session_id). Used by the requirement detail

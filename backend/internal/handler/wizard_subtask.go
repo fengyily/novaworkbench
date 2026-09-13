@@ -394,7 +394,11 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		Prompt       string `json:"prompt"`
 		Title        string `json:"title"`
 		Model        string `json:"model"`
-		FreshSession bool   `json:"freshSession"`
+		// ClaudeConfigID is the user-picked (or parent-inherited) claude_configs
+		// row id from the composer's ModelSelect. Empty lets the runner resolve
+		// it (model→config lookup / parent requirement config / role / active).
+		ClaudeConfigID string `json:"claude_config_id"`
+		FreshSession   bool   `json:"freshSession"`
 		// AgentServerID selects the child's execution environment. A pointer so
 		// an omitted field (nil) defaults to the parent requirement's env
 		// (inheritance), while an explicit "" means the user deliberately chose
@@ -453,7 +457,7 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		"sub_task_id": st.ID,
 	})
 
-	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, "", false, true, body.FreshSession)
+	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, body.ClaudeConfigID, false, true, body.FreshSession)
 }
 
 // AdjustSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/adjust.
