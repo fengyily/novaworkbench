@@ -172,6 +172,24 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 //   - both NULL → the requirement sits at created_at as a zero-duration
 //     event (legacy rows fall into this bucket without a backfill).
 //
+// createdAtDayExpr returns a dialect-specific expression that renders
+// created_at as a zero-padded "YYYY-MM-DD" string. SQLite stores DATETIME
+// as TEXT so substr() suffices; MySQL and PostgreSQL store a real temporal
+// type (DATETIME / TIMESTAMP) and need DATE_FORMAT / to_char. The result is
+// always TEXT so lexical comparison against fromKey/toKey is correct.
+// Mirrors UsageService.dateExpr() — kept separate to avoid cross-service
+// coupling between RequirementService and UsageService.
+func (s *RequirementService) createdAtDayExpr() string {
+	switch s.db.Dialect() {
+	case db.Postgres:
+		return "to_char(created_at, 'YYYY-MM-DD')"
+	case db.MySQL:
+		return "DATE_FORMAT(created_at, '%Y-%m-%d')"
+	default:
+		return "substr(created_at,1,10)"
+	}
+}
+
 // Archived rows are always excluded — same default as List().
 func (s *RequirementService) Calendar(from, to time.Time, projectID, kind string) ([]model.Requirement, error) {
 	where := "WHERE status != 'archived'"
@@ -202,15 +220,17 @@ func (s *RequirementService) Calendar(from, to time.Time, projectID, kind string
 	// Range predicate. SQLite stores DATETIME as TEXT in mixed formats
 	// (CURRENT_TIMESTAMP → "YYYY-MM-DD HH:MM:SS", Go time.Time driver write →
 	// RFC3339), but every value parses to a comparable lexical prefix at the
-	// day boundary. The window is [from, to) on a day-level prefix so a single
-	// substr() expression matches all three dialects (the pattern lives in
-	// usage.dateExpr / usage.DailyByProject). It covers BOTH scheduling modes:
+	// day boundary. The window is [from, to) on a day-level prefix. The day
+	// expression itself is dialect-aware (mirrors UsageService.dateExpr() /
+	// UsageService.DailyByProject) so it works on SQLite, MySQL, and
+	// PostgreSQL. It covers BOTH scheduling modes:
 	//   - legacy (planned_* NULL) → uses created_at at day-level
 	//   - scheduled                → uses planned_start_at COALESCE end date
+	dayExpr := s.createdAtDayExpr()
 	fromKey := from.Format("2006-01-02")
 	toKey := to.Format("2006-01-02")
 	where += " AND ("
-	where += "(planned_start_at IS NULL AND substr(created_at,1,10) >= ? AND substr(created_at,1,10) < ?)"
+	where += "(planned_start_at IS NULL AND " + dayExpr + " >= ? AND " + dayExpr + " < ?)"
 	args = append(args, fromKey, toKey)
 	where += " OR (planned_start_at IS NOT NULL AND COALESCE(planned_end_at, planned_start_at) >= ? AND planned_start_at < ?)"
 	// planned_* are only ever written by UpdateSchedule via time.Time params,
