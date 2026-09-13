@@ -393,7 +393,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 				forkSessionID:  forkSessionID,
 				model:          model,
 				claudeConfigID: claudeConfigID,
-				usage:          h.usageCtxFor("architect_design", id, req.ProjectID, job.ID, model, "", ""),
+				usage:          h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 				PermissionMode: "plan",
 			},
 		})
@@ -415,7 +415,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 			ForkSessionID:  forkSessionID,
 			PermissionMode: "plan",
 		})
-		out = runClaudeStream(jobSink{job}, cmd, "architect-design", h.usageCtxFor("architect_design", id, req.ProjectID, job.ID, model, "", ""))
+		out = runClaudeStream(jobSink{job}, cmd, "architect-design", h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID))
 	}
 
 	h.finalizeArchitectRun(out, p, job, kbReadTitles, sourceSID, newDesignSID, id, model)
@@ -549,9 +549,14 @@ func (h *WizardHandler) finalizeArchitectRun(
 	}
 	_ = h.reqSvc.UpdateDesignJob(id, "")
 
-	// Record the effective model for the architect stage (success path only).
+	// Record the effective model + resolved Claude config for the architect
+	// stage (success path only) so a refresh re-hydrates both the model and the
+	// config dropdown, and the dev stage can fall back to a persisted config.
 	if perr := h.reqSvc.UpdateArchitectModel(id, model); perr != nil {
 		log.Printf("[architect-design] failed to persist architect_model for %s: %v", id, perr)
+	}
+	if perr := h.reqSvc.UpdateArchitectConfig(id, p.ClaudeConfigID); perr != nil {
+		log.Printf("[architect-design] failed to persist architect_config_id for %s: %v", id, perr)
 	}
 	// Close the knowledge loop: mark which read entries the run actually used.
 	if len(kbReadTitles) > 0 {

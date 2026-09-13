@@ -42,6 +42,12 @@ type SubTask struct {
 	// stored per-row so the SubTaskPanel can show "默认模型" badges without
 	// joining back to the role table.
 	Model           string     `json:"model"`
+	// ClaudeConfigID is the claude_configs row the child was dispatched
+	// against, resolved when the run starts (inherited from the parent
+	// requirement's developer stage / composer pick / model→config lookup).
+	// Paired with Model it records exactly which gateway + model pair the
+	// child inherited, so a mismatch is auditable instead of invisible.
+	ClaudeConfigID  string     `json:"claude_config_id"`
 	// InputTokens / OutputTokens / Cache* mirror the token_usage columns the
 	// wizard already records under step="sub_task". Persisted on the row so
 	// the SubTaskCard header can render "🪙 12.4k in / 3.1k out" inline

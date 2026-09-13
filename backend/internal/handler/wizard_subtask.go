@@ -394,7 +394,11 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		Prompt       string `json:"prompt"`
 		Title        string `json:"title"`
 		Model        string `json:"model"`
-		FreshSession bool   `json:"freshSession"`
+		// ClaudeConfigID is the user-picked (or parent-inherited) claude_configs
+		// row id from the composer's ModelSelect. Empty lets the runner resolve
+		// it (model→config lookup / parent requirement config / role / active).
+		ClaudeConfigID string `json:"claude_config_id"`
+		FreshSession   bool   `json:"freshSession"`
 		// AgentServerID selects the child's execution environment. A pointer so
 		// an omitted field (nil) defaults to the parent requirement's env
 		// (inheritance), while an explicit "" means the user deliberately chose
@@ -453,7 +457,7 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		"sub_task_id": st.ID,
 	})
 
-	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, "", false, true, body.FreshSession)
+	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, body.ClaudeConfigID, false, true, body.FreshSession)
 }
 
 // AdjustSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/adjust.
@@ -969,13 +973,25 @@ func (h *WizardHandler) GenerateSubTaskSummary(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Resolve the same runtime params tryAutoOrchestrate uses: developer role's
-	// model + claude config, plus the requirement's worktree path so the
-	// summary agent edits the right tree.
+	// Resolve the same runtime params tryAutoOrchestrate uses — the model +
+	// claude config the requirement was developed with (falling back to the
+	// developer role's), plus the requirement's worktree path so the summary
+	// agent edits the right tree. Inheriting the requirement's own pairing keeps
+	// the summary turn on the same gateway as the children it summarizes
+	// instead of the global active config (see pushPRRuntimeModel /
+	// resolveConfigIDForRun for the chain this mirrors).
 	_, modelName, claudeConfigID := h.roleConfig("developer")
+	if req.DeveloperModel != "" && req.DeveloperModel != DefaultModelLabel {
+		modelName = req.DeveloperModel
+	}
 	if body.Model != "" {
 		modelName = body.Model
 	}
+	fallbackCfgID := claudeConfigID
+	if req.DeveloperConfigID != "" {
+		fallbackCfgID = req.DeveloperConfigID
+	}
+	claudeConfigID = h.resolveConfigIDForRun("", modelName, fallbackCfgID)
 	workDir := ""
 	if proj, perr := h.projectSvc.Get(req.ProjectID); perr == nil {
 		workDir = proj.LocalPath

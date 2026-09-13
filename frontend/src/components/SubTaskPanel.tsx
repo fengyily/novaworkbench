@@ -896,7 +896,29 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // composers) — picking once applies to the next adjustment round,
   // mirroring how a user thinks about model choice on the main
   // requirement.
-  const [createModel, setCreateModel] = useState<string>('');
+  // createModel / createConfigId seed from the parent requirement's persisted
+  // developer stage (developer_model / developer_config_id) so a manually-
+  // created sub-task defaults to the SAME model + Claude config the requirement
+  // was developed with (the inheritance rule) — not the global active config's
+  // default. The '默认模型' sentinel normalizes to '' so the picker shows its
+  // own default label instead of the literal. Both are seeded via effects
+  // (mirroring createAgentServerId) with a touched-ref guard so a later
+  // requirement refresh can't clobber a deliberate user choice.
+  const parentDeveloperModel =
+    requirement?.developer_model && requirement.developer_model !== DefaultModelLabel
+      ? requirement.developer_model
+      : '';
+  const parentDeveloperConfigId = requirement?.developer_config_id ?? '';
+  const [createModel, setCreateModel] = useState<string>(parentDeveloperModel);
+  const [createConfigId, setCreateConfigId] = useState<string>(parentDeveloperConfigId);
+  const touchedModelRef = useRef(false);
+  const touchedConfigRef = useRef(false);
+  useEffect(() => {
+    if (!touchedModelRef.current) setCreateModel(parentDeveloperModel);
+  }, [parentDeveloperModel]);
+  useEffect(() => {
+    if (!touchedConfigRef.current) setCreateConfigId(parentDeveloperConfigId);
+  }, [parentDeveloperConfigId]);
   const [adjustModel, setAdjustModel] = useState<string>('');
   // Per-sub-task execution environment for the composer. Seeded to the parent
   // requirement's agent_server_id so a manually-created sub-task defaults to
@@ -1199,6 +1221,10 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       await subTasksApi.create(requirementId, {
         prompt: p,
         ...(createModel ? { model: createModel } : {}),
+        // Send the picked Claude config so model + gateway agree (inherited
+        // from the parent's developer stage by default). Empty lets the backend
+        // resolve it (model→config lookup / parent config / role / active).
+        ...(createConfigId ? { claude_config_id: createConfigId } : {}),
         ...(sessionMode === 'fresh' ? { freshSession: true } : {}),
         // Always send the resolved environment (even '' for 本地) so the
         // backend records an explicit choice — an omitted field would fall
@@ -1212,7 +1238,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     } finally {
       setSubmitting(false);
     }
-  }, [prompt, submitting, createModel, sessionMode, createAgentServerId, requirementId, loadList, t]);
+  }, [prompt, submitting, createModel, createConfigId, sessionMode, createAgentServerId, requirementId, loadList, t]);
 
   // --- Manual re-split (🔄 Re-split) ------------------------------------
   // Escape hatch for when StartCoding's auto-orchestration produced no
@@ -1237,7 +1263,10 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       // beside the textarea) so the user doesn't pick the model twice.
       const { job_id } = await subTasksApi.reOrchestrate(
         requirementId,
-        { ...(createModel ? { model: createModel } : {}) },
+        {
+          ...(createModel ? { model: createModel } : {}),
+          ...(createConfigId ? { claude_config_id: createConfigId } : {}),
+        },
       );
       reSplitEsRef.current?.close();
       reSplitEsRef.current = createEventStream(
@@ -1268,7 +1297,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       setError(e?.message || t('components.subTaskPanel.errReSplit'));
       setReSplitBusy(false);
     }
-  }, [reSplitBusy, createModel, requirementId, loadList, t]);
+  }, [reSplitBusy, createModel, createConfigId, requirementId, loadList, t]);
 
   // Close the re-split stream on unmount.
   useEffect(() => () => { reSplitEsRef.current?.close(); reSplitEsRef.current = null; }, []);
@@ -1481,12 +1510,14 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             model; "Default model (X)" shows what that fallback actually is. */}
         <ModelSelect
           value={createModel}
-          onChange={setCreateModel}
+          onChange={(m) => { touchedModelRef.current = true; setCreateModel(m); }}
           label={t('components.subTaskPanel.modelLabel')}
           stage="developer"
           defaultModelName={developerDefaultModel}
           disabled={submitting || reSplitBusy}
           working={submitting || reSplitBusy}
+          configId={createConfigId || undefined}
+          onConfigChange={(c) => { touchedConfigRef.current = true; setCreateConfigId(c); }}
         />
         {!createModel && !developerDefaultModel && (
           <div className="sub-model-warning" role="note">

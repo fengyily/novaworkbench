@@ -368,6 +368,14 @@ func (r *SubTaskRunner) Run(
 	// matching config below so model and base URL always agree.
 	_, devModel, devCfgID := r.roleConfig("developer")
 	modelName := devModel
+	// Inherit the parent requirement's persisted developer model so a manual
+	// sub-task defaults to the SAME model the requirement was developed with
+	// (not the developer role / active-config default). Skip the '默认模型'
+	// sentinel — it means "no specific model", so we keep the role default.
+	// An explicit modelOverride (composer picker / redo) still wins below.
+	if req != nil && req.DeveloperModel != "" && req.DeveloperModel != DefaultModelLabel {
+		modelName = req.DeveloperModel
+	}
 	if modelOverride != "" {
 		modelName = modelOverride
 	}
@@ -432,38 +440,38 @@ func (r *SubTaskRunner) Run(
 	}
 
 	execSystemPrompt, _, executorConfigID := r.roleConfig(executorRoleKey)
-	// Pick the Claude config the resolved model actually belongs to. Priority:
-	//   1. caller-supplied configIDOverride (merge push path — keeps the
-	//      pr_author-role binding explicit and bypasses the model lookup)
-	//   2. the model-override's owning config (user explicitly picked a
-	//      model from another config; without this we'd send the override
-	//      model to the developer/executor role's binding and the wrong
-	//      gateway would 400 on the unknown model id)
-	//   3. the developer role's bound config (covers the developer-default
-	//      model + its role-bound gateway)
-	//   4. the executor role's bound config (legacy fallback for users who
-	//      rely on executor-role binding only; harmless when 1–3 match)
-	var finalConfigID string
-	switch {
-	case configIDOverride != "":
-		finalConfigID = configIDOverride
-	case modelOverride != "":
-		if cid, cerr := r.claudeCfg.ResolveConfigForModel(modelOverride); cerr == nil && cid != "" {
-			finalConfigID = cid
-		} else if devCfgID != "" {
-			finalConfigID = devCfgID
-		} else {
-			finalConfigID = executorConfigID
-		}
-	case devCfgID != "":
-		finalConfigID = devCfgID
-	default:
-		finalConfigID = executorConfigID
+	// Pick the Claude config the resolved model actually belongs to, so the
+	// gateway (ANTHROPIC_BASE_URL / AUTH_TOKEN) always matches ANTHROPIC_MODEL:
+	//   1. caller-supplied configIDOverride (explicit pick — composer ModelSelect
+	//      / merge push path's pr_author binding) wins verbatim
+	//   2. otherwise pickConfigForModel(modelName, …) — the inherited/persisted
+	//      config when it owns the model, else the config that owns the model
+	//      (this is what recovers a requirement whose developer_model was
+	//      persisted before developer_config_id existed), else the parent
+	//      requirement's persisted config / developer role / executor role
+	//      binding in that order
+	// Model and config must be resolved together: inheriting the parent's model
+	// while keeping the role's bound gateway was the "配置=默认配置 但模型=a模型"
+	// mismatch (and a 400 from the wrong base URL).
+	parentDevCfgID := ""
+	if req != nil {
+		parentDevCfgID = req.DeveloperConfigID
+	}
+	finalConfigID := configIDOverride
+	if finalConfigID == "" {
+		finalConfigID = pickConfigForModel(r.claudeCfg, modelName, parentDevCfgID, devCfgID, executorConfigID)
+	}
+	// Record the resolved config on the row (best-effort, before dispatch so an
+	// aborted/failed child still shows which gateway it was aimed at). The
+	// sub-task card and the audit trail then answer "which config+model did this
+	// child inherit from the main task".
+	if perr := r.subTaskSvc.UpdateClaudeConfigID(st.ID, finalConfigID); perr != nil {
+		log.Printf("[sub-task] failed to persist claude_config_id for %s: %v", st.ID, perr)
 	}
 
 	// "sub_task" step key — distinct from "coding" / "adjust_coding" so
 	// token-usage rollups don't double-count.
-	subUsage := r.usageCtxFor("sub_task", st.RequirementID, req.ProjectID, job.ID, modelName, "", body)
+	subUsage := r.usageCtxForConfig("sub_task", st.RequirementID, req.ProjectID, job.ID, modelName, "", body, finalConfigID)
 
 	// Execution-consistency: when the parent requirement was developed on an
 	// Agent server, its code lives in that host's worktree — a locally-spawned
@@ -656,6 +664,23 @@ func (r *SubTaskRunner) usageCtxFor(step, requirementID, projectID, jobID, model
 		Meta:           meta,
 		Summary:        summary,
 	}
+}
+
+// usageCtxForConfig is usageCtxFor with the sub-task's RESOLVED config id (the
+// inherited / picked one, which is often not the global active config). Same
+// rationale as WizardHandler.usageCtxForConfig: the token_usage row must name
+// the config that actually served the run, otherwise the requirement's usage
+// table shows the active config next to a model it doesn't offer and the
+// per-config cost rollups land on the wrong row.
+func (r *SubTaskRunner) usageCtxForConfig(step, requirementID, projectID, jobID, model, meta, summary, resolvedConfigID string) *usageCtx {
+	ctx := r.usageCtxFor(step, requirementID, projectID, jobID, model, meta, summary)
+	if resolvedConfigID != "" && r.claudeCfg != nil {
+		ctx.ClaudeConfigID = resolvedConfigID
+		if c, err := r.claudeCfg.Get(resolvedConfigID); err == nil && c != nil {
+			ctx.Currency = c.Currency
+		}
+	}
+	return ctx
 }
 
 // mentionedSkills parses @slug mentions from text and returns the matching

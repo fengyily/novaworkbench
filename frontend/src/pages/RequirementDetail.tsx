@@ -612,6 +612,11 @@ export default function RequirementDetail() {
   // so the backend resolves gateway auth + base URL from the SAME row the
   // model came from (fixes the "BASE URL doesn't match selected model" bug).
   const [developerConfigId, setDeveloperConfigId] = useState('');
+  // The user-picked claude_configs row id from the architect-stage ModelSelect.
+  // Forwarded to /api/wizard/architect-design as `claude_config_id` and seeded
+  // from requirements.architect_config_id so a refresh re-hydrates BOTH the
+  // config dropdown and the model (fixes the "模型不在当前配置列表中" symptom).
+  const [architectConfigId, setArchitectConfigId] = useState('');
   // Agent-server selector for the developer stage. Empty string = local
   // execution (the historical default); non-empty = run claude on the chosen
   // remote target. Only `ready` servers are listed — the wizard refuses to
@@ -767,6 +772,12 @@ export default function RequirementDetail() {
     setAnalystModel(norm(req.analyst_model ?? ''));
     setArchitectModel(norm(req.architect_model ?? ''));
     setDeveloperModel(norm(req.developer_model ?? ''));
+    // Seed the config dropdowns from the persisted per-stage config so a
+    // refresh restores the config the model actually belongs to (not the
+    // global active config). Empty stays empty → the ModelSelect falls back to
+    // its active-config default (see `configId={xxx || undefined}` below).
+    setArchitectConfigId(req.architect_config_id ?? '');
+    setDeveloperConfigId(req.developer_config_id ?? '');
   }, [req]);
 
   // Effective default model per role (role-config model > active Claude
@@ -1423,6 +1434,11 @@ export default function RequirementDetail() {
           read_knowledge: useKnowledge,
           // Per-request model override — empty means the role's configured model.
           ...(architectModel ? { model: architectModel } : {}),
+          // User-picked Claude config for the architect stage. Empty = the
+          // backend resolves it (model→config lookup / role / active). Sent so
+          // the picked config is persisted (architect_config_id) and re-hydrates
+          // on refresh instead of falling back to the global active config.
+          ...(architectConfigId ? { claude_config_id: architectConfigId } : {}),
           // Route the architect stage to a remote Agent server. Empty =
           // local execution (legacy default). The wizard remote branch
           // refuses servers that aren't in `ready` status, so an empty /
@@ -2392,7 +2408,7 @@ export default function RequirementDetail() {
                       label={t('requirements.detail2.devModelLabel')}
                       defaultModelName={developerDefaultModel}
                       title={coding ? t('requirements.detail2.devModelBusyTitle') : t('requirements.detail2.devModelTitle')}
-                      configId={developerConfigId}
+                      configId={developerConfigId || undefined}
                       onConfigChange={setDeveloperConfigId}
                     />
                   </div>
@@ -3246,6 +3262,8 @@ export default function RequirementDetail() {
                       label={t('requirements.detail2.architectModelLabel')}
                       defaultModelName={architectDefaultModel}
                       title={t('requirements.detail2.architectModelTitle')}
+                      configId={architectConfigId || undefined}
+                      onConfigChange={setArchitectConfigId}
                     />
                   )}
                   {/* Design-stage execution environment, selectable BEFORE the
@@ -3372,6 +3390,8 @@ export default function RequirementDetail() {
               label={t('requirements.detail2.architectModelLabel')}
               defaultModelName={architectDefaultModel}
               title={architectWorking ? t('requirements.detail2.architectModelBusyTitle') : t('requirements.detail2.architectModelTitle')}
+              configId={architectConfigId || undefined}
+              onConfigChange={setArchitectConfigId}
             />
             {/* Design-stage Agent server selector. Mirrors the dev-stage
                 picker in the coding modal: empty = local execution (default),
@@ -3640,7 +3660,7 @@ export default function RequirementDetail() {
                   label={t('requirements.detail2.devModelLabel')}
                   defaultModelName={developerDefaultModel}
                   title={coding ? t('requirements.detail2.devModelBusyTitle') : t('requirements.detail2.devModelIdleTitle')}
-                  configId={developerConfigId}
+                  configId={developerConfigId || undefined}
                   onConfigChange={setDeveloperConfigId}
                 />
                 {/* Agent-server selector. Empty = local execution (the default
@@ -3773,7 +3793,7 @@ export default function RequirementDetail() {
                     working={coding}
                     stage="developer"
                     defaultModelName={developerDefaultModel}
-                    configId={developerConfigId}
+                    configId={developerConfigId || undefined}
                     onConfigChange={setDeveloperConfigId}
                   />
                 </div>

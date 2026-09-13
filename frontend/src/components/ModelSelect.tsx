@@ -1,6 +1,7 @@
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { claudeApi, DefaultModelLabel, type ClaudeConfigItem } from '../api/client';
+import { configIdForModel } from '../utils/modelConfig';
 
 // ModelSelect is the per-stage model picker for the wizard pipeline.
 //
@@ -158,6 +159,36 @@ export default function ModelSelect({
     !!selectedConfigId &&
     cfgModels.length > 0 &&
     !cfgModels.includes(normalized);
+
+  // Model → config alignment (runs once per distinct model value).
+  //
+  // A persisted model — the requirement's per-stage choice, a sub-task's
+  // inherited model, or a legacy row written before the matching *_config_id
+  // column existed — may belong to a config that is NOT the one selected here.
+  // The default selection is the active config, so leaving it alone both
+  // renders the "当前：a 模型（不在当前配置列表中）" marker and sends the run to
+  // the wrong gateway (config B's base URL with config A's model — the
+  // "配置=配置B 但模型=a 模型" mismatch). When the selected config doesn't own
+  // the model but some config does, adopt the owning config; when the parent
+  // owns this state (onConfigChange provided) it is told too, so the resolved
+  // config travels with the request and gets persisted. See configIdForModel.
+  //
+  // The ref guard is what keeps this from fighting the user: after the model
+  // has been aligned once, deliberately switching the config dropdown (to then
+  // pick a model from another config) is left untouched.
+  const alignedForRef = useRef<string>('');
+  useEffect(() => {
+    if (normalized === '' || alignedForRef.current === normalized) return;
+    if (configs.length === 0) return; // configs still loading — align on the next pass
+    const target = configIdForModel(configs, normalized, selectedConfigId);
+    alignedForRef.current = normalized;
+    if (!target) return;
+    if (onConfigChange) {
+      onConfigChange(target);
+    } else {
+      setInternalConfigId(target);
+    }
+  }, [configs, normalized, selectedConfigId, onConfigChange]);
 
   // "Default model" alone, or "Default model (<resolved id>)". Active config's
   // default_model is what the empty selection resolves to when role has

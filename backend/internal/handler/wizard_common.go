@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/novaworkbench/backend/internal/model"
+	"github.com/novaworkbench/backend/internal/service"
 )
 
 // DefaultModelLabel is the display + persistence literal used when neither the
@@ -119,6 +120,123 @@ func (h *WizardHandler) resolveConfigIDForRun(requestCl, model, devCfgID string)
 	return h.activeConfigID()
 }
 
+// configOwnsModel reports whether the claude_configs row cfgID in configs
+// lists model in its models array. Empty id / empty model / missing row /
+// empty model list all return false so callers fall through to the next
+// candidate instead of treating "we don't know" as a match.
+func configOwnsModel(configs []model.ClaudeConfig, cfgID, model string) bool {
+	if cfgID == "" || model == "" {
+		return false
+	}
+	for _, c := range configs {
+		if c.ID != cfgID {
+			continue
+		}
+		for _, e := range c.Models {
+			if e.Model == model {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// pickConfigForModelFrom is pickConfigForModel's pure core (split out so the
+// priority chain is unit-testable without a DB). configs is expected in
+// ClaudeConfigService.List order (created_at ASC, id ASC) — the same order
+// ResolveConfigForModel uses — so a model listed by several configs resolves
+// identically through both paths.
+func pickConfigForModelFrom(configs []model.ClaudeConfig, model string, candidates ...string) string {
+	if model != "" {
+		// 1. a caller-supplied binding that really owns the model wins (two
+		//    configs may list the same id; the caller's priority decides).
+		for _, cand := range candidates {
+			if configOwnsModel(configs, cand, model) {
+				return cand
+			}
+		}
+		// 2. the config that owns the model — the only way to recover the
+		//    binding for rows that persisted the model before the matching
+		//    *_config_id column existed (legacy requirements / sub-tasks).
+		for _, c := range configs {
+			if configOwnsModel(configs, c.ID, model) {
+				return c.ID
+			}
+		}
+	}
+	// 3. the model isn't known to any list → keep the caller's best binding
+	//    rather than silently reverting to the global active config.
+	for _, cand := range candidates {
+		if cand != "" {
+			return cand
+		}
+	}
+	return ""
+}
+
+// pickConfigForModel returns the claude_configs id the given model should run
+// against, so the gateway (ANTHROPIC_BASE_URL / AUTH_TOKEN) always agrees with
+// ANTHROPIC_MODEL. candidates are the caller's bindings in priority order
+// (typically: the parent requirement's persisted config, the developer role
+// binding, the executor role binding). Walks them as documented on
+// pickConfigForModelFrom; returns "" when nothing matches, which callers treat
+// as "fall back to the global active config" (llm.Gateway's own empty-id
+// behavior).
+func pickConfigForModel(cfgSvc *service.ClaudeConfigService, model string, candidates ...string) string {
+	if cfgSvc == nil {
+		return ""
+	}
+	configs, err := cfgSvc.List()
+	if err != nil {
+		// A config-table read failure must not drop the caller's binding —
+		// fall through with no ownership knowledge instead.
+		return pickConfigForModelFrom(nil, model, candidates...)
+	}
+	return pickConfigForModelFrom(configs, model, candidates...)
+}
+
+// pushPRRuntimeModel resolves the model + claude_config_id the
+// "提交 → 推送 → 创建 PR" child agent runs with.
+//
+// The push/PR child is a sub-task like any other, so it must inherit the MAIN
+// task's model + gateway: dispatching it with the global active config's
+// default model while the requirement was developed on another config is the
+// "配置=配置B（默认）但模型=a 模型" mismatch — right model name, wrong
+// ANTHROPIC_BASE_URL. Callers pass their pr_author resolution as the fallback
+// persona (the push child writes the PR summary, so pr_author is the sensible
+// default for a requirement that never recorded a developer model).
+//
+// Priority:
+//  1. explicitModel — the user's per-request pick (MergeDialog →
+//     MergeHandler.Push). The config id is left EMPTY on purpose: the runner's
+//     own pickConfigForModel then derives the gateway from the model itself
+//     (the picked model may live on a config other than the parent's), instead
+//     of pinning a possibly-stale pairing verbatim.
+//  2. the requirement's persisted developer model. The config id stays empty
+//     for the same reason: SubTaskRunner.Run reads req.DeveloperConfigID as its
+//     FIRST candidate (pickConfigForModel prefers whichever candidate actually
+//     owns the model), which also repairs legacy rows that persisted
+//     developer_model before developer_config_id existed.
+//  3. prModel / prCfgID — the caller's pr_author resolution, byte-identical to
+//     the pre-inheritance behavior when the requirement has no developer model.
+//     They are passed as a PAIR: when prModel is empty the config is dropped
+//     too, so SubTaskRunner.Run derives the model and its gateway together
+//     (req.DeveloperConfigID → developer role → executor role) instead of
+//     pinning a config that may not own whatever model the runner ends up with.
+func pushPRRuntimeModel(reqRow *model.Requirement, explicitModel, prModel, prCfgID string) (modelName, configID string) {
+	if explicitModel != "" {
+		return explicitModel, ""
+	}
+	if reqRow != nil && reqRow.DeveloperModel != "" && reqRow.DeveloperModel != DefaultModelLabel {
+		return reqRow.DeveloperModel, ""
+	}
+	if prModel == "" {
+		return "", ""
+	}
+	return prModel, prCfgID
+}
+
 // effectiveModel resolves the model that will actually be dispatched to the
 // claude CLI for a role. roleModel is the role's explicit override. Falls
 // back to the role's bound config's default, then the global active
@@ -204,6 +322,24 @@ func (h *WizardHandler) usageCtxFor(step, requirementID, projectID, jobID, model
 		Summary:         summary,
 		PersistSnapshot: persist,
 	}
+}
+
+// usageCtxForConfig is usageCtxFor with an explicit resolved claude_config_id.
+// A run may execute against a config that is NOT the global active one (a
+// per-request picker choice, the requirement's persisted stage binding, or the
+// role's binding), so stamping the active config id would mislabel both the
+// requirement-detail usage table ("配置=默认配置" while the model column reads a
+// model that config doesn't even offer) and the per-config cost rollups. An
+// empty resolvedConfigID keeps usageCtxFor's active-config behavior.
+func (h *WizardHandler) usageCtxForConfig(step, requirementID, projectID, jobID, model, meta, summary, resolvedConfigID string) *usageCtx {
+	ctx := h.usageCtxFor(step, requirementID, projectID, jobID, model, meta, summary)
+	if resolvedConfigID != "" && h.claudeCfg != nil {
+		ctx.ClaudeConfigID = resolvedConfigID
+		if c, err := h.claudeCfg.Get(resolvedConfigID); err == nil && c != nil {
+			ctx.Currency = c.Currency
+		}
+	}
+	return ctx
 }
 
 // snapshotStep maps a usageCtx.Step (the wizard invocation label) to the wizard
@@ -366,6 +502,19 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 		log.Printf("[auto-push] %s: sub-task runner not wired, skip", reqRow.ID)
 		return
 	}
+	// Re-read the requirement before resolving the model/config below. The
+	// callers hand us the in-memory row they loaded BEFORE this development run,
+	// so a model the user picked for THIS run is only visible in the DB
+	// (start-coding persists it on its success path, immediately before
+	// dispatching us). Fall back to the caller's row on a read error so a
+	// transient DB hiccup never blocks the push.
+	if h.reqSvc != nil {
+		if fresh, gerr := h.reqSvc.Get(reqRow.ID); gerr == nil && fresh != nil {
+			reqRow = fresh
+		} else if gerr != nil {
+			log.Printf("[auto-push] %s: requirement reload failed (%v), using caller row", reqRow.ID, gerr)
+		}
+	}
 	proj, perr := h.projectSvc.Get(reqRow.ProjectID)
 	if perr != nil || proj == nil {
 		log.Printf("[auto-push] %s: project load failed (%v), skip", reqRow.ID, perr)
@@ -410,18 +559,24 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 		return
 	}
 
-	// Effective model: pr_author role (matches the manual push default). The
-	// "默认模型" sentinel collapses to "" via cliModelArg so the runner falls
-	// back to its own resolution instead of persisting the display literal.
+	// Effective model + config: inherit the requirement's own persisted
+	// developer pairing (the model + gateway the main task was developed on),
+	// with the pr_author role as the persona fallback — see pushPRRuntimeModel.
+	// Without the inheritance this auto-dispatched child ran on the global
+	// active config while carrying a model from another one, and its
+	// sub_tasks.model / token_usage.claude_config_id recorded that mismatch.
+	// The "默认模型" sentinel collapses to "" via cliModelArg so the runner
+	// falls back to its own resolution instead of persisting the display literal.
 	_, prModel, roleConfigID := h.roleConfig("pr_author")
 	prModel = cliModelArg(prModel)
+	pushModel, pushCfgID := pushPRRuntimeModel(reqRow, "", prModel, roleConfigID)
 
-	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, "", prModel, roleConfigID)
+	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, "", pushModel, pushCfgID)
 	if err != nil {
 		log.Printf("[auto-push] %s: dispatch failed: %v", reqRow.ID, err)
 		return
 	}
-	log.Printf("[auto-push] %s: dispatched push+PR sub-task %s job %s branch=%s", reqRow.ID, subTaskID, jobID, dev)
+	log.Printf("[auto-push] %s: dispatched push+PR sub-task %s job %s branch=%s model=%q inherited-config=%q", reqRow.ID, subTaskID, jobID, dev, pushModel, reqRow.DeveloperConfigID)
 }
 
 func truncateStr(s string, n int) string {
