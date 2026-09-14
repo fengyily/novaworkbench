@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/novaworkbench/backend/internal/db"
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/platform"
@@ -35,6 +36,7 @@ import (
 // branch, mid-merge MERGE_HEAD) lives on disk, so a backend restart between
 // steps is recoverable: /merge/state reads the real git state.
 type MergeHandler struct {
+	db           *db.DB
 	projectSvc    *service.ProjectService
 	reqSvc        *service.RequirementService
 	llm           *llm.Gateway
@@ -52,8 +54,9 @@ type MergeHandler struct {
 	agentSvrSvc *service.AgentServerService
 }
 
-func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, agentSvrSvc *service.AgentServerService) *MergeHandler {
+func NewMergeHandler(database *db.DB, projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, agentSvrSvc *service.AgentServerService) *MergeHandler {
 	return &MergeHandler{
+		db:           database,
 		projectSvc:    projectSvc,
 		reqSvc:        reqSvc,
 		llm:           llmGateway,
@@ -921,6 +924,17 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 		base = project.DefaultBranch
 	}
 
+	// 项目历史语言风格：用于让 Claude 子代理写 commit / PR title / PR body 时
+	// 遵循项目历史语言偏好（zh / en / mixed）。优先使用已加载的 project 行；
+	// 若加载失败则降级到包内私有 helper 直查 DB。
+	commitLang := ""
+	if project != nil {
+		commitLang = service.ResolveCommitLang(project.CommitLang, project.CommitLangOverride)
+	}
+	if commitLang == "" {
+		commitLang = loadProjectCommitLang(h.db, reqRow.ProjectID)
+	}
+
 	// Resolve the effective model + claude config up-front so the SubTaskPanel
 	// can render the badge from the moment the row appears. Precedence:
 	// explicit body.Model > the requirement's own persisted developer model >
@@ -937,7 +951,7 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	// The child starts a fresh session (the main-agent session may already be
 	// gone or unsuitable to continue) and runs in the requirement's own
 	// worktree / agent server (resolved inside dispatchPushPRSubTask).
-	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, body.CommitMessage, effectiveModel, roleConfigID)
+	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, body.CommitMessage, effectiveModel, roleConfigID, commitLang)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
@@ -965,8 +979,8 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 //
 // Returns the JobStore job id + sub_tasks row id so an HTTP caller can hand
 // them to the frontend for SSE subscription; the automatic caller ignores them.
-func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, model, roleConfigID string) (jobID, subTaskID string, err error) {
-	prompt := buildPushSubTaskPrompt(reqRow, dev, base, remote, platformType, commitMessage)
+func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, model, roleConfigID, commitLang string) (jobID, subTaskID string, err error) {
+	prompt := buildPushSubTaskPrompt(reqRow, dev, base, remote, platformType, commitMessage, commitLang)
 	title := "推送并创建 PR"
 	if commitMessage != "" {
 		title = "推送并创建 PR: " + truncateMergePrompt(commitMessage, 40)
@@ -998,7 +1012,7 @@ func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev
 // platformType is the project's configured platform ("github" / "gitlab" /
 // "gitea") — empty tells the child to surface a compare URL via git
 // (no token / no automated PR).
-func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage string) string {
+func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, commitLang string) string {
 	var b strings.Builder
 	b.WriteString("请完成「提交 → 合并主分支 → 推送 → 创建 PR」全流程。当前任务所有 git 操作都在当前工作目录（worktree / 项目目录）中执行；请避免在工作目录以外执行任何写操作。\n")
 	// Agent-server dispatch: the child runs inside the requirement's remote
@@ -1105,6 +1119,19 @@ func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platfo
 	b.WriteString("- 所有 git 操作必须显式 `git -C <dir>` 或先 `cd` 到工作目录再执行。\n")
 	b.WriteString("- 如遇网络 / 凭据 / 远端权限错误，请明确报告并停止后续步骤。\n")
 	b.WriteString("- 完成后请简要输出：执行了哪些步骤、最终状态（成功 / 失败）、PR 链接（如有），方便作为子任务产物落盘。\n")
+
+	// 项目历史风格注入：当 commitLang 非空时，在 prompt 末尾追加一行提示，
+	// 让 Claude 在写 commit 信息与 PR 标题/正文时遵循项目历史语言（zh / en /
+	// mixed）。空值表示无风格偏好，按子任务默认行为处理。StyleHint 内部已做
+	// override 解析，这里直接传 commitLang 与空 override 等价于传入最终值。
+	if commitLang != "" {
+		if hint := service.StyleHint(commitLang, ""); hint != "" {
+			b.WriteString("\n")
+			b.WriteString(hint)
+			b.WriteString("\n")
+		}
+	}
+
 	return b.String()
 }
 
@@ -1391,6 +1418,26 @@ func (h *MergeHandler) loadProjectNoWrite(reqID string) (*model.Project, error) 
 		return nil, err
 	}
 	return h.projectSvc.Get(reqRow.ProjectID)
+}
+
+// loadProjectCommitLang 读取指定项目 commit_lang 与 commit_lang_override，
+// 调用 service.ResolveCommitLang 按「override 优先 → stored 次之 → 空」优先级
+// 解析后返回最终语言（zh / en / mixed / ""），供推送子任务 prompt 注入风格
+// 提示使用。读不到 / 项目不存在时返回空字符串，调用方据此省略风格行。
+// 包内私有，handler 包外部无需依赖此函数。
+func loadProjectCommitLang(db *db.DB, projectID string) string {
+	if db == nil || projectID == "" {
+		return ""
+	}
+	var lang, override string
+	err := db.QueryRow(
+		"SELECT commit_lang, commit_lang_override FROM projects WHERE id = ?",
+		projectID,
+	).Scan(&lang, &override)
+	if err != nil {
+		return ""
+	}
+	return service.ResolveCommitLang(lang, override)
 }
 
 // gitIdentityForReq returns the (name, email) the merge commit should use,
