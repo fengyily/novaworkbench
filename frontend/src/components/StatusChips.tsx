@@ -30,17 +30,27 @@ export function StatusChips({ req, className }: StatusChipsProps) {
   const { t } = useTranslation();
   const chips = statusChips(req);
   if (chips.length === 0) return null;
+  // Wrap in a single inline-flex container so the chip group reads as one
+  // ordered "tag string" (源/方案 → 进度 → 待确认) instead of loose chips
+  // fighting for the same baseline. .status-chips in index.css owns the gap
+  // + nowrap rules; individual chips keep the existing status-* palette.
+  // className is forwarded to the container (not the chips) so callers can
+  // layer effects on the whole group, e.g. claude-pulse on the detail header.
   return (
-    <>
+    <span
+      className={`status-chips${className ? ' ' + className : ''}`}
+      role="group"
+      aria-label={tLabel(t, statusChipLabelKeys as Record<string, string>, 'status')}
+    >
       {chips.map((c, i) => (
         <span
           key={`${c.code}-${i}`}
-          className={`status-badge ${c.toneClass}${className ? ' ' + className : ''}`}
+          className={`status-badge ${c.toneClass}`}
         >
           {tLabel(t, statusChipLabelKeys as Record<string, string>, c.code as string)}
         </span>
       ))}
-    </>
+    </span>
   );
 }
 

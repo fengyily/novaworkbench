@@ -250,6 +250,18 @@
   background: var(--color-primary-light, #eef2ff) !important;
 }
 
+/* Requirements table status column (#5 in the .pr-table) — same chip-group
+   sizing as the cross-project RequirementsList so the two lists read as one
+   visual family. The cell also holds the claude-pulse-dot (active wizard
+   job indicator) which is small enough not to need its own column rule.
+   Let .status-chips own its internal flex-wrap so a 3-chip row on a tight
+   viewport wraps gracefully to a second line instead of overflowing.
+   Column order: 1 id / 2 type / 3 title / 4 priority / 5 status. */
+.pr-table thead th:nth-child(5),
+.pr-table tbody td:nth-child(5) {
+  min-width: 240px;
+}
+
 .pr-branch {
   font-family: var(--font-mono, monospace);
   font-size: 11px;
