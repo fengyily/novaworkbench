@@ -136,8 +136,18 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		// user-facing contract "子任务全部完成才视为开发结束". Sub-selects contain
 		// no `?` placeholders, so they survive db.Rebind unchanged on every
 		// dialect (SQLite / MySQL / PostgreSQL).
+		//
+		// ORDER BY … LIMIT 1 (not MAX()) is deliberate — SQLite drops the
+		// column's DATETIME affinity through an aggregate, so the driver hands
+		// back an unparseable string and rows.Scan into *time.Time fails with
+		// "unsupported Scan, storing driver.Value type string into type
+		// *time.Time"; selecting the column value directly preserves affinity
+		// and parses into *time.Time on every dialect (mirrors Get()'s
+		// DevEndedAt pattern above). The NOT EXISTS(...) guard preserves the
+		// "only when ALL subtasks are completed" semantic; otherwise the
+		// subquery returns no row → NULL.
 		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,"+
-			"COALESCE((SELECT MAX(st.completed_at) FROM sub_tasks st WHERE st.requirement_id = r.id AND NOT EXISTS(SELECT 1 FROM sub_tasks o WHERE o.requirement_id = r.id AND o.completed_at IS NULL)), NULL) AS dev_ended_at"+
+			"(SELECT st.completed_at FROM sub_tasks st WHERE st.requirement_id = r.id AND NOT EXISTS(SELECT 1 FROM sub_tasks o WHERE o.requirement_id = r.id AND o.completed_at IS NULL) ORDER BY st.completed_at DESC LIMIT 1) AS dev_ended_at"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" "+where+" ORDER BY CASE WHEN r.status = 'done' THEN 1 ELSE 0 END ASC, r.created_at DESC",
 		args...)
