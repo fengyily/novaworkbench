@@ -1046,6 +1046,10 @@ export interface MergeState {
   mid_merge: boolean;
   conflict_files: string[];
   worktree_path?: string;
+  commit_lang?: 'auto' | 'zh' | 'en' | 'mixed' | '';
+  commit_lang_override?: 'auto' | 'zh' | 'en' | 'mixed' | '';
+  commit_lang_source?: 'detected' | 'override' | 'default' | '';
+  commit_lang_updated_at?: string;
 }
 export const mergeApi = {
   state: (reqId: string) => api.get<MergeState>(`/api/requirements/${reqId}/merge/state`),

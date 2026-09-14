@@ -36,7 +36,7 @@ import (
 // branch, mid-merge MERGE_HEAD) lives on disk, so a backend restart between
 // steps is recoverable: /merge/state reads the real git state.
 type MergeHandler struct {
-	db           *db.DB
+	db            *db.DB
 	projectSvc    *service.ProjectService
 	reqSvc        *service.RequirementService
 	llm           *llm.Gateway
@@ -56,7 +56,7 @@ type MergeHandler struct {
 
 func NewMergeHandler(database *db.DB, projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, agentSvrSvc *service.AgentServerService) *MergeHandler {
 	return &MergeHandler{
-		db:           database,
+		db:            database,
 		projectSvc:    projectSvc,
 		reqSvc:        reqSvc,
 		llm:           llmGateway,
@@ -520,22 +520,41 @@ func (h *MergeHandler) State(w http.ResponseWriter, r *http.Request) {
 	}
 	prURL := buildPRURL(pf, webBase, owner, repo, target, dev)
 
+	// 项目提交/PR 风格：合并弹窗的徽章需要这些字段。projectSvc 为 nil 时
+	// （旧 handler wiring）退化为空串，前端把空串当作 "auto / 未检测"。
+	commitLang := ""
+	commitLangOverride := ""
+	commitLangSource := ""
+	var commitLangUpdatedAt *time.Time
+	if h.projectSvc != nil {
+		if proj, perr := h.projectSvc.Get(reqRow.ProjectID); perr == nil && proj != nil {
+			commitLang = proj.CommitLang
+			commitLangOverride = proj.CommitLangOverride
+			commitLangSource = proj.CommitLangSource
+			commitLangUpdatedAt = proj.CommitLangUpdatedAt
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"is_git":            true,
-		"requirement_id":    reqRow.ID,
-		"dev_branch":        dev,
-		"target_branch":     target,
-		"uncommitted_count": len(uncommitted),
-		"uncommitted_files": uncommitted,
-		"ahead":             ahead,
-		"behind":            behind,
-		"has_remote":        hasRemote,
-		"remote_url":        remote,
-		"platform":          pf,
-		"pr_url":            prURL,
-		"mid_merge":         midMerge(dir),
-		"conflict_files":    conflictedFiles(dir),
-		"worktree_path":     reqRow.WorktreePath,
+		"is_git":                 true,
+		"requirement_id":         reqRow.ID,
+		"dev_branch":             dev,
+		"target_branch":          target,
+		"uncommitted_count":      len(uncommitted),
+		"uncommitted_files":      uncommitted,
+		"ahead":                  ahead,
+		"behind":                 behind,
+		"has_remote":             hasRemote,
+		"remote_url":             remote,
+		"platform":               pf,
+		"pr_url":                 prURL,
+		"mid_merge":              midMerge(dir),
+		"conflict_files":         conflictedFiles(dir),
+		"worktree_path":          reqRow.WorktreePath,
+		"commit_lang":            commitLang,
+		"commit_lang_override":   commitLangOverride,
+		"commit_lang_source":     commitLangSource,
+		"commit_lang_updated_at": commitLangUpdatedAt,
 	})
 }
 
