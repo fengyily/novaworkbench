@@ -1032,6 +1032,14 @@ export interface MergeState {
   mid_merge: boolean;
   conflict_files: string[];
   worktree_path?: string;
+  // 项目提交/PR 风格（detected / override / source / updated_at）—— 用于
+  // 合并弹窗上方展示「📝 项目风格：xxx」徽章，源数据来自
+  // State handler (handler/merge.go) 的 loadProjectCommitLangState。两者都
+  // 为空时徽章隐藏。
+  commit_lang?: string;
+  commit_lang_override?: string;
+  commit_lang_source?: string;
+  commit_lang_updated_at?: string;
 }
 export const mergeApi = {
   state: (reqId: string) => api.get<MergeState>(`/api/requirements/${reqId}/merge/state`),

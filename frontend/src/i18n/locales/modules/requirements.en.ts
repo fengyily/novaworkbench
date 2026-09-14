@@ -213,6 +213,14 @@ export const requirements = {
     mergeInProgressWarn: 'A merge is currently in progress — resolve the conflicts or abort the merge first.',
     mergeNoRemoteWarn: 'This project has no origin remote configured, so it cannot push.',
     mergePushBtn: 'Push and open PR',
+    // Project commit/PR style badge text (rendered above the merge modal).
+    // Override takes precedence when set; falls back to detected value; badge
+    // is hidden entirely when both are empty.
+    mergeCommitLangLabel: 'Project style',
+    mergeCommitLangAuto: 'Auto (default English)',
+    mergeCommitLangZh: '中文 (Chinese)',
+    mergeCommitLangEn: 'English',
+    mergeCommitLangEmpty: 'Undetected',
     editTitle: 'Edit requirement',
     editLabelTitle: 'Title',
     editLabelDesc: 'Description',

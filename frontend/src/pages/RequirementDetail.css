@@ -1340,6 +1340,26 @@ select.preflight-field-input {
 }
 .merge-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
+/* 项目提交/PR 风格徽章——合并区与合并弹窗标题下方的小标签，让用户直观
+   看到本次 commit / PR 将用什么语言撰写。override 优先于 detected；
+   二者都为空时父组件直接返回 null，不渲染该元素。 */
+.merge-lang-row { margin-bottom: 8px; }
+.merge-modal-lang-row { margin: 6px 0 10px; }
+.commit-lang-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--color-bg-2, #f1f5f9);
+  color: var(--color-text-secondary, #64748b);
+  border: 1px solid var(--color-border, #e2e8f0);
+  cursor: help;
+  white-space: nowrap;
+}
+
 /* Inline status row inside `.merge-section` — currently used by the
    "隔离开发目录 / path / 清理" line. Sits as a horizontal row on
    desktop; the mobile media block below restacks the three children

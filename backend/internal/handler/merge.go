@@ -517,22 +517,31 @@ func (h *MergeHandler) State(w http.ResponseWriter, r *http.Request) {
 	}
 	prURL := buildPRURL(pf, webBase, owner, repo, target, dev)
 
+	// 项目提交/PR 风格（detected + override + source + updated_at）—— 前端合并
+	// 弹窗上方展示「📝 项目风格：xxx」徽章，让用户直观看到本次 commit / PR
+	// 将用什么语言撰写。detected 与 override 都为空时表示该字段不展示。
+	commitLang, commitLangOverride, commitLangSource, commitLangUpdatedAt := loadProjectCommitLangState(h.projectSvc, reqRow.ProjectID)
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"is_git":            true,
-		"requirement_id":    reqRow.ID,
-		"dev_branch":        dev,
-		"target_branch":     target,
-		"uncommitted_count": len(uncommitted),
-		"uncommitted_files": uncommitted,
-		"ahead":             ahead,
-		"behind":            behind,
-		"has_remote":        hasRemote,
-		"remote_url":        remote,
-		"platform":          pf,
-		"pr_url":            prURL,
-		"mid_merge":         midMerge(dir),
-		"conflict_files":    conflictedFiles(dir),
-		"worktree_path":     reqRow.WorktreePath,
+		"is_git":                 true,
+		"requirement_id":         reqRow.ID,
+		"dev_branch":             dev,
+		"target_branch":          target,
+		"uncommitted_count":      len(uncommitted),
+		"uncommitted_files":      uncommitted,
+		"ahead":                  ahead,
+		"behind":                 behind,
+		"has_remote":             hasRemote,
+		"remote_url":             remote,
+		"platform":               pf,
+		"pr_url":                 prURL,
+		"mid_merge":              midMerge(dir),
+		"conflict_files":         conflictedFiles(dir),
+		"worktree_path":          reqRow.WorktreePath,
+		"commit_lang":            commitLang,
+		"commit_lang_override":   commitLangOverride,
+		"commit_lang_source":     commitLangSource,
+		"commit_lang_updated_at": commitLangUpdatedAt,
 	})
 }
 
@@ -1391,6 +1400,26 @@ func (h *MergeHandler) loadProjectNoWrite(reqID string) (*model.Project, error) 
 		return nil, err
 	}
 	return h.projectSvc.Get(reqRow.ProjectID)
+}
+
+// loadProjectCommitLangState 返回项目 commit_lang 四元组（detected 值、
+// override、source、updated_at），供 State handler 透传给前端做徽章渲染。
+// 与 loadProjectCommitLang 的区别：后者只返回 ResolveCommitLang 后的最终
+// 语言串（zh/en/mixed/""），供推送子任务 prompt 注入风格提示；本函数返回
+// 全部原始字段，前端可以分别展示「用户 override 优先 / 检测值兜底 / 来源
+// 与更新时间」等语义。读不到 / 项目不存在时所有字段返回零值。
+func loadProjectCommitLangState(projectSvc *service.ProjectService, projectID string) (lang string, override string, source string, updatedAt string) {
+	if projectSvc == nil || projectID == "" {
+		return "", "", "", ""
+	}
+	proj, err := projectSvc.Get(projectID)
+	if err != nil || proj == nil {
+		return "", "", "", ""
+	}
+	if proj.CommitLangUpdatedAt != nil {
+		updatedAt = proj.CommitLangUpdatedAt.Format(time.RFC3339)
+	}
+	return proj.CommitLang, proj.CommitLangOverride, proj.CommitLangSource, updatedAt
 }
 
 // gitIdentityForReq returns the (name, email) the merge commit should use,

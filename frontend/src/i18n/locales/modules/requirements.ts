@@ -221,6 +221,13 @@ export const requirements = {
     mergeInProgressWarn: '当前存在未完成的合并，请先解决冲突或中止合并。',
     mergeNoRemoteWarn: '该项目未配置 origin 远程仓库，无法推送。',
     mergePushBtn: '推送并发起 PR',
+    // 项目提交/PR 风格徽章文案（前端合并弹窗上方）。override 非空时优先
+    // 显示 override；override 为空显示 detected；两者都空时整个徽章隐藏。
+    mergeCommitLangLabel: '项目风格',
+    mergeCommitLangAuto: '自动（默认英文）',
+    mergeCommitLangZh: '中文',
+    mergeCommitLangEn: 'English',
+    mergeCommitLangEmpty: '未检测',
     editTitle: '编辑需求',
     editLabelTitle: '标题',
     editLabelDesc: '描述',

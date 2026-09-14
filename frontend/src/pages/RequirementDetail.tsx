@@ -2000,6 +2000,23 @@ export default function RequirementDetail() {
     await refreshMergeState();
   };
 
+  // 项目提交/PR 风格徽章：override 优先，否则取 detected；二都为空时
+  // 返回 null（不显示徽章）。mixed 视为「默认英文」与验收标准一致。
+  const renderCommitLangBadge = (ms: MergeState | null) => {
+    if (!ms) return null;
+    const effective = (ms.commit_lang_override || ms.commit_lang || '').trim();
+    if (!effective || effective === 'auto') return null;
+    let label: string;
+    if (effective === 'zh') label = t('requirements.detail2.mergeCommitLangZh');
+    else if (effective === 'en') label = t('requirements.detail2.mergeCommitLangEn');
+    else label = t('requirements.detail2.mergeCommitLangAuto');
+    return (
+      <span className="commit-lang-chip" title={`source: ${ms.commit_lang_source || '-'} · updated: ${ms.commit_lang_updated_at || '-'}`}>
+        📝 {t('requirements.detail2.mergeCommitLangLabel')}：{label}
+      </span>
+    );
+  };
+
   const confirmMerge = async () => {
     if (!req || !id) return;
     setShowMergeModal(false);
@@ -2518,6 +2535,9 @@ export default function RequirementDetail() {
         <div className="modal-overlay" onClick={() => !merging && setShowMergeModal(false)}>
           <div className="modal-box merge-modal" onClick={e => e.stopPropagation()}>
             <h3>{mergeMode === 'local' ? <><IconMerge size={16} className="icon-mr" />{t('requirements.detail2.mergeLocalTitle')}</> : <><IconGlobe size={16} className="icon-mr" />{t('requirements.detail2.mergePrTitle')}</>}</h3>
+            {renderCommitLangBadge(mergeState) && (
+              <div className="merge-modal-lang-row">{renderCommitLangBadge(mergeState)}</div>
+            )}
             {mergeMode === 'local' ? (
               <>
                 <div className="modal-field">
@@ -3907,6 +3927,9 @@ export default function RequirementDetail() {
 
               {/* ── Merge / PR step ── */}
               <div className="merge-section">
+                {renderCommitLangBadge(mergeState) && (
+                  <div className="merge-lang-row">{renderCommitLangBadge(mergeState)}</div>
+                )}
                 <div className="merge-actions stack-mobile">
                   <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}><IconMerge size={13} className="btn-icon" />{t('requirements.detail2.mergeLocalTitle')}</button>
                   <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}><IconGlobe size={13} className="btn-icon" />{t('requirements.detail2.mergePrTitle')}</button>
