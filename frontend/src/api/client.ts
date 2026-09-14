@@ -149,6 +149,15 @@ export interface Project {
   deleted_dir?: number;
   description: string;
   description_manual: boolean;
+  // Per-project commit/PR style preference. Detected value lives in
+  // commit_lang; user override lives in commit_lang_override (empty =
+  // honor detection, "zh"/"en"/"mixed" = force a value). Detected at scan
+  // time by service.DetectCommitLanguage (backend/internal/service/
+  // project_style.go). Surfaced in the project edit panel and the merge
+  // modal badge via commitStyleApi.
+  commit_lang?: string;
+  commit_lang_detected_at?: string;
+  commit_lang_override?: string;
 }
 
 export interface DashboardData {
@@ -211,6 +220,20 @@ export const projectsApi = {
   backfillDescriptions: () =>
     api.post<{ updated: number; skipped: number; failed: number }>(
       '/api/projects/descriptions/backfill', {},
+    ),
+};
+
+// Per-project commit / PR style preference. The detected language comes from
+// service.DetectCommitLanguage (set by ScannerService.Scan on project add /
+// rescan); commit_lang_override lets the user pin a language independent of
+// detection (empty = honor detection; "auto"/""/empty values all mean auto).
+// Frontend surface: ProjectDetail edit panel + merge modal badge (rendered
+// from MergeState.commit_lang + MergeState.commit_lang_override).
+export const commitStyleApi = {
+  setOverride: (projectId: string, override: string) =>
+    api.put<{ status: string }>(
+      `/api/projects/${projectId}/commit-lang-override`,
+      { override },
     ),
 };
 

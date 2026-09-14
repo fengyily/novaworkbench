@@ -347,6 +347,13 @@ func main() {
 	mux.HandleFunc("POST /api/projects/{id}/description/regenerate", projectH.RegenerateDescription)
 	mux.HandleFunc("POST /api/projects/descriptions/backfill", projectH.BackfillDescriptions)
 
+	// Commit / PR style preference (project-level override on top of the
+	// scanner-detected commit history). Read by the merge modal badge and
+	// the push sub-task prompt to decide whether to write commit messages
+	// and PR titles in Chinese or English (default English when unset).
+	mux.HandleFunc("GET /api/projects/{id}/commit-lang", projectH.GetCommitLang)
+	mux.HandleFunc("PUT /api/projects/{id}/commit-lang-override", projectH.SetCommitLangOverride)
+
 	// Weekly reports (AI-generated from git log + requirement data)
 	mux.HandleFunc("GET /api/projects/{id}/reports", reportH.List)
 	mux.HandleFunc("GET /api/projects/{id}/reports/rule", reportH.GetRule)

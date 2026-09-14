@@ -571,7 +571,12 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 	prModel = cliModelArg(prModel)
 	pushModel, pushCfgID := pushPRRuntimeModel(reqRow, "", prModel, roleConfigID)
 
-	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, "", pushModel, pushCfgID)
+	// Resolve the project's commit/PR language style: user override beats
+	// detection beats "en" default. The hint rides in the push sub-task prompt
+	// so commit messages and PR titles follow project history automatically.
+	commitLang := service.ResolveCommitLang(proj.CommitLang, proj.CommitLangOverride)
+
+	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, "", pushModel, pushCfgID, commitLang)
 	if err != nil {
 		log.Printf("[auto-push] %s: dispatch failed: %v", reqRow.ID, err)
 		return

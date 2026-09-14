@@ -941,12 +941,17 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	_, prModel, prCfgID := h.roleConfig("pr_author")
 	effectiveModel, roleConfigID := pushPRRuntimeModel(reqRow, body.Model, prModel, prCfgID)
 
+	// Resolve the project's commit/PR language style: user override beats
+	// detection beats "en" default. The style hint rides in the push sub-task
+	// prompt so commit messages and PR titles naturally follow project history.
+	commitLang := service.ResolveCommitLang(project.CommitLang, project.CommitLangOverride)
+
 	// Dispatch the push+PR child agent through the shared core so the manual
 	// path here and the automatic WizardHandler.autoPushPR path never diverge.
 	// The child starts a fresh session (the main-agent session may already be
 	// gone or unsuitable to continue) and runs in the requirement's own
 	// worktree / agent server (resolved inside dispatchPushPRSubTask).
-	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, body.CommitMessage, effectiveModel, roleConfigID)
+	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, body.CommitMessage, effectiveModel, roleConfigID, commitLang)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
@@ -974,8 +979,8 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 //
 // Returns the JobStore job id + sub_tasks row id so an HTTP caller can hand
 // them to the frontend for SSE subscription; the automatic caller ignores them.
-func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, model, roleConfigID string) (jobID, subTaskID string, err error) {
-	prompt := buildPushSubTaskPrompt(reqRow, dev, base, remote, platformType, commitMessage)
+func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, model, roleConfigID, commitLang string) (jobID, subTaskID string, err error) {
+	prompt := buildPushSubTaskPrompt(reqRow, dev, base, remote, platformType, commitMessage, commitLang)
 	title := "推送并创建 PR"
 	if commitMessage != "" {
 		title = "推送并创建 PR: " + truncateMergePrompt(commitMessage, 40)
@@ -1007,7 +1012,7 @@ func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev
 // platformType is the project's configured platform ("github" / "gitlab" /
 // "gitea") — empty tells the child to surface a compare URL via git
 // (no token / no automated PR).
-func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage string) string {
+func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, commitLang string) string {
 	var b strings.Builder
 	b.WriteString("请完成「提交 → 合并主分支 → 推送 → 创建 PR」全流程。当前任务所有 git 操作都在当前工作目录（worktree / 项目目录）中执行；请避免在工作目录以外执行任何写操作。\n")
 	// Agent-server dispatch: the child runs inside the requirement's remote
@@ -1067,6 +1072,9 @@ func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platfo
 	b.WriteString("` 推送开发分支到 origin。如果推送失败（例如需要先 pull），请尝试 `git pull --rebase origin ")
 	b.WriteString(dev)
 	b.WriteString("` 后再推送，仍失败则报告错误并停止。\n")
+	b.WriteString("\n## 风格要求\n")
+	b.WriteString(service.StyleHint(commitLang))
+	b.WriteString("\n\n")
 	b.WriteString("5. **创建 PR**（如平台支持）：\n")
 	switch platformType {
 	case "github":
@@ -1098,8 +1106,9 @@ func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platfo
 		b.WriteString(" 上的 compare 链接创建 PR。\n")
 	}
 	b.WriteString("\n## PR 摘要要求\n")
-	b.WriteString("- PR 标题使用中文，一句话概括本次改动（不超过 40 字，不要以 `feat:` 等前缀开头）。\n")
-	b.WriteString("- PR 正文使用 Markdown，按「改动概述 / 主要变更 / 关键文件 / 验证方式」组织，简洁有重点。\n")
+	b.WriteString("- 遵循上方「风格要求」所规定的语言撰写。\n")
+	b.WriteString("- 标题一句话概括本次改动（不超过 40 字，不要以 `feat:` 等前缀开头）。\n")
+	b.WriteString("- 正文使用 Markdown，按「改动概述 / 主要变更 / 关键文件 / 验证方式」组织，简洁有重点。\n")
 	b.WriteString("- 可执行 `git log origin/")
 	b.WriteString(base)
 	b.WriteString("..")

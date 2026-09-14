@@ -6,7 +6,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   projectsApi, runnerApi, reviewApi, platformApi, requirementsApi, knowledgeApi,
-  usageApi, usageTotalInput, fmtCost, wizardApi,
+  usageApi, usageTotalInput, fmtCost, wizardApi, commitStyleApi,
   type Project, type RunStatus, type PR, type PRListResponse, type PlatformToken,
   type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage,
   kindLabelKeys, kindOf, API_BASE, authedFetch,
@@ -465,6 +465,36 @@ export default function ProjectDetail() {
     }
   };
 
+  // ── Overview: commit / PR style override ─────────────────────────────────
+  // Pinned value overrides the auto-detected language (commit_lang) the next
+  // time a commit / PR is generated for this project. Empty string falls
+  // back to detection. Saving re-fetches the project to keep commit_lang_*
+  // state coherent (override + detection timestamp).
+  const [commitLangSaving, setCommitLangSaving] = useState(false);
+  const [commitLangMsg, setCommitLangMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const handleCommitLangChange = async (next: string) => {
+    if (!id) return;
+    setCommitLangSaving(true);
+    setCommitLangMsg(null);
+    try {
+      await commitStyleApi.setOverride(id, next);
+      const refreshed = await projectsApi.get(id);
+      setProject(refreshed);
+      setCommitLangMsg({ ok: true, text: t('projects.detail.commitLangSaved') });
+    } catch (e: unknown) {
+      setCommitLangMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setCommitLangSaving(false);
+    }
+  };
+  // Map a backend enum to a localized display label for the "Detected" hint.
+  const commitLangDetectedLabel = (lang?: string): string => {
+    if (lang === 'zh') return t('projects.detail.commitLangZh');
+    if (lang === 'en') return t('projects.detail.commitLangEn');
+    if (lang === 'mixed') return t('projects.detail.commitLangMixed');
+    return t('projects.detail.commitLangAuto');
+  };
+
   // ── Review tab handlers ────────────────────────────────────────────────────
 
   const handleReview = useCallback(async (pr: PR) => {
@@ -907,6 +937,43 @@ export default function ProjectDetail() {
             {descMsg && (
               <div style={{ marginTop: 8, fontSize: 12, color: descMsg.ok ? 'var(--color-success)' : 'var(--color-error)' }}>
                 {descMsg.ok ? '✅ ' : '❌ '}{descMsg.text}
+              </div>
+            )}
+          </div>
+
+          {/* Commit / PR style preference — sets commit_lang_override so future
+              push sub-tasks and PR title/body generators follow the chosen
+              language instead of the auto-detected one. Detection runs at scan
+              time (see service.DetectCommitLanguage); empty override means
+              honor the detected value. Saving refreshes the project row so
+              commit_lang_detected_at stays coherent. */}
+          <div className="detail-section" style={{ marginTop: 16 }}>
+            <div className="section-header" style={{ marginBottom: 12 }}>
+              <span style={{ fontWeight: 600, fontSize: 14 }}>{t('projects.detail.commitLangLabel')}</span>
+              {project.commit_lang && (
+                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                  {t('projects.detail.commitLangDetected', { lang: commitLangDetectedLabel(project.commit_lang) })}
+                </span>
+              )}
+            </div>
+
+            <select
+              className="form-input"
+              value={project.commit_lang_override || ''}
+              onChange={e => handleCommitLangChange(e.target.value)}
+              disabled={commitLangSaving}
+              title={t('projects.detail.commitLangOverrideHint')}
+              style={{ maxWidth: 320 }}
+            >
+              <option value="">{t('projects.detail.commitLangAuto')}</option>
+              <option value="zh">{t('projects.detail.commitLangZh')}</option>
+              <option value="en">{t('projects.detail.commitLangEn')}</option>
+              <option value="mixed">{t('projects.detail.commitLangMixed')}</option>
+            </select>
+
+            {commitLangMsg && (
+              <div style={{ marginTop: 8, fontSize: 12, color: commitLangMsg.ok ? 'var(--color-success)' : 'var(--color-error)' }}>
+                {commitLangMsg.ok ? '✅ ' : '❌ '}{commitLangMsg.text}
               </div>
             )}
           </div>
