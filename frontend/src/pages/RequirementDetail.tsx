@@ -685,18 +685,15 @@ export default function RequirementDetail() {
     return () => { cancelled = true; clearInterval(id); };
   }, [req?.id]);
 
-  // Development-mode selector for the coding stage. '' = the UI hasn't
-  // picked yet (the StartCoding request omits dev_mode and the backend
-  // falls back to the persisted value, or 'session' on rows that predate
-  // the column); 'session' = session-based dev (fork the design session,
-  // legacy default); 'design' = design-based dev (fresh session, hand the
-  // stored design doc to the agent via the -p prompt). Persisted in
-  // requirements.dev_mode and seeded from the row so a re-run preserves
-  // the previous choice by default.
-  const [devMode, setDevMode] = useState<'' | 'session' | 'design'>('');
+  // Development-mode selector for the coding stage. 'design' = design-based
+  // dev (fresh session, hand the stored design doc to the agent via the -p
+  // prompt; the new default). 'session' = session-based dev (fork the design
+  // session, legacy behavior). Persisted in requirements.dev_mode and seeded
+  // from the row so a re-run preserves the previous choice by default.
+  const [devMode, setDevMode] = useState<'session' | 'design'>('design');
   useEffect(() => {
-    if (req?.dev_mode) {
-      setDevMode((cur) => (cur === '' ? req.dev_mode! : cur));
+    if (req?.dev_mode === 'session' || req?.dev_mode === 'design') {
+      setDevMode(req.dev_mode);
     }
   }, [req?.dev_mode]);
 
@@ -1797,13 +1794,13 @@ export default function RequirementDetail() {
           // action (adjust / continue / sub-task / merge / cleanup) reuses the
           // stored value, so adjust/continue below deliberately omit it.
           ...(agentServerId ? { sync_mode: syncMode } : {}),
-          // Development-mode: 'session' (default when not set — fork the
-          // design session) or 'design' (fresh session, hand the stored
-          // design doc to the agent via the -p prompt). Sent only when the
-          // user explicitly picked one; otherwise the backend falls back to
-          // the persisted requirements.dev_mode (or 'session' on legacy
-          // rows), which keeps "Rebuild" consistent with the previous run.
-          ...(devMode ? { dev_mode: devMode } : {}),
+          // Development-mode: 'design' (default — fresh session, hand the
+          // stored design doc to the agent via the -p prompt) or 'session'
+          // (fork the design session, legacy behavior). Always sent — the
+          // UI no longer offers a "reuse previous" option, so devMode is
+          // never empty. Legacy clients may still send '' which the backend
+          // falls back to requirements.dev_mode or 'session'.
+          dev_mode: devMode,
         }),
       });
       const json = await res.json();
@@ -2457,11 +2454,12 @@ export default function RequirementDetail() {
                       </div>
                     </div>
                   </label>
-                  {/* Development-mode radio: "Session-based" (default) = fork the design
-                      session; "Design-based" = create a new session with
-                      the design as the only input. Seed stays consistent with
-                      dev_source/dev_mode; the local choice can be changed before
-                      confirming the launch. */}
+                  {/* Development-mode radio: "Design-based" (default) = create a
+                      new session with the design as the only input; "Session-based"
+                      = fork the design session. The local choice can be changed
+                      before confirming the launch; seed effect pulls the persisted
+                      requirements.dev_mode so a re-run preserves the previous
+                      explicit choice. */}
                   <div className="preflight-toggle" style={{ display: 'block' }}>
                     <div className="preflight-toggle-body">
                       <div className="preflight-toggle-title">{t('requirements.detail2.preflightDevModeTitle')}</div>
@@ -2473,17 +2471,6 @@ export default function RequirementDetail() {
                           <input
                             type="radio"
                             name="devModeModal"
-                            value="session"
-                            checked={devMode === 'session'}
-                            onChange={() => setDevMode('session')}
-                            disabled={coding}
-                          />
-                          {t('requirements.detail2.preflightDevModeSession')}
-                        </label>
-                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                          <input
-                            type="radio"
-                            name="devModeModal"
                             value="design"
                             checked={devMode === 'design'}
                             onChange={() => setDevMode('design')}
@@ -2491,16 +2478,16 @@ export default function RequirementDetail() {
                           />
                           {t('requirements.detail2.preflightDevModeDesign')}
                         </label>
-                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer', color: 'var(--color-text-muted)' }}>
+                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
                           <input
                             type="radio"
                             name="devModeModal"
-                            value=""
-                            checked={devMode === ''}
-                            onChange={() => setDevMode('')}
+                            value="session"
+                            checked={devMode === 'session'}
+                            onChange={() => setDevMode('session')}
                             disabled={coding}
                           />
-                          {t('requirements.detail2.preflightDevModeKeep')}
+                          {t('requirements.detail2.preflightDevModeSession')}
                         </label>
                       </div>
                     </div>
@@ -3697,30 +3684,25 @@ export default function RequirementDetail() {
                     style={{ minWidth: 140 }}
                   />
                 </label>
-                {/* Development-mode selector. Empty = reuse previous setting
-                    (first-run default = session); 'session' = session-based
-                    dev (continue in the original design session, legacy
-                    behavior); 'design' = design-based dev (create a new
-                    session and hand the design as the only input to the
-                    Agent). Seed matches dev_source: first entry reads
-                    req.dev_mode. */}
+                {/* Development-mode selector. 'design' = design-based dev (default;
+                    create a new session and hand the design as the only input
+                    to the Agent). 'session' = session-based dev (continue in
+                    the original design session, legacy behavior). Seed
+                    matches dev_source: first entry reads req.dev_mode. */}
                 <label style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                   {t('requirements.detail2.devModeLabel')}
                   <select
                     className="form-input"
                     style={{ minWidth: 150 }}
                     value={devMode}
-                    onChange={(e) => setDevMode(e.target.value as '' | 'session' | 'design')}
+                    onChange={(e) => setDevMode(e.target.value as 'session' | 'design')}
                     disabled={coding}
                     title={devMode === 'design'
                       ? t('requirements.detail2.devModeNewSessionTitle')
-                      : devMode === 'session'
-                      ? t('requirements.detail2.devModeResumeSessionTitle')
-                      : t('requirements.detail2.devModeEmptyTitle')}
+                      : t('requirements.detail2.devModeResumeSessionTitle')}
                   >
-                    <option value="">{t('requirements.detail2.devModeKeepOption')}</option>
-                    <option value="session">{t('requirements.detail2.devModeSessionOption')}</option>
                     <option value="design">{t('requirements.detail2.devModeDesignOption')}</option>
+                    <option value="session">{t('requirements.detail2.devModeSessionOption')}</option>
                   </select>
                 </label>
                 {agentServers.length === 0 && (
