@@ -372,6 +372,27 @@ export const requirements = {
     codingCompleteBtn: 'Mark development complete',
     codingRedoTitle: 'Fork a new session from the technical design, dropping the previous dev history',
     codingRedoBtn: 'Re-develop',
+    // Tags (chips editor) — free-form short labels for ad-hoc categorization.
+    tagsLabel: 'Tags',
+    tagsPlaceholder: 'Type a tag and press Enter (e.g. blocked, v2, customer-A)',
+    tagsEmpty: 'No tags yet — add one below',
+    tagsRemoveTitle: 'Remove this tag',
+    tagsAddTitle: 'Add tag',
+    tagsLimit: 'Up to {{max}} tags, each ≤ {{len}} chars',
+    // Close — manual short-circuit from any non-terminal stage. Distinct
+    // from "Mark development complete" (the natural done gate) because it
+    // carries a user-supplied reason and stamps both completed_at + closed_at.
+    closeBtn: 'Close requirement',
+    closeBtnTitle: 'Force-close: skip remaining stages and mark the requirement as done',
+    closeBtnBusy: 'Closing…',
+    closeReasonLabel: 'Close reason (optional)',
+    closeReasonPlaceholder: 'e.g. duplicate, deferred, customer withdrew',
+    closeConfirmTitle: 'Close this requirement?',
+    closeConfirmDesc: 'Closing skips the remaining stages (already-completed stages are unaffected) and marks the requirement as done. To reverse, click "Unarchive".',
+    closeFailPrefix: 'Close failed: ',
+    closeSuccess: 'Closed',
+    closedBadge: 'Force-closed',
+    closedReasonPrefix: 'Close reason: ',
     // Developer-stage run env / dev-mode selectors.
     devEnvLabel: 'Execution target',
     devEnvOnTitle: 'Claude CLI will run on {{name}}',

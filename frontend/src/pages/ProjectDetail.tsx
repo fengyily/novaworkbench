@@ -25,6 +25,34 @@ import './KnowledgePage.css';
 
 type Tab = 'overview' | 'knowledge' | 'run' | 'requirements' | 'review' | 'weekly' | 'usage';
 
+// Columns the requirements table allows the user to sort by clicking the
+// header. Each value maps to one logical comparator in `compareRequirements`
+// below — adding a sortable column is a two-line change (type + comparator)
+// plus an `isSortable` flag on the <th>. Columns NOT in this union (type,
+// agent server, tokens, cost) intentionally don't sort because their data
+// either has no natural ordering (agent server name) or no cheap client-side
+// representation (cost is computed from token usage).
+type ReqSortColumn = 'id' | 'title' | 'priority' | 'status' | 'created_at' | 'updated_at';
+
+// Sort direction. First click picks the column's `defaultDir` (see
+// `toggleSort`); subsequent clicks on the same column flip between asc /
+// desc. Strings (not a numeric enum) so the value is trivial to drop into
+// `aria-sort` and the column-header indicator.
+type ReqSortDir = 'asc' | 'desc';
+
+// Natural "first click" direction for each sortable column. Chosen so the
+// most-useful order shows up immediately — high priority first (desc),
+// newest first (desc), A→Z (asc), active stages first (asc). Users who want
+// the opposite can click again to flip.
+const REQ_SORT_DEFAULT_DIR: Record<ReqSortColumn, ReqSortDir> = {
+  id: 'desc',
+  title: 'asc',
+  priority: 'desc',
+  status: 'asc',
+  created_at: 'desc',
+  updated_at: 'desc',
+};
+
 const priorityDots: Record<string, string> = {
   high: '🔴', medium: '🟡', low: '🟢',
 };
@@ -60,6 +88,63 @@ function reqPageWindow(total: number, current: number): (number | '…')[] {
     prev = p;
   }
   return out;
+}
+
+// SortHeader — clickable <th> that drives the requirements-tab sort state.
+// Renders the column label plus an arrow indicator (▲ / ▼) when active, and
+// sets aria-sort so screen readers announce the sort direction. Inactive
+// columns show a faint ↕ so the click affordance is discoverable without
+// being noisy. Click anywhere on the header to trigger `onSort(col)` — the
+// parent decides whether to flip direction or reset to the column default.
+//
+// Kept as a plain function (not a useCallback inside the component) so it
+// doesn't need to be wrapped in React.memo — re-renders are cheap, and the
+// parent already passes stable handlers via `toggleSort`.
+function SortHeader({
+  col,
+  label,
+  width,
+  sortColumn,
+  sortDir,
+  onSort,
+}: {
+  col: ReqSortColumn;
+  label: string;
+  width?: number;
+  sortColumn: ReqSortColumn | null;
+  sortDir: ReqSortDir;
+  onSort: (col: ReqSortColumn) => void;
+}) {
+  const active = sortColumn === col;
+  // ↑ = ascending, ↓ = descending, ↕ = inactive (subtle hint that the
+  // column is sortable). The arrow lives in its own span so the layout
+  // doesn't reflow when the indicator changes.
+  const arrow = active ? (sortDir === 'asc' ? '▲' : '▼') : '↕';
+  const ariaSort = active
+    ? (sortDir === 'asc' ? 'ascending' : 'descending')
+    : 'none';
+  return (
+    <th
+      style={width ? { width } : undefined}
+      className={`pr-th-sortable${active ? ' is-active' : ''}`}
+      aria-sort={ariaSort as 'ascending' | 'descending' | 'none'}
+      onClick={() => onSort(col)}
+      role="button"
+      tabIndex={0}
+      onKeyDown={e => {
+        // Space / Enter activates the header — mirrors native <button>
+        // semantics so keyboard users can sort without reaching for the
+        // mouse.
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSort(col);
+        }
+      }}
+    >
+      <span className="pr-th-sortable-label">{label}</span>
+      <span className={`pr-th-sortable-arrow${active ? ' is-active' : ''}`} aria-hidden="true">{arrow}</span>
+    </th>
+  );
 }
 
 export default function ProjectDetail() {
@@ -154,6 +239,25 @@ export default function ProjectDetail() {
   const [showCreateReq, setShowCreateReq] = useState(false);
   // Requirements tab pagination — first page by default.
   const [reqPage, setReqPage] = useState(1);
+  // Requirements-tab filter + sort (only affects the requirements tab; the
+  // overview's recent list keeps its own narrower `status !== 'done'` filter).
+  // Default = 'active' so first-time visitors see only in-flight work (the
+  // same slice the overview shows); a long backlog of done/archived rows
+  // would otherwise bury everything below the fold. Users can flip to
+  // 'all' / 'done' / 'archived' via the chip group above the table.
+  const [reqStatusFilter, setReqStatusFilter] = useState<'all' | 'active' | 'done' | 'archived'>('active');
+  // Text search applied to title + description (case-insensitive contains).
+  // Empty string disables the search filter. Lives next to the status chips
+  // so users can quickly narrow down to a specific bug / feature without
+  // scrolling the full backlog.
+  const [reqSearch, setReqSearch] = useState('');
+  // Column-driven sort. `reqSortColumn === null` keeps the backend order
+  // authoritative (done-last + created_at DESC) — same default as before.
+  // Clicking a sortable column header sets `reqSortColumn` and seeds
+  // `reqSortDir` with that column's natural direction; a second click on
+  // the same header flips the direction. See `toggleSort` for the rule.
+  const [reqSortColumn, setReqSortColumn] = useState<ReqSortColumn | null>(null);
+  const [reqSortDir, setReqSortDir] = useState<ReqSortDir>('desc');
 
   // Requirement ids currently running a wizard job (across the whole
   // backend process). Populated by polling GET /api/wizard/active-jobs
@@ -309,6 +413,11 @@ export default function ProjectDetail() {
   // replaced (initial load, post-create refresh), so a previously selected page
   // can never land past the new last page.
   useEffect(() => { setReqPage(1); }, [reqs]);
+
+  // Same reset when the user changes the filter, search, or sort — otherwise
+  // a page-3 selection can survive a filter that only has 1 page of results
+  // and silently render an empty tbody.
+  useEffect(() => { setReqPage(1); }, [reqStatusFilter, reqSearch, reqSortColumn, reqSortDir]);
 
   // 5s poll of /api/wizard/active-jobs. Drives the small amber breathing
   // dot rendered next to each requirement's status badge in
@@ -581,7 +690,46 @@ export default function ProjectDetail() {
     >
       <td data-label={t('projects.detail.colId')} style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{req.id}</td>
       <td data-label={t('projects.detail.colType')}><span className={`kind-badge kind-${kindOf(req)}`}>{tLabel(t, kindLabelKeys as Record<string, string>, kindOf(req))}</span></td>
-      <td data-label={t('projects.detail.colTitle')} className="pr-title">{req.title}</td>
+      <td data-label={t('projects.detail.colTitle')} className="pr-title">
+        <div className="pr-title-text">{req.title}</div>
+        {/* Tag chips: rendered below the title as a compact strip (max 3
+            visible, then +N overflow). Empty / undefined = no chips row,
+            so legacy rows without the tags column stay on the original
+            one-line title layout. Force-closed rows also surface a small
+            "中途关闭" badge with the reason as the hover tooltip so the
+            user can tell at a glance why a done row looks short. */}
+        {(() => {
+          const list: string[] = (() => {
+            const raw = (req.tags || '').trim();
+            if (!raw || raw === '[]') return [];
+            try {
+              const parsed = JSON.parse(raw);
+              return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+            } catch { return []; }
+          })();
+          if (list.length === 0 && !req.closed_at) return null;
+          const visible = list.slice(0, 3);
+          const overflow = list.length - visible.length;
+          return (
+            <div className="pr-title-tags">
+              {req.closed_at && (
+                <span
+                  className="req-tag-chip pr-title-tag pr-title-tag-closed"
+                  title={req.closed_reason || t('requirements.detail2.closedBadge')}
+                >
+                  {t('requirements.detail2.closedBadge')}
+                </span>
+              )}
+              {visible.map(tag => (
+                <span key={tag} className="req-tag-chip pr-title-tag" title={tag}>{tag}</span>
+              ))}
+              {overflow > 0 && (
+                <span className="req-tag-chip pr-title-tag pr-title-tag-more" title={list.slice(3).join(', ')}>+{overflow}</span>
+              )}
+            </div>
+          );
+        })()}
+      </td>
       <td data-label={t('projects.detail.colPriority')}><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
       <td data-label={t('projects.detail.colStatus')}>
         <StatusChips req={req} />
@@ -640,12 +788,106 @@ export default function ProjectDetail() {
   // The requirements tab keeps showing everything (done sorts to the end).
   const overviewReqs = reqs.filter(r => r.status !== 'done');
 
+  // Requirements tab — client-side filter + search applied BEFORE the sort
+  // and pagination. Two independent predicates are combined here so the sort
+  // step below only ever sees the final user-visible slice.
+  //   • Status chip: 'all' intentionally excludes 'archived' (consistent with
+  //     the backend's List() default, which hides archived unless the caller
+  //     explicitly opts in via status='archived'); 'archived' is its own
+  //     bucket so it never bleeds into other views.
+  //   • Search box: case-insensitive substring match against the title OR
+  //     description. Whitespace-trimmed so a stray space at the end doesn't
+  //     accidentally exclude every row.
+  const filteredReqs = useMemo(() => {
+    const term = reqSearch.trim().toLowerCase();
+    return reqs.filter(r => {
+      // Status predicate
+      switch (reqStatusFilter) {
+        case 'all':       if (r.status === 'archived') return false; break;
+        case 'active':    if (!['draft', 'analyzing', 'designing', 'designed', 'developing'].includes(r.status)) return false; break;
+        case 'done':      if (r.status !== 'done') return false; break;
+        case 'archived':  if (r.status !== 'archived') return false; break;
+      }
+      // Search predicate (empty term = pass)
+      if (!term) return true;
+      const title = (r.title || '').toLowerCase();
+      const desc = (r.description || '').toLowerCase();
+      return title.includes(term) || desc.includes(term);
+    });
+  }, [reqs, reqStatusFilter, reqSearch]);
+
+  // Comparator for one sortable column. Returns negative if `a` should
+  // appear before `b` in ASC order; the caller flips the sign for DESC.
+  // Pure functions so the sort step is trivially testable.
+  const compareRequirements = (a: Requirement, b: Requirement, col: ReqSortColumn): number => {
+    switch (col) {
+      case 'id':
+        // `req_xxxxxxxx` is hex; lexicographic compare matches numeric order
+        // because the ids are zero-padded to a fixed width.
+        return (a.id || '').localeCompare(b.id || '');
+      case 'title':
+        return (a.title || '').localeCompare(b.title || '', undefined, { sensitivity: 'base' });
+      case 'priority': {
+        // Custom order so high→low stays meaningful in both directions.
+        const order: Record<string, number> = { high: 0, medium: 1, low: 2 };
+        return (order[a.priority] ?? 99) - (order[b.priority] ?? 99);
+      }
+      case 'status': {
+        // Lifecycle order: draft→analyzing→designing→designed→developing→done→archived.
+        // Ascending shows "what's in flight" first; descending is rarely useful
+        // but still consistent.
+        const order: Record<string, number> = {
+          draft: 0, analyzing: 1, designing: 2, designed: 3, developing: 4,
+          done: 5, archived: 6,
+        };
+        return (order[a.status] ?? 99) - (order[b.status] ?? 99);
+      }
+      case 'created_at':
+      case 'updated_at':
+        // ISO-8601 strings sort correctly lexicographically — same approach as
+        // the earlier dropdown sort, kept here for consistency.
+        return (a[col] || '').localeCompare(b[col] || '');
+    }
+  };
+
+  // Sort the filtered slice. `reqSortColumn === null` is a pass-through —
+  // the backend already returns done-last + created_at DESC, and we want
+  // that order to stay authoritative when no column has been clicked yet.
+  // When a column is active, the sort uses `compareRequirements` and applies
+  // `reqSortDir` (flip the sign for DESC). The list is shallow-copied first
+  // so we never mutate `filteredReqs` (it'd poison the next render's
+  // reference equality).
+  const sortedReqs = useMemo(() => {
+    if (reqSortColumn === null) return filteredReqs;
+    const sign = reqSortDir === 'asc' ? 1 : -1;
+    return [...filteredReqs].sort((a, b) => {
+      const cmp = compareRequirements(a, b, reqSortColumn);
+      if (cmp !== 0) return sign * cmp;
+      // Stable tie-breaker: fall back to backend order (created_at DESC).
+      // Keeps the active sort's primary key unambiguous and matches what
+      // the user saw before clicking.
+      return (b.created_at || '').localeCompare(a.created_at || '');
+    });
+  }, [filteredReqs, reqSortColumn, reqSortDir]);
+
+  // Header-click handler. Same column flips direction; new column resets to
+  // that column's natural default (REQ_SORT_DEFAULT_DIR). The page reset is
+  // handled by the useEffect above.
+  const toggleSort = (col: ReqSortColumn) => {
+    if (reqSortColumn === col) {
+      setReqSortDir(d => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setReqSortColumn(col);
+      setReqSortDir(REQ_SORT_DEFAULT_DIR[col]);
+    }
+  };
+
   // Requirements tab pagination. The page is clamped to the (possibly shrunken)
   // list so a stale reqPage never escapes the array; the reset effect below
   // normally snaps back to page 1 after a list refresh.
-  const totalReqPages = Math.max(1, Math.ceil(reqs.length / REQ_PAGE_SIZE));
+  const totalReqPages = Math.max(1, Math.ceil(sortedReqs.length / REQ_PAGE_SIZE));
   const curReqPage = Math.min(reqPage, totalReqPages);
-  const pagedReqs = reqs.slice((curReqPage - 1) * REQ_PAGE_SIZE, curReqPage * REQ_PAGE_SIZE);
+  const pagedReqs = sortedReqs.slice((curReqPage - 1) * REQ_PAGE_SIZE, curReqPage * REQ_PAGE_SIZE);
 
   // Render a group of knowledge entries under a labeled section. Reuses the
   // kb-card styles from KnowledgePage.css. The content preview is stripped of
@@ -1193,6 +1435,92 @@ export default function ProjectDetail() {
             </button>
           </div>
 
+          {/* Status filter (chip group) + text search. Mounted under the
+              run-control-bar and ABOVE the composer so the controls stay
+              visible even when the composer is collapsed.
+
+              Status is rendered as a chip group instead of a <select>:
+              every status is one tap away (no menu open / arrow-key dance),
+              the active chip is obvious at a glance, and the group is
+              keyboard-friendly via the implicit button focus ring. The
+              chip pattern matches the cross-project RequirementsList so
+              the two pages read as one family — `.project-req-chip` /
+              `.project-req-chip.active` mirror `.req-kind-chip` semantics.
+
+              Search is a single text box that filters on title OR
+              description (case-insensitive contains). Reuses the global
+              `.search-input` pill style from index.css so the affordance
+              looks consistent with the search input on the cross-project
+              list. The trailing × clear button shows up only when there's
+              text — common UX pattern, matches RequirementsList. */}
+
+          {/* Counter sits on the right side of the run-control-bar so users
+              can see "本项目关联的需求（X）" even before they touch the
+              filter. The shown/total counter (under the search box) shows
+              the post-filter count, which is the more useful number once
+              they've started narrowing things down. */}
+          <div className="project-req-filter-bar">
+            <div className="project-req-filter-chips" role="tablist" aria-label={t('projects.detail.reqFilterStatusLabel')}>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={reqStatusFilter === 'active'}
+                className={`project-req-chip project-req-chip-active${reqStatusFilter === 'active' ? ' is-active' : ''}`}
+                onClick={() => setReqStatusFilter('active')}
+              >
+                {t('projects.detail.reqFilterActive')}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={reqStatusFilter === 'all'}
+                className={`project-req-chip project-req-chip-all${reqStatusFilter === 'all' ? ' is-active' : ''}`}
+                onClick={() => setReqStatusFilter('all')}
+              >
+                {t('projects.detail.reqFilterAll')}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={reqStatusFilter === 'done'}
+                className={`project-req-chip project-req-chip-done${reqStatusFilter === 'done' ? ' is-active' : ''}`}
+                onClick={() => setReqStatusFilter('done')}
+              >
+                {t('projects.detail.reqFilterDone')}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={reqStatusFilter === 'archived'}
+                className={`project-req-chip project-req-chip-archived${reqStatusFilter === 'archived' ? ' is-active' : ''}`}
+                onClick={() => setReqStatusFilter('archived')}
+              >
+                {t('projects.detail.reqFilterArchived')}
+              </button>
+            </div>
+            <div className="search-input project-req-search">
+              <span className="search-input-icon" aria-hidden="true">🔍</span>
+              <input
+                type="text"
+                value={reqSearch}
+                onChange={e => setReqSearch(e.target.value)}
+                placeholder={t('projects.detail.reqSearchPlaceholder')}
+                aria-label={t('projects.detail.reqSearchAriaLabel')}
+              />
+              {reqSearch && (
+                <button
+                  type="button"
+                  className="search-input-clear"
+                  aria-label={t('projects.detail.reqSearchClear')}
+                  onClick={() => setReqSearch('')}
+                >×</button>
+              )}
+            </div>
+            <span className="project-req-filter-count">
+              {t('projects.detail.reqCountFiltered', { shown: sortedReqs.length, total: reqs.length })}
+            </span>
+          </div>
+
           {/* The composer is mounted ABOVE the requirements list so the
               user sees it appear right under the button they just
               clicked. Previously it rendered at the bottom of the tab
@@ -1236,21 +1564,77 @@ export default function ProjectDetail() {
             <div className="tab-empty"><p>{t('projects.detail.reqEmpty')}</p></div>
           )}
 
-          {!reqsLoading && !reqsError && reqs.length > 0 && (
+          {/* The project has requirements but the active filter / search
+              shows none (e.g. user picked 'archived' but the project has
+              zero archived rows, or typed a keyword that doesn't match).
+              Reusing `reqEmpty` would lie ("项目暂无需求") since the
+              project does have rows — a dedicated "filtered" copy keeps
+              the hint accurate and nudges the user toward the controls. */}
+          {!reqsLoading && !reqsError && reqs.length > 0 && sortedReqs.length === 0 && (
+            <div className="tab-empty"><p>{t('projects.detail.reqEmptyFiltered')}</p></div>
+          )}
+
+          {!reqsLoading && !reqsError && sortedReqs.length > 0 && (
             <div className="pr-list">
               <table className="pr-table table-cards">
                 <thead>
                   <tr>
-                    <th style={{ width: 110 }}>{t('projects.detail.colId')}</th>
+                    {/* Sortable headers use the <SortHeader> component (defined
+                        near the top of the file): clickable, shows the ↑ / ↓
+                        arrow on the active column, sets aria-sort for screen
+                        readers. Non-sortable columns (Type / Agent server /
+                        Tokens / Cost) stay plain <th>. */}
+                    <SortHeader
+                      col="id"
+                      width={110}
+                      label={t('projects.detail.colId')}
+                      sortColumn={reqSortColumn}
+                      sortDir={reqSortDir}
+                      onSort={toggleSort}
+                    />
                     <th style={{ width: 70 }}>{t('projects.detail.colType')}</th>
-                    <th>{t('projects.detail.colTitle')}</th>
-                    <th style={{ width: 90 }}>{t('projects.detail.colPriority')}</th>
-                    <th style={{ width: 130 }}>{t('projects.detail.colStatus')}</th>
+                    <SortHeader
+                      col="title"
+                      label={t('projects.detail.colTitle')}
+                      sortColumn={reqSortColumn}
+                      sortDir={reqSortDir}
+                      onSort={toggleSort}
+                    />
+                    <SortHeader
+                      col="priority"
+                      width={90}
+                      label={t('projects.detail.colPriority')}
+                      sortColumn={reqSortColumn}
+                      sortDir={reqSortDir}
+                      onSort={toggleSort}
+                    />
+                    <SortHeader
+                      col="status"
+                      width={130}
+                      label={t('projects.detail.colStatus')}
+                      sortColumn={reqSortColumn}
+                      sortDir={reqSortDir}
+                      onSort={toggleSort}
+                    />
                     <th style={{ width: 140 }}>{t('projects.detail.colAgentServer')}</th>
                     <th style={{ width: 130 }}>{t('projects.detail.colTokens')}</th>
-                      <th style={{ width: 110 }}>{t('projects.detail.colCost')}</th>
-                    <th style={{ width: 110 }}>{t('projects.detail.colCreatedAt')}</th>
-                    <th style={{ width: 110 }}>{t('projects.detail.colUpdatedAt')}</th>
+                    <th style={{ width: 110 }}>{t('projects.detail.colCost')}</th>
+                    <SortHeader
+                      col="created_at"
+                      width={110}
+                      label={t('projects.detail.colCreatedAt')}
+                      sortColumn={reqSortColumn}
+                      sortDir={reqSortDir}
+                      onSort={toggleSort}
+                    />
+                    <SortHeader
+                      col="updated_at"
+                      width={110}
+                      label={t('projects.detail.colUpdatedAt')}
+                      sortColumn={reqSortColumn}
+                      sortDir={reqSortDir}
+                      onSort={toggleSort}
+                    />
                   </tr>
                 </thead>
                 <tbody>

@@ -200,6 +200,24 @@ export const projects = {
     paginationInfo: '{{total}} total · page {{cur}} / {{totalPages}}',
     paginationPrev: '‹ Prev',
     paginationNext: 'Next ›',
+    // Requirements tab — status filter chips + text search (above the table).
+    // Sort is now driven by clicking the table column headers (no separate
+    // "sort by" dropdown), so the old reqSort* keys were dropped.
+    // `reqCountFiltered` is a template with {{shown}} / {{total}} placeholders.
+    // `reqSortAscAria` / `reqSortDescAria` are screen-reader labels for the
+    // ↑ / ↓ sort indicator on the active column header.
+    reqFilterStatusLabel: 'Status',
+    reqFilterAll: 'All',
+    reqFilterActive: 'In progress',
+    reqFilterDone: 'Done',
+    reqFilterArchived: 'Archived',
+    reqSearchPlaceholder: 'Search title or description…',
+    reqSearchAriaLabel: 'Search by title or description',
+    reqSearchClear: 'Clear search',
+    reqSortAscAria: 'Ascending',
+    reqSortDescAria: 'Descending',
+    reqCountFiltered: 'Showing {{shown}} / {{total}}',
+    reqEmptyFiltered: 'No requirements match the current filter — try a different status or search term',
     runDetected: 'Detected {{file}}',
     runMissing: 'No docker-compose file detected',
     runStart: 'Start',

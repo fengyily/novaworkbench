@@ -387,6 +387,28 @@ export const requirements = {
     codingCompleteBtn: '开发完成',
     codingRedoTitle: '从技术方案重新 fork 新会话开始开发，不携带上次开发历史',
     codingRedoBtn: '重新开发',
+    // Tags (chips editor) — free-form short labels for ad-hoc categorization.
+    tagsLabel: '标记',
+    tagsPlaceholder: '输入标记后回车（如 阻塞、v2、客户A）',
+    tagsEmpty: '暂无标记，点击下方输入框添加',
+    tagsRemoveTitle: '移除该标记',
+    tagsAddTitle: '添加标记',
+    tagsLimit: '最多 {{max}} 个标记，每个不超过 {{len}} 字',
+    // Close — manual short-circuit from any non-terminal stage. Distinct
+    // from "开发完成" (the natural done gate) because it carries a
+    // user-supplied reason and stamps both completed_at + closed_at.
+    closeBtn: '关闭需求',
+    closeBtnTitle: '强制关闭：跳过剩余生命周期，直接标记为已完成',
+    closeBtnBusy: '关闭中…',
+    closeReasonLabel: '关闭原因（可选）',
+    closeReasonPlaceholder: '例如：重复需求、本期不做、客户已撤回',
+    closeConfirmTitle: '关闭该需求？',
+    closeConfirmDesc: '关闭后将跳过剩余阶段（已完成的阶段不受影响），状态置为已完成。如需恢复，可点击「取消归档」。',
+    closeFailPrefix: '关闭失败：',
+    closeSuccess: '已关闭',
+    // Tags + close trail shown on the detail header.
+    closedBadge: '中途关闭',
+    closedReasonPrefix: '关闭原因：',
     // Developer-stage run env / dev-mode selectors.
     devEnvLabel: '执行环境',
     devEnvOnTitle: '将在 {{name}} 上执行 Claude CLI',

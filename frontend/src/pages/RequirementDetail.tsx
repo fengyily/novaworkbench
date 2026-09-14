@@ -1339,6 +1339,76 @@ export default function RequirementDetail() {
   // freshly-minted detail page.
   const [summarizeOpen, setSummarizeOpen] = useState(false);
 
+  // ── Tags (chips editor) ───────────────────────────────────────────────────
+  // Local edit buffer is the source of truth while the editor is open; the
+  // effect below re-seeds it whenever the requirement id changes (page nav,
+  // manual refresh) so the chips never go stale. Persisted on every add /
+  // remove — the round-trip is cheap (PUT /api/requirements/{id}/tags) and
+  // it keeps the URL state self-consistent on browser refresh.
+  const [tags, setTags] = useState<string[]>([]);
+  const [tagInput, setTagInput] = useState('');
+  useEffect(() => {
+    if (!req) { setTags([]); return; }
+    const raw = (req.tags || '').trim();
+    if (!raw || raw === '[]') { setTags([]); return; }
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        setTags(parsed.filter((x): x is string => typeof x === 'string'));
+        return;
+      }
+    } catch { /* fall through to empty */ }
+    setTags([]);
+  }, [req?.id, req?.tags]);
+
+  const addTag = (raw: string) => {
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    if (tags.includes(trimmed)) { setTagInput(''); return; }
+    if (tags.length >= 20) { setTagInput(''); return; }
+    const next = [...tags, trimmed];
+    setTags(next);
+    setTagInput('');
+    requirementsApi.updateTags(req!.id, next)
+      .then(updated => setReq(updated))
+      .catch(err => alert(t('requirements.detail2.closeFailPrefix') + (err instanceof Error ? err.message : String(err))));
+  };
+
+  const removeTag = (tag: string) => {
+    const next = tags.filter(x => x !== tag);
+    setTags(next);
+    requirementsApi.updateTags(req!.id, next)
+      .then(updated => setReq(updated))
+      .catch(err => alert(t('requirements.detail2.closeFailPrefix') + (err instanceof Error ? err.message : String(err))));
+  };
+
+  // ── Close (force-close modal) ─────────────────────────────────────────────
+  // State for the close-confirmation modal: opens when the user clicks
+  // "关闭需求", captures an optional reason, and POSTs to /close. The
+  // refreshed requirement (with status='done' + closed_at/closed_reason
+  // stamped) is written back via setReq so the header / meta bar / footer
+  // all re-render without a manual refresh.
+  const [closeModalOpen, setCloseModalOpen] = useState(false);
+  const [closeReason, setCloseReason] = useState('');
+  const [closeBusy, setCloseBusy] = useState(false);
+  const [closeErr, setCloseErr] = useState('');
+
+  const submitClose = async () => {
+    if (!req || closeBusy) return;
+    setCloseBusy(true);
+    setCloseErr('');
+    try {
+      const updated = await requirementsApi.close(req.id, closeReason.trim());
+      setReq(updated);
+      setCloseModalOpen(false);
+      setCloseReason('');
+    } catch (e: unknown) {
+      setCloseErr(t('requirements.detail2.closeFailPrefix') + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setCloseBusy(false);
+    }
+  };
+
   // ── Architect phase: async design generation via JobStore ─────────────────
   // The architect-design endpoint creates a background job and returns its id
   // immediately (same pattern as start-coding). We stream the job's log lines
@@ -2694,6 +2764,20 @@ export default function RequirementDetail() {
             </button>
           )}
           <button className="btn btn-sm" onClick={openEdit}><IconRefine size={13} className="btn-icon" />{t('requirements.detail2.headerEditBtn')}</button>
+          {/* Close (force-close). Available for any non-terminal, non-archived
+              requirement — short-circuits the remaining pipeline stages and
+              stamps a user-supplied reason. Hidden when the requirement is
+              already done (the natural "开发完成" gate is the right path) or
+              archived (Unarchive is the only legal reversal). */}
+          {req.status !== 'archived' && req.status !== 'done' && (
+            <button
+              className="btn btn-sm"
+              onClick={() => setCloseModalOpen(true)}
+              title={t('requirements.detail2.closeBtnTitle')}
+            >
+              <IconCheck size={13} className="btn-icon" />{t('requirements.detail2.closeBtn')}
+            </button>
+          )}
           <button className="btn btn-sm btn-danger" onClick={handleDelete}><IconTrash size={13} className="btn-icon" />{t('requirements.detail2.headerDeleteBtn')}</button>
         </div>
       </div>
@@ -2707,6 +2791,19 @@ export default function RequirementDetail() {
             Lets the detail-page head show at a glance whether a wizard job
             is currently running. Auto-paused under prefers-reduced-motion. */}
         <span className={`status-badge status-${req.status}${claudeWorking ? ' claude-pulse' : ''}`}>{tLabel(t, statusLabelKeys as Record<string,string>, req.status)}</span>
+        {/* Force-close badge — only present when closed_at was stamped by the
+            manual Close endpoint. The reason (if supplied) rides as the badge
+            tooltip so it doesn't bloat the meta row, and the description
+            section below also surfaces the full text for the case the user
+            wants to read it back. */}
+        {req.closed_at && (
+          <span
+            className="status-badge closed-badge"
+            title={req.closed_reason ? `${t('requirements.detail2.closedReasonPrefix')}${req.closed_reason}` : t('requirements.detail2.closedBadge')}
+          >
+            {t('requirements.detail2.closedBadge')}
+          </span>
+        )}
         <span className={`priority-tag ${req.priority}`}>{req.priority.toUpperCase()}</span>
         <span className={`claude-status${claudeWorking ? ' working claude-pulse' : ''}`} title={claudeWorking ? t('requirements.detail2.claudeBusyTitle') : t('requirements.detail2.claudeIdleTitle')}>
           {claudeWorking ? <><IconBotBadge size={12} className="icon-mr" />{t('requirements.detail2.claudeBusy')}</> : <><IconSleep size={12} className="icon-mr" />{t('requirements.detail2.claudeIdle')}</>}
@@ -2814,6 +2911,64 @@ export default function RequirementDetail() {
           )}
         </div>
       )}
+
+      {/* Tags (chips editor) — ad-hoc free-form labels. Saved on every add /
+          remove via PUT /api/requirements/{id}/tags; the chips disappear on
+          archived rows is not necessary (read-only is fine — the editor stays
+          open even after archive so the user can curate tags before / after
+          unarchive). */}
+      <div className="detail-section tags-section">
+        <div className="section-header" style={{ marginBottom: 8 }}>
+          <span className="ledger-title">
+            <span className="ledger-title-mark" aria-hidden />
+            {t('requirements.detail2.tagsLabel')}
+          </span>
+          <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+            {t('requirements.detail2.tagsLimit', { max: 20, len: 32 })}
+          </span>
+        </div>
+        {tags.length === 0 && (
+          <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
+            {t('requirements.detail2.tagsEmpty')}
+          </div>
+        )}
+        <div className="tags-chip-row">
+          {tags.map(tag => (
+            <span key={tag} className="req-tag-chip" title={t('requirements.detail2.tagsRemoveTitle')}>
+              <span className="req-tag-chip-label">{tag}</span>
+              <button
+                type="button"
+                className="req-tag-chip-remove"
+                aria-label={t('requirements.detail2.tagsRemoveTitle')}
+                onClick={() => removeTag(tag)}
+              >×</button>
+            </span>
+          ))}
+          <input
+            className="req-tag-input"
+            placeholder={t('requirements.detail2.tagsPlaceholder')}
+            value={tagInput}
+            onChange={e => setTagInput(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                addTag(tagInput);
+              } else if (e.key === ',' || e.key === '，') {
+                e.preventDefault();
+                addTag(tagInput);
+              }
+            }}
+            title={t('requirements.detail2.tagsAddTitle')}
+            maxLength={32}
+            disabled={tags.length >= 20}
+          />
+        </div>
+        {req.closed_reason && (
+          <div className="closed-reason-line">
+            {t('requirements.detail2.closedReasonPrefix')}{req.closed_reason}
+          </div>
+        )}
+      </div>
 
       {/* Time spent — plan-analysis span + development span. Rendered only when
           there is at least one metric to show (a fresh draft has neither). */}
@@ -4094,6 +4249,51 @@ export default function RequirementDetail() {
             navigate(`/requirements/${newId}`);
           }}
         />
+      )}
+
+      {/* Close (force-close) confirmation modal. Mirrors the
+          SummarizeToRequirementModal style: full-screen overlay, compact
+          centered card, textarea for the optional reason. Disabled
+          Submit while the request is in flight; an inline error line below
+          the textarea carries server-side validation failures (e.g.
+          archived rows rejected with 400). */}
+      {closeModalOpen && (
+        <div className="kb-modal-overlay modal-fullscreen-overlay" onClick={() => !closeBusy && setCloseModalOpen(false)}>
+          <div className="kb-modal modal-fullscreen close-modal" onClick={e => e.stopPropagation()}>
+            <div className="kb-modal-header">
+              <h2>{t('requirements.detail2.closeConfirmTitle')}</h2>
+              <button className="kb-modal-close" onClick={() => !closeBusy && setCloseModalOpen(false)} aria-label="close">×</button>
+            </div>
+            <div className="kb-modal-body">
+              <p style={{ marginTop: 0, color: 'var(--color-text-secondary)', lineHeight: 1.6 }}>
+                {t('requirements.detail2.closeConfirmDesc')}
+              </p>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: 'var(--color-text-secondary)' }}>
+                {t('requirements.detail2.closeReasonLabel')}
+              </label>
+              <textarea
+                className="review-comment-editor"
+                rows={4}
+                value={closeReason}
+                onChange={e => setCloseReason(e.target.value)}
+                placeholder={t('requirements.detail2.closeReasonPlaceholder')}
+                maxLength={500}
+                disabled={closeBusy}
+              />
+              {closeErr && (
+                <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-error)' }}>{closeErr}</div>
+              )}
+              <div className="review-comment-actions" style={{ marginTop: 16 }}>
+                <button className="btn" onClick={() => setCloseModalOpen(false)} disabled={closeBusy}>
+                  {t('requirements.detail.cancel')}
+                </button>
+                <button className="btn btn-primary" onClick={submitClose} disabled={closeBusy}>
+                  {closeBusy ? t('requirements.detail2.closeBtnBusy') : t('requirements.detail2.closeBtn')}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {scheduleModal && (

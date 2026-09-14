@@ -168,6 +168,27 @@ type Requirement struct {
 	// have a future-dated wizard task waiting. Empty when no pending schedule
 	// exists (and on Create, which does not join).
 	ScheduledRunAt *time.Time `json:"scheduled_run_at,omitempty"`
+	// Tags is the JSON-array string of user-supplied short labels attached
+	// to this requirement: free-form short strings such as "阻塞", "外部依赖",
+	// "v2", "客户A". Always a valid JSON array string (empty "[]" when no
+	// tags); trimmed, deduped, length- and count-capped by
+	// RequirementService.UpdateTags. Empty in legacy rows before the column
+	// existed (default value is "[]" so the frontend never sees null).
+	Tags string `json:"tags"`
+	// ClosedAt is stamped when the user force-closes a requirement via the
+	// "关闭需求" action (service.RequirementService.Close). NULL for natural
+	// completion (developer-complete gate flips status to "done" without
+	// writing this column). Combined with ClosedReason, lets the UI
+	// distinguish "开发完成" from "中途关闭". Both columns live on the
+	// requirements row itself so they survive JobStore eviction / server
+	// restart.
+	ClosedAt *time.Time `json:"closed_at,omitempty"`
+	// ClosedReason is the user-supplied rationale when the requirement was
+	// force-closed (e.g. "重复需求", "本期不做"). Empty string when the
+	// requirement was never force-closed or when the user left the reason
+	// blank. Free-form text — the service does not enforce a vocabulary so
+	// the UI can show whatever the user typed (truncated in lists).
+	ClosedReason string `json:"closed_reason"`
 }
 
 type CreateRequirementReq struct {
