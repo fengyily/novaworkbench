@@ -5,7 +5,9 @@ import (
 	"database/sql"
 
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"regexp"
 	"github.com/novaworkbench/backend/internal/db"
@@ -163,6 +165,8 @@ func (s *ProjectService) ListTrash() ([]model.Project, error) {
 }
 
 func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error) {
+	log.Printf("[gitlab-debug] service.Add entry: remote_url=%q platform_type=%q platform_token_id=%q branch=%q",
+		req.RemoteURL, req.PlatformType, req.PlatformTokenID, req.Branch)
 	path := req.LocalPath
 
 	// Remote mode: no local path supplied yet — clone into the workspace using
@@ -184,15 +188,27 @@ func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error
 
 	// Validate the optional platform/token pairing before any disk work so
 	// a bad token never leaves a half-cloned tree behind.
-	tokenSecret, tokenPlatform, err := s.resolveCloneAuth(req.PlatformType, req.PlatformTokenID, req.RemoteURL)
+	tokenSecret, tokenPlatform, tokenBaseURL, tokenGitUserName, err := s.resolveCloneAuth(req.PlatformType, req.PlatformTokenID, req.RemoteURL)
 	if err != nil {
 		return nil, err
+	}
+
+	// Pre-clone token validation: GitLab's git HTTP basic auth and the
+	// `/api/v4/user` endpoint use different auth paths, so a token that's
+	// valid for the API may still be rejected on `git clone` (e.g. missing
+	// `read_repository` scope, or the GitLab admin disabled basic auth on
+	// the git endpoints). Validate up-front and return a specific error
+	// instead of the cryptic "HTTP Basic: Access denied" from git.
+	if req.RemoteURL != "" && tokenSecret != "" && tokenPlatform == "gitlab" {
+		if vErr := validateGitLabToken(tokenBaseURL, tokenSecret, req.RemoteURL); vErr != nil {
+			return nil, vErr
+		}
 	}
 
 	// Clone the remote into the target when it doesn't exist yet.
 	if req.RemoteURL != "" {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
-			if err := cloneRepo(req.RemoteURL, req.Branch, path, tokenPlatform, tokenSecret); err != nil {
+			if err := cloneRepo(req.RemoteURL, req.Branch, path, tokenPlatform, tokenSecret, tokenGitUserName); err != nil {
 				return nil, err
 			}
 		}
@@ -262,28 +278,35 @@ func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error
 //
 // Both platformType and tokenID must be set together — passing one without
 // the other is treated as TOKEN_NOT_FOUND to keep the contract explicit.
-func (s *ProjectService) resolveCloneAuth(platformType, tokenID, remoteURL string) (string, string, error) {
+func (s *ProjectService) resolveCloneAuth(platformType, tokenID, remoteURL string) (string, string, string, string, error) {
+	host, _ := urlHost(remoteURL)
+	log.Printf("[gitlab-debug] resolveCloneAuth in: platform_type=%q token_id=%q remote_host=%q",
+		platformType, tokenID, host)
 	if tokenID == "" && platformType == "" {
-		return "", "", nil
+		log.Printf("[gitlab-debug] resolveCloneAuth early-return: no token requested (public-repo path)")
+		return "", "", "", "", nil
 	}
 	if tokenID == "" || platformType == "" {
-		return "", "", fmt.Errorf("TOKEN_NOT_FOUND: token id and platform must be supplied together")
+		return "", "", "", "", fmt.Errorf("TOKEN_NOT_FOUND: token id and platform must be supplied together")
 	}
 	tok, err := s.platforms.Get(tokenID)
 	if err != nil {
-		return "", "", fmt.Errorf("TOKEN_NOT_FOUND: %w", err)
+		log.Printf("[gitlab-debug] resolveCloneAuth platforms.Get(%q) err=%v", tokenID, err)
+		return "", "", "", "", fmt.Errorf("TOKEN_NOT_FOUND: %w", err)
 	}
 	if tok.Platform != platformType {
-		return "", "", fmt.Errorf("PLATFORM_MISMATCH: token is for %q, request asked for %q", tok.Platform, platformType)
+		return "", "", "", "", fmt.Errorf("PLATFORM_MISMATCH: token is for %q, request asked for %q", tok.Platform, platformType)
 	}
 	// Defensive: if the URL host suggests a different platform than the
 	// supplied token (e.g. github token + gitlab.com URL), refuse the clone
 	// rather than silently push the wrong creds.
-	if host, ok := urlHost(remoteURL); ok && hostPlatform(host) != "" && hostPlatform(host) != tok.Platform {
-		return "", "", fmt.Errorf("PLATFORM_MISMATCH: remote host %q belongs to %q but token is for %q",
+	if host != "" && hostPlatform(host) != "" && hostPlatform(host) != tok.Platform {
+		return "", "", "", "", fmt.Errorf("PLATFORM_MISMATCH: remote host %q belongs to %q but token is for %q",
 			host, hostPlatform(host), tok.Platform)
 	}
-	return tok.Token, tok.Platform, nil
+	log.Printf("[gitlab-debug] resolveCloneAuth out: token=%s platform=%q base_url=%q git_user_name=%q",
+		redactToken(tok.Token), tok.Platform, tok.BaseURL, tok.GitUserName)
+	return tok.Token, tok.Platform, tok.BaseURL, tok.GitUserName, nil
 }
 
 // urlHost extracts the lowercased hostname from a git URL. Returns
@@ -438,8 +461,11 @@ func repoName(url string) string {
 //	                                 on stdin
 //
 // A redundant "yes\n" is piped into stdin as belt-and-suspenders.
-func cloneRepo(remote, branch, dest, platform, tokenSecret string) error {
-	cloneURL := injectCredentials(remote, platform, tokenSecret)
+func cloneRepo(remote, branch, dest, platform, tokenSecret, gitUserName string) error {
+	log.Printf("[gitlab-debug] cloneRepo in: platform=%q token=%s git_user_name=%q dest=%q branch=%q",
+		platform, redactToken(tokenSecret), gitUserName, dest, branch)
+	cloneURL := injectCredentials(remote, platform, tokenSecret, gitUserName)
+	log.Printf("[gitlab-debug] cloneRepo final URL: %s", redactUserinfo(cloneURL))
 
 	args := []string{"clone"}
 	if branch != "" && branch != "main" && branch != "master" {
@@ -501,6 +527,104 @@ func isMissingExecutable(err error) bool {
 	return strings.Contains(err.Error(), "executable file not found in $PATH")
 }
 
+// validateGitLabToken probes the GitLab instance with the supplied token
+// before attempting a `git clone`. Two checks run in order:
+//
+//  1. GET {baseURL}/api/v4/user — confirms the token is recognised at all
+//     (catches: wrong / expired / revoked tokens, wrong base URL).
+//  2. GET {baseURL}/api/v4/projects/{path} — confirms the token can see the
+//     specific project the user wants to clone (catches: missing
+//     `read_repository` scope, project access not granted, project
+//     doesn't exist on this instance).
+//
+// Both endpoints are authenticated with the `PRIVATE-TOKEN` header (not
+// HTTP basic), so they exercise a different code path from `git clone`'s
+// HTTP basic auth. A token that passes these checks but still gets
+// "HTTP Basic: Access denied" on `git clone` indicates the GitLab admin
+// has disabled basic auth on the git endpoints — the returned error
+// message points the user at that, instead of leaving them guessing.
+//
+// All errors are prefixed with `TOKEN_INVALID:` so the handler can map
+// them to a dedicated HTTP status. The token is never echoed back; URLs
+// are passed through redactUserinfo.
+func validateGitLabToken(baseURL, token, remoteURL string) error {
+	if baseURL == "" {
+		return fmt.Errorf("TOKEN_INVALID: GitLab base_url 未配置 — 请在「平台 Token」中重新保存 videocut-Gitlab，并填写 base_url（如 http://172.20.210.36）")
+	}
+	apiBase := strings.TrimRight(baseURL, "/") + "/api/v4"
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	// 1. /user — basic token validity.
+	req, _ := http.NewRequest(http.MethodGet, apiBase+"/user", nil)
+	req.Header.Set("PRIVATE-TOKEN", token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("TOKEN_INVALID: 无法连接 GitLab %s — %w", redactUserinfo(baseURL), err)
+	}
+	userBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
+		return fmt.Errorf("TOKEN_INVALID: GitLab 拒绝此 token (HTTP %d) — token 可能过期、被撤销或权限不足。请在 %s/-/user_settings/personal_access_tokens 重新生成 token，并确保勾选 api 和 read_repository (或 write_repository) 权限",
+			resp.StatusCode, redactUserinfo(baseURL))
+	case resp.StatusCode != http.StatusOK:
+		return fmt.Errorf("TOKEN_INVALID: GitLab /user 响应异常 (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(userBody)))
+	}
+
+	// 2. /projects/{path} — project-level access. Skipped if we can't
+	//    derive a project path from the remote URL.
+	projPath := extractGitLabProjectPath(remoteURL)
+	if projPath == "" {
+		return nil
+	}
+	projURL := apiBase + "/projects/" + url.PathEscape(projPath)
+	req2, _ := http.NewRequest(http.MethodGet, projURL, nil)
+	req2.Header.Set("PRIVATE-TOKEN", token)
+	resp2, err := client.Do(req2)
+	if err != nil {
+		return fmt.Errorf("TOKEN_INVALID: 无法连接 GitLab 验证项目访问 — %w", err)
+	}
+	projBody, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	switch {
+	case resp2.StatusCode == http.StatusUnauthorized, resp2.StatusCode == http.StatusForbidden:
+		return fmt.Errorf("TOKEN_INVALID: token 鉴权通过，但无法访问项目 %s (HTTP %d) — token 没有该项目的 read_repository 权限，或 token 已被吊销对该项目的访问。请在 GitLab 项目设置 → Members 确认 token 对应用户已被授予 Reporter 及以上角色",
+			projPath, resp2.StatusCode)
+	case resp2.StatusCode == http.StatusNotFound:
+		return fmt.Errorf("TOKEN_INVALID: 项目 %s 在 GitLab 上不存在，或 token 没有该项目访问权限 (HTTP 404)。请确认 URL 拼写或为 token 授予项目访问权", projPath)
+	case resp2.StatusCode != http.StatusOK:
+		return fmt.Errorf("TOKEN_INVALID: GitLab /projects 响应异常 (HTTP %d): %s", resp2.StatusCode, strings.TrimSpace(string(projBody)))
+	}
+	return nil
+}
+
+// extractGitLabProjectPath turns a clone URL into the GitLab project
+// path. Examples:
+//
+//	http://gitlab.example.com/team2/videocutbot.git  → "team2/videocutbot"
+//	https://gitlab.example.com/group/sub/proj.git    → "group/sub/proj"
+//	git@gitlab.example.com:team2/videocutbot.git     → "team2/videocutbot"
+//
+// Returns "" when no path can be derived.
+func extractGitLabProjectPath(remoteURL string) string {
+	s := strings.TrimSpace(remoteURL)
+	// Strip scp-like `user@host:` prefix for SSH URLs.
+	if i := strings.Index(s, "@"); i > 0 {
+		rest := s[i+1:]
+		if j := strings.Index(rest, ":"); j > 0 && !strings.Contains(rest[:j], "/") {
+			s = rest[j+1:]
+		}
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Path == "" {
+		return ""
+	}
+	p := strings.TrimPrefix(u.Path, "/")
+	p = strings.TrimSuffix(p, ".git")
+	p = strings.TrimSuffix(p, "/")
+	return p
+}
+
 // wrapGitError returns a clear error when git is missing on PATH, otherwise
 // falls back to the previous "git <op> failed: <out> — <err>" format. Used
 // by Add's auto-init path where there is no captured git stderr.
@@ -515,26 +639,63 @@ func wrapGitError(op, out string, err error) error {
 // userinfo for HTTPS remotes. SSH / git@… remotes are returned unchanged —
 // SSH auth is key-based, not token-based. An empty tokenSecret passes the
 // URL through verbatim (public repo path).
-func injectCredentials(remote, platform, tokenSecret string) string {
+func injectCredentials(remote, platform, tokenSecret, gitUserName string) string {
 	if tokenSecret == "" {
+		log.Printf("[gitlab-debug] injectCredentials: empty token, returning raw URL host=%q",
+			hostOnlyForLog(remote))
 		return remote
 	}
 	u, err := url.Parse(remote)
 	if err != nil || u.Scheme == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		// git@…:owner/repo.git or any non-HTTP URL — leave alone.
+		log.Printf("[gitlab-debug] injectCredentials: non-http URL host=%q scheme=%q, pass-through",
+			u.Host, u.Scheme)
 		return remote
 	}
-	// Personal access tokens: drop any existing userinfo, embed the token
-	// in userinfo. The user segment depends on platform:
-	//   - github / gitea: plain token ("https://<token>@host/...")
-	//   - gitlab:         "oauth2:<token>" — GitLab rejects the plain form
-	//                     with "HTTP Basic: Access denied".
+	// Drop any existing userinfo before re-attaching our own; otherwise the
+	// rewritten URL would carry both the original and injected credentials.
+	u.User = nil
+	// Build the userinfo. url.UserPassword(username, password) keeps the
+	// structural ":" between user and password un-percent-encoded, so the
+	// wire form is `http://<user>:<password>@host/...` — which is what
+	// GitLab expects (it reads the colon-separated form for HTTP basic).
+	//
+	// Platform-specific user/password split:
+	//   - github / gitea:  user=<token>, password=""  → "https://<token>@host/..."
+	//   - gitlab + username: user=<gitUserName>, password=<token>
+	//                       → "http://fengyi:glpat-xxx@host/..." (works on self-hosted
+	//                         GitLab that rejects the bare `oauth2:` prefix)
+	//   - gitlab without username: user="oauth2", password=<token>
+	//                       → "http://oauth2:<token>@host/..." (the GitLab-docs form
+	//                         for PAT auth; preserved as a fallback if git_user_name
+	//                         is empty in the platform_tokens row)
 	user := tokenSecret
-	if platform == "gitlab" {
-		user = "oauth2:" + tokenSecret
+	password := ""
+	switch platform {
+	case "gitlab":
+		if gitUserName != "" {
+			user = gitUserName
+			password = tokenSecret
+		} else {
+			user = "oauth2"
+			password = tokenSecret
+		}
 	}
-	u.User = url.UserPassword(user, "")
-	return u.String()
+	u.User = url.UserPassword(user, password)
+	out := u.String()
+	log.Printf("[gitlab-debug] injectCredentials out: platform=%q token=%s host=%s",
+		platform, redactToken(tokenSecret), redactUserinfo(out))
+	return out
+}
+
+// hostOnlyForLog extracts just the host portion of a raw URL for logging,
+// tolerating malformed input.
+func hostOnlyForLog(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "<unparseable>"
+	}
+	return u.Host
 }
 
 // redactUserinfo strips any https://user:token@host segments from s so an
@@ -544,6 +705,19 @@ var userinfoPattern = regexp.MustCompile(`([a-z][a-z0-9+\-.]*://)([^/\s:@]+):([^
 
 func redactUserinfo(s string) string {
 	return userinfoPattern.ReplaceAllString(s, "$1<redacted>@")
+}
+
+// redactToken returns a safe-to-log form of a token secret: first 4 + "***" +
+// last 4 chars. Short / empty tokens collapse to a sentinel so we never leak
+// the full value into the log stream.
+func redactToken(s string) string {
+	if s == "" {
+		return "<empty>"
+	}
+	if len(s) <= 8 {
+		return "<short>"
+	}
+	return s[:4] + "***" + s[len(s)-4:]
 }
 
 // OriginURL returns the project's git remote_url with the platform token
@@ -563,13 +737,13 @@ func (s *ProjectService) OriginURL(projectID string) (string, error) {
 	if p.RemoteURL == "" {
 		return "", fmt.Errorf("NO_REMOTE: project %s has no remote_url configured", projectID)
 	}
-	tok, _, err := s.resolveCloneAuth(p.PlatformType, p.PlatformTokenID, p.RemoteURL)
+	tok, plat, _, gitUserName, err := s.resolveCloneAuth(p.PlatformType, p.PlatformTokenID, p.RemoteURL)
 	if err != nil {
 		// TOKEN_NOT_FOUND / PLATFORM_MISMATCH: propagate but caller may choose
 		// to fall back to the raw URL for a public repo.
 		return "", err
 	}
-	return injectCredentials(p.RemoteURL, p.PlatformType, tok), nil
+	return injectCredentials(p.RemoteURL, plat, tok, gitUserName), nil
 }
 
 // Restore re-clones a soft-deleted project's directory from its stored
@@ -594,12 +768,12 @@ func (s *ProjectService) Restore(id string) (*model.Project, error) {
 		return nil, fmt.Errorf("DIR_EXISTS: target directory already exists: %s", p.LocalPath)
 	}
 
-	tokenSecret, tokenPlatform, err := s.resolveCloneAuth(p.PlatformType, p.PlatformTokenID, p.RemoteURL)
+	tokenSecret, tokenPlatform, _, tokenGitUserName, err := s.resolveCloneAuth(p.PlatformType, p.PlatformTokenID, p.RemoteURL)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := cloneRepo(p.RemoteURL, p.DefaultBranch, p.LocalPath, tokenPlatform, tokenSecret); err != nil {
+	if err := cloneRepo(p.RemoteURL, p.DefaultBranch, p.LocalPath, tokenPlatform, tokenSecret, tokenGitUserName); err != nil {
 		return nil, fmt.Errorf("RESTORE_FAILED: %w", err)
 	}
 
@@ -646,7 +820,7 @@ func (s *ProjectService) EnsureCloned(id string) error {
 	if p.RemoteURL == "" {
 		return fmt.Errorf("project directory missing and no remote URL to re-clone: %s", p.LocalPath)
 	}
-	tokenSecret, tokenPlatform, err := s.resolveCloneAuth(p.PlatformType, p.PlatformTokenID, p.RemoteURL)
+	tokenSecret, tokenPlatform, _, tokenGitUserName, err := s.resolveCloneAuth(p.PlatformType, p.PlatformTokenID, p.RemoteURL)
 	if err != nil {
 		return err
 	}
@@ -654,7 +828,7 @@ func (s *ProjectService) EnsureCloned(id string) error {
 	if branch == "" {
 		branch = "main"
 	}
-	if err := cloneRepo(p.RemoteURL, branch, p.LocalPath, tokenPlatform, tokenSecret); err != nil {
+	if err := cloneRepo(p.RemoteURL, branch, p.LocalPath, tokenPlatform, tokenSecret, tokenGitUserName); err != nil {
 		return fmt.Errorf("re-clone from %s: %w", redactUserinfo(p.RemoteURL), err)
 	}
 	return nil

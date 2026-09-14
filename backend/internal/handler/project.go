@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 	"unicode/utf8"
@@ -73,6 +74,8 @@ func (h *ProjectHandler) Add(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Invalid JSON body")
 		return
 	}
+	log.Printf("[gitlab-debug] handler.project.Add req: remote_url=%q platform_type=%q platform_token_id=%q branch=%q local_path=%q",
+		req.RemoteURL, req.PlatformType, req.PlatformTokenID, req.Branch, req.LocalPath)
 
 	p, err := h.svc.Add(req)
 	if err != nil {
@@ -80,6 +83,8 @@ func (h *ProjectHandler) Add(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(msg, "TOKEN_NOT_FOUND"):
 			writeError(w, http.StatusBadRequest, "TOKEN_NOT_FOUND", msg)
+		case strings.HasPrefix(msg, "TOKEN_INVALID"):
+			writeError(w, http.StatusBadRequest, "TOKEN_INVALID", msg)
 		case strings.HasPrefix(msg, "PLATFORM_MISMATCH"):
 			writeError(w, http.StatusBadRequest, "PLATFORM_MISMATCH", msg)
 		default:
@@ -139,6 +144,8 @@ func (h *ProjectHandler) Restore(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "DIR_EXISTS", msg)
 		case strings.HasPrefix(msg, "TOKEN_NOT_FOUND"):
 			writeError(w, http.StatusBadRequest, "TOKEN_NOT_FOUND", msg)
+		case strings.HasPrefix(msg, "TOKEN_INVALID"):
+			writeError(w, http.StatusBadRequest, "TOKEN_INVALID", msg)
 		case strings.HasPrefix(msg, "PLATFORM_MISMATCH"):
 			writeError(w, http.StatusBadRequest, "PLATFORM_MISMATCH", msg)
 		case strings.HasPrefix(msg, "RESTORE_FAILED"):
