@@ -21,6 +21,7 @@ import {
 import { tLabel } from '../i18n/label';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import { DevSourceBadge } from '../components/DevSourceBadge';
+import { StatusChips } from '../components/StatusChips';
 import { fmtRelative, fmtDateTime } from '../utils/intl';
 import './RequirementsList.css';
 
@@ -264,9 +265,7 @@ export default function RequirementsList() {
                       {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
                     </td>
                     <td data-label={t('requirements.list.colStatus')}>
-                      <span className={`status-badge status-${r.status}`}>
-                        {tLabel(t, statusLabelKeys, r.status)}
-                      </span>
+                      <StatusChips req={r} />
                     </td>
                     {/* Model column — the developer-stage model actually
                         dispatched to the Claude CLI (the value pinned in
@@ -344,9 +343,7 @@ export default function RequirementsList() {
                   <span className={`kind-badge kind-${k}`} title={tLabel(t, kindLabelKeys, k)}>
                     {tLabel(t, kindShortLabelKeys, k)}
                   </span>
-                  <span className={`status-badge status-${r.status}`}>
-                    {tLabel(t, statusLabelKeys, r.status)}
-                  </span>
+                  <StatusChips req={r} />
                 </div>
                 <div className="req-card-mobile-title">
                   {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
