@@ -740,27 +740,20 @@ var alterColumns = []string{
 	// (attempts >= SummaryMaxAttempts). Bumped atomically by RunOrchestratorSummary
 	// right after MarkSummary('running'), so a crash mid-round still counts.
 	`ALTER TABLE orchestration_batches ADD COLUMN summary_attempts INTEGER NOT NULL DEFAULT 0`,
-	// Detected commit/PR language of this project. Populated by ScannerService
-	// from a git-log CJK/Latin tally ("zh" / "en" / "mixed"). Empty = never
-	// detected (treat as "en" per the requirement). The override column below
-	// lets the user pin a different style from the project settings page.
-	`ALTER TABLE projects ADD COLUMN commit_lang TEXT NOT NULL DEFAULT 'auto'`,
-	// SHA256 hex of the sampled commit subjects at detection time. Lets the
-	// scanner skip a fresh tally when no new commits have landed since the
-	// last run (same idempotency shape as description_hash).
-	`ALTER TABLE projects ADD COLUMN commit_lang_hash TEXT NOT NULL DEFAULT ''`,
-	// Records who wrote commit_lang: "auto" via scanner, "manual" via the
-	// override API, "" if never written. Surfaced to the UI so the user can
-	// see whether the value came from detection or their own hand.
-	`ALTER TABLE projects ADD COLUMN commit_lang_source TEXT NOT NULL DEFAULT ''`,
-	// Timestamp of the last successful write to commit_lang (auto or manual).
-	// Used by the project settings page to show how stale detection is.
-	`ALTER TABLE projects ADD COLUMN commit_lang_updated_at DATETIME`,
-	// User override for the detected language. Empty string = no override
-	// (use the detected value). Allowed values: "zh" / "en" / "mixed" — the
-	// "auto" string is the API-level marker meaning "no override" (stored as
-	// '' in the column). See service.ResolveCommitLang / service.StyleHint.
+	// Per-project commit-message language for the "提交/PR 遵循项目历史风格"
+	// feature. commit_lang holds the auto-detected value (zh/en/mixed/'');
+	// commit_lang_override is the user-pinned value, always winning over the
+	// detection; commit_lang_source records the origin of the stored lang
+	// ('auto' = scanner-detected, 'manual' = set via override API, '' = never
+	// written). commit_lang_updated_at is the last successful write timestamp
+	// (nullable so legacy rows don't fake a write). MySQL TEXT DEFAULT '' is
+	// wrapped to DEFAULT ('') by mysqlTextDefault; Postgres DATETIME→TIMESTAMP
+	// by fixupSchema. isIgnorableDDLError swallows "duplicate column" so the
+	// ALTERs are safe to ship before all DBs have caught up.
+	`ALTER TABLE projects ADD COLUMN commit_lang TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN commit_lang_override TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE projects ADD COLUMN commit_lang_source TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE projects ADD COLUMN commit_lang_updated_at DATETIME`,
 }
 
 var (

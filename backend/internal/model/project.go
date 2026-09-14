@@ -30,20 +30,16 @@ type Project struct {
 	ClaudeProjectSlug string `json:"claude_project_slug,omitempty"`
 	// Commit language preference driving the "提交/PR 遵循项目历史风格"
 	// pipeline. CommitLang is the auto-detected dominant language of the
-	// project's git history (zh / en / mixed / "auto"). CommitLangOverride
-	// is the user-pinned value and always wins over CommitLang when non-empty.
-	// CommitLangHash is the SHA256 hex of the sampled commit subjects at
-	// detection time (used by the scanner to skip a fresh tally when no new
-	// commits have landed). CommitLangUpdatedAt is the timestamp of the
-	// last successful write. CommitLangSource records who wrote the value
-	// ("auto" via scanner, "manual" via the override API, "" if never
-	// written) — surfaced to the UI so the user can tell at a glance whether
-	// a value came from auto-detection or their own hand.
-	CommitLang          string     `json:"commit_lang,omitempty"`
-	CommitLangHash      string     `json:"-"`
-	CommitLangSource    string     `json:"commit_lang_source,omitempty"`
+	// project's git history (zh / en / mixed / ""). CommitLangOverride is
+	// the user-pinned value and always wins over CommitLang when non-empty.
+	// CommitLangSource records who set CommitLang ("auto" via scanner,
+	// "manual" via override API, "" never written). CommitLangUpdatedAt is
+	// the last successful write timestamp. Consumed by the wizard push
+	// sub-task prompt, the pr_author role, and the frontend style chip.
+	CommitLang         string     `json:"commit_lang,omitempty"`
+	CommitLangOverride string     `json:"commit_lang_override,omitempty"`
+	CommitLangSource   string     `json:"commit_lang_source,omitempty"`
 	CommitLangUpdatedAt *time.Time `json:"commit_lang_updated_at,omitempty"`
-	CommitLangOverride  string     `json:"commit_lang_override,omitempty"`
 }
 
 // AddProjectRequest is the body of POST /api/projects.

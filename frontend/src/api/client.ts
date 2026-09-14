@@ -149,15 +149,13 @@ export interface Project {
   deleted_dir?: number;
   description: string;
   description_manual: boolean;
-  // Per-project commit/PR style preference. Detected value lives in
-  // commit_lang; user override lives in commit_lang_override (empty =
-  // honor detection, "zh"/"en"/"mixed" = force a value). Detected at scan
-  // time by service.DetectCommitLanguage (backend/internal/service/
-  // project_style.go). Surfaced in the project edit panel and the merge
-  // modal badge via commitStyleApi.
+  // Commit / PR language — detected by the scanner or pinned by the user.
+  // Override wins when set; the effective value is resolved by callers via
+  // ResolveCommitLang (helper in src/utils/commitLang.ts).
   commit_lang?: string;
-  commit_lang_detected_at?: string;
   commit_lang_override?: string;
+  commit_lang_source?: string;
+  commit_lang_updated_at?: string;
 }
 
 export interface DashboardData {
@@ -221,20 +219,13 @@ export const projectsApi = {
     api.post<{ updated: number; skipped: number; failed: number }>(
       '/api/projects/descriptions/backfill', {},
     ),
-};
-
-// Per-project commit / PR style preference. The detected language comes from
-// service.DetectCommitLanguage (set by ScannerService.Scan on project add /
-// rescan); commit_lang_override lets the user pin a language independent of
-// detection (empty = honor detection; "auto"/""/empty values all mean auto).
-// Frontend surface: ProjectDetail edit panel + merge modal badge (rendered
-// from MergeState.commit_lang + MergeState.commit_lang_override).
-export const commitStyleApi = {
-  setOverride: (projectId: string, override: string) =>
-    api.put<{ status: string }>(
-      `/api/projects/${projectId}/commit-lang-override`,
-      { override },
-    ),
+  // Pin a project-wide language override that the wizard pipeline uses when
+  // generating commit messages, push summaries, and PR titles/bodies. Pass
+  // override="" to clear the pin and revert to the auto-detected value.
+  // Backend rejects any other string with 400 INVALID_OVERRIDE; the server
+  // returns the refreshed Project row so callers can update local state.
+  setCommitLangOverride: (projectId: string, override: string) =>
+    api.put<Project>(`/api/projects/${projectId}/commit-lang-override`, { override }),
 };
 
 export const dashboardApi = {
@@ -1055,14 +1046,6 @@ export interface MergeState {
   mid_merge: boolean;
   conflict_files: string[];
   worktree_path?: string;
-  // 项目提交/PR 风格（detected / override / source / updated_at）—— 用于
-  // 合并弹窗上方展示「📝 项目风格：xxx」徽章，源数据来自
-  // State handler (handler/merge.go) 的 loadProjectCommitLangState。两者都
-  // 为空时徽章隐藏。
-  commit_lang?: string;
-  commit_lang_override?: string;
-  commit_lang_source?: string;
-  commit_lang_updated_at?: string;
 }
 export const mergeApi = {
   state: (reqId: string) => api.get<MergeState>(`/api/requirements/${reqId}/merge/state`),

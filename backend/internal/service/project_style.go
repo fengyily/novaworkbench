@@ -1,183 +1,104 @@
 package service
 
 import (
+	"bytes"
+	"context"
 	"os/exec"
 	"strings"
+	"time"
 	"unicode"
 )
 
-// commitLangSampleSize is how many recent non-merge commit subjects we sample
-// when detecting the project's dominant language. Larger than the typical
-// "read 50 commits" heuristic so a noisy first few hundred don't dominate a
-// 10k-commit OSS repo, but small enough that `git log` on a slow filesystem
-// still finishes in well under a second.
-const commitLangSampleSize = 500
-
-// commitLangMinChars is the floor on total valid (CJK + Latin) characters
-// before we trust the ratio. Below this we don't have enough signal to tell
-// "Chinese-heavy" from "all-emoji" and fall back to the default per the
-// requirement "在无法确定项目历史风格的情况下，相关内容使用英文".
-const commitLangMinChars = 10
-
-// commitLangThreshold is the proportion (0..1) at which we declare a single
-// language dominant. Anything below this on both sides becomes "mixed".
-const commitLangThreshold = 0.7
-
-// mergeBotPrefixes lists subject prefixes we skip before tallying. These come
-// from Dependabot / Renovate / GitHub UI merge buttons and don't reflect the
-// project's authored style.
-var mergeBotPrefixes = []string{
-	"Merge ",
-	"Revert ",
-	"Bump ",
-	"chore(deps",
-	"build(deps",
-	"ci(deps",
-}
-
-// DetectCommitLanguage reads up to commitLangSampleSize non-merge commits from
-// the project at projPath, tallies CJK (unicode.Han) vs Latin (ASCII letters)
-// characters, and returns the dominant style.
+// DetectCommitLanguage 扫描项目最近 200 条 commit message，统计中文 commit
+// 占比，返回推断的语言与置信度。中日韩字符通过 unicode.Han 类判断（等价于
+// 正则表达式 \p{Han}）。
 //
-//   - (lang, hash, nil) on success — lang ∈ {"zh", "en", "mixed"}
-//   - ("en", "", nil) on git error or insufficient samples (the requirement
-//     mandates English as the safe default when style is undetermined)
-//   - ("en", "", err) only on truly catastrophic failures (we still default
-//     to English so the caller never blocks a scan)
+// 返回约定：
+//   - 非 git 仓库 / 无 commit / git 不可用 → ("", 0, nil)
+//   - 至少 1 条 commit → lang 为 "zh" 或 "en"，confidence 为对应比例 [0,1]
+//   - 子命令执行失败（非 git 仓库）→ ("", 0, nil)，不向上抛错
 //
-// hash is the SHA256 hex of the concatenated subjects (in log order). The
-// scanner uses it as the "did anything new land?" sentinel.
-func DetectCommitLanguage(projPath string) (string, string, error) {
-	if projPath == "" {
-		return "en", "", nil
+// git 命令设有 5s 超时；输入输出通过 bytes.Buffer 捕获，避免 spawn 子 shell。
+// 函数无全局状态，可独立测试。
+func DetectCommitLanguage(projectDir string) (string, float64, error) {
+	if _, err := exec.LookPath("git"); err != nil {
+		// git 不在 PATH 中：无法推断，按"无 commit"语义返回空，不视为错误
+		return "", 0, nil
 	}
-	cmd := exec.Command("git", "-C", projPath, "log",
-		"--no-merges",
-		"-n", itoa(commitLangSampleSize),
-		"--pretty=format:%s")
-	out, err := cmd.Output()
-	if err != nil {
-		// not a git repo, git not installed, or no commits — treat as
-		// undetermined and default to English per the requirement.
-		return "en", "", nil
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", projectDir, "log", "--pretty=format:%s", "-n", "200")
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		// 非 git 目录、空仓库、命令异常等都视为无 commit
+		return "", 0, nil
 	}
-
-	raw := strings.Split(string(out), "\n")
-	samples := make([]string, 0, len(raw))
-	var cjk, latin int
-	for _, line := range raw {
-		s := strings.TrimSpace(line)
-		if s == "" {
+	raw := strings.TrimSpace(stdout.String())
+	if raw == "" {
+		return "", 0, nil
+	}
+	lines := strings.Split(raw, "\n")
+	zh, en := 0, 0
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
-		if hasAnyPrefix(s, mergeBotPrefixes) {
-			continue
-		}
-		samples = append(samples, s)
-		for _, r := range s {
-			switch {
-			case unicode.Is(unicode.Han, r):
-				cjk++
-			case r < 128 && unicode.IsLetter(r):
-				latin++
-			}
+		if containsHan(line) {
+			zh++
+		} else {
+			en++
 		}
 	}
-
-	total := cjk + latin
-	if total < commitLangMinChars {
-		// Too few alphabetic characters to be statistically meaningful;
-		// the file probably contains only symbols / numbers / punctuation
-		// (e.g. a release commit that bumps a version). Default to English.
-		return "en", "", nil
+	total := zh + en
+	if total == 0 {
+		return "", 0, nil
 	}
-
-	var lang string
-	cjkRatio := float64(cjk) / float64(total)
-	latinRatio := float64(latin) / float64(total)
-	switch {
-	case cjkRatio > commitLangThreshold:
-		lang = "zh"
-	case latinRatio > commitLangThreshold:
-		lang = "en"
-	default:
-		lang = "mixed"
+	if zh >= en {
+		return "zh", float64(zh) / float64(total), nil
 	}
-	return lang, sha256Hex(strings.Join(samples, "\n")), nil
+	return "en", float64(en) / float64(total), nil
 }
 
-// StyleHint maps a language code to the LLM-facing instruction string
-// spliced into the push sub-task prompt and the pr_author system prompt.
-//
-//   - "zh"     → 强制中文撰写
-//   - "en"     → 强制英文撰写
-//   - 其它(包含 "mixed" / "auto" / "") → 默认英文，但说明项目是中英混用
-func StyleHint(lang string) string {
-	switch lang {
-	case "zh":
-		return "请使用中文撰写 commit 信息与 PR 标题/正文。"
-	case "en":
-		return "Please write commit messages and PR title/body in English."
-	default:
-		return "项目历史风格为中英混用；请默认使用英文撰写 commit 信息与 PR 标题/正文。"
-	}
-}
-
-// ResolveCommitLang picks the effective language for a project using the
-// precedence: non-empty override > detected stored value > "en" default.
-//
-// Pass project.CommitLang and project.CommitLangOverride directly. The
-// "auto" string is never returned — it's the API-level "no override" marker
-// that callers may store as "" in the override column.
-func ResolveCommitLang(stored, override string) string {
-	if override != "" && override != "auto" {
-		return override
-	}
-	if stored != "" && stored != "auto" {
-		return stored
-	}
-	return "en"
-}
-
-// CommitLangEnumValues returns the four values the UI is allowed to pick from
-// in the override selector. Order matters — the first entry ("auto") is the
-// default state meaning "no override, use the detected value".
-func CommitLangEnumValues() []string {
-	return []string{"auto", "zh", "en", "mixed"}
-}
-
-// hasAnyPrefix returns true when s starts with any of the supplied prefixes.
-// Inline copy of strings.HasPrefix over a slice; cheaper than building a
-// trie for the half-dozen entries we have today.
-func hasAnyPrefix(s string, prefixes []string) bool {
-	for _, p := range prefixes {
-		if strings.HasPrefix(s, p) {
+// containsHan 报告 s 中是否包含任何中日韩字符（unicode.Han 类）。
+func containsHan(s string) bool {
+	for _, r := range s {
+		if unicode.Is(unicode.Han, r) {
 			return true
 		}
 	}
 	return false
 }
 
-// itoa converts a non-negative int to its decimal string form without
-// pulling in strconv for a single call site.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
+// StyleHint 根据 DB 读取的 lang 与 UI 上的 override 返回展示文本。
+// override 优先；lang 为空时返回空字符串。返回结果形如：
+//
+//	"📝 项目提交风格：中文"
+//	"📝 项目提交风格：English"
+//	"📝 项目提交风格：中英混用"
+//
+// 两者皆空时返回空字符串，调用方应自行决定是否渲染。
+func StyleHint(lang, override string) string {
+	switch ResolveCommitLang(lang, override) {
+	case "zh":
+		return "📝 项目提交风格：中文"
+	case "en":
+		return "📝 项目提交风格：English"
+	case "mixed":
+		return "📝 项目提交风格：中英混用"
+	default:
+		return ""
 	}
-	var buf [20]byte
-	i := len(buf)
-	neg := n < 0
-	if neg {
-		n = -n
+}
+
+// ResolveCommitLang 决策项目提交风格的最终值。优先级：
+//  1. 用户覆盖值（override 非空）
+//  2. 自动检测值（stored）
+//  3. 两者皆空时返回空字符串（调用方按"未确定风格"处理）
+func ResolveCommitLang(stored, override string) string {
+	if override != "" {
+		return override
 	}
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
+	return stored
 }

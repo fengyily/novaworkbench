@@ -112,14 +112,9 @@ func (s *ScannerService) Scan(projectID string) (*ScanResult, error) {
 	// description hasn't been manually locked. Non-fatal — never blocks a scan.
 	s.maybeGenerateDescription(projectID, projectPath)
 
-	// Detect (or re-detect) the project's dominant commit language so commit
-	// messages and PR titles follow the same style the project already uses.
-	// Runs after maybeGenerateDescription because the two helpers share the
-	// same idempotency guard shape (compare a hash against the persisted one)
-	// and we want description generation to have the same DB-write priority
-	// ordering. Errors here are non-fatal — the requirement mandates English
-	// as the safe default when style is undetermined, and that default is
-	// resolved at handler read time via service.ResolveCommitLang.
+	// Pair with the description generator above: infer the project's dominant
+	// commit-message language from git history. Non-fatal — a non-git /
+	// empty / mixed repo never blocks the scan.
 	s.maybeDetectCommitLang(projectID, projectPath)
 
 	result.Duration = time.Since(start).Round(time.Millisecond).String()
@@ -163,45 +158,41 @@ func (s *ScannerService) maybeGenerateDescription(projectID, projectPath string)
 	s.projectSvc.SetAutoDescription(projectID, summary, hash)
 }
 
-// maybeDetectCommitLang samples the project's recent commit subjects and
-// persists the dominant language ("zh" / "en" / "mixed") alongside a
-// SHA256 of the sample so a re-run with no new commits is a no-op.
-//
-// Mirrors maybeGenerateDescription's idempotency shape: bail on read
-// failure, bail when the hash matches, otherwise write. The set is gated by
-// ProjectService.SetAutoCommitLang so a user override is never clobbered by
-// an automatic re-detection. Non-fatal: every error path returns silently
-// so a missing git binary / broken repo never blocks a scan.
+// maybeDetectCommitLang is the scanner-side counterpart to
+// maybeGenerateDescription: on every scan, sample the project's recent git
+// history via DetectCommitLanguage and persist the inferred commit-message
+// language into projects.commit_lang. Designed to mirror the description
+// pair exactly:
+//   - skips when the user has pinned a commit_lang_override (same idea as
+//     description_manual — explicit user value wins over auto-detection)
+//   - skips when confidence is below the 0.6 threshold to avoid churning the
+//     column on tiny or mixed repos (mirrors the description_hash-equality
+//     early-return)
+//   - never aborts the scan on failure — DetectCommitLanguage already
+//     degrades gracefully for non-git / empty repos, and any DB error is
+//     swallowed (same as maybeGenerateDescription's "non-fatal" contract)
+// commit_lang_source is stamped as "auto" so the override-aware readers
+// (StyleHint / ResolveCommitLang) can tell auto-detected values apart from
+// user-pinned ones without re-reading the override column.
 func (s *ScannerService) maybeDetectCommitLang(projectID, projectPath string) {
-	if s.projectSvc == nil {
-		return
+	var override string
+	_ = s.db.QueryRow(
+		"SELECT commit_lang_override FROM projects WHERE id = ?",
+		projectID,
+	).Scan(&override)
+	if override != "" {
+		return // user-pinned override always wins over auto-detection
 	}
-	lang, hash, err := DetectCommitLanguage(projectPath)
-	if err != nil {
-		return
+
+	lang, confidence, err := DetectCommitLanguage(projectPath)
+	if err != nil || lang == "" || confidence < 0.6 {
+		return // empty repo / noisy sample / non-git → don't churn the column
 	}
-	if hash == "" {
-		// DetectCommitLanguage returns ("en", "", nil) when there's
-		// nothing to detect (no commits, no alphabetic content). We still
-		// want to record that we looked — write the default so a later
-		// scan can compare its own hash and skip.
-		// ProjectService.SetAutoCommitLang treats this as a normal write.
-	}
-	storedLang, storedHash, _, err := s.projectSvc.CommitLangState(projectID)
-	if err != nil {
-		return
-	}
-	if storedHash != "" && storedHash == hash {
-		return // already up to date
-	}
-	// If detection is unchanged (same lang, just hash differs because of
-	// formatting noise) still record the fresh hash + timestamp; otherwise
-	// caller's lang may differ from storedLang and we update.
-	_ = storedLang
-	updated, err := s.projectSvc.SetAutoCommitLang(projectID, lang, hash)
-	if err != nil || !updated {
-		return
-	}
+
+	_, _ = s.db.Exec(
+		"UPDATE projects SET commit_lang = ?, commit_lang_source = ?, commit_lang_updated_at = ? WHERE id = ?",
+		lang, "auto", time.Now(), projectID,
+	)
 }
 
 // RegenerateDescription forces a fresh AI summary for a project: it ignores the

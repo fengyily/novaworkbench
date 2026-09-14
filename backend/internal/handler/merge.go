@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/novaworkbench/backend/internal/db"
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/platform"
@@ -35,6 +36,7 @@ import (
 // branch, mid-merge MERGE_HEAD) lives on disk, so a backend restart between
 // steps is recoverable: /merge/state reads the real git state.
 type MergeHandler struct {
+	db           *db.DB
 	projectSvc    *service.ProjectService
 	reqSvc        *service.RequirementService
 	llm           *llm.Gateway
@@ -52,8 +54,9 @@ type MergeHandler struct {
 	agentSvrSvc *service.AgentServerService
 }
 
-func NewMergeHandler(projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, agentSvrSvc *service.AgentServerService) *MergeHandler {
+func NewMergeHandler(database *db.DB, projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, agentSvrSvc *service.AgentServerService) *MergeHandler {
 	return &MergeHandler{
+		db:           database,
 		projectSvc:    projectSvc,
 		reqSvc:        reqSvc,
 		llm:           llmGateway,
@@ -517,31 +520,22 @@ func (h *MergeHandler) State(w http.ResponseWriter, r *http.Request) {
 	}
 	prURL := buildPRURL(pf, webBase, owner, repo, target, dev)
 
-	// 项目提交/PR 风格（detected + override + source + updated_at）—— 前端合并
-	// 弹窗上方展示「📝 项目风格：xxx」徽章，让用户直观看到本次 commit / PR
-	// 将用什么语言撰写。detected 与 override 都为空时表示该字段不展示。
-	commitLang, commitLangOverride, commitLangSource, commitLangUpdatedAt := loadProjectCommitLangState(h.projectSvc, reqRow.ProjectID)
-
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"is_git":                 true,
-		"requirement_id":         reqRow.ID,
-		"dev_branch":             dev,
-		"target_branch":          target,
-		"uncommitted_count":      len(uncommitted),
-		"uncommitted_files":      uncommitted,
-		"ahead":                  ahead,
-		"behind":                 behind,
-		"has_remote":             hasRemote,
-		"remote_url":             remote,
-		"platform":               pf,
-		"pr_url":                 prURL,
-		"mid_merge":              midMerge(dir),
-		"conflict_files":         conflictedFiles(dir),
-		"worktree_path":          reqRow.WorktreePath,
-		"commit_lang":            commitLang,
-		"commit_lang_override":   commitLangOverride,
-		"commit_lang_source":     commitLangSource,
-		"commit_lang_updated_at": commitLangUpdatedAt,
+		"is_git":            true,
+		"requirement_id":    reqRow.ID,
+		"dev_branch":        dev,
+		"target_branch":     target,
+		"uncommitted_count": len(uncommitted),
+		"uncommitted_files": uncommitted,
+		"ahead":             ahead,
+		"behind":            behind,
+		"has_remote":        hasRemote,
+		"remote_url":        remote,
+		"platform":          pf,
+		"pr_url":            prURL,
+		"mid_merge":         midMerge(dir),
+		"conflict_files":    conflictedFiles(dir),
+		"worktree_path":     reqRow.WorktreePath,
 	})
 }
 
@@ -930,6 +924,17 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 		base = project.DefaultBranch
 	}
 
+	// 项目历史语言风格：用于让 Claude 子代理写 commit / PR title / PR body 时
+	// 遵循项目历史语言偏好（zh / en / mixed）。优先使用已加载的 project 行；
+	// 若加载失败则降级到包内私有 helper 直查 DB。
+	commitLang := ""
+	if project != nil {
+		commitLang = service.ResolveCommitLang(project.CommitLang, project.CommitLangOverride)
+	}
+	if commitLang == "" {
+		commitLang = loadProjectCommitLang(h.db, reqRow.ProjectID)
+	}
+
 	// Resolve the effective model + claude config up-front so the SubTaskPanel
 	// can render the badge from the moment the row appears. Precedence:
 	// explicit body.Model > the requirement's own persisted developer model >
@@ -940,11 +945,6 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	// inherits the main task's model AND gateway.
 	_, prModel, prCfgID := h.roleConfig("pr_author")
 	effectiveModel, roleConfigID := pushPRRuntimeModel(reqRow, body.Model, prModel, prCfgID)
-
-	// Resolve the project's commit/PR language style: user override beats
-	// detection beats "en" default. The style hint rides in the push sub-task
-	// prompt so commit messages and PR titles naturally follow project history.
-	commitLang := service.ResolveCommitLang(project.CommitLang, project.CommitLangOverride)
 
 	// Dispatch the push+PR child agent through the shared core so the manual
 	// path here and the automatic WizardHandler.autoPushPR path never diverge.
@@ -1072,9 +1072,6 @@ func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platfo
 	b.WriteString("` 推送开发分支到 origin。如果推送失败（例如需要先 pull），请尝试 `git pull --rebase origin ")
 	b.WriteString(dev)
 	b.WriteString("` 后再推送，仍失败则报告错误并停止。\n")
-	b.WriteString("\n## 风格要求\n")
-	b.WriteString(service.StyleHint(commitLang))
-	b.WriteString("\n\n")
 	b.WriteString("5. **创建 PR**（如平台支持）：\n")
 	switch platformType {
 	case "github":
@@ -1106,9 +1103,8 @@ func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platfo
 		b.WriteString(" 上的 compare 链接创建 PR。\n")
 	}
 	b.WriteString("\n## PR 摘要要求\n")
-	b.WriteString("- 遵循上方「风格要求」所规定的语言撰写。\n")
-	b.WriteString("- 标题一句话概括本次改动（不超过 40 字，不要以 `feat:` 等前缀开头）。\n")
-	b.WriteString("- 正文使用 Markdown，按「改动概述 / 主要变更 / 关键文件 / 验证方式」组织，简洁有重点。\n")
+	b.WriteString("- PR 标题使用中文，一句话概括本次改动（不超过 40 字，不要以 `feat:` 等前缀开头）。\n")
+	b.WriteString("- PR 正文使用 Markdown，按「改动概述 / 主要变更 / 关键文件 / 验证方式」组织，简洁有重点。\n")
 	b.WriteString("- 可执行 `git log origin/")
 	b.WriteString(base)
 	b.WriteString("..")
@@ -1123,6 +1119,19 @@ func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platfo
 	b.WriteString("- 所有 git 操作必须显式 `git -C <dir>` 或先 `cd` 到工作目录再执行。\n")
 	b.WriteString("- 如遇网络 / 凭据 / 远端权限错误，请明确报告并停止后续步骤。\n")
 	b.WriteString("- 完成后请简要输出：执行了哪些步骤、最终状态（成功 / 失败）、PR 链接（如有），方便作为子任务产物落盘。\n")
+
+	// 项目历史风格注入：当 commitLang 非空时，在 prompt 末尾追加一行提示，
+	// 让 Claude 在写 commit 信息与 PR 标题/正文时遵循项目历史语言（zh / en /
+	// mixed）。空值表示无风格偏好，按子任务默认行为处理。StyleHint 内部已做
+	// override 解析，这里直接传 commitLang 与空 override 等价于传入最终值。
+	if commitLang != "" {
+		if hint := service.StyleHint(commitLang, ""); hint != "" {
+			b.WriteString("\n")
+			b.WriteString(hint)
+			b.WriteString("\n")
+		}
+	}
+
 	return b.String()
 }
 
@@ -1411,24 +1420,24 @@ func (h *MergeHandler) loadProjectNoWrite(reqID string) (*model.Project, error) 
 	return h.projectSvc.Get(reqRow.ProjectID)
 }
 
-// loadProjectCommitLangState 返回项目 commit_lang 四元组（detected 值、
-// override、source、updated_at），供 State handler 透传给前端做徽章渲染。
-// 与 loadProjectCommitLang 的区别：后者只返回 ResolveCommitLang 后的最终
-// 语言串（zh/en/mixed/""），供推送子任务 prompt 注入风格提示；本函数返回
-// 全部原始字段，前端可以分别展示「用户 override 优先 / 检测值兜底 / 来源
-// 与更新时间」等语义。读不到 / 项目不存在时所有字段返回零值。
-func loadProjectCommitLangState(projectSvc *service.ProjectService, projectID string) (lang string, override string, source string, updatedAt string) {
-	if projectSvc == nil || projectID == "" {
-		return "", "", "", ""
+// loadProjectCommitLang 读取指定项目 commit_lang 与 commit_lang_override，
+// 调用 service.ResolveCommitLang 按「override 优先 → stored 次之 → 空」优先级
+// 解析后返回最终语言（zh / en / mixed / ""），供推送子任务 prompt 注入风格
+// 提示使用。读不到 / 项目不存在时返回空字符串，调用方据此省略风格行。
+// 包内私有，handler 包外部无需依赖此函数。
+func loadProjectCommitLang(db *db.DB, projectID string) string {
+	if db == nil || projectID == "" {
+		return ""
 	}
-	proj, err := projectSvc.Get(projectID)
-	if err != nil || proj == nil {
-		return "", "", "", ""
+	var lang, override string
+	err := db.QueryRow(
+		"SELECT commit_lang, commit_lang_override FROM projects WHERE id = ?",
+		projectID,
+	).Scan(&lang, &override)
+	if err != nil {
+		return ""
 	}
-	if proj.CommitLangUpdatedAt != nil {
-		updatedAt = proj.CommitLangUpdatedAt.Format(time.RFC3339)
-	}
-	return proj.CommitLang, proj.CommitLangOverride, proj.CommitLangSource, updatedAt
+	return service.ResolveCommitLang(lang, override)
 }
 
 // gitIdentityForReq returns the (name, email) the merge commit should use,

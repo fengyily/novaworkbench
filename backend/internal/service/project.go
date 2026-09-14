@@ -49,7 +49,7 @@ func (s *ProjectService) ListForUser(userID string, isAdmin bool) ([]model.Proje
 	q := `SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
 		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug,
-		commit_lang, commit_lang_hash, commit_lang_source, commit_lang_updated_at, commit_lang_override
+		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at
 		FROM projects`
 	args := []any{}
 	if !isAdmin || userID == "" {
@@ -76,7 +76,7 @@ func (s *ProjectService) ListForUser(userID string, isAdmin bool) ([]model.Proje
 			&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
 			&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
 			&p.ClaudeProjectSlug,
-			&p.CommitLang, &p.CommitLangHash, &p.CommitLangSource, &p.CommitLangUpdatedAt, &p.CommitLangOverride)
+			&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -106,13 +106,13 @@ func (s *ProjectService) Get(id string) (*model.Project, error) {
 	err := s.db.QueryRow(`SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
 		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug,
-		commit_lang, commit_lang_hash, commit_lang_source, commit_lang_updated_at, commit_lang_override
+		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at
 		FROM projects WHERE id = ? AND deleted_at IS NULL`, id).Scan(
 		&p.ID, &p.Name, &p.LocalPath, &p.RemoteURL, &p.Status,
 		&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
 		&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
 		&p.ClaudeProjectSlug,
-		&p.CommitLang, &p.CommitLangHash, &p.CommitLangSource, &p.CommitLangUpdatedAt, &p.CommitLangOverride)
+		&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("project not found")
 	}
@@ -128,13 +128,13 @@ func (s *ProjectService) getAny(id string) (*model.Project, error) {
 	err := s.db.QueryRow(`SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
 		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug,
-		commit_lang, commit_lang_hash, commit_lang_source, commit_lang_updated_at, commit_lang_override
+		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at
 		FROM projects WHERE id = ?`, id).Scan(
 		&p.ID, &p.Name, &p.LocalPath, &p.RemoteURL, &p.Status,
 		&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
 		&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
 		&p.ClaudeProjectSlug,
-		&p.CommitLang, &p.CommitLangHash, &p.CommitLangSource, &p.CommitLangUpdatedAt, &p.CommitLangOverride)
+		&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("project not found")
 	}
@@ -149,7 +149,7 @@ func (s *ProjectService) ListTrash() ([]model.Project, error) {
 	rows, err := s.db.Query(`SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
 		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug,
-		commit_lang, commit_lang_hash, commit_lang_source, commit_lang_updated_at, commit_lang_override
+		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at
 		FROM projects WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC`)
 	if err != nil {
 		return nil, err
@@ -163,7 +163,7 @@ func (s *ProjectService) ListTrash() ([]model.Project, error) {
 			&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
 			&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
 			&p.ClaudeProjectSlug,
-			&p.CommitLang, &p.CommitLangHash, &p.CommitLangSource, &p.CommitLangUpdatedAt, &p.CommitLangOverride)
+			&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -1147,54 +1147,6 @@ func (s *ProjectService) DescriptionState(id string) (desc string, manual bool, 
 	return
 }
 
-// CommitLangState returns the auto-detected language, the SHA256 of the
-// commit subjects sampled at detection time, and the user override. Used by
-// ScannerService.maybeDetectCommitLang to decide whether a fresh tally is
-// needed (compare the returned hash against a freshly-computed one).
-//
-// An empty hash on a non-empty lang means "we've never detected anything";
-// the scanner treats that the same as "the project has no commits yet" and
-// writes a new detection on the next scan.
-func (s *ProjectService) CommitLangState(id string) (lang, hash, override string, err error) {
-	err = s.db.QueryRow(
-		`SELECT commit_lang, commit_lang_hash, commit_lang_override FROM projects WHERE id = ?`, id).
-		Scan(&lang, &hash, &override)
-	return
-}
-
-// SetAutoCommitLang writes the scanner-detected language and the sample
-// hash. It only updates when the row has no user-pinned override so that a
-// manual override isn't clobbered by an automatic re-detection. Returns
-// true when the row was actually updated.
-func (s *ProjectService) SetAutoCommitLang(id, lang, hash string) (bool, error) {
-	now := time.Now()
-	res, err := s.db.Exec(
-		`UPDATE projects
-		 SET commit_lang = ?, commit_lang_hash = ?, commit_lang_source = 'auto',
-		     commit_lang_updated_at = ?, updated_at = ?
-		 WHERE id = ? AND (commit_lang_override = '' OR commit_lang_override = 'auto')`,
-		lang, hash, now, now, id)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
-}
-
-// SetCommitLangOverride writes (or clears) the user-pinned commit language.
-// Pass "" or "auto" to clear the override and fall back to detection. The
-// canonical value set is enforced at the HTTP layer (see project handler);
-// here we just write whatever the caller hands us.
-func (s *ProjectService) SetCommitLangOverride(id, override string) error {
-	if override == "auto" {
-		override = ""
-	}
-	_, err := s.db.Exec(
-		`UPDATE projects SET commit_lang_override = ?, updated_at = ? WHERE id = ?`,
-		override, time.Now(), id)
-	return err
-}
-
 // UpdateClaudeProjectSlug persists the claude CLI session slug assigned to
 // this project. Called by DiscoverAndCacheClaudeProjectSlug on first
 // discovery so subsequent reads avoid the on-disk scan.
@@ -1291,4 +1243,49 @@ func (s *ProjectService) ListProjectsNeedingDescription() ([]ProjectRef, error) 
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// SetCommitLangOverride persists the user's pinned language override for
+// commits / push / PR in this project. Pass override="" to clear the pin and
+// revert to the auto-detected value (or the default "en" when nothing has
+// been detected yet). When the override is non-empty, commit_lang_source is
+// flipped to "user"; when cleared, it reverts to "auto" so the UI badge
+// matches the resolved effective value. Returns the refreshed project row
+// (handlers can echo it directly to the client).
+//
+// Validated values: "" / "zh" / "en" / "mixed". Anything else returns
+// INVALID_OVERRIDE so the handler can map to 400 BAD_REQUEST without
+// scraping the message.
+func (s *ProjectService) SetCommitLangOverride(id, override string) (*model.Project, error) {
+	override = strings.TrimSpace(override)
+	if override != "" && override != "zh" && override != "en" && override != "mixed" {
+		return nil, fmt.Errorf("INVALID_OVERRIDE: override must be empty, zh, en, or mixed")
+	}
+	now := time.Now()
+	// Effective source tracks where the *currently effective* language value
+	// comes from: "user" when override is set, "auto" when the override is
+	// cleared and we fall back to whatever the scanner last wrote.
+	source := "auto"
+	if override != "" {
+		source = "user"
+	}
+	res, err := s.db.Exec(
+		`UPDATE projects SET commit_lang_override = ?, commit_lang_source = ?, commit_lang_updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
+		override, source, now, id)
+	if err != nil {
+		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return nil, fmt.Errorf("project not found: %s", id)
+	}
+	return s.Get(id)
+}
+
+// ClearCommitLangOverride removes any user-pinned language override; the
+// effective language falls back to the auto-detected value (or "en" if
+// nothing has been detected yet). Thin wrapper around SetCommitLangOverride
+// for callers that prefer the explicit semantic.
+func (s *ProjectService) ClearCommitLangOverride(id string) (*model.Project, error) {
+	return s.SetCommitLangOverride(id, "")
 }

@@ -149,6 +149,20 @@
   white-space: nowrap;
 }
 
+/* Status column (#3) hosts up to 3 ordered chips (源/方案 → 进度 → 待确认)
+   rendered by StatusChips. Each chip is ~64px; with the 4px group gap and
+   side padding a worst-case row needs ~240px before the group is allowed
+   to wrap onto a second line. We hold min-width instead of width so the
+   column can still breathe on a 1280px viewport (auto-distributes the
+   leftover to the title column). No white-space: nowrap on the cell —
+   the StatusChips container already handles single-chip atomicity, and
+   forcing the cell to nowrap would clip chips instead of wrapping the
+   group gracefully. */
+.req-table thead th:nth-child(3),
+.req-table tbody td:nth-child(3) {
+  min-width: 240px;
+}
+
 .req-table thead th:nth-child(4),
 .req-table tbody td:nth-child(4) {
   /* Model names like "claude-sonnet-4-5" can run ~16 chars; 150px is enough

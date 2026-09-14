@@ -329,89 +329,37 @@ func (h *ProjectHandler) BackfillDescriptions(w http.ResponseWriter, r *http.Req
 	})
 }
 
-// commitLangOverrideAllowed is the canonical enum. Empty string means "no
-// override" (i.e. fall back to the detected value); the HTTP layer normalises
-// "auto" → "" before writing.
-var commitLangOverrideAllowed = map[string]bool{
-	"":      true,
-	"zh":    true,
-	"en":    true,
-	"mixed": true,
-}
-
-// SetCommitLangOverride writes (or clears) the user-pinned commit/PR language
-// for a project. Empty body / "auto" / "" clears the override and falls back
-// to the scanner-detected value at read time. The valid set is enforced here
-// so callers can't persist arbitrary strings. Returns the updated project so
-// the frontend can refresh its badge without a second GET round trip.
-// PUT /api/projects/{id}/commit-lang-override  body: {"override": "zh"}
+// SetCommitLangOverride updates the user-pinned language override that the
+// wizard pipeline uses when generating commit messages, push summaries, and
+// PR titles/bodies. Pass override="" to clear the pin and revert to the
+// auto-detected value (or "en" when nothing has been detected yet).
+//
+// PUT /api/projects/{id}/commit-lang-override  body: {"override": "zh" | "en" | "mixed" | ""}
 func (h *ProjectHandler) SetCommitLangOverride(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "缺少项目 ID")
+		return
+	}
 	var body struct {
 		Override string `json:"override"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid body")
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "请求体格式错误")
 		return
 	}
-	// Normalise "auto" → "" so the DB always stores either a real value or
-	// empty (mirrors service.SetCommitLangOverride).
-	override := body.Override
-	if override == "auto" {
-		override = ""
-	}
-	if !commitLangOverrideAllowed[override] {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST",
-			"override must be one of: '', 'zh', 'en', 'mixed'")
-		return
-	}
-	// Existence check first — distinguish 404 (project gone) from 500 (DB
-	// hiccup), and surface a friendly error rather than the raw driver
-	// message.
-	if _, err := h.svc.Get(id); err != nil {
-		writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", err.Error())
-		return
-	}
-	if err := h.svc.SetCommitLangOverride(id, override); err != nil {
-		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
-		return
-	}
-	updated, err := h.svc.Get(id)
+	p, err := h.svc.SetCommitLangOverride(id, body.Override)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		msg := err.Error()
+		switch {
+		case strings.HasPrefix(msg, "INVALID_OVERRIDE"):
+			writeError(w, http.StatusBadRequest, "INVALID_OVERRIDE", msg)
+		case strings.HasPrefix(msg, "project not found"):
+			writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", msg)
+		default:
+			writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", msg)
+		}
 		return
 	}
-	writeJSON(w, http.StatusOK, updated)
-}
-
-// GetCommitLang returns the project's commit_lang four-tuple (detected value,
-// user override, source string, last-updated timestamp). Mirrors the fields
-// embedded in MergeState so the ProjectDetail page can render the badge and
-// the override picker from a single source.
-// GET /api/projects/{id}/commit-lang
-func (h *ProjectHandler) GetCommitLang(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	p, err := h.svc.Get(id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", err.Error())
-		return
-	}
-	updatedAt := ""
-	if p.CommitLangUpdatedAt != nil {
-		updatedAt = p.CommitLangUpdatedAt.UTC().Format("2006-01-02T15:04:05Z")
-	}
-	// Effective = override when non-empty, otherwise detected. Mirrors
-	// service.ResolveCommitLang so the UI sees the same value the push
-	// sub-task prompt will use.
-	effective := p.CommitLang
-	if p.CommitLangOverride != "" && p.CommitLangOverride != "auto" {
-		effective = p.CommitLangOverride
-	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"detected":      p.CommitLang,
-		"override":      p.CommitLangOverride,
-		"effective":     effective,
-		"source":        p.CommitLangSource,
-		"updated_at":    updatedAt,
-	})
+	writeJSON(w, http.StatusOK, p)
 }
