@@ -477,6 +477,27 @@ body.no-scroll {
   font-weight: 600;
   background: var(--color-active);
   color: var(--color-primary);
+  /* Single chip text must never break — the painted label is a unit, not a
+     run of letters. Pairs with .status-chips below for the multi-chip case
+     where the GROUP is allowed to wrap, but each chip stays atomic. */
+  white-space: nowrap;
+}
+
+/* ── Status chip group (StatusChips.tsx) ───────────────────────────
+   Ordered multi-chip badges that read as one "tag string"
+   (源/方案 → 进度 → 待确认) instead of loose chips on the same baseline.
+   Lives alongside .status-badge so individual chips elsewhere keep their
+   existing visual weight; only chip groups pick up the tighter gap +
+   middle alignment. Vertical-align: middle so the group sits on the
+   text baseline of whatever inline context holds it (table cell, mobile
+   card head, detail-page title row). */
+.status-chips {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  vertical-align: middle;
+  line-height: 1.4;
 }
 /* requirement lifecycle */
 .status-badge.status-draft      { background: #f1f5f9; color: #475569; }
