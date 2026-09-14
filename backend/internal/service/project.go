@@ -163,6 +163,8 @@ func (s *ProjectService) ListTrash() ([]model.Project, error) {
 }
 
 func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error) {
+	log.Printf("[gitlab-debug] service.Add entry: remote_url=%q platform_type=%q platform_token_id=%q branch=%q",
+		req.RemoteURL, req.PlatformType, req.PlatformTokenID, req.Branch)
 	path := req.LocalPath
 
 	// Remote mode: no local path supplied yet — clone into the workspace using
@@ -263,7 +265,11 @@ func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error
 // Both platformType and tokenID must be set together — passing one without
 // the other is treated as TOKEN_NOT_FOUND to keep the contract explicit.
 func (s *ProjectService) resolveCloneAuth(platformType, tokenID, remoteURL string) (string, string, error) {
+	host, _ := urlHost(remoteURL)
+	log.Printf("[gitlab-debug] resolveCloneAuth in: platform_type=%q token_id=%q remote_host=%q",
+		platformType, tokenID, host)
 	if tokenID == "" && platformType == "" {
+		log.Printf("[gitlab-debug] resolveCloneAuth early-return: no token requested (public-repo path)")
 		return "", "", nil
 	}
 	if tokenID == "" || platformType == "" {
@@ -271,6 +277,7 @@ func (s *ProjectService) resolveCloneAuth(platformType, tokenID, remoteURL strin
 	}
 	tok, err := s.platforms.Get(tokenID)
 	if err != nil {
+		log.Printf("[gitlab-debug] resolveCloneAuth platforms.Get(%q) err=%v", tokenID, err)
 		return "", "", fmt.Errorf("TOKEN_NOT_FOUND: %w", err)
 	}
 	if tok.Platform != platformType {
@@ -279,10 +286,12 @@ func (s *ProjectService) resolveCloneAuth(platformType, tokenID, remoteURL strin
 	// Defensive: if the URL host suggests a different platform than the
 	// supplied token (e.g. github token + gitlab.com URL), refuse the clone
 	// rather than silently push the wrong creds.
-	if host, ok := urlHost(remoteURL); ok && hostPlatform(host) != "" && hostPlatform(host) != tok.Platform {
+	if host != "" && hostPlatform(host) != "" && hostPlatform(host) != tok.Platform {
 		return "", "", fmt.Errorf("PLATFORM_MISMATCH: remote host %q belongs to %q but token is for %q",
 			host, hostPlatform(host), tok.Platform)
 	}
+	log.Printf("[gitlab-debug] resolveCloneAuth out: token=%s platform=%q",
+		redactToken(tok.Token), tok.Platform)
 	return tok.Token, tok.Platform, nil
 }
 
@@ -439,7 +448,10 @@ func repoName(url string) string {
 //
 // A redundant "yes\n" is piped into stdin as belt-and-suspenders.
 func cloneRepo(remote, branch, dest, platform, tokenSecret string) error {
+	log.Printf("[gitlab-debug] cloneRepo in: platform=%q token=%s dest=%q branch=%q",
+		platform, redactToken(tokenSecret), dest, branch)
 	cloneURL := injectCredentials(remote, platform, tokenSecret)
+	log.Printf("[gitlab-debug] cloneRepo final URL: %s", redactUserinfo(cloneURL))
 
 	args := []string{"clone"}
 	if branch != "" && branch != "main" && branch != "master" {
@@ -517,11 +529,15 @@ func wrapGitError(op, out string, err error) error {
 // URL through verbatim (public repo path).
 func injectCredentials(remote, platform, tokenSecret string) string {
 	if tokenSecret == "" {
+		log.Printf("[gitlab-debug] injectCredentials: empty token, returning raw URL host=%q",
+			hostOnlyForLog(remote))
 		return remote
 	}
 	u, err := url.Parse(remote)
 	if err != nil || u.Scheme == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		// git@…:owner/repo.git or any non-HTTP URL — leave alone.
+		log.Printf("[gitlab-debug] injectCredentials: non-http URL host=%q scheme=%q, pass-through",
+			u.Host, u.Scheme)
 		return remote
 	}
 	// Personal access tokens: drop any existing userinfo, embed the token
@@ -534,7 +550,20 @@ func injectCredentials(remote, platform, tokenSecret string) string {
 		user = "oauth2:" + tokenSecret
 	}
 	u.User = url.UserPassword(user, "")
-	return u.String()
+	out := u.String()
+	log.Printf("[gitlab-debug] injectCredentials out: platform=%q token=%s host=%s",
+		platform, redactToken(tokenSecret), redactUserinfo(out))
+	return out
+}
+
+// hostOnlyForLog extracts just the host portion of a raw URL for logging,
+// tolerating malformed input.
+func hostOnlyForLog(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "<unparseable>"
+	}
+	return u.Host
 }
 
 // redactUserinfo strips any https://user:token@host segments from s so an
@@ -544,6 +573,19 @@ var userinfoPattern = regexp.MustCompile(`([a-z][a-z0-9+\-.]*://)([^/\s:@]+):([^
 
 func redactUserinfo(s string) string {
 	return userinfoPattern.ReplaceAllString(s, "$1<redacted>@")
+}
+
+// redactToken returns a safe-to-log form of a token secret: first 4 + "***" +
+// last 4 chars. Short / empty tokens collapse to a sentinel so we never leak
+// the full value into the log stream.
+func redactToken(s string) string {
+	if s == "" {
+		return "<empty>"
+	}
+	if len(s) <= 8 {
+		return "<short>"
+	}
+	return s[:4] + "***" + s[len(s)-4:]
 }
 
 // OriginURL returns the project's git remote_url with the platform token
