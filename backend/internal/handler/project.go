@@ -83,6 +83,8 @@ func (h *ProjectHandler) Add(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(msg, "TOKEN_NOT_FOUND"):
 			writeError(w, http.StatusBadRequest, "TOKEN_NOT_FOUND", msg)
+		case strings.HasPrefix(msg, "TOKEN_INVALID"):
+			writeError(w, http.StatusBadRequest, "TOKEN_INVALID", msg)
 		case strings.HasPrefix(msg, "PLATFORM_MISMATCH"):
 			writeError(w, http.StatusBadRequest, "PLATFORM_MISMATCH", msg)
 		default:
@@ -142,6 +144,8 @@ func (h *ProjectHandler) Restore(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "DIR_EXISTS", msg)
 		case strings.HasPrefix(msg, "TOKEN_NOT_FOUND"):
 			writeError(w, http.StatusBadRequest, "TOKEN_NOT_FOUND", msg)
+		case strings.HasPrefix(msg, "TOKEN_INVALID"):
+			writeError(w, http.StatusBadRequest, "TOKEN_INVALID", msg)
 		case strings.HasPrefix(msg, "PLATFORM_MISMATCH"):
 			writeError(w, http.StatusBadRequest, "PLATFORM_MISMATCH", msg)
 		case strings.HasPrefix(msg, "RESTORE_FAILED"):
