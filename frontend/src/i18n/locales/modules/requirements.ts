@@ -365,6 +365,11 @@ export const requirements = {
     designSectionRisks: '实现风险',
     designExpandCollapse: '▲ 收起方案',
     designExpandShow: '▼ 展开全文',
+    // BRIEF (requirement.description) collapse toggle — mirrors the design
+    // toggle above but uses a plain "collapse" label since the BRIEF is short
+    // enough that "收起方案" reads as overkill.
+    descExpandCollapse: '▲ 收起',
+    descExpandShow: '▼ 展开完整需求描述',
     designCompleteBtn: '方案完成',
     // Developer-stage CTAs.
     devReadyDesignedHint: '方案已完成。将根据技术方案进行开发实现。',

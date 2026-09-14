@@ -109,6 +109,26 @@ function isLongDesignDoc(raw: string): boolean {
   return lines > 12 || chars > 1200;
 }
 
+// Decide whether the BRIEF card (requirement.description) is long enough to
+// warrant the "default collapsed / click to expand" treatment. The threshold
+// here is TIGHTER than isLongDesignDoc (8 lines / 500 chars vs 12 / 1200)
+// because the BRIEF card sits at the very top of the requirement detail page,
+// above every other section. The user's first action on this page is usually
+// to scroll past the description to reach the design / coding panel —
+// collapsing a long BRIEF removes 200+ px of forced scrolling. Short
+// descriptions are still rendered in full, unchanged. The check tolerates
+// only the Markdown payload (req.description is always stored as Markdown).
+//
+// Kept outside the component so it isn't recreated on every render — called
+// from a useEffect keyed on req.id / req.description.
+function isLongDescription(raw: string): boolean {
+  if (!raw || !raw.trim()) return false;
+  const body = raw;
+  const lines = body.split('\n').length;
+  const chars = body.length;
+  return lines > 8 || chars > 500;
+}
+
 // Two-role stage-gate lifecycle. Each gate is completed by a manual action.
 // draft → analyzing → designing → designed → developing → done
 type Stage = 'analyst' | 'architect' | 'developer' | 'done';
@@ -994,6 +1014,21 @@ export default function RequirementDetail() {
     setIsLongDesign(!!req?.design_docs && isLongDesignDoc(req.design_docs));
     setDesignExpanded(false);
   }, [req?.id, req?.design_docs]);
+
+  // Collapsible BRIEF (requirement.description) state. Mirrors the design-doc
+  // collapse above: long descriptions default to collapsed (truncated with a
+  // fade-mask + "Expand full text" button), short ones render in full. The
+  // BRIEF sits at the very top of the page above every other section, so
+  // collapsing it removes the biggest source of forced scrolling on a long
+  // requirement. Re-evaluated whenever the requirement or its stored
+  // description change, and any switch collapses the view back to its
+  // default so the user isn't left with a stale "expanded" state.
+  const [descExpanded, setDescExpanded] = useState(false);
+  const [isLongDesc, setIsLongDesc] = useState(false);
+  useEffect(() => {
+    setIsLongDesc(isLongDescription(req?.description ?? ''));
+    setDescExpanded(false);
+  }, [req?.id, req?.description]);
 
   // Edit modal state
   const [showEditModal, setShowEditModal] = useState(false);
@@ -2757,11 +2792,26 @@ export default function RequirementDetail() {
             <span className="spec-card-tag-label">BRIEF</span>
             <span className="spec-card-tag-date">{req.created_at?.slice(0, 10) ?? ''}</span>
           </div>
-          <div className="spec-card-body">
+          <div
+            className={
+              'spec-card-body' +
+              (isLongDesc && !descExpanded ? ' detail-desc-collapsed' : '')
+            }
+          >
             <div className="analysis-summary">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{req.description}</ReactMarkdown>
             </div>
           </div>
+          {isLongDesc && (
+            <button
+              type="button"
+              className="btn btn-sm design-toggle-btn"
+              onClick={() => setDescExpanded(v => !v)}
+              aria-expanded={descExpanded}
+            >
+              {descExpanded ? t('requirements.detail2.descExpandCollapse') : t('requirements.detail2.descExpandShow')}
+            </button>
+          )}
         </div>
       )}
 
