@@ -13,10 +13,11 @@ import (
 // (the root cause of "scheduler ctx not provided; Executor must be
 // invoked through Scheduler.Dispatch").
 type capturingExec struct {
-	gotCtx  context.Context
-	called  bool
-	design  bool
-	coding  bool
+	gotCtx     context.Context
+	called     bool
+	design     bool
+	coding     bool
+	designCode bool
 }
 
 func (c *capturingExec) RunScheduledDesign(ctx context.Context, _ DesignParams) (string, error) {
@@ -31,6 +32,14 @@ func (c *capturingExec) RunScheduledDesign(ctx context.Context, _ DesignParams) 
 
 func (c *capturingExec) RunScheduledCoding(ctx context.Context, _ CodingParams) (string, error) {
 	c.gotCtx, c.called, c.coding = ctx, true, true
+	if v, ok := ctx.Value(SchedCtxKey{}).(SchedCtxValue); ok {
+		return v.JobID, nil
+	}
+	return "", nil
+}
+
+func (c *capturingExec) RunScheduledDesignAndCoding(ctx context.Context, _ DesignCodingParams) (string, error) {
+	c.gotCtx, c.called, c.designCode = ctx, true, true
 	if v, ok := ctx.Value(SchedCtxKey{}).(SchedCtxValue); ok {
 		return v.JobID, nil
 	}

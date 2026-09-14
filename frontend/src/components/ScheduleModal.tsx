@@ -1,10 +1,18 @@
-// ScheduleModal — schedules a design / coding run.
+// ScheduleModal — schedules a design / coding / design_and_coding run.
 //
 // The parent (RequirementDetail) passes taskType, requirementId and context
-// defaults (initialModel / defaultBranchName / defaultBaseBranch /
-// agentServers). The user picks a time + model and it POSTs to
-// /api/schedules; on success the parent refreshes its "scheduled HH:MM"
-// strip and closes the modal.
+// defaults (initialModel / initialCodingModel / defaultBranchName /
+// defaultBaseBranch / agentServers). The user picks a time + (one or two)
+// models + optional agent servers and it POSTs to /api/schedules; on
+// success the parent refreshes its "scheduled HH:MM" strip and closes the
+// modal.
+//
+// taskType === 'design_and_coding' renders two stacked configuration
+// sections (方案设计 / 开发) sharing the same run-at picker and the same
+// "读取知识库" checkbox. This keeps the merged-mode UX visually identical
+// to the manual two-stage toolbar that the same RequirementDetail page
+// uses: the user picks one architect model + one developer model and the
+// scheduler chains them via the existing OnFinish callback.
 //
 // The time field is a native `<input type="datetime-local">` whose value is
 // the user's local time without a timezone suffix. Sent raw, the backend
@@ -43,7 +51,12 @@ interface Props {
   requirementId: string;
   requirementTitle: string;
   // Pre-selected model id (display value). '' = the stage's default model.
+  // Used for design and coding tasks; for design_and_coding this seeds the
+  // design-stage model only (initialCodingModel seeds the coding stage).
   initialModel: string;
+  // design_and_coding-only default for the developer-stage model. Ignored
+  // when taskType !== 'design_and_coding'.
+  initialCodingModel?: string;
   // Coding-only defaults (taken from the requirement's openBranchModal form).
   defaultBranchName?: string;
   defaultBaseBranch?: string;
@@ -83,6 +96,7 @@ export function ScheduleModal({
   requirementId,
   requirementTitle,
   initialModel,
+  initialCodingModel,
   defaultBranchName,
   defaultBaseBranch,
   agentServers,
@@ -97,17 +111,22 @@ export function ScheduleModal({
   const [baseBranch, setBaseBranch] = useState(defaultBaseBranch || '');
   const [agentServerId, setAgentServerId] = useState('');
   const [splitTasks, setSplitTasks] = useState(true);
+  // design_and_coding-only (developer stage)
+  const [codingModel, setCodingModel] = useState(initialCodingModel || '');
+  const [codingAgentServerId, setCodingAgentServerId] = useState('');
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
-  // The wizard stage this modal maps to. Reuses ModelSelect's chip colors
-  // so the user sees the same accent rail as the manual buttons.
-  const stage = useMemo<'architect' | 'developer'>(
-    () => (taskType === 'design' ? 'architect' : 'developer'),
-    [taskType],
-  );
-  const titlePrefix = taskType === 'design' ? t('schedules.modal.titleDesign') : t('schedules.modal.titleCoding');
+  const isMerged = taskType === 'design_and_coding';
+  const isDesign = taskType === 'design' || taskType === 'design_and_coding';
+  const isCoding = taskType === 'coding' || taskType === 'design_and_coding';
+
+  const titlePrefix = useMemo(() => {
+    if (taskType === 'design') return t('schedules.modal.titleDesign');
+    if (taskType === 'coding') return t('schedules.modal.titleCoding');
+    return t('schedules.modal.titleDesignCoding');
+  }, [taskType, t]);
 
   if (!open) return null;
 
@@ -129,10 +148,14 @@ export function ScheduleModal({
       if (agentServerId) {
         body.agent_server_id = agentServerId;
       }
-      if (taskType === 'coding') {
+      if (isCoding) {
         body.branch_name = branchName;
         body.base_branch = baseBranch;
         body.split_tasks = splitTasks;
+      }
+      if (isMerged) {
+        body.coding_model = codingModel || undefined;
+        body.coding_agent_server_id = codingAgentServerId || undefined;
       }
       const created = await schedulesApi.create(body);
       onScheduled(created);
@@ -177,9 +200,14 @@ export function ScheduleModal({
         <div className="modal-body">
           <p className="modal-confirm-text">
             {t('schedules.modal.introPrefix')}<strong>{requirementTitle || t('schedules.modal.sourceFallback')}</strong>{t('schedules.modal.introMiddle')}
-            {taskType === 'design' ? t('schedules.modal.introDesign') : t('schedules.modal.introCoding')}{t('schedules.modal.introSuffix')}
+            {isMerged
+              ? t('schedules.modal.introDesignCoding')
+              : (taskType === 'design' ? t('schedules.modal.introDesign') : t('schedules.modal.introCoding'))}
+            {t('schedules.modal.introSuffix')}
           </p>
 
+          {/* Run-at picker is shared across all stages of a merged task —
+              the timer fires once and the scheduler chains the stages. */}
           <div className="modal-field">
             <label htmlFor="sched-run-at">{t('schedules.modal.runAtLabel')}</label>
             <input
@@ -195,79 +223,152 @@ export function ScheduleModal({
             </small>
           </div>
 
-          <div className="modal-field">
-            <label>{t('schedules.modal.modelLabel')}</label>
-            <ModelSelect
-              value={model}
-              onChange={setModel}
-              stage={stage}
-              working={submitting}
-            />
-            <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
-              {t('schedules.modal.modelHint')}
-            </small>
-          </div>
-
-          <div className="modal-field modal-check-row">
-            <label>
-              <input
-                type="checkbox"
-                checked={readKnowledge}
-                onChange={e => setReadKnowledge(e.target.checked)}
-                disabled={submitting}
-              />
-              {t('schedules.modal.readKnowledge')}
-            </label>
-          </div>
-
-          {/* Agent-server picker is shared between design (remote plan-mode
-              execution) and coding (remote CLI execution). The two stages
-              share the same server list — only the label/local-option
-              wording diverges, so we render the shared <ExecEnvSelect> for
-              both and branch on taskType for those two i18n strings. The
-              option list itself ("name (host)") is now identical in both
-              cases, matching the design toolbar and the sub-task composer.
-              The design-stage task only uses the selection when the user
-              picks one, otherwise the scheduler falls back to local
-              execution. */}
-          {(taskType === 'coding' || taskType === 'design') && (
-            <div className="modal-field">
-              {/* Plain <label> sibling (no htmlFor) rather than a wrapping
-                  label: ExecEnvSelect renders a bare <select> with no id, and
-                  this matches the model field above, which also pairs a
-                  for-less label with its control. */}
-              <label>
-                {taskType === 'design'
-                  ? t('schedules.modal.designAgentServerLabel')
-                  : t('schedules.modal.agentLabel')}
-              </label>
-              <ExecEnvSelect
-                servers={agentServers}
-                value={agentServerId}
-                onChange={setAgentServerId}
-                disabled={submitting}
-                title={
-                  agentServers.length === 0
-                    ? t('schedules.modal.designAgentServerEmptyTitle')
-                    : ''
-                }
-                localOptionLabel={
-                  taskType === 'design'
-                    ? t('schedules.modal.designAgentServerDefault')
-                    : t('schedules.modal.agentLocal')
-                }
-                style={{ minWidth: 160 }}
-              />
-              {agentServers.length === 0 && (
-                <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
-                  {t('schedules.modal.designAgentServerNoHint')}
-                </small>
+          {/* Design-stage section: rendered for both 'design' and
+              'design_and_coding'. ModelSelect.stage="architect" keeps the
+              chip colors consistent with the manual design toolbar. */}
+          {isDesign && (
+            <>
+              {isMerged && (
+                <div className="modal-section-title">{t('schedules.modal.sectionDesignTitle')}</div>
               )}
-            </div>
+              <div className="modal-field">
+                <label>{t('schedules.modal.designModelLabel')}</label>
+                <ModelSelect
+                  value={model}
+                  onChange={setModel}
+                  stage="architect"
+                  working={submitting}
+                />
+                <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
+                  {t('schedules.modal.modelHint')}
+                </small>
+              </div>
+
+              <div className="modal-field modal-check-row">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={readKnowledge}
+                    onChange={e => setReadKnowledge(e.target.checked)}
+                    disabled={submitting}
+                  />
+                  {t('schedules.modal.readKnowledge')}
+                </label>
+              </div>
+
+              {/* Agent-server picker is shared between design (remote plan-mode
+                  execution) and coding (remote CLI execution). The two stages
+                  share the same server list — only the label/local-option
+                  wording diverges, so we render the shared <ExecEnvSelect> for
+                  both and branch on taskType for those two i18n strings. The
+                  option list itself ("name (host)") is now identical in both
+                  cases, matching the design toolbar and the sub-task composer.
+                  The design-stage task only uses the selection when the user
+                  picks one, otherwise the scheduler falls back to local
+                  execution. */}
+              <div className="modal-field">
+                {/* Plain <label> sibling (no htmlFor) rather than a wrapping
+                    label: ExecEnvSelect renders a bare <select> with no id, and
+                    this matches the model field above, which also pairs a
+                    for-less label with its control. */}
+                <label>
+                  {taskType === 'design'
+                    ? t('schedules.modal.designAgentServerLabel')
+                    : t('schedules.modal.designAgentServerLabelMerged')}
+                </label>
+                <ExecEnvSelect
+                  servers={agentServers}
+                  value={agentServerId}
+                  onChange={setAgentServerId}
+                  disabled={submitting}
+                  title={
+                    agentServers.length === 0
+                      ? t('schedules.modal.designAgentServerEmptyTitle')
+                      : ''
+                  }
+                  localOptionLabel={
+                    taskType === 'design'
+                      ? t('schedules.modal.designAgentServerDefault')
+                      : t('schedules.modal.designAgentServerDefaultMerged')
+                  }
+                  style={{ minWidth: 160 }}
+                />
+                {agentServers.length === 0 && (
+                  <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
+                    {t('schedules.modal.designAgentServerNoHint')}
+                  </small>
+                )}
+              </div>
+            </>
           )}
 
-          {taskType === 'coding' && (
+          {/* Coding-stage section: rendered for both 'coding' and
+              'design_and_coding'. design_and_coding renders a second
+              ModelSelect (stage="developer") and a developer-side ExecEnvSelect
+              that feed the coding_model / coding_agent_server_id columns. */}
+          {isCoding && (
             <>
+              {isMerged && (
+                <div className="modal-section-title">{t('schedules.modal.sectionCodingTitle')}</div>
+              )}
+
+              <div className="modal-field">
+                <label>{isMerged ? t('schedules.modal.codingModelLabel') : t('schedules.modal.modelLabel')}</label>
+                <ModelSelect
+                  value={isMerged ? codingModel : model}
+                  onChange={isMerged ? setCodingModel : setModel}
+                  stage="developer"
+                  working={submitting}
+                />
+                <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
+                  {t('schedules.modal.modelHint')}
+                </small>
+              </div>
+
+              {isMerged && (
+                <div className="modal-field modal-check-row">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={readKnowledge}
+                      onChange={e => setReadKnowledge(e.target.checked)}
+                      disabled={submitting}
+                    />
+                    {t('schedules.modal.readKnowledge')}
+                  </label>
+                </div>
+              )}
+
+              <div className="modal-field">
+                <label>
+                  {isMerged
+                    ? t('schedules.modal.codingAgentServerLabel')
+                    : t('schedules.modal.agentLabel')}
+                </label>
+                <ExecEnvSelect
+                  servers={agentServers}
+                  value={isMerged ? codingAgentServerId : agentServerId}
+                  onChange={isMerged ? setCodingAgentServerId : setAgentServerId}
+                  disabled={submitting}
+                  title={
+                    agentServers.length === 0
+                      ? t('schedules.modal.designAgentServerEmptyTitle')
+                      : ''
+                  }
+                  localOptionLabel={
+                    isMerged
+                      ? t('schedules.modal.codingAgentServerDefault')
+                      : t('schedules.modal.agentLocal')
+                  }
+                  style={{ minWidth: 160 }}
+                />
+                {agentServers.length === 0 && (
+                  <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
+                    {t('schedules.modal.designAgentServerNoHint')}
+                  </small>
+                )}
+              </div>
+
               <div className="modal-field">
                 <label htmlFor="sched-branch">{t('schedules.modal.branchLabel')}</label>
                 <input

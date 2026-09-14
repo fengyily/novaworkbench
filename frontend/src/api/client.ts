@@ -1741,7 +1741,7 @@ export const agentServersApi = {
 // and internal/scheduler for the polling loop.
 // ────────────────────────────────────────────────────────────────────────
 
-export type ScheduledTaskType = 'design' | 'coding';
+export type ScheduledTaskType = 'design' | 'coding' | 'design_and_coding';
 export type ScheduledTaskStatus =
   | 'pending'
   | 'running'
@@ -1756,12 +1756,15 @@ export interface ScheduledTask {
   project_id: string;
   requirement_title: string;
   run_at: string; // RFC3339 from server, preserves the offset the client sent so the moment round-trips correctly even when server TZ ≠ client TZ
-  model: string; // '' = role default
+  model: string; // design / design_and_coding 设计阶段；'' = role default
   read_knowledge: boolean;
-  branch_name: string; // coding only
-  base_branch: string; // coding only
-  agent_server_id: string; // coding only
-  split_tasks: boolean; // coding only
+  branch_name: string; // coding / design_and_coding
+  base_branch: string; // coding / design_and_coding
+  agent_server_id: string; // design / coding / design_and_coding 设计阶段执行环境
+  split_tasks: boolean; // coding / design_and_coding
+  // design_and_coding 专属：开发者阶段配置，与上面"设计阶段"字段一一对应
+  coding_model?: string;
+  coding_agent_server_id?: string;
   status: ScheduledTaskStatus;
   job_id: string;
   error_message: string;
@@ -1781,6 +1784,9 @@ export interface CreateScheduleReq {
   base_branch?: string;
   agent_server_id?: string;
   split_tasks?: boolean;
+  // design_and_coding 专属：开发者阶段配置
+  coding_model?: string;
+  coding_agent_server_id?: string;
 }
 
 export const schedulesApi = {

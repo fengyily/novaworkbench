@@ -46,8 +46,8 @@ func NewScheduledTaskService(database *db.DB) *ScheduledTaskService {
 // (requirement_id, task_type). Returns the persisted row so the handler can
 // surface the new id without a second round-trip.
 func (s *ScheduledTaskService) Create(t *model.ScheduledTask) (*model.ScheduledTask, error) {
-	if t.TaskType != model.SchedTypeDesign && t.TaskType != model.SchedTypeCoding {
-		return nil, fmt.Errorf("invalid task_type %q (want design|coding)", t.TaskType)
+	if t.TaskType != model.SchedTypeDesign && t.TaskType != model.SchedTypeCoding && t.TaskType != model.SchedTypeDesignCoding {
+		return nil, fmt.Errorf("invalid task_type %q (want design|coding|design_and_coding)", t.TaskType)
 	}
 	if t.RequirementID == "" {
 		return nil, errors.New("requirement_id is required")
@@ -55,7 +55,7 @@ func (s *ScheduledTaskService) Create(t *model.ScheduledTask) (*model.ScheduledT
 	if t.RunAt.IsZero() {
 		return nil, errors.New("run_at is required")
 	}
-	dup, err := s.HasPending(t.RequirementID, t.TaskType)
+	dup, err := s.HasPendingConflict(t.RequirementID, t.TaskType)
 	if err != nil {
 		return nil, err
 	}
@@ -85,12 +85,13 @@ func (s *ScheduledTaskService) Create(t *model.ScheduledTask) (*model.ScheduledT
 	_, err = s.db.Exec(`INSERT INTO scheduled_tasks
 		(id, task_type, requirement_id, project_id, requirement_title,
 		 run_at, model, read_knowledge, branch_name, base_branch,
-		 agent_server_id, split_tasks, status, job_id, error_message,
-		 created_by, created_at, updated_at, executed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 agent_server_id, split_tasks, coding_model, coding_agent_server_id,
+		 status, job_id, error_message, created_by, created_at, updated_at, executed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.ID, t.TaskType, t.RequirementID, t.ProjectID, t.RequirementTitle,
 		t.RunAt, t.Model, t.ReadKnowledge, t.BranchName, t.BaseBranch,
-		t.AgentServerID, t.SplitTasks, t.Status, t.JobID, t.ErrorMessage,
+		t.AgentServerID, t.SplitTasks, t.CodingModel, t.CodingAgentServerID,
+		t.Status, t.JobID, t.ErrorMessage,
 		t.CreatedBy, t.CreatedAt, t.UpdatedAt, t.ExecutedAt,
 	)
 	if err != nil {
@@ -118,7 +119,8 @@ func (s *ScheduledTaskService) List(status, taskType, requirementID string) ([]m
 	}
 	query := `SELECT id, task_type, requirement_id, project_id, requirement_title,
 		run_at, model, read_knowledge, branch_name, base_branch,
-		agent_server_id, split_tasks, status, job_id, error_message,
+		agent_server_id, split_tasks, coding_model, coding_agent_server_id,
+		status, job_id, error_message,
 		created_by, created_at, updated_at, executed_at
 		FROM scheduled_tasks`
 	if len(clauses) > 0 {
@@ -148,7 +150,8 @@ func (s *ScheduledTaskService) List(status, taskType, requirementID string) ([]m
 func (s *ScheduledTaskService) Get(id string) (*model.ScheduledTask, error) {
 	rows, err := s.db.Query(`SELECT id, task_type, requirement_id, project_id, requirement_title,
 		run_at, model, read_knowledge, branch_name, base_branch,
-		agent_server_id, split_tasks, status, job_id, error_message,
+		agent_server_id, split_tasks, coding_model, coding_agent_server_id,
+		status, job_id, error_message,
 		created_by, created_at, updated_at, executed_at
 		FROM scheduled_tasks WHERE id = ?`, id)
 	if err != nil {
@@ -167,7 +170,8 @@ func (s *ScheduledTaskService) Get(id string) (*model.ScheduledTask, error) {
 func (s *ScheduledTaskService) Due(now time.Time, limit int) ([]model.ScheduledTask, error) {
 	rows, err := s.db.Query(`SELECT id, task_type, requirement_id, project_id, requirement_title,
 		run_at, model, read_knowledge, branch_name, base_branch,
-		agent_server_id, split_tasks, status, job_id, error_message,
+		agent_server_id, split_tasks, coding_model, coding_agent_server_id,
+		status, job_id, error_message,
 		created_by, created_at, updated_at, executed_at
 		FROM scheduled_tasks
 		WHERE status = ? AND run_at <= ?
@@ -289,14 +293,73 @@ func (s *ScheduledTaskService) RecoverInterrupted() (int64, error) {
 }
 
 // HasPending reports whether the (requirement_id, task_type) pair already has
-// a pending row. Used by Create to enforce uniqueness and by the wizard
-// detail page to render the "已定时 HH:MM" hint.
+// a pending row. Used by the wizard detail page to render the
+// "已定时 HH:MM" hint. Kept for backward compatibility — Create now calls
+// HasPendingConflict so a merged design_and_coding task can detect a
+// pre-existing pending design or coding row on the same requirement.
 func (s *ScheduledTaskService) HasPending(requirementID, taskType string) (bool, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM scheduled_tasks
 		WHERE requirement_id = ? AND task_type = ? AND status = ?`,
 		requirementID, taskType, model.SchedStatusPending).Scan(&n)
 	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// HasPendingConflict reports whether inserting a new pending row of
+// taskType for requirementID would overlap with an existing pending row
+// in a way that would race against the wizard pipeline.
+//
+// Conflict matrix (rows / cols = existing pending row / new task_type):
+//
+//	              design          coding          design_and_coding
+//	design        conflict        no conflict     conflict
+//	coding        no conflict     conflict        conflict
+//	design_and_coding conflict   conflict        conflict
+//
+// The rationale: a design_and_coding row dispatches BOTH stages in series;
+// any pending single-stage row for the same requirement would either
+// duplicate the same stage or fire concurrently, which is exactly the
+// "two claude processes fighting over the same requirement" failure mode
+// the wizard is not designed to handle. Conversely, a new staging row
+// against an existing pending single-stage row is fine as long as the
+// existing one covers the OTHER stage (e.g. a fresh coding row when a
+// design row is pending is safe — the design row handles architect, the
+// coding row handles developer, no overlap).
+func (s *ScheduledTaskService) HasPendingConflict(requirementID, taskType string) (bool, error) {
+	var conflicting []string
+	switch taskType {
+	case model.SchedTypeDesign:
+		// design races with design itself, and with design_and_coding
+		// (the latter would also fire a design stage).
+		conflicting = []string{model.SchedTypeDesign, model.SchedTypeDesignCoding}
+	case model.SchedTypeCoding:
+		// coding races with coding itself, and with design_and_coding.
+		conflicting = []string{model.SchedTypeCoding, model.SchedTypeDesignCoding}
+	case model.SchedTypeDesignCoding:
+		// Merged races with anything pending for the same requirement.
+		conflicting = []string{
+			model.SchedTypeDesign,
+			model.SchedTypeCoding,
+			model.SchedTypeDesignCoding,
+		}
+	default:
+		return false, fmt.Errorf("HasPendingConflict: unknown task_type %q", taskType)
+	}
+	placeholders := strings.Repeat("?,", len(conflicting))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, 0, len(conflicting)+2)
+	args = append(args, requirementID, model.SchedStatusPending)
+	for _, t := range conflicting {
+		args = append(args, t)
+	}
+	q := fmt.Sprintf(`SELECT COUNT(*) FROM scheduled_tasks
+		WHERE requirement_id = ? AND status = ? AND task_type IN (%s)`,
+		placeholders)
+	var n int
+	if err := s.db.QueryRow(q, args...).Scan(&n); err != nil {
 		return false, err
 	}
 	return n > 0, nil
@@ -329,7 +392,8 @@ func scanScheduledTask(rows *sql.Rows) (*model.ScheduledTask, error) {
 	if err := rows.Scan(
 		&t.ID, &t.TaskType, &t.RequirementID, &t.ProjectID, &t.RequirementTitle,
 		&runAtRaw, &t.Model, &t.ReadKnowledge, &t.BranchName, &t.BaseBranch,
-		&t.AgentServerID, &t.SplitTasks, &t.Status, &t.JobID, &t.ErrorMessage,
+		&t.AgentServerID, &t.SplitTasks, &t.CodingModel, &t.CodingAgentServerID,
+		&t.Status, &t.JobID, &t.ErrorMessage,
 		&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &executedAt,
 	); err != nil {
 		return nil, err

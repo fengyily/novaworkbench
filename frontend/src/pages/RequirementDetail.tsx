@@ -720,18 +720,23 @@ export default function RequirementDetail() {
   // anyway, but the UI being upfront avoids the round-trip). Modal is
   // controlled by modalState — null when closed; otherwise carries the
   // taskType we want to create.
-  const [pendingByType, setPendingByType] = useState<Record<'design' | 'coding', ScheduledTask | null>>({
+  const [pendingByType, setPendingByType] = useState<Record<'design' | 'coding' | 'design_and_coding', ScheduledTask | null>>({
     design: null,
     coding: null,
+    design_and_coding: null,
   });
-  const [scheduleModal, setScheduleModal] = useState<{ taskType: 'design' | 'coding' } | null>(null);
+  const [scheduleModal, setScheduleModal] = useState<{ taskType: 'design' | 'coding' | 'design_and_coding' } | null>(null);
   const loadPendingSchedules = useCallback(async () => {
     if (!req) return;
     try {
       const rows = await schedulesApi.list({ requirement_id: req.id, status: 'pending' });
-      const map: Record<'design' | 'coding', ScheduledTask | null> = { design: null, coding: null };
+      const map: Record<'design' | 'coding' | 'design_and_coding', ScheduledTask | null> = {
+        design: null,
+        coding: null,
+        design_and_coding: null,
+      };
       for (const r of rows ?? []) {
-        if (r.task_type === 'design' || r.task_type === 'coding') {
+        if (r.task_type === 'design' || r.task_type === 'coding' || r.task_type === 'design_and_coding') {
           map[r.task_type] = r;
         }
       }
@@ -3232,6 +3237,23 @@ export default function RequirementDetail() {
                       <IconClock size={13} className="btn-icon" />{t('requirements.detail2.scheduleDesignBtn')}
                     </button>
                   )}
+                  {/* Scheduled design+code (merged) generation: one scheduled
+                      task that runs architect-design and, on success, chains
+                      into start-coding. Hidden for kind=idea (merged task
+                      includes a coding stage, same gate as the "定时开发"
+                      button below) and disabled when ANY pending row already
+                      exists for this requirement — the backend's
+                      HasPendingConflict will surface a 409 otherwise. */}
+                  {reqKind !== 'idea' && !pendingByType.design && !pendingByType.coding && !pendingByType.design_and_coding && (
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => setScheduleModal({ taskType: 'design_and_coding' })}
+                      disabled={!!busy}
+                      title={t('requirements.detail2.scheduleDesignCodingTitle')}
+                    >
+                      <IconClock size={13} className="btn-icon" />{t('requirements.detail2.scheduleDesignCodingBtn')}
+                    </button>
+                  )}
                   {/* Pending schedule hint — surfaces the planned time and
                       offers an inline cancel link so the user doesn't have
                       to navigate to the SchedulesPage. */}
@@ -3240,6 +3262,19 @@ export default function RequirementDetail() {
                       task={pendingByType.design}
                       onCancel={async () => {
                         await schedulesApi.cancel(pendingByType.design!.id);
+                        loadPendingSchedules();
+                      }}
+                    />
+                  )}
+                  {/* Merged (design+code) pending hint — same UX as the
+                      single-stage hint above, just labelled "方案+开发" so the
+                      user knows one row covers both stages. */}
+                  {pendingByType.design_and_coding && (
+                    <PendingScheduleHint
+                      task={pendingByType.design_and_coding}
+                      label={t('schedules.type.designCoding')}
+                      onCancel={async () => {
+                        await schedulesApi.cancel(pendingByType.design_and_coding!.id);
                         loadPendingSchedules();
                       }}
                     />
@@ -4017,14 +4052,25 @@ export default function RequirementDetail() {
           taskType={scheduleModal.taskType}
           requirementId={req.id}
           requirementTitle={req.title}
-          initialModel={scheduleModal.taskType === 'design' ? architectModel : developerModel}
+          initialModel={
+            scheduleModal.taskType === 'design'
+              ? architectModel
+              : scheduleModal.taskType === 'design_and_coding'
+                ? architectModel
+                : developerModel
+          }
+          initialCodingModel={
+            scheduleModal.taskType === 'design_and_coding' ? developerModel : undefined
+          }
           defaultBranchName={
-            scheduleModal.taskType === 'coding'
+            scheduleModal.taskType === 'coding' || scheduleModal.taskType === 'design_and_coding'
               ? `feat/${req.id.replace(/^req_/, '')}`
               : undefined
           }
           defaultBaseBranch={
-            scheduleModal.taskType === 'coding' ? (project?.default_branch ?? 'main') : undefined
+            scheduleModal.taskType === 'coding' || scheduleModal.taskType === 'design_and_coding'
+              ? (project?.default_branch ?? 'main')
+              : undefined
           }
           agentServers={agentServers.map(s => ({ id: s.id, name: s.name, host: s.host }))}
           onClose={() => setScheduleModal(null)}
@@ -4045,13 +4091,25 @@ export default function RequirementDetail() {
 function PendingScheduleHint({
   task,
   onCancel,
+  label,
 }: {
   task: ScheduledTask;
   onCancel: () => void;
+  // Optional override for the leading type label (e.g. "方案+开发" for the
+  // merged design_and_coding row). Defaults to the type-label lookup so
+  // single-stage rows don't need to pass anything.
+  label?: string;
 }) {
   const { t } = useTranslation();
   const when = new Date(task.run_at);
   const formatted = fmtDateTime(when.toISOString());
+  const typeLabel =
+    label ??
+    (task.task_type === 'design'
+      ? t('schedules.type.design')
+      : task.task_type === 'design_and_coding'
+        ? t('schedules.type.designCoding')
+        : t('schedules.type.coding'));
   return (
     <span
       style={{
@@ -4065,7 +4123,10 @@ function PendingScheduleHint({
         gap: 6,
       }}
     >
-      <IconClock size={12} />{t('requirements.detail2.pendingScheduleLabel', { when: formatted })}
+      <IconClock size={12} />
+      {typeLabel}
+      {' · '}
+      {t('requirements.detail2.pendingScheduleLabel', { when: formatted })}
       <button
         className="btn btn-sm"
         onClick={onCancel}

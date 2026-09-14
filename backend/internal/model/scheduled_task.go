@@ -18,25 +18,32 @@ import "time"
 // for list rendering — avoids a JOIN on every row of /api/schedules and
 // keeps the FK CASCADE behavior intact when the requirement is deleted.
 type ScheduledTask struct {
-	ID               string     `json:"id"`
-	TaskType         string     `json:"task_type"`         // SchedTypeDesign | SchedTypeCoding
-	RequirementID    string     `json:"requirement_id"`
-	ProjectID        string     `json:"project_id"`
-	RequirementTitle string     `json:"requirement_title"`
-	RunAt            time.Time  `json:"run_at"`
-	Model            string     `json:"model"`             // '' = 角色默认（执行时由 roleConfig 解析）
-	ReadKnowledge    bool       `json:"read_knowledge"`
-	BranchName       string     `json:"branch_name"`      // coding only
-	BaseBranch       string     `json:"base_branch"`      // coding only
-	AgentServerID    string     `json:"agent_server_id"`  // coding only; '' = 本地
-	SplitTasks       bool       `json:"split_tasks"`      // coding only
-	Status           string     `json:"status"`
-	JobID            string     `json:"job_id"`
-	ErrorMessage     string     `json:"error_message"`
-	CreatedBy        string     `json:"created_by"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	ExecutedAt       *time.Time `json:"executed_at,omitempty"`
+	ID                  string     `json:"id"`
+	TaskType            string     `json:"task_type"`         // SchedTypeDesign | SchedTypeCoding | SchedTypeDesignCoding
+	RequirementID       string     `json:"requirement_id"`
+	ProjectID           string     `json:"project_id"`
+	RequirementTitle    string     `json:"requirement_title"`
+	RunAt               time.Time  `json:"run_at"`
+	Model               string     `json:"model"`             // design: 方案模型；design_and_coding: 设计阶段模型；'' = 角色默认
+	ReadKnowledge       bool       `json:"read_knowledge"`
+	BranchName          string     `json:"branch_name"`      // coding / design_and_coding
+	BaseBranch          string     `json:"base_branch"`      // coding / design_and_coding
+	AgentServerID       string     `json:"agent_server_id"`  // design / coding / design_and_coding（设计阶段执行环境）；'' = 本地
+	SplitTasks          bool       `json:"split_tasks"`      // coding / design_and_coding
+	// CodingModel / CodingAgentServerID are only used by the merged
+	// design_and_coding task type — they configure the second (developer)
+	// stage independently from the design-stage fields above. Single-stage
+	// design / coding tasks leave both empty so existing rows stay backward
+	// compatible with the pre-merge schema.
+	CodingModel         string     `json:"coding_model"`
+	CodingAgentServerID string     `json:"coding_agent_server_id"`
+	Status              string     `json:"status"`
+	JobID               string     `json:"job_id"`
+	ErrorMessage        string     `json:"error_message"`
+	CreatedBy           string     `json:"created_by"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+	ExecutedAt          *time.Time `json:"executed_at,omitempty"`
 }
 
 // ScheduledTask status / task_type constants. Plain strings to mirror the SQL
@@ -49,6 +56,7 @@ const (
 	SchedStatusFailed    = "failed"
 	SchedStatusCanceled  = "canceled"
 
-	SchedTypeDesign = "design"
-	SchedTypeCoding = "coding"
+	SchedTypeDesign        = "design"
+	SchedTypeCoding        = "coding"
+	SchedTypeDesignCoding  = "design_and_coding"
 )

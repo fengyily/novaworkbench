@@ -44,17 +44,21 @@ func NewScheduleHandler(svc *service.ScheduledTaskService, reqSvc *service.Requi
 // Create body — mirrors the schedule JSON fields the frontend sends. We
 // only require requirement_id + task_type + run_at; everything else is
 // optional. model == "" means "use the role default" (resolved at
-// dispatch time).
+// dispatch time). CodingModel / CodingAgentServerID are only consumed
+// when task_type == "design_and_coding" (the merged two-stage task);
+// single-stage tasks ignore them.
 type createScheduleReq struct {
-	RequirementID    string `json:"requirement_id"`
-	TaskType         string `json:"task_type"`
-	RunAt            string `json:"run_at"`
-	Model            string `json:"model"`
-	ReadKnowledge    bool   `json:"read_knowledge"`
-	BranchName       string `json:"branch_name"`
-	BaseBranch       string `json:"base_branch"`
-	AgentServerID    string `json:"agent_server_id"`
-	SplitTasks       bool   `json:"split_tasks"`
+	RequirementID       string `json:"requirement_id"`
+	TaskType            string `json:"task_type"`
+	RunAt               string `json:"run_at"`
+	Model               string `json:"model"`
+	ReadKnowledge       bool   `json:"read_knowledge"`
+	BranchName          string `json:"branch_name"`
+	BaseBranch          string `json:"base_branch"`
+	AgentServerID       string `json:"agent_server_id"`
+	SplitTasks          bool   `json:"split_tasks"`
+	CodingModel         string `json:"coding_model"`
+	CodingAgentServerID string `json:"coding_agent_server_id"`
 }
 
 // Create persists a new scheduled task. The handler validates:
@@ -74,8 +78,8 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "INVALID", "requirement_id is required")
 		return
 	}
-	if body.TaskType != model.SchedTypeDesign && body.TaskType != model.SchedTypeCoding {
-		writeError(w, 400, "INVALID", fmt.Sprintf("task_type must be %q or %q", model.SchedTypeDesign, model.SchedTypeCoding))
+	if body.TaskType != model.SchedTypeDesign && body.TaskType != model.SchedTypeCoding && body.TaskType != model.SchedTypeDesignCoding {
+		writeError(w, 400, "INVALID", fmt.Sprintf("task_type must be %q, %q or %q", model.SchedTypeDesign, model.SchedTypeCoding, model.SchedTypeDesignCoding))
 		return
 	}
 	if body.RunAt == "" {
@@ -102,23 +106,25 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "INTERNAL", err.Error())
 		return
 	}
-	if body.TaskType == model.SchedTypeCoding && req.Kind == "idea" {
+	if (body.TaskType == model.SchedTypeCoding || body.TaskType == model.SchedTypeDesignCoding) && req.Kind == "idea" {
 		writeError(w, 400, "IDEA_NOT_DEVELOPABLE", "「想法」类需求暂不支持进入开发阶段")
 		return
 	}
 
 	t := &model.ScheduledTask{
-		TaskType:         body.TaskType,
-		RequirementID:    body.RequirementID,
-		ProjectID:        req.ProjectID,
-		RequirementTitle: req.Title,
-		RunAt:            runAt,
-		Model:            body.Model,
-		ReadKnowledge:    body.ReadKnowledge,
-		BranchName:       body.BranchName,
-		BaseBranch:       body.BaseBranch,
-		AgentServerID:    body.AgentServerID,
-		SplitTasks:       body.SplitTasks,
+		TaskType:            body.TaskType,
+		RequirementID:       body.RequirementID,
+		ProjectID:           req.ProjectID,
+		RequirementTitle:    req.Title,
+		RunAt:               runAt,
+		Model:               body.Model,
+		ReadKnowledge:       body.ReadKnowledge,
+		BranchName:          body.BranchName,
+		BaseBranch:          body.BaseBranch,
+		AgentServerID:       body.AgentServerID,
+		SplitTasks:          body.SplitTasks,
+		CodingModel:         body.CodingModel,
+		CodingAgentServerID: body.CodingAgentServerID,
 	}
 	created, err := h.svc.Create(t)
 	if err != nil {
