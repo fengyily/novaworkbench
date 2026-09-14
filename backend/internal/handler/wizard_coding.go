@@ -129,6 +129,9 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		if perr := h.jobLogSvc.Save(job.ID, p.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
 			log.Printf("[start-coding] failed to persist job log %s: %v", job.ID, perr)
 		}
+		if cb != nil && cb.OnFinish != nil {
+			cb.OnFinish(job.ID, status == store.JobDone)
+		}
 	}()
 	// Terminal-state fallback. Every exit path is *supposed* to call
 	// job.Finish, but nothing enforces it: an early return or a panic left the
