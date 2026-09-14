@@ -1362,11 +1362,11 @@ export default function RequirementDetail() {
   }, [req?.id, req?.tags]);
 
   const addTag = (raw: string) => {
-    const t = raw.trim();
-    if (!t) return;
-    if (tags.includes(t)) { setTagInput(''); return; }
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    if (tags.includes(trimmed)) { setTagInput(''); return; }
     if (tags.length >= 20) { setTagInput(''); return; }
-    const next = [...tags, t];
+    const next = [...tags, trimmed];
     setTags(next);
     setTagInput('');
     requirementsApi.updateTags(req!.id, next)
@@ -1374,8 +1374,8 @@ export default function RequirementDetail() {
       .catch(err => alert(t('requirements.detail2.closeFailPrefix') + (err instanceof Error ? err.message : String(err))));
   };
 
-  const removeTag = (t: string) => {
-    const next = tags.filter(x => x !== t);
+  const removeTag = (tag: string) => {
+    const next = tags.filter(x => x !== tag);
     setTags(next);
     requirementsApi.updateTags(req!.id, next)
       .then(updated => setReq(updated))
