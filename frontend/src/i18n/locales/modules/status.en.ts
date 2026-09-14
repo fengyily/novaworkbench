@@ -9,6 +9,12 @@ export const status = {
     done: '✅ Done',
     archived: '📦 Archived',
   },
+  // Combined-chip labels — must mirror status.ts reqChip key-for-key.
+  reqChip: {
+    skipDesign: 'Design skipped',
+    devDone: 'Coding done',
+    pendingConfirm: 'Awaiting confirm',
+  },
   kind: {
     issue: '🐛 Issue',
     requirement: '📋 Requirement',

@@ -8,12 +8,13 @@ import {
   projectsApi, runnerApi, reviewApi, platformApi, requirementsApi, knowledgeApi,
   usageApi, usageTotalInput, fmtCost, wizardApi,
   type Project, type RunStatus, type PR, type PRListResponse, type PlatformToken,
-  type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage, statusLabelKeys,
+  type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage,
   kindLabelKeys, kindOf, API_BASE, authedFetch,
 } from '../api/client';
 import { tLabel } from '../i18n/label';
 import { fmtDate, fmtDateTime } from '../utils/intl';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
+import { StatusChips } from '../components/StatusChips';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
 import { IconPlug, IconRobot } from '../components/icons';
 import { stripMarkdownPreview } from '../utils/preview';
@@ -549,11 +550,13 @@ export default function ProjectDetail() {
       <td data-label={t('projects.detail.colTitle')} className="pr-title">{req.title}</td>
       <td data-label={t('projects.detail.colPriority')}><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
       <td data-label={t('projects.detail.colStatus')}>
-        <span className={`status-badge status-${req.status}`}>{tLabel(t, statusLabelKeys as Record<string, string>, req.status)}</span>
+        <StatusChips req={req} />
         {/* Breathing dot for any wizard job in flight on this requirement
             (analyst/design/apply/coding). Set is populated by the 5s poll
             of /api/wizard/active-jobs above. aria-label + title so screen
-            readers + hover explain the indicator (the dot has no text). */}
+            readers + hover explain the indicator (the dot has no text).
+            Rendered next to the status chip group; both are visible at once
+            because pulse indicates an active job, chip indicates stored status. */}
         {activeReqIds.has(req.id) && (
           <span
             className="claude-pulse-dot is-work"

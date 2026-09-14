@@ -744,6 +744,26 @@ export const statusLabelKeys: Record<string, string> = {
   archived: 'status.req.archived',
 };
 
+// Code vocabulary for the combined-chips badge on the requirements list.
+// Keys here are the chip codes consumed by components/StatusChips.tsx; they
+// resolve at render time via i18n/label.ts tLabel().
+//   - skipDesign / devDone / pendingConfirm reuse the new status.reqChip.* keys
+//   - draft / analyzing / designing / designed / developing / done / archived
+//     are reused from status.req.* so the chip text stays in lockstep with the
+//     single-badge list filter.
+export const statusChipLabelKeys: Record<string, string> = {
+  skipDesign: 'status.reqChip.skipDesign',
+  devDone: 'status.reqChip.devDone',
+  pendingConfirm: 'status.reqChip.pendingConfirm',
+  draft: 'status.req.draft',
+  analyzing: 'status.req.analyzing',
+  designing: 'status.req.designing',
+  designed: 'status.req.designed',
+  developing: 'status.req.developing',
+  done: 'status.req.done',
+  archived: 'status.req.archived',
+};
+
 // Priority display labels. The DB stores free-form "high"/"medium"/"low"
 // (the create-form only writes those three), but legacy rows can have
 // anything — the lookup falls back to the raw value so we never render

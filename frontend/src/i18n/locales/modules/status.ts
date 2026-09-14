@@ -14,6 +14,15 @@ export const status = {
     done: '✅ 开发完成',
     archived: '📦 已归档',
   },
+  // Combined-chip labels for the requirements list / project-detail rows
+  // (multi-chip badge that overlays status + skip_design + dev_ended_at).
+  // Distinct from status.req.* on purpose: these are intermediate, no emoji,
+  // and composed alongside a primary status chip at render time.
+  reqChip: {
+    skipDesign: '跳过方案',
+    devDone: '开发完成',
+    pendingConfirm: '待确认',
+  },
   // requirement kinds
   kind: {
     issue: '🐛 Issue',
