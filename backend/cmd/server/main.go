@@ -347,6 +347,11 @@ func main() {
 	mux.HandleFunc("POST /api/projects/{id}/description/regenerate", projectH.RegenerateDescription)
 	mux.HandleFunc("POST /api/projects/descriptions/backfill", projectH.BackfillDescriptions)
 
+	// Project commit/PR language override — user-pinned value that wins over
+	// the scanner's auto-detection when generating commit messages, push
+	// summaries, and PR titles/bodies.
+	mux.HandleFunc("PUT /api/projects/{id}/commit-lang-override", projectH.SetCommitLangOverride)
+
 	// Weekly reports (AI-generated from git log + requirement data)
 	mux.HandleFunc("GET /api/projects/{id}/reports", reportH.List)
 	mux.HandleFunc("GET /api/projects/{id}/reports/rule", reportH.GetRule)
