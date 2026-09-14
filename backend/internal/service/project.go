@@ -524,10 +524,16 @@ func injectCredentials(remote, platform, tokenSecret string) string {
 		// git@…:owner/repo.git or any non-HTTP URL — leave alone.
 		return remote
 	}
-	// Personal access tokens: drop any existing userinfo, set token as
-	// username. GitHub PATs, GitLab PATs, and Gitea PATs all accept
-	// "https://<token>@host/…" — the simplest portable form.
-	u.User = url.UserPassword(tokenSecret, "")
+	// Personal access tokens: drop any existing userinfo, embed the token
+	// in userinfo. The user segment depends on platform:
+	//   - github / gitea: plain token ("https://<token>@host/...")
+	//   - gitlab:         "oauth2:<token>" — GitLab rejects the plain form
+	//                     with "HTTP Basic: Access denied".
+	user := tokenSecret
+	if platform == "gitlab" {
+		user = "oauth2:" + tokenSecret
+	}
+	u.User = url.UserPassword(user, "")
 	return u.String()
 }
 
