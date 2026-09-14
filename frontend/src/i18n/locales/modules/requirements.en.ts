@@ -351,6 +351,11 @@ export const requirements = {
     designSectionRisks: 'Implementation risks',
     designExpandCollapse: '▲ Collapse design',
     designExpandShow: '▼ Show full design',
+    // BRIEF (requirement.description) collapse toggle — mirrors the design
+    // toggle above; uses "Collapse" without "design" since the BRIEF is the
+    // requirement's own description, not the technical design.
+    descExpandCollapse: '▲ Collapse',
+    descExpandShow: '▼ Show full description',
     designCompleteBtn: 'Design complete',
     // Developer-stage CTAs.
     devReadyDesignedHint: 'Design complete. Development will follow the technical design.',
