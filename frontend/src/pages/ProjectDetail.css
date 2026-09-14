@@ -541,6 +541,89 @@
   .platform-form-row > * { width: 100% !important; min-width: 0; }
 }
 
+/* Requirements tab — filter + sort bar.
+   --------------------------------------------------------------------------
+   Sits between the run-control-bar (count + "+ New requirement" button) and
+   the requirements table. Two label/select groups (status filter + sort key)
+   plus an inline "shown / total" counter on the right. Uses the
+   `.project-req-filter-bar` namespace so it cannot collide with the
+   cross-project RequirementsList's `.req-filter-bar` rules — same idea, two
+   different layouts, kept distinct on purpose. */
+.project-req-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  /* A touch of vertical breathing room — sits between run-control-bar (12px
+     bottom margin) and the table, so 10px top keeps the cluster cohesive
+     without crowding the table. */
+  margin: 4px 0 12px;
+  padding: 0 2px;
+}
+
+.project-req-filter-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* Lets each group shrink without the label wrapping mid-character when the
+     bar wraps onto a second line on narrow viewports. */
+  min-width: 0;
+}
+
+.project-req-filter-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  /* Stable horizontal rhythm — without flex-shrink: 0 a 360px viewport would
+     chop the CJK characters of "状态" / "排序" mid-glyph when the bar wraps. */
+  flex-shrink: 0;
+}
+
+.project-req-filter-group .form-input {
+  width: auto;
+  min-width: 160px;
+  /* Match the height of the surrounding labels for optical alignment — the
+     default form-input padding makes selects taller than the inline label
+     text otherwise. */
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+/* The shown/total counter hugs the right edge on desktop and stacks under
+   the controls on mobile. `margin-left: auto` only takes effect inside a
+   flex container, which .project-req-filter-bar is. */
+.project-req-filter-count {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+  /* Stack vertically so each control gets a full-width tap target; the count
+     counter drops below the controls instead of floating on the right edge
+     (otherwise it'd crowd into the second select). */
+  .project-req-filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .project-req-filter-group {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .project-req-filter-group .form-input {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+  }
+  .project-req-filter-count {
+    margin-left: 0;
+    text-align: right;
+  }
+}
+
 /* Requirements tab pagination */
 .pagination {
   display: flex;

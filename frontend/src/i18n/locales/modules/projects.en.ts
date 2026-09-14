@@ -200,6 +200,20 @@ export const projects = {
     paginationInfo: '{{total}} total · page {{cur}} / {{totalPages}}',
     paginationPrev: '‹ Prev',
     paginationNext: 'Next ›',
+    // Requirements tab — filter + sort controls (above the requirements table).
+    // `reqCountFiltered` is a template string with {{shown}} / {{total}} placeholders
+    // so the user sees both the post-filter row count and the project's total.
+    reqFilterStatusLabel: 'Status',
+    reqFilterAll: 'All',
+    reqFilterActive: 'In progress',
+    reqFilterDone: 'Done',
+    reqFilterArchived: 'Archived',
+    reqSortByLabel: 'Sort',
+    reqSortDefault: 'Default (newest first)',
+    reqSortUpdatedAt: 'Last updated',
+    reqSortPriority: 'Priority (high → low)',
+    reqSortStatus: 'Status (active → done → archived)',
+    reqCountFiltered: 'Showing {{shown}} / {{total}}',
     runDetected: 'Detected {{file}}',
     runMissing: 'No docker-compose file detected',
     runStart: 'Start',

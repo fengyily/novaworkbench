@@ -154,6 +154,16 @@ export default function ProjectDetail() {
   const [showCreateReq, setShowCreateReq] = useState(false);
   // Requirements tab pagination — first page by default.
   const [reqPage, setReqPage] = useState(1);
+  // Requirements-tab filter + sort (only affects the requirements tab; the
+  // overview's recent list keeps its own narrower `status !== 'done'` filter).
+  // Default = 'active' so first-time visitors see only in-flight work (the
+  // same slice the overview shows); a long backlog of done/archived rows
+  // would otherwise bury everything below the fold. Users can flip to
+  // 'all' / 'done' / 'archived' via the new filter bar.
+  const [reqStatusFilter, setReqStatusFilter] = useState<'all' | 'active' | 'done' | 'archived'>('active');
+  // 'default' keeps the backend order (done-last + created_at DESC) — no
+  // client-side re-sort so the SQL ORDER BY stays authoritative.
+  const [reqSortBy, setReqSortBy] = useState<'default' | 'updated_at' | 'priority' | 'status'>('default');
 
   // Requirement ids currently running a wizard job (across the whole
   // backend process). Populated by polling GET /api/wizard/active-jobs
@@ -309,6 +319,11 @@ export default function ProjectDetail() {
   // replaced (initial load, post-create refresh), so a previously selected page
   // can never land past the new last page.
   useEffect(() => { setReqPage(1); }, [reqs]);
+
+  // Same reset when the user changes the filter or sort dropdown — otherwise
+  // a page-3 selection can survive a filter that only has 1 page of results
+  // and silently render an empty tbody.
+  useEffect(() => { setReqPage(1); }, [reqStatusFilter, reqSortBy]);
 
   // 5s poll of /api/wizard/active-jobs. Drives the small amber breathing
   // dot rendered next to each requirement's status badge in
@@ -640,12 +655,52 @@ export default function ProjectDetail() {
   // The requirements tab keeps showing everything (done sorts to the end).
   const overviewReqs = reqs.filter(r => r.status !== 'done');
 
+  // Requirements tab — client-side status filter applied BEFORE the sort
+  // and pagination. 'all' intentionally excludes 'archived' (consistent with
+  // the backend's List() default, which hides archived unless the caller
+  // explicitly opts in via status='archived'); 'archived' is its own bucket.
+  const filteredReqs = useMemo(() => {
+    switch (reqStatusFilter) {
+      case 'all':
+        return reqs.filter(r => r.status !== 'archived');
+      case 'active':
+        return reqs.filter(r => ['draft', 'analyzing', 'designing', 'designed', 'developing'].includes(r.status));
+      case 'done':
+        return reqs.filter(r => r.status === 'done');
+      case 'archived':
+        return reqs.filter(r => r.status === 'archived');
+    }
+  }, [reqs, reqStatusFilter]);
+
+  // Sort the filtered slice. 'default' is a no-op pass-through — the backend
+  // already returns done-last + created_at DESC, and we want that order to
+  // stay authoritative. Other modes are stable enough for a list of ≤ a few
+  // hundred rows; localeCompare on ISO-8601 strings is a cheap, dialect-safe
+  // substitute for a Date compare.
+  const sortedReqs = useMemo(() => {
+    if (reqSortBy === 'default') return filteredReqs;
+    const arr = [...filteredReqs];
+    if (reqSortBy === 'updated_at') {
+      arr.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+    } else if (reqSortBy === 'priority') {
+      const order: Record<string, number> = { high: 0, medium: 1, low: 2 };
+      arr.sort((a, b) => (order[a.priority] ?? 99) - (order[b.priority] ?? 99));
+    } else if (reqSortBy === 'status') {
+      const order: Record<string, number> = {
+        draft: 0, analyzing: 1, designing: 2, designed: 3, developing: 4,
+        done: 5, archived: 6,
+      };
+      arr.sort((a, b) => (order[a.status] ?? 99) - (order[b.status] ?? 99));
+    }
+    return arr;
+  }, [filteredReqs, reqSortBy]);
+
   // Requirements tab pagination. The page is clamped to the (possibly shrunken)
   // list so a stale reqPage never escapes the array; the reset effect below
   // normally snaps back to page 1 after a list refresh.
-  const totalReqPages = Math.max(1, Math.ceil(reqs.length / REQ_PAGE_SIZE));
+  const totalReqPages = Math.max(1, Math.ceil(sortedReqs.length / REQ_PAGE_SIZE));
   const curReqPage = Math.min(reqPage, totalReqPages);
-  const pagedReqs = reqs.slice((curReqPage - 1) * REQ_PAGE_SIZE, curReqPage * REQ_PAGE_SIZE);
+  const pagedReqs = sortedReqs.slice((curReqPage - 1) * REQ_PAGE_SIZE, curReqPage * REQ_PAGE_SIZE);
 
   // Render a group of knowledge entries under a labeled section. Reuses the
   // kb-card styles from KnowledgePage.css. The content preview is stripped of
@@ -1193,6 +1248,46 @@ export default function ProjectDetail() {
             </button>
           </div>
 
+          {/* Status filter + sort controls. Mounted under the run-control-bar
+              and ABOVE the composer so the dropdowns stay visible even when
+              the composer is collapsed. Default value of reqStatusFilter is
+              'active' — first-time visitors only see in-flight work, which
+              keeps the table from being buried under a long backlog of
+              done/archived rows. The trailing `reqCountFiltered` text shows
+              the current slice vs. the project total so users immediately
+              understand why some rows are missing. */}
+          <div className="project-req-filter-bar">
+            <label className="project-req-filter-group">
+              <span className="project-req-filter-label">{t('projects.detail.reqFilterStatusLabel')}</span>
+              <select
+                className="form-input"
+                value={reqStatusFilter}
+                onChange={e => setReqStatusFilter(e.target.value as 'all' | 'active' | 'done' | 'archived')}
+              >
+                <option value="active">{t('projects.detail.reqFilterActive')}</option>
+                <option value="all">{t('projects.detail.reqFilterAll')}</option>
+                <option value="done">{t('projects.detail.reqFilterDone')}</option>
+                <option value="archived">{t('projects.detail.reqFilterArchived')}</option>
+              </select>
+            </label>
+            <label className="project-req-filter-group">
+              <span className="project-req-filter-label">{t('projects.detail.reqSortByLabel')}</span>
+              <select
+                className="form-input"
+                value={reqSortBy}
+                onChange={e => setReqSortBy(e.target.value as 'default' | 'updated_at' | 'priority' | 'status')}
+              >
+                <option value="default">{t('projects.detail.reqSortDefault')}</option>
+                <option value="updated_at">{t('projects.detail.reqSortUpdatedAt')}</option>
+                <option value="priority">{t('projects.detail.reqSortPriority')}</option>
+                <option value="status">{t('projects.detail.reqSortStatus')}</option>
+              </select>
+            </label>
+            <span className="project-req-filter-count">
+              {t('projects.detail.reqCountFiltered', { shown: sortedReqs.length, total: reqs.length })}
+            </span>
+          </div>
+
           {/* The composer is mounted ABOVE the requirements list so the
               user sees it appear right under the button they just
               clicked. Previously it rendered at the bottom of the tab
@@ -1236,7 +1331,18 @@ export default function ProjectDetail() {
             <div className="tab-empty"><p>{t('projects.detail.reqEmpty')}</p></div>
           )}
 
-          {!reqsLoading && !reqsError && reqs.length > 0 && (
+          {/* The project has requirements but the active filter / sort shows
+              none (e.g. user picked 'archived' but the project has zero
+              archived rows). Hard-coded Chinese fallback — the
+              reqEmptyFiltered i18n key was intentionally out of scope for
+              this change, and a one-line hint is enough to unblock the
+              user. Reusing reqEmpty here would lie ("项目暂无需求") since
+              the project does have rows, just none matching the filter. */}
+          {!reqsLoading && !reqsError && reqs.length > 0 && sortedReqs.length === 0 && (
+            <div className="tab-empty"><p>没有符合筛选条件的需求，调一下过滤或排序试试。</p></div>
+          )}
+
+          {!reqsLoading && !reqsError && sortedReqs.length > 0 && (
             <div className="pr-list">
               <table className="pr-table table-cards">
                 <thead>
