@@ -185,3 +185,170 @@ func modelStatusFromOk(ok bool) string {
 	}
 	return "failed"
 }
+
+// RunScheduledDesignAndCoding satisfies scheduler.Executor for the merged
+// "design_and_coding" task type. It chains the architect-design and
+// start-coding wizard stages using the per-stage fields carried in
+// DesignCodingParams (designModel/agent for stage 1, codingModel/agent
+// for stage 2, branch / split for the coding side).
+//
+// Lifecycle:
+//
+//   - Pre-gate: mirror RunScheduledDesign's done/archived + manual-job
+//     checks; on either failure the row is failed and the executor
+//     returns early.
+//   - Stage 1 (design): WizardHandler.RunScheduledDesign fires with the
+//     designModel / designAgentServerID. On its OnFinish callback:
+//   - ok=false → schedSvc.Finish(schedID, false, designJobID, "方案设计阶段
+//     执行失败，请查看日志"); return.
+//   - ok=true  → reqSvc.UpdateStatus(reqID, "designed") (auto-promote the
+//     requirement past the manual 方案完成 gate — the architect stage
+//     writes design_docs but stops at status=designing), then build
+//     codingRunParams with the developer-stage model / agent / branch /
+//     split fields and call WizardHandler.RunScheduledCoding with a
+//     chained callback. That callback flips the scheduled_tasks row to
+//     its terminal state (succeeded or failed) using the coding job id.
+//   - The scheduled_tasks.job_id recorded on Finish is whichever stage
+//     finished last (coding on the happy path, design on stage-1
+//     failure), matching the schema's "any non-empty JobStore id" intent
+//     for the list-page "查看日志" deep link.
+//
+// scheduled_tasks.status stays at "running" across the chain — the row
+// only flips terminal when the LAST stage's OnFinish fires. A server
+// restart mid-chain is recovered by RecoverInterrupted (running → failed),
+// which leaves the design-stage design_docs in place so the user can
+// re-trigger stage 2 manually from the requirement detail page.
+func (e *ScheduledExecutor) RunScheduledDesignAndCoding(ctx context.Context, p scheduler.DesignCodingParams) (string, error) {
+	// 1. Pull schedID out of ctx. dispatchFromCtx is the same helper the
+	//    single-stage paths use so the production code path is identical.
+	_, schedID, err := e.dispatchFromCtx(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	// 2. Pre-gate: same done/archived + manual-design-job checks as
+	//    RunScheduledDesign. Doing this BEFORE the goroutine fires lets us
+	//    fail the row synchronously and avoid orphaning an in-flight
+	//    design job when the requirement is already terminal.
+	req, err := e.h.reqSvc.Get(p.RequirementID)
+	if err != nil {
+		_ = e.schedSvc.Finish(schedID, false, "", "加载需求失败: "+err.Error())
+		return "", fmt.Errorf("加载需求失败: %w", err)
+	}
+	if req.Status == "done" || req.Status == "archived" {
+		_ = e.schedSvc.Finish(schedID, false, "", "需求已完成/归档，定时任务取消执行")
+		return "", fmt.Errorf("需求已完成/归档，定时任务取消执行")
+	}
+	if req.DesignJobID != "" && e.h.jobs.Live(req.DesignJobID) {
+		_ = e.schedSvc.Finish(schedID, false, "", "已有手动方案任务在执行，定时任务跳过")
+		return "", fmt.Errorf("已有手动方案任务在执行，定时任务跳过")
+	}
+
+	// 3. Stage 1 — architect design. Re-read the requirement once more
+	//    right before firing so the latest designSessionID / analyst-stage
+	//    state is in effect (the user could have updated it between our
+	//    pre-gate and now). Pass the user-picked model + agent server
+	//    through the design-stage fields of the merged task; ReadKnowledge
+	//    is shared between the two stages per the merge-modal UI.
+	stage1JobID, err := e.h.RunScheduledDesign(p.RequirementID, p.DesignModel, p.ReadKnowledge, p.DesignAgentServerID, e.chainedDesignCallback(p.RequirementID, schedID, p))
+	if err != nil {
+		// Synchronous failure (the prepare step rejected, no goroutine was
+		// spawned). Mark the row failed immediately.
+		_ = e.schedSvc.Finish(schedID, false, "", err.Error())
+		return "", err
+	}
+
+	// Returned jobID is the design-stage id — the scheduler will surface it
+	// in logs. The terminal scheduled_tasks.job_id gets overwritten by
+	// chainedDesignCallback / chainedCodingCallback to whichever stage
+	// finishes last.
+	return stage1JobID, nil
+}
+
+// chainedDesignCallback builds the OnFinish closure for the design stage
+// of a merged task. On success it auto-promotes the requirement to
+// "designed" (the architect stage leaves the row at "designing" — this
+// promotion is exactly what the manual "方案完成" button does), then
+// dispatches the coding stage with the developer-side fields carried on
+// DesignCodingParams. On failure it flips the scheduled_tasks row to
+// failed with the design job id.
+func (e *ScheduledExecutor) chainedDesignCallback(reqID, schedID string, p scheduler.DesignCodingParams) *runCallbacks {
+	return &runCallbacks{
+		OnFinish: func(designJobID string, ok bool) {
+			if !ok {
+				if err := e.schedSvc.Finish(schedID, false, designJobID, "方案设计阶段执行失败，请查看日志"); err != nil {
+					log.Printf("[scheduler-executor] Finish %s failed: %v", schedID, err)
+					return
+				}
+				log.Printf("[scheduler-executor] merged scheduled task %s design stage failed job=%s", schedID, designJobID)
+				return
+			}
+			// Auto-promote past the manual 方案完成 gate so the coding
+			// stage's status gate ("designed" → "developing") can proceed.
+			// RunScheduledCoding itself handles "designing" → "designed" in
+			// its status switch, so this is a belt-and-suspenders pass that
+			// also serves as the "design stage's outcome is recognized"
+			// signal for any UI reading requirements.status.
+			if _, err := e.h.reqSvc.UpdateStatus(reqID, "designed"); err != nil {
+				log.Printf("[scheduler-executor] promote to designed for %s failed: %v", reqID, err)
+			}
+			// Re-load the requirement so the coding stage picks up the
+			// LATEST title / description (the user may have edited the
+			// requirement between creating the scheduled task and the
+			// dispatch firing).
+			req, err := e.h.reqSvc.Get(reqID)
+			if err != nil {
+				if ferr := e.schedSvc.Finish(schedID, false, designJobID, "加载需求失败: "+err.Error()); ferr != nil {
+					log.Printf("[scheduler-executor] Finish %s failed: %v", schedID, ferr)
+				}
+				return
+			}
+			cp := &codingRunParams{
+				RequirementID:    reqID,
+				RequirementTitle: req.Title,
+				RequirementDesc:  req.Description,
+				BranchName:       p.BranchName,
+				BaseBranch:       p.BaseBranch,
+				Model:            p.CodingModel,
+				ReadKnowledge:    p.ReadKnowledge,
+				AgentServerID:    p.CodingAgentServerID,
+				SplitTasks:       p.SplitTasks,
+				// ProjectPath / ClaudeConfigID / AutoPushPR / DevMode / SyncMode
+				// stay empty so the wizard exec body resolves them via the
+				// existing per-stage priority chain (same behavior as the
+				// manual coding flow with an empty prefill).
+			}
+			codingJobID, cerr := e.h.RunScheduledCoding(cp, e.chainedCodingCallback(schedID))
+			if cerr != nil {
+				if ferr := e.schedSvc.Finish(schedID, false, designJobID, "开发阶段派发失败: "+cerr.Error()); ferr != nil {
+					log.Printf("[scheduler-executor] Finish %s failed: %v", schedID, ferr)
+				}
+				return
+			}
+			log.Printf("[scheduler-executor] merged scheduled task %s dispatched coding stage job=%s (design job=%s)", schedID, codingJobID, designJobID)
+		},
+	}
+}
+
+// chainedCodingCallback is the OnFinish closure for the second stage of
+// a merged task. It simply flips the scheduled_tasks row terminal — the
+// design callback has already done the heavy lifting. JobID here is the
+// coding job id, which becomes the value scheduled_tasks.job_id lands
+// with on success (matching the "last-stage wins" rule from the
+// RunScheduledDesignAndCoding docstring).
+func (e *ScheduledExecutor) chainedCodingCallback(schedID string) *runCallbacks {
+	return &runCallbacks{
+		OnFinish: func(codingJobID string, ok bool) {
+			msg := ""
+			if !ok {
+				msg = "开发阶段执行失败，请查看日志"
+			}
+			if err := e.schedSvc.Finish(schedID, ok, codingJobID, msg); err != nil {
+				log.Printf("[scheduler-executor] Finish %s failed: %v", schedID, err)
+				return
+			}
+			status := modelStatusFromOk(ok)
+			log.Printf("[scheduler-executor] merged scheduled task %s finished status=%s job=%s", schedID, status, codingJobID)
+		},
+	}
+}

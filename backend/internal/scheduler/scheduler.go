@@ -59,6 +59,29 @@ type CodingParams struct {
 	ReadKnowledge bool
 }
 
+// DesignCodingParams is the wizard-facing shape for a merged
+// "design_and_coding" scheduled task: one row whose first stage runs
+// architect-design and, on success, chains into start-coding. Both stages
+// keep their own model / Agent-server binding — the design stage uses
+// DesignModel / DesignAgentServerID (mirroring DesignParams above), the
+// coding stage uses the Coding-prefixed fields (mirroring CodingParams
+// minus SplitTasks=false default). SplitTasks defaults to false on the
+// coding stage; the existing single-stage split_tasks flag from the DB row
+// feeds through SplitTasks.
+type DesignCodingParams struct {
+	RequirementID       string
+	// Design stage
+	DesignModel         string
+	DesignAgentServerID string
+	ReadKnowledge       bool
+	// Coding stage (chained from design on success)
+	CodingModel         string
+	CodingAgentServerID string
+	BranchName          string
+	BaseBranch          string
+	SplitTasks          bool
+}
+
 // Executor is the wizard's adapter surface. The handler package provides
 // the concrete implementation (handler/schedule_executor.go). Every method
 // returns the JobStore job id on success; non-nil err means the dispatch
@@ -66,6 +89,7 @@ type CodingParams struct {
 type Executor interface {
 	RunScheduledDesign(ctx context.Context, p DesignParams) (jobID string, err error)
 	RunScheduledCoding(ctx context.Context, p CodingParams) (jobID string, err error)
+	RunScheduledDesignAndCoding(ctx context.Context, p DesignCodingParams) (jobID string, err error)
 }
 
 // Scheduler polls scheduled_tasks for due rows and dispatches them through
@@ -271,6 +295,22 @@ func (s *Scheduler) dispatch(t model.ScheduledTask) {
 			AgentServerID: t.AgentServerID,
 			SplitTasks:    t.SplitTasks,
 			ReadKnowledge: t.ReadKnowledge,
+		})
+	case model.SchedTypeDesignCoding:
+		// Merged two-stage task: design runs first; on success the executor
+		// chains into coding using the *_model / *_agent_server_id columns
+		// dedicated to the developer stage. ReadKnowledge is shared
+		// (one checkbox in the modal → both stages opt in together).
+		jobID, err = s.exec.RunScheduledDesignAndCoding(ctx, DesignCodingParams{
+			RequirementID:       t.RequirementID,
+			DesignModel:         t.Model,
+			DesignAgentServerID: t.AgentServerID,
+			ReadKnowledge:       t.ReadKnowledge,
+			CodingModel:         t.CodingModel,
+			CodingAgentServerID: t.CodingAgentServerID,
+			BranchName:          t.BranchName,
+			BaseBranch:          t.BaseBranch,
+			SplitTasks:          t.SplitTasks,
 		})
 	default:
 		// Defensive — DB guard at Create time already rejects bad types.

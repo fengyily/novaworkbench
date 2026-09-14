@@ -405,25 +405,27 @@ CREATE INDEX IF NOT EXISTS idx_orch_batches_active ON orchestration_batches(stat
 --   pending → canceled                (user cancel)
 --   running → failed                  (boot recovery)
 CREATE TABLE IF NOT EXISTS scheduled_tasks (
-	id                TEXT PRIMARY KEY,
-	task_type         TEXT NOT NULL DEFAULT 'design',   -- 'design' | 'coding'
-	requirement_id    TEXT NOT NULL,
-	project_id        TEXT NOT NULL DEFAULT '',
-	requirement_title TEXT NOT NULL DEFAULT '',
-	run_at            DATETIME NOT NULL,
-	model             TEXT NOT NULL DEFAULT '',         -- '' = 角色默认（执行时再解析）
-	read_knowledge    INTEGER NOT NULL DEFAULT 0,
-	branch_name       TEXT NOT NULL DEFAULT '',         -- coding only
-	base_branch       TEXT NOT NULL DEFAULT '',         -- coding only
-	agent_server_id   TEXT NOT NULL DEFAULT '',         -- coding only ('' = 本地)
-	split_tasks       INTEGER NOT NULL DEFAULT 0,       -- coding only
-	status            TEXT NOT NULL DEFAULT 'pending',
-	job_id            TEXT NOT NULL DEFAULT '',         -- 关联 JobStore / job_logs
-	error_message     TEXT NOT NULL DEFAULT '',
-	created_by        TEXT NOT NULL DEFAULT '',         -- username
-	created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
-	updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
-	executed_at       DATETIME,                         -- 认领时间；pending 时 NULL
+	id                    TEXT PRIMARY KEY,
+	task_type             TEXT NOT NULL DEFAULT 'design',   -- 'design' | 'coding' | 'design_and_coding'
+	requirement_id        TEXT NOT NULL,
+	project_id            TEXT NOT NULL DEFAULT '',
+	requirement_title     TEXT NOT NULL DEFAULT '',
+	run_at                DATETIME NOT NULL,
+	model                 TEXT NOT NULL DEFAULT '',         -- design 模型 / design_and_coding 设计阶段模型；'' = 角色默认
+	read_knowledge        INTEGER NOT NULL DEFAULT 0,
+	branch_name           TEXT NOT NULL DEFAULT '',         -- coding / design_and_coding
+	base_branch           TEXT NOT NULL DEFAULT '',         -- coding / design_and_coding
+	agent_server_id       TEXT NOT NULL DEFAULT '',         -- design / coding / design_and_coding 设计阶段执行环境
+	split_tasks           INTEGER NOT NULL DEFAULT 0,       -- coding / design_and_coding 开发方式
+	coding_model          TEXT NOT NULL DEFAULT '',         -- design_and_coding 开发阶段模型；'' = 角色默认
+	coding_agent_server_id TEXT NOT NULL DEFAULT '',        -- design_and_coding 开发阶段执行环境 ('' = 本地)
+	status                TEXT NOT NULL DEFAULT 'pending',
+	job_id                TEXT NOT NULL DEFAULT '',         -- 关联 JobStore / job_logs
+	error_message         TEXT NOT NULL DEFAULT '',
+	created_by            TEXT NOT NULL DEFAULT '',         -- username
+	created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
+	executed_at           DATETIME,                         -- 认领时间；pending 时 NULL
 	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_sched_status  ON scheduled_tasks(status);
@@ -522,6 +524,14 @@ var alterColumns = []string{
 	// errors on already-migrated DBs (sqlite/mysql/pg), so this is safe to
 	// ship before all deployments have caught up.
 	`ALTER TABLE requirements ADD COLUMN design_agent_server_id TEXT NOT NULL DEFAULT ''`,
+	// Merged "design_and_coding" scheduled task: per-stage model / agent-server
+	// binding for the developer half of the chained run. coding_model mirrors
+	// the design-stage model column (empty = role default resolved at dispatch
+	// time); coding_agent_server_id mirrors agent_server_id / design_agent_server_id
+	// (empty = 本地). Both default '' so legacy rows from before the merge feature
+	// continue to scan cleanly without a backfill.
+	`ALTER TABLE scheduled_tasks ADD COLUMN coding_model TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE scheduled_tasks ADD COLUMN coding_agent_server_id TEXT NOT NULL DEFAULT ''`,
 	// Per-role Claude-config binding: lets a role carry its own ANTHROPIC_BASE_URL
 	// + ANTHROPIC_AUTH_TOKEN pair (via claude_configs.id) so the role's chosen
 	// model runs against the role's chosen gateway, not just the global active

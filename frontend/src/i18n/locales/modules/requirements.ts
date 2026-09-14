@@ -342,6 +342,8 @@ export const requirements = {
     // Schedule (定时) entry points inside wizard sections.
     scheduleDesignTitle: '设置未来时间自动生成技术方案，可预选模型',
     scheduleDesignBtn: '定时生成方案',
+    scheduleDesignCodingTitle: '设置未来时间自动生成技术方案并继续开发，可分别为两阶段预选模型与执行环境',
+    scheduleDesignCodingBtn: '定时生成方案并开发',
     scheduleCodingTitle: '设置未来时间自动开始开发，可预选模型与执行环境',
     scheduleCodingBtn: '定时开发',
     // Architect-stage CTAs.

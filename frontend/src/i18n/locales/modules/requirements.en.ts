@@ -328,6 +328,8 @@ export const requirements = {
     // Schedule (定时) entry points inside wizard sections.
     scheduleDesignTitle: 'Schedule design generation at a future time (optional model pick)',
     scheduleDesignBtn: 'Schedule design',
+    scheduleDesignCodingTitle: 'Schedule a chained design-then-coding run with separate model + exec env per stage',
+    scheduleDesignCodingBtn: 'Schedule design + coding',
     scheduleCodingTitle: 'Schedule coding start at a future time (optional model + exec env)',
     scheduleCodingBtn: 'Schedule coding',
     // Architect-stage CTAs.

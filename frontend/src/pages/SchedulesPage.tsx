@@ -40,6 +40,7 @@ const STATUS_OPTIONS: { value: ScheduledTaskStatus; labelKey: string }[] = [
 const TYPE_OPTIONS: { value: ScheduledTaskType; labelKey: string }[] = [
   { value: 'design', labelKey: 'schedules.type.design' },
   { value: 'coding', labelKey: 'schedules.type.coding' },
+  { value: 'design_and_coding', labelKey: 'schedules.type.designCoding' },
 ];
 
 const statusLabelKeys: Record<ScheduledTaskStatus, string> = {
@@ -52,6 +53,7 @@ const statusLabelKeys: Record<ScheduledTaskStatus, string> = {
 const typeLabelKeys: Record<ScheduledTaskType, string> = {
   design: 'schedules.type.design',
   coding: 'schedules.type.coding',
+  design_and_coding: 'schedules.type.designCoding',
 };
 
 // Compact "in 3 h / 3 d ago" formatter for the run_at column — picks the two
@@ -344,15 +346,21 @@ function ScheduleRow({
   const canLog = (t.status === 'succeeded' || t.status === 'failed' || t.status === 'running') && !!t.job_id;
   const rowClass = `schedules-row schedules-row-${t.status}${showOverdue ? ' schedules-row-overdue' : ''}`;
   const isDesign = t.task_type === 'design';
+  const isMerged = t.task_type === 'design_and_coding';
+  const badgeTitle = isDesign
+    ? tr('schedules.typeDesignTitle')
+    : isMerged
+      ? tr('schedules.typeMergedTitle')
+      : tr('schedules.typeCodingTitle');
   return (
     <div className={rowClass}>
       <div className="schedules-row-main">
         <div className="schedules-row-top">
           <span
             className={`schedules-type-badge type-${t.task_type}`}
-            title={isDesign ? tr('schedules.typeDesignTitle') : tr('schedules.typeCodingTitle')}
+            title={badgeTitle}
           >
-            {isDesign ? '📐' : <IconRocket size={11} />}
+            {isDesign ? '📐' : isMerged ? <>📐<IconRocket size={11} /></> : <IconRocket size={11} />}
             {tr(typeLabelKeys[t.task_type])}
           </span>
           <span className="schedules-row-title">
