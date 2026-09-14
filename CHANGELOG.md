@@ -5,6 +5,56 @@ All notable changes to NovaWorkbench will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/fengyily/novaworkbench/compare/v0.3.0...v0.4.0) (2026-09-14)
+
+
+### Features
+
+* **agent-server:** add local sync mode (git bundle transport) ([c551ffc](https://github.com/fengyily/novaworkbench/commit/c551ffcc243843df945de669974325b64115f565))
+* **agent-server:** 新增本地同步模式（git bundle 传输） ([33acc48](https://github.com/fengyily/novaworkbench/commit/33acc48fd1491f2079ab7a7c6ee71e47412ac165))
+* **exec-env:** close the first-run picker gap, unify sub-task environment resolution ([5bfedb7](https://github.com/fengyily/novaworkbench/commit/5bfedb767c712d902a73581bbef413c37b211c58))
+* **exec-env:** close the first-run picker gap, unify sub-task environment resolution ([f349c9b](https://github.com/fengyily/novaworkbench/commit/f349c9b73aca8c72993120e35751d451007d7530))
+* **merge:** inject project commit-lang into push sub-task prompt ([8e2c623](https://github.com/fengyily/novaworkbench/commit/8e2c623e0a9dbfda1185f3083d2dbda2f11b6226))
+* **platform:** add project commit-language detection helpers ([5cfe10c](https://github.com/fengyily/novaworkbench/commit/5cfe10c40bda499e534e50700875878cf9e2c853))
+* **platform:** pre-clone GitLab token validation ([e294bb2](https://github.com/fengyily/novaworkbench/commit/e294bb26f90d35ff1d17be9724527282757e40b4))
+* **projects:** add commit-lang override API and TS bindings ([9debb6a](https://github.com/fengyily/novaworkbench/commit/9debb6a8cb3229e3ec1cfe3cd23e3019bed9a1ca))
+* **projects:** commit/PR language override UI on ProjectDetail ([38f37d4](https://github.com/fengyily/novaworkbench/commit/38f37d4cf2fe9ea01687a7e0d0f93c85a0b67724))
+* **requirements:** default to design-based dev and remove 'reuse previous' option ([4379e78](https://github.com/fengyily/novaworkbench/commit/4379e78ef21c64976c1dba69642415e604519ee9))
+* **requirements:** status chip group — multi-badge composition on list views ([3b6ee11](https://github.com/fengyily/novaworkbench/commit/3b6ee11bb2f4a35291689086eb440a76de1f8c66))
+* **requirements:** 关闭 + 标记功能 ([23e7aa2](https://github.com/fengyily/novaworkbench/commit/23e7aa22788b28c3d0aa59faa5699d9f701488fa))
+* **requirements:** 需求列表状态丰富与组合展示 ([b3faba9](https://github.com/fengyily/novaworkbench/commit/b3faba9882b778e751d13b73886fd70fa64db984))
+* **requirements:** 需求方案分析与开发任务耗时统计 ([afe5185](https://github.com/fengyily/novaworkbench/commit/afe51852456cae0192b51662105ae09f2e333943))
+* **requirements:** 需求方案分析与开发任务耗时统计 ([6c089f9](https://github.com/fengyily/novaworkbench/commit/6c089f9d4b912b1600b46b88d616557779a94b73))
+* **scanner:** wire commit-language detection into Scan ([97fdec3](https://github.com/fengyily/novaworkbench/commit/97fdec3f3227168bf64bd78303b0cf52636cbed5))
+* **scheduled_tasks:** support merged design+code scheduled tasks ([183dfe2](https://github.com/fengyily/novaworkbench/commit/183dfe2c5ce55bea86c586cc8b6975f15d82d80b))
+* **wizard:** auto commit/push/create-PR after development finishes ([c3d4a47](https://github.com/fengyily/novaworkbench/commit/c3d4a47c14f1f81e0ff76ba533e9f86c950faed8))
+* **wizard:** richer dev logs — sync branch tip + per-session sync detail ([c6f1d25](https://github.com/fengyily/novaworkbench/commit/c6f1d25a1965aa0e5247b35a454038a413e0bc5d))
+
+
+### Bug Fixes
+
+* **calendar:** stop phantom event dots on year-view filler cells ([02d0ded](https://github.com/fengyily/novaworkbench/commit/02d0ded20e5e54b5ffa2c031875e12c51c3beab4))
+* **calendar:** 修复需求日历年视图月边界的幻影事件圆点 ([6704bd0](https://github.com/fengyily/novaworkbench/commit/6704bd056569b7f96c9d77ec59815d01c8ca0a35))
+* **frontend:** 弹层小屏适配，启动开发会话按钮常驻可点 ([33b0f9f](https://github.com/fengyily/novaworkbench/commit/33b0f9fd521bd3c69406815d76c22bd284377130))
+* **frontend:** 弹层小屏适配，启动开发会话按钮常驻可点 ([7c2e8cf](https://github.com/fengyily/novaworkbench/commit/7c2e8cf8321df488f83a5215021126f3b60c6b8f))
+* **merge:** route local-sync push/PR sub-task to local worktree ([e7b0895](https://github.com/fengyily/novaworkbench/commit/e7b0895fb6b56615802b53a0660288e5a0cf4069))
+* **merge:** route local-sync push/PR sub-task to local worktree ([a7f2258](https://github.com/fengyily/novaworkbench/commit/a7f225802952fbfdb3318eb180a1dc9fa6b8ce6a))
+* **platform:** use &lt;username&gt;:&lt;token&gt; form for GitLab clone auth ([e6e86fe](https://github.com/fengyily/novaworkbench/commit/e6e86fee68c85902db74d6829d1aae2cd37d05fb))
+* **platform:** use oauth2: prefix for GitLab clone auth ([f068455](https://github.com/fengyily/novaworkbench/commit/f06845573531bfca987ac4ea7b15b55370e4088e))
+* **platform:** use oauth2: prefix for GitLab clone auth ([04b79d5](https://github.com/fengyily/novaworkbench/commit/04b79d5cdd4debd1e9cb497bacb4687f68c29c3e))
+* **requirement:** make Calendar SQL dialect-aware for PostgreSQL (SQLSTATE 42883) ([379f8c4](https://github.com/fengyily/novaworkbench/commit/379f8c4246961112f002d4690ca0186a92598799))
+* **requirement:** preserve DATETIME affinity for dev_ended_at in List() ([55abfa1](https://github.com/fengyily/novaworkbench/commit/55abfa1034c0a2bb8ef006b3b4078aca8b64882b))
+* **requirement:** restore fullscreen for completed design plan ([67608df](https://github.com/fengyily/novaworkbench/commit/67608df7dbc8933c3c413363359c34e9faffa864))
+* **requirement:** 修复方案完成后全屏按钮无反应 ([213cac1](https://github.com/fengyily/novaworkbench/commit/213cac1f176a703f0695dd0a477b51252dee0327))
+* **subtask:** 子任务/继续开发按模型对齐网关，修复配置未随模型持久化 ([a61a591](https://github.com/fengyily/novaworkbench/commit/a61a591c258b1aa069808a97606b6b10b8fe6b2a))
+* **subtask:** 子任务/重新拆分继承主任务开发模型与 Claude 配置 ([4e322f2](https://github.com/fengyily/novaworkbench/commit/4e322f28327a7224bd54071acf5fa297b81f449e))
+* **subtask:** 自动子任务（含「提交推送创建PR」）继承主任务配置与模型 ([8b9613f](https://github.com/fengyily/novaworkbench/commit/8b9613f090dc23c67bab336f1a8d5bb098ea31cd))
+* **wizard:** 会话历史同步透明化 —— 无 source session 时跳过整目录上行 ([798aa5a](https://github.com/fengyily/novaworkbench/commit/798aa5ab251d7f53c3d90e86e13b10b06f4e8037))
+* **wizard:** 修复 Agent 服务器收尾 push 的 src refspec does not match any 错误 ([68c3132](https://github.com/fengyily/novaworkbench/commit/68c31320125490a74f353901c9416109466fd692))
+* **wizard:** 持久化每阶段 Claude 配置，修复刷新后配置回落 active 的错配 ([b914dea](https://github.com/fengyily/novaworkbench/commit/b914dea943061fdb3e0185124b54e8c4f7cd5283))
+* **wizard:** 持久化每阶段 Claude 配置，修复刷新后配置回落 active 的错配 ([1616c18](https://github.com/fengyily/novaworkbench/commit/1616c187c7f274d897c47d88e4a63f595bccfd08))
+* 仅当 inMonth 时才读取计数，填充格恒为 0，去掉幻影圆点。真实格计数不变。 ([02d0ded](https://github.com/fengyily/novaworkbench/commit/02d0ded20e5e54b5ffa2c031875e12c51c3beab4))
+
 ## [0.3.0](https://github.com/fengyily/novaworkbench/compare/v0.2.0...v0.3.0) (2026-09-11)
 
 
