@@ -754,6 +754,25 @@ var alterColumns = []string{
 	`ALTER TABLE projects ADD COLUMN commit_lang_override TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN commit_lang_source TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN commit_lang_updated_at DATETIME`,
+	// Requirement tags: free-form short labels (e.g. "阻塞", "外部依赖", "v2") that
+	// users can attach to a requirement for ad-hoc categorization beyond the
+	// fixed-status / priority / kind axis. Stored as a JSON array string ("[]" when
+	// empty) — same shape as acceptance_criteria / design_docs — so the frontend
+	// can read/write a string[] without an extra join table. Empty array is the
+	// default so legacy rows render as "no tags" with no backfill. Validated in
+	// service.RequirementService.UpdateTags (trim, dedupe, length-cap, count-cap).
+	`ALTER TABLE requirements ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`,
+	// Closed-trail for the manual "关闭需求" action. ClosedAt is stamped when
+	// the user force-closes a requirement from any non-terminal state
+	// (analyzing / designing / designed / developing) via the Close endpoint,
+	// and stays NULL for natural completion (status transitions to "done" via
+	// the normal developer-complete gate). ClosedReason is the user-supplied
+	// rationale (default empty string). Together they let the UI distinguish
+	// "开发完成" (自然完成) from "中途关闭" (强制关闭) on the list / detail
+	// pages, and let the wizard skip the sub-task / merge / PR gates for
+	// closed-from-non-developing rows.
+	`ALTER TABLE requirements ADD COLUMN closed_at      DATETIME`,
+	`ALTER TABLE requirements ADD COLUMN closed_reason TEXT NOT NULL DEFAULT ''`,
 }
 
 var (

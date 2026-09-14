@@ -128,9 +128,41 @@
 .req-row-title {
   font-weight: 500;
   max-width: 360px;
+}
+
+.req-row-title-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.req-row-title-tags {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.req-row-title-tag {
+  font-size: 11px;
+  padding: 1px 8px;
+  cursor: default;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.req-row-title-tag-closed {
+  background: #FEF3C7 !important;
+  color: #92400E !important;
+  border: 1px solid #FCD34D;
+}
+
+.req-row-title-tag-more {
+  background: var(--color-hover, #F1F5F9) !important;
+  color: var(--color-text-secondary, #64748B) !important;
 }
 
 .req-row-dim { color: var(--color-text-muted, #94A3B8); }

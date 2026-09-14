@@ -262,7 +262,41 @@ export default function RequirementsList() {
                       </span>
                     </td>
                     <td className="req-row-title" data-label={t('requirements.list.colTitle')}>
-                      {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
+                      <div className="req-row-title-text">
+                        {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
+                      </div>
+                      {/* Mirror the project-page chip strip: tags render
+                          under the title as a 3-chip cap with +N overflow.
+                          Force-closed rows carry a small amber badge so the
+                          cross-project list reads consistently with the
+                          in-project tab. */}
+                      {(() => {
+                        const raw = (r.tags || '').trim();
+                        const list: string[] = (!raw || raw === '[]') ? [] : (() => {
+                          try {
+                            const parsed = JSON.parse(raw);
+                            return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+                          } catch { return []; }
+                        })();
+                        if (list.length === 0 && !r.closed_at) return null;
+                        const visible = list.slice(0, 3);
+                        const overflow = list.length - visible.length;
+                        return (
+                          <div className="req-row-title-tags">
+                            {r.closed_at && (
+                              <span className="req-tag-chip req-row-title-tag req-row-title-tag-closed" title={r.closed_reason || t('requirements.detail2.closedBadge')}>
+                                {t('requirements.detail2.closedBadge')}
+                              </span>
+                            )}
+                            {visible.map(tag => (
+                              <span key={tag} className="req-tag-chip req-row-title-tag" title={tag}>{tag}</span>
+                            ))}
+                            {overflow > 0 && (
+                              <span className="req-tag-chip req-row-title-tag req-row-title-tag-more" title={list.slice(3).join(', ')}>+{overflow}</span>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </td>
                     <td data-label={t('requirements.list.colStatus')}>
                       <StatusChips req={r} />

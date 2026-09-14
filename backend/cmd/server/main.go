@@ -437,6 +437,12 @@ func main() {
 	mux.HandleFunc("PATCH /api/requirements/{id}/status", reqH.UpdateStatus)
 	mux.HandleFunc("PATCH /api/requirements/{id}/kind", reqH.UpdateKind)
 	mux.HandleFunc("PATCH /api/requirements/{id}/schedule", reqH.UpdateSchedule)
+	// Force-close + tag management. Close skips the validTransitions gate so
+	// the user can short-circuit the lifecycle from any active stage; see
+	// service.RequirementService.Close for the rules. UpdateTags replaces the
+	// full tag list (chips editor on the detail page).
+	mux.HandleFunc("POST /api/requirements/{id}/close", reqH.Close)
+	mux.HandleFunc("PUT /api/requirements/{id}/tags", reqH.UpdateTags)
 	// PromoteFromIdea: turns a finished idea-discussion thread into a new
 	// requirement row (kind=requirement, source_requirement_id=idea.id). The
 	// original idea is left fully intact — see service.PromoteFromIdea.

@@ -215,6 +215,48 @@ func (h *RequirementHandler) UpdateKind(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, 200, item)
 }
 
+// UpdateTags replaces the requirement's tag list with the caller-supplied
+// values. Body shape: {"tags": ["阻塞", "v2", ...]}. Tags are normalized
+// server-side (trim / dedupe / length- and count-cap) so a malformed
+// payload never reaches the JSON column — see service.RequirementService.
+// UpdateTags for the cap values.
+func (h *RequirementHandler) UpdateTags(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Tags []string `json:"tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON")
+		return
+	}
+	item, err := h.svc.UpdateTags(r.PathValue("id"), body.Tags)
+	if err != nil {
+		writeError(w, 400, "UPDATE_TAGS_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, 200, item)
+}
+
+// Close force-closes a requirement from any non-archived state. Unlike
+// PATCH /status (which is gated by validTransitions and only reachable from
+// `developing` → `done` via the natural "开发完成" gate), Close lets the
+// user cut the pipeline short from any active stage. Body shape:
+// {"reason": "..."} (optional, capped server-side). Returns the refreshed
+// requirement; archived rows are rejected with 400.
+func (h *RequirementHandler) Close(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	// Body is optional — decode best-effort so an empty body lands as
+	// reason="".
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	item, err := h.svc.Close(r.PathValue("id"), body.Reason)
+	if err != nil {
+		writeError(w, 400, "CLOSE_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, 200, item)
+}
+
 func (h *RequirementHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 	var req model.UpdateStatusReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

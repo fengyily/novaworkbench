@@ -146,7 +146,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		// DevEndedAt pattern above). The NOT EXISTS(...) guard preserves the
 		// "only when ALL subtasks are completed" semantic; otherwise the
 		// subquery returns no row → NULL.
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.closed_at,r.closed_reason,"+
 			"(SELECT st.completed_at FROM sub_tasks st WHERE st.requirement_id = r.id AND NOT EXISTS(SELECT 1 FROM sub_tasks o WHERE o.requirement_id = r.id AND o.completed_at IS NULL) ORDER BY st.completed_at DESC LIMIT 1) AS dev_ended_at"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" "+where+" ORDER BY CASE WHEN r.status = 'done' THEN 1 ELSE 0 END ASC, r.created_at DESC",
@@ -167,7 +167,9 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.UsageSnapshots, &r.CodingPlan, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush,
-			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt, &r.DevEndedAt); err != nil {
+			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt,
+			&r.Tags, &r.ClosedAt, &r.ClosedReason,
+			&r.DevEndedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, r)
@@ -343,7 +345,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	// created_at / updated_at — unqualified references would be ambiguous on
 	// MySQL/Postgres.
 	err := s.db.QueryRow(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.closed_at,r.closed_reason"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
@@ -354,7 +356,8 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.UsageSnapshots, &r.CodingPlan, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush,
-			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt)
+			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt,
+			&r.Tags, &r.ClosedAt, &r.ClosedReason)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("requirement not found")
 	}
@@ -1226,6 +1229,115 @@ func (s *RequirementService) UpdateKind(id, newKind string) (*model.Requirement,
 func (s *RequirementService) Delete(id string) error {
 	_, err := s.db.Exec("DELETE FROM requirements WHERE id = ?", id)
 	return err
+}
+
+// Tags caps for UpdateTags. Length cap matches the chips' visual width so a
+// tag stays readable in one line; count cap keeps the JSON column small and
+// avoids a runaway UI when a caller ships hundreds of tags.
+const (
+	maxTagLength = 32
+	maxTagCount  = 20
+)
+
+// normalizeTags trims / dedupes / caps the user-supplied tag list so the
+// stored JSON array is always well-formed and bounded. The order of the
+// resulting slice is "first-seen" — the same tag supplied twice keeps its
+// first position; this gives the UI a stable render order across edits
+// without forcing a sort (so the user can curate the visual order
+// themselves). Returns the cleaned slice ready to be marshaled by the
+// caller.
+func normalizeTags(raw []string) []string {
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, t := range raw {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if len([]rune(t)) > maxTagLength {
+			t = string([]rune(t)[:maxTagLength])
+		}
+		if _, dup := seen[t]; dup {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+		if len(out) >= maxTagCount {
+			break
+		}
+	}
+	return out
+}
+
+// UpdateTags replaces the requirement's tag list with the caller-supplied
+// values. The payload is normalized (trim / dedupe / length- and count-cap)
+// so the JSON column never holds an unbounded or malformed array. The
+// existing Requirement row's other columns are untouched — only `tags` and
+// `updated_at` are written. Used by the chips editor on the detail page.
+func (s *RequirementService) UpdateTags(id string, tags []string) (*model.Requirement, error) {
+	if _, err := s.Get(id); err != nil {
+		return nil, err
+	}
+	cleaned := normalizeTags(tags)
+	blob := "[]"
+	if len(cleaned) > 0 {
+		raw, mErr := json.Marshal(cleaned)
+		if mErr != nil {
+			return nil, fmt.Errorf("marshal tags: %w", mErr)
+		}
+		blob = string(raw)
+	}
+	if _, err := s.db.Exec(
+		"UPDATE requirements SET tags=?, updated_at=? WHERE id=?",
+		blob, time.Now(), id,
+	); err != nil {
+		return nil, err
+	}
+	return s.Get(id)
+}
+
+// Close force-closes a requirement from any non-terminal state. Unlike
+// UpdateStatus('done') — which is only reachable from `developing` and
+// represents the natural "开发完成" gate — Close lets the user cut the
+// pipeline short from any active stage (analyzing / designing / designed
+// / developing / draft). The status flips to "done" and BOTH completed_at
+// and closed_at are stamped, so the UI can distinguish "自然完成" (closed_at
+// NULL) from "中途关闭" (closed_at + closed_reason set). archived rows
+// cannot be re-closed (Unarchive is the only path back). Done rows are
+// idempotent — re-closing updates closed_reason / closed_at but does not
+// rewrite completed_at (the original completion timestamp is preserved so
+// the audit trail stays accurate).
+func (s *RequirementService) Close(id string, reason string) (*model.Requirement, error) {
+	r, err := s.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if r.Status == "archived" {
+		return nil, fmt.Errorf("archived requirements cannot be closed; unarchive first")
+	}
+	reason = strings.TrimSpace(reason)
+	if len([]rune(reason)) > 500 {
+		reason = string([]rune(reason)[:500])
+	}
+	now := time.Now()
+	// Preserve the original completed_at on already-done rows (writes only
+	// closed_at + closed_reason + updated_at), so an idempotent close doesn't
+	// rewrite the audit trail. New closes stamp completed_at for the first
+	// time.
+	setClauses := []string{"status='done'", "updated_at=?", "closed_at=?", "closed_reason=?"}
+	setArgs := []interface{}{now, now, reason}
+	if r.Status != "done" {
+		setClauses = append(setClauses, "completed_at=?")
+		setArgs = append(setArgs, now)
+	}
+	setArgs = append(setArgs, id)
+	if _, err := s.db.Exec(
+		"UPDATE requirements SET "+strings.Join(setClauses, ", ")+" WHERE id=?",
+		setArgs...,
+	); err != nil {
+		return nil, err
+	}
+	return s.Get(id)
 }
 
 func (s *RequirementService) GetRefinementChat(reqID string) (string, error) {

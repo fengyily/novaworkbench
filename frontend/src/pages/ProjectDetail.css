@@ -278,11 +278,51 @@
 }
 
 .pr-title {
-  max-width: 280px;
+  max-width: 320px;
+  color: var(--color-text);
+}
+
+/* Two-line title cell: the actual title (single-line ellipsis) plus a
+   tags row underneath. Splitting onto two rows keeps the title readable
+   while surfacing 0-3 chips per row. The container re-enables wrap so
+   the chips row can flow to a second line if it overflows; we keep
+   overflow:hidden at the *cell* (parent td) to align with the rest of
+   the row, but the inner div can wrap freely because pr-title only
+   constrains the inner .pr-title-text. */
+.pr-title-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--color-text);
+  font-weight: 500;
+}
+
+.pr-title-tags {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.pr-title-tag {
+  font-size: 11px;
+  padding: 1px 8px;
+  cursor: default;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pr-title-tag-closed {
+  background: #FEF3C7 !important;
+  color: #92400E !important;
+  border: 1px solid #FCD34D;
+}
+
+.pr-title-tag-more {
+  background: var(--color-hover, #F1F5F9) !important;
+  color: var(--color-text-secondary, #64748B) !important;
 }
 
 .btn-sm {
@@ -541,58 +581,111 @@
   .platform-form-row > * { width: 100% !important; min-width: 0; }
 }
 
-/* Requirements tab — filter + sort bar.
+/* Requirements tab — status chip group + text search bar.
    --------------------------------------------------------------------------
    Sits between the run-control-bar (count + "+ New requirement" button) and
-   the requirements table. Two label/select groups (status filter + sort key)
-   plus an inline "shown / total" counter on the right. Uses the
-   `.project-req-filter-bar` namespace so it cannot collide with the
-   cross-project RequirementsList's `.req-filter-bar` rules — same idea, two
-   different layouts, kept distinct on purpose. */
+   the requirements table. Three rows of content share the bar:
+     1. Status chips — pill buttons, one tap to switch slice. Active chip is
+        filled with the brand indigo so the active state is obvious at a
+        glance. Each chip also carries a status-specific accent so the user
+        can associate the chip with the rows it reveals (green-ish for done,
+        amber-ish for archived, neutral for active/all).
+     2. Search input — reuses the global `.search-input` style (rounded pill
+        with magnifier glyph and × clear). Width is bounded so it never
+        eats more than ~half the bar on desktop.
+     3. Counter — `显示 X / Y 条`, hugged to the right edge with margin-left:auto.
+
+   Uses the `.project-req-*` namespace so it cannot collide with the
+   cross-project RequirementsList's `.req-filter-bar` / `.req-kind-chip`
+   rules — same idea, two different layouts, kept distinct on purpose. */
 .project-req-filter-bar {
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
-  /* A touch of vertical breathing room — sits between run-control-bar (12px
-     bottom margin) and the table, so 10px top keeps the cluster cohesive
-     without crowding the table. */
+  /* Sits between run-control-bar (12px bottom margin) and the table, so 10px
+     top keeps the cluster cohesive without crowding the table. */
   margin: 4px 0 12px;
   padding: 0 2px;
 }
 
-.project-req-filter-group {
+/* Chip row — horizontal flex of pill buttons. role=tablist on the parent
+   turns each chip into a "tab" semantically; see <SortHeader> below for the
+   matching th pattern. */
+.project-req-filter-chips {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  /* Lets each group shrink without the label wrapping mid-character when the
-     bar wraps onto a second line on narrow viewports. */
-  min-width: 0;
+  flex-wrap: wrap;
 }
 
-.project-req-filter-label {
-  font-size: 13px;
-  font-weight: 600;
+/* Pill button. Three rules matter:
+   - `border-radius: 999px` makes it a pill regardless of label width
+   - the `:not(.is-active)` variant is a soft outline that picks up the
+     status-specific accent on hover so the chip group reads as "tabs" rather
+     than "buttons" (the same pattern as the cross-project kind chips)
+   - the `.is-active` variant fills with brand indigo + white text so the
+     current slice is obvious without reading the label. */
+.project-req-chip {
+  appearance: none;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
   color: var(--color-text-secondary);
-  white-space: nowrap;
-  /* Stable horizontal rhythm — without flex-shrink: 0 a 360px viewport would
-     chop the CJK characters of "状态" / "排序" mid-glyph when the bar wraps. */
-  flex-shrink: 0;
-}
-
-.project-req-filter-group .form-input {
-  width: auto;
-  min-width: 160px;
-  /* Match the height of the surrounding labels for optical alignment — the
-     default form-input padding makes selects taller than the inline label
-     text otherwise. */
-  padding: 6px 10px;
+  padding: 4px 14px;
+  border-radius: 999px;
   font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms ease, border-color 120ms ease,
+              color 120ms ease, box-shadow 120ms ease;
+}
+.project-req-chip:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+.project-req-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.18);
 }
 
-/* The shown/total counter hugs the right edge on desktop and stacks under
-   the controls on mobile. `margin-left: auto` only takes effect inside a
-   flex container, which .project-req-filter-bar is. */
+/* Active state — filled with the brand color so the current slice is
+   unmistakable. We override the hover rule so the chip stays primary when
+   the user hovers the active one (otherwise hovering flips it back to a
+   hover-only state and the user briefly wonders "did I just deselect?"). */
+.project-req-chip.is-active,
+.project-req-chip.is-active:hover {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+}
+
+/* Status-specific accents on the inactive state. Done gets an emerald hint,
+   archived gets an amber hint — mirrors the StatusChips palette so users
+   who already know the status colors can predict the chip's meaning
+   without reading the label. The active state still uses brand indigo so
+   "what's selected" and "what status each chip filters" stay visually
+   distinct. */
+.project-req-chip-done:not(.is-active):hover {
+  border-color: #10B981;
+  color: #047857;
+}
+.project-req-chip-archived:not(.is-active):hover {
+  border-color: #F59E0B;
+  color: #B45309;
+}
+
+/* Search input — reuses the global `.search-input` rounded-pill style.
+   Width is bounded so the chips stay in their lane on desktop; on mobile
+   the bar wraps and the search stretches full-width. */
+.project-req-search {
+  flex: 1 1 220px;
+  min-width: 200px;
+  max-width: 360px;
+}
+
+/* The shown/total counter hugs the right edge on desktop. `margin-left: auto`
+   only takes effect inside a flex container — `.project-req-filter-bar` is. */
 .project-req-filter-count {
   margin-left: auto;
   font-size: 12px;
@@ -601,27 +694,62 @@
 }
 
 @media (max-width: 768px) {
-  /* Stack vertically so each control gets a full-width tap target; the count
-     counter drops below the controls instead of floating on the right edge
-     (otherwise it'd crowd into the second select). */
+  /* Stack vertically so each row gets full width on a narrow viewport.
+     Chip row stays horizontal (it's intrinsically a single row), but the
+     search input and counter drop below it. The counter still right-
+     aligns via text-align:right so the "X / Y" doesn't crowd the chips. */
   .project-req-filter-bar {
     flex-direction: column;
     align-items: stretch;
     gap: 8px;
   }
-  .project-req-filter-group {
-    width: 100%;
-    justify-content: space-between;
+  .project-req-filter-chips {
+    flex-wrap: wrap;
   }
-  .project-req-filter-group .form-input {
-    flex: 1 1 auto;
-    width: auto;
-    min-width: 0;
+  .project-req-search {
+    max-width: none;
   }
   .project-req-filter-count {
     margin-left: 0;
     text-align: right;
   }
+}
+
+/* Sortable column headers. Same th padding as the static headers above;
+   the only addition is a hover/active affordance + a trailing arrow span.
+   The arrow is positioned with a small left margin so it doesn't crowd the
+   label on narrow columns. */
+.pr-th-sortable {
+  cursor: pointer;
+  user-select: none;
+  /* Slight gap so the click target feels intentional, not accidental. */
+  transition: color 120ms ease, background-color 120ms ease;
+}
+.pr-th-sortable:hover {
+  color: var(--color-primary);
+  background: var(--color-surface);
+}
+.pr-th-sortable:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--color-primary);
+}
+.pr-th-sortable.is-active {
+  color: var(--color-primary);
+}
+.pr-th-sortable-arrow {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 10px;
+  color: var(--color-text-muted);
+  /* Vertical-align middle so the arrow sits on the same baseline as the
+     label regardless of font metrics. */
+  vertical-align: middle;
+}
+.pr-th-sortable-arrow.is-active {
+  color: var(--color-primary);
+  /* Active arrow gets a touch more weight so the user can spot it in a
+     sea of column headers. */
+  font-weight: 700;
 }
 
 /* Requirements tab pagination */

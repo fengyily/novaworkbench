@@ -679,6 +679,17 @@ export interface Requirement {
   // 派生字段：最早一条 pending scheduled_tasks.run_at。Calendar 端点附
   // 带，前端用 🕐 icon 标识。List/Get 不携带。
   scheduled_run_at?: string;
+  // 用户标记（自由短标签，例如 "阻塞"、"外部依赖"、"v2"、"客户A"）。
+  // 后端存为 JSON 数组字符串；空数组写为 "[]"，前端展示时 JSON.parse 后
+  // 渲染为 chips。Read-modify-write：每次 PUT 整体覆盖，写入前由后端
+  // 去重 + trim + 长度 + 数量 限制。空数组 / undefined = 没有标记。
+  tags?: string;
+  // 关闭痕迹。closed_at 在用户通过 POST /api/requirements/{id}/close
+  // 强制关闭时打点（自然完成 → done 不写此列）；closed_reason 是用户
+  // 填写的关闭原因。两者配合 closed_at 让 UI 区分「开发完成」（自然
+  // 完成）与「中途关闭」（强制关闭）。archived 行不允许 Close。
+  closed_at?: string;
+  closed_reason?: string;
 }
 
 // Default to "requirement" on the client too, so legacy rows missing the
@@ -812,6 +823,18 @@ export const requirementsApi = {
     api.put<Requirement>(`/api/requirements/${id}`, data),
   updateStatus: (id: string, status: string) =>
     api.patch<Requirement>(`/api/requirements/${id}/status`, { status }),
+  // Force-close a requirement from any non-archived state — bypasses the
+  // validTransitions gate that PATCH /status enforces, so the user can cut
+  // the pipeline short from analyzing / designing / designed / developing /
+  // draft and stamp a user-supplied "closed_reason" alongside the close.
+  // Returns the refreshed requirement; archived rows are rejected with 400.
+  close: (id: string, reason?: string) =>
+    api.post<Requirement>(`/api/requirements/${id}/close`, { reason: reason ?? '' }),
+  // Replace the requirement's full tag list. Server normalizes (trim /
+  // dedupe / length- and count-cap) before persisting, so a UI error is
+  // caught by the response rather than corrupting the JSON column.
+  updateTags: (id: string, tags: string[]) =>
+    api.put<Requirement>(`/api/requirements/${id}/tags`, { tags }),
   // Promote a finished Issue or Idea into a Requirement. Only one-way (issue/idea → requirement);
   // the backend validates the rule and rejects everything else with a 400.
   updateKind: (id: string, kind: Kind) =>

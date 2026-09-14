@@ -205,20 +205,24 @@ export const projects = {
     paginationInfo: '共 {{total}} 条 · 第 {{cur}} / {{totalPages}} 页',
     paginationPrev: '‹ 上一页',
     paginationNext: '下一页 ›',
-    // Requirements tab — filter + sort controls (above the requirements table).
-    // `reqCountFiltered` is a template string with {{shown}} / {{total}} placeholders
-    // so the user sees both the post-filter row count and the project's total.
+    // Requirements tab — status filter chips + text search (above the table).
+    // Sort is now driven by clicking the table column headers (no separate
+    // "sort by" dropdown), so the old reqSort* keys were dropped.
+    // `reqCountFiltered` is a template with {{shown}} / {{total}} placeholders.
+    // `reqSortAscAria` / `reqSortDescAria` are screen-reader labels for the
+    // ↑ / ↓ sort indicator on the active column header.
     reqFilterStatusLabel: '状态',
     reqFilterAll: '全部',
     reqFilterActive: '进行中',
     reqFilterDone: '已完成',
     reqFilterArchived: '已归档',
-    reqSortByLabel: '排序',
-    reqSortDefault: '默认（最新创建）',
-    reqSortUpdatedAt: '最新更新',
-    reqSortPriority: '优先级（高 → 低）',
-    reqSortStatus: '状态（进行中 → 已完成 → 已归档）',
+    reqSearchPlaceholder: '搜索标题或描述…',
+    reqSearchAriaLabel: '按标题或描述搜索',
+    reqSearchClear: '清除搜索',
+    reqSortAscAria: '升序',
+    reqSortDescAria: '降序',
     reqCountFiltered: '显示 {{shown}} / {{total}} 条',
+    reqEmptyFiltered: '没有符合筛选条件的需求，调一下过滤或搜索试试',
     // Run tab.
     runDetected: '已检测到 {{file}}',
     runMissing: '未检测到 docker-compose 文件',
