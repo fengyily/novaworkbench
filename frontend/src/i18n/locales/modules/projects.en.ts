@@ -142,6 +142,23 @@ export const projects = {
     descRegenerating: 'Generating…',
     descRegenerateTitle: 'Regenerate from the current CLAUDE.md (clears the manual-edit flag)',
     descRegenerated: 'Regenerated',
+    // Overview — commit / PR language override (pins the language used by
+    // wizard-generated commit messages, push summaries, and PR titles/bodies;
+    // unset → use the language auto-detected from git history).
+    commitLang: {
+      label: 'Commit style',
+      auto: 'Auto-detected (auto)',
+      zh: '中文 (Chinese)',
+      en: 'English (en)',
+      hint: 'When unset, the language is auto-detected from the project git history. Setting this pins the language for commit messages and PR titles/bodies.',
+      saved: 'Saved',
+      saveFailed: 'Save failed: {{msg}}',
+      overrideBadge: 'Manually overridden',
+      sourceAuto: 'Auto',
+      sourceOverride: 'Manual',
+      detectedLabel: 'Detected: ',
+      noDetect: 'Not yet detected',
+    },
     platformTitle: 'Platform config',
     platformCurrent: 'Current: {{platform}}',
     platformUnbound: '(no token bound)',

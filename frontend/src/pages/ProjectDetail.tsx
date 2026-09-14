@@ -140,6 +140,12 @@ export default function ProjectDetail() {
   const [regenerating, setRegenerating] = useState(false);
   const [descMsg, setDescMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
+  // Overview: commit / PR language override (pins wizard-generated commit
+  // messages, push summaries, and PR titles/bodies). Empty string = auto
+  // (fall back to commit_lang detected from git history).
+  const [commitLangSaving, setCommitLangSaving] = useState(false);
+  const [commitLangMsg, setCommitLangMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
   // Requirements (shared by the requirements tab and the overview recent list)
   const [reqs, setReqs] = useState<Requirement[]>([]);
   const [reqsLoading, setReqsLoading] = useState(false);
@@ -462,6 +468,34 @@ export default function ProjectDetail() {
       setDescMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
     } finally {
       setRegenerating(false);
+    }
+  };
+
+  // ── Overview: commit / PR language override ───────────────────────────────
+  // Pinned language used by the wizard pipeline when generating commit
+  // messages, push summaries, and PR titles/bodies. value="" → revert to
+  // auto (the value auto-detected from git history by the scanner).
+  const handleCommitLangChange = async (value: string) => {
+    if (!id || commitLangSaving) return;
+    const normalized = value ?? '';
+    setCommitLangSaving(true);
+    setCommitLangMsg(null);
+    try {
+      const updated = await projectsApi.setCommitLangOverride(id, normalized);
+      setProject(updated);
+      setCommitLangMsg({
+        ok: true,
+        text: t('projects.detail.commitLang.saved'),
+      });
+    } catch (e: unknown) {
+      setCommitLangMsg({
+        ok: false,
+        text: t('projects.detail.commitLang.saveFailed', {
+          msg: e instanceof Error ? e.message : String(e),
+        }),
+      });
+    } finally {
+      setCommitLangSaving(false);
     }
   };
 
@@ -907,6 +941,71 @@ export default function ProjectDetail() {
             {descMsg && (
               <div style={{ marginTop: 8, fontSize: 12, color: descMsg.ok ? 'var(--color-success)' : 'var(--color-error)' }}>
                 {descMsg.ok ? '✅ ' : '❌ '}{descMsg.text}
+              </div>
+            )}
+          </div>
+
+          {/* Commit / PR language override — pins the language used by the
+              wizard pipeline for commit messages, push summaries, and PR
+              titles/bodies. Empty value = auto (use the git-history detected
+              value). The active source (auto vs manual override) is surfaced
+              inline so the user can tell which one is currently in effect. */}
+          <div className="detail-section" style={{ marginTop: 16 }}>
+            <div className="section-header" style={{ marginBottom: 12 }}>
+              <span style={{ fontWeight: 600, fontSize: 14 }}>{t('projects.detail.commitLang.label')}</span>
+              <span
+                data-testid="commit-lang-source"
+                style={{
+                  fontSize: 12,
+                  color: project.commit_lang_source === 'override'
+                    ? 'var(--color-primary)'
+                    : 'var(--color-text-muted)',
+                  fontWeight: project.commit_lang_source === 'override' ? 600 : 400,
+                }}
+              >
+                {project.commit_lang_source === 'override'
+                  ? t('projects.detail.commitLang.overrideBadge')
+                  : t('projects.detail.commitLang.sourceAuto')}
+              </span>
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <select
+                className="form-input"
+                style={{ flex: '1 1 200px', maxWidth: 280 }}
+                value={project.commit_lang_override ?? ''}
+                onChange={e => handleCommitLangChange(e.target.value)}
+                disabled={commitLangSaving}
+                aria-label={t('projects.detail.commitLang.label')}
+              >
+                <option value="">{t('projects.detail.commitLang.auto')}</option>
+                <option value="zh">{t('projects.detail.commitLang.zh')}</option>
+                <option value="en">{t('projects.detail.commitLang.en')}</option>
+              </select>
+              {commitLangSaving && (
+                <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                  {t('projects.detail.basicSaving')}
+                </span>
+              )}
+            </div>
+            <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
+              {t('projects.detail.commitLang.hint')}
+              {project.commit_lang && project.commit_lang !== 'auto' && project.commit_lang_source !== 'override' && (
+                <span style={{ marginLeft: 6 }}>
+                  {t('projects.detail.commitLang.detectedLabel')}
+                  <code style={{ background: 'var(--color-bg-2, #f1f5f9)', padding: '1px 6px', borderRadius: 4 }}>
+                    {project.commit_lang}
+                  </code>
+                </span>
+              )}
+              {!project.commit_lang && (
+                <span style={{ marginLeft: 6, fontStyle: 'italic' }}>
+                  {t('projects.detail.commitLang.noDetect')}
+                </span>
+              )}
+            </div>
+            {commitLangMsg && (
+              <div style={{ marginTop: 8, fontSize: 12, color: commitLangMsg.ok ? 'var(--color-success)' : 'var(--color-error)' }}>
+                {commitLangMsg.ok ? '✅ ' : '❌ '}{commitLangMsg.text}
               </div>
             )}
           </div>
