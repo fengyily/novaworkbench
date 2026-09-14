@@ -632,10 +632,11 @@ export interface Requirement {
   // Development-mode provenance for the coding stage, stamped when StartCoding
   // runs. 'session' = fork the design/analysis session (legacy default —
   // Claude inherits the full conversation). 'design' = fresh session, hand
-  // the stored design doc to the agent via the -p prompt. Empty/undefined
-  // = never coded or predates this field; the UI shows no badge in that
-  // case rather than guessing "session".
-  dev_mode?: '' | 'session' | 'design';
+  // the stored design doc to the agent via the -p prompt (the new default).
+  // Older rows that predate this field may still surface as undefined; the
+  // UI treats that as "never coded" and shows no badge rather than guessing
+  // "session".
+  dev_mode?: 'session' | 'design';
   // Agent-server code-transport (sync) mode, stamped when the coding stage
   // starts on an Agent server. '' = 远程 Git 仓库同步 (origin clone/push,
   // legacy default). 'local' = 本地仓库同步 (git-bundle over SFTP for a
@@ -882,8 +883,10 @@ export interface StartCodingReq {
    * Coding session threading strategy. 'session' = fork the design/analysis
    * session (legacy default, Claude inherits the conversation). 'design' =
    * fresh session, hand the stored design doc to the agent via the -p
-   * prompt. Empty/undefined = backend falls back to the requirement row's
-   * persisted value (or 'session' on rows that predate dev_mode).
+   * prompt (the new default, the frontend always sends this). '' is kept
+   * for backward compatibility with external clients that predate the UI
+   * change — the backend still falls back to the persisted value or
+   * 'session' when an empty string is received.
    */
   dev_mode?: '' | 'session' | 'design';
   /**
