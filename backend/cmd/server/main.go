@@ -258,7 +258,7 @@ func main() {
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
-	mergeH := handler.NewMergeHandler(projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc)
+	mergeH := handler.NewMergeHandler(database, projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)
 	roleH := handler.NewRoleHandler(roleSvc, claudeCfgSvc)
 	settingH := handler.NewSettingHandler(settingSvc)
@@ -346,6 +346,11 @@ func main() {
 	mux.HandleFunc("PUT /api/projects/{id}/description", projectH.UpdateDescription)
 	mux.HandleFunc("POST /api/projects/{id}/description/regenerate", projectH.RegenerateDescription)
 	mux.HandleFunc("POST /api/projects/descriptions/backfill", projectH.BackfillDescriptions)
+
+	// Project commit/PR language override — user-pinned value that wins over
+	// the scanner's auto-detection when generating commit messages, push
+	// summaries, and PR titles/bodies.
+	mux.HandleFunc("PUT /api/projects/{id}/commit-lang-override", projectH.SetCommitLangOverride)
 
 	// Weekly reports (AI-generated from git log + requirement data)
 	mux.HandleFunc("GET /api/projects/{id}/reports", reportH.List)

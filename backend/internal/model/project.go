@@ -28,6 +28,18 @@ type Project struct {
 	// session dir to the remote cwd's slug for SFTP session sync. Empty
 	// until discovered.
 	ClaudeProjectSlug string `json:"claude_project_slug,omitempty"`
+	// Commit language preference driving the "提交/PR 遵循项目历史风格"
+	// pipeline. CommitLang is the auto-detected dominant language of the
+	// project's git history (zh / en / mixed / ""). CommitLangOverride is
+	// the user-pinned value and always wins over CommitLang when non-empty.
+	// CommitLangSource records who set CommitLang ("auto" via scanner,
+	// "manual" via override API, "" never written). CommitLangUpdatedAt is
+	// the last successful write timestamp. Consumed by the wizard push
+	// sub-task prompt, the pr_author role, and the frontend style chip.
+	CommitLang         string     `json:"commit_lang,omitempty"`
+	CommitLangOverride string     `json:"commit_lang_override,omitempty"`
+	CommitLangSource   string     `json:"commit_lang_source,omitempty"`
+	CommitLangUpdatedAt *time.Time `json:"commit_lang_updated_at,omitempty"`
 }
 
 // AddProjectRequest is the body of POST /api/projects.

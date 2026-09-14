@@ -112,6 +112,11 @@ func (s *ScannerService) Scan(projectID string) (*ScanResult, error) {
 	// description hasn't been manually locked. Non-fatal — never blocks a scan.
 	s.maybeGenerateDescription(projectID, projectPath)
 
+	// Pair with the description generator above: infer the project's dominant
+	// commit-message language from git history. Non-fatal — a non-git /
+	// empty / mixed repo never blocks the scan.
+	s.maybeDetectCommitLang(projectID, projectPath)
+
 	result.Duration = time.Since(start).Round(time.Millisecond).String()
 	return result, nil
 }
@@ -151,6 +156,43 @@ func (s *ScannerService) maybeGenerateDescription(projectID, projectPath string)
 		return // keep the old value on failure
 	}
 	s.projectSvc.SetAutoDescription(projectID, summary, hash)
+}
+
+// maybeDetectCommitLang is the scanner-side counterpart to
+// maybeGenerateDescription: on every scan, sample the project's recent git
+// history via DetectCommitLanguage and persist the inferred commit-message
+// language into projects.commit_lang. Designed to mirror the description
+// pair exactly:
+//   - skips when the user has pinned a commit_lang_override (same idea as
+//     description_manual — explicit user value wins over auto-detection)
+//   - skips when confidence is below the 0.6 threshold to avoid churning the
+//     column on tiny or mixed repos (mirrors the description_hash-equality
+//     early-return)
+//   - never aborts the scan on failure — DetectCommitLanguage already
+//     degrades gracefully for non-git / empty repos, and any DB error is
+//     swallowed (same as maybeGenerateDescription's "non-fatal" contract)
+// commit_lang_source is stamped as "auto" so the override-aware readers
+// (StyleHint / ResolveCommitLang) can tell auto-detected values apart from
+// user-pinned ones without re-reading the override column.
+func (s *ScannerService) maybeDetectCommitLang(projectID, projectPath string) {
+	var override string
+	_ = s.db.QueryRow(
+		"SELECT commit_lang_override FROM projects WHERE id = ?",
+		projectID,
+	).Scan(&override)
+	if override != "" {
+		return // user-pinned override always wins over auto-detection
+	}
+
+	lang, confidence, err := DetectCommitLanguage(projectPath)
+	if err != nil || lang == "" || confidence < 0.6 {
+		return // empty repo / noisy sample / non-git → don't churn the column
+	}
+
+	_, _ = s.db.Exec(
+		"UPDATE projects SET commit_lang = ?, commit_lang_source = ?, commit_lang_updated_at = ? WHERE id = ?",
+		lang, "auto", time.Now(), projectID,
+	)
 }
 
 // RegenerateDescription forces a fresh AI summary for a project: it ignores the

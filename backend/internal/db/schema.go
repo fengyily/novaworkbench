@@ -740,6 +740,20 @@ var alterColumns = []string{
 	// (attempts >= SummaryMaxAttempts). Bumped atomically by RunOrchestratorSummary
 	// right after MarkSummary('running'), so a crash mid-round still counts.
 	`ALTER TABLE orchestration_batches ADD COLUMN summary_attempts INTEGER NOT NULL DEFAULT 0`,
+	// Per-project commit-message language for the "提交/PR 遵循项目历史风格"
+	// feature. commit_lang holds the auto-detected value (zh/en/mixed/'');
+	// commit_lang_override is the user-pinned value, always winning over the
+	// detection; commit_lang_source records the origin of the stored lang
+	// ('auto' = scanner-detected, 'manual' = set via override API, '' = never
+	// written). commit_lang_updated_at is the last successful write timestamp
+	// (nullable so legacy rows don't fake a write). MySQL TEXT DEFAULT '' is
+	// wrapped to DEFAULT ('') by mysqlTextDefault; Postgres DATETIME→TIMESTAMP
+	// by fixupSchema. isIgnorableDDLError swallows "duplicate column" so the
+	// ALTERs are safe to ship before all DBs have caught up.
+	`ALTER TABLE projects ADD COLUMN commit_lang TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE projects ADD COLUMN commit_lang_override TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE projects ADD COLUMN commit_lang_source TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE projects ADD COLUMN commit_lang_updated_at DATETIME`,
 }
 
 var (

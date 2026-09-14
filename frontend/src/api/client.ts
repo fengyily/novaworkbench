@@ -149,6 +149,13 @@ export interface Project {
   deleted_dir?: number;
   description: string;
   description_manual: boolean;
+  // Commit / PR language — detected by the scanner or pinned by the user.
+  // Override wins when set; the effective value is resolved by callers via
+  // ResolveCommitLang (helper in src/utils/commitLang.ts).
+  commit_lang?: string;
+  commit_lang_override?: string;
+  commit_lang_source?: string;
+  commit_lang_updated_at?: string;
 }
 
 export interface DashboardData {
@@ -212,6 +219,13 @@ export const projectsApi = {
     api.post<{ updated: number; skipped: number; failed: number }>(
       '/api/projects/descriptions/backfill', {},
     ),
+  // Pin a project-wide language override that the wizard pipeline uses when
+  // generating commit messages, push summaries, and PR titles/bodies. Pass
+  // override="" to clear the pin and revert to the auto-detected value.
+  // Backend rejects any other string with 400 INVALID_OVERRIDE; the server
+  // returns the refreshed Project row so callers can update local state.
+  setCommitLangOverride: (projectId: string, override: string) =>
+    api.put<Project>(`/api/projects/${projectId}/commit-lang-override`, { override }),
 };
 
 export const dashboardApi = {

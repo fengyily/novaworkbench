@@ -143,6 +143,23 @@ export const projects = {
     descRegenerating: '生成中...',
     descRegenerateTitle: '根据当前 CLAUDE.md 重新由 AI 生成（会清除手动修改标记）',
     descRegenerated: '已重新生成',
+    // Overview — commit / PR language override (pins the language used by
+    // wizard-generated commit messages, push summaries, and PR titles/bodies;
+    // unset → use the language auto-detected from git history).
+    commitLang: {
+      label: '提交风格',
+      auto: '自动检测 (auto)',
+      zh: '中文 (zh)',
+      en: 'English (en)',
+      hint: '未设置时，根据项目 git 历史自动检测语言。设置后会覆盖检测结果，用于 commit 信息与 PR 标题 / 正文。',
+      saved: '已保存',
+      saveFailed: '保存失败：{{msg}}',
+      overrideBadge: '已手动覆盖',
+      sourceAuto: '自动',
+      sourceOverride: '手动',
+      detectedLabel: '当前检测值：',
+      noDetect: '尚未检测',
+    },
     // Overview — platform config.
     platformTitle: '平台配置',
     platformCurrent: '当前：{{platform}}',

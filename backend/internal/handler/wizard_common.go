@@ -571,7 +571,17 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 	prModel = cliModelArg(prModel)
 	pushModel, pushCfgID := pushPRRuntimeModel(reqRow, "", prModel, roleConfigID)
 
-	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, "", pushModel, pushCfgID)
+	// 项目历史语言风格：让推送子任务 prompt 注入 commit/PR 风格提示。优先
+	// 使用已加载的 project 行；若 proj 为 nil 则由私有 helper 直查 DB。
+	commitLang := ""
+	if proj != nil {
+		commitLang = service.ResolveCommitLang(proj.CommitLang, proj.CommitLangOverride)
+	}
+	if commitLang == "" {
+		commitLang = loadProjectCommitLang(h.db, reqRow.ProjectID)
+	}
+
+	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, "", pushModel, pushCfgID, commitLang)
 	if err != nil {
 		log.Printf("[auto-push] %s: dispatch failed: %v", reqRow.ID, err)
 		return

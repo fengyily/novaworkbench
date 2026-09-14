@@ -328,3 +328,38 @@ func (h *ProjectHandler) BackfillDescriptions(w http.ResponseWriter, r *http.Req
 		"failed":  failed,
 	})
 }
+
+// SetCommitLangOverride updates the user-pinned language override that the
+// wizard pipeline uses when generating commit messages, push summaries, and
+// PR titles/bodies. Pass override="" to clear the pin and revert to the
+// auto-detected value (or "en" when nothing has been detected yet).
+//
+// PUT /api/projects/{id}/commit-lang-override  body: {"override": "zh" | "en" | "mixed" | ""}
+func (h *ProjectHandler) SetCommitLangOverride(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "缺少项目 ID")
+		return
+	}
+	var body struct {
+		Override string `json:"override"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "请求体格式错误")
+		return
+	}
+	p, err := h.svc.SetCommitLangOverride(id, body.Override)
+	if err != nil {
+		msg := err.Error()
+		switch {
+		case strings.HasPrefix(msg, "INVALID_OVERRIDE"):
+			writeError(w, http.StatusBadRequest, "INVALID_OVERRIDE", msg)
+		case strings.HasPrefix(msg, "project not found"):
+			writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", msg)
+		default:
+			writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", msg)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
