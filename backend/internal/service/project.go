@@ -188,7 +188,7 @@ func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error
 
 	// Validate the optional platform/token pairing before any disk work so
 	// a bad token never leaves a half-cloned tree behind.
-	tokenSecret, tokenPlatform, tokenBaseURL, err := s.resolveCloneAuth(req.PlatformType, req.PlatformTokenID, req.RemoteURL)
+	tokenSecret, tokenPlatform, tokenBaseURL, tokenGitUserName, err := s.resolveCloneAuth(req.PlatformType, req.PlatformTokenID, req.RemoteURL)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +208,7 @@ func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error
 	// Clone the remote into the target when it doesn't exist yet.
 	if req.RemoteURL != "" {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
-			if err := cloneRepo(req.RemoteURL, req.Branch, path, tokenPlatform, tokenSecret); err != nil {
+			if err := cloneRepo(req.RemoteURL, req.Branch, path, tokenPlatform, tokenSecret, tokenGitUserName); err != nil {
 				return nil, err
 			}
 		}
@@ -278,35 +278,35 @@ func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error
 //
 // Both platformType and tokenID must be set together — passing one without
 // the other is treated as TOKEN_NOT_FOUND to keep the contract explicit.
-func (s *ProjectService) resolveCloneAuth(platformType, tokenID, remoteURL string) (string, string, string, error) {
+func (s *ProjectService) resolveCloneAuth(platformType, tokenID, remoteURL string) (string, string, string, string, error) {
 	host, _ := urlHost(remoteURL)
 	log.Printf("[gitlab-debug] resolveCloneAuth in: platform_type=%q token_id=%q remote_host=%q",
 		platformType, tokenID, host)
 	if tokenID == "" && platformType == "" {
 		log.Printf("[gitlab-debug] resolveCloneAuth early-return: no token requested (public-repo path)")
-		return "", "", "", nil
+		return "", "", "", "", nil
 	}
 	if tokenID == "" || platformType == "" {
-		return "", "", "", fmt.Errorf("TOKEN_NOT_FOUND: token id and platform must be supplied together")
+		return "", "", "", "", fmt.Errorf("TOKEN_NOT_FOUND: token id and platform must be supplied together")
 	}
 	tok, err := s.platforms.Get(tokenID)
 	if err != nil {
 		log.Printf("[gitlab-debug] resolveCloneAuth platforms.Get(%q) err=%v", tokenID, err)
-		return "", "", "", fmt.Errorf("TOKEN_NOT_FOUND: %w", err)
+		return "", "", "", "", fmt.Errorf("TOKEN_NOT_FOUND: %w", err)
 	}
 	if tok.Platform != platformType {
-		return "", "", "", fmt.Errorf("PLATFORM_MISMATCH: token is for %q, request asked for %q", tok.Platform, platformType)
+		return "", "", "", "", fmt.Errorf("PLATFORM_MISMATCH: token is for %q, request asked for %q", tok.Platform, platformType)
 	}
 	// Defensive: if the URL host suggests a different platform than the
 	// supplied token (e.g. github token + gitlab.com URL), refuse the clone
 	// rather than silently push the wrong creds.
 	if host != "" && hostPlatform(host) != "" && hostPlatform(host) != tok.Platform {
-		return "", "", "", fmt.Errorf("PLATFORM_MISMATCH: remote host %q belongs to %q but token is for %q",
+		return "", "", "", "", fmt.Errorf("PLATFORM_MISMATCH: remote host %q belongs to %q but token is for %q",
 			host, hostPlatform(host), tok.Platform)
 	}
-	log.Printf("[gitlab-debug] resolveCloneAuth out: token=%s platform=%q base_url=%q",
-		redactToken(tok.Token), tok.Platform, tok.BaseURL)
-	return tok.Token, tok.Platform, tok.BaseURL, nil
+	log.Printf("[gitlab-debug] resolveCloneAuth out: token=%s platform=%q base_url=%q git_user_name=%q",
+		redactToken(tok.Token), tok.Platform, tok.BaseURL, tok.GitUserName)
+	return tok.Token, tok.Platform, tok.BaseURL, tok.GitUserName, nil
 }
 
 // urlHost extracts the lowercased hostname from a git URL. Returns
@@ -461,10 +461,10 @@ func repoName(url string) string {
 //	                                 on stdin
 //
 // A redundant "yes\n" is piped into stdin as belt-and-suspenders.
-func cloneRepo(remote, branch, dest, platform, tokenSecret string) error {
-	log.Printf("[gitlab-debug] cloneRepo in: platform=%q token=%s dest=%q branch=%q",
-		platform, redactToken(tokenSecret), dest, branch)
-	cloneURL := injectCredentials(remote, platform, tokenSecret)
+func cloneRepo(remote, branch, dest, platform, tokenSecret, gitUserName string) error {
+	log.Printf("[gitlab-debug] cloneRepo in: platform=%q token=%s git_user_name=%q dest=%q branch=%q",
+		platform, redactToken(tokenSecret), gitUserName, dest, branch)
+	cloneURL := injectCredentials(remote, platform, tokenSecret, gitUserName)
 	log.Printf("[gitlab-debug] cloneRepo final URL: %s", redactUserinfo(cloneURL))
 
 	args := []string{"clone"}
@@ -639,7 +639,7 @@ func wrapGitError(op, out string, err error) error {
 // userinfo for HTTPS remotes. SSH / git@… remotes are returned unchanged —
 // SSH auth is key-based, not token-based. An empty tokenSecret passes the
 // URL through verbatim (public repo path).
-func injectCredentials(remote, platform, tokenSecret string) string {
+func injectCredentials(remote, platform, tokenSecret, gitUserName string) string {
 	if tokenSecret == "" {
 		log.Printf("[gitlab-debug] injectCredentials: empty token, returning raw URL host=%q",
 			hostOnlyForLog(remote))
@@ -652,16 +652,36 @@ func injectCredentials(remote, platform, tokenSecret string) string {
 			u.Host, u.Scheme)
 		return remote
 	}
-	// Personal access tokens: drop any existing userinfo, embed the token
-	// in userinfo. The user segment depends on platform:
-	//   - github / gitea: plain token ("https://<token>@host/...")
-	//   - gitlab:         "oauth2:<token>" — GitLab rejects the plain form
-	//                     with "HTTP Basic: Access denied".
+	// Drop any existing userinfo before re-attaching our own; otherwise the
+	// rewritten URL would carry both the original and injected credentials.
+	u.User = nil
+	// Build the userinfo. url.UserPassword(username, password) keeps the
+	// structural ":" between user and password un-percent-encoded, so the
+	// wire form is `http://<user>:<password>@host/...` — which is what
+	// GitLab expects (it reads the colon-separated form for HTTP basic).
+	//
+	// Platform-specific user/password split:
+	//   - github / gitea:  user=<token>, password=""  → "https://<token>@host/..."
+	//   - gitlab + username: user=<gitUserName>, password=<token>
+	//                       → "http://fengyi:glpat-xxx@host/..." (works on self-hosted
+	//                         GitLab that rejects the bare `oauth2:` prefix)
+	//   - gitlab without username: user="oauth2", password=<token>
+	//                       → "http://oauth2:<token>@host/..." (the GitLab-docs form
+	//                         for PAT auth; preserved as a fallback if git_user_name
+	//                         is empty in the platform_tokens row)
 	user := tokenSecret
-	if platform == "gitlab" {
-		user = "oauth2:" + tokenSecret
+	password := ""
+	switch platform {
+	case "gitlab":
+		if gitUserName != "" {
+			user = gitUserName
+			password = tokenSecret
+		} else {
+			user = "oauth2"
+			password = tokenSecret
+		}
 	}
-	u.User = url.UserPassword(user, "")
+	u.User = url.UserPassword(user, password)
 	out := u.String()
 	log.Printf("[gitlab-debug] injectCredentials out: platform=%q token=%s host=%s",
 		platform, redactToken(tokenSecret), redactUserinfo(out))
@@ -717,13 +737,13 @@ func (s *ProjectService) OriginURL(projectID string) (string, error) {
 	if p.RemoteURL == "" {
 		return "", fmt.Errorf("NO_REMOTE: project %s has no remote_url configured", projectID)
 	}
-	tok, _, _, err := s.resolveCloneAuth(p.PlatformType, p.PlatformTokenID, p.RemoteURL)
+	tok, plat, _, gitUserName, err := s.resolveCloneAuth(p.PlatformType, p.PlatformTokenID, p.RemoteURL)
 	if err != nil {
 		// TOKEN_NOT_FOUND / PLATFORM_MISMATCH: propagate but caller may choose
 		// to fall back to the raw URL for a public repo.
 		return "", err
 	}
-	return injectCredentials(p.RemoteURL, p.PlatformType, tok), nil
+	return injectCredentials(p.RemoteURL, plat, tok, gitUserName), nil
 }
 
 // Restore re-clones a soft-deleted project's directory from its stored
@@ -748,12 +768,12 @@ func (s *ProjectService) Restore(id string) (*model.Project, error) {
 		return nil, fmt.Errorf("DIR_EXISTS: target directory already exists: %s", p.LocalPath)
 	}
 
-	tokenSecret, tokenPlatform, _, err := s.resolveCloneAuth(p.PlatformType, p.PlatformTokenID, p.RemoteURL)
+	tokenSecret, tokenPlatform, _, tokenGitUserName, err := s.resolveCloneAuth(p.PlatformType, p.PlatformTokenID, p.RemoteURL)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := cloneRepo(p.RemoteURL, p.DefaultBranch, p.LocalPath, tokenPlatform, tokenSecret); err != nil {
+	if err := cloneRepo(p.RemoteURL, p.DefaultBranch, p.LocalPath, tokenPlatform, tokenSecret, tokenGitUserName); err != nil {
 		return nil, fmt.Errorf("RESTORE_FAILED: %w", err)
 	}
 
@@ -800,7 +820,7 @@ func (s *ProjectService) EnsureCloned(id string) error {
 	if p.RemoteURL == "" {
 		return fmt.Errorf("project directory missing and no remote URL to re-clone: %s", p.LocalPath)
 	}
-	tokenSecret, tokenPlatform, _, err := s.resolveCloneAuth(p.PlatformType, p.PlatformTokenID, p.RemoteURL)
+	tokenSecret, tokenPlatform, _, tokenGitUserName, err := s.resolveCloneAuth(p.PlatformType, p.PlatformTokenID, p.RemoteURL)
 	if err != nil {
 		return err
 	}
@@ -808,7 +828,7 @@ func (s *ProjectService) EnsureCloned(id string) error {
 	if branch == "" {
 		branch = "main"
 	}
-	if err := cloneRepo(p.RemoteURL, branch, p.LocalPath, tokenPlatform, tokenSecret); err != nil {
+	if err := cloneRepo(p.RemoteURL, branch, p.LocalPath, tokenPlatform, tokenSecret, tokenGitUserName); err != nil {
 		return fmt.Errorf("re-clone from %s: %w", redactUserinfo(p.RemoteURL), err)
 	}
 	return nil
