@@ -18,6 +18,7 @@ import (
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/platform"
+	promptpkg "github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 )
@@ -808,6 +809,8 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 			"请逐个读取这些冲突文件，理解 \"ours\"（当前目标分支）与 \"theirs\"（被合并分支）双方的意图，"+
 			"合理整合两边的改动、消除冲突标记后写回文件。完成后执行 `git add -A` 暂存所有已解决的文件，"+
 			"再执行 `git commit --no-edit` 完成合并提交。不要留下任何冲突标记。用中文说明你的处理。", fileList)
+		// 强制 git 提交/推送规范（禁 AI 署名 + 凭据说明）。
+		prompt += "\n" + promptpkg.GitCommitConvention + "\n"
 
 		// Pin the project's git identity into Claude's env so its
 		// `git commit --no-edit` runs with a real committer on Docker hosts.
@@ -819,6 +822,14 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 			if email != "" {
 				extraEnv = append(extraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
 			}
+		}
+		// HTTPS 平台凭据：临时 askpass 脚本 + GIT_TERMINAL_PROMPT=0，
+		// 让 Claude 的 `git commit` / 后续任何 git 操作在无 ambient 凭据
+		// 的环境下也能认证。SSH / 无 token 时 helper 返回空 env，no-op
+		// cleanup 不影响。defer 写在 goroutine 内、cmd 启动之后。
+		if credEnv, credCleanup := gitCredentialEnv(h.projectSvc, h.platformSvc, reqRow); len(credEnv) > 0 {
+			extraEnv = append(extraEnv, credEnv...)
+			defer credCleanup()
 		}
 
 		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
@@ -1120,6 +1131,12 @@ func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platfo
 	b.WriteString("- 如遇网络 / 凭据 / 远端权限错误，请明确报告并停止后续步骤。\n")
 	b.WriteString("- 完成后请简要输出：执行了哪些步骤、最终状态（成功 / 失败）、PR 链接（如有），方便作为子任务产物落盘。\n")
 
+	// 强制 git 提交/推送规范：禁止 AI 署名 + 凭据由 askpass 脚本注入，
+	// 此 prompt 走 SubTaskRunner.Run 已注入凭据 env，这里只补规范段。
+	b.WriteString("\n\n")
+	b.WriteString(promptpkg.GitCommitConvention)
+	b.WriteString("\n")
+
 	// 项目历史风格注入：当 commitLang 非空时，在 prompt 末尾追加一行提示，
 	// 让 Claude 在写 commit 信息与 PR 标题/正文时遵循项目历史语言（zh / en /
 	// mixed）。空值表示无风格偏好，按子任务默认行为处理。StyleHint 内部已做
@@ -1242,6 +1259,8 @@ func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflic
 		"请逐个读取这些冲突文件，理解 \"ours\"（当前开发分支）与 \"theirs\"（主分支）双方的意图，"+
 		"合理整合两边的改动、消除冲突标记后写回文件。完成后执行 git add -A 暂存所有已解决的文件，"+
 		"再执行 git commit --no-edit 完成合并提交。不要留下任何冲突标记。用中文说明你的处理。", fileList)
+	// 强制 git 提交/推送规范（禁 AI 署名 + 凭据说明）。
+	prompt += "\n" + promptpkg.GitCommitConvention + "\n"
 	// Hand Claude the project's git identity so its `git commit --no-edit`
 	// (run inside the merge step) carries the right author/committer on
 	// Docker hosts that have no ~/.gitconfig mounted.
@@ -1254,6 +1273,13 @@ func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflic
 		if email != "" {
 			extraEnv = append(extraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
 		}
+	}
+	// HTTPS 平台凭据：临时 askpass 脚本 + GIT_TERMINAL_PROMPT=0，
+	// 让 Claude 的 `git commit --no-edit` 在无 ambient 凭据的环境下
+	// 也能认证。SSH / 无 token 时 helper 返回空 env，no-op cleanup 不影响。
+	if credEnv, credCleanup := gitCredentialEnv(h.projectSvc, h.platformSvc, reqRow); len(credEnv) > 0 {
+		extraEnv = append(extraEnv, credEnv...)
+		defer credCleanup()
 	}
 	// Provision GPG signing material in devDir so Claude's `git commit
 	// --no-edit` picks up commit.gpgsign=true from the worktree config

@@ -10,6 +10,7 @@ import (
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
+	promptpkg "github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/internal/util"
@@ -61,6 +62,12 @@ type SubTaskRunner struct {
 	// child local; a non-nil value is required to honor dev_source="agent".
 	remoteCoding func(*remoteCodingInput) claudeStreamOutcome
 	skillSvc     *service.SkillService
+	// platformSvc resolves the platform token bound to the requirement's project
+	// so Run can inject HTTPS git credentials + committer identity into the
+	// locally-spawned claude subprocess (see gitCredentialEnv). Nil keeps every
+	// child on ambient credentials — preserved behaviour for handlers that
+	// don't construct one with this field wired.
+	platformSvc *service.PlatformTokenService
 	// agentSvrSvc resolves the Agent server a requirement was developed on.
 	// When the parent requirement carries an agent_server_id, Run dispatches
 	// the child to that server instead of spawning a local CLI — the child's
@@ -93,6 +100,7 @@ func NewSubTaskRunner(
 	claudeCfg *service.ClaudeConfigService,
 	usageSvc usageRecorder,
 	skillSvc *service.SkillService,
+	platformSvc *service.PlatformTokenService,
 	agentSvrSvc *service.AgentServerService,
 	remoteCoding func(*remoteCodingInput) claudeStreamOutcome,
 	runConcurrency int,
@@ -111,6 +119,7 @@ func NewSubTaskRunner(
 		claudeCfg:    claudeCfg,
 		usageSvc:     usageSvc,
 		skillSvc:     skillSvc,
+		platformSvc:  platformSvc,
 		remoteCoding: remoteCoding,
 		runSem:       make(chan struct{}, runConcurrency),
 	}
@@ -411,6 +420,7 @@ func (r *SubTaskRunner) Run(
 		prompt = "## 子任务\n\n" + body + "\n"
 	}
 	prompt += "\n> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
+	prompt += "\n" + promptpkg.GitCommitConvention + "\n"
 	// Fresh-session path: prepend the parent context block so the new
 	// claude session knows enough to act on the user's instruction even
 	// without --resume. The block (built by buildParentContext) is bounded
@@ -518,6 +528,8 @@ func (r *SubTaskRunner) Run(
 		resumeFlag = false
 		forkFor = false
 	}
+	credEnv, credCleanup := gitCredentialEnv(r.projectSvc, r.platformSvc, req)
+	defer credCleanup()
 	cmd, cancel := r.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        workDir,
@@ -536,6 +548,7 @@ func (r *SubTaskRunner) Run(
 		Resume:        resumeFlag,
 		Fork:          forkFor,
 		ForkSessionID: newSID,
+		ExtraEnv:      credEnv, // NEW: HTTPS git creds + committer identity
 	})
 	// Hand the subprocess + cancel to the JobStore so StopSubTask can SIGTERM
 	// it (gateway's exec.CommandContext chains SIGTERM → WaitDelay 5s →
