@@ -204,6 +204,33 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Route to this stage's session: design→architect, coding→developer. The
+	// session already holds the stage's conversation and the doc it generated,
+	// so we --resume it and append ONLY the user's new message — no
+	// ConversationHistory / CurrentDoc re-feeding (the resumed
+	// conversation IS the context).
+	var requirement *model.Requirement
+	if req.RequirementID != "" {
+		requirement, _ = h.reqSvc.Get(req.RequirementID)
+	}
+	// Execution-consistency: a requirement whose design/coding stage ran on
+	// an Agent server has its session jsonl + worktree living on THAT host,
+	// not on this backend's disk. The local exec path can't --resume what
+	// it can't see — the worker on the remote side would fail with
+	// "No conversation found". Mirror wizard_coding.go:1162-1189
+	// (AdjustCoding) by routing the refine to the same server, but switch
+	// the response shape from SSE-direct to a JobStore JSON handoff so the
+	// prepareRemoteAgentRun sink can fan progress into the job. The local
+	// SSE-direct path below stays byte-for-byte unchanged.
+	agentID := ""
+	if requirement != nil {
+		agentID = stageAgentServerID(requirement, req.DocType)
+	}
+	if agentID != "" && h.agentSvrSvc != nil {
+		h.refineDocViaAgent(w, r, &req, requirement, agentID)
+		return
+	}
+
 	rc := http.NewResponseController(w)
 	writeSSEHeaders(w)
 	w.WriteHeader(http.StatusOK)
@@ -214,15 +241,6 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 		docLabel = "开发指令"
 	}
 
-	// Route to this stage's session: design→architect, coding→developer. The
-	// session already holds the stage's conversation and the doc it generated,
-	// so we --resume it and append ONLY the user's new message — no
-	// ConversationHistory / CurrentDoc re-feeding (the resumed
-	// conversation IS the context).
-	var requirement *model.Requirement
-	if req.RequirementID != "" {
-		requirement, _ = h.reqSvc.Get(req.RequirementID)
-	}
 	sourceSID, roleKey := "", "analyst"
 	if requirement != nil {
 		sourceSID, roleKey = docStageSession(requirement, req.DocType)
@@ -393,6 +411,177 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	rc.Flush()
 }
 
+// refineDocViaAgent is the Agent-server counterpart of the SSE-direct body
+// of RefineDoc. It mirrors the local branch's prompt / role / workdir
+// resolution but switches the response shape to a JobStore JSON handoff —
+// the prepareRemoteAgentRun sink streams phase / tool_call progress into
+// the job, and the frontend reconnects via /api/wizard/jobs/{id}/stream
+// (the same channel apply-doc already uses). Returns immediately after
+// the job is created so the browser's POST unblocks fast.
+//
+// Why JobStore over SSE-direct here:
+//   - prepareRemoteAgentRun's runRemoteArchitectDesign entry hard-codes
+//     `in.job.Append(...)` / `&jobWriter{job: in.job}` — SSE-direct would
+//     require either rewriting that sink (touches architect-design +
+//     coding) or wrapping it in an adapter. JobStore keeps the change
+//     scoped to refine-doc / apply-doc.
+//   - The frontend's reconnect logic (DocRefineChat.boot apply-reconnect)
+//     already handles "the in-memory applyJobId points at a job that
+//     survived a refresh"; the same pattern covers Agent-bound refine
+//     turns transparently.
+func (h *WizardHandler) refineDocViaAgent(w http.ResponseWriter, r *http.Request, req *struct {
+	RequirementID       string `json:"requirement_id"`
+	ProjectPath         string `json:"project_path"`
+	DocType             string `json:"doc_type"`
+	CurrentDoc          string `json:"current_doc"`
+	ConversationHistory string `json:"conversation_history"`
+	UserMessage         string `json:"user_message"`
+	Model               string `json:"model"`
+}, requirement *model.Requirement, agentID string) {
+	docLabel := "技术方案"
+	if req.DocType == "coding" {
+		docLabel = "开发指令"
+	}
+
+	sourceSID, roleKey := docStageSession(requirement, req.DocType)
+	// On the Agent path the fresh-session fallback (which mints a brand-new
+	// UUID and persists it to design_session_id locally) is meaningless —
+	// there is no local session file for Claude to resume, and writing
+	// the freshly-minted id into the DB would mask the actual binding
+	// (the design stage was run on the Agent server). Surface the same
+	// "请先生成" hint the SSE-direct branch uses and bail out cleanly.
+	if sourceSID == "" {
+		writeError(w, 400, "NO_SESSION", "尚未找到该阶段的会话，请先生成"+docLabel+"后再 refine。")
+		return
+	}
+
+	systemPrompt, model, claudeConfigID := h.roleConfig(roleKey)
+	if req.Model != "" {
+		model = req.Model
+	}
+	_ = systemPrompt // Agent worker prepends the role persona into the prompt itself; not passed via --system-prompt.
+
+	projectPath := req.ProjectPath
+	defaultBranch := ""
+	if proj, perr := h.projectSvc.Get(requirement.ProjectID); perr == nil {
+		if projectPath == "" {
+			projectPath = proj.LocalPath
+		}
+		defaultBranch = proj.DefaultBranch
+	}
+	// workDir is only the SFTP upload source for prepareRemoteAgentRun
+	// (the Agent side re-roots the conversation into its own
+	// /tmp/nova-agent/<projectID>/<reqID> worktree). A failure here
+	// bubbles up the same way it does in the local branch.
+	workDir, err := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+	if err != nil {
+		writeError(w, 500, "WORKTREE_FAILED", "worktree 创建失败："+err.Error())
+		return
+	}
+
+	// Prompt shape mirrors the local SSE-direct resume branch — the
+	// Agent-side conversation already carries the doc + prior turns, so
+	// we only send the user's new message plus the [REFINE_COMPLETE]
+	// instruction. Fresh-session seeding doesn't apply (we bailed out
+	// above when sourceSID == "").
+	prompt := fmt.Sprintf("用户消息：\n%s\n\n", req.UserMessage) +
+		"请基于我们的对话上下文回应用户对「" + docLabel + "」的修改意见，" +
+		"完整列出每一个修改点的具体内容（包含涉及的表/字段/接口/逻辑），不要中途截断或留空。" +
+		"若用户确认修改已完成，在回复最后单独一行追加：[REFINE_COMPLETE]\n用中文。"
+
+	skillText := req.UserMessage
+	skillText = requirement.Title + " " + requirement.Description + " " + req.UserMessage
+	if block := llm.BuildSkillsBlock(h.mentionedSkills(skillText)); block != "" {
+		prompt = block + prompt
+	}
+
+	// Same JobStore handoff shape as ApplyDoc: create the job, return the
+	// id immediately, run Claude on context.Background() in the goroutine
+	// so a page refresh doesn't kill the run.
+	job := h.jobs.Create(req.RequirementID)
+	job.SetType("refine_doc")
+	log.Printf("[refine-doc] routed to agent server %s for req=%s doc_type=%s", agentID, req.RequirementID, req.DocType)
+	writeJSON(w, 200, map[string]string{"job_id": job.ID})
+
+	reqID := req.RequirementID
+	docType := req.DocType
+
+	go func() {
+		log.Printf("[refine-doc] agent job %s started for %s (doc_type=%s)", job.ID, reqID, docType)
+		job.Append(store.LogLine{Type: "phase", Content: "🔌 切换到 Agent 服务器继续 refine..."})
+
+		refineUsage := h.usageCtxFor("refine_doc", reqID, requirement.ProjectID, job.ID, model, fmt.Sprintf("{\"doc_type\":%q}", docType), "")
+		out := h.runRemoteArchitectDesign(&remoteArchitectInput{
+			remoteRunInput: &remoteRunInput{
+				job:            job,
+				serverID:       agentID,
+				reqRow:         requirement,
+				prompt:         prompt,
+				workDir:        workDir,
+				sourceSID:      sourceSID,
+				fork:           false,
+				sessionArg:     sourceSID,
+				forkSessionID:  "",
+				model:          model,
+				claudeConfigID: claudeConfigID,
+				usage:          refineUsage,
+				// Refine / apply aren't plan-mode runs — leave PermissionMode
+				// empty so the worker uses the dev default
+				// --dangerously-skip-permissions.
+				PermissionMode: "",
+			},
+		})
+
+		// Mirror the local branch's terminal-state handling so a remote
+		// refine turn reports the same outcome to the frontend as a
+		// local one (and so the rest of the DocRefineChat reconnect
+		// path is indistinguishable between the two).
+		if out.staleSession {
+			if docType == "design" {
+				_ = h.reqSvc.UpdateDesignSession(reqID, "")
+			} else if docType == "coding" {
+				_ = h.reqSvc.UpdateCodingSession(reqID, "")
+			}
+			job.Append(store.LogLine{Type: "error", Content: docLabel + "会话已过期，请重新生成对应文档后再 refine。"})
+			job.Finish(1, store.JobError)
+			return
+		}
+		if out.errMsg != "" {
+			job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+			job.Finish(1, store.JobError)
+			return
+		}
+		if out.finalResult == "" {
+			job.Append(store.LogLine{Type: "error", Content: "❌ Claude 未返回结果，请重试"})
+			job.Finish(1, store.JobError)
+			return
+		}
+
+		var historyParts []string
+		if req.UserMessage != "" {
+			historyParts = append(historyParts, "User: "+req.UserMessage)
+		}
+		if out.finalResult != "" {
+			historyParts = append(historyParts, "AI: "+strings.TrimSpace(out.finalResult))
+		}
+		updatedHistory := strings.Join(historyParts, "\n")
+		refineComplete := strings.Contains(out.finalResult, "[REFINE_COMPLETE]")
+
+		// Job done — frontend reads `result` for the AI message and the
+		// `done` log line for the terminal marker (same protocol
+		// AdjustCoding's apply path uses for its done event).
+		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
+		doneData, _ := json.Marshal(map[string]interface{}{
+			"type":            "done",
+			"history":         updatedHistory,
+			"refine_complete": refineComplete,
+		})
+		job.Append(store.LogLine{Type: "done", Content: string(doneData)})
+		job.Finish(0, store.JobDone)
+		log.Printf("[refine-doc] agent job %s finished for %s", job.ID, reqID)
+	}()
+}
+
 // ApplyDoc lets Claude rewrite the stored doc field based on the refine
 // conversation. It runs as a background JobStore job (same pattern as
 // analyst-chat / architect-design): the handler returns a job id immediately
@@ -443,6 +632,13 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "NO_SESSION", "尚未找到该阶段的会话，请先生成"+docLabel+"后再 apply。")
 		return
 	}
+	// Execution-consistency (mirror wizard_coding.go:1162-1189 / RefineDoc):
+	// when this stage's doc was produced on an Agent server, the session
+	// jsonl + worktree live on THAT host. Running apply locally would
+	// --resume against an absent file. Read the persisted binding here
+	// rather than trusting a body field, so the user's per-request override
+	// can't silently re-point the run to a different host.
+	agentID := stageAgentServerID(requirement, req.DocType)
 
 	projectPath := req.ProjectPath
 	defaultBranch := ""
@@ -515,17 +711,48 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 			applyPrompt = block + prompt
 		}
 
-		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-			Prompt:         applyPrompt,
-			WorkDir:        workDir,
-			SystemPrompt:   systemPrompt,
-			Model:          cliModelArg(model),
-			ClaudeConfigID: claudeConfigID,
-			SessionID:      sourceSID,
-			Resume:         true,
-		})
 		applyUsage := h.usageCtxFor("apply_doc", reqID, requirement.ProjectID, job.ID, model, fmt.Sprintf("{\"doc_type\":%q}", docType), "")
-		out := runClaudeStream(jobSink{job}, cmd, "apply-doc", applyUsage)
+		var out claudeStreamOutcome
+		if agentID != "" && h.agentSvrSvc != nil {
+			// Agent-server branch: dispatch the apply to the same host the
+			// doc was generated on, so --resume lands on the existing
+			// session file. The terminal-state handling below consumes the
+			// same claudeStreamOutcome shape as the local branch — we
+			// keep it untouched.
+			log.Printf("[apply-doc] routed to agent server %s for req=%s doc_type=%s", agentID, reqID, docType)
+			job.Append(store.LogLine{Type: "phase", Content: "🔌 切换到 Agent 服务器继续 apply..."})
+			out = h.runRemoteArchitectDesign(&remoteArchitectInput{
+				remoteRunInput: &remoteRunInput{
+					job:            job,
+					serverID:       agentID,
+					reqRow:         requirement,
+					prompt:         applyPrompt,
+					workDir:        workDir,
+					sourceSID:      sourceSID,
+					fork:           false,
+					sessionArg:     sourceSID,
+					forkSessionID:  "",
+					model:          model,
+					claudeConfigID: claudeConfigID,
+					usage:          applyUsage,
+					// Apply isn't plan-mode; empty keeps the dev
+					// default --dangerously-skip-permissions on the
+					// worker side.
+					PermissionMode: "",
+				},
+			})
+		} else {
+			cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+				Prompt:         applyPrompt,
+				WorkDir:        workDir,
+				SystemPrompt:   systemPrompt,
+				Model:          cliModelArg(model),
+				ClaudeConfigID: claudeConfigID,
+				SessionID:      sourceSID,
+				Resume:         true,
+			})
+			out = runClaudeStream(jobSink{job}, cmd, "apply-doc", applyUsage)
+		}
 
 		if out.staleSession {
 			// The stage's conversation is gone. Clear its session id so the user
@@ -590,6 +817,29 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		job.Finish(0, store.JobDone)
 		log.Printf("[apply-doc] job %s finished for %s", job.ID, reqID)
 	}()
+}
+
+// stageAgentServerID maps a refine/apply doc_type to the requirement's agent
+// server binding for that stage. Mirrors docStageSession's split:
+//
+//	design → design_agent_server_id (architect stage binding)
+//	coding → agent_server_id        (dev stage binding)
+//
+// Returns "" when the stage hasn't been routed to an agent server, so the
+// caller falls through to the local exec path unchanged. Reading the
+// persisted binding here (rather than trusting a body field) is the same
+// "intentionally skip re-binding" rule wizard_coding.go:1235-1242 enforces
+// for adjust-coding — it keeps execution consistent with the environment
+// the doc actually lives in, and avoids silently re-pointing a running
+// requirement to a different host.
+func stageAgentServerID(req *model.Requirement, docType string) string {
+	switch docType {
+	case "design":
+		return req.DesignAgentServerID
+	case "coding":
+		return req.AgentServerID
+	}
+	return ""
 }
 
 // mentionedSkills parses @slug mentions from text and returns the matching
