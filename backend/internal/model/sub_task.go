@@ -90,6 +90,14 @@ type SubTask struct {
 	// "manual" even after GenerateSubTaskSummary stamps them with a
 	// summarizing batch_id. Drives the SubTaskCard source badge.
 	Source       string  `json:"source,omitempty"`
+	// SessionMode records which conversation-threading policy the user picked
+	// at manual create time. "fork" = inherit the parent coding session via
+	// --fork-session (the default). "with_context" = new session with the
+	// requirement / design / sibling digests block injected into the prompt.
+	// "bare" = new session with no context block and no role system prompt
+	// (CLI built-in defaults only). Persisted for audit and SubTaskCard badge
+	// rendering; never mutated after insert.
+	SessionMode  string  `json:"session_mode,omitempty"`
 	// AgentServerID is the execution environment this sub-task runs on: empty
 	// = 本地执行; non-empty = the agent_servers.id. Persisted per-row so an
 	// auto-orchestrated child inherits the parent requirement's environment and
@@ -157,6 +165,28 @@ const (
 const (
 	SubTaskSourceManual = "manual"
 	SubTaskSourceAuto   = "auto"
+)
+
+// SubTaskSessionMode values describe which conversation-threading policy
+// the user picked at manual create time. Persisted on the row for audit /
+// badge rendering; never mutated.
+//
+//   - SubTaskSessionModeFork:        default — inherit the parent coding
+//                                    session via --fork-session. Behaves
+//                                    exactly like the legacy StartSubTask
+//                                    path before session-mode was exposed.
+//   - SubTaskSessionModeWithContext: new session; buildParentContext() is
+//                                    prepended to the prompt so the child
+//                                    has the requirement / design / recent
+//                                    turns without --resume.
+//   - SubTaskSessionModeBare:        new session; no context block, no role
+//                                    system prompt — CLI built-in defaults
+//                                    only. Equivalent to invoking `claude`
+//                                    manually with -p "<prompt>".
+const (
+	SubTaskSessionModeFork        = "fork"
+	SubTaskSessionModeWithContext = "with_context"
+	SubTaskSessionModeBare        = "bare"
 )
 
 // SubTaskTokens is the four-field token view the wizard handler hands the

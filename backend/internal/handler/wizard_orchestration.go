@@ -249,7 +249,7 @@ func (h *WizardHandler) commitOrchestrationBatch(
 		childAgentServerID = req.AgentServerID
 	}
 	for i, t := range payload.Subtasks {
-		if _, cerr := h.subTaskSvc.CreateWithBatchTx(tx, reqID, t.Title, t.Prompt, modelName, orchestratorSID, obID, i+1, childAgentServerID); cerr != nil {
+		if _, cerr := h.subTaskSvc.CreateWithBatchTx(tx, reqID, t.Title, t.Prompt, modelName, orchestratorSID, obID, i+1, childAgentServerID, ""); cerr != nil {
 			log.Printf("[re-orchestrate] %s: create child %d (%s): %v", reqID, i+1, t.Title, cerr)
 			return
 		}
@@ -981,7 +981,7 @@ func (h *WizardHandler) tryAutoOrchestrate(
 		// Inherit the parent requirement's execution environment so an
 		// auto-orchestrated child runs where the code lives (and the
 		// SubTaskCard badge shows the same environment as the main task).
-		if _, cerr := h.subTaskSvc.CreateWithBatchTx(tx, reqID, t.Title, t.Prompt, modelName, orchestratorSID, obID, i+1, req.AgentServerID); cerr != nil {
+		if _, cerr := h.subTaskSvc.CreateWithBatchTx(tx, reqID, t.Title, t.Prompt, modelName, orchestratorSID, obID, i+1, req.AgentServerID, ""); cerr != nil {
 			log.Printf("[auto-orchestrate] %s: create child %d (%s): %v", reqID, i+1, t.Title, cerr)
 			return
 		}

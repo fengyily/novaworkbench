@@ -148,8 +148,13 @@ func (r *SubTaskRunner) SetRemoteCoding(fn func(*remoteCodingInput) claudeStream
 // modelDisplay is persisted up-front so the SubTaskPanel can show the model
 // badge from the moment the row is visible (before MarkRunning stamps anything
 // else). Pass "" when the model is unspecified.
-func (r *SubTaskRunner) NewPendingSubTask(reqID, title, prompt, modelDisplay, sourceSID, agentServerID string) (*model.SubTask, *store.Job, string, error) {
-	st, err := r.subTaskSvc.Create(reqID, title, prompt, modelDisplay, sourceSID, "", 0, agentServerID)
+//
+// sessionMode persists the user-picked conversation-threading policy on the
+// row (see model.SubTaskSessionMode*). Pass "" to let SubTaskService.Create
+// default to "fork" (the legacy StartSubTask behavior, and the value auto-
+// orchestrated children always take).
+func (r *SubTaskRunner) NewPendingSubTask(reqID, title, prompt, modelDisplay, sourceSID, agentServerID, sessionMode string) (*model.SubTask, *store.Job, string, error) {
+	st, err := r.subTaskSvc.Create(reqID, title, prompt, modelDisplay, sourceSID, "", 0, agentServerID, sessionMode)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -298,6 +303,7 @@ func (r *SubTaskRunner) Run(
 	adjust bool,
 	fork bool,
 	freshSession bool,
+	bare bool,
 ) {
 	startTime, mErr := r.subTaskSvc.MarkRunning(st.ID)
 	if mErr != nil {
@@ -421,6 +427,21 @@ func (r *SubTaskRunner) Run(
 	}
 	prompt += "\n> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
 	prompt += "\n" + promptpkg.GitCommitConvention + "\n"
+	// Bare ("新会话（裸 claude）") path: skip --resume, skip parent context
+	// injection, skip the executor role system prompt — invoke claude with
+	// only the user's free-text body. Takes priority over freshSession so
+	// callers that pass both still get the bare experience. The CLI argv
+	// below sees sourceSID="" and SystemPrompt="" which together drop both
+	// --resume and --system-prompt from streamArgs (gateway.go:407, the
+	// empty-string short-circuit).
+	if bare {
+		freshSession = false
+		sourceSID = ""
+		job.Append(store.LogLine{
+			Type:    "message",
+			Content: "🪶 已选择「裸 claude」会话：不注入上下文、不携带角色系统提示词，使用 CLI 内置默认。",
+		})
+	}
 	// Fresh-session path: prepend the parent context block so the new
 	// claude session knows enough to act on the user's instruction even
 	// without --resume. The block (built by buildParentContext) is bounded
@@ -441,6 +462,13 @@ func (r *SubTaskRunner) Run(
 				log.Printf("[sub-task] failed to clear source_session_id for fresh-session %s: %v", st.ID, perr)
 			}
 			sourceSID = ""
+		}
+	}
+	// Bare path also clears source_session_id so the audit trail and the
+	// SubTaskCard display stay consistent with the "new session" framing.
+	if bare {
+		if perr := r.subTaskSvc.UpdateSession(st.ID, newSID, ""); perr != nil {
+			log.Printf("[sub-task] failed to clear source_session_id for bare-session %s: %v", st.ID, perr)
 		}
 	}
 	if r.skillSvc != nil {
@@ -516,6 +544,7 @@ func (r *SubTaskRunner) Run(
 			claudeConfigID: finalConfigID,
 			usage:          subUsage,
 			FreshSession:   freshSession,
+			Bare:           bare,
 		})
 		r.finishSubTask(st, job, out, modelName, startTime)
 		return
@@ -524,16 +553,25 @@ func (r *SubTaskRunner) Run(
 	// Local execution: resolve resume / fork into the right CLI argv.
 	resumeFlag := true
 	forkFor := fork
-	if freshSession {
+	if freshSession || bare {
 		resumeFlag = false
 		forkFor = false
 	}
 	credEnv, credCleanup := gitCredentialEnv(r.projectSvc, r.platformSvc, req)
 	defer credCleanup()
+	// Bare path drops the executor role system prompt — the user explicitly
+	// asked for a "裸 claude" session that uses CLI built-in defaults. Any
+	// other path inherits the executor persona, including the "你是一位资深
+	// 软件工程师…" persona that "## 子任务" / "## 追加调整" headers were
+	// designed to coexist with.
+	systemPromptForRun := execSystemPrompt
+	if bare {
+		systemPromptForRun = ""
+	}
 	cmd, cancel := r.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        workDir,
-		SystemPrompt:   execSystemPrompt,
+		SystemPrompt:   systemPromptForRun,
 		Model:          cliModelArg(modelName),
 		ClaudeConfigID: finalConfigID,
 		// --resume <sourceSID> --session-id <newSID> [--fork-session]:
@@ -544,6 +582,8 @@ func (r *SubTaskRunner) Run(
 		//   - freshSession=true → no --resume at all; the newSID is sent
 		//     as --session-id only so the JSONL is keyed correctly for
 		//     subsequent runs.
+		//   - bare=true → same argv shape as freshSession, but SystemPrompt=""
+		//     so the CLI uses its built-in defaults (no role persona).
 		SessionID:     sourceSID,
 		Resume:        resumeFlag,
 		Fork:          forkFor,

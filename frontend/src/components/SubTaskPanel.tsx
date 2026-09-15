@@ -633,6 +633,28 @@ function SubTaskCard({ st, index, total, onChanged, onCreated: _onCreated, onRes
               👤 {t('components.subTaskCard.sourceManual')}
             </span>
           )}
+          {/* Session-mode badge: surfaces the user-picked conversation-
+              threading policy at create time. 'fork' is the default and
+              intentionally hidden (no badge noise on the happy path); the
+              non-default 'with_context' / 'bare' modes show distinct chips
+              so the user can tell at a glance why a sub-task didn't pick up
+              the parent's conversation. */}
+          {st.session_mode === 'with_context' && (
+            <span
+              className="sub-card-mode-chip sub-card-mode-with-context"
+              title={t('components.subTaskCard.sessionModeWithContextTitle')}
+            >
+              {t('components.subTaskCard.sessionModeWithContext')}
+            </span>
+          )}
+          {st.session_mode === 'bare' && (
+            <span
+              className="sub-card-mode-chip sub-card-mode-bare"
+              title={t('components.subTaskCard.sessionModeBareTitle')}
+            >
+              {t('components.subTaskCard.sessionModeBare')}
+            </span>
+          )}
           {/* Execution environment: 💻 本地 or 🛰️ Agent Server「name」. Shows
               "由哪个 Agent Server 开发" for every card; auto-orchestrated
               children inherit the main task's environment so they render the
@@ -1021,12 +1043,13 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   })();
 
   // latestArtifactStale: derived from the freshest sub-task's artifact.
-  // Used to (a) auto-select the 「新会话」 radio and (b) render the
-  // short explanation under the radio. We only flag the original legacy
-  // wording "❌ 源会话已失效（session 文件不存在）" — the new side-specific
-  // variants still match this substring so they ALSO trip the auto-
-  // promote, which is the right UX (any of the three means the user's
-  // last sub-task hit the bug).
+  // Used to auto-select the 「带上下文」 radio on follow-up clicks when the
+  // last sub-task hit the missing-jsonl bug. We only flag the original
+  // legacy wording "❌ 源会话已失效（session 文件不存在）" — the new side-
+  // specific variants still match this substring so they ALSO trip the
+  // auto-promote, which is the right UX (any of the three means the user's
+  // last sub-task hit the bug). The radio itself is always visible now —
+  // this hook only drives the default-selection hint, not visibility.
   const latestArtifactStale = (() => {
     if (!sortedItems || sortedItems.length === 0) return null;
     const latest = sortedItems[0];
@@ -1186,21 +1209,30 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // it in either direction).
 
   // 「新会话（含需求上下文）」 mode. The radio surfaces when (a) the
-  // requirement was developed on an Agent server (so the source-session-
-  // missing bug can hit) OR (b) the latest sub-task artifact starts with
-  // the legacy generic "❌ 源会话已失效" wording (which means the user
-  // has already hit the bug and we should pre-select the recovery path).
-  // Default remains "继续上一会话" (freshSession=false) to preserve the
-  // legacy behavior on every happy path.
-  const showFreshOption =
-    !!requirement?.agent_server_id ||
-    (latestArtifactStale && latestArtifactStale.isStale);
-  const [sessionMode, setSessionMode] = useState<'resume' | 'fresh'>('resume');
+  // Always show the radio — the previous `showFreshOption` gate hid it on
+  // local happy-path development which caused "本地开发时启动子任务没有会
+  // 话模式选择" reports. Three options are now permanent:
+  //
+  //   - 'resume'       继承主任务会话 (default) — --fork-session, child
+  //                    inherits the parent coding session's conversation.
+  //   - 'with_context' 带上下文（新会话） — skip --resume, inject
+  //                    buildParentContext() into the prompt, keep the
+  //                    executor role system prompt.
+  //   - 'bare'         新会话（裸 claude） — skip --resume, skip context
+  //                    injection, pass SystemPrompt="" so the CLI uses its
+  //                    built-in defaults.
+  //
+  // `resume` is disabled in the radio when there's no parent coding session
+  // yet (codingSessionId === '') so a click doesn't bounce off the
+  // backend's 409 NO_SESSION check. The with_context / bare options stay
+  // enabled — they explicitly opt out of the parent-session requirement.
+  const [sessionMode, setSessionMode] = useState<'resume' | 'with_context' | 'bare'>('resume');
   useEffect(() => {
     // When the user just saw a stale-session failure, auto-promote to
-    // 「新会话」 so a follow-up click "just works".
+    // 「带上下文」 so a follow-up click "just works" (the new session won't
+    // try to resume the missing JSONL).
     if (latestArtifactStale && latestArtifactStale.isStale) {
-      setSessionMode('fresh');
+      setSessionMode('with_context');
     }
   }, [latestArtifactStale]);
 
@@ -1216,8 +1248,11 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       // `model` is optional; empty selection lets the backend fall back to
       // the developer-role effective model. Sending the literal DefaultModelLabel
       // sentinel would never happen here — ModelSelect normalises it to "".
-      // `freshSession` is the 「新会话（含需求上下文）」 opt-in (see the
-      // radio above). Defaults to false (= legacy --fork-session path).
+      // Session mode (mutually exclusive in the UI, but we never send both
+      // flags at the same time):
+      //   - 'resume'       → omit both freshSession and bare → fork path
+      //   - 'with_context' → freshSession: true → new session + injected context
+      //   - 'bare'         → bare: true → new session, no context, no system prompt
       await subTasksApi.create(requirementId, {
         prompt: p,
         ...(createModel ? { model: createModel } : {}),
@@ -1225,7 +1260,8 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         // from the parent's developer stage by default). Empty lets the backend
         // resolve it (model→config lookup / parent config / role / active).
         ...(createConfigId ? { claude_config_id: createConfigId } : {}),
-        ...(sessionMode === 'fresh' ? { freshSession: true } : {}),
+        ...(sessionMode === 'with_context' ? { freshSession: true } : {}),
+        ...(sessionMode === 'bare' ? { bare: true } : {}),
         // Always send the resolved environment (even '' for 本地) so the
         // backend records an explicit choice — an omitted field would fall
         // back to the parent's env, which is wrong when the user picked 本地.
@@ -1544,43 +1580,61 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             )}
           </label>
         )}
-        {/* Session-mode radio: surfaces only when the bug is in scope
-            (Agent server requirement OR the last sub-task artifact
-            indicates a stale-session failure). Default stays "继续上一
-            会话" on every happy path so we don't accidentally switch
-            existing users over. */}
-        {showFreshOption && (
-          <div className="sub-session-mode" role="radiogroup" aria-label={t('components.subTaskPanel.sessionMode.label')}>
-            <span className="sub-session-mode-label">{t('components.subTaskPanel.sessionMode.label')}</span>
-            <label className="sub-session-mode-option">
-              <input
-                type="radio"
-                name="sessionMode"
-                value="resume"
-                checked={sessionMode === 'resume'}
-                onChange={() => setSessionMode('resume')}
-                disabled={submitting || reSplitBusy}
-              />
-              <span>{t('components.subTaskPanel.sessionMode.resume')}</span>
-            </label>
-            <label className="sub-session-mode-option">
-              <input
-                type="radio"
-                name="sessionMode"
-                value="fresh"
-                checked={sessionMode === 'fresh'}
-                onChange={() => setSessionMode('fresh')}
-                disabled={submitting || reSplitBusy}
-              />
-              <span>{t('components.subTaskPanel.sessionMode.fresh')}</span>
-            </label>
-            {latestArtifactStale && latestArtifactStale.isStale && (
-              <div className="sub-session-mode-hint" role="note">
-                {t('components.subTaskPanel.sessionMode.freshHint')}
-              </div>
-            )}
-          </div>
-        )}
+        {/* Session-mode radio: always visible on manual sub-task creation
+            (was previously gated by `showFreshOption` and only shown for
+            Agent-server requirements / post-stale-artifact, which made
+            local happy-path development feel "missing a knob"). Three
+            options — see useState above for the canonical mapping. The
+            `resume` option is disabled when there's no parent coding
+            session yet (codingSessionId === '') so a click doesn't
+            bounce off the backend's 409 NO_SESSION check. The hint
+            block under the radio shows only when the latest sub-task
+            artifact looks like the legacy missing-jsonl bug, telling the
+            user the radio is non-default for a reason. */}
+        <div className="sub-session-mode" role="radiogroup" aria-label={t('components.subTaskPanel.sessionMode.label')}>
+          <span className="sub-session-mode-label">{t('components.subTaskPanel.sessionMode.label')}</span>
+          <label className="sub-session-mode-option">
+            <input
+              type="radio"
+              name="sessionMode"
+              value="resume"
+              checked={sessionMode === 'resume'}
+              onChange={() => setSessionMode('resume')}
+              disabled={submitting || reSplitBusy || !codingSessionId}
+            />
+            <span>{t('components.subTaskPanel.sessionMode.resume')}</span>
+            <span className="sub-session-mode-hint">{t('components.subTaskPanel.sessionMode.resumeHint')}</span>
+          </label>
+          <label className="sub-session-mode-option">
+            <input
+              type="radio"
+              name="sessionMode"
+              value="with_context"
+              checked={sessionMode === 'with_context'}
+              onChange={() => setSessionMode('with_context')}
+              disabled={submitting || reSplitBusy}
+            />
+            <span>{t('components.subTaskPanel.sessionMode.withContext')}</span>
+            <span className="sub-session-mode-hint">{t('components.subTaskPanel.sessionMode.withContextHint')}</span>
+          </label>
+          <label className="sub-session-mode-option">
+            <input
+              type="radio"
+              name="sessionMode"
+              value="bare"
+              checked={sessionMode === 'bare'}
+              onChange={() => setSessionMode('bare')}
+              disabled={submitting || reSplitBusy}
+            />
+            <span>{t('components.subTaskPanel.sessionMode.bare')}</span>
+            <span className="sub-session-mode-hint">{t('components.subTaskPanel.sessionMode.bareHint')}</span>
+          </label>
+          {latestArtifactStale && latestArtifactStale.isStale && (
+            <div className="sub-session-mode-hint" role="note">
+              {t('components.subTaskPanel.sessionMode.freshHint')}
+            </div>
+          )}
+        </div>
         <div className="sub-composer-toolbar">
           <span className="sub-composer-hint">
             {t('components.subTaskPanel.composerHint')}

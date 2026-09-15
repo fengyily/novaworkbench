@@ -364,25 +364,40 @@ export interface SubTask {
   // derive Stop availability from THESE fields, not from agent_server_id.
   effective_agent_server_id?: string;
   effective_agent_server_name?: string;
+  // Session-mode picked at manual create time:
+  //   'fork'         — inherit parent coding session via --fork-session
+  //                    (default; omitted from the badge so happy-path
+  //                    cards stay clean).
+  //   'with_context' — new session with buildParentContext() injected.
+  //   'bare'         — new session, no context, no role system prompt.
+  // The frontend uses the value to render the per-card badge chips
+  // ('带上下文' / '裸 claude'). Older backends that predate the column
+  // return undefined here — treat as 'fork'.
+  session_mode?: 'fork' | 'with_context' | 'bare';
 }
 
 export const subTasksApi = {
   // Start a child agent. Returns the JobStore job_id (for SSE stream) and
   // the sub_task_id (for refetch / list updates).
   //
-  // freshSession opts into the 「新会话（含需求上下文）」 recovery path:
-  // the backend skips --resume, mints a new claude session id, and
-  // prepends a ## 父任务上下文 block (requirement title / design /
-  // recent turns / sibling digests) so the new session can answer the
-  // instruction without the parent's JSONL. Used when the user saw
-  // "源会话已失效" and chose the radio opt-in. The default (false)
-  // preserves the legacy --fork-session path.
+  // Session mode (mutually exclusive in the UI but the backend tolerates
+  // both — `bare` wins if both are set):
+  //   - freshSession: opts into the 「带上下文（新会话）」 mode. The backend
+  //     skips --resume, mints a new claude session id, and prepends a
+  //     ## 父任务上下文 block (requirement title / design / recent turns /
+  //     sibling digests) so the new session can answer the instruction
+  //     without the parent's JSONL.
+  //   - bare: opts into the 「新会话（裸 claude）」 mode. The backend skips
+  //     --resume AND skips the role system prompt — claude runs with its
+  //     built-in defaults only.
+  //   - default (both false): the legacy --fork-session path that
+  //     inherits the parent coding session.
   // agent_server_id selects the execution environment. Omit the field to
   // inherit the parent requirement's environment (default); pass '' to force
   // 本地, or an agent_servers.id to run on that server.
   create: (
     requirementId: string,
-    data: { prompt: string; title?: string; model?: string; claude_config_id?: string; freshSession?: boolean; agent_server_id?: string },
+    data: { prompt: string; title?: string; model?: string; claude_config_id?: string; freshSession?: boolean; bare?: boolean; agent_server_id?: string },
   ) => api.post<{ job_id: string; sub_task_id: string }>(`/api/requirements/${requirementId}/sub-tasks`, data),
   // List all sub-tasks for a requirement (oldest first).
   list: (requirementId: string) =>

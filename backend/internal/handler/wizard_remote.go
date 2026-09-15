@@ -28,8 +28,8 @@ import (
 // the local branch already resolved (prompt, workDir, session threading).
 //
 // Dev-stage retains this struct because it carries dev-specific fields
-// (startCodingReq + FreshSession) that the architect stage does not need.
-// The shared SSH / worktree / session-sync / worker-call trunk lives in
+// (startCodingReq + FreshSession + Bare) that the architect stage does not
+// need. The shared SSH / worktree / session-sync / worker-call trunk lives in
 // prepareRemoteAgentRun and is fed by remoteRunInput (below).
 type remoteCodingInput struct {
 	job            *store.Job
@@ -55,6 +55,14 @@ type remoteCodingInput struct {
 	// ## 父任务上下文 block at the top of the prompt so the new session
 	// still knows the requirement title / design / parent context.
 	FreshSession bool
+	// Bare marks the 「新会话（裸 claude）」 session mode: skip --resume AND
+	// skip the role system prompt — pass SystemPrompt="" so the worker
+	// invokes claude with only the user's free-text body and CLI built-in
+	// defaults. Documented separately from FreshSession because the local
+	// path's SystemPrompt selection differs (remote always passes ""), but
+	// the SubTaskRunner.Run priority is bare > freshSession > fork so the
+	// audit trail matches whichever flag the caller actually set.
+	Bare bool
 }
 
 // startCodingReq mirrors the anonymous struct StartCoding decodes so the
@@ -460,7 +468,11 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// exposed. The response is a streaming NDJSON body (one JSON event per
 	// line, same shape as the old `claude --output-format stream-json`
 	// output) that the existing parseStreamJSONFromReader consumes directly.
-	in.job.Append(store.LogLine{Type: "phase", Content: "🤖 Agent 服务器开始执行（nova-agent-worker）..."})
+	bareHint := ""
+	if in.Bare {
+		bareHint = "（裸 claude 模式）"
+	}
+	in.job.Append(store.LogLine{Type: "phase", Content: "🤖 Agent 服务器开始执行（nova-agent-worker）..." + bareHint})
 
 	workerAddr := "127.0.0.1:7000"
 	httpClient := &http.Client{Transport: client.HTTPTransport(workerAddr)}
