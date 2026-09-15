@@ -73,6 +73,11 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   const [applyLines, setApplyLines] = useState<LogLine[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventStream | null>(null);
+  // streamDocJobRef holds the latest streamDocJob useCallback so
+  // streamRefine can hand off to the Agent-bound JobStore flow without a
+  // circular useCallback dependency (streamDocJob is defined later in the
+  // file and would otherwise need to be in streamRefine's deps array).
+  const streamDocJobRef = useRef<(jobId: string, kind: 'apply' | 'refine') => Promise<boolean>>(() => Promise.resolve(false));
   // Context-usage is CONTROLLED — the parent owns the live state (so the
   // always-on top strip shares it and persists across refresh / panel
   // collapse). We report `usage` SSE events upward via onUsage; the value
@@ -135,6 +140,17 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   // The authoritative conversation lives in the resumed claude session on the
   // server (keyed by requirement_id + doc_type). We only stream the user's new
   // message; no conversation_history / current_doc is re-fed.
+  //
+  // Two response shapes the backend may send, depending on whether the
+  // requirement's design/coding stage was bound to an Agent server:
+  //   1. SSE-direct (text/event-stream) — local exec path, the legacy
+  //      handler streams phase / tool_call / message / done frames.
+  //   2. JobStore JSON ({success, data:{job_id}}) — Agent-bound path,
+  //      the handler returns a job id and the refine runs on context.
+  //      Background() in a goroutine. We subscribe to the same
+  //      /api/wizard/jobs/{id}/stream channel the apply path uses.
+  // We branch on Content-Type right after authedFetch resolves, so the
+  // local path stays a simple ReadableStream pump.
   const streamRefine = useCallback(async (userMessage: string) => {
     const res = await authedFetch(`${API_BASE}/api/wizard/refine-doc`, {
       method: 'POST',
@@ -148,6 +164,22 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         ...(selectedModel ? { model: selectedModel } : {}),
       }),
     });
+
+    const ctype = res.headers.get('content-type') || '';
+    // Agent-bound branch: backend returned a JSON envelope with the JobStore
+    // job id. Subscribe to the same /api/wizard/jobs/{id}/stream channel
+    // apply-doc uses, and translate the job's terminal `done` log line back
+    // into the refine_complete flag the local SSE-direct path used to
+    // surface via the `done` SSE event. The job's `result` log line carries
+    // the AI text; we splice it into the streaming ai placeholder the same
+    // way SSE `message` events did.
+    if (ctype.includes('application/json')) {
+      const data = await res.json();
+      const jobId = data?.data?.job_id || data?.job_id;
+      if (!jobId) throw new Error(data?.error?.message || t('wizard.docRefine.noJobId'));
+      const complete = await streamDocJobRef.current(jobId, 'refine');
+      return complete;
+    }
 
     const reader = res.body?.getReader();
     if (!reader) throw new Error(t('wizard.docRefine.noStream'));
@@ -261,83 +293,181 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
     }
   };
 
-  // Stream an apply-doc JobStore job: phase / tool_call / thinking progress →
-  // applyLines; on job_done, refresh the requirement (design_docs was persisted
-  // server-side). The job replays its full history first, so this works both for
-  // a freshly-started apply and for reconnecting to an in-flight apply after a
-  // page refresh (applyJobId prop). The apply runs on context.Background() in
-  // the backend, so it survives the refresh — this SSE is just a progress view.
-  const streamApplyJob = useCallback((jobId: string) => {
+  // Stream an apply-doc / refine-doc JobStore job: phase / tool_call / thinking
+  // progress → applyLines; on job_done, refresh the requirement for `apply`
+  // (design_docs was persisted server-side). The job replays its full history
+  // first, so this works both for a freshly-started apply and for
+  // reconnecting to an in-flight apply after a page refresh (applyJobId prop).
+  // The apply runs on context.Background() in the backend, so it survives the
+  // refresh — this SSE is just a progress view.
+  //
+  // The `kind` selector picks between the two flows the backend now exposes
+  // for the wizard doc-refine endpoints:
+  //   - 'apply'  → started by handleApply (design_docs was persisted, so
+  //                onTurnDone fires on success to refresh the parent).
+  //                State machine: applying=true while running; no separate
+  //                refine-state set.
+  //   - 'refine' → started by streamRefine when the backend returned an
+  //                Agent-bound JSON handoff (see the `content-type`
+  //                branch in streamRefine). The job's terminal `done` log
+  //                line carries the same {type, history, refine_complete}
+  //                payload the local SSE-direct path used to emit; we
+  //                resolve the returned Promise with the `refine_complete`
+  //                flag so streamRefine can flip refineComplete and tear
+  //                down its own working state.
+  // The error i18n key is reused from apply (wizard.docRefine.applyJobLost)
+  // to avoid pulling in a new translation entry — the message is generic
+  // enough to cover both flows ("apply job lost" reads naturally for a
+  // refine job that got evicted mid-turn).
+  const streamDocJob = useCallback((jobId: string, kind: 'apply' | 'refine'): Promise<boolean> => {
     if (esRef.current) esRef.current.close();
-    setApplying(true);
-    setApplyLines([]);
-    esRef.current = createEventStream(
-      `/api/wizard/jobs/${jobId}/stream`,
-      (evt) => {
-        if (evt.type === 'job_done') {
-          esRef.current?.close();
-          esRef.current = null;
-          setApplying(false);
-          if (evt.status === 'done' || evt.exit_code === 0) {
-            setApplyLines(prev => [...prev, { type: 'phase', content: t('wizard.docRefine.applyOk', { label }) }]);
-            // design_docs was persisted server-side; refresh renders it and
-            // clears apply_job_id (the doc-change reset effect tears down here).
-            onTurnDone?.();
-          } else {
-            setApplyLines(prev => [...prev, { type: 'error', content: t('wizard.docRefine.applyFail') }]);
-          }
-          return;
-        }
-        if (evt.type === 'error') {
-          setApplyLines(prev => [...prev, { type: 'error', content: '❌ ' + (evt.content ?? '') }]);
-          return;
-        }
-        // Surface phase / tool_call progress (incl. the thinking_tokens
-        // heartbeat). Skip "message" lines — the regenerated doc is large and
-        // lands in design_docs via the refresh, not in this thin progress panel.
-        // Coalesce consecutive thinking-tokens phase lines into one updatable
-        // row instead of stacking one per heartbeat. Use backend `at` so phase
-        // timings are accurate; client-side Date.now() as fallback.
-        if (evt.type === 'phase' || evt.type === 'tool_call') {
-          const at = typeof evt.at === 'number' ? evt.at : Date.now();
-          setApplyLines(prev => appendLogLine(prev.slice(-80), { type: evt.type, content: evt.content ?? '', at }));
-        }
-        // Usage snapshot for the apply-doc turn. Same parsing as the refine-
-        // doc stream above; both feeds target the same wizard stage so the
-        // last write wins on the bar regardless of which flow emitted it.
-        if (evt.type === 'usage') {
-          try {
-            const parsed = JSON.parse(evt.content ?? '{}');
-            onUsage?.(computeUsage(parsed, compressStep));
-          } catch { /* malformed payload — ignore */ }
-        }
-      },
-      () => {
-        // The stream dropped (or the job is gone — backend restarted, ring
-        // evicted). Poll the snapshot once; if it's gone, drop to idle so the
-        // user can retry.
-        esRef.current = null;
-        authedFetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
-        .then(r => r.json())
-        .then(json => {
-          if (!json.success) {
-            setApplying(false);
-            setApplyLines(prev => [...prev, { type: 'error', content: t('wizard.docRefine.applyJobLost') }]);
+    if (kind === 'apply') {
+      setApplying(true);
+      setApplyLines([]);
+    } else {
+      setRefineLines([]);
+    }
+    return new Promise<boolean>((resolve) => {
+      esRef.current = createEventStream(
+        `/api/wizard/jobs/${jobId}/stream`,
+        (evt) => {
+          if (evt.type === 'job_done') {
+            esRef.current?.close();
+            esRef.current = null;
+            const success = evt.status === 'done' || evt.exit_code === 0;
+            if (kind === 'apply') {
+              setApplying(false);
+              if (success) {
+                setApplyLines(prev => [...prev, { type: 'phase', content: t('wizard.docRefine.applyOk', { label }) }]);
+                // design_docs was persisted server-side; refresh renders it and
+                // clears apply_job_id (the doc-change reset effect tears down here).
+                onTurnDone?.();
+              } else {
+                setApplyLines(prev => [...prev, { type: 'error', content: t('wizard.docRefine.applyFail') }]);
+              }
+            }
+            resolve(success);
             return;
           }
-          const { status, log } = json.data as { status: string; log: { type: string; content: string; at?: number }[] };
-          const visible = coalesceLogLines((log || []).filter(l => l.type === 'phase' || l.type === 'tool_call' || l.type === 'error') as LogLine[]);
-          if (visible.length > 0) setApplyLines(visible);
-          if (status === 'running') {
-            streamApplyJob(jobId); // transient drop — re-arm the stream
-          } else {
-            setApplying(false);
+          if (evt.type === 'error') {
+            const line = { type: 'error' as const, content: '❌ ' + (evt.content ?? '') };
+            if (kind === 'apply') {
+              setApplyLines(prev => [...prev, line]);
+            } else {
+              setRefineLines(prev => appendLogLine(prev.slice(-80), line));
+            }
+            return;
           }
-        })
-        .catch(() => { setApplying(false); });
-      },
-    );
+          if (evt.type === 'done') {
+            // The Agent-bound refine-doc path emits the same terminal
+            // {type:"done", history, refine_complete} envelope as the
+            // SSE-direct path, packed into the `done` log line's
+            // content. Pull it apart here so the caller's
+            // refineComplete flip stays consistent across both
+            // response shapes.
+            try {
+              const payload = JSON.parse(evt.content ?? '{}');
+              if (typeof payload.refine_complete === 'boolean') {
+                resolve(payload.refine_complete);
+                return;
+              }
+            } catch { /* not JSON — fall through to log-only handling */ }
+            // Job-level done without an inner refine payload — fall
+            // back to treating it as a non-completion signal so the
+            // user can decide to send another refinement.
+            return;
+          }
+          if (evt.type === 'result') {
+            // Mirror the SSE-direct `message` path: stream the final
+            // AI text into the chat placeholder. The agent-bound
+            // refine-doc handler always emits exactly one `result`
+            // line with the trimmed finalResult before the `done`
+            // log line, so this is the canonical AI reply.
+            if (kind === 'refine') {
+              setMessages(prev => {
+                const next = [...prev];
+                const idx = next.length - 1;
+                if (idx >= 0) next[idx] = {
+                  role: 'ai',
+                  content: ((next[idx].content || '') + (evt.content ?? '') + '\n').replace('[REFINE_COMPLETE]', '').trim(),
+                  isError: next[idx].isError,
+                };
+                return next;
+              });
+            } else {
+              // Apply's result is the regenerated doc; it lands in
+              // design_docs via the refresh, so don't pollute the
+              // chat transcript with it.
+            }
+            return;
+          }
+          if (evt.type === 'phase' || evt.type === 'tool_call') {
+            // Live activity feed — surfaces connection / tool labels
+            // during the (often multi-minute) turn so the user has
+            // progress feedback. Use the backend-stamped `at` so
+            // phase timings stay accurate; client-side Date.now() as
+            // fallback for old data.
+            const at = typeof evt.at === 'number' ? evt.at : Date.now();
+            if (kind === 'apply') {
+              setApplyLines(prev => appendLogLine(prev.slice(-80), { type: evt.type, content: evt.content ?? '', at }));
+            } else {
+              setRefineLines(prev => appendLogLine(prev.slice(-80), { type: evt.type, content: evt.content ?? '', at }));
+            }
+            return;
+          }
+          // Usage snapshot for either turn. Same parsing as
+          // DeepRefineChat: backend marshals UsageInfo into `content`
+          // as a JSON string; both feeds target the same wizard
+          // stage so the last write wins on the bar regardless of
+          // which flow emitted it.
+          if (evt.type === 'usage') {
+            try {
+              const parsed = JSON.parse(evt.content ?? '{}');
+              onUsage?.(computeUsage(parsed, compressStep));
+            } catch { /* malformed payload — ignore */ }
+          }
+        },
+        () => {
+          // The stream dropped (or the job is gone — backend restarted, ring
+          // evicted). Poll the snapshot once; if it's gone, drop to idle so the
+          // user can retry.
+          esRef.current = null;
+          authedFetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
+          .then(r => r.json())
+          .then(json => {
+            if (!json.success) {
+              if (kind === 'apply') {
+                setApplying(false);
+                setApplyLines(prev => [...prev, { type: 'error', content: t('wizard.docRefine.applyJobLost') }]);
+              }
+              resolve(false);
+              return;
+            }
+            const { status, log } = json.data as { status: string; log: { type: string; content: string; at?: number }[] };
+            const visible = coalesceLogLines((log || []).filter(l => l.type === 'phase' || l.type === 'tool_call' || l.type === 'error') as LogLine[]);
+            if (visible.length > 0 && kind === 'apply') setApplyLines(visible);
+            if (status === 'running') {
+              streamDocJob(jobId, kind).then(resolve); // transient drop — re-arm the stream
+            } else {
+              if (kind === 'apply') setApplying(false);
+              resolve(status !== 'done' && status !== 'success');
+            }
+          })
+          .catch(() => {
+            if (kind === 'apply') setApplying(false);
+            resolve(false);
+          });
+        },
+      );
+    });
   }, [label, compressStep, onTurnDone, onUsage, t]);
+
+  // Keep the ref pointed at the latest useCallback so streamRefine's
+  // Agent-bound handoff can resolve to the up-to-date closure (the ref
+  // sidesteps the otherwise-circular useCallback dep).
+  useEffect(() => {
+    streamDocJobRef.current = streamDocJob;
+  }, [streamDocJob]);
 
   const handleApply = async () => {
     setApplyLines([]);
@@ -357,7 +487,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
       const json = await res.json();
       const jobId = json.data?.job_id;
       if (!jobId) throw new Error(json.error?.message || t('wizard.docRefine.noJobId'));
-      streamApplyJob(jobId);
+      await streamDocJob(jobId, 'apply');
     } catch (err: any) {
       setApplying(false);
       setApplyLines([{ type: 'error', content: '❌ ' + err.message }]);
@@ -429,7 +559,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         if (visible.length > 0) setApplyLines(visible);
         if (status === 'running') {
           setExpanded(true);
-          streamApplyJob(applyJobId);
+          streamDocJob(applyJobId, 'apply');
         } else {
           setApplying(false);
         }
