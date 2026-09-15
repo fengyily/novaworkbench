@@ -722,6 +722,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	if block := llm.BuildSkillsBlock(h.mentionedSkills(skillText)); block != "" {
 		prompt = block + prompt
 	}
+	// Append the git commit / push convention (no AI signature trailers,
+	// no token echoed in commands) to every coding -p prompt. The helpers
+	// (agentDirectPrompt / developerDecomposePrompt, patched separately
+	// in wizard_orchestration.go) also embed this string — duplication is
+	// harmless: Claude just sees the same rule twice.
+	prompt += "\n" + promptpkg.GitCommitConvention + "\n"
 	// Inject the project's git committer identity (from its platform
 	// token) as GIT_AUTHOR_*/GIT_COMMITTER_* env into the claude
 	// subprocess. git reads these env vars over any config, so when the
@@ -739,6 +745,18 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		if email != "" {
 			codingExtraEnv = append(codingExtraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
 		}
+	}
+	// HTTPS git credentials: when the project has a platform token bound
+	// and the remote is HTTPS, write a per-run GIT_ASKPASS script so the
+	// developer's `git push origin <branch>` via Bash tool authenticates
+	// without exposing the token to the model / prompt / .git/config.
+	// SSH remotes and unconfigured projects get (nil, no-op cleanup) from
+	// the helper and fall back to ambient credentials (preserves dev-
+	// machine behaviour). cleanup() is a no-op when no askpass script was
+	// written, so defer is always safe.
+	if credEnv, credCleanup := gitCredentialEnv(h.projectSvc, h.platformSvc, reqRow); len(credEnv) > 0 {
+		codingExtraEnv = append(codingExtraEnv, credEnv...)
+		defer credCleanup()
 	}
 	// GPG signing: when the project's platform token has GPG enabled and
 	// carries key material, lay down a per-run GNUPGHOME under the OS

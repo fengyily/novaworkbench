@@ -15,6 +15,7 @@ import (
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
+	promptpkg "github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/internal/util"
 )
@@ -490,7 +491,9 @@ func developerDecomposePrompt(title, leadIn, workDir string) string {
 			"   {\"subtasks\":[{\"title\":\"...\",\"prompt\":\"...\"}]}，每个子任务的 prompt 必须包含足够上下文（涉及文件、做什么改动、产物形式）；\n"+
 			"3. 最后在回复中单独一行输出 [SUBTASKS_READY] 哨兵。\n"+
 			"注意：第 2 步的 Write 文件是后端调度子Agent 的主要依据，务必调用 Write 工具完成，不要只在回复里贴 JSON。\n"+
-			"要求：不要直接编写项目代码（由子Agent完成）；不要输出『等待确认』——直接给出拆分结果，后端检测到拆分文件后会自动串行调度子Agent执行并在全部完成后交回主Agent汇总。",
+			"要求：不要直接编写项目代码（由子Agent完成）；不要输出『等待确认』——直接给出拆分结果，后端检测到拆分文件后会自动串行调度子Agent执行并在全部完成后交回主Agent汇总。\n"+
+			promptpkg.GitCommitConvention+
+			"\n",
 		title, subTasksFilePath(workDir))
 }
 
@@ -512,7 +515,9 @@ func agentDirectPrompt(title, leadIn, workDir string) string {
 		"现在切换到「Agent 开发者」角色，正在执行需求（需求：%s，工作目录：%s）。\n"+
 			leadIn+
 			"直接使用 Read / Edit / Write / Bash 工具完成代码实现、构建与基础验证，并在结束时进行 git commit。\n"+
-			"完成后在最终回复里简要说明：做了什么、关键文件、验证方式。",
+			"完成后在最终回复里简要说明：做了什么、关键文件、验证方式。\n"+
+			promptpkg.GitCommitConvention+
+			"\n",
 		title, workDir)
 }
 
@@ -1191,7 +1196,8 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	executorPrompt := "## 子任务\n\n" + st.Prompt + "\n\n" +
 		"> 本任务通过 --fork-session 继承了主 Agent 的项目上下文与代码库访问权限。\n" +
 		"> 如需补充信息，可正常读取项目文件或调用工具。\n" +
-		"> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
+		"> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n" +
+		promptpkg.GitCommitConvention + "\n"
 
 	// Heartbeat ticker: keeps batch_id_seq_run fresh for boot recovery. Capped
 	// at the configured interval so a stuck Finish() can't leak past one
@@ -1235,6 +1241,10 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	// attribution stay with the requirement row, only the dispatch target moves.
 	effectiveServerID := resolveEffectiveAgentServer(st, req)
 
+	// HTTPS git 凭据 + committer 身份注入本地子进程（仅本地路径，远端 Agent-Server
+	// 路径不动 —— 远端 push 认证已通过 origin URL 完成，Part B 不动远端）。
+	credEnv, credCleanup := gitCredentialEnv(h.projectSvc, h.platformSvc, req)
+	defer credCleanup()
 	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         executorPrompt,
 		WorkDir:        batch.WorkDir,
@@ -1245,6 +1255,7 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 		Resume:         true,
 		Fork:           true,
 		ForkSessionID:  childSID,
+		ExtraEnv:       credEnv,
 	})
 	if cmd == nil {
 		earlyExitReason = "GenerateCode 返回空 cmd"
