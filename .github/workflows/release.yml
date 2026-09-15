@@ -293,11 +293,24 @@ jobs:
           git config --global advice.detachedHead false
 
           WORK="$(mktemp -d)"
-          # depth=1 + --no-single-branch so subsequent fetches (if any) work.
-          git clone --branch gh-pages --depth 1 \
-            "https://x-access-token:${APT_REPO_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            "$WORK/apt"
-          cd "$WORK/apt"
+          REPO_URL="https://x-access-token:${APT_REPO_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          # First-time publish: gh-pages may not exist on origin yet (a repo
+          # that never enabled Pages / never had a docs branch). git clone
+          # --branch exits 128 when the remote ref is missing, so we fall
+          # back to an orphan-branch init and push -u to create the upstream
+          # ref. The `if ... else ... fi` pattern keeps stderr from the
+          # failing clone from being surfaced as a step error.
+          if git clone --branch gh-pages --depth 1 "$REPO_URL" "$WORK/apt" 2>/dev/null; then
+            cd "$WORK/apt"
+          else
+            echo "::notice::gh-pages branch missing on origin; initializing orphan branch"
+            mkdir -p "$WORK/apt"
+            cd "$WORK/apt"
+            git init -q
+            git checkout -q --orphan gh-pages
+            git remote add origin "$REPO_URL"
+          fi
 
           # First-ever publish: clone of an empty / uninitialized gh-pages
           # branch leaves the working dir with only .git/. Create the
