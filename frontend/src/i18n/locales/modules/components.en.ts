@@ -102,14 +102,24 @@ export const components = {
     summaryToastOk: '✅ Summary submitted',
     summaryToastErrPrefix: '❌',
     summaryToastErrFallback: 'Failed to submit summary',
-    // 「新会话（含需求上下文）」 mode (P2 fallback for the source-session-
-    // missing bug on Agent Server runs). The radio only renders when the
-    // requirement has agent_server_id OR the latest sub-task artifact
-    // indicates a stale-session failure. Default stays "继续上一会话".
+    // Session-mode radio. Always visible now (was previously gated by
+    // Agent-server / stale-artifact conditions). Three options let the
+    // user pick the conversation-threading policy at manual sub-task
+    // create time:
+    //   - resume      Inherit the parent main-agent session (--fork-session).
+    //   - withContext New session, parent context injected.
+    //   - bare        Bare claude, CLI built-in defaults only.
+    // The `freshHint` survives as the "why is the radio non-default" banner
+    // shown only when the latest sub-task artifact looks like the legacy
+    // missing-jsonl bug (so a follow-up click pre-selects with_context).
     sessionMode: {
       label: 'Session mode',
-      resume: 'Resume previous session',
-      fresh: 'New session (with requirement context)',
+      resume: 'Inherit main session',
+      resumeHint: 'Fork the main coding session; the sub-task inherits the conversation.',
+      withContext: 'With context (new session)',
+      withContextHint: 'New session with the requirement / design / recent parent turns injected into the prompt.',
+      bare: 'New session (bare claude)',
+      bareHint: 'Nothing carried — no context, no role system prompt; CLI built-in defaults.',
       freshHint: 'The previous session was not found on the Agent Server. We recommend the "New session" mode — it auto-injects the requirement title, design docs, and the last 10 turns of the previous session as context.',
     },
   },
@@ -180,6 +190,13 @@ export const components = {
     sourceAutoTitle: 'Auto-dispatched by main Agent',
     sourceManual: 'Manual',
     sourceManualTitle: 'Manually created by user',
+    // Per-card session-mode badge (only renders for non-default modes;
+    // 'fork' is intentionally hidden). Labels are short so the meta line
+    // stays one row, titles hold the full explanation on hover.
+    sessionModeWithContext: 'With context',
+    sessionModeWithContextTitle: 'New session with requirement / design / recent parent turns injected',
+    sessionModeBare: 'Bare claude',
+    sessionModeBareTitle: 'New session with no context and no role system prompt',
   },
   createRequirement: {
     title: 'New requirement',

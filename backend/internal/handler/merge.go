@@ -994,11 +994,11 @@ func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev
 	if codeLivesOnAgent(reqRow) {
 		pushServerID = reqRow.AgentServerID
 	}
-	st, job, newSID, nerr := runner.NewPendingSubTask(reqRow.ID, title, prompt, model, sourceSID, pushServerID)
+	st, job, newSID, nerr := runner.NewPendingSubTask(reqRow.ID, title, prompt, model, sourceSID, pushServerID, "")
 	if nerr != nil {
 		return "", "", nerr
 	}
-	go runner.Run(reqRow, st, job, newSID, sourceSID, prompt, model, roleConfigID, false, true, false)
+	go runner.Run(reqRow, st, job, newSID, sourceSID, prompt, model, roleConfigID, false, true, false, false)
 	return job.ID, st.ID, nil
 }
 

@@ -734,6 +734,12 @@ var alterColumns = []string{
 	// to a remote parent. NULL vs '' is the only signal that distinguishes
 	// "legacy / unspecified" from "explicitly local".
 	`ALTER TABLE sub_tasks ADD COLUMN agent_server_id TEXT`,
+	// Per-row session-threading policy for manually-created sub-tasks. Three
+	// values: "fork" (default — inherit parent coding session via
+	// --fork-session), "with_context" (new session with parent context block
+	// injected), "bare" (new session, no context, no role system prompt).
+	// Default 'fork' preserves the legacy behavior on every existing row.
+	`ALTER TABLE sub_tasks ADD COLUMN session_mode TEXT NOT NULL DEFAULT 'fork'`,
 	// Orchestration summary retry cap: the tick loop's case SummaryError branch
 	// consults this column to decide whether to re-arm a fresh summary goroutine
 	// (attempts < SummaryMaxAttempts) or flip the whole batch to BatchErrored

@@ -293,13 +293,17 @@ func readParentJsonlTurns(worktreePath, sourceSID string) string {
 // fork=false (ContinueSubTask) reuses parent.SessionID via `--resume` so the
 // child continues the previous JSONL in place.
 //
-// freshSession is the 「新会话（含需求上下文）」 mode: skip --resume, inject
-// a ## 父任务上下文 block at the top of the prompt, and stamp the row with
-// an empty source_session_id (the column is preserved, the row just no
-// longer claims to derive from any specific parent session). Currently
-// only StartSubTask honors it; AdjustSubTask / RedoSubTask / ContinueSubTask
-// keep their existing semantics because they explicitly fork off a known
-// parent's session.
+// freshSession is the 「带上下文」 mode: skip --resume, inject a ## 父任务上下文
+// block at the top of the prompt, and stamp the row with an empty
+// source_session_id. Only StartSubTask honors it.
+//
+// bare is the 「新会话（裸 claude）」 mode: skip --resume, skip the context
+// injection, and pass SystemPrompt="" to the CLI so it uses its built-in
+// defaults. Only StartSubTask honors it; AdjustSubTask / RedoSubTask /
+// ContinueSubTask keep their existing semantics because they explicitly
+// continue a known parent sub-task session. bare takes priority over
+// freshSession inside SubTaskRunner.Run so a future caller that passes
+// both still gets the bare experience.
 //
 // See SubTaskRunner.Run for the full lifecycle.
 func (h *WizardHandler) runSubTask(
@@ -314,6 +318,7 @@ func (h *WizardHandler) runSubTask(
 	adjust bool,
 	fork bool,
 	freshSession bool,
+	bare bool,
 ) {
 	if h.subTaskRunner == nil {
 		log.Printf("[sub-task] runner not wired, cannot run %s", st.ID)
@@ -321,7 +326,7 @@ func (h *WizardHandler) runSubTask(
 		job.Finish(1, store.JobError)
 		return
 	}
-	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, adjust, fork, freshSession)
+	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, adjust, fork, freshSession, bare)
 	// (The agent-server routing branch previously inlined here moved to
 	// SubTaskRunner.Run so that every sub-task path — manual children,
 	// orchestrated children, and push/PR sub-tasks — shares the same
@@ -380,12 +385,25 @@ func computeSubTaskCostCents(modelName string, tokens model.SubTaskTokens, claud
 // subprocess spawn is delegated to runner.Run so the runtime stays in one
 // place.
 //
-// freshSession == true opts out of the --resume path entirely (the user
-// saw the 「源会话已失效」 error and chose the 「新会话（含需求上下文）」
-// recovery). The row is still inserted with the parent SID recorded so
-// audit logs stay readable, but the runner overwrites source_session_id
-// to "" when persisting via NewPendingSubTask (the column is not used at
-// run time) — see SubTaskRunner.Run.
+// Session-mode selection — exactly one of three values, persisted on the
+// row's session_mode column (model.SubTaskSessionMode*):
+//
+//   - "fork" (default, when both FreshSession and Bare are false): the
+//     legacy StartSubTask behavior. The child --fork-session's off the
+//     parent coding session and inherits the conversation context.
+//   - "with_context" (FreshSession=true): the 「带上下文」 mode. Skip
+//     --resume, prepend buildParentContext() to the prompt, keep the
+//     executor role system prompt.
+//   - "bare" (Bare=true): the 「新会话（裸 claude）」 mode. Skip --resume,
+//     skip buildParentContext(), pass SystemPrompt="" to the CLI so it
+//     uses its built-in defaults. Bare takes priority over FreshSession
+//     in SubTaskRunner.Run so an old client that sends both still gets
+//     the bare experience.
+//
+// When FreshSession or Bare is true, we still record the parent SID on
+// the row at insert time (audit-trail integrity), but the runner drops
+// --resume and writes back an empty source_session_id before dispatch —
+// see SubTaskRunner.Run for the runtime side.
 func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 	if !h.requireSubTaskSvc(w) {
 		return
@@ -398,7 +416,14 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		// row id from the composer's ModelSelect. Empty lets the runner resolve
 		// it (model→config lookup / parent requirement config / role / active).
 		ClaudeConfigID string `json:"claude_config_id"`
-		FreshSession   bool   `json:"freshSession"`
+		// FreshSession picks the 「带上下文」 session mode. Kept for backward
+		// compatibility with older clients that predate the explicit
+		// session_mode UI; the frontend now sets either freshSession or
+		// bare based on the user's radio choice, never both.
+		FreshSession bool `json:"freshSession"`
+		// Bare picks the 「新会话（裸 claude）」 session mode. Wins over
+		// FreshSession when both are set (defensive — see runner.Run).
+		Bare bool `json:"bare"`
 		// AgentServerID selects the child's execution environment. A pointer so
 		// an omitted field (nil) defaults to the parent requirement's env
 		// (inheritance), while an explicit "" means the user deliberately chose
@@ -420,12 +445,12 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sourceSID := subTaskSourceSID(req, "")
-	// Fresh-session path is the explicit "no parent session needed"
-	// override: even when the requirement has no main-agent session
-	// yet, the user can still start a sub-task with an injected parent
-	// context. The legacy non-fresh path still 409s on missing parent
-	// session so the contract there is unchanged.
-	if sourceSID == "" && !body.FreshSession {
+	// Fresh-session and bare paths are explicit "no parent session needed"
+	// overrides: even when the requirement has no main-agent session yet,
+	// the user can still start a sub-task (with_context) or a bare claude
+	// session (without anything). The legacy path still 409s on missing
+	// parent session so the contract there is unchanged.
+	if sourceSID == "" && !body.FreshSession && !body.Bare {
 		writeError(w, http.StatusConflict, "NO_SESSION",
 			"需求尚未启动 coding 或 design session，无法创建子任务")
 		return
@@ -439,15 +464,28 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Persist the row with sourceSID resolved as usual. When freshSession
-	// is true, we still record the parent SID on the row (audit-trail
-	// integrity), but the runner drops --resume and writes back an empty
+	// Normalize the session mode + log line for the audit trail. Mirrors the
+	// runner's bare > freshSession > fork priority so the column matches
+	// the argv the child actually receives.
+	var sessionMode string
+	switch {
+	case body.Bare:
+		sessionMode = model.SubTaskSessionModeBare
+	case body.FreshSession:
+		sessionMode = model.SubTaskSessionModeWithContext
+	default:
+		sessionMode = model.SubTaskSessionModeFork
+	}
+
+	// Persist the row with sourceSID resolved as usual. When FreshSession
+	// or Bare is true, we still record the parent SID on the row (audit
+	// trail), but the runner drops --resume and writes back an empty
 	// source_session_id — see SubTaskRunner.Run for the runtime side.
 	// Resolve the execution environment: default to the parent requirement's
 	// (inheritance) when the field is omitted, honor an explicit value
 	// (including "" for 本地) otherwise.
 	agentServerID := resolveSubTaskAgentServer(body.AgentServerID, req.AgentServerID)
-	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(id, strings.TrimSpace(body.Title), body.Prompt, body.Model, sourceSID, agentServerID)
+	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(id, strings.TrimSpace(body.Title), body.Prompt, body.Model, sourceSID, agentServerID, sessionMode)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
@@ -457,7 +495,7 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		"sub_task_id": st.ID,
 	})
 
-	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, body.ClaudeConfigID, false, true, body.FreshSession)
+	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, body.ClaudeConfigID, false, true, body.FreshSession, body.Bare)
 }
 
 // AdjustSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/adjust.
@@ -549,7 +587,7 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 	// prompt prefix + system prompt as a fresh sub-task, but the
 	// source_session_id is the parent's session id (not the main agent),
 	// so the conversation inherits the parent's edits.
-	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, "", true, true, false)
+	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, "", true, true, false, false)
 }
 
 // RedoSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/redo.
@@ -644,7 +682,7 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 	// Re-use the shared spawn helper with adjust=false, fork=true and the
 	// ORIGINAL prompt (st.Prompt) so the child re-executes the same task
 	// from a clean fork off the requirement's main-agent session.
-	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false, true, false)
+	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false, true, false, false)
 }
 
 // continueSubTaskPrompt is the fixed Chinese prompt used by ContinueSubTask.
@@ -753,7 +791,7 @@ func (h *WizardHandler) ContinueSubTask(w http.ResponseWriter, r *http.Request) 
 	// Run() with fork=false picks "## 继续执行" as the prompt header so the
 	// child's contextualization stays consistent with the wizard's coding
 	// ContinueCoding path.
-	go h.runSubTask(req, st, job, newSID, sourceSID, continueSubTaskPrompt, body.Model, "", false, false, false)
+	go h.runSubTask(req, st, job, newSID, sourceSID, continueSubTaskPrompt, body.Model, "", false, false, false, false)
 }
 
 // StopSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/stop.

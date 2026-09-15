@@ -53,7 +53,7 @@ func NewSubTaskService(database *db.DB) *SubTaskService {
 // and 0 for manual sub-tasks; pass the batch id and 1..N sequence number for
 // children of tryAutoOrchestrate. OrchestrationQueue's tick uses these to
 // dispatch children in batch_seq order.
-func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID string) (*model.SubTask, error) {
+func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID, sessionMode string) (*model.SubTask, error) {
 	if reqID == "" {
 		return nil, errors.New("requirement_id is required")
 	}
@@ -67,33 +67,37 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 		// the panel — the rest still lives on the prompt.
 		title = capTitle(title, 80)
 	}
+	if sessionMode == "" {
+		sessionMode = model.SubTaskSessionModeFork
+	}
 	id := util.NewID("st")
 	now := time.Now()
 	_, err := s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
 		model, source_session_id, batch_id, batch_seq, source, agent_server_id,
-		created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session_mode, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, title, prompt, model.SubTaskStatusPending,
 		modelDisplay, sourceSID, batchID, batchSeq, model.SubTaskSourceManual, agentServerID,
-		now, now)
+		sessionMode, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert sub_task: %w", err)
 	}
 	return &model.SubTask{
-		ID:              id,
-		RequirementID:   reqID,
-		Title:           title,
-		Prompt:          prompt,
-		Status:          model.SubTaskStatusPending,
-		Model:           modelDisplay,
-		SourceSessionID: sourceSID,
-		BatchID:         batchID,
-		BatchSeq:        batchSeq,
-		Source:          model.SubTaskSourceManual,
-		AgentServerID:   agentServerID,
+		ID:               id,
+		RequirementID:    reqID,
+		Title:            title,
+		Prompt:           prompt,
+		Status:           model.SubTaskStatusPending,
+		Model:            modelDisplay,
+		SourceSessionID:  sourceSID,
+		BatchID:          batchID,
+		BatchSeq:         batchSeq,
+		Source:           model.SubTaskSourceManual,
+		AgentServerID:    agentServerID,
 		AgentServerIDSet: true,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		SessionMode:      sessionMode,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}, nil
 }
 
@@ -103,7 +107,7 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 // rolled back instead of leaving an orphaned batch with no children (or vice
 // versa). The return value is the same as Create; the caller does not need
 // the tx reference again because the caller owns the rollback/commit.
-func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID string) (*model.SubTask, error) {
+func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID, sessionMode string) (*model.SubTask, error) {
 	if tx == nil {
 		return nil, errors.New("tx is required")
 	}
@@ -118,33 +122,37 @@ func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, mode
 	} else {
 		title = capTitle(title, 80)
 	}
+	if sessionMode == "" {
+		sessionMode = model.SubTaskSessionModeFork
+	}
 	id := util.NewID("st")
 	now := time.Now()
 	_, err := tx.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
 		model, source_session_id, batch_id, batch_seq, source, agent_server_id,
-		created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session_mode, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, title, prompt, model.SubTaskStatusPending,
 		modelDisplay, sourceSID, batchID, batchSeq, model.SubTaskSourceAuto, agentServerID,
-		now, now)
+		sessionMode, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert sub_task: %w", err)
 	}
 	return &model.SubTask{
-		ID:              id,
-		RequirementID:   reqID,
-		Title:           title,
-		Prompt:          prompt,
-		Status:          model.SubTaskStatusPending,
-		Model:           modelDisplay,
-		SourceSessionID: sourceSID,
-		BatchID:         batchID,
-		BatchSeq:        batchSeq,
-		Source:          model.SubTaskSourceAuto,
-		AgentServerID:   agentServerID,
+		ID:               id,
+		RequirementID:    reqID,
+		Title:            title,
+		Prompt:           prompt,
+		Status:           model.SubTaskStatusPending,
+		Model:            modelDisplay,
+		SourceSessionID:  sourceSID,
+		BatchID:          batchID,
+		BatchSeq:         batchSeq,
+		Source:           model.SubTaskSourceAuto,
+		AgentServerID:    agentServerID,
 		AgentServerIDSet: true,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		SessionMode:      sessionMode,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}, nil
 }
 
@@ -160,7 +168,8 @@ func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 		cost_cents, duration_seconds,
 		created_at, updated_at, completed_at,
 		batch_id, batch_seq, batch_id_seq_run, source,
-		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), '')
+		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
+		session_mode
 		FROM sub_tasks WHERE requirement_id = ? ORDER BY created_at DESC, id DESC`, reqID)
 	if err != nil {
 		return nil, err
@@ -197,7 +206,8 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 		cost_cents, duration_seconds,
 		created_at, updated_at, completed_at,
 		batch_id, batch_seq, batch_id_seq_run, source,
-		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), '')
+		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
+		session_mode
 		FROM sub_tasks WHERE id = ?`, id)
 	if err != nil {
 		return nil, err
@@ -232,7 +242,8 @@ func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
 		cost_cents, duration_seconds,
 		created_at, updated_at, completed_at,
 		batch_id, batch_seq, batch_id_seq_run, source,
-		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), '')
+		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
+		session_mode
 		FROM sub_tasks WHERE batch_id = ?
 		ORDER BY batch_seq ASC, created_at ASC, id ASC`, batchID)
 	if err != nil {
@@ -413,7 +424,8 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 		cost_cents, duration_seconds,
 		created_at, updated_at, completed_at,
 		batch_id, batch_seq, batch_id_seq_run, source,
-		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), '')
+		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
+		session_mode
 		FROM sub_tasks
 		 WHERE batch_id=? AND status=?
 		 ORDER BY batch_seq ASC, created_at ASC
@@ -561,27 +573,35 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 	// The adjustment stays in the SAME execution environment as the sub-task
 	// it forks from — its edits build on the parent's worktree, so inheriting
 	// parent.AgentServerID keeps the follow-up run coherent with where the
-	// parent's code lives.
+	// parent's code lives. session_mode is inherited too so the card badge
+	// stays consistent across the parent / child pair (an adjustment of a
+	// "bare" sub-task remains "bare", etc.). Falls back to "fork" when the
+	// parent row predates the column (legacy rows scan with DEFAULT).
+	adjustMode := parent.SessionMode
+	if adjustMode == "" {
+		adjustMode = model.SubTaskSessionModeFork
+	}
 	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
-		source_session_id, source, agent_server_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		source_session_id, source, agent_server_id, session_mode, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, adjustTitle, prompt, model.SubTaskStatusPending,
-		parent.SessionID, model.SubTaskSourceManual, parent.AgentServerID, now, now)
+		parent.SessionID, model.SubTaskSourceManual, parent.AgentServerID, adjustMode, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert adjustment sub_task: %w", err)
 	}
 	return &model.SubTask{
-		ID:              id,
-		RequirementID:   reqID,
-		Title:           adjustTitle,
-		Prompt:          prompt,
-		Status:          model.SubTaskStatusPending,
-		SourceSessionID: parent.SessionID,
-		Source:          model.SubTaskSourceManual,
-		AgentServerID:   parent.AgentServerID,
+		ID:               id,
+		RequirementID:    reqID,
+		Title:            adjustTitle,
+		Prompt:           prompt,
+		Status:           model.SubTaskStatusPending,
+		SourceSessionID:  parent.SessionID,
+		Source:           model.SubTaskSourceManual,
+		AgentServerID:    parent.AgentServerID,
 		AgentServerIDSet: true,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		SessionMode:      adjustMode,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	}, nil
 }
 
@@ -857,6 +877,7 @@ func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 		&st.BatchID, &st.BatchSeq, &heartbeat,
 		&st.Source,
 		&agentServerID, &st.AgentServerName,
+		&st.SessionMode,
 	); err != nil {
 		return nil, err
 	}
