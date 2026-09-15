@@ -5,6 +5,21 @@ All notable changes to NovaWorkbench will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0](https://github.com/fengyily/novaworkbench/compare/v0.4.0...v0.5.0) (2026-09-15)
+
+
+### Features
+
+* **sub-task:** 手动启动子任务支持选择会话模式 ([08cb155](https://github.com/fengyily/novaworkbench/commit/08cb1551b2c28f3dd5898d93181978061488a49a))
+
+
+### Bug Fixes
+
+* **release:** bootstrap missing gh-pages branch on first publish ([7aacce3](https://github.com/fengyily/novaworkbench/commit/7aacce3d5df677770a30721a166af8345b517349))
+* **release:** drop unsupported --architecture flag, use per-arch pool subdirs ([c977616](https://github.com/fengyily/novaworkbench/commit/c977616d7311940194947498bd1bedd521bcd717))
+* **release:** expand deb glob outside double quotes in apt publish ([f3f8052](https://github.com/fengyily/novaworkbench/commit/f3f80520ed571ff0ac356af3fd04881797b5775c))
+* **wizard:** route refine-doc / apply-doc to Agent server when stage was bound to one ([a204100](https://github.com/fengyily/novaworkbench/commit/a204100026ea4dcc6ed497c34eb0e2d61e967608))
+
 ## [0.4.0](https://github.com/fengyily/novaworkbench/compare/v0.3.0...v0.4.0) (2026-09-14)
 
 
