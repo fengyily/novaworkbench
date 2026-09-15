@@ -111,14 +111,24 @@ export const components = {
     summaryToastOk: '✅ 汇总已发起',
     summaryToastErrPrefix: '❌',
     summaryToastErrFallback: '汇总发起失败',
-    // 「新会话（含需求上下文）」 mode (P2 fallback for the source-session-
-    // missing bug on Agent Server runs). The radio only renders when the
-    // requirement has agent_server_id OR the latest sub-task artifact
-    // indicates a stale-session failure. Default stays "继续上一会话".
+    // Session-mode radio. Always visible now (was previously gated by
+    // Agent-server / stale-artifact conditions). Three options let the
+    // user pick the conversation-threading policy at manual sub-task
+    // create time:
+    //   - resume      继承主任务会话 — fork the parent coding session.
+    //   - withContext 带上下文（新会话） — new session, parent context injected.
+    //   - bare        新会话（裸 claude） — bare claude, CLI built-in defaults.
+    // The `freshHint` survives as the "why is the radio non-default" banner
+    // shown only when the latest sub-task artifact looks like the legacy
+    // missing-jsonl bug (so a follow-up click pre-selects with_context).
     sessionMode: {
       label: '会话模式',
-      resume: '继续上一会话',
-      fresh: '新会话（含需求上下文）',
+      resume: '继承主任务会话',
+      resumeHint: 'fork 主开发 session id，子任务延续主任务的对话上下文。',
+      withContext: '带上下文（新会话）',
+      withContextHint: '新建会话，但把需求 / 技术方案 / 父会话近期内容拼到 prompt 里。',
+      bare: '新会话（裸 claude）',
+      bareHint: '什么都不带，也不带角色系统提示词，直接用 claude 默认。',
       freshHint: '上次会话在 Agent 服务器上找不到，建议用「新会话」模式（会自动带上需求 + 设计文档 + 上一会话最近 10 轮作为上下文）',
     },
   },
@@ -192,6 +202,13 @@ export const components = {
     sourceAutoTitle: '由主 Agent 自动派发',
     sourceManual: '手动',
     sourceManualTitle: '由用户手动创建',
+    // Per-card session-mode badge (only renders for non-default modes;
+    // 'fork' is intentionally hidden). Labels are short so the meta line
+    // stays one row, titles hold the full explanation on hover.
+    sessionModeWithContext: '带上下文',
+    sessionModeWithContextTitle: '新建会话，但带上了需求 / 设计方案 / 父会话近期内容',
+    sessionModeBare: '裸 claude',
+    sessionModeBareTitle: '新建会话，不带上下文也不带角色系统提示词',
   },
   createRequirement: {
     title: '新需求',
