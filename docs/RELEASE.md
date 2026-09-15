@@ -97,10 +97,12 @@ VERSION=v0.3.0 make build
 
 ## apt 仓库发布
 
-除 tar.gz / GHCR 镜像外，release 流水线还会同时把 nova 推送到 apt 仓库，让
-Debian / Ubuntu 用户能直接 `apt install nova`。本仓库使用
-[goreleaser/nfpm](https://nfpm.goreleaser.com/) 打包 + 同仓库 `gh-pages` 分支
-自承载的 apt 源（`[trusted=yes]`，免 GPG 签名）。
+除 tar.gz / GHCR 镜像外，release 流水线还会同时把 nova 推送到独立的 apt 仓库
+[`fengyily/linux-repo`](https://github.com/fengyily/linux-repo)，让 Debian / Ubuntu
+用户能直接 `apt install nova`。这与 [shield-cli](https://github.com/fengyily/shield-cli)
+的发行形态对齐：apt 源走独立仓库、本仓库不出现 gh-pages 噪声。本仓库使用
+[goreleaser/nfpm](https://nfpm.goreleaser.com/) 打包，apt 源用 `[trusted=yes]`
+免 GPG 签名。
 
 ### 自动流程
 
@@ -113,21 +115,26 @@ Debian / Ubuntu 用户能直接 `apt install nova`。本仓库使用
    - deb 包 contents 只把二进制落到 `/usr/bin/nova`，**不**含 postinst 建用户 / 注册服务
      ——这两步由 `nova install` 子命令在用户机器上显式执行，保持审计与回滚的可控。
 3. 把 `dist/debs/*.deb` 追加到 `gh release create` 的附件列表，与 tar.gz / zip 一起发布。
-4. clone 同仓库 `gh-pages` 分支到临时目录，把 `.deb` 复制到 `pool/main/n/nova/`，
-   用 `apt-ftparchive packages` 为每个 arch 生成 `dists/stable/main/binary-<arch>/Packages(.gz)`，
-   用 `apt-ftparchive release` 生成 `dists/stable/Release`，最后 commit & push。
+4. clone `fengyily/linux-repo` 默认分支到临时目录，把 `.deb` 复制到
+   `pool/main/n/nova/binary-<arch>/`，用 `apt-ftparchive packages` 为每个 arch 生成
+   `dists/stable/main/binary-<arch>/Packages(.gz)`，用 `apt-ftparchive release` 生成
+   `dists/stable/Release`，最后 commit & push。
 
 ### 仓库前置设置
 
-- **Settings → Pages**：Build from branch 选择 `gh-pages` / `(root)`，让仓库根目录
-  直接作为 apt 源根（路径前缀 `/apt`）。首次发布前必须手动启用一次，否则
-  `https://<owner>.github.io/novaworkbench/apt/dists/stable/Release` 会 404。
-- **Permissions**：workflow 已声明 `contents: write`，同仓库 push `gh-pages`
-  不需要额外 PAT。`secrets.APT_REPO_TOKEN` 仅在你想把 apt 仓库搬到独立 repo
-  时使用（fallback 到 `GITHUB_TOKEN`）。
-- **README 中的 `<PAGES_HOST>`**：根据实际 Pages 域名替换占位（默认
-  `https://<owner>.github.io/novaworkbench`），用户执行
-  `echo "deb [trusted=yes] https://<PAGES_HOST>/apt stable main" | sudo tee /etc/apt/sources.list.d/nova.list` 即可。
+- **apt 仓库侧**：[`fengyily/linux-repo`](https://github.com/fengyily/linux-repo)
+  是独立仓库，初次推送时 GitHub Actions 会自动 `git init --orphan main` 并 push。
+  - **Settings → Pages**：Build from branch 选择 `main` / `(root)`，让仓库根目录
+    直接作为 apt 源根。首次发布前必须手动启用一次，否则
+    `https://fengyily.github.io/linux-repo/dists/stable/Release` 会 404。
+- **凭据**：在仓库 Settings → Secrets and variables → Actions 里新建
+  `APT_REPO_TOKEN`，粘贴一个对 `fengyily/linux-repo` 有 **contents: write**
+  权限的 PAT（classic PAT 勾选 `repo` 即可；fine-grained PAT 需要 `Contents: Read and
+  write`）。`APT_REPO_TOKEN` 是**必需**的——linux-repo 与本仓库不是同一个 repo，
+  workflow 默认的 `GITHUB_TOKEN` 没有跨仓库写权限。
+- **README 中的 apt 源**：用户直接执行
+  `echo "deb [trusted=yes] https://fengyily.github.io/linux-repo/ stable main" | sudo tee /etc/apt/sources.list.d/nova.list`
+  即可，不再需要替换占位。
 
 ### 迁移到正式 GPG 签名源（可选）
 
@@ -151,13 +158,13 @@ apt-releaser 子 key，签名而非认证）。
 # 1. release.yml 跑完后检查 GitHub Release 附件
 gh release view vX.Y.Z --json assets --jq '.assets[].name' | grep '\.deb$'
 
-# 2. 检查 gh-pages 分支的 apt 目录结构
-git clone -b gh-pages --depth 1 https://github.com/<owner>/novaworkbench
-ls novaworkbench/pool/main/n/nova/
-ls novaworkbench/dists/stable/main/binary-amd64/
+# 2. 检查 linux-repo 的 apt 目录结构
+git clone --depth 1 https://github.com/fengyily/linux-repo
+ls linux-repo/pool/main/n/nova/
+ls linux-repo/dists/stable/main/binary-amd64/
 
 # 3. 端到端（在一台干净的 Debian/Ubuntu 容器里）
-echo "deb [trusted=yes] https://<owner>.github.io/novaworkbench/apt stable main" \
+echo "deb [trusted=yes] https://fengyily.github.io/linux-repo/ stable main" \
   | sudo tee /etc/apt/sources.list.d/nova.list
 sudo apt update
 sudo apt install nova
@@ -171,5 +178,5 @@ which nova && nova --help
 - `frontend/src/components/Layout.tsx` 当前硬编码 `v0.1.0` 字符串，与 build-time
   ldflags 不联动。是否要从 `/api/health.version` 拉取动态版本号是独立的 UI 改进
   （涉及 i18n key 与 React 状态），不在本次 Release Please 集成范围内。
-- 当前 apt 源走 `gh-pages` 分支根目录（路径 `/apt`），如果未来 Pages 改用作其他用途，
-  需要把 apt 目录独立到 gh-pages 的子目录或者改用独立仓库 `apt.novaworkbench.dev`。
+- apt 源走独立仓库 `fengyily/linux-repo`，首次发布前需要在该仓库 Settings → Pages
+  启用 `main` / `(root)`；否则 GitHub Pages 404。本仓库不再依赖 `gh-pages` 分支。

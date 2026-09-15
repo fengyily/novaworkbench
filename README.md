@@ -164,10 +164,10 @@ NovaWorkbench 把"本地代码仓库 + AI 协作"装进一个单二进制应用�
 
 ### 1. 添加 apt 源
 
-将 `<PAGES_HOST>` 替换为仓库实际的 GitHub Pages 域名（默认 `https://<owner>.github.io/novaworkbench`，也可使用自定义域如 `apt.novaworkbench.dev`）。首次配置后只需执行一次。
+apt 仓库托管在独立仓库 [`fengyily/linux-repo`](https://github.com/fengyily/linux-repo)，通过 GitHub Pages（`https://fengyily.github.io/linux-repo/`）对外提供。直接复制下面这段即可：
 
 ```bash
-echo "deb [trusted=yes] https://<PAGES_HOST>/apt stable main" \
+echo "deb [trusted=yes] https://fengyily.github.io/linux-repo/ stable main" \
   | sudo tee /etc/apt/sources.list.d/nova.list
 sudo apt update
 ```
