@@ -17,6 +17,7 @@ NovaWorkbench 把"本地代码仓库 + AI 协作"装进一个单二进制应用�
 - [背景：解决什么问题](#背景解决什么问题)
 - [核心功能](#核心功能)
 - [技术架构](#技术架构)
+- [apt 安装（Debian / Ubuntu）](#apt-安装debian--ubuntu)
 - [下载预编译二进制](#下载预编译二进制)
 - [快速启动](#快速启动)
 - [使用指南](#使用指南)
@@ -154,6 +155,51 @@ NovaWorkbench 把"本地代码仓库 + AI 协作"装进一个单二进制应用�
 - **SSE 全双工流**：所有 AI 长任务（wizard / review / runner / report）都走 `text/event-stream`，前端用 `ReadableStream` 手动解析。
 - **JobStore 共享**：三类后台任务（Wizard coding / Runner / Review）共用一个 `store.NewJobStore(50)`，SSE 形状统一。
 - **三角色 stage-gate**：analyst / architect / developer 各自独立会话（`--resume --fork-session`），状态由用户手动推进，不让 AI 自己宣布完成。
+
+---
+
+## apt 安装（Debian / Ubuntu）
+
+推荐 Linux 服务器使用 apt 一键安装与自启动。NovaWorkbench 以非 root 的 `nova` 用户运行 systemd 服务。
+
+### 1. 添加 apt 源
+
+将 `<PAGES_HOST>` 替换为仓库实际的 GitHub Pages 域名（默认 `https://<owner>.github.io/novaworkbench`，也可使用自定义域如 `apt.novaworkbench.dev`）。首次配置后只需执行一次。
+
+```bash
+echo "deb [trusted=yes] https://<PAGES_HOST>/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/nova.list
+sudo apt update
+```
+
+> `[trusted=yes]` 表示跳过 GPG 签名校验（apt 仓库使用 `apt-ftparchive` 生成的明文 `Release`，未做 GPG 签名）。如需正式签名源，见 [docs/RELEASE.md → apt 仓库发布](docs/RELEASE.md#apt-仓库发布) 的迁移说明。
+
+### 2. 安装 nova
+
+```bash
+sudo apt install nova
+```
+
+deb 包会把 `nova` 二进制落到 `/usr/bin/nova`，但**不会**自动创建运行用户、不会自动注册 systemd 服务——这两步刻意保持独立，方便审计与回滚。
+
+### 3. 创建 nova 用户（首次部署需要）
+
+```bash
+sudo useradd --create-home --home-dir /home/nova --shell /bin/bash nova
+```
+
+只需要执行一次。该用户的 `~/.novaworkbench/` 会作为 nova 的数据目录（SQLite / secret key / claude 会话）。
+
+### 4. 注册 systemd 服务并开机自启
+
+```bash
+sudo nova install
+# 卸载：sudo nova uninstall
+```
+
+`nova install` 会写入 `/etc/systemd/system/nova.service`（`Type=simple` / `User=nova` / `Restart=always`），执行 `systemctl daemon-reload` + `enable --now`。完成后访问 `http://<host>:9527/`。日志：`journalctl -u nova -f`。
+
+> 默认端口 `9527` 是非特权端口，不需要额外权限。如果改用 < 1024 端口（如 80 / 443），需要给 systemd unit 加 `AmbientCapabilities=CAP_NET_BIND_SERVICE` 并以 root 运行（README 不展开，可直接编辑 `/etc/systemd/system/nova.service` 后 `systemctl daemon-reload`）。
 
 ---
 
