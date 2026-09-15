@@ -319,14 +319,22 @@ jobs:
           mkdir -p dists/stable/main/binary-amd64
           mkdir -p dists/stable/main/binary-arm64
 
-          cp -v "$GITHUB_WORKSPACE/dist/debs/"*.deb pool/main/n/nova/
-
-          # Per-arch Packages + Packages.gz. apt-ftparchive picks up every
-          # .deb in the named directory and emits a stanza per package.
+          # Per-arch pool subdirectories. The previous implementation called
+          # `apt-ftparchive packages --architecture "$ARCH" pool/...` but
+          # that flag is not supported by the apt-ftparchive shipped on
+          # ubuntu-latest (it only accepts `-a/--arch` for setting the
+          # metadata Architecture field, not for filtering, and rejects
+          # `--architecture` outright: "E: Command line option
+          # --architecture is not understood in combination with the other
+          # options"). Splitting debs into per-arch subdirs lets
+          # `apt-ftparchive packages <path>` scan only that arch and emit
+          # a clean Packages file without any filter flag — works across
+          # every apt-utils version we ship on.
           for ARCH in amd64 arm64; do
-            apt-ftparchive packages \
-              --architecture "$ARCH" \
-              pool/main/n/nova/ \
+            ARCH_POOL="pool/main/n/nova/binary-${ARCH}"
+            mkdir -p "$ARCH_POOL"
+            cp -v "$GITHUB_WORKSPACE/dist/debs/nova_*_${ARCH}.deb" "$ARCH_POOL/"
+            apt-ftparchive packages "$ARCH_POOL" \
               > "dists/stable/main/binary-${ARCH}/Packages"
             gzip -9kf "dists/stable/main/binary-${ARCH}/Packages"
           done
