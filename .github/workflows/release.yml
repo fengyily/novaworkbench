@@ -333,7 +333,18 @@ jobs:
           for ARCH in amd64 arm64; do
             ARCH_POOL="pool/main/n/nova/binary-${ARCH}"
             mkdir -p "$ARCH_POOL"
-            cp -v "$GITHUB_WORKSPACE/dist/debs/nova_*_${ARCH}.deb" "$ARCH_POOL/"
+            # Glob MUST live outside double quotes for bash to expand it.
+            # The previous `cp -v "$GITHUB_WORKSPACE/dist/debs/nova_*_${ARCH}.deb"`
+            # passed `nova_*_${ARCH}.deb` as a literal string (no file with
+            # `*` in its name exists), so cp exited 1 even though the build
+            # step had produced the matching `nova_<ver>_<arch>.deb`. A for
+            # loop expands the glob at iteration time; the `[ -f ]` guard
+            # makes a non-matching literal pattern a clean no-op instead of
+            # tripping `set -e` on cp's nonzero exit.
+            for deb in "$GITHUB_WORKSPACE"/dist/debs/nova_*_"${ARCH}".deb; do
+              [ -f "$deb" ] || continue
+              cp -v "$deb" "$ARCH_POOL/"
+            done
             apt-ftparchive packages "$ARCH_POOL" \
               > "dists/stable/main/binary-${ARCH}/Packages"
             gzip -9kf "dists/stable/main/binary-${ARCH}/Packages"
