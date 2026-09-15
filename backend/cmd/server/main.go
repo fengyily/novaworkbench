@@ -21,12 +21,35 @@ import (
 	"github.com/novaworkbench/backend/internal/scheduler"
 	"github.com/novaworkbench/backend/internal/secret"
 	"github.com/novaworkbench/backend/internal/service"
+	"github.com/novaworkbench/backend/internal/servicemgr"
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/web"
 )
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+	// Subcommand interception. Must run BEFORE flag.Parse() so the server's
+	// own flags (-migrate / -port) keep their familiar shape; install,
+	// uninstall, and version each carry their own flag.FlagSet internally so
+	// they never collide with the server's flags.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "install":
+			if err := servicemgr.RunInstall(os.Args[2:]); err != nil {
+				log.Fatalf("nova install: %v", err)
+			}
+			return
+		case "uninstall":
+			if err := servicemgr.RunUninstall(os.Args[2:]); err != nil {
+				log.Fatalf("nova uninstall: %v", err)
+			}
+			return
+		case "version":
+			servicemgr.RunVersion()
+			return
+		}
+	}
 
 	migrateFlag := flag.Bool("migrate", false,
 		"one-shot data migration: copy all data from a SQLite file into the configured target database (NOVA_DB_DRIVER/NOVA_DB_DSN or dbconfig.json), then exit")

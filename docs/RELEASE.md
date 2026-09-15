@@ -93,8 +93,83 @@ VERSION=v0.3.0 make build
 ./dist/nova   # /api/health 报告 v0.3.0
 ```
 
+---
+
+## apt 仓库发布
+
+除 tar.gz / GHCR 镜像外，release 流水线还会同时把 nova 推送到 apt 仓库，让
+Debian / Ubuntu 用户能直接 `apt install nova`。本仓库使用
+[goreleaser/nfpm](https://nfpm.goreleaser.com/) 打包 + 同仓库 `gh-pages` 分支
+自承载的 apt 源（`[trusted=yes]`，免 GPG 签名）。
+
+### 自动流程
+
+`release.yml` 在 5 平台二进制构建之后、归档之前会做：
+
+1. 下载 [nfpm](https://github.com/goreleaser/nfpm/releases) 二进制到 `/usr/local/bin/nfpm`。
+2. 循环 `amd64` / `arm64`，以 [`packaging/nfpm.yaml`](../packaging/nfpm.yaml) 为模板
+   生成 `nova_<version>_amd64.deb` / `nova_<version>_arm64.deb`。
+   - `${VERSION}` / `${ARCH}` 由 CI 注入，与二进制 ldflags 同源，避免版本漂移。
+   - deb 包 contents 只把二进制落到 `/usr/bin/nova`，**不**含 postinst 建用户 / 注册服务
+     ——这两步由 `nova install` 子命令在用户机器上显式执行，保持审计与回滚的可控。
+3. 把 `dist/debs/*.deb` 追加到 `gh release create` 的附件列表，与 tar.gz / zip 一起发布。
+4. clone 同仓库 `gh-pages` 分支到临时目录，把 `.deb` 复制到 `pool/main/n/nova/`，
+   用 `apt-ftparchive packages` 为每个 arch 生成 `dists/stable/main/binary-<arch>/Packages(.gz)`，
+   用 `apt-ftparchive release` 生成 `dists/stable/Release`，最后 commit & push。
+
+### 仓库前置设置
+
+- **Settings → Pages**：Build from branch 选择 `gh-pages` / `(root)`，让仓库根目录
+  直接作为 apt 源根（路径前缀 `/apt`）。首次发布前必须手动启用一次，否则
+  `https://<owner>.github.io/novaworkbench/apt/dists/stable/Release` 会 404。
+- **Permissions**：workflow 已声明 `contents: write`，同仓库 push `gh-pages`
+  不需要额外 PAT。`secrets.APT_REPO_TOKEN` 仅在你想把 apt 仓库搬到独立 repo
+  时使用（fallback 到 `GITHUB_TOKEN`）。
+- **README 中的 `<PAGES_HOST>`**：根据实际 Pages 域名替换占位（默认
+  `https://<owner>.github.io/novaworkbench`），用户执行
+  `echo "deb [trusted=yes] https://<PAGES_HOST>/apt stable main" | sudo tee /etc/apt/sources.list.d/nova.list` 即可。
+
+### 迁移到正式 GPG 签名源（可选）
+
+当前为简化首版，使用 `[trusted=yes]` + 明文 `Release`，不签名。生产环境若需要
+真正的 apt 信任链，改造点：
+
+- 用户侧源文件去掉 `[trusted=yes]`，改成默认（要求签名）。
+- CI 侧：用 `reprepro` / `freight` 取代 `apt-ftparchive`，或继续用 `apt-ftparchive`
+  但额外生成 `dists/stable/InRelease`（明文 + 摘要）与 `dists/stable/Release.gpg`
+  （签名版）。
+- 在 CI 加一个 `gpg --batch --import` + `gpg -abs` 步骤，私钥通过
+  `secrets.APT_GPG_PRIVATE_KEY` / `secrets.APT_GPG_PASSPHRASE` 注入。
+- `release.yml` 同步新增对应的签名 step。
+
+代价是首次构建时间增加 5–10 秒，且需要妥善保管 GPG 私钥（建议用独立的
+apt-releaser 子 key，签名而非认证）。
+
+### 验证
+
+```bash
+# 1. release.yml 跑完后检查 GitHub Release 附件
+gh release view vX.Y.Z --json assets --jq '.assets[].name' | grep '\.deb$'
+
+# 2. 检查 gh-pages 分支的 apt 目录结构
+git clone -b gh-pages --depth 1 https://github.com/<owner>/novaworkbench
+ls novaworkbench/pool/main/n/nova/
+ls novaworkbench/dists/stable/main/binary-amd64/
+
+# 3. 端到端（在一台干净的 Debian/Ubuntu 容器里）
+echo "deb [trusted=yes] https://<owner>.github.io/novaworkbench/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/nova.list
+sudo apt update
+sudo apt install nova
+which nova && nova --help
+```
+
+---
+
 ## 已知遗留
 
 - `frontend/src/components/Layout.tsx` 当前硬编码 `v0.1.0` 字符串，与 build-time
   ldflags 不联动。是否要从 `/api/health.version` 拉取动态版本号是独立的 UI 改进
   （涉及 i18n key 与 React 状态），不在本次 Release Please 集成范围内。
+- 当前 apt 源走 `gh-pages` 分支根目录（路径 `/apt`），如果未来 Pages 改用作其他用途，
+  需要把 apt 目录独立到 gh-pages 的子目录或者改用独立仓库 `apt.novaworkbench.dev`。

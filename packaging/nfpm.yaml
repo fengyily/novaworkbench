@@ -1,0 +1,57 @@
+# nfpm configuration for the NovaWorkbench apt repository.
+#
+# This file is consumed by the "Build .deb packages" step in
+# .github/workflows/release.yml. Two values are substituted at packaging time:
+#
+#   ${VERSION}  — the release tag (e.g. "0.2.0", WITHOUT the leading "v";
+#                 ldflags strip it via the existing version resolver). Injected
+#                 as the nfpm --env VERSION=... flag below.
+#   ${ARCH}     — "amd64" or "arm64". Injected as --arch "$ARCH" per loop
+#                 iteration.
+#
+# Per release-please convention, version numbers must be sortable and contain
+# only [0-9A-Za-z.+~:-] — we strip the leading "v" because Debian's package
+# version field does not allow it. The CI step that invokes nfpm does the
+# stripping.
+#
+# We deliberately do NOT define a postinst / prerm script: the requirement
+# says "create nova user" and "register systemd service" must be explicit
+# user steps (`sudo useradd ... nova` followed by `sudo nova install`). The
+# deb package only places the binary at /usr/bin/nova. See README "apt 安装"
+# for the documented install flow.
+
+name: nova
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: utils
+priority: optional
+maintainer: NovaWorkbench <noreply@novaworkbench.dev>
+description: |
+  NovaWorkbench — 本地优先、AI 原生的开发者工作台。
+
+  安装后请参考 README「apt 安装」一节：
+    1. sudo useradd --create-home --home-dir /home/nova --shell /bin/bash nova
+    2. sudo nova install
+  之后服务会以 nova 用户身份监听 http://<host>:9527/。
+homepage: https://github.com/novaworkbench/novaworkbench
+license: MIT
+
+# File placement. The src path is relative to the working directory nfpm is
+# invoked from — the CI step runs nfpm from the repo root, so `dist/...`
+# resolves there. Local dry-runs should be invoked from the repo root as
+# well (`nfpm package --config packaging/nfpm.yaml ...`).
+#
+# `expand: true` is REQUIRED for env-var interpolation (${ARCH}) to apply
+# to file contents — without it nfpm treats src as a literal string and
+# glob fails with "no matching files".
+contents:
+  - src: dist/novaworkbench-linux-${ARCH}
+    dst: /usr/bin/nova
+    expand: true
+
+# /usr/bin/nova must be executable by all users (apt will refuse the install
+# otherwise). We hand the file the canonical 0755 mode; umask 0077 only
+# affects directories created by the package scripts (none here), and keeps
+# any future addition of /etc/nova/* scoped to root.
+umask: 0077
