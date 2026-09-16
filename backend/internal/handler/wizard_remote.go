@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -189,7 +190,7 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		if oerr != nil || originURL == "" {
 			return claudeStreamOutcome{errMsg: "项目未配置 git 远程仓库，无法在 Agent 服务器执行。请先在项目设置中配置 origin，或在启动开发时选择「本地仓库同步」。" + errString(oerr)}
 		}
-		tr = originTransport{originURL: originURL}
+		tr = originTransport{originURL: originURL, projectID: in.reqRow.ProjectID, projectSvc: h.projectSvc}
 	}
 	baseRepo := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/base"
 	wtPath := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID
@@ -975,7 +976,9 @@ type codeTransport interface {
 // PrepareRemote / CollectResult are a verbatim extraction of the previous
 // inline Step 2 / Step 7 — zero behavior change for the origin path.
 type originTransport struct {
-	originURL string // resolved via project.OriginURL before dispatch
+	originURL  string // resolved via project.OriginURL before dispatch
+	projectID  string // for stamping projects.sync_status after the SSH fetch
+	projectSvc *service.ProjectService
 }
 
 func (t originTransport) PrepareRemote(ctx context.Context, client *gossh.Client, in *remoteCodingInput, baseRepo, wtPath, branch, baseBranch string) error {
@@ -992,8 +995,20 @@ func (t originTransport) PrepareRemote(ctx context.Context, client *gossh.Client
 	// the worktree strategies below branch off the latest upstream. Best-effort:
 	// any failure is logged but does not abort (the fallback strategies cover a
 	// missing origin/<baseBranch>).
-	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin "+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
+	fetchExit, _ := client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin "+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
 	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree prune", "", nil, &jobWriter{job: in.job}, nil)
+	// Persist the SSH-side fetch outcome onto the local projects.sync_status so
+	// the UI ProjectDetail badge reflects what just happened on the agent
+	// host. logf may be nil on background paths — guard accordingly.
+	if t.projectSvc != nil && t.projectID != "" {
+		if fetchExit == 0 {
+			in.job.Append(store.LogLine{Type: "phase", Content: "✅ 已同步 origin/" + baseBranch})
+			t.projectSvc.UpdateSyncStatus(t.projectID, service.SyncStatusOK, "")
+		} else {
+			in.job.Append(store.LogLine{Type: "phase", Content: "⚠️ 同步失败，使用本地快照继续（agent 主机 fetch 退出码 " + strconv.Itoa(fetchExit) + "）"})
+			t.projectSvc.UpdateSyncStatus(t.projectID, service.SyncStatusError, "")
+		}
+	}
 
 	if !client.Exists(wtPath) {
 		// Strategy 1: branch off origin/<baseBranch> (freshly fetched above).

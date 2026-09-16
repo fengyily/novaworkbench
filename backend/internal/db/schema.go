@@ -760,6 +760,21 @@ var alterColumns = []string{
 	`ALTER TABLE projects ADD COLUMN commit_lang_override TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN commit_lang_source TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN commit_lang_updated_at DATETIME`,
+	// Repo-sync trail for the "方案设计前同步仓库到工作目录" feature. last_synced_at
+	// is the timestamp of the most recent clone/fetch attempt (best-effort, so a
+	// failure still stamps the column). last_synced_commit is the short SHA of
+	// origin/<defaultBranch> after the last successful sync (empty string when
+	// never synced). sync_status is the terminal state of the most recent sync
+	// attempt: 'idle' = never synced, 'ok' = last attempt succeeded, 'error' =
+	// last attempt failed (used by the wizard's "best-effort, don't block"
+	// policy to surface ⚠️ fallback hints via SSE phase events). MySQL
+	// TEXT DEFAULT '' stays as-is (column name is not reserved and fixupSchema
+	// leaves it alone); Postgres DATETIME→TIMESTAMP by fixupSchema.
+	// isIgnorableDDLError swallows "duplicate column" so these ALTERs are safe
+	// to ship before all DBs have caught up.
+	`ALTER TABLE projects ADD COLUMN last_synced_at DATETIME`,
+	`ALTER TABLE projects ADD COLUMN last_synced_commit TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE projects ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'idle'`,
 	// Requirement tags: free-form short labels (e.g. "阻塞", "外部依赖", "v2") that
 	// users can attach to a requirement for ad-hoc categorization beyond the
 	// fixed-status / priority / kind axis. Stored as a JSON array string ("[]" when

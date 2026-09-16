@@ -87,18 +87,29 @@ func (e *ScheduledExecutor) RunScheduledCoding(ctx context.Context, p scheduler.
 	if err != nil {
 		return "", fmt.Errorf("加载需求失败: %w", err)
 	}
-	switch req.Status {
-	case "designed":
+	// === 主动状态转移 ============================================
+	// 进入 coding 阶段时主动把 requirement 推到 'developing'。修复
+	// req_30080193f1c95255 类型的 bug——之前 `case "designed"` 分支
+	// 里的翻写在某些时序窗口里被跳过 /覆盖，导致 status 卡在 'designed'，
+	// scheduled_tasks.status='succeeded' 但用户看到的 status chip 还
+	// 是「方案完成」。把 UpdateStatus 提到 switch 之前，保证两条合法
+	// 进入路径（designed、draft+skip_design）都能写一次 'developing'；
+	// 后续 switch 仅做合法性校验，不写状态。
+	if req.Status == "designed" || (req.Status == "draft" && req.SkipDesign) {
 		if _, err := e.h.reqSvc.UpdateStatus(req.ID, "developing"); err != nil {
 			return "", fmt.Errorf("状态转移失败: %w", err)
 		}
-	case "draft":
-		if !req.SkipDesign {
-			return "", fmt.Errorf("需求未生成技术方案，无法开始开发")
+		// 重新读 req，让后续逻辑看到最新 status。
+		if req, err = e.h.reqSvc.Get(req.ID); err != nil {
+			return "", fmt.Errorf("重新加载需求失败: %w", err)
 		}
-		// skip-design 直接放行（start-coding 自身会主动 UpdateStatus→developing）
-	case "developing":
-		// 放行；等同「重新开发」
+	}
+	switch req.Status {
+	case "designed", "developing":
+		// 已统一在前面翻过 developing；放行。
+	case "draft":
+		// 上一段没命中（SkipDesign=false）→ 拒绝。
+		return "", fmt.Errorf("需求未生成技术方案，无法开始开发")
 	case "analyzing", "designing":
 		return "", fmt.Errorf("需求处于 %s 阶段，请等待该阶段完成", req.Status)
 	case "done", "archived":
@@ -283,12 +294,15 @@ func (e *ScheduledExecutor) chainedDesignCallback(reqID, schedID string, p sched
 				log.Printf("[scheduler-executor] merged scheduled task %s design stage failed job=%s", schedID, designJobID)
 				return
 			}
-			// Auto-promote past the manual 方案完成 gate so the coding
-			// stage's status gate ("designed" → "developing") can proceed.
-			// RunScheduledCoding itself handles "designing" → "designed" in
-			// its status switch, so this is a belt-and-suspenders pass that
-			// also serves as the "design stage's outcome is recognized"
-			// signal for any UI reading requirements.status.
+			// UX-compatible status stamp: write 'designed' here so the UI
+			// (status chip / statusChips.ts:designed → "📐 方案完成") reflects
+			// the architect stage's outcome BEFORE the coding stage starts
+			// its own background job. The actual state-machine driver is
+			// RunScheduledCoding (modified per req_30080193f1c95255 post-mortem):
+			// it now proactively writes 'developing' before the switch, so this
+			// stamp is *not* the gate that allows coding to fire — it's a
+			// display-only side effect, NOT belt-and-suspenders. Removing it
+			// is safe; keeping it improves the user-visible status timeline.
 			if _, err := e.h.reqSvc.UpdateStatus(reqID, "designed"); err != nil {
 				log.Printf("[scheduler-executor] promote to designed for %s failed: %v", reqID, err)
 			}

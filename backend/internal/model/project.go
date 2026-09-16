@@ -40,6 +40,18 @@ type Project struct {
 	CommitLangOverride string     `json:"commit_lang_override,omitempty"`
 	CommitLangSource   string     `json:"commit_lang_source,omitempty"`
 	CommitLangUpdatedAt *time.Time `json:"commit_lang_updated_at,omitempty"`
+	// Repo-sync trail for the "方案设计前同步仓库到工作目录" wizard prologue.
+	// LastSyncedAt is the timestamp of the most recent clone/fetch attempt
+	// (best-effort — failure still stamps the column). LastSyncedCommit is the
+	// short SHA of origin/<defaultBranch> after the last successful sync
+	// (empty until first sync). SyncStatus is the terminal state of the most
+	// recent sync attempt: 'idle' = never synced, 'ok' = success, 'error' =
+	// last attempt failed (see service.SyncStatusIdle/OK/Error constants).
+	// Surfaced via GET /api/projects/{id} so the ProjectDetail badge and the
+	// architect-design "24h stale" hint can read it without a new endpoint.
+	LastSyncedAt     *time.Time `json:"last_synced_at,omitempty"`
+	LastSyncedCommit string     `json:"last_synced_commit"`
+	SyncStatus       string     `json:"sync_status"` // idle | ok | error
 }
 
 // AddProjectRequest is the body of POST /api/projects.

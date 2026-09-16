@@ -156,6 +156,15 @@ export interface Project {
   commit_lang_override?: string;
   commit_lang_source?: string;
   commit_lang_updated_at?: string;
+  // Wizard pre-stage repo sync: stamped by the backend the moment it clones
+  // or fetches origin before architect-design runs. sync_status reflects the
+  // last attempt (idle = never synced, ok = last sync succeeded, error =
+  // last sync failed and the wizard continued with the local snapshot).
+  // frontend surfaces it on the ProjectDetail overview and as a non-blocking
+  // 24h stale hint on the architect entry.
+  last_synced_at?: string;
+  last_synced_commit?: string;
+  sync_status?: 'idle' | 'ok' | 'error';
 }
 
 export interface DashboardData {
@@ -1847,6 +1856,13 @@ export interface ScheduledTask {
   created_at: string;
   updated_at: string;
   executed_at: string | null;
+  // requirement_status: the LIVE status of the linked requirement at query
+  // time, populated by the backend's LEFT JOIN. Surfaced as a chip next to
+  // the requirement title in /schedules so users can disambiguate
+  // "定时任务 succeeded" vs "需求还停在 draft" (req_30080193f1c95255
+  // post-mortem). Empty string when the linked requirement was CASCADE-
+  // deleted — the page hides the chip in that case.
+  requirement_status?: string;
 }
 
 export interface CreateScheduleReq {

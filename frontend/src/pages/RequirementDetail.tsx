@@ -83,6 +83,23 @@ interface DesignData {
 //
 // Kept outside the component so it isn't recreated on every render — this is
 // called from a useEffect that fires on req.id / req.design_docs changes.
+// isSyncStale — frontend mirror of the "sync > 24h" rule the architect-design
+// stage honours before spawning Claude. The hard-coded threshold is
+// intentional (design explicitly does NOT expose it as a setting): users
+// who haven't generated a design in 24h get a non-blocking hint telling
+// them the system is about to auto-sync (the wizard backend runs
+// EnsureClonedAndSynced via resolveWorkDirLogged before claude spawns, so
+// there is NO manual pull step — the hint just frames the upcoming
+// 🔄/✅ lines in the SSE stream). error / missing → stale.
+function isSyncStale(p?: Project | null): boolean {
+  if (!p) return false;
+  if (p.sync_status === 'error') return true;
+  if (!p.last_synced_at) return true;
+  const t = new Date(p.last_synced_at).getTime();
+  if (Number.isNaN(t)) return true;
+  return Date.now() - t > 24 * 3600 * 1000;
+}
+
 function isLongDesignDoc(raw: string): boolean {
   if (!raw || !raw.trim()) return false;
   let body = raw;
@@ -1531,6 +1548,21 @@ export default function RequirementDetail() {
     // (option not used) the panel stays hidden.
     setKnowledgeItems([]);
     setKnowledgeEmpty(false);
+
+    // Non-blocking 24h stale-sync hint. Surfaces a single inline line in the
+    // JobStream panel before the backend's sync phase events arrive, so the
+    // user understands why the wizard is doing extra git work. The backend
+    // runs EnsureClonedAndSynced (wizard_common.go::resolveWorkDirLogged) for
+    // every architect-design invocation, so this hint is purely advisory —
+    // it never gates the run and never asks the user to pull manually.
+    if (isSyncStale(project)) {
+      // eslint-disable-next-line no-console
+      console.warn('[architect-design] sync stale', project?.last_synced_at, project?.sync_status);
+      setDesignLines((prev) => [
+        ...prev,
+        { type: 'message', content: t('projects.detail.syncStaleHint') },
+      ]);
+    }
 
     try {
       const res = await authedFetch(`${API_BASE}/api/wizard/architect-design`, {
