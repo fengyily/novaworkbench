@@ -52,6 +52,17 @@ type Project struct {
 	LastSyncedAt     *time.Time `json:"last_synced_at,omitempty"`
 	LastSyncedCommit string     `json:"last_synced_commit"`
 	SyncStatus       string     `json:"sync_status"` // idle | ok | error
+	// Denormalized counters surfaced on the /projects list page so the UI can
+	// render "需求数 / Issue 数 / 想法数" without a per-row GROUP BY aggregate.
+	// Each column is INTEGER NOT NULL DEFAULT 0 — newly inserted rows get 0 from
+	// the column default (so Add doesn't need to specify them in its INSERT),
+	// and the schema.go ALTER migrates existing rows to 0 (no backfill, per
+	// the requirement "不做实时统计"). The columns are intentionally NOT
+	// maintained in RequirementService.Create / UpdateKind — the count is a
+	// snapshot at row creation only.
+	RequirementCount int `json:"requirement_count"`
+	IssueCount       int `json:"issue_count"`
+	IdeaCount        int `json:"idea_count"`
 }
 
 // AddProjectRequest is the body of POST /api/projects.

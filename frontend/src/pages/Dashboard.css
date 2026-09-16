@@ -148,6 +148,13 @@
   color: var(--color-primary);
 }
 
+/* Stored requirement / issue / idea counters on the projects table */
+.project-table td.count-cell {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+}
+
 .quick-actions {
   display: flex;
   gap: 12px;
