@@ -788,6 +788,49 @@ export default function RequirementDetail() {
     loadPendingSchedules();
   }, [loadPendingSchedules]);
 
+  // ── Active scheduled-task detection ──
+  // 后台 scheduler 派发的 JobStore job_id 是 user-invisible 的（HTTP
+  // /api/wizard/start-coding 路径才在响应里返回 job_id，scheduler 路径不返
+  // 回）。所以前端必须主动 poll /api/schedules?requirement_id=X&status=running
+  // 拿到 running 的 scheduled task 和它持有的 job_id，然后用 streamJob 订
+  // 阅 SSE——与手动「🚀 开始开发」走完全相同的入口。
+  //
+  // 同时也读 requirements.coding_job_id（HTTP 路径写、scheduler 路径也写
+  // ——见 schedule_executor.go RunScheduledCoding prologue + wizard_coding.go
+  // StartCoding 的 UpdateCodingJob）。两条路径取并集：scheduled task 优先
+  // （它持有真实的 JobStore job id），若 scheduled task 还没出现但
+  // coding_job_id 已有（比如 scheduler 调度慢一拍、HTTP 启动但 coding job
+  // 还没在 JobStore 注册完），就用 coding_job_id 兜底。
+  //
+  // 这是 req_57a1397b01268480 的 post-mortem 修复——之前完全没这条链路，
+  // 定时任务跑完用户在需求详情页看不到任何进度。
+  const [activeSchedJobId, setActiveSchedJobId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!req?.id) {
+      setActiveSchedJobId(null);
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const [running, fresh] = await Promise.all([
+          schedulesApi.list({ requirement_id: req.id, status: 'running' }).catch(() => []),
+          requirementsApi.get(req.id).catch(() => null),
+        ]);
+        if (cancelled) return;
+        const fromSched = (running ?? []).find((s) => !!s.job_id)?.job_id || '';
+        const fromReq = (fresh?.coding_job_id) || '';
+        const next = fromSched || fromReq || '';
+        setActiveSchedJobId((prev) => (prev === next ? prev : next || null));
+      } catch {
+        /* transient blip — keep previous */
+      }
+    };
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [req?.id]);
+
   // Seed the selector from the requirement's persisted development source so
   // a re-run (re-develop / start-development after a restart) defaults to the
   // SAME Agent server the code already lives on, instead of silently
@@ -1894,6 +1937,28 @@ export default function RequirementDetail() {
     );
   }, [id, refresh, fetchOrchBatch, showSummaryDoneToast, t]);
 
+  // ── Auto-attach to scheduler-dispatched coding SSE ──
+  // activeSchedJobId 变化时调用 streamJob 订阅 SSE（与手动「🚀 开始开发」
+  // 走完全相同的入口）。streamJob 自己会管理 esRef，所以多次 mount/unmount
+  // 是安全的——上一个 handle 在 streamJob 入口处就被 esRef.current.close()
+  // 关掉了，不会泄漏。
+  //
+  // 唯一关键约束：手动场景下 streamJob 也会被调用（用户在 wizard 面板点
+  // 开始开发），两路可能撞车。我们用 activeSchedJobIdRef 做幂等：如果
+  // streamJob 已经在订阅这个 job_id 了就不重复 attach。手动新启动会换
+  // 一个新 job_id，所以也不会被这条 ref 误屏蔽。
+  //
+  // 必须放在 streamJob useCallback 声明之后——TS2448 不允许在闭包内引用
+  // 还未声明的 const binding，所以不能跟前面的 activeSchedJobId poll 钩子
+  // 放在一起（那个钩子定义在 ~830 行，streamJob 在 ~1820 行）。
+  const activeSchedJobIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeSchedJobId) return;
+    if (activeSchedJobIdRef.current === activeSchedJobId) return;
+    activeSchedJobIdRef.current = activeSchedJobId;
+    streamJob(activeSchedJobId, { keepDone: false });
+  }, [activeSchedJobId, streamJob]);
+
   const doStartCoding = async (bName: string, bBase: string, useKnowledge: boolean, splitTasks: boolean, autoPushPR: boolean) => {
     if (!req || !project || !id) return;
     setCoding(true);
@@ -2368,7 +2433,7 @@ export default function RequirementDetail() {
 // on even when this page hasn't loaded the latest persisted pointer yet.
   const claudeWorking = coding || designing || analystWorking || refineWorking ||
     !!req.analysis_job_id || !!req.design_job_id || !!req.apply_job_id ||
-    activeReqIds.has(req.id);
+    !!req.coding_job_id || activeReqIds.has(req.id) || !!activeSchedJobId;
   // Per-stage working flags drive the model-switch disable (task requirement:
   // Claude working — model switch disabled).
   const architectWorking = designing || !!req.design_job_id;

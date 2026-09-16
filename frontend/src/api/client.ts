@@ -600,6 +600,12 @@ export interface Requirement {
   // user can jump back to the originating idea.
   source_requirement_id?: string;
   design_session_id: string; design_job_id: string; analysis_job_id: string; apply_job_id: string; coding_session_id: string;
+  // coding_job_id: persisted JobStore job id for the running start-coding /
+  // adjust-coding / continue-coding job, written by wizard_coding.go (HTTP
+  // path) and schedule_executor.go (scheduler path). The detail page reads
+  // it back after a refresh to attach to the live SSE stream when the
+  // scheduled-task poll hasn't surfaced a job_id yet (cold start race).
+  coding_job_id?: string;
   skip_analysis: boolean;
   skip_design: boolean;
   branch_name?: string;
