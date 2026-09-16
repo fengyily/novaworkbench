@@ -182,21 +182,17 @@ export const components = {
     cancel: '取消',
     adjustBusy: '启动中…',
     adjustSubmit: '🚀 追加调整',
-    // Redo (in-place): re-run the SAME prompt on the SAME sub_tasks row.
-    // forked from the requirement's main coding session with a brand-new
-    // claude session id; the row count never grows on a redo.
-    redoHint: '在原任务基础上重新执行（不创建新记录）',
+    // Redo: 重新执行该任务，新行作为子节点挂在原任务下（不再原地更新）。
+    // 走一个全新的 claude session id，parent_subtask_id 指回原行。
+    redoHint: '重新执行该任务，新任务作为子节点显示',
     redoModelLabel: '重做模型',
     redoSubmit: '🚀 开始重做',
     errAdjust: '追加调整失败',
     errRedo: '仅失败的任务可重做',
-    // Continue (in-place, --resume): pick up the same claude session id
-    // where it left off and finish the work. Available on error AND on
-    // stopped rows (a user who hit Stop and then realised they wanted
-    // more progress hits Continue rather than Redo — Resume is cheaper
-    // and inherits whatever partial edits the previous run made).
+    // Continue: 在原会话上 --resume 续接，新行作为子节点挂在原任务下。
+    // 可在 error / stopped 状态下触发。Resume 比 Redo 便宜，能继承上次运行的中间产物。
     continueToggle: '继续',
-    continueHint: '在原会话上 --resume 续接，不创建新记录',
+    continueHint: '在原会话上 --resume 续接，新任务作为子节点显示',
     continueSubmit: '▶ 继续执行',
     continueBusy: '续接中…',
     errContinue: '该子任务无法继续',
@@ -225,6 +221,10 @@ export const components = {
     // badge and the picker read as the same option.
     sessionModeBare: '新会话',
     sessionModeBareTitle: '新建会话，不带上下文也不带角色系统提示词，使用 claude 默认',
+    // Tree 折叠/徽标文案：父卡片展示子任务数量并允许展开/收起整棵子树。
+    treeExpand: '展开后续操作',
+    treeCollapse: '收起后续操作',
+    childCount: '{{count}} 个后续操作',
   },
   createRequirement: {
     title: '新需求',

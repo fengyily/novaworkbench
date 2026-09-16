@@ -53,7 +53,11 @@ func NewSubTaskService(database *db.DB) *SubTaskService {
 // and 0 for manual sub-tasks; pass the batch id and 1..N sequence number for
 // children of tryAutoOrchestrate. OrchestrationQueue's tick uses these to
 // dispatch children in batch_seq order.
-func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID, sessionMode string) (*model.SubTask, error) {
+//
+// parentSubtaskID links this row under a parent sub_task when it was created
+// by Adjust / Redo / Continue. Pass "" for roots (manual StartSubTask / auto-
+// orchestrated children). Drives SubTaskPanel's recursive tree rendering.
+func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID, sessionMode, parentSubtaskID string) (*model.SubTask, error) {
 	if reqID == "" {
 		return nil, errors.New("requirement_id is required")
 	}
@@ -72,11 +76,11 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 	}
 	id := util.NewID("st")
 	now := time.Now()
-	_, err := s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
+	_, err := s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, parent_subtask_id, title, prompt, status,
 		model, source_session_id, batch_id, batch_seq, source, agent_server_id,
 		session_mode, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, reqID, title, prompt, model.SubTaskStatusPending,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, reqID, parentSubtaskID, title, prompt, model.SubTaskStatusPending,
 		modelDisplay, sourceSID, batchID, batchSeq, model.SubTaskSourceManual, agentServerID,
 		sessionMode, now, now)
 	if err != nil {
@@ -85,6 +89,7 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 	return &model.SubTask{
 		ID:               id,
 		RequirementID:    reqID,
+		ParentSubtaskID:  parentSubtaskID,
 		Title:            title,
 		Prompt:           prompt,
 		Status:           model.SubTaskStatusPending,
@@ -107,7 +112,7 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 // rolled back instead of leaving an orphaned batch with no children (or vice
 // versa). The return value is the same as Create; the caller does not need
 // the tx reference again because the caller owns the rollback/commit.
-func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID, sessionMode string) (*model.SubTask, error) {
+func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID, sessionMode, parentSubtaskID string) (*model.SubTask, error) {
 	if tx == nil {
 		return nil, errors.New("tx is required")
 	}
@@ -127,11 +132,11 @@ func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, mode
 	}
 	id := util.NewID("st")
 	now := time.Now()
-	_, err := tx.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
+	_, err := tx.Exec(`INSERT INTO sub_tasks (id, requirement_id, parent_subtask_id, title, prompt, status,
 		model, source_session_id, batch_id, batch_seq, source, agent_server_id,
 		session_mode, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, reqID, title, prompt, model.SubTaskStatusPending,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, reqID, parentSubtaskID, title, prompt, model.SubTaskStatusPending,
 		modelDisplay, sourceSID, batchID, batchSeq, model.SubTaskSourceAuto, agentServerID,
 		sessionMode, now, now)
 	if err != nil {
@@ -140,6 +145,7 @@ func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, mode
 	return &model.SubTask{
 		ID:               id,
 		RequirementID:    reqID,
+		ParentSubtaskID:  parentSubtaskID,
 		Title:            title,
 		Prompt:           prompt,
 		Status:           model.SubTaskStatusPending,
@@ -162,7 +168,7 @@ func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, mode
 // rows with the same created_at (millisecond ties possible across DBs)
 // keep a stable order.
 func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
-	rows, err := s.db.Query(`SELECT id, requirement_id, title, prompt, status,
+	rows, err := s.db.Query(`SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
 		session_id, source_session_id, job_id, artifact, model, claude_config_id,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
@@ -200,7 +206,7 @@ func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 // matches the URL parameter happens in the handler, not here (this service
 // stays a thin SQL wrapper).
 func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
-	rows, err := s.db.Query(`SELECT id, requirement_id, title, prompt, status,
+	rows, err := s.db.Query(`SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
 		session_id, source_session_id, job_id, artifact, model, claude_config_id,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
@@ -236,7 +242,7 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 // children when computing summary inputs. Returns an empty slice when the
 // batch has no rows — never nil.
 func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
-	rows, err := s.db.Query(`SELECT id, requirement_id, title, prompt, status,
+	rows, err := s.db.Query(`SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
 		session_id, source_session_id, job_id, artifact, model, claude_config_id,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
@@ -382,7 +388,7 @@ func (s *SubTaskService) CountTerminalByBatch(batchID string) (done, errored int
 // ReArmErroredForRetry flips this batch's failed children back to 'pending' so
 // the next tick re-dispatches them, and returns how many rows were re-armed.
 // This is the automatic half of "失败重做"; the manual half is the card's
-// 重做 / 继续 buttons (RedoReset / ContinueReset), which stay available
+// 重做 / 继续 buttons (RedoAsNew / ContinueAsNew), which stay available
 // regardless of the setting.
 //
 // Guards, in the WHERE clause:
@@ -397,10 +403,11 @@ func (s *SubTaskService) CountTerminalByBatch(batchID string) (done, errored int
 //     model.SummaryMaxAttempts. retryMax ≤ 0 short-circuits
 //     to a no-op without touching the DB.
 //
-// The reset mirrors RedoReset's "clean in-place re-run" semantics — artifact,
-// job_id and completed_at are cleared, and batch_id_seq_run is nulled so the
-// stale heartbeat from the failed run can't make RecoverInterrupted treat the
-// re-armed row as an orphan on the next boot. The caller (the orchestration
+// The reset mirrors the manual 重做 / 继续 buttons' "clean re-run" semantics —
+// artifact, job_id and completed_at are cleared, and batch_id_seq_run is
+// nulled so the stale heartbeat from the failed run can't make
+// RecoverInterrupted treat the re-armed row as an orphan on the next boot.
+// The caller (the orchestration
 // tick) must run this BEFORE CountTerminalByBatch: a re-armed row leaves the
 // 'error' bucket, so counting first would flip the batch into summarizing a
 // tick before the retry ever got dispatched.
@@ -463,7 +470,7 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 	if n == 0 {
 		return nil, false, nil
 	}
-	rows, err := s.db.Query(`SELECT id, requirement_id, title, prompt, status,
+	rows, err := s.db.Query(`SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
 		session_id, source_session_id, job_id, artifact, model, claude_config_id,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
@@ -626,10 +633,10 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 	if adjustMode == "" {
 		adjustMode = model.SubTaskSessionModeFork
 	}
-	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
+	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, parent_subtask_id, title, prompt, status,
 		source_session_id, source, agent_server_id, session_mode, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, reqID, adjustTitle, prompt, model.SubTaskStatusPending,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, reqID, parent.ID, adjustTitle, prompt, model.SubTaskStatusPending,
 		parent.SessionID, model.SubTaskSourceManual, parent.AgentServerID, adjustMode, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert adjustment sub_task: %w", err)
@@ -637,6 +644,7 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 	return &model.SubTask{
 		ID:               id,
 		RequirementID:    reqID,
+		ParentSubtaskID:  parent.ID,
 		Title:            adjustTitle,
 		Prompt:           prompt,
 		Status:           model.SubTaskStatusPending,
@@ -650,96 +658,128 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 	}, nil
 }
 
-// RedoReset re-arms an existing sub_task row in place for a fresh
-// "redo" run — replaces the previous "create new row on redo" behavior
-// (see git history for the deleted SubTaskService.Redo). Keeps the same
-// row id so the SubTaskPanel never grows a "重做: 重做: …" list explosion;
-// the handler then mints a new claude session id (util.NewUUID) and the
-// runner forks the parent's source session for a clean retry.
+// RedoAsNew creates a fresh sub_task row that hangs under the failed parent
+// as a child — replaces the prior in-place RedoReset so the SubTaskPanel can
+// render Redo / Continue / Adjust as a recursive tree. The original failed
+// row stays untouched (status remains 'error') so its card still tells the
+// user "this attempt failed" while the new child carries the fresh attempt.
 //
-// Cleared on reset: status (→ pending), job_id, artifact, completed_at,
-// and all four token counters / cost / duration columns. Kept on reset:
-// id, requirement_id, title, prompt, source, batch_id, batch_seq,
-// session_id, source_session_id (handler overwrites these right after via
-// UpdateSession), and created_at. modelOverride, when non-empty, overrides
-// the model column so the user can switch models on retry; the empty
-// string keeps whatever model the row already carries.
+// Inheritance from the parent:
+//   - prompt + requirement_id (same work item)
+//   - source_session_id (runner uses this as the --fork-session source so
+//     the redo inherits the same project context as the failed attempt)
+//   - agent_server_id, session_mode (execution environment stays coherent)
+//   - model (when modelOverride is empty)
 //
-// Returns the row as a freshly-read *model.SubTask so the handler can
-// pass it straight into the spawn helper without a second Get call.
-func (s *SubTaskService) RedoReset(subTaskID, modelOverride string) (*model.SubTask, error) {
-	if subTaskID == "" {
-		return nil, errors.New("sub_task_id is required")
+// The new row's session_id is left empty — the wizard handler / SubTaskRunner
+// will mint a fresh claude session id via UpdateSession before spawning, the
+// same way a brand-new manual sub-task is initialized.
+func (s *SubTaskService) RedoAsNew(parentID, modelOverride string) (*model.SubTask, error) {
+	if parentID == "" {
+		return nil, errors.New("parent sub_task id is required")
 	}
-	if _, err := s.Get(subTaskID); err != nil {
-		return nil, fmt.Errorf("load sub_task: %w", err)
+	parent, err := s.Get(parentID)
+	if err != nil {
+		return nil, fmt.Errorf("load parent sub_task: %w", err)
 	}
+	modelName := modelOverride
+	if modelName == "" {
+		modelName = parent.Model
+	}
+	title := capTitle("重做: "+parent.Title, 80)
+	id := util.NewID("st")
 	now := time.Now()
-	if modelOverride != "" {
-		if _, err := s.db.Exec(`UPDATE sub_tasks SET
-			status=?, job_id='', artifact='', completed_at=NULL,
-			input_tokens=0, output_tokens=0,
-			cache_creation_tokens=0, cache_read_tokens=0,
-			cost_cents=0, duration_seconds=0,
-			model=?, updated_at=? WHERE id=?`,
-			model.SubTaskStatusPending, modelOverride, now, subTaskID); err != nil {
-			return nil, fmt.Errorf("reset sub_task: %w", err)
-		}
-	} else {
-		if _, err := s.db.Exec(`UPDATE sub_tasks SET
-			status=?, job_id='', artifact='', completed_at=NULL,
-			input_tokens=0, output_tokens=0,
-			cache_creation_tokens=0, cache_read_tokens=0,
-			cost_cents=0, duration_seconds=0,
-			updated_at=? WHERE id=?`,
-			model.SubTaskStatusPending, now, subTaskID); err != nil {
-			return nil, fmt.Errorf("reset sub_task: %w", err)
-		}
+	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, parent_subtask_id, title, prompt, status,
+		model, source_session_id, batch_id, batch_seq, source, agent_server_id,
+		session_mode, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, parent.RequirementID, parent.ID, title, parent.Prompt, model.SubTaskStatusPending,
+		modelName, parent.SessionID, "", 0, model.SubTaskSourceManual, parent.AgentServerID,
+		parent.SessionMode, now, now)
+	if err != nil {
+		return nil, fmt.Errorf("insert redo sub_task: %w", err)
 	}
-	return s.Get(subTaskID)
+	return &model.SubTask{
+		ID:               id,
+		RequirementID:    parent.RequirementID,
+		ParentSubtaskID:  parent.ID,
+		Title:            title,
+		Prompt:           parent.Prompt,
+		Status:           model.SubTaskStatusPending,
+		Model:            modelName,
+		SourceSessionID:  parent.SessionID,
+		BatchID:          "",
+		BatchSeq:         0,
+		Source:           model.SubTaskSourceManual,
+		AgentServerID:    parent.AgentServerID,
+		AgentServerIDSet: true,
+		SessionMode:      parent.SessionMode,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}, nil
 }
 
-// ContinueReset is the Continue-path twin of RedoReset: it re-arms the row
-// in place, but preserves the existing Artifact (the previous run's
-// report stays visible until the new run lands its terminal artifact).
-// session_id and source_session_id are NOT touched — Continue reuses the
-// parent's session via --resume <parent.session_id> --fork-session=false,
-// so the new run inherits the full conversation context from where the
-// old run stopped (whether that was a mid-run crash, a manual Stop, or a
-// graceful error exit).
+// ContinueAsNew is the Continue-path twin of RedoAsNew — it inserts a fresh
+// child row that hangs under the parent (status must be 'error' or 'stopped')
+// instead of re-arming the parent in place. The handler's runner then spawns
+// the new attempt with `--resume <parent.SessionID>`, so the conversation
+// continues from where the old run stopped (whether that was a manual Stop,
+// a graceful error exit, or a mid-run crash). The parent's session_id and
+// session_mode are inherited verbatim so the resume path lands in the same
+// context the parent left behind.
 //
-// Like RedoReset, this returns the freshly-read row so the handler can
-// hand it to the spawn helper without a second Get call.
-func (s *SubTaskService) ContinueReset(subTaskID, modelOverride string) (*model.SubTask, error) {
-	if subTaskID == "" {
-		return nil, errors.New("sub_task_id is required")
+// Like RedoAsNew, the original row keeps its terminal status so the SubTaskPanel
+// shows the failure history alongside the new attempt.
+func (s *SubTaskService) ContinueAsNew(parentID, modelOverride string) (*model.SubTask, error) {
+	if parentID == "" {
+		return nil, errors.New("parent sub_task id is required")
 	}
-	if _, err := s.Get(subTaskID); err != nil {
-		return nil, fmt.Errorf("load sub_task: %w", err)
+	parent, err := s.Get(parentID)
+	if err != nil {
+		return nil, fmt.Errorf("load parent sub_task: %w", err)
 	}
+	if parent.Status != model.SubTaskStatusError && parent.Status != model.SubTaskStatusStopped {
+		return nil, fmt.Errorf("continue requires parent in error or stopped, got %q", parent.Status)
+	}
+	modelName := modelOverride
+	if modelName == "" {
+		modelName = parent.Model
+	}
+	continueMode := parent.SessionMode
+	if continueMode == "" {
+		continueMode = model.SubTaskSessionModeFork
+	}
+	title := capTitle("继续: "+parent.Title, 80)
+	id := util.NewID("st")
 	now := time.Now()
-	if modelOverride != "" {
-		if _, err := s.db.Exec(`UPDATE sub_tasks SET
-			status=?, job_id='', completed_at=NULL,
-			input_tokens=0, output_tokens=0,
-			cache_creation_tokens=0, cache_read_tokens=0,
-			cost_cents=0, duration_seconds=0,
-			model=?, updated_at=? WHERE id=?`,
-			model.SubTaskStatusPending, modelOverride, now, subTaskID); err != nil {
-			return nil, fmt.Errorf("reset sub_task for continue: %w", err)
-		}
-	} else {
-		if _, err := s.db.Exec(`UPDATE sub_tasks SET
-			status=?, job_id='', completed_at=NULL,
-			input_tokens=0, output_tokens=0,
-			cache_creation_tokens=0, cache_read_tokens=0,
-			cost_cents=0, duration_seconds=0,
-			updated_at=? WHERE id=?`,
-			model.SubTaskStatusPending, now, subTaskID); err != nil {
-			return nil, fmt.Errorf("reset sub_task for continue: %w", err)
-		}
+	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, parent_subtask_id, title, prompt, status,
+		model, source_session_id, batch_id, batch_seq, source, agent_server_id,
+		session_mode, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, parent.RequirementID, parent.ID, title, parent.Prompt, model.SubTaskStatusPending,
+		modelName, parent.SessionID, "", 0, model.SubTaskSourceManual, parent.AgentServerID,
+		continueMode, now, now)
+	if err != nil {
+		return nil, fmt.Errorf("insert continue sub_task: %w", err)
 	}
-	return s.Get(subTaskID)
+	return &model.SubTask{
+		ID:               id,
+		RequirementID:    parent.RequirementID,
+		ParentSubtaskID:  parent.ID,
+		Title:            title,
+		Prompt:           parent.Prompt,
+		Status:           model.SubTaskStatusPending,
+		Model:            modelName,
+		SourceSessionID:  parent.SessionID,
+		BatchID:          "",
+		BatchSeq:         0,
+		Source:           model.SubTaskSourceManual,
+		AgentServerID:    parent.AgentServerID,
+		AgentServerIDSet: true,
+		SessionMode:      continueMode,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}, nil
 }
 
 // MarkStopped flips a running sub_task into the "stopped" terminal state
@@ -868,11 +908,19 @@ func (s *SubTaskService) RecoverInterrupted() (int64, error) {
 	// Note: stopped rows don't match the WHERE clause (status IN
 	// running/pending), so a stopped row stays stopped — the user pressed
 	// Stop on purpose, that's not a backend-restart signal.
+	//
+	// Child rows (parent_subtask_id != '') are intentionally excluded:
+	// a Redo / Continue / Adjust child that errored on backend crash should
+	// be explicitly retried by the user against its parent (via Redo /
+	// Continue on the parent card), NOT silently auto-recovered here —
+	// otherwise the tree's history semantics get muddled (the parent
+	// would no longer be the visible source of truth for "what failed").
 	res, err := s.db.Exec(`UPDATE sub_tasks
 		SET status=?, artifact=CASE WHEN artifact != '' THEN artifact ELSE ? END,
 		    completed_at=?, updated_at=?
 		WHERE status IN (?, ?)
-		  AND (batch_id = '' OR batch_id IS NULL)`,
+		  AND (batch_id = '' OR batch_id IS NULL)
+		  AND (parent_subtask_id = '' OR parent_subtask_id IS NULL)`,
 		model.SubTaskStatusError,
 		"❌ 服务在子任务执行期间重启，任务中断。请通过「重新拆分」或手动启动重新执行。",
 		now, now,
@@ -915,7 +963,7 @@ func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 	var heartbeat sql.NullTime
 	var agentServerID sql.NullString
 	if err := rows.Scan(
-		&st.ID, &st.RequirementID, &st.Title, &st.Prompt, &st.Status,
+		&st.ID, &st.RequirementID, &st.ParentSubtaskID, &st.Title, &st.Prompt, &st.Status,
 		&st.SessionID, &st.SourceSessionID, &st.JobID, &st.Artifact, &st.Model, &st.ClaudeConfigID,
 		&st.InputTokens, &st.OutputTokens, &st.CacheCreationTokens, &st.CacheReadTokens,
 		&st.CostCents, &st.DurationSeconds,

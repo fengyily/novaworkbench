@@ -485,7 +485,7 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 	// (inheritance) when the field is omitted, honor an explicit value
 	// (including "" for 本地) otherwise.
 	agentServerID := resolveSubTaskAgentServer(body.AgentServerID, req.AgentServerID)
-	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(id, strings.TrimSpace(body.Title), body.Prompt, body.Model, sourceSID, agentServerID, sessionMode)
+	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(id, strings.TrimSpace(body.Title), body.Prompt, body.Model, sourceSID, agentServerID, sessionMode, "")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
@@ -502,11 +502,15 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 //
 // Body: { "prompt": "...", "model"?: "..." }
 //
-// Creates a NEW sub_task row that forks the parent sub_task's session id —
-// letting the user push follow-up instructions into the same implementation
-// thread without re-forking from the (much older) main-agent session. The
-// prompt is the only new instruction; the rest of the context (project
-// files, design docs, prior code edits) is inherited automatically.
+// Creates a NEW child sub_task row (parent_subtask_id = parent.ID) that
+// forks the parent sub_task's session id — letting the user push follow-up
+// instructions into the same implementation thread without re-forking from
+// the (much older) main-agent session. The child row carries the
+// "调整: <parent title>" title and inherits the parent's agent_server_id /
+// session_mode / source_session_id. The prompt is the only new instruction;
+// the rest of the context (project files, design docs, prior code edits) is
+// inherited automatically. The SubTaskPanel renders the child nested under
+// the parent card, sorted by created_at DESC.
 func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 	if !h.requireSubTaskSvc(w) {
 		return
@@ -594,20 +598,24 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 //
 // Body: { "model"?: "..." }
 //
-// Re-runs a FAILED sub-task on its EXISTING row (no new sub_tasks row
-// inserted) with a fresh session id and a fresh JobStore job. The user
-// keeps seeing the same card; only the status flips back to running and
-// the artifact is overwritten when the new run finishes.
+// Re-runs a FAILED sub-task by INSERTing a NEW child sub_tasks row (via
+// SubTaskService.RedoAsNew) that points back at the failed parent via
+// parent_subtask_id. The failed row is preserved (its status stays
+// 'error') so the SubTaskPanel can render the redo as a nested child
+// rather than overwriting the parent's history. The child gets a brand-new
+// id, a brand-new session id, and a brand-new JobStore job.
 //
-// Session-derivation strategy: the redo forks the requirement's main-agent
-// session (coding_session_id → design_session_id fallback), NOT the
-// parent's own session — so the new run starts from a clean slate, free of
-// the partial / broken state the failed run left behind on the parent's
-// JSONL. This mirrors the original RedoSubTask semantics ("从 source session
-// 干净 fork 再跑") but without INSERTing a child row.
+// Session-derivation strategy: the child forks the requirement's main-agent
+// session (coding_session_id → design_session_id fallback), NOT the parent's
+// own session — so the new run starts from a clean slate, free of the
+// partial / broken state the failed run left behind on the parent's JSONL.
+// This mirrors the original RedoSubTask semantics ("从 source session 干净
+// fork 再跑") but the redo is now materialized as a child row instead of
+// mutating the parent in place.
 //
 // The optional model override lets the user switch models on the retry;
-// empty falls back to the developer role default inside runSubTask.
+// empty falls back to the parent row's stored model (then to the developer
+// role default inside runSubTask).
 func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 	if !h.requireSubTaskSvc(w) {
 		return
@@ -652,10 +660,11 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// In-place reset: clears artifact / job_id / token counters / cost /
-	// duration / completed_at and flips status back to pending. The row id
-	// (and prompt / title / source_session_id / source) are preserved.
-	st, err := h.subTaskSvc.RedoReset(sid, body.Model)
+	// Create a NEW child row via RedoAsNew. The failed parent's status stays
+	// 'error' (preserved on the parent row); the child gets its own id, a
+	// fresh session id, and parent_subtask_id pointing back at the failed
+	// row so SubTaskPanel renders it as a nested child.
+	st, err := h.subTaskSvc.RedoAsNew(sid, body.Model)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
@@ -696,17 +705,21 @@ const continueSubTaskPrompt = "继续完成之前的子任务。请先检查当�
 //
 // Body: { "model"?: "..." }
 //
-// In-place resume of an interrupted / failed / stopped sub-task on the SAME
-// session id (no fork, no new JSONL). Compared to RedoSubTask:
+// Resumes an interrupted / failed / stopped sub-task by INSERTing a NEW
+// child sub_tasks row (via SubTaskService.ContinueAsNew) that points back
+// at the original via parent_subtask_id. The parent row is preserved (its
+// status stays 'error' or 'stopped') so the SubTaskPanel can render the
+// resume as a nested child. Compared to RedoSubTask:
 //
 //   - Redo forks the requirement's main-agent session (clean start, new
 //     session id, --fork-session).
-//   - Continue reuses parent.SessionID and runs --resume <parent.SessionID>
-//     so the child continues the same JSONL the previous attempt left off in,
-//     inheriting the conversation history it had built up. The previous
-//     artifact stays visible on the row until the new run's Finish overwrites
-//     it, so a user who refreshes mid-run sees the partial report instead of
-//     a blank card.
+//   - Continue reuses parent.SessionID on the NEW child row and runs
+//     --resume <parent.SessionID> so the child continues the same JSONL
+//     the previous attempt left off in, inheriting the conversation
+//     history it had built up. The parent's artifact stays visible on the
+//     parent card until the new run's Finish overwrites the child's
+//     artifact, so a user who refreshes mid-run sees the partial report on
+//     the parent card instead of a blank child card.
 //
 // Trigger conditions: parent.Status must be one of {error, stopped}.
 // running/pending/done are NOT continue-eligible:
@@ -756,12 +769,12 @@ func (h *WizardHandler) ContinueSubTask(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// In-place reset that PRESERVES the existing artifact (so a refresh mid-
-	// run still shows the previous report). Token / cost / duration /
-	// completed_at / job_id are cleared so the SubTaskCard header re-renders
-	// from zero; model is updated only when the caller passed a non-empty
-	// override.
-	st, err := h.subTaskSvc.ContinueReset(sid, body.Model)
+	// Create a NEW child row via ContinueAsNew. The parent row is preserved
+	// with its 'error' / 'stopped' status intact; the child inherits the
+	// parent's session_id (via the UpdateSession call below) and
+	// source_session_id (stamped by ContinueAsNew), so --resume picks up
+	// the same JSONL.
+	st, err := h.subTaskSvc.ContinueAsNew(sid, body.Model)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return

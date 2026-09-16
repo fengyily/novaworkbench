@@ -10,8 +10,9 @@ import (
 // seedSubTaskRowForRedo is the redo-specific helper: it inserts a parent
 // sub_tasks row with status='error' (the only state RedoSubTask allows
 // the redo from) and a pre-existing session_id / source_session_id /
-// job_id / artifact so we can prove RedoReset clears the right columns
-// and keeps the others intact.
+// job_id / artifact so we can prove RedoAsNew leaves the parent row
+// untouched and produces a fresh child row that links back via
+// parent_subtask_id.
 func seedSubTaskRowForRedo(t *testing.T, d *db.DB, id, status, sessionID, sourceSID, jobID, artifact string) {
 	t.Helper()
 	if _, err := d.Exec(
@@ -36,7 +37,9 @@ func seedSubTaskRowForRedo(t *testing.T, d *db.DB, id, status, sessionID, source
 }
 
 // countSubTasks returns the row count for a single requirement. Used by
-// TestRedoReset_NoNewRow to prove RedoReset doesn't insert a new row.
+// TestRedoAsNew_InsertsChildRow to prove RedoAsNew DOES grow a new row
+// (replaces the legacy "原地重做 must not grow rows" invariant — the
+// Tree feature explicitly wants every action to land a child row).
 func countSubTasks(t *testing.T, d *db.DB) int {
 	t.Helper()
 	var n int
@@ -46,17 +49,13 @@ func countSubTasks(t *testing.T, d *db.DB) int {
 	return n
 }
 
-// TestRedoReset_NoNewRow locks down the headline invariant of the
-// "原地重做" feature: pressing Redo must NOT grow a new sub_task row.
-// The same id carries across runs; only the volatile columns
-// (status, job_id, artifact, completed_at, tokens, cost, duration)
-// are cleared, while the durable columns (session_id, source_session_id,
-// prompt, title, source, batch_id, model) survive.
-//
-// We seed a row with non-trivial session/job/artifact/tokens and assert
-// each cleared column lands at zero / empty, and each preserved column
-// matches its seeded value.
-func TestRedoReset_NoNewRow(t *testing.T) {
+// TestRedoAsNew_InsertsChildRow locks down the new tree-friendly redo
+// semantics: pressing Redo MUST grow a new sub_tasks row that hangs
+// under the original as a child. The parent row keeps its terminal
+// status ('error') and all its durable columns (session_id, artifact,
+// tokens, completed_at) untouched so the SubTaskPanel can render both
+// cards — the failed original and the fresh child — at the same time.
+func TestRedoAsNew_InsertsChildRow(t *testing.T) {
 	d := newTestDB(t)
 	seedSubTaskRowForRedo(t, d, "st_redo", "error", "sid_a", "sid_src", "job_old", "旧报告")
 	if got := countSubTasks(t, d); got != 1 {
@@ -64,64 +63,113 @@ func TestRedoReset_NoNewRow(t *testing.T) {
 	}
 
 	svc := NewSubTaskService(d)
-	res, err := svc.RedoReset("st_redo", "")
+	res, err := svc.RedoAsNew("st_redo", "")
 	if err != nil {
-		t.Fatalf("RedoReset: %v", err)
+		t.Fatalf("RedoAsNew: %v", err)
 	}
-	if got := countSubTasks(t, d); got != 1 {
-		t.Errorf("RedoReset inserted a new row: count = %d, want 1 (原地重做 must not grow rows)", got)
+	if got := countSubTasks(t, d); got != 2 {
+		t.Errorf("RedoAsNew did not grow a row: count = %d, want 2 (tree redo must insert a child)", got)
 	}
 
-	if res.ID != "st_redo" {
-		t.Errorf("id = %q, want st_redo", res.ID)
+	// Returned struct is the NEW child row, not the parent.
+	if res.ID == "st_redo" {
+		t.Errorf("RedoAsNew returned the parent id %q; expected a freshly minted child id", res.ID)
+	}
+	if res.ParentSubtaskID != "st_redo" {
+		t.Errorf("returned ParentSubtaskID = %q, want st_redo", res.ParentSubtaskID)
 	}
 	if res.Status != "pending" {
-		t.Errorf("status = %q, want pending", res.Status)
+		t.Errorf("new row status = %q, want pending", res.Status)
 	}
 	if res.Artifact != "" {
-		t.Errorf("artifact = %q, want empty (cleared for fresh run)", res.Artifact)
+		t.Errorf("new row artifact = %q, want empty (fresh run)", res.Artifact)
 	}
 	if res.JobID != "" {
-		t.Errorf("job_id = %q, want empty (cleared so page refresh doesn't reconnect to stale job)", res.JobID)
-	}
-	if res.SessionID != "sid_a" {
-		t.Errorf("session_id = %q, want sid_a (handler overwrites via UpdateSession right after)", res.SessionID)
-	}
-	if res.SourceSessionID != "sid_src" {
-		t.Errorf("source_session_id = %q, want sid_src", res.SourceSessionID)
+		t.Errorf("new row job_id = %q, want empty (runner mints a new one)", res.JobID)
 	}
 	if res.InputTokens != 0 || res.OutputTokens != 0 ||
 		res.CacheCreationTokens != 0 || res.CacheReadTokens != 0 ||
 		res.CostCents != 0 || res.DurationSeconds != 0 {
-		t.Errorf("metrics not zeroed: in=%d out=%d cc=%d cr=%d cost=%d dur=%d",
+		t.Errorf("new row metrics not zeroed: in=%d out=%d cc=%d cr=%d cost=%d dur=%d",
 			res.InputTokens, res.OutputTokens, res.CacheCreationTokens, res.CacheReadTokens, res.CostCents, res.DurationSeconds)
+	}
+
+	// Title must be the redo-prefixed shape so the SubTaskPanel can render
+	// a "重做: <原标题>" header. capTitle truncates at 80 runes.
+	if got := res.Title; got != "重做: t" {
+		t.Errorf("new row title = %q, want %q", got, "重做: t")
+	}
+
+	// Parent row stays untouched in DB.
+	parent, err := svc.Get("st_redo")
+	if err != nil {
+		t.Fatalf("Get parent: %v", err)
+	}
+	if parent.Status != "error" {
+		t.Errorf("parent status = %q, want error (RedoAsNew must NOT mutate the parent)", parent.Status)
+	}
+	if parent.Artifact != "旧报告" {
+		t.Errorf("parent artifact clobbered: got %q, want 旧报告", parent.Artifact)
+	}
+	if parent.JobID != "job_old" {
+		t.Errorf("parent job_id clobbered: got %q, want job_old", parent.JobID)
+	}
+	if parent.InputTokens != 10 || parent.OutputTokens != 20 ||
+		parent.CacheCreationTokens != 1 || parent.CacheReadTokens != 2 ||
+		parent.CostCents != 30 || parent.DurationSeconds != 40 {
+		t.Errorf("parent token counters clobbered: in=%d out=%d cc=%d cr=%d cost=%d dur=%d",
+			parent.InputTokens, parent.OutputTokens, parent.CacheCreationTokens, parent.CacheReadTokens, parent.CostCents, parent.DurationSeconds)
+	}
+	if parent.SessionID != "sid_a" {
+		t.Errorf("parent session_id clobbered: got %q, want sid_a", parent.SessionID)
+	}
+	if parent.SourceSessionID != "sid_src" {
+		t.Errorf("parent source_session_id clobbered: got %q, want sid_src", parent.SourceSessionID)
+	}
+	if parent.ParentSubtaskID != "" {
+		t.Errorf("parent ParentSubtaskID = %q, want empty (parent itself must not be a child)", parent.ParentSubtaskID)
 	}
 }
 
-// TestRedoReset_ModelOverride asserts the optional model switch: when the
+// TestRedoAsNew_ModelOverride asserts the optional model switch: when the
 // user picks a different model from the picker before pressing Redo,
-// the row's model column is overwritten so the SubTaskCard shows the
-// new badge immediately and the runner uses the new value.
-func TestRedoReset_ModelOverride(t *testing.T) {
+// the new child row's model column is set to the override so the
+// SubTaskCard shows the new badge immediately and the runner uses the
+// new value. The parent row's model is unchanged.
+func TestRedoAsNew_ModelOverride(t *testing.T) {
 	d := newTestDB(t)
 	seedSubTaskRowForRedo(t, d, "st_redo_m", "error", "sid_b", "sid_src", "job_old", "旧报告")
 
 	svc := NewSubTaskService(d)
-	res, err := svc.RedoReset("st_redo_m", "claude-test")
+	res, err := svc.RedoAsNew("st_redo_m", "claude-test")
 	if err != nil {
-		t.Fatalf("RedoReset: %v", err)
+		t.Fatalf("RedoAsNew: %v", err)
 	}
 	if res.Model != "claude-test" {
-		t.Errorf("model = %q, want claude-test", res.Model)
+		t.Errorf("new row model = %q, want claude-test", res.Model)
 	}
-	// Confirm persistence — re-read from DB to make sure the UPDATE
+	if res.ParentSubtaskID != "st_redo_m" {
+		t.Errorf("new row ParentSubtaskID = %q, want st_redo_m", res.ParentSubtaskID)
+	}
+	// Confirm persistence — re-read from DB to make sure the INSERT
 	// actually committed (not just that the returned struct was
 	// populated).
-	got, err := svc.Get("st_redo_m")
+	got, err := svc.Get(res.ID)
 	if err != nil {
-		t.Fatalf("Get: %v", err)
+		t.Fatalf("Get new row: %v", err)
 	}
 	if got.Model != "claude-test" {
-		t.Errorf("persisted model = %q, want claude-test", got.Model)
+		t.Errorf("persisted new-row model = %q, want claude-test", got.Model)
+	}
+	if got.ParentSubtaskID != "st_redo_m" {
+		t.Errorf("persisted ParentSubtaskID = %q, want st_redo_m", got.ParentSubtaskID)
+	}
+	// Parent keeps its original model.
+	parent, err := svc.Get("st_redo_m")
+	if err != nil {
+		t.Fatalf("Get parent: %v", err)
+	}
+	if parent.Model != "claude-old" {
+		t.Errorf("parent model clobbered: got %q, want claude-old", parent.Model)
 	}
 }

@@ -15,6 +15,12 @@ import "time"
 type SubTask struct {
 	ID              string     `json:"id"`
 	RequirementID   string     `json:"requirement_id"`
+	// ParentSubtaskID is the id of the sub_task this row descends from — set
+	// on rows produced by Adjust / Redo / Continue, empty on roots (original
+	// manual / auto-orchestrated rows). Drives the SubTaskPanel's recursive
+	// tree rendering; existing rows pre-migration keep DEFAULT '' and render
+	// as roots, so no backfill is needed.
+	ParentSubtaskID string     `json:"parent_subtask_id"`
 	Title           string     `json:"title"`
 	Prompt          string     `json:"prompt"`
 	// Status mirrors the JobStore job lifecycle: pending → running → done | error.

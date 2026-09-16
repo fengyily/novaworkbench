@@ -333,6 +333,34 @@
  * previous dark card background was doing, but stays inside the platform
  * language.
  */
+
+/* Tree-form lineage chrome: child rows (depth > 0) are indented from
+ * the left and draw a vertical connector line on their outer edge so
+ * the parent → child hierarchy is glanceable. Indentation comes from
+ * the inline marginLeft the React side computes (depth * 24px), so the
+ * CSS only needs to provide the connector + a slightly tighter radius
+ * so nested cards read as part of the same row, not a separate panel. */
+.sub-card.sub-card-child {
+  position: relative;
+  border-left: 1px solid var(--color-border);
+  margin-top: 8px;
+}
+.sub-card.sub-card-child::before {
+  /* 2px connector line on the outer (left) edge of the indented card.
+     Anchored top-left so the line continues visually from the parent
+     card above; uses the platform border token so it matches the rest
+     of the panel chrome. */
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -1px;
+  bottom: 0;
+  width: 2px;
+  background: var(--color-border);
+  border-radius: 1px;
+  pointer-events: none;
+}
+
 .sub-card {
   border: 1px solid var(--color-border);
   border-left: 3px solid var(--color-border); /* default; overridden per status */
@@ -506,6 +534,47 @@
   flex-shrink: 0;
   margin-left: auto;
   font-size: 10px;
+}
+
+/* Tree-form collapse handle: shown on every parent card (childCount > 1).
+   The glyph (▾/▸) is the affordance, the count chip is the readable
+   description. The handle is part of the meta line so it sits alongside
+   the status chip and the existing source/retry/mode chips; tapping it
+   does NOT toggle card expand — the handler stops propagation so the
+   two click targets stay independent. */
+.sub-card-tree-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px 2px 4px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-hover);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+  flex-shrink: 0;
+}
+.sub-card-tree-toggle:hover {
+  background: rgba(79, 70, 229, 0.08);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+.sub-card-tree-toggle:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+.sub-card-tree-toggle-glyph {
+  font-size: 10px;
+  line-height: 1;
+  display: inline-flex;
+  width: 12px;
+  justify-content: center;
+}
+.sub-card-tree-toggle-count {
+  font-variant-numeric: tabular-nums;
 }
 .sub-card-title {
   margin: 0;
