@@ -12,6 +12,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -283,6 +284,14 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// remote_url + platform token; when there is no remote to restore from
 	// EnsureCloned returns a clear error naming the missing path.
 	if reqRow != nil {
+		// Best-effort sync prologue: clone when the directory is missing AND
+		// fetch origin/<defaultBranch> when it exists, persisting the outcome
+		// onto projects.sync_status. Failures are surfaced as job lines but
+		// do not abort the coding run (EnsureWorktreeLogged below will still
+		// branch off the local checkout).
+		_, _ = h.projectSvc.EnsureClonedAndSynced(context.Background(), reqRow.ProjectID, func(msg string) {
+			job.Append(store.LogLine{Type: "phase", Content: msg})
+		})
 		if cerr := h.projectSvc.EnsureCloned(reqRow.ProjectID); cerr != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ " + cerr.Error()})
 			job.Finish(1, store.JobError)

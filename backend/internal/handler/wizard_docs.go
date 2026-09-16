@@ -290,7 +290,7 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 			defaultBranch = proj.DefaultBranch
 		}
 	}
-	workDir, err := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+	workDir, err := h.resolveWorkDir(r.Context(), requirement, projectPath, defaultBranch)
 	if err != nil {
 		sendStatus(w, rc, "error", err.Error())
 		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
@@ -473,7 +473,7 @@ func (h *WizardHandler) refineDocViaAgent(w http.ResponseWriter, r *http.Request
 	// (the Agent side re-roots the conversation into its own
 	// /tmp/nova-agent/<projectID>/<reqID> worktree). A failure here
 	// bubbles up the same way it does in the local branch.
-	workDir, err := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+	workDir, err := h.resolveWorkDir(r.Context(), requirement, projectPath, defaultBranch)
 	if err != nil {
 		writeError(w, 500, "WORKTREE_FAILED", "worktree 创建失败："+err.Error())
 		return
@@ -648,7 +648,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		}
 		defaultBranch = proj.DefaultBranch
 	}
-	workDir, err := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+	workDir, err := h.resolveWorkDir(r.Context(), requirement, projectPath, defaultBranch)
 	if err != nil {
 		writeError(w, 500, "WORKTREE_FAILED", "worktree 创建失败："+err.Error())
 		return
@@ -974,7 +974,7 @@ func (h *WizardHandler) CompressContext(w http.ResponseWriter, r *http.Request) 
 		projectPath = proj.LocalPath
 		defaultBranch = proj.DefaultBranch
 	}
-	workDir, werr := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+	workDir, werr := h.resolveWorkDir(r.Context(), requirement, projectPath, defaultBranch)
 	if werr != nil {
 		// Non-fatal: a missing worktree doesn't break --resume, which can run
 		// without a cwd. Log it so debugging is possible but proceed.

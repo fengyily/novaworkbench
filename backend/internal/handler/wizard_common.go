@@ -7,6 +7,7 @@ package handler
 // metadata, worktree anchoring, SSE sendStatus).
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -382,7 +383,7 @@ func (h *WizardHandler) activeConfigMeta() (id, currency string) {
 // the caller (typically a wizard Job) wants to surface them in the SSE panel.
 // logf may be nil; nil disables log echoing silently so the legacy callers
 // keep working unchanged.
-func (h *WizardHandler) resolveWorkDirLogged(req *model.Requirement, projectPath, defaultBranch string, logf func(string)) (string, error) {
+func (h *WizardHandler) resolveWorkDirLogged(ctx context.Context, req *model.Requirement, projectPath, defaultBranch string, logf func(string)) (string, error) {
 	if req == nil || projectPath == "" {
 		return projectPath, nil
 	}
@@ -394,12 +395,34 @@ func (h *WizardHandler) resolveWorkDirLogged(req *model.Requirement, projectPath
 	// rebuild, so auto-restore from the project's stored remote before giving
 	// up.
 	if _, err := os.Stat(projectPath); err != nil {
-		if restoreErr := h.projectSvc.EnsureCloned(req.ProjectID); restoreErr != nil {
-			return "", fmt.Errorf("project directory not found on this host: %s — %w", projectPath, restoreErr)
+		// Prefer the new EnsureClonedAndSynced prologue: it clones when the
+		// directory is missing AND fetches the latest origin/<base> when the
+		// directory is present, persisting sync_status either way. Sync
+		// failures are non-fatal (logged via logf); only a hard clone failure
+		// is surfaced to the caller.
+		if err == nil {
+			_ = err // placate linters; kept for the no-op-when-OK branch below
 		}
+		// Always run the sync prologue so an existing stale directory still
+		// gets a fresh fetch and a sync_status stamp.
+		_, _ = h.projectSvc.EnsureClonedAndSynced(ctx, req.ProjectID, logf)
 		if _, err := os.Stat(projectPath); err != nil {
-			return "", fmt.Errorf("project directory not found on this host: %s", projectPath)
+			// Sync prologue couldn't materialize the directory (no remote or
+			// clone failed). Fall back to the legacy EnsureCloned so the old
+			// error message still surfaces.
+			if restoreErr := h.projectSvc.EnsureCloned(req.ProjectID); restoreErr != nil {
+				return "", fmt.Errorf("project directory not found on this host: %s — %w", projectPath, restoreErr)
+			}
+			if _, err := os.Stat(projectPath); err != nil {
+				return "", fmt.Errorf("project directory not found on this host: %s", projectPath)
+			}
 		}
+	} else {
+		// Directory is present — still run the sync prologue so the project
+		// row gets a fresh fetch + last_synced_at stamp before the worktree
+		// is anchored. This is the "design against the latest version"
+		// guarantee the wizard UX promises.
+		_, _ = h.projectSvc.EnsureClonedAndSynced(ctx, req.ProjectID, logf)
 	}
 	if req.WorktreePath != "" {
 		if _, err := os.Stat(req.WorktreePath); err == nil {
@@ -442,8 +465,8 @@ func (h *WizardHandler) resolveWorkDirLogged(req *model.Requirement, projectPath
 //
 // This is the log-silent variant; pass resolveWorkDirLogged directly when the
 // caller has a Job and wants the sync lines to surface in the SSE panel.
-func (h *WizardHandler) resolveWorkDir(req *model.Requirement, projectPath, defaultBranch string) (string, error) {
-	return h.resolveWorkDirLogged(req, projectPath, defaultBranch, nil)
+func (h *WizardHandler) resolveWorkDir(ctx context.Context, req *model.Requirement, projectPath, defaultBranch string) (string, error) {
+	return h.resolveWorkDirLogged(ctx, req, projectPath, defaultBranch, nil)
 }
 
 // requireAnchoredFork guards against forking a source session that was created

@@ -142,6 +142,23 @@ export const projects = {
     descRegenerating: 'Generating…',
     descRegenerateTitle: 'Regenerate from the current CLAUDE.md (clears the manual-edit flag)',
     descRegenerated: 'Regenerated',
+    // Overview — repo sync badge. Mirrors projects.last_synced_at /
+    // last_synced_commit / sync_status columns stamped by the backend the
+    // moment it clones or fetches origin before architect-design runs.
+    // syncStaleHint is reused on RequirementDetail's architect entry as a
+    // non-blocking 24h stale hint, so it lives here instead of wizard.*.
+    // The wizard backend auto-runs EnsureClonedAndSynced before every
+    // architect-design invocation (wizard_common.go::resolveWorkDirLogged),
+    // so the hint should NOT ask the user to manually pull — it should
+    // explain the auto-sync that is about to happen in the SSE stream.
+    syncTitle: 'Repo sync',
+    syncLastTime: 'Last synced: {{time}}',
+    syncNever: 'Not yet synced',
+    syncStatusOK: 'Synced',
+    syncStatusError: 'Sync failed',
+    syncStatusIdle: 'Awaiting sync',
+    syncShortSHA: '(commit {sha})',
+    syncStaleHint: 'Repo hasn\'t been synced in >24h — the system will auto-fetch the latest code before generating the design',
     // Overview — commit / PR language override (pins the language used by
     // wizard-generated commit messages, push summaries, and PR titles/bodies;
     // unset → use the language auto-detected from git history).
