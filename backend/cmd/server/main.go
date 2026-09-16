@@ -234,7 +234,7 @@ func main() {
 			log.Printf("[startup] ignoring invalid NOVA_SUBTASK_CONCURRENCY=%q (want positive int), falling back to %d", env, subTaskConcurrency)
 		}
 	}
-	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, agentSvrSvc, nil, subTaskConcurrency)
+	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, nil, subTaskConcurrency)
 	batchSvc := service.NewOrchestrationBatchService(database)
 	if n, err := batchSvc.Recover(); err != nil {
 		log.Printf("[main] orchestration batch recovery: %v", err)
