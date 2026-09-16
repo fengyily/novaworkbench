@@ -129,7 +129,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		// Anchor the analyst stage to the isolated worktree (created here if
 		// missing) so the whole session chain — analysis → design → coding — is
 		// rooted in the worktree and never leaks original-dir absolute paths.
-		workDir, err := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+		workDir, err := h.resolveWorkDir(context.Background(), requirement, projectPath, defaultBranch)
 		if err != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ " + err.Error()})
 			job.Finish(1, store.JobError)
@@ -322,7 +322,7 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	workDir, err := h.resolveWorkDir(requirement, projectPath, defaultBranch)
+	workDir, err := h.resolveWorkDir(r.Context(), requirement, projectPath, defaultBranch)
 	if err != nil {
 		sendStatus(w, rc, "error", err.Error())
 		fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")

@@ -863,6 +863,222 @@ func (s *ProjectService) EnsureCloned(id string) error {
 	return nil
 }
 
+// ProjectSyncResult reports the outcome of EnsureClonedAndSynced so the
+// caller (handler wizard stages) can tailor user-facing phase events
+// ("cloned" vs "fetched" vs "skipped") without re-inspecting the project.
+//
+// All fields are best-effort metadata — the function never returns a fatal
+// error for git failures; it stamps sync_status=error and lets the wizard
+// continue with the local snapshot.
+type ProjectSyncResult struct {
+	Cloned  bool   // true when this call performed a `git clone`
+	Fetched bool   // true when this call performed a `git fetch origin <base>`
+	OldSHA  string // HEAD before fetch (empty when Cloned=true or Skipped=true)
+	NewSHA  string // origin/<defaultBranch> SHA after fetch (or HEAD after clone)
+	Skipped bool   // true when the project has no remote_url → sync_status stays idle
+	Err     error  // non-nil when the last git step failed (network, auth, timeout)
+}
+
+// fetchTimeout caps the inner `git fetch origin <base>` so a stalled network
+// or an unreachable remote cannot hang a wizard Job. 30s mirrors
+// handler/worktree.go's syncBaseBranch timeout.
+const fetchTimeout = 30 * time.Second
+
+// syncBaseBranchService is the service-layer twin of handler/worktree.go's
+// syncBaseBranch. It fetches the project's main branch into the local repo
+// so any worktree branched afterwards starts from the latest upstream SHA.
+//
+// Returns the pre-fetch HEAD and the post-fetch origin/<baseBranch> SHA so
+// the caller can surface them as user-visible phase lines. logf may be nil.
+//
+// Best-effort by design: no remote / offline / missing ref / fetch failure
+// all surface as a non-nil error wrapped with the trimmed stderr — the caller
+// (EnsureClonedAndSynced) decides whether to swallow or propagate.
+func syncBaseBranchService(ctx context.Context, projectPath, baseBranch string, logf func(string)) (oldSHA, newSHA string, err error) {
+	if projectPath == "" || baseBranch == "" {
+		return "", "", nil
+	}
+	// Skip non-git checkouts silently (the wizard falls back to the legacy
+	// in-place strategy via resolveWorkDir → EnsureWorktreeLogged).
+	if _, gerr := gitRunPlain(projectPath, "rev-parse", "--is-inside-work-tree"); gerr != nil {
+		return "", "", nil
+	}
+	if _, gerr := gitRunPlain(projectPath, "remote", "get-url", "origin"); gerr != nil {
+		if logf != nil {
+			logf("ℹ️ 项目未配置 origin 远程，跳过主分支同步")
+		}
+		return "", "", nil
+	}
+	// Capture the pre-fetch HEAD so callers can diff "what changed".
+	if head, herr := gitRunPlain(projectPath, "rev-parse", "HEAD"); herr == nil {
+		oldSHA = strings.TrimSpace(head)
+	}
+	// GIT_TERMINAL_PROMPT=0 disables interactive auth (private repos with
+	// missing credentials would otherwise hang forever).
+	fctx, cancel := context.WithTimeout(ctx, fetchTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(fctx, "git", "-C", projectPath, "fetch", "origin", baseBranch)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if runErr := cmd.Run(); runErr != nil {
+		return oldSHA, "", fmt.Errorf("git fetch origin %s: %s: %w", baseBranch, strings.TrimSpace(stderr.String()), runErr)
+	}
+	if tip, terr := gitRunPlain(projectPath, "rev-parse", "--verify", "--quiet", "origin/"+baseBranch); terr == nil {
+		newSHA = strings.TrimSpace(tip)
+	}
+	if logf != nil {
+		logf("🔄 已同步 origin/" + baseBranch)
+		if newSHA != "" {
+			if msg, terr := gitRunPlain(projectPath, "log", "-1", "origin/"+baseBranch,
+				"--format=%h %s (%an, %ad)", "--date=format:%Y-%m-%d %H:%M"); terr == nil {
+				if msg = strings.TrimSpace(msg); msg != "" {
+					logf("📌 origin/" + baseBranch + " 最新提交: " + msg)
+				}
+			}
+		}
+	}
+	return oldSHA, newSHA, nil
+}
+
+// gitRunPlain is a thin wrapper over exec.Command("git", ...) for read-only
+// subcommands used by syncBaseBranchService. It deliberately does NOT take a
+// timeout — callers wrap with their own context when needed.
+func gitRunPlain(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return stdout.String(), fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// EnsureClonedAndSynced is the wizard prologue for every architect / coding
+// / analyst stage: it makes sure the project's local checkout is either
+// cloned from origin (when missing) or freshly fetched from origin/<base>
+// (when present), and persists the outcome onto projects.sync_status so the
+// UI can show "已同步 / 同步失败 / 待同步".
+//
+// Behaviour matrix:
+//
+//	remote missing  + dir missing   →  fatal "no remote to re-clone" (matches EnsureCloned)
+//	remote missing  + dir present   →  Skipped=true, sync_status stays idle
+//	remote present  + dir missing   →  EnsureCloned → Cloned=true, sync_status=ok
+//	remote present  + dir present   →  fetch → Fetched=true, sync_status=ok (or error on failure)
+//
+// Sync failures (network / auth / timeout) are LOGGED and stamped as
+// sync_status=error but DO NOT return a non-nil error: the wizard continues
+// with the local snapshot so an offline user can still produce a design
+// against the last-known code. ctx is used to bound the inner fetch.
+func (s *ProjectService) EnsureClonedAndSynced(ctx context.Context, id string, logf func(string)) (ProjectSyncResult, error) {
+	var res ProjectSyncResult
+	p, err := s.Get(id)
+	if err != nil {
+		return res, err
+	}
+	if p.LocalPath == "" {
+		return res, fmt.Errorf("project has no local_path")
+	}
+	now := time.Now()
+	stat, statErr := os.Stat(p.LocalPath)
+	switch {
+	case statErr == nil && !stat.IsDir():
+		return res, fmt.Errorf("project path is not a directory: %s", p.LocalPath)
+	case statErr != nil && !os.IsNotExist(statErr):
+		return res, fmt.Errorf("stat project dir: %w", statErr)
+	}
+
+	// Case 1: project has no remote → nothing to sync against. Leave
+	// sync_status untouched so a future edit (setting remote_url) starts
+	// from idle, and skip both clone and fetch.
+	if p.RemoteURL == "" {
+		res.Skipped = true
+		if logf != nil {
+			logf("ℹ️ 项目未配置 remote_url，跳过仓库同步")
+		}
+		return res, nil
+	}
+
+	// Case 2: directory missing → reuse EnsureCloned's clone path. Treat its
+	// failure as sync_status=error (the wizard still proceeds to the legacy
+	// "project directory not found" error via resolveWorkDirLogged, so the
+	// failure is surfaced higher up).
+	if statErr != nil {
+		if logf != nil {
+			logf("🔄 同步仓库到最新版本…（首次 clone）")
+		}
+		if cerr := s.EnsureCloned(id); cerr != nil {
+			res.Err = cerr
+			if logf != nil {
+				logf("⚠️ " + cerr.Error())
+			}
+			_ = s.updateSyncStatus(id, SyncStatusError, "", now)
+			return res, nil // not fatal — caller decides
+		}
+		res.Cloned = true
+		if head, herr := gitRunPlain(p.LocalPath, "rev-parse", "HEAD"); herr == nil {
+			res.NewSHA = strings.TrimSpace(head)
+		}
+		if logf != nil {
+			logf("✅ 仓库已同步（克隆）")
+		}
+		_ = s.updateSyncStatus(id, SyncStatusOK, res.NewSHA, now)
+		return res, nil
+	}
+
+	// Case 3: directory present → fetch origin/<base>. Best-effort.
+	if logf != nil {
+		logf("🔄 同步仓库到最新版本…")
+	}
+	oldSHA, newSHA, ferr := syncBaseBranchService(ctx, p.LocalPath, p.DefaultBranch, logf)
+	if ferr != nil {
+		res.Err = ferr
+		if logf != nil {
+			logf("⚠️ " + ferr.Error())
+		}
+		_ = s.updateSyncStatus(id, SyncStatusError, "", now)
+		return res, nil // not fatal
+	}
+	res.Fetched = true
+	res.OldSHA = oldSHA
+	res.NewSHA = newSHA
+	if logf != nil {
+		logf("✅ 已同步" + shortSHATag(newSHA))
+	}
+	_ = s.updateSyncStatus(id, SyncStatusOK, newSHA, now)
+	return res, nil
+}
+
+// shortSHATag renders a 7-char commit tag for SSE phase lines (" 已同步到 abc1234").
+// Empty input → empty string so the caller can chain without branching.
+func shortSHATag(sha string) string {
+	sha = strings.TrimSpace(sha)
+	if sha == "" {
+		return ""
+	}
+	if len(sha) > 7 {
+		sha = sha[:7]
+	}
+	return " 到 " + sha
+}
+
+// updateSyncStatus stamps last_synced_at / last_synced_commit / sync_status
+// + updated_at on a project row. Errors are swallowed by callers (the wizard
+// must continue even when the audit row write fails) — only logged here for
+// ops visibility.
+func (s *ProjectService) updateSyncStatus(id, status, commit string, when time.Time) error {
+	_, err := s.db.Exec(
+		`UPDATE projects SET sync_status = ?, last_synced_commit = ?, last_synced_at = ?, updated_at = ? WHERE id = ?`,
+		status, commit, when, when, id,
+	)
+	if err != nil {
+		log.Printf("[project-sync] update %s status=%s commit=%s: %v", id, status, commit, err)
+	}
+	return err
+}
+
 // Purge permanently removes a soft-deleted project and its on-disk
 // directory. Errors are prefixed with NOT_IN_TRASH / PROJECT_NOT_FOUND /
 // REMOVE_DIR_FAILED / PURGE_FAILED so the handler can map them to HTTP

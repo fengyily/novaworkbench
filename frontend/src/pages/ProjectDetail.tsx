@@ -1124,6 +1124,59 @@ export default function ProjectDetail() {
             )}
           </div>
 
+          {/* Repo sync badge — mirrors projects.last_synced_at /
+              last_synced_commit / sync_status stamped by the backend the
+              moment it clones or fetches origin before architect-design runs.
+              Renders inline (no modal, no toast) so the user can see at a
+              glance whether the local checkout reflects upstream. The
+              sync_status colour follows the existing CSS variables
+              (--color-success / --color-error / --color-text-muted). */}
+          <div className="detail-section" style={{ marginTop: 16 }}>
+            <div className="section-header" style={{ marginBottom: 12 }}>
+              <span style={{ fontWeight: 600, fontSize: 14 }}>{t('projects.detail.syncTitle')}</span>
+            </div>
+            {(() => {
+              const status = project.sync_status;
+              const lastAt = project.last_synced_at;
+              const sha = (project.last_synced_commit || '').slice(0, 7);
+              if (status === 'ok' && lastAt) {
+                return (
+                  <div style={{ fontSize: 13, color: 'var(--color-success)' }}>
+                    ✅ {t('projects.detail.syncStatusOK')}
+                    {' · '}
+                    {t('projects.detail.syncLastTime', { time: fmtDateTime(lastAt) })}
+                    {sha && (
+                      <>
+                        {' '}
+                        {t('projects.detail.syncShortSHA', { sha })}
+                      </>
+                    )}
+                  </div>
+                );
+              }
+              if (status === 'error') {
+                return (
+                  <div style={{ fontSize: 13, color: 'var(--color-error)' }}>
+                    ❌ {t('projects.detail.syncStatusError')}
+                    {lastAt && (
+                      <>
+                        {' · '}
+                        {t('projects.detail.syncLastTime', { time: fmtDateTime(lastAt) })}
+                      </>
+                    )}
+                  </div>
+                );
+              }
+              // idle / undefined — project never went through the wizard or
+              // has no remote configured. Don't show SHA/time.
+              return (
+                <div style={{ fontSize: 13, color: 'var(--color-text-muted)' }}>
+                  ℹ️ {t('projects.detail.syncStatusIdle')}
+                </div>
+              );
+            })()}
+          </div>
+
           {/* Project description (AI-generated from CLAUDE.md, manual-edit lockable) */}
           <div className="detail-section" style={{ marginTop: 16 }}>
             <div className="section-header" style={{ marginBottom: 12 }}>

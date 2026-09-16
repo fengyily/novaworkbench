@@ -268,3 +268,41 @@ ok  	github.com/novaworkbench/backend/internal/store	1.962s
 - 把任何凭据 / token / 平台账号打印到输出
 - 添加 AI 署名 commit（`🤖 Generated with Claude Code`、`Co-Authored-By: Claude`、`Co-authored-by: ...` 等 trailer）
 - 把本 VALIDATION.md 改成 AI 署名 PR body
+---
+
+## 7. Step 6 — 手工 UI 验证 + 提交与推送（2026-09-16）
+
+### 自动化验证（已在本会话内执行）
+
+| 项 | 结果 |
+|---|---|
+| `go vet ./...` | ✅ EXIT 0 |
+| `go build ./...` | ✅ EXIT 0 |
+| `go test ./...` | ✅ 全包通过（db / handler / llm / scheduler / service / ssh / store） |
+| SQLite 迁移幂等（双次启动，无 duplicate column） | ✅ |
+| `node scripts/check-i18n-keys.mjs` | ✅ 唯一缺失的 3 个键（`requirements.list.calendar / clearSearch / searchAriaLabel`）来自**未改动的** `RequirementsList.tsx`，与本次改动无关 |
+| `bash scripts/check-i18n-cjk.sh` | ✅ 命中项均为预存的硬编码中文常量，与本次改动无关 |
+| `cd frontend && npm run lint` | ✅ 仅 warning（均为预存的 `react-hooks/exhaustive-deps`），无 error |
+| `cd frontend && npm run build` | ✅ tsc -b 通过；vite build 成功 |
+
+### 手工 UI 验证（5 项）：**运行环境受限 → 标注 follow-up**
+
+| 用例 | 状态 | 说明 |
+|---|---|---|
+| 用例 1：首次访问（项目目录不存在 → 自动 clone + 同步） | ⚠️ **follow-up** | 需要人工 mv 真实项目 local_path 后点「生成技术方案」。CI/headless 环境无 dev server + 浏览器，无法执行 |
+| 用例 2：远端领先（fetch 后基于新 SHA 设计） | ⚠️ **follow-up** | 需要 GitHub/GitLab/Gitea test repo + 推 commit 操作；headless 无法验证 |
+| 用例 3：网络故障（不可达 remote → sync_status=error + 本地快照降级） | ⚠️ **follow-up** | 依赖真实 UI 交互；`EnsureClonedAndSynced` 在 service 单测已覆盖（详见 service 包测试） |
+| 用例 4：远端 agent-server 路径（SSH fetch 失败降级） | ⚠️ **follow-up** | 依赖 agent-server 测试主机 |
+| 用例 5/6：i18n 完整性 / 前端 build | ✅ 已自动化验证通过 |
+
+> **手工用例降级依据**：
+> - service 层 `EnsureClonedAndSynced` 的核心行为（clone / fetch / skip / 失败降级 + sync_status 落库）已在 `service` 包测试通过；
+> - schema 迁移幂等已在两个独立 /tmp/nova-validation*.db 实例验证；
+> - SSE phase 事件文案由 service 层 `logf` 透传，前端 i18n 键已对应，前端 build/lint 通过；
+> - 真正需要 dev server + 浏览器的 SSE 流可视化、徽章渲染、24h 提示条只能由用户在本地启动 dev server 时人工核对。
+
+### commit 与推送
+
+- 工作分支：`feat/req_89a1fce301492b46`（已与 origin 同步 1 提交 `b8ef6af`，领先 main 1 提交）
+- 本次新增改动：Step 2/3/5/6 落盘；commit message 严格遵循既有风格（无 AI 署名 / Co-Authored-By trailer / 无平台凭据）
+- 平台认证：直接 `git push origin feat/req_89a1fce301492b46`（使用项目配置的 Platform Token；不在命令里手写凭据）

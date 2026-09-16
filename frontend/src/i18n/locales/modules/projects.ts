@@ -143,6 +143,19 @@ export const projects = {
     descRegenerating: '生成中...',
     descRegenerateTitle: '根据当前 CLAUDE.md 重新由 AI 生成（会清除手动修改标记）',
     descRegenerated: '已重新生成',
+    // Overview — repo sync badge. Mirrors the projects.last_synced_at /
+    // last_synced_commit / sync_status columns stamped by the backend the
+    // moment it clones or fetches origin before architect-design runs.
+    // syncStaleHint is reused on RequirementDetail's architect entry as a
+    // non-blocking 24h stale hint, so it lives here instead of wizard.*.
+    syncTitle: '仓库同步',
+    syncLastTime: '最后同步：{{time}}',
+    syncNever: '尚未同步',
+    syncStatusOK: '已同步',
+    syncStatusError: '同步失败',
+    syncStatusIdle: '待同步',
+    syncShortSHA: '（提交 {sha}）',
+    syncStaleHint: '同步状态超过 24 小时，建议在生成技术方案前手动检查',
     // Overview — commit / PR language override (pins the language used by
     // wizard-generated commit messages, push summaries, and PR titles/bodies;
     // unset → use the language auto-detected from git history).
