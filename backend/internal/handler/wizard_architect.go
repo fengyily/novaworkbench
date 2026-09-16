@@ -78,7 +78,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		ReadKnowledge bool   `json:"read_knowledge"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	p, job, af := h.prepareArchitectDesign(body.RequirementID, body.Model, body.ClaudeConfigID, body.AgentServerID, body.ReadKnowledge)
+	p, job, af := h.prepareArchitectDesign(r.Context(), body.RequirementID, body.Model, body.ClaudeConfigID, body.AgentServerID, body.ReadKnowledge)
 	if writeIfAPIError(w, af) {
 		return
 	}
@@ -97,7 +97,7 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 // own row); empty = local execution. Empty today is the common case —
 // schedule_executor.go forwards p.AgentServerID directly.
 func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnowledge bool, agentServerID string, cb *runCallbacks) (string, error) {
-	p, job, af := h.prepareArchitectDesign(requirementID, model, "", agentServerID, readKnowledge)
+	p, job, af := h.prepareArchitectDesign(context.Background(), requirementID, model, "", agentServerID, readKnowledge)
 	if af != nil {
 		return "", af
 	}
@@ -118,7 +118,7 @@ func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnow
 // line-for-line the same as the original synchronous section; only the
 // writeError calls have been replaced with returning *apiFailure so the
 // scheduler can reuse the same validation outcomes.
-func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride, claudeConfigIDOverride string, agentServerID string, readKnowledge bool) (*designRunParams, *store.Job, *apiFailure) {
+func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementID, modelOverride, claudeConfigIDOverride string, agentServerID string, readKnowledge bool) (*designRunParams, *store.Job, *apiFailure) {
 	id := requirementID
 	if id == "" {
 		return nil, nil, fail(400, "INVALID", "missing requirement id")
@@ -216,7 +216,7 @@ func (h *WizardHandler) prepareArchitectDesign(requirementID, modelOverride, cla
 	// lines in the Job panel as soon as the architect stage starts — the
 	// alternative (deferred to coding) would leave them blind during the design
 	// pass.
-	workDir, wdErr := h.resolveWorkDirLogged(req, projectPath, defaultBranch, func(s string) {
+	workDir, wdErr := h.resolveWorkDirLogged(ctx, req, projectPath, defaultBranch, func(s string) {
 		job.Append(store.LogLine{Type: "message", Content: s})
 	})
 	if wdErr != nil {

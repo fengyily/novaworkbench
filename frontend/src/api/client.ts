@@ -156,6 +156,15 @@ export interface Project {
   commit_lang_override?: string;
   commit_lang_source?: string;
   commit_lang_updated_at?: string;
+  // Wizard pre-stage repo sync: stamped by the backend the moment it clones
+  // or fetches origin before architect-design runs. sync_status reflects the
+  // last attempt (idle = never synced, ok = last sync succeeded, error =
+  // last sync failed and the wizard continued with the local snapshot).
+  // frontend surfaces it on the ProjectDetail overview and as a non-blocking
+  // 24h stale hint on the architect entry.
+  last_synced_at?: string;
+  last_synced_commit?: string;
+  sync_status?: 'idle' | 'ok' | 'error';
 }
 
 export interface DashboardData {

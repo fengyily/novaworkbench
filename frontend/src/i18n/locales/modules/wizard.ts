@@ -117,6 +117,16 @@ export const wizard = {
     stepLabelDesign: '架构师设计',
     stepLabelCoding: '开发指令',
   },
+  // architect — SSE phase labels emitted by the backend wizard during the
+  // pre-stage repo sync (clone / fetch). Rendered verbatim by the existing
+  // JobStream panel — keep the leading emoji intact so the message visually
+  // matches the inline phase frame.
+  architect: {
+    syncPhaseStart: '🔄 同步仓库到最新版本…',
+    syncPhaseCloned: '✅ 仓库已同步（克隆）',
+    syncPhaseFetched: '✅ 已同步到 {sha}',
+    syncPhaseFailed: '⚠️ 同步失败，使用本地快照继续',
+  },
 } as const;
 
 export default wizard;
