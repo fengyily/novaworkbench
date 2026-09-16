@@ -44,6 +44,15 @@ type ScheduledTask struct {
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
 	ExecutedAt          *time.Time `json:"executed_at,omitempty"`
+	// RequirementStatus is the LIVE status of the linked requirement at the
+	// moment of query — populated by LEFT JOIN `requirements` so the
+	// /schedules list can render a status chip next to the requirement
+	// title (req_30080193f1c95255 post-mortem: a `succeeded` schedule with
+	// the requirement still showing "方案完成" confused the user into
+	// thinking development hadn't started). Empty when the linked
+	// requirement is deleted (FK CASCADE) — the frontend treats '' as a
+	// hidden chip rather than rendering "📝 ?".
+	RequirementStatus   string     `json:"requirement_status,omitempty"`
 }
 
 // ScheduledTask status / task_type constants. Plain strings to mirror the SQL
