@@ -26,6 +26,19 @@ type ProjectService struct {
 	platforms  *PlatformTokenService
 }
 
+// SyncStatus* constants drive the projects.sync_status column (see schema.go's
+// last_synced_* ALTERs). The wizard's EnsureClonedAndSynced stamps one of these
+// after every clone/fetch attempt; the value is exposed via GET /api/projects/{id}
+// so the ProjectDetail badge and the architect-design "24h stale" hint can read
+// it without a new endpoint. New rows default to SyncStatusIdle via the column
+// DEFAULT clause, so legacy / pre-migration projects render as "待同步" without
+// a backfill.
+const (
+	SyncStatusIdle  = "idle"  // project has never been synced (clone or fetch)
+	SyncStatusOK    = "ok"    // last sync attempt succeeded (cloned or fetched)
+	SyncStatusError = "error" // last sync attempt failed; wizard fell back to local snapshot
+)
+
 // ProjectRef is a lightweight project handle (id + path) used by callers that
 // only need to locate the on-disk project (e.g. description backfill).
 type ProjectRef struct {
@@ -49,7 +62,8 @@ func (s *ProjectService) ListForUser(userID string, isAdmin bool) ([]model.Proje
 	q := `SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
 		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug,
-		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at
+		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at,
+		last_synced_at, last_synced_commit, sync_status
 		FROM projects`
 	args := []any{}
 	if !isAdmin || userID == "" {
@@ -76,7 +90,8 @@ func (s *ProjectService) ListForUser(userID string, isAdmin bool) ([]model.Proje
 			&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
 			&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
 			&p.ClaudeProjectSlug,
-			&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt)
+			&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt,
+			&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus)
 		if err != nil {
 			return nil, err
 		}
@@ -106,13 +121,15 @@ func (s *ProjectService) Get(id string) (*model.Project, error) {
 	err := s.db.QueryRow(`SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
 		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug,
-		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at
+		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at,
+		last_synced_at, last_synced_commit, sync_status
 		FROM projects WHERE id = ? AND deleted_at IS NULL`, id).Scan(
 		&p.ID, &p.Name, &p.LocalPath, &p.RemoteURL, &p.Status,
 		&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
 		&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
 		&p.ClaudeProjectSlug,
-		&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt)
+		&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt,
+		&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("project not found")
 	}
@@ -128,13 +145,15 @@ func (s *ProjectService) getAny(id string) (*model.Project, error) {
 	err := s.db.QueryRow(`SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
 		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug,
-		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at
+		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at,
+		last_synced_at, last_synced_commit, sync_status
 		FROM projects WHERE id = ?`, id).Scan(
 		&p.ID, &p.Name, &p.LocalPath, &p.RemoteURL, &p.Status,
 		&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
 		&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
 		&p.ClaudeProjectSlug,
-		&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt)
+		&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt,
+		&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("project not found")
 	}
@@ -149,7 +168,8 @@ func (s *ProjectService) ListTrash() ([]model.Project, error) {
 	rows, err := s.db.Query(`SELECT id, name, local_path, remote_url, status, default_branch,
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
 		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug,
-		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at
+		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at,
+		last_synced_at, last_synced_commit, sync_status
 		FROM projects WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC`)
 	if err != nil {
 		return nil, err
@@ -163,7 +183,8 @@ func (s *ProjectService) ListTrash() ([]model.Project, error) {
 			&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
 			&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
 			&p.ClaudeProjectSlug,
-			&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt)
+			&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt,
+			&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus)
 		if err != nil {
 			return nil, err
 		}
