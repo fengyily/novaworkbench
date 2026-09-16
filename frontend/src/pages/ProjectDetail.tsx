@@ -765,22 +765,28 @@ export default function ProjectDetail() {
       <td data-label={t('projects.detail.colPriority')}><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
       <td data-label={t('projects.detail.colStatus')}>
         <StatusChips req={req} />
-        {/* Pending-scheduled clock — surfaces that this requirement has a
+        {/* Pending-scheduled chip — surfaces that this requirement has a
             future dispatch waiting (mirror of the cross-project list).
             rendered BEFORE the pulse dot so the static chip row reads as
             "status | clock | pulse" (clock = stored fact, pulse = live
             activity). Gated on scheduled_run_at filled by the backend
-            List endpoint (same helper the calendar uses). */}
+            List endpoint (same helper the calendar uses). Uses the shared
+            .schedule-chip indigo pill so the affordance is unmissable —
+            a bare 13px outline icon next to the colored status badges
+            was visually swallowed and users couldn't tell scheduled rows
+            apart. */}
         {req.scheduled_run_at && (
-          <IconClock
-            size={13}
-            className="icon-mr"
+          <span
+            className="schedule-chip"
             title={t('requirements.list.scheduledTooltip', {
               time: fmtDateTime(req.scheduled_run_at),
               rel: fmtRunAtRelative(req.scheduled_run_at),
             })}
             aria-label={t('requirements.list.scheduledAria')}
-          />
+          >
+            <IconClock size={12} className="schedule-chip-icon" />
+            {fmtRunAtRelative(req.scheduled_run_at)}
+          </span>
         )}
         {/* Breathing dot for any wizard job in flight on this requirement
             (analyst/design/apply/coding). Set is populated by the 5s poll

@@ -122,18 +122,24 @@ export default function RequirementsList() {
   // nothing when the row has no scheduled_run_at (omitted on the wire); the
   // hover title combines the absolute time with the same relative countdown
   // string SchedulesPage uses, so both surfaces speak the same vocabulary.
+  // Wrapped in a small indigo chip (see .schedule-chip in index.css) — the
+  // bare 13px outline icon was easy to miss next to the title text, the
+  // tinted pill makes the "has a schedule" affordance unmissable in dense
+  // cross-project lists.
   const scheduleClock = (r: Requirement) => {
     if (!r.scheduled_run_at) return null;
     return (
-      <IconClock
-        size={13}
-        className="icon-mr"
+      <span
+        className="schedule-chip"
         title={t('requirements.list.scheduledTooltip', {
           time: fmtDateTime(r.scheduled_run_at),
           rel: fmtRunAtRelative(r.scheduled_run_at),
         })}
         aria-label={t('requirements.list.scheduledAria')}
-      />
+      >
+        <IconClock size={12} className="schedule-chip-icon" />
+        {fmtRunAtRelative(r.scheduled_run_at)}
+      </span>
     );
   };
 
