@@ -1396,7 +1396,7 @@ export interface SkillMarket {
 
 export const skillsApi = {
   list: () => api.get<Skill[]>('/api/settings/skills'),
-  create: (data: { name: string; slug: string; content: string; description?: string; source_url?: string }) =>
+  create: (data: { name: string; slug: string; content: string; description?: string; source_url?: string; enabled?: boolean }) =>
     api.post<Skill>('/api/settings/skills', data),
   update: (id: string, data: { name: string; slug: string; content: string; description: string; enabled: boolean }) =>
     api.put<Skill>(`/api/settings/skills/${id}`, data),
@@ -1410,6 +1410,9 @@ export const skillsApi = {
         : '';
     return api.get<MarketSkill[]>('/api/settings/skills/market' + qs);
   },
+  installed: () => api.get<MarketSkill[]>('/api/settings/skills/installed'),
+  installCommand: (data: { repo: string; skill?: string }) =>
+    api.post<MarketSkill[]>('/api/settings/skills/install-command', data),
 };
 
 // Weekly reports (AI-generated from git log + requirement data)

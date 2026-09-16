@@ -419,6 +419,10 @@ func main() {
 	mux.HandleFunc("DELETE /api/settings/skills/{id}", skillH.Delete)
 	mux.HandleFunc("GET /api/settings/skills/markets", skillH.Markets)
 	mux.HandleFunc("GET /api/settings/skills/market", skillH.Market)
+	// Command-installed skills — scan ~/.claude/skills (npx skills add) and
+	// integrate discovered skills (imported with enabled=false via POST above).
+	mux.HandleFunc("GET /api/settings/skills/installed", skillH.Installed)
+	mux.HandleFunc("POST /api/settings/skills/install-command", skillH.InstallCommand)
 
 	// Claude CLI configurations (settings) — multiple named configs (auth
 	// token + base URL + model list); the active one is injected as env vars

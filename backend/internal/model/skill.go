@@ -24,6 +24,10 @@ type CreateSkillReq struct {
 	Content     string `json:"content"`
 	Description string `json:"description"`
 	SourceURL   string `json:"source_url"`
+	// Enabled controls the initial enabled state. nil is treated as true so
+	// existing market installs keep enabling the skill by default; command
+	// integration passes false so the skill can be @mentioned but not auto-loaded.
+	Enabled *bool `json:"enabled"`
 }
 
 type UpdateSkillReq struct {

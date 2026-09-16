@@ -20,9 +20,11 @@ const emptyForm = (): SkillForm => ({
   source_url: '',
 });
 
+const PAGE_SIZE = 12;
+
 export default function SettingsSkills() {
   const { t } = useTranslation();
-  const [activeTab, setActiveTab] = useState<'installed' | 'market'>('installed');
+  const [activeTab, setActiveTab] = useState<'installed' | 'market' | 'command'>('installed');
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -41,6 +43,15 @@ export default function SettingsSkills() {
   const [marketError, setMarketError] = useState('');
   const [installingSlug, setInstallingSlug] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  const [marketPage, setMarketPage] = useState(1);
+
+  // Command install state
+  const [commandRepo, setCommandRepo] = useState('');
+  const [commandInstalling, setCommandInstalling] = useState(false);
+  const [commandError, setCommandError] = useState('');
+  const [discovered, setDiscovered] = useState<MarketSkill[]>([]);
+  const [discoverLoading, setDiscoverLoading] = useState(false);
+  const [integratingSlug, setIntegratingSlug] = useState('');
 
   const load = async () => {
     setLoading(true);
@@ -74,6 +85,9 @@ export default function SettingsSkills() {
     if (activeTab === 'market' && markets.length === 0) {
       loadMarkets();
     }
+    if (activeTab === 'command' && discovered.length === 0) {
+      fetchDiscovered();
+    }
   }, [activeTab]);
 
   // Auto-fetch when market selection changes
@@ -88,6 +102,7 @@ export default function SettingsSkills() {
     setMarketError('');
     setMarketSkills([]);
     setSearchQuery('');
+    setMarketPage(1);
     try {
       const data = await skillsApi.market(
         marketId ? { market: marketId } : { registry }
@@ -97,6 +112,54 @@ export default function SettingsSkills() {
       setMarketError(e instanceof Error ? e.message : t('settings.skills.loadFailed'));
     } finally {
       setMarketLoading(false);
+    }
+  };
+
+  const fetchDiscovered = async () => {
+    setDiscoverLoading(true);
+    setCommandError('');
+    try {
+      const data = await skillsApi.installed();
+      setDiscovered(data ?? []);
+    } catch (e: unknown) {
+      setCommandError(e instanceof Error ? e.message : t('settings.skills.loadFailed'));
+    } finally {
+      setDiscoverLoading(false);
+    }
+  };
+
+  const handleInstallCommand = async () => {
+    const repo = commandRepo.trim();
+    if (!repo) return;
+    setCommandInstalling(true);
+    setCommandError('');
+    try {
+      const data = await skillsApi.installCommand({ repo });
+      setDiscovered(data ?? []);
+    } catch (e: unknown) {
+      setCommandError(e instanceof Error ? e.message : t('settings.skills.commandFailed'));
+    } finally {
+      setCommandInstalling(false);
+    }
+  };
+
+  const handleIntegrate = async (mk: MarketSkill) => {
+    setIntegratingSlug(mk.slug);
+    setCommandError('');
+    try {
+      await skillsApi.create({
+        name: mk.name,
+        slug: mk.slug,
+        content: mk.content,
+        description: mk.description,
+        source_url: mk.source_url,
+        enabled: false,
+      });
+      await load();
+    } catch (e: unknown) {
+      setCommandError(e instanceof Error ? e.message : t('settings.skills.saveFailed'));
+    } finally {
+      setIntegratingSlug('');
     }
   };
 
@@ -211,6 +274,13 @@ export default function SettingsSkills() {
       )
     : marketSkills;
 
+  const totalPages = Math.max(1, Math.ceil(filteredMarketSkills.length / PAGE_SIZE));
+  const clampedPage = Math.min(marketPage, totalPages);
+  const pagedMarketSkills = filteredMarketSkills.slice(
+    (clampedPage - 1) * PAGE_SIZE,
+    clampedPage * PAGE_SIZE
+  );
+
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
@@ -238,7 +308,7 @@ export default function SettingsSkills() {
 
       {/* Tabs */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 20, borderBottom: '1px solid #e2e8f0' }}>
-        {(['installed', 'market'] as const).map((tab) => (
+        {(['installed', 'market', 'command'] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -252,7 +322,11 @@ export default function SettingsSkills() {
               fontWeight: activeTab === tab ? 600 : 400,
             }}
           >
-            {tab === 'installed' ? t('settings.skills.tabInstalled', { n: skills.length }) : t('settings.skills.tabMarket')}
+            {tab === 'installed'
+              ? t('settings.skills.tabInstalled', { n: skills.length })
+              : tab === 'market'
+                ? t('settings.skills.tabMarket')
+                : t('settings.skills.tabCommand')}
           </button>
         ))}
       </div>
@@ -392,7 +466,7 @@ export default function SettingsSkills() {
               style={{ marginBottom: 12 }}
               placeholder={t('settings.skills.searchPlaceholder')}
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => { setSearchQuery(e.target.value); setMarketPage(1); }}
             />
           )}
 
@@ -404,7 +478,7 @@ export default function SettingsSkills() {
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {filteredMarketSkills.map((mk) => {
+              {pagedMarketSkills.map((mk) => {
                 const installed = installedSlugs.has(mk.slug);
                 return (
                   <div
@@ -433,6 +507,115 @@ export default function SettingsSkills() {
                       style={{ flexShrink: 0 }}
                     >
                       {installingSlug === mk.slug ? t('settings.skills.installing') : installed ? t('settings.skills.installed') : t('settings.skills.install')}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Pagination */}
+          {!marketLoading && totalPages > 1 && (
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 12, marginTop: 16 }}>
+              <button
+                className="btn btn-sm btn-secondary"
+                disabled={clampedPage <= 1}
+                onClick={() => setMarketPage(clampedPage - 1)}
+              >
+                {t('settings.skills.prevPage')}
+              </button>
+              <span style={{ color: '#64748B', fontSize: 13 }}>
+                {t('settings.skills.pageInfo', { page: clampedPage, total: totalPages })}
+              </span>
+              <button
+                className="btn btn-sm btn-secondary"
+                disabled={clampedPage >= totalPages}
+                onClick={() => setMarketPage(clampedPage + 1)}
+              >
+                {t('settings.skills.nextPage')}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Command Install Tab */}
+      {activeTab === 'command' && (
+        <div>
+          <div style={{ color: '#64748B', fontSize: 13, marginBottom: 12, lineHeight: 1.6 }}>
+            {t('settings.skills.commandHint')}
+          </div>
+
+          <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
+            <input
+              className="form-input"
+              style={{ flex: 1, fontSize: 13, fontFamily: 'monospace' }}
+              placeholder={t('settings.skills.commandRepoPlaceholder')}
+              value={commandRepo}
+              onChange={(e) => setCommandRepo(e.target.value)}
+              disabled={commandInstalling}
+            />
+            <button
+              className="btn btn-primary"
+              style={{ flexShrink: 0 }}
+              disabled={!commandRepo.trim() || commandInstalling}
+              onClick={handleInstallCommand}
+            >
+              {commandInstalling ? t('settings.skills.commandInstalling') : t('settings.skills.commandInstall')}
+            </button>
+            <button
+              className="btn btn-secondary"
+              style={{ flexShrink: 0 }}
+              disabled={discoverLoading || commandInstalling}
+              onClick={fetchDiscovered}
+            >
+              {t('settings.skills.commandRefresh')}
+            </button>
+          </div>
+
+          {commandError && <div style={{ color: '#EF4444', marginBottom: 12 }}>{commandError}</div>}
+
+          {discoverLoading ? (
+            <div style={{ color: '#64748B', padding: 20, textAlign: 'center' }}>{t('settings.skills.loading')}</div>
+          ) : discovered.length === 0 ? (
+            <div style={{ color: '#64748B', padding: 20, textAlign: 'center' }}>
+              {t('settings.skills.commandEmpty')}
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {discovered.map((mk) => {
+                const integrated = installedSlugs.has(mk.slug);
+                return (
+                  <div
+                    key={mk.slug}
+                    style={{
+                      border: '1px solid #E2E8F0',
+                      borderRadius: 8,
+                      padding: '12px 16px',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'flex-start',
+                      gap: 16,
+                    }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, marginBottom: 4 }}>{mk.name}</div>
+                      {mk.description && (
+                        <div style={{ color: '#64748B', fontSize: 13, marginBottom: 4 }}>{mk.description}</div>
+                      )}
+                      <code style={{ fontSize: 12, color: '#94A3B8' }}>{mk.slug}</code>
+                    </div>
+                    <button
+                      className={`btn btn-sm ${integrated ? 'btn-secondary' : 'btn-primary'}`}
+                      disabled={integrated || integratingSlug === mk.slug}
+                      onClick={() => handleIntegrate(mk)}
+                      style={{ flexShrink: 0 }}
+                    >
+                      {integratingSlug === mk.slug
+                        ? t('settings.skills.integrating')
+                        : integrated
+                          ? t('settings.skills.integrated')
+                          : t('settings.skills.integrate')}
                     </button>
                   </div>
                 );

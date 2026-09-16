@@ -56,9 +56,13 @@ func (s *SkillService) Get(id string) (*model.Skill, error) {
 func (s *SkillService) Create(req model.CreateSkillReq) (*model.Skill, error) {
 	id := util.NewID("skill")
 	now := time.Now()
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
 	if _, err := s.db.Exec(
 		"INSERT INTO skills (id, name, slug, content, description, enabled, source_url, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-		id, req.Name, req.Slug, req.Content, req.Description, true, req.SourceURL, now, now,
+		id, req.Name, req.Slug, req.Content, req.Description, enabled, req.SourceURL, now, now,
 	); err != nil {
 		return nil, err
 	}
