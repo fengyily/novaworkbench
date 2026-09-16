@@ -148,6 +148,10 @@ export const projects = {
     // moment it clones or fetches origin before architect-design runs.
     // syncStaleHint is reused on RequirementDetail's architect entry as a
     // non-blocking 24h stale hint, so it lives here instead of wizard.*.
+    // The wizard backend auto-runs EnsureClonedAndSynced before every
+    // architect-design invocation (wizard_common.go::resolveWorkDirLogged),
+    // so the hint should NOT ask the user to manually pull — it should
+    // explain the auto-sync that is about to happen in the SSE stream.
     syncTitle: '仓库同步',
     syncLastTime: '最后同步：{{time}}',
     syncNever: '尚未同步',
@@ -155,7 +159,7 @@ export const projects = {
     syncStatusError: '同步失败',
     syncStatusIdle: '待同步',
     syncShortSHA: '（提交 {sha}）',
-    syncStaleHint: '同步状态超过 24 小时，建议在生成技术方案前手动检查',
+    syncStaleHint: '仓库超过 24 小时未同步，系统将在生成技术方案前自动同步最新代码',
     // Overview — commit / PR language override (pins the language used by
     // wizard-generated commit messages, push summaries, and PR titles/bodies;
     // unset → use the language auto-detected from git history).

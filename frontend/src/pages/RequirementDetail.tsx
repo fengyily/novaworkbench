@@ -84,10 +84,13 @@ interface DesignData {
 // Kept outside the component so it isn't recreated on every render — this is
 // called from a useEffect that fires on req.id / req.design_docs changes.
 // isSyncStale — frontend mirror of the "sync > 24h" rule the architect-design
-// stage enforces before spawning Claude. The hard-coded threshold is
-// intentional (design explicitly does NOT expose it as a setting): users who
-// haven't generated a design in 24h get a non-blocking hint so they can
-// verify the local checkout before Claude reads it. error / missing → stale.
+// stage honours before spawning Claude. The hard-coded threshold is
+// intentional (design explicitly does NOT expose it as a setting): users
+// who haven't generated a design in 24h get a non-blocking hint telling
+// them the system is about to auto-sync (the wizard backend runs
+// EnsureClonedAndSynced via resolveWorkDirLogged before claude spawns, so
+// there is NO manual pull step — the hint just frames the upcoming
+// 🔄/✅ lines in the SSE stream). error / missing → stale.
 function isSyncStale(p?: Project | null): boolean {
   if (!p) return false;
   if (p.sync_status === 'error') return true;
@@ -1548,8 +1551,10 @@ export default function RequirementDetail() {
 
     // Non-blocking 24h stale-sync hint. Surfaces a single inline line in the
     // JobStream panel before the backend's sync phase events arrive, so the
-    // user understands why the wizard is doing extra git work. Pure
-    // advisory — never gates the run.
+    // user understands why the wizard is doing extra git work. The backend
+    // runs EnsureClonedAndSynced (wizard_common.go::resolveWorkDirLogged) for
+    // every architect-design invocation, so this hint is purely advisory —
+    // it never gates the run and never asks the user to pull manually.
     if (isSyncStale(project)) {
       // eslint-disable-next-line no-console
       console.warn('[architect-design] sync stale', project?.last_synced_at, project?.sync_status);
