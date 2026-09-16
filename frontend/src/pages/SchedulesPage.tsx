@@ -26,6 +26,7 @@ import i18next from 'i18next';
 import { fmtDateTime, fmtRelative } from '../utils/intl';
 import { errorMessage } from '../utils/errMsg';
 import { IconClock, IconClose, IconAlert, IconHourglass, IconRocket } from '../components/icons';
+import StatusChips from '../components/StatusChips';
 import './SchedulesPage.css';
 
 // Filter options + row labels hold translation KEYS, resolved during render.
@@ -370,6 +371,15 @@ function ScheduleRow({
               <span className="schedules-row-title-missing">
                 {t.requirement_id}
               </span>
+            )}
+            {/* requirement_status chip — populated by the backend's LEFT JOIN
+                (see model/scheduled_task.go RequirementStatus + service/scheduled_task.go
+                List/Get/Due). Hidden when the linked requirement was CASCADE-deleted
+                (empty string) or when the requirement has no associated state.
+                Closes the req_30080193f1c95255 feedback loop where users couldn't
+                tell from /schedules alone that development had completed. */}
+            {t.requirement_status && (
+              <StatusChips req={{ status: t.requirement_status }} className="schedules-row-req-chip" />
             )}
           </span>
         </div>

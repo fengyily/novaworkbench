@@ -19,16 +19,29 @@ import { statusChips } from '../utils/statusChips';
  * can layer effects like the wizard "working" pulse.
  */
 export interface StatusChipsProps {
-  req: Pick<
-    Requirement,
-    'status' | 'skip_design' | 'design_docs' | 'dev_ended_at'
+  // Partial<Pick<…>> rather than Pick<…>: Pick made skip_design / design_docs
+  // appear required even though Requirement declares them optional, which
+  // blocked callers that only had the live `status` string (e.g. /schedules'
+  // LEFT JOIN of requirements.status, no skip_design / design_docs in scope).
+  // utils/statusChips.ts already handles every field as optional and falls
+  // back to a single-chip default when they're missing, so Partial is the
+  // accurate contract.
+  req: Partial<
+    Pick<Requirement, 'status' | 'skip_design' | 'design_docs' | 'dev_ended_at'>
   >;
   className?: string;
 }
 
 export function StatusChips({ req, className }: StatusChipsProps) {
   const { t } = useTranslation();
-  const chips = statusChips(req);
+  // req.status is required by StatusChipsInput even though the outer Pick is
+  // Partial; a missing status means there's nothing meaningful to render,
+  // so short-circuit with null instead of feeding undefined to statusChips.
+  if (!req.status) return null;
+  // Spread into a fresh StatusChipsInput so TypeScript narrows req.status
+  // to `string` here (it can't carry the narrowing across a function call).
+  const status = req.status;
+  const chips = statusChips({ ...req, status });
   if (chips.length === 0) return null;
   // Wrap in a single inline-flex container so the chip group reads as one
   // ordered "tag string" (源/方案 → 进度 → 待确认) instead of loose chips
