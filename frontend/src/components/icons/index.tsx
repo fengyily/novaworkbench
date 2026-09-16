@@ -382,6 +382,26 @@ export const IconHand = makeRichIcon(() => [
   <path key="c" d="M15 11V5.5a1.5 1.5 0 0 1 3 0V13a6 6 0 0 1-6 6H10a4 4 0 0 1-3.5-2l-2.5-4a1.5 1.5 0 0 1 2.5-1.6L8 13" />,
 ]);
 
+/** Server tower — replaces 🛰️ for the Agent Server badge. Three stacked
+ *  rack units with a status dot on the front; reads as "remote machine" next
+ *  to the laptop glyph for local execution. */
+export const IconServer = makeRichIcon(() => [
+  <rect key="a" x="3.5" y="4.5" width="17" height="5" rx="1.5" />,
+  <rect key="b" x="3.5" y="14.5" width="17" height="5" rx="1.5" />,
+  <path key="c" d="M7 7h2M7 17h2" />,
+  <circle key="d" cx="17" cy="7" r="0.6" fill="currentColor" stroke="none" />,
+  <circle key="e" cx="17" cy="17" r="0.6" fill="currentColor" stroke="none" />,
+]);
+
+/** Laptop / local workstation — replaces 💻. Open clamshell with screen
+ *  line + base, so it visually contrasts with the rack-shaped IconServer
+ *  and reads as "this machine, here". */
+export const IconLaptop = makeRichIcon(() => [
+  <rect key="a" x="4.5" y="5.5" width="15" height="10" rx="1.5" />,
+  <path key="b" d="M3 18.5h18M6.5 16.5h11" />,
+  <path key="c" d="M4.5 5.5h15" />,
+]);
+
 /** Arrow right — replaces → / ➜ */
 export const IconArrowRight = makeIcon('M5 12h14M13 6l6 6-6 6');
 

@@ -1,7 +1,12 @@
 .req-detail { width: 100%; }
 
 .detail-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-.detail-id { font-size: 12px; color: var(--color-text-muted); font-family: var(--font-mono); }
+.detail-id {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
 
 /* Edit-modal skip_analysis row — replaces the inline `<label style>` and
    the previous `<small>` token typo (`var(--text-secondary, ...)` was
@@ -21,27 +26,56 @@
 }
 .edit-skip-row input { width: auto; }
 
-.req-detail h1 { font-size: 22px; font-weight: 700; margin-bottom: 12px; }
+.req-detail h1 {
+  font-size: 22px;
+  font-weight: 700;
+  margin-bottom: 12px;
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+}
 
-.detail-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
-
-.priority-tag {
+.detail-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+  align-items: center;
+}
+/* Every chip in the meta row stays on a single line — the painted label is a
+   unit, not a run of letters; flex-wrap on the parent lets the ROW wrap
+   onto multiple lines on narrow screens, but each chip itself never breaks
+   mid-label. */
+.detail-meta > * {
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 6px;
   padding: 3px 10px;
-  border-radius: 4px;
   font-size: 12px;
   font-weight: 600;
+  line-height: 1.4;
+  border: 1px solid transparent;
 }
-.priority-tag.high { background: #fee2e2; color: #dc2626; }
-.priority-tag.medium { background: #fef3c7; color: #d97706; }
-.priority-tag.low { background: #d1fae5; color: #059669; }
 
+/* Unified meta-chip visuals. Previously each chip (priority, project,
+   agent-server, compressed, source-link) reinvented its own border /
+   radius / padding. The .detail-meta > * selector above pins the
+   shared dimensions; these rules override the colors per chip. */
+
+/* Priority — same palette it always had (red/amber/green), now wearing
+   the shared padding/border. */
+.priority-tag { /* colors via .detail-meta > * */ }
+.priority-tag.high { background: #fee2e2; color: #b91c1c; }
+.priority-tag.medium { background: #fef3c7; color: #b45309; }
+.priority-tag.low { background: #d1fae5; color: #047857; }
+
+/* Project — neutral surface, faint outline so it reads as "context link",
+   not as a status. */
 .project-tag {
-  padding: 3px 10px;
-  background: var(--color-bg);
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  font-size: 12px;
+  background: var(--color-surface);
+  border-color: var(--color-border);
   color: var(--color-text-secondary);
+  font-weight: 500;
 }
 
 /* Header badge for the Agent Server the requirement was developed on.
@@ -49,32 +83,43 @@
    target" concept surfaces there as the 执行环境 selector) so the two
    read as one visual family. Hover shows the full server name via title. */
 .agent-server-badge {
-  padding: 3px 10px;
   background: #F5F3FF;
   color: #7C3AED;
-  border-radius: 4px;
-  font-size: 12px;
+  border-color: #DDD6FE;
   font-weight: 500;
-  cursor: default;
   max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-/* Per-stage "📦 已压缩" badge in the requirement header meta row. Mirrors
+/* Per-stage "已压缩" badge in the requirement header meta row. Mirrors
    the existing chip/tag patterns (kind-badge / status-tag) but uses a
    neutral surface tint + amber text so it reads as "useful state" rather
    than "warning" — the user explicitly invoked the compression, this
    isn't an alert. Hover shows the timestamp via the title attr. */
 .compressed-badge {
-  padding: 3px 10px;
   background: #FEF3C7;
   color: #B45309;
-  border-radius: 4px;
-  font-size: 12px;
+  border-color: #FDE68A;
   font-weight: 500;
-  cursor: default;
+}
+
+/* Source link — points back to the requirement this row was promoted from.
+   Renders as a small, muted chip so it doesn't compete with the primary
+   status / kind badges in the meta row. (Layout moved up next to the other
+   .detail-meta > * rules so it inherits the shared chip dimensions.) */
+.source-link {
+  background: var(--color-surface);
+  border-color: var(--color-border);
+  color: var(--color-text-secondary);
+  font-weight: 500;
+  text-decoration: none;
+  transition: background-color 80ms ease, color 80ms ease;
+}
+.source-link:hover {
+  background: var(--color-hover, #F1F5F9);
+  color: var(--color-primary, #4F46E5);
+  border-color: var(--color-primary, #4F46E5);
 }
 
 /* SessionContextStrip — always-on row of three mini usage bars (分析师/方案/
@@ -155,7 +200,14 @@
   padding: 20px;
   margin-bottom: 16px;
 }
-.detail-section h3 { font-size: 15px; margin-bottom: 12px; }
+.detail-section h3 {
+  font-size: 15px;
+  margin-bottom: 12px;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 .detail-section p { font-size: 14px; color: var(--color-text-secondary); line-height: 1.7; }
 
 /* The "追加调整" chat panel renders directly below the action buttons (开发完成 /
@@ -323,9 +375,16 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   margin-bottom: 12px;
 }
-.section-header h3 { margin-bottom: 0; }
+.section-header h3 {
+  margin-bottom: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
 
 /* Analysis-complete confirmation panel */
 .confirm-panel {
@@ -789,6 +848,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
 }
 .preflight-eyebrow::before {
   content: '';
@@ -838,6 +898,7 @@
 .flight-leg-label {
   color: var(--color-text-muted);
   letter-spacing: 0.08em;
+  white-space: nowrap;
 }
 .flight-leg-value {
   color: var(--color-text);
@@ -849,6 +910,9 @@
 .flight-arrow {
   margin: 0 10px;
   color: var(--color-border);
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
 }
 .flight-sep {
   margin: 0 4px;
@@ -891,6 +955,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
 }
 .preflight-section-label::before {
   content: '';
@@ -1241,6 +1306,7 @@ select.preflight-field-input {
   gap: 6px;
   font-size: 13px;
   color: var(--color-text-muted, #94a3b8);
+  white-space: nowrap;
 }
 .stage-step.active {
   color: var(--color-primary, #4f46e5);
@@ -1267,7 +1333,15 @@ select.preflight-field-input {
   background: var(--color-success-soft, #d1fae5);
   color: var(--color-success-deep, #047857);
 }
-.stage-sep { margin: 0 8px; color: var(--color-text-muted, #cbd5e1); }
+/* Stage-sep is now an SVG arrow (IconArrowRight) instead of a literal →,
+   so the styling only handles color + alignment instead of glyph metrics. */
+.stage-sep {
+  color: var(--color-text-muted, #cbd5e1);
+  margin: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
 /* Effective-model badge shown beside each stage label when the stage has run.
    Empty values are not rendered, so historical rows (pre-feature) stay clean. */
 .stage-model-tag {
@@ -1393,6 +1467,7 @@ allowed so the row collapses cleanly on every viewport. */
 .merge-hint-label {
   flex-shrink: 0;
   font-weight: 600;
+  white-space: nowrap;
 }
 .merge-hint-path {
   flex: 1 1 240px;
@@ -1644,6 +1719,7 @@ allowed so the row collapses cleanly on every viewport. */
   background: var(--color-active);
   padding: 2px 8px;
   border-radius: 10px;
+  white-space: nowrap;
 }
 .ac-textarea {
   width: 100%;
@@ -1871,14 +1947,17 @@ allowed so the row collapses cleanly on every viewport. */
 
   /* Compact meta tag row at the top of the detail — drop the project
      chip on narrow screens (it's already in the breadcrumb above) and
-     shrink the priority tag. */
+     shrink the priority tag. Project + agent-server badges get
+     `white-space: normal` here so a long name can wrap inside the chip
+     instead of pushing other chips off-screen; the other chips in this
+     row keep nowrap because their labels never grow past 6 characters. */
   .detail-meta {
     gap: 6px;
   }
-  .project-tag { font-size: 11px; padding: 2px 8px; word-break: break-all; max-width: 100%; }
+  .project-tag { font-size: 11px; padding: 2px 8px; white-space: normal; word-break: break-all; max-width: 100%; }
   /* Same narrow-screen compaction as project-tag: the agent-server badge
      would otherwise overflow on a 360px viewport. */
-  .agent-server-badge { font-size: 11px; padding: 2px 8px; max-width: 100%; }
+  .agent-server-badge { font-size: 11px; padding: 2px 8px; white-space: normal; max-width: 100%; }
   /* Claude status pill is `inline-flex` and never wrapped by default,
      so on a 360px viewport it shoves the project tag off-screen. Let
      it wrap and shrink like the other chips in this row. */
@@ -2082,26 +2161,6 @@ allowed so the row collapses cleanly on every viewport. */
     padding: 8px 12px;     /* larger tap target on touch */
     min-height: 36px;
   }
-}
-
-/* Source link — points back to the requirement this row was promoted from.
-   Renders as a small, muted chip so it doesn't compete with the primary
-   status / kind badges in the meta row. */
-.source-link {
-  display: inline-block;
-  padding: 3px 10px;
-  border-radius: 4px;
-  font-size: 12px;
-  font-weight: 500;
-  background: var(--color-surface-muted, #F8FAFC);
-  color: var(--color-text-secondary, #64748B);
-  text-decoration: none;
-  border: 1px solid var(--color-border, #E2E8F0);
-  transition: background-color 80ms ease, color 80ms ease;
-}
-.source-link:hover {
-  background: var(--color-hover, #F1F5F9);
-  color: var(--color-primary, #4F46E5);
 }
 
 /* All modals use the canonical `.modal-overlay` + `.modal-box` shell (with
@@ -2383,6 +2442,7 @@ allowed so the row collapses cleanly on every viewport. */
   font-weight: 600;
   color: var(--color-text);
   letter-spacing: 0.01em;
+  white-space: nowrap;
 }
 
 .subtask-hint-mini {
@@ -2783,11 +2843,13 @@ allowed so the row collapses cleanly on every viewport. */
   padding: 1px 6px;
   background: rgba(79, 70, 229, 0.08);
   border-radius: 2px;
+  white-space: nowrap;
 }
 .spec-card-tag-date {
   font-family: var(--font-mono);
   font-size: 11px;
   color: #8B7E5E;
+  white-space: nowrap;
 }
 .spec-card-body {
   /* Match the existing analysis-summary margin rules but tighter — the
@@ -2826,6 +2888,7 @@ allowed so the row collapses cleanly on every viewport. */
   letter-spacing: 0.04em;
   color: var(--color-text);
   text-transform: none;
+  white-space: nowrap;
 }
 .ledger-title-mark {
   display: inline-block;
@@ -2971,13 +3034,26 @@ allowed so the row collapses cleanly on every viewport. */
 
 /* Mark chips (preset selector) — 头部 meta 行 inline 多选。颜色由
    inline style 出（每个 preset 一个 hex），CSS 只负责 layout / 形状 /
-   交互态。.is-active 时背景填充 preset bg，字色 preset color。 */
-.req-mark-chip-strip {
+   交互态。.is-active 时背景填充 preset bg，字色 preset color。
+
+   Selector is scoped to `.detail-meta >` on purpose: `.detail-meta > *`
+   hands every direct child the shared meta-chip chrome (padding /
+   border-radius / border / font-weight). This strip is a *container* of
+   chips rather than a chip itself, so it must opt out of that chrome —
+   matching the blanket selector's specificity (0,1,0) and relying on
+   source order would be fragile, and the inherited `font-weight: 600`
+   would bold every label, flattening the .is-active weight distinction. */
+.detail-meta > .req-mark-chip-strip {
   display: inline-flex;
   flex-wrap: wrap;
   gap: 4px;
   align-items: center;
   margin: 0 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  font-weight: 400;
+  line-height: 1;
 }
 .req-mark-chip {
   display: inline-flex;
@@ -3009,7 +3085,8 @@ allowed so the row collapses cleanly on every viewport. */
 }
 
 @media (max-width: 768px) {
-  .req-mark-chip-strip { gap: 3px; }
+  /* Same specificity as the base rule above so it still wins on source order. */
+  .detail-meta > .req-mark-chip-strip { gap: 3px; }
   .req-mark-chip-label { font-size: 11px; }
 }
 
@@ -3042,18 +3119,17 @@ allowed so the row collapses cleanly on every viewport. */
 }
 
 .req-tag-chip-remove {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
   border: none;
   background: transparent;
   color: #5B21B6;
-  font-size: 14px;
-  line-height: 1;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   transition: background-color 100ms ease, color 100ms ease;
 }
 

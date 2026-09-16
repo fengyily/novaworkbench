@@ -102,25 +102,28 @@ export const components = {
     summaryToastOk: '✅ Summary submitted',
     summaryToastErrPrefix: '❌',
     summaryToastErrFallback: 'Failed to submit summary',
-    // Session-mode radio. Always visible now (was previously gated by
-    // Agent-server / stale-artifact conditions). Three options let the
-    // user pick the conversation-threading policy at manual sub-task
+    // Session-mode segmented control. Always visible now (was previously
+    // gated by Agent-server / stale-artifact conditions). Three options let
+    // the user pick the conversation-threading policy at manual sub-task
     // create time:
     //   - resume      Inherit the parent main-agent session (--fork-session).
     //   - withContext New session, parent context injected.
-    //   - bare        Bare claude, CLI built-in defaults only.
-    // The `freshHint` survives as the "why is the radio non-default" banner
+    //   - bare        New session, CLI built-in defaults only.
+    // The `freshHint` survives as the "why is the mode non-default" advisory
     // shown only when the latest sub-task artifact looks like the legacy
     // missing-jsonl bug (so a follow-up click pre-selects with_context).
+    // Segmented control: labels stay short enough for one line at a third of
+    // the composer width; the explanation for the picked mode renders in the
+    // single `.sub-session-mode-desc` line below the control.
     sessionMode: {
       label: 'Session mode',
       resume: 'Inherit main session',
-      resumeHint: 'Fork the main coding session; the sub-task inherits the conversation.',
-      withContext: 'With context (new session)',
-      withContextHint: 'New session with the requirement / design / recent parent turns injected into the prompt.',
-      bare: 'New session (bare claude)',
-      bareHint: 'Nothing carried — no context, no role system prompt; CLI built-in defaults.',
-      freshHint: 'The previous session was not found on the Agent Server. We recommend the "New session" mode — it auto-injects the requirement title, design docs, and the last 10 turns of the previous session as context.',
+      resumeHint: 'Fork the main coding session id; the sub-task continues the main task\'s conversation',
+      withContext: 'With context',
+      withContextHint: 'New session with the requirement / design / recent parent turns injected into the prompt',
+      bare: 'New session',
+      bareHint: 'Nothing carried — no context, no role system prompt; claude CLI defaults only',
+      freshHint: 'The previous session was not found on the Agent Server. We recommend the "With context" mode — it auto-injects the requirement title, design docs, and the last 10 turns of the previous session as context.',
     },
   },
   subTaskCard: {
@@ -195,8 +198,10 @@ export const components = {
     // stays one row, titles hold the full explanation on hover.
     sessionModeWithContext: 'With context',
     sessionModeWithContextTitle: 'New session with requirement / design / recent parent turns injected',
-    sessionModeBare: 'Bare claude',
-    sessionModeBareTitle: 'New session with no context and no role system prompt',
+    // Wording matches the composer's session-mode segment label so the card
+    // badge and the picker read as the same option.
+    sessionModeBare: 'New session',
+    sessionModeBareTitle: 'New session with no context and no role system prompt; claude CLI defaults',
   },
   createRequirement: {
     title: 'New requirement',
