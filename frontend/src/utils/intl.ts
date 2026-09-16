@@ -85,3 +85,30 @@ export function fmtRelative(v: DateLike): string {
   const yr = Math.floor(mo / 12);
   return tt('time.yearsAgo', { n: yr });
 }
+
+// fmtRunAtRelative — 两向紧凑相对时间（"in 3 h" / "3 h ago"），用于 run_at 倒计时。
+// 与 fmtRelative 仅展示过去不同：这里同时覆盖未来（调度前）和过去（已超时仍 pending）。
+// 文案取自 time.* i18n key。nowMs 默认 Date.now()，便于测试与单次渲染快照。
+export function fmtRunAtRelative(v: DateLike, nowMs: number = Date.now()): string {
+  const d = toDate(v);
+  if (!d) return v === null || v === undefined || v === '' ? '' : String(v);
+  const diff = d.getTime() - nowMs;
+  const abs = Math.abs(diff);
+  const min = 60_000;
+  const hour = 60 * min;
+  const day = 24 * hour;
+  const tt = i18next.t.bind(i18next) as (key: string, opts?: Record<string, unknown>) => string;
+  if (abs < min) return diff >= 0 ? tt('time.soon') : tt('time.justNow');
+  if (abs < hour) {
+    const m = Math.round(abs / min);
+    return diff >= 0 ? tt('time.inMinutes', { n: m }) : tt('time.minutesAgo', { n: m });
+  }
+  if (abs < day) {
+    const h = Math.round(abs / hour);
+    return diff >= 0 ? tt('time.inHours', { n: h }) : tt('time.hoursAgo', { n: h });
+  }
+  const dDays = Math.round(abs / day);
+  if (dDays < 30) return diff >= 0 ? tt('time.inDays', { n: dDays }) : tt('time.daysAgo', { n: dDays });
+  const months = Math.round(dDays / 30);
+  return diff >= 0 ? tt('time.inMonths', { n: months }) : tt('time.monthsAgo', { n: months });
+}

@@ -23,7 +23,8 @@ import { tLabel } from '../i18n/label';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import { DevSourceBadge } from '../components/DevSourceBadge';
 import { StatusChips } from '../components/StatusChips';
-import { fmtRelative, fmtDateTime } from '../utils/intl';
+import { fmtRelative, fmtDateTime, fmtRunAtRelative } from '../utils/intl';
+import { IconClock } from '../components/icons';
 import './RequirementsList.css';
 
 // KIND_FILTERS holds translation KEYS for the chip labels (resolved on
@@ -116,6 +117,25 @@ export default function RequirementsList() {
   // their visibility at the 768px breakpoint so each surface is only
   // shown in its lane.
   const openCreate = () => setShowCreate(s => !s);
+
+  // Inline helper for the "has a pending scheduled task" affordance. Renders
+  // nothing when the row has no scheduled_run_at (omitted on the wire); the
+  // hover title combines the absolute time with the same relative countdown
+  // string SchedulesPage uses, so both surfaces speak the same vocabulary.
+  const scheduleClock = (r: Requirement) => {
+    if (!r.scheduled_run_at) return null;
+    return (
+      <IconClock
+        size={13}
+        className="icon-mr"
+        title={t('requirements.list.scheduledTooltip', {
+          time: fmtDateTime(r.scheduled_run_at),
+          rel: fmtRunAtRelative(r.scheduled_run_at),
+        })}
+        aria-label={t('requirements.list.scheduledAria')}
+      />
+    );
+  };
 
   return (
     <div className="requirements-list-page">
@@ -264,6 +284,7 @@ export default function RequirementsList() {
                     </td>
                     <td className="req-row-title" data-label={t('requirements.list.colTitle')}>
                       <div className="req-row-title-text">
+                        {scheduleClock(r)}
                         {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
                       </div>
                       {/* Preset marks (important / follow_up / blocked / at_risk)
@@ -441,6 +462,7 @@ export default function RequirementsList() {
                   );
                 })()}
                 <div className="req-card-mobile-title">
+                  {scheduleClock(r)}
                   {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
                 </div>
                 <div className="req-card-mobile-foot">

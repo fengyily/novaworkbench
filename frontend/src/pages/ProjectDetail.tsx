@@ -13,11 +13,11 @@ import {
   MARK_PRESETS, parseMarks,
 } from '../api/client';
 import { tLabel } from '../i18n/label';
-import { fmtDate, fmtDateTime } from '../utils/intl';
+import { fmtDate, fmtDateTime, fmtRunAtRelative } from '../utils/intl';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import { StatusChips } from '../components/StatusChips';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
-import { IconPlug, IconRobot } from '../components/icons';
+import { IconPlug, IconRobot, IconClock } from '../components/icons';
 import { stripMarkdownPreview } from '../utils/preview';
 import { createEventStream, type EventStream } from '../api/stream';
 import './RequirementDetail.css';
@@ -765,6 +765,23 @@ export default function ProjectDetail() {
       <td data-label={t('projects.detail.colPriority')}><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
       <td data-label={t('projects.detail.colStatus')}>
         <StatusChips req={req} />
+        {/* Pending-scheduled clock — surfaces that this requirement has a
+            future dispatch waiting (mirror of the cross-project list).
+            rendered BEFORE the pulse dot so the static chip row reads as
+            "status | clock | pulse" (clock = stored fact, pulse = live
+            activity). Gated on scheduled_run_at filled by the backend
+            List endpoint (same helper the calendar uses). */}
+        {req.scheduled_run_at && (
+          <IconClock
+            size={13}
+            className="icon-mr"
+            title={t('requirements.list.scheduledTooltip', {
+              time: fmtDateTime(req.scheduled_run_at),
+              rel: fmtRunAtRelative(req.scheduled_run_at),
+            })}
+            aria-label={t('requirements.list.scheduledAria')}
+          />
+        )}
         {/* Breathing dot for any wizard job in flight on this requirement
             (analyst/design/apply/coding). Set is populated by the 5s poll
             of /api/wizard/active-jobs above. aria-label + title so screen
