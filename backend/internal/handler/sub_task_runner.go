@@ -182,8 +182,8 @@ func (r *SubTaskRunner) SetRemoteCoding(fn func(*remoteCodingInput) claudeStream
 // row (see model.SubTaskSessionMode*). Pass "" to let SubTaskService.Create
 // default to "fork" (the legacy StartSubTask behavior, and the value auto-
 // orchestrated children always take).
-func (r *SubTaskRunner) NewPendingSubTask(reqID, title, prompt, modelDisplay, sourceSID, agentServerID, sessionMode string) (*model.SubTask, *store.Job, string, error) {
-	st, err := r.subTaskSvc.Create(reqID, title, prompt, modelDisplay, sourceSID, "", 0, agentServerID, sessionMode)
+func (r *SubTaskRunner) NewPendingSubTask(reqID, title, prompt, modelDisplay, sourceSID, agentServerID, sessionMode, parentSubtaskID string) (*model.SubTask, *store.Job, string, error) {
+	st, err := r.subTaskSvc.Create(reqID, title, prompt, modelDisplay, sourceSID, "", 0, agentServerID, sessionMode, parentSubtaskID)
 	if err != nil {
 		return nil, nil, "", err
 	}

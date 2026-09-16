@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
@@ -74,6 +74,43 @@ interface Props {
   // The composer defaults the choice to the parent requirement's
   // agent_server_id (inheritance) but lets the user override per sub-task.
   agentServers?: AgentServer[];
+}
+
+// Tree-form lineage marker — Adjust / Redo / Continue produce a NEW
+// sub_task row whose `parent_subtask_id` points at the originating row, so
+// the panel can render a nested tree (roots = original manual / auto-
+// orchestrated rows; descendants = 续接/重做/调整 follow-ups). Trees are
+// built client-side from the flat list returned by `subTasksApi.list`,
+// sorted newest-first within every level, and a parent node's collapse
+// state hides its whole subtree. The empty string is the root bucket so
+// legacy rows pre-dating the column render unchanged as roots.
+type TreeNode = { node: SubTask; depth: number; children: TreeNode[] };
+
+function buildTree(items: SubTask[]): TreeNode[] {
+  const byParent = new Map<string, SubTask[]>();
+  for (const it of items) {
+    const k = it.parent_subtask_id ?? '';
+    const arr = byParent.get(k) ?? [];
+    arr.push(it);
+    byParent.set(k, arr);
+  }
+  const sortNewest = (a: SubTask, b: SubTask) => {
+    const at = new Date(a.created_at).getTime();
+    const bt = new Date(b.created_at).getTime();
+    if (at !== bt) return bt - at;
+    return (b.id ?? '').localeCompare(a.id ?? '');
+  };
+  const build = (key: string, depth: number): TreeNode[] =>
+    (byParent.get(key) ?? []).slice().sort(sortNewest).map((n) => ({
+      node: n, depth, children: build(n.id, depth + 1),
+    }));
+  return build('', 0);
+}
+
+function countDescendants(n: TreeNode): number {
+  let c = 1; // self
+  for (const ch of n.children) c += countDescendants(ch);
+  return c;
 }
 
 // Status vocabulary — labels hold i18n KEYS (resolved at render) so the
@@ -291,6 +328,24 @@ interface CardProps {
   st: SubTask;
   index: number;
   total: number;
+  // Depth inside the parent → children tree. 0 = root card; non-zero cards
+  // are visually indented and get a left-edge connector line so the
+  // hierarchy is glanceable. Driven by buildTree at the panel root; a
+  // legacy list (no parent_subtask_id column) collapses every card to
+  // depth=0, so existing requirements render unchanged.
+  depth?: number;
+  // Total count of descendants (self + transitive children). Drives the
+  // collapse-handle visibility and the "N 个后续操作" badge. 0 means no
+  // children — the handle and badge are hidden entirely.
+  childCount?: number;
+  // Whether this card's subtree is currently collapsed. When true the
+  // panel skips rendering this card's children; the handle label flips
+  // to "展开" so the next click expands.
+  isCollapsed?: boolean;
+  // Toggle handler fired when the user clicks the collapse handle. The
+  // panel owns the collapsed Set and re-renders the flat list whenever
+  // it changes.
+  onToggleCollapse?: () => void;
   onChanged: (next: SubTask) => void;
   // Optional callback fired after a redo (or any action that adds a NEW
   // sub-task row) succeeds. The panel root passes loadList so the freshly
@@ -374,7 +429,22 @@ function useRestartSubTask(args: {
   }, [st, requirementId, onChanged, onRestarted, setStreaming, setLines]);
 }
 
-function SubTaskCard({ st, index, total, onChanged, onCreated: _onCreated, onRestarted, canStop, adjustModel = '', onAdjustModelChange, retryMax = 0 }: CardProps) {
+function SubTaskCard({
+  st,
+  index,
+  total,
+  depth = 0,
+  childCount = 0,
+  isCollapsed = false,
+  onToggleCollapse,
+  onChanged,
+  onCreated: _onCreated,
+  onRestarted,
+  canStop,
+  adjustModel = '',
+  onAdjustModelChange,
+  retryMax = 0,
+}: CardProps) {
   const { t } = useTranslation();
   // The card uses a layout that mirrors an issue tracker detail view:
   //   ┌─ terminal-style header line ────────────────────────────────┐
@@ -631,8 +701,23 @@ function SubTaskCard({ st, index, total, onChanged, onCreated: _onCreated, onRes
     ? t('components.subTaskCard.liveTicker', { duration: fmtDuration(liveSeconds) })
     : (st.duration_seconds > 0 ? t('components.subTaskCard.liveTicker', { duration: fmtDuration(st.duration_seconds) }) : '');
 
+  // Tree-form chrome: depth drives horizontal indentation and the
+  // left-edge connector line; childCount > 0 surfaces a collapse handle
+  // (▾/▸) plus a "N 个后续操作" badge so the user can tell at a glance
+  // how many follow-up actions are nested below. handleClick deliberately
+  // stops propagation so the header's expand/collapse stays independent
+  // of the tree's collapse.
+  const treeIndent = depth * 24;
+  const handleClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onToggleCollapse?.();
+  };
+
   return (
-    <article className={`sub-card sub-card-${st.status}`}>
+    <article
+      className={`sub-card sub-card-${st.status}${depth > 0 ? ' sub-card-child' : ''}`}
+      style={depth > 0 ? { marginLeft: treeIndent } : undefined}
+    >
       <header
         className="sub-card-header"
         onClick={() => setExpanded((v) => !v)}
@@ -644,6 +729,25 @@ function SubTaskCard({ st, index, total, onChanged, onCreated: _onCreated, onRes
             Sits ABOVE the title so a long user-supplied title never
             competes for horizontal space with the metadata row. */}
         <div className="sub-card-meta">
+          {childCount > 1 && onToggleCollapse && (
+            <button
+              type="button"
+              className="sub-card-tree-toggle"
+              onClick={handleClick}
+              title={isCollapsed
+                ? t('components.subTaskCard.treeExpand')
+                : t('components.subTaskCard.treeCollapse')}
+              aria-label={isCollapsed
+                ? t('components.subTaskCard.treeExpand')
+                : t('components.subTaskCard.treeCollapse')}
+              aria-expanded={!isCollapsed}
+            >
+              <span className="sub-card-tree-toggle-glyph" aria-hidden="true">{isCollapsed ? '▸' : '▾'}</span>
+              <span className="sub-card-tree-toggle-count">
+                {t('components.subTaskCard.childCount', { count: childCount - 1 })}
+              </span>
+            </button>
+          )}
           <span className={statusChipClass[st.status]}>{chipLabel}</span>
           {retryCount > 0 && (
             <span
@@ -1078,20 +1182,31 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     setSummaryExpanded(false);
   }, [requirement?.id, summaryReport]);
 
-  // Sort children newest-first. The requirement explicitly asks for
-  // "按创建时间排倒序" (newest first). This replaces the previous
-  // batch_seq ASC sort so that a freshly-created manual card immediately
-  // floats to the top. The id DESC tie-breaker keeps rows with identical
-  // created_at timestamps in a stable order.
-  const sortedItems = (() => {
-    if (!items) return items;
-    return [...items].sort((a, b) => {
-      const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
-      const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
-      if (aTime !== bTime) return bTime - aTime;
-      return (b.id || '').localeCompare(a.id || '');
-    });
-  })();
+  // Tree-form rendering: build a parent → children forest from the flat
+  // sub_tasks list (grouping by parent_subtask_id, '' bucket is the roots),
+  // then pre-order-flatten it so each level still shows newest-first
+  // (matching the previous "按创建时间倒序" rule) but children render
+  // indented under their parent. The `collapsed` Set tracks which parent
+  // ids have their subtree hidden; when a parent collapses, its entire
+  // descendant chain is skipped from `flat` until the user expands again.
+  const tree = useMemo(() => buildTree(items ?? []), [items]);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const flat: TreeNode[] = useMemo(() => {
+    const out: TreeNode[] = [];
+    const walk = (nodes: TreeNode[]) => {
+      for (const n of nodes) {
+        out.push(n);
+        if (!collapsed.has(n.node.id)) walk(n.children);
+      }
+    };
+    walk(tree);
+    return out;
+  }, [tree, collapsed]);
+  // sortedItems alias kept for downstream derivations that still iterate
+  // the flat list by .status (polling, latestArtifactStale, summary CTA).
+  // It points at the same array as `flat` so those consumers don't need
+  // any tree-aware logic — only the renderer walks the tree.
+  const sortedItems = flat.map((n) => n.node);
 
   // latestArtifactStale: derived from the freshest sub-task's artifact.
   // Used to auto-select the 「带上下文」 radio on follow-up clicks when the
@@ -1743,19 +1858,28 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             <div>{t('components.subTaskPanel.empty')}</div>
           </div>
         )}
-        {sortedItems && sortedItems.length > 0 && sortedItems.map((st, i) => (
+        {flat.length > 0 && flat.map((tn, i) => (
           <SubTaskCard
-            key={st.id}
-            st={st}
+            key={tn.node.id}
+            st={tn.node}
             index={i}
-            total={sortedItems.length}
+            total={flat.length}
+            depth={tn.depth}
+            childCount={countDescendants(tn)}
+            isCollapsed={collapsed.has(tn.node.id)}
+            onToggleCollapse={() => setCollapsed((prev) => {
+              const next = new Set(prev);
+              if (next.has(tn.node.id)) next.delete(tn.node.id);
+              else next.add(tn.node.id);
+              return next;
+            })}
             onChanged={onItemChanged}
             onCreated={loadList}
             onRestarted={handleSubTaskRestarted}
             // Per-card: this child's OWN effective environment decides whether
             // Stop is offered. `?? agent_server_id` is the same old-backend
             // fallback the environment badge above uses.
-            canStop={!(st.effective_agent_server_id ?? st.agent_server_id)}
+            canStop={!(tn.node.effective_agent_server_id ?? tn.node.agent_server_id)}
             adjustModel={adjustModel}
             onAdjustModelChange={setAdjustModel}
             retryMax={retryMax}

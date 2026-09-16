@@ -167,7 +167,7 @@ export const components = {
     cancel: 'Cancel',
     adjustBusy: 'Starting…',
     adjustSubmit: '🚀 Send follow-up',
-    redoHint: 'Re-run on top of the original task (no new record)',
+    redoHint: 'Re-run the task; the new attempt will appear as a child node',
     redoModelLabel: 'Redo model',
     redoSubmit: '🚀 Start redo',
     errAdjust: 'Failed to send follow-up',
@@ -178,7 +178,7 @@ export const components = {
     // and then realised they wanted to keep going picks Continue instead
     // of Redo.
     continueToggle: 'Continue',
-    continueHint: '--resume the original session, no new record',
+    continueHint: '--resume the original session; the new attempt will appear as a child node',
     continueSubmit: '▶ Continue',
     continueBusy: 'Continuing…',
     errContinue: 'This sub-task cannot be continued',
@@ -207,6 +207,13 @@ export const components = {
     // badge and the picker read as the same option.
     sessionModeBare: 'New session',
     sessionModeBareTitle: 'New session with no context and no role system prompt; claude CLI defaults',
+    // Tree expand/collapse + child count badge for the sub-task tree view.
+    // No _one/_other plural keys: the zh-CN locale uses a single key for this
+    // badge, so we mirror that to keep the two files in lockstep (the i18n
+    // check script enforces parity).
+    treeExpand: 'Show follow-ups',
+    treeCollapse: 'Hide follow-ups',
+    childCount: '{{count}} follow-up(s)',
   },
   createRequirement: {
     title: 'New requirement',

@@ -344,6 +344,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_servers_status ON agent_servers(status);
 CREATE TABLE IF NOT EXISTS sub_tasks (
 	id                 TEXT PRIMARY KEY,
 	requirement_id     TEXT NOT NULL,
+	parent_subtask_id  TEXT NOT NULL DEFAULT '',
 	title              TEXT NOT NULL DEFAULT '',
 	prompt             TEXT NOT NULL DEFAULT '',
 	status             TEXT NOT NULL DEFAULT 'pending',
@@ -748,6 +749,12 @@ var alterColumns = []string{
 	// shape as orchestration_batches.summary_attempts. Manual 重做 / 继续 do NOT
 	// touch it: the column counts automatic re-arms only.
 	`ALTER TABLE sub_tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0`,
+	// 父子链接：Adjust / Redo / Continue 产生的子任务挂在父任务 id 之下。
+	// 空串 = 根任务（手动创建或自动编排的行），DEFAULT '' 让存量数据自动成为根，
+	// 无需 backfill。SubTaskPanel 据此递归构建树。
+	`ALTER TABLE sub_tasks ADD COLUMN parent_subtask_id TEXT NOT NULL DEFAULT ''`,
+	// 父子查询索引：未来「列出某个父任务的所有子任务」按此索引即可。
+	`CREATE INDEX IF NOT EXISTS idx_sub_tasks_parent ON sub_tasks(parent_subtask_id)`,
 	// Orchestration summary retry cap: the tick loop's case SummaryError branch
 	// consults this column to decide whether to re-arm a fresh summary goroutine
 	// (attempts < SummaryMaxAttempts) or flip the whole batch to BatchErrored

@@ -388,6 +388,13 @@ export interface SubTask {
   // 失败自动重做 is on). Manual 重做 / 继续 never bump it. Undefined on older
   // backends — the card hides the badge then.
   retry_count?: number;
+  // Tree-form lineage marker: the id of the sub_task this row descends from,
+  // set on rows produced by Adjust / Redo / Continue (the user's "重做 / 继续 /
+  // 追加调整所产生的任务"). Empty on root rows (manually-created sub-tasks
+  // and auto-orchestrated children) — the SubTaskPanel uses this field to
+  // group rows into a parent → children tree with the empty string as the
+  // root key. Undefined on older backends — the panel treats them as roots.
+  parent_subtask_id?: string;
 }
 
 export const subTasksApi = {
