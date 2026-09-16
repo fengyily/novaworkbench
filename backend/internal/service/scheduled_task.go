@@ -109,24 +109,29 @@ func (s *ScheduledTaskService) Create(t *model.ScheduledTask) (*model.ScheduledT
 func (s *ScheduledTaskService) List(status, taskType, requirementID string) ([]model.ScheduledTask, error) {
 	var clauses []string
 	var args []any
+	// Column references must be qualified with the `st` alias because the
+	// LEFT JOIN against `requirements` introduces same-named columns (id,
+	// status) — SQLite returns "ambiguous column name" without the alias.
 	if status != "" {
-		clauses = append(clauses, "status = ?")
+		clauses = append(clauses, "st.status = ?")
 		args = append(args, status)
 	}
 	if requirementID != "" {
-		clauses = append(clauses, "requirement_id = ?")
+		clauses = append(clauses, "st.requirement_id = ?")
 		args = append(args, requirementID)
 	}
-	query := `SELECT id, task_type, requirement_id, project_id, requirement_title,
-		run_at, model, read_knowledge, branch_name, base_branch,
-		agent_server_id, split_tasks, coding_model, coding_agent_server_id,
-		status, job_id, error_message,
-		created_by, created_at, updated_at, executed_at
-		FROM scheduled_tasks`
+	query := `SELECT st.id, st.task_type, st.requirement_id, st.project_id, st.requirement_title,
+		st.run_at, st.model, st.read_knowledge, st.branch_name, st.base_branch,
+		st.agent_server_id, st.split_tasks, st.coding_model, st.coding_agent_server_id,
+		st.status, st.job_id, st.error_message,
+		st.created_by, st.created_at, st.updated_at, st.executed_at,
+		COALESCE(r.status, '') AS requirement_status
+		FROM scheduled_tasks st
+		LEFT JOIN requirements r ON r.id = st.requirement_id`
 	if len(clauses) > 0 {
 		query += " WHERE " + strings.Join(clauses, " AND ")
 	}
-	query += " ORDER BY run_at ASC, id ASC"
+	query += " ORDER BY st.run_at ASC, st.id ASC"
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -148,12 +153,15 @@ func (s *ScheduledTaskService) List(status, taskType, requirementID string) ([]m
 
 // Get loads one row by id. Returns ErrNotFound when no row matches.
 func (s *ScheduledTaskService) Get(id string) (*model.ScheduledTask, error) {
-	rows, err := s.db.Query(`SELECT id, task_type, requirement_id, project_id, requirement_title,
-		run_at, model, read_knowledge, branch_name, base_branch,
-		agent_server_id, split_tasks, coding_model, coding_agent_server_id,
-		status, job_id, error_message,
-		created_by, created_at, updated_at, executed_at
-		FROM scheduled_tasks WHERE id = ?`, id)
+	rows, err := s.db.Query(`SELECT st.id, st.task_type, st.requirement_id, st.project_id, st.requirement_title,
+		st.run_at, st.model, st.read_knowledge, st.branch_name, st.base_branch,
+		st.agent_server_id, st.split_tasks, st.coding_model, st.coding_agent_server_id,
+		st.status, st.job_id, st.error_message,
+		st.created_by, st.created_at, st.updated_at, st.executed_at,
+		COALESCE(r.status, '') AS requirement_status
+		FROM scheduled_tasks st
+		LEFT JOIN requirements r ON r.id = st.requirement_id
+		WHERE st.id = ?`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -168,14 +176,16 @@ func (s *ScheduledTaskService) Get(id string) (*model.ScheduledTask, error) {
 // first. The scheduler caps to 50 per tick to bound the SELECT cost and the
 // per-tick dispatch fan-out.
 func (s *ScheduledTaskService) Due(now time.Time, limit int) ([]model.ScheduledTask, error) {
-	rows, err := s.db.Query(`SELECT id, task_type, requirement_id, project_id, requirement_title,
-		run_at, model, read_knowledge, branch_name, base_branch,
-		agent_server_id, split_tasks, coding_model, coding_agent_server_id,
-		status, job_id, error_message,
-		created_by, created_at, updated_at, executed_at
-		FROM scheduled_tasks
-		WHERE status = ? AND run_at <= ?
-		ORDER BY run_at ASC LIMIT ?`,
+	rows, err := s.db.Query(`SELECT st.id, st.task_type, st.requirement_id, st.project_id, st.requirement_title,
+		st.run_at, st.model, st.read_knowledge, st.branch_name, st.base_branch,
+		st.agent_server_id, st.split_tasks, st.coding_model, st.coding_agent_server_id,
+		st.status, st.job_id, st.error_message,
+		st.created_by, st.created_at, st.updated_at, st.executed_at,
+		COALESCE(r.status, '') AS requirement_status
+		FROM scheduled_tasks st
+		LEFT JOIN requirements r ON r.id = st.requirement_id
+		WHERE st.status = ? AND st.run_at <= ?
+		ORDER BY st.run_at ASC LIMIT ?`,
 		model.SchedStatusPending, now, limit)
 	if err != nil {
 		return nil, err
@@ -395,6 +405,7 @@ func scanScheduledTask(rows *sql.Rows) (*model.ScheduledTask, error) {
 		&t.AgentServerID, &t.SplitTasks, &t.CodingModel, &t.CodingAgentServerID,
 		&t.Status, &t.JobID, &t.ErrorMessage,
 		&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &executedAt,
+		&t.RequirementStatus,
 	); err != nil {
 		return nil, err
 	}

@@ -1409,7 +1409,7 @@ export interface SkillMarket {
 
 export const skillsApi = {
   list: () => api.get<Skill[]>('/api/settings/skills'),
-  create: (data: { name: string; slug: string; content: string; description?: string; source_url?: string }) =>
+  create: (data: { name: string; slug: string; content: string; description?: string; source_url?: string; enabled?: boolean }) =>
     api.post<Skill>('/api/settings/skills', data),
   update: (id: string, data: { name: string; slug: string; content: string; description: string; enabled: boolean }) =>
     api.put<Skill>(`/api/settings/skills/${id}`, data),
@@ -1423,6 +1423,9 @@ export const skillsApi = {
         : '';
     return api.get<MarketSkill[]>('/api/settings/skills/market' + qs);
   },
+  installed: () => api.get<MarketSkill[]>('/api/settings/skills/installed'),
+  installCommand: (data: { repo: string; skill?: string }) =>
+    api.post<MarketSkill[]>('/api/settings/skills/install-command', data),
 };
 
 // Weekly reports (AI-generated from git log + requirement data)
@@ -1866,6 +1869,13 @@ export interface ScheduledTask {
   created_at: string;
   updated_at: string;
   executed_at: string | null;
+  // requirement_status: the LIVE status of the linked requirement at query
+  // time, populated by the backend's LEFT JOIN. Surfaced as a chip next to
+  // the requirement title in /schedules so users can disambiguate
+  // "定时任务 succeeded" vs "需求还停在 draft" (req_30080193f1c95255
+  // post-mortem). Empty string when the linked requirement was CASCADE-
+  // deleted — the page hides the chip in that case.
+  requirement_status?: string;
 }
 
 export interface CreateScheduleReq {
