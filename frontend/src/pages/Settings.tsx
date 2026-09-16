@@ -15,6 +15,10 @@ const settingsTabs = [
   { to: '/settings/skills', labelKey: 'settings.tabs.skills', permission: 'setting.roles_ai' },
   { to: '/settings/claude', labelKey: 'settings.tabs.claude', permission: 'setting.claude' },
   { to: '/settings/llm', labelKey: 'settings.tabs.llm', permission: 'setting.llm' },
+  // Sub-task execution policy (per-project concurrency + failure auto-redo).
+  // Reuses the setting.llm permission rather than seeding a new ACL key —
+  // both are "AI 执行通道" knobs for the same operator role.
+  { to: '/settings/subtask', labelKey: 'settings.tabs.subtask', permission: 'setting.llm' },
   { to: '/settings/database', labelKey: 'settings.tabs.database', permission: 'setting.database' },
   { to: '/settings/preflight', labelKey: 'settings.tabs.preflight', permission: 'setting.preflight' },
 ];

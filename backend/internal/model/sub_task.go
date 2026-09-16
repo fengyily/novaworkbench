@@ -98,6 +98,13 @@ type SubTask struct {
 	// (CLI built-in defaults only). Persisted for audit and SubTaskCard badge
 	// rendering; never mutated after insert.
 	SessionMode  string  `json:"session_mode,omitempty"`
+	// RetryCount is how many times the orchestration tick has automatically
+	// re-armed this child after a failure (see SubTaskService.ReArmErroredForRetry).
+	// Only auto-orchestrated children are ever re-armed, and only when the
+	// subtask.auto_retry setting is on; the tick stops re-arming once the count
+	// reaches the configured subtask.retry_max. Manual 重做 / 继续 never bump it,
+	// so the number always reads as "系统自动重做了几次".
+	RetryCount int `json:"retry_count"`
 	// AgentServerID is the execution environment this sub-task runs on: empty
 	// = 本地执行; non-empty = the agent_servers.id. Persisted per-row so an
 	// auto-orchestrated child inherits the parent requirement's environment and

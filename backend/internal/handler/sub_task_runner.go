@@ -75,21 +75,39 @@ type SubTaskRunner struct {
 	// (or missing) checkout. Nil keeps every child local.
 	agentSvrSvc *service.AgentServerService
 	// runSem caps the number of claude CLI subprocesses that may be alive
-	// at once. Buffered channel used as a counting semaphore: every Run
-	// acquires a slot on entry (blocking when full) and releases on return.
-	// Sized by NewSubTaskRunner's runConcurrency argument (env
-	// NOVA_SUBTASK_CONCURRENCY; default DefaultSubTaskConcurrency).
+	// at once ACROSS ALL PROJECTS — the process-wide OOM ceiling. Buffered
+	// channel used as a counting semaphore: every Run acquires a slot on entry
+	// (blocking when full) and releases on return. Sized by NewSubTaskRunner's
+	// runConcurrency argument (env NOVA_SUBTASK_CONCURRENCY; default
+	// DefaultSubTaskConcurrency). Shared with the orchestration queue when main
+	// passes the same channel in, so the two dispatch paths share one ceiling.
 	runSem chan struct{}
+	// limiter is the PER-PROJECT admission gate, shared with the orchestration
+	// queue. It is taken BEFORE runSem (same order on both paths, so the two
+	// can't deadlock) and is what makes every sub-task — manual 重做/继续
+	// included — queue behind its project's configured concurrency instead of
+	// fanning out per click.
+	limiter *service.ProjectLimiter
+	// settingSvc supplies the per-project concurrency on each Run so a settings
+	// change applies to the next dispatch without a restart. Nil keeps whatever
+	// cap the limiter was constructed with.
+	settingSvc *service.SettingService
 }
 
 // NewSubTaskRunner wires the shared sub-task executor. All dependencies are
 // required (the runner will panic-via-nil-deref if any is missing — same
 // convention as the handler constructors, which all assume a fully wired main).
 //
-// runConcurrency caps how many concurrent Run invocations can hold a slot.
-// Pass 0 to use DefaultSubTaskConcurrency; pass a positive int to override
-// (env NOVA_SUBTASK_CONCURRENCY is the intended source). Negative values are
-// treated as 0.
+// runConcurrency caps how many concurrent Run invocations can hold a slot
+// process-wide. Pass 0 to use DefaultSubTaskConcurrency; pass a positive int to
+// override (env NOVA_SUBTASK_CONCURRENCY is the intended source). Negative
+// values are treated as 0. Pass a non-nil globalSem instead to SHARE that
+// ceiling with the orchestration queue (main does); runConcurrency is then only
+// used as the fallback size when globalSem is nil.
+//
+// limiter is the per-project gate (shared with the orchestration queue) and
+// settingSvc refreshes its cap per Run; both may be nil in tests, in which case
+// the runner falls back to a private limiter at the default cap.
 func NewSubTaskRunner(
 	projectSvc *service.ProjectService,
 	subTaskSvc *service.SubTaskService,
@@ -104,9 +122,18 @@ func NewSubTaskRunner(
 	agentSvrSvc *service.AgentServerService,
 	remoteCoding func(*remoteCodingInput) claudeStreamOutcome,
 	runConcurrency int,
+	globalSem chan struct{},
+	limiter *service.ProjectLimiter,
+	settingSvc *service.SettingService,
 ) *SubTaskRunner {
 	if runConcurrency <= 0 {
 		runConcurrency = DefaultSubTaskConcurrency
+	}
+	if globalSem == nil {
+		globalSem = make(chan struct{}, runConcurrency)
+	}
+	if limiter == nil {
+		limiter = service.NewProjectLimiter(service.DefaultSubTaskProjectConcurrency)
 	}
 	return &SubTaskRunner{
 		agentSvrSvc:  agentSvrSvc,
@@ -121,7 +148,9 @@ func NewSubTaskRunner(
 		skillSvc:     skillSvc,
 		platformSvc:  platformSvc,
 		remoteCoding: remoteCoding,
-		runSem:       make(chan struct{}, runConcurrency),
+		runSem:       globalSem,
+		limiter:      limiter,
+		settingSvc:   settingSvc,
 	}
 }
 
@@ -305,10 +334,6 @@ func (r *SubTaskRunner) Run(
 	freshSession bool,
 	bare bool,
 ) {
-	startTime, mErr := r.subTaskSvc.MarkRunning(st.ID)
-	if mErr != nil {
-		log.Printf("[sub-task] failed to mark running for %s: %v", st.ID, mErr)
-	}
 	// Best-effort persistence: backend restart mid-run won't lose the log.
 	defer func() {
 		lines, status, exitCode := job.Snapshot()
@@ -343,20 +368,69 @@ func (r *SubTaskRunner) Run(
 		}
 	}()
 
-	// Concurrency cap: multiple sub-tasks can fan out at once (manual clicks
-	// or auto-orchestrator fan-out), but unlimited concurrency tips the OS OOM /
-	// macOS jetsam killer into SIGKILLing the parent nova process — a signal
-	// Go cannot intercept, which is exactly the "system exits for no reason"
-	// symptom. Block here when over cap; the wait log lands in the job panel
-	// so the user sees the queue, not a frozen UI.
+	// Admission, two gates in a fixed order (same order the orchestration queue
+	// uses, so they can never deadlock against each other):
+	//
+	//  1. the PER-PROJECT gate — "子任务从项目的角度排队": one project may have
+	//     at most `subtask.concurrency` children in flight, while other
+	//     projects keep running in parallel. Every manual entry point
+	//     (StartSubTask / Adjust / 重做 / 继续) funnels through Run, so manual
+	//     recovery queues behind exactly the same cap as automatic dispatch.
+	//  2. the process-wide ceiling — unlimited concurrency tips the OS OOM /
+	//     macOS jetsam killer into SIGKILLing the parent nova process (a signal
+	//     Go cannot intercept: the "system exits for no reason" symptom).
+	//
+	// Unlike the tick loop (which must not block and defers to its next pass),
+	// this path waits: the user clicked, so the sub-task should eventually run.
+	// Polling rather than a condition variable because the cap itself is
+	// mutable and sub-tasks last minutes — a sub-second poll is free by
+	// comparison. Both waits log into the job panel so the user sees a queue,
+	// not a frozen UI.
+	//
+	// Refresh the cap from settings first so a just-saved value applies to this
+	// dispatch.
+	if r.settingSvc != nil {
+		if conc, _, _, cerr := r.settingSvc.SubTaskConfig(); cerr == nil {
+			r.limiter.SetMax(conc)
+		} else {
+			log.Printf("[sub-task] read sub-task settings: %v (keeping cap %d)", cerr, r.limiter.Max())
+		}
+	}
+	projectID := req.ProjectID
+	if !r.limiter.TryAcquire(projectID) {
+		job.Append(store.LogLine{Type: "phase", Content: fmt.Sprintf("⏳ 排队中（当前项目并发上限 %d 已满）...", r.limiter.Max())})
+		for !r.limiter.TryAcquire(projectID) {
+			time.Sleep(750 * time.Millisecond)
+		}
+	}
+	defer r.limiter.Release(projectID)
 	select {
 	case r.runSem <- struct{}{}:
 		// slot acquired immediately
 	default:
-		job.Append(store.LogLine{Type: "phase", Content: fmt.Sprintf("⏳ 等待空闲 worker slot（并发上限 %d 已满）...", cap(r.runSem))})
+		job.Append(store.LogLine{Type: "phase", Content: fmt.Sprintf("⏳ 等待空闲 worker slot（进程并发上限 %d 已满）...", cap(r.runSem))})
 		r.runSem <- struct{}{}
 	}
 	defer func() { <-r.runSem }()
+
+	// The wait above can last minutes, and the user may well have stopped the
+	// sub-task while it sat in the queue (StopSubTask accepts a queued row and
+	// flips it to 'stopped'). Honor that before spawning anything — otherwise
+	// the card would go from 已停止 back to 运行中 on its own.
+	if cur, gerr := r.subTaskSvc.Get(st.ID); gerr == nil && cur != nil && cur.Status == model.SubTaskStatusStopped {
+		job.Append(store.LogLine{Type: "message", Content: "⏹ 排队期间已被停止，未启动执行"})
+		job.Finish(0, store.JobDone)
+		return
+	}
+
+	// Only now does the row become "运行中": flipping it before the gates would
+	// make a queued sub-task render as running for as long as it waits, which
+	// is the exact confusion the project queue is meant to remove. It also
+	// keeps duration_seconds measuring execution time, not queue time.
+	startTime, mErr := r.subTaskSvc.MarkRunning(st.ID)
+	if mErr != nil {
+		log.Printf("[sub-task] failed to mark running for %s: %v", st.ID, mErr)
+	}
 
 	role := "🤖 调整子任务启动中..."
 	if !adjust {

@@ -383,6 +383,11 @@ export interface SubTask {
   // ('带上下文' / '裸 claude'). Older backends that predate the column
   // return undefined here — treat as 'fork'.
   session_mode?: 'fork' | 'with_context' | 'bare';
+  // How many times the backend has AUTOMATICALLY re-done this sub-task after a
+  // failure (only auto-orchestrated children, only when 设置 → 子任务 →
+  // 失败自动重做 is on). Manual 重做 / 继续 never bump it. Undefined on older
+  // backends — the card hides the badge then.
+  retry_count?: number;
 }
 
 export const subTasksApi = {
@@ -1308,6 +1313,23 @@ export const llmApi = {
   get: () => api.get<LLMConfig>('/api/settings/llm'),
   update: (data: { base_url: string; api_key?: string; model: string; clear_api_key?: boolean }) =>
     api.put<LLMConfig>('/api/settings/llm', data),
+};
+
+// Sub-task execution policy. concurrency is applied PER PROJECT (each project
+// may run that many sub-tasks at once; different projects still run in
+// parallel), auto_retry decides whether a failed auto-orchestrated child is
+// re-dispatched by the backend (default false — recovery is a manual 重做/继续),
+// and retry_max caps those automatic re-dispatches. The backend re-reads these
+// on every orchestration tick / sub-task launch, so saving takes effect without
+// a restart.
+export interface SubTaskConfig {
+  concurrency: number;
+  auto_retry: boolean;
+  retry_max: number;
+}
+export const subTaskConfigApi = {
+  get: () => api.get<SubTaskConfig>('/api/settings/subtask'),
+  update: (data: SubTaskConfig) => api.put<SubTaskConfig>('/api/settings/subtask', data),
 };
 
 // Database driver config (sqlite default; mysql/postgres via settings UI or

@@ -15,6 +15,7 @@ import SettingsRoles from './pages/SettingsRoles';
 import SettingsClaude from './pages/SettingsClaude';
 import SettingsAgentServers from './pages/SettingsAgentServers';
 import SettingsLLM from './pages/SettingsLLM';
+import SettingsSubTask from './pages/SettingsSubTask';
 import SettingsDatabase from './pages/SettingsDatabase';
 import SettingsPreflight from './pages/SettingsPreflight';
 import SettingsUsers from './pages/SettingsUsers';
@@ -77,6 +78,7 @@ export default function App() {
               <Route path="skills" element={<SettingsSkills />} />
               <Route path="claude" element={<SettingsClaude />} />
               <Route path="llm" element={<SettingsLLM />} />
+              <Route path="subtask" element={<SettingsSubTask />} />
               <Route path="database" element={<SettingsDatabase />} />
               <Route path="preflight" element={<SettingsPreflight />} />
             </Route>

@@ -8,6 +8,7 @@ import {
   subTaskCliCommand,
   subTaskAdjustCommand,
   claudeApi,
+  subTaskConfigApi,
   claudeSettingsPrefix,
   DefaultModelLabel,
   type SubTask,
@@ -322,6 +323,11 @@ interface CardProps {
   // write back to the panel-level adjustModel state. Without this each
   // card would need its own picker copy.
   onAdjustModelChange?: (model: string) => void;
+  // Configured cap for automatic failure redo (设置 → 子任务). Fetched once at
+  // the panel level and passed down so each card can render "自动重做 1/2"
+  // instead of a bare count. 0 = not known yet / failed to read; the badge
+  // then falls back to the count-only wording.
+  retryMax?: number;
 }
 
 // useRestartSubTask encapsulates the "原地翻转" semantics shared by the
@@ -368,7 +374,7 @@ function useRestartSubTask(args: {
   }, [st, requirementId, onChanged, onRestarted, setStreaming, setLines]);
 }
 
-function SubTaskCard({ st, index, total, onChanged, onCreated: _onCreated, onRestarted, canStop, adjustModel = '', onAdjustModelChange }: CardProps) {
+function SubTaskCard({ st, index, total, onChanged, onCreated: _onCreated, onRestarted, canStop, adjustModel = '', onAdjustModelChange, retryMax = 0 }: CardProps) {
   const { t } = useTranslation();
   // The card uses a layout that mirrors an issue tracker detail view:
   //   ┌─ terminal-style header line ────────────────────────────────┐
@@ -440,7 +446,19 @@ function SubTaskCard({ st, index, total, onChanged, onCreated: _onCreated, onRes
   // `live ?? fallback` so refresh-after-finish still shows the same bar.
   const [usage, setUsage] = useState<UsageInfo | undefined>(undefined);
   const esRef = useRef<EventStream | null>(null);
-  const chipLabel = t(statusLabelKeys[st.status]);
+  // 'pending' now always means "queued behind the project's concurrency gate":
+  // the orchestration tick deliberately leaves a row pending rather than
+  // claiming one it can't run, and the manual runner flips to running only
+  // after it wins a slot. Hence the explicit "等待项目空闲" wording instead of
+  // the generic pending chip.
+  const queued = st.status === 'pending';
+  const chipLabel = queued
+    ? t('components.subTaskCard.statusQueued')
+    : t(statusLabelKeys[st.status]);
+  // Automatic-redo counter: only auto-orchestrated children are ever re-armed
+  // by the backend, and only when the setting is on, so a non-zero value is
+  // always worth surfacing (it explains why a card ran more than once).
+  const retryCount = st.retry_count ?? 0;
 
   // Shared Redo/Continue driver. Lives at the top of the component so
   // both submitRedo and submitContinue close over the same function and
@@ -627,6 +645,16 @@ function SubTaskCard({ st, index, total, onChanged, onCreated: _onCreated, onRes
             competes for horizontal space with the metadata row. */}
         <div className="sub-card-meta">
           <span className={statusChipClass[st.status]}>{chipLabel}</span>
+          {retryCount > 0 && (
+            <span
+              className="sub-card-retry"
+              title={t('components.subTaskCard.retryBadgeTitle', { count: retryCount, max: retryMax || retryCount })}
+            >
+              {retryMax > 0
+                ? t('components.subTaskCard.retryBadge', { count: retryCount, max: retryMax })
+                : t('components.subTaskCard.retryBadgeNoMax', { count: retryCount })}
+            </span>
+          )}
           {/* Source badge: 🪄 Auto (auto-orchestrated) vs 👤 Manual (manual).
               Drives off `source` first; falls back to the legacy `batch_id`
               heuristic so older backends (no source column) still render. */}
@@ -702,7 +730,12 @@ function SubTaskCard({ st, index, total, onChanged, onCreated: _onCreated, onRes
               a localized title) when canStop=false — the parent flips
               that for Agent-Server executions where the backend rejects
               /stop with 501 STOP_REMOTE_NOT_SUPPORTED. */}
-          {st.status === 'running' && (
+          {/* Stop is offered while running AND while queued (a manual
+              sub-task waiting on its project's concurrency gate already owns a
+              job, so the backend can abandon it before any claude process
+              starts). An orchestrated child waiting to be claimed has no job
+              yet — nothing to stop, and the queue will dispatch it in order. */}
+          {(st.status === 'running' || (queued && !!st.job_id)) && (
             <button
               type="button"
               className="sub-card-stop-btn"
@@ -903,6 +936,17 @@ function isLongSummary(raw: string | undefined): boolean {
 export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange, developerDefaultModel = '', batch, onBatchChange, agentServers = [] }: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<SubTask[] | null>(null);
+  // Configured automatic-redo cap (设置 → 子任务). Read once per mount purely to
+  // give the per-card retry badge a denominator; a failure is non-fatal (the
+  // badge falls back to a count-only wording), so no error state is kept.
+  const [retryMax, setRetryMax] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    subTaskConfigApi.get()
+      .then(cfg => { if (!cancelled) setRetryMax(cfg.retry_max); })
+      .catch(() => { /* badge degrades to the count-only wording */ });
+    return () => { cancelled = true; };
+  }, []);
   const [prompt, setPrompt] = useState('');
   // Title input was removed: opening a sub-task now only needs a description.
   // The backend auto-derives a card-header title from the prompt (first 40
@@ -1714,6 +1758,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             canStop={!(st.effective_agent_server_id ?? st.agent_server_id)}
             adjustModel={adjustModel}
             onAdjustModelChange={setAdjustModel}
+            retryMax={retryMax}
           />
         ))}
       </div>

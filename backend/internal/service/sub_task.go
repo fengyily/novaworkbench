@@ -169,7 +169,7 @@ func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 		created_at, updated_at, completed_at,
 		batch_id, batch_seq, batch_id_seq_run, source,
 		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-		session_mode
+		session_mode, retry_count
 		FROM sub_tasks WHERE requirement_id = ? ORDER BY created_at DESC, id DESC`, reqID)
 	if err != nil {
 		return nil, err
@@ -207,7 +207,7 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 		created_at, updated_at, completed_at,
 		batch_id, batch_seq, batch_id_seq_run, source,
 		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-		session_mode
+		session_mode, retry_count
 		FROM sub_tasks WHERE id = ?`, id)
 	if err != nil {
 		return nil, err
@@ -243,7 +243,7 @@ func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
 		created_at, updated_at, completed_at,
 		batch_id, batch_seq, batch_id_seq_run, source,
 		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-		session_mode
+		session_mode, retry_count
 		FROM sub_tasks WHERE batch_id = ?
 		ORDER BY batch_seq ASC, created_at ASC, id ASC`, batchID)
 	if err != nil {
@@ -379,6 +379,51 @@ func (s *SubTaskService) CountTerminalByBatch(batchID string) (done, errored int
 	return int(d), int(e), nil
 }
 
+// ReArmErroredForRetry flips this batch's failed children back to 'pending' so
+// the next tick re-dispatches them, and returns how many rows were re-armed.
+// This is the automatic half of "失败重做"; the manual half is the card's
+// 重做 / 继续 buttons (RedoReset / ContinueReset), which stay available
+// regardless of the setting.
+//
+// Guards, in the WHERE clause:
+//   - batch_id=?             — only auto-orchestrated children. Manual rows
+//     (batch_id='') are never re-armed automatically; the user drives those.
+//   - status='error'         — stopped rows are deliberately excluded: the user
+//     halted them on purpose, and silently restarting a
+//     stopped child would fight the user's own action.
+//   - retry_count < retryMax — the hard stop that keeps a deterministically
+//     failing child from looping forever, mirroring
+//     orchestration_batches.summary_attempts /
+//     model.SummaryMaxAttempts. retryMax ≤ 0 short-circuits
+//     to a no-op without touching the DB.
+//
+// The reset mirrors RedoReset's "clean in-place re-run" semantics — artifact,
+// job_id and completed_at are cleared, and batch_id_seq_run is nulled so the
+// stale heartbeat from the failed run can't make RecoverInterrupted treat the
+// re-armed row as an orphan on the next boot. The caller (the orchestration
+// tick) must run this BEFORE CountTerminalByBatch: a re-armed row leaves the
+// 'error' bucket, so counting first would flip the batch into summarizing a
+// tick before the retry ever got dispatched.
+func (s *SubTaskService) ReArmErroredForRetry(batchID string, retryMax int) (int64, error) {
+	if batchID == "" {
+		return 0, errors.New("batch_id is required")
+	}
+	if retryMax <= 0 {
+		return 0, nil
+	}
+	res, err := s.db.Exec(`UPDATE sub_tasks SET
+		status=?, retry_count=retry_count+1,
+		batch_id_seq_run=NULL, job_id='', artifact='', completed_at=NULL,
+		updated_at=?
+		WHERE batch_id=? AND status=? AND retry_count < ?`,
+		model.SubTaskStatusPending, time.Now(), batchID, model.SubTaskStatusError, retryMax)
+	if err != nil {
+		return 0, fmt.Errorf("re-arm errored sub_tasks: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // ClaimNextPending atomically picks the lowest batch_seq pending row for
 // batchID and flips it to running. Used by OrchestrationQueue's tick loop so
 // the (batch_id, batch_seq) ordering is preserved across crash/restart — only
@@ -425,7 +470,7 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 		created_at, updated_at, completed_at,
 		batch_id, batch_seq, batch_id_seq_run, source,
 		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-		session_mode
+		session_mode, retry_count
 		FROM sub_tasks
 		 WHERE batch_id=? AND status=?
 		 ORDER BY batch_seq ASC, created_at ASC
@@ -861,8 +906,9 @@ func (s *SubTaskService) RecoverInterrupted() (int64, error) {
 
 // scanSubTask is a shared row→struct mapper. Pulled out so List / Get can
 // share the column order without each method carrying its own Scan list.
-// The SELECT must end with `source, agent_server_id, <server name>` — the
-// last being a correlated subquery / join resolving agent_servers.name.
+// The SELECT must end with `source, agent_server_id, <server name>,
+// session_mode, retry_count` — the server name being a correlated subquery /
+// join resolving agent_servers.name.
 func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 	var st model.SubTask
 	var completedAt sql.NullTime
@@ -877,7 +923,7 @@ func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 		&st.BatchID, &st.BatchSeq, &heartbeat,
 		&st.Source,
 		&agentServerID, &st.AgentServerName,
-		&st.SessionMode,
+		&st.SessionMode, &st.RetryCount,
 	); err != nil {
 		return nil, err
 	}
