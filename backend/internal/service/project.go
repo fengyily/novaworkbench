@@ -1079,6 +1079,17 @@ func (s *ProjectService) updateSyncStatus(id, status, commit string, when time.T
 	return err
 }
 
+// UpdateSyncStatus is the public counterpart of updateSyncStatus. The agent-
+// server SSH path runs `git fetch origin <base>` inside originTransport
+// (handler/wizard_remote.go) and needs to stamp the local projects.sync_status
+// from outside the service package — exposes a thin wrapper that fills in the
+// timestamp and delegates to the private method so the only DB-write code
+// path stays in one spot. Errors are still swallowed at the private layer so a
+// failed audit row write never aborts the wizard.
+func (s *ProjectService) UpdateSyncStatus(id, status, commit string) {
+	_ = s.updateSyncStatus(id, status, commit, time.Now())
+}
+
 // Purge permanently removes a soft-deleted project and its on-disk
 // directory. Errors are prefixed with NOT_IN_TRASH / PROJECT_NOT_FOUND /
 // REMOVE_DIR_FAILED / PURGE_FAILED so the handler can map them to HTTP

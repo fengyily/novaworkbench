@@ -1003,8 +1003,10 @@ func (t originTransport) PrepareRemote(ctx context.Context, client *gossh.Client
 	if t.projectSvc != nil && t.projectID != "" {
 		if fetchExit == 0 {
 			in.job.Append(store.LogLine{Type: "phase", Content: "✅ 已同步 origin/" + baseBranch})
+			t.projectSvc.UpdateSyncStatus(t.projectID, service.SyncStatusOK, "")
 		} else {
 			in.job.Append(store.LogLine{Type: "phase", Content: "⚠️ 同步失败，使用本地快照继续（agent 主机 fetch 退出码 " + strconv.Itoa(fetchExit) + "）"})
+			t.projectSvc.UpdateSyncStatus(t.projectID, service.SyncStatusError, "")
 		}
 	}
 

@@ -306,3 +306,66 @@ ok  	github.com/novaworkbench/backend/internal/store	1.962s
 - 工作分支：`feat/req_89a1fce301492b46`（已与 origin 同步 1 提交 `b8ef6af`，领先 main 1 提交）
 - 本次新增改动：Step 2/3/5/6 落盘；commit message 严格遵循既有风格（无 AI 署名 / Co-Authored-By trailer / 无平台凭据）
 - 平台认证：直接 `git push origin feat/req_89a1fce301492b46`（使用项目配置的 Platform Token；不在命令里手写凭据）
+
+---
+
+## 8. Step 6 follow-up — 4-case 集成 smoke + remote fetch 收尾（2026-09-16）
+
+上一节把 4 个手工 UI 用例标记为 follow-up，本会话又补了两件事把它们尽量自动化并修了一个实施遗漏：
+
+### 8.1 实施遗漏：远端 SSH fetch 没回写本地 `projects.sync_status`
+
+`originTransport.PrepareRemote`（handler/wizard_remote.go）抓了 `fetchExit` 但只发了 SSE phase 文案，**没有把 exit code 转成 sync_status 落库**——service 包私有方法 `updateSyncStatus` 在 handler 包够不着。补：
+
+- `backend/internal/service/project.go`：新增公开薄壳 `ProjectService.UpdateSyncStatus(id, status, commit)`，仅做 `now := time.Now()` + 调私有方法，确保 DB 写入路径仍然只有一处；
+- `backend/internal/handler/wizard_remote.go`：`originTransport.PrepareRemote` 在抓完 `fetchExit` 后：
+  - `fetchExit == 0` → 发 `✅ 已同步 origin/<base>` phase + `UpdateSyncStatus(id, SyncStatusOK, "")`；
+  - `fetchExit != 0` → 发 `⚠️ 同步失败，使用本地快照继续（agent 主机 fetch 退出码 N）` phase + `UpdateSyncStatus(id, SyncStatusError, "")`；
+  - 与本地 `EnsureClonedAndSynced` 一致：失败不返回 fatal，调用方继续走 worktree 策略。
+
+### 8.2 4-case 集成 smoke（替代手工 UI 点击）
+
+新加 `backend/internal/service/project_sync_test.go::TestEnsureClonedAndSynced_FourScenarios`，在 `t.TempDir()` 里：
+
+1. `git init --bare` 建一个 upstream；
+2. 跑 `git clone` + 写文件 + commit + push 作为 seed commit；
+3. 用 4 个 subtest 跑 `EnsureClonedAndSynced` 并断言 DB 落库字段。
+
+执行结果（`go test -run TestEnsureClonedAndSynced_FourScenarios ./internal/service/ -v`）：
+
+```
+--- PASS: TestEnsureClonedAndSynced_FourScenarios (0.42s)
+    --- PASS: Case1_MissingDir_Clones (0.03s)
+    --- PASS: Case2_RemoteAhead_Fetches (0.16s)
+    --- PASS: Case3_NoRemote_Skips (0.00s)
+    --- PASS: Case4_UnreachableRemote_FallsBack (0.06s)
+PASS
+ok  github.com/novaworkbench/backend/internal/service  0.851s
+```
+
+逐项断言对应：
+
+| 用例 | DB 行断言 |
+|---|---|
+| Case 1（目录缺失 + 有 remote） | `Cloned=true`、`sync_status=ok`、`last_synced_commit` 非空、`last_synced_at` 非零、`os.Stat(localPath)` 通过 |
+| Case 2（远端领先） | `Fetched=true`、`last_synced_commit` 从旧 SHA 推进到新 SHA、`sync_status=ok` |
+| Case 3（remote_url=""） | `Skipped=true`、`sync_status` 维持 schema 默认 `'idle'` |
+| Case 4（远端不可达 `https://127.0.0.1:1/dead.git`） | 函数不返回 fatal error、`res.Err` 非空、`sync_status=error`、`last_synced_at` 被 stamp（审计留痕） |
+
+### 8.3 仍需人工核对的部分
+
+- **SSE 流可视化**（前端 `JobStream` 实际消费到的 phase 帧顺序）：dev server + 浏览器才能截图，本会话无法执行；
+- **ProjectDetail 徽章渲染**（色块 / 相对时间）：同上；
+- **RequirementDetail 24h 提示条** 的非阻塞行为：同上。
+
+这三条与代码逻辑正交（service / i18n / handler 都已绿），留给用户在本地浏览器里 30 秒 内人工确认。
+
+### 8.4 回归门槛复跑
+
+```
+go vet ./...                            → EXIT 0
+go build ./...                          → EXIT 0
+go test ./...                           → ok db / ok handler / ok llm / ok scheduler / ok service / ok ssh / ok store
+cd frontend && npm run build            → tsc -b + vite build 成功（393 modules, 274ms）
+cd frontend && npm run lint             → EXIT 0（仅预存 warning）
+```
