@@ -304,6 +304,36 @@
   align-items: center;
 }
 
+/* Preset mark strip (重要 / 跟进 / 阻塞 / 风险) rendered ABOVE the title in
+   the project-page requirements table (both the overview "recent
+   requirements" and the requirements tab — they share renderRequirementRows).
+   Mirrors .req-row-marks on the global list page; colors come per-chip from
+   inline style driven by MARK_PRESETS, so this only owns layout + shape. */
+.pr-title-marks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 4px;
+  align-items: center;
+}
+
+.pr-title-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 500;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+
 .pr-title-tag {
   font-size: 11px;
   padding: 1px 8px;
