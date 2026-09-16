@@ -165,6 +165,10 @@ export interface Project {
   last_synced_at?: string;
   last_synced_commit?: string;
   sync_status?: 'idle' | 'ok' | 'error';
+  // Stored counters (set at project creation; not maintained in real time).
+  requirement_count?: number;
+  issue_count?: number;
+  idea_count?: number;
 }
 
 export interface DashboardData {

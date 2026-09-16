@@ -63,7 +63,8 @@ func (s *ProjectService) ListForUser(userID string, isAdmin bool) ([]model.Proje
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
 		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug,
 		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at,
-		last_synced_at, last_synced_commit, sync_status
+		last_synced_at, last_synced_commit, sync_status,
+		requirement_count, issue_count, idea_count
 		FROM projects`
 	args := []any{}
 	if !isAdmin || userID == "" {
@@ -91,7 +92,8 @@ func (s *ProjectService) ListForUser(userID string, isAdmin bool) ([]model.Proje
 			&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
 			&p.ClaudeProjectSlug,
 			&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt,
-			&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus)
+			&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus,
+		&p.RequirementCount, &p.IssueCount, &p.IdeaCount)
 		if err != nil {
 			return nil, err
 		}
@@ -122,14 +124,16 @@ func (s *ProjectService) Get(id string) (*model.Project, error) {
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
 		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug,
 		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at,
-		last_synced_at, last_synced_commit, sync_status
+		last_synced_at, last_synced_commit, sync_status,
+		requirement_count, issue_count, idea_count
 		FROM projects WHERE id = ? AND deleted_at IS NULL`, id).Scan(
 		&p.ID, &p.Name, &p.LocalPath, &p.RemoteURL, &p.Status,
 		&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
 		&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
 		&p.ClaudeProjectSlug,
 		&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt,
-		&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus)
+		&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus,
+		&p.RequirementCount, &p.IssueCount, &p.IdeaCount)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("project not found")
 	}
@@ -146,14 +150,16 @@ func (s *ProjectService) getAny(id string) (*model.Project, error) {
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
 		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug,
 		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at,
-		last_synced_at, last_synced_commit, sync_status
+		last_synced_at, last_synced_commit, sync_status,
+		requirement_count, issue_count, idea_count
 		FROM projects WHERE id = ?`, id).Scan(
 		&p.ID, &p.Name, &p.LocalPath, &p.RemoteURL, &p.Status,
 		&p.DefaultBranch, &p.ProjectType, &p.ClaudeFiles, &p.PlatformType, &p.PlatformTokenID,
 		&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
 		&p.ClaudeProjectSlug,
 		&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt,
-		&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus)
+		&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus,
+		&p.RequirementCount, &p.IssueCount, &p.IdeaCount)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("project not found")
 	}
@@ -169,7 +175,8 @@ func (s *ProjectService) ListTrash() ([]model.Project, error) {
 		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
 		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug,
 		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at,
-		last_synced_at, last_synced_commit, sync_status
+		last_synced_at, last_synced_commit, sync_status,
+		requirement_count, issue_count, idea_count
 		FROM projects WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC`)
 	if err != nil {
 		return nil, err
@@ -184,7 +191,8 @@ func (s *ProjectService) ListTrash() ([]model.Project, error) {
 			&p.AddedAt, &p.UpdatedAt, &p.LastScannedAt, &p.DeletedAt, &p.DeletedDir, &p.Description, &p.DescriptionManual, &p.DescriptionHash,
 			&p.ClaudeProjectSlug,
 			&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt,
-			&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus)
+			&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus,
+		&p.RequirementCount, &p.IssueCount, &p.IdeaCount)
 		if err != nil {
 			return nil, err
 		}

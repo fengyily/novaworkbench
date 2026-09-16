@@ -383,6 +383,9 @@ export function ProjectsList() {
               <th>{t('projects.list.colType')}</th>
               <th>{t('projects.list.colPath')}</th>
               <th>{t('projects.list.colStatus')}</th>
+              <th>{t('projects.list.colRequirementCount')}</th>
+              <th>{t('projects.list.colIssueCount')}</th>
+              <th>{t('projects.list.colIdeaCount')}</th>
               <th>{view === 'active' ? t('projects.list.colUpdated') : t('projects.list.colDeleted')}</th>
               <th>{t('projects.list.colActions')}</th>
             </tr>
@@ -410,6 +413,9 @@ export function ProjectsList() {
                     ) : null}
                   </td>
                   <td><span className={`status-badge status-${p.status}`}>{statusBadge(p.status)}</span></td>
+                  <td className="count-cell">{p.requirement_count ?? 0}</td>
+                  <td className="count-cell">{p.issue_count ?? 0}</td>
+                  <td className="count-cell">{p.idea_count ?? 0}</td>
                   <td>{fmtDateTime(view === 'active' ? p.updated_at : (p.deleted_at || p.updated_at))}</td>
                   <td onClick={e => e.stopPropagation()}>
                     {view === 'active' ? (
