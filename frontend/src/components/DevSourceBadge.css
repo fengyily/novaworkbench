@@ -15,7 +15,12 @@
 }
 
 .dev-source-badge .dsb-icon {
-  font-size: 11px;
+  /* Library SVG — kept at 13px to optically match the 12px label; the
+     glyph's own vertical-align nudge (in components/icons/index.tsx) keeps it
+     centered with the baseline. */
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
 }
 
 .dev-source-badge.is-agent {

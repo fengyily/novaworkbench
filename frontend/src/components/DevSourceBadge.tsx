@@ -1,5 +1,6 @@
 import { useTranslation } from 'react-i18next';
 import type { Requirement } from '../api/client';
+import { IconLaptop, IconServer } from './icons';
 import './DevSourceBadge.css';
 
 /**
@@ -34,7 +35,7 @@ export function DevSourceBadge({
   if (source === 'local') {
     return (
       <span className="dev-source-badge is-local" title={t('components.devSource.localTitle')}>
-        <span className="dsb-icon">💻</span>
+        <IconLaptop size={13} className="dsb-icon" />
         <span className="dsb-label">{t('components.devSource.local')}</span>
       </span>
     );
@@ -52,7 +53,7 @@ export function DevSourceBadge({
   if (compact) {
     return (
       <span className="dev-source-badge is-agent" title={tip}>
-        <span className="dsb-icon">🛰️</span>
+        <IconServer size={13} className="dsb-icon" />
         <span className="dsb-label">Agent</span>
         <span className="dsb-server">{serverName}</span>
       </span>
@@ -61,7 +62,7 @@ export function DevSourceBadge({
 
   return (
     <span className="dev-source-badge is-agent is-wide" title={tip}>
-      <span className="dsb-icon">🛰️</span>
+      <IconServer size={13} className="dsb-icon" />
       <span className="dsb-label">{t('components.devSource.agentLabel')}</span>
       <span className="dsb-server">{serverName}</span>
       {model && <span className="dsb-model">{model}</span>}

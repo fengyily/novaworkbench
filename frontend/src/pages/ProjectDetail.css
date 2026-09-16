@@ -927,15 +927,23 @@
   color: var(--color-text, #1e293b);
 }
 .kb-modal-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
   background: none;
   border: none;
-  font-size: 1.5rem;
+  border-radius: 8px;
   cursor: pointer;
   color: var(--color-text-secondary, #64748b);
-  line-height: 1;
   padding: 0;
+  transition: background 0.15s ease, color 0.15s ease;
 }
-.kb-modal-close:hover { color: var(--color-text, #1e293b); }
+.kb-modal-close:hover {
+  color: var(--color-text, #1e293b);
+  background: var(--color-hover);
+}
 .kb-modal-body {
   padding: 24px;
   overflow-y: auto;
