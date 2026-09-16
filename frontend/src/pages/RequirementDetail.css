@@ -2951,6 +2951,68 @@ allowed so the row collapses cleanly on every viewport. */
   padding: 12px 16px;
 }
 
+/* Compact tags strip — 压缩后的 tags 编辑区：单行 chip + input，
+   不再占用独立 .detail-section / .section-header 包装。视觉降级到
+   一行 inline，与 BRIEF 卡末尾同位置（rendered in detail-body 内）。
+   颜色 / 形状由 inline style 与现有 .req-tag-chip / .req-tag-input
+   提供；本类只负责 layout 与 padding。 */
+.tags-compact {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0 0;
+  margin-top: 4px;
+}
+.tags-compact-empty {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  margin-bottom: 2px;
+}
+
+/* Mark chips (preset selector) — 头部 meta 行 inline 多选。颜色由
+   inline style 出（每个 preset 一个 hex），CSS 只负责 layout / 形状 /
+   交互态。.is-active 时背景填充 preset bg，字色 preset color。 */
+.req-mark-chip-strip {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  margin: 0 2px;
+}
+.req-mark-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  background: transparent;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.req-mark-chip:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.req-mark-chip.is-active {
+  font-weight: 600;
+}
+.req-mark-chip-icon {
+  font-size: 11px;
+  line-height: 1;
+}
+.req-mark-chip-label {
+  font-size: 12px;
+  line-height: 1;
+}
+
+@media (max-width: 768px) {
+  .req-mark-chip-strip { gap: 3px; }
+  .req-mark-chip-label { font-size: 11px; }
+}
+
 .tags-chip-row {
   display: flex;
   flex-wrap: wrap;

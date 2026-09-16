@@ -708,6 +708,13 @@ export interface Requirement {
   // 渲染为 chips。Read-modify-write：每次 PUT 整体覆盖，写入前由后端
   // 去重 + trim + 长度 + 数量 限制。空数组 / undefined = 没有标记。
   tags?: string;
+  // 预设化语义标记（"important" | "follow_up" | "blocked" | "at_risk"）。
+  // 后端存为 JSON 数组字符串；白名单（service.MarkWhitelist）+ 数量上限
+  // （maxMarksCount = 5）+ 排序前置（list 接口 ORDER BY 让有 marks 的需求
+  // 排在无 marks 之前）。写入走 PUT /api/requirements/{id}/marks；绕过 UI
+  // 直接 PUT 也会被服务端 normalizeMarks 静默丢弃不在白名单的值。前端
+  // 用 parseMarks(raw) 转成 code[] 后渲染 preset chip。
+  marks?: string;
   // 关闭痕迹。closed_at 在用户通过 POST /api/requirements/{id}/close
   // 强制关闭时打点（自然完成 → done 不写此列）；closed_reason 是用户
   // 填写的关闭原因。两者配合 closed_at 让 UI 区分「开发完成」（自然
@@ -859,6 +866,12 @@ export const requirementsApi = {
   // caught by the response rather than corrupting the JSON column.
   updateTags: (id: string, tags: string[]) =>
     api.put<Requirement>(`/api/requirements/${id}/tags`, { tags }),
+  // Replace the requirement's preset mark list (important / follow_up /
+  // blocked / at_risk). Server normalizes against MarkWhitelist (unknown
+  // values silently dropped) + count-cap (max 5). Marks affect list
+  // sort order — rows with any mark float above unmarked rows.
+  updateMarks: (id: string, marks: string[]) =>
+    api.put<Requirement>(`/api/requirements/${id}/marks`, { marks }),
   // Promote a finished Issue or Idea into a Requirement. Only one-way (issue/idea → requirement);
   // the backend validates the rule and rejects everything else with a 400.
   updateKind: (id: string, kind: Kind) =>
@@ -1886,3 +1899,30 @@ export const schedulesApi = {
     api.post<ScheduledTask>(`/api/schedules/${id}/cancel`, {}),
   remove: (id: string) => api.delete<{ id: string; status: string }>(`/api/schedules/${id}`),
 };
+
+// ── Requirement marks ─────────────────────────────────────────────────────────
+// 标记预设。前端用 preset 颜色渲染 chip；后端 service.MarkWhitelist
+// 是权威白名单，UI 只展示这几项，绕过 UI 直接 PUT 也会被服务端 normalizeMarks
+// 静默丢弃。PUT /api/requirements/{id}/marks；list 接口的 ORDER BY 让有 marks
+// 的需求排在无 marks 之前。
+export const MARK_PRESETS = [
+  { code: 'important', color: '#dc2626', bg: '#fee2e2', icon: '🔴' },
+  { code: 'follow_up', color: '#2563eb', bg: '#dbeafe', icon: '🔵' },
+  { code: 'blocked',   color: '#d97706', bg: '#fef3c7', icon: '🟠' },
+  { code: 'at_risk',   color: '#7c3aed', bg: '#f5f3ff', icon: '🟣' },
+] as const;
+
+export type MarkPresetCode = typeof MARK_PRESETS[number]['code'];
+
+// 给定后端存的 JSON 字符串（"[]" 或 "[\"important\"]" 等），解析成 code[]；
+// 用于详情页 / 列表页读出 marks 数组。未传 / 解析失败 → []。
+export function parseMarks(raw: string | undefined | null): string[] {
+  if (!raw) return [];
+  const s = raw.trim();
+  if (!s || s === '[]') return [];
+  try {
+    const v = JSON.parse(s);
+    if (Array.isArray(v)) return v.filter((x): x is string => typeof x === 'string');
+  } catch { /* fall through */ }
+  return [];
+}

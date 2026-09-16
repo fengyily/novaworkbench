@@ -175,6 +175,16 @@ type Requirement struct {
 	// RequirementService.UpdateTags. Empty in legacy rows before the column
 	// existed (default value is "[]" so the frontend never sees null).
 	Tags string `json:"tags"`
+	// Marks is the JSON-array string of preset semantic tags attached to
+	// this requirement. Preset values are drawn from the service-layer
+	// MarkWhitelist (currently "important" / "follow_up" / "blocked" /
+	// "at_risk"); unknown values are silently dropped at the service layer
+	// so the column never holds an unrecognized code. Empty array is
+	// written as "[]" so legacy rows render as "no marks" without a
+	// separate backfill. Affects list sort order — rows with any mark float
+	// above unmarked rows of the same done/active status. Maximum 5 marks
+	// per requirement (maxMarksCount in RequirementService).
+	Marks string `json:"marks"`
 	// ClosedAt is stamped when the user force-closes a requirement via the
 	// "关闭需求" action (service.RequirementService.Close). NULL for natural
 	// completion (developer-complete gate flips status to "done" without

@@ -82,7 +82,7 @@ var validTransitions = map[string][]string{
 	"archived": {"done"},
 }
 
-func (s *RequirementService) List(projectID string, status string, priority string, kind string) ([]model.Requirement, error) {
+func (s *RequirementService) List(projectID string, status string, priority string, kind string, mark string) ([]model.Requirement, error) {
 	// Every requirements column is qualified with the "r" alias because the
 	// LEFT JOIN against agent_servers (below) introduces same-named columns
 	// (status, created_at, updated_at) — unqualified references would be
@@ -124,6 +124,21 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 			where += " AND r.kind IN (" + strings.Join(placeholders, ",") + ")"
 		}
 	}
+	// Mark filter — JSON-array substring match against the `marks` column.
+	// We probe for both the standalone form ("code") and the tail-comma form
+	// ("code",) so a single-element array and a multi-element array both
+	// match. Substring-match is acceptable because MarkWhitelist has only
+	// four fixed codes — none of them is a prefix of another — and because
+	// the column only ever holds values that already passed through
+	// normalizeMarks. The `mark` value itself comes from URL query, so we
+	// re-quote it defensively against `"` to keep the LIKE literal well-
+	// formed (the caller is supposed to pass a whitelist code, but defense
+	// in depth is cheap here).
+	if mark != "" {
+		safe := strings.ReplaceAll(mark, `"`, "")
+		where += " AND (r.marks LIKE ? OR r.marks LIKE ?)"
+		args = append(args, "%\""+safe+"\"%", "%\""+safe+",%")
+	}
 
 	rows, err := s.db.Query(
 		// DevEndedAt is a derived read-only column — emitted only when the
@@ -146,10 +161,10 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		// DevEndedAt pattern above). The NOT EXISTS(...) guard preserves the
 		// "only when ALL subtasks are completed" semantic; otherwise the
 		// subquery returns no row → NULL.
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.closed_at,r.closed_reason,"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,"+
 			"(SELECT st.completed_at FROM sub_tasks st WHERE st.requirement_id = r.id AND NOT EXISTS(SELECT 1 FROM sub_tasks o WHERE o.requirement_id = r.id AND o.completed_at IS NULL) ORDER BY st.completed_at DESC LIMIT 1) AS dev_ended_at"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
-			" "+where+" ORDER BY CASE WHEN r.status = 'done' THEN 1 ELSE 0 END ASC, r.created_at DESC",
+			" "+where+" ORDER BY CASE WHEN r.status = 'done' THEN 1 ELSE 0 END ASC, CASE WHEN r.marks IS NULL OR r.marks = '' OR r.marks = '[]' THEN 1 ELSE 0 END ASC, r.created_at DESC",
 		args...)
 	if err != nil {
 		return nil, err
@@ -168,7 +183,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.UsageSnapshots, &r.CodingPlan, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt,
-			&r.Tags, &r.ClosedAt, &r.ClosedReason,
+			&r.Tags, &r.Marks, &r.ClosedAt, &r.ClosedReason,
 			&r.DevEndedAt); err != nil {
 			return nil, err
 		}
@@ -266,9 +281,12 @@ func (s *RequirementService) Calendar(from, to time.Time, projectID, kind string
 
 	// Slim SELECT — only what the grid actually renders. SubTaskCount is not
 	// joined here (calendar doesn't need it); AgentServerName is left empty
-	// (calendar UI shows it on the detail panel, fetched lazily).
-	q := "SELECT id, project_id, title, status, priority, kind, created_at, updated_at, completed_at, planned_start_at, planned_end_at FROM requirements " +
-		where + " ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END ASC, created_at DESC"
+	// (calendar UI shows it on the detail panel, fetched lazily). `marks`
+	// is appended so the same done/marked/created_at ORDER BY precedence
+	// as the main List endpoint floats marked rows above unmarked ones in
+	// the calendar grid (consistency with the requirements list view).
+	q := "SELECT id, project_id, title, status, priority, kind, created_at, updated_at, completed_at, planned_start_at, planned_end_at, marks FROM requirements " +
+		where + " ORDER BY CASE WHEN status = 'done' THEN 1 ELSE 0 END ASC, CASE WHEN marks IS NULL OR marks = '' OR marks = '[]' THEN 1 ELSE 0 END ASC, created_at DESC"
 
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
@@ -279,7 +297,7 @@ func (s *RequirementService) Calendar(from, to time.Time, projectID, kind string
 	for rows.Next() {
 		var r model.Requirement
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Title, &r.Status, &r.Priority, &r.Kind,
-			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.PlannedStartAt, &r.PlannedEndAt); err != nil {
+			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.PlannedStartAt, &r.PlannedEndAt, &r.Marks); err != nil {
 			return nil, err
 		}
 		items = append(items, r)
@@ -345,7 +363,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	// created_at / updated_at — unqualified references would be ambiguous on
 	// MySQL/Postgres.
 	err := s.db.QueryRow(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.closed_at,r.closed_reason"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
@@ -357,7 +375,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.UsageSnapshots, &r.CodingPlan, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt,
-			&r.Tags, &r.ClosedAt, &r.ClosedReason)
+			&r.Tags, &r.Marks, &r.ClosedAt, &r.ClosedReason)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("requirement not found")
 	}
@@ -1239,6 +1257,29 @@ const (
 	maxTagCount  = 20
 )
 
+// Marks caps for UpdateMarks. Length cap covers the longest current preset
+// ("follow_up" = 9 runes, well under 16) plus headroom for future codes;
+// count cap (5) keeps the meta-row chip strip readable on the detail page
+// and bounds the JSON column growth.
+const (
+	maxMarkLength = 16
+	maxMarksCount = 5
+)
+
+// MarkWhitelist is the canonical set of preset codes the service accepts for
+// the `marks` JSON column. Values outside this set are silently dropped by
+// normalizeMarks — the UI only surfaces these four presets via chip buttons,
+// but the service layer is the single source of truth so a caller that
+// bypasses the UI (curl, future programmatic tools) can never write an
+// unknown code that would then surface in the ORDER BY CASE-WHEN or render
+// as an undefined CSS class on the list/detail pages.
+var MarkWhitelist = map[string]struct{}{
+	"important": {},
+	"follow_up": {},
+	"blocked":   {},
+	"at_risk":   {},
+}
+
 // normalizeTags trims / dedupes / caps the user-supplied tag list so the
 // stored JSON array is always well-formed and bounded. The order of the
 // resulting slice is "first-seen" — the same tag supplied twice keeps its
@@ -1289,6 +1330,70 @@ func (s *RequirementService) UpdateTags(id string, tags []string) (*model.Requir
 	}
 	if _, err := s.db.Exec(
 		"UPDATE requirements SET tags=?, updated_at=? WHERE id=?",
+		blob, time.Now(), id,
+	); err != nil {
+		return nil, err
+	}
+	return s.Get(id)
+}
+
+// normalizeMarks trims / caps / whitelist-filters / dedupes the
+// caller-supplied mark list so the stored JSON array only ever holds
+// recognized preset codes (see MarkWhitelist). Unknown values are silently
+// dropped (not an error) — the UI's chip selector only emits whitelisted
+// codes, so a stray value is most likely a stale client talking to a newer
+// server, and silently coercing it keeps the round-trip idempotent. Order
+// preservation matches normalizeTags: first-seen wins, so the chip strip
+// stays in the order the user built.
+func normalizeMarks(raw []string) []string {
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, m := range raw {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			continue
+		}
+		if len([]rune(m)) > maxMarkLength {
+			m = string([]rune(m)[:maxMarkLength])
+		}
+		if _, ok := MarkWhitelist[m]; !ok {
+			continue
+		}
+		if _, dup := seen[m]; dup {
+			continue
+		}
+		seen[m] = struct{}{}
+		out = append(out, m)
+		if len(out) >= maxMarksCount {
+			break
+		}
+	}
+	return out
+}
+
+// UpdateMarks replaces the requirement's preset mark list with the
+// caller-supplied values. The payload is normalized (trim /
+// whitelist-filter / length- and count-cap) so the JSON column never holds
+// an unknown preset code that would later surface in the ORDER BY
+// CASE-WHEN or as an undefined CSS class. Only `marks` and `updated_at`
+// are written — other columns untouched. Used by the inline chip selector
+// on the detail page; List/Calendar ORDER BY reads this column to float
+// marked rows above unmarked ones.
+func (s *RequirementService) UpdateMarks(id string, marks []string) (*model.Requirement, error) {
+	if _, err := s.Get(id); err != nil {
+		return nil, err
+	}
+	cleaned := normalizeMarks(marks)
+	blob := "[]"
+	if len(cleaned) > 0 {
+		raw, mErr := json.Marshal(cleaned)
+		if mErr != nil {
+			return nil, fmt.Errorf("marshal marks: %w", mErr)
+		}
+		blob = string(raw)
+	}
+	if _, err := s.db.Exec(
+		"UPDATE requirements SET marks=?, updated_at=? WHERE id=?",
 		blob, time.Now(), id,
 	); err != nil {
 		return nil, err

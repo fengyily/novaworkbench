@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode, type CSSProperties } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, DefaultModelLabel, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch } from '../api/client';
 import { tLabel } from '../i18n/label';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
@@ -1378,6 +1378,12 @@ export default function RequirementDetail() {
     setTags([]);
   }, [req?.id, req?.tags]);
 
+  // ── Marks (preset chip selector) ────────────────────────────────────────
+  // 与 tags 分离：marks 是后端白名单预设（important / follow_up / blocked /
+  // at_risk），影响列表排序前置（list 接口 ORDER BY 让有 marks 的需求排在
+  // 无 marks 之前）。编辑走 PUT /api/requirements/{id}/marks；archived 行
+  // 编辑禁用但仍渲染（只读 chips）。
+
   const addTag = (raw: string) => {
     const trimmed = raw.trim();
     if (!trimmed) return;
@@ -1397,6 +1403,27 @@ export default function RequirementDetail() {
     requirementsApi.updateTags(req!.id, next)
       .then(updated => setReq(updated))
       .catch(err => alert(t('requirements.detail2.closeFailPrefix') + (err instanceof Error ? err.message : String(err))));
+  };
+
+  // ── Marks (preset chip selector) ──────────────────────────────────────────
+  // 与 tags 语义分离：marks 是后端白名单预设（important / follow_up /
+  // blocked / at_risk），影响列表排序前置（"有 mark 的需求优先排前面"）。
+  // 编辑走 PUT /api/requirements/{id}/marks，每次 toggle 整体覆盖；服务端
+  // normalizeMarks 会对白名单外的值静默丢弃。archived 行只读（无法切换）。
+  const [marks, setMarks] = useState<string[]>([]);
+  useEffect(() => {
+    if (!req) { setMarks([]); return; }
+    setMarks(parseMarks(req.marks));
+  }, [req?.id, req?.marks]);
+  const toggleMark = (code: string) => {
+    if (!req || req.status === 'archived') return;
+    const next = marks.includes(code)
+      ? marks.filter(x => x !== code)
+      : [...marks, code];
+    setMarks(next);
+    requirementsApi.updateMarks(req.id, next)
+      .then(updated => setReq(updated))
+      .catch(err => alert(t('requirements.detail2.marksFailPrefix') + (err instanceof Error ? err.message : String(err))));
   };
 
   // ── Close (force-close modal) ─────────────────────────────────────────────
@@ -2837,6 +2864,31 @@ export default function RequirementDetail() {
           </span>
         )}
         <span className={`priority-tag ${req.priority}`}>{req.priority.toUpperCase()}</span>
+        {/* Marks (preset chip selector) — inline 多选切换。位于 priority 与
+            claude-status 之间，避免与 status-badge 视觉冲撞；颜色由 preset
+            inline style 控制，CSS 只负责 layout / 形状。archived 行只读。 */}
+        <span className="req-mark-chip-strip" aria-label={t('requirements.detail2.marksLabel')}>
+          {MARK_PRESETS.map(p => {
+            const active = marks.includes(p.code);
+            const presetLabel = t(`requirements.detail2.marksPreset.${p.code}`);
+            return (
+              <button
+                key={p.code}
+                type="button"
+                className={`req-mark-chip ${active ? 'is-active' : ''} ${p.code}`}
+                style={active
+                  ? { background: p.bg, color: p.color, borderColor: p.color }
+                  : { background: 'transparent', color: p.color, borderColor: p.color }}
+                onClick={() => toggleMark(p.code)}
+                disabled={req.status === 'archived'}
+                title={t('requirements.detail2.marksToggleTitle', { code: presetLabel })}
+              >
+                <span className="req-mark-chip-icon" aria-hidden>{p.icon}</span>
+                <span className="req-mark-chip-label">{presetLabel}</span>
+              </button>
+            );
+          })}
+        </span>
         <span className={`claude-status${claudeWorking ? ' working claude-pulse' : ''}`} title={claudeWorking ? t('requirements.detail2.claudeBusyTitle') : t('requirements.detail2.claudeIdleTitle')}>
           {claudeWorking ? <><IconBotBadge size={12} className="icon-mr" />{t('requirements.detail2.claudeBusy')}</> : <><IconSleep size={12} className="icon-mr" />{t('requirements.detail2.claudeIdle')}</>}
         </span>
@@ -2944,56 +2996,49 @@ export default function RequirementDetail() {
         </div>
       )}
 
-      {/* Tags (chips editor) — ad-hoc free-form labels. Saved on every add /
-          remove via PUT /api/requirements/{id}/tags; the chips disappear on
-          archived rows is not necessary (read-only is fine — the editor stays
-          open even after archive so the user can curate tags before / after
-          unarchive). */}
-      <div className="detail-section tags-section">
-        <div className="section-header" style={{ marginBottom: 8 }}>
-          <span className="ledger-title">
-            <span className="ledger-title-mark" aria-hidden />
-            {t('requirements.detail2.tagsLabel')}
-          </span>
-          <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-            {t('requirements.detail2.tagsLimit', { max: 20, len: 32 })}
-          </span>
-        </div>
+      {/* Compact tags strip — 与 mark chip 选择器语义分离，mark 在头部 meta 行
+          走 preset 颜色，tags 仍是自由短文本但视觉降级为单行 chip strip
+          （不再占用独立 .detail-section / .section-header 包装）。archived 行
+          chip 保留只读，input 与 remove × 仅在非 archived 时显示。始终渲染
+          —— description 为空时也要露出 chip strip。 */}
+      <div className="tags-compact">
         {tags.length === 0 && (
-          <div style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
-            {t('requirements.detail2.tagsEmpty')}
-          </div>
+          <div className="tags-compact-empty">{t('requirements.detail2.tagsEmpty')}</div>
         )}
         <div className="tags-chip-row">
           {tags.map(tag => (
             <span key={tag} className="req-tag-chip" title={t('requirements.detail2.tagsRemoveTitle')}>
               <span className="req-tag-chip-label">{tag}</span>
-              <button
-                type="button"
-                className="req-tag-chip-remove"
-                aria-label={t('requirements.detail2.tagsRemoveTitle')}
-                onClick={() => removeTag(tag)}
-              >×</button>
+              {req.status !== 'archived' && (
+                <button
+                  type="button"
+                  className="req-tag-chip-remove"
+                  aria-label={t('requirements.detail2.tagsRemoveTitle')}
+                  onClick={() => removeTag(tag)}
+                >×</button>
+              )}
             </span>
           ))}
-          <input
-            className="req-tag-input"
-            placeholder={t('requirements.detail2.tagsPlaceholder')}
-            value={tagInput}
-            onChange={e => setTagInput(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                addTag(tagInput);
-              } else if (e.key === ',' || e.key === '，') {
-                e.preventDefault();
-                addTag(tagInput);
-              }
-            }}
-            title={t('requirements.detail2.tagsAddTitle')}
-            maxLength={32}
-            disabled={tags.length >= 20}
-          />
+          {req.status !== 'archived' && (
+            <input
+              className="req-tag-input"
+              placeholder={t('requirements.detail2.tagsPlaceholder')}
+              value={tagInput}
+              onChange={e => setTagInput(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  addTag(tagInput);
+                } else if (e.key === ',' || e.key === '，') {
+                  e.preventDefault();
+                  addTag(tagInput);
+                }
+              }}
+              title={t('requirements.detail2.tagsAddTitle')}
+              maxLength={32}
+              disabled={tags.length >= 20}
+            />
+          )}
         </div>
         {req.closed_reason && (
           <div className="closed-reason-line">

@@ -394,6 +394,21 @@ export const requirements = {
     tagsRemoveTitle: '移除该标记',
     tagsAddTitle: '添加标记',
     tagsLimit: '最多 {{max}} 个标记，每个不超过 {{len}} 字',
+    // Marks (preset chip selector) — 与 tags 语义分离。后端白名单预设
+    // （important / follow_up / blocked / at_risk），影响列表排序前置。
+    // 颜色由 preset inline style 控制；CSS 只负责 layout。
+    marksLabel: '标记',
+    marksFailPrefix: '标记更新失败：',
+    marksPreset: {
+      important: '重要',
+      follow_up: '跟进',
+      blocked: '阻塞',
+      at_risk: '风险',
+    },
+    marksToggleTitle: '切换标记 {{code}}',
+    list: {
+      marksIndicator: '已标记 {{n}} 项',
+    },
     // Close — manual short-circuit from any non-terminal stage. Distinct
     // from "开发完成" (the natural done gate) because it carries a
     // user-supplied reason and stamps both completed_at + closed_at.

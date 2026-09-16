@@ -26,7 +26,7 @@ func NewRequirementHandler(svc *service.RequirementService, llmGateway *llm.Gate
 
 func (h *RequirementHandler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	items, err := h.svc.List(q.Get("project_id"), q.Get("status"), q.Get("priority"), q.Get("kind"))
+	items, err := h.svc.List(q.Get("project_id"), q.Get("status"), q.Get("priority"), q.Get("kind"), q.Get("mark"))
 	if err != nil {
 		writeError(w, 500, "INTERNAL", err.Error())
 		return
@@ -231,6 +231,30 @@ func (h *RequirementHandler) UpdateTags(w http.ResponseWriter, r *http.Request) 
 	item, err := h.svc.UpdateTags(r.PathValue("id"), body.Tags)
 	if err != nil {
 		writeError(w, 400, "UPDATE_TAGS_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, 200, item)
+}
+
+// UpdateMarks replaces the requirement's preset mark list with the
+// caller-supplied values. Body shape: {"marks": ["important", "follow_up",
+// ...]}. Marks are normalized server-side against MarkWhitelist (unknown
+// values silently dropped) + count-capped (max 5) — see service.
+// RequirementService.UpdateMarks / normalizeMarks for the rules. Unlike
+// tags, marks directly affect list sort order (rows with any mark float
+// above unmarked rows), so the whitelist is enforced even for direct
+// callers that bypass the UI.
+func (h *RequirementHandler) UpdateMarks(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Marks []string `json:"marks"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON")
+		return
+	}
+	item, err := h.svc.UpdateMarks(r.PathValue("id"), body.Marks)
+	if err != nil {
+		writeError(w, 400, "UPDATE_MARKS_FAILED", err.Error())
 		return
 	}
 	writeJSON(w, 200, item)
