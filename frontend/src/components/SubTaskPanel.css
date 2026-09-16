@@ -435,6 +435,7 @@
    One rule for both the source and the session-mode chip so the meta line
    can't drift into two slightly different chip shapes. */
 .sub-card-source,
+.sub-card-retry,
 .sub-card-mode-chip {
   display: inline-flex;
   align-items: center;
@@ -456,6 +457,16 @@
   background: rgba(16, 185, 129, 0.10);  /* Emerald 50 */
   border: 1px solid rgba(16, 185, 129, 0.30);
   color: #047857;  /* Emerald 700 */
+}
+
+/* Automatic-redo badge — only appears when the backend re-dispatched this
+   sub-task after a failure (设置 → 子任务 → 失败自动重做). Amber: not an error
+   (the row may well have succeeded on the retry), but worth noticing.
+   Geometry comes from the shared chip rule above. */
+.sub-card-retry {
+  background: rgba(245, 158, 11, 0.12);  /* Amber 50 */
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: #B45309;  /* Amber 700 */
 }
 
 /* Session-mode chip — surfaces the user-picked conversation-threading

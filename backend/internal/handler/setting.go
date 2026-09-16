@@ -40,6 +40,68 @@ func (h *SettingHandler) GetLLM(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// SubTaskConfigResponse is the API shape for the sub-task execution policy:
+// per-project concurrency + automatic failure retry. Mirrors the three
+// settings keys one-for-one (see service.SettingService.SubTaskConfig).
+type SubTaskConfigResponse struct {
+	// Concurrency is how many sub-tasks ONE project may run at the same
+	// time. Different projects still run in parallel — this is the "从项目的
+	// 角度排队" knob, not a process-wide cap (that stays on env
+	// NOVA_SUBTASK_CONCURRENCY).
+	Concurrency int `json:"concurrency"`
+	// AutoRetry turns automatic re-dispatch of failed auto-orchestrated
+	// children on. Default false: recovery is a manual action.
+	AutoRetry bool `json:"auto_retry"`
+	// RetryMax caps automatic re-arms per child.
+	RetryMax int `json:"retry_max"`
+}
+
+// GetSubTaskConfig returns the current sub-task execution policy.
+func (h *SettingHandler) GetSubTaskConfig(w http.ResponseWriter, r *http.Request) {
+	concurrency, autoRetry, retryMax, err := h.svc.SubTaskConfig()
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, SubTaskConfigResponse{Concurrency: concurrency, AutoRetry: autoRetry, RetryMax: retryMax})
+}
+
+// UpdateSubTaskConfig persists the sub-task execution policy. The write only
+// touches the settings table — the orchestration tick and SubTaskRunner.Run
+// re-read it on their next pass (≤10s for the tick), so the new values take
+// effect without a restart and without this handler holding a reference to the
+// ProjectLimiter.
+func (h *SettingHandler) UpdateSubTaskConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Concurrency int  `json:"concurrency"`
+		AutoRetry   bool `json:"auto_retry"`
+		RetryMax    int  `json:"retry_max"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	if req.Concurrency < 1 {
+		writeError(w, 400, "INVALID", "concurrency 必须 ≥ 1")
+		return
+	}
+	if req.RetryMax < 0 {
+		writeError(w, 400, "INVALID", "retry_max 不能为负数")
+		return
+	}
+	if err := h.svc.SetSubTaskConfig(req.Concurrency, req.AutoRetry, req.RetryMax); err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	// Re-read so the response reflects the persisted (clamped) state.
+	concurrency, autoRetry, retryMax, err := h.svc.SubTaskConfig()
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, SubTaskConfigResponse{Concurrency: concurrency, AutoRetry: autoRetry, RetryMax: retryMax})
+}
+
 // UpdateLLM upserts the direct LLM channel configuration. An empty api_key
 // means "keep the existing secret" (so base-URL/model-only edits don't wipe
 // the key); set clear_api_key=true to explicitly remove the stored key.

@@ -851,7 +851,14 @@ func (h *WizardHandler) StopSubTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task does not belong to this requirement")
 		return
 	}
-	if parent.Status != model.SubTaskStatusRunning {
+	// Running rows are the obvious case. A 'pending' row that already owns a
+	// job is the QUEUED case (waiting on its project's concurrency gate, see
+	// service.ProjectLimiter): its goroutine is parked before any claude
+	// process exists, and SubTaskRunner.Run re-checks the row for 'stopped'
+	// right after admission, so stopping here reliably prevents the run. A
+	// pending row without a job has no goroutine to stop at all.
+	queued := parent.Status == model.SubTaskStatusPending && parent.JobID != ""
+	if parent.Status != model.SubTaskStatusRunning && !queued {
 		writeError(w, http.StatusConflict, "NOT_RUNNING", "该子任务未运行，无需停止")
 		return
 	}

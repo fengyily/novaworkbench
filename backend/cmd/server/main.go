@@ -234,7 +234,23 @@ func main() {
 			log.Printf("[startup] ignoring invalid NOVA_SUBTASK_CONCURRENCY=%q (want positive int), falling back to %d", env, subTaskConcurrency)
 		}
 	}
-	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, nil, subTaskConcurrency)
+	// Process-wide ceiling, shared by BOTH dispatch paths (manual runner and
+	// orchestration tick) so the total number of claude children is capped once
+	// instead of once per path.
+	subTaskGlobalSem := make(chan struct{}, subTaskConcurrency)
+	// Per-project admission gate: "子任务从项目的角度排队". One shared instance so a
+	// manual 重做 and an auto-orchestrated child compete for the SAME project
+	// slots. The cap comes from settings (subtask.concurrency, default 1) and is
+	// refreshed on every tick / Run, so changing it in the UI takes effect
+	// without a restart.
+	subTaskConc, subTaskAutoRetry, subTaskRetryMax, scErr := settingSvc.SubTaskConfig()
+	if scErr != nil {
+		log.Printf("[startup] read sub-task settings: %v (using defaults)", scErr)
+	}
+	log.Printf("[startup] sub-task policy: per-project concurrency=%d auto-retry=%v retry-max=%d (process ceiling=%d)",
+		subTaskConc, subTaskAutoRetry, subTaskRetryMax, subTaskConcurrency)
+	projectLimiter := service.NewProjectLimiter(subTaskConc)
+	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, nil, subTaskConcurrency, subTaskGlobalSem, projectLimiter, settingSvc)
 	batchSvc := service.NewOrchestrationBatchService(database)
 	if n, err := batchSvc.Recover(); err != nil {
 		log.Printf("[main] orchestration batch recovery: %v", err)
@@ -263,15 +279,14 @@ func main() {
 	// separate concerns). The wizard handler is the SubTaskExecutor; the
 	// queue Kick()s immediately after each batch creation in
 	// tryAutoOrchestrate so the first child doesn't wait the full interval.
-	// Concurrency=1 keeps each batch strictly sequential: only one child runs
-	// at a time across the whole process, so a long-running child can't have
-	// its worktree / git branch / dev-server contended by a sibling that the
-	// queue claims from the same batch on the next tick. The wizard's
-	// CLAUDE_TIMEOUT floor (30m) is the per-child budget; with cap=1 the
-	// bottleneck is the slowest child, which is exactly what serial
-	// orchestration promises. Bump above 1 only if multiple batches are
-	// expected to overlap AND they target different worktrees.
-	orchQueue := scheduler.NewOrchestrationQueue(database, batchSvc, subTaskSvc, wizardH, 1 /*concurrency*/, 10*time.Second)
+	// Admission goes through the shared projectLimiter: with the default cap of
+	// 1 each PROJECT runs its children strictly sequentially (so a long-running
+	// child can't have its worktree / git branch / dev server contended by a
+	// sibling the queue claims on the next tick), while different projects
+	// proceed in parallel. Raise settings → 子任务 → 并发数 only when the project's
+	// children are known not to contend for the same worktree. The process-wide
+	// ceiling (subTaskGlobalSem) still bounds the total across projects.
+	orchQueue := scheduler.NewOrchestrationQueue(database, batchSvc, subTaskSvc, reqSvc, wizardH, projectLimiter, settingSvc, subTaskGlobalSem, 10*time.Second)
 	if err := orchQueue.Recover(); err != nil {
 		log.Printf("[main] orchestration queue recover: %v", err)
 	}
@@ -439,6 +454,13 @@ func main() {
 	// lightweight tasks (requirement title distillation). Bypasses claude CLI.
 	mux.HandleFunc("GET /api/settings/llm", settingH.GetLLM)
 	mux.HandleFunc("PUT /api/settings/llm", settingH.UpdateLLM)
+
+	// Sub-task execution policy (settings) — per-project concurrency + whether
+	// a failed auto-orchestrated child is re-done automatically (default off:
+	// recovery is a manual action) + the automatic-retry cap. Read live by the
+	// orchestration tick and SubTaskRunner, so a change needs no restart.
+	mux.HandleFunc("GET /api/settings/subtask", settingH.GetSubTaskConfig)
+	mux.HandleFunc("PUT /api/settings/subtask", settingH.UpdateSubTaskConfig)
 
 	// Database (settings) — driver info, connection test, save (takes effect
 	// on restart), and one-shot SQLite → MySQL/Postgres data migration.

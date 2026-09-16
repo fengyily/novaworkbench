@@ -9,7 +9,8 @@
 //
 // Lifecycle:
 //
-//	q := scheduler.NewOrchestrationQueue(database, batchSvc, subTaskSvc, wizardH, 2, 10*time.Second)
+//	q := scheduler.NewOrchestrationQueue(database, batchSvc, subTaskSvc, reqSvc,
+//	        wizardH, limiter, settingSvc, globalSem, 10*time.Second)
 //	q.Recover()      // reset orphaned running → pending, stale summary → pending
 //	q.Start()        // single goroutine, 10s default tick
 //	...
@@ -51,21 +52,37 @@ type SubTaskExecutor interface {
 // OrchestrationQueue polls orchestration_batches for active rows and
 // dispatches their children (and summary round) through SubTaskExecutor.
 // All fields are unexported; construct via New and mutate via the lifecycle
-// methods only. The struct keeps three concurrency primitives:
+// methods only. The struct keeps these concurrency primitives:
 //
-//	stopCh — closed by Stop() to ask the loop to exit
-//	kickCh — buffer-1 channel; Kick() pushes to wake the loop early
-//	runSem — semaphore capping in-flight wizardH calls so a burst of active
-//	         batches can't fan out unbounded subprocesses
+//	stopCh  — closed by Stop() to ask the loop to exit
+//	kickCh  — buffer-1 channel; Kick() pushes to wake the loop early
+//	limiter — the PER-PROJECT admission gate, shared with SubTaskRunner so the
+//	          manual path queues behind the same cap (see service.ProjectLimiter)
+//	runSem  — process-wide OOM ceiling (env NOVA_SUBTASK_CONCURRENCY), also
+//	          shared with SubTaskRunner: the total number of claude children
+//	          across ALL projects can never exceed it
+//
+// The two gates are always taken in the order limiter → runSem (and released
+// in reverse) on both dispatch paths, so they can't deadlock against each
+// other.
 //
 // running is a WaitGroup for in-flight goroutines; Stop() drains it (with a
 // timeout) so child subprocesses don't outlive a clean shutdown by too long.
 // once / stopOnce guard the Start / Stop transitions so a stray second call
 // is a no-op rather than a panic on a closed channel.
 type OrchestrationQueue struct {
-	db           *db.DB
-	batchSvc     *service.OrchestrationBatchService
-	subTaskSvc   *service.SubTaskService
+	db         *db.DB
+	batchSvc   *service.OrchestrationBatchService
+	subTaskSvc *service.SubTaskService
+	// reqSvc resolves batch.RequirementID → requirements.project_id. The
+	// orchestration_batches row carries no project_id, and the per-project gate
+	// needs one, so every dispatch does this lookup before admission.
+	reqSvc *service.RequirementService
+	// settingSvc supplies the sub-task policy (per-project concurrency, auto
+	// retry on/off, retry cap). Re-read at the top of every tick so a settings
+	// change lands within one interval without a restart.
+	settingSvc   *service.SettingService
+	limiter      *service.ProjectLimiter
 	wizardH      SubTaskExecutor
 	tickInterval time.Duration
 
@@ -78,35 +95,107 @@ type OrchestrationQueue struct {
 	stopOnce sync.Once
 }
 
-// NewOrchestrationQueue wires up the queue. concurrency caps in-flight
-// wizardH calls (typically 2 — the wizard already throttles heavy claude
-// work; the semaphore here mainly protects against a backlog of active
-// batches at boot). interval is the polling period for tick(); pass 0 to
-// fall back to a 10s default.
+// NewOrchestrationQueue wires up the queue.
+//
+// limiter is the per-project admission gate (shared with handler.SubTaskRunner
+// so manual and automatic dispatch queue behind ONE cap per project); its max
+// is refreshed from settings on every tick. globalSem is the process-wide
+// ceiling, also shared with the runner; pass nil to run without one (tests).
+// interval is the polling period for tick(); pass 0 to fall back to a 10s
+// default.
 func NewOrchestrationQueue(
 	database *db.DB,
 	batchSvc *service.OrchestrationBatchService,
 	subTaskSvc *service.SubTaskService,
+	reqSvc *service.RequirementService,
 	wizardH SubTaskExecutor,
-	concurrency int,
+	limiter *service.ProjectLimiter,
+	settingSvc *service.SettingService,
+	globalSem chan struct{},
 	interval time.Duration,
 ) *OrchestrationQueue {
-	if concurrency < 1 {
-		concurrency = 2
-	}
 	if interval <= 0 {
 		interval = 10 * time.Second
+	}
+	if limiter == nil {
+		limiter = service.NewProjectLimiter(service.DefaultSubTaskProjectConcurrency)
 	}
 	return &OrchestrationQueue{
 		db:           database,
 		batchSvc:     batchSvc,
 		subTaskSvc:   subTaskSvc,
+		reqSvc:       reqSvc,
+		settingSvc:   settingSvc,
+		limiter:      limiter,
 		wizardH:      wizardH,
 		tickInterval: interval,
 		stopCh:       make(chan struct{}),
 		kickCh:       make(chan struct{}, 1),
-		runSem:       make(chan struct{}, concurrency),
+		runSem:       globalSem,
 	}
+}
+
+// subTaskPolicy reads the current sub-task execution policy, pushing the
+// per-project cap into the shared limiter as a side effect (this is what makes
+// a settings change hot). Falls back to the defaults when no setting service
+// was wired or the read fails — a settings hiccup must never stall dispatch.
+func (q *OrchestrationQueue) subTaskPolicy() (autoRetry bool, retryMax int) {
+	if q.settingSvc == nil {
+		return false, service.DefaultSubTaskRetryMax
+	}
+	conc, autoRetry, retryMax, err := q.settingSvc.SubTaskConfig()
+	if err != nil {
+		log.Printf("[orch] read sub-task settings: %v (using %d/%v/%d)", err, conc, autoRetry, retryMax)
+	}
+	q.limiter.SetMax(conc)
+	return autoRetry, retryMax
+}
+
+// acquireSlot takes the per-project gate and then the process-wide ceiling,
+// returning false (having released whatever it took) when either is full. The
+// tick must never block on a slot: blocking here would either stall every other
+// batch in the same tick or — worse — claim a DB row it cannot run.
+func (q *OrchestrationQueue) acquireSlot(projectID string) bool {
+	if !q.limiter.TryAcquire(projectID) {
+		return false
+	}
+	if q.runSem == nil {
+		return true
+	}
+	select {
+	case q.runSem <- struct{}{}:
+		return true
+	default:
+		q.limiter.Release(projectID)
+		return false
+	}
+}
+
+// releaseSlot is the exact inverse of acquireSlot (ceiling first, then the
+// project gate). Only call it after acquireSlot returned true.
+func (q *OrchestrationQueue) releaseSlot(projectID string) {
+	if q.runSem != nil {
+		<-q.runSem
+	}
+	q.limiter.Release(projectID)
+}
+
+// projectIDFor resolves the project a batch belongs to (via its requirement)
+// so the per-project gate has a key. Returns false when the requirement can't
+// be read — the caller skips the batch this tick rather than dispatching it
+// outside the gate.
+func (q *OrchestrationQueue) projectIDFor(batch *model.OrchestrationBatch) (string, bool) {
+	// No requirement service wired (tests): fall back to the shared "" bucket
+	// so dispatch stays gated rather than stopping altogether.
+	if q.reqSvc == nil {
+		return "", true
+	}
+	req, err := q.reqSvc.Get(batch.RequirementID)
+	if err != nil || req == nil {
+		log.Printf("[orch] resolve project for batch %s (req %s): %v", batch.ID, batch.RequirementID, err)
+		return "", false
+	}
+	return req.ProjectID, true
 }
 
 // Recover is the boot-time companion to Start. It delegates to the two
@@ -138,7 +227,8 @@ func (q *OrchestrationQueue) Recover() error {
 // (sync.Once).
 func (q *OrchestrationQueue) Start() {
 	q.once.Do(func() {
-		log.Printf("[orch] started (interval=%s concurrency=%d)", q.tickInterval, cap(q.runSem))
+		log.Printf("[orch] started (interval=%s per-project=%d process-ceiling=%d)",
+			q.tickInterval, q.limiter.Max(), cap(q.runSem))
 		go q.loop()
 	})
 }
@@ -211,6 +301,9 @@ func (q *OrchestrationQueue) tick() {
 		log.Printf("[orch] listActive: %v", err)
 		return
 	}
+	// Read the policy once per tick (and refresh the limiter's cap with it) so
+	// every batch in this pass sees the same configuration.
+	autoRetry, retryMax := q.subTaskPolicy()
 	for i := range batches {
 		batch := batches[i]
 		// Check stopCh between batches so a long queue can exit mid-iteration.
@@ -219,11 +312,17 @@ func (q *OrchestrationQueue) tick() {
 			return
 		default:
 		}
+		// The per-project gate needs a project id; a batch whose requirement
+		// can't be read is skipped rather than dispatched ungated.
+		projectID, ok := q.projectIDFor(&batch)
+		if !ok {
+			continue
+		}
 		switch batch.Status {
 		case model.BatchDispatching:
-			q.tickDispatching(&batch)
+			q.tickDispatching(&batch, projectID, autoRetry, retryMax)
 		case model.BatchSummarizing:
-			q.tickSummarizing(&batch)
+			q.tickSummarizing(&batch, projectID)
 		}
 	}
 }
@@ -232,65 +331,79 @@ func (q *OrchestrationQueue) tick() {
 //
 // Lifecycle (must stay in this order):
 //
-//  1. Try to grab the global runSem (non-blocking select-default). The
-//     semaphore caps in-flight claude children at the configured
-//     concurrency; if it's full we MUST return without claiming any
-//     row, otherwise ClaimNextPending would flip the next pending child
-//     to status='running' and the wizard's UI would show it as "运行中"
-//     even though its goroutine is just sitting on `q.runSem <- {}`
-//     waiting for the previous child to finish. Without this guard
-//     every 10s tick would advance one row past the semaphore's
-//     capacity, leaving a growing backlog of zombie "running" rows
-//     whose goroutines never started a claude process.
-//  2. With the semaphore held, call ClaimNextPending to atomically
-//     promote the lowest-seq pending row to status='running'. If the
-//     claim fails (DB error) or no row was claimable (the previous
-//     tick already promoted this batch's next row), release the
-//     semaphore before returning so we don't leak a slot.
+//  1. Try to grab a slot for this batch's PROJECT (per-project gate, then the
+//     process-wide ceiling) — both non-blocking. If either is full we MUST
+//     return without claiming any row, otherwise ClaimNextPending would flip
+//     the next pending child to status='running' and the wizard's UI would
+//     show it as "运行中" even though nothing is executing. Without this guard
+//     every 10s tick would advance one row past the capacity, leaving a
+//     growing backlog of zombie "running" rows whose goroutines never started
+//     a claude process. Leaving the row 'pending' is exactly what makes the
+//     card render "排队中".
+//  2. With the slot held, call ClaimNextPending to atomically promote the
+//     lowest-seq pending row to status='running'. If the claim fails (DB
+//     error) or no row was claimable (the previous tick already promoted this
+//     batch's next row), release the slot before returning so we don't leak it.
 //  3. On a successful claim, spawn the wizard's ExecuteOrchestratedChild
-//     goroutine; its deferred `<-q.runSem` releases the slot when the
-//     child finishes.
+//     goroutine; its deferred releaseSlot frees the slot when the child
+//     finishes.
 //
-// On "no pending rows AND sem was released" the existing terminal-count
-// path checks whether every child has reached a terminal state and, if
-// so, flips the batch into summarizing.
-func (q *OrchestrationQueue) tickDispatching(batch *model.OrchestrationBatch) {
-	// (1) Non-blocking semaphore grab. If full, defer until the next tick —
-	// the DB row stays 'pending' so the UI shows "排队中" instead of a
-	// misleading "运行中".
-	select {
-	case q.runSem <- struct{}{}:
-		// got a slot — proceed to claim below.
-	default:
-		log.Printf("[orch] tick %s: runSem full, deferring next claim", batch.ID)
+// On "no pending rows AND slot was released" we first give failed children a
+// chance to be re-armed (when the user enabled subtask.auto_retry), and only
+// then run the terminal-count path that flips the batch into summarizing.
+func (q *OrchestrationQueue) tickDispatching(batch *model.OrchestrationBatch, projectID string, autoRetry bool, retryMax int) {
+	// (1) Non-blocking admission. If full, defer until the next tick — the DB
+	// row stays 'pending' so the UI shows "排队中" instead of a misleading
+	// "运行中".
+	if !q.acquireSlot(projectID) {
+		log.Printf("[orch] tick %s: project %s at capacity (%d), deferring next claim",
+			batch.ID, projectID, q.limiter.Max())
 		return
 	}
 
-	// (2) Promote the next pending row. The semaphore slot is held across
-	// this DB write so a parallel queue instance (or this queue's own
-	// earlier goroutine that's still draining) can't race past us.
+	// (2) Promote the next pending row. The slot is held across this DB write
+	// so a parallel queue instance (or this queue's own earlier goroutine
+	// that's still draining) can't race past us.
 	st, ok, err := q.subTaskSvc.ClaimNextPending(batch.ID)
 	if err != nil {
 		log.Printf("[orch] claim %s: %v", batch.ID, err)
-		<-q.runSem
+		q.releaseSlot(projectID)
 		return
 	}
 	if ok {
 		q.running.Add(1)
 		go func(b *model.OrchestrationBatch, s *model.SubTask) {
 			defer q.running.Done()
-			defer func() { <-q.runSem }()
+			defer q.releaseSlot(projectID)
 			q.wizardH.ExecuteOrchestratedChild(b, s)
 		}(batch, st)
 		return
 	}
 	// No row to claim — release the slot we grabbed above so the next
 	// tick can try again. (Common when another tick already flipped the
-	// row between our select and our SELECT.)
-	<-q.runSem
+	// row between our admission check and our SELECT.)
+	q.releaseSlot(projectID)
 
-	// No pending row claimed — every child must have hit a terminal status.
-	// Count and flip the batch to summarizing if so.
+	// No pending row claimed — every child has hit a terminal status. Before
+	// treating the batch as finished, optionally re-arm the failed children:
+	// "子任务失败自动重做" is opt-in (settings key subtask.auto_retry, default
+	// off) and capped by retry_max, mirroring the summary-retry branch in
+	// tickSummarizing. A re-armed row leaves the 'error' bucket, so this MUST
+	// run before CountTerminalByBatch — otherwise the batch would flip to
+	// summarizing a tick before the retry got dispatched.
+	if autoRetry {
+		n, rerr := q.subTaskSvc.ReArmErroredForRetry(batch.ID, retryMax)
+		if rerr != nil {
+			log.Printf("[orch] re-arm errored children %s: %v", batch.ID, rerr)
+		} else if n > 0 {
+			log.Printf("[orch] batch %s: re-armed %d errored children for auto retry (max %d)",
+				batch.ID, n, retryMax)
+			// Next tick claims them in batch_seq order.
+			return
+		}
+	}
+
+	// Count and flip the batch to summarizing if every child is terminal.
 	done, errored, err := q.subTaskSvc.CountTerminalByBatch(batch.ID)
 	if err != nil {
 		log.Printf("[orch] countTerminal %s: %v", batch.ID, err)
@@ -309,14 +422,23 @@ func (q *OrchestrationQueue) tickDispatching(batch *model.OrchestrationBatch) {
 // Arms a new summary goroutine when summary_status='pending'; checks the
 // heartbeat and re-arms when summary_status='running' but the heartbeat is
 // stale (>5min).
-func (q *OrchestrationQueue) tickSummarizing(batch *model.OrchestrationBatch) {
+//
+// The summary round spawns a claude process of its own, so it goes through the
+// same per-project gate as the children — otherwise a project at its cap could
+// still fan out one extra process per summarizing batch. A full gate simply
+// leaves summary_status='pending' for the next tick.
+func (q *OrchestrationQueue) tickSummarizing(batch *model.OrchestrationBatch, projectID string) {
 	switch batch.SummaryStatus {
 	case model.SummaryPending:
+		if !q.acquireSlot(projectID) {
+			log.Printf("[orch] tick %s: project %s at capacity (%d), deferring summary",
+				batch.ID, projectID, q.limiter.Max())
+			return
+		}
 		q.running.Add(1)
 		go func(b *model.OrchestrationBatch) {
 			defer q.running.Done()
-			defer func() { <-q.runSem }()
-			q.runSem <- struct{}{}
+			defer q.releaseSlot(projectID)
 			q.wizardH.RunOrchestratorSummary(b.ID)
 		}(batch)
 	case model.SummaryRunning:

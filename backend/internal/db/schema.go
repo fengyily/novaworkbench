@@ -740,6 +740,14 @@ var alterColumns = []string{
 	// injected), "bare" (new session, no context, no role system prompt).
 	// Default 'fork' preserves the legacy behavior on every existing row.
 	`ALTER TABLE sub_tasks ADD COLUMN session_mode TEXT NOT NULL DEFAULT 'fork'`,
+	// Automatic-failure-retry counter for auto-orchestrated children. Bumped by
+	// SubTaskService.ReArmErroredForRetry each time the orchestration tick flips
+	// a failed child back to 'pending' (only when setting subtask.auto_retry is
+	// on), and compared against setting subtask.retry_max so a deterministically
+	// failing child stops after N attempts instead of looping forever — the same
+	// shape as orchestration_batches.summary_attempts. Manual 重做 / 继续 do NOT
+	// touch it: the column counts automatic re-arms only.
+	`ALTER TABLE sub_tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0`,
 	// Orchestration summary retry cap: the tick loop's case SummaryError branch
 	// consults this column to decide whether to re-arm a fresh summary goroutine
 	// (attempts < SummaryMaxAttempts) or flip the whole batch to BatchErrored

@@ -141,6 +141,16 @@ export const components = {
     statusRunning: '运行中',
     statusDone: '已完成',
     statusError: '出错',
+    statusStopped: '已停止',
+    // Shown instead of statusPending when the row is waiting on the project's
+    // concurrency gate (no job yet) — it makes "为什么不动" answerable at a glance.
+    statusQueued: '排队中 · 等待项目空闲',
+    // Automatic failure redo counter (设置 → 子任务 → 失败自动重做).
+    retryBadge: '🔁 自动重做 {{count}}/{{max}}',
+    // Same badge when the configured cap couldn't be read (the count alone is
+    // still true; inventing a denominator would not be).
+    retryBadgeNoMax: '🔁 自动重做 {{count}} 次',
+    retryBadgeTitle: '该子任务失败后已被系统自动重做 {{count}} 次（上限 {{max}} 次，可在 设置 → 子任务 调整）',
     secondsAgo: '{{n}}秒前',
     minutesAgo: '{{n}}分钟前',
     hoursAgo: '{{n}}小时前',
