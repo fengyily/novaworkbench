@@ -783,6 +783,19 @@ var alterColumns = []string{
 	// default so legacy rows render as "no tags" with no backfill. Validated in
 	// service.RequirementService.UpdateTags (trim, dedupe, length-cap, count-cap).
 	`ALTER TABLE requirements ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`,
+	// Requirement marks: preset semantic tags ("important" / "follow_up" /
+	// "blocked" / "at_risk") chosen from a fixed whitelist rather than typed
+	// freely — distinguishes "preset attention flags that drive list sort
+	// order" (this column) from "free-form short labels" (tags above). Stored
+	// as a JSON array string ("[]" when empty), same shape as tags, so the
+	// frontend read/write path matches. Empty array is the default so legacy
+	// rows render as "no marks" with no backfill. Validated in
+	// service.RequirementService.UpdateMarks — values not in MarkWhitelist
+	// are silently dropped, list is trimmed, length-capped (maxMarkLength =
+	// 16) and count-capped (maxMarksCount = 5). Drives the secondary
+	// CASE-WHEN in List/Calendar ORDER BY so marked rows float above
+	// unmarked rows of the same done/active status.
+	`ALTER TABLE requirements ADD COLUMN marks TEXT NOT NULL DEFAULT '[]'`,
 	// Closed-trail for the manual "关闭需求" action. ClosedAt is stamped when
 	// the user force-closes a requirement from any non-terminal state
 	// (analyzing / designing / designed / developing) via the Close endpoint,

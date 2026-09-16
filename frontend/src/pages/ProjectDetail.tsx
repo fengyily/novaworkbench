@@ -10,6 +10,7 @@ import {
   type Project, type RunStatus, type PR, type PRListResponse, type PlatformToken,
   type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage,
   kindLabelKeys, kindOf, API_BASE, authedFetch,
+  MARK_PRESETS, parseMarks,
 } from '../api/client';
 import { tLabel } from '../i18n/label';
 import { fmtDate, fmtDateTime } from '../utils/intl';
@@ -691,6 +692,37 @@ export default function ProjectDetail() {
       <td data-label={t('projects.detail.colId')} style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{req.id}</td>
       <td data-label={t('projects.detail.colType')}><span className={`kind-badge kind-${kindOf(req)}`}>{tLabel(t, kindLabelKeys as Record<string, string>, kindOf(req))}</span></td>
       <td data-label={t('projects.detail.colTitle')} className="pr-title">
+        {/* Preset marks (重要 / 跟进 / 阻塞 / 风险) sit ABOVE the title, same
+            position as the global RequirementsList: preset color + icon so a
+            marked requirement stands out at a glance. Unmarked rows render
+            nothing (no extra height), and unknown codes are skipped so a
+            stale value written before a preset is renamed can't crash the
+            row. Colors come from MARK_PRESETS in api/client.ts (single
+            source of truth shared with the detail-page editor). */}
+        {(() => {
+          const rowMarks = parseMarks(req.marks);
+          if (rowMarks.length === 0) return null;
+          return (
+            <div className="pr-title-marks">
+              {rowMarks.map(code => {
+                const p = MARK_PRESETS.find(x => x.code === code);
+                if (!p) return null;
+                const label = t(`requirements.detail2.marksPreset.${p.code}`);
+                return (
+                  <span
+                    key={code}
+                    className="pr-title-mark"
+                    style={{ color: p.color, background: p.bg, borderColor: p.color }}
+                    title={label}
+                  >
+                    <span aria-hidden>{p.icon}</span>
+                    <span>{label}</span>
+                  </span>
+                );
+              })}
+            </div>
+          );
+        })()}
         <div className="pr-title-text">{req.title}</div>
         {/* Tag chips: rendered below the title as a compact strip (max 3
             visible, then +N overflow). Empty / undefined = no chips row,

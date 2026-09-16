@@ -16,6 +16,7 @@ import { useTranslation } from 'react-i18next';
 import {
   requirementsApi, projectsApi,
   statusLabelKeys, kindLabelKeys, kindShortLabelKeys, priorityLabelKeys, kindOf,
+  MARK_PRESETS, parseMarks,
   type Kind, type Project, type Requirement,
 } from '../api/client';
 import { tLabel } from '../i18n/label';
@@ -265,6 +266,37 @@ export default function RequirementsList() {
                       <div className="req-row-title-text">
                         {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
                       </div>
+                      {/* Preset marks (important / follow_up / blocked / at_risk)
+                          sit ABOVE the title (per frontend design): preset
+                          color + icon, and only render when the row actually
+                          has at least one mark (empty list → skip the row
+                          entirely so unmarked rows don't get extra height).
+                          Uses the shared MARK_PRESETS list from api/client.ts
+                          so colors stay in sync with the detail-page editor. */}
+                      {(() => {
+                        const rowMarks = parseMarks(r.marks);
+                        if (rowMarks.length === 0) return null;
+                        return (
+                          <div className="req-row-marks">
+                            {rowMarks.map(code => {
+                              const p = MARK_PRESETS.find(x => x.code === code);
+                              if (!p) return null;
+                              const label = t(`requirements.detail2.marksPreset.${p.code}`);
+                              return (
+                                <span
+                                  key={code}
+                                  className={`req-row-mark-tag ${p.code}`}
+                                  style={{ color: p.color, background: p.bg, borderColor: p.color }}
+                                  title={label}
+                                >
+                                  <span aria-hidden>{p.icon}</span>
+                                  <span>{label}</span>
+                                </span>
+                              );
+                            })}
+                          </div>
+                        );
+                      })()}
                       {/* Mirror the project-page chip strip: tags render
                           under the title as a 3-chip cap with +N overflow.
                           Force-closed rows carry a small amber badge so the
@@ -379,6 +411,35 @@ export default function RequirementsList() {
                   </span>
                   <StatusChips req={r} />
                 </div>
+                {/* Preset marks on mobile: same chip strip as the desktop
+                    title column, rendered above the title. Empty list →
+                    nothing rendered (so unmarked cards keep their natural
+                    height). Mirrors the design's "mark 比 priority 更显眼
+                    — 因为它直接影响排序" intent. */}
+                {(() => {
+                  const rowMarks = parseMarks(r.marks);
+                  if (rowMarks.length === 0) return null;
+                  return (
+                    <div className="req-row-marks">
+                      {rowMarks.map(code => {
+                        const p = MARK_PRESETS.find(x => x.code === code);
+                        if (!p) return null;
+                        const label = t(`requirements.detail2.marksPreset.${p.code}`);
+                        return (
+                          <span
+                            key={code}
+                            className={`req-row-mark-tag ${p.code}`}
+                            style={{ color: p.color, background: p.bg, borderColor: p.color }}
+                            title={label}
+                          >
+                            <span aria-hidden>{p.icon}</span>
+                            <span>{label}</span>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
                 <div className="req-card-mobile-title">
                   {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
                 </div>

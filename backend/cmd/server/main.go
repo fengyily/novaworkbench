@@ -470,6 +470,10 @@ func main() {
 	// full tag list (chips editor on the detail page).
 	mux.HandleFunc("POST /api/requirements/{id}/close", reqH.Close)
 	mux.HandleFunc("PUT /api/requirements/{id}/tags", reqH.UpdateTags)
+	// UpdateMarks replaces the requirement's preset mark list (important /
+	// follow_up / blocked / at_risk). Service normalizes against
+	// MarkWhitelist (unknown values silently dropped) + count-capped.
+	mux.HandleFunc("PUT /api/requirements/{id}/marks", reqH.UpdateMarks)
 	// PromoteFromIdea: turns a finished idea-discussion thread into a new
 	// requirement row (kind=requirement, source_requirement_id=idea.id). The
 	// original idea is left fully intact — see service.PromoteFromIdea.

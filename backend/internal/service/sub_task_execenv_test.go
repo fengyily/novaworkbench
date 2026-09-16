@@ -45,7 +45,7 @@ func TestExecEnvSanity(t *testing.T) {
 	if got.AgentServerName != "Prod Box" {
 		t.Fatalf("dev server name not read back: %q", got.AgentServerName)
 	}
-	list, err := reqSvc.List("proj_1", "", "", "")
+	list, err := reqSvc.List("proj_1", "", "", "", "")
 	if err != nil || len(list) != 1 {
 		t.Fatalf("req List: %v n=%d", err, len(list))
 	}

@@ -144,6 +144,37 @@
   align-items: center;
 }
 
+/* Preset mark chip strip (重要 / 跟进 / 阻塞 / 风险). Sits above the title
+   in the desktop row and above the title in the mobile card. Colors come
+   from inline style per-chip (each preset has a unique color/bg pair);
+   this CSS only owns the layout / shape so any future color tweak can
+   be a one-line change in api/client.ts MARK_PRESETS without touching
+   the stylesheet. Reused unchanged in .req-card-mobile. */
+.req-row-marks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 4px;
+  margin-top: 2px;
+  align-items: center;
+}
+
+.req-row-mark-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 500;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .req-row-title-tag {
   font-size: 11px;
   padding: 1px 8px;

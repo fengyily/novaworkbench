@@ -379,6 +379,21 @@ export const requirements = {
     tagsRemoveTitle: 'Remove this tag',
     tagsAddTitle: 'Add tag',
     tagsLimit: 'Up to {{max}} tags, each ≤ {{len}} chars',
+    // Marks (preset chip selector) — semantically separate from tags.
+    // Server-side whitelisted presets (important / follow_up / blocked /
+    // at_risk); rows with any mark float to the top of the list.
+    marksLabel: 'Marks',
+    marksFailPrefix: 'Update mark failed: ',
+    marksPreset: {
+      important: 'Important',
+      follow_up: 'Follow-up',
+      blocked: 'Blocked',
+      at_risk: 'At risk',
+    },
+    marksToggleTitle: 'Toggle mark {{code}}',
+    list: {
+      marksIndicator: '{{n}} marked',
+    },
     // Close — manual short-circuit from any non-terminal stage. Distinct
     // from "Mark development complete" (the natural done gate) because it
     // carries a user-supplied reason and stamps both completed_at + closed_at.
