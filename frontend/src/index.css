@@ -448,11 +448,12 @@ body.no-scroll {
   align-items: center;
   gap: 4px;
   padding: 3px 10px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   font-weight: 600;
   background: #f1f5f9;
   color: #64748b;
+  white-space: nowrap;
 }
 .claude-status.working {
   background: #fef3c7;

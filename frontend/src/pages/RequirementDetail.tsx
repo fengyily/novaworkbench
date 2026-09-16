@@ -38,6 +38,7 @@ import {
   IconWrench,
   IconHand,
   IconArrowBack,
+  IconArrowRight,
   IconListOrdered,
   IconPin,
   IconPlay,
@@ -52,6 +53,7 @@ import {
   IconChat,
   IconTrash,
   IconSparkles,
+  IconClose,
 } from '../components/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -2401,7 +2403,7 @@ export default function RequirementDetail() {
                 <span className="flight-leg">
                   <span className="flight-leg-label">GIT</span>
                   <span className="flight-leg-value" title={stripBase}>{stripBase}</span>
-                  <span className="flight-arrow">→</span>
+                  <IconArrowRight size={11} className="flight-arrow" aria-hidden />
                   <span className="flight-leg-value" title={stripNew}>{stripNew}</span>
                 </span>
                 <span className="flight-sep">·</span>
@@ -2941,7 +2943,7 @@ export default function RequirementDetail() {
                 className="req-tag-chip-remove"
                 aria-label={t('requirements.detail2.tagsRemoveTitle')}
                 onClick={() => removeTag(tag)}
-              >×</button>
+              ><IconClose size={11} aria-hidden /></button>
             </span>
           ))}
           <input
@@ -3322,7 +3324,7 @@ export default function RequirementDetail() {
                   {timingRunning ? ` (${t('requirements.detail2.timingRunning')})` : ''}
                 </span>
               )}
-              {i < visibleSteps.length - 1 && <span className="stage-sep">→</span>}
+              {i < visibleSteps.length - 1 && <IconArrowRight size={12} className="stage-sep" aria-hidden />}
             </div>
           );
         })}
@@ -4262,7 +4264,7 @@ export default function RequirementDetail() {
           <div className="kb-modal modal-fullscreen close-modal" onClick={e => e.stopPropagation()}>
             <div className="kb-modal-header">
               <h2>{t('requirements.detail2.closeConfirmTitle')}</h2>
-              <button className="kb-modal-close" onClick={() => !closeBusy && setCloseModalOpen(false)} aria-label="close">×</button>
+              <button className="kb-modal-close" onClick={() => !closeBusy && setCloseModalOpen(false)} aria-label="close"><IconClose size={14} aria-hidden /></button>
             </div>
             <div className="kb-modal-body">
               <p style={{ marginTop: 0, color: 'var(--color-text-secondary)', lineHeight: 1.6 }}>
