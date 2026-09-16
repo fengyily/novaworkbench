@@ -85,6 +85,13 @@ const statusLabelKeys: Record<SubTaskStatus, string> = {
   error:   'components.subTaskCard.statusError',
   stopped: 'components.subTaskCard.statusStopped',
 };
+// Conversation-threading policy picked at manual sub-task create time.
+// Kept in sync with the backend's model.SubTaskSessionMode* constants:
+//   resume       → fork the parent coding session (--fork-session)
+//   with_context → new session, parent context injected into the prompt
+//   bare         → new session, no context and no role system prompt
+type SessionMode = 'resume' | 'with_context' | 'bare';
+
 const statusChipClass: Record<SubTaskStatus, string> = {
   pending: 'sub-card-status-chip sub-card-status-pending',
   running: 'sub-card-status-chip sub-card-status-running',
@@ -1226,7 +1233,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // yet (codingSessionId === '') so a click doesn't bounce off the
   // backend's 409 NO_SESSION check. The with_context / bare options stay
   // enabled — they explicitly opt out of the parent-session requirement.
-  const [sessionMode, setSessionMode] = useState<'resume' | 'with_context' | 'bare'>('resume');
+  const [sessionMode, setSessionMode] = useState<SessionMode>('resume');
   useEffect(() => {
     // When the user just saw a stale-session failure, auto-promote to
     // 「带上下文」 so a follow-up click "just works" (the new session won't
@@ -1360,6 +1367,35 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // summaryReport] effect can read them. See the declaration near the top
   // of the component body for the JSDoc explaining the data source.
   const activeChildCount = activeBatch?.childIds.length ?? 0;
+
+  // Session-mode segmented control contents. Ordered most→least inherited so
+  // the default (继承主任务会话) sits left, where the eye lands first. Each
+  // entry carries its own description; only the SELECTED one is rendered
+  // below the control (see .sub-session-mode-desc) — showing all three at
+  // once made the row wrap into a ragged two-line grid.
+  const sessionModeOptions: Array<{ key: SessionMode; label: string; desc: string; unavailable?: boolean }> = [
+    {
+      key: 'resume',
+      label: t('components.subTaskPanel.sessionMode.resume'),
+      desc: t('components.subTaskPanel.sessionMode.resumeHint'),
+      // Belt-and-braces: the panel early-returns before the composer when
+      // there is no parent coding session, so this segment is normally always
+      // selectable. Keeping the guard means a future softening of that early
+      // return degrades to "segment greyed out" instead of a 409 bounce.
+      unavailable: !codingSessionId,
+    },
+    {
+      key: 'with_context',
+      label: t('components.subTaskPanel.sessionMode.withContext'),
+      desc: t('components.subTaskPanel.sessionMode.withContextHint'),
+    },
+    {
+      key: 'bare',
+      label: t('components.subTaskPanel.sessionMode.bare'),
+      desc: t('components.subTaskPanel.sessionMode.bareHint'),
+    },
+  ];
+  const activeSessionMode = sessionModeOptions.find((o) => o.key === sessionMode) ?? sessionModeOptions[0];
 
   return (
     <section className="sub-panel" aria-labelledby="sub-panel-title">
@@ -1580,59 +1616,54 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             )}
           </label>
         )}
-        {/* Session-mode radio: always visible on manual sub-task creation
-            (was previously gated by `showFreshOption` and only shown for
-            Agent-server requirements / post-stale-artifact, which made
-            local happy-path development feel "missing a knob"). Three
-            options — see useState above for the canonical mapping. The
-            `resume` option is disabled when there's no parent coding
-            session yet (codingSessionId === '') so a click doesn't
-            bounce off the backend's 409 NO_SESSION check. The hint
-            block under the radio shows only when the latest sub-task
-            artifact looks like the legacy missing-jsonl bug, telling the
-            user the radio is non-default for a reason. */}
-        <div className="sub-session-mode" role="radiogroup" aria-label={t('components.subTaskPanel.sessionMode.label')}>
-          <span className="sub-session-mode-label">{t('components.subTaskPanel.sessionMode.label')}</span>
-          <label className="sub-session-mode-option">
-            <input
-              type="radio"
-              name="sessionMode"
-              value="resume"
-              checked={sessionMode === 'resume'}
-              onChange={() => setSessionMode('resume')}
-              disabled={submitting || reSplitBusy || !codingSessionId}
-            />
-            <span>{t('components.subTaskPanel.sessionMode.resume')}</span>
-            <span className="sub-session-mode-hint">{t('components.subTaskPanel.sessionMode.resumeHint')}</span>
-          </label>
-          <label className="sub-session-mode-option">
-            <input
-              type="radio"
-              name="sessionMode"
-              value="with_context"
-              checked={sessionMode === 'with_context'}
-              onChange={() => setSessionMode('with_context')}
-              disabled={submitting || reSplitBusy}
-            />
-            <span>{t('components.subTaskPanel.sessionMode.withContext')}</span>
-            <span className="sub-session-mode-hint">{t('components.subTaskPanel.sessionMode.withContextHint')}</span>
-          </label>
-          <label className="sub-session-mode-option">
-            <input
-              type="radio"
-              name="sessionMode"
-              value="bare"
-              checked={sessionMode === 'bare'}
-              onChange={() => setSessionMode('bare')}
-              disabled={submitting || reSplitBusy}
-            />
-            <span>{t('components.subTaskPanel.sessionMode.bare')}</span>
-            <span className="sub-session-mode-hint">{t('components.subTaskPanel.sessionMode.bareHint')}</span>
-          </label>
+        {/* Session-mode selector — a segmented control, always visible on
+            manual sub-task creation (the old `showFreshOption` gate hid it on
+            local happy-path development, which read as "missing a knob").
+            Three options, ordered most→least inherited:
+
+              resume       继承主任务会话 (default) — fork the parent coding
+                           session via --fork-session.
+              with_context 带上下文 — new session, buildParentContext()
+                           injected into the prompt, executor role prompt kept.
+              bare         新会话 — new session, no context block, no role
+                           system prompt (CLI built-in defaults).
+
+            Layout note: one segment row + ONE description line for the
+            selected mode. Descriptions used to live inside every option as
+            full-width hint spans, which made the block wrap into a ragged
+            multi-row grid that looked unrelated to the rest of the composer. */}
+        <div className="sub-session-mode">
+          <span className="sub-session-mode-label" id="sub-session-mode-label">
+            {t('components.subTaskPanel.sessionMode.label')}
+          </span>
+          <div className="sub-session-mode-segments" role="radiogroup" aria-labelledby="sub-session-mode-label">
+            {sessionModeOptions.map((opt) => {
+              const active = sessionMode === opt.key;
+              const isDisabled = submitting || reSplitBusy || !!opt.unavailable;
+              return (
+                <label
+                  key={opt.key}
+                  className={`sub-session-mode-option${active ? ' is-active' : ''}${isDisabled ? ' is-disabled' : ''}`}
+                  title={opt.desc}
+                >
+                  <input
+                    type="radio"
+                    name="sessionMode"
+                    value={opt.key}
+                    checked={active}
+                    onChange={() => setSessionMode(opt.key)}
+                    disabled={isDisabled}
+                  />
+                  <span className="sub-session-mode-option-text">{opt.label}</span>
+                </label>
+              );
+            })}
+          </div>
+          <span className="sub-session-mode-desc" role="note">{activeSessionMode.desc}</span>
           {latestArtifactStale && latestArtifactStale.isStale && (
-            <div className="sub-session-mode-hint" role="note">
+            <span className="sub-session-mode-warn" role="note">
               {t('components.subTaskPanel.sessionMode.freshHint')}
-            </div>
+            </span>
           )}
         </div>
         <div className="sub-composer-toolbar">
