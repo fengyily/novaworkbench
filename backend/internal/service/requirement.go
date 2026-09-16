@@ -606,6 +606,20 @@ func (s *RequirementService) UpdateApplyJob(id, jobID string) error {
 	return err
 }
 
+// UpdateCodingJob persists the active start-coding / adjust-coding /
+// continue-coding JobStore job id so a page refresh can reconnect to the
+// running coding job. Pass "" to clear it on terminal so the UI stops
+// showing the "developing" spinner and the next stage can start. Mirrors
+// UpdateDesignJob / UpdateApplyJob — necessary because the scheduler
+// path (RunScheduledCoding) does NOT return a job_id to the caller, so
+// the only way the detail page can subscribe to the live coding SSE
+// stream after a refresh is by reading the id back out of this column.
+func (s *RequirementService) UpdateCodingJob(id, jobID string) error {
+	_, err := s.db.Exec("UPDATE requirements SET coding_job_id=?, updated_at=? WHERE id=?",
+		jobID, time.Now(), id)
+	return err
+}
+
 // UpdateCodingSession persists the claude CLI session id for the developer
 // conversation (a fork off the design session). Subsequent coding turns resume it.
 func (s *RequirementService) UpdateCodingSession(id, sessionID string) error {

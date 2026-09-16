@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/scheduler"
 	"github.com/novaworkbench/backend/internal/service"
 )
@@ -137,6 +138,16 @@ func (e *ScheduledExecutor) RunScheduledCoding(ctx context.Context, p scheduler.
 	if err != nil {
 		return "", err
 	}
+	// 把 coding 的 JobStore job_id 持久化到 requirements.coding_job_id，
+	// 这样前端 5s poll /api/wizard/active-jobs 拿到 running job 后能
+	// 直接用 job_id attach SSE（与 HTTP /api/wizard/start-coding 路径
+	// 行为一致；前端 streamJob(jobId) 即可订阅）。之前 scheduler 路径
+	// 只把 job_id 写到 scheduled_tasks.job_id，前端 RequirementDetail
+	// 详情页完全看不见，于是出现 req_57a1397b01268480 「定时执行完了
+	// 但 UI 上没有任何进度反馈」的现象。
+	if cerr := e.h.reqSvc.UpdateCodingJob(req.ID, jobID); cerr != nil {
+		log.Printf("[scheduler-executor] UpdateCodingJob %s failed: %v", req.ID, cerr)
+	}
 	_, err = e.h.RunScheduledCoding(cp, e.callbackFor(schedID))
 	if err != nil {
 		return "", err
@@ -174,6 +185,15 @@ func (e *ScheduledExecutor) dispatchFromCtx(ctx context.Context) (jobID, schedID
 // callbackFor returns a *runCallbacks whose OnFinish flips the
 // scheduled_tasks row terminal when the wizard exec body finishes.
 // Closes over schedID so the executor doesn't need any lookup table.
+//
+// On the coding path (we infer this from the task_type stored on the
+// scheduled_tasks row), a successful finish also stamps
+// requirements.status='developing' and clears requirements.coding_job_id.
+// That second stamp is the missing link behind the
+// req_57a1397b01268480 post-mortem — without it the coding job could
+// complete (status='succeeded' on scheduled_tasks) while the requirement
+// row stayed at status='designed' and the frontend had no live SSE
+// job_id to attach to after a refresh.
 func (e *ScheduledExecutor) callbackFor(schedID string) *runCallbacks {
 	return &runCallbacks{
 		OnFinish: func(jobID string, ok bool) {
@@ -181,6 +201,23 @@ func (e *ScheduledExecutor) callbackFor(schedID string) *runCallbacks {
 			if err := e.schedSvc.Finish(schedID, ok, jobID, ""); err != nil {
 				log.Printf("[scheduler-executor] Finish %s failed: %v", schedID, err)
 				return
+			}
+			// Post-Finish cleanup: coding-path bookkeeping. Only runs on
+			// success and only when the row's task_type actually ran a
+			// coding stage (design-only rows don't carry coding_job_id in
+			// the first place, but we still clear it defensively in case a
+			// future design_and_coding merge takes this branch).
+			if ok {
+				if st, gerr := e.schedSvc.Get(schedID); gerr == nil && st != nil {
+					if st.TaskType == model.SchedTypeCoding || st.TaskType == model.SchedTypeDesignCoding {
+						if _, uerr := e.h.reqSvc.UpdateStatus(st.RequirementID, "developing"); uerr != nil {
+							log.Printf("[scheduler-executor] UpdateStatus developing for %s failed: %v", st.RequirementID, uerr)
+						}
+					}
+					if uerr := e.h.reqSvc.UpdateCodingJob(st.RequirementID, ""); uerr != nil {
+						log.Printf("[scheduler-executor] UpdateCodingJob clear for %s failed: %v", st.RequirementID, uerr)
+					}
+				}
 			}
 			log.Printf("[scheduler-executor] scheduled task %s finished status=%s job=%s", schedID, status, jobID)
 		},
@@ -350,6 +387,12 @@ func (e *ScheduledExecutor) chainedDesignCallback(reqID, schedID string, p sched
 // coding job id, which becomes the value scheduled_tasks.job_id lands
 // with on success (matching the "last-stage wins" rule from the
 // RunScheduledDesignAndCoding docstring).
+//
+// On success we also stamp requirements.status='developing' (chainedDesignCallback
+// overwrote it with 'designed' after the architect stage, which left the chip
+// stuck on "📐 方案完成" even though coding actually finished — the original
+// req_57a1397b01268480 symptom) and clear requirements.coding_job_id so a
+// later page refresh doesn't try to attach to a dead in-memory JobStore job.
 func (e *ScheduledExecutor) chainedCodingCallback(schedID string) *runCallbacks {
 	return &runCallbacks{
 		OnFinish: func(codingJobID string, ok bool) {
@@ -360,6 +403,19 @@ func (e *ScheduledExecutor) chainedCodingCallback(schedID string) *runCallbacks 
 			if err := e.schedSvc.Finish(schedID, ok, codingJobID, msg); err != nil {
 				log.Printf("[scheduler-executor] Finish %s failed: %v", schedID, err)
 				return
+			}
+			if ok {
+				// Pull the requirement id off the scheduled_tasks row so the
+				// status / coding_job_id stamps go to the right row without
+				// needing the caller to thread it through.
+				if st, gerr := e.schedSvc.Get(schedID); gerr == nil && st != nil {
+					if _, uerr := e.h.reqSvc.UpdateStatus(st.RequirementID, "developing"); uerr != nil {
+						log.Printf("[scheduler-executor] UpdateStatus developing for %s failed: %v", st.RequirementID, uerr)
+					}
+					if uerr := e.h.reqSvc.UpdateCodingJob(st.RequirementID, ""); uerr != nil {
+						log.Printf("[scheduler-executor] UpdateCodingJob clear for %s failed: %v", st.RequirementID, uerr)
+					}
+				}
 			}
 			status := modelStatusFromOk(ok)
 			log.Printf("[scheduler-executor] merged scheduled task %s finished status=%s job=%s", schedID, status, codingJobID)

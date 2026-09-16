@@ -94,6 +94,13 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 
 	job := h.jobs.Create(p.RequirementID)
 	job.SetType("start_coding")
+	// Persist the live coding job_id so a refreshed detail page can attach
+	// back to this SSE stream (mirrors UpdateDesignJob in the architect path).
+	if p.RequirementID != "" {
+		if uerr := h.reqSvc.UpdateCodingJob(p.RequirementID, job.ID); uerr != nil {
+			log.Printf("[start-coding] failed to persist coding_job_id for %s: %v", p.RequirementID, uerr)
+		}
+	}
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	go h.execStartCoding(&p, job, nil)
@@ -129,6 +136,16 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		lines, status, exitCode := job.Snapshot()
 		if perr := h.jobLogSvc.Save(job.ID, p.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
 			log.Printf("[start-coding] failed to persist job log %s: %v", job.ID, perr)
+		}
+		// Always clear the persisted coding_job_id on terminal so a later
+		// refresh doesn't try to attach to a dead in-memory JobStore job.
+		// The column is the only durable hook the detail page has for
+		// reconnecting to the live SSE stream — leaving a stale id here
+		// was the symptom behind req_57a1397b01268480.
+		if p.RequirementID != "" {
+			if uerr := h.reqSvc.UpdateCodingJob(p.RequirementID, ""); uerr != nil {
+				log.Printf("[start-coding] failed to clear coding_job_id for %s: %v", p.RequirementID, uerr)
+			}
 		}
 		if cb != nil && cb.OnFinish != nil {
 			cb.OnFinish(job.ID, status == store.JobDone)
@@ -1140,6 +1157,11 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 	job := h.jobs.Create(body.RequirementID)
 	job.SetType("adjust_coding")
 	job.SetModel(model)
+	// Persist the live coding_job_id so a refreshed detail page can reconnect
+	// to the adjust-coding SSE stream (mirrors StartCoding).
+	if uerr := h.reqSvc.UpdateCodingJob(body.RequirementID, job.ID); uerr != nil {
+		log.Printf("[adjust-coding] failed to persist coding_job_id for %s: %v", body.RequirementID, uerr)
+	}
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	go func() {
@@ -1149,6 +1171,11 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			lines, status, exitCode := job.Snapshot()
 			if perr := h.jobLogSvc.Save(job.ID, body.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, model); perr != nil {
 				log.Printf("[adjust-coding] failed to persist job log %s: %v", job.ID, perr)
+			}
+			// Clear coding_job_id on terminal — keeps the column from
+			// pointing at a dead in-memory JobStore job after a refresh.
+			if uerr := h.reqSvc.UpdateCodingJob(body.RequirementID, ""); uerr != nil {
+				log.Printf("[adjust-coding] failed to clear coding_job_id for %s: %v", body.RequirementID, uerr)
 			}
 		}()
 		log.Printf("[adjust-coding] job %s started for %s (resume %s)", job.ID, body.RequirementID, req.CodingSessionID)
@@ -1381,6 +1408,11 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 	job := h.jobs.Create(body.RequirementID)
 	job.SetType("continue_coding")
 	job.SetModel(model)
+	// Persist the live coding_job_id so a refreshed detail page can reconnect
+	// to the continue-coding SSE stream (mirrors StartCoding / AdjustCoding).
+	if uerr := h.reqSvc.UpdateCodingJob(body.RequirementID, job.ID); uerr != nil {
+		log.Printf("[continue-coding] failed to persist coding_job_id for %s: %v", body.RequirementID, uerr)
+	}
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	go func() {
@@ -1392,6 +1424,11 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 			lines, status, exitCode := job.Snapshot()
 			if perr := h.jobLogSvc.Save(job.ID, body.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, model); perr != nil {
 				log.Printf("[continue-coding] failed to persist job log %s: %v", job.ID, perr)
+			}
+			// Clear coding_job_id on terminal — keeps the column from
+			// pointing at a dead in-memory JobStore job after a refresh.
+			if uerr := h.reqSvc.UpdateCodingJob(body.RequirementID, ""); uerr != nil {
+				log.Printf("[continue-coding] failed to clear coding_job_id for %s: %v", body.RequirementID, uerr)
 			}
 		}()
 		log.Printf("[continue-coding] job %s started for %s (resume %s)", job.ID, body.RequirementID, req.CodingSessionID)

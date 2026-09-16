@@ -465,6 +465,17 @@ var alterColumns = []string{
 	`ALTER TABLE requirements ADD COLUMN coding_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN analysis_job_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN apply_job_id TEXT NOT NULL DEFAULT ''`,
+	// coding_job_id: persisted JobStore job id for the running start-coding /
+	// adjust-coding / continue-coding job, so the detail page can reconnect to
+	// its SSE stream after a refresh. Mirrors design_job_id / apply_job_id.
+	// Cleared on terminal so a stale id never lingers after the job is gone
+	// (JobStore is in-memory; without this a restart would leave the column
+	// pointing at a dead id and the page would 404 on /api/wizard/jobs/{id}).
+	// Fixes req_57a1397b01268480's "schedule ran but UI stayed blind" symptom:
+	// the scheduler path used to keep the job_id only in scheduled_tasks.job_id
+	// and never surface it to the frontend, so a refreshed detail page had no
+	// way to attach to the live coding SSE stream.
+	`ALTER TABLE requirements ADD COLUMN coding_job_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN skip_analysis INTEGER NOT NULL DEFAULT 1`,
 	// skip_design: "直接开发" — when true, the requirement skips the analyst AND
 	// architect stages entirely and goes straight to coding (draft → developing).
