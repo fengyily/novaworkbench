@@ -1099,6 +1099,86 @@ func (h *WizardHandler) extractSubtasksWithLLM(reqID, finalResult string) *orche
 // (batch_id='') and orchestrated children both produce identical runtime
 // behavior; the only difference is how they were entered into the table.
 func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch, st *model.SubTask) {
+	// Variable declarations must precede the defer blocks below — the
+	// panic guard and early-exit guard are registered as deferred
+	// closures that capture these by reference. Hoisting them to the top
+	// lets both guards read the post-assignment values without an "undefined
+	// variable" compile error (closures register a reference, not a value,
+	// but the identifier must be in scope at the defer statement itself).
+	var earlyExitReason string
+	var hbDone chan struct{}
+	var job *store.Job
+	var modelName string
+
+	// Panic guard registered FIRST so it covers the entire function body —
+	// including the `if h.subTaskSvc == nil` nil-check and the early-exit
+	// defer block below. The previous layout registered this defer AFTER
+	// variable declarations and the subTaskSvc nil-check, which meant a
+	// panic in that prologue left the row stuck at status='running' forever
+	// (the row had already been flipped to running by ClaimNextPending
+	// before this goroutine entered).
+	//
+	// On panic we now ALSO call subTaskSvc.Finish(st.ID, status='error',
+	// ...) so the row leaves 'running' and the next tick can dispatch
+	// sibling rows normally. Previously the recover only finished the
+	// in-memory *store.Job — leaving sub_tasks.status='running' with a
+	// fresh heartbeat that RecoverInterrupted would never trip.
+	//
+	// LIFO ordering: this defer is registered FIRST so it runs LAST. The
+	// early-exit guard below runs first; if it already wrote an error
+	// artifact + closed hbDone, the panic guard must not double-write.
+	// We skip the Finish call when earlyExitReason != "" (early-exit path
+	// already took care of the row), and we close hbDone only when the
+	// early-exit guard didn't already close it.
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[orchestrate] panic recovered for child %s (batch %s seq %d): %v\n%s",
+				st.ID, batch.ID, st.BatchSeq, rec, debug.Stack())
+			if job != nil {
+				job.Append(store.LogLine{Type: "error", Content: "❌ 内部异常，任务已中止: " + fmt.Sprint(rec)})
+			}
+			// Force the sub_tasks row to a terminal status. The job_id may
+			// be empty here (panic before UpdateJobID), but we still call
+			// Finish — Finish only writes the columns we pass, and 'status'
+			// is the one that matters for the next tick. This is the bug
+			// fix path for the "stuck running with empty job_id" symptom:
+			// before this, a panic anywhere before UpdateJobID left the
+			// row orphaned indefinitely.
+			//
+			// Skip if the early-exit guard already wrote the row — the
+			// panic surfaced AFTER the early-exit path had already taken
+			// ownership of the error artifact. The early-exit guard
+			// closes hbDone + writes Finish + closes job in that sequence;
+			// re-writing here would clobber its carefully-built artifact
+			// with a generic panic message.
+			if h.subTaskSvc != nil && earlyExitReason == "" {
+				if ferr := h.subTaskSvc.Finish(st.ID, model.SubTaskStatusError,
+					"❌ 子任务执行阶段异常退出: "+fmt.Sprint(rec),
+					modelName, model.SubTaskTokens{}, 0, time.Time{}); ferr != nil {
+					log.Printf("[orchestrate] panic-recover Finish %s failed: %v", st.ID, ferr)
+				}
+			}
+			// Close hbDone if the early-exit guard didn't already. The
+			// select-default pattern avoids a double-close panic when the
+			// early-exit guard (registered later, runs first per LIFO)
+			// already closed it.
+			if hbDone != nil {
+				select {
+				case <-hbDone:
+				default:
+					close(hbDone)
+				}
+			}
+		}
+		// Never leave the job in JobRunning. Idempotent Finish makes the two
+		// normal exits (early-exit guard, happy path) no-ops here.
+		if job != nil {
+			if _, status, _ := job.Snapshot(); status == store.JobRunning {
+				job.Finish(1, store.JobError)
+			}
+		}
+	}()
+
 	if h.subTaskSvc == nil {
 		return
 	}
@@ -1110,38 +1190,6 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	// return would leave the row stuck at status='running' forever — the
 	// OrchestrationQueue's next tick would see it as in-flight and skip it,
 	// while the sibling rows behind it would never be claimed.
-	var earlyExitReason string
-	var hbDone chan struct{}
-	var job *store.Job
-	var modelName string
-	// Terminal-state fallback (same rationale as the coding goroutine in
-	// wizard_coding.go): a panic here would otherwise leave this child's job
-	// running forever — its card spins on "Claude 正在工作..." with no recovery
-	// path, and only a backend restart clears it.
-	//
-	// Registered BEFORE the early-exit guard below, deliberately: defer is LIFO,
-	// so the early-exit guard runs first and keeps ownership of its early-exit
-	// artifact + "❌ 子任务早退" log lines (its Appends must land before the job
-	// goes terminal — Append drops post-terminal lines). This fallback then only
-	// ever acts on the panic path, where earlyExitReason is still "" and the
-	// guard above returns early. job is assigned further down the function,
-	// hence the nil check throughout.
-	defer func() {
-		if rec := recover(); rec != nil {
-			log.Printf("[orchestrate] panic recovered for child %s (batch %s seq %d): %v\n%s",
-				st.ID, batch.ID, st.BatchSeq, rec, debug.Stack())
-			if job != nil {
-				job.Append(store.LogLine{Type: "error", Content: "❌ 内部异常，任务已中止: " + fmt.Sprint(rec)})
-			}
-		}
-		// Never leave the job in JobRunning. Idempotent Finish makes the two
-		// normal exits (early-exit guard, happy path) no-ops here.
-		if job != nil {
-			if _, status, _ := job.Snapshot(); status == store.JobRunning {
-				job.Finish(1, store.JobError)
-			}
-		}
-	}()
 	defer func() {
 		if earlyExitReason == "" {
 			return
@@ -1209,6 +1257,19 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	}
 	hbDone = make(chan struct{})
 	go func() {
+		// Recover the heartbeat loop in isolation — a panic here would
+		// otherwise kill the goroutine silently and leave
+		// batch_id_seq_run stale, which is exactly the symptom that
+		// triggers the OrchestrationQueue self-heal. Without this, a
+		// single bad MarkHeartbeat (nil dep, transient DB error
+		// propagating as panic, etc.) would silently strand every child
+		// in this batch.
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("[orchestrate] heartbeat panic for child %s (batch %s seq %d): %v",
+					st.ID, batch.ID, st.BatchSeq, rec)
+			}
+		}()
 		ticker := time.NewTicker(hbInterval)
 		defer ticker.Stop()
 		for {
