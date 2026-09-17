@@ -93,6 +93,11 @@ export const schedules = {
     errAlreadyScheduled: 'A pending scheduled task already exists — cancel or delete it on the Scheduled tasks page first.',
     errRunAtTooSoon: 'The planned time is too soon — pick a time at least 30 seconds from now.',
     errIdeaNotDevelopable: 'An idea cannot be scheduled for development directly — convert it to a requirement first.',
+    // Mirror zh-CN. Used by DesignCodingImmediateModal when backend surfaces a
+    // NO_SESSION failure from prepareArchitectDesign.
+    errNoSession: 'This requirement has not finished the analysis stage yet, design cannot be triggered directly.',
+    // Catch-all fallback for unrecognized error codes.
+    errGeneric: 'Operation failed, please try again later.',
     errSubmit: 'Submit failed',
   },
 } as const;

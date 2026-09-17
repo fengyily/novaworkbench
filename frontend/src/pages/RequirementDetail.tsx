@@ -14,6 +14,7 @@ import { ExecEnvBadge } from '../components/ExecEnvBadge';
 import { ExecEnvSelect } from '../components/ExecEnvSelect';
 import { SummarizeToRequirementModal } from '../components/SummarizeToRequirementModal';
 import { ScheduleModal } from '../components/ScheduleModal';
+import { DesignCodingImmediateModal } from '../components/DesignCodingImmediateModal';
 import { schedulesApi, type ScheduledTask } from '../api/client';
 import {
   StageIcon,
@@ -765,6 +766,13 @@ export default function RequirementDetail() {
     design_and_coding: null,
   });
   const [scheduleModal, setScheduleModal] = useState<{ taskType: 'design' | 'coding' | 'design_and_coding' } | null>(null);
+  // Immediate "design + coding" launch — opens DesignCodingImmediateModal and
+  // on submit fires the backend's /api/wizard/requirements/{id}/design-and-coding
+  // endpoint (wizard_immediate.go) instead of writing a scheduled_tasks row.
+  // Separate state from scheduleModal so the two flows don't fight for the
+  // same modal component (ScheduleModal needs taskType; the immediate modal
+  // has no run_at / taskType axis and self-handles submit).
+  const [immediateModalOpen, setImmediateModalOpen] = useState(false);
   const loadPendingSchedules = useCallback(async () => {
     if (!req) return;
     try {
@@ -3603,6 +3611,23 @@ export default function RequirementDetail() {
                       <IconClock size={13} className="btn-icon" />{t('requirements.detail2.scheduleDesignCodingBtn')}
                     </button>
                   )}
+                  {/* Immediate "design + coding" — runs architect-design and
+                      chains start-coding in one backend round-trip via
+                      /api/wizard/requirements/{id}/design-and-coding. No
+                      scheduled_tasks row is written. Disabled while a design
+                      job is already in flight (`designing`) so we don't open
+                      a modal the backend's preGate will 409; the modal's own
+                      pre-flight covers the live-job race for the second
+                      click anyway. */}
+                  {reqKind !== 'idea' && !pendingByType.design && !pendingByType.coding && !pendingByType.design_and_coding && !designing && !busy && (
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => setImmediateModalOpen(true)}
+                      title={t('requirements.detail2.immediateDesignCodingTitle')}
+                    >
+                      <IconRocket size={13} className="btn-icon" />{t('requirements.detail2.immediateDesignCodingBtn')}
+                    </button>
+                  )}
                   {/* Pending schedule hint — surfaces the planned time and
                       offers an inline cancel link so the user doesn't have
                       to navigate to the SchedulesPage. */}
@@ -4024,6 +4049,22 @@ export default function RequirementDetail() {
                     title={t('requirements.detail2.scheduleCodingTitle')}
                   >
                     <IconClock size={13} className="btn-icon" />{t('requirements.detail2.scheduleCodingBtn')}
+                  </button>
+                )}
+                {/* Immediate "design + coding" trigger in the developer
+                    section. Visible when no coding is in flight and no
+                    scheduled merged task exists; clicking opens
+                    DesignCodingImmediateModal which chains design → coding
+                    server-side. design_and_coding pending row is also
+                    excluded — if a merged schedule is already queued there's
+                    no value in launching a second chain immediately. */}
+                {!pendingByType.coding && !coding && !pendingByType.design_and_coding && !busy && (
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => setImmediateModalOpen(true)}
+                    title={t('requirements.detail2.immediateDesignCodingTitle')}
+                  >
+                    <IconRocket size={13} className="btn-icon" />{t('requirements.detail2.immediateDesignCodingBtn')}
                   </button>
                 )}
                 {pendingByType.coding && (
@@ -4474,6 +4515,33 @@ export default function RequirementDetail() {
           }}
         />
       )}
+
+      {/* Immediate "design + coding" modal — sibling to <ScheduleModal>.
+          The modal self-handles the wizardApi.startDesignAndCoding call and
+          returns the design phase's JobStore id via onLaunched; we then hook
+          it into the existing streamDesignJob so the page consumes the SSE
+          stream identically to a manually launched design. The coding stage
+          lands on requirements.coding_job_id via the backend's chained
+          callback, which the activeSchedJobId poll (~line 807) picks up
+          automatically — no extra wiring. The modal returns null when
+          `open=false` so we can mount it unconditionally. */}
+      <DesignCodingImmediateModal
+        open={immediateModalOpen}
+        requirementId={req.id}
+        requirementTitle={req.title}
+        initialDesignModel={architectModel}
+        initialCodingModel={developerModel}
+        defaultBranchName={`feat/${req.id.replace(/^req_/, '')}`}
+        defaultBaseBranch={project?.default_branch ?? 'main'}
+        agentServers={agentServers}
+        onLaunched={(designJobId) => {
+          setImmediateModalOpen(false);
+          setDesignLines([]);
+          setDesigning(true);
+          streamDesignJob(designJobId);
+        }}
+        onClose={() => setImmediateModalOpen(false)}
+      />
     </div>
   );
 }
