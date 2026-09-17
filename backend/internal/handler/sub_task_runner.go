@@ -531,21 +531,32 @@ func (r *SubTaskRunner) Run(
 	// to 32 KB and follows a strict priority order — requirement title
 	// / description always survive, lower-priority sections truncate as
 	// the budget tightens. See wizard_subtask.go for the full policy.
+	//
+	// The sourceSID clear is OUTSIDE the `if ctx != ""` block on purpose:
+	// when the parent has no injectable context (empty description, no
+	// design docs, missing JSONL, no prior sub-task rows, no usage
+	// snapshot), buildParentContext returns "" and we still must drop the
+	// stale parent SID — otherwise runLocalSubTaskAttempt will forward it
+	// as StreamOpts.SessionID and the CLI's `else` branch in
+	// gateway.streamArgs emits `--session-id <stale-sid>` against a JSONL
+	// that does not exist on disk, surfacing as the misleading
+	// "❌ 源会话已失效（session 文件不存在）" error to the user.
 	if freshSession {
 		if ctx := buildParentContext(req, r.subTaskSvc, sourceSID); ctx != "" {
 			prompt = ctx + "\n" + prompt
 			job.Append(store.LogLine{Type: "message", Content: "🧩 已注入父任务上下文（前 200 字预览：" + truncateForLog(ctx, 200) + "）"})
-			// Clear the row's source_session_id so audit readers don't
-			// mistake this row for a forked child of a session that
-			// doesn't exist on the remote. NewPendingSubTask already
-			// persisted the parent SID; we overwrite it here in the
-			// goroutine (after the API has returned) so the response is
-			// never blocked on this write.
-			if perr := r.subTaskSvc.UpdateSession(st.ID, newSID, ""); perr != nil {
-				log.Printf("[sub-task] failed to clear source_session_id for fresh-session %s: %v", st.ID, perr)
-			}
-			sourceSID = ""
 		}
+		// Clear the row's source_session_id so audit readers don't
+		// mistake this row for a forked child of a session that
+		// doesn't exist on the remote. NewPendingSubTask already
+		// persisted the parent SID; we overwrite it here in the
+		// goroutine (after the API has returned) so the response is
+		// never blocked on this write. Always runs — see comment above
+		// on why the empty-ctx case must also clear.
+		if perr := r.subTaskSvc.UpdateSession(st.ID, newSID, ""); perr != nil {
+			log.Printf("[sub-task] failed to clear source_session_id for fresh-session %s: %v", st.ID, perr)
+		}
+		sourceSID = ""
 	}
 	// Bare path also clears source_session_id so the audit trail and the
 	// SubTaskCard display stay consistent with the "new session" framing.
@@ -665,7 +676,20 @@ func (r *SubTaskRunner) Run(
 		// on stale. fresh-session / bare StartSubTask paths naturally
 		// collapse to one attempt because sourceSID was cleared to "" in
 		// the prompt-building block above.
+		//
+		// Belt-and-suspenders: even though the prompt-building block above
+		// clears sourceSID for freshSession/bare, staleSourceCandidates
+		// would otherwise still walk up to parentSourceSID and
+		// req.CodingSessionID — both of which can be stale (the JSONL
+		// files may have been cleaned up between runs). On the
+		// fresh-session path we explicitly opt out of any parent-chain
+		// retry: the user picked "新会话" precisely because the parent
+		// session is suspect, so retrying against the same parent chain
+		// would just re-surface the same "❌ 源会话已失效" symptom.
 		candidates := staleSourceCandidates(sourceSID, parentSourceSID, req.CodingSessionID)
+		if freshSession || bare {
+			candidates = []string{""}
+		}
 		for idx, src := range candidates {
 			sidForThisAttempt := newSID
 			if idx > 0 {
