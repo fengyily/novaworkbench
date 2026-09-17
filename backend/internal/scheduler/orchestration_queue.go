@@ -20,6 +20,8 @@ package scheduler
 
 import (
 	"log"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -93,6 +95,14 @@ type OrchestrationQueue struct {
 
 	once     sync.Once
 	stopOnce sync.Once
+
+	// staleAfter is the heartbeat cutoff used by selfHealStaleRunning: a
+	// 'running' row whose batch_id_seq_run is older than this gets flipped
+	// back to 'pending' so the tick can re-claim it. Read once at
+	// construction from env NOVA_ORCH_STALE_AFTER (default 2 minutes);
+	// MUST stay strictly greater than the 5s MarkHeartbeat interval or a
+	// live goroutine would race its own heartbeat.
+	staleAfter time.Duration
 }
 
 // NewOrchestrationQueue wires up the queue.
@@ -120,6 +130,16 @@ func NewOrchestrationQueue(
 	if limiter == nil {
 		limiter = service.NewProjectLimiter(service.DefaultSubTaskProjectConcurrency)
 	}
+	staleAfter := 2 * time.Minute
+	if raw := strings.TrimSpace(os.Getenv("NOVA_ORCH_STALE_AFTER")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d >= 30*time.Second {
+			staleAfter = d
+		} else if err != nil {
+			log.Printf("[orch] invalid NOVA_ORCH_STALE_AFTER=%q: %v (using default %s)", raw, err, staleAfter)
+		} else {
+			log.Printf("[orch] NOVA_ORCH_STALE_AFTER=%s too short (<30s); using default %s to avoid racing the 5s heartbeat", raw, staleAfter)
+		}
+	}
 	return &OrchestrationQueue{
 		db:           database,
 		batchSvc:     batchSvc,
@@ -132,6 +152,7 @@ func NewOrchestrationQueue(
 		stopCh:       make(chan struct{}),
 		kickCh:       make(chan struct{}, 1),
 		runSem:       globalSem,
+		staleAfter:   staleAfter,
 	}
 }
 
@@ -320,6 +341,16 @@ func (q *OrchestrationQueue) tick() {
 		}
 		switch batch.Status {
 		case model.BatchDispatching:
+			// Self-heal BEFORE dispatch: flip any 'running' row whose
+			// heartbeat is older than q.staleAfter back to 'pending' so
+			// tickDispatching's ClaimNextPending can re-claim it this tick.
+			// Without this, a goroutine that died mid-execution (panic in
+			// runClaudeStream, missing early-exit guard, etc.) leaves the
+			// row stuck at 'running' forever — RecoverInterrupted only
+			// runs at startup, so the stuck state survives until a
+			// backend reboot. See selfHealStaleRunning docstring for the
+			// cutoff-vs-heartbeat safety reasoning.
+			q.selfHealStaleRunning(&batch)
 			q.tickDispatching(&batch, projectID, autoRetry, retryMax)
 		case model.BatchSummarizing:
 			q.tickSummarizing(&batch, projectID)
@@ -471,5 +502,39 @@ func (q *OrchestrationQueue) tickSummarizing(batch *model.OrchestrationBatch, pr
 		}
 		log.Printf("[orch] batch %s summary_status=error, re-armed pending (attempt %d/%d)",
 			batch.ID, batch.SummaryAttempts+1, model.SummaryMaxAttempts)
+	}
+}
+
+// selfHealStaleRunning flips 'running' rows in this batch whose heartbeat
+// (batch_id_seq_run) is older than q.staleAfter back to 'pending' so the
+// next tickDispatching call can re-claim them. This is the live-tick
+// counterpart to RecoverInterrupted's orchestrated pass — same SQL shape,
+// but (a) scoped to a single batch_id, (b) parameterized on a tighter
+// cutoff, (c) safe to invoke on every 10s tick.
+//
+// The cutoff (default 2 minutes, env NOVA_ORCH_STALE_AFTER) MUST stay
+// strictly greater than the 5-second MarkHeartbeat interval, otherwise a
+// live goroutine whose DB write is just slow would race its own heartbeat
+// reset and the next ClaimNextPending would re-claim the same
+// (batch_id, batch_seq) — double-dispatching a single sub-task to two
+// concurrent claude processes. The minimum 30s bound in the constructor
+// enforces this from the env side.
+//
+// Caller order matters: this MUST run BEFORE tickDispatching. tickDispatching
+// acquires a slot, then calls ClaimNextPending, then spawns the goroutine;
+// if we healed rows first, the slot acquisition in the SAME tick can then
+// claim one of those freshly-flipped rows. Without healing first, the
+// running rows keep blocking the batch's terminal count (CountTerminalByBatch
+// ignores 'running') and the dispatching batch can never flip to
+// summarizing — even after the user manually retries the requirement.
+func (q *OrchestrationQueue) selfHealStaleRunning(batch *model.OrchestrationBatch) {
+	n, err := q.subTaskSvc.RecoverStaleRunningInBatch(batch.ID, q.staleAfter)
+	if err != nil {
+		log.Printf("[orch] self-heal %s: %v", batch.ID, err)
+		return
+	}
+	if n > 0 {
+		log.Printf("[orch] batch %s: self-healed %d stale running rows back to pending (cutoff %s)",
+			batch.ID, n, q.staleAfter)
 	}
 }
