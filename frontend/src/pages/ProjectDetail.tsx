@@ -831,10 +831,10 @@ export default function ProjectDetail() {
         })()}
       </td>
       <td data-label={t('projects.detail.colCreatedAt')} style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
-        {req.created_at ? fmtDate(req.created_at) : '—'}
+        {req.created_at ? fmtDateTime(req.created_at) : '—'}
       </td>
       <td data-label={t('projects.detail.colUpdatedAt')} style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
-        {req.updated_at ? fmtDate(req.updated_at) : '—'}
+        {req.updated_at ? fmtDateTime(req.updated_at) : '—'}
       </td>
     </tr>
   ));
