@@ -73,7 +73,7 @@ func resolveSubTaskAgentServer(explicit *string, fallback string) string {
 //     Claude session file exists). Capped to last 10 user/assistant
 //     turns, each entry capped to 400 chars, to fit the budget.
 //  4. Recent sub-task artifact digests (top 5, first 200 chars each) so
-//    the new session knows what siblings already did.
+//     the new session knows what siblings already did.
 //  5. requirements.usage_snapshots — fallback for the recent-turns
 //     block when no jsonl is on disk (mirrors what the wizard chat
 //     renders when the user can't load the session).
@@ -417,9 +417,9 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Prompt       string `json:"prompt"`
-		Title        string `json:"title"`
-		Model        string `json:"model"`
+		Prompt string `json:"prompt"`
+		Title  string `json:"title"`
+		Model  string `json:"model"`
 		// ClaudeConfigID is the user-picked (or parent-inherited) claude_configs
 		// row id from the composer's ModelSelect. Empty lets the runner resolve
 		// it (model→config lookup / parent requirement config / role / active).
@@ -966,6 +966,88 @@ func (h *WizardHandler) StopSubTask(w http.ResponseWriter, r *http.Request) {
 		"status":      "stopping",
 		"sub_task_id": parent.ID,
 		"job_id":      parent.JobID,
+	})
+}
+
+// DeleteSubTask handles DELETE /api/requirements/{id}/sub-tasks/{sid}. It
+// deletes an error-status sub-task, its entire descendant subtree, and each
+// row's on-disk claude session JSONL (local os.Remove + remote SSH rm,
+// best-effort). Refuses (409 NOT_ERROR) when the target isn't 'error', and
+// (409 HAS_ACTIVE) when the target or any descendant is still pending/running,
+// so a partially-running tree is never half-deleted. token_usage rows and the
+// in-memory JobStore jobs are intentionally left untouched.
+func (h *WizardHandler) DeleteSubTask(w http.ResponseWriter, r *http.Request) {
+	if !h.requireSubTaskSvc(w) {
+		return
+	}
+	id := r.PathValue("id")   // requirement id
+	sid := r.PathValue("sid") // sub-task id
+	req, err := h.reqSvc.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "requirement not found")
+		return
+	}
+	target, err := h.subTaskSvc.Get(sid)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task not found")
+		return
+	}
+	if target.RequirementID != id {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task does not belong to this requirement")
+		return
+	}
+	// Gate 1: only failed rows are deletable.
+	if target.Status != model.SubTaskStatusError {
+		writeError(w, http.StatusConflict, "NOT_ERROR", "只能删除失败状态的子任务")
+		return
+	}
+	// Collect the subtree (root + descendants) so a redo/continue/adjust chain
+	// is removed together and never left orphaned in the tree.
+	subtree, err := h.subTaskSvc.Subtree(sid)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	// Gate 2: refuse if any row in the subtree is still active. Checked before
+	// touching any file or row so the operation is all-or-nothing.
+	for _, st := range subtree {
+		if st.Status == model.SubTaskStatusPending || st.Status == model.SubTaskStatusRunning {
+			writeError(w, http.StatusConflict, "HAS_ACTIVE", "存在正在执行的子任务，请先停止后再删除")
+			return
+		}
+	}
+	// Best-effort session teardown, then bulk-delete the rows.
+	ids := make([]string, 0, len(subtree))
+	for _, st := range subtree {
+		ids = append(ids, st.ID)
+		if st.SessionID == "" {
+			continue // no physical session was ever minted for this row
+		}
+		// Local copy is always attempted: it covers local runs AND the
+		// down-synced copy a remote run leaves under the LOCAL slug.
+		localPath := filepath.Join(claudeSessionHome(), "projects",
+			util.EncodeClaudeSlug(req.WorktreePath), st.SessionID+".jsonl")
+		if rmErr := os.Remove(localPath); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.Printf("[sub-task delete] local session rm failed (%s): %v", localPath, rmErr)
+		}
+		// Remote copy: resolve this row's EFFECTIVE environment (its own
+		// agent_server_id, falling back to the requirement's for legacy rows) —
+		// identical rule to StopSubTask.
+		effServer := st.AgentServerID
+		if !st.AgentServerIDSet {
+			effServer = req.AgentServerID
+		}
+		if effServer != "" {
+			h.deleteRemoteSubTaskSession(req, effServer, st.SessionID)
+		}
+	}
+	if derr := h.subTaskSvc.DeleteByIDs(ids); derr != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", derr.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "deleted",
+		"deleted_ids": ids,
 	})
 }
 

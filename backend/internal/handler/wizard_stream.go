@@ -429,11 +429,30 @@ func usagePayload(step, modelName string, inTok, outTok, cc, cr int) map[string]
 
 // isStaleSessionError reports whether a non-success result event (optionally
 // combined with stderr) indicates the --resume target conversation doesn't exist
-// on disk. The claude CLI surfaces this as an "errors" array entry of the form
-// "No conversation found with session ID: <uuid>" (subtype error_during_execution).
+// on disk.
+//
+// Covered error formats (the claude CLI has rewritten this message across
+// versions; we match the historical and current shapes so the stale-session
+// fallback chain in SubTaskRunner.Run keeps firing):
+//
+//   - "No conversation found with session ID: <uuid>"
+//     (legacy format; emitted via the result event's "errors" array,
+//     subtype error_during_execution)
+//   - "Error: Session ID <uuid>..."
+//     (current format observed on --resume failures — surfaced as the CLI's
+//     top-level error / stderr text when the target JSONL is gone)
+//   - "Session not found" / "session not found"
+//     (defensive catch-all in case a future CLI release uses a slightly
+//     different wording; we only need to match the substring)
+//
 // evt may be nil, in which case only stderr is checked.
 func isStaleSessionError(evt map[string]interface{}, stderr string) bool {
-	contains := func(s string) bool { return strings.Contains(s, "No conversation found") }
+	contains := func(s string) bool {
+		return strings.Contains(s, "No conversation found") ||
+			strings.Contains(s, "Error: Session ID") ||
+			strings.Contains(s, "Session not found") ||
+			strings.Contains(s, "session not found")
+	}
 	if stderr != "" && contains(stderr) {
 		return true
 	}

@@ -360,6 +360,10 @@ interface CardProps {
   // new entry to refresh), and we don't want to loadList a parent list
   // that already contains this row.
   onRestarted?: (subTaskId: string, newJobId: string) => void;
+  // Fires after a successful delete of a FAILED sub-task. Carries the full set
+  // of removed ids (the row plus its descendant subtree) so the panel can
+  // prune them from the list optimistically without a reload.
+  onDeleted?: (deletedIds: string[]) => void;
   // Stop availability is decided PER CARD from the sub-task's OWN effective
   // environment (st.effective_agent_server_id): a remote child cannot be
   // stopped in this iteration (the backend rejects /stop with 501
@@ -440,6 +444,7 @@ function SubTaskCard({
   onChanged,
   onCreated: _onCreated,
   onRestarted,
+  onDeleted,
   canStop,
   adjustModel = '',
   onAdjustModelChange,
@@ -510,6 +515,10 @@ function SubTaskCard({
   // --resume call is in flight. Mirror of stopping/redoing; kept
   // separate so the drawer-style `adjusting` state isn't affected.
   const [continueBusy, setContinueBusy] = useState(false);
+  // Delete busy state — disabled on the button while the DELETE call is in
+  // flight. On success the panel prunes the row (and its subtree) from the
+  // list, so this card unmounts; on error we clear the flag and alert.
+  const [deleting, setDeleting] = useState(false);
   // Live usage snapshot — driven by SSE `usage` frames (step="sub_task")
   // OR computed client-side from the persisted sub_tasks.*_tokens columns
   // when the card has finished and SSE has gone quiet. We display
@@ -686,6 +695,25 @@ function SubTaskCard({
       window.alert(e?.message || t('components.subTaskCard.errStop'));
     }
   }, [stopping, st.status, canStop, st.requirement_id, st.id, t]);
+
+  // Delete (🗑 删除): remove a FAILED sub-task and its descendant subtree via
+  // the backend's DELETE endpoint, which also tears down each row's on-disk
+  // claude session JSONL. Only offered on 'error' rows. On success the parent
+  // prunes every returned id from the list (this card and its children); on
+  // error we surface the localized message (e.g. 409 when a descendant is
+  // still running).
+  const submitDelete = useCallback(async () => {
+    if (deleting || st.status !== 'error') return;
+    if (!window.confirm(t('components.subTaskCard.deleteConfirm'))) return;
+    setDeleting(true);
+    try {
+      const resp = await subTasksApi.delete(st.requirement_id, st.id);
+      onDeleted?.(resp.deleted_ids);
+    } catch (e: any) {
+      setDeleting(false);
+      window.alert(e?.message || t('components.subTaskCard.errDelete'));
+    }
+  }, [deleting, st.status, st.requirement_id, st.id, onDeleted, t]);
 
   // The header-right summary block surfaces two quick-glance signals the
   // user always wants at a glance without expanding the card:
@@ -933,7 +961,10 @@ function SubTaskCard({
               a brand-new claude session from the requirement's main
               coding_session_id; Continue --resume's the row's own
               existing session id (cheaper, preserves partial work). */}
-          {!streaming && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && st.session_id && (
+          {/* A failed row is always shown even without a session_id so its
+              delete affordance stays reachable; the other actions keep their
+              own inner guards (Adjust/Continue/Redo require a session). */}
+          {!streaming && (((st.status === 'done' || st.status === 'error' || st.status === 'stopped') && st.session_id) || st.status === 'error') && (
             <div className="sub-card-adjust">
               {/* Toggle row: Adjust / Continue / Redo collapse to a single
                   row when no drawer is open. Continue sits before Redo so
@@ -966,6 +997,17 @@ function SubTaskCard({
                       className="sub-adjust-toggle"
                       onClick={() => setRedoing(true)}
                     >{t('components.subTaskCard.redoToggle')}</button>
+                  )}
+                  {/* Delete: only on a FAILED row. Removes this sub-task, its
+                      descendant subtree, and each row's claude session file.
+                      The backend enforces the same 'error' guard. */}
+                  {st.status === 'error' && (
+                    <button
+                      type="button"
+                      className="sub-adjust-toggle"
+                      onClick={submitDelete}
+                      disabled={deleting}
+                    >{deleting ? t('components.subTaskCard.deleting') : t('components.subTaskCard.deleteToggle')}</button>
                   )}
                 </div>
               )}
@@ -1368,6 +1410,15 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       : p) : prev);
   }, []);
 
+  // onDeleted: fired after a successful delete of a FAILED sub-task. The
+  // backend returns every removed id (the row plus its descendant subtree),
+  // so we prune them all from the list in one pass; buildTree/flat recompute
+  // automatically and the whole subtree drops cleanly.
+  const handleSubTaskDeleted = useCallback((deletedIds: string[]) => {
+    const gone = new Set(deletedIds);
+    setItems((prev) => prev ? prev.filter((p) => !gone.has(p.id)) : prev);
+  }, []);
+
   // Stop availability is computed per card at the render site below, from each
   // sub-task's own effective environment — see CardProps.canStop. It is
   // deliberately NOT a panel-level constant: the main task's environment says
@@ -1393,14 +1444,27 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // backend's 409 NO_SESSION check. The with_context / bare options stay
   // enabled — they explicitly opt out of the parent-session requirement.
   const [sessionMode, setSessionMode] = useState<SessionMode>('resume');
+  // Track whether the user has touched the session-mode radio. The
+  // stale-artifact auto-promote below MUST NOT stomp a deliberate user
+  // pick: a fresh poll re-creates `latestArtifactStale` on every render
+  // and re-fires the effect, so without this guard the radio snaps back
+  // to 「带上下文」 and the user can never land on 「新会话」.
+  const sessionModeTouchedRef = useRef(false);
   useEffect(() => {
-    // When the user just saw a stale-session failure, auto-promote to
+    // When the user just saw a stale-session failure AND hasn't made a
+    // deliberate choice yet, auto-promote the default 'resume' to
     // 「带上下文」 so a follow-up click "just works" (the new session won't
-    // try to resume the missing JSONL).
-    if (latestArtifactStale && latestArtifactStale.isStale) {
+    // try to resume the missing JSONL). Once the user picks anything
+    // manually — including 「新会话」 — we leave their choice alone.
+    if (
+      sessionModeTouchedRef.current === false &&
+      sessionMode === 'resume' &&
+      latestArtifactStale &&
+      latestArtifactStale.isStale
+    ) {
       setSessionMode('with_context');
     }
-  }, [latestArtifactStale]);
+  }, [latestArtifactStale, sessionMode]);
 
   const onCreate = useCallback(async () => {
     const p = prompt.trim();
@@ -1810,7 +1874,14 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
                     name="sessionMode"
                     value={opt.key}
                     checked={active}
-                    onChange={() => setSessionMode(opt.key)}
+                    onChange={() => {
+                      // Mark the radio as user-touched so the
+                      // latestArtifactStale auto-promote effect below
+                      // stops stomping on a deliberate pick on the next
+                      // 5s poll refresh.
+                      sessionModeTouchedRef.current = true;
+                      setSessionMode(opt.key);
+                    }}
                     disabled={isDisabled}
                   />
                   <span className="sub-session-mode-option-text">{opt.label}</span>
@@ -1876,6 +1947,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             onChanged={onItemChanged}
             onCreated={loadList}
             onRestarted={handleSubTaskRestarted}
+            onDeleted={handleSubTaskDeleted}
             // Per-card: this child's OWN effective environment decides whether
             // Stop is offered. `?? agent_server_id` is the same old-backend
             // fallback the environment badge above uses.

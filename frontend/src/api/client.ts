@@ -477,6 +477,15 @@ export const subTasksApi = {
       `/api/requirements/${requirementId}/sub-tasks/${subTaskId}/stop`,
       {},
     ),
+  // Delete a FAILED sub-task and its descendant subtree. The backend also
+  // removes each row's on-disk claude session JSONL (best-effort, local +
+  // remote agent-server). Returns the full set of removed ids so the caller
+  // can prune the list optimistically. 409 NOT_ERROR when the row isn't
+  // failed; 409 HAS_ACTIVE when a descendant is still running/pending.
+  delete: (requirementId: string, subTaskId: string) =>
+    api.delete<{ status: string; deleted_ids: string[] }>(
+      `/api/requirements/${requirementId}/sub-tasks/${subTaskId}`,
+    ),
   // Auto-orchestrate: ask the developer main agent to decompose + dispatch.
   // Returns the main-agent's reply (sentinel-stripped) + ids of the
   // children it just spawned. Each child's progress streams via the

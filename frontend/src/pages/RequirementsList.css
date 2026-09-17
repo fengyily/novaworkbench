@@ -127,7 +127,9 @@
 
 .req-row-title {
   font-weight: 500;
-  max-width: 360px;
+  /* Trimmed from 360→320 to free room for the second-precision
+     Updated column. The cell's own ellipsis kicks in past this. */
+  max-width: 320px;
 }
 
 .req-row-title-text {
@@ -224,37 +226,44 @@
 /* Pin per-column widths so the table never crowds the kind badge onto
    two lines. The badge itself (Issue / 需求 / 想法) sits inside the type
    column; its content is already short, but the column auto-distributes
-   width across 6 headers and the type column gets squeezed. Holding
+   width across 8 headers and the type column gets squeezed. Holding
    width + white-space keeps the cell single-line.
-   Widths chosen so a 1280px viewport still leaves the title column with
-   ~400px before its max-width kicks in.
-   Column order: 1 类型 / 2 标题 / 3 状态 / 4 模型名称 / 5 项目 / 6 优先级 / 7 Agent 服务器. */
+   Column order: 1 类型 / 2 标题 / 3 状态 / 4 模型名称 / 5 项目 / 6 优先级 / 7 Agent 服务器 / 8 更新时间.
+   Widths were re-tuned when the Updated column grew from "MM/DD HH:mm"
+   (16 chars) to second-precision "MM/DD HH:mm:ss" (19 chars): the
+   Status column min-width was trimmed from 240→200 (StatusChips wrap to
+   two lines on tight rows), the Agent-server column from 220→180
+   (the chip itself ellipsizes), and the Updated column is pinned at
+   152px with nowrap so the datetime never breaks. Total still leaves
+   the title its readable ~260px on a 1280px viewport. */
 .req-table thead th:nth-child(1),
 .req-table tbody td:nth-child(1) {
-  width: 100px;
+  width: 88px;
   white-space: nowrap;
 }
 
 /* Status column (#3) hosts up to 3 ordered chips (源/方案 → 进度 → 待确认)
    rendered by StatusChips. Each chip is ~64px; with the 4px group gap and
-   side padding a worst-case row needs ~240px before the group is allowed
+   side padding a 3-chip row needs ~210px before the group is allowed
    to wrap onto a second line. We hold min-width instead of width so the
    column can still breathe on a 1280px viewport (auto-distributes the
    leftover to the title column). No white-space: nowrap on the cell —
    the StatusChips container already handles single-chip atomicity, and
    forcing the cell to nowrap would clip chips instead of wrapping the
-   group gracefully. */
+   group gracefully. The min-width was trimmed from 240→200 to make
+   room for the second-precision datetime column; chips on tight rows
+   wrap to 2 lines (StatusChips already lays out as a flex row). */
 .req-table thead th:nth-child(3),
 .req-table tbody td:nth-child(3) {
-  min-width: 240px;
+  min-width: 200px;
 }
 
 .req-table thead th:nth-child(4),
 .req-table tbody td:nth-child(4) {
-  /* Model names like "claude-sonnet-4-5" can run ~16 chars; 150px is enough
+  /* Model names like "claude-sonnet-4-5" can run ~16 chars; 130px is enough
      to render them inline at 12px, and long ones ellipsize via the chip's
-     own max-width. */
-  width: 150px;
+     own max-width. Trimmed from 150 to make room for the Updated column. */
+  width: 130px;
   white-space: nowrap;
 }
 
@@ -266,24 +275,57 @@
 
 .req-table thead th:nth-child(6),
 .req-table tbody td:nth-child(6) {
-  width: 110px;
+  width: 96px;
   white-space: nowrap;
 }
 
 .req-table thead th:nth-child(7),
 .req-table tbody td:nth-child(7) {
-  /* Agent 服务器 now hosts the full DevSourceBadge ("🛰️ Agent server_name"
-     or "💻 本地开发"); 220px gives the longest server names room before
-     the chip's own max-width ellipsizes. */
-  width: 220px;
+  /* Agent 服务器 hosts the full DevSourceBadge ("🛰️ Agent server_name"
+     or "💻 本地开发"); trimmed 220→180 to make room for the Updated
+     column. The chip itself still ellipsizes via its own max-width. */
+  width: 180px;
   white-space: nowrap;
 }
 
+/* Updated column (#8). Pinning the width is the contract that lets the
+   second-precision datetime stay on a single line — without an explicit
+   width the cell auto-shrinks and "2026/09/17 14:30:45" wraps at the
+   space. Mono + tabular-nums is the matching visual: the digits sit in
+   fixed-width slots so a column of timestamps reads as one precision
+   instrument, not a string of slightly-jittery numbers. Slightly muted
+   color + 12px so it reads as metadata (not as content). Vertical-align
+   middle so the timestamp stays anchored to the row center when adjacent
+   rows are taller (e.g. a title with two mark chips). The tooltip
+   provides the relative-time context users actually scan for ("3 hours
+   ago"); the cell itself stays on the precise absolute time, which is
+   what makes second granularity useful. */
+.req-table thead th:nth-child(8),
+.req-table tbody td:nth-child(8) {
+  width: 152px;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.req-table tbody td.req-row-updated {
+  font-family: var(--font-mono, ui-monospace, 'SF Mono', Consolas, Menlo, monospace);
+  font-size: 12px;
+  color: var(--color-text-muted, #94A3B8);
+  /* Tabular numerals keep the columns of digits lined up — the whole
+     point of seconds-precision is that you can sort by visual width,
+     so digits of unequal width would defeat that. */
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+  letter-spacing: 0;
+}
+
 /* The title column is the only flexible one — let it absorb the
-   remaining width up to its 360px ellipsis cap. */
+   remaining width up to its 320px ellipsis cap (trimmed from 360 to
+   make room for the Updated column). */
 .req-table thead th:nth-child(2),
 .req-table tbody td:nth-child(2) {
   min-width: 240px;
+  max-width: 320px;
 }
 
 /* Priority tag (desktop table column). Same color logic as the

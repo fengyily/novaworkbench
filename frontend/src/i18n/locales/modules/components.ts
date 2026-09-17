@@ -207,6 +207,12 @@ export const components = {
     stopped: '已停止',
     stopRemoteDisabled: '远程 Agent 服务器执行暂不支持停止',
     errStop: '停止失败',
+    // Delete: 仅对失败（error）状态的子任务开放。删除该子任务及其所有子级，
+    // 并一并删除各行关联的 claude 会话文件（本地 + 远端 Agent 服务器，尽力而为）。
+    deleteToggle: '🗑 删除',
+    deleting: '删除中…',
+    deleteConfirm: '确认删除该失败子任务及其所有子级？关联的 Claude 会话文件也会被删除，操作不可恢复。',
+    errDelete: '删除失败',
     errContinueNoSession: '该子任务无法续接：原会话 id 为空',
     sourceAuto: '自动',
     sourceAutoTitle: '由主 Agent 自动派发',

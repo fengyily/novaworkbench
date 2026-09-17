@@ -586,6 +586,11 @@ func main() {
 	// "stopped". 501 STOP_REMOTE_NOT_SUPPORTED when the requirement was
 	// developed on an Agent server (no kill RPC yet on the worker).
 	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/{sid}/stop", wizardH.StopSubTask)
+	// Delete a FAILED sub-task and its descendant subtree, tearing down each
+	// row's on-disk claude session JSONL (local os.Remove + remote SSH rm,
+	// best-effort). 409 NOT_ERROR when the target isn't failed; 409 HAS_ACTIVE
+	// when the subtree still has a running/pending row.
+	mux.HandleFunc("DELETE /api/requirements/{id}/sub-tasks/{sid}", wizardH.DeleteSubTask)
 	// Manual re-split: resumes the coding session with the decomposition
 	// trigger and runs the same parse+dispatch pipeline as StartCoding's
 	// auto-orchestrate. Escape hatch for when auto-orchestration produced
