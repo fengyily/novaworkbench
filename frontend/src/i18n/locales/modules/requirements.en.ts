@@ -581,6 +581,12 @@ export const requirements = {
     immediateErrTerminal: 'Requirement is terminal — cannot launch',
     immediateErrBusy: 'A design or coding job is already in flight',
     immediateErrStatus: 'Requirement status does not allow an immediate launch (wait for analysis)',
+    // Preflight-style mission summary strip + section labels.
+    immediateEyebrow: 'Pre-flight · Immediate',
+    immediateSubtitle: 'Requirement "{{title}}" will run design + coding back-to-back with the configuration below — no scheduled task is written.',
+    immediateDesignSection: 'Design · Architecture',
+    immediateCodingSection: 'Coding · Development',
+    immediateFlightAria: 'Two-stage mission summary',
   },
 } as const;
 

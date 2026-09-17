@@ -637,6 +637,12 @@ export const requirements = {
     immediateErrTerminal: '需求已完成或归档，无法立即触发',
     immediateErrBusy: '已有方案或开发任务在执行，请稍后再试',
     immediateErrStatus: '当前需求状态不支持立即触发（请等待分析阶段完成）',
+    // Preflight-style mission summary strip + section labels.
+    immediateEyebrow: 'Pre-flight · 立即',
+    immediateSubtitle: '需求「{{title}}」将立即按下方配置依次执行方案设计 + 开发两个阶段，无需写入调度任务。',
+    immediateDesignSection: 'Design · 方案设计',
+    immediateCodingSection: 'Coding · 开发',
+    immediateFlightAria: '两阶段任务摘要',
   },
 } as const;
 
