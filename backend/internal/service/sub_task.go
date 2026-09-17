@@ -952,6 +952,52 @@ func (s *SubTaskService) RecoverInterrupted() (int64, error) {
 	return manualAffected + orchestratedAffected, nil
 }
 
+// RecoverStaleRunningInBatch flips 'running' rows of a single batch whose
+// heartbeat (batch_id_seq_run) is older than staleAfter back to 'pending'
+// so the live OrchestrationQueue tick can re-claim them. It is the per-tick
+// companion to RecoverInterrupted's orchestrated pass: same SQL shape, but
+// (a) scoped to one batch_id and (b) parameterized on the cutoff so callers
+// can use a tighter threshold than the boot-time 5-minute default.
+//
+// The cutoff is bound as a Go time.Time (NOT computed in SQL via
+// NOW() - INTERVAL '...') to stay portable across SQLite/MySQL/Postgres —
+// SQLite has no INTERVAL keyword and would reject the literal form. The
+// heartbeat column is nullable, so the IS NOT NULL guard is required to
+// skip rows that were just claimed (ClaimNextPending stamps it, but any
+// future schema tweak that drops the stamp shouldn't widen the match).
+//
+// staleAfter MUST be strictly greater than the 5s heartbeat interval
+// (orchestrator's MarkHeartbeat tick), otherwise a live goroutine would
+// race its own heartbeat and the next ClaimNextPending would re-claim the
+// same (batch_id, batch_seq) row — spawning a second concurrent claude
+// CLI for the same sub-task. The queue's own config defaults to 2 minutes
+// for that reason; if you call this from elsewhere, pick a value ≥ 30s.
+//
+// Idempotent: rows that are already 'pending'/'done'/'error' are not
+// touched, so this is safe to invoke on every tick. Returns the number
+// of rows flipped so the caller can log a self-heal line.
+func (s *SubTaskService) RecoverStaleRunningInBatch(batchID string, staleAfter time.Duration) (int64, error) {
+	if batchID == "" {
+		return 0, errors.New("batch_id is required")
+	}
+	if staleAfter <= 0 {
+		return 0, errors.New("staleAfter must be positive")
+	}
+	cutoff := time.Now().Add(-staleAfter)
+	res, err := s.db.Exec(`UPDATE sub_tasks
+		SET status=?, batch_id_seq_run=NULL, job_id='', updated_at=?
+		WHERE batch_id=? AND status=?
+		  AND batch_id_seq_run IS NOT NULL
+		  AND batch_id_seq_run < ?`,
+		model.SubTaskStatusPending, time.Now(),
+		batchID, model.SubTaskStatusRunning, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("recover stale running in batch %s: %w", batchID, err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // scanSubTask is a shared row→struct mapper. Pulled out so List / Get can
 // share the column order without each method carrying its own Scan list.
 // The SELECT must end with `source, agent_server_id, <server name>,
