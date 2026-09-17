@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/db"
@@ -236,6 +237,85 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 	return &one[0], nil
 }
 
+// Subtree returns rootID's row plus every descendant (children linked via
+// parent_subtask_id, transitively). The returned slice has the root first,
+// then rows discovered breadth-first level by level. Returns sql.ErrNoRows
+// when rootID itself does not exist (delegated to Get).
+//
+// It walks the tree in Go rather than with a recursive CTE so it stays
+// portable across SQLite / MySQL / Postgres. Each level runs one query and
+// closes its cursor before the next Query — SQLite runs MaxOpenConns == 1, so
+// an overlapping cursor would deadlock (same discipline as List / Get).
+//
+// The SELECT column list mirrors List / Get and reuses scanSubTask, so
+// SessionID / Status / AgentServerID / AgentServerIDSet are all populated —
+// the delete path needs them to resolve local-vs-remote session teardown.
+func (s *SubTaskService) Subtree(rootID string) ([]model.SubTask, error) {
+	root, err := s.Get(rootID)
+	if err != nil {
+		return nil, err
+	}
+	out := []model.SubTask{*root}
+	frontier := []string{rootID}
+	for len(frontier) > 0 {
+		placeholders := make([]string, len(frontier))
+		args := make([]any, len(frontier))
+		for i, id := range frontier {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		q := `SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
+			session_id, source_session_id, job_id, artifact, model, claude_config_id,
+			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+			cost_cents, duration_seconds,
+			created_at, updated_at, completed_at,
+			batch_id, batch_seq, batch_id_seq_run, source,
+			agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
+			session_mode, retry_count
+			FROM sub_tasks WHERE parent_subtask_id IN (` + strings.Join(placeholders, ",") + `)`
+		rows, err := s.db.Query(q, args...)
+		if err != nil {
+			return nil, err
+		}
+		var next []string
+		for rows.Next() {
+			st, err := scanSubTask(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out = append(out, *st)
+			next = append(next, st.ID)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+		frontier = next
+	}
+	return out, nil
+}
+
+// DeleteByIDs removes the given sub_task rows in a single statement. The caller
+// is responsible for validating the set beforehand (target is 'error', no
+// active rows in the subtree). token_usage rows and in-memory JobStore jobs are
+// intentionally left untouched — usage stays for accounting and jobs age out of
+// the ring buffer on their own. A nil/empty id list is a no-op.
+func (s *SubTaskService) DeleteByIDs(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	_, err := s.db.Exec(`DELETE FROM sub_tasks WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	return err
+}
+
 // ListByBatch returns every sub-task attached to batchID, ordered by
 // batch_seq ASC (then created_at ASC as a tie-breaker for the legacy
 // batch_seq=0 manual rows). Used by OrchestrationQueue to enumerate a batch's
@@ -287,7 +367,7 @@ func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
 
 // requirementAgentServerID reads the parent requirement's execution
 // environment in one primary-key lookup. Returns "" both when the requirement
-// is local (agent_server_id = '') and when the row is missing — the caller
+// is local (agent_server_id = ”) and when the row is missing — the caller
 // cannot tell the two apart and does not need to, since both resolve to 本地.
 // Errors are deliberately swallowed (best-effort, mirroring the name backfill)
 // so a sub-task list never fails to render just because the parent row was
@@ -317,7 +397,7 @@ func (s *SubTaskService) requirementAgentServerID(reqID string) string {
 //     back to the parent requirement's agent_server_id.
 //
 // This is the fix for the client-side divergence: AgentServerIDSet is
-// json:"-", so the frontend cannot re-derive the NULL-vs-'' distinction and
+// json:"-", so the frontend cannot re-derive the NULL-vs-” distinction and
 // used to read the raw column, showing 本地 for a legacy child that actually
 // ran remotely (and gating its Stop button on the MAIN task's environment).
 //
@@ -393,7 +473,7 @@ func (s *SubTaskService) CountTerminalByBatch(batchID string) (done, errored int
 //
 // Guards, in the WHERE clause:
 //   - batch_id=?             — only auto-orchestrated children. Manual rows
-//     (batch_id='') are never re-armed automatically; the user drives those.
+//     (batch_id=”) are never re-armed automatically; the user drives those.
 //   - status='error'         — stopped rows are deliberately excluded: the user
 //     halted them on purpose, and silently restarting a
 //     stopped child would fight the user's own action.
@@ -535,7 +615,7 @@ func (s *SubTaskService) UpdateJobID(id, jobID string) error {
 
 // SetBatchID stamps an existing sub_task row with the given batch_id and
 // batch_seq. Used by the manual-summary path (GenerateSubTaskSummary) to
-// retroactively attach manual children (batch_id='', batch_seq=0) to a
+// retroactively attach manual children (batch_id=”, batch_seq=0) to a
 // freshly-created summarizing batch so RunOrchestratorSummary's
 // ListByBatch picks them up. Idempotent — re-stamping is harmless because
 // the same row already has the same id, and batch_seq follows the user's
@@ -875,11 +955,11 @@ func (s *SubTaskService) UpdateRunStatsOnStop(id, modelName string, tokens model
 // tell the user to redo" behavior while the auto-orchestrated path gets the
 // restart-safe behavior the new OrchestrationQueue expects:
 //
-//  1. Manual path (batch_id='' OR NULL): pending/running rows become error
+//  1. Manual path (batch_id=” OR NULL): pending/running rows become error
 //     with a recovery artifact, exactly like the pre-batch behavior. The
 //     sub-task was driven by an in-memory JobStore goroutine that died with
 //     the backend, so there's nothing to recover — the user must re-trigger.
-//  2. Orchestrated path (batch_id != ''): running rows whose heartbeat
+//  2. Orchestrated path (batch_id != ”): running rows whose heartbeat
 //     (batch_id_seq_run) is older than 5 minutes are flipped back to
 //     pending. The owning goroutine died with the backend, but the row
 //     itself is intact in the DB; OrchestrationQueue's next tick will

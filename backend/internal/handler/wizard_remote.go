@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1478,6 +1479,44 @@ func claudeSessionHome() string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".claude")
+}
+
+// deleteRemoteSubTaskSession best-effort removes a sub-task's Claude session
+// JSONL from an Agent server. The remote worktree is deterministic
+// (/tmp/nova-agent/<projectID>/<reqID>, see runRemoteCoding) and the CLI keys
+// sessions under ~/.claude/projects/<slug>/<sid>.jsonl where slug is
+// EncodeClaudeSlug(remoteWorktree). Any failure (missing credential, dial
+// timeout, non-zero rm) is logged and swallowed — the DB row is deleted
+// regardless (requirement: robustness over strictness).
+//
+// The `~` in the remote path is left UNQUOTED so the remote shell expands it;
+// the slug and sid contain only [A-Za-z0-9-] (EncodeClaudeSlug + a UUID), so
+// there is no shell-metacharacter injection risk and no quoting is needed.
+func (h *WizardHandler) deleteRemoteSubTaskSession(req *model.Requirement, serverID, sid string) {
+	if h.agentSvrSvc == nil || req == nil || serverID == "" || sid == "" {
+		return
+	}
+	srv, plain, err := h.agentSvrSvc.GetWithCredential(serverID)
+	if err != nil {
+		log.Printf("[sub-task delete] remote cred load failed (server=%s): %v", serverID, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	client, err := gossh.Dial(ctx, srv.Host, srv.Port, srv.Username, srv.AuthType, plain)
+	if err != nil {
+		log.Printf("[sub-task delete] remote dial failed (server=%s): %v", serverID, err)
+		return
+	}
+	defer client.Close()
+	remoteWt := "/tmp/nova-agent/" + req.ProjectID + "/" + req.ID
+	remoteSlug := util.EncodeClaudeSlug(remoteWt)
+	remotePath := "~/.claude/projects/" + remoteSlug + "/" + sid + ".jsonl"
+	cmd := "rm -f " + remotePath
+	if code, execErr := client.Exec(ctx, cmd, "rm-session", nil, io.Discard, nil); execErr != nil || code != 0 {
+		log.Printf("[sub-task delete] remote rm failed (server=%s path=%s code=%d): %v",
+			serverID, remotePath, code, execErr)
+	}
 }
 
 // claudeProjectsSlugDir locates the on-disk directory where claude stores
