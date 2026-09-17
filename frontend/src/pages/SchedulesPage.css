@@ -337,6 +337,33 @@
   color: #0e7490;
 }
 
+/* Recurrence cadence chip (🔁 每天 09:00) shown next to the type badge. */
+.schedules-freq-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  background: #fef3c7;
+  color: #92400e;
+}
+
+/* Paused-plan chip + row dimming. */
+.schedules-paused-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #e2e8f0;
+  color: #475569;
+}
+.schedules-row.schedules-row-paused { opacity: 0.72; }
+
 .schedules-row-title {
   font-size: 14.5px;
   font-weight: 600;

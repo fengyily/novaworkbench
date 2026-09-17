@@ -31,12 +31,26 @@ import { useTranslation } from 'react-i18next';
 import {
   schedulesApi,
   type CreateScheduleReq,
+  type ScheduledRecurrence,
   type ScheduledTaskType,
   type ScheduledTask as ScheduledTaskRow,
 } from '../api/client';
 import ModelSelect from './ModelSelect';
 import { ExecEnvSelect } from './ExecEnvSelect';
-import { toRFC3339Local } from '../utils/time';
+import { toRFC3339Local, WEEK_LABELS } from '../utils/time';
+
+// WEEK_LABELS is Monday-first (一二三四五六日); the backend recur_days uses
+// 0=Sunday (JS getDay convention). This maps a WEEK_LABELS index to its
+// day number so the two conventions never leak into each other.
+const WEEKDAY_INDEX_TO_DAYNUM = [1, 2, 3, 4, 5, 6, 0];
+
+// Default recur_time = now + 5 minutes as "HH:MM" (matches the one-shot
+// picker's default so switching frequency doesn't jump the time).
+function defaultRecurTime(): string {
+  const d = new Date(Date.now() + 5 * 60_000);
+  const pad = (n: number) => `${n}`.padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 export interface AgentServerOption {
   id: string;
@@ -104,6 +118,11 @@ export function ScheduleModal({
 }: Props) {
   const { t } = useTranslation();
   const [runAt, setRunAt] = useState(defaultRunAtLocal);
+  // Recurrence: 'once' (default, preserves the historical one-shot UX),
+  // 'daily' or 'weekly'. daily/weekly use recurTime + (weekly) recurDays.
+  const [recurrence, setRecurrence] = useState<ScheduledRecurrence>('once');
+  const [recurTime, setRecurTime] = useState(defaultRecurTime);
+  const [recurDays, setRecurDays] = useState<Set<number>>(new Set());
   const [model, setModel] = useState(initialModel || '');
   const [readKnowledge, setReadKnowledge] = useState(false);
   // Coding-only
@@ -133,14 +152,31 @@ export function ScheduleModal({
   const handleSubmit = async () => {
     setSubmitting(true);
     setErrorMsg('');
+    // Client-side guard: weekly needs at least one weekday selected.
+    if (recurrence === 'weekly' && recurDays.size === 0) {
+      setErrorMsg(t('schedules.modal.errWeekdaysRequired'));
+      setSubmitting(false);
+      return;
+    }
     try {
       const body: CreateScheduleReq = {
         requirement_id: requirementId,
         task_type: taskType,
-        run_at: toRFC3339Local(runAt),
         model: model || undefined,
         read_knowledge: readKnowledge,
       };
+      if (recurrence === 'once') {
+        body.run_at = toRFC3339Local(runAt);
+      } else {
+        // The server derives run_at from the rule; send the rule + the
+        // browser tz so the wall-clock time projects onto the right instant.
+        body.recurrence = recurrence;
+        body.recur_time = recurTime;
+        body.recur_tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        if (recurrence === 'weekly') {
+          body.recur_days = Array.from(recurDays).sort((a, b) => a - b).join(',');
+        }
+      }
       // agent_server_id is shared between design and coding (design-stage
       // remote execution was added in 2026-09; coding has had it longer).
       // Empty string means "local execution" on the backend side, so we
@@ -168,6 +204,10 @@ export function ScheduleModal({
         setErrorMsg(t('schedules.modal.errRunAtTooSoon'));
       } else if (code === 'IDEA_NOT_DEVELOPABLE') {
         setErrorMsg(t('schedules.modal.errIdeaNotDevelopable'));
+      } else if (code === 'INVALID_RECUR_TIME') {
+        setErrorMsg(t('schedules.modal.errRecurTime'));
+      } else if (code === 'INVALID_RECUR_DAYS') {
+        setErrorMsg(t('schedules.modal.errRecurDays'));
       } else {
         setErrorMsg(err?.message || t('schedules.modal.errSubmit'));
       }
@@ -206,22 +246,90 @@ export function ScheduleModal({
             {t('schedules.modal.introSuffix')}
           </p>
 
-          {/* Run-at picker is shared across all stages of a merged task —
-              the timer fires once and the scheduler chains the stages. */}
+          {/* Execution frequency — defaults to 一次性 (once) so the existing
+              one-shot UX is unchanged. Picking 每天 / 每周 swaps the run-at
+              picker for a time-of-day (and, for weekly, a weekday) selector;
+              the scheduler re-arms the row to the next occurrence after each
+              run. Merged tasks still fire once per occurrence and chain the
+              stages internally. */}
           <div className="modal-field">
-            <label htmlFor="sched-run-at">{t('schedules.modal.runAtLabel')}</label>
-            <input
-              id="sched-run-at"
-              className="form-input"
-              type="datetime-local"
-              value={runAt}
-              min={minRunAtLocal()}
-              onChange={e => setRunAt(e.target.value)}
-            />
-            <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
-              {t('schedules.modal.runAtHint')}
-            </small>
+            <label>{t('schedules.modal.recurrenceLabel')}</label>
+            <div className="schedule-freq-row">
+              {(['once', 'daily', 'weekly'] as ScheduledRecurrence[]).map(r => (
+                <button
+                  key={r}
+                  type="button"
+                  className={`schedule-freq-pill${recurrence === r ? ' active' : ''}`}
+                  onClick={() => setRecurrence(r)}
+                  disabled={submitting}
+                >
+                  {t(`schedules.modal.recurrence.${r}`)}
+                </button>
+              ))}
+            </div>
           </div>
+
+          {recurrence === 'once' ? (
+            /* Run-at picker is shared across all stages of a merged task —
+               the timer fires once and the scheduler chains the stages. */
+            <div className="modal-field">
+              <label htmlFor="sched-run-at">{t('schedules.modal.runAtLabel')}</label>
+              <input
+                id="sched-run-at"
+                className="form-input"
+                type="datetime-local"
+                value={runAt}
+                min={minRunAtLocal()}
+                onChange={e => setRunAt(e.target.value)}
+              />
+              <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
+                {t('schedules.modal.runAtHint')}
+              </small>
+            </div>
+          ) : (
+            <>
+              {recurrence === 'weekly' && (
+                <div className="modal-field">
+                  <label>{t('schedules.modal.recurDaysLabel')}</label>
+                  <div className="schedule-weekday-row">
+                    {WEEK_LABELS.map((label, idx) => {
+                      const day = WEEKDAY_INDEX_TO_DAYNUM[idx];
+                      const on = recurDays.has(day);
+                      return (
+                        <button
+                          key={day}
+                          type="button"
+                          className={`schedule-weekday-pill${on ? ' active' : ''}`}
+                          onClick={() => setRecurDays(prev => {
+                            const next = new Set(prev);
+                            if (next.has(day)) next.delete(day); else next.add(day);
+                            return next;
+                          })}
+                          disabled={submitting}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              <div className="modal-field">
+                <label htmlFor="sched-recur-time">{t('schedules.modal.recurTimeLabel')}</label>
+                <input
+                  id="sched-recur-time"
+                  className="form-input"
+                  type="time"
+                  value={recurTime}
+                  onChange={e => setRecurTime(e.target.value)}
+                  disabled={submitting}
+                />
+                <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
+                  {t('schedules.modal.recurTimeHint')}
+                </small>
+              </div>
+            </>
+          )}
 
           {/* Design-stage section: rendered for both 'design' and
               'design_and_coding'. ModelSelect.stage="architect" keeps the

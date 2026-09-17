@@ -44,6 +44,23 @@ type ScheduledTask struct {
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
 	ExecutedAt          *time.Time `json:"executed_at,omitempty"`
+	// Recurrence describes whether this row is a one-shot ("once", the
+	// historical default) or an alarm-style repeating plan ("daily" /
+	// "weekly"). A recurring row is never written to a terminal status by
+	// Finish — instead it is re-armed: status flips back to pending and
+	// run_at is pushed to the next occurrence computed by NextRunAt. The
+	// last-run outcome is preserved in the Last* fields below for list
+	// display since status can no longer carry it.
+	Recurrence          string     `json:"recurrence"`           // SchedRecurOnce | SchedRecurDaily | SchedRecurWeekly
+	RecurTime           string     `json:"recur_time"`           // "HH:MM" local wall-clock (daily/weekly)
+	RecurDays           string     `json:"recur_days"`           // weekday CSV, 0-6, 0=Sunday (JS getDay convention); weekly only
+	RecurTZ             string     `json:"recur_tz"`             // IANA tz name (e.g. "Asia/Shanghai") used to project recur_time onto a UTC instant
+	Active              bool       `json:"active"`               // enable/pause gate; Due only picks active rows
+	LastRunAt           *time.Time `json:"last_run_at,omitempty"` // last time the recurring row fired (UTC, nullable)
+	LastStatus          string     `json:"last_status"`          // last run outcome: succeeded | failed
+	LastError           string     `json:"last_error"`           // last run error message
+	LastJobID           string     `json:"last_job_id"`          // last run JobStore job id (list "查看日志" deep link)
+	RunCount            int        `json:"run_count"`            // number of times this row has fired
 	// RequirementStatus is the LIVE status of the linked requirement at the
 	// moment of query — populated by LEFT JOIN `requirements` so the
 	// /schedules list can render a status chip next to the requirement
@@ -68,4 +85,10 @@ const (
 	SchedTypeDesign        = "design"
 	SchedTypeCoding        = "coding"
 	SchedTypeDesignCoding  = "design_and_coding"
+
+	// Recurrence modes. "once" is the historical one-shot behavior; "daily"
+	// and "weekly" repeat via the re-arm model (see ScheduledTask.Recurrence).
+	SchedRecurOnce   = "once"
+	SchedRecurDaily  = "daily"
+	SchedRecurWeekly = "weekly"
 )

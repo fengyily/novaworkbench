@@ -56,12 +56,40 @@ const typeLabelKeys: Record<ScheduledTaskType, string> = {
   design_and_coding: 'schedules.type.designCoding',
 };
 
+// formatRecurChip renders a recurring row's cadence, e.g. "🔁 每天 09:00" or
+// "🔁 每周一三五 09:00". recur_days is a CSV of 0-6 (0=Sunday), mapped to the
+// localized short weekday names indexed by the SAME 0=Sunday convention.
+function formatRecurChip(
+  tr: (k: string, o?: Record<string, unknown>) => string,
+  row: ScheduledTask,
+): string {
+  const time = row.recur_time || '';
+  if (row.recurrence === 'daily') {
+    return tr('schedules.recur.dailyChip', { time });
+  }
+  if (row.recurrence === 'weekly') {
+    const days = (row.recur_days || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean)
+      .map(Number)
+      .sort((a, b) => a - b)
+      .map(d => tr(`schedules.recur.weekdayShort.${d}`))
+      .join('');
+    return tr('schedules.recur.weeklyChip', { days, time });
+  }
+  return '';
+}
+
 export default function SchedulesPage() {
   const { t } = useTranslation();
   const [rows, setRows] = useState<ScheduledTask[]>([]);
   const [loading, setLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState<'' | ScheduledTaskStatus>('');
   const [typeFilter, setTypeFilter] = useState<'' | ScheduledTaskType>('');
+  // Frequency filter is client-side (the list endpoint has no recurrence
+  // param): '' = all, 'once' = one-shot, 'recurring' = daily/weekly.
+  const [freqFilter, setFreqFilter] = useState<'' | 'once' | 'recurring'>('');
   // Log-popup state. Holds the selected job id; null = closed. The popup
   // fetches the wizard job snapshot once on open.
   const [logJobId, setLogJobId] = useState<string | null>(null);
@@ -117,18 +145,27 @@ export default function SchedulesPage() {
     return c;
   }, [rows]);
 
-  // Sort: pending tasks by run_at ASC (soonest first), then everything else
-  // by run_at DESC (most recent first). The split keeps the live-action
-  // items at the top of the page and the audit trail below.
+  // Apply the client-side frequency filter first (once vs recurring).
+  const freqFiltered = useMemo(() => {
+    if (!freqFilter) return rows;
+    if (freqFilter === 'once') return rows.filter(r => (r.recurrence ?? 'once') === 'once');
+    return rows.filter(r => (r.recurrence ?? 'once') !== 'once');
+  }, [rows, freqFilter]);
+
+  // Sort: live tasks (pending/running AND not paused) by run_at ASC (soonest
+  // first), then everything else — terminal rows AND paused recurring rows —
+  // by run_at DESC. Keeps the actionable items at the top and the rest below.
   const sorted = useMemo(() => {
-    const pending = rows
-      .filter(r => r.status === 'pending' || r.status === 'running')
+    const isLive = (r: ScheduledTask) =>
+      (r.status === 'pending' || r.status === 'running') && r.active !== false;
+    const live = freqFiltered
+      .filter(isLive)
       .sort((a, b) => new Date(a.run_at).getTime() - new Date(b.run_at).getTime());
-    const rest = rows
-      .filter(r => r.status !== 'pending' && r.status !== 'running')
+    const rest = freqFiltered
+      .filter(r => !isLive(r))
       .sort((a, b) => new Date(b.run_at).getTime() - new Date(a.run_at).getTime());
-    return [...pending, ...rest];
-  }, [rows]);
+    return [...live, ...rest];
+  }, [freqFiltered]);
 
   // "Next fire" countdown for the header chip — null when there's no
   // pending task in scope. Shows "overdue" (red) when the soonest
@@ -150,6 +187,17 @@ export default function SchedulesPage() {
       // looks identical to a stale row and confuses the user about whether
       // the button worked.
       alert(t('schedules.cancelFailed', { msg: errorMessage(err) }));
+    }
+    load();
+  };
+  // Pause / resume a recurring task via PATCH { active }. Resuming makes the
+  // backend recompute the next run_at from the rule, so a refresh follows.
+  const handleToggleActive = async (row: ScheduledTask) => {
+    const next = !(row.active !== false);
+    try {
+      await schedulesApi.update(row.id, { active: next });
+    } catch (err) {
+      alert(t(next ? 'schedules.recur.resumeFailed' : 'schedules.recur.pauseFailed', { msg: errorMessage(err) }));
     }
     load();
   };
@@ -249,6 +297,30 @@ export default function SchedulesPage() {
             </button>
           ))}
         </div>
+        <div className="schedules-filter-group">
+          <span className="schedules-filter-label">{t('schedules.filterFreq')}</span>
+          <button
+            type="button"
+            className={`schedules-type-chip${freqFilter === '' ? ' active' : ''}`}
+            onClick={() => setFreqFilter('')}
+          >
+            {t('schedules.all')}
+          </button>
+          <button
+            type="button"
+            className={`schedules-type-chip${freqFilter === 'once' ? ' active' : ''}`}
+            onClick={() => setFreqFilter(freqFilter === 'once' ? '' : 'once')}
+          >
+            {t('schedules.freq.once')}
+          </button>
+          <button
+            type="button"
+            className={`schedules-type-chip${freqFilter === 'recurring' ? ' active' : ''}`}
+            onClick={() => setFreqFilter(freqFilter === 'recurring' ? '' : 'recurring')}
+          >
+            {t('schedules.freq.recurring')}
+          </button>
+        </div>
       </div>
 
       {/* List */}
@@ -276,6 +348,7 @@ export default function SchedulesPage() {
               onCancel={() => handleCancel(t.id)}
               onDelete={() => handleDelete(t.id)}
               onOpenLog={() => handleOpenLog(t.job_id)}
+              onToggleActive={() => handleToggleActive(t)}
             />
           ))}
         </div>
@@ -302,12 +375,14 @@ function ScheduleRow({
   onCancel,
   onDelete,
   onOpenLog,
+  onToggleActive,
 }: {
   t: ScheduledTask;
   now: number;
   onCancel: () => void;
   onDelete: () => void;
-  onOpenLog: () => void;
+  onOpenLog: (jobId: string) => void;
+  onToggleActive: () => void;
 }) {
   // The row prop is also called `t` (the ScheduledTask), so the translate
   // function is aliased `tr` here — `tk` is the loose variant for keys that
@@ -316,9 +391,16 @@ function ScheduleRow({
   const tr = trStrict as unknown as (k: string, o?: Record<string, unknown>) => string;
   const runAtMs = new Date(t.run_at).getTime();
   const isPast = runAtMs < now;
-  const showOverdue = t.status === 'pending' && isPast;
-  const canLog = (t.status === 'succeeded' || t.status === 'failed' || t.status === 'running') && !!t.job_id;
-  const rowClass = `schedules-row schedules-row-${t.status}${showOverdue ? ' schedules-row-overdue' : ''}`;
+  const recurring = (t.recurrence ?? 'once') !== 'once';
+  const paused = recurring && t.active === false;
+  const showOverdue = t.status === 'pending' && isPast && !paused;
+  // One-shot rows deep-link via job_id (terminal); recurring rows sit at
+  // pending between runs, so their log lives in last_job_id.
+  const logJobId = recurring ? t.last_job_id : t.job_id;
+  const canLog = recurring
+    ? !!t.last_job_id
+    : (t.status === 'succeeded' || t.status === 'failed' || t.status === 'running') && !!t.job_id;
+  const rowClass = `schedules-row schedules-row-${t.status}${showOverdue ? ' schedules-row-overdue' : ''}${paused ? ' schedules-row-paused' : ''}`;
   const isDesign = t.task_type === 'design';
   const isMerged = t.task_type === 'design_and_coding';
   const badgeTitle = isDesign
@@ -337,6 +419,14 @@ function ScheduleRow({
             {isDesign ? '📐' : isMerged ? <>📐<IconRocket size={11} /></> : <IconRocket size={11} />}
             {tr(typeLabelKeys[t.task_type])}
           </span>
+          {recurring && (
+            <span className="schedules-freq-chip" title={tr(`schedules.recur.${t.recurrence}`)}>
+              {formatRecurChip(tr, t)}
+            </span>
+          )}
+          {paused && (
+            <span className="schedules-paused-chip">{tr('schedules.recur.paused')}</span>
+          )}
           <span className="schedules-row-title">
             {t.requirement_title ? (
               <Link to={`/requirements/${t.requirement_id}`}>{t.requirement_title}</Link>
@@ -372,6 +462,22 @@ function ScheduleRow({
           <span className="schedules-meta-item" title={tr('schedules.modelTitle')}>
             <span className="schedules-meta-model">{t.model || tr('schedules.defaultModel')}</span>
           </span>
+          {recurring && (
+            <span className="schedules-meta-item" title={tr('schedules.recur.lastResult')}>
+              {tr('schedules.recur.lastResult')}:{' '}
+              {t.last_status ? (
+                <>
+                  <span className={`status-badge status-${t.last_status}`}>
+                    {tr(statusLabelKeys[t.last_status as ScheduledTaskStatus] || t.last_status)}
+                  </span>
+                  {t.last_run_at && <> · {fmtRelative(t.last_run_at)}</>}
+                </>
+              ) : (
+                <span>{tr('schedules.recur.neverRun')}</span>
+              )}
+              {' · '}{tr('schedules.recur.runCount', { n: t.run_count ?? 0 })}
+            </span>
+          )}
           <span className="schedules-meta-item" title={tr('schedules.createdTitle')}>
             {tr('schedules.createdPrefix')} {fmtRelative(t.created_at)}
           </span>
@@ -387,11 +493,17 @@ function ScheduleRow({
           {tr(statusLabelKeys[t.status])}
         </span>
         <div className="schedules-row-actions">
-          {t.status === 'pending' && (
-            <button className="btn btn-sm" onClick={onCancel}>{tr('schedules.cancel')}</button>
+          {recurring ? (
+            <button className="btn btn-sm" onClick={onToggleActive}>
+              {paused ? tr('schedules.recur.resume') : tr('schedules.recur.pause')}
+            </button>
+          ) : (
+            t.status === 'pending' && (
+              <button className="btn btn-sm" onClick={onCancel}>{tr('schedules.cancel')}</button>
+            )
           )}
           {canLog && (
-            <button className="btn btn-sm" onClick={onOpenLog}>{tr('schedules.viewLog')}</button>
+            <button className="btn btn-sm" onClick={() => onOpenLog(logJobId)}>{tr('schedules.viewLog')}</button>
           )}
           <button
             className="btn btn-sm schedules-btn-danger"

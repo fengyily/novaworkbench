@@ -12,6 +12,12 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	// Embed the IANA timezone database into the binary. The build is
+	// CGO_ENABLED=0 single-binary and may run in a scratch container with no
+	// system tzdata, so time.LoadLocation(tz) — used by the recurring
+	// scheduled-task NextRunAt computation — would otherwise fail. This
+	// makes every IANA zone name resolvable regardless of the host.
+	_ "time/tzdata"
 
 	"github.com/novaworkbench/backend/internal/db"
 	"github.com/novaworkbench/backend/internal/handler"
@@ -551,6 +557,7 @@ func main() {
 	mux.HandleFunc("POST /api/schedules", schedulePerm(http.HandlerFunc(schedH.Create)).ServeHTTP)
 	mux.HandleFunc("GET /api/schedules", schedulePerm(http.HandlerFunc(schedH.List)).ServeHTTP)
 	mux.HandleFunc("GET /api/schedules/{id}", schedulePerm(http.HandlerFunc(schedH.Get)).ServeHTTP)
+	mux.HandleFunc("PATCH /api/schedules/{id}", schedulePerm(http.HandlerFunc(schedH.Update)).ServeHTTP)
 	mux.HandleFunc("POST /api/schedules/{id}/cancel", schedulePerm(http.HandlerFunc(schedH.Cancel)).ServeHTTP)
 	mux.HandleFunc("DELETE /api/schedules/{id}", schedulePerm(http.HandlerFunc(schedH.Delete)).ServeHTTP)
 

@@ -1884,6 +1884,9 @@ export type ScheduledTaskStatus =
   | 'succeeded'
   | 'failed'
   | 'canceled';
+// Recurrence mode: 'once' = one-shot (legacy default); 'daily'/'weekly' =
+// alarm-style repeating plans re-armed by the backend after each run.
+export type ScheduledRecurrence = 'once' | 'daily' | 'weekly';
 
 export interface ScheduledTask {
   id: string;
@@ -1908,6 +1911,19 @@ export interface ScheduledTask {
   created_at: string;
   updated_at: string;
   executed_at: string | null;
+  // Recurrence fields. recurrence='once' means a one-shot task (last_* are
+  // empty). For 'daily'/'weekly' the row repeats: run_at is the NEXT fire,
+  // and the last_* fields carry the previous run's outcome for list display.
+  recurrence: ScheduledRecurrence;
+  recur_time: string; // "HH:MM" local wall-clock
+  recur_days: string; // CSV of weekday numbers 0-6, 0=Sunday
+  recur_tz: string; // IANA tz name
+  active: boolean; // false = paused (not dispatched)
+  last_run_at: string | null;
+  last_status: string; // '' | 'succeeded' | 'failed'
+  last_error: string;
+  last_job_id: string;
+  run_count: number;
   // requirement_status: the LIVE status of the linked requirement at query
   // time, populated by the backend's LEFT JOIN. Surfaced as a chip next to
   // the requirement title in /schedules so users can disambiguate
@@ -1920,7 +1936,10 @@ export interface ScheduledTask {
 export interface CreateScheduleReq {
   requirement_id: string;
   task_type: ScheduledTaskType;
-  run_at: string; // RFC3339 with timezone offset (e.g. "2026-09-07T23:30:00+08:00"); the frontend converts the datetime-local picker value to this so the absolute moment is unambiguous regardless of the server's local TZ.
+  // For recurrence='once' this is required (RFC3339 with timezone offset, e.g.
+  // "2026-09-07T23:30:00+08:00"). For 'daily'/'weekly' it is omitted — the
+  // server derives the first run from the rule.
+  run_at?: string;
   model?: string;
   read_knowledge?: boolean;
   branch_name?: string;
@@ -1930,6 +1949,26 @@ export interface CreateScheduleReq {
   // design_and_coding 专属：开发者阶段配置
   coding_model?: string;
   coding_agent_server_id?: string;
+  // Recurrence — omit or 'once' for a one-shot task. daily/weekly send
+  // recur_time (HH:MM); weekly also sends recur_days (CSV 0-6, 0=Sunday);
+  // both send recur_tz (IANA tz name) so the server projects the wall-clock
+  // time onto a UTC instant.
+  recurrence?: ScheduledRecurrence;
+  recur_time?: string;
+  recur_days?: string;
+  recur_tz?: string;
+}
+
+// UpdateScheduleReq — partial patch for editing a rule or pausing/resuming.
+// Only the provided keys change; a pause toggle sends just { active }.
+export interface UpdateScheduleReq {
+  recurrence?: ScheduledRecurrence;
+  recur_time?: string;
+  recur_days?: string;
+  recur_tz?: string;
+  model?: string;
+  run_at?: string;
+  active?: boolean;
 }
 
 export const schedulesApi = {
@@ -1944,6 +1983,8 @@ export const schedulesApi = {
   get: (id: string) => api.get<ScheduledTask>(`/api/schedules/${id}`),
   create: (data: CreateScheduleReq) =>
     api.post<ScheduledTask>('/api/schedules', data),
+  update: (id: string, patch: UpdateScheduleReq) =>
+    api.patch<ScheduledTask>(`/api/schedules/${id}`, patch),
   cancel: (id: string) =>
     api.post<ScheduledTask>(`/api/schedules/${id}/cancel`, {}),
   remove: (id: string) => api.delete<{ id: string; status: string }>(`/api/schedules/${id}`),

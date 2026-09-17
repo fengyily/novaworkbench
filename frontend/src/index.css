@@ -1543,6 +1543,46 @@ select.form-input { cursor: pointer; }
 
 /* ── Schedule modal (legacy: ScheduleModal.tsx still uses .schedule-modal) ── */
 .schedule-modal .modal-body { padding: 16px 20px; }
+
+/* Recurrence frequency pills (一次性 / 每天 / 每周) + weekly weekday picker. */
+.schedule-freq-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.schedule-freq-pill {
+  padding: 6px 14px;
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--color-text, #334155);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.schedule-freq-pill:hover:not(:disabled) { border-color: var(--color-primary, #4F46E5); }
+.schedule-freq-pill.active {
+  background: var(--color-primary, #4F46E5);
+  border-color: var(--color-primary, #4F46E5);
+  color: #fff;
+}
+.schedule-freq-pill:disabled { opacity: 0.6; cursor: default; }
+
+.schedule-weekday-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.schedule-weekday-pill {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--color-text, #334155);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.schedule-weekday-pill:hover:not(:disabled) { border-color: var(--color-primary, #4F46E5); }
+.schedule-weekday-pill.active {
+  background: var(--color-primary, #4F46E5);
+  border-color: var(--color-primary, #4F46E5);
+  color: #fff;
+}
+.schedule-weekday-pill:disabled { opacity: 0.6; cursor: default; }
 /* The scheduled-task log modal now lives in SchedulesPage.css under
    .schedules-log-* — the legacy .schedule-log-* rules have been
    removed to avoid duplicate styles for the same surface. */

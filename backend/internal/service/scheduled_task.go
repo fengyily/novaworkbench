@@ -52,8 +52,29 @@ func (s *ScheduledTaskService) Create(t *model.ScheduledTask) (*model.ScheduledT
 	if t.RequirementID == "" {
 		return nil, errors.New("requirement_id is required")
 	}
-	if t.RunAt.IsZero() {
-		return nil, errors.New("run_at is required")
+	// Recurrence handling. Empty defaults to "once" for backward
+	// compatibility. For recurring plans the first run_at is derived from the
+	// rule (relative to now) rather than trusting a client-supplied absolute
+	// time — the rule is the single source of truth for when the plan fires.
+	if t.Recurrence == "" {
+		t.Recurrence = model.SchedRecurOnce
+	}
+	switch t.Recurrence {
+	case model.SchedRecurOnce:
+		if t.RunAt.IsZero() {
+			return nil, errors.New("run_at is required")
+		}
+	case model.SchedRecurDaily, model.SchedRecurWeekly:
+		next, err := NextRunAt(t.Recurrence, t.RecurTime, t.RecurDays, t.RecurTZ, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		if next.IsZero() {
+			return nil, errors.New("could not compute first run for recurring task")
+		}
+		t.RunAt = next
+	default:
+		return nil, fmt.Errorf("invalid recurrence %q (want once|daily|weekly)", t.Recurrence)
 	}
 	dup, err := s.HasPendingConflict(t.RequirementID, t.TaskType)
 	if err != nil {
@@ -82,17 +103,26 @@ func (s *ScheduledTaskService) Create(t *model.ScheduledTask) (*model.ScheduledT
 	if t.Status == "" {
 		t.Status = model.SchedStatusPending
 	}
+	// New rows are active by default (Create has no pause path); pausing is a
+	// later Update. The Active field is set true here so the returned struct
+	// reflects the persisted DEFAULT 1 without a re-read.
+	t.Active = true
 	_, err = s.db.Exec(`INSERT INTO scheduled_tasks
 		(id, task_type, requirement_id, project_id, requirement_title,
 		 run_at, model, read_knowledge, branch_name, base_branch,
 		 agent_server_id, split_tasks, coding_model, coding_agent_server_id,
-		 status, job_id, error_message, created_by, created_at, updated_at, executed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 status, job_id, error_message, created_by, created_at, updated_at, executed_at,
+		 recurrence, recur_time, recur_days, recur_tz, active,
+		 last_status, last_error, last_job_id, run_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		 ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.ID, t.TaskType, t.RequirementID, t.ProjectID, t.RequirementTitle,
 		t.RunAt, t.Model, t.ReadKnowledge, t.BranchName, t.BaseBranch,
 		t.AgentServerID, t.SplitTasks, t.CodingModel, t.CodingAgentServerID,
 		t.Status, t.JobID, t.ErrorMessage,
 		t.CreatedBy, t.CreatedAt, t.UpdatedAt, t.ExecutedAt,
+		t.Recurrence, t.RecurTime, t.RecurDays, t.RecurTZ, t.Active,
+		t.LastStatus, t.LastError, t.LastJobID, t.RunCount,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert scheduled_task: %w", err)
@@ -125,6 +155,8 @@ func (s *ScheduledTaskService) List(status, taskType, requirementID string) ([]m
 		st.agent_server_id, st.split_tasks, st.coding_model, st.coding_agent_server_id,
 		st.status, st.job_id, st.error_message,
 		st.created_by, st.created_at, st.updated_at, st.executed_at,
+		st.recurrence, st.recur_time, st.recur_days, st.recur_tz, st.active,
+		st.last_run_at, st.last_status, st.last_error, st.last_job_id, st.run_count,
 		COALESCE(r.status, '') AS requirement_status
 		FROM scheduled_tasks st
 		LEFT JOIN requirements r ON r.id = st.requirement_id`
@@ -158,6 +190,8 @@ func (s *ScheduledTaskService) Get(id string) (*model.ScheduledTask, error) {
 		st.agent_server_id, st.split_tasks, st.coding_model, st.coding_agent_server_id,
 		st.status, st.job_id, st.error_message,
 		st.created_by, st.created_at, st.updated_at, st.executed_at,
+		st.recurrence, st.recur_time, st.recur_days, st.recur_tz, st.active,
+		st.last_run_at, st.last_status, st.last_error, st.last_job_id, st.run_count,
 		COALESCE(r.status, '') AS requirement_status
 		FROM scheduled_tasks st
 		LEFT JOIN requirements r ON r.id = st.requirement_id
@@ -181,10 +215,12 @@ func (s *ScheduledTaskService) Due(now time.Time, limit int) ([]model.ScheduledT
 		st.agent_server_id, st.split_tasks, st.coding_model, st.coding_agent_server_id,
 		st.status, st.job_id, st.error_message,
 		st.created_by, st.created_at, st.updated_at, st.executed_at,
+		st.recurrence, st.recur_time, st.recur_days, st.recur_tz, st.active,
+		st.last_run_at, st.last_status, st.last_error, st.last_job_id, st.run_count,
 		COALESCE(r.status, '') AS requirement_status
 		FROM scheduled_tasks st
 		LEFT JOIN requirements r ON r.id = st.requirement_id
-		WHERE st.status = ? AND st.run_at <= ?
+		WHERE st.status = ? AND st.run_at <= ? AND st.active = 1
 		ORDER BY st.run_at ASC LIMIT ?`,
 		model.SchedStatusPending, now, limit)
 	if err != nil {
@@ -217,17 +253,65 @@ func (s *ScheduledTaskService) Claim(id string, now time.Time) (bool, error) {
 	return n == 1, nil
 }
 
-// Finish records the terminal state of a dispatched task: succeeded/failed,
-// the JobStore job id (so the list page can deep-link to /api/wizard/jobs/...),
-// and any error string. Pass ok=true for success, false for failure.
+// Finish records the outcome of a dispatched task. It is the SINGLE hook
+// through which every executor callback and the scheduler's dispatch-failure
+// path retire a run, which is exactly why recurrence re-arming lives here
+// rather than in the executors: changing this one method makes all three
+// task types (design / coding / design_and_coding) repeat with no executor
+// edits.
+//
+// Behavior:
+//   - once (or paused recurring) → the historical terminal write:
+//     status = succeeded|failed, job_id, error_message.
+//   - active recurring          → RE-ARM: the row is pushed back to pending
+//     with run_at advanced to the next occurrence (computed relative to now,
+//     so a slow AI run never drifts the schedule and never overlaps the next
+//     fire). The last-run outcome is recorded in the last_* columns and
+//     run_count is incremented. If NextRunAt cannot produce a next time
+//     (should not happen for a validated row) the row degrades to terminal +
+//     inactive so it stops firing instead of silently looping.
+//
+// Pass ok=true for success, false for failure.
 func (s *ScheduledTaskService) Finish(id string, ok bool, jobID, errMsg string) error {
-	status := model.SchedStatusSucceeded
-	if !ok {
-		status = model.SchedStatusFailed
+	row, err := s.Get(id)
+	if err != nil {
+		return err
 	}
-	_, err := s.db.Exec(`UPDATE scheduled_tasks SET status = ?, job_id = ?, error_message = ?, updated_at = ?
+	now := time.Now().UTC()
+	lastStatus := model.SchedStatusSucceeded
+	if !ok {
+		lastStatus = model.SchedStatusFailed
+	}
+
+	// Non-recurring or paused rows keep the original terminal semantics.
+	if row.Recurrence == "" || row.Recurrence == model.SchedRecurOnce || !row.Active {
+		_, err := s.db.Exec(`UPDATE scheduled_tasks SET status = ?, job_id = ?, error_message = ?, updated_at = ?
+			WHERE id = ?`,
+			lastStatus, jobID, errMsg, now, id)
+		return err
+	}
+
+	// Active recurring row → re-arm to the next occurrence.
+	next, nerr := NextRunAt(row.Recurrence, row.RecurTime, row.RecurDays, row.RecurTZ, now)
+	if nerr != nil || next.IsZero() {
+		// Degrade to terminal + inactive so a broken rule can't spin.
+		_, derr := s.db.Exec(`UPDATE scheduled_tasks SET status = ?, active = ?, job_id = ?, error_message = ?,
+			last_run_at = ?, last_status = ?, last_error = ?, last_job_id = ?, run_count = run_count + 1, updated_at = ?
+			WHERE id = ?`,
+			lastStatus, false, jobID, errMsg, now, lastStatus, errMsg, jobID, now, id)
+		if derr != nil {
+			return derr
+		}
+		if nerr != nil {
+			return nerr
+		}
+		return nil
+	}
+	_, err = s.db.Exec(`UPDATE scheduled_tasks SET status = ?, run_at = ?, executed_at = NULL,
+		job_id = ?, error_message = ?,
+		last_run_at = ?, last_status = ?, last_error = ?, last_job_id = ?, run_count = run_count + 1, updated_at = ?
 		WHERE id = ?`,
-		status, jobID, errMsg, time.Now(), id)
+		model.SchedStatusPending, next, jobID, errMsg, now, lastStatus, errMsg, jobID, now, id)
 	return err
 }
 
@@ -246,6 +330,106 @@ func (s *ScheduledTaskService) Cancel(id string) error {
 		return ErrNotPending
 	}
 	return nil
+}
+
+// ScheduledTaskPatch carries the editable fields for Update. Every field is
+// a pointer so "not provided" (nil) is distinguishable from "set to the zero
+// value" — a PATCH that only flips `active` must not blank out the rule.
+type ScheduledTaskPatch struct {
+	Recurrence *string
+	RecurTime  *string
+	RecurDays  *string
+	RecurTZ    *string
+	Model      *string
+	RunAt      *time.Time // once-task edits only
+	Active     *bool      // pause (false) / resume (true)
+}
+
+// Update applies a partial patch to a scheduled task. It backs both the
+// "edit rule" and "pause / resume" UI actions. The run_at is recomputed from
+// the rule (relative to now) whenever a rule-affecting field changes, the row
+// is resumed from a paused/terminal state, so a stale next-fire time never
+// lingers. Returns the refreshed row.
+func (s *ScheduledTaskService) Update(id string, patch ScheduledTaskPatch) (*model.ScheduledTask, error) {
+	row, err := s.Get(id)
+	if err != nil {
+		return nil, err
+	}
+
+	ruleChanged := false
+	if patch.Recurrence != nil && *patch.Recurrence != row.Recurrence {
+		row.Recurrence = *patch.Recurrence
+		ruleChanged = true
+	}
+	if patch.RecurTime != nil && *patch.RecurTime != row.RecurTime {
+		row.RecurTime = *patch.RecurTime
+		ruleChanged = true
+	}
+	if patch.RecurDays != nil && *patch.RecurDays != row.RecurDays {
+		row.RecurDays = *patch.RecurDays
+		ruleChanged = true
+	}
+	if patch.RecurTZ != nil && *patch.RecurTZ != row.RecurTZ {
+		row.RecurTZ = *patch.RecurTZ
+		ruleChanged = true
+	}
+	if patch.Model != nil {
+		row.Model = *patch.Model
+	}
+	resumed := false
+	if patch.Active != nil {
+		if *patch.Active && !row.Active {
+			resumed = true
+		}
+		row.Active = *patch.Active
+	}
+	if row.Recurrence == "" {
+		row.Recurrence = model.SchedRecurOnce
+	}
+
+	switch row.Recurrence {
+	case model.SchedRecurOnce:
+		if patch.RunAt != nil {
+			row.RunAt = patch.RunAt.UTC()
+		}
+		if row.RunAt.IsZero() {
+			return nil, errors.New("run_at is required")
+		}
+	case model.SchedRecurDaily, model.SchedRecurWeekly:
+		// Recompute the next fire when the rule changed, the row is being
+		// resumed, or it currently sits in a terminal state (was 'once', or
+		// a degraded recurring row) — otherwise a paused-then-edited plan
+		// would keep a stale run_at. A no-op rule edit on a live pending row
+		// still validates the rule below.
+		terminal := row.Status != model.SchedStatusPending && row.Status != model.SchedStatusRunning
+		if ruleChanged || resumed || terminal {
+			next, nerr := NextRunAt(row.Recurrence, row.RecurTime, row.RecurDays, row.RecurTZ, time.Now())
+			if nerr != nil {
+				return nil, nerr
+			}
+			if next.IsZero() {
+				return nil, errors.New("could not compute next run for recurring task")
+			}
+			row.RunAt = next
+			if row.Status != model.SchedStatusRunning {
+				row.Status = model.SchedStatusPending
+			}
+		} else if _, nerr := NextRunAt(row.Recurrence, row.RecurTime, row.RecurDays, row.RecurTZ, time.Now()); nerr != nil {
+			return nil, nerr
+		}
+	default:
+		return nil, fmt.Errorf("invalid recurrence %q (want once|daily|weekly)", row.Recurrence)
+	}
+
+	_, err = s.db.Exec(`UPDATE scheduled_tasks SET recurrence = ?, recur_time = ?, recur_days = ?, recur_tz = ?,
+		model = ?, active = ?, run_at = ?, status = ?, updated_at = ?
+		WHERE id = ?`,
+		row.Recurrence, row.RecurTime, row.RecurDays, row.RecurTZ,
+		row.Model, row.Active, row.RunAt.UTC(), row.Status, time.Now().UTC(), id)
+	if err != nil {
+		return nil, err
+	}
+	return s.Get(id)
 }
 
 // Delete removes the row regardless of status — pending, running, and
@@ -274,9 +458,13 @@ func (s *ScheduledTaskService) Delete(id string) error {
 // get a normal dispatch attempt.
 func (s *ScheduledTaskService) FailExpired(now time.Time, cutoff time.Duration, message string) (int64, error) {
 	floor := now.Add(-cutoff)
+	// Active recurring rows are deliberately excluded: an overdue recurring
+	// row should be picked up ONCE by Due (a single catch-up fire) and then
+	// re-armed forward by Finish, not blindly failed. Only one-shot rows (and
+	// paused recurring rows, which Due already ignores) are expired here.
 	res, err := s.db.Exec(`UPDATE scheduled_tasks SET status = ?, error_message = ?, updated_at = ?
-		WHERE status = ? AND run_at < ?`,
-		model.SchedStatusFailed, message, now, model.SchedStatusPending, floor)
+		WHERE status = ? AND run_at < ? AND (recurrence = ? OR active = 0)`,
+		model.SchedStatusFailed, message, now, model.SchedStatusPending, floor, model.SchedRecurOnce)
 	if err != nil {
 		return 0, err
 	}
@@ -289,16 +477,59 @@ func (s *ScheduledTaskService) FailExpired(now time.Time, cutoff time.Duration, 
 // SubTaskService.RecoverInterrupted; the scheduler calls this once before
 // Start. Returns the number of rows recovered.
 func (s *ScheduledTaskService) RecoverInterrupted() (int64, error) {
-	now := time.Now()
-	res, err := s.db.Exec(`UPDATE scheduled_tasks SET status = ?, error_message = ?, updated_at = ?
-		WHERE status = ?`,
-		model.SchedStatusFailed,
-		"服务在定时任务执行期间重启，执行中断。请到需求详情页手动重试。",
-		now, model.SchedStatusRunning)
+	const interruptedMsg = "服务在定时任务执行期间重启，执行中断。请到需求详情页手动重试。"
+	now := time.Now().UTC()
+	// Load the running rows first so recurring plans can be re-armed rather
+	// than parked in a terminal `failed` state (a one-shot boot-recovery
+	// failure is fine — the plan is done — but a recurring plan must survive
+	// a restart and fire again at its next occurrence).
+	rows, err := s.db.Query(`SELECT id, recurrence, recur_time, recur_days, recur_tz, active
+		FROM scheduled_tasks WHERE status = ?`, model.SchedStatusRunning)
 	if err != nil {
 		return 0, err
 	}
-	n, _ := res.RowsAffected()
+	type running struct {
+		id, recurrence, recurTime, recurDays, recurTZ string
+		active                                        bool
+	}
+	var list []running
+	for rows.Next() {
+		var r running
+		if err := rows.Scan(&r.id, &r.recurrence, &r.recurTime, &r.recurDays, &r.recurTZ, &r.active); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		list = append(list, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	var n int64
+	for _, r := range list {
+		recurring := r.active && r.recurrence != "" && r.recurrence != model.SchedRecurOnce
+		if recurring {
+			next, nerr := NextRunAt(r.recurrence, r.recurTime, r.recurDays, r.recurTZ, now)
+			if nerr == nil && !next.IsZero() {
+				if _, uerr := s.db.Exec(`UPDATE scheduled_tasks SET status = ?, run_at = ?, executed_at = NULL,
+					last_run_at = ?, last_status = ?, last_error = ?, run_count = run_count + 1, updated_at = ?
+					WHERE id = ?`,
+					model.SchedStatusPending, next, now, model.SchedStatusFailed, interruptedMsg, now, r.id); uerr != nil {
+					return n, uerr
+				}
+				n++
+				continue
+			}
+			// Fall through to terminal failure when the rule can't re-arm.
+		}
+		if _, uerr := s.db.Exec(`UPDATE scheduled_tasks SET status = ?, error_message = ?, updated_at = ?
+			WHERE id = ?`,
+			model.SchedStatusFailed, interruptedMsg, now, r.id); uerr != nil {
+			return n, uerr
+		}
+		n++
+	}
 	return n, nil
 }
 
@@ -399,12 +630,19 @@ func scanScheduledTask(rows *sql.Rows) (*model.ScheduledTask, error) {
 	var t model.ScheduledTask
 	var executedAt sql.NullTime
 	var runAtRaw sql.NullString
+	// last_run_at is scanned as a string (not *time.Time) for the same
+	// modernc SQLite round-trip reason documented above run_at — a bare
+	// Scan into *time.Time re-triggers the "unsupported Scan ... string into
+	// *time.Time" 500. parseRunAtString tolerates every stored form.
+	var lastRunAtRaw sql.NullString
 	if err := rows.Scan(
 		&t.ID, &t.TaskType, &t.RequirementID, &t.ProjectID, &t.RequirementTitle,
 		&runAtRaw, &t.Model, &t.ReadKnowledge, &t.BranchName, &t.BaseBranch,
 		&t.AgentServerID, &t.SplitTasks, &t.CodingModel, &t.CodingAgentServerID,
 		&t.Status, &t.JobID, &t.ErrorMessage,
 		&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &executedAt,
+		&t.Recurrence, &t.RecurTime, &t.RecurDays, &t.RecurTZ, &t.Active,
+		&lastRunAtRaw, &t.LastStatus, &t.LastError, &t.LastJobID, &t.RunCount,
 		&t.RequirementStatus,
 	); err != nil {
 		return nil, err
@@ -415,6 +653,11 @@ func scanScheduledTask(rows *sql.Rows) (*model.ScheduledTask, error) {
 	if executedAt.Valid {
 		tt := executedAt.Time
 		t.ExecutedAt = &tt
+	}
+	if lastRunAtRaw.Valid && strings.TrimSpace(lastRunAtRaw.String) != "" {
+		if lr := parseRunAtString(lastRunAtRaw.String); !lr.IsZero() {
+			t.LastRunAt = &lr
+		}
 	}
 	return &t, nil
 }
