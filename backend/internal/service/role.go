@@ -259,7 +259,7 @@ const architectOldPromptSignature = "涵盖：整体实现思路、涉及文件"
 // current template-driven persona. Used by MigrateArchitectRole to
 // short-circuit when the row already carries the new persona (so the
 // migration is safe to call on every boot without re-applying).
-const architectNewPromptSignature = "需求理解复述"
+const architectNewPromptSignature = "页面 UI 调整说明"
 
 // MigrateArchitectRole brings the architect role's built-in system_prompt
 // forward to the template-driven persona for databases whose architect role
