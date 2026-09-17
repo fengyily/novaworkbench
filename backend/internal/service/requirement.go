@@ -193,6 +193,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		items = []model.Requirement{}
 	}
 	s.attachAgentServerNames(items)
+	s.attachScheduledRunAt(items)
 	return items, nil
 }
 

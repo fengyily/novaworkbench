@@ -13,11 +13,11 @@ import {
   MARK_PRESETS, parseMarks,
 } from '../api/client';
 import { tLabel } from '../i18n/label';
-import { fmtDate, fmtDateTime } from '../utils/intl';
+import { fmtDate, fmtDateTime, fmtRunAtRelative } from '../utils/intl';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import { StatusChips } from '../components/StatusChips';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
-import { IconPlug, IconRobot } from '../components/icons';
+import { IconPlug, IconRobot, IconClock } from '../components/icons';
 import { stripMarkdownPreview } from '../utils/preview';
 import { createEventStream, type EventStream } from '../api/stream';
 import './RequirementDetail.css';
@@ -765,6 +765,29 @@ export default function ProjectDetail() {
       <td data-label={t('projects.detail.colPriority')}><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
       <td data-label={t('projects.detail.colStatus')}>
         <StatusChips req={req} />
+        {/* Pending-scheduled chip — surfaces that this requirement has a
+            future dispatch waiting (mirror of the cross-project list).
+            rendered BEFORE the pulse dot so the static chip row reads as
+            "status | clock | pulse" (clock = stored fact, pulse = live
+            activity). Gated on scheduled_run_at filled by the backend
+            List endpoint (same helper the calendar uses). Uses the shared
+            .schedule-chip indigo pill so the affordance is unmissable —
+            a bare 13px outline icon next to the colored status badges
+            was visually swallowed and users couldn't tell scheduled rows
+            apart. */}
+        {req.scheduled_run_at && (
+          <span
+            className="schedule-chip"
+            title={t('requirements.list.scheduledTooltip', {
+              time: fmtDateTime(req.scheduled_run_at),
+              rel: fmtRunAtRelative(req.scheduled_run_at),
+            })}
+            aria-label={t('requirements.list.scheduledAria')}
+          >
+            <IconClock size={12} className="schedule-chip-icon" />
+            {fmtRunAtRelative(req.scheduled_run_at)}
+          </span>
+        )}
         {/* Breathing dot for any wizard job in flight on this requirement
             (analyst/design/apply/coding). Set is populated by the 5s poll
             of /api/wizard/active-jobs above. aria-label + title so screen

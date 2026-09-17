@@ -196,6 +196,35 @@ body.no-scroll {
 .claude-status { display: inline-flex; align-items: center; gap: 4px; }
 .claude-status .icon-mr { margin-right: 0; }
 
+/* Scheduled-task clock chip — small indigo pill rendered next to a row's
+   status / title to surface that the requirement has a pending dispatch
+   waiting. Uses an explicit background so it doesn't blend into plain text
+   (the bare 13px outline icon was easy to miss in dense lists). Sits
+   inline-flex so it aligns with neighboring chips like the status badge
+   row in ProjectDetail.tsx and the title text in RequirementsList.tsx. */
+.schedule-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  margin-right: 4px;
+  border-radius: 999px;
+  background: #EEF2FF;       /* var(--color-active) — soft indigo wash */
+  color: var(--color-primary, #4F46E5);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.schedule-chip .schedule-chip-icon {
+  /* Tighter override of .icon-mr: chip has its own gap + padding, so the
+     default 4px right margin would double-space. flex-shrink keeps the
+     clock visible when the row is narrow. */
+  margin-right: 0;
+  flex-shrink: 0;
+}
+
 /* ── Touch target sizing ────────────────────────────────────────
    Apple HIG and WCAG 2.5.5 both call for ≥44×44px tap targets. On mobile
    we expand small buttons (which are fine on desktop with a mouse) so the

@@ -22,8 +22,7 @@ import {
   type RunJob,
 } from '../api/client';
 import { useTranslation } from 'react-i18next';
-import i18next from 'i18next';
-import { fmtDateTime, fmtRelative } from '../utils/intl';
+import { fmtDateTime, fmtRelative, fmtRunAtRelative } from '../utils/intl';
 import { errorMessage } from '../utils/errMsg';
 import { IconClock, IconClose, IconAlert, IconHourglass, IconRocket } from '../components/icons';
 import StatusChips from '../components/StatusChips';
@@ -56,32 +55,6 @@ const typeLabelKeys: Record<ScheduledTaskType, string> = {
   coding: 'schedules.type.coding',
   design_and_coding: 'schedules.type.designCoding',
 };
-
-// Compact "in 3 h / 3 d ago" formatter for the run_at column — picks the two
-// most significant units so a year-old log still fits its tight cell.
-// Phrasing comes from the time.* keys, read at call time so a language
-// switch updates it on the next render.
-function relativeRunAt(iso: string, nowMs: number): string {
-  const diff = new Date(iso).getTime() - nowMs;
-  const abs = Math.abs(diff);
-  const min = 60_000;
-  const hour = 60 * min;
-  const day = 24 * hour;
-  const tt = i18next.t as unknown as (k: string, o?: Record<string, unknown>) => string;
-  if (abs < min) return diff >= 0 ? tt('time.soon') : tt('time.justNow');
-  if (abs < hour) {
-    const m = Math.round(abs / min);
-    return diff >= 0 ? tt('time.inMinutes', { n: m }) : tt('time.minutesAgo', { n: m });
-  }
-  if (abs < day) {
-    const h = Math.round(abs / hour);
-    return diff >= 0 ? tt('time.inHours', { n: h }) : tt('time.hoursAgo', { n: h });
-  }
-  const d = Math.round(abs / day);
-  if (d < 30) return diff >= 0 ? tt('time.inDays', { n: d }) : tt('time.daysAgo', { n: d });
-  const months = Math.round(d / 30);
-  return diff >= 0 ? tt('time.inMonths', { n: months }) : tt('time.monthsAgo', { n: months });
-}
 
 export default function SchedulesPage() {
   const { t } = useTranslation();
@@ -165,7 +138,7 @@ export default function SchedulesPage() {
     .filter(r => r.status === 'pending')
     .map(r => new Date(r.run_at).getTime())
     .sort((a, b) => a - b)[0];
-  const nextLabel = nextPending != null ? relativeRunAt(new Date(nextPending).toISOString(), now) : null;
+  const nextLabel = nextPending != null ? fmtRunAtRelative(new Date(nextPending).toISOString(), now) : null;
   const isOverdue = nextPending != null && nextPending < now;
 
   const handleCancel = async (id: string) => {
@@ -393,7 +366,7 @@ function ScheduleRow({
             </span>
             {fmtDateTime(t.run_at)}
             <span style={{ color: 'var(--color-text-muted)' }}>·</span>
-            <span>{relativeRunAt(t.run_at, now)}</span>
+            <span>{fmtRunAtRelative(t.run_at, now)}</span>
             {showOverdue && <span>· {tr('schedules.overdue')}</span>}
           </span>
           <span className="schedules-meta-item" title={tr('schedules.modelTitle')}>

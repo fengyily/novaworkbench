@@ -40,6 +40,10 @@ export const requirements = {
     emptyTitle: '还没有需求',
     emptyDesc: '在项目详情里创建需求，或点击右上角新建。',
     newButton: '+ 新建需求',
+    // Has-pending-schedule affordance rendered by RequirementsList rows.
+    // Mirrors the "🕐" semantics already shown on /requirements/calendar.
+    scheduledTooltip: '定时执行 · {{time}} · {{rel}}',
+    scheduledAria: '有定时执行计划',
   },
   detail: {
     titleFallback: '（未命名需求）',
