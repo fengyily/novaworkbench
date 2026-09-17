@@ -36,6 +36,37 @@ const KIND_FILTERS: { value: Kind; labelKey: string; emoji: string }[] = [
   { value: 'idea', labelKey: 'requirements.list.kindFilters.idea', emoji: '💡' },
 ];
 
+// MarksStrip renders the preset mark chip strip (重要 / 跟进 / 阻塞 / 风险)
+// INLINE with the requirement title. Empty marks → nothing rendered. Used by
+// both the desktop table row and the mobile card so the inline layout stays
+// in sync across the two surfaces. Returns null when there are no marks so
+// unmarked rows don't pick up extra spacing.
+function MarksStrip({ marks }: { marks: string | undefined }) {
+  const { t } = useTranslation();
+  const rowMarks = parseMarks(marks);
+  if (rowMarks.length === 0) return null;
+  return (
+    <div className="req-row-marks">
+      {rowMarks.map(code => {
+        const p = MARK_PRESETS.find(x => x.code === code);
+        if (!p) return null;
+        const label = t(`requirements.detail2.marksPreset.${p.code}`);
+        return (
+          <span
+            key={code}
+            className={`req-row-mark-tag ${p.code}`}
+            style={{ color: p.color, background: p.bg, borderColor: p.color }}
+            title={label}
+          >
+            <span aria-hidden>{p.icon}</span>
+            <span>{label}</span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function RequirementsList() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -290,40 +321,19 @@ export default function RequirementsList() {
                     </td>
                     <td className="req-row-title" data-label={t('requirements.list.colTitle')}>
                       <div className="req-row-title-text">
+                        {/* Preset marks (important / follow_up / blocked / at_risk)
+                            render INLINE with the title (chip strip BEFORE the
+                            schedule clock + title text) so marked requirements
+                            stay on a single line. Empty list → nothing rendered
+                            (so unmarked rows don't get extra spacing). Colors
+                            come from MARK_PRESETS in api/client.ts so the
+                            detail-page editor stays in sync. */}
+                        <MarksStrip marks={r.marks} />
                         {scheduleClock(r)}
-                        {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
+                        <span className="req-row-title-text-label">
+                          {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
+                        </span>
                       </div>
-                      {/* Preset marks (important / follow_up / blocked / at_risk)
-                          sit ABOVE the title (per frontend design): preset
-                          color + icon, and only render when the row actually
-                          has at least one mark (empty list → skip the row
-                          entirely so unmarked rows don't get extra height).
-                          Uses the shared MARK_PRESETS list from api/client.ts
-                          so colors stay in sync with the detail-page editor. */}
-                      {(() => {
-                        const rowMarks = parseMarks(r.marks);
-                        if (rowMarks.length === 0) return null;
-                        return (
-                          <div className="req-row-marks">
-                            {rowMarks.map(code => {
-                              const p = MARK_PRESETS.find(x => x.code === code);
-                              if (!p) return null;
-                              const label = t(`requirements.detail2.marksPreset.${p.code}`);
-                              return (
-                                <span
-                                  key={code}
-                                  className={`req-row-mark-tag ${p.code}`}
-                                  style={{ color: p.color, background: p.bg, borderColor: p.color }}
-                                  title={label}
-                                >
-                                  <span aria-hidden>{p.icon}</span>
-                                  <span>{label}</span>
-                                </span>
-                              );
-                            })}
-                          </div>
-                        );
-                      })()}
                       {/* Mirror the project-page chip strip: tags render
                           under the title as a 3-chip cap with +N overflow.
                           Force-closed rows carry a small amber badge so the
@@ -439,37 +449,18 @@ export default function RequirementsList() {
                   <StatusChips req={r} />
                 </div>
                 {/* Preset marks on mobile: same chip strip as the desktop
-                    title column, rendered above the title. Empty list →
-                    nothing rendered (so unmarked cards keep their natural
-                    height). Mirrors the design's "mark 比 priority 更显眼
-                    — 因为它直接影响排序" intent. */}
-                {(() => {
-                  const rowMarks = parseMarks(r.marks);
-                  if (rowMarks.length === 0) return null;
-                  return (
-                    <div className="req-row-marks">
-                      {rowMarks.map(code => {
-                        const p = MARK_PRESETS.find(x => x.code === code);
-                        if (!p) return null;
-                        const label = t(`requirements.detail2.marksPreset.${p.code}`);
-                        return (
-                          <span
-                            key={code}
-                            className={`req-row-mark-tag ${p.code}`}
-                            style={{ color: p.color, background: p.bg, borderColor: p.color }}
-                            title={label}
-                          >
-                            <span aria-hidden>{p.icon}</span>
-                            <span>{label}</span>
-                          </span>
-                        );
-                      })}
-                    </div>
-                  );
-                })()}
+                    title column, now rendered INLINE with the title (chip
+                    strip → schedule clock → title text) so marked cards
+                    stay on a single line. Empty list → nothing rendered
+                    (so unmarked cards keep their natural height). Mirrors
+                    the design's "mark 比 priority 更显眼 — 因为它直接
+                    影响排序" intent. */}
                 <div className="req-card-mobile-title">
+                  <MarksStrip marks={r.marks} />
                   {scheduleClock(r)}
-                  {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
+                  <span className="req-row-title-text-label">
+                    {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
+                  </span>
                 </div>
                 <div className="req-card-mobile-foot">
                   <span className="req-card-mobile-project" title={projectName}>
