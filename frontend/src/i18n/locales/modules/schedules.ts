@@ -96,6 +96,14 @@ export const schedules = {
     errAlreadyScheduled: '已存在一条 pending 定时任务，请先到「定时任务」页取消或删除。',
     errRunAtTooSoon: '计划时间距现在太近，请选一个至少 30 秒后的时间。',
     errIdeaNotDevelopable: '「想法」类需求不能直接安排开发，请先转为需求。',
+    // Used by DesignCodingImmediateModal when backend surfaces a NO_SESSION
+    // failure from prepareArchitectDesign. Falls back to errSubmit if you want
+    // a single generic message.
+    errNoSession: '当前需求尚未完成分析阶段，无法直接生成方案。',
+    // Catch-all for unrecognized error codes from the immediate
+    // design-and-coding endpoint (and any future modal that needs the same
+    // fallback).
+    errGeneric: '操作失败，请稍后重试。',
     errSubmit: '提交失败',
   },
 } as const;

@@ -1024,6 +1024,43 @@ export interface StartCodingReq {
   sync_mode?: '' | 'local' | 'remote';
 }
 
+/**
+ * Request shape for POST /api/wizard/requirements/{id}/design-and-coding.
+ * The backend (wizard_immediate.go) chains architect-design → start-coding
+ * synchronously server-side and only writes to the `requirements` row
+ * (never `scheduled_tasks`). All fields are optional; empty strings /
+ * omitted booleans fall back to backend defaults (role model, project
+ * default_branch, etc.). Mirrors the column set on `scheduled_tasks` for
+ * the design_and_coding case minus the `run_at` column.
+ */
+export interface DesignCodingImmediateReq {
+  read_knowledge?: boolean;
+  design_model?: string;
+  /** design stage's claude_configs row id; '' = backend resolves. */
+  design_claude_config_id?: string;
+  /** design stage Agent server; '' = local execution. */
+  design_agent_server_id?: string;
+  coding_model?: string;
+  /** coding stage's claude_configs row id; '' = backend resolves. */
+  coding_claude_config_id?: string;
+  /** coding stage Agent server; '' = local execution. */
+  coding_agent_server_id?: string;
+  branch_name?: string;
+  base_branch?: string;
+  split_tasks?: boolean;
+  /** nil = keep the requirement row's persisted value; true/false = override. */
+  auto_push_pr?: boolean;
+  dev_mode?: '' | 'session' | 'design';
+  sync_mode?: '' | 'local' | 'remote';
+}
+
+export interface DesignCodingImmediateResp {
+  /** JobStore id for the design stage. The chained coding job's id will
+   * land on `requirements.coding_job_id` once coding kicks off, and the
+   * existing active-jobs poll picks it up without further round-trips. */
+  design_job_id: string;
+}
+
 export const wizardApi = {
   /**
    * Trigger claude to compress the current stage's conversation into a short
@@ -1041,6 +1078,21 @@ export const wizardApi = {
       requirement_id: requirementId,
       step,
     }),
+  /**
+   * Immediately fire the chained "design + coding" run for one requirement
+   * (parallel to scheduled_tasks.task_type='design_and_coding', but without
+   * persisting a scheduled row). The backend returns the design stage's
+   * JobStore id synchronously; the parent should hand that id to
+   * streamDesignJob so the design SSE picks up immediately. The coding
+   * stage starts server-side once design finishes; its job id lands on
+   * `requirements.coding_job_id` and the page's active-jobs poll picks it
+   * up without any extra wiring here.
+   */
+  startDesignAndCoding: (requirementId: string, body: DesignCodingImmediateReq) =>
+    api.post<DesignCodingImmediateResp>(
+      `/api/wizard/requirements/${requirementId}/design-and-coding`,
+      body,
+    ),
   /**
    * Fetch the persisted compression summary for one stage. Returns an
    * empty summary + null timestamp when the stage has never been
