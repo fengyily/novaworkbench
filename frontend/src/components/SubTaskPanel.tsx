@@ -1393,14 +1393,27 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // backend's 409 NO_SESSION check. The with_context / bare options stay
   // enabled — they explicitly opt out of the parent-session requirement.
   const [sessionMode, setSessionMode] = useState<SessionMode>('resume');
+  // Track whether the user has touched the session-mode radio. The
+  // stale-artifact auto-promote below MUST NOT stomp a deliberate user
+  // pick: a fresh poll re-creates `latestArtifactStale` on every render
+  // and re-fires the effect, so without this guard the radio snaps back
+  // to 「带上下文」 and the user can never land on 「新会话」.
+  const sessionModeTouchedRef = useRef(false);
   useEffect(() => {
-    // When the user just saw a stale-session failure, auto-promote to
+    // When the user just saw a stale-session failure AND hasn't made a
+    // deliberate choice yet, auto-promote the default 'resume' to
     // 「带上下文」 so a follow-up click "just works" (the new session won't
-    // try to resume the missing JSONL).
-    if (latestArtifactStale && latestArtifactStale.isStale) {
+    // try to resume the missing JSONL). Once the user picks anything
+    // manually — including 「新会话」 — we leave their choice alone.
+    if (
+      sessionModeTouchedRef.current === false &&
+      sessionMode === 'resume' &&
+      latestArtifactStale &&
+      latestArtifactStale.isStale
+    ) {
       setSessionMode('with_context');
     }
-  }, [latestArtifactStale]);
+  }, [latestArtifactStale, sessionMode]);
 
   const onCreate = useCallback(async () => {
     const p = prompt.trim();
@@ -1810,7 +1823,14 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
                     name="sessionMode"
                     value={opt.key}
                     checked={active}
-                    onChange={() => setSessionMode(opt.key)}
+                    onChange={() => {
+                      // Mark the radio as user-touched so the
+                      // latestArtifactStale auto-promote effect below
+                      // stops stomping on a deliberate pick on the next
+                      // 5s poll refresh.
+                      sessionModeTouchedRef.current = true;
+                      setSessionMode(opt.key);
+                    }}
                     disabled={isDisabled}
                   />
                   <span className="sub-session-mode-option-text">{opt.label}</span>
