@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -584,7 +585,28 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 // at boot time is treated as orphaned and flipped back to pending for
 // re-dispatch. The status='running' guard means a Finish() that races the
 // heartbeat doesn't accidentally reset the heartbeat on a terminal row.
-func (s *SubTaskService) MarkHeartbeat(subTaskID string) error {
+//
+// expectedSessionID is the claude session id the goroutine was started with.
+// When non-empty, the UPDATE additionally requires session_id=? — this is the
+// defense against the self-heal/double-dispatch race: if a re-claim has
+// already overwritten session_id (via UpdateSession in the new goroutine's
+// prologue), this heartbeat MUST become a no-op so the row's batch_id_seq_run
+// reflects the new owner. Without this guard, a zombie heartbeat from the
+// original run could keep an orphaned row from being deleted by RecoverStaleRunningInBatch
+// even after the queue has re-claimed and re-launched it. Pass "" to keep the
+// legacy "any running row" behavior (e.g. boot recovery paths that don't have
+// a session id in hand).
+//
+// Returns nil on a successful refresh OR on a 0-row update caused by a session
+// mismatch / status flip — the caller treats both as "heartbeat accepted" and
+// the next tick re-evaluates state from scratch.
+func (s *SubTaskService) MarkHeartbeat(subTaskID, expectedSessionID string) error {
+	if expectedSessionID != "" {
+		_, err := s.db.Exec(`UPDATE sub_tasks SET batch_id_seq_run=CURRENT_TIMESTAMP
+			WHERE id=? AND status=? AND session_id=?`,
+			subTaskID, model.SubTaskStatusRunning, expectedSessionID)
+		return err
+	}
 	_, err := s.db.Exec(`UPDATE sub_tasks SET batch_id_seq_run=CURRENT_TIMESTAMP
 		WHERE id=? AND status=?`,
 		subTaskID, model.SubTaskStatusRunning)
@@ -899,6 +921,34 @@ func (s *SubTaskService) MarkStopped(subTaskID, priorArtifact string) error {
 // computation (e.g. when called from a CreateAdjustment path that doesn't
 // care about wall-clock); the column then stays at its default 0.
 func (s *SubTaskService) Finish(id, status, artifact, modelName string, tokens model.SubTaskTokens, costCents int, startTime time.Time) error {
+	return s.finishInternal(id, status, artifact, modelName, tokens, costCents, startTime, "")
+}
+
+// FinishForSession is the idempotent twin of Finish: it refuses to write when
+// the row's stored session_id has already been overwritten by a re-claim
+// (orchestration self-heal re-launched the same sub_task). This is the
+// defense against the "same child row finished twice, twice spawned a new
+// claude process" race reported in req_650ea321dcab5195: a goroutine that
+// started before the re-claim would call Finish with status='done' and
+// silently clobber the row again, double-counting tokens and double-finishing
+// the row. With expectedSessionID set, FinishForSession first reads
+// sub_tasks.session_id and only writes when it matches. A 0-row UPDATE is a
+// no-op (no error) and is logged at debug level so the false-positive path
+// is still observable.
+//
+// Pass expectedSessionID="" to fall through to the legacy Finish semantics —
+// the existing call sites that don't have a session id in hand keep working.
+func (s *SubTaskService) FinishForSession(id, expectedSessionID, status, artifact, modelName string, tokens model.SubTaskTokens, costCents int, startTime time.Time) error {
+	return s.finishInternal(id, status, artifact, modelName, tokens, costCents, startTime, expectedSessionID)
+}
+
+// finishInternal is the shared terminal-write body. expectedSessionID when
+// non-empty turns the UPDATE into a session-id-conditional write so a stale
+// goroutine cannot clobber a row that a re-claim has already finished (or is
+// actively running under a fresh session). The duration / artifact / token
+// columns stay untouched on mismatch — exactly what we want, because the new
+// owner is the authoritative terminal writer.
+func (s *SubTaskService) finishInternal(id, status, artifact, modelName string, tokens model.SubTaskTokens, costCents int, startTime time.Time, expectedSessionID string) error {
 	now := time.Now()
 	duration := 0
 	if !startTime.IsZero() {
@@ -906,6 +956,17 @@ func (s *SubTaskService) Finish(id, status, artifact, modelName string, tokens m
 		if duration < 0 {
 			duration = 0
 		}
+	}
+	if expectedSessionID != "" {
+		_, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, model=?,
+			input_tokens=?, output_tokens=?, cache_creation_tokens=?, cache_read_tokens=?,
+			cost_cents=?, duration_seconds=?,
+			completed_at=?, updated_at=? WHERE id=? AND session_id=?`,
+			status, artifact, modelName,
+			tokens.Input, tokens.Output, tokens.CacheCreation, tokens.CacheRead,
+			costCents, duration,
+			now, now, id, expectedSessionID)
+		return err
 	}
 	_, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, model=?,
 		input_tokens=?, output_tokens=?, cache_creation_tokens=?, cache_read_tokens=?,
@@ -930,7 +991,13 @@ func (s *SubTaskService) Finish(id, status, artifact, modelName string, tokens m
 // for stopped rows, but then token usage / cost / duration would stay at zero
 // forever (and the dashboard / SubTaskCard header would show "—" instead of
 // the resolved amount).
-func (s *SubTaskService) UpdateRunStatsOnStop(id, modelName string, tokens model.SubTaskTokens, costCents int, startTime time.Time) error {
+//
+// expectedSessionID — same idempotency contract as FinishForSession. Pass ""
+// for the original 6-arg behavior. When non-empty, the UPDATE only fires when
+// the row's session_id matches, so a stale post-stop reconcile cannot
+// overwrite token stats for a row that a re-claim has already finished under
+// a fresh session.
+func (s *SubTaskService) UpdateRunStatsOnStop(id, expectedSessionID, modelName string, tokens model.SubTaskTokens, costCents int, startTime time.Time) error {
 	now := time.Now()
 	duration := 0
 	if !startTime.IsZero() {
@@ -938,6 +1005,17 @@ func (s *SubTaskService) UpdateRunStatsOnStop(id, modelName string, tokens model
 		if duration < 0 {
 			duration = 0
 		}
+	}
+	if expectedSessionID != "" {
+		_, err := s.db.Exec(`UPDATE sub_tasks SET model=?,
+			input_tokens=?, output_tokens=?, cache_creation_tokens=?, cache_read_tokens=?,
+			cost_cents=?, duration_seconds=?, completed_at=?, updated_at=?
+			WHERE id=? AND session_id=?`,
+			modelName,
+			tokens.Input, tokens.Output, tokens.CacheCreation, tokens.CacheRead,
+			costCents, duration,
+			now, now, id, expectedSessionID)
+		return err
 	}
 	_, err := s.db.Exec(`UPDATE sub_tasks SET model=?,
 		input_tokens=?, output_tokens=?, cache_creation_tokens=?, cache_read_tokens=?,
@@ -1054,28 +1132,103 @@ func (s *SubTaskService) RecoverInterrupted() (int64, error) {
 // for that reason; if you call this from elsewhere, pick a value ≥ 30s.
 //
 // Idempotent: rows that are already 'pending'/'done'/'error' are not
-// touched, so this is safe to invoke on every tick. Returns the number
-// of rows flipped so the caller can log a self-heal line.
-func (s *SubTaskService) RecoverStaleRunningInBatch(batchID string, staleAfter time.Duration) (int64, error) {
+// touched, so this is safe to invoke on every tick. Returns the IDs and
+// metadata of the rows flipped so the caller can log a self-heal line
+// per row (child_id / session_id / last-heartbeat age / job_id) — these
+// four fields are the diagnostic breadcrumb that distinguishes a true
+// crashed-child recover from a false-positive that killed a still-live
+// goroutine (req_650ea321dcab5195 was this kind of false positive).
+//
+// Concurrency note: we deliberately do NOT wrap the SELECT + UPDATE in a
+// single transaction. The DB layer's *db.Tx wrapper exposes only Exec /
+// QueryRow (not Query), so the SELECT path has to go through the
+// connection pool — which would land on a different connection than the
+// UPDATE's tx, defeating the FOR UPDATE we wanted. SQLite's single-writer
+// (MaxOpenConns=1) model already serializes the pair; MySQL/Postgres
+// accept the eventual-consistency window because (a) MarkHeartbeat is
+// session-id-conditional so a live goroutine's write after our SELECT but
+// before our UPDATE simply keeps the row alive for the next tick, and
+// (b) the per-row FinishForSession guard ensures even a stolen reclaim
+// cannot double-finish the row.
+type RecoveredStaleRow struct {
+	ID           string
+	SessionID    string
+	JobID        string
+	HeartbeatAge time.Duration
+}
+
+func (s *SubTaskService) RecoverStaleRunningInBatch(batchID string, staleAfter time.Duration) ([]RecoveredStaleRow, error) {
 	if batchID == "" {
-		return 0, errors.New("batch_id is required")
+		return nil, errors.New("batch_id is required")
 	}
 	if staleAfter <= 0 {
-		return 0, errors.New("staleAfter must be positive")
+		return nil, errors.New("staleAfter must be positive")
 	}
-	cutoff := time.Now().Add(-staleAfter)
+	now := time.Now()
+	cutoff := now.Add(-staleAfter)
+	rows, err := s.db.Query(`SELECT id, COALESCE(session_id,''), COALESCE(job_id,''), batch_id_seq_run
+		FROM sub_tasks
+		WHERE batch_id=? AND status=?
+		  AND batch_id_seq_run IS NOT NULL
+		  AND batch_id_seq_run < ?`,
+		batchID, model.SubTaskStatusRunning, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("recover stale running in batch %s: select: %w", batchID, err)
+	}
+	var affected []RecoveredStaleRow
+	for rows.Next() {
+		var (
+			id, sid, jid string
+			heartbeat    sql.NullTime
+		)
+		if scanErr := rows.Scan(&id, &sid, &jid, &heartbeat); scanErr != nil {
+			rows.Close()
+			return nil, fmt.Errorf("recover stale running in batch %s: scan: %w", batchID, scanErr)
+		}
+		age := time.Duration(0)
+		if heartbeat.Valid {
+			age = now.Sub(heartbeat.Time)
+			if age < 0 {
+				age = 0
+			}
+		}
+		affected = append(affected, RecoveredStaleRow{
+			ID:           id,
+			SessionID:    sid,
+			JobID:        jid,
+			HeartbeatAge: age,
+		})
+	}
+	if rerr := rows.Err(); rerr != nil {
+		rows.Close()
+		return nil, fmt.Errorf("recover stale running in batch %s: rows: %w", batchID, rerr)
+	}
+	rows.Close()
+	if len(affected) == 0 {
+		return nil, nil
+	}
 	res, err := s.db.Exec(`UPDATE sub_tasks
 		SET status=?, batch_id_seq_run=NULL, job_id='', updated_at=?
 		WHERE batch_id=? AND status=?
 		  AND batch_id_seq_run IS NOT NULL
 		  AND batch_id_seq_run < ?`,
-		model.SubTaskStatusPending, time.Now(),
+		model.SubTaskStatusPending, now,
 		batchID, model.SubTaskStatusRunning, cutoff)
 	if err != nil {
-		return 0, fmt.Errorf("recover stale running in batch %s: %w", batchID, err)
+		return affected, fmt.Errorf("recover stale running in batch %s: update: %w", batchID, err)
 	}
 	n, _ := res.RowsAffected()
-	return n, nil
+	// If a concurrent MarkHeartbeat landed between SELECT and UPDATE and
+	// refreshed the heartbeat past the cutoff, the UPDATE 0-rows-matched
+	// even though our SELECT saw a stale row. Truncate the metadata to
+	// whatever was actually flipped, leaving any race-survivors out of the
+	// log line so operators aren't misled.
+	if int(n) < len(affected) {
+		log.Printf("[orch] self-heal %s: %d row(s) flipped, %d raced past cutoff (likely live heartbeat landed mid-recover)",
+			batchID, n, len(affected)-int(n))
+		affected = affected[:n]
+	}
+	return affected, nil
 }
 
 // scanSubTask is a shared row→struct mapper. Pulled out so List / Get can

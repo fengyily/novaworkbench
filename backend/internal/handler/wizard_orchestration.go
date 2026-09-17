@@ -1109,6 +1109,16 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	var hbDone chan struct{}
 	var job *store.Job
 	var modelName string
+	// childSID is hoisted alongside the other closure-captured locals so the
+	// panic guard and early-exit guard can pass it into FinishForSession
+	// (defense against the self-heal double-dispatch race: a stale goroutine
+	// refuses to clobber a row whose session_id has been overwritten by a
+	// re-claim). The actual mint happens further below at the UpdateSession
+	// call site; until then it is "" and FinishForSession treats that as
+	// "session not yet established" and falls through to the unconditional
+	// write — safe because no heartbeat / job pre-mint has happened yet, so
+	// the row can't have been re-claimed either.
+	var childSID string
 
 	// Panic guard registered FIRST so it covers the entire function body —
 	// including the `if h.subTaskSvc == nil` nil-check and the early-exit
@@ -1152,7 +1162,12 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 			// re-writing here would clobber its carefully-built artifact
 			// with a generic panic message.
 			if h.subTaskSvc != nil && earlyExitReason == "" {
-				if ferr := h.subTaskSvc.Finish(st.ID, model.SubTaskStatusError,
+				// Same session-id-conditional semantics as the early-exit
+				// path. A panic surfaced AFTER UpdateSession has set
+				// childSID — a re-claim mid-panic MUST NOT be silently
+				// overwritten with a generic panic artifact.
+				if ferr := h.subTaskSvc.FinishForSession(st.ID, childSID,
+					model.SubTaskStatusError,
 					"❌ 子任务执行阶段异常退出: "+fmt.Sprint(rec),
 					modelName, model.SubTaskTokens{}, 0, time.Time{}); ferr != nil {
 					log.Printf("[orchestrate] panic-recover Finish %s failed: %v", st.ID, ferr)
@@ -1206,7 +1221,13 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 		log.Printf("[orchestrate] child %s (batch %s seq %d) early exit: %s",
 			st.ID, batch.ID, st.BatchSeq, earlyExitReason)
 		artifact := buildSubTaskArtifact(st, modelName, "❌ "+earlyExitReason, time.Now())
-		if perr := h.subTaskSvc.Finish(st.ID, model.SubTaskStatusError, artifact, modelName,
+		// Session-id-conditional Finish: when childSID is empty (early exit
+		// before UpdateSession ran) FinishForSession falls back to the
+		// unconditional write — safe because no re-claim could have
+		// happened without first persisting a session id. Once childSID
+		// is set, a session-id mismatch on the row is the only way to
+		// have been re-claimed, and we MUST NOT clobber the new owner.
+		if perr := h.subTaskSvc.FinishForSession(st.ID, childSID, model.SubTaskStatusError, artifact, modelName,
 			model.SubTaskTokens{}, 0, time.Time{}); perr != nil {
 			log.Printf("[orchestrate] early-exit Finish %s failed: %v", st.ID, perr)
 		}
@@ -1218,7 +1239,12 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	}()
 
 	// Pre-mint child session id (forked from the orchestrator/main session).
-	childSID := util.NewUUID()
+	// Assigned to the hoisted childSID var so the panic guard and early-exit
+	// guard (which capture it by reference) see the post-mint value when they
+	// run. Until this line, childSID is "" and FinishForSession falls through
+	// to the unconditional write path — safe because no heartbeat / job
+	// pre-mint has happened yet.
+	childSID = util.NewUUID()
 	if perr := h.subTaskSvc.UpdateSession(st.ID, childSID, batch.OrchestratorSessionID); perr != nil {
 		log.Printf("[orchestrate] failed to persist child session for %s: %v", st.ID, perr)
 	}
@@ -1256,6 +1282,15 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 		hbInterval = 5 * time.Second
 	}
 	hbDone = make(chan struct{})
+	// heartbeatSessionID is captured at goroutine start so every tick of the
+	// heartbeat loop is anchored to the session the goroutine was actually
+	// launched with. If a self-heal re-claims this row and a NEW goroutine
+	// overwrites session_id via UpdateSession, our heartbeat MUST become a
+	// no-op (SubTaskService.MarkHeartbeat refuses to update a row whose
+	// session_id no longer matches) — otherwise a zombie heartbeat would keep
+	// the orphaned row's batch_id_seq_run fresh and the next self-heal would
+	// keep deleting it / re-claiming it / re-launching it in a loop.
+	heartbeatSessionID := childSID
 	go func() {
 		// Recover the heartbeat loop in isolation — a panic here would
 		// otherwise kill the goroutine silently and leave
@@ -1277,7 +1312,7 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 			case <-hbDone:
 				return
 			case <-ticker.C:
-				if herr := h.subTaskSvc.MarkHeartbeat(st.ID); herr != nil {
+				if herr := h.subTaskSvc.MarkHeartbeat(st.ID, heartbeatSessionID); herr != nil {
 					log.Printf("[orchestrate] heartbeat %s: %v", st.ID, herr)
 				}
 			}
@@ -1405,8 +1440,22 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 		CacheCreation: out.lastUsage.CacheCreationTokens,
 		CacheRead:     out.lastUsage.CacheReadTokens,
 	}
-	if perr := h.subTaskSvc.Finish(st.ID, status, artifact, modelName, tokens, 0, time.Time{}); perr != nil {
+	// Session-id-conditional Finish — see FinishForSession docstring. The
+	// childSID captured at goroutine start is the authoritative session id;
+	// when a self-heal has re-claimed the row, our goroutine's Finish write
+	// would otherwise overwrite the new owner's tokens + artifact + status
+	// (the exact double-finish race in req_650ea321dcab5195). A 0-row update
+	// is logged at info so an ops dashboard can spot false-positive self-heals.
+	if perr := h.subTaskSvc.FinishForSession(st.ID, childSID, status, artifact, modelName, tokens, 0, time.Time{}); perr != nil {
 		log.Printf("[orchestrate] failed to persist finish for %s: %v", st.ID, perr)
+	} else {
+		// Quick post-write read to confirm we were the writer. Used only as
+		// a log signal — race-prone by definition, so it never gates
+		// behavior.
+		if cur, gerr := h.subTaskSvc.Get(st.ID); gerr == nil && cur != nil && cur.SessionID != childSID {
+			log.Printf("[orchestrate] child %s (batch %s seq %d) finish bypassed: session_id mismatch (ours=%s row=%s) — likely re-claimed mid-run",
+				st.ID, batch.ID, st.BatchSeq, childSID, cur.SessionID)
+		}
 	}
 	// Persist job log too (mirrors StartSubTask's defer — survives restart).
 	lines, jstatus, exitCode := job.Snapshot()

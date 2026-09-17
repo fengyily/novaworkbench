@@ -527,14 +527,37 @@ func (q *OrchestrationQueue) tickSummarizing(batch *model.OrchestrationBatch, pr
 // running rows keep blocking the batch's terminal count (CountTerminalByBatch
 // ignores 'running') and the dispatching batch can never flip to
 // summarizing — even after the user manually retries the requirement.
+//
+// Observability: every row flipped gets its own [orch] line carrying the
+// child_id / session_id / job_id / heartbeat_age. These four fields are
+// what distinguish a real orphan recover (heartbeat_age ~ cutoff, no
+// live goroutine) from a false-positive that killed a still-live child
+// (heartbeat_age <= staleAfter but the heartbeat goroutine had stopped
+// ticking). Operators inspecting the next self-heal can grep for the
+// pattern; the structured fields stay machine-parseable for ops dashboards.
 func (q *OrchestrationQueue) selfHealStaleRunning(batch *model.OrchestrationBatch) {
-	n, err := q.subTaskSvc.RecoverStaleRunningInBatch(batch.ID, q.staleAfter)
+	rows, err := q.subTaskSvc.RecoverStaleRunningInBatch(batch.ID, q.staleAfter)
 	if err != nil {
 		log.Printf("[orch] self-heal %s: %v", batch.ID, err)
 		return
 	}
-	if n > 0 {
-		log.Printf("[orch] batch %s: self-healed %d stale running rows back to pending (cutoff %s)",
-			batch.ID, n, q.staleAfter)
+	if len(rows) == 0 {
+		return
+	}
+	log.Printf("[orch] batch %s: self-healed %d stale running rows back to pending (cutoff %s)",
+		batch.ID, len(rows), q.staleAfter)
+	for _, r := range rows {
+		// Truncate the session id in logs (UUID v4 → keep first 8 hex) so a
+		// log-grep regex doesn't need to escape the full 36-char tail.
+		sidShort := r.SessionID
+		if len(sidShort) > 8 {
+			sidShort = sidShort[:8] + "…"
+		}
+		jobShort := r.JobID
+		if jobShort == "" {
+			jobShort = "<empty>"
+		}
+		log.Printf("[orch]   self-healed child_id=%s session_id=%s job_id=%s heartbeat_age=%s",
+			r.ID, sidShort, jobShort, r.HeartbeatAge)
 	}
 }

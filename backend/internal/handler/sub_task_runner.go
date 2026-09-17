@@ -858,7 +858,10 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 	// raw QueryRow would, and SubTaskService already owns the column list.
 	if cur, gerr := r.subTaskSvc.Get(st.ID); gerr == nil && cur.Status == model.SubTaskStatusStopped {
 		job.Append(store.LogLine{Type: "done", Content: "⏹ 子任务已被用户中止，跳过 artifact 写入"})
-		if perr := r.subTaskSvc.UpdateRunStatsOnStop(st.ID, modelName, tokens, costCents, startTime); perr != nil {
+		// Manual sub-task path: orchestration self-heal doesn't apply
+		// (batch_id='') so the session-id guard is unnecessary; pass "" to
+		// keep the legacy unconditional-write behavior.
+		if perr := r.subTaskSvc.UpdateRunStatsOnStop(st.ID, "", modelName, tokens, costCents, startTime); perr != nil {
 			log.Printf("[sub-task] failed to persist run-stats-on-stop for %s: %v", st.ID, perr)
 		}
 		job.Finish(0, store.JobDone)
