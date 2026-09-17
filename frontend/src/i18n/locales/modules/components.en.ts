@@ -193,6 +193,13 @@ export const components = {
     stopped: 'Stopped',
     stopRemoteDisabled: 'Stopping is not yet supported for remote Agent Server execution',
     errStop: 'Failed to stop',
+    // Delete: only offered on failed (error) sub-tasks. Removes this sub-task
+    // and all of its children, and also deletes each row's associated claude
+    // session file (local + remote Agent Server, best-effort).
+    deleteToggle: '🗑 Delete',
+    deleting: 'Deleting…',
+    deleteConfirm: 'Delete this failed sub-task and all of its children? The associated Claude session file will also be removed. This cannot be undone.',
+    errDelete: 'Failed to delete',
     errContinueNoSession: 'This sub-task cannot be continued: the original session id is empty',
     sourceAuto: 'Auto',
     sourceAutoTitle: 'Auto-dispatched by main Agent',
