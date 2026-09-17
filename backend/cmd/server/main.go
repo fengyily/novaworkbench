@@ -528,6 +528,11 @@ func main() {
 	mux.HandleFunc("POST /api/wizard/start-coding", wizardH.StartCoding)
 	mux.HandleFunc("POST /api/wizard/adjust-coding", wizardH.AdjustCoding)
 	mux.HandleFunc("POST /api/wizard/continue-coding", wizardH.ContinueCoding)
+	// "立即生成方案并开发" — chains architect-design + start-coding back-to-back
+	// with per-stage model / Claude-config / Agent-server / branch / split_tasks
+	// overrides. Mirrors scheduled design_and_coding but writes no
+	// scheduled_tasks row; the chained callbacks only touch requirements.
+	mux.HandleFunc("POST /api/wizard/requirements/{id}/design-and-coding", wizardH.RunImmediateDesignAndCoding)
 	mux.HandleFunc("GET /api/wizard/jobs/{id}", wizardH.GetJob)
 	mux.HandleFunc("GET /api/wizard/jobs/{id}/stream", wizardH.StreamJob)
 	mux.HandleFunc("GET /api/wizard/active-jobs", wizardH.GetActiveJobs)
