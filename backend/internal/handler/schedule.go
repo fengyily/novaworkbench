@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,6 +60,13 @@ type createScheduleReq struct {
 	SplitTasks          bool   `json:"split_tasks"`
 	CodingModel         string `json:"coding_model"`
 	CodingAgentServerID string `json:"coding_agent_server_id"`
+	// Recurrence fields — empty Recurrence defaults to "once" (the historical
+	// one-shot behavior, which requires RunAt). For "daily"/"weekly" the
+	// server derives RunAt from the rule, so RunAt may be omitted.
+	Recurrence          string `json:"recurrence"`
+	RecurTime           string `json:"recur_time"` // "HH:MM"
+	RecurDays           string `json:"recur_days"` // CSV 0-6, 0=Sunday (weekly)
+	RecurTZ             string `json:"recur_tz"`   // IANA tz name
 }
 
 // Create persists a new scheduled task. The handler validates:
@@ -82,17 +90,41 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "INVALID", fmt.Sprintf("task_type must be %q, %q or %q", model.SchedTypeDesign, model.SchedTypeCoding, model.SchedTypeDesignCoding))
 		return
 	}
-	if body.RunAt == "" {
-		writeError(w, 400, "INVALID", "run_at is required")
-		return
+	// Normalize + validate recurrence. Empty = "once" (backward compatible).
+	recurrence := body.Recurrence
+	if recurrence == "" {
+		recurrence = model.SchedRecurOnce
 	}
-	runAt, err := parseRunAt(body.RunAt)
-	if err != nil {
-		writeError(w, 400, "INVALID_RUN_AT", err.Error())
-		return
-	}
-	if runAt.Before(time.Now().Add(30 * time.Second)) {
-		writeError(w, 400, "RUN_AT_TOO_SOON", "run_at must be at least 30 seconds in the future")
+	var runAt time.Time
+	switch recurrence {
+	case model.SchedRecurOnce:
+		if body.RunAt == "" {
+			writeError(w, 400, "INVALID", "run_at is required")
+			return
+		}
+		var err error
+		runAt, err = parseRunAt(body.RunAt)
+		if err != nil {
+			writeError(w, 400, "INVALID_RUN_AT", err.Error())
+			return
+		}
+		if runAt.Before(time.Now().Add(30 * time.Second)) {
+			writeError(w, 400, "RUN_AT_TOO_SOON", "run_at must be at least 30 seconds in the future")
+			return
+		}
+	case model.SchedRecurDaily, model.SchedRecurWeekly:
+		// The service derives run_at from the rule; validate the rule shape
+		// here so the user gets a 400 rather than a 500 from NextRunAt.
+		if !validRecurTime(body.RecurTime) {
+			writeError(w, 400, "INVALID_RECUR_TIME", "recur_time must be HH:MM (00:00-23:59)")
+			return
+		}
+		if recurrence == model.SchedRecurWeekly && !validRecurDays(body.RecurDays) {
+			writeError(w, 400, "INVALID_RECUR_DAYS", "recur_days must be a non-empty CSV of weekday numbers 0-6 (0=Sunday)")
+			return
+		}
+	default:
+		writeError(w, 400, "INVALID", fmt.Sprintf("recurrence must be %q, %q or %q", model.SchedRecurOnce, model.SchedRecurDaily, model.SchedRecurWeekly))
 		return
 	}
 
@@ -125,6 +157,10 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		SplitTasks:          body.SplitTasks,
 		CodingModel:         body.CodingModel,
 		CodingAgentServerID: body.CodingAgentServerID,
+		Recurrence:          recurrence,
+		RecurTime:           body.RecurTime,
+		RecurDays:           body.RecurDays,
+		RecurTZ:             body.RecurTZ,
 	}
 	created, err := h.svc.Create(t)
 	if err != nil {
@@ -196,6 +232,77 @@ func (h *ScheduleHandler) Cancel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, t)
 }
 
+// updateScheduleReq is the PATCH body. Every field is a pointer so an
+// omitted key means "leave unchanged" — a pause toggle sends only
+// {"active": false} and must not blank out the recurrence rule.
+type updateScheduleReq struct {
+	Recurrence *string `json:"recurrence"`
+	RecurTime  *string `json:"recur_time"`
+	RecurDays  *string `json:"recur_days"`
+	RecurTZ    *string `json:"recur_tz"`
+	Model      *string `json:"model"`
+	RunAt      *string `json:"run_at"`
+	Active     *bool   `json:"active"`
+}
+
+// Update patches a scheduled task: edit the recurrence rule / model, or
+// pause / resume via {"active": false/true}. Rule-affecting edits cause the
+// service to recompute the next run_at from the rule. Returns the refreshed
+// row so the UI re-renders without a second GET.
+func (h *ScheduleHandler) Update(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body updateScheduleReq
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON")
+		return
+	}
+	patch := service.ScheduledTaskPatch{
+		Recurrence: body.Recurrence,
+		RecurTime:  body.RecurTime,
+		RecurDays:  body.RecurDays,
+		RecurTZ:    body.RecurTZ,
+		Model:      body.Model,
+		Active:     body.Active,
+	}
+	// Validate the recurrence enum when provided.
+	if body.Recurrence != nil {
+		switch *body.Recurrence {
+		case model.SchedRecurOnce, model.SchedRecurDaily, model.SchedRecurWeekly:
+		default:
+			writeError(w, 400, "INVALID", fmt.Sprintf("recurrence must be %q, %q or %q", model.SchedRecurOnce, model.SchedRecurDaily, model.SchedRecurWeekly))
+			return
+		}
+	}
+	if body.RecurTime != nil && *body.RecurTime != "" && !validRecurTime(*body.RecurTime) {
+		writeError(w, 400, "INVALID_RECUR_TIME", "recur_time must be HH:MM (00:00-23:59)")
+		return
+	}
+	if body.RecurDays != nil && *body.RecurDays != "" && !validRecurDays(*body.RecurDays) {
+		writeError(w, 400, "INVALID_RECUR_DAYS", "recur_days must be a CSV of weekday numbers 0-6 (0=Sunday)")
+		return
+	}
+	if body.RunAt != nil && *body.RunAt != "" {
+		rt, err := parseRunAt(*body.RunAt)
+		if err != nil {
+			writeError(w, 400, "INVALID_RUN_AT", err.Error())
+			return
+		}
+		patch.RunAt = &rt
+	}
+	updated, err := h.svc.Update(id, patch)
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			writeError(w, 404, "NOT_FOUND", "scheduled task not found")
+			return
+		}
+		// Update's non-DB errors are rule-validation failures surfaced from
+		// service.NextRunAt; return them as a 400 so the client can correct.
+		writeError(w, 400, "INVALID", err.Error())
+		return
+	}
+	writeJSON(w, 200, updated)
+}
+
 // Delete removes the row outright regardless of status — pending,
 // running, succeeded, failed and canceled rows all delete. The earlier
 // "pending must be canceled first" gate was removed because the
@@ -238,4 +345,42 @@ func parseRunAt(s string) (time.Time, error) {
 		return t, nil
 	}
 	return time.Time{}, fmt.Errorf("无法解析时间 %q（期望 RFC3339 或 YYYY-MM-DDTHH:MM）", s)
+}
+
+// validRecurTime reports whether s is a well-formed "HH:MM" 24-hour string.
+// Mirrors the parse the service does in NextRunAt so the handler can reject
+// bad input with a 400 before it reaches the service layer.
+func validRecurTime(s string) bool {
+	s = strings.TrimSpace(s)
+	parts := strings.Split(s, ":")
+	if len(parts) != 2 {
+		return false
+	}
+	h, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil || h < 0 || h > 23 {
+		return false
+	}
+	m, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil || m < 0 || m > 59 {
+		return false
+	}
+	return true
+}
+
+// validRecurDays reports whether s is a non-empty CSV of weekday numbers in
+// [0,6] (0=Sunday, JS getDay convention). Used to validate weekly rules.
+func validRecurDays(s string) bool {
+	found := false
+	for _, raw := range strings.Split(s, ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		d, err := strconv.Atoi(raw)
+		if err != nil || d < 0 || d > 6 {
+			return false
+		}
+		found = true
+	}
+	return found
 }

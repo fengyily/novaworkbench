@@ -427,6 +427,16 @@ CREATE TABLE IF NOT EXISTS scheduled_tasks (
 	created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
 	executed_at           DATETIME,                         -- 认领时间；pending 时 NULL
+	recurrence            TEXT NOT NULL DEFAULT 'once',     -- 'once' | 'daily' | 'weekly'
+	recur_time            TEXT NOT NULL DEFAULT '',         -- "HH:MM" 本地时刻 (daily/weekly)
+	recur_days            TEXT NOT NULL DEFAULT '',         -- 周几 CSV, 0-6, 0=周日 (weekly)
+	recur_tz              TEXT NOT NULL DEFAULT '',         -- IANA 时区名，把时刻投影成 UTC
+	active                INTEGER NOT NULL DEFAULT 1,       -- 启用/暂停闸门 (Due 仅取 active=1)
+	last_run_at           DATETIME,                         -- 上次触发时刻 (UTC, nullable)
+	last_status           TEXT NOT NULL DEFAULT '',         -- 上次结果 succeeded/failed
+	last_error            TEXT NOT NULL DEFAULT '',         -- 上次错误
+	last_job_id           TEXT NOT NULL DEFAULT '',         -- 上次 JobStore job
+	run_count             INTEGER NOT NULL DEFAULT 0,       -- 已执行次数
 	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_sched_status  ON scheduled_tasks(status);
@@ -544,6 +554,24 @@ var alterColumns = []string{
 	// continue to scan cleanly without a backfill.
 	`ALTER TABLE scheduled_tasks ADD COLUMN coding_model TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE scheduled_tasks ADD COLUMN coding_agent_server_id TEXT NOT NULL DEFAULT ''`,
+	// Recurring scheduled tasks: an "alarm-style" repeating plan lives on the
+	// same row as a one-shot task (recurrence='once' is the legacy default so
+	// existing rows keep one-shot semantics). A recurring row is re-armed by
+	// service.Finish (status→pending, run_at pushed to the next occurrence)
+	// instead of going terminal; the last-run outcome is kept in the last_*
+	// columns since status can no longer represent it. last_run_at is a
+	// nullable DATETIME (→ TIMESTAMP on Postgres via fixupSchema) and is read
+	// through parseRunAtString to survive the modernc SQLite time round-trip.
+	`ALTER TABLE scheduled_tasks ADD COLUMN recurrence TEXT NOT NULL DEFAULT 'once'`,
+	`ALTER TABLE scheduled_tasks ADD COLUMN recur_time TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE scheduled_tasks ADD COLUMN recur_days TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE scheduled_tasks ADD COLUMN recur_tz TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE scheduled_tasks ADD COLUMN active INTEGER NOT NULL DEFAULT 1`,
+	`ALTER TABLE scheduled_tasks ADD COLUMN last_run_at DATETIME`,
+	`ALTER TABLE scheduled_tasks ADD COLUMN last_status TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE scheduled_tasks ADD COLUMN last_error TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE scheduled_tasks ADD COLUMN last_job_id TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE scheduled_tasks ADD COLUMN run_count INTEGER NOT NULL DEFAULT 0`,
 	// Per-role Claude-config binding: lets a role carry its own ANTHROPIC_BASE_URL
 	// + ANTHROPIC_AUTH_TOKEN pair (via claude_configs.id) so the role's chosen
 	// model runs against the role's chosen gateway, not just the global active
