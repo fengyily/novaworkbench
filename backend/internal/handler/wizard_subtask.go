@@ -305,6 +305,13 @@ func readParentJsonlTurns(worktreePath, sourceSID string) string {
 // freshSession inside SubTaskRunner.Run so a future caller that passes
 // both still gets the bare experience.
 //
+// parentSourceSID is the parent sub-task's own source_session_id (the
+// session the parent was forked from). AdjustSubTask / RedoSubTask /
+// ContinueSubTask pass the parent's row's SourceSessionID; StartSubTask
+// passes "" (no sub-task parent). SubTaskRunner.Run uses it as the second
+// candidate in the stale-session fallback chain (parent.SessionID →
+// parent.SourceSessionID → req.CodingSessionID) on the local fork path.
+//
 // See SubTaskRunner.Run for the full lifecycle.
 func (h *WizardHandler) runSubTask(
 	req *model.Requirement,
@@ -319,6 +326,7 @@ func (h *WizardHandler) runSubTask(
 	fork bool,
 	freshSession bool,
 	bare bool,
+	parentSourceSID string,
 ) {
 	if h.subTaskRunner == nil {
 		log.Printf("[sub-task] runner not wired, cannot run %s", st.ID)
@@ -326,7 +334,7 @@ func (h *WizardHandler) runSubTask(
 		job.Finish(1, store.JobError)
 		return
 	}
-	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, adjust, fork, freshSession, bare)
+	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, adjust, fork, freshSession, bare, parentSourceSID)
 	// (The agent-server routing branch previously inlined here moved to
 	// SubTaskRunner.Run so that every sub-task path — manual children,
 	// orchestrated children, and push/PR sub-tasks — shares the same
@@ -495,7 +503,7 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		"sub_task_id": st.ID,
 	})
 
-	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, body.ClaudeConfigID, false, true, body.FreshSession, body.Bare)
+	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, body.ClaudeConfigID, false, true, body.FreshSession, body.Bare, "")
 }
 
 // AdjustSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/adjust.
@@ -591,7 +599,7 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 	// prompt prefix + system prompt as a fresh sub-task, but the
 	// source_session_id is the parent's session id (not the main agent),
 	// so the conversation inherits the parent's edits.
-	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, "", true, true, false, false)
+	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, "", true, true, false, false, parent.SourceSessionID)
 }
 
 // RedoSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/redo.
@@ -691,7 +699,7 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 	// Re-use the shared spawn helper with adjust=false, fork=true and the
 	// ORIGINAL prompt (st.Prompt) so the child re-executes the same task
 	// from a clean fork off the requirement's main-agent session.
-	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false, true, false, false)
+	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false, true, false, false, parent.SourceSessionID)
 }
 
 // continueSubTaskPrompt is the fixed Chinese prompt used by ContinueSubTask.
@@ -804,7 +812,7 @@ func (h *WizardHandler) ContinueSubTask(w http.ResponseWriter, r *http.Request) 
 	// Run() with fork=false picks "## 继续执行" as the prompt header so the
 	// child's contextualization stays consistent with the wizard's coding
 	// ContinueCoding path.
-	go h.runSubTask(req, st, job, newSID, sourceSID, continueSubTaskPrompt, body.Model, "", false, false, false, false)
+	go h.runSubTask(req, st, job, newSID, sourceSID, continueSubTaskPrompt, body.Model, "", false, false, false, false, parent.SourceSessionID)
 }
 
 // StopSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/stop.

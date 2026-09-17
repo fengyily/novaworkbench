@@ -320,6 +320,14 @@ func appendCrossEnvHint(job *store.Job, effectiveServerID, parentServerID, syncM
 // model. adjust flips the prompt header between "## 子任务" and "## 追加调整"
 // so the child agent's contextualization stays consistent with the wizard's
 // manual sub-task composer.
+//
+// parentSourceSID is the parent sub-task's own source_session_id (i.e. the
+// session the parent was itself forked from). AdjustSubTask / RedoSubTask
+// pass the parent's row's SourceSessionID; StartSubTask and orchestrated
+// children pass "" (they have no sub-task parent). The local-path fallback
+// loop uses it as the second candidate when the primary source's JSONL is
+// missing on disk, walking up the chain: sourceSID → parentSourceSID →
+// req.CodingSessionID.
 func (r *SubTaskRunner) Run(
 	req *model.Requirement,
 	st *model.SubTask,
@@ -333,6 +341,7 @@ func (r *SubTaskRunner) Run(
 	fork bool,
 	freshSession bool,
 	bare bool,
+	parentSourceSID string,
 ) {
 	// Best-effort persistence: backend restart mid-run won't lose the log.
 	defer func() {
@@ -625,12 +634,6 @@ func (r *SubTaskRunner) Run(
 	}
 
 	// Local execution: resolve resume / fork into the right CLI argv.
-	resumeFlag := true
-	forkFor := fork
-	if freshSession || bare {
-		resumeFlag = false
-		forkFor = false
-	}
 	credEnv, credCleanup := gitCredentialEnv(r.projectSvc, r.platformSvc, req)
 	defer credCleanup()
 	// Bare path drops the executor role system prompt — the user explicitly
@@ -641,6 +644,105 @@ func (r *SubTaskRunner) Run(
 	systemPromptForRun := execSystemPrompt
 	if bare {
 		systemPromptForRun = ""
+	}
+
+	var out claudeStreamOutcome
+	if !fork {
+		// ContinueSubTask path: single attempt, no fallback. Per user
+		// decision (2026-09-17) the stale-session hard-fail semantics for
+		// --resume-in-place are preserved — a stale parent JSONL here
+		// means the user must "重做" rather than auto-recover.
+		out = r.runLocalSubTaskAttempt(
+			job, prompt, systemPromptForRun, modelName,
+			sourceSID, newSID,
+			adjust, /*forkFlag*/ false,
+			freshSession, bare,
+			workDir, subUsage, finalConfigID, credEnv,
+		)
+	} else {
+		// fork=true (StartSubTask / AdjustSubTask / RedoSubTask): try the
+		// caller-supplied source SID first, then walk up the parent chain
+		// on stale. fresh-session / bare StartSubTask paths naturally
+		// collapse to one attempt because sourceSID was cleared to "" in
+		// the prompt-building block above.
+		candidates := staleSourceCandidates(sourceSID, parentSourceSID, req.CodingSessionID)
+		for idx, src := range candidates {
+			sidForThisAttempt := newSID
+			if idx > 0 {
+				// First attempt must keep the AdjustSubTask pre-stamped
+				// newSID so the DB row matches what the API response
+				// already returned. Subsequent retries mint fresh UUIDs
+				// and stamp them through UpdateSession below.
+				sidForThisAttempt = util.NewUUID()
+			}
+			// Persist the chosen source/new pair on the row so the audit
+			// trail and any subsequent "继续执行" resume the right JSONL.
+			if perr := r.subTaskSvc.UpdateSession(st.ID, sidForThisAttempt, src); perr != nil {
+				log.Printf("[sub-task] UpdateSession warn for %s: %v", st.ID, perr)
+			}
+			if idx > 0 {
+				job.Append(store.LogLine{Type: "phase",
+					Content: fmt.Sprintf("🔄 子任务源会话=%s (回退第 %d 层)", src, idx)})
+			}
+			out = r.runLocalSubTaskAttempt(
+				job, prompt, systemPromptForRun, modelName,
+				src, sidForThisAttempt,
+				/*adjustFlag*/ idx == 0 && adjust,
+				/*forkFlag*/  true,
+				freshSession, bare,
+				workDir, subUsage, finalConfigID, credEnv,
+			)
+			// Success: claude returned a real finalResult without stale error.
+			if !out.staleSession && out.errMsg == "" && out.finalResult != "" {
+				break
+			}
+			// Non-stale error (network / rate-limit / model error): bail,
+			// do NOT retry — retrying would amplify the failure.
+			if !out.staleSession {
+				break
+			}
+			// Last candidate also stale: fall through to the 4-way
+			// diagnostic in finishSubTask (preserves the user-visible
+			// "❌ 源会话已失效…" wording that downstream log-grep alerts
+			// key off).
+			if idx == len(candidates)-1 {
+				break
+			}
+			job.Append(store.LogLine{Type: "phase",
+				Content: "🔄 源会话已过期，自动尝试上一级会话..."})
+		}
+	}
+	r.finishSubTask(st, job, out, modelName, startTime)
+}
+
+// runLocalSubTaskAttempt launches a single claude subprocess for the local
+// sub-task path and returns its outcome. Mirrors the original Run's local
+// branch (argv construction + runClaudeStream) but exposes sourceSID /
+// newSID / adjustFlag / forkFlag so the stale-session fallback loop in Run
+// can re-call it with different chain entries.
+//
+// freshSession / bare override the resume / fork flags to false (per the
+// original local branch's "no --resume at all" handling). job lifecycle is
+// caller-owned: SetCmd replaces any prior cmd on the job (safe because
+// runClaudeStream is synchronous and waits for the cmd to exit before
+// returning), and the per-call cancel() defers fire when this function
+// returns.
+func (r *SubTaskRunner) runLocalSubTaskAttempt(
+	job *store.Job,
+	prompt, systemPromptForRun, modelName string,
+	sourceSID, newSID string,
+	adjustFlag, forkFlag bool,
+	freshSession, bare bool,
+	workDir string,
+	subUsage *usageCtx,
+	finalConfigID string,
+	credEnv []string,
+) claudeStreamOutcome {
+	resumeFlag := true
+	forkFor := forkFlag
+	if freshSession || bare {
+		resumeFlag = false
+		forkFor = false
 	}
 	cmd, cancel := r.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         prompt,
@@ -658,11 +760,11 @@ func (r *SubTaskRunner) Run(
 		//     subsequent runs.
 		//   - bare=true → same argv shape as freshSession, but SystemPrompt=""
 		//     so the CLI uses its built-in defaults (no role persona).
-		SessionID:     sourceSID,
-		Resume:        resumeFlag,
-		Fork:          forkFor,
+		SessionID:    sourceSID,
+		Resume:       resumeFlag,
+		Fork:         forkFor,
 		ForkSessionID: newSID,
-		ExtraEnv:      credEnv, // NEW: HTTPS git creds + committer identity
+		ExtraEnv:     credEnv, // HTTPS git creds + committer identity
 	})
 	// Hand the subprocess + cancel to the JobStore so StopSubTask can SIGTERM
 	// it (gateway's exec.CommandContext chains SIGTERM → WaitDelay 5s →
@@ -670,8 +772,38 @@ func (r *SubTaskRunner) Run(
 	// here and the deferred cleanup.
 	job.SetCmd(cmd, cancel)
 	defer cancel()
-	out := runClaudeStream(jobSink{job}, cmd, "sub-task", subUsage)
-	r.finishSubTask(st, job, out, modelName, startTime)
+	return runClaudeStream(jobSink{job}, cmd, "sub-task", subUsage)
+}
+
+// staleSourceCandidates builds the fallback chain of source session IDs to
+// try when the primary source's JSONL is missing on disk.
+//
+//   - index 0: sourceSID — the caller's primary source (most context)
+//   - index 1: parentSourceSID — the parent sub-task's own source; only
+//     populated for AdjustSubTask / RedoSubTask / ContinueSubTask children.
+//     StartSubTask and orchestrated children pass "".
+//   - index 2: reqCodingSID — the requirement's main coding session
+//     (requirements.coding_session_id).
+//
+// Returns de-duplicated, non-empty entries. Does NOT walk to
+// req.DesignSessionID — same scope as subTaskSourceSID today. The
+// fork=false (ContinueSubTask) path bypasses this chain entirely per the
+// 2026-09-17 user decision to keep stale-session hard-fail semantics for
+// --resume-in-place.
+func staleSourceCandidates(sourceSID, parentSourceSID, reqCodingSID string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, sid := range []string{sourceSID, parentSourceSID, reqCodingSID} {
+		if sid == "" {
+			continue
+		}
+		if _, ok := seen[sid]; ok {
+			continue
+		}
+		seen[sid] = struct{}{}
+		out = append(out, sid)
+	}
+	return out
 }
 
 // finishSubTask persists the terminal state shared by the local and remote

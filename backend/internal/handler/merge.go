@@ -1009,7 +1009,7 @@ func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev
 	if nerr != nil {
 		return "", "", nerr
 	}
-	go runner.Run(reqRow, st, job, newSID, sourceSID, prompt, model, roleConfigID, false, true, false, false)
+	go runner.Run(reqRow, st, job, newSID, sourceSID, prompt, model, roleConfigID, false, true, false, false, "")
 	return job.ID, st.ID, nil
 }
 
