@@ -692,13 +692,14 @@ export default function ProjectDetail() {
       <td data-label={t('projects.detail.colId')} style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{req.id}</td>
       <td data-label={t('projects.detail.colType')}><span className={`kind-badge kind-${kindOf(req)}`}>{tLabel(t, kindLabelKeys as Record<string, string>, kindOf(req))}</span></td>
       <td data-label={t('projects.detail.colTitle')} className="pr-title">
-        {/* Preset marks (重要 / 跟进 / 阻塞 / 风险) now render INLINE with
-            the title (chip strip BEFORE the title text) so marked
-            requirements stay on a single line. Unmarked rows render nothing
-            (no extra height), and unknown codes are skipped so a stale value
+        {/* Preset marks (重要 / 跟进 / 阻塞 / 风险) render INLINE with
+            the title (chip strip BEFORE the schedule clock + title text)
+            so marked requirements stay on a single line — same order as
+            the global RequirementsList. Unmarked rows render nothing (no
+            extra height), and unknown codes are skipped so a stale value
             written before a preset is renamed can't crash the row. Colors
-            come from MARK_PRESETS in api/client.ts (single source of truth
-            shared with the detail-page editor). */}
+            come from MARK_PRESETS in api/client.ts (single source of
+            truth shared with the detail-page editor). */}
         <div className="pr-title-text">
           {(() => {
             const rowMarks = parseMarks(req.marks);
@@ -724,6 +725,27 @@ export default function ProjectDetail() {
               </div>
             );
           })()}
+          {/* Pending-scheduled chip — unified with the cross-project list:
+              clock renders BEFORE the title text so both surfaces read
+              identically. Mirrors scheduleClock() in RequirementsList.tsx
+              and reuses the shared .schedule-chip indigo pill — the
+              affordance is unmissable next to the title text, where the
+              bare 13px outline icon was visually swallowed by the
+              surrounding status badges. Gated on scheduled_run_at from
+              the backend List endpoint (same helper the calendar uses). */}
+          {req.scheduled_run_at && (
+            <span
+              className="schedule-chip"
+              title={t('requirements.list.scheduledTooltip', {
+                time: fmtDateTime(req.scheduled_run_at),
+                rel: fmtRunAtRelative(req.scheduled_run_at),
+              })}
+              aria-label={t('requirements.list.scheduledAria')}
+            >
+              <IconClock size={12} className="schedule-chip-icon" />
+              {fmtRunAtRelative(req.scheduled_run_at)}
+            </span>
+          )}
           <span className="pr-title-text-label">{req.title}</span>
         </div>
         {/* Tag chips: rendered below the title as a compact strip (max 3
@@ -767,29 +789,6 @@ export default function ProjectDetail() {
       <td data-label={t('projects.detail.colPriority')}><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
       <td data-label={t('projects.detail.colStatus')}>
         <StatusChips req={req} />
-        {/* Pending-scheduled chip — surfaces that this requirement has a
-            future dispatch waiting (mirror of the cross-project list).
-            rendered BEFORE the pulse dot so the static chip row reads as
-            "status | clock | pulse" (clock = stored fact, pulse = live
-            activity). Gated on scheduled_run_at filled by the backend
-            List endpoint (same helper the calendar uses). Uses the shared
-            .schedule-chip indigo pill so the affordance is unmissable —
-            a bare 13px outline icon next to the colored status badges
-            was visually swallowed and users couldn't tell scheduled rows
-            apart. */}
-        {req.scheduled_run_at && (
-          <span
-            className="schedule-chip"
-            title={t('requirements.list.scheduledTooltip', {
-              time: fmtDateTime(req.scheduled_run_at),
-              rel: fmtRunAtRelative(req.scheduled_run_at),
-            })}
-            aria-label={t('requirements.list.scheduledAria')}
-          >
-            <IconClock size={12} className="schedule-chip-icon" />
-            {fmtRunAtRelative(req.scheduled_run_at)}
-          </span>
-        )}
         {/* Breathing dot for any wizard job in flight on this requirement
             (analyst/design/apply/coding). Set is populated by the 5s poll
             of /api/wizard/active-jobs above. aria-label + title so screen
