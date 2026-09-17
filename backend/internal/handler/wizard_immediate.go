@@ -231,11 +231,12 @@ func (h *WizardHandler) immediateDesignCallback(reqID string, body designCodingI
 				DevMode:          body.DevMode,
 				SyncMode:         body.SyncMode,
 			}
-			if _, cerr := h.RunScheduledCoding(cp, h.immediateCodingCallback(reqID)); cerr != nil {
+			codingJobID, cerr := h.RunScheduledCoding(cp, h.immediateCodingCallback(reqID))
+			if cerr != nil {
 				log.Printf("[immediate-design-coding] dispatch coding for %s failed: %v", reqID, cerr)
 				return
 			}
-			log.Printf("[immediate-design-coding] dispatched coding stage for %s (design job=%s)", reqID, designJobID)
+			log.Printf("[immediate-design-coding] dispatched coding stage for %s (design job=%s coding job=%s)", reqID, designJobID, codingJobID)
 		},
 	}
 }
