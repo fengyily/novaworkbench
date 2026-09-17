@@ -282,18 +282,25 @@
   color: var(--color-text);
 }
 
-/* Two-line title cell: the actual title (single-line ellipsis) plus a
-   tags row underneath. Splitting onto two rows keeps the title readable
-   while surfacing 0-3 chips per row. The container re-enables wrap so
-   the chips row can flow to a second line if it overflows; we keep
-   overflow:hidden at the *cell* (parent td) to align with the rest of
-   the row, but the inner div can wrap freely because pr-title only
-   constrains the inner .pr-title-text. */
+/* Title cell with mark chips + title text on a single line. The cell stays
+   the same width (so the table column doesn't grow) and the chips never
+   shrink (flex-shrink:0 on .pr-title-marks / .pr-title-mark); the title
+   text takes whatever width is left and ellipsis-truncates if the title
+   runs long. The tag chips row underneath (.pr-title-tags) is unchanged. */
 .pr-title-text {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-weight: 500;
+}
+
+.pr-title-text-label {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 500;
 }
 
 .pr-title-tags {
@@ -304,16 +311,18 @@
   align-items: center;
 }
 
-/* Preset mark strip (重要 / 跟进 / 阻塞 / 风险) rendered ABOVE the title in
-   the project-page requirements table (both the overview "recent
-   requirements" and the requirements tab — they share renderRequirementRows).
-   Mirrors .req-row-marks on the global list page; colors come per-chip from
-   inline style driven by MARK_PRESETS, so this only owns layout + shape. */
+/* Preset mark strip (重要 / 跟进 / 阻塞 / 风险) now rendered INLINE with the
+   title (first child of the title flex row) in the project-page requirements
+   table (both the overview "recent requirements" and the requirements tab —
+   they share renderRequirementRows). Mirrors .req-row-marks on the global
+   list page; colors come per-chip from inline style driven by MARK_PRESETS,
+   so this only owns layout + shape. flex-shrink:0 keeps the chips readable
+   when the title is long enough to ellipsis. */
 .pr-title-marks {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-bottom: 4px;
+  flex-shrink: 0;
   align-items: center;
 }
 
@@ -332,6 +341,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: default;
+  flex-shrink: 0;
 }
 
 .pr-title-tag {

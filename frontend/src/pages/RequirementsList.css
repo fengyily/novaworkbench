@@ -131,9 +131,30 @@
 }
 
 .req-row-title-text {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.req-row-title-text-label {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* On the mobile card the title gets up to 3 lines (long titles wrap rather
+   than truncate to keep the card readable), so the label relaxes the
+   single-line ellipsis and uses line-clamp instead. */
+.req-card-mobile-title .req-row-title-text-label {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  word-break: break-word;
+  text-overflow: clip;
 }
 
 .req-row-title-tags {
@@ -144,18 +165,19 @@
   align-items: center;
 }
 
-/* Preset mark chip strip (重要 / 跟进 / 阻塞 / 风险). Sits above the title
-   in the desktop row and above the title in the mobile card. Colors come
-   from inline style per-chip (each preset has a unique color/bg pair);
-   this CSS only owns the layout / shape so any future color tweak can
-   be a one-line change in api/client.ts MARK_PRESETS without touching
-   the stylesheet. Reused unchanged in .req-card-mobile. */
+/* Preset mark chip strip (重要 / 跟进 / 阻塞 / 风险). Now lives INLINE with
+   the requirement title (in the same flex row as the schedule clock + title
+   text) so marked requirements stay on a single line. Colors come from
+   inline style per-chip (each preset has a unique color/bg pair); this CSS
+   only owns the layout / shape so any future color tweak can be a one-line
+   change in api/client.ts MARK_PRESETS without touching the stylesheet.
+   Reused unchanged in .req-card-mobile. flex-shrink:0 keeps the chips
+   readable when the title is long enough that the label has to ellipsis. */
 .req-row-marks {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-bottom: 4px;
-  margin-top: 2px;
+  flex-shrink: 0;
   align-items: center;
 }
 
@@ -173,6 +195,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .req-row-title-tag {
@@ -419,13 +442,15 @@
   font-weight: 600;
   line-height: 1.4;
   color: var(--color-text, #1E293B);
-  /* Cap at 3 lines so a long title doesn't blow up the card; ellipsis
-     keeps the card height consistent for visual scanning. */
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  word-break: break-word;
+  /* Inline flex row so mark chips sit on the same line as the title (marked
+     cards stay one row; unmarked cards show only the title). The title text
+     itself stays capped at 3 lines via .req-row-title-text-label so a long
+     title doesn't blow up the card. */
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .req-card-mobile-foot {
