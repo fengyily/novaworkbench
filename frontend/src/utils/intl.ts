@@ -26,7 +26,13 @@ function toDate(v: DateLike): Date | null {
 }
 
 const dateOpts: Intl.DateTimeFormatOptions = { year: 'numeric', month: '2-digit', day: '2-digit' };
+// `hour12: false` keeps zh/en shipping the same 24h shape.
 const timeOpts: Intl.DateTimeFormatOptions = { hour: '2-digit', minute: '2-digit', hour12: false };
+// Seconds-enabled variant used by fmtDateTime (requirement list wants
+// hour-minute-second granularity, see fmtDateTime below). Kept separate
+// from `timeOpts` so fmtTime() can stay at minute-only without callers
+// needing to opt out of seconds.
+const timeOptsWithSeconds: Intl.DateTimeFormatOptions = { ...timeOpts, second: '2-digit' };
 
 // fmtDate — "2026/09/08" (zh) / "09/08/2026" (en). Invalid/empty input
 // renders as-is (or an empty string) so unfinished rows don't show "Invalid
@@ -44,11 +50,18 @@ export function fmtTime(v: DateLike): string {
   return new Intl.DateTimeFormat(intlLocale(), timeOpts).format(d);
 }
 
-// fmtDateTime — "2026/09/08 14:05".
+// fmtDateTime — "2026/09/08 14:05:30". Renders to the *second* because the
+// requirement list (project-level + cross-project) wants to distinguish
+// rows updated within the same minute — the previous minute-only output
+// was indistinguishable from "to the day" once the date column scrolled
+// off. formatToParts keeps locale-specific separators (en uses
+// "MM/DD/YYYY, HH:mm:ss", zh uses "YYYY/MM/DD HH:mm:ss") and we just
+// collapse the comma that the en-US DateTimeFormat inserts between
+// the date and the time so the visual stays a single space.
 export function fmtDateTime(v: DateLike): string {
   const d = toDate(v);
   if (!d) return v === null || v === undefined || v === '' ? '' : String(v);
-  const dtf = new Intl.DateTimeFormat(intlLocale(), { ...dateOpts, ...timeOpts });
+  const dtf = new Intl.DateTimeFormat(intlLocale(), { ...dateOpts, ...timeOptsWithSeconds });
   return dtf
     .formatToParts(d)
     .map((p) => p.value)
