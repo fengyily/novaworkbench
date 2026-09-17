@@ -574,6 +574,13 @@ export const requirements = {
     statusBadgeDone: 'Done',
     statusBadgeArchived: 'Archived',
     compressModalClose: 'Close',
+    // Immediate design + coding launch (back-to-back without scheduled_tasks).
+    immediateDesignCodingTitle: 'Run design + coding back-to-back, with separate model + exec env per stage',
+    immediateDesignCodingBtn: 'Run design + coding now',
+    immediateLaunchBtn: '⚡ Launch now',
+    immediateErrTerminal: 'Requirement is terminal — cannot launch',
+    immediateErrBusy: 'A design or coding job is already in flight',
+    immediateErrStatus: 'Requirement status does not allow an immediate launch (wait for analysis)',
   },
 } as const;
 
