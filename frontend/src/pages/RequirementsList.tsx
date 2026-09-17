@@ -394,7 +394,13 @@ export default function RequirementsList() {
                     <td data-label={t('requirements.list.colAgentServer')} className="req-row-devsource">
                       <DevSourceBadge req={r} compact />
                     </td>
-                    <td data-label={t('requirements.list.colUpdated')}>{fmtDateTime(r.updated_at)}</td>
+                    <td
+                      data-label={t('requirements.list.colUpdated')}
+                      className="req-row-updated"
+                      title={r.updated_at ? fmtRelative(r.updated_at) : undefined}
+                    >
+                      {fmtDateTime(r.updated_at)}
+                    </td>
                   </tr>
                 );
               })}

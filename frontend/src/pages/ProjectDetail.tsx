@@ -13,7 +13,7 @@ import {
   MARK_PRESETS, parseMarks,
 } from '../api/client';
 import { tLabel } from '../i18n/label';
-import { fmtDate, fmtDateTime, fmtRunAtRelative } from '../utils/intl';
+import { fmtDate, fmtDateTime, fmtRelative, fmtRunAtRelative } from '../utils/intl';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import { StatusChips } from '../components/StatusChips';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
@@ -830,10 +830,30 @@ export default function ProjectDetail() {
           return fmtCost(u.costs);
         })()}
       </td>
-      <td data-label={t('projects.detail.colCreatedAt')} style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+      <td
+        data-label={t('projects.detail.colCreatedAt')}
+        style={{
+          color: 'var(--color-text-muted)',
+          fontSize: 12,
+          fontFamily: 'var(--font-mono)',
+          fontVariantNumeric: 'tabular-nums',
+          whiteSpace: 'nowrap',
+        }}
+        title={req.created_at ? fmtRelative(req.created_at) : undefined}
+      >
         {req.created_at ? fmtDateTime(req.created_at) : '—'}
       </td>
-      <td data-label={t('projects.detail.colUpdatedAt')} style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+      <td
+        data-label={t('projects.detail.colUpdatedAt')}
+        style={{
+          color: 'var(--color-text-muted)',
+          fontSize: 12,
+          fontFamily: 'var(--font-mono)',
+          fontVariantNumeric: 'tabular-nums',
+          whiteSpace: 'nowrap',
+        }}
+        title={req.updated_at ? fmtRelative(req.updated_at) : undefined}
+      >
         {req.updated_at ? fmtDateTime(req.updated_at) : '—'}
       </td>
     </tr>
@@ -1458,8 +1478,8 @@ export default function ProjectDetail() {
                       <th style={{ width: 140 }}>{t('projects.detail.colAgentServer')}</th>
                       <th style={{ width: 130 }}>{t('projects.detail.colTokens')}</th>
                       <th style={{ width: 110 }}>{t('projects.detail.colCost')}</th>
-                      <th style={{ width: 110 }}>{t('projects.detail.colCreatedAt')}</th>
-                      <th style={{ width: 110 }}>{t('projects.detail.colUpdatedAt')}</th>
+                      <th style={{ width: 144 }}>{t('projects.detail.colCreatedAt')}</th>
+                      <th style={{ width: 144 }}>{t('projects.detail.colUpdatedAt')}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1729,7 +1749,7 @@ export default function ProjectDetail() {
                     <th style={{ width: 110 }}>{t('projects.detail.colCost')}</th>
                     <SortHeader
                       col="created_at"
-                      width={110}
+                      width={144}
                       label={t('projects.detail.colCreatedAt')}
                       sortColumn={reqSortColumn}
                       sortDir={reqSortDir}
@@ -1737,7 +1757,7 @@ export default function ProjectDetail() {
                     />
                     <SortHeader
                       col="updated_at"
-                      width={110}
+                      width={144}
                       label={t('projects.detail.colUpdatedAt')}
                       sortColumn={reqSortColumn}
                       sortDir={reqSortDir}
