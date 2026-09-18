@@ -518,13 +518,35 @@ func (s *SubTaskService) ReArmErroredForRetry(batchID string, retryMax int) (int
 // one caller can ever own a given (batch_id, batch_seq) at a time, and
 // ClaimNextPending is the single entry point that grants that ownership.
 //
-// Implementation: an UPDATE with the candidate id resolved by a correlated
-// subquery, evaluated by the database inside the same statement. The
-// `AND status='pending'` clause on the outer WHERE makes the flip
-// conditional — if another writer has already changed status, RowsAffected
-// drops to 0 and the second bool return is false; no row is leaked to a stale
-// caller. On success the batch_id_seq_run column is stamped with the current
-// time as a heartbeat that RecoverInterrupted inspects on boot.
+// Implementation: resolve the candidate id with its own SELECT, flip it with
+// an UPDATE pinned to that id, then read the row back BY THAT ID. The
+// `AND status='pending'` clause on the UPDATE makes the flip conditional — if
+// another writer changed the status between our SELECT and our UPDATE,
+// RowsAffected drops to 0, no row is leaked to a stale caller, and we retry
+// with a fresh candidate. On success the batch_id_seq_run column is stamped
+// with the current time as a heartbeat that RecoverInterrupted inspects on
+// boot.
+//
+// The returned row MUST be the row this call promoted. An earlier version
+// resolved the candidate inside the UPDATE (correlated subquery over
+// status='pending') and then read back the lowest-seq *running* row — the same
+// row only while at most one child runs at a time. At subtask.concurrency=2
+// the second claim promoted seq 2 but returned seq 1, the child already
+// executing, which broke the ownership contract in both directions:
+//
+//   - The caller re-dispatched a LIVE child. ExecuteOrchestratedChild mints a
+//     fresh session id over session_id, so the first goroutine's
+//     FinishForSession stopped matching ("finish bypassed: session_id
+//     mismatch — likely re-claimed mid-run") and a second claude process
+//     worked the same prompt.
+//   - The row actually promoted was never dispatched: it sat at
+//     status='running' with the claim-time heartbeat and no session_id /
+//     job_id, so nothing refreshed the heartbeat. selfHealStaleRunning flipped
+//     it back to pending at exactly staleAfter ("session_id= job_id=<empty>
+//     heartbeat_age=2m0.001s") and the next tick re-entered the loop.
+//
+// Both symptoms are the same root cause, so any future rewrite has to keep
+// promote-side and return-side pinned to one id.
 //
 // The heartbeat MUST be stamped from a bound time.Time in UTC — never from
 // SQL CURRENT_TIMESTAMP, and never from a local-zone time.Time. The
@@ -553,61 +575,81 @@ func (s *SubTaskService) ReArmErroredForRetry(batchID string, retryMax int) (int
 // persist. MySQL/Postgres convert the parameter to a native TIMESTAMP and
 // were never affected, but they stay correct under this rule too.
 //
-// On RowsAffected==1 we re-SELECT the row with a WHERE batch_id=? AND
-// status='running' ORDER BY batch_seq ASC LIMIT 1 — there's exactly one
-// running row we just produced under SQLite's single-writer model and READ
-// COMMITTED semantics on MySQL/Postgres, so the re-select is unambiguous.
+// claimMaxAttempts bounds the candidate/flip retry loop in ClaimNextPending.
+// Each lost race means a concurrent writer claimed (or finished) the candidate
+// between our SELECT and our UPDATE; retrying picks the next one. SQLite's
+// single-writer model makes a loss impossible, and on MySQL/Postgres the only
+// competing writers are other queue ticks, so the loop settles immediately —
+// the bound just keeps a pathological interleaving from spinning a tick.
+const claimMaxAttempts = 8
+
 func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool, error) {
 	if batchID == "" {
 		return nil, false, errors.New("batch_id is required")
 	}
-	now := time.Now()
-	// hb is UTC (see docstring); updated_at keeps the local-zone convention
-	// the rest of this table's writes use, since nothing compares it in SQL.
-	hb := now.UTC()
-	res, err := s.db.Exec(`UPDATE sub_tasks
-		SET status=?, updated_at=?, batch_id_seq_run=?
-		WHERE id = (
-			SELECT id FROM sub_tasks
+	for attempt := 0; attempt < claimMaxAttempts; attempt++ {
+		var candidateID string
+		err := s.db.QueryRow(`SELECT id FROM sub_tasks
 			 WHERE batch_id=? AND status=?
 			 ORDER BY batch_seq ASC, created_at ASC
-			 LIMIT 1
-		)
-		AND status=?`,
-		model.SubTaskStatusRunning, now, hb,
-		batchID, model.SubTaskStatusPending, model.SubTaskStatusPending)
-	if err != nil {
-		return nil, false, fmt.Errorf("claim pending sub_task: %w", err)
+			 LIMIT 1`,
+			batchID, model.SubTaskStatusPending).Scan(&candidateID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, nil
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("select pending sub_task: %w", err)
+		}
+
+		now := time.Now()
+		// hb is UTC (see docstring); updated_at keeps the local-zone convention
+		// the rest of this table's writes use, since nothing compares it in SQL.
+		hb := now.UTC()
+		res, err := s.db.Exec(`UPDATE sub_tasks
+			SET status=?, updated_at=?, batch_id_seq_run=?
+			WHERE id=? AND status=?`,
+			model.SubTaskStatusRunning, now, hb,
+			candidateID, model.SubTaskStatusPending)
+		if err != nil {
+			return nil, false, fmt.Errorf("claim pending sub_task: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			// Someone else claimed this candidate first; try the next one.
+			continue
+		}
+
+		// Read back BY ID — never by "lowest-seq running row". See the
+		// docstring: a batch may hold several running rows at once, and
+		// handing back one we didn't promote re-dispatches a live child while
+		// stranding the row we did promote.
+		rows, err := s.db.Query(`SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
+			session_id, source_session_id, job_id, artifact, model, claude_config_id,
+			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+			cost_cents, duration_seconds,
+			created_at, updated_at, completed_at,
+			batch_id, batch_seq, batch_id_seq_run, source,
+			agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
+			session_mode, retry_count
+			FROM sub_tasks WHERE id=?`, candidateID)
+		if err != nil {
+			return nil, false, fmt.Errorf("re-select claimed sub_task: %w", err)
+		}
+		if !rows.Next() {
+			rows.Close()
+			return nil, false, fmt.Errorf("claim succeeded but row %s vanished for batch %s", candidateID, batchID)
+		}
+		st, serr := scanSubTask(rows)
+		rows.Close()
+		if serr != nil {
+			return nil, false, serr
+		}
+		return st, true, nil
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return nil, false, nil
-	}
-	rows, err := s.db.Query(`SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
-		session_id, source_session_id, job_id, artifact, model, claude_config_id,
-		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-		cost_cents, duration_seconds,
-		created_at, updated_at, completed_at,
-		batch_id, batch_seq, batch_id_seq_run, source,
-		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-		session_mode, retry_count
-		FROM sub_tasks
-		 WHERE batch_id=? AND status=?
-		 ORDER BY batch_seq ASC, created_at ASC
-		 LIMIT 1`,
-		batchID, model.SubTaskStatusRunning)
-	if err != nil {
-		return nil, false, fmt.Errorf("re-select claimed sub_task: %w", err)
-	}
-	defer rows.Close()
-	if !rows.Next() {
-		return nil, false, fmt.Errorf("claim succeeded but row vanished for batch %s", batchID)
-	}
-	st, err := scanSubTask(rows)
-	if err != nil {
-		return nil, false, err
-	}
-	return st, true, nil
+	// Every candidate we picked was claimed by someone else. The rows are
+	// owned and running, so this is the same outcome as "nothing to claim":
+	// the caller releases its slot and the next tick re-evaluates.
+	log.Printf("[sub-task] claim %s: lost %d consecutive races, deferring to next tick", batchID, claimMaxAttempts)
+	return nil, false, nil
 }
 
 // MarkHeartbeat refreshes batch_id_seq_run to the current timestamp for a
