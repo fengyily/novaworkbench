@@ -112,33 +112,55 @@ func (h *WizardHandler) RunImmediateDesignAndCoding(w http.ResponseWriter, r *ht
 		}
 	}
 
-	reqRow, err := h.reqSvc.Get(id)
-	if err != nil {
-		writeError(w, 404, immediateErrRequirementNotFound, "requirement not found")
-		return
-	}
-
-	if af := h.immediatePreGate(reqRow); af != nil {
+	jobID, af := h.launchDesignAndCoding(id, &body)
+	if af != nil {
 		writeIfAPIError(w, af)
 		return
 	}
+	writeJSON(w, 200, map[string]string{"design_job_id": jobID})
+}
 
+// launchDesignAndCoding is the shared dispatch for an immediate
+// design+coding run, reused by both the HTTP handler
+// (RunImmediateDesignAndCoding above) and Create's launch spec
+// (requirement_launch.go dispatchLaunch → immediate + design_and_coding
+// branch). Pulled out so the chain
+//
+//	immediatePreGate → prepareArchitectDesign → execArchitectDesign (goroutine)
+//
+// is defined exactly once — the HTTP path and the launch-spec path both
+// invoke this helper, so a future edit can't accidentally diverge them.
+//
+// Returns the JobStore design-stage job id; the chained coding-stage
+// job id is picked up by RequirementDetail's existing activeSchedJobId
+// poll loop without any frontend change (wizard_immediate.go prologue).
+//
+// Returns *apiFailure on any pre-flight rejection; the HTTP caller maps
+// the failure verbatim via writeIfAPIError, and the launch-spec caller
+// surfaces it through Create's launch_error display field. Error codes
+// are the immediateErr* constants defined above so the frontend's
+// existing translation keys keep working in both paths.
+func (h *WizardHandler) launchDesignAndCoding(reqID string, body *designCodingImmediateReq) (string, *apiFailure) {
+	reqRow, err := h.reqSvc.Get(reqID)
+	if err != nil {
+		return "", fail(404, immediateErrRequirementNotFound, "requirement not found")
+	}
+	if af := h.immediatePreGate(reqRow); af != nil {
+		return "", af
+	}
 	// Prepare the architect stage synchronously — same prepare step the
 	// HTTP /api/wizard/architect-design and the scheduler path share, so
 	// validation (NO_SESSION, UNANCHORED_SESSION, WORKTREE_FAILED, …)
 	// is identical. prepareArchitectDesign mints the JobStore job and
 	// persists design_job_id on the requirement row before we return, so
 	// a second concurrent POST hits DESIGN_JOB_ACTIVE on the next call.
-	p, job, af := h.prepareArchitectDesign(context.Background(), id, body.DesignModel, body.DesignConfigID, body.DesignAgentServerID, body.ReadKnowledge)
+	p, job, af := h.prepareArchitectDesign(context.Background(), reqID, body.DesignModel, body.DesignConfigID, body.DesignAgentServerID, body.ReadKnowledge)
 	if af != nil {
-		writeIfAPIError(w, af)
-		return
+		return "", af
 	}
-
-	cb := h.immediateDesignCallback(id, body)
+	cb := h.immediateDesignCallback(reqID, *body)
 	go h.execArchitectDesign(p, job, cb)
-
-	writeJSON(w, 200, map[string]string{"design_job_id": job.ID})
+	return job.ID, nil
 }
 
 // immediatePreGate centralizes the synchronous state checks before the
