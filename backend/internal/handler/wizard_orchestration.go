@@ -1651,6 +1651,13 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 	if perr := h.reqSvc.UpdateCodingPlan(batch.RequirementID, out.finalResult); perr != nil {
 		log.Printf("[orchestrate] summary %s persist coding_plan: %v", batchID, perr)
 	}
+	// Orchestrator summary persisted — bump parent requirement last-active time.
+	// Best-effort: UpdateCodingPlan already bumps updated_at, but a dedicated Touch
+	// here keeps the semantic "summary completed" signal explicit and survives any
+	// future change where UpdateCodingPlan might not write updated_at.
+	if perr := h.reqSvc.Touch(batch.RequirementID); perr != nil {
+		log.Printf("[orchestrate] touch parent %s: %v", batch.RequirementID, perr)
+	}
 	job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
 	job.Append(store.LogLine{Type: "done", Content: "✅ 汇总完成！"})
 	job.Finish(0, store.JobDone)

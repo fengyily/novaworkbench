@@ -50,12 +50,16 @@ const DefaultSubTaskConcurrency = 4
 type SubTaskRunner struct {
 	projectSvc *service.ProjectService
 	subTaskSvc *service.SubTaskService
-	jobs       *store.JobStore
-	llm        *llm.Gateway
-	roleSvc    *service.RoleService
-	jobLogSvc  *service.JobLogService
-	claudeCfg  *service.ClaudeConfigService
-	usageSvc   usageRecorder
+	// reqSvc bumps the parent requirement's updated_at on terminal sub-task
+	// transitions (done/error/stopped) so the "last active time" reflects
+	// every visible activity, not just status changes.
+	reqSvc    *service.RequirementService
+	jobs      *store.JobStore
+	llm       *llm.Gateway
+	roleSvc   *service.RoleService
+	jobLogSvc *service.JobLogService
+	claudeCfg *service.ClaudeConfigService
+	usageSvc  usageRecorder
 	// remoteCoding is set by the wizard handler at construction time so the
 	// runner can dispatch children to the requirement's Agent server without
 	// importing wizard.go (which would create a circular dep). Nil keeps every
@@ -111,6 +115,7 @@ type SubTaskRunner struct {
 func NewSubTaskRunner(
 	projectSvc *service.ProjectService,
 	subTaskSvc *service.SubTaskService,
+	reqSvc *service.RequirementService,
 	jobs *store.JobStore,
 	llm *llm.Gateway,
 	roleSvc *service.RoleService,
@@ -139,6 +144,7 @@ func NewSubTaskRunner(
 		agentSvrSvc:  agentSvrSvc,
 		projectSvc:   projectSvc,
 		subTaskSvc:   subTaskSvc,
+		reqSvc:       reqSvc,
 		jobs:         jobs,
 		llm:          llm,
 		roleSvc:      roleSvc,
@@ -919,6 +925,14 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 	artifact := buildSubTaskArtifact(st, modelName, artifactBody, time.Now())
 	if perr := r.subTaskSvc.Finish(st.ID, finalStatus, artifact, modelName, tokens, costCents, startTime); perr != nil {
 		log.Printf("[sub-task] failed to persist finish for %s: %v", st.ID, perr)
+	}
+	// Best-effort bump parent requirement updated_at on terminal sub-task
+	// transitions (done/error/stopped). A touch failure never blocks the
+	// sub-task lifecycle — the row + job are already persisted above.
+	if r.reqSvc != nil {
+		if perr := r.reqSvc.Touch(st.RequirementID); perr != nil {
+			log.Printf("[sub-task] touch parent %s: %v", st.RequirementID, perr)
+		}
 	}
 	job.Finish(0, store.JobDone)
 	log.Printf("[sub-task] job %s finished for %s status=%s", job.ID, st.ID, finalStatus)
