@@ -58,6 +58,14 @@ type projectPathResolver interface {
 	Get(id string) (*model.Project, error)
 }
 
+// jobAppender is the narrow subset of *store.Job that resolveCodingProjectPath
+// actually needs (it only emits log lines). Using an interface here lets unit
+// tests stub the sink without instantiating the full JobStore ring buffer or
+// a real Job; production callers continue to pass *store.Job.
+type jobAppender interface {
+	Append(store.LogLine)
+}
+
 type codingRunParams struct {
 	ProjectPath      string `json:"project_path"`
 	RequirementTitle string `json:"requirement_title"`
@@ -96,6 +104,47 @@ type codingRunParams struct {
 	// (empty remote_url → local). Persisted to the requirement row so all
 	// follow-up actions (追加调整 / 继续开发 / 子任务 / 合并 / 清理) reuse it.
 	SyncMode string `json:"sync_mode"`
+}
+
+// resolveCodingProjectPath fills in codingRunParams.ProjectPath when the
+// caller (typically ScheduledExecutor.RunScheduledCoding) didn't pre-fill it.
+// It is the inline-extracted version of what used to live in execStartCoding;
+// pulling it out keeps the regression surface tight (one helper, one error
+// path) and lets unit tests stub the project lookup without standing up a
+// real *service.ProjectService / *db.DB.
+//
+// Contract:
+//   - p.ProjectPath != "" → no-op, returns nil. Caller already knows the dir.
+//   - p.ProjectPath == "" && reqRow == nil → no-op, returns nil. Legacy
+//     quick-start path: no requirement row means no project id to fall back
+//     to, so we leave ProjectPath empty and let execStartCoding's downstream
+//     checks fail loudly (matches pre-existing behavior).
+//   - p.ProjectPath == "" && reqRow != nil → ask `getter` for the project.
+//     Success → write p.ProjectPath = proj.LocalPath + log a `phase` line.
+//     Failure → log an `error` line and return a non-nil error; the caller
+//     finishes the job with JobError and returns.
+//
+// The getter parameter accepts a narrow interface (projectPathResolver) so
+// tests pass a tiny fake without importing *service.ProjectService.
+func (h *WizardHandler) resolveCodingProjectPath(p *codingRunParams, reqRow *model.Requirement, getter projectPathResolver, job jobAppender) error {
+	if p.ProjectPath != "" {
+		return nil
+	}
+	if reqRow == nil || getter == nil {
+		return nil
+	}
+	proj, err := getter.Get(reqRow.ProjectID)
+	if err != nil {
+		job.Append(store.LogLine{Type: "error", Content: "❌ 无法解析项目目录：projectSvc.Get(" + reqRow.ProjectID + ") 失败: " + err.Error()})
+		return err
+	}
+	if proj == nil || proj.LocalPath == "" {
+		job.Append(store.LogLine{Type: "error", Content: "❌ 无法解析项目目录：项目 " + reqRow.ProjectID + " 的 LocalPath 为空"})
+		return fmt.Errorf("project %s has empty LocalPath", reqRow.ProjectID)
+	}
+	p.ProjectPath = proj.LocalPath
+	job.Append(store.LogLine{Type: "phase", Content: "📁 已从项目元数据解析工作目录: " + p.ProjectPath})
+	return nil
 }
 
 func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
@@ -351,19 +400,9 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// chdir-ing to "". Resolve ProjectPath from the persisted project's
 	// LocalPath when the caller (typically the scheduler) didn't pre-fill it;
 	// log the resolved path so the SSE panel makes the directory explicit.
-	if p.ProjectPath == "" && reqRow != nil {
-		if proj, perr := h.projectSvc.Get(reqRow.ProjectID); perr == nil && proj != nil && proj.LocalPath != "" {
-			p.ProjectPath = proj.LocalPath
-			job.Append(store.LogLine{Type: "phase", Content: "📁 已从项目元数据解析工作目录: " + p.ProjectPath})
-		} else if perr != nil {
-			job.Append(store.LogLine{Type: "error", Content: "❌ 无法解析项目目录：projectSvc.Get(" + reqRow.ProjectID + ") 失败: " + perr.Error()})
-			job.Finish(1, store.JobError)
-			return
-		} else {
-			job.Append(store.LogLine{Type: "error", Content: "❌ 无法解析项目目录：项目 " + reqRow.ProjectID + " 的 LocalPath 为空"})
-			job.Finish(1, store.JobError)
-			return
-		}
+	if err := h.resolveCodingProjectPath(p, reqRow, h.projectSvc, job); err != nil {
+		job.Finish(1, store.JobError)
+		return
 	}
 
 	// Resolve the working directory for coding. When a branch is requested
