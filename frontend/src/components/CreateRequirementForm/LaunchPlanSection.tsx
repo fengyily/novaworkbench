@@ -108,9 +108,9 @@ export default function LaunchPlanSection({
 }: LaunchPlanSectionProps) {
   const { t } = useTranslation();
 
-  // Defensive: the parent already hides this component for idea, but
-  // re-check so onChange can never emit a launch spec for an idea.
-  if (kind === 'idea') return null;
+  // NOTE: the `kind === 'idea' → return null` guard lives BELOW all hook
+  // calls so React's rules-of-hooks (same order every render) is honored.
+  // Hooks come first; the guard is purely a render-time decision.
 
   // Project to ExecEnvServer (only id/name/host are read by the shared
   // <ExecEnvSelect>).
@@ -221,6 +221,11 @@ export default function LaunchPlanSection({
   ]);
 
   const fieldDisabled = !!disabled;
+
+  // Defensive: the parent already hides this component for idea, but
+  // re-check so onChange can never emit a launch spec for an idea. This
+  // runs AFTER every hook above so the hook order is stable.
+  if (kind === 'idea') return null;
 
   return (
     <div className="launch-plan-section">

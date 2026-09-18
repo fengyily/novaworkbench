@@ -1662,6 +1662,21 @@ export default function ProjectDetail() {
                 onClose={() => setShowCreateReq(false)}
                 onCreated={async (created: Requirement) => {
                   setShowCreateReq(false);
+                  // Launch plan attached at creation time — the backend
+                  // already dispatched (or tried to). Surface the dispatch
+                  // result, then route to the detail page WITHOUT the
+                  // autoStartDesign/autoStartCoding intent flags, because
+                  // the job is already running (or already on the schedule)
+                  // and re-prompting would mislead.
+                  if (created.launch_error) {
+                    // eslint-disable-next-line no-alert
+                    window.alert(t('components.createRequirement.launchPlan.launchFailed', { reason: created.launch_error }));
+                  }
+                  if (created.launch_mode === 'immediate' || created.launch_mode === 'scheduled') {
+                    navigate(`/requirements/${created.id}`);
+                    return;
+                  }
+                  // No launch plan → original behavior, line-for-line.
                   // Skip analysis → auto-enter the design stage: navigate to
                   // the detail page and pass the autoStartDesign intent flag
                   // so RequirementDetail auto-triggers architect-design in a
