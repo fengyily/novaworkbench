@@ -42,22 +42,41 @@ func WorktreePath(projectPath, reqID string) string {
 
 // worktreeRegistered reports whether wtPath is a registered worktree of the
 // repo at projectPath (parsed from `git worktree list --porcelain`).
+//
+// Path matching goes through filepath.EvalSymlinks on both sides so a
+// symlinked home directory (common on macOS, where /var/folders/... and
+// /private/var/folders/... refer to the same on-disk location but compare
+// unequal as strings) doesn't make the function silently return false. A
+// fallback to filepath.Abs keeps the comparison working when the wtPath
+// doesn't exist yet — EvalSymlinks requires the path to be present.
 func worktreeRegistered(projectPath, wtPath string) (bool, error) {
 	out, err := gitRun(projectPath, "worktree", "list", "--porcelain")
 	if err != nil {
 		return false, err
 	}
-	absWt, _ := filepath.Abs(wtPath)
+	absWt := canonicalPath(wtPath)
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "worktree ") {
 			p := strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
-			if ap, e := filepath.Abs(p); e == nil && ap == absWt {
+			if canonicalPath(p) == absWt {
 				return true, nil
 			}
 		}
 	}
 	return false, nil
+}
+
+// canonicalPath returns the symlink-resolved absolute path of p. When p
+// doesn't exist (e.g. we're about to register a brand-new worktree), fall
+// back to filepath.Abs so the caller still gets a usable string. Used by
+// worktreeRegistered to make path comparisons immune to symlinked parents.
+func canonicalPath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	abs, _ := filepath.Abs(p)
+	return abs
 }
 
 // gitRunWithTimeout is gitRun with an additional context timeout and an
@@ -218,28 +237,54 @@ func ensureWorktreeFrom(projectPath, reqID, branch, baseBranch string, skipSync 
 	wtPath := WorktreePath(projectPath, reqID)
 
 	// Already registered → reuse it, ensuring the right branch is checked out.
+	// If the persisted worktree exists but the target branch is missing
+	// locally (typical after a host switch where ~/.novaworkbench/worktrees
+	// was restored but the underlying refs/heads/<branch> never made it into
+	// this clone), drop the stale registration and fall through to the
+	// creation strategy — git would otherwise refuse the checkout with
+	// "路径规格 '<branch>' 未匹配任何 Git 已知文件" and the wizard job fails.
 	if registered, _ := worktreeRegistered(projectPath, wtPath); registered {
-		if cur := currentBranch(wtPath); cur != branch && cur != "" {
+		cur := currentBranch(wtPath)
+		reuse := cur == branch || cur == ""
+		if !reuse {
 			if _, err := gitRun(wtPath, "checkout", branch); err != nil {
-				return "", fmt.Errorf("checkout %s in worktree: %w", branch, err)
-			}
-		}
-		// Best-effort fast-forward from the freshly-fetched main ref. startRef
-		// may be "" (no remote / no base) — in that case there is nothing to
-		// merge and we simply return the reused worktree as-is. On divergence
-		// (local commits / dirty tree / fork) we log a hint and keep the
-		// user's work intact; never --force / reset --hard here.
-		if startRef != "" {
-			if _, mErr := gitRun(wtPath, "merge", "--ff-only", startRef); mErr == nil {
-				if logf != nil {
-					logf("⬆️ 已从 " + startRef + " 更新")
+				// Distinguish "branch missing locally" (recoverable: drop the
+				// stale worktree and recreate below) from a generic checkout
+				// failure such as a dirty tree (still a hard error).
+				if _, exErr := gitRun(projectPath, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch); exErr != nil {
+					if logf != nil {
+						logf("ℹ️ 已注册 worktree 的目标分支 " + branch + " 在本地不存在，移除后重建 worktree")
+					}
+					_, _ = gitRun(projectPath, "worktree", "remove", "--force", wtPath)
+					_, _ = gitRun(projectPath, "worktree", "prune")
+				} else {
+					return "", fmt.Errorf("checkout %s in worktree: %w", branch, err)
 				}
-			} else if logf != nil {
-				logf("ℹ️ 已有改动，无法从主分支快进更新，继续在当前分支工作")
+			} else {
+				reuse = true
 			}
 		}
-		logLatestCommit(wtPath, logf)
-		return wtPath, nil
+		if reuse {
+			// Best-effort fast-forward from the freshly-fetched main ref.
+			// startRef may be "" (no remote / no base) — in that case there
+			// is nothing to merge and we simply return the reused worktree
+			// as-is. On divergence (local commits / dirty tree / fork) we
+			// log a hint and keep the user's work intact; never --force /
+			// reset --hard here.
+			if startRef != "" {
+				if _, mErr := gitRun(wtPath, "merge", "--ff-only", startRef); mErr == nil {
+					if logf != nil {
+						logf("⬆️ 已从 " + startRef + " 更新")
+					}
+				} else if logf != nil {
+					logf("ℹ️ 已有改动，无法从主分支快进更新，继续在当前分支工作")
+				}
+			}
+			logLatestCommit(wtPath, logf)
+			return wtPath, nil
+		}
+		// Fall through to the creation strategy below: the stale worktree was
+		// removed and reuse is no longer possible.
 	}
 
 	// A leftover directory that isn't a registered worktree (half-created,
@@ -258,7 +303,10 @@ func ensureWorktreeFrom(projectPath, reqID, branch, baseBranch string, skipSync 
 		if out, err := gitRun(projectPath, "worktree", "add", "-b", branch, wtPath, startRef); err == nil {
 			logLatestCommit(wtPath, logf)
 			return wtPath, nil
-		} else if !strings.Contains(out, "already exists") {
+		} else if !worktreeAddBranchExists(out, err) {
+			// "a branch named <name> already exists" is the only expected
+			// failure here — fall through to the next attempt. Anything
+			// else surfaces to the caller verbatim.
 			if out != "" {
 				return "", fmt.Errorf("git worktree add (%s): %s", startRef, out)
 			}
@@ -271,17 +319,14 @@ func ensureWorktreeFrom(projectPath, reqID, branch, baseBranch string, skipSync 
 	if out, err := gitRun(projectPath, "worktree", "add", "-b", branch, wtPath); err == nil {
 		logLatestCommit(wtPath, logf)
 		return wtPath, nil
-	} else {
+	} else if !worktreeAddBranchExists(out, err) {
 		// "fatal: a branch named <name> already exists" is the only expected
-		// failure here — fall through to the attach path below.
-		if !strings.Contains(out, "already exists") {
-			// Any other failure (e.g. dirty working tree) — surface the
-			// stderr so the user knows what to do.
-			if out != "" {
-				return "", fmt.Errorf("git worktree add: %s", out)
-			}
-			return "", fmt.Errorf("git worktree add: %w", err)
+		// failure here — fall through to the attach path below. Anything
+		// else (dirty working tree, etc.) surfaces verbatim.
+		if out != "" {
+			return "", fmt.Errorf("git worktree add: %s", out)
 		}
+		return "", fmt.Errorf("git worktree add: %w", err)
 	}
 
 	// 2. User-supplied base branch exists and the branch exists in another
@@ -290,7 +335,7 @@ func ensureWorktreeFrom(projectPath, reqID, branch, baseBranch string, skipSync 
 		if out, err := gitRun(projectPath, "worktree", "add", "-b", branch, wtPath, baseBranch); err == nil {
 			logLatestCommit(wtPath, logf)
 			return wtPath, nil
-		} else if !strings.Contains(out, "already exists") {
+		} else if !worktreeAddBranchExists(out, err) {
 			if out != "" {
 				return "", fmt.Errorf("git worktree add (%s): %s", baseBranch, out)
 			}
@@ -360,4 +405,31 @@ func RemoveWorktree(projectPath, wtPath string, force bool) error {
 	}
 	_, _ = gitRun(projectPath, "worktree", "prune")
 	return nil
+}
+
+// worktreeAddBranchExists reports whether a failed `git worktree add -b
+// <branch>` attempt collided with an existing local branch — the
+// recoverable fall-through signal in ensureWorktreeFrom's strategy order.
+//
+// git writes the "branch already exists" diagnostic to STDERR (not stdout),
+// so the previous code's `strings.Contains(out, "already exists")` check
+// silently missed it in any locale where stdout happened to be empty (i.e.
+// every locale — the message only ever lands on stderr). It also missed the
+// Chinese translation ("已经存在") and the matching "分支 '...' 已经存在"
+// wording. This helper greps BOTH channels AND the wrapped stderr error so
+// the fall-through works regardless of locale or stream routing.
+func worktreeAddBranchExists(stdoutText string, err error) bool {
+	combined := stdoutText
+	if err != nil {
+		combined += " " + err.Error()
+	}
+	// English / C locale
+	if strings.Contains(combined, "already exists") {
+		return true
+	}
+	// Simplified Chinese
+	if strings.Contains(combined, "已经存在") {
+		return true
+	}
+	return false
 }
