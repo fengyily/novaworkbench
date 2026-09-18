@@ -217,7 +217,6 @@ func main() {
 	scannerH := handler.NewScannerHandler(scannerSvc)
 	sharedJobs := store.NewJobStore(50)
 	preflightH := handler.NewPreflightHandler(pfRegistry, sharedJobs)
-	reqH := handler.NewRequirementHandler(reqSvc, llmGateway, sharedJobs, usageSvc)
 	// SubTaskRunner is the shared executor for child-agent rows: both the
 	// wizard (manual sub-tasks + auto-orchestrated children) and the merge
 	// handler (push + PR sub-task) delegate to it. Constructed once so the
@@ -268,6 +267,11 @@ func main() {
 	// Agent-server-developed requirement run on that server, so every sub-task
 	// dispatch (manual / orchestrated / push+PR) routes through it.
 	subTaskRunner.SetRemoteCoding(wizardH.RunRemoteCoding)
+	// Requirement handler is constructed here — after wizardH + schedSvc — so
+	// its Create handler can dispatch the optional 启动计划 (immediate wizard
+	// run / scheduled task) atomically. See requirement_launch.go and
+	// requirement.go's Create method.
+	reqH := handler.NewRequirementHandler(reqSvc, llmGateway, sharedJobs, usageSvc, wizardH, schedSvc)
 	// Scheduled-task executor (wizard bridge) and HTTP handler. The
 	// scheduler package polls scheduled_tasks rows and dispatches through
 	// the executor; both live in main.go so the lifecycle is the same as
