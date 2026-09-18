@@ -239,36 +239,48 @@ func executorMigratedPrompt() string {
 	return ""
 }
 
-// architectOldPromptSignature is the substring we look for in the existing
-// architect role's system_prompt to decide whether the row still carries the
-// pre-模板化 persona (the old short "涵盖：整体实现思路、涉及文件…" version)
-// vs the current template-driven "需求/项目上下文/输出要求/工作方式约束"
-// persona. SeedDefaults already leaves the row alone — but the rewrite is a
-// behavioural change (the new prompt enforces a structured 6-section output
-// + 7 working-style rules that the old one didn't), so on upgrade we must
-// rewrite the existing row when it still carries the old persona.
+// architectOldPromptSignatures are the substrings that identify a *previous
+// built-in* architect system_prompt — i.e. a row we shipped ourselves and may
+// therefore safely rewrite on upgrade. Each entry is a stable, distinctive
+// phrase from one historical revision, never a generic marker, so a user who
+// has genuinely customized the prompt is NOT clobbered.
 //
-// The substring is intentionally a stable, distinctive phrase from the
-// original architect prompt — not just "architect" or a generic marker —
-// so a user who has genuinely customized the prompt is NOT clobbered.
-// If the substring is absent (because the user already customized, OR
-// because a previous release already migrated them), we skip.
-const architectOldPromptSignature = "涵盖：整体实现思路、涉及文件"
+// Revisions, oldest first:
+//  1. "涵盖：整体实现思路、涉及文件" — the pre-模板化 short persona, replaced by the
+//     template-driven "需求/项目上下文/输出要求/工作方式约束" version.
+//  2. "页面 UI 调整说明" — the template-driven persona *before* the plan-mode
+//     guidance (Explore Agent budget + "write the plan to
+//     ~/.claude/plans/<slug>.md") was added. That guidance is what keeps the
+//     architect from stalling nova's watchdog and losing the design, so
+//     existing installs need it too — without this entry the rewording would
+//     only ever reach fresh databases.
+//
+// Note entry 2 also appears in the current prompt, so MigrateArchitectRole
+// must check architectNewPromptSignature first (it does).
+var architectOldPromptSignatures = []string{
+	"涵盖：整体实现思路、涉及文件",
+	"页面 UI 调整说明",
+}
 
 // architectNewPromptSignature is the substring that uniquely identifies the
-// current template-driven persona. Used by MigrateArchitectRole to
-// short-circuit when the row already carries the new persona (so the
-// migration is safe to call on every boot without re-applying).
-const architectNewPromptSignature = "页面 UI 调整说明"
+// *current* built-in persona. Used by MigrateArchitectRole to short-circuit
+// when the row is already up to date (so the migration is safe to call on
+// every boot without re-applying).
+//
+// Keep this pointing at the newest addition to the prompt: when the built-in
+// changes again, move the phrase that used to live here into
+// architectOldPromptSignatures and set this to something unique to the new
+// text — otherwise upgrades silently stop propagating.
+const architectNewPromptSignature = "方案落盘"
 
 // MigrateArchitectRole brings the architect role's built-in system_prompt
-// forward to the template-driven persona for databases whose architect role
-// still carries the legacy "涵盖：整体实现思路…" prompt. Idempotent:
+// forward to the current built-in for databases still carrying an older
+// shipped revision (see architectOldPromptSignatures). Idempotent:
 //   - row missing (fresh DB): no-op, SeedDefaults already inserted the new prompt
-//   - row present + old signature: UPDATE system_prompt to the new default,
-//     leave name / model / claude_config_id / enabled untouched
-//   - row present + new signature: no-op (already migrated)
-//   - row present + neither signature: user customized; we can't tell old vs
+//   - row present + a known old signature: UPDATE system_prompt to the new
+//     default, leave name / model / claude_config_id / enabled untouched
+//   - row present + new signature: no-op (already up to date)
+//   - row present + no known signature: user customized; we can't tell old vs
 //     custom, so NO-OP. The user can hit the settings page → role → Reset to
 //     pick up the new built-in.
 //
@@ -284,7 +296,14 @@ func (s *RoleService) MigrateArchitectRole() (bool, error) {
 	if strings.Contains(prompt, architectNewPromptSignature) {
 		return false, nil
 	}
-	if !strings.Contains(prompt, architectOldPromptSignature) {
+	known := false
+	for _, sig := range architectOldPromptSignatures {
+		if strings.Contains(prompt, sig) {
+			known = true
+			break
+		}
+	}
+	if !known {
 		// User-customized prompt that we don't recognize; leave it alone so the
 		// user can keep their wording. The settings UI's reset button is the
 		// supported way to opt into the new built-in.
