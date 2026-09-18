@@ -111,6 +111,10 @@ export const requirements = {
   // pipeline / merge step / sub-task panel integration / usage tables).
   // All labels rendered by RequirementDetail.tsx.
   detail2: {
+    // Locked design baseline (origin/<base> HEAD SHA), shown as a 7-char badge
+    // in the design section; the full SHA is in the title. Hidden when empty.
+    designBaseLabel: 'Base',
+    designBaseTooltip: 'Locked design baseline (origin/<base> SHA)',
     knowledgeReadTitle: 'Read project knowledge base',
     knowledgeReadLink: 'View full knowledge base →',
     knowledgeReadEmpty: 'No relevant knowledge — went straight to code analysis.',

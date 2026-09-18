@@ -383,9 +383,34 @@ func (h *WizardHandler) activeConfigMeta() (id, currency string) {
 // the caller (typically a wizard Job) wants to surface them in the SSE panel.
 // logf may be nil; nil disables log echoing silently so the legacy callers
 // keep working unchanged.
+//
+// This is now a thin wrapper: the directory prologue lives in
+// ensureProjectDir and the worktree-anchoring step lives in anchorWorktree,
+// so the design stage's hard-sync path can reuse those primitives via
+// resolveWorkDirSynced without dragging in the best-effort EnsureClonedAndSynced
+// prologue (which would do a redundant soft fetch before our gate).
 func (h *WizardHandler) resolveWorkDirLogged(ctx context.Context, req *model.Requirement, projectPath, defaultBranch string, logf func(string)) (string, error) {
 	if req == nil || projectPath == "" {
 		return projectPath, nil
+	}
+	if err := h.ensureProjectDir(ctx, req, projectPath, logf); err != nil {
+		return "", err
+	}
+	return h.anchorWorktree(req, projectPath, defaultBranch, false, logf)
+}
+
+// ensureProjectDir is the directory prologue of resolveWorkDirLogged: it
+// validates that projectPath exists and materializes it from the project's
+// stored remote when missing. The sync prologue (EnsureClonedAndSynced) is
+// best-effort by design — its failures are logged but never propagated,
+// matching the legacy behavior so analyst / coding / refine-doc / apply-doc
+// callers stay zero-impact.
+//
+// logf may be nil; nil disables log echoing silently so the legacy callers
+// keep working unchanged.
+func (h *WizardHandler) ensureProjectDir(ctx context.Context, req *model.Requirement, projectPath string, logf func(string)) error {
+	if req == nil || projectPath == "" {
+		return nil
 	}
 	// Validate the project path exists before any git operations. A missing
 	// directory normally causes gitRun to fail with a generic error that
@@ -411,10 +436,10 @@ func (h *WizardHandler) resolveWorkDirLogged(ctx context.Context, req *model.Req
 			// clone failed). Fall back to the legacy EnsureCloned so the old
 			// error message still surfaces.
 			if restoreErr := h.projectSvc.EnsureCloned(req.ProjectID); restoreErr != nil {
-				return "", fmt.Errorf("project directory not found on this host: %s — %w", projectPath, restoreErr)
+				return fmt.Errorf("project directory not found on this host: %s — %w", projectPath, restoreErr)
 			}
 			if _, err := os.Stat(projectPath); err != nil {
-				return "", fmt.Errorf("project directory not found on this host: %s", projectPath)
+				return fmt.Errorf("project directory not found on this host: %s", projectPath)
 			}
 		}
 	} else {
@@ -423,6 +448,24 @@ func (h *WizardHandler) resolveWorkDirLogged(ctx context.Context, req *model.Req
 		// is anchored. This is the "design against the latest version"
 		// guarantee the wizard UX promises.
 		_, _ = h.projectSvc.EnsureClonedAndSynced(ctx, req.ProjectID, logf)
+	}
+	return nil
+}
+
+// anchorWorktree creates (or reuses) the requirement's isolated worktree and
+// persists the path on the requirement row. skipSync=true skips the
+// best-effort syncBaseBranch step inside ensureWorktreeFrom — callers that
+// have already performed an equivalent fetch upstream (e.g. the design
+// stage's hard-sync via SyncDesignBase) pass true to avoid duplicate
+// "🔄 已同步 origin/<base>" log lines on the SSE panel. Non-git projects
+// resolve to projectPath with a nil error (legacy in-place behavior); a git
+// repo whose worktree add fails returns a non-nil error.
+//
+// logf may be nil; nil disables log echoing silently so the legacy callers
+// keep working unchanged.
+func (h *WizardHandler) anchorWorktree(req *model.Requirement, projectPath, defaultBranch string, skipSync bool, logf func(string)) (string, error) {
+	if req == nil || projectPath == "" {
+		return projectPath, nil
 	}
 	if req.WorktreePath != "" {
 		if _, err := os.Stat(req.WorktreePath); err == nil {
@@ -434,7 +477,7 @@ func (h *WizardHandler) resolveWorkDirLogged(ctx context.Context, req *model.Req
 		defaultBranch = "main"
 	}
 	branch := "feat/" + req.ID
-	wtPath, err := EnsureWorktreeLogged(projectPath, req.ID, branch, defaultBranch, logf)
+	wtPath, err := ensureWorktreeFrom(projectPath, req.ID, branch, defaultBranch, skipSync, logf)
 	if err != nil {
 		if errors.Is(err, ErrNotAGitRepo) {
 			return projectPath, nil // non-git repo → legacy in-place
@@ -448,6 +491,31 @@ func (h *WizardHandler) resolveWorkDirLogged(ctx context.Context, req *model.Req
 		log.Printf("[wizard] persist worktree for %s: %v", req.ID, perr)
 	}
 	return wtPath, nil
+}
+
+// resolveWorkDirSynced is the design-stage entry point. It runs the project's
+// hard sync (SyncDesignBase) BEFORE anchoring the worktree so the design
+// prompt is built against origin/<base> HEAD — and skips the worktree layer's
+// best-effort syncBaseBranch to avoid duplicate "🔄 已同步 origin/<base>" log
+// lines on the SSE panel. SyncDesignBase failures propagate verbatim so the
+// caller (wizard_architect.prepareDesignWorkspace) can render a SyncGateError
+// as a job-stream error event. A Skipped result (non-git / no origin / unborn
+// HEAD) leaves baseSHA empty; the caller decides whether to stamp it.
+//
+// timeout bounds the underlying fetch; pass the setting-driven value from
+// settingSvc.GitSyncTimeout so changes take effect without a restart.
+func (h *WizardHandler) resolveWorkDirSynced(ctx context.Context, req *model.Requirement, projectPath, defaultBranch string, timeout time.Duration, logf func(string)) (workDir, baseSHA string, err error) {
+	if req == nil || projectPath == "" {
+		return projectPath, "", nil
+	}
+	res, serr := h.projectSvc.SyncDesignBase(ctx, req.ProjectID, timeout, logf)
+	if serr != nil {
+		// Hard block: the design stage must not proceed against a stale local
+		// checkout. Caller renders the SyncGateError in the SSE panel.
+		return "", "", serr
+	}
+	wt, werr := h.anchorWorktree(req, projectPath, defaultBranch, true, logf)
+	return wt, res.BaseSHA, werr
 }
 
 // resolveWorkDir returns the directory the current claude stage should run in:

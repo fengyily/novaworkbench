@@ -698,6 +698,9 @@ export interface Requirement {
   // ran); the design section's selector falls back to local.
   design_agent_server_id?: string;
   design_agent_server_name?: string;
+  // architect-design 阶段锁定的事实基线（同步完成后 origin/<base> 的 HEAD SHA）。
+  // 空字符串 = 未跑过 / 未配置 / 非 git 项目。merge 阶段把非空值塞进 PR body。
+  design_base_sha?: string;
   // Development-mode provenance for the coding stage, stamped when StartCoding
   // runs. 'session' = fork the design/analysis session (legacy default —
   // Claude inherits the full conversation). 'design' = fresh session, hand
@@ -1408,6 +1411,17 @@ export interface SubTaskConfig {
 export const subTaskConfigApi = {
   get: () => api.get<SubTaskConfig>('/api/settings/subtask'),
   update: (data: SubTaskConfig) => api.put<SubTaskConfig>('/api/settings/subtask', data),
+};
+
+// Git sync (design-stage hard sync to origin/<base>) timeout. The backend
+// reads this on every design run, so saving takes effect without a restart.
+// Range is clamped server-side to [10, 600] seconds; default 60.
+export interface GitSyncConfig {
+  timeout_seconds: number;
+}
+export const gitSyncConfigApi = {
+  get: () => api.get<GitSyncConfig>('/api/settings/git-sync'),
+  update: (data: GitSyncConfig) => api.put<GitSyncConfig>('/api/settings/git-sync', data),
 };
 
 // Database driver config (sqlite default; mysql/postgres via settings UI or

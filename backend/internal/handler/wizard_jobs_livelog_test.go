@@ -55,7 +55,7 @@ const frameDeadline = 5 * time.Second
 // from the ring buffer, which never happens here).
 func newJobsTestServer() (*httptest.Server, *store.JobStore) {
 	jobs := store.NewJobStore(50)
-	h := NewWizardHandler(nil, nil, nil, nil, nil, jobs, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	h := NewWizardHandler(nil, nil, nil, nil, nil, jobs, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/wizard/jobs/{id}", h.GetJob)
 	mux.HandleFunc("GET /api/wizard/jobs/{id}/stream", h.StreamJob)

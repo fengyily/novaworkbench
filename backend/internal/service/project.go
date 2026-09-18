@@ -783,6 +783,49 @@ func (s *ProjectService) OriginURL(projectID string) (string, error) {
 	return injectCredentials(p.RemoteURL, plat, tok, gitUserName), nil
 }
 
+// FirstOriginURLForProbe returns the first non-soft-deleted project's
+// remote_url (with platform credentials injected) so a per-server check job
+// can probe git remote reachability without needing project context itself.
+//
+// "Check" is server-scoped, not project-scoped, so we pick any project with
+// a configured remote_url — the probe is just a connectivity smoke test, not
+// a clone. Returns ("", nil) when no project has a remote configured (the
+// caller should treat that as "nothing to probe" rather than an error).
+//
+// Callers MUST redact the returned URL via handler.redactOriginForLog before
+// surfacing it in any user-visible log line — the token is embedded in
+// userinfo and would otherwise leak.
+func (s *ProjectService) FirstOriginURLForProbe() (string, error) {
+	var (
+		id, remoteURL, platformType, platformTokenID string
+	)
+	err := s.db.QueryRow(
+		`SELECT id, remote_url, platform_type, platform_token_id
+		   FROM projects
+		  WHERE deleted_at IS NULL AND remote_url != ''
+		  ORDER BY updated_at DESC
+		  LIMIT 1`,
+	).Scan(&id, &remoteURL, &platformType, &platformTokenID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	// Reuse the same credential-injection path as OriginURL — a project
+	// configured without a token (e.g. public repo) falls through with the
+	// raw URL, which is fine for an `ls-remote` probe.
+	tok, plat, _, gitUserName, cerr := s.resolveCloneAuth(platformType, platformTokenID, remoteURL)
+	if cerr != nil {
+		// TOKEN_NOT_FOUND / PLATFORM_MISMATCH → fall back to the raw URL so a
+		// public repo still probes cleanly. This mirrors OriginURL's
+		// "propagate but caller may fall back" semantics, adapted for the
+		// probe use-case where any URL is better than nothing.
+		return remoteURL, nil
+	}
+	return injectCredentials(remoteURL, plat, tok, gitUserName), nil
+}
+
 // Restore re-clones a soft-deleted project's directory from its stored
 // remote_url/default_branch and clears the soft-delete flags. It errors with
 // NO_REMOTE / DIR_EXISTS / RESTORE_FAILED / TOKEN_NOT_FOUND / PLATFORM_MISMATCH

@@ -13,6 +13,7 @@ export const settings = {
     subtask: 'Sub-tasks',
     database: 'Database',
     preflight: 'Dependencies',
+    gitSync: 'Git Sync',
   },
   // agentServers: the Agent Server settings sub-page (the form modal +
   // the per-server card with check / install / edit / delete actions).
@@ -212,6 +213,16 @@ export const settings = {
     retryMaxLabel: 'Max automatic redos',
     retryMaxHint: 'How many times one sub-task may be re-dispatched automatically before it stays in "error" and the batch moves on to its summary. Only applies when automatic redo is on.',
     save: '💾 Save',
+    saving: 'Saving…',
+    savedAt: 'Saved · {{time}}',
+  },
+  gitSync: {
+    title: 'Git Sync Settings',
+    desc: 'Configuration for the design-stage hard sync',
+    timeoutLabel: 'Sync Timeout (seconds)',
+    timeoutHint: 'Maximum time the design-stage hard sync (gate + fetch + ff) may take; large repos on first fetch may need a higher value.',
+    save: 'Save',
+    loading: 'Loading…',
     saving: 'Saving…',
     savedAt: 'Saved · {{time}}',
   },

@@ -116,6 +116,17 @@ type Requirement struct {
 	// Server「<名称>」" without a second round-trip. Empty for local design runs
 	// or when the server row was deleted. omitempty keeps Create responses clean.
 	DesignAgentServerName string `json:"design_agent_server_name,omitempty"`
+	// DesignBaseSHA is the 40-char HEAD SHA of origin/<default_branch> captured
+	// at the moment the architect-design stage synced to it. Written by the
+	// design-stage prologue (right after the hard sync succeeds, BEFORE claude
+	// is spawned) so a failed claude run still records which baseline the agent
+	// was about to design against. The merge stage surfaces it in the PR body
+	// for traceability. The coding stage deliberately does NOT inherit this
+	// value — by the time StartCoding runs, origin/<base> may have advanced and
+	// coding should branch from the fresh upstream, not from the design-time
+	// snapshot. Empty for legacy rows and requirements whose design stage was
+	// skipped (no remote / non-git / unborn HEAD — Skipped branch).
+	DesignBaseSHA string `json:"design_base_sha"`
 	// DevMode records HOW the coding stage was launched: "session" forks the
 	// design session (legacy default — Claude inherits the full analysis+design
 	// conversation), "design" starts a fresh session and hands the stored

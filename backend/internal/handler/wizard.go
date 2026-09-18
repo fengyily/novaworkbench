@@ -59,6 +59,12 @@ type WizardHandler struct {
 	orchQueue interface {
 		Kick()
 	}
+	// settingSvc exposes the settings KV (git.sync_timeout_seconds, subtask
+	// policy, …) to wizard handlers. The architect-design stage re-reads
+	// GitSyncTimeout() on every entry so a value change takes effect without
+	// a restart — same hot-read pattern as SubTaskConfig. Optional: when nil
+	// the wizard falls back to the service-layer default (60s).
+	settingSvc *service.SettingService
 	// summaryKickIntervalSec is the period of the summary-round heartbeat
 	// (MarkSummaryHeartbeat) the RunOrchestratorSummary goroutine issues while
 	// the summary is in flight. Default 5s matches the batch-recovery cutoff
@@ -67,7 +73,7 @@ type WizardHandler struct {
 	summaryKickIntervalSec int
 }
 
-func NewWizardHandler(database *db.DB, projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, agentSvrSvc *service.AgentServerService, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, batchSvc *service.OrchestrationBatchService) *WizardHandler {
+func NewWizardHandler(database *db.DB, projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, agentSvrSvc *service.AgentServerService, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, batchSvc *service.OrchestrationBatchService, settingSvc *service.SettingService) *WizardHandler {
 	return &WizardHandler{
 		db:                     database,
 		projectSvc:             projectSvc,
@@ -85,6 +91,7 @@ func NewWizardHandler(database *db.DB, projectSvc *service.ProjectService, reqSv
 		agentSvrSvc:            agentSvrSvc,
 		subTaskRunner:          subTaskRunner,
 		batchSvc:               batchSvc,
+		settingSvc:             settingSvc,
 		summaryKickIntervalSec: 5,
 	}
 }

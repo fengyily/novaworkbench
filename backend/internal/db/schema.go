@@ -877,6 +877,14 @@ var alterColumns = []string{
 	`ALTER TABLE projects ADD COLUMN requirement_count INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE projects ADD COLUMN issue_count        INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE projects ADD COLUMN idea_count         INTEGER NOT NULL DEFAULT 0`,
+	// design_base_sha: architect-design 运行时锁定的事实基线 —— 同步完成后
+	// origin/<default_branch> 的 40 位 HEAD SHA。写入时机是 claude spawn 之前,
+	// 所以即使本次 design 失败也留下"基于哪个基线起草"的记录。merge 阶段把它
+	// 写进 PR body。coding 阶段刻意不继承(design 锁定基线,coding 适配演进)。
+	// TEXT 默认 '' 兼容 SQLite / MySQL / Postgres 三方言,mysqlTextDefault 会把
+	// MySQL 上的 TEXT DEFAULT '' 转成 TEXT DEFAULT (''),isIgnorableDDLError 吞
+	// 掉"duplicate column"以便历史 DB 平滑升级。
+	`ALTER TABLE requirements ADD COLUMN design_base_sha TEXT NOT NULL DEFAULT ''`,
 }
 
 var (

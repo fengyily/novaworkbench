@@ -185,14 +185,35 @@ func resolveStartRef(projectPath, baseBranch string) string {
 //
 // logf may be nil; when non-nil it receives one-line Chinese hints that should
 // be surfaced to the user (typically wired to job.Append(store.LogLine{...})).
+//
+// This is a thin wrapper around ensureWorktreeFrom that hardcodes skipSync to
+// false — callers must never be allowed to suppress the best-effort fetch from
+// this entry point, otherwise an explicit "fetch the upstream before branching"
+// guarantee is silently lost. The only caller that legitimately wants to skip
+// the inner sync is the design stage's hard-sync prologue (which has already
+// fetched via service.ProjectService.SyncDesignBase and would otherwise print
+// duplicate "🔄 已同步 origin/<base>" lines); that path is wired directly to
+// ensureWorktreeFrom with skipSync=true from wizard_common.go.
 func EnsureWorktreeLogged(projectPath, reqID, branch, baseBranch string, logf func(string)) (string, error) {
+	return ensureWorktreeFrom(projectPath, reqID, branch, baseBranch, false, logf)
+}
+
+// ensureWorktreeFrom is the shared body of EnsureWorktreeLogged / EnsureWorktree.
+// skipSync=false keeps the legacy best-effort syncBaseBranch step before
+// branching (default for every public caller); skipSync=true skips it for
+// callers that have already done an equivalent fetch upstream and want to
+// avoid duplicate "🔄 已同步 origin/<base>" log lines. See the contract block
+// on EnsureWorktreeLogged above for the full behaviour list.
+func ensureWorktreeFrom(projectPath, reqID, branch, baseBranch string, skipSync bool, logf func(string)) (string, error) {
 	if branch == "" {
 		return "", nil
 	}
 	if _, err := gitRun(projectPath, "rev-parse", "--is-inside-work-tree"); err != nil {
 		return "", ErrNotAGitRepo
 	}
-	syncBaseBranch(projectPath, baseBranch, logf)
+	if !skipSync {
+		syncBaseBranch(projectPath, baseBranch, logf)
+	}
 	startRef := resolveStartRef(projectPath, baseBranch)
 	wtPath := WorktreePath(projectPath, reqID)
 
@@ -296,8 +317,8 @@ func EnsureWorktreeLogged(projectPath, reqID, branch, baseBranch string, logf fu
 // EnsureWorktree is the log-less thin wrapper that all legacy callers use.
 // New code should prefer EnsureWorktreeLogged so the user sees the sync lines
 // in the Job panel. Signature and behaviour are preserved: this is the same
-// function as before, just routed through the new logged variant with a nil
-// logf. The strategy order is:
+// function as before, just routed through ensureWorktreeFrom with a nil
+// logf and skipSync hardcoded to false. The strategy order is:
 //
 //	1'. origin/<baseBranch> if syncBaseBranch + resolveStartRef produced one,
 //	    else skip (legacy callers without a remote never had one).
@@ -314,7 +335,7 @@ func EnsureWorktreeLogged(projectPath, reqID, branch, baseBranch string, logf fu
 // Returns ("", nil) when branch is "" (caller wants the legacy path).
 // ErrNotAGitRepo lets the caller fall back without erroring.
 func EnsureWorktree(projectPath, reqID, branch, baseBranch string) (string, error) {
-	return EnsureWorktreeLogged(projectPath, reqID, branch, baseBranch, nil)
+	return ensureWorktreeFrom(projectPath, reqID, branch, baseBranch, false, nil)
 }
 
 // RemoveWorktree removes a registered worktree (and prunes stale worktree

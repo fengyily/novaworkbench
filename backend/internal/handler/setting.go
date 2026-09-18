@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/novaworkbench/backend/internal/service"
 )
@@ -38,6 +39,52 @@ func (h *SettingHandler) GetLLM(w http.ResponseWriter, r *http.Request) {
 		APIKeyPreview: service.MaskToken(apiKey),
 		Model:         model,
 	})
+}
+
+// GitSyncConfigResponse is the API shape for the architect-design stage's hard
+// sync timeout. Mirrors service.SettingService.GitSyncTimeout (which clamps the
+// persisted integer to [10, 600] seconds; default 60 when missing/invalid).
+// The handler re-reads after write so the response reflects the persisted
+// (clamped) state — same pattern as SubTaskConfigResponse.
+type GitSyncConfigResponse struct {
+	TimeoutSeconds int `json:"timeout_seconds"`
+}
+
+// GetGitSyncConfig returns the current git-sync timeout in seconds.
+func (h *SettingHandler) GetGitSyncConfig(w http.ResponseWriter, r *http.Request) {
+	dur, err := h.svc.GitSyncTimeout()
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, GitSyncConfigResponse{TimeoutSeconds: int(dur / time.Second)})
+}
+
+// UpdateGitSyncConfig persists the git-sync timeout. Clamping (to [10, 600])
+// happens inside SetGitSyncTimeout so a bad payload can never be written in a
+// shape the dispatch loops would have to defend against on every read.
+// Nothing else happens on write: the wizard re-reads the value at design-
+// stage entry, which is what makes the change hot without wiring the wizard
+// to this service.
+func (h *SettingHandler) UpdateGitSyncConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TimeoutSeconds int `json:"timeout_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	if err := h.svc.SetGitSyncTimeout(req.TimeoutSeconds); err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	// Re-read so the response reflects the persisted (clamped) state.
+	dur, err := h.svc.GitSyncTimeout()
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, GitSyncConfigResponse{TimeoutSeconds: int(dur / time.Second)})
 }
 
 // SubTaskConfigResponse is the API shape for the sub-task execution policy:

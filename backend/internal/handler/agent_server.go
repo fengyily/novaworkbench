@@ -28,12 +28,13 @@ import (
 )
 
 type AgentServerHandler struct {
-	svc  *service.AgentServerService
-	jobs *store.JobStore
+	svc        *service.AgentServerService
+	jobs       *store.JobStore
+	projectSvc *service.ProjectService
 }
 
-func NewAgentServerHandler(svc *service.AgentServerService, jobs *store.JobStore) *AgentServerHandler {
-	return &AgentServerHandler{svc: svc, jobs: jobs}
+func NewAgentServerHandler(svc *service.AgentServerService, jobs *store.JobStore, projectSvc *service.ProjectService) *AgentServerHandler {
+	return &AgentServerHandler{svc: svc, jobs: jobs, projectSvc: projectSvc}
 }
 
 // ---- CRUD -----------------------------------------------------------------
@@ -222,6 +223,48 @@ func (h *AgentServerHandler) runCheck(job *store.Job, serverID string) {
 
 	status := model.AgentServerStatusReady
 	summary := "所有依赖已就绪"
+
+	// Git remote reachability probe — uses any project's remote_url as a
+	// smoke target so a Check run can catch a broken credential / DNS /
+	// network before the user starts a real coding job. Server-scoped (no
+	// project context), so "no probeable remote" is not an error; only a
+	// failed probe is. Run on the LOCAL host (the probe targets the project's
+	// remote_url, which the remote agent doesn't carry anyway) and bound to
+	// 15s so a slow DNS hang can't stall the whole Check.
+	job.Append(store.LogLine{Type: "phase", Content: "🔍 检查 git 远程访问..."})
+	if h.projectSvc == nil {
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ ProjectService 未注入，跳过 git 远程探测"})
+	} else if rawURL, perr := h.projectSvc.FirstOriginURLForProbe(); perr != nil {
+		// DB error → not a hard block; the rest of the check still runs.
+		job.Append(store.LogLine{Type: "message", Content: "⚠️ 无法读取项目列表以探测 git 远程: " + perr.Error()})
+	} else if rawURL == "" {
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 无可探测的 git 远程（尚无项目配置 remote_url），跳过"})
+	} else {
+		job.Append(store.LogLine{Type: "message", Content: "📡 探测: " + redactOriginForLog(rawURL)})
+		// 15s timeout via the shared gitRunWithTimeout helper (worktree.go).
+		// The env slice disables git's terminal prompt so a missing/unauthorized
+		// credential fails fast instead of blocking on stdin.
+		if _, gerr := gitRunWithTimeout(".", 15*time.Second,
+			[]string{"GIT_TERMINAL_PROMPT=0"}, "ls-remote", "--heads", rawURL); gerr != nil {
+			// Take the first line of stderr (which gitRunWithTimeout prefixes
+			// to the error) for a human-readable failure reason. Fall back to
+			// a generic hint if it's empty.
+			first := strings.TrimSpace(strings.SplitN(gerr.Error(), "\n", 2)[0])
+			if first == "" {
+				first = "ls-remote 失败"
+			}
+			job.Append(store.LogLine{Type: "error", Content: "git 远程访问失败: " + first})
+			status = model.AgentServerStatusError
+			if summary == "所有依赖已就绪" {
+				summary = "git 远程访问失败: " + first
+			} else {
+				summary += "; git 远程访问失败: " + first
+			}
+		} else {
+			job.Append(store.LogLine{Type: "message", Content: "✓ git 远程可访问"})
+		}
+	}
+
 	if len(missing) > 0 {
 		status = model.AgentServerStatusError
 		summary = "缺少依赖: " + strings.Join(missing, ", ") + "，请点「安装依赖」"

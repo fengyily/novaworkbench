@@ -3667,6 +3667,20 @@ export default function RequirementDetail() {
                       onConfigChange={setArchitectConfigId}
                     />
                   )}
+                  {/* Design baseline SHA — the 40-char origin/<base> HEAD that the
+                      architect-design prologue locked. Empty / undefined = stage
+                      hasn't synced yet (or never ran / non-git project), so we
+                      skip rendering entirely instead of showing a stale or
+                      meaningless placeholder. Hidden for kind=idea — the
+                      architect stage doesn't run for ideas. */}
+                  {reqKind !== 'idea' && req?.design_base_sha && (
+                    <span
+                      className="dev-mode-badge"
+                      title={req.design_base_sha}
+                    >
+                      📌 {t('requirements.detail2.designBaseLabel', '基线')}: {req.design_base_sha.slice(0, 7)}
+                    </span>
+                  )}
                   {/* Design-stage execution environment, selectable BEFORE the
                       FIRST plan run. Shared-state note: `agentServerId` is the
                       exact state runArchitectDesign reads at submit time, and

@@ -111,6 +111,10 @@ export const requirements = {
   // pipeline / merge step / sub-task panel integration / usage tables).
   // All labels rendered by RequirementDetail.tsx.
   detail2: {
+    // architect-design 阶段锁定的事实基线（origin/<base> HEAD SHA），显示在
+    // 方案区的 7 位徽章，title 给全 SHA。无值时徽章不渲染。
+    designBaseLabel: '基线',
+    designBaseTooltip: 'architect-design 阶段锁定的事实基线 (origin/<base> SHA)',
     // Knowledge-read panel (architect / developer stage heads).
     knowledgeReadTitle: '已读取项目知识库',
     knowledgeReadLink: '查看知识库全文 →',

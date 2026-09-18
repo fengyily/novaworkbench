@@ -191,7 +191,7 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		if oerr != nil || originURL == "" {
 			return claudeStreamOutcome{errMsg: "项目未配置 git 远程仓库，无法在 Agent 服务器执行。请先在项目设置中配置 origin，或在启动开发时选择「本地仓库同步」。" + errString(oerr)}
 		}
-		tr = originTransport{originURL: originURL, projectID: in.reqRow.ProjectID, projectSvc: h.projectSvc}
+		tr = originTransport{originURL: originURL, projectID: in.reqRow.ProjectID, projectSvc: h.projectSvc, reqSvc: h.reqSvc, settingSvc: h.settingSvc}
 	}
 	baseRepo := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/base"
 	wtPath := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID
@@ -661,12 +661,29 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 		if exit, _ := client.Exec(ctx, "git clone "+shellQuoteSingle(originURL)+" "+shellQuoteSingle(baseRepo), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
 			return claudeStreamOutcome{errMsg: "git clone 失败（exit=" + fmtInt(exit) + "），请检查 origin 凭据"}, cleanup, nil
 		}
-	} else {
-		client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin --prune", "", nil, &jobWriter{job: in.job}, nil)
 	}
-	// Always (re)fetch the project's main branch into origin/<baseBranch> so
-	// the worktree strategies below branch off the latest upstream.
-	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin "+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
+	// Hard-sync the remote scratch repo to origin/<baseBranch>: auto-correct
+	// HEAD (scratch dir → reset, not reject), fetch under timeout, fast-
+	// forward, then emit NOVA_BASE_SHA= on its own line for the caller to
+	// stamp onto the requirement. Replaces the previous two best-effort
+	// fetches so the design + coding share one validated baseline (matches
+	// the local path's resolveWorkDirSynced behaviour).
+	timeout, _ := h.settingSvc.GitSyncTimeout()
+	var syncStdout bytes.Buffer
+	var syncStderr bytes.Buffer
+	syncOut := io.MultiWriter(&syncStdout, &jobWriter{job: in.job})
+	if exit, _ := client.Exec(ctx, buildRemoteSyncScript(baseRepo, baseBranch, timeout), "", nil, syncOut, &syncStderr); exit != 0 {
+		return claudeStreamOutcome{errMsg: "Agent 服务器仓库同步失败（exit=" + fmtInt(exit) + "）：" + strings.TrimSpace(syncStderr.String())}, cleanup, nil
+	}
+	if sha := parseBaseSHAFromRemoteSyncOutput(syncStdout.String()); sha != "" {
+		if uerr := h.reqSvc.UpdateDesignBaseSHA(in.reqRow.ID, sha); uerr != nil {
+			in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 写入 design_base_sha 失败（" + uerr.Error() + "），继续运行"})
+		} else {
+			in.job.Append(store.LogLine{Type: "message", Content: "📌 已锁定远端基线: " + sha[:7]})
+		}
+	} else {
+		in.job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未能从同步脚本解析 NOVA_BASE_SHA，跳过 design_base_sha 落库"})
+	}
 	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree prune", "", nil, &jobWriter{job: in.job}, nil)
 
 	if !client.Exists(wtPath) {
@@ -980,6 +997,13 @@ type originTransport struct {
 	originURL  string // resolved via project.OriginURL before dispatch
 	projectID  string // for stamping projects.sync_status after the SSH fetch
 	projectSvc *service.ProjectService
+	// reqSvc stamps the freshly-fetched origin/<base> SHA onto the
+	// requirement's design_base_sha column (mirrors the local path's
+	// resolveWorkDirSynced). settingSvc resolves the hard-sync timeout.
+	// Both are passed from the WizardHandler so the transport keeps no
+	// back-pointer to it (the type lives outside the handler layer).
+	reqSvc     *service.RequirementService
+	settingSvc *service.SettingService
 }
 
 func (t originTransport) PrepareRemote(ctx context.Context, client *gossh.Client, in *remoteCodingInput, baseRepo, wtPath, branch, baseBranch string) error {
@@ -989,26 +1013,47 @@ func (t originTransport) PrepareRemote(ctx context.Context, client *gossh.Client
 		if exit, _ := client.Exec(ctx, "git clone "+shellQuoteSingle(t.originURL)+" "+shellQuoteSingle(baseRepo), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
 			return fmt.Errorf("git clone 失败（exit=%d），请检查 origin 凭据", exit)
 		}
-	} else {
-		client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin --prune", "", nil, &jobWriter{job: in.job}, nil)
 	}
-	// Always (re)fetch the project's main branch into origin/<baseBranch> so
-	// the worktree strategies below branch off the latest upstream. Best-effort:
-	// any failure is logged but does not abort (the fallback strategies cover a
-	// missing origin/<baseBranch>).
-	fetchExit, _ := client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git fetch origin "+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
+	// Hard-sync the scratch repo onto origin/<baseBranch> via the shared
+	// script (mirror of prepareRemoteAgentRun): auto-correct HEAD, fetch
+	// under timeout, fast-forward, then emit NOVA_BASE_SHA=. Replaces the
+	// previous best-effort `git fetch origin --prune` + targeted fetch so
+	// a stale or diverged scratch repo can no longer leak into the
+	// worktree strategies below.
+	var syncTimeout time.Duration
+	if t.settingSvc != nil {
+		syncTimeout, _ = t.settingSvc.GitSyncTimeout()
+	}
+	var syncStdout bytes.Buffer
+	var syncStderr bytes.Buffer
+	syncOut := io.MultiWriter(&syncStdout, &jobWriter{job: in.job})
+	syncExit, _ := client.Exec(ctx, buildRemoteSyncScript(baseRepo, baseBranch, syncTimeout), "", nil, syncOut, &syncStderr)
 	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree prune", "", nil, &jobWriter{job: in.job}, nil)
-	// Persist the SSH-side fetch outcome onto the local projects.sync_status so
+	// Persist the SSH-side sync outcome onto the local projects.sync_status so
 	// the UI ProjectDetail badge reflects what just happened on the agent
 	// host. logf may be nil on background paths — guard accordingly.
 	if t.projectSvc != nil && t.projectID != "" {
-		if fetchExit == 0 {
+		if syncExit == 0 {
 			in.job.Append(store.LogLine{Type: "phase", Content: "✅ 已同步 origin/" + baseBranch})
 			t.projectSvc.UpdateSyncStatus(t.projectID, service.SyncStatusOK, "")
 		} else {
-			in.job.Append(store.LogLine{Type: "phase", Content: "⚠️ 同步失败，使用本地快照继续（agent 主机 fetch 退出码 " + strconv.Itoa(fetchExit) + "）"})
+			in.job.Append(store.LogLine{Type: "phase", Content: "❌ 同步失败（exit=" + strconv.Itoa(syncExit) + "）"})
 			t.projectSvc.UpdateSyncStatus(t.projectID, service.SyncStatusError, "")
 		}
+	}
+	if syncExit != 0 {
+		return fmt.Errorf("Agent 服务器仓库同步失败（exit=%d）：%s", syncExit, strings.TrimSpace(syncStderr.String()))
+	}
+	if sha := parseBaseSHAFromRemoteSyncOutput(syncStdout.String()); sha != "" {
+		if t.reqSvc != nil {
+			if uerr := t.reqSvc.UpdateDesignBaseSHA(in.reqRow.ID, sha); uerr != nil {
+				in.job.Append(store.LogLine{Type: "message", Content: "⚠️ 写入 design_base_sha 失败（" + uerr.Error() + "），继续运行"})
+			} else {
+				in.job.Append(store.LogLine{Type: "message", Content: "📌 已锁定远端基线: " + sha[:7]})
+			}
+		}
+	} else {
+		in.job.Append(store.LogLine{Type: "message", Content: "ℹ️ 未能从同步脚本解析 NOVA_BASE_SHA，跳过 design_base_sha 落库"})
 	}
 
 	if !client.Exists(wtPath) {
@@ -1424,6 +1469,99 @@ func workerRunRequest(opts llm.StreamOpts, envPairs []string) workerRunBody {
 // open-quote. Empty strings become ”.
 func shellQuoteSingle(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// buildRemoteSyncScript generates the bash body that the Agent-server side
+// runs after a successful `git clone` / on an existing scratch repo. It
+// covers the four steps the design-and-coding share:
+//
+//  1. Auto-correct HEAD onto baseBranch — the scratch clone is owned by
+//     nova (the user never edits /tmp/nova-agent/<proj>/base), and the
+//     upstream default branch may not equal projects.default_branch (e.g.
+//     repo's default is main but the project pins develop), so a detached
+//     HEAD or stale checked-out branch is reset rather than rejected.
+//  2. Hard reset + clean so any half-finished state from the previous run
+//     can't poison this one (safe because the directory is scratch).
+//  3. Fetch origin/<base> under GIT_TERMINAL_PROMPT=0 with a timeout
+//     prefix when the host has coreutils `timeout` (Linux) or `gtimeout`
+//     (macOS via brew); on hosts lacking both, fall back to the SSH ctx's
+//     35-minute ceiling and surface a one-line hint in the log via stdout.
+//  4. Fast-forward onto origin/<base>, then emit the freshly-fetched tip
+//     SHA on its own NOVA_BASE_SHA= line for the Go-side caller to parse.
+//
+// The function deliberately returns ONE shell string (no envvars the
+// caller can manipulate from outside the file) so the remote has no choice
+// but to execute exactly the steps above in order. Any failure aborts via
+// `set -e` so the caller's exit-code check is unambiguous.
+func buildRemoteSyncScript(baseRepo, baseBranch string, timeout time.Duration) string {
+	seconds := int(timeout / time.Second)
+	if seconds < 10 {
+		seconds = 10
+	}
+	if seconds > 600 {
+		seconds = 600
+	}
+	qRepo := shellQuoteSingle(baseRepo)
+	qBranch := shellQuoteSingle(baseBranch)
+	qSeconds := shellQuoteSingle(strconv.Itoa(seconds))
+	return strings.Join([]string{
+		"set -e",
+		"cd " + qRepo,
+		// Auto-correct HEAD onto baseBranch (assume B: scratch dir, never user's).
+		"cur=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)",
+		"if [ \"$cur\" != " + qBranch + " ]; then git checkout " + qBranch + " >/dev/null 2>&1 || true; fi",
+		"git reset --hard >/dev/null 2>&1 || true",
+		"git clean -fd >/dev/null 2>&1 || true",
+		// Pick the first available timeout binary; fall back to no-prefix
+		// (SSH ctx 35min ceiling) on hosts with neither.
+		"if command -v timeout >/dev/null 2>&1; then TIMEOUT_BIN=timeout",
+		"elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN=gtimeout",
+		"else echo \"[nova-agent] 未检测到 timeout/gtimeout，由 SSH ctx 兜底\"; TIMEOUT_BIN=",
+		"fi",
+		// Fetch + ff in two commands so the merge failure (if any) is
+		// distinguishable in the stderr tail from a fetch failure.
+		"if [ -n \"$TIMEOUT_BIN\" ]; then \"$TIMEOUT_BIN\" " + qSeconds + " env GIT_TERMINAL_PROMPT=0 git fetch origin " + qBranch + "; else env GIT_TERMINAL_PROMPT=0 git fetch origin " + qBranch + "; fi",
+		"git merge --ff-only origin/" + qBranch,
+		// Surface the freshly-fetched tip SHA on its own line so the Go
+		// caller can parse it without scraping git porcelain.
+		"echo \"NOVA_BASE_SHA=$(git rev-parse origin/" + qBranch + ")\"",
+	}, "\n")
+}
+
+// parseBaseSHAFromRemoteSyncOutput scans the stdout/stderr-merged output of
+// the remote sync script for the NOVA_BASE_SHA= marker line and returns the
+// 40-hex SHA. Returns "" when the marker is missing or malformed — callers
+// log a hint but do NOT fail the run (a missing marker just means the script
+// reached its echo step but git could not resolve origin/<base> for some
+// reason; the fast-forward already aborted upstream of this point via
+// `set -e` if that was the case).
+func parseBaseSHAFromRemoteSyncOutput(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "NOVA_BASE_SHA=") {
+			continue
+		}
+		sha := strings.TrimPrefix(line, "NOVA_BASE_SHA=")
+		sha = strings.TrimSpace(sha)
+		if len(sha) == 40 && isHexLower(sha) {
+			return sha
+		}
+		return ""
+	}
+	return ""
+}
+
+// isHexLower reports whether s is exactly n lowercase hex characters.
+func isHexLower(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // redactOriginForLog strips userinfo (the embedded token) from the origin
