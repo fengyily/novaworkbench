@@ -681,6 +681,10 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 					log.Printf("[merge/local] clear worktree fields for %s: %v", reqRow.ID, perr)
 				}
 			}
+			// Merge completed — bump parent requirement last-active time.
+			if merr := h.reqSvc.Touch(reqRow.ID); merr != nil {
+				log.Printf("[merge] touch requirement %s: %v", reqRow.ID, merr)
+			}
 			job.Append(store.LogLine{Type: "done", Content: "✅ 已合并 " + dev + " → " + target})
 			job.Finish(0, store.JobDone)
 			return
@@ -968,6 +972,10 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[merge/push] sub-task %s job %s req %s: branch=%s", subTaskID, jobID, reqRow.ID, dev)
+	// Push/PR sub-task dispatched — bump parent requirement last-active time.
+	if perr := h.reqSvc.Touch(reqRow.ID); perr != nil {
+		log.Printf("[merge] touch requirement %s after push dispatch: %v", reqRow.ID, perr)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"job_id":      jobID,
 		"sub_task_id": subTaskID,

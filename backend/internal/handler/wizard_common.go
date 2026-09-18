@@ -678,6 +678,12 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 		return
 	}
 	log.Printf("[auto-push] %s: dispatched push+PR sub-task %s job %s branch=%s model=%q inherited-config=%q", reqRow.ID, subTaskID, jobID, dev, pushModel, reqRow.DeveloperConfigID)
+
+	// Bump parent requirement last-active time so the auto-push dispatch shows
+	// up in RequirementsList / ProjectDetail "更新时间" columns.
+	if perr := h.reqSvc.Touch(reqRow.ID); perr != nil {
+		log.Printf("[wizard] touch requirement %s after auto-push: %v", reqRow.ID, perr)
+	}
 }
 
 func truncateStr(s string, n int) string {
