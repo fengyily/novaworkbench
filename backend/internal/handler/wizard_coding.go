@@ -327,6 +327,32 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		return
 	}
 
+	// ProjectPath fallback: ScheduledExecutor.RunScheduledCoding constructs
+	// codingRunParams with an empty ProjectPath (schedule_executor.go:124-136)
+	// and explicitly delegates dir resolution to the wizard exec body. Before
+	// this fallback, an empty ProjectPath let `workDir`/`branchDir` stay as
+	// "" — EnsureWorktreeLogged("", ...) then probed the nova binary's own
+	// CWD (reported "ℹ️ 非 git 仓库"), git pull ran there and bubbled up the
+	// C-runtime "致命错误：无法读取当前工作目录: No such file or directory",
+	// and finally the spawned `claude` (Bun runtime) failed with ENOENT when
+	// chdir-ing to "". Resolve ProjectPath from the persisted project's
+	// LocalPath when the caller (typically the scheduler) didn't pre-fill it;
+	// log the resolved path so the SSE panel makes the directory explicit.
+	if p.ProjectPath == "" && reqRow != nil {
+		if proj, perr := h.projectSvc.Get(reqRow.ProjectID); perr == nil && proj != nil && proj.LocalPath != "" {
+			p.ProjectPath = proj.LocalPath
+			job.Append(store.LogLine{Type: "phase", Content: "📁 已从项目元数据解析工作目录: " + p.ProjectPath})
+		} else if perr != nil {
+			job.Append(store.LogLine{Type: "error", Content: "❌ 无法解析项目目录：projectSvc.Get(" + reqRow.ProjectID + ") 失败: " + perr.Error()})
+			job.Finish(1, store.JobError)
+			return
+		} else {
+			job.Append(store.LogLine{Type: "error", Content: "❌ 无法解析项目目录：项目 " + reqRow.ProjectID + " 的 LocalPath 为空"})
+			job.Finish(1, store.JobError)
+			return
+		}
+	}
+
 	// Resolve the working directory for coding. When a branch is requested
 	// AND the project is a git repo with a requirement id to key on, develop
 	// in an isolated git worktree per requirement so parallel requirements
@@ -352,7 +378,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			job.Append(store.LogLine{Type: "message", Content: "🌿 已创建/复用隔离 worktree: " + wtPath})
 		case errors.Is(wtErr, ErrNotAGitRepo):
 			// Fall through to the legacy in-place checkout below.
-			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，在项目目录直接开发"})
+			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，在项目目录直接开发: " + p.ProjectPath})
 		default:
 			job.Append(store.LogLine{Type: "error", Content: "❌ 创建 worktree 失败: " + wtErr.Error()})
 			job.Finish(1, store.JobError)
@@ -377,7 +403,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// currently has.
 	if p.BranchName != "" && !useWorktree {
 		if _, gerr := gitRun(branchDir, "rev-parse", "--is-inside-work-tree"); gerr != nil {
-			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，跳过分支切换，在项目目录直接开发"})
+			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，跳过分支切换，在项目目录直接开发: " + branchDir})
 		} else {
 			syncBaseBranch(branchDir, baseBranch, func(s string) {
 				job.Append(store.LogLine{Type: "message", Content: s})
@@ -434,7 +460,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			fallbackCmd.Dir = branchDir
 			fbOut, fbErr := fallbackCmd.CombinedOutput()
 			if fbErr != nil {
-				job.Append(store.LogLine{Type: "message", Content: "ℹ️ 跳过 git pull（无远程跟踪或已分叉），继续在当前分支开发: " + strings.TrimSpace(string(append(pullOut, fbOut...)))})
+				job.Append(store.LogLine{Type: "message", Content: "ℹ️ 跳过 git pull（无远程跟踪或已分叉），继续在当前分支开发: branchDir=" + branchDir + " | " + strings.TrimSpace(string(append(pullOut, fbOut...)))})
 			} else {
 				job.Append(store.LogLine{Type: "message", Content: "⬇️ " + strings.TrimSpace(string(fbOut))})
 			}
