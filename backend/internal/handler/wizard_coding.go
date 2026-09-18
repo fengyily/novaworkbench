@@ -45,6 +45,19 @@ import (
 // defaulted). Pulling the anonymous struct to a named type is what lets the
 // scheduler reuse the exec body without re-deriving any of the request-
 // shape semantics.
+// projectPathResolver is the narrow subset of *service.ProjectService that
+// resolveCodingProjectPath actually needs. Defining it here (rather than at
+// the call site) keeps the helper testable without standing up a real DB or
+// pulling the full ProjectService struct: in unit tests a tiny fake stub
+// satisfies this interface with one line.
+//
+// *service.ProjectService satisfies the interface implicitly via its existing
+// `Get(id string) (*model.Project, error)` method (service/project.go:121),
+// so production callers keep wiring `h.projectSvc` directly.
+type projectPathResolver interface {
+	Get(id string) (*model.Project, error)
+}
+
 type codingRunParams struct {
 	ProjectPath      string `json:"project_path"`
 	RequirementTitle string `json:"requirement_title"`
