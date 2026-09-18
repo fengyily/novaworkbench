@@ -13,12 +13,14 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	promptpkg "github.com/novaworkbench/backend/internal/prompt"
+	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/internal/util"
 )
@@ -205,73 +207,15 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 		log.Printf("[architect-design] failed to persist design_job_id for %s: %v", id, perr)
 	}
 
-	// Anchor the architect stage to the isolated worktree (created here if the
-	// analyst stage was skipped) so the plan and its session are rooted in the
-	// worktree — otherwise the coding stage forks this session and follows the
-	// original-dir absolute paths back to the shared checkout.
-	//
-	// The plan-mode claude run happens in a goroutine writing progress into the
-	// job store (execArchitectDesign). Using resolveWorkDirLogged (instead of
-	// the log-silent resolveWorkDir) means the user sees the worktree sync
-	// lines in the Job panel as soon as the architect stage starts — the
-	// alternative (deferred to coding) would leave them blind during the design
-	// pass.
-	workDir, wdErr := h.resolveWorkDirLogged(ctx, req, projectPath, defaultBranch, func(s string) {
-		job.Append(store.LogLine{Type: "message", Content: s})
-	})
-	if wdErr != nil {
-		// Roll back the design_job_id so the next attempt can mint a fresh
-		// job; the user shouldn't see a dead "executing" pointer after the
-		// worktree stage failed.
-		_ = h.reqSvc.UpdateDesignJob(id, "")
-		return nil, nil, fail(500, "WORKTREE_FAILED", "worktree 创建失败："+wdErr.Error())
-	}
-
-	// Plan-mode task prompt. When resuming/forking an existing conversation
-	// (analyst session present), the resumed thread already carries the
-	// requirement and its analysis — we just ask Claude to switch to the
-	// architect role and produce a plan. On the skip-analysis path (no
-	// session) we must seed the fresh conversation with the requirement plus
-	// pre-read project context, since there is no prior discussion to inherit.
-	// 需求标题始终作为锚点：resume 分支依赖「续接的会话已携带需求」这一假设，
-	// 一旦该假设不成立（会话失效 / 被清理 / 上下文被压缩），模型就完全看不到
-	// 任务内容。带上标题的成本极低，可避免该假设失效时提示词变成空壳。
-	prompt := "## 需求标题\n" + req.Title + "\n\n" +
-		"现在切换到「架构师」角色。基于我们刚才完成的需求分析对话，" +
-		"请阅读项目相关源文件核实技术细节，制定具体可执行的技术实现方案（plan）。" +
-		"方案应涵盖：整体实现思路、需要新增或修改的文件、具体实现步骤、数据模型/数据库变更、实现风险及应对。"
-	if skipAnalysis && sourceSID == "" {
-		docBlock, _, treeSummary := collectProjectContext(workDir, req.Title)
-		prompt = "现在切换到「架构师」角色。请基于以下需求与项目信息，阅读相关源文件核实技术细节，" +
-			"制定具体可执行的技术实现方案（plan）。\n\n" +
-			"## 需求标题\n" + req.Title + "\n\n" +
-			"## 需求描述\n" + req.Description + "\n\n" +
-			"## 项目上下文\n" + docBlock + "\n" + treeSummary + "\n\n" +
-			"方案应涵盖：整体实现思路、需要新增或修改的文件、具体实现步骤、数据模型/数据库变更、实现风险及应对。" +
-			"请先复述你对需求的理解，再给出方案。"
-		// Context-compression handoff (fresh-session path only): when the
-		// design stage was previously compressed, the requirement carries a
-		// Chinese summary we want the architect to see as scene-setting
-		// context. We only inject on the fresh-session path because the
-		// resume path (skipAnalysis==false) inherits the analyst conversation
-		// natively via --resume, where the prior design summary isn't
-		// applicable. The prefix also goes BEFORE the rest of the prompt so
-		// the model treats it as ground truth rather than as a post-hoc
-		// addendum, and the parenthetical disclaimer discourages the model
-		// from acting on it as if it were a fresh instruction.
-		if req.DesignContextSummary != "" {
-			prompt = "## 上下文压缩摘要（之前的方案设计对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
-				req.DesignContextSummary + "\n\n" + prompt
-		}
-	}
-	// Tail: append the kind-specific block (Issue / Idea framing). For an Idea
-	// the user would normally have hidden this CTA in the frontend; we still
-	// inject the block defensively so an out-of-band call (e.g. curl, the
-	// wizard page, or a future "重新生成技术方案" path) sees consistent
-	// guidance. For Requirement the block is empty.
-	if block := promptpkg.ArchitectBlock(req.Kind, req); block != "" {
-		prompt += "\n\n" + block
-	}
+	// Worktree anchoring + prompt construction used to happen synchronously
+	// here. They've moved into prepareDesignWorkspace, which runs inside the
+	// goroutine spawned by execArchitectDesign — moving them off the HTTP
+	// request thread is what lets the SSE panel show the hard-sync phase
+	// events in real time (a 60s fetch used to hang the HTTP connection
+	// before the user saw anything). The design_job_id is rolled back inside
+	// prepareDesignWorkspace on any failure path, keeping the "no stale
+	// design_job_id across runs" invariant that the pre-move code maintained
+	// via the early-return on wdErr.
 
 	systemPrompt, model, claudeConfigID := h.roleConfig("architect")
 	// Per-request model override (highest precedence); empty means role default.
@@ -290,8 +234,12 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 		Fork:           fork,
 		SkipAnalysis:   skipAnalysis,
 		NewDesignSID:   newDesignSID,
-		WorkDir:        workDir,
-		Prompt:         prompt,
+		// WorkDir + Prompt are populated by prepareDesignWorkspace inside
+		// execArchitectDesign's goroutine — they live off the HTTP request
+		// thread so the SSE panel can surface the hard-sync phase events
+		// (see prepareDesignWorkspace for the full rationale).
+		WorkDir:        "",
+		Prompt:         "",
 		SystemPrompt:   systemPrompt,
 		Model:          model,
 		ClaudeConfigID: claudeConfigID,
@@ -314,6 +262,137 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 //     the dev-stage local/remote split in StartCoding. The terminal-state
 //     handling is identical between branches so any future change only
 //     needs to land in one place.
+
+// prepareDesignWorkspace runs inside the architect-design goroutine spawned by
+// execArchitectDesign. It owns the parts that used to live in
+// prepareArchitectDesign's HTTP thread:
+//
+//  1. the hard git sync to origin/<default_branch> (gates + fetch + ff + SHA
+//     capture), which can take up to git.sync_timeout_seconds (default 60s)
+//     on a slow repo;
+//  2. the worktree anchor for the requirement;
+//  3. the design_base_sha stamp on the requirement (used by merge.go to
+//     annotate the PR body);
+//  4. the plan-mode task prompt construction (the three branches that used
+//     to live at the tail of prepareArchitectDesign — analyst-resume /
+//     fresh-skip-analysis / DesignContextSummary-prefix).
+//
+// Moving these off the HTTP request thread is what lets the SSE panel show
+// the hard-sync phase events ("🔄 同步仓库基线到 origin/<base>…" / "📌 设计
+// 基线已锁定: abc1234") in real time. Previously the user's HTTP connection
+// hung for up to 60s before job_id came back — they had no idea anything
+// was happening.
+//
+// Returns true on success (p.WorkDir and p.Prompt are populated), false on
+// any failure (the job has already been Finished with status=JobError and
+// design_job_id has been rolled back, mirroring the legacy early-return on
+// wdErr). The caller should return immediately on false.
+func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Job) bool {
+	// Surface the hard-sync phase up-front so the user sees something is
+	// happening even on a slow network. The actual fetch line is emitted by
+	// SyncToOriginBase through logf (which we wire to a job.Append below).
+	job.Append(store.LogLine{Type: "phase", Content: "🔄 同步仓库基线到 origin/" + p.DefaultBranch + "…"})
+
+	// Read the timeout fresh on every design entry so a settings change takes
+	// effect without restarting the backend (same hot-reload story as the
+	// subtask concurrency / auto-retry settings). Missing/garbage → 60s.
+	timeout, _ := h.settingSvc.GitSyncTimeout()
+
+	workDir, baseSHA, err := h.resolveWorkDirSynced(context.Background(), p.Req, p.ProjectPath, p.DefaultBranch, timeout, func(s string) {
+		job.Append(store.LogLine{Type: "message", Content: s})
+	})
+	if err != nil {
+		// Render the gate failure in the same SSE panel the user is watching.
+		// *service.SyncGateError carries a human-readable Msg plus the raw
+		// git stderr / porcelain / log output (truncated to 2KB by
+		// SyncToOriginBase) — both get their own error line so the user can
+		// see the actionable Chinese hint AND the diagnostic output.
+		var gateErr *service.SyncGateError
+		if errors.As(err, &gateErr) {
+			job.Append(store.LogLine{Type: "error", Content: gateErr.Msg})
+			if gateErr.Stderr != "" {
+				job.Append(store.LogLine{Type: "error", Content: gateErr.Stderr})
+			}
+		} else {
+			job.Append(store.LogLine{Type: "error", Content: err.Error()})
+		}
+		// Roll back the design_job_id so the next attempt can mint a fresh
+		// job; the user shouldn't see a dead "executing" pointer after the
+		// gate failed. Mirrors the legacy early-return on wdErr.
+		_ = h.reqSvc.UpdateDesignJob(p.Req.ID, "")
+		job.Finish(1, store.JobError)
+		return false
+	}
+
+	p.WorkDir = workDir
+
+	// Stamp the design baseline SHA before spawning claude, so the record
+	// survives a mid-run crash (the merge stage reads this column for the
+	// PR-body annotation). Skipped when SyncDesignBase returned
+	// Skipped=true (non-git / no origin / unborn HEAD) — baseSHA is "" in
+	// that case and we simply omit the phase event.
+	if baseSHA != "" {
+		if uerr := h.reqSvc.UpdateDesignBaseSHA(p.Req.ID, baseSHA); uerr != nil {
+			log.Printf("[architect-design] failed to persist design_base_sha for %s: %v", p.Req.ID, uerr)
+		}
+		job.Append(store.LogLine{Type: "phase", Content: "📌 设计基线已锁定: " + baseSHA[:7]})
+	}
+
+	// Plan-mode task prompt — relocated verbatim from prepareArchitectDesign
+	// (the three branches: analyst-resume, fresh skip-analysis, and the
+	// DesignContextSummary handoff). Logic intentionally unchanged so
+	// wizard_architect_test.go's prompt-branch coverage keeps applying.
+	//
+	// Plan-mode task prompt. When resuming/forking an existing conversation
+	// (analyst session present), the resumed thread already carries the
+	// requirement and its analysis — we just ask Claude to switch to the
+	// architect role and produce a plan. On the skip-analysis path (no
+	// session) we must seed the fresh conversation with the requirement plus
+	// pre-read project context, since there is no prior discussion to inherit.
+	// 需求标题始终作为锚点：resume 分支依赖「续接的会话已携带需求」这一假设，
+	// 一旦该假设不成立（会话失效 / 被清理 / 上下文被压缩），模型就完全看不到
+	// 任务内容。带上标题的成本极低，可避免该假设失效时提示词变成空壳。
+	prompt := "## 需求标题\n" + p.Req.Title + "\n\n" +
+		"现在切换到「架构师」角色。基于我们刚才完成的需求分析对话，" +
+		"请阅读项目相关源文件核实技术细节，制定具体可执行的技术实现方案（plan）。" +
+		"方案应涵盖：整体实现思路、需要新增或修改的文件、具体实现步骤、数据模型/数据库变更、实现风险及应对。"
+	if p.SkipAnalysis && p.SourceSID == "" {
+		docBlock, _, treeSummary := collectProjectContext(workDir, p.Req.Title)
+		prompt = "现在切换到「架构师」角色。请基于以下需求与项目信息，阅读相关源文件核实技术细节，" +
+			"制定具体可执行的技术实现方案（plan）。\n\n" +
+			"## 需求标题\n" + p.Req.Title + "\n\n" +
+			"## 需求描述\n" + p.Req.Description + "\n\n" +
+			"## 项目上下文\n" + docBlock + "\n" + treeSummary + "\n\n" +
+			"方案应涵盖：整体实现思路、需要新增或修改的文件、具体实现步骤、数据模型/数据库变更、实现风险及应对。" +
+			"请先复述你对需求的理解，再给出方案。"
+		// Context-compression handoff (fresh-session path only): when the
+		// design stage was previously compressed, the requirement carries a
+		// Chinese summary we want the architect to see as scene-setting
+		// context. We only inject on the fresh-session path because the
+		// resume path (skipAnalysis==false) inherits the analyst conversation
+		// natively via --resume, where the prior design summary isn't
+		// applicable. The prefix also goes BEFORE the rest of the prompt so
+		// the model treats it as ground truth rather than as a post-hoc
+		// addendum, and the parenthetical disclaimer discourages the model
+		// from acting on it as if it were a fresh instruction.
+		if p.Req.DesignContextSummary != "" {
+			prompt = "## 上下文压缩摘要（之前的方案设计对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
+				p.Req.DesignContextSummary + "\n\n" + prompt
+		}
+	}
+	// Tail: append the kind-specific block (Issue / Idea framing). For an Idea
+	// the user would normally have hidden this CTA in the frontend; we still
+	// inject the block defensively so an out-of-band call (e.g. curl, the
+	// wizard page, or a future "重新生成技术方案" path) sees consistent
+	// guidance. For Requirement the block is empty.
+	if block := promptpkg.ArchitectBlock(p.Req.Kind, p.Req); block != "" {
+		prompt += "\n\n" + block
+	}
+	p.Prompt = prompt
+
+	return true
+}
+
 func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, cb *runCallbacks) {
 	defer func() {
 		lines, status, exitCode := job.Snapshot()
@@ -324,6 +403,17 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 			cb.OnFinish(job.ID, status == store.JobDone)
 		}
 	}()
+
+	// Hard-sync + worktree anchor + prompt build used to happen inside
+	// prepareArchitectDesign's HTTP request thread. They now live in
+	// prepareDesignWorkspace so the SSE panel can stream the hard-sync phase
+	// events ("🔄 同步仓库基线…" / "📌 设计基线已锁定 …") in real time and the
+	// user's HTTP connection returns with job_id immediately. On any
+	// failure the job has already been Finished with JobError and
+	// design_job_id has been rolled back; we just return.
+	if !h.prepareDesignWorkspace(p, job) {
+		return
+	}
 
 	id := p.Req.ID
 	fork := p.Fork

@@ -1399,6 +1399,11 @@ func (h *MergeHandler) createPRWithFallback(job *store.Job, project *model.Proje
 	if body == "" {
 		body = reqRow.Description
 	}
+	// 设计基线可追溯：把 design 阶段锁定的 origin/<base> SHA 附在 PR 正文末尾，
+	// 评审者据此判断方案起草时的代码状态与当前 base 差了多少。空值不追加。
+	if reqRow.DesignBaseSHA != "" {
+		body += "\n\n---\n设计基线 (design base): `" + reqRow.DesignBaseSHA + "`"
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

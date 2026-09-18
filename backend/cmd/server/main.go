@@ -263,7 +263,7 @@ func main() {
 	} else if n > 0 {
 		log.Printf("[main] orchestration batch recovery: reset %d stale summaries", n)
 	}
-	wizardH := handler.NewWizardHandler(database, projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, subTaskSvc, subTaskRunner, batchSvc)
+	wizardH := handler.NewWizardHandler(database, projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, subTaskSvc, subTaskRunner, batchSvc, settingSvc)
 	// Wire the remote-coding entrypoint AFTER both are built: children of an
 	// Agent-server-developed requirement run on that server, so every sub-task
 	// dispatch (manual / orchestrated / push+PR) routes through it.
@@ -317,7 +317,7 @@ func main() {
 	// credential is sealed by internal/secret (AES-256-GCM); the wizard's
 	// StartCoding remote branch consumes this service when a request carries
 	// agent_server_id.
-	agentSvrH := handler.NewAgentServerHandler(agentSvrSvc, sharedJobs)
+	agentSvrH := handler.NewAgentServerHandler(agentSvrSvc, sharedJobs, projectSvc)
 
 	// Router
 	mux := http.NewServeMux()
@@ -467,6 +467,13 @@ func main() {
 	// orchestration tick and SubTaskRunner, so a change needs no restart.
 	mux.HandleFunc("GET /api/settings/subtask", settingH.GetSubTaskConfig)
 	mux.HandleFunc("PUT /api/settings/subtask", settingH.UpdateSubTaskConfig)
+
+	// Git-sync timeout (settings) — upper bound on the design-stage hard sync
+	// (gates + fetch + ff). Read live on every design entry by WizardHandler,
+	// so a change needs no restart. Permission key reuses "setting.llm" (same
+	// as the subtask settings, see SettingsSubTask).
+	mux.HandleFunc("GET /api/settings/git-sync", settingH.GetGitSyncConfig)
+	mux.HandleFunc("PUT /api/settings/git-sync", settingH.UpdateGitSyncConfig)
 
 	// Database (settings) — driver info, connection test, save (takes effect
 	// on restart), and one-shot SQLite → MySQL/Postgres data migration.

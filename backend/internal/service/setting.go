@@ -49,6 +49,30 @@ const (
 	DefaultSubTaskRetryMax           = 1
 )
 
+// Setting keys + defaults for the design-stage hard git sync (see service/
+// git_sync.go). Read on every architect-design entry, so a change takes effect
+// without restarting the backend — same hot-reload pattern as the subtask
+// settings above.
+//
+//   - git.sync_timeout_seconds: how long the architect-design stage may spend
+//     on the local hard sync (status check → fetch → ff-only merge → resolve
+//     base SHA). Bounded below to keep a misconfiguration from being useless
+//     (≥ 10s) and above to bound the worst-case HTTP / pre-spawn wait
+//     (≤ 600s, accommodates a slow first fetch on a large repo).
+const (
+	settingGitSyncTimeout = "git.sync_timeout_seconds"
+)
+
+// Defaults + clamp limits for the design-stage sync timeout. The default 60s
+// matches the architecture decision; the [10, 600] envelope is enforced at
+// both read and write time so a bad payload can never be persisted in a
+// shape the design stage would have to defend against on every call.
+const (
+	DefaultGitSyncTimeoutSeconds = 60
+	minGitSyncTimeoutSeconds     = 10
+	maxGitSyncTimeoutSeconds     = 600
+)
+
 // SettingService persists arbitrary key/value settings. The Claude CLI
 // configuration now lives in the dedicated claude_configs table (see
 // ClaudeConfigService); this service still owns the direct HTTP LLM channel
@@ -192,6 +216,47 @@ func (s *SettingService) SetSubTaskConfig(concurrency int, autoRetry bool, retry
 		return err
 	}
 	return s.Set(settingSubTaskRetryMax, strconv.Itoa(retryMax))
+}
+
+// GitSyncTimeout returns the design-stage hard-sync timeout. Missing or
+// malformed values fall back to the 60s default rather than erroring: the
+// settings row is optional, and a broken value must not stall every
+// architect-design run. A DB error IS returned so callers can keep the last
+// known good value. The result is always within [10s, 600s] regardless of
+// what was persisted.
+func (s *SettingService) GitSyncTimeout() (time.Duration, error) {
+	defaultDur := time.Duration(DefaultGitSyncTimeoutSeconds) * time.Second
+	raw, err := s.Get(settingGitSyncTimeout)
+	if err != nil {
+		return defaultDur, err
+	}
+	n, cerr := strconv.Atoi(strings.TrimSpace(raw))
+	if cerr != nil || n <= 0 {
+		return defaultDur, nil
+	}
+	if n < minGitSyncTimeoutSeconds {
+		n = minGitSyncTimeoutSeconds
+	}
+	if n > maxGitSyncTimeoutSeconds {
+		n = maxGitSyncTimeoutSeconds
+	}
+	return time.Duration(n) * time.Second, nil
+}
+
+// SetGitSyncTimeout persists the design-stage hard-sync timeout, clamped to
+// [10s, 600s]. The clamp runs on write so a bad payload can never end up on
+// disk in a shape the design stage would have to defend against on every
+// read. Nothing else happens on write: the wizard re-reads the timeout on
+// every architect-design entry, which is what makes the change hot without
+// wiring the sync code into this service.
+func (s *SettingService) SetGitSyncTimeout(seconds int) error {
+	if seconds < minGitSyncTimeoutSeconds {
+		seconds = minGitSyncTimeoutSeconds
+	}
+	if seconds > maxGitSyncTimeoutSeconds {
+		seconds = maxGitSyncTimeoutSeconds
+	}
+	return s.Set(settingGitSyncTimeout, strconv.Itoa(seconds))
 }
 
 // MaskToken returns a redacted preview of a secret token for API responses.

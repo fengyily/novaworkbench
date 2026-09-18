@@ -16,6 +16,7 @@ export const settings = {
     subtask: '子任务',
     database: '数据库',
     preflight: '环境依赖',
+    gitSync: 'Git 同步',
   },
   // agentServers: the Agent Server settings sub-page (the form modal +
   // the per-server card with check / install / edit / delete actions).
@@ -216,6 +217,16 @@ export const settings = {
     retryMaxHint: '每个子任务最多被自动重做的次数，超过后保持「出错」并进入汇总。仅在开启「失败后自动重做」时生效。',
     save: '💾 保存',
     saving: '保存中...',
+    savedAt: '已保存 · {{time}}',
+  },
+  gitSync: {
+    title: 'Git 同步设置',
+    desc: 'design 阶段硬同步相关配置',
+    timeoutLabel: '同步超时（秒）',
+    timeoutHint: 'design 阶段硬同步（闸门 + fetch + ff）允许的最长耗时；大仓库首次 fetch 可能需要调高',
+    save: '保存',
+    loading: '加载中…',
+    saving: '保存中…',
     savedAt: '已保存 · {{time}}',
   },
   preflight: {
