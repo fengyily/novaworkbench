@@ -209,6 +209,12 @@ export default function RequirementsList() {
           onClose={() => setShowCreate(false)}
           onCreated={req => {
             setShowCreate(false);
+            // 启动计划 dispatch failed server-side: the requirement exists but
+            // nothing is running. Say so before landing on the detail page,
+            // which carries the manual entry points.
+            if (req.launch_error) {
+              alert(t('components.createRequirement.launch.dispatchFailed', { reason: req.launch_error }));
+            }
             navigate(`/requirements/${req.id}`);
           }}
         />

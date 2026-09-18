@@ -112,15 +112,32 @@ func (h *WizardHandler) RunImmediateDesignAndCoding(w http.ResponseWriter, r *ht
 		}
 	}
 
-	reqRow, err := h.reqSvc.Get(id)
-	if err != nil {
-		writeError(w, 404, immediateErrRequirementNotFound, "requirement not found")
+	designJobID, af := h.launchDesignAndCoding(id, body)
+	if af != nil {
+		writeIfAPIError(w, af)
 		return
 	}
 
+	writeJSON(w, 200, map[string]string{"design_job_id": designJobID})
+}
+
+// launchDesignAndCoding is the transport-agnostic body of an immediate
+// design → coding chain: load the requirement, run the pre-gate, prepare
+// the architect stage synchronously, then fire the goroutine whose OnFinish
+// chains the coding stage. Returns the design stage's JobStore job id.
+//
+// Extracted from RunImmediateDesignAndCoding so the HTTP endpoint and the
+// create-time "启动计划" dispatcher (requirement_launch.go) share ONE chained
+// callback implementation — a second copy would inevitably drift on the next
+// change to the design → coding handoff.
+func (h *WizardHandler) launchDesignAndCoding(id string, body designCodingImmediateReq) (string, *apiFailure) {
+	reqRow, err := h.reqSvc.Get(id)
+	if err != nil {
+		return "", fail(404, immediateErrRequirementNotFound, "requirement not found")
+	}
+
 	if af := h.immediatePreGate(reqRow); af != nil {
-		writeIfAPIError(w, af)
-		return
+		return "", af
 	}
 
 	// Prepare the architect stage synchronously — same prepare step the
@@ -131,14 +148,13 @@ func (h *WizardHandler) RunImmediateDesignAndCoding(w http.ResponseWriter, r *ht
 	// a second concurrent POST hits DESIGN_JOB_ACTIVE on the next call.
 	p, job, af := h.prepareArchitectDesign(context.Background(), id, body.DesignModel, body.DesignConfigID, body.DesignAgentServerID, body.ReadKnowledge)
 	if af != nil {
-		writeIfAPIError(w, af)
-		return
+		return "", af
 	}
 
 	cb := h.immediateDesignCallback(id, body)
 	go h.execArchitectDesign(p, job, cb)
 
-	writeJSON(w, 200, map[string]string{"design_job_id": job.ID})
+	return job.ID, nil
 }
 
 // immediatePreGate centralizes the synchronous state checks before the

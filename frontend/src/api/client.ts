@@ -607,6 +607,50 @@ function escapeForShell(s: string): string {
 // Requirements
 export type Kind = 'issue' | 'requirement' | 'idea';
 
+/** Launch mode for a create-time 启动计划. */
+export type LaunchMode = 'immediate' | 'scheduled';
+
+/**
+ * LaunchSpec — the optional "启动计划" carried by POST /api/requirements.
+ *
+ * It lets the creator decide, on the create screen itself, whether the new
+ * requirement starts working right away or at a scheduled moment, and with
+ * which per-stage model / execution environment / branch / split / dev-mode
+ * configuration. The requirement's own skip_analysis / skip_design flags
+ * decide WHICH stages run (coding only vs design+coding); this object only
+ * carries their configuration.
+ *
+ * Field names are intentionally identical to DesignCodingImmediateReq (run
+ * config) and CreateScheduleReq (recurrence) so the same JSON shape flows
+ * straight through to the backend's existing dispatch entry points.
+ */
+export interface LaunchSpec {
+  mode: LaunchMode;
+  read_knowledge?: boolean;
+  design_model?: string;
+  design_claude_config_id?: string;
+  /** '' = local execution. */
+  design_agent_server_id?: string;
+  coding_model?: string;
+  coding_claude_config_id?: string;
+  /** '' = local execution. */
+  coding_agent_server_id?: string;
+  branch_name?: string;
+  base_branch?: string;
+  split_tasks?: boolean;
+  auto_push_pr?: boolean;
+  dev_mode?: '' | 'session' | 'design';
+  sync_mode?: '' | 'local' | 'remote';
+  // Scheduled mode only — mirrors CreateScheduleReq. run_at is required for
+  // recurrence='once' (RFC3339 with offset, via toRFC3339Local); daily/weekly
+  // send recur_time (+ recur_days for weekly) and recur_tz instead.
+  run_at?: string;
+  recurrence?: ScheduledRecurrence;
+  recur_time?: string;
+  recur_days?: string;
+  recur_tz?: string;
+}
+
 export interface Requirement {
   id: string; project_id: string; title: string; description: string;
   status: string; priority: string; kind?: Kind;
@@ -755,6 +799,13 @@ export interface Requirement {
   // 完成）与「中途关闭」（强制关闭）。archived 行不允许 Close。
   closed_at?: string;
   closed_reason?: string;
+  // 启动计划的派发结果 —— display-only 字段，仅 POST /api/requirements 的
+  // 响应里出现（且仅当请求带了 launch）。launch_mode 非空表示后端已经开跑
+  // （immediate）或已排期（scheduled），此时创建页不应再引导用户手动启动；
+  // launch_error 非空表示需求已建好但启动失败，需提示用户去详情页手动启动。
+  launch_mode?: LaunchMode;
+  launch_schedule_id?: string;
+  launch_error?: string;
 }
 
 // Default to "requirement" on the client too, so legacy rows missing the
@@ -882,6 +933,11 @@ export const requirementsApi = {
     // description. The raw text is stored verbatim and a fallback title
     // (first line, capped) is used. UI default = true (skip).
     skip_organize?: boolean;
+    // launch: the optional 启动计划. Omit it entirely (the create form does
+    // so unless the user expands the section) and creation behaves exactly
+    // as before. When present the backend dispatches it right after the row
+    // is minted and reports the outcome via the response's launch_* fields.
+    launch?: LaunchSpec;
   }) => api.post<Requirement>('/api/requirements', data),
   get: (id: string) => api.get<Requirement>(`/api/requirements/${id}`),
   update: (id: string, data: { title: string; description: string; priority: string; skip_analysis?: boolean }) =>

@@ -210,7 +210,74 @@ type Requirement struct {
 	// blank. Free-form text — the service does not enforce a vocabulary so
 	// the UI can show whatever the user typed (truncated in lists).
 	ClosedReason string `json:"closed_reason"`
+	// LaunchMode / LaunchScheduleID / LaunchError are display-only fields
+	// (NOT requirements columns), populated ONLY by RequirementHandler.Create
+	// when the create request carried a `launch` spec — every other endpoint
+	// leaves them empty and `omitempty` keeps them out of the JSON entirely.
+	// They tell the creating client what the server did with the launch plan
+	// so it can skip its own autoStart* guidance (immediate) or show the
+	// "已排期" strip (scheduled) without a second round-trip.
+	//
+	//	LaunchMode       — "immediate" | "scheduled"; empty when nothing ran.
+	//	LaunchScheduleID — scheduled_tasks.id for LaunchMode == "scheduled".
+	//	LaunchError      — human-readable reason the dispatch failed. The
+	//	                   requirement itself is still created (201) — we never
+	//	                   roll back the user's text because the launch bounced.
+	LaunchMode       string `json:"launch_mode,omitempty"`
+	LaunchScheduleID string `json:"launch_schedule_id,omitempty"`
+	LaunchError      string `json:"launch_error,omitempty"`
 }
+
+// LaunchSpec is the optional "启动计划" carried by POST /api/requirements.
+// It lets the creator decide — at creation time, on the same screen that
+// renders the model / execution-environment pickers — whether the new
+// requirement starts working immediately or at a scheduled moment, and with
+// which per-stage configuration.
+//
+// Field names are deliberately identical to the two existing dispatch
+// entry points so the same JSON shape flows through unchanged:
+//
+//	design_* / coding_* / branch_* / split_tasks / auto_push_pr / dev_mode /
+//	sync_mode / read_knowledge   → handler.designCodingImmediateReq
+//	run_at / recurrence / recur_* → handler.createScheduleReq
+//
+// Mode is the only new field. The requirement's own skip_analysis /
+// skip_design flags decide WHICH stages run (see handler.resolveLaunchTaskType)
+// — the spec only carries the configuration for them.
+type LaunchSpec struct {
+	// Mode: "immediate" runs the stages now; "scheduled" writes a
+	// scheduled_tasks row. Empty / unknown values are rejected.
+	Mode string `json:"mode"`
+
+	// Shared + per-stage run configuration (mirrors designCodingImmediateReq).
+	ReadKnowledge       bool   `json:"read_knowledge"`
+	DesignModel         string `json:"design_model"`
+	DesignConfigID      string `json:"design_claude_config_id"`
+	DesignAgentServerID string `json:"design_agent_server_id"`
+	CodingModel         string `json:"coding_model"`
+	CodingConfigID      string `json:"coding_claude_config_id"`
+	CodingAgentServerID string `json:"coding_agent_server_id"`
+	BranchName          string `json:"branch_name"`
+	BaseBranch          string `json:"base_branch"`
+	SplitTasks          bool   `json:"split_tasks"`
+	AutoPushPR          *bool  `json:"auto_push_pr"`
+	DevMode             string `json:"dev_mode"`
+	SyncMode            string `json:"sync_mode"`
+
+	// Scheduled-mode only (mirrors createScheduleReq). Ignored when
+	// Mode == "immediate".
+	RunAt      string `json:"run_at"`
+	Recurrence string `json:"recurrence"`
+	RecurTime  string `json:"recur_time"` // "HH:MM"
+	RecurDays  string `json:"recur_days"` // CSV 0-6, 0=Sunday (weekly)
+	RecurTZ    string `json:"recur_tz"`   // IANA tz name
+}
+
+// Launch mode constants for LaunchSpec.Mode.
+const (
+	LaunchModeImmediate = "immediate"
+	LaunchModeScheduled = "scheduled"
+)
 
 type CreateRequirementReq struct {
 	ProjectID    string `json:"project_id"`
@@ -232,6 +299,12 @@ type CreateRequirementReq struct {
 	// Validated in service.RequirementService (must point to an existing row in
 	// the same project).
 	SourceRequirementID string `json:"source_requirement_id"`
+	// Launch: optional "启动计划". nil (the field omitted entirely) keeps the
+	// historical behavior — Create just persists the row and returns. When
+	// present, RequirementHandler.Create dispatches the plan after the row is
+	// minted and reports the outcome via the response's launch_* fields.
+	// Only read by Create; Update ignores it.
+	Launch *LaunchSpec `json:"launch"`
 }
 
 type UpdateStatusReq struct {

@@ -249,6 +249,37 @@ export const components = {
     errNeedDesc: 'Please enter a description',
     errNeedProject: 'Please select a project',
     errCreate: 'Failed to create',
+    // Launch plan — decide at creation time whether the requirement runs now
+    // or on a schedule, with which per-stage model / execution environment /
+    // split / dev mode. Collapsed by default; while collapsed, creation
+    // behaves exactly as before.
+    launch: {
+      sectionTitle: '⚙ Launch plan (optional)',
+      sectionHint: 'Leave collapsed to just create the requirement',
+      modeLabel: 'Launch',
+      modeImmediate: 'Run now',
+      modeScheduled: 'Schedule',
+      immediateBlocked: 'A "full pipeline" requirement has no analysis session yet, so design cannot start immediately. Pick "Schedule", or finish the analysis first.',
+      scheduledFullHint: 'Note: finish the requirement analysis before the scheduled time, otherwise that run will fail.',
+      recurrenceLabel: 'Frequency',
+      designSection: 'Design stage',
+      codingSection: 'Coding stage',
+      execEnvLabel: 'Execution environment',
+      localExec: 'Local',
+      noAgentHint: 'No ready Agent Server — the run will execute locally.',
+      readKnowledge: 'Read the project knowledge base first',
+      splitTasks: 'Split into sub-tasks automatically',
+      baseBranch: 'Base branch',
+      newBranch: 'Dev branch',
+      newBranchPlaceholder: 'Leave empty for feat/<req id>',
+      devModeLabel: 'Dev mode',
+      devModeDesign: 'From design doc (fresh session)',
+      devModeSession: 'From session (resume the design session)',
+      submitImmediate: 'Create & start',
+      submitScheduled: 'Create & schedule',
+      dispatchFailed: 'Requirement created, but the automatic launch failed: {{reason}}. Start it manually from the detail page.',
+      scheduled: 'Requirement created and scheduled to run automatically.',
+    },
   },
 
   codingChat: {

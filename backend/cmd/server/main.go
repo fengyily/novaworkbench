@@ -217,7 +217,6 @@ func main() {
 	scannerH := handler.NewScannerHandler(scannerSvc)
 	sharedJobs := store.NewJobStore(50)
 	preflightH := handler.NewPreflightHandler(pfRegistry, sharedJobs)
-	reqH := handler.NewRequirementHandler(reqSvc, llmGateway, sharedJobs, usageSvc)
 	// SubTaskRunner is the shared executor for child-agent rows: both the
 	// wizard (manual sub-tasks + auto-orchestrated children) and the merge
 	// handler (push + PR sub-task) delegate to it. Constructed once so the
@@ -274,6 +273,13 @@ func main() {
 	// the rest of the wiring.
 	schedExec := handler.NewScheduledExecutor(wizardH, schedSvc)
 	schedH := handler.NewScheduleHandler(schedSvc, reqSvc)
+	// RequirementHandler is constructed HERE (not with the other handlers
+	// above) because POST /api/requirements can now carry a 启动计划 that
+	// dispatches straight into the wizard / scheduler — so it depends on
+	// wizardH + schedSvc, both of which only exist at this point. reqH is
+	// only referenced by the route registrations further down, so moving
+	// the construction later is safe.
+	reqH := handler.NewRequirementHandler(reqSvc, llmGateway, sharedJobs, usageSvc, wizardH, schedSvc)
 	schedulerRunner := scheduler.New(database, schedExec)
 	if _, err := schedulerRunner.Recover(); err != nil {
 		log.Printf("[main] scheduler recovery: %v", err)

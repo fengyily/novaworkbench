@@ -246,6 +246,132 @@
   color: var(--color-text-muted, #94A3B8);
 }
 
+/* --- 启动计划 (launch plan) -------------------------------------- */
+
+/* A quiet, bordered drawer below the flow picker. Collapsed by default:
+   the header is the only thing visible until the user opts in, so the
+   panel keeps reading as a fast notepad. Deliberately NOT a <details>
+   element — the open state has to be readable by handleSubmit (an
+   un-expanded drawer never sends a launch plan). */
+
+.create-req-form .create-req-launch {
+  margin-top: 14px;
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 8px;
+  background: var(--color-surface, #fff);
+  overflow: hidden;
+}
+
+.create-req-form .create-req-launch-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text, #1E293B);
+  text-align: left;
+  cursor: pointer;
+}
+
+.create-req-form .create-req-launch-toggle:hover:not(:disabled) {
+  background: var(--color-hover, #F1F5F9);
+}
+
+.create-req-form .create-req-launch-toggle:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.create-req-form .create-req-launch-caret {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+/* Pushed to the right edge and de-emphasised: the hint explains the
+   default ("不展开就不会自动启动"), it is not part of the action. */
+.create-req-form .create-req-launch-hint {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+.create-req-form .create-req-launch-body {
+  padding: 4px 12px 12px;
+  border-top: 1px solid var(--color-border, #E2E8F0);
+}
+
+/* Per-stage group (方案 / 开发). The left rail is the same device the
+   requirement-detail toolbars use to separate stage-scoped controls. */
+.create-req-form .create-req-launch-stage {
+  margin-top: 12px;
+  padding-left: 10px;
+  border-left: 2px solid var(--color-border, #E2E8F0);
+}
+
+.create-req-form .create-req-launch-stage-label {
+  margin-bottom: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary, #64748B);
+}
+
+.create-req-form .create-req-launch-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.create-req-form .create-req-launch-branches {
+  display: flex;
+  gap: 12px;
+}
+
+.create-req-form .create-req-launch-branches .form-group {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Checkbox + radio rows are inline (the field-caption rules in index.css /
+   ProjectDetail.css would otherwise stack them as block captions). */
+.create-req-form .create-req-launch-check,
+.create-req-form .create-req-launch-radios label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--color-text, #1E293B);
+  cursor: pointer;
+}
+
+.create-req-form .create-req-launch-check { margin-top: 4px; }
+
+.create-req-form .create-req-launch-radios {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+/* Amber, not red: these are "this combination won't launch" advisories,
+   not submit-blocking validation errors — creation still succeeds. */
+.create-req-form .create-req-launch-warn {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-warning, #D97706);
+}
+
 /* --- Error + actions -------------------------------------------- */
 
 .create-req-form .create-req-error {
@@ -287,6 +413,9 @@
   .create-req-form .create-req-meta-row { flex-direction: column; gap: 14px; }
   .create-req-form .create-req-kind { display: flex; }
   .create-req-form .create-req-shortcut { display: none; }
+  .create-req-form .create-req-launch-branches { flex-direction: column; gap: 14px; }
+  /* The header hint would squeeze the title onto two lines on a phone. */
+  .create-req-form .create-req-launch-hint { display: none; }
 
   /* Touch target: the toggle is the only control in the panel without a
      native 44px hit area, and it is the easiest one to fat-finger because

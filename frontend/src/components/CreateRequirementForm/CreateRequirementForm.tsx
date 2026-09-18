@@ -20,10 +20,12 @@
 //     picker for cross-project creation.
 //   - onCreated / onClose: success and close callbacks.
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import AtMentionTextarea from '../AtMentionTextarea';
-import { kindLabelKeys, kindHintKeys, kindPlaceholderKeys, kindCreateLabelKeys, type Kind, requirementsApi, type Requirement } from '../../api/client';
+import { agentServersApi, kindLabelKeys, kindHintKeys, kindPlaceholderKeys, kindCreateLabelKeys, type Kind, type LaunchSpec, requirementsApi, type Requirement } from '../../api/client';
+import type { ExecEnvServer } from '../ExecEnvSelect';
+import LaunchPlanSection from './LaunchPlanSection';
 import { tLabel } from '../../i18n/label';
 import { errorMessage } from '../../utils/errMsg';
 import './CreateRequirementForm.css';
@@ -79,6 +81,24 @@ export function CreateRequirementForm({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  // 启动计划 — collapsed by default and, while collapsed, contributes nothing
+  // to the request. This is load-bearing: the panel is a fast notepad, and a
+  // launch plan that defaulted to "on" would mean every casual jot-down fires
+  // a 30-minute coding job. Expanding it is the opt-in.
+  const [launchOpen, setLaunchOpen] = useState(false);
+  const [launchSpec, setLaunchSpec] = useState<LaunchSpec | null>(null);
+  const [agentServers, setAgentServers] = useState<ExecEnvServer[]>([]);
+  // Only `ready` servers are offered — same filter RequirementDetail applies,
+  // because the backend refuses non-ready targets anyway.
+  useEffect(() => {
+    if (!launchOpen || agentServers.length > 0) return;
+    agentServersApi.list()
+      .then(rows => setAgentServers((rows ?? []).filter(s => s.status === 'ready')))
+      .catch(() => {/* settings page is the source of truth — ignore */});
+  }, [launchOpen, agentServers.length]);
+  const handleLaunchChange = useCallback((spec: LaunchSpec | null) => {
+    setLaunchSpec(spec);
+  }, []);
 
   // Cross-project mode: pick the first project as a sensible default so the
   // submit button isn't disabled on first paint.
@@ -121,6 +141,10 @@ export function CreateRequirementForm({
         skip_analysis: skipAnalysis,
         skip_design: skipDesign,
         skip_organize: skipOrganize,
+        // Only sent when the user actually expanded the 启动计划 block AND the
+        // plan is dispatchable. Omitting the key keeps the create path
+        // byte-identical to the pre-feature behavior.
+        launch: showLaunchPlan && launchOpen ? (launchSpec ?? undefined) : undefined,
       });
       onCreated(created);
     } catch (err: any) {
@@ -138,9 +162,20 @@ export function CreateRequirementForm({
   };
 
   const showOptions = kind !== 'idea';
+  // kind=idea never enters the dev pipeline (both the immediate and the
+  // scheduled backend paths reject it), so the whole block is hidden.
+  const showLaunchPlan = kind !== 'idea';
   const showProjectPicker = !fixedProjectId && !!projectOptions && projectOptions.length > 0;
   const canSubmit = !saving && !!description.trim() && !!projectId;
   const charCount = description.trim().length;
+  // The submit label is the last visual confirmation before a long job
+  // starts, so it names what will actually happen.
+  const activeLaunchMode = showLaunchPlan && launchOpen ? launchSpec?.mode : undefined;
+  const submitLabel = activeLaunchMode === 'immediate'
+    ? t('components.createRequirement.launch.submitImmediate')
+    : activeLaunchMode === 'scheduled'
+      ? t('components.createRequirement.launch.submitScheduled')
+      : tLabel(t, kindCreateLabelKeys as Record<string, string>, kind);
 
   return (
     <div className="create-req-form" data-testid="create-requirement-form" ref={rootRef}>
@@ -277,6 +312,37 @@ export function CreateRequirementForm({
         </div>
       )}
 
+      {/* Step 4 — 启动计划（可选）. Collapsed by default; while collapsed the
+          submit path is identical to the pre-feature one. Expanding it puts
+          the per-stage model + execution-environment pickers on THIS screen,
+          which is what makes "创建即启动" legitimate (see the project rule in
+          LaunchPlanSection's prologue). */}
+      {showLaunchPlan && (
+        <div className="create-req-launch">
+          <button
+            type="button"
+            className="create-req-launch-toggle"
+            aria-expanded={launchOpen}
+            onClick={() => setLaunchOpen(v => !v)}
+            disabled={saving}
+          >
+            <span className="create-req-launch-caret" aria-hidden>{launchOpen ? '▾' : '▸'}</span>
+            {t('components.createRequirement.launch.sectionTitle')}
+            <span className="create-req-launch-hint">
+              {t('components.createRequirement.launch.sectionHint')}
+            </span>
+          </button>
+          {launchOpen && (
+            <LaunchPlanSection
+              flow={flow}
+              agentServers={agentServers}
+              disabled={saving}
+              onChange={handleLaunchChange}
+            />
+          )}
+        </div>
+      )}
+
       {error && (
         <div className="create-req-error" role="alert">{error}</div>
       )}
@@ -287,7 +353,7 @@ export function CreateRequirementForm({
         <button className="btn btn-primary" onClick={handleSubmit} disabled={!canSubmit}>
           {saving
             ? (skipOrganize ? t('components.createRequirement.saving') : t('components.createRequirement.savingOrganize'))
-            : tLabel(t, kindCreateLabelKeys as Record<string, string>, kind)}
+            : submitLabel}
         </button>
       </div>
     </div>

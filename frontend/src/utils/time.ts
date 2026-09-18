@@ -155,6 +155,12 @@ export function yearMatrix(year: number): { month: number; matrix: Date[][] }[] 
 // 周内 7 天的中文短标签（周一为首）。给日历表头用。
 export const WEEK_LABELS = ['一', '二', '三', '四', '五', '六', '日'] as const;
 
+// WEEK_LABELS 是「周一为首」（一二三四五六日）；后端 recur_days 用
+// 0=周日（JS getDay 约定）。这张表把 WEEK_LABELS 的下标映射到对应的
+// day number，避免两套约定互相渗透。任何渲染星期 pill 的地方（ScheduleModal、
+// 创建页的启动计划区块）都必须复用它，不要就地重写 0=周日 的换算。
+export const WEEKDAY_INDEX_TO_DAYNUM = [1, 2, 3, 4, 5, 6, 0] as const;
+
 // 中文月份标签（一月/二月/...）。
 export const MONTH_LABELS = ['一月', '二月', '三月', '四月', '五月', '六月',
   '七月', '八月', '九月', '十月', '十一月', '十二月'] as const;

@@ -168,6 +168,55 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 	go h.execStartCoding(&p, job, nil)
 }
 
+// gateCodingEntry is the SINGLE status gate every non-HTTP coding entry
+// point must pass through before dispatching a coding run. It was extracted
+// verbatim from ScheduledExecutor.RunScheduledCoding so the scheduler path
+// and the create-time "启动计划" path can never drift apart (the failure mode
+// that would produce: "定时能跑、创建时跑不了", or worse, the reverse).
+//
+// Semantics (unchanged from the scheduler original):
+//
+//	designed            → UpdateStatus('developing'), re-read, 放行
+//	draft + SkipDesign  → UpdateStatus('developing'), re-read, 放行（直接开发）
+//	developing          → 放行（等同「重新开发」）
+//	draft（无 SkipDesign）→ error 需求未生成技术方案
+//	analyzing/designing → error 请等待该阶段完成
+//	done/archived       → error 已完成/归档
+//
+// The proactive UpdateStatus BEFORE the switch is load-bearing (see the
+// req_30080193f1c95255 post-mortem in the original comment): it guarantees
+// both legal entry paths stamp 'developing' exactly once, and the switch
+// below only validates.
+//
+// Returns the (possibly re-read) requirement so the caller builds its
+// codingRunParams from the freshest title / description.
+func (h *WizardHandler) gateCodingEntry(req *model.Requirement) (*model.Requirement, error) {
+	var err error
+	if req.Status == "designed" || (req.Status == "draft" && req.SkipDesign) {
+		if _, err = h.reqSvc.UpdateStatus(req.ID, "developing"); err != nil {
+			return nil, fmt.Errorf("状态转移失败: %w", err)
+		}
+		// Re-read req so the caller and the switch below see the latest status.
+		if req, err = h.reqSvc.Get(req.ID); err != nil {
+			return nil, fmt.Errorf("重新加载需求失败: %w", err)
+		}
+	}
+	switch req.Status {
+	case "designed", "developing":
+		// 已统一在前面翻过 developing；放行。
+		return req, nil
+	case "draft":
+		// 上一段没命中（SkipDesign=false）→ 拒绝。
+		return nil, fmt.Errorf("需求未生成技术方案，无法开始开发")
+	case "analyzing", "designing":
+		return nil, fmt.Errorf("需求处于 %s 阶段，请等待该阶段完成", req.Status)
+	case "done", "archived":
+		return nil, fmt.Errorf("需求已完成/归档，定时任务取消执行")
+	default:
+		return nil, fmt.Errorf("需求状态异常: %s", req.Status)
+	}
+}
+
 // RunScheduledCoding is the scheduler-facing entry point. It mirrors
 // StartCoding: JSON-body → struct → jobs.Create → go execStartCoding, but
 // the caller hands us a fully populated codingRunParams (the scheduler

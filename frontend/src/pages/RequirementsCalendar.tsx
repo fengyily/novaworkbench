@@ -8,6 +8,7 @@
 // 乐观更新：先本地合 planned_* 再 PATCH，失败回滚 + toast。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import {
   requirementsApi,
@@ -39,6 +40,7 @@ const KIND_FILTERS: { value: Kind; label: string }[] = [
 ];
 
 export default function RequirementsCalendar() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const [view, setView] = useState<ViewMode>('month');
   const [focus, setFocus] = useState(() => startOfDay(new Date()));
@@ -352,6 +354,13 @@ export default function RequirementsCalendar() {
           projectId={projectFilter || (projects[0]?.id ?? '')}
           onClose={() => setCreateAt(null)}
           onCreated={req => {
+            // 启动计划的派发结果：成功时提示已排期/已开始，失败时提示需求
+            // 已创建但未启动（详情页有全套手动入口）。
+            if (req.launch_error) {
+              showToast(t('components.createRequirement.launch.dispatchFailed', { reason: req.launch_error }));
+            } else if (req.launch_mode === 'scheduled') {
+              showToast(t('components.createRequirement.launch.scheduled'));
+            }
             // 新建后把 planned_start_at 设 设为 createAt 当日 00:00，让它
             // 立刻出现在刚双击的那一格里，不用手动拖一次。
             const iso = new Date(createAt.day);

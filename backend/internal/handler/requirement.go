@@ -18,10 +18,18 @@ type RequirementHandler struct {
 	llm      *llm.Gateway
 	jobs     *store.JobStore
 	usageSvc usageRecorder
+	// wizardH / schedSvc back the create-time "启动计划" (see
+	// requirement_launch.go). Both are optional: nil disables the
+	// corresponding dispatch path and Create reports it via launch_error
+	// rather than panicking, so tests can construct a bare handler.
+	// The handler → handler dependency mirrors the existing
+	// handler.NewScheduledExecutor(wizardH, schedSvc) wiring in main.go.
+	wizardH  *WizardHandler
+	schedSvc *service.ScheduledTaskService
 }
 
-func NewRequirementHandler(svc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, usageSvc usageRecorder) *RequirementHandler {
-	return &RequirementHandler{svc: svc, llm: llmGateway, jobs: jobs, usageSvc: usageSvc}
+func NewRequirementHandler(svc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, usageSvc usageRecorder, wizardH *WizardHandler, schedSvc *service.ScheduledTaskService) *RequirementHandler {
+	return &RequirementHandler{svc: svc, llm: llmGateway, jobs: jobs, usageSvc: usageSvc, wizardH: wizardH, schedSvc: schedSvc}
 }
 
 func (h *RequirementHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -155,6 +163,35 @@ func (h *RequirementHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 		if rerr := h.usageSvc.Record(u); rerr != nil {
 			log.Printf("[requirement] record usage for %s failed: %v (ignored)", item.ID, rerr)
+		}
+	}
+	// 启动计划 ("launch plan"): when the creator decided up front that this
+	// requirement should start working immediately or at a scheduled moment
+	// — with a specific per-stage model / execution environment / split /
+	// dev-mode configuration — dispatch it now. See requirement_launch.go
+	// for the flow → task-type mapping and the two hard gates it respects.
+	//
+	// Deliberately NON-fatal: a dispatch failure still answers 201 with the
+	// reason in launch_error. The requirement (and the text the user wrote)
+	// is already persisted, and the detail page carries every manual entry
+	// point needed to start the work by hand — deleting the row as
+	// compensation would be strictly worse.
+	if req.Launch != nil {
+		mode, schedID, af := h.dispatchLaunch(item, req.Launch)
+		if af != nil {
+			log.Printf("[requirement] launch dispatch for %s failed: %s (%s)", item.ID, af.Msg, af.Code)
+			item.LaunchError = af.Msg
+		} else {
+			item.LaunchMode = mode
+			item.LaunchScheduleID = schedID
+			// Re-read so the response reflects the status the dispatch just
+			// stamped (draft → developing for the immediate coding path) and
+			// any job-id columns the wizard stages persisted.
+			if fresh, gerr := h.svc.Get(item.ID); gerr == nil && fresh != nil {
+				fresh.LaunchMode = mode
+				fresh.LaunchScheduleID = schedID
+				item = fresh
+			}
 		}
 	}
 	writeJSON(w, 201, item)

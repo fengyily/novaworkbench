@@ -37,12 +37,11 @@ import {
 } from '../api/client';
 import ModelSelect from './ModelSelect';
 import { ExecEnvSelect } from './ExecEnvSelect';
-import { toRFC3339Local, WEEK_LABELS } from '../utils/time';
-
-// WEEK_LABELS is Monday-first (一二三四五六日); the backend recur_days uses
-// 0=Sunday (JS getDay convention). This maps a WEEK_LABELS index to its
-// day number so the two conventions never leak into each other.
-const WEEKDAY_INDEX_TO_DAYNUM = [1, 2, 3, 4, 5, 6, 0];
+// WEEKDAY_INDEX_TO_DAYNUM maps a (Monday-first) WEEK_LABELS index to the
+// backend's 0=Sunday day number. It lived here until the create-page 启动计划
+// section needed the same weekday pills — moved to utils/time so there is
+// exactly one place that knows the two conventions differ.
+import { toRFC3339Local, WEEK_LABELS, WEEKDAY_INDEX_TO_DAYNUM } from '../utils/time';
 
 // Default recur_time = now + 5 minutes as "HH:MM" (matches the one-shot
 // picker's default so switching frequency doesn't jump the time).

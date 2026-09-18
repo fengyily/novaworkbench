@@ -1662,6 +1662,22 @@ export default function ProjectDetail() {
                 onClose={() => setShowCreateReq(false)}
                 onCreated={async (created: Requirement) => {
                   setShowCreateReq(false);
+                  // 启动计划: the create form already collected the execution
+                  // environment + models and the backend has ALREADY started
+                  // the work (immediate) or written the scheduled row
+                  // (scheduled). Navigate without any autoStart* intent —
+                  // re-triggering the manual entry points here would either
+                  // double-dispatch or (worse) mislead the user into thinking
+                  // nothing happened.
+                  if (created.launch_error) {
+                    alert(t('components.createRequirement.launch.dispatchFailed', { reason: created.launch_error }));
+                    navigate(`/requirements/${created.id}`);
+                    return;
+                  }
+                  if (created.launch_mode) {
+                    navigate(`/requirements/${created.id}`);
+                    return;
+                  }
                   // Skip analysis → auto-enter the design stage: navigate to
                   // the detail page and pass the autoStartDesign intent flag
                   // so RequirementDetail auto-triggers architect-design in a
