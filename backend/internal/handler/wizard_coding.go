@@ -1055,7 +1055,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		return
 	}
 
-	out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage)
+	out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage, codingStallTimeout)
 
 	// The coding session id is already persisted upfront. Correct it only if
 	// the CLI reported a different id than the one we pre-minted (a safety
@@ -1073,6 +1073,9 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	}
 	if out.errMsg != "" {
 		job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+		if out.stalledByWatchdog != nil && out.stalledByWatchdog.Load() {
+			job.SetErrorKind("stalled")
+		}
 		job.Finish(1, store.JobError)
 		return
 	}
@@ -1354,7 +1357,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		})
 		defer cancel()
 		adjustUsage := h.usageCtxForConfig("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message, claudeConfigID)
-		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding", adjustUsage)
+		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding", adjustUsage, codingStallTimeout)
 
 		// Stale --resume: the coding session file is gone (~/.claude/ cleaned
 		// or too old). Surface a clear error rather than silently starting a
@@ -1366,6 +1369,9 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		}
 		if out.errMsg != "" {
 			job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+			if out.stalledByWatchdog != nil && out.stalledByWatchdog.Load() {
+				job.SetErrorKind("stalled")
+			}
 			job.Finish(1, store.JobError)
 			return
 		}
@@ -1587,7 +1593,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		})
 		defer cancel()
 		continueUsage := h.usageCtxForConfig("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "", claudeConfigID)
-		out := runClaudeStream(jobSink{job}, cmd, "continue-coding", continueUsage)
+		out := runClaudeStream(jobSink{job}, cmd, "continue-coding", continueUsage, codingStallTimeout)
 
 		// Stale --resume: the coding session file is gone. Surface a clear error
 		// rather than silently starting fresh — the user can still 重新开发
@@ -1599,6 +1605,9 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		}
 		if out.errMsg != "" {
 			job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+			if out.stalledByWatchdog != nil && out.stalledByWatchdog.Load() {
+				job.SetErrorKind("stalled")
+			}
 			job.Finish(1, store.JobError)
 			return
 		}

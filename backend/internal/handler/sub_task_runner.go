@@ -813,7 +813,7 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 	// here and the deferred cleanup.
 	job.SetCmd(cmd, cancel)
 	defer cancel()
-	return runClaudeStream(jobSink{job}, cmd, "sub-task", subUsage)
+	return runClaudeStream(jobSink{job}, cmd, "sub-task", subUsage, codingStallTimeout)
 }
 
 // staleSourceCandidates builds the fallback chain of source session IDs to
@@ -912,6 +912,9 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 		finalStatus = model.SubTaskStatusError
 		artifactBody = "❌ " + out.errMsg
 		job.Append(store.LogLine{Type: "error", Content: artifactBody})
+		if out.stalledByWatchdog != nil && out.stalledByWatchdog.Load() {
+			job.SetErrorKind("stalled")
+		}
 	case out.finalResult == "":
 		finalStatus = model.SubTaskStatusError
 		artifactBody = "❌ Claude 未返回结果，请重试"

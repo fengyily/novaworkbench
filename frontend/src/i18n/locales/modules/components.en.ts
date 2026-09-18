@@ -84,6 +84,7 @@ export const components = {
     errLoad: 'Failed to load sub-tasks',
     errCreate: 'Failed to start sub-task',
     errReSplit: 'Failed to re-split',
+    stalledHint: "Claude stream went silent and the watchdog terminated the sub-task. Use Continue or Redo to retry, or check whether the task triggered an unusually long IO (npm install, large file edit).",
     // Banner status texts (batch state machine — see summaryCta derivation).
     bannerSummarizing: '📝 Main agent is generating the summary report…',
     bannerSummaryFailed: '❌ Summary report generation failed — click to retry',

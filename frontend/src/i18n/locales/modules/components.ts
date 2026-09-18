@@ -93,6 +93,7 @@ export const components = {
     errLoad: '加载子任务失败',
     errCreate: '启动子任务失败',
     errReSplit: '重新拆分失败',
+    stalledHint: 'Claude 流静默超时，子任务已被看门狗终止。可点击「继续」或「重新执行」重试，或检查任务是否触发了超长 IO（npm install / 大文件编辑）。',
     // Banner status texts (batch state machine — see summaryCta derivation).
     bannerSummarizing: '📝 主 Agent 正在生成汇总报告…',
     bannerSummaryFailed: '❌ 汇总报告生成失败，请点击重试',

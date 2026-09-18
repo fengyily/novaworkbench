@@ -561,8 +561,8 @@ function SubTaskCard({
       `/api/wizard/jobs/${st.job_id}/stream`,
       (evt) => {
         if (!evt || typeof evt !== 'object') return;
-        const t = evt.type as string;
-        if (t === 'usage') {
+        const evtType = evt.type as string;
+        if (evtType === 'usage') {
           try {
             const raw = typeof evt.content === 'string' ? JSON.parse(evt.content) : null;
             if (raw) setUsage(computeUsage(raw, 'sub_task'));
@@ -572,15 +572,29 @@ function SubTaskCard({
           // payload as terminal scrollback and confuse the user.
           return;
         }
-        if (t === 'job_done') {
+        if (evtType === 'job_done') {
           setStreaming(false);
+          // Stalled runs (watchdog killed the subprocess) get an extra hint
+          // line appended to the visible log so the user can tell "流静默
+          // 超时" apart from a hard crash. The retry/continue buttons below
+          // already work the same way for both kinds — this is purely
+          // diagnostic. We use the existing 'phase' type so it picks up the
+          // phase styling already wired in SubTaskLogView without needing a
+          // new CSS class.
+          if (evt && (evt as any).error_kind === 'stalled') {
+            setLines((prev) => appendLogLine(prev, {
+              type: 'phase',
+              content: '⚠️ ' + t('components.subTaskPanel.stalledHint'),
+              at: Date.now(),
+            }));
+          }
           subTasksApi.get(st.requirement_id, st.id)
             .then((next) => { setArtifact(next.artifact); onChanged(next); })
             .catch(() => { /* keep last-known state */ });
           return;
         }
         setLines((prev) => appendLogLine(prev, {
-          type: t,
+          type: evtType,
           content: typeof evt.content === 'string' ? evt.content : (evt.content ? JSON.stringify(evt.content) : ''),
           at: typeof evt.at === 'number' ? evt.at : Date.now(),
         }));

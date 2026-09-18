@@ -12,12 +12,111 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 )
+
+// Stall watchdog windows.
+//
+// defaultStallTimeout is applied to every runClaudeStream caller that doesn't
+// pass an explicit override. It has to be long enough that a normal tool
+// round-trip (Read/Grep/Bash) never trips it, but short enough that a proxy
+// which silently drops the connection doesn't wedge the job for an unbounded
+// time.
+//
+// Stages where Claude legitimately goes quiet for longer than this — notably
+// start-coding / adjust-coding / continue-coding / sub-task / apply-doc, which
+// may run `npm install`, `go build ./...`, or Write/Edit on large files —
+// must pass codingStallTimeout via runClaudeStream's variadic argument.
+//
+// Do NOT raise defaultStallTimeout to cover them: that would mask genuinely
+// hung proxies on every other stage.
+const (
+	defaultStallTimeout = 3 * time.Minute
+	codingStallTimeout  = 20 * time.Minute
+)
+
+// resolveStallTimeout picks the effective stall watchdog window. Variadic
+// override wins when present and positive; otherwise the package default.
+// Centralized so tests can pin both branches without spinning up a real
+// subprocess.
+func resolveStallTimeout(override []time.Duration) time.Duration {
+	if len(override) > 0 && override[0] > 0 {
+		return override[0]
+	}
+	return defaultStallTimeout
+}
+
+// stallErrorMessage formats the post-loop user-facing error. When the
+// watchdog fired it returns a "stream went silent" message that names the
+// effective window; otherwise it returns the legacy "Claude 异常退出: ..."
+// string for non-zero exits.
+func stallErrorMessage(wasStalled bool, stallTimeout time.Duration, exitErr error, stderrTrim string) string {
+	if wasStalled {
+		return fmt.Sprintf("Claude 流静默超过 %v，看门狗终止（请重试或检查网络/磁盘）", stallTimeout)
+	}
+	msg := "Claude 异常退出: " + exitErr.Error()
+	if stderrTrim != "" {
+		msg = "Claude 异常退出: " + stderrTrim
+	}
+	return msg
+}
+
+// runStallWatchdog owns the timer/heartbeat/kill loop used by runClaudeStream.
+// It is a separate function (instead of an inline goroutine) so tests can
+// inject a fake beatFn / killFn / short timeout and assert behavior in
+// milliseconds instead of minutes.
+//
+// The returned *atomic.Bool is flipped to true the instant the timer fires
+// and killFn is invoked. Callers read it after stopping the watchdog so they
+// can branch on whether the kill was due to a stall vs. another abnormal
+// exit. The goroutine itself is intentionally fire-and-forget; the caller is
+// expected to coordinate its lifetime via the heartbeats channel (close to
+// stop cleanly) and an outer watchdogDone close (matching the inline shape
+// the previous implementation had).
+func runStallWatchdog(scope string, stallTimeout time.Duration, heartbeats <-chan struct{}, killFn func()) *atomic.Bool {
+	stalled := &atomic.Bool{}
+	go func() {
+		// Arming matches the inline implementation the helper replaced:
+		// the timer doesn't start counting until the first heartbeat arrives
+		// (so a job whose CLI never emits any stdout — e.g. an early crash —
+		// isn't killed by the watchdog before it has a chance to flush its
+		// own error). Runtime behavior is identical to the previous shape.
+		timer := time.NewTimer(stallTimeout)
+		if !timer.Stop() {
+			<-timer.C
+		}
+		var armed bool
+		for {
+			select {
+			case _, ok := <-heartbeats:
+				if !ok {
+					return
+				}
+				if !armed {
+					armed = true
+				}
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(stallTimeout)
+			case <-timer.C:
+				log.Printf("[%s] stream stalled %v with no new events; terminating", scope, stallTimeout)
+				stalled.Store(true)
+				killFn()
+				return
+			}
+		}
+	}()
+	return stalled
+}
 
 // toolCallLabel returns a human-readable Chinese label for a tool call event.
 func toolCallLabel(toolName string, input map[string]interface{}) string {
@@ -361,6 +460,14 @@ type claudeStreamOutcome struct {
 	// compress-context handler reads this to populate the `done` payload's
 	// tokens_used field without a second DB roundtrip.
 	lastUsage lastUsageSnapshot
+	// stalledByWatchdog is set non-nil at construction and flipped to true the
+	// instant the stall timer fires and killProcessGroup is called. The main
+	// goroutine reads it after <-watchdogDone so the post-loop cmd.Wait() branch
+	// can prefer a watchdog-specific error message over the generic "signal:
+	// terminated" exit error, and so handlers can propagate Job.ErrorKind="stalled"
+	// to the frontend. Using *atomic.Bool (rather than a plain bool) lets the
+	// watchdog goroutine flip it without holding the outer mutex.
+	stalledByWatchdog *atomic.Bool
 }
 
 // lastUsageSnapshot is the token-count view of a single claude turn, derived
@@ -529,7 +636,13 @@ func (silentSink) emit(line store.LogLine) {}
 // row (best-effort — errors are logged and never break the stream). Pass the
 // same uctx to both calls of a stale-fallback retry so each invocation's
 // tokens are recorded.
-func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCtx) claudeStreamOutcome {
+//
+// stallTimeoutOverride optionally replaces defaultStallTimeout for this run.
+// It is variadic (rather than a required parameter) so the existing call
+// sites keep the 3-minute behaviour without being touched — only stages that
+// have a documented reason to wait longer opt in. Non-positive values and
+// extra elements are ignored.
+func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCtx, stallTimeoutOverride ...time.Duration) claudeStreamOutcome {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return claudeStreamOutcome{errMsg: "启动 Claude 失败: " + err.Error()}
@@ -564,6 +677,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	logClaudeCmd(scope, cmd)
 
 	var out claudeStreamOutcome
+	out.stalledByWatchdog = &atomic.Bool{}
 	// thinkingTokens tracks the last token count we reported so we can
 	// throttle thinking_tokens progress messages (every 50 tokens).
 	var lastThinkingReport int
@@ -576,38 +690,17 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	// arrives for stallTimeout (proxy went silent without emitting a result
 	// event), kill the group so the scan loop unblocks. Without this a proxy
 	// that drops the connection mid-stream would wedge the job permanently.
-	const stallTimeout = 3 * time.Minute
+	//
+	// The actual timer/heartbeat/kill loop lives in runStallWatchdog (see
+	// file header comment) so the behavior is unit-testable without spawning
+	// a real subprocess.
+	stallTimeout := resolveStallTimeout(stallTimeoutOverride)
+	log.Printf("[%s] stall watchdog window=%v", scope, stallTimeout)
 	heartbeats := make(chan struct{}, 1)
 	watchdogDone := make(chan struct{})
 	go func() {
 		defer close(watchdogDone)
-		timer := time.NewTimer(stallTimeout)
-		if !timer.Stop() {
-			<-timer.C
-		}
-		var armed bool
-		for {
-			select {
-			case _, ok := <-heartbeats:
-				if !ok {
-					return
-				}
-				if !armed {
-					armed = true
-				}
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				timer.Reset(stallTimeout)
-			case <-timer.C:
-				log.Printf("[%s] stream stalled %v with no new events; terminating", scope, stallTimeout)
-				killProcessGroup(cmd)
-				return
-			}
-		}
+		runStallWatchdog(scope, stallTimeout, heartbeats, func() { killProcessGroup(cmd) })
 	}()
 	beat := func() {
 		select {
@@ -889,13 +982,12 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 		stderrTrim := strings.TrimSpace(stderrBuf.String())
 		log.Printf("[%s] claude exited: %v stderr=%s", scope, err, stderrTrim)
 		// A non-zero exit is only fatal if we never got a result; some error
-		// events still carry a usable result field.
+		// events still carry a usable result field. When the stall watchdog
+		// was the cause of the kill, prefer a "stream went silent" message
+		// over the generic "signal: terminated" so the user (and the UI's
+		// stalled-banner branch) can tell the two cases apart.
 		if out.finalResult == "" && out.errMsg == "" {
-			msg := "Claude 异常退出: " + err.Error()
-			if stderrTrim != "" {
-				msg = "Claude 异常退出: " + stderrTrim
-			}
-			out.errMsg = msg
+			out.errMsg = stallErrorMessage(out.stalledByWatchdog.Load(), stallTimeout, err, stderrTrim)
 		}
 	}
 	// Re-check staleness against stderr in case the CLI printed the error there

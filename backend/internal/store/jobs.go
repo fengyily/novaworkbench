@@ -45,6 +45,14 @@ type Job struct {
 	// care about requirement_id). Used by the global active-jobs endpoint
 	// to surface the wizard pipeline state to list / detail pages.
 	Type string `json:"type,omitempty"`
+	// ErrorKind distinguishes terminal failure modes for the frontend. Empty
+	// when the job is still running or finished successfully. Known values:
+	//   "stalled" — runClaudeStream's stall watchdog killed the subprocess
+	//               after no new stdout for the configured window; usually a
+	//               long-IO pause rather than a hard error.
+	// Future kinds (rate_limited, context_overflow, ...) can land here without
+	// breaking older clients (omitempty keeps the wire shape additive).
+	ErrorKind string `json:"error_kind,omitempty"`
 	mu    sync.RWMutex
 	subs  []chan LogLine
 	// cmd / cancel wire the running subprocess into the job so a handler-side
@@ -77,6 +85,15 @@ func (j *Job) SetModel(model string) {
 func (j *Job) SetType(t string) {
 	j.mu.Lock()
 	j.Type = t
+	j.mu.Unlock()
+}
+
+// SetErrorKind records the terminal-failure kind on the job. Mirrors the
+// SetModel / SetType pattern so subscribers see a consistent value.
+// Must be called BEFORE Finish(); values set after Finish are not surfaced.
+func (j *Job) SetErrorKind(kind string) {
+	j.mu.Lock()
+	j.ErrorKind = kind
 	j.mu.Unlock()
 }
 
@@ -321,6 +338,7 @@ type ActiveJob struct {
 	RequirementID string    `json:"requirement_id"`
 	Status        JobStatus `json:"status"`
 	Type          string    `json:"type"`
+	ErrorKind     string    `json:"error_kind,omitempty"`
 }
 
 // ActiveJobs returns a snapshot of all currently-running jobs across all
@@ -341,6 +359,7 @@ func (s *JobStore) ActiveJobs() []ActiveJob {
 		j.mu.RLock()
 		running := j.Status == JobRunning
 		t := j.Type
+		k := j.ErrorKind
 		j.mu.RUnlock()
 		if !running {
 			continue
@@ -350,6 +369,7 @@ func (s *JobStore) ActiveJobs() []ActiveJob {
 			RequirementID: j.RequirementID,
 			Status:        JobRunning,
 			Type:          t,
+			ErrorKind:     k,
 		})
 	}
 	return out
