@@ -548,6 +548,9 @@ func (h *WizardHandler) refineDocViaAgent(w http.ResponseWriter, r *http.Request
 		}
 		if out.errMsg != "" {
 			job.Append(store.LogLine{Type: "error", Content: "❌ " + out.errMsg})
+			if out.stalledByWatchdog != nil && out.stalledByWatchdog.Load() {
+				job.SetErrorKind("stalled")
+			}
 			job.Finish(1, store.JobError)
 			return
 		}
@@ -751,7 +754,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 				SessionID:      sourceSID,
 				Resume:         true,
 			})
-			out = runClaudeStream(jobSink{job}, cmd, "apply-doc", applyUsage)
+			out = runClaudeStream(jobSink{job}, cmd, "apply-doc", applyUsage, codingStallTimeout)
 		}
 
 		if out.staleSession {

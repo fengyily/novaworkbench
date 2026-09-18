@@ -88,7 +88,9 @@ func wrapRecorder(j *jobRecorder) jobRecorderAppender { return j }
 //  1. ProjectPath empty + reqRow != nil + getter OK → fallback resolves,
 //     p.ProjectPath is rewritten, one `phase` line is appended, error is nil.
 //  2. ProjectPath empty + reqRow == nil → no-op (legacy quick-start path),
-//     p.ProjectPath stays "", no lines appended, no getter call.
+//     p.ProjectPath stays "", one `message` line is appended to make the
+//     no-op deliberate (the missing log line is what made
+//     req_b646601dbc5e7ac3 hard to triage), no getter call.
 //  3. ProjectPath non-empty → no-op, no getter call, no line appended.
 func TestResolveCodingProjectPath(t *testing.T) {
 	t.Run("empty_project_path_with_req_row_resolves_via_projectsvc", func(t *testing.T) {
@@ -142,8 +144,17 @@ func TestResolveCodingProjectPath(t *testing.T) {
 		if getter.callCount() != 0 {
 			t.Fatalf("getter should NOT be called when reqRow is nil; got %d calls", getter.callCount())
 		}
-		if lines := rec.snapshot(); len(lines) != 0 {
-			t.Fatalf("expected zero log lines for no-op path, got %d: %+v", len(lines), lines)
+		// No-op path emits ONE diagnostic message line so the operator can tell
+		// the no-op was deliberate (see helper docstring for rationale).
+		lines := rec.snapshot()
+		if len(lines) != 1 {
+			t.Fatalf("expected exactly 1 diagnostic line for no-op path, got %d: %+v", len(lines), lines)
+		}
+		if lines[0].Type != "message" {
+			t.Fatalf("no-op diagnostic should be type=message, got %q", lines[0].Type)
+		}
+		if !strings.Contains(lines[0].Content, "ProjectPath") {
+			t.Fatalf("no-op diagnostic should mention ProjectPath, got %q", lines[0].Content)
 		}
 	})
 
@@ -168,6 +179,49 @@ func TestResolveCodingProjectPath(t *testing.T) {
 		}
 		if lines := rec.snapshot(); len(lines) != 0 {
 			t.Fatalf("expected zero log lines for no-op path, got %d: %+v", len(lines), lines)
+		}
+	})
+
+	// Edge case: the project store may legitimately carry a tilde-prefixed
+	// path (~/work/...) or a relative path (./repo) for self-hosted projects.
+	// The helper must NOT shell-expand those — it is pure literal string
+	// passthrough into cmd.Dir, and Go's os/exec never expands "~" or "."
+	// the way the shell does. Pinning this so a future "convenience"
+	// normalization never silently rewrites the operator's path.
+	t.Run("path_is_taken_literally_no_shell_expansion", func(t *testing.T) {
+		cases := []struct {
+			name      string
+			localPath string
+		}{
+			{"tilde_prefix_kept_as_is", "~/work/proj"},
+			{"relative_dot_kept_as_is", "./repo"},
+			{"dotdot_kept_as_is", "../sibling/repo"},
+			{"env_var_literal_kept_as_is", "$HOME/work/proj"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				p := &codingRunParams{}
+				reqRow := &model.Requirement{ID: "req_abc", ProjectID: "proj_xyz"}
+				getter := &fakeProjectGetter{
+					response: &model.Project{ID: "proj_xyz", LocalPath: tc.localPath},
+				}
+				rec := &jobRecorder{}
+
+				h := &WizardHandler{}
+				if err := h.resolveCodingProjectPath(p, reqRow, getter, wrapRecorder(rec)); err != nil {
+					t.Fatalf("expected nil error, got %v", err)
+				}
+				if p.ProjectPath != tc.localPath {
+					t.Fatalf("ProjectPath = %q, want %q (literal, no expansion)", p.ProjectPath, tc.localPath)
+				}
+				lines := rec.snapshot()
+				if len(lines) != 1 || lines[0].Type != "phase" {
+					t.Fatalf("expected exactly 1 phase log line, got %+v", lines)
+				}
+				if !strings.Contains(lines[0].Content, tc.localPath) {
+					t.Fatalf("phase log should echo the literal path %q, got %q", tc.localPath, lines[0].Content)
+				}
+			})
 		}
 	})
 }

@@ -1400,7 +1400,7 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 			usage:         childUsage,
 		})
 	} else {
-		out = runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage)
+		out = runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage, codingStallTimeout)
 	}
 
 	// Stop the heartbeat BEFORE Finish so a slow MarkHeartbeat can't race
@@ -1431,6 +1431,9 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	} else if out.errMsg != "" {
 		status = model.SubTaskStatusError
 		artifactBody = "❌ " + out.errMsg
+		if out.stalledByWatchdog != nil && out.stalledByWatchdog.Load() {
+			job.SetErrorKind("stalled")
+		}
 	} else if out.finalResult == "" {
 		status = model.SubTaskStatusError
 		artifactBody = "❌ Claude 未返回结果，请重试"

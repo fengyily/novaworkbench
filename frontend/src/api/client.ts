@@ -1137,6 +1137,7 @@ export interface ActiveJob {
   requirement_id: string;
   status: 'running';
   type: string;
+  error_kind?: string;
 }
 
 export interface RunStatus {
@@ -1147,6 +1148,13 @@ export interface RunStatus {
   started_at?: string;
   finished_at?: string;
   compose_file?: string;
+  // error_kind distinguishes terminal failure modes from the backend's
+  // store.Job.ErrorKind. Currently known values: "stalled" (runClaudeStream's
+  // stall watchdog killed the subprocess after no new stdout for the
+  // configured window — usually a long-IO pause rather than a hard error).
+  // The UI uses this to render a distinct amber "stalled" banner with a
+  // retry CTA instead of the generic red error block.
+  error_kind?: string;
 }
 
 export interface RunJob {
