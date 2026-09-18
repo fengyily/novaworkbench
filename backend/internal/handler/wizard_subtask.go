@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -1141,7 +1142,9 @@ func (h *WizardHandler) GenerateSubTaskSummary(w http.ResponseWriter, r *http.Re
 	}
 	claudeConfigID = h.resolveConfigIDForRun("", modelName, fallbackCfgID)
 	workDir := ""
-	if proj, perr := h.projectSvc.Get(req.ProjectID); perr == nil {
+	var proj *model.Project
+	if p, perr := h.projectSvc.Get(req.ProjectID); perr == nil {
+		proj = p
 		workDir = proj.LocalPath
 	}
 	if req.WorktreePath != "" {
@@ -1150,7 +1153,14 @@ func (h *WizardHandler) GenerateSubTaskSummary(w http.ResponseWriter, r *http.Re
 		}
 	}
 	if workDir == "" {
-		writeError(w, http.StatusBadRequest, "no_workdir", "无法解析工作目录，请先完成 start-coding")
+		// 诊断增强：把候选目录附在错误消息里（参见 sub_task_runner.go 同注释）
+		projPath := ""
+		if proj != nil {
+			projPath = proj.LocalPath
+		}
+		writeError(w, http.StatusBadRequest, "no_workdir",
+			fmt.Sprintf("无法解析工作目录，请先完成 start-coding（req_id=%s, project_id=%s, worktree_path=%q, project_local_path=%q）",
+				req.ID, req.ProjectID, req.WorktreePath, projPath))
 		return
 	}
 	// Pull the orchestrator session id (the coding session main agent forked).

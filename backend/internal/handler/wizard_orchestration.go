@@ -78,7 +78,9 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 		// Workdir: prefer the requirement's isolated worktree (mirrors
 		// runSubTask so both paths agree on where the code lives).
 		workDir := ""
-		if proj, perr := h.projectSvc.Get(req.ProjectID); perr == nil {
+		var proj *model.Project
+		if p, perr := h.projectSvc.Get(req.ProjectID); perr == nil {
+			proj = p
 			workDir = proj.LocalPath
 		}
 		if req.WorktreePath != "" {
@@ -87,7 +89,14 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if workDir == "" {
-			job.Append(store.LogLine{Type: "error", Content: "❌ 无法解析工作目录"})
+			// 诊断增强：把候选目录写进行，便于排错
+			// （参见 sub_task_runner.go 同注释 / req_b646601dbc5e7ac3 现象）。
+			projPath := ""
+			if proj != nil {
+				projPath = proj.LocalPath
+			}
+			job.Append(store.LogLine{Type: "error", Content: fmt.Sprintf("❌ 无法解析工作目录（req_id=%s, project_id=%s, worktree_path=%q, project_local_path=%q）",
+				req.ID, req.ProjectID, req.WorktreePath, projPath)})
 			job.Finish(1, store.JobError)
 			return
 		}

@@ -45,6 +45,27 @@ import (
 // defaulted). Pulling the anonymous struct to a named type is what lets the
 // scheduler reuse the exec body without re-deriving any of the request-
 // shape semantics.
+// projectPathResolver is the narrow subset of *service.ProjectService that
+// resolveCodingProjectPath actually needs. Defining it here (rather than at
+// the call site) keeps the helper testable without standing up a real DB or
+// pulling the full ProjectService struct: in unit tests a tiny fake stub
+// satisfies this interface with one line.
+//
+// *service.ProjectService satisfies the interface implicitly via its existing
+// `Get(id string) (*model.Project, error)` method (service/project.go:121),
+// so production callers keep wiring `h.projectSvc` directly.
+type projectPathResolver interface {
+	Get(id string) (*model.Project, error)
+}
+
+// jobAppender is the narrow subset of *store.Job that resolveCodingProjectPath
+// actually needs (it only emits log lines). Using an interface here lets unit
+// tests stub the sink without instantiating the full JobStore ring buffer or
+// a real Job; production callers continue to pass *store.Job.
+type jobAppender interface {
+	Append(store.LogLine)
+}
+
 type codingRunParams struct {
 	ProjectPath      string `json:"project_path"`
 	RequirementTitle string `json:"requirement_title"`
@@ -83,6 +104,47 @@ type codingRunParams struct {
 	// (empty remote_url → local). Persisted to the requirement row so all
 	// follow-up actions (追加调整 / 继续开发 / 子任务 / 合并 / 清理) reuse it.
 	SyncMode string `json:"sync_mode"`
+}
+
+// resolveCodingProjectPath fills in codingRunParams.ProjectPath when the
+// caller (typically ScheduledExecutor.RunScheduledCoding) didn't pre-fill it.
+// It is the inline-extracted version of what used to live in execStartCoding;
+// pulling it out keeps the regression surface tight (one helper, one error
+// path) and lets unit tests stub the project lookup without standing up a
+// real *service.ProjectService / *db.DB.
+//
+// Contract:
+//   - p.ProjectPath != "" → no-op, returns nil. Caller already knows the dir.
+//   - p.ProjectPath == "" && reqRow == nil → no-op, returns nil. Legacy
+//     quick-start path: no requirement row means no project id to fall back
+//     to, so we leave ProjectPath empty and let execStartCoding's downstream
+//     checks fail loudly (matches pre-existing behavior).
+//   - p.ProjectPath == "" && reqRow != nil → ask `getter` for the project.
+//     Success → write p.ProjectPath = proj.LocalPath + log a `phase` line.
+//     Failure → log an `error` line and return a non-nil error; the caller
+//     finishes the job with JobError and returns.
+//
+// The getter parameter accepts a narrow interface (projectPathResolver) so
+// tests pass a tiny fake without importing *service.ProjectService.
+func (h *WizardHandler) resolveCodingProjectPath(p *codingRunParams, reqRow *model.Requirement, getter projectPathResolver, job jobAppender) error {
+	if p.ProjectPath != "" {
+		return nil
+	}
+	if reqRow == nil || getter == nil {
+		return nil
+	}
+	proj, err := getter.Get(reqRow.ProjectID)
+	if err != nil {
+		job.Append(store.LogLine{Type: "error", Content: "❌ 无法解析项目目录：projectSvc.Get(" + reqRow.ProjectID + ") 失败: " + err.Error()})
+		return err
+	}
+	if proj == nil || proj.LocalPath == "" {
+		job.Append(store.LogLine{Type: "error", Content: "❌ 无法解析项目目录：项目 " + reqRow.ProjectID + " 的 LocalPath 为空"})
+		return fmt.Errorf("project %s has empty LocalPath", reqRow.ProjectID)
+	}
+	p.ProjectPath = proj.LocalPath
+	job.Append(store.LogLine{Type: "phase", Content: "📁 已从项目元数据解析工作目录: " + p.ProjectPath})
+	return nil
 }
 
 func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
@@ -327,6 +389,22 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		return
 	}
 
+	// ProjectPath fallback: ScheduledExecutor.RunScheduledCoding constructs
+	// codingRunParams with an empty ProjectPath (schedule_executor.go:124-136)
+	// and explicitly delegates dir resolution to the wizard exec body. Before
+	// this fallback, an empty ProjectPath let `workDir`/`branchDir` stay as
+	// "" — EnsureWorktreeLogged("", ...) then probed the nova binary's own
+	// CWD (reported "ℹ️ 非 git 仓库"), git pull ran there and bubbled up the
+	// C-runtime "致命错误：无法读取当前工作目录: No such file or directory",
+	// and finally the spawned `claude` (Bun runtime) failed with ENOENT when
+	// chdir-ing to "". Resolve ProjectPath from the persisted project's
+	// LocalPath when the caller (typically the scheduler) didn't pre-fill it;
+	// log the resolved path so the SSE panel makes the directory explicit.
+	if err := h.resolveCodingProjectPath(p, reqRow, h.projectSvc, job); err != nil {
+		job.Finish(1, store.JobError)
+		return
+	}
+
 	// Resolve the working directory for coding. When a branch is requested
 	// AND the project is a git repo with a requirement id to key on, develop
 	// in an isolated git worktree per requirement so parallel requirements
@@ -352,7 +430,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			job.Append(store.LogLine{Type: "message", Content: "🌿 已创建/复用隔离 worktree: " + wtPath})
 		case errors.Is(wtErr, ErrNotAGitRepo):
 			// Fall through to the legacy in-place checkout below.
-			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，在项目目录直接开发"})
+			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，在项目目录直接开发: " + p.ProjectPath})
 		default:
 			job.Append(store.LogLine{Type: "error", Content: "❌ 创建 worktree 失败: " + wtErr.Error()})
 			job.Finish(1, store.JobError)
@@ -377,7 +455,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// currently has.
 	if p.BranchName != "" && !useWorktree {
 		if _, gerr := gitRun(branchDir, "rev-parse", "--is-inside-work-tree"); gerr != nil {
-			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，跳过分支切换，在项目目录直接开发"})
+			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，跳过分支切换，在项目目录直接开发: " + branchDir})
 		} else {
 			syncBaseBranch(branchDir, baseBranch, func(s string) {
 				job.Append(store.LogLine{Type: "message", Content: s})
@@ -434,7 +512,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			fallbackCmd.Dir = branchDir
 			fbOut, fbErr := fallbackCmd.CombinedOutput()
 			if fbErr != nil {
-				job.Append(store.LogLine{Type: "message", Content: "ℹ️ 跳过 git pull（无远程跟踪或已分叉），继续在当前分支开发: " + strings.TrimSpace(string(append(pullOut, fbOut...)))})
+				job.Append(store.LogLine{Type: "message", Content: "ℹ️ 跳过 git pull（无远程跟踪或已分叉），继续在当前分支开发: branchDir=" + branchDir + " | " + strings.TrimSpace(string(append(pullOut, fbOut...)))})
 			} else {
 				job.Append(store.LogLine{Type: "message", Content: "⬇️ " + strings.TrimSpace(string(fbOut))})
 			}
