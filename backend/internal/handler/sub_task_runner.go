@@ -482,8 +482,10 @@ func (r *SubTaskRunner) Run(
 	// Workdir: prefer the requirement's isolated worktree. Fallback to
 	// project checkout for legacy rows.
 	workDir := ""
+	var proj *model.Project
 	if r.projectSvc != nil {
-		if proj, perr := r.projectSvc.Get(req.ProjectID); perr == nil {
+		if p, perr := r.projectSvc.Get(req.ProjectID); perr == nil {
+			proj = p
 			workDir = proj.LocalPath
 		}
 	}
@@ -493,9 +495,18 @@ func (r *SubTaskRunner) Run(
 		}
 	}
 	if workDir == "" {
-		job.Append(store.LogLine{Type: "error", Content: "❌ 无法解析工作目录"})
+		// 诊断增强：把尝试过的目录都带上，便于运维/用户一眼看到失败原因
+		// （req_b646601dbc5e7ac3 现象：定时任务日志只打一行「无法解析工作目录」，
+		//  完全看不出哪个 worktree 没 stat 通过、项目的本地路径是什么）。
+		projPath := ""
+		if proj != nil {
+			projPath = proj.LocalPath
+		}
+		diag := fmt.Sprintf("❌ 无法解析工作目录（sub_task_id=%s, req_id=%s, project_id=%s, worktree_path=%q, project_local_path=%q）",
+			st.ID, req.ID, req.ProjectID, req.WorktreePath, projPath)
+		job.Append(store.LogLine{Type: "error", Content: diag})
 		job.Finish(1, store.JobError)
-		r.subTaskSvc.Finish(st.ID, model.SubTaskStatusError, buildSubTaskArtifact(st, modelName, "无法解析工作目录", time.Now()), modelName, model.SubTaskTokens{}, 0, startTime)
+		r.subTaskSvc.Finish(st.ID, model.SubTaskStatusError, buildSubTaskArtifact(st, modelName, diag, time.Now()), modelName, model.SubTaskTokens{}, 0, startTime)
 		return
 	}
 
