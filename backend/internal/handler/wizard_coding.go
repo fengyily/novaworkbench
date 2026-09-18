@@ -115,10 +115,13 @@ type codingRunParams struct {
 //
 // Contract:
 //   - p.ProjectPath != "" → no-op, returns nil. Caller already knows the dir.
-//   - p.ProjectPath == "" && reqRow == nil → no-op, returns nil. Legacy
-//     quick-start path: no requirement row means no project id to fall back
-//     to, so we leave ProjectPath empty and let execStartCoding's downstream
-//     checks fail loudly (matches pre-existing behavior).
+//   - p.ProjectPath == "" && reqRow == nil → no-op, returns nil, but emits
+//     a `message` line on the job so the operator sees in the panel that the
+//     fallback was intentionally skipped (no requirement row → no project id
+//     to resolve against). The downstream workDir stays "" and a later
+//     EnsureWorktreeLogged("", ...) / cmd.Dir="" is the visible failure mode;
+//     the explicit message here lets the operator triage without digging
+//     through the wizard_coding.go history.
 //   - p.ProjectPath == "" && reqRow != nil → ask `getter` for the project.
 //     Success → write p.ProjectPath = proj.LocalPath + log a `phase` line.
 //     Failure → log an `error` line and return a non-nil error; the caller
@@ -131,6 +134,14 @@ func (h *WizardHandler) resolveCodingProjectPath(p *codingRunParams, reqRow *mod
 		return nil
 	}
 	if reqRow == nil || getter == nil {
+		// No requirement row means no project id to fall back to. The legacy
+		// /wizard quick-start path enters here; we intentionally leave
+		// ProjectPath empty so execStartCoding's downstream checks fail
+		// loudly. Emit one diagnostic line so the operator sees the no-op is
+		// deliberate rather than a missing log entry — the absence of any
+		// ProjectPath-related message is what made req_b646601dbc5e7ac3 so
+		// confusing to triage in the first place.
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ ProjectPath 缺失且无可解析的项目元数据（quick-start 旧路径），保留 ProjectPath=\"\" 让后续检查失败"})
 		return nil
 	}
 	proj, err := getter.Get(reqRow.ProjectID)
@@ -295,6 +306,18 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			if devSource == service.DevSourceLocal {
 				reqRow.AgentServerID = ""
 			}
+		}
+		// Echo the resolved execution environment on the job panel so the
+		// reader can tell at a glance which path the run is going to take —
+		// the legacy behavior only stamped the value into the requirement row,
+		// which left a scheduled task looking indistinguishable from an HTTP
+		// run until the user opened the requirement page. Mirrors the
+		// remote-execution summary the merge + auto-push stages emit, so
+		// local / remote diagnostics read symmetrically.
+		if p.AgentServerID == "" {
+			job.Append(store.LogLine{Type: "phase", Content: "🏠 本地执行（Agent server 未指定，使用本机 nova 进程 spawn Claude）"})
+		} else {
+			job.Append(store.LogLine{Type: "phase", Content: "💻🖥️ Agent server 执行: " + p.AgentServerID})
 		}
 		// Stamp the dev-mode provenance alongside dev_source. Empty request
 		// field → fall back to the previously persisted value (so 重新开发
