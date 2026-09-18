@@ -153,6 +153,18 @@ func toolCallLabel(toolName string, input map[string]interface{}) string {
 	return "🔧 " + toolName
 }
 
+// isExitPlanTool reports whether toolName is the plan-mode "submit the plan
+// for approval" tool. Its tool_use input carries the complete plan Markdown
+// under the `plan` key, which makes it a usable fallback source for
+// architect-design when Claude never writes ~/.claude/plans/<slug>.md.
+//
+// Two spellings are accepted: the current claude CLI ships "ExitPlanMode",
+// while shorter "ExitPlan" has been observed from relays/older builds. Both
+// use the same input shape, so matching either costs nothing.
+func isExitPlanTool(toolName string) bool {
+	return toolName == "ExitPlanMode" || toolName == "ExitPlan"
+}
+
 // toolResultContent extracts and truncates the content of a tool_result block.
 func toolResultContent(b map[string]interface{}) string {
 	switch v := b["content"].(type) {
@@ -638,7 +650,7 @@ func (silentSink) emit(line store.LogLine) {}
 // tokens are recorded.
 //
 // stallTimeoutOverride optionally replaces defaultStallTimeout for this run.
-// It is variadic (rather than a required parameter) so the existing call
+// It is variadic (rather than a required parameter) so the ~15 existing call
 // sites keep the 3-minute behaviour without being touched — only stages that
 // have a documented reason to wait longer opt in. Non-positive values and
 // extra elements are ignored.
@@ -839,6 +851,19 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 									out.subTasksJSON = c
 								}
 							}
+						}
+					}
+					// Fallback plan capture for plan mode: instead of writing
+					// the plan to ~/.claude/plans/*.md, Claude may hand it
+					// straight to the plan-approval tool, whose input carries
+					// the full Markdown. Without this the design would be lost
+					// (out.planContent empty → "Claude 未返回结果"). Guarded on
+					// planContent being empty so a real plan-file Write always
+					// wins — it is the authoritative full document.
+					if isExitPlanTool(toolName) && out.planContent == "" && input != nil {
+						if pl, ok := input["plan"].(string); ok && pl != "" {
+							out.planContent = pl
+							log.Printf("[%s] captured %s tool_use plan=%d bytes", scope, toolName, len(pl))
 						}
 					}
 					// Harvest the touched path/pattern for the "was the injected
@@ -1106,6 +1131,15 @@ func parseStreamJSONFromReader(r io.Reader, sink streamSink, scope string, uctx 
 									out.planContent = c
 								}
 							}
+						}
+					}
+					// Same plan-approval-tool fallback as the local path (see
+					// runClaudeStream) so a remote architect-design run on an
+					// Agent Server captures the plan identically.
+					if isExitPlanTool(toolName) && out.planContent == "" && input != nil {
+						if pl, ok := input["plan"].(string); ok && pl != "" {
+							out.planContent = pl
+							log.Printf("[%s] captured %s tool_use plan=%d bytes", scope, toolName, len(pl))
 						}
 					}
 					if p := inputToolPath(toolName, input); p != "" {

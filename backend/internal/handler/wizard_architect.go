@@ -16,6 +16,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
@@ -24,6 +25,23 @@ import (
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/internal/util"
 )
+
+// architectStallTimeout is the stall-watchdog window for the architect-design
+// stage, overriding runClaudeStream's 3-minute default.
+//
+// Why this stage needs more room: plan mode lets Claude dispatch Explore
+// sub-agents (the architect persona explicitly invites parallel exploration),
+// and while the main thread waits on them it emits nothing at all on stdout.
+// The 3-minute default therefore treated a perfectly healthy multi-module
+// investigation as a hung proxy, killed the process group, and left
+// out.planContent / out.finalResult both empty — finalizeArchitectRun then
+// reported "Claude 未返回结果" and design_docs was never written, even though
+// Claude had done (or was about to do) the work.
+//
+// 10 minutes covers observed Explore fan-outs with margin while keeping the
+// watchdog meaningful: a genuinely dead proxy still gets killed and reported
+// instead of hanging the job forever.
+const architectStallTimeout = 10 * time.Minute
 
 // ArchitectDesign is the architect-phase design generator. It creates a
 // background JobStore job, persists its id on the requirement (so a page refresh
@@ -505,7 +523,9 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 			ForkSessionID:  forkSessionID,
 			PermissionMode: "plan",
 		})
-		out = runClaudeStream(jobSink{job}, cmd, "architect-design", h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID))
+		out = runClaudeStream(jobSink{job}, cmd, "architect-design",
+			h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
+			architectStallTimeout)
 	}
 
 	h.finalizeArchitectRun(out, p, job, kbReadTitles, sourceSID, newDesignSID, id, model)
