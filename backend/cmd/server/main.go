@@ -256,7 +256,7 @@ func main() {
 	log.Printf("[startup] sub-task policy: per-project concurrency=%d auto-retry=%v retry-max=%d (process ceiling=%d)",
 		subTaskConc, subTaskAutoRetry, subTaskRetryMax, subTaskConcurrency)
 	projectLimiter := service.NewProjectLimiter(subTaskConc)
-	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, nil, subTaskConcurrency, subTaskGlobalSem, projectLimiter, settingSvc)
+	subTaskRunner := handler.NewSubTaskRunner(projectSvc, subTaskSvc, reqSvc, sharedJobs, llmGateway, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, nil, subTaskConcurrency, subTaskGlobalSem, projectLimiter, settingSvc)
 	batchSvc := service.NewOrchestrationBatchService(database)
 	if n, err := batchSvc.Recover(); err != nil {
 		log.Printf("[main] orchestration batch recovery: %v", err)

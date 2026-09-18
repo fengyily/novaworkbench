@@ -484,6 +484,20 @@ func (s *RequirementService) Create(req model.CreateRequirementReq) (*model.Requ
 	return s.Get(id)
 }
 
+// Touch bumps requirements.updated_at to time.Now() for the given requirement ID.
+// Used by handlers to signal user-visible activity for non-status-changing events
+// (sub-task completion, merge success, push dispatch). Best-effort: callers should
+// log + continue on error.
+func (s *RequirementService) Touch(id string) error {
+	if id == "" {
+		return nil
+	}
+	_, err := s.db.Exec(
+		`UPDATE requirements SET updated_at = ? WHERE id = ?`,
+		time.Now(), id)
+	return err
+}
+
 func (s *RequirementService) Update(id string, req model.CreateRequirementReq) (*model.Requirement, error) {
 	// skip_analysis is a *bool: nil preserves the stored value (COALESCE keeps
 	// the existing column when the param is NULL), a non-nil pointer updates it.
