@@ -12,16 +12,24 @@ import (
 // Used by the double-dispatch regression tests so each scenario can stage a
 // known DB shape (status, batch_id_seq_run age, session_id) without going
 // through Create + Finish.
+//
+// batch_id_seq_run is staged in UTC because that is what production writes
+// (ClaimNextPending / MarkHeartbeat). It matters: on SQLite the stale-cutoff
+// predicate compares this column as text, so seeding it in a different zone
+// than production uses would let these tests pass against a build whose
+// predicate is broken — which is exactly how the double-dispatch loop shipped
+// green. See SubTaskService.ClaimNextPending's docstring.
 func seedRunningRow(t *testing.T, d *db.DB, id, batchID, sessionID, jobID, status string, heartbeatAge time.Duration) {
 	t.Helper()
 	d.Exec("INSERT INTO projects (id, name, local_path) VALUES ('proj_dd', 'p', '/tmp/p')")
 	d.Exec("INSERT INTO requirements (id, project_id, title) VALUES ('req_dd', 'proj_dd', 'req')")
-	hb := time.Now().Add(-heartbeatAge)
+	now := time.Now().Add(-heartbeatAge)
+	hb := now.UTC()
 	if _, err := d.Exec(`INSERT INTO sub_tasks (id, requirement_id, title, prompt, status,
 		session_id, source_session_id, job_id, model, source,
 		batch_id, batch_seq, batch_id_seq_run, created_at, updated_at)
 		VALUES (?, 'req_dd', 't', 'p', ?, ?, 'src', ?, '', 'auto', ?, 1, ?, ?, ?)`,
-		id, status, sessionID, jobID, batchID, hb, hb, hb); err != nil {
+		id, status, sessionID, jobID, batchID, hb, now, now); err != nil {
 		t.Fatalf("seed sub_task %s: %v", id, err)
 	}
 }

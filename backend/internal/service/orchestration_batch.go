@@ -328,14 +328,21 @@ func (s *OrchestrationBatchService) BumpAndFetchSummaryAttempts(id string) (int,
 // orphaned by a backend crash. The status='running' guard makes a late
 // heartbeat on an already-terminal summary a no-op rather than a zombie
 // rewrite of a finalized row.
+//
+// The stamp is a bound time.Time in UTC, never SQL CURRENT_TIMESTAMP and
+// never a local-zone time: Recover compares this column against a bound
+// cutoff, and on SQLite that comparison is textual, so every writer has to
+// render the same zone or the predicate stops ordering by instant. The same
+// mismatch on sub_tasks.batch_id_seq_run self-healed live children into a
+// double-dispatch loop — see SubTaskService.ClaimNextPending's docstring.
 func (s *OrchestrationBatchService) MarkSummaryHeartbeat(id string) error {
 	if id == "" {
 		return errors.New("batch id is required")
 	}
 	_, err := s.db.Exec(`UPDATE orchestration_batches
-		SET summary_heartbeat_at=CURRENT_TIMESTAMP
+		SET summary_heartbeat_at=?
 		WHERE id=? AND summary_status=?`,
-		id, model.SummaryRunning)
+		time.Now().UTC(), id, model.SummaryRunning)
 	return err
 }
 
@@ -388,8 +395,11 @@ func (s *OrchestrationBatchService) MarkCompleted(id string) error {
 // Cutoff is computed in Go and passed as a parameter so all three dialects
 // (SQLite/MySQL/Postgres) compare DATETIME against a Go-side time.Time the
 // same way — no string-formatted datetime('now', ...) tricks to translate.
+// It is bound in UTC to match MarkSummaryHeartbeat (and rows a pre-fix build
+// stamped with CURRENT_TIMESTAMP): SQLite compares these as text, so a
+// disagreeing zone rendering would make every live summary look stale.
 func (s *OrchestrationBatchService) Recover() (int, error) {
-	cutoff := time.Now().Add(-5 * time.Minute)
+	cutoff := time.Now().Add(-5 * time.Minute).UTC()
 	res, err := s.db.Exec(`UPDATE orchestration_batches
 		SET summary_status=?, summary_heartbeat_at=NULL, updated_at=CURRENT_TIMESTAMP
 		WHERE summary_status=?

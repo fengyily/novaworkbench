@@ -526,6 +526,33 @@ func (s *SubTaskService) ReArmErroredForRetry(batchID string, retryMax int) (int
 // caller. On success the batch_id_seq_run column is stamped with the current
 // time as a heartbeat that RecoverInterrupted inspects on boot.
 //
+// The heartbeat MUST be stamped from a bound time.Time in UTC — never from
+// SQL CURRENT_TIMESTAMP, and never from a local-zone time.Time. The
+// stale-detection predicates (RecoverStaleRunningInBatch /
+// RecoverInterrupted) compare this column against a bound cutoff, and on
+// SQLite that comparison is a *string* comparison: the column's DATETIME type
+// name carries NUMERIC affinity, neither operand parses as a number, so
+// SQLite falls back to comparing text. Text only orders by instant when every
+// writer renders the same zone in the same layout. Two ways that broke:
+//
+//   - CURRENT_TIMESTAMP renders second-resolution UTC with no zone
+//     ('2026-09-18 03:32:43') while the driver renders a bound time.Time via
+//     its String() form ('2026-09-18 11:30:43.08 +0800 CST m=+0.03'). Under
+//     UTC+8 the hour field alone ('03' < '11') made *every* heartbeat test
+//     older than the cutoff, on every tick: live children were self-healed
+//     back to pending and re-dispatched, so each sub-task ran under a second
+//     concurrent claude process (observed: heartbeat_age≈4s being healed
+//     against a 2-minute cutoff).
+//   - A local-zone bound time.Time agrees with a local-zone cutoff but not
+//     with rows already written by CURRENT_TIMESTAMP, and inverts entirely at
+//     a negative UTC offset where the local hour field sorts *below* UTC's.
+//
+// UTC on both sides is the one representation that orders correctly against
+// new rows and against CURRENT_TIMESTAMP rows already in a live nova.db. It
+// also strips the monotonic-clock reading that String() would otherwise
+// persist. MySQL/Postgres convert the parameter to a native TIMESTAMP and
+// were never affected, but they stay correct under this rule too.
+//
 // On RowsAffected==1 we re-SELECT the row with a WHERE batch_id=? AND
 // status='running' ORDER BY batch_seq ASC LIMIT 1 — there's exactly one
 // running row we just produced under SQLite's single-writer model and READ
@@ -534,8 +561,12 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 	if batchID == "" {
 		return nil, false, errors.New("batch_id is required")
 	}
+	now := time.Now()
+	// hb is UTC (see docstring); updated_at keeps the local-zone convention
+	// the rest of this table's writes use, since nothing compares it in SQL.
+	hb := now.UTC()
 	res, err := s.db.Exec(`UPDATE sub_tasks
-		SET status=?, updated_at=CURRENT_TIMESTAMP, batch_id_seq_run=CURRENT_TIMESTAMP
+		SET status=?, updated_at=?, batch_id_seq_run=?
 		WHERE id = (
 			SELECT id FROM sub_tasks
 			 WHERE batch_id=? AND status=?
@@ -543,7 +574,8 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 			 LIMIT 1
 		)
 		AND status=?`,
-		model.SubTaskStatusRunning, batchID, model.SubTaskStatusPending, model.SubTaskStatusPending)
+		model.SubTaskStatusRunning, now, hb,
+		batchID, model.SubTaskStatusPending, model.SubTaskStatusPending)
 	if err != nil {
 		return nil, false, fmt.Errorf("claim pending sub_task: %w", err)
 	}
@@ -600,16 +632,21 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 // Returns nil on a successful refresh OR on a 0-row update caused by a session
 // mismatch / status flip — the caller treats both as "heartbeat accepted" and
 // the next tick re-evaluates state from scratch.
+//
+// The stamp is a bound time.Time in UTC, not SQL CURRENT_TIMESTAMP and not a
+// local-zone time — see ClaimNextPending's docstring for the double-dispatch
+// loop that mixing representations caused.
 func (s *SubTaskService) MarkHeartbeat(subTaskID, expectedSessionID string) error {
+	now := time.Now().UTC()
 	if expectedSessionID != "" {
-		_, err := s.db.Exec(`UPDATE sub_tasks SET batch_id_seq_run=CURRENT_TIMESTAMP
+		_, err := s.db.Exec(`UPDATE sub_tasks SET batch_id_seq_run=?
 			WHERE id=? AND status=? AND session_id=?`,
-			subTaskID, model.SubTaskStatusRunning, expectedSessionID)
+			now, subTaskID, model.SubTaskStatusRunning, expectedSessionID)
 		return err
 	}
-	_, err := s.db.Exec(`UPDATE sub_tasks SET batch_id_seq_run=CURRENT_TIMESTAMP
+	_, err := s.db.Exec(`UPDATE sub_tasks SET batch_id_seq_run=?
 		WHERE id=? AND status=?`,
-		subTaskID, model.SubTaskStatusRunning)
+		now, subTaskID, model.SubTaskStatusRunning)
 	return err
 }
 
@@ -1089,12 +1126,13 @@ func (s *SubTaskService) RecoverInterrupted() (int64, error) {
 	manualAffected, _ := res.RowsAffected()
 
 	// Pass 2: orchestrated sub-tasks — flip stale running rows back to
-	// pending so OrchestrationQueue re-dispatches them. cutoff is the Go
-	// time threshold; the SQL parameter binding puts it into the dialect's
-	// DATETIME comparison natively (SQLite/MySQL/Postgres all accept
-	// time.Time as a parameter and compare correctly against stored
-	// DATETIME/TIMESTAMP values).
-	cutoff := now.Add(-5 * time.Minute)
+	// pending so OrchestrationQueue re-dispatches them. cutoff is bound in
+	// UTC to match every writer of batch_id_seq_run (ClaimNextPending /
+	// MarkHeartbeat) as well as rows a pre-fix build stamped with SQL
+	// CURRENT_TIMESTAMP; on SQLite this comparison is textual, so a
+	// disagreeing zone rendering stops it ordering by instant — see
+	// ClaimNextPending's docstring for the production failure that caused.
+	cutoff := now.Add(-5 * time.Minute).UTC()
 	res2, err := s.db.Exec(`UPDATE sub_tasks
 		SET status=?, batch_id_seq_run=NULL, updated_at=?
 		WHERE status=?
@@ -1165,7 +1203,10 @@ func (s *SubTaskService) RecoverStaleRunningInBatch(batchID string, staleAfter t
 		return nil, errors.New("staleAfter must be positive")
 	}
 	now := time.Now()
-	cutoff := now.Add(-staleAfter)
+	// UTC to match every writer of batch_id_seq_run — on SQLite this is a
+	// text comparison, so the zone rendering has to agree or the predicate
+	// stops ordering by instant (see ClaimNextPending's docstring).
+	cutoff := now.Add(-staleAfter).UTC()
 	rows, err := s.db.Query(`SELECT id, COALESCE(session_id,''), COALESCE(job_id,''), batch_id_seq_run
 		FROM sub_tasks
 		WHERE batch_id=? AND status=?
@@ -1207,28 +1248,51 @@ func (s *SubTaskService) RecoverStaleRunningInBatch(batchID string, staleAfter t
 	if len(affected) == 0 {
 		return nil, nil
 	}
-	res, err := s.db.Exec(`UPDATE sub_tasks
-		SET status=?, batch_id_seq_run=NULL, job_id='', updated_at=?
-		WHERE batch_id=? AND status=?
-		  AND batch_id_seq_run IS NOT NULL
-		  AND batch_id_seq_run < ?`,
-		model.SubTaskStatusPending, now,
-		batchID, model.SubTaskStatusRunning, cutoff)
-	if err != nil {
-		return affected, fmt.Errorf("recover stale running in batch %s: update: %w", batchID, err)
+	// Flip each candidate by its own id, carrying the session id we observed
+	// in the SELECT as an extra guard. Re-running the batch-wide predicate
+	// here instead would decide the flip on a second, independent evaluation:
+	// rows that went stale between our SELECT and UPDATE would be flipped
+	// without appearing in `affected`, and the old positional truncation
+	// (`affected = affected[:n]`) then attributed the flips to whichever
+	// candidates happened to sort first — so the per-row child_id /
+	// session_id / heartbeat_age breadcrumb could name a row that was never
+	// touched. Since that breadcrumb is the only evidence available when
+	// diagnosing a false-positive self-heal, it has to be exact.
+	//
+	// The session_id condition also closes the race the batch-wide UPDATE
+	// could lose: if a re-claim overwrote session_id after our SELECT, this
+	// row now belongs to a different owner and must not be flipped.
+	flipped := make([]RecoveredStaleRow, 0, len(affected))
+	var raced int
+	for _, r := range affected {
+		res, uerr := s.db.Exec(`UPDATE sub_tasks
+			SET status=?, batch_id_seq_run=NULL, job_id='', updated_at=?
+			WHERE id=? AND status=?
+			  AND COALESCE(session_id,'')=?
+			  AND batch_id_seq_run IS NOT NULL
+			  AND batch_id_seq_run < ?`,
+			model.SubTaskStatusPending, now,
+			r.ID, model.SubTaskStatusRunning, r.SessionID, cutoff)
+		if uerr != nil {
+			return flipped, fmt.Errorf("recover stale running in batch %s: update %s: %w", batchID, r.ID, uerr)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			flipped = append(flipped, r)
+		} else {
+			raced++
+		}
 	}
-	n, _ := res.RowsAffected()
-	// If a concurrent MarkHeartbeat landed between SELECT and UPDATE and
-	// refreshed the heartbeat past the cutoff, the UPDATE 0-rows-matched
-	// even though our SELECT saw a stale row. Truncate the metadata to
-	// whatever was actually flipped, leaving any race-survivors out of the
-	// log line so operators aren't misled.
-	if int(n) < len(affected) {
+	// A 0-row update means a concurrent MarkHeartbeat refreshed the heartbeat
+	// past the cutoff, or a re-claim changed status / session_id, between our
+	// SELECT and this UPDATE. Either way the row is live and stays running.
+	if raced > 0 {
 		log.Printf("[orch] self-heal %s: %d row(s) flipped, %d raced past cutoff (likely live heartbeat landed mid-recover)",
-			batchID, n, len(affected)-int(n))
-		affected = affected[:n]
+			batchID, len(flipped), raced)
 	}
-	return affected, nil
+	if len(flipped) == 0 {
+		return nil, nil
+	}
+	return flipped, nil
 }
 
 // scanSubTask is a shared row→struct mapper. Pulled out so List / Get can
