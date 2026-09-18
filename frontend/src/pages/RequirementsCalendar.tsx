@@ -9,6 +9,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import {
   requirementsApi,
   projectsApi,
@@ -40,6 +41,7 @@ const KIND_FILTERS: { value: Kind; label: string }[] = [
 
 export default function RequirementsCalendar() {
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const [view, setView] = useState<ViewMode>('month');
   const [focus, setFocus] = useState(() => startOfDay(new Date()));
   const [projects, setProjects] = useState<Project[]>([]);
@@ -352,6 +354,20 @@ export default function RequirementsCalendar() {
           projectId={projectFilter || (projects[0]?.id ?? '')}
           onClose={() => setCreateAt(null)}
           onCreated={req => {
+            // Launch plan attached at creation time — the backend already
+            // dispatched (or tried to). Surface the dispatch result, then
+            // route to the detail page so the user sees the running job
+            // (immediate) or the scheduled time (scheduled) instead of
+            // the freshly-created requirement sitting in this calendar view.
+            if (req.launch_error) {
+              showToast(t('components.createRequirement.launchPlan.launchFailed', { reason: req.launch_error }));
+            }
+            if (req.launch_mode === 'immediate' || req.launch_mode === 'scheduled') {
+              setCreateAt(null);
+              navigate(`/requirements/${req.id}`);
+              return;
+            }
+            // No launch plan → original behavior, line-for-line.
             // 新建后把 planned_start_at 设 设为 createAt 当日 00:00，让它
             // 立刻出现在刚双击的那一格里，不用手动拖一次。
             const iso = new Date(createAt.day);

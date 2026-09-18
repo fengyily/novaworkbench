@@ -209,6 +209,15 @@ export default function RequirementsList() {
           onClose={() => setShowCreate(false)}
           onCreated={req => {
             setShowCreate(false);
+            // Launch plan attached at creation time — the backend already
+            // dispatched (or tried to). Surface the dispatch result before
+            // routing; navigation itself is the same shape as the original
+            // path (the detail page's loadPendingSchedules will render the
+            // scheduled time for launch_mode === 'scheduled').
+            if (req.launch_error) {
+              // eslint-disable-next-line no-alert
+              window.alert(t('components.createRequirement.launchPlan.launchFailed', { reason: req.launch_error }));
+            }
             navigate(`/requirements/${req.id}`);
           }}
         />

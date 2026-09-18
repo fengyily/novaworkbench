@@ -88,35 +88,17 @@ func (e *ScheduledExecutor) RunScheduledCoding(ctx context.Context, p scheduler.
 	if err != nil {
 		return "", fmt.Errorf("加载需求失败: %w", err)
 	}
-	// === 主动状态转移 ============================================
-	// 进入 coding 阶段时主动把 requirement 推到 'developing'。修复
-	// req_30080193f1c95255 类型的 bug——之前 `case "designed"` 分支
-	// 里的翻写在某些时序窗口里被跳过 /覆盖，导致 status 卡在 'designed'，
-	// scheduled_tasks.status='succeeded' 但用户看到的 status chip 还
-	// 是「方案完成」。把 UpdateStatus 提到 switch 之前，保证两条合法
-	// 进入路径（designed、draft+skip_design）都能写一次 'developing'；
-	// 后续 switch 仅做合法性校验，不写状态。
-	if req.Status == "designed" || (req.Status == "draft" && req.SkipDesign) {
-		if _, err := e.h.reqSvc.UpdateStatus(req.ID, "developing"); err != nil {
-			return "", fmt.Errorf("状态转移失败: %w", err)
-		}
-		// 重新读 req，让后续逻辑看到最新 status。
-		if req, err = e.h.reqSvc.Get(req.ID); err != nil {
-			return "", fmt.Errorf("重新加载需求失败: %w", err)
-		}
-	}
-	switch req.Status {
-	case "designed", "developing":
-		// 已统一在前面翻过 developing；放行。
-	case "draft":
-		// 上一段没命中（SkipDesign=false）→ 拒绝。
-		return "", fmt.Errorf("需求未生成技术方案，无法开始开发")
-	case "analyzing", "designing":
-		return "", fmt.Errorf("需求处于 %s 阶段，请等待该阶段完成", req.Status)
-	case "done", "archived":
-		return "", fmt.Errorf("需求已完成/归档，定时任务取消执行")
-	default:
-		return "", fmt.Errorf("需求状态异常: %s", req.Status)
+	// === 主动状态转移 + 合法性校验 ============================================
+	// 抽到 wizardH.gateCodingEntry 复用——Create 的启动计划（launch spec）
+	// 走同一个 gate，避免后续只在 schedule_executor 改而立即启动路径忘改
+	// 造成的「定时能跑、立即跑不动」漂移。gateCodingEntry 内部完成
+	// UpdateStatus + re-Get + switch 校验，返回更新后的 req。
+	//
+	// 错误信息（中文 message）与原内联实现逐字一致，scheduler 写入
+	// scheduled_tasks.error_message 的文本不变。
+	req, af := e.h.gateCodingEntry(req)
+	if af != nil {
+		return "", fmt.Errorf("%s", af.Msg)
 	}
 
 	// 构造 codingRunParams（按 wizard 既有字段）。Title / Desc 从最新需求

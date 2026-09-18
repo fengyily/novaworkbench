@@ -755,6 +755,75 @@ export interface Requirement {
   // 完成）与「中途关闭」（强制关闭）。archived 行不允许 Close。
   closed_at?: string;
   closed_reason?: string;
+  // Launch-spec dispatch result (display-only, NOT a requirements column).
+  // Populated ONLY by POST /api/requirements when the request carried a
+  // launch spec. launch_mode tells the caller which downstream path the
+  // backend took: "immediate" = a coding/design job was kicked off and its
+  // SSE/JobStore id is already persisted on the row, "scheduled" = a
+  // scheduled_tasks row was created (id in launch_schedule_id). launch_error
+  // is set when the create succeeded but the dispatch failed — the row is
+  // still valid, the UI prompts the user to start manually from the detail
+  // page (avoids a destructive delete-the-just-created-requirement
+  // compensating action). All three undefined = no launch spec was supplied, so
+  // the caller should keep today's existing onCreated branch behavior.
+  launch_mode?: 'immediate' | 'scheduled';
+  launch_schedule_id?: string;
+  launch_error?: string;
+}
+
+// LaunchSpec is the optional execution plan attached to a POST /api/requirements
+// request. When omitted, Create behaves exactly as today (insert row + return).
+// When supplied, the backend resolves the flow → task-type mapping (see
+// requirement_launch.go resolveLaunchTaskType) and dispatches either an
+// immediate coding/design+coding job or persists a scheduled_tasks row before
+// the response is sent. Field naming is deliberately aligned with backend
+// internal/model/requirement.go LaunchSpec + codingRunParams from wizard_coding.go
+// + createScheduleReq from schedule.go so the dispatch helpers can reuse the
+// same shape end-to-end.
+export interface ScheduleSpec {
+  recurrence?: 'once' | 'daily' | 'weekly';
+  // RFC3339 local (no zone) for once; required when recurrence === 'once'.
+  run_at?: string;
+  // HH:MM for daily/weekly; required when recurrence !== 'once'.
+  recur_time?: string;
+  // CSV of weekday numbers in the schedule_executor.go convention (0 = Sun,
+  // 1 = Mon, ..., 6 = Sat — NOT the ISO 1=Mon convention the UI pills use,
+  // see utils/time.ts WEEKDAY_INDEX_TO_DAYNUM for the conversion).
+  recur_days?: string;
+  // IANA tz name; defaults to user's local zone on the backend.
+  recur_tz?: string;
+}
+
+export interface LaunchSpec {
+  // Dispatch mode. Both fields stay undefined when the spec is empty.
+  mode?: 'immediate' | 'scheduled';
+  // Architect stage (only honored when the resolved task type is
+  // design_and_coding). Mirrors designCodingImmediateReq.
+  design_model?: string;
+  design_claude_config_id?: string;
+  design_agent_server_id?: string;
+  // Developer stage (honored by both task_type=coding and the coding half of
+  // design_and_coding). Mirrors codingRunParams.
+  coding_model?: string;
+  coding_claude_config_id?: string;
+  coding_agent_server_id?: string;
+  branch_name?: string;
+  base_branch?: string;
+  split_tasks?: boolean;
+  auto_push_pr?: boolean;
+  read_knowledge?: boolean;
+  // '' = remote-Git sync (legacy default), 'local' = local-repo sync (used
+  // for self-hosted repos with no reachable remote). Mirrors sync_mode on the
+  // developer stage. Empty/undefined = backend default.
+  sync_mode?: '' | 'local';
+  // 'session' = fork the design/analysis session (legacy default); 'design'
+  // (or 'plan') = fresh session handing the stored design doc via -p prompt.
+  // Mirrors dev_mode. Empty/undefined = backend default.
+  dev_mode?: 'session' | 'design';
+  // Only required when mode === 'scheduled'. The backend reuses
+  // parseRunAt / validRecurTime / validRecurDays from schedule.go for
+  // validation — do NOT re-validate in the UI.
+  schedule?: ScheduleSpec;
 }
 
 // Default to "requirement" on the client too, so legacy rows missing the
@@ -882,6 +951,13 @@ export const requirementsApi = {
     // description. The raw text is stored verbatim and a fallback title
     // (first line, capped) is used. UI default = true (skip).
     skip_organize?: boolean;
+    // launch: optional execution plan attached at create time. When supplied,
+    // the backend resolves flow → task-type, then either kicks off an
+    // immediate coding / design+coding job or persists a scheduled_tasks row
+    // before sending the 201 response. Omit (or pass undefined) to keep today's
+    // create-only behavior. The response Requirement carries
+    // launch_mode / launch_schedule_id / launch_error as display-only fields.
+    launch?: LaunchSpec;
   }) => api.post<Requirement>('/api/requirements', data),
   get: (id: string) => api.get<Requirement>(`/api/requirements/${id}`),
   update: (id: string, data: { title: string; description: string; priority: string; skip_analysis?: boolean }) =>

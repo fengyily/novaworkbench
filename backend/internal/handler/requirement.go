@@ -18,10 +18,15 @@ type RequirementHandler struct {
 	llm      *llm.Gateway
 	jobs     *store.JobStore
 	usageSvc usageRecorder
+	// wizardH / schedSvc power the optional 启动计划 (launch spec) on Create —
+	// dispatchLaunch (requirement_launch.go) needs both to dispatch an
+	// immediate wizard run or to insert a scheduled_tasks row.
+	wizardH *WizardHandler
+	schedSvc *service.ScheduledTaskService
 }
 
-func NewRequirementHandler(svc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, usageSvc usageRecorder) *RequirementHandler {
-	return &RequirementHandler{svc: svc, llm: llmGateway, jobs: jobs, usageSvc: usageSvc}
+func NewRequirementHandler(svc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, usageSvc usageRecorder, wizardH *WizardHandler, schedSvc *service.ScheduledTaskService) *RequirementHandler {
+	return &RequirementHandler{svc: svc, llm: llmGateway, jobs: jobs, usageSvc: usageSvc, wizardH: wizardH, schedSvc: schedSvc}
 }
 
 func (h *RequirementHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -157,7 +162,43 @@ func (h *RequirementHandler) Create(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[requirement] record usage for %s failed: %v (ignored)", item.ID, rerr)
 		}
 	}
+	// Optional launch spec — when the caller attaches one to Create, dispatch
+	// the chosen execution plan (immediate wizard run / scheduled task) before
+	// serializing the response. dispatchLaunch handles its own validation
+	// (resolveLaunchTaskType: full+immediate → 400 LAUNCH_NEEDS_ANALYSIS;
+	// idea → 400 LAUNCH_NOT_ALLOWED) and writes schedule id onto item.LaunchScheduleID.
+	//
+	// Failure handling: when dispatchLaunch returns an *apiFailure the
+	// requirement row has already been inserted — rolling back would discard
+	// the user's description. We surface the failure on the response as
+	// item.LaunchError and still return 201, letting the frontend prompt the
+	// user to start the run manually from the detail page (which already has
+	// full manual start controls). No compensating delete.
+	if req.Launch != nil {
+		mode, scheduleID, dispatchErr := dispatchLaunch(item, req.Launch, h.wizardH, h.schedSvc)
+		if dispatchErr != nil {
+			item.LaunchError = launchErrorMessage(dispatchErr)
+			log.Printf("[requirement] launch dispatch for %s failed: %s (requirement preserved)", item.ID, dispatchErr.Msg)
+		} else {
+			item.LaunchMode = mode
+			item.LaunchScheduleID = scheduleID
+		}
+	}
 	writeJSON(w, 201, item)
+}
+
+// launchErrorMessage flattens an *apiFailure into a single user-facing
+// message string (Code + Msg). The frontend's launch_failed copy
+// surfaces this verbatim — keeping the code prefix makes cross-referencing
+// translation keys straightforward.
+func launchErrorMessage(af *apiFailure) string {
+	if af == nil {
+		return ""
+	}
+	if af.Code == "" {
+		return af.Msg
+	}
+	return af.Code + ": " + af.Msg
 }
 
 // fallbackTitle derives a short title from the requirement content when the LLM

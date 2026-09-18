@@ -192,6 +192,57 @@ func (h *WizardHandler) RunScheduledCoding(p *codingRunParams, cb *runCallbacks)
 	return job.ID, nil
 }
 
+// gateCodingEntry enforces the development-stage hard gate for coding,
+// shared by ScheduledExecutor.RunScheduledCoding and any future caller
+// that wants to enter the coding stage (e.g. Create's immediate launch
+// spec). It performs three steps verbatim from the inline gate that used
+// to live in schedule_executor.go:91-120:
+//
+//  1. Active status promotion: designed → developing,
+//     draft + SkipDesign → developing. This is the explicit UpdateStatus
+//     that fixes req_30080193f1c95255 — without it, status could stay
+//     stuck on "designed" even though scheduled_tasks.status=succeeded.
+//  2. Re-Get the requirement so the caller observes the freshly promoted
+//     status. UpdateStatus doesn't return the new row, so an explicit
+//     Get is required; without it the switch below would still see the
+//     pre-promotion value and reject the draft+SkipDesign path.
+//  3. Validate the post-promotion status. Any non-allowed status returns
+//     *apiFailure with the original Chinese message so the scheduler's
+//     err.Error() — which is written verbatim to
+//     scheduled_tasks.error_message — stays bit-for-bit identical to
+//     the previous inline-gate implementation.
+//
+// Returns the freshly loaded *model.Requirement on success so the caller
+// can build codingRunParams from the post-promotion row. Returns nil +
+// *apiFailure on any failure.
+func (h *WizardHandler) gateCodingEntry(req *model.Requirement) (*model.Requirement, *apiFailure) {
+	if req.Status == "designed" || (req.Status == "draft" && req.SkipDesign) {
+		if _, err := h.reqSvc.UpdateStatus(req.ID, "developing"); err != nil {
+			return nil, fail(500, "GATE_UPDATE_FAILED", "状态转移失败: "+err.Error())
+		}
+	}
+	// Reload so the switch below sees the post-promotion status
+	// (mirrors schedule_executor.go:104-106 — UpdateStatus does not
+	// return the new row, so the inline gate did the same re-Get).
+	updated, err := h.reqSvc.Get(req.ID)
+	if err != nil {
+		return nil, fail(500, "GATE_RELOAD_FAILED", "重新加载需求失败: "+err.Error())
+	}
+	switch updated.Status {
+	case "designed", "developing":
+		// 已统一在前面翻过 developing；放行。
+	case "draft":
+		return nil, fail(409, "GATE_NEED_DESIGN", "需求未生成技术方案，无法开始开发")
+	case "analyzing", "designing":
+		return nil, fail(409, "GATE_INVALID_STATUS", "需求处于 "+updated.Status+" 阶段，请等待该阶段完成")
+	case "done", "archived":
+		return nil, fail(409, "GATE_TERMINAL", "需求已完成/归档，定时任务取消执行")
+	default:
+		return nil, fail(409, "GATE_INVALID_STATUS", "需求状态异常: "+updated.Status)
+	}
+	return updated, nil
+}
+
 // execStartCoding is the goroutine body extracted from StartCoding. Same
 // line-for-line as the original anonymous goroutine: the JSON decode +
 // jobs.Create step was already synchronous, so this is a pure extraction

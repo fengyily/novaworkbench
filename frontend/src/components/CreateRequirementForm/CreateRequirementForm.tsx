@@ -23,7 +23,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import AtMentionTextarea from '../AtMentionTextarea';
-import { kindLabelKeys, kindHintKeys, kindPlaceholderKeys, kindCreateLabelKeys, type Kind, requirementsApi, type Requirement } from '../../api/client';
+import LaunchPlanSection from './LaunchPlanSection';
+import { kindLabelKeys, kindHintKeys, kindPlaceholderKeys, kindCreateLabelKeys, type Kind, type AgentServer, type LaunchSpec, agentServersApi, requirementsApi, type Requirement } from '../../api/client';
 import { tLabel } from '../../i18n/label';
 import { errorMessage } from '../../utils/errMsg';
 import './CreateRequirementForm.css';
@@ -80,6 +81,15 @@ export function CreateRequirementForm({
   const [error, setError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
+  // Launch-plan state. The section is collapsed by default — opening it is
+  // an explicit "I'm opting into a long-running task" gesture, matching the
+  // existing fast-notepad ergonomics of this panel.
+  const [launchOpen, setLaunchOpen] = useState(false);
+  const [launchSpec, setLaunchSpec] = useState<LaunchSpec | null>(null);
+  // Filter to ready servers here so LaunchPlanSection receives a stable
+  // contract; mirrors RequirementDetail.tsx:674-677 exactly.
+  const [agentServers, setAgentServers] = useState<AgentServer[]>([]);
+
   // Cross-project mode: pick the first project as a sensible default so the
   // submit button isn't disabled on first paint.
   useEffect(() => {
@@ -92,6 +102,23 @@ export function CreateRequirementForm({
   // caret there on mount so opening the panel is one click, not two.
   useEffect(() => {
     rootRef.current?.querySelector('textarea')?.focus();
+  }, []);
+
+  // Load ready agent servers once on mount. Even when the launch-plan
+  // section stays collapsed we still pay this cost — the data is tiny and
+  // toggling open later must never trigger a second spinner.
+  useEffect(() => {
+    let alive = true;
+    agentServersApi.list()
+      .then((rows) => {
+        if (!alive) return;
+        setAgentServers(rows.filter((s) => s.status === 'ready'));
+      })
+      .catch(() => {
+        // Non-fatal: an empty list means ExecEnvSelect will show only the
+        // local option, which is still a valid choice.
+      });
+    return () => { alive = false; };
   }, []);
 
   const handleSubmit = async () => {
@@ -121,6 +148,9 @@ export function CreateRequirementForm({
         skip_analysis: skipAnalysis,
         skip_design: skipDesign,
         skip_organize: skipOrganize,
+        // Launch spec is optional. When undefined, requirementsApi.create
+        // serialises it as missing key — server treats it as "no plan".
+        launch: launchSpec ?? undefined,
       });
       onCreated(created);
     } catch (err: any) {
@@ -277,6 +307,32 @@ export function CreateRequirementForm({
         </div>
       )}
 
+      {/* Step 4 — Optional launch plan. Collapsed by default to preserve the
+          "fast notepad" ergonomics; opening it is an explicit opt-in to a
+          long-running task. kind=idea hides the entire block (matches the
+          existing idea-only hide rule above for flow/priority). The
+          mounted state is owned here, LaunchPlanSection owns only its
+          per-section sub-state via onChange. */}
+      {kind !== 'idea' && (
+        <details
+          className="launch-section"
+          open={launchOpen}
+          onToggle={(e) => setLaunchOpen((e.target as HTMLDetailsElement).open)}
+        >
+          <summary>
+            <span>{t('components.createRequirement.launchPlan.title')}</span>
+            <span className="launch-section__hint">{t('components.createRequirement.launchPlan.hint')}</span>
+          </summary>
+          <LaunchPlanSection
+            flow={flow}
+            kind={kind}
+            agentServers={agentServers}
+            disabled={saving}
+            onChange={setLaunchSpec}
+          />
+        </details>
+      )}
+
       {error && (
         <div className="create-req-error" role="alert">{error}</div>
       )}
@@ -285,9 +341,23 @@ export function CreateRequirementForm({
         <span className="create-req-shortcut" aria-hidden>{t('components.createRequirement.shortcut')}</span>
         <button className="btn" onClick={onClose} disabled={saving}>{t('common.actions.cancel')}</button>
         <button className="btn btn-primary" onClick={handleSubmit} disabled={!canSubmit}>
-          {saving
-            ? (skipOrganize ? t('components.createRequirement.saving') : t('components.createRequirement.savingOrganize'))
-            : tLabel(t, kindCreateLabelKeys as Record<string, string>, kind)}
+          {(() => {
+            if (saving) {
+              return skipOrganize
+                ? t('components.createRequirement.saving')
+                : t('components.createRequirement.savingOrganize');
+            }
+            // When a launch plan is set, the button copy advertises the
+            // actual action (start vs schedule) so the user gets one last
+            // visual confirmation before kicking off a long-running job.
+            if (launchSpec?.mode === 'scheduled') {
+              return t('components.createRequirement.launchPlan.submitScheduled');
+            }
+            if (launchSpec?.mode === 'immediate') {
+              return t('components.createRequirement.launchPlan.submitImmediate');
+            }
+            return tLabel(t, kindCreateLabelKeys as Record<string, string>, kind);
+          })()}
         </button>
       </div>
     </div>
