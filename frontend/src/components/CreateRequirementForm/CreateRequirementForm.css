@@ -305,3 +305,193 @@
      it optically centres against the 13px label. */
   .create-req-form .create-req-toggle-track { margin-top: 1px; }
 }
+
+/* --- Launch plan (optional) --------------------------------------- */
+
+/* The launch plan is collapsed by default. The <details>/<summary>
+   element gives us free open/close + keyboard support (Enter / Space), so
+   the panel only needs cosmetic treatment. The summary carries a left
+   accent rail so it visually pairs with the toggle above it; the right
+   hint text tells the user "no change unless you open this". */
+
+.create-req-form details.launch-section {
+  margin-top: 14px;
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 8px;
+  background: var(--color-surface, #fff);
+}
+
+.create-req-form details.launch-section > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 12px 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text, #1E293B);
+  border-left: 3px solid var(--color-primary, #4F46E5);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  user-select: none;
+}
+
+.create-req-form details.launch-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.create-req-form details.launch-section > summary::after {
+  content: '▸';
+  font-size: 11px;
+  color: var(--color-text-muted, #94A3B8);
+  transition: transform 120ms ease;
+}
+
+.create-req-form details.launch-section[open] > summary::after {
+  transform: rotate(90deg);
+}
+
+.create-req-form .launch-section__hint {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+.create-req-form .launch-section__body {
+  padding: 4px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.create-req-form .launch-section__note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+.create-req-form .launch-section__row {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--color-hover, #F1F5F9);
+  border-radius: 8px;
+  align-self: flex-start;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.create-req-form .launch-section__mode {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary, #64748B);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.create-req-form .launch-section__mode.selected {
+  background: var(--color-surface, #fff);
+  color: var(--color-primary, #4F46E5);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1);
+}
+
+.create-req-form .launch-section__mode:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.create-req-form .launch-section__schedule,
+.create-req-form .launch-section__stage {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.create-req-form .launch-section__stage {
+  border-top: 1px dashed var(--color-border, #E2E8F0);
+  padding-top: 12px;
+}
+
+.create-req-form .launch-section__stage-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #64748B);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.create-req-form .launch-section__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.create-req-form .launch-section__field > label {
+  font-size: 12px;
+  color: var(--color-text-secondary, #64748B);
+  font-weight: 500;
+  margin: 0;
+}
+
+.create-req-form .launch-section__weekdays {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.create-req-form .launch-section__weekday {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--color-border, #E2E8F0);
+  background: var(--color-surface, #fff);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary, #64748B);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.create-req-form .launch-section__weekday.selected {
+  background: var(--color-primary, #4F46E5);
+  color: #fff;
+  border-color: var(--color-primary, #4F46E5);
+}
+
+.create-req-form .launch-section__toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.create-req-form .launch-section__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--color-text, #1E293B);
+  cursor: pointer;
+  user-select: none;
+}
+
+.create-req-form .launch-section__toggle input[type='checkbox'] {
+  margin: 0;
+}
+
+@media (max-width: 640px) {
+  .create-req-form details.launch-section > summary { font-size: 12px; }
+  .create-req-form .launch-section__hint { display: none; }
+}
