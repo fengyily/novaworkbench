@@ -590,4 +590,20 @@
   .req-kind-chip-hint {
     flex: 0 0 auto;
   }
+
+  /* Compact the search box on mobile — the global .search-input has
+     font-size: 13px which triggers iOS Safari's auto-zoom on focus
+     (making the whole viewport zoom in and the box look huge), and
+     the 8px vertical padding looks chunky when the pill stretches
+     to full viewport width. The .req-filter-search selector scopes
+     the override to this page only — RequirementsCalendar /
+     ProjectDetail reuse .search-input unchanged. */
+  .req-filter-search .search-input {
+    min-width: 0;
+    padding: 0 6px 0 10px;
+  }
+  .req-filter-search .search-input input {
+    font-size: 16px;
+    padding: 6px 0;
+  }
 }
