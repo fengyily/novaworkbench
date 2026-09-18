@@ -179,6 +179,14 @@ type Requirement struct {
 	// have a future-dated wizard task waiting. Empty when no pending schedule
 	// exists (and on Create, which does not join).
 	ScheduledRunAt *time.Time `json:"scheduled_run_at,omitempty"`
+	// LaunchMode / LaunchScheduleID / LaunchError are display-only (NOT
+	// requirements columns), populated ONLY by Create when the request
+	// carried a launch spec. They let the three creation entry points
+	// (ProjectDetail / RequirementsList / RequirementsCalendar) route the
+	// post-create navigation without a second round-trip.
+	LaunchMode       string `json:"launch_mode,omitempty"`        // "immediate" | "scheduled"
+	LaunchScheduleID string `json:"launch_schedule_id,omitempty"` // scheduled_tasks.id
+	LaunchError      string `json:"launch_error,omitempty"`       // create succeeded but dispatch failed
 	// Tags is the JSON-array string of user-supplied short labels attached
 	// to this requirement: free-form short strings such as "阻塞", "外部依赖",
 	// "v2", "客户A". Always a valid JSON array string (empty "[]" when no
@@ -232,10 +240,89 @@ type CreateRequirementReq struct {
 	// Validated in service.RequirementService (must point to an existing row in
 	// the same project).
 	SourceRequirementID string `json:"source_requirement_id"`
+
+	// Launch: optional execution plan attached at creation time. When set,
+	// the handler dispatches the run synchronously (Mode=="immediate") or
+	// inserts a scheduled_tasks row (Mode=="scheduled") as part of the same
+	// Create call, and the response carries display-only LaunchMode /
+	// LaunchScheduleID / LaunchError fields so the frontend can route the
+	// user straight to the detail page. **When Launch is nil, Create behaves
+	// exactly as before** — no dispatch, no scheduling, response shape
+	// unchanged.
+	Launch *LaunchSpec `json:"launch,omitempty"`
 }
 
 type UpdateStatusReq struct {
 	Status string `json:"status"`
+}
+
+// LaunchSpec carries the optional execution plan attached at requirement
+// creation time. When Create decodes a non-nil Launch it dispatches the run
+// (immediate) or schedules it (scheduled) on the same request — see
+// handler.requirement_launch.go for the flow → taskType table. When Launch
+// is nil, Create behaves exactly as before (no dispatch, no scheduling).
+//
+// JSON tag names mirror the wire contracts of designCodingImmediateReq
+// (handler/wizard_immediate.go) and createScheduleReq (handler/schedule.go)
+// verbatim, so the launch-spec body can be translated into either request
+// type without any field remapping. Required fields per mode:
+//
+//	immediate / design_and_coding: design_model + design_claude_config_id
+//	immediate / coding:            coding_model + coding_claude_config_id
+//	scheduled (any task_type):     schedule.recurrence + (schedule.run_at
+//	                                for "once"; schedule.recur_time [+
+//	                                schedule.recur_days for "weekly"])
+type LaunchSpec struct {
+	// Mode selects the dispatch path. "immediate" runs the task as soon as
+	// Create resolves (a JobStore job is minted and the SSE stream attaches
+	// from /api/wizard/jobs/{id}/stream). "scheduled" inserts a row into
+	// scheduled_tasks; the scheduler tick picks it up at Schedule.RunAt.
+	Mode string `json:"mode"` // "immediate" | "scheduled"
+
+	// Per-stage model + Claude-config + Agent-server overrides. Both stages
+	// are always present in the struct — the dispatch path picks the
+	// relevant subset by taskType — so the JSON body is uniform regardless
+	// of which mode the user picked on the form.
+	DesignModel         string `json:"design_model,omitempty"`
+	DesignClaudeConfigID string `json:"design_claude_config_id,omitempty"`
+	DesignAgentServerID string `json:"design_agent_server_id,omitempty"`
+	CodingModel         string `json:"coding_model,omitempty"`
+	CodingClaudeConfigID string `json:"coding_claude_config_id,omitempty"`
+	CodingAgentServerID  string `json:"coding_agent_server_id,omitempty"`
+
+	// Shared options — apply to whichever stage the dispatch picks.
+	ReadKnowledge bool   `json:"read_knowledge"`
+	BranchName    string `json:"branch_name,omitempty"`
+	BaseBranch    string `json:"base_branch,omitempty"`
+	SplitTasks    bool   `json:"split_tasks"`
+	// AutoPushPR is *bool so an omitted key means "use the row's persisted
+	// value" (mirrors codingRunParams.AutoPushPR semantics). Defaults in
+	// dispatch: false for *bool — callers that want the project default
+	// must leave it nil.
+	AutoPushPR *bool  `json:"auto_push_pr,omitempty"`
+	DevMode    string `json:"dev_mode,omitempty"` // "session" | "design"
+	SyncMode   string `json:"sync_mode,omitempty"`
+
+	// Schedule is the schedule-only sub-spec. Only consumed when Mode ==
+	// "scheduled". Ignored (and may be nil) for immediate dispatches so the
+	// same LaunchSpec struct can be reused on the immediate form without
+	// re-shaping the payload.
+	Schedule *LaunchScheduleSpec `json:"schedule,omitempty"`
+}
+
+// LaunchScheduleSpec is the schedule block of LaunchSpec. Field semantics
+// mirror createScheduleReq (handler/schedule.go) verbatim — in particular
+// Recurrence defaults to "once" when empty, and RunAt is only required for
+// "once" (daily/weekly derive the next fire time from RecurTime +
+// RecurDays at scheduler tick time). RecurDays is a CSV of weekday numbers
+// 0-6 (0=Sunday) and is only meaningful for "weekly" — see
+// schedule_executor.NextRunAt for the canonical implementation.
+type LaunchScheduleSpec struct {
+	Recurrence string `json:"recurrence,omitempty"` // "once" | "daily" | "weekly"
+	RunAt      string `json:"run_at,omitempty"`      // RFC3339 or "YYYY-MM-DDTHH:MM" (once only)
+	RecurTime  string `json:"recur_time,omitempty"`  // "HH:MM" (daily/weekly)
+	RecurDays  string `json:"recur_days,omitempty"`  // CSV 0-6 (weekly only)
+	RecurTZ    string `json:"recur_tz,omitempty"`    // IANA tz name
 }
 
 // UpdateScheduleReq is the body for PATCH /api/requirements/{id}/schedule.
