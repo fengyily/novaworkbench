@@ -29,6 +29,7 @@ import (
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/servicemgr"
 	"github.com/novaworkbench/backend/internal/store"
+	"github.com/novaworkbench/backend/cmd/hello"
 	"github.com/novaworkbench/backend/web"
 )
 
@@ -53,6 +54,11 @@ func main() {
 			return
 		case "version":
 			servicemgr.RunVersion()
+			return
+		case "hello":
+			if err := hello.RunHello(); err != nil {
+				log.Fatalf("nova hello: %v", err)
+			}
 			return
 		}
 	}
