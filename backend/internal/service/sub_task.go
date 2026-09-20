@@ -518,6 +518,18 @@ func (s *SubTaskService) ReArmErroredForRetry(batchID string, retryMax int) (int
 // one caller can ever own a given (batch_id, batch_seq) at a time, and
 // ClaimNextPending is the single entry point that grants that ownership.
 //
+// Strict in-order execution: the candidate SELECT only returns a row when
+// every sibling with a smaller batch_seq has already reached a terminal
+// status ('done' / 'error' / 'stopped'). batch_seq=1 is the only row with
+// no predecessor and is always eligible. A non-seq-1 row whose predecessor
+// is still pending/running is rejected at the SQL layer — the next tick
+// re-evaluates after the predecessor settles. This pairs with the per-batch
+// semaphore in OrchestrationQueue (Go-layer gate that caps in-flight
+// children at 1 per batch) so the two layers reinforce each other: the Go
+// gate prevents two concurrent goroutines from racing on the same batch,
+// the SQL gate protects any future caller that bypasses OrchestrationQueue
+// (manual resume, ops scripts) from promoting an out-of-order row.
+//
 // Implementation: resolve the candidate id with its own SELECT, flip it with
 // an UPDATE pinned to that id, then read the row back BY THAT ID. The
 // `AND status='pending'` clause on the UPDATE makes the flip conditional — if
@@ -587,13 +599,37 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 	if batchID == "" {
 		return nil, false, errors.New("batch_id is required")
 	}
+	// The candidate SELECT enforces the "all predecessor batch_seq rows must be
+	// terminal" rule in SQL: a pending row whose batch_seq > 1 is only
+	// claimable when no sibling with a smaller batch_seq is still in flight
+	// (status NOT IN ('done','error','stopped')). batch_seq = 1 has no
+	// predecessor and is always eligible. The NOT EXISTS correlated subquery
+	// is covered by idx_sub_tasks_batch_seq (added in schema.go alongside the
+	// per-batch serial gate in OrchestrationQueue); on SQLite the single-
+	// writer model makes the predicate safe; on MySQL/Postgres the index
+	// keeps the lookup O(log n) regardless of batch size. The pair
+	// (gate-in-Go, gate-in-SQL) is intentional: the Go gate prevents two
+	// in-flight goroutines from racing on the same batch, and the SQL gate
+	// protects every future caller that bypasses OrchestrationQueue (manual
+	// resume paths, ops scripts, etc.) from promoting out-of-order rows.
 	for attempt := 0; attempt < claimMaxAttempts; attempt++ {
 		var candidateID string
 		err := s.db.QueryRow(`SELECT id FROM sub_tasks
 			 WHERE batch_id=? AND status=?
+			   AND (
+			     batch_seq = 1
+			     OR NOT EXISTS (
+			       SELECT 1 FROM sub_tasks s2
+			       WHERE s2.batch_id = sub_tasks.batch_id
+			         AND s2.batch_seq < sub_tasks.batch_seq
+			         AND s2.status NOT IN (?, ?, ?)
+			     )
+			   )
 			 ORDER BY batch_seq ASC, created_at ASC
 			 LIMIT 1`,
-			batchID, model.SubTaskStatusPending).Scan(&candidateID)
+			batchID, model.SubTaskStatusPending,
+			model.SubTaskStatusDone, model.SubTaskStatusError, model.SubTaskStatusStopped,
+		).Scan(&candidateID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, false, nil
 		}

@@ -908,6 +908,15 @@ var alterColumns = []string{
 	// MySQL 上的 TEXT DEFAULT '' 转成 TEXT DEFAULT (''),isIgnorableDDLError 吞
 	// 掉"duplicate column"以便历史 DB 平滑升级。
 	`ALTER TABLE requirements ADD COLUMN design_base_sha TEXT NOT NULL DEFAULT ''`,
+	// Strict in-order dispatch index: ClaimNextPending's NOT EXISTS correlated
+	// subquery (service/sub_task.go) filters by batch_id + batch_seq, and
+	// orchestration queue ticks scan the same predicate every 10s. Adding a
+	// composite index keeps the lookup O(log n) per candidate evaluation
+	// regardless of the total sub_tasks table size. The (batch_id, batch_seq)
+	// order matches the predicate's grouping key first and the comparison
+	// column second. CREATE INDEX IF NOT EXISTS is idempotent across SQLite /
+	// MySQL / Postgres without fixupSchema rewriting.
+	`CREATE INDEX IF NOT EXISTS idx_sub_tasks_batch_seq ON sub_tasks(batch_id, batch_seq)`,
 }
 
 var (

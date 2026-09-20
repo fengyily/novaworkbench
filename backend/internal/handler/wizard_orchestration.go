@@ -20,6 +20,34 @@ import (
 	"github.com/novaworkbench/backend/internal/util"
 )
 
+// wrapSerialMeta stamps the audit-only {"serial":true,...} marker onto the
+// orchestration_batches.meta column when an orchestrated batch is committed.
+// The marker is informational — OrchestrationQueue enforces strict in-order
+// execution at runtime via a per-batch semaphore regardless of what's in meta
+// — but recording it gives operators a queryable signal (and grep-friendly log
+// filter) when investigating why a multi-child batch ran sequentially. When
+// the caller-supplied meta is non-empty (re-split path carries the raw step
+// JSON) we preserve it via JSON merge; the legacy auto path's empty meta
+// becomes {"serial":true,"reason":"..."}. A meta-parse failure is non-fatal —
+// the column stays empty rather than blocking dispatch.
+func wrapSerialMeta(existing string) string {
+	const reason = "orchestrated batch guarantees strict in-order execution"
+	if existing == "" {
+		return fmt.Sprintf(`{"serial":true,"reason":%q}`, reason)
+	}
+	var merged map[string]interface{}
+	if err := json.Unmarshal([]byte(existing), &merged); err != nil {
+		return existing // not valid JSON; leave it untouched rather than corrupt
+	}
+	merged["serial"] = true
+	merged["reason"] = reason
+	out, err := json.Marshal(merged)
+	if err != nil {
+		return existing
+	}
+	return string(out)
+}
+
 func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 	if !h.requireSubTaskSvc(w) {
 		return
@@ -252,7 +280,7 @@ func (h *WizardHandler) commitOrchestrationBatch(
 		}
 	}()
 
-	obID, berr := h.batchSvc.CreateWithTx(tx, reqID, orchestratorSID, modelName, workDir, claudeConfigID, len(payload.Subtasks), meta)
+	obID, berr := h.batchSvc.CreateWithTx(tx, reqID, orchestratorSID, modelName, workDir, claudeConfigID, len(payload.Subtasks), wrapSerialMeta(meta))
 	if berr != nil {
 		log.Printf("[%s] %s: create batch: %v", logTag, reqID, berr)
 		return

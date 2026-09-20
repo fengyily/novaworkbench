@@ -81,9 +81,18 @@ interface Props {
 // the panel can render a nested tree (roots = original manual / auto-
 // orchestrated rows; descendants = 续接/重做/调整 follow-ups). Trees are
 // built client-side from the flat list returned by `subTasksApi.list`,
-// sorted newest-first within every level, and a parent node's collapse
-// state hides its whole subtree. The empty string is the root bucket so
-// legacy rows pre-dating the column render unchanged as roots.
+// and a parent node's collapse state hides its whole subtree. The empty
+// string is the root bucket so legacy rows pre-dating the column render
+// unchanged as roots.
+//
+// Sibling order: orchestrated siblings (same non-empty batch_id) are sorted
+// by batch_seq ASC so the rendered order matches the planner's intended
+// execution order (OrchestrationQueue runs them strictly in seq order).
+// Cross-bucket siblings — one orchestrated, one manual — fall back to
+// newest-first: orchestrated siblings stay grouped together and surface
+// above manual ones because they share a batch_id. Legacy rows with no
+// batch_seq (manual tasks pre-dating the column) sort last within their
+// own bucket so a fresh auto batch still leads.
 type TreeNode = { node: SubTask; depth: number; children: TreeNode[] };
 
 function buildTree(items: SubTask[]): TreeNode[] {
@@ -94,14 +103,28 @@ function buildTree(items: SubTask[]): TreeNode[] {
     arr.push(it);
     byParent.set(k, arr);
   }
-  const sortNewest = (a: SubTask, b: SubTask) => {
+  const sortSiblings = (a: SubTask, b: SubTask) => {
+    const aBatch = a.batch_id ?? '';
+    const bBatch = b.batch_id ?? '';
+    // Same orchestrated batch → respect planner order (batch_seq ASC).
+    if (aBatch && bBatch && aBatch === bBatch) {
+      const as = a.batch_seq || 0;
+      const bs = b.batch_seq || 0;
+      if (as !== bs) return as - bs;
+      // Same batch_seq (legacy duplicate): fall back to created_at so the
+      // sort is still deterministic.
+    }
+    // Manual tasks float below orchestrated tasks; within their own
+    // bucket, sort newest-first.
+    if (aBatch && !bBatch) return -1;
+    if (!aBatch && bBatch) return 1;
     const at = new Date(a.created_at).getTime();
     const bt = new Date(b.created_at).getTime();
     if (at !== bt) return bt - at;
     return (b.id ?? '').localeCompare(a.id ?? '');
   };
   const build = (key: string, depth: number): TreeNode[] =>
-    (byParent.get(key) ?? []).slice().sort(sortNewest).map((n) => ({
+    (byParent.get(key) ?? []).slice().sort(sortSiblings).map((n) => ({
       node: n, depth, children: build(n.id, depth + 1),
     }));
   return build('', 0);
@@ -855,6 +878,20 @@ function SubTaskCard({
             serverName={st.effective_agent_server_name ?? st.agent_server_name}
             compact
           />
+          {/* Planned execution-order badge for orchestrated cards. Renders
+              ONLY when batch_id is set so a manual sub-task doesn't pick up
+              a confusing "规划序号 1 / 1" label. The two numbers come from
+              batch_seq (planner order) and the batch's total_children; the
+              surface rendering order matches this number, not the legacy
+              list index (see buildTree sortSiblings). */}
+          {st.batch_id && (st.batch_seq ?? 0) > 0 && (
+            <span
+              className="sub-card-planned-seq"
+              title={t('components.subTaskCard.plannedSeq', { n: st.batch_seq, total })}
+            >
+              {t('components.subTaskCard.plannedSeq', { n: st.batch_seq, total })}
+            </span>
+          )}
           <span className="sub-card-counter">{String(index + 1).padStart(2, '0')} / {String(total).padStart(2, '0')}</span>
           {st.model && st.model !== DefaultModelLabel && (
             <span className="sub-card-model">{st.model}</span>

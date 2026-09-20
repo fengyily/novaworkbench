@@ -232,6 +232,17 @@ export const components = {
     treeExpand: '展开后续操作',
     treeCollapse: '收起后续操作',
     childCount: '{{count}} 个后续操作',
+    // Planning-time execution order for orchestrated sub-tasks. The
+    // ordinal is sub_tasks.batch_seq (1..N), and the count is the batch's
+    // total_children so the user can see "this is step 2 of 5".
+    // Renders only when batch_id is non-empty (i.e. the row belongs to
+    // an orchestrated batch, not a manual sub-task).
+    plannedSeq: '规划序号 {{n}} / {{total}}',
+    // Surfaced when the project-level concurrency cap > 1 lets a child
+    // run alongside tasks from OTHER projects. Within the same orchestrated
+    // batch the queue enforces strict in-order, so the warning only
+    // mentions cross-project parallelism.
+    parallelWarn: '⚠️ 当前批次与其他项目子任务并发执行（项目闸门 {{n}}）',
   },
   createRequirement: {
     title: '新需求',

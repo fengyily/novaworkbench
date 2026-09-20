@@ -63,10 +63,16 @@ type SubTaskExecutor interface {
 //	runSem  — process-wide OOM ceiling (env NOVA_SUBTASK_CONCURRENCY), also
 //	          shared with SubTaskRunner: the total number of claude children
 //	          across ALL projects can never exceed it
+//	batchSem — per-batch serial gate (capacity=1 per batch_id), lazy-init via
+//	          sync.Map. Pinned in tickDispatching BEFORE the project slot so
+//	          the same batch can never have two children in flight at once,
+//	          regardless of subtask.concurrency. Manual sub-tasks have empty
+//	          batch_id and never take this gate; the existing per-project
+//	          concurrency cap stays authoritative for them.
 //
-// The two gates are always taken in the order limiter → runSem (and released
-// in reverse) on both dispatch paths, so they can't deadlock against each
-// other.
+// The three gates are always taken in the order batchSem → limiter → runSem
+// (and released in reverse) on both dispatch paths, so they can't deadlock
+// against each other.
 //
 // running is a WaitGroup for in-flight goroutines; Stop() drains it (with a
 // timeout) so child subprocesses don't outlive a clean shutdown by too long.
@@ -92,6 +98,15 @@ type OrchestrationQueue struct {
 	kickCh  chan struct{}
 	runSem  chan struct{}
 	running sync.WaitGroup
+
+	// batchSem is the per-batch serial gate: capacity-1 channel per batch_id,
+	// lazy-initialized on first acquire. Guarantees that at most one
+	// orchestrated child per batch is in flight at any moment, decoupled from
+	// subtask.concurrency (which only governs manual sub-tasks). Reset is a
+	// non-goal — orphans get reaped by Recover at startup and the next lazy
+	// init reuses the same map slot. sync.Map is used because the access
+	// pattern is "read-mostly: one init per batch, many subsequent reads".
+	batchSem sync.Map // key: string (batch_id), value: chan struct{} (cap=1)
 
 	once     sync.Once
 	stopOnce sync.Once
@@ -199,6 +214,52 @@ func (q *OrchestrationQueue) releaseSlot(projectID string) {
 		<-q.runSem
 	}
 	q.limiter.Release(projectID)
+}
+
+// acquireBatchSem lazily initializes a capacity-1 semaphore for the given
+// batch_id and tries to take it without blocking. Returns true when the
+// caller now owns the gate (must pair with releaseBatchSem), false when
+// another dispatcher is already running for this batch — the caller must
+// leave the batch alone this tick and try again later.
+//
+// Empty batch_id is rejected so a misrouted manual sub-task can't poison
+// the "" bucket. The lazy LoadOrStore keeps a single goroutine responsible
+// for the first init; concurrent callers all observe the same channel and
+// race only on the channel send below.
+func (q *OrchestrationQueue) acquireBatchSem(batchID string) bool {
+	if batchID == "" {
+		// Defensive: tickDispatching is only called for active batches which
+		// always have a non-empty id, but guard anyway so a future caller
+		// can't accidentally serialize all manual tasks on the "" bucket.
+		return true
+	}
+	sem, _ := q.batchSem.LoadOrStore(batchID, make(chan struct{}, 1))
+	select {
+	case sem.(chan struct{}) <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// releaseBatchSem pairs with acquireBatchSem — non-blocking, idempotent.
+// Safe to call when the matching acquire never happened (e.g. the tick
+// returned early after a different failure): the receive will simply
+// succeed immediately because no token is in the channel. The non-blocking
+// form protects against accidentally freeing a token that another tick
+// already grabbed (would require reordering defers, which LIFO prevents).
+func (q *OrchestrationQueue) releaseBatchSem(batchID string) {
+	if batchID == "" {
+		return
+	}
+	v, ok := q.batchSem.Load(batchID)
+	if !ok {
+		return
+	}
+	select {
+	case <-v.(chan struct{}):
+	default:
+	}
 }
 
 // projectIDFor resolves the project a batch belongs to (via its requirement)
@@ -362,6 +423,9 @@ func (q *OrchestrationQueue) tick() {
 //
 // Lifecycle (must stay in this order):
 //
+//  0. Take the per-batch serial gate (capacity=1). One in-flight child per
+//     batch regardless of subtask.concurrency. If another tick already owns
+//     it, defer — the row stays 'pending' and the UI renders "排队中".
 //  1. Try to grab a slot for this batch's PROJECT (per-project gate, then the
 //     process-wide ceiling) — both non-blocking. If either is full we MUST
 //     return without claiming any row, otherwise ClaimNextPending would flip
@@ -376,19 +440,28 @@ func (q *OrchestrationQueue) tick() {
 //     error) or no row was claimable (the previous tick already promoted this
 //     batch's next row), release the slot before returning so we don't leak it.
 //  3. On a successful claim, spawn the wizard's ExecuteOrchestratedChild
-//     goroutine; its deferred releaseSlot frees the slot when the child
-//     finishes.
+//     goroutine; its deferred releaseSlot + releaseBatchSem (LIFO order —
+//     releaseBatchSem last) frees both gates when the child finishes.
 //
 // On "no pending rows AND slot was released" we first give failed children a
 // chance to be re-armed (when the user enabled subtask.auto_retry), and only
 // then run the terminal-count path that flips the batch into summarizing.
 func (q *OrchestrationQueue) tickDispatching(batch *model.OrchestrationBatch, projectID string, autoRetry bool, retryMax int) {
+	// (0) Per-batch serial gate — orchestrated batches run strictly in-order
+	// even when subtask.concurrency > 1. Manual sub-tasks skip this gate
+	// (empty batch_id) so the project's concurrency cap keeps its old meaning.
+	if !q.acquireBatchSem(batch.ID) {
+		log.Printf("[orch] tick %s: batch already in-flight, deferring next claim", batch.ID)
+		return
+	}
+
 	// (1) Non-blocking admission. If full, defer until the next tick — the DB
 	// row stays 'pending' so the UI shows "排队中" instead of a misleading
 	// "运行中".
 	if !q.acquireSlot(projectID) {
 		log.Printf("[orch] tick %s: project %s at capacity (%d), deferring next claim",
 			batch.ID, projectID, q.limiter.Max())
+		q.releaseBatchSem(batch.ID)
 		return
 	}
 
@@ -399,12 +472,14 @@ func (q *OrchestrationQueue) tickDispatching(batch *model.OrchestrationBatch, pr
 	if err != nil {
 		log.Printf("[orch] claim %s: %v", batch.ID, err)
 		q.releaseSlot(projectID)
+		q.releaseBatchSem(batch.ID)
 		return
 	}
 	if ok {
 		q.running.Add(1)
 		go func(b *model.OrchestrationBatch, s *model.SubTask) {
 			defer q.running.Done()
+			defer q.releaseBatchSem(b.ID) // LIFO: released LAST → reverse of acquire order
 			defer q.releaseSlot(projectID)
 			q.wizardH.ExecuteOrchestratedChild(b, s)
 		}(batch, st)
@@ -414,6 +489,7 @@ func (q *OrchestrationQueue) tickDispatching(batch *model.OrchestrationBatch, pr
 	// tick can try again. (Common when another tick already flipped the
 	// row between our admission check and our SELECT.)
 	q.releaseSlot(projectID)
+	q.releaseBatchSem(batch.ID)
 
 	// No pending row claimed — every child has hit a terminal status. Before
 	// treating the batch as finished, optionally re-arm the failed children:

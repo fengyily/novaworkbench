@@ -222,6 +222,15 @@ export const components = {
     treeExpand: 'Show follow-ups',
     treeCollapse: 'Hide follow-ups',
     childCount: '{{count}} follow-up(s)',
+    // Planning-time execution order for orchestrated sub-tasks. The
+    // ordinal is sub_tasks.batch_seq (1..N), the total is batch
+    // total_children. Renders only when batch_id is non-empty.
+    plannedSeq: 'Planned #{{n}} of {{total}}',
+    // Surfaced when the project-level concurrency cap > 1 lets a child
+    // run alongside tasks from OTHER projects. Within the same orchestrated
+    // batch the queue enforces strict in-order, so the warning only
+    // mentions cross-project parallelism.
+    parallelWarn: '⚠️ Running concurrently with other projects (cap {{n}})',
   },
   createRequirement: {
     title: 'New requirement',
