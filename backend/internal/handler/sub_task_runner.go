@@ -352,8 +352,11 @@ func (r *SubTaskRunner) Run(
 	// Best-effort persistence: backend restart mid-run won't lose the log.
 	defer func() {
 		lines, status, exitCode := job.Snapshot()
+		log.Printf("[sub-task] defer-Save job_id=%s req_id=%s sub_task_id=%s status=%s exit=%d lines=%d", job.ID, st.RequirementID, st.ID, status, exitCode, len(lines))
 		if perr := r.jobLogSvc.Save(job.ID, st.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
 			log.Printf("[sub-task] failed to persist job log %s: %v", job.ID, perr)
+		} else {
+			log.Printf("[sub-task] defer-Save OK job_id=%s", job.ID)
 		}
 	}()
 	// Terminal-state fallback (same rationale as the coding goroutine in

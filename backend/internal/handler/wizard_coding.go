@@ -308,8 +308,11 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		// below once roleConfig resolves it) so the defer doesn't capture a
 		// `model` local that would shadow the model package.
 		lines, status, exitCode := job.Snapshot()
+		log.Printf("[start-coding] defer-Save job_id=%s req_id=%s status=%s exit=%d lines=%d", job.ID, p.RequirementID, status, exitCode, len(lines))
 		if perr := h.jobLogSvc.Save(job.ID, p.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, job.Model); perr != nil {
 			log.Printf("[start-coding] failed to persist job log %s: %v", job.ID, perr)
+		} else {
+			log.Printf("[start-coding] defer-Save OK job_id=%s", job.ID)
 		}
 		// Always clear the persisted coding_job_id on terminal so a later
 		// refresh doesn't try to attach to a dead in-memory JobStore job.

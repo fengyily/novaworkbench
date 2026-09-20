@@ -230,8 +230,14 @@ func (h *WizardHandler) immediateDesignCallback(reqID string, body designCodingI
 				log.Printf("[immediate-design-coding] design stage failed for %s job=%s — not dispatching coding", reqID, designJobID)
 				return
 			}
-			if _, err := h.reqSvc.UpdateStatus(reqID, "designed"); err != nil {
-				log.Printf("[immediate-design-coding] UpdateStatus designed for %s failed: %v", reqID, err)
+			// Idempotent stamp: only write 'designed' when the row isn't already
+			// there. Architect may be re-run on a row that's already 'designed'
+			// (e.g. user previously designed but never coded, then chose
+			// 立即执行) — the state machine rejects designed -> designed.
+			if cur, gerr := h.reqSvc.Get(reqID); gerr == nil && cur != nil && cur.Status != "designed" {
+				if _, err := h.reqSvc.UpdateStatus(reqID, "designed"); err != nil {
+					log.Printf("[immediate-design-coding] UpdateStatus designed for %s failed: %v", reqID, err)
+				}
 			}
 			req, err := h.reqSvc.Get(reqID)
 			if err != nil {
