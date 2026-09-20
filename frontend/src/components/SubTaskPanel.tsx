@@ -1393,11 +1393,54 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // Periodic refresh while any child is alive — catches JobStore eviction
   // and the eventual artifact write without having to thread job_done
   // from each card up to the panel root.
+  //
+  // The poll stays armed for two extra cases the simple "items has
+  // running rows" check used to miss:
+  //
+  //   1. The orchestration chain is still moving on disk even though
+  //      `items` has no live rows right now: status ∈ {dispatching,
+  //      summarizing} or summary_status === 'running'. Without the
+  //      extra guard the poll dies the moment children flip to
+  //      terminal, and the follow-on commits (the auto-push sub-task
+  //      wizard_orchestration.go:1538 dispatches after summary done)
+  //      never appear in the list until the next manual refresh.
+  //
+  //   2. summary_status just flipped to 'done' — see the second effect
+  //      below for the one-shot re-fetch that picks up the new push
+  //      sub-task row the backend INSERTs a tick later.
   useEffect(() => {
-    if (!items || !items.some((s) => s.status === 'running' || s.status === 'pending')) return;
+    const hasRunningChild = !!items && items.some((s) => s.status === 'running' || s.status === 'pending');
+    const batchActive = !!batch && (
+      batch.status === 'dispatching'
+      || batch.status === 'summarizing'
+      || batch.summary_status === 'pending'
+      || batch.summary_status === 'running'
+    );
+    if (!hasRunningChild && !batchActive) return;
     const t = setInterval(loadList, 5000);
     return () => clearInterval(t);
-  }, [items, loadList]);
+  }, [items, batch, loadList]);
+
+  // When the summary round just finished, the orchestrator kicks off
+  // the auto-push child (wizard_orchestration.go:1537-1539
+  // `go h.autoPushPR(req)`) a few hundred ms later. That INSERT lands
+  // after the panel's existing 5s tick just observed summary_status=
+  // 'done', so without this hook the new "推送并创建 PR" row sits
+  // invisible until the next manual reload. Fire a one-shot loadList
+  // ~1.5s later so we catch the row before any meaningful delay the
+  // user could perceive.
+  const lastSummaryStatusSeenRef = useRef<string | null>(null);
+  useEffect(() => {
+    const current = batch?.summary_status ?? null;
+    if (current === 'done' && lastSummaryStatusSeenRef.current !== null && lastSummaryStatusSeenRef.current !== 'done') {
+      const timer = window.setTimeout(() => {
+        loadList().catch(() => { /* swallow: parent's loadList owns its own error state */ });
+      }, 1500);
+      return () => window.clearTimeout(timer);
+    }
+    lastSummaryStatusSeenRef.current = current;
+    return undefined;
+  }, [batch?.summary_status, loadList]);
 
   // Auto-clear the active-batch badge when all children reach a terminal
   // state — otherwise the badge would linger after the summary has landed.

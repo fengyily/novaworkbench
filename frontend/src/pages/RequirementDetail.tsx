@@ -1285,6 +1285,32 @@ export default function RequirementDetail() {
     loadUsage();
   }, [id, loadUsage]);
 
+  // The summary round writes requirements.coding_plan on the
+  // backend (wizard_orchestration.go:1486 UpdateCodingPlan) without
+  // surfacing that fact over the SSE stream — the summary job's
+  // job_done frame carries neither batch_id nor summary_status
+  // (see store/jobs.go Frame serialization), so the page-level
+  // summary-done branch below — which only fires for frames with
+  // evt.batch_id && evt.summary_status === 'done' — never matches
+  // for the auto path. Without this reconciliation hook the
+  // requirement row (and therefore SubTaskPanel.summaryReport which
+  // reads requirement.coding_plan) stays stale until the user
+  // manually reloads the page.
+  //
+  // When we observe summary_status just land (non-done → done),
+  // refetch the requirement so SubTaskPanel's summaryReport prop
+  // updates within one poll tick. Declared after `refresh` so the
+  // closure captures the binding without a forward-reference
+  // (TS2448/2454).
+  const lastSummaryStatusRef = useRef<string | null>(null);
+  useEffect(() => {
+    const current = orchBatch?.summary_status ?? null;
+    if (current === 'done' && lastSummaryStatusRef.current !== null && lastSummaryStatusRef.current !== 'done') {
+      refresh();
+    }
+    lastSummaryStatusRef.current = current;
+  }, [orchBatch?.summary_status, refresh]);
+
   // 设计文档存在多种存储形态:
   //   - 计划模式 (新): 原始 Markdown 字符串
   //   - legacy JSON 对象: {overview, files, steps, model_changes, risks}
@@ -1292,24 +1318,32 @@ export default function RequirementDetail() {
   //   - 边缘情形 1: finalResult fallback 可能产出以 { 开头的非设计 JSON
   //   - 边缘情形 2: Claude 在 apply-doc 输出被 ```markdown ... ``` 围栏包裹,
   //     ReactMarkdown 会把整段当代码块渲染,需要 strip 外层围栏
+  //   - 边缘情形 3: schema 默认值 '[]' (backend/internal/db/schema.go:55)
+  //     在 designing 阶段仍携带字面量 '[]';任何解析结果若不含有效设计
+  //     内容,一律视为无设计,返回 {} —— 避免 hasDesign 误为 true 后
+  //     ReactMarkdown 把字面量渲染出来,也避免 doStartCoding 注入
+  //     `## 技术方案\n[]` 到开发 prompt。
   //
   // 仅当 JSON 解析结果显式携带 plan_markdown 或任意 legacy 字段,
-  // 才视为 DesignData;否则一律把原始字符串当 Markdown 渲染;
-  // 当作 Markdown 之前先剥掉外层代码围栏。
+  // 才视为 DesignData;若为合法 JSON 但不带设计内容,统一返回 {}。
+  // 当作 Markdown 之前先剥掉外层代码围栏(只发生在 JSON parse 失败分支)。
   const parseDesign = (raw: string): DesignData => {
     if (!raw) return {};
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
     } catch {
+      // 不是合法 JSON:整段视为 Markdown(去除可能的代码围栏)。
       return { plan_markdown: stripOuterFence(raw) };
     }
     // legacy JSON 数组形态:["# 方案\n## 详情", ...]
+    // 空数组 / 全空白元素 / 全非字符串元素 → 一律视为无设计。
     if (Array.isArray(parsed)) {
       const first = parsed.find((v) => typeof v === 'string' && v.trim() !== '');
-      return { plan_markdown: typeof first === 'string' ? stripOuterFence(first) : raw };
+      if (typeof first !== 'string') return {};
+      return { plan_markdown: stripOuterFence(first) };
     }
-    if (parsed && typeof parsed === 'object') {
+    if (parsed !== null && typeof parsed === 'object') {
       const obj = parsed as Partial<DesignData>;
       const objHasShape = typeof obj.plan_markdown === 'string'
           || obj.overview !== undefined
@@ -1319,13 +1353,18 @@ export default function RequirementDetail() {
           || obj.risks !== undefined;
       if (objHasShape) {
         if (typeof obj.plan_markdown === 'string') {
-          obj.plan_markdown = stripOuterFence(obj.plan_markdown);
+          // 空 / 全空白 plan_markdown → undefined,避免下游三元
+          // 同时被误判 truthy,与 hasDesign 语义保持一致。
+          const trimmed = obj.plan_markdown.trim();
+          obj.plan_markdown = trimmed === '' ? undefined : stripOuterFence(trimmed);
         }
         return obj;
       }
     }
-    // JSON 解析成功但不符合 DesignData 形态 → 原始内容视为 Markdown
-    return { plan_markdown: stripOuterFence(raw) };
+    // JSON 解析成功但不带设计内容:'{}' / '42' / 'null' / 'true' 等
+    // 任何不携带 DesignData 字段的形态。返回 {} 而非把 raw 当 Markdown
+    // 渲染,以防 hasDesign 误开启。
+    return {};
   };
 
   // 剥离外层 ```lang ... ``` 围栏(以及无 lang 标签的 ``` ... ``` 形式)。
