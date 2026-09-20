@@ -211,15 +211,21 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 		// payload check), it will return the single fallback child only if
 		// the input is empty. To preserve the manual path's "no fallback"
 		// behavior we instead drive the commit directly.
-		h.commitOrchestrationBatch(id, sessionID, payload, workDir, modelName, claudeConfigID)
+		h.commitOrchestrationBatch(id, sessionID, payload, workDir, modelName, claudeConfigID, "", "re-orchestrate")
 	}()
 }
 
-// commitOrchestrationBatch is the manual re-split's commit primitive: it
-// inserts N sub_tasks (status=pending, batch_id, batch_seq=1..N) and 1
-// orchestration_batches row in a single Tx, then kicks the queue. Shared
-// shape with tryAutoOrchestrate's commit block, but takes a pre-parsed
-// payload so the manual path's "no fallback child" contract holds.
+// commitOrchestrationBatch is the shared commit primitive for every path that
+// dispatches a pre-parsed decomposition: it inserts N sub_tasks
+// (status=pending, batch_id, batch_seq=1..N) and 1 orchestration_batches row
+// in a single Tx, then kicks the queue. Shared shape with tryAutoOrchestrate's
+// commit block, but takes a pre-parsed payload so the caller's "no fallback
+// child" contract holds.
+//
+// Two callers today: the manual re-split (ReOrchestrate) and the plan-mode
+// split path (execCodingPlanSplit). meta carries the raw step JSON the payload
+// was decoded from (empty for the manual path) and logTag prefixes the log
+// lines so the two paths stay distinguishable in the server log.
 //
 // Errors are logged + swallowed; the user-facing job has already finished
 // by the time we reach here, so a tx failure surfaces as "no children
@@ -228,14 +234,15 @@ func (h *WizardHandler) commitOrchestrationBatch(
 	reqID, orchestratorSID string,
 	payload *orchestratorPayload,
 	workDir, modelName, claudeConfigID string,
+	meta, logTag string,
 ) {
 	if h.subTaskSvc == nil || h.batchSvc == nil || payload == nil || len(payload.Subtasks) == 0 {
-		log.Printf("[re-orchestrate] %s: missing deps or empty payload; skip commit", reqID)
+		log.Printf("[%s] %s: missing deps or empty payload; skip commit", logTag, reqID)
 		return
 	}
 	tx, terr := h.db.Begin()
 	if terr != nil {
-		log.Printf("[re-orchestrate] %s: begin tx: %v", reqID, terr)
+		log.Printf("[%s] %s: begin tx: %v", logTag, reqID, terr)
 		return
 	}
 	committed := false
@@ -245,9 +252,9 @@ func (h *WizardHandler) commitOrchestrationBatch(
 		}
 	}()
 
-	obID, berr := h.batchSvc.CreateWithTx(tx, reqID, orchestratorSID, modelName, workDir, claudeConfigID, len(payload.Subtasks))
+	obID, berr := h.batchSvc.CreateWithTx(tx, reqID, orchestratorSID, modelName, workDir, claudeConfigID, len(payload.Subtasks), meta)
 	if berr != nil {
-		log.Printf("[re-orchestrate] %s: create batch: %v", reqID, berr)
+		log.Printf("[%s] %s: create batch: %v", logTag, reqID, berr)
 		return
 	}
 	// Inherit the parent requirement's execution environment for every child
@@ -259,16 +266,16 @@ func (h *WizardHandler) commitOrchestrationBatch(
 	}
 	for i, t := range payload.Subtasks {
 		if _, cerr := h.subTaskSvc.CreateWithBatchTx(tx, reqID, t.Title, t.Prompt, modelName, orchestratorSID, obID, i+1, childAgentServerID, "", ""); cerr != nil {
-			log.Printf("[re-orchestrate] %s: create child %d (%s): %v", reqID, i+1, t.Title, cerr)
+			log.Printf("[%s] %s: create child %d (%s): %v", logTag, reqID, i+1, t.Title, cerr)
 			return
 		}
 	}
 	if cerr := tx.Commit(); cerr != nil {
-		log.Printf("[re-orchestrate] %s: commit: %v", reqID, cerr)
+		log.Printf("[%s] %s: commit: %v", logTag, reqID, cerr)
 		return
 	}
 	committed = true
-	log.Printf("[re-orchestrate] %s: committed batch %s with %d children", reqID, obID, len(payload.Subtasks))
+	log.Printf("[%s] %s: committed batch %s with %d children", logTag, reqID, obID, len(payload.Subtasks))
 	if h.orchQueue != nil {
 		h.orchQueue.Kick()
 	}
@@ -894,181 +901,6 @@ func normalizePayload(p *orchestratorPayload) *orchestratorPayload {
 		return nil
 	}
 	return p
-}
-
-// tryAutoOrchestrate is the auto-dispatch path called by StartCoding right
-// after the main agent turn finishes. It resolves the main agent's
-// decomposition via resolveSubtasksPayload (Write-captured JSON → sentinel
-// text → markdown table → LLM extractor → single fallback child) and
-// commits N sub_tasks + 1 orchestration_batches inside a single transaction,
-// then returns immediately — dispatch is no longer this function's job.
-//
-// The new flow:
-//
-//  1. Resolve the payload (unchanged parse chain).
-//  2. Insert N sub_tasks (status=pending, batch_id, batch_seq=1..N) and 1
-//     orchestration_batches row in a single Tx. Either everything commits or
-//     everything rolls back, so a mid-Tx failure never leaves an orphan
-//     batch with zero children.
-//  3. Kick the OrchestrationQueue so the first child doesn't wait the full
-//     tick interval. The queue then drives sub-task dispatch in batch_seq
-//     order and triggers the summary round when every child has reached a
-//     terminal state.
-//
-// Restart-safety is handled by OrchestrationQueue.tick() (which calls
-// ClaimNextPending / CountTerminalByBatch / MarkSummarizing) and
-// OrchestrationBatchService.Recover() on boot — see those for details. This
-// function does not own any goroutine after the Tx commits.
-//
-// Frontend progress remains observable through:
-//   - /api/requirements/{id}/sub-tasks                 → live status of each child
-//   - /api/wizard/jobs/{child_job_id}/stream           → live tool calls of each child
-//   - /api/requirements/{id}                           → requirements.coding_plan surfaces the summary
-//   - /api/requirements/{id}/orchestration/batch       → batch status (live)
-func (h *WizardHandler) tryAutoOrchestrate(
-	reqID string,
-	orchestratorSID string,
-	finalResult string,
-	capturedJSON string,
-	req *model.Requirement,
-	workDir, modelName, claudeConfigID string,
-) {
-	if h.subTaskSvc == nil || h.batchSvc == nil {
-		return
-	}
-	if req == nil {
-		// Defensive: shouldn't happen (StartCoding fetched it before
-		// dispatching this goroutine), but skip cleanly if so.
-		log.Printf("[auto-orchestrate] %s: requirement row missing, skipping dispatch", reqID)
-		return
-	}
-	// Double-fire guard: refuse to start a new batch while one is already
-	// dispatching or summarizing for this requirement. The user clicking
-	// StartCoding twice (or the manual re-orchestrate path racing this) would
-	// otherwise create two competing batches — the second one would silently
-	// leak children that the first batch's summary ignores.
-	if existing, gerr := h.batchSvc.GetActiveByRequirement(reqID); gerr == nil && existing != nil {
-		log.Printf("[auto-orchestrate] %s: active batch %s already in %s — skip", reqID, existing.ID, existing.Status)
-		return
-	}
-
-	payload := h.resolveSubtasksPayload(reqID, finalResult, capturedJSON, req)
-	// The subtasks.json the main agent Wrote into the worktree has been
-	// consumed (or rejected) — remove it so it never pollutes the dev branch
-	// or gets mistaken for a fresh decomposition on the next turn.
-	if workDir != "" {
-		if rerr := os.Remove(subTasksFilePath(workDir)); rerr != nil && !os.IsNotExist(rerr) {
-			log.Printf("[orchestrate] %s: failed to remove %s: %v", reqID, subTasksFilePath(workDir), rerr)
-		}
-	}
-	if payload == nil {
-		return
-	}
-
-	// Single Tx: batch + N sub_tasks commit atomically. A mid-Tx failure
-	// rolls back everything; the user can safely retry by clicking StartCoding
-	// again (the GetActiveByRequirement gate above will then be empty).
-	tx, terr := h.db.Begin()
-	if terr != nil {
-		log.Printf("[auto-orchestrate] %s: begin tx: %v", reqID, terr)
-		return
-	}
-	// Defer Rollback on every error path; Commit clears it via the named return.
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-
-	obID, berr := h.batchSvc.CreateWithTx(tx, reqID, orchestratorSID, modelName, workDir, claudeConfigID, len(payload.Subtasks))
-	if berr != nil {
-		log.Printf("[auto-orchestrate] %s: create batch: %v", reqID, berr)
-		return
-	}
-	for i, t := range payload.Subtasks {
-		// Inherit the parent requirement's execution environment so an
-		// auto-orchestrated child runs where the code lives (and the
-		// SubTaskCard badge shows the same environment as the main task).
-		if _, cerr := h.subTaskSvc.CreateWithBatchTx(tx, reqID, t.Title, t.Prompt, modelName, orchestratorSID, obID, i+1, req.AgentServerID, "", ""); cerr != nil {
-			log.Printf("[auto-orchestrate] %s: create child %d (%s): %v", reqID, i+1, t.Title, cerr)
-			return
-		}
-	}
-	if cerr := tx.Commit(); cerr != nil {
-		log.Printf("[auto-orchestrate] %s: commit: %v", reqID, cerr)
-		return
-	}
-	committed = true
-	log.Printf("[auto-orchestrate] %s: committed batch %s with %d children — scheduler tick will dispatch", reqID, obID, len(payload.Subtasks))
-
-	// Wake the queue immediately so the first child doesn't wait the full
-	// tick interval. Kick is non-blocking; nil-check because main.go may
-	// wire the queue AFTER the first batch has been created in tests.
-	if h.orchQueue != nil {
-		h.orchQueue.Kick()
-	}
-}
-
-// resolveSubtasksPayload turns the main agent's turn output into a concrete
-// sub-task list. The channels are tried in strict reliability order:
-//
-//  1. Write-captured subtasks.json (structured tool_use input — the primary
-//     channel; cannot be mangled by prose / code fences).
-//  2. ```json fence + [SUBTASKS_READY] sentinel in the reply text.
-//  3. Markdown breakdown table heuristic.
-//  4. A cheap single-shot LLM extractor over the raw reply (one retry with
-//     the parse error fed back).
-//  5. A single fallback child covering the whole requirement — the UX
-//     promise is "开始开发后一定有子 Agent 在工作", so the pipeline never
-//     stalls at zero children.
-//
-// Returns nil only when there is nothing to dispatch at all (empty reply
-// AND empty requirement prompt source). Shared by tryAutoOrchestrate and
-// ReOrchestrate so the manual re-split behaves identically.
-func (h *WizardHandler) resolveSubtasksPayload(
-	reqID, finalResult, capturedJSON string,
-	req *model.Requirement,
-) *orchestratorPayload {
-	// 1. Write-captured JSON (primary).
-	if p := decodeSubtasksPayload(capturedJSON); p != nil {
-		log.Printf("[orchestrate] %s: using Write-captured subtasks.json (%d subtasks)", reqID, len(p.Subtasks))
-		return p
-	}
-	if strings.TrimSpace(capturedJSON) != "" {
-		log.Printf("[orchestrate] %s: Write-captured subtasks.json failed to decode, falling through to text parsing", reqID)
-	}
-
-	if strings.TrimSpace(finalResult) != "" {
-		// 2. Sentinel + JSON text block.
-		if p, ok := extractSubtasksPayload(finalResult); ok {
-			log.Printf("[orchestrate] %s: using sentinel+JSON text block (%d subtasks)", reqID, len(p.Subtasks))
-			return p
-		}
-		// 3. Markdown table heuristic.
-		if p := extractSubtasksFromMarkdown(finalResult); p != nil {
-			log.Printf("[orchestrate] %s: no sentinel; using markdown plan (%d subtasks)", reqID, len(p.Subtasks))
-			return p
-		}
-		// 4. LLM extractor (single-shot, one retry with the parse error).
-		if p := h.extractSubtasksWithLLM(reqID, finalResult); p != nil {
-			log.Printf("[orchestrate] %s: using LLM-extracted subtasks (%d)", reqID, len(p.Subtasks))
-			return p
-		}
-	}
-
-	// 5. Single fallback child: the whole requirement as one task.
-	title := req.Title
-	prompt := "## 需求\n\n" + req.Title
-	if d := strings.TrimSpace(req.Description); d != "" {
-		prompt += "\n\n" + d
-	}
-	prompt += "\n\n> 说明：主 Agent 未能给出可用的任务拆分，请直接基于项目上下文完成整个需求。"
-	if title == "" {
-		title = "执行整个需求"
-	}
-	log.Printf("[auto-orchestrate] %s: all parse channels failed — dispatching whole requirement as one fallback child", reqID)
-	return &orchestratorPayload{Subtasks: []orchestratedSubtask{{Title: truncateForLog(title, 40), Prompt: prompt}}}
 }
 
 // extractSubtasksWithLLM is fallback channel 4: asks a cheap single-shot

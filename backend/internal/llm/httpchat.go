@@ -64,6 +64,27 @@ acceptance_criteria：数组，每项一句话，描述"如何验证这个需求
 - 不要补写讨论中从未出现过的功能，不要臆测技术实现方案。
 只输出该 JSON 对象，不要任何前后缀说明。`
 
+// extractStepsSystemPrompt converts the planner persona's plan-mode
+// implementation-steps Markdown into the sub-task envelope the orchestration
+// layer already speaks. The envelope key is deliberately "subtasks" (not
+// "steps") so the caller can reuse the existing decodeSubtasksPayload /
+// normalizePayload parsers rather than growing a second, drifting one.
+//
+// The "self-contained prompt" rule is the load-bearing instruction here: each
+// dispatched child agent forks the planning session but is given ONLY its own
+// prompt as the -p message, so a step that says "同上一步" is unexecutable.
+const extractStepsSystemPrompt = `你是一位软件项目调度助手。用户会给你一份「实施步骤计划」的 Markdown，请把其中的步骤列表提取成结构化的子任务列表。
+只输出一个 JSON 对象，不要输出任何其他文字、解释或 markdown 代码围栏。
+格式严格为：{"subtasks":[{"title":"<子任务标题>","prompt":"<执行该步骤的完整提示词>"}]}
+规则：
+- 计划里的每一个编号步骤对应一个子任务，保持原有顺序；序号本身（1、2、#）不是标题。
+- title：一句话概括该步骤要做的事，不超过 40 个字。
+- prompt 必须自包含：执行该步骤的子 Agent 看不到这份计划、看不到其他步骤，只能看到你写的 prompt。因此要把该步骤的目标、涉及文件路径、具体改动内容、产物形式、验收点都完整写进 prompt，必要的上下文宁可重复也不要用「见上一步」「同方案所述」这类指代。
+- 不要合并步骤，也不要把一个步骤拆成多个；不要新增计划里没有的步骤。
+- 计划里的前言、背景、风险分析等非步骤章节不要变成子任务。
+- 如果这份文本里确实没有任何可执行的步骤列表，输出 {"subtasks":[]}。
+只输出该 JSON 对象，不要任何前后缀说明。`
+
 // summarizeIdeaToRequirementResult is the JSON shape summarizeIdeaToRequirementPrompt
 // produces. The service treats an empty Markdown as "discussion didn't converge"
 // and refuses to create a new requirement.

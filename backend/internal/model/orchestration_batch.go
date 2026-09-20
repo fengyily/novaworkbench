@@ -36,6 +36,13 @@ type OrchestrationBatch struct {
 	SummaryJobID          string
 	SummaryHeartbeatAt    *time.Time
 	SummaryAttempts       int
+	// Meta is the raw step JSON this batch was decomposed from (the
+	// {"subtasks":[…]} envelope the planner's plan Markdown was parsed into).
+	// Write-only provenance: nothing reads it at runtime, but it lets an
+	// operator diff "what was proposed" against "what got dispatched" without
+	// re-running the planning turn. Empty for batches created by the legacy
+	// [SUBTASKS_READY] path or the manual re-split.
+	Meta string
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
 	CompletedAt           *time.Time

@@ -161,7 +161,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		// DevEndedAt pattern above). The NOT EXISTS(...) guard preserves the
 		// "only when ALL subtasks are completed" semantic; otherwise the
 		// subquery returns no row → NULL.
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,"+
 			"(SELECT st.completed_at FROM sub_tasks st WHERE st.requirement_id = r.id AND NOT EXISTS(SELECT 1 FROM sub_tasks o WHERE o.requirement_id = r.id AND o.completed_at IS NULL) ORDER BY st.completed_at DESC LIMIT 1) AS dev_ended_at"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" "+where+" ORDER BY CASE WHEN r.status = 'done' THEN 1 ELSE 0 END ASC, CASE WHEN r.marks IS NULL OR r.marks = '' OR r.marks = '[]' THEN 1 ELSE 0 END ASC, r.created_at DESC",
@@ -182,7 +182,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
 			&r.DesignBaseSHA,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
-			&r.UsageSnapshots, &r.CodingPlan, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush,
+			&r.UsageSnapshots, &r.CodingPlan, &r.CodingStepPlan, &r.CodingPhase, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt,
 			&r.Tags, &r.Marks, &r.ClosedAt, &r.ClosedReason,
 			&r.DevEndedAt); err != nil {
@@ -365,7 +365,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	// created_at / updated_at — unqualified references would be ambiguous on
 	// MySQL/Postgres.
 	err := s.db.QueryRow(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
@@ -376,7 +376,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
 			&r.DesignBaseSHA,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
-			&r.UsageSnapshots, &r.CodingPlan, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush,
+			&r.UsageSnapshots, &r.CodingPlan, &r.CodingStepPlan, &r.CodingPhase, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt,
 			&r.Tags, &r.Marks, &r.ClosedAt, &r.ClosedReason)
 	if err == sql.ErrNoRows {
@@ -831,6 +831,42 @@ func (s *RequirementService) UpdateWorktree(id, branch, path string) error {
 func (s *RequirementService) UpdateCodingPlan(id, plan string) error {
 	_, err := s.db.Exec("UPDATE requirements SET coding_plan=?, updated_at=? WHERE id=?",
 		plan, time.Now(), id)
+	return err
+}
+
+// Coding-stage sub-states for requirements.coding_phase. Only the SPLIT
+// coding path (split_tasks=true + local execution) ever sets these; the
+// direct-implementation path leaves the column empty throughout.
+//
+//	CodingPhasePlanning    — plan-mode claude is drafting the step list
+//	CodingPhaseDecomposing — the step list is being parsed into sub_tasks
+//
+// The empty string is the idle value and is what every terminal path
+// restores, so a finished (or failed, or panicked) run never leaves the
+// requirement locked.
+const (
+	CodingPhasePlanning    = "planning"
+	CodingPhaseDecomposing = "decomposing"
+)
+
+// UpdateCodingStepPlan persists the plan-mode implementation-steps Markdown
+// the planner persona produced at the head of the split coding path. Unlike
+// UpdateCodingPlan (the post-run summary) this is the source the decomposition
+// step parses into sub_tasks, so it is written before any child is dispatched
+// and is what an operator reads to understand why a batch looks the way it does.
+func (s *RequirementService) UpdateCodingStepPlan(id, plan string) error {
+	_, err := s.db.Exec("UPDATE requirements SET coding_step_plan=?, updated_at=? WHERE id=?",
+		plan, time.Now(), id)
+	return err
+}
+
+// UpdateCodingPhase moves the coding stage's sub-state (see CodingPhase*
+// constants). Passing "" clears it — every terminal path in the split
+// orchestrator does exactly that via defer, which is what keeps the
+// start-coding re-entry lock from outliving the run that took it.
+func (s *RequirementService) UpdateCodingPhase(id, phase string) error {
+	_, err := s.db.Exec("UPDATE requirements SET coding_phase=?, updated_at=? WHERE id=?",
+		phase, time.Now(), id)
 	return err
 }
 
