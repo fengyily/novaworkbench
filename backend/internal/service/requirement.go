@@ -5,11 +5,12 @@ import (
 
 	"encoding/json"
 	"fmt"
-	"github.com/novaworkbench/backend/internal/db"
+	"log"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/novaworkbench/backend/internal/db"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/util"
 )
@@ -520,6 +521,20 @@ func (s *RequirementService) UpdateStatus(id string, newStatus string) (*model.R
 	r, err := s.Get(id)
 	if err != nil {
 		return nil, err
+	}
+
+	// Idempotent no-op when the row is already in the target status. Two
+	// callers legitimately stamp the same value: wizard_coding.go:281
+	// (gateCodingEntry fires on every coding start) and
+	// wizard_immediate.go:290 (immediateCodingCallback.OnFinish fires after
+	// the coding job completes). The first wins, the second used to log
+	// "invalid status transition: developing -> developing" — a noisy
+	// signal that hid real problems. Same-state callers across the codebase
+	// (schedule_executor.go etc.) now collapse to a single log line
+	// tagged [req-status] so we can spot genuine duplicates.
+	if r.Status == newStatus {
+		log.Printf("[req-status] %s: same-state no-op status=%s", id, newStatus)
+		return r, nil
 	}
 
 	// Validate transition

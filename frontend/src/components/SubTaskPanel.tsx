@@ -1409,34 +1409,55 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   //      below for the one-shot re-fetch that picks up the new push
   //      sub-task row the backend INSERTs a tick later.
   useEffect(() => {
-    const hasRunningChild = !!items && items.some((s) => s.status === 'running' || s.status === 'pending');
-    const batchActive = !!batch && (
-      batch.status === 'dispatching'
-      || batch.status === 'summarizing'
-      || batch.summary_status === 'pending'
-      || batch.summary_status === 'running'
-    );
-    if (!hasRunningChild && !batchActive) return;
+    // Always poll every 5s while the panel is mounted. The per-requirement
+    // sub-task SSE stream (subTasksApi.subscribeEvents below) is the primary
+    // signal; this 5s timer is the safety net for SSE disconnects. The list
+    // endpoint is cheap (single SELECT, ~ms) so the unconditional cadence
+    // doesn't add meaningful load.
     const t = setInterval(loadList, 5000);
     return () => clearInterval(t);
-  }, [items, batch, loadList]);
+  }, [loadList]);
+
+  // Live push of sub-task status flips. Backend handler
+  // WizardHandler.StreamSubTasks emits a "changed" frame on every
+  // MarkRunning / Finish / FinishForSession / MarkStopped for any sub_task
+  // row attached to this requirement. Re-fetch the list on receipt — it's
+  // the same code path as the per-card SSE `job_done` -> subTasksApi.get,
+  // but for the WHOLE list instead of a single row.
+  useEffect(() => {
+    const stream = subTasksApi.subscribeEvents(
+      requirementId,
+      (ev) => {
+        if (ev && (ev as { type?: string }).type === 'changed') {
+          loadList().catch(() => { /* parent's loadList owns its error state */ });
+        }
+      },
+      () => { /* onDone — the 5s poll above is the fallback */ },
+    );
+    return () => stream.close();
+  }, [requirementId, loadList]);
 
   // When the summary round just finished, the orchestrator kicks off
   // the auto-push child (wizard_orchestration.go:1537-1539
   // `go h.autoPushPR(req)`) a few hundred ms later. That INSERT lands
   // after the panel's existing 5s tick just observed summary_status=
   // 'done', so without this hook the new "推送并创建 PR" row sits
-  // invisible until the next manual reload. Fire a one-shot loadList
-  // ~1.5s later so we catch the row before any meaningful delay the
-  // user could perceive.
+  // invisible until the next manual reload. Fire TWO reloads (1.5s + 4s)
+  // so we catch the row even if a backend tick delays the INSERT — race
+  // window previously left the auto-push row invisible for up to one poll
+  // cycle when the summary goroutine's INSERT landed just after the 1.5s
+  // timer fired.
   const lastSummaryStatusSeenRef = useRef<string | null>(null);
   useEffect(() => {
     const current = batch?.summary_status ?? null;
     if (current === 'done' && lastSummaryStatusSeenRef.current !== null && lastSummaryStatusSeenRef.current !== 'done') {
-      const timer = window.setTimeout(() => {
+      const t1 = window.setTimeout(() => {
         loadList().catch(() => { /* swallow: parent's loadList owns its own error state */ });
       }, 1500);
-      return () => window.clearTimeout(timer);
+      const t2 = window.setTimeout(() => {
+        loadList().catch(() => { /* swallow: parent's loadList owns its own error state */ });
+      }, 4000);
+      return () => { window.clearTimeout(t1); window.clearTimeout(t2) };
     }
     lastSummaryStatusSeenRef.current = current;
     return undefined;

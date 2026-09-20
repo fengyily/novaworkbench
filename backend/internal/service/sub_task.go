@@ -29,11 +29,37 @@ import (
 // worktree path / branch isolation that prevents the children from stomping on
 // each other's file edits.
 type SubTaskService struct {
-	db *db.DB
+	db     *db.DB
+	events *SubTaskEventHub
 }
 
 func NewSubTaskService(database *db.DB) *SubTaskService {
 	return &SubTaskService{db: database}
+}
+
+// SetEvents wires a SubTaskEventHub so MarkRunning / Finish /
+// FinishForSession / MarkStopped can fan a "changed" signal to per-requirement
+// SSE subscribers after each write. The hub is optional — callers that never
+// register an SSE stream simply have no subscribers, and Notify becomes a no-op.
+// This is wired in main.go AFTER both objects exist to avoid constructor
+// order coupling.
+func (s *SubTaskService) SetEvents(events *SubTaskEventHub) {
+	s.events = events
+}
+
+// Events returns the hub (nil if SetEvents was never called). Handlers that
+// own an SSE endpoint call hub.Subscribe / Unsubscribe on this directly.
+func (s *SubTaskService) Events() *SubTaskEventHub {
+	return s.events
+}
+
+// notifyChanged is the internal helper every status-affecting write calls
+// after the DB update commits. It's a no-op when no hub is wired.
+func (s *SubTaskService) notifyChanged(reqID string) {
+	if s.events == nil || reqID == "" {
+		return
+	}
+	s.events.Notify(reqID)
 }
 
 // Create inserts a new sub-task row in the "pending" state. Title defaults to
@@ -59,7 +85,12 @@ func NewSubTaskService(database *db.DB) *SubTaskService {
 // parentSubtaskID links this row under a parent sub_task when it was created
 // by Adjust / Redo / Continue. Pass "" for roots (manual StartSubTask / auto-
 // orchestrated children). Drives SubTaskPanel's recursive tree rendering.
-func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID, sessionMode, parentSubtaskID string) (*model.SubTask, error) {
+//
+// source stamps the row's provenance tag (see model.SubTaskSource*). Empty
+// defaults to SubTaskSourceManual — pre-existing callers that omit the field
+// keep the original behaviour, while dispatchPushPRSubTask can pass
+// SubTaskSourcePushPR so the idempotency guard can find it later.
+func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID, sessionMode, parentSubtaskID, source string) (*model.SubTask, error) {
 	if reqID == "" {
 		return nil, errors.New("requirement_id is required")
 	}
@@ -76,6 +107,9 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 	if sessionMode == "" {
 		sessionMode = model.SubTaskSessionModeFork
 	}
+	if source == "" {
+		source = model.SubTaskSourceManual
+	}
 	id := util.NewID("st")
 	now := time.Now()
 	_, err := s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, parent_subtask_id, title, prompt, status,
@@ -83,7 +117,7 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 		session_mode, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, parentSubtaskID, title, prompt, model.SubTaskStatusPending,
-		modelDisplay, sourceSID, batchID, batchSeq, model.SubTaskSourceManual, agentServerID,
+		modelDisplay, sourceSID, batchID, batchSeq, source, agentServerID,
 		sessionMode, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert sub_task: %w", err)
@@ -99,7 +133,7 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 		SourceSessionID:  sourceSID,
 		BatchID:          batchID,
 		BatchSeq:         batchSeq,
-		Source:           model.SubTaskSourceManual,
+		Source:           source,
 		AgentServerID:    agentServerID,
 		AgentServerIDSet: true,
 		SessionMode:      sessionMode,
@@ -114,7 +148,11 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 // rolled back instead of leaving an orphaned batch with no children (or vice
 // versa). The return value is the same as Create; the caller does not need
 // the tx reference again because the caller owns the rollback/commit.
-func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID, sessionMode, parentSubtaskID string) (*model.SubTask, error) {
+//
+// source mirrors Create's parameter — empty falls back to SubTaskSourceAuto
+// (the historical default for batch children). Currently only "auto" rows
+// ever flow through this entry point.
+func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID, sessionMode, parentSubtaskID, source string) (*model.SubTask, error) {
 	if tx == nil {
 		return nil, errors.New("tx is required")
 	}
@@ -132,6 +170,9 @@ func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, mode
 	if sessionMode == "" {
 		sessionMode = model.SubTaskSessionModeFork
 	}
+	if source == "" {
+		source = model.SubTaskSourceAuto
+	}
 	id := util.NewID("st")
 	now := time.Now()
 	_, err := tx.Exec(`INSERT INTO sub_tasks (id, requirement_id, parent_subtask_id, title, prompt, status,
@@ -139,7 +180,7 @@ func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, mode
 		session_mode, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, parentSubtaskID, title, prompt, model.SubTaskStatusPending,
-		modelDisplay, sourceSID, batchID, batchSeq, model.SubTaskSourceAuto, agentServerID,
+		modelDisplay, sourceSID, batchID, batchSeq, source, agentServerID,
 		sessionMode, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert sub_task: %w", err)
@@ -155,13 +196,67 @@ func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, mode
 		SourceSessionID:  sourceSID,
 		BatchID:          batchID,
 		BatchSeq:         batchSeq,
-		Source:           model.SubTaskSourceAuto,
+		Source:           source,
 		AgentServerID:    agentServerID,
 		AgentServerIDSet: true,
 		SessionMode:      sessionMode,
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}, nil
+}
+
+// FindRecentPushForReq returns the most recent sub_tasks row tagged with
+// source='push_pr' for reqID whose status is still pending/running AND whose
+// created_at falls within lookbackSec. It exists so dispatchPushPRSubTask can
+// short-circuit a second "推送并创建 PR" attempt that's still in-flight —
+// without it, a manual click on the page button and the autoPushPR post-
+// development trigger can both spawn child agents and end up committing /
+// pushing twice (see issue log: req_f7bece3eb6cebc18 produced 2 push rows
+// for the same orchestration summary).
+//
+// lookbackSec guards against stale rows left behind by a crash / orphaned
+// goroutine: a row older than the lookback is treated as gone. Recommended
+// value is 90s — comfortably above the typical push+PR round-trip while
+// still collapsing manual+auto races that fire within a few seconds of each
+// other. Returns nil, nil when no candidate exists (the common path).
+func (s *SubTaskService) FindRecentPushForReq(reqID string, lookbackSec int) (*model.SubTask, error) {
+	if reqID == "" {
+		return nil, nil
+	}
+	if lookbackSec <= 0 {
+		lookbackSec = 90
+	}
+	rows, err := s.db.Query(`SELECT id, requirement_id, parent_subtask_id, title, prompt, status,
+		session_id, source_session_id, job_id, artifact, model, claude_config_id,
+		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+		cost_cents, duration_seconds,
+		created_at, updated_at, completed_at,
+		batch_id, batch_seq, batch_id_seq_run, source,
+		agent_server_id, '' AS agent_server_name,
+		session_mode, retry_count
+		FROM sub_tasks
+		WHERE requirement_id = ?
+		  AND source = ?
+		  AND status IN (?, ?)
+		  AND created_at > (NOW() - make_interval(secs => ?))
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`,
+		reqID, model.SubTaskSourcePushPR, model.SubTaskStatusPending, model.SubTaskStatusRunning, lookbackSec)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if rerr := rows.Err(); rerr != nil {
+			return nil, rerr
+		}
+		return nil, nil
+	}
+	st, err := scanSubTask(rows)
+	if err != nil {
+		return nil, err
+	}
+	return st, nil
 }
 
 // List returns every sub-task attached to reqID, **newest first** —
@@ -749,6 +844,20 @@ func (s *SubTaskService) UpdateModel(id, modelName string) error {
 	return err
 }
 
+// UpdateSource overwrites the provenance tag on a sub_tasks row. Used by
+// dispatchPushPRSubTask to stamp SubTaskSourcePushPR on the row after
+// NewPendingSubTask returns (NewPendingSubTask itself defaults to
+// SubTaskSourceManual). Stamping here keeps the column-level discriminator
+// consistent with what FindRecentPushForReq looks up against.
+func (s *SubTaskService) UpdateSource(id, source string) error {
+	if id == "" || source == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`UPDATE sub_tasks SET source=?, updated_at=? WHERE id=?`,
+		source, time.Now(), id)
+	return err
+}
+
 // UpdateClaudeConfigID stamps the claude_configs row the child was actually
 // dispatched against. Written by the runner right after resolution (before the
 // claude subprocess spawns) so the audit trail survives an aborted or failed
@@ -772,6 +881,16 @@ func (s *SubTaskService) MarkRunning(id string) (time.Time, error) {
 	now := time.Now()
 	_, err := s.db.Exec(`UPDATE sub_tasks SET status=?, updated_at=? WHERE id=?`,
 		model.SubTaskStatusRunning, now, id)
+	if err == nil {
+		// Fan-out to per-requirement SSE subscribers so the SubTaskPanel
+		// re-fetches and shows the row as "running" the moment it transitions,
+		// instead of waiting for the 5s poll. Lookup is best-effort — a read
+		// failure means we just skip the broadcast, the poll catches up.
+		if st, gerr := s.Get(id); gerr == nil && st != nil {
+			s.notifyChanged(st.RequirementID)
+			log.Printf("[sub-task-event] %s: sub_task=%s status=running notify", st.RequirementID, id)
+		}
+	}
 	return now, err
 }
 
@@ -986,6 +1105,12 @@ func (s *SubTaskService) MarkStopped(subTaskID, priorArtifact string) error {
 	newArtifact := banner + priorArtifact
 	_, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, completed_at=?, updated_at=? WHERE id=?`,
 		model.SubTaskStatusStopped, newArtifact, now, now, subTaskID)
+	if err == nil {
+		if st, gerr := s.Get(subTaskID); gerr == nil && st != nil {
+			s.notifyChanged(st.RequirementID)
+			log.Printf("[sub-task-event] %s: sub_task=%s status=stopped notify", st.RequirementID, subTaskID)
+		}
+	}
 	return err
 }
 
@@ -1045,6 +1170,12 @@ func (s *SubTaskService) finishInternal(id, status, artifact, modelName string, 
 			tokens.Input, tokens.Output, tokens.CacheCreation, tokens.CacheRead,
 			costCents, duration,
 			now, now, id, expectedSessionID)
+		if err == nil {
+			if st, gerr := s.Get(id); gerr == nil && st != nil {
+				s.notifyChanged(st.RequirementID)
+				log.Printf("[sub-task-event] %s: sub_task=%s status=%s notify (session-conditional)", st.RequirementID, id, status)
+			}
+		}
 		return err
 	}
 	_, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, model=?,
@@ -1055,6 +1186,12 @@ func (s *SubTaskService) finishInternal(id, status, artifact, modelName string, 
 		tokens.Input, tokens.Output, tokens.CacheCreation, tokens.CacheRead,
 		costCents, duration,
 		now, now, id)
+	if err == nil {
+		if st, gerr := s.Get(id); gerr == nil && st != nil {
+			s.notifyChanged(st.RequirementID)
+			log.Printf("[sub-task-event] %s: sub_task=%s status=%s notify", st.RequirementID, id, status)
+		}
+	}
 	return err
 }
 

@@ -6,6 +6,7 @@
 // at a different backend, set VITE_API_BASE=http://other-host:9527 at build
 // time (vite inlines it).
 import i18next from 'i18next';
+import { createEventStream, type EventStream } from './stream';
 
 export const API_BASE = import.meta.env.VITE_API_BASE || '';
 
@@ -518,6 +519,23 @@ export const subTasksApi = {
     api.get<OrchestrationBatch | null>(
       `/api/requirements/${requirementId}/orchestration/batch`,
     ).catch((): OrchestrationBatch | null => null),
+  // Subscribe to per-requirement sub-task SSE stream. Emits frames:
+  //   { type: "hello", req_id } once on connect
+  //   { type: "changed" }       whenever any sub_tasks row on this req changes
+  //   ": keepalive" comments every 15s (filtered by createEventStream)
+  // onMessage receives each parsed frame; onClose fires on disconnect. The
+  // returned EventStream exposes .close() to cancel the subscription — the
+  // caller is responsible for invoking it in the useEffect cleanup.
+  subscribeEvents: (
+    requirementId: string,
+    onMessage: (data: any) => void,
+    onClose: () => void,
+  ): EventStream =>
+    createEventStream(
+      `/api/requirements/${requirementId}/sub-tasks/stream`,
+      onMessage,
+      onClose,
+    ),
 };
 
 // SubTaskOrchestrateResponse is what the backend returns from POST

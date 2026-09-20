@@ -265,7 +265,7 @@ func (h *WizardHandler) commitOrchestrationBatch(
 		childAgentServerID = req.AgentServerID
 	}
 	for i, t := range payload.Subtasks {
-		if _, cerr := h.subTaskSvc.CreateWithBatchTx(tx, reqID, t.Title, t.Prompt, modelName, orchestratorSID, obID, i+1, childAgentServerID, "", ""); cerr != nil {
+		if _, cerr := h.subTaskSvc.CreateWithBatchTx(tx, reqID, t.Title, t.Prompt, modelName, orchestratorSID, obID, i+1, childAgentServerID, "", "", ""); cerr != nil {
 			log.Printf("[%s] %s: create child %d (%s): %v", logTag, reqID, i+1, t.Title, cerr)
 			return
 		}
@@ -1032,6 +1032,14 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 			if _, status, _ := job.Snapshot(); status == store.JobRunning {
 				job.Finish(1, store.JobError)
 			}
+			// Persist job_logs after the (possibly idempotent) Finish so the
+			// terminal status lands in SQLite — both the happy path and the
+			// panic-recover / early-exit paths funnel through here. Done
+			// AFTER the Finish call so Snapshot reports the terminal state.
+			plines, pstatus, pexit := job.Snapshot()
+			if sperr := h.jobLogSvc.Save(job.ID, st.RequirementID, string(pstatus), pexit, job.StartedAt, job.FinishedAt, plines, modelName); sperr != nil {
+				log.Printf("[orch-joblog] %s: defer persist failed job_id=%s err=%v", st.ID, job.ID, sperr)
+			}
 		}
 	}()
 
@@ -1075,7 +1083,18 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 		if job != nil {
 			job.Append(store.LogLine{Type: "error", Content: "❌ " + earlyExitReason})
 			job.Append(store.LogLine{Type: "done", Content: "❌ 子任务早退"})
+			// Finish BEFORE the job_logs write so Snapshot reports the
+			// terminal status. See happy-path note above for why this
+			// ordering matters — the same bug class hit the happy path,
+			// and the early-exit path was just missing the Save entirely
+			// (job_logs row stayed NULL for early-exit children).
 			job.Finish(1, store.JobError)
+			elines, estatus, eexit := job.Snapshot()
+			if sperr := h.jobLogSvc.Save(job.ID, reqID, string(estatus), eexit, job.StartedAt, job.FinishedAt, elines, modelName); sperr != nil {
+				log.Printf("[orch-joblog] %s: early-exit persist failed job_id=%s err=%v", st.ID, job.ID, sperr)
+			} else {
+				log.Printf("[orch-joblog] %s: early-exit persisted job_id=%s status=%s", st.ID, job.ID, estatus)
+			}
 		}
 	}()
 
@@ -1302,11 +1321,21 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 		}
 	}
 	// Persist job log too (mirrors StartSubTask's defer — survives restart).
+	// Order matters: job.Finish FIRST so job.Snapshot reports the terminal
+	// status (JobDone), THEN write to job_logs. The previous ordering
+	// (Snapshot → Save → Finish) saved 'status=running' because Snapshot
+	// fired while the job was still JobRunning — orchestrator children
+	// then appeared stuck-running in job_logs even after the sub-task
+	// row was correctly terminal, and /api/wizard/active-jobs polled by
+	// the requirement detail page kept showing the "Claude 工作中"
+	// badge (job_logs.status is what the persistent view reads).
+	job.Finish(0, store.JobDone)
 	lines, jstatus, exitCode := job.Snapshot()
 	if perr := h.jobLogSvc.Save(job.ID, reqID, string(jstatus), exitCode, job.StartedAt, job.FinishedAt, lines, modelName); perr != nil {
-		log.Printf("[orchestrate] failed to persist job log %s: %v", job.ID, perr)
+		log.Printf("[orch-joblog] %s: persist failed job_id=%s err=%v", st.ID, job.ID, perr)
+	} else {
+		log.Printf("[orch-joblog] %s: persisted job_id=%s status=%s exit=%d", st.ID, job.ID, jstatus, exitCode)
 	}
-	job.Finish(0, store.JobDone)
 	log.Printf("[orchestrate] child %s (batch %s seq %d) finished status=%s", st.ID, batch.ID, st.BatchSeq, status)
 }
 

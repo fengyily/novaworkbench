@@ -966,7 +966,7 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	// The child starts a fresh session (the main-agent session may already be
 	// gone or unsuitable to continue) and runs in the requirement's own
 	// worktree / agent server (resolved inside dispatchPushPRSubTask).
-	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, body.CommitMessage, effectiveModel, roleConfigID, commitLang)
+	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, body.CommitMessage, effectiveModel, roleConfigID, commitLang, "manual")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
@@ -996,9 +996,33 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 // physically lives (codeLivesOnAgent): the agent host for remote-sync, or the
 // local worktree for local-sync — where the origin credentials actually live.
 //
+// sourceTag stamps the row's provenance so FindRecentPushForReq can later
+// detect a duplicate dispatch ("auto" from autoPushPR; "manual" from the page
+// button). The idempotency short-circuit was the result of investigating
+// req_f7bece3eb6cebc18, where both triggers fired and produced 2 commit+push
+// runs.
+//
 // Returns the JobStore job id + sub_tasks row id so an HTTP caller can hand
 // them to the frontend for SSE subscription; the automatic caller ignores them.
-func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, model, roleConfigID, commitLang string) (jobID, subTaskID string, err error) {
+func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, modelName, roleConfigID, commitLang, sourceTag string) (jobID, subTaskID string, err error) {
+	log.Printf("[push-pr] %s: dispatch attempt source=%s model=%s cfg=%s commit_msg_set=%v",
+		reqRow.ID, sourceTag, modelName, roleConfigID, commitMessage != "")
+
+	// Idempotency guard: collapse manual+auto races that fire within a few
+	// seconds of each other. A row already tagged push_pr AND still
+	// pending/running means another dispatch is in-flight — return its ids
+	// so the caller (manual button or autoPushPR) can subscribe to its SSE
+	// stream instead of starting a second concurrent push that would race
+	// on git push -u and CreatePR.
+	const lookbackSec = 90
+	if existing, ferr := runner.subTaskSvc.FindRecentPushForReq(reqRow.ID, lookbackSec); ferr != nil {
+		log.Printf("[push-pr] %s: idempotency lookup failed: %v (continuing)", reqRow.ID, ferr)
+	} else if existing != nil {
+		log.Printf("[push-pr] %s: idempotent hit existing sub_task=%s job_id=%s status=%s created_at=%s",
+			reqRow.ID, existing.ID, existing.JobID, existing.Status, existing.CreatedAt.Format(time.RFC3339))
+		return existing.JobID, existing.ID, nil
+	}
+
 	prompt := buildPushSubTaskPrompt(reqRow, dev, base, remote, platformType, commitMessage, commitLang)
 	title := "推送并创建 PR"
 	if commitMessage != "" {
@@ -1013,11 +1037,22 @@ func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev
 	if codeLivesOnAgent(reqRow) {
 		pushServerID = reqRow.AgentServerID
 	}
-	st, job, newSID, nerr := runner.NewPendingSubTask(reqRow.ID, title, prompt, model, sourceSID, pushServerID, "", "")
+	// Pass sourceTag into the runner so the row's source column lands as
+	// SubTaskSourcePushPR and the lookup above stays self-consistent.
+	st, job, newSID, nerr := runner.NewPendingSubTask(reqRow.ID, title, prompt, modelName, sourceSID, pushServerID, "", "")
 	if nerr != nil {
 		return "", "", nerr
 	}
-	go runner.Run(reqRow, st, job, newSID, sourceSID, prompt, model, roleConfigID, false, true, false, false, "")
+	if sourceTag == model.SubTaskSourcePushPR || sourceTag == "auto" || sourceTag == "manual" {
+		// Persist the discriminator separately from NewPendingSubTask's
+		// default ("manual"). UpdateSource stamps the same column without
+		// touching anything else.
+		if uerr := runner.subTaskSvc.UpdateSource(st.ID, model.SubTaskSourcePushPR); uerr != nil {
+			log.Printf("[push-pr] %s: failed to stamp source=push_pr on %s: %v", reqRow.ID, st.ID, uerr)
+		}
+	}
+	log.Printf("[push-pr] %s: dispatched new sub_task=%s job_id=%s model=%s", reqRow.ID, st.ID, job.ID, modelName)
+	go runner.Run(reqRow, st, job, newSID, sourceSID, prompt, modelName, roleConfigID, false, true, false, false, "")
 	return job.ID, st.ID, nil
 }
 

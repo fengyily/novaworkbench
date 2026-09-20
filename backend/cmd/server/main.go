@@ -104,6 +104,9 @@ func main() {
 	skillSvc := service.NewSkillService(database)
 	agentSvrSvc := service.NewAgentServerService(database)
 	subTaskSvc := service.NewSubTaskService(database)
+	subTaskEvents := service.NewSubTaskEventHub()
+	subTaskSvc.SetEvents(subTaskEvents)
+	log.Printf("[sub-task-event] hub initialized")
 	schedSvc := service.NewScheduledTaskService(database)
 
 	// Seed built-in roles on first run (idempotent).
@@ -613,6 +616,13 @@ func main() {
 	// no children (or the user wants a fresh split).
 	mux.HandleFunc("POST /api/requirements/{id}/re-orchestrate", wizardH.ReOrchestrate)
 	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/summary", wizardH.GenerateSubTaskSummary)
+	// Per-requirement sub-task SSE stream — emits a "changed" signal whenever
+	// any sub_tasks row for the requirement transitions state. The frontend
+	// SubTaskPanel subscribes and re-fetches the list on every event so the
+	// panel converges within ~1s of a status flip instead of waiting up to
+	// 5s for the polling timer. See service.SubTaskEventHub +
+	// handler.StreamSubTasks.
+	mux.HandleFunc("GET /api/requirements/{id}/sub-tasks/stream", wizardH.StreamSubTasks)
 	// Live snapshot of the most recent orchestration_batches row for a
 	// requirement. The SubTaskPanel polls this every 3-5s while children
 	// are alive to drive the summary-CTA banner; returns the latest batch

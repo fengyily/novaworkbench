@@ -175,9 +175,15 @@ const (
 // "manual" means created by StartSubTask / Adjust / Redo. Set at insert
 // and never mutated, so it stays a reliable provenance marker even after
 // SetBatchID groups a manual child under a summary batch.
+//
+// "push_pr" marks rows dispatched by dispatchPushPRSubTask (both the manual
+// MergeHandler.Push button and the autoPushPR end-of-development trigger).
+// It's the discriminator the idempotency guard keys on — see
+// SubTaskService.FindRecentPushForReq.
 const (
 	SubTaskSourceManual = "manual"
 	SubTaskSourceAuto   = "auto"
+	SubTaskSourcePushPR = "push_pr"
 )
 
 // SubTaskSessionMode values describe which conversation-threading policy

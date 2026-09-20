@@ -55,7 +55,7 @@ func TestExecEnvSanity(t *testing.T) {
 
 	stSvc := NewSubTaskService(d)
 	// Explicit remote sub-task.
-	remote, err := stSvc.Create("req_1", "remote task", "do X", "", "", "", 0, "as_1", "", "")
+	remote, err := stSvc.Create("req_1", "remote task", "do X", "", "", "", 0, "as_1", "", "", "")
 	if err != nil {
 		t.Fatalf("create remote: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestExecEnvSanity(t *testing.T) {
 		t.Fatalf("remote row: set=%v id=%q", remote.AgentServerIDSet, remote.AgentServerID)
 	}
 	// Explicit local sub-task (empty string, NOT null).
-	local, err := stSvc.Create("req_1", "local task", "do Y", "", "", "", 0, "", "", "")
+	local, err := stSvc.Create("req_1", "local task", "do Y", "", "", "", 0, "", "", "", "")
 	if err != nil {
 		t.Fatalf("create local: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestAttachEffectiveEnvLocalParent(t *testing.T) {
 		t.Fatalf("insert requirement: %v", err)
 	}
 	stSvc := NewSubTaskService(d)
-	legacy, err := stSvc.Create("req_2", "legacy task", "do L", "", "", "", 0, "", "", "")
+	legacy, err := stSvc.Create("req_2", "legacy task", "do L", "", "", "", 0, "", "", "", "")
 	if err != nil {
 		t.Fatalf("create child: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestAttachEffectiveEnvLocalParent(t *testing.T) {
 	if _, err := d.Exec(`UPDATE sub_tasks SET agent_server_id=NULL WHERE id=?`, legacy.ID); err != nil {
 		t.Fatalf("null out agent_server_id: %v", err)
 	}
-	remote, err := stSvc.Create("req_2", "remote task", "do R", "", "", "", 0, "as_2", "", "")
+	remote, err := stSvc.Create("req_2", "remote task", "do R", "", "", "", 0, "as_2", "", "", "")
 	if err != nil {
 		t.Fatalf("create remote child: %v", err)
 	}
@@ -227,14 +227,14 @@ func TestAttachEffectiveEnvLocalParent(t *testing.T) {
 	// the SAME resolution rule as List/Get — otherwise an auto-orchestrated
 	// child's card and its dispatch could disagree. No orchestration_batches
 	// row is required: sub_tasks.batch_id carries no FK.
-	batchedLegacy, err := stSvc.Create("req_2", "batched legacy", "do B", "", "", "batch_1", 1, "", "", "")
+	batchedLegacy, err := stSvc.Create("req_2", "batched legacy", "do B", "", "", "batch_1", 1, "", "", "", "")
 	if err != nil {
 		t.Fatalf("create batched legacy child: %v", err)
 	}
 	if _, err := d.Exec(`UPDATE sub_tasks SET agent_server_id=NULL WHERE id=?`, batchedLegacy.ID); err != nil {
 		t.Fatalf("null out batched agent_server_id: %v", err)
 	}
-	if _, err := stSvc.Create("req_2", "batched remote", "do BR", "", "", "batch_1", 2, "as_2", "", ""); err != nil {
+	if _, err := stSvc.Create("req_2", "batched remote", "do BR", "", "", "batch_1", 2, "as_2", "", "", ""); err != nil {
 		t.Fatalf("create batched remote child: %v", err)
 	}
 	batchRows, err := stSvc.ListByBatch("batch_1")

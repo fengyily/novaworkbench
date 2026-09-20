@@ -672,7 +672,7 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 		commitLang = loadProjectCommitLang(h.db, reqRow.ProjectID)
 	}
 
-	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, "", pushModel, pushCfgID, commitLang)
+	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, "", pushModel, pushCfgID, commitLang, "auto")
 	if err != nil {
 		log.Printf("[auto-push] %s: dispatch failed: %v", reqRow.ID, err)
 		return
