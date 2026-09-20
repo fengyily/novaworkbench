@@ -392,6 +392,7 @@ CREATE TABLE IF NOT EXISTS orchestration_batches (
 	summary_status          TEXT NOT NULL DEFAULT 'pending',
 	summary_job_id          TEXT NOT NULL DEFAULT '',
 	summary_heartbeat_at    DATETIME,
+	meta                    TEXT NOT NULL DEFAULT '',
 	created_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
 	completed_at            DATETIME,
@@ -671,6 +672,28 @@ var alterColumns = []string{
 	// from; persisted on completion so a server restart / JobStore eviction
 	// doesn't lose the breakdown.
 	`ALTER TABLE requirements ADD COLUMN coding_plan TEXT NOT NULL DEFAULT ''`,
+	// coding_step_plan: the plan-mode "implementation steps" Markdown produced
+	// by the planner persona at the start of the SPLIT coding path
+	// (split_tasks=true + local execution). Distinct from coding_plan above:
+	// this one is the *input* to the decomposition step (it is parsed into
+	// sub_tasks rows), while coding_plan is the *output* summary the
+	// orchestrator writes once every child has finished. Keeping them apart
+	// means the summary round can't clobber the steps the batch was built from
+	// (and the SubTaskPanel's summary card keeps rendering what it always did).
+	`ALTER TABLE requirements ADD COLUMN coding_step_plan TEXT NOT NULL DEFAULT ''`,
+	// coding_phase: sub-state of the coding stage — '' | 'planning' |
+	// 'decomposing'. Deliberately NOT part of requirements.status: adding
+	// statuses there would ripple through validTransitions, the frontend
+	// status chips, the `status=active` list filter, the calendar and i18n for
+	// what is really just a two-line progress hint. Doubles as the re-entry
+	// lock for start-coding (see StartCoding, which pairs it with
+	// JobStore.Live so a crashed run can't leave a permanent lock).
+	`ALTER TABLE requirements ADD COLUMN coding_phase TEXT NOT NULL DEFAULT ''`,
+	// orchestration_batches.meta: the raw step JSON this batch was built from.
+	// Write-only provenance for now — it lets an operator diff "what the
+	// planner proposed" against "what actually got dispatched" when a batch
+	// looks wrong, without re-running the planning turn.
+	`ALTER TABLE orchestration_batches ADD COLUMN meta TEXT NOT NULL DEFAULT ''`,
 	// Development-environment provenance, stamped once when the coding stage
 	// starts (StartCoding). dev_source is "agent" (the requirement was coded
 	// on a remote Agent server) or "local" (coded on the NovaWorkbench host);

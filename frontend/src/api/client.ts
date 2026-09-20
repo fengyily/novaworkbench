@@ -670,6 +670,18 @@ export interface Requirement {
   // main agent emits its structured plan. Rendered by SubTaskPanel as the
   // suggested-sub-tasks preview.
   coding_plan?: string;
+  // coding_step_plan: the plan-mode implementation-step list produced at the
+  // head of the SPLIT coding path (「拆分并自动派发」 + local execution). It is
+  // the INPUT the backend decomposes into sub_tasks — the mirror image of
+  // coding_plan, which is the summary written once every child has finished.
+  // Empty when the requirement never took the split path.
+  coding_step_plan?: string;
+  // coding_phase: sub-state of the coding stage, set only by the split path.
+  // '' = idle, 'planning' = drafting the step list, 'decomposing' = parsing it
+  // into sub-tasks. Drives the detail page's progress hint on a fresh load
+  // (before the job SSE stream reconnects) and backs the backend's
+  // start-coding re-entry lock (a second POST gets 409 CODING_IN_PROGRESS).
+  coding_phase?: 'planning' | 'decomposing' | '';
   // sub_task_count: number of rows in sub_tasks linked to this requirement.
   // Populated by the backend on GET /api/requirements/{id} via a
   // SELECT COUNT(*); used by RequirementDetail to hide the requirement-

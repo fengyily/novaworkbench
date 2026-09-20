@@ -4,10 +4,16 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "check-node": "node ./scripts/check-node.mjs",
+    "predev": "npm run check-node",
     "dev": "vite",
+    "prebuild": "npm run check-node",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview"
+  },
+  "engines": {
+    "node": ">=20.19.0 <21 || >=22.12.0"
   },
   "dependencies": {
     "html2pdf.js": "^0.14.0",

@@ -28,6 +28,12 @@ LDFLAGS := -s -w \
 #   make clean         - remove backend/web/dist and the deps-checked sentinel
 #   make doctor        - run scripts/check-build-deps.sh to verify toolchain
 #
+# The frontend build runs through scripts/with-node.sh, which puts a
+# Vite-compatible Node (20.19+ / 22.12+) on PATH — a machine whose default
+# `node` is 18.x (Debian/Ubuntu apt) still builds as long as a newer Node is
+# installed somewhere (nvm / fnm / volta / asdf / homebrew), or NOVA_NODE_BIN
+# points at one.
+#
 # Build-time preflight: the first `make build` after `make clean` runs
 # scripts/check-build-deps.sh to verify go / node / npm / git are present.
 # Set INSTALL=1 to auto-install missing tools via apt/brew/winget:
@@ -38,7 +44,7 @@ LDFLAGS := -s -w \
 .PHONY: build build-frontend build-backend run clean doctor
 
 SENTINEL := .deps-checked
-$(SENTINEL): scripts/check-build-deps.sh
+$(SENTINEL): scripts/check-build-deps.sh scripts/node-env.sh
 ifndef SKIP_DEPS_CHECK
 ifeq ($(INSTALL),1)
 	@scripts/check-build-deps.sh --install --with-frontend
@@ -52,7 +58,7 @@ build: build-frontend build-backend
 build-frontend build-backend: $(SENTINEL)
 
 build-frontend:
-	cd frontend && npm ci && npm run build
+	cd frontend && ../scripts/with-node.sh npm ci && ../scripts/with-node.sh npm run build
 	rm -rf backend/web/dist
 	mkdir -p backend/web/dist
 	cp -r frontend/dist/. backend/web/dist/

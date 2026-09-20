@@ -21,12 +21,14 @@ The canonical build is **single-binary**: the frontend SPA is built into `fronte
 
 ```bash
 make build                       # frontend build -> copy -> CGO_ENABLED=0 go build -> dist/nova
-make build-frontend              # npm ci + npm run build -> backend/web/dist
+make build-frontend              # npm ci + npm run build -> backend/web/dist (via scripts/with-node.sh)
 make build-backend               # backend only (pair with NOVA_SKIP_FRONTEND=1)
 make run                         # dev backend only (frontend HMR runs separately)
 make doctor                      # scripts/check-build-deps.sh --with-frontend
 make clean                       # remove embedded dist, built binary, .deps-checked sentinel
 INSTALL=1 make build             # auto-install missing toolchain via scripts/check-build-deps.sh
+NOVA_NODE_BIN=/path/to/node/bin make build   # pin the Node used by the frontend build
+scripts/with-node.sh npm run build           # run any command with a Vite-compatible Node (20.19+/22.12+)
 SKIP_DEPS_CHECK=1 make build     # bypass the preflight (CI cache)
 
 # Backend (from backend/)

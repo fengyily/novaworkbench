@@ -371,6 +371,8 @@ export const requirements = {
     devReadyPathLabel: 'Project path:',
     devReadyWorktreeHint: 'Development is isolated in a git worktree (<code>{{path}}.worktrees/{{id}}</code>) so parallel requirements do not interfere.',
     codingWorkingHint: 'Claude is working…',
+    codingPhasePlanning: 'Drafting implementation steps (plan mode, read-only)…',
+    codingPhaseDecomposing: 'Splitting into sub-tasks…',
     // Adjust composer.
     adjustSessionTag: 'Resumes the original coding session · only this prompt is carried',
     adjustComposerPlaceholder: 'Describe what to adjust… Claude will --resume the original coding session and run the change without re-reading project context.',

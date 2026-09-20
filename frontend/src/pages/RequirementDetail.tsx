@@ -2048,6 +2048,14 @@ export default function RequirementDetail() {
         }),
       });
       const json = await res.json();
+      // Surface the envelope's error before falling back to the generic
+      // "no job id" message. start-coding can legitimately refuse (409
+      // CODING_IN_PROGRESS when a plan-mode split run is still planning or
+      // decomposing), and that reason is far more actionable than
+      // "jobIdMissing" — which is all the user saw before this check existed.
+      if (!res.ok || json.success === false) {
+        throw new Error(json.error?.message || t('requirements.detail2.jobIdMissing'));
+      }
       const jobId = json.data?.job_id;
       if (!jobId) throw new Error(t('requirements.detail2.jobIdMissing'));
       localStorage.setItem(`coding_job_${id}`, jobId);
@@ -4153,7 +4161,12 @@ export default function RequirementDetail() {
             </div>
           )}
 
-          {(codingLines.length > 0 || coding) && (
+          {/* req.coding_phase is included so a page loaded mid-run shows the
+              panel immediately: on the plan-mode split path the planning turn
+              can take minutes, and until the job SSE stream reconnects both
+              `coding` and `codingLines` are still empty — which used to render
+              a blank page under a requirement that was very much busy. */}
+          {(codingLines.length > 0 || coding || !!req.coding_phase) && (
             <div className={`coding-panel ${codingFs.isFullscreen ? 'is-fullscreen' : ''}`} ref={codingRef}>
               {codingFs.isFullscreen && (
                 <FullscreenButton isFullscreen onClick={codingFs.exit} variant="floating" />
@@ -4174,7 +4187,21 @@ export default function RequirementDetail() {
                 onShowSummary={handleShowCodingSummary}
               />
               <CodingLines lines={codingLines} working={coding} />
-              {coding && <div className="coding-line coding-line-tool_call"><IconHourglass size={12} className="icon-mr" />{t('requirements.detail2.codingWorkingHint')}</div>}
+              {/* Progress hint. req.coding_phase (set only by the plan-mode
+                  split path) names the phase concretely — "正在制定实施步骤…" /
+                  "正在拆分子任务…" — instead of the generic "Claude 正在工作".
+                  It is also the only hint available on a fresh page load,
+                  before the SSE stream reconnects and flips `coding` true. */}
+              {(coding || !!req.coding_phase) && (
+                <div className="coding-line coding-line-tool_call">
+                  <IconHourglass size={12} className="icon-mr" />
+                  {req.coding_phase === 'planning'
+                    ? t('requirements.detail2.codingPhasePlanning')
+                    : req.coding_phase === 'decomposing'
+                      ? t('requirements.detail2.codingPhaseDecomposing')
+                      : t('requirements.detail2.codingWorkingHint')}
+                </div>
+              )}
             </div>
           )}
 

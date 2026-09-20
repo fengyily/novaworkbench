@@ -75,6 +75,18 @@ type Requirement struct {
 	// parent plan every child task forks from; persisted on completion so
 	// a server restart / JobStore eviction doesn't lose the breakdown.
 	CodingPlan string `json:"coding_plan"`
+	// CodingStepPlan: the plan-mode implementation-steps Markdown produced by
+	// the planner persona at the head of the SPLIT coding path. It is the
+	// INPUT the decomposition step parses into sub_tasks rows — the mirror
+	// image of CodingPlan, which is the summary OUTPUT written once every
+	// child has finished. Empty = the requirement never took the split path
+	// (or predates it).
+	CodingStepPlan string `json:"coding_step_plan"`
+	// CodingPhase is the coding stage's sub-state: "" (idle) /
+	// CodingPhasePlanning / CodingPhaseDecomposing. It drives the detail
+	// page's progress hint on a fresh page load (before the SSE stream
+	// reconnects) and doubles as start-coding's re-entry lock.
+	CodingPhase string `json:"coding_phase"`
 	// DevSource / AgentServerID record WHERE this requirement was developed.
 	// DevSource is DevSourceAgent ("agent") or DevSourceLocal ("local"),
 	// stamped once when the coding stage starts; empty = never coded.
