@@ -1508,6 +1508,26 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 	}
 	log.Printf("[orchestrate] summary saved to requirements.coding_plan for %s (batch %s)", batch.RequirementID, batchID)
 
+	// Auto-promote parent requirement to "done" on the split path. The split
+	// (sub-task orchestration) path was previously stuck on status='developing'
+	// forever — the summary-completion JobStore job fires job_done here, but
+	// nothing flipped the requirement's own status, so the user had to click
+	// 「开发完成」 manually after every successful orchestration. The non-split
+	// path already auto-promotes inside execStartCoding's success branch.
+	// UpdateStatus is idempotent on the transition table (developing→done is
+	// allowed; any other source state is rejected by the guard, so a stuck
+	// archived/closed row is left alone). We re-Get the row first because
+	// the `req` snapshot above may pre-date the summary round.
+	if current, gerr := h.reqSvc.Get(batch.RequirementID); gerr != nil {
+		log.Printf("[orchestrate] summary %s auto-promote re-Get %s failed: %v", batchID, batch.RequirementID, gerr)
+	} else if current.Status == "developing" {
+		if _, uerr := h.reqSvc.UpdateStatus(batch.RequirementID, "done"); uerr != nil {
+			log.Printf("[orchestrate] summary %s auto-promote %s to done failed: %v", batchID, batch.RequirementID, uerr)
+		} else {
+			log.Printf("[orchestrate] summary %s auto-promoted %s to done", batchID, batch.RequirementID)
+		}
+	}
+
 	// Auto-push收尾 (拆分路径): all children + the summary are done, so
 	// development is complete — trigger the "提交 → 推送 → 创建 PR" sub-task
 	// when the requirement opted in. This is the split counterpart to the
