@@ -238,6 +238,17 @@ func (h *WizardHandler) RunScheduledCoding(p *codingRunParams, cb *runCallbacks)
 	}
 	job := h.jobs.Create(p.RequirementID)
 	job.SetType("start_coding")
+	// Persist the live coding_job_id so a refreshed detail page can attach
+	// back to this SSE stream — mirrors StartCoding's UpdateCodingJob call.
+	// Without this, the immediate (design-and-coding) path never writes
+	// coding_job_id, so the frontend's activeSchedJobId poll never picks up
+	// the coding stage's SSE stream and the "开发实现" panel stays blank
+	// even while the coding-plan stage is actively running.
+	if p.RequirementID != "" {
+		if uerr := h.reqSvc.UpdateCodingJob(p.RequirementID, job.ID); uerr != nil {
+			log.Printf("[start-coding] failed to persist coding_job_id for %s: %v", p.RequirementID, uerr)
+		}
+	}
 	go h.execStartCoding(p, job, cb)
 	return job.ID, nil
 }
