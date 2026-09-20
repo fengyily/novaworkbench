@@ -40,7 +40,7 @@ import { toRFC3339Local, WEEK_LABELS } from '../../utils/time';
 import type { AgentServer, LaunchSpec, ScheduleSpec } from '../../api/client';
 
 type Flow = 'full' | 'skip-analysis' | 'direct';
-type Mode = 'immediate' | 'scheduled';
+type Mode = 'manual' | 'immediate' | 'scheduled';
 type Recurrence = 'once' | 'daily' | 'weekly';
 
 // Monday-first UI ↔ JS getDay() (0=Sunday) backend convention. Same
@@ -51,9 +51,14 @@ const WEEKDAY_INDEX_TO_DAYNUM: readonly number[] = [1, 2, 3, 4, 5, 6, 0];
 // Decides which stages should render and whether this combination is
 // launchable at all. `blocked` means the parent's submit should be
 // disabled and neither stage renders.
-type ResolvedTaskType = 'coding' | 'design_and_coding' | 'blocked';
+type ResolvedTaskType = 'manual' | 'coding' | 'design_and_coding' | 'blocked';
 
 function resolveTaskType(flow: Flow, mode: Mode): ResolvedTaskType {
+  // Manual = no dispatch at all; the requirement is created as-is and the
+  // user manually triggers the stage from the detail page later. Valid for
+  // every flow (full + manual is allowed — the user just walks analyst →
+  // architect by hand), so short-circuit before the flow-specific mapping.
+  if (mode === 'manual') return 'manual';
   if (flow === 'direct') return 'coding';
   if (flow === 'skip-analysis') return 'design_and_coding';
   // flow === 'full'
@@ -119,9 +124,12 @@ export default function LaunchPlanSection({
     [agentServers],
   );
 
-  // Top-level dispatch mode. Defaults to 'immediate' so the common
-  // "create and start coding" path is one click after expanding.
-  const [mode, setMode] = useState<Mode>('immediate');
+  // Top-level dispatch mode. Defaults to 'manual' so creating a requirement
+  // never auto-starts a long-running job by accident — the user must
+  // explicitly opt into immediate/scheduled. Manual emits no launch spec
+  // (see the effect below), so it behaves exactly like leaving the launch
+  // plan collapsed.
+  const [mode, setMode] = useState<Mode>('manual');
 
   // Schedule sub-state. Same defaults ScheduleModal uses.
   const [recurrence, setRecurrence] = useState<Recurrence>('once');
@@ -165,6 +173,15 @@ export default function LaunchPlanSection({
   // every parent re-render would cause an update-loop, hence the
   // eslint-disable.
   useEffect(() => {
+    // Manual = no launch spec. The parent sends `launch: undefined`, the
+    // backend skips dispatch, and ProjectDetail's onCreated falls through
+    // to the original skip-based navigation (autoStartDesign guide for
+    // skip-analysis, branch modal for skip-design). Functionally identical
+    // to leaving the launch-plan section collapsed.
+    if (mode === 'manual') {
+      onChange(null);
+      return;
+    }
     if (isFullImmediate) {
       onChange(null);
       return;
@@ -229,15 +246,28 @@ export default function LaunchPlanSection({
 
   return (
     <div className="launch-plan-section">
-      {/* Top-level mode toggle: "立即执行 / 定时执行". The full+immediate
-          radio stays visible but disabled so the user understands why
-          immediate is off (rather than silently dropping the option). */}
+      {/* Top-level mode toggle: "手动执行 / 立即执行 / 定时执行". Manual is
+          the default so a stray submit never kicks off a 30-minute coding
+          job; the user must actively opt into immediate/scheduled. The
+          full+immediate radio stays visible but disabled so the user
+          understands why immediate is off (rather than silently dropping
+          the option). */}
       <div className="modal-field">
         <div
           className="schedule-freq-row"
           role="radiogroup"
           aria-label={t('components.createRequirement.launchPlan.title')}
         >
+          <button
+            type="button"
+            role="radio"
+            aria-checked={mode === 'manual'}
+            className={`schedule-freq-pill${mode === 'manual' ? ' active' : ''}`}
+            onClick={() => setMode('manual')}
+            disabled={fieldDisabled}
+          >
+            {t('components.createRequirement.launchPlan.manual')}
+          </button>
           <button
             type="button"
             role="radio"
@@ -264,6 +294,11 @@ export default function LaunchPlanSection({
             {t('components.createRequirement.launchPlan.scheduled')}
           </button>
         </div>
+        {mode === 'manual' && (
+          <small className="launch-plan-section__note">
+            {t('components.createRequirement.launchPlan.manualHint')}
+          </small>
+        )}
         {isFullImmediate && (
           <small className="launch-plan-section__note">
             {t('components.createRequirement.launchPlan.fullFlowImmediateDisabled')}
