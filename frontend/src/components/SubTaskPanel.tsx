@@ -442,7 +442,7 @@ function SubTaskCard({
   isCollapsed = false,
   onToggleCollapse,
   onChanged,
-  onCreated: _onCreated,
+  onCreated,
   onRestarted,
   onDeleted,
   canStop,
@@ -631,17 +631,20 @@ function SubTaskCard({
       // adjustment composer and let the next list-poll show the new row.
       setAdjusting(false);
       setAdjustInput('');
-      // Fire-and-forget: parent will refresh via list poll, then this
-      // card's matching row keeps showing this card's old id (now stale).
-      // The cleaner fix — reloading the whole list — is already handled
-      // by the periodic refresh in the panel root.
-      void resp;
+      // Reload the list so the new "调整: ..." row appears without a
+      // manual page refresh — mirrors the onCreate path (the parent
+      // SubTaskPanel wires onCreated={loadList} at the render site,
+      // which also re-notifies the parent via onSubTasksChange and
+      // (because the new row is pending) automatically rearms the
+      // 5s polling interval at the panel root).
+      await onCreated?.();
+      void resp; // keep response in scope for future job_id / sub_task_id use
     } catch (e: any) {
       setAdjustError(e?.message || t('components.subTaskCard.errAdjust'));
     } finally {
       setAdjustBusy(false);
     }
-  }, [adjustInput, adjustBusy, adjustModel, st.id, st.requirement_id, t]);
+  }, [adjustInput, adjustBusy, adjustModel, st.id, st.requirement_id, t, onCreated]);
 
   const submitRedo = useCallback(async () => {
     if (redoBusy) return;
