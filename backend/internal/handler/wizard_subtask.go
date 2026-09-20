@@ -1286,8 +1286,14 @@ func buildSubTaskArtifact(st *model.SubTask, model, body string, finishedAt time
 // prompt doesn't spam the coding panel. Uses the same char-budget as the
 // SubTaskPanel card title (240) so the panel preview matches the panel.
 func truncateForLog(s string, max int) string {
-	if len(s) <= max {
+	// Count runes, not bytes. Every caller feeds this either Chinese log
+	// previews or sub-task titles, so a byte slice would cut a multi-byte
+	// character in half — producing mojibake in the SSE panel and, via
+	// normalizePayload's auto-filled titles, persisting invalid UTF-8 into
+	// sub_tasks.title.
+	r := []rune(s)
+	if len(r) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	return string(r[:max]) + "…"
 }

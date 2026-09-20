@@ -385,6 +385,8 @@ export const requirements = {
     devReadyPathLabel: '项目路径：',
     devReadyWorktreeHint: '将在独立 git worktree 中隔离开发（<code>{{path}}.worktrees/{{id}}</code>），多需求并行互不干扰。',
     codingWorkingHint: 'Claude 正在工作...',
+    codingPhasePlanning: '正在制定实施步骤（plan 模式只读探索代码）...',
+    codingPhaseDecomposing: '正在拆分子任务...',
     // Compressed summary modal close is provided by btnClose.
     // Adjust composer (multi-turn follow-up after a coding run).
     adjustSessionTag: '续接原开发会话 · 仅携带本指令',

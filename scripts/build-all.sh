@@ -49,7 +49,9 @@ fi
 
 if $WITH_FRONTEND || [[ ! -f backend/web/dist/index.html ]]; then
   echo ">> building frontend..."
-  (cd frontend && npm ci && npm run build)
+  # with-node.sh picks a Vite-compatible Node (20.19+ / 22.12+) even when the
+  # default `node` on PATH is too old — see scripts/node-env.sh.
+  (cd frontend && ../scripts/with-node.sh npm ci && ../scripts/with-node.sh npm run build)
   rm -rf backend/web/dist
   mkdir -p backend/web/dist
   cp -r frontend/dist/. backend/web/dist/

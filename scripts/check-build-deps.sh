@@ -11,10 +11,14 @@
 #
 # Minimum versions reflect the project's toolchain:
 #   - Go 1.22+ (project uses Go 1.22 routing features; go.mod says 1.25)
-#   - Node 20+ (Vite 8 requires Node 20.19+ or 22.12+)
+#   - Node 20.19+ or 22.12+ (Vite 8's hard requirement; 18.x crashes with
+#     "ReferenceError: CustomEvent is not defined" inside vite's CLI)
 #   - npm (bundled with Node)
 #   - git (used by the runner handler to inspect project worktrees)
 set -euo pipefail
+
+# shellcheck source=scripts/node-env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/node-env.sh"
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 WITH_FRONTEND=false
@@ -24,7 +28,7 @@ for arg in "$@"; do
     --with-frontend) WITH_FRONTEND=true ;;
     --install)       INSTALL=true ;;
     -h|--help)
-      sed -n '2,18p' "$0"
+      sed -n '2,17p' "$0"
       exit 0
       ;;
   esac
@@ -43,7 +47,8 @@ fail() { printf "${R}✗${R} %-12s %s\n" "$1" "$2"; }
 # ---- version helpers ------------------------------------------------------
 
 min_go=1.22
-min_node=20
+# The node requirement is expressed by nova_node_version_ok (node-env.sh):
+# 20.19+ or 22.12+.
 
 cmp_ver() {
   # returns 0 (ok) / 1 (too old). arg: actual, required
@@ -52,28 +57,22 @@ cmp_ver() {
   [[ "$highest" == "$actual" ]]
 }
 
+# These must never abort the script (set -e): a broken/too-old tool on PATH
+# is exactly what we are here to report — e.g. an npm whose node is 18.x
+# exits non-zero on `npm --version`.
 get_go_version() {
-  if command -v go >/dev/null 2>&1; then
-    go version | awk '{print $3}' | sed 's/^go//'
-  else
-    echo ""
-  fi
+  command -v go >/dev/null 2>&1 || { echo ""; return 0; }
+  go version 2>/dev/null | awk '{print $3}' | sed 's/^go//'
 }
 
 get_node_version() {
-  if command -v node >/dev/null 2>&1; then
-    node --version | sed 's/^v//'
-  else
-    echo ""
-  fi
+  command -v node >/dev/null 2>&1 || { echo ""; return 0; }
+  node --version 2>/dev/null | sed 's/^v//'
 }
 
 get_npm_version() {
-  if command -v npm >/dev/null 2>&1; then
-    npm --version
-  else
-    echo ""
-  fi
+  command -v npm >/dev/null 2>&1 || { echo ""; return 0; }
+  npm --version 2>/dev/null || echo ""
 }
 
 # ---- platform-specific install --------------------------------------------
@@ -133,6 +132,33 @@ install_pkgs() {
   esac
 }
 
+# Node needs its own installer: apt/dnf still ship Node 18, which Vite 8
+# rejects outright. Linux therefore goes through nvm (per-user, no sudo),
+# mirroring internal/preflight's runtime install path.
+install_node_via_nvm() {
+  warn "node" "通过 nvm 安装 LTS 版本（用户态，无需 sudo）…"
+  command -v curl >/dev/null 2>&1 || install_pkgs curl || true
+  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  # shellcheck disable=SC1091
+  [[ -s "$NVM_DIR/nvm.sh" ]] && . "$NVM_DIR/nvm.sh"
+  nvm install --lts
+}
+
+install_node() {
+  case "$OS" in
+    darwin)
+      if command -v brew >/dev/null 2>&1; then
+        install_with_brew node
+      else
+        install_node_via_nvm
+      fi
+      ;;
+    mingw*|msys*|cygwin*) install_with_winget "OpenJS.NodeJS.LTS" ;;
+    *)                    install_node_via_nvm ;;
+  esac
+}
+
 # Map go / node package names per platform
 pkg_for() {
   local tool="$1"
@@ -165,22 +191,42 @@ else
   fi
 fi
 
-# node (only if frontend requested)
-if $WITH_FRONTEND; then
-  if [[ -z "$NODE_VER" ]]; then
-    fail "node" "未安装"; missing+=(node)
-  else
-    if cmp_ver "$NODE_VER" "$min_node.0"; then
-      ok "node"  "v${NODE_VER} (≥ ${min_node})"
+# node (only if frontend requested). The build itself runs through
+# scripts/with-node.sh, so a too-old `node` on PATH is fine as long as a
+# compatible one exists elsewhere (nvm / fnm / volta / asdf / homebrew) —
+# report on the one the build will actually use.
+report_node() {
+  local bindir usable
+  bindir="$(nova_find_node_bin || true)"
+  if [[ -z "$bindir" ]]; then
+    if [[ -z "$NODE_VER" ]]; then
+      fail "node" "未安装（需要 $(nova_node_requirement)）"
     else
-      fail "node" "v${NODE_VER} 低于要求的 ${min_node}"; missing+=(node)
+      fail "node" "v${NODE_VER} 不满足 $(nova_node_requirement)"
     fi
+    missing+=(node)
+    return
+  fi
+  usable="$(nova_node_binary_version "$bindir/node")"
+  ok "node" "v${usable} (${bindir}/node)"
+  if [[ -n "$NODE_VER" ]] && ! nova_node_version_ok "$NODE_VER"; then
+    warn "node" "PATH 上的 node 为 v${NODE_VER}（过低），构建会自动改用上面这个"
+  fi
+  # npm ships next to node; prefer that one over whatever PATH resolves to.
+  # It must run with its own node first on PATH (npm's shebang is
+  # `#!/usr/bin/env node`, which would otherwise pick the too-old one).
+  if [[ -x "$bindir/npm" ]]; then
+    NPM_VER="$(PATH="$bindir:$PATH" "$bindir/npm" --version 2>/dev/null || echo "")"
   fi
   if [[ -z "$NPM_VER" ]]; then
-    fail "npm"  "未安装"; missing+=(npm)
+    fail "npm" "未安装"; missing+=(npm)
   else
-    ok "npm"    "v${NPM_VER}"
+    ok "npm" "v${NPM_VER}"
   fi
+}
+
+if $WITH_FRONTEND; then
+  report_node
 else
   if [[ -n "$NODE_VER" ]]; then
     ok "node"   "v${NODE_VER}（前端构建需要；用 --with-frontend 启用检查）"
@@ -202,16 +248,32 @@ if [[ ${#missing[@]} -gt 0 ]]; then
   echo ""
   if $INSTALL; then
     echo ">> 自动安装: ${missing[*]}"
+    # node/npm are installed by install_node (distro packages are too old on
+    # Debian/Ubuntu); everything else goes through the package manager.
     pkgs=()
-    for t in "${missing[@]}"; do pkgs+=("$(pkg_for "$t")"); done
-    install_pkgs "${pkgs[@]}" || true
+    node_wanted=false
+    for t in "${missing[@]}"; do
+      case "$t" in
+        node|npm) node_wanted=true ;;
+        *)        pkgs+=("$(pkg_for "$t")") ;;
+      esac
+    done
+    [[ ${#pkgs[@]} -gt 0 ]] && { install_pkgs "${pkgs[@]}" || true; }
+    $node_wanted && { install_node || true; }
     # Re-check
     GO_VER=$(get_go_version); NODE_VER=$(get_node_version); NPM_VER=$(get_npm_version)
     echo ""
     echo ">> 重新检查："
     if [[ -z "$GO_VER" ]]; then fail "go" "仍未安装"; exit 1; fi
     if $WITH_FRONTEND; then
-      if [[ -z "$NODE_VER" || -z "$NPM_VER" ]]; then fail "node/npm" "仍未安装"; exit 1; fi
+      node_bin="$(nova_find_node_bin || true)"
+      if [[ -z "$node_bin" ]]; then
+        fail "node" "仍不满足 $(nova_node_requirement)"
+        nova_node_install_hint
+        exit 1
+      fi
+      ok "node" "v$(nova_node_binary_version "$node_bin/node") (${node_bin}/node)"
+      if [[ -z "$NPM_VER" && ! -x "$node_bin/npm" ]]; then fail "npm" "仍未安装"; exit 1; fi
     fi
   else
     echo ""
@@ -221,11 +283,16 @@ if [[ ${#missing[@]} -gt 0 ]]; then
       linux)
         if command -v apt-get >/dev/null 2>&1; then
           echo "  ${B}自动安装：${R}   scripts/check-build-deps.sh --install --with-frontend"
-          echo "  ${B}手动安装：${R}   sudo apt-get install -y golang-go nodejs npm git"
+          echo "  ${B}手动安装：${R}   sudo apt-get install -y golang-go git"
         elif command -v dnf >/dev/null 2>&1; then
-          echo "  ${B}手动安装：${R}   sudo dnf install -y golang nodejs npm git"
+          echo "  ${B}手动安装：${R}   sudo dnf install -y golang git"
         elif command -v yum >/dev/null 2>&1; then
-          echo "  ${B}手动安装：${R}   sudo yum install -y golang nodejs npm git"
+          echo "  ${B}手动安装：${R}   sudo yum install -y golang git"
+        fi
+        # 发行版仓库的 nodejs 普遍还停留在 18.x，Vite 8 不接受，单独用 nvm 装。
+        if [[ " ${missing[*]} " == *" node "* || " ${missing[*]} " == *" npm "* ]]; then
+          echo "  ${B}Node.js：${R}     $(nova_node_requirement)"
+          nova_node_install_hint
         fi
         ;;
       darwin)

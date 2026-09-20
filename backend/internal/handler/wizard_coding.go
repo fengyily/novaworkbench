@@ -158,10 +158,57 @@ func (h *WizardHandler) resolveCodingProjectPath(p *codingRunParams, reqRow *mod
 	return nil
 }
 
+// codingReentryLock reports whether a start-coding request must be refused
+// because the requirement is already mid-run in the plan-mode split path.
+// Returns the user-facing Chinese message on refusal, "" when the caller may
+// proceed.
+//
+// The lock is the conjunction of two signals, and needs both:
+//
+//   - requirements.coding_phase != "" — a split run reached planning or
+//     decomposing and hasn't cleared the column yet. On its own this is
+//     unsafe: a backend that dies mid-planning leaves the column set forever
+//     and the requirement can never be developed again.
+//   - JobStore.Live(coding_job_id) — the job that took the lock is still
+//     running *in this process*. JobStore is an in-memory ring buffer, so a
+//     restart wipes it and the stale column stops mattering. That is what
+//     makes the lock self-healing without a boot-recovery pass. Reuses
+//     lookupCodingJobID (wizard_immediate.go) because coding_job_id is a
+//     DB-only column that the Requirement struct deliberately doesn't carry.
+//
+// Only the split path sets coding_phase, so the direct-implementation path
+// (agent persona) is unaffected — it can still be re-run at will, exactly as
+// before. Any lookup error falls through to "allow": refusing to start work
+// because we couldn't read a row is strictly worse than a rare double-start.
+func (h *WizardHandler) codingReentryLock(reqID string) string {
+	if reqID == "" {
+		return ""
+	}
+	req, err := h.reqSvc.Get(reqID)
+	if err != nil || req == nil || req.CodingPhase == "" {
+		return ""
+	}
+	codingJobID, _ := h.lookupCodingJobID(reqID)
+	if codingJobID == "" || !h.jobs.Live(codingJobID) {
+		return ""
+	}
+	switch req.CodingPhase {
+	case service.CodingPhaseDecomposing:
+		return "该需求正在拆分子任务，请等待完成后再发起开发"
+	default:
+		return "该需求正在制定实施步骤，请等待完成后再发起开发"
+	}
+}
+
 func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 	var p codingRunParams
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		writeError(w, 400, "INVALID", "Invalid JSON")
+		return
+	}
+
+	if msg := h.codingReentryLock(p.RequirementID); msg != "" {
+		writeError(w, http.StatusConflict, "CODING_IN_PROGRESS", msg)
 		return
 	}
 
@@ -186,6 +233,9 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 // the optional cb lets us flip the scheduled_tasks row when the job
 // finishes. Returns the JobStore job id.
 func (h *WizardHandler) RunScheduledCoding(p *codingRunParams, cb *runCallbacks) (string, error) {
+	if msg := h.codingReentryLock(p.RequirementID); msg != "" {
+		return "", fail(http.StatusConflict, "CODING_IN_PROGRESS", msg)
+	}
 	job := h.jobs.Create(p.RequirementID)
 	job.SetType("start_coding")
 	go h.execStartCoding(p, job, cb)
@@ -691,10 +741,10 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	//     prompt says "不要先拆分子任务" + "一次会话内完成端到端开发", which is
 	//     exactly the behavior we want when the main agent is supposed to
 	//     implement the requirement itself.
-	//   • "developer" — local execution with split_tasks=true (default = true
-	//     for legacy / no-split-switch callers). The developer persona is the
-	//     统筹协调者 that decomposes into sub-tasks + emits [SUBTASKS_READY]
-	//     so tryAutoOrchestrate dispatches children.
+	//   • "planner" — local execution with split_tasks=true. The planner persona
+	//     runs in plan mode (read-only) and drafts an implementation-step list,
+	//     which execCodingPlanSplit then decomposes into sub_tasks. See
+	//     wizard_coding_plan.go.
 	//
 	// Why not "developer" + a "直接实现" -p override when split_tasks=false?
 	// The developer system prompt explicitly says "**不要直接编写项目代码**——
@@ -704,9 +754,25 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// anyway, defeating the user's "不拆分" choice. Routing through the agent
 	// role is the only reliable fix: its persona + system prompt consistently
 	// say "don't decompose, implement end-to-end" (see role_defaults.go).
+	//
+	// The "developer" persona (统筹协调者 + [SUBTASKS_READY] sentinel) is no
+	// longer reachable from start-coding: the split path it used to serve now
+	// goes through "planner". It stays wired for ReOrchestrate (手动重新拆分),
+	// which still drives decomposition through the sentinel channel.
 	roleKey := "developer"
-	if p.AgentServerID != "" || !p.SplitTasks {
+	switch {
+	case p.AgentServerID != "" || !p.SplitTasks:
 		roleKey = "agent"
+	case h.subTaskSvc == nil || h.batchSvc == nil:
+		// Sub-task orchestration isn't wired in this deployment, so there is
+		// nothing to dispatch the planned steps to. Planning anyway would burn
+		// a full 30-minute plan turn and then strand the user with a step list
+		// and zero children — fall back to end-to-end implementation instead.
+		log.Printf("[start-coding] %s: split requested but sub-task orchestration is not wired; falling back to direct implementation", p.RequirementID)
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 当前部署未启用子任务编排，已改为单会话端到端开发。"})
+		roleKey = "agent"
+	default:
+		roleKey = "planner"
 	}
 	systemPrompt, model, claudeConfigID := h.roleConfig(roleKey)
 	// Per-request model override (highest precedence); empty means role default.
@@ -735,6 +801,42 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	}
 	claudeConfigID = h.resolveConfigIDForRun(p.ClaudeConfigID, model, fallbackCfgID)
 	job.SetModel(model)
+
+	// === PLAN-MODE SPLIT PATH ==========================================
+	// Local execution + split_tasks=true: instead of running a write-enabled
+	// main agent and hoping it emits [SUBTASKS_READY], run claude in plan mode
+	// to draft an implementation-step list, then decompose that list into
+	// sub_tasks over the lightweight HTTP LLM channel. execCodingPlanSplit owns
+	// the whole run (including job.Finish) and the orchestration queue takes it
+	// from there.
+	//
+	// Branching HERE is deliberate: everything above is shared setup we want —
+	// worktree creation / branch checkout / pull, dev_source + dev_mode +
+	// sync_mode + auto_push stamping, session pre-mint, model + config
+	// resolution. Everything BELOW (GPG provisioning, git credential askpass,
+	// GIT_AUTHOR_* env) exists so a write-enabled agent can commit; plan mode
+	// never commits, and each dispatched child re-provisions its own identity
+	// through sub_task_runner.
+	//
+	// Returning early is safe: the three defers registered at the top of this
+	// function (job-log persistence, coding_job_id clearing, panic recovery +
+	// terminal-state convergence) all still fire.
+	if roleKey == "planner" {
+		h.execCodingPlanSplit(&planSplitInput{
+			p:              p,
+			job:            job,
+			reqRow:         reqRow,
+			workDir:        workDir,
+			systemPrompt:   systemPrompt,
+			model:          model,
+			claudeConfigID: claudeConfigID,
+			sourceSID:      sourceSID,
+			fork:           fork,
+			newCodingSID:   newCodingSID,
+		})
+		return
+	}
+
 	var prompt string
 	if sourceSID == "" {
 		// Fresh-session path: no design/analysis session to fork (skip-design
@@ -1187,40 +1289,19 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	job.Finish(0, store.JobDone)
 	log.Printf("[start-coding] job %s finished status=%s exit=%d", job.ID, job.Status, job.ExitCode)
 
-	// === AUTO-ORCHESTRATE ============================================
-	// 主 Agent 在 start-coding 阶段已经掌握需求 / 设计 / 项目上下文。
-	// 用户希望"一键编排 = 主 Agent 自动派发"——main agent 一返回
-	// finalResult，立刻交给 tryAutoOrchestrate：有 [SUBTASKS_READY]
-	// sentinel + JSON 时串行派发子 Agent + 异步汇总；没命中就把
-	// coding_plan 当作普通任务分解展示，但不派发（保持现有行为）。
+	// Auto-push收尾: every run that reaches this line is the direct-implementation
+	// path (roleKey == "agent" — Agent-Server execution or split_tasks=false), so
+	// development is complete right here and the "提交 → 推送 → 创建 PR" sub-task
+	// can be dispatched when enabled.
 	//
-	// Agent-Server 路径走 "agent" 角色，该角色的 system prompt 与 -p 指令
-	// 都不要求 [SUBTASKS_READY] 哨兵 / subtasks.json；为了一致性直接跳过
-	// orchestrator（不调用，即便没有 sentinel 也会安全 no-op，但调用
-	// 本身会引入无谓的 goroutine + 日志噪音）。
+	// The split path never gets here: it returns early into execCodingPlanSplit
+	// above, and its auto-push fires after RunOrchestratorSummary once every
+	// child has finished. That early return is what guarantees no duplicate
+	// dispatch — the old `roleKey == "agent" || !p.SplitTasks` guard that used to
+	// do that job is gone with it.
 	//
-	// 当 split_tasks=false（用户选择"不拆分任务"）时，StartCoding 已经把
-	// roleKey 切到 "agent" 并使用 agentDirectPrompt，-p 消息不携带任何触发
-	// 语、agent 的 system prompt 也明确"不要拆分子任务"；此时再调
-	// tryAutoOrchestrate 只会扫到空 payload 然后空转派发 0 个子任务，
-	// 等价于一次 no-op，但仍然多开一个 goroutine + 一段 resolveSubtasksPayload
-	// 的日志噪音，所以一并短路。split_tasks=true + 本地 = roleKey=="developer"，
-	// 走原 developerDecomposePrompt + 派发链路，行为与改动前一致。
-	//
-	// 该调用改用独立 goroutine，不阻塞 start-coding 自身的 job_done
-	// 信号，用户的开发启动 SSE 立即结束；子任务的进度仍由
-	// dispatchOneChild 的 JobStore job 推流。
-	if roleKey != "agent" && p.RequirementID != "" && newCodingSID != "" && h.subTaskSvc != nil && p.SplitTasks {
-		go h.tryAutoOrchestrate(p.RequirementID, newCodingSID, out.finalResult, out.subTasksJSON, reqRow, workDir, model, claudeConfigID)
-	}
-
-	// Auto-push收尾 (本地非拆分路径): when this run does NOT go through the split
-	// orchestrator (agent role, or split disabled), development is complete
-	// right here — trigger the "提交 → 推送 → 创建 PR" sub-task when enabled.
-	// The split path triggers autoPushPR after RunOrchestratorSummary instead,
-	// so this guard (roleKey == "agent" || !p.SplitTasks) prevents a duplicate
-	// dispatch. Goroutine keeps it off this job's job_done SSE.
-	if reqRow != nil && reqRow.AutoPush && (roleKey == "agent" || !p.SplitTasks) {
+	// Goroutine keeps the push off this job's job_done SSE frame.
+	if reqRow != nil && reqRow.AutoPush {
 		go h.autoPushPR(reqRow)
 	}
 }

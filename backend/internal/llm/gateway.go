@@ -687,6 +687,47 @@ func (g *Gateway) SummarizeIdeaToRequirement(content string) (markdown, title st
 	return res.Markdown, res.Title, res.AcceptanceCriteria, nil
 }
 
+// ExtractStepsFromPlan converts the planner persona's plan-mode
+// implementation-steps Markdown into the {"subtasks":[{"title","prompt"}]}
+// envelope, over the direct HTTP LLM channel (OpenAI-compatible). This is the
+// "decomposing" half of the split coding path: plan-mode claude drafts the
+// steps, this cheap single-shot call structures them, and the orchestration
+// layer dispatches one child per step.
+//
+// Uses the HTTP channel rather than the claude CLI because the task needs no
+// tool use and runs on the critical path between "plan is ready" and "first
+// child starts" — a CLI spawn would add seconds and a second session to a
+// pure text transformation.
+//
+// There is deliberately NO claude CLI fallback (same policy as
+// SummarizeIdeaToRequirement): when the channel is unconfigured or the model
+// returns garbage, the caller degrades to a single sub-task carrying the whole
+// plan, which keeps the pipeline moving instead of stalling at zero children.
+// The caller JSON-decodes the returned text — this method performs no validation.
+func (g *Gateway) ExtractStepsFromPlan(planMarkdown string) (string, error) {
+	if g.llmCfg == nil {
+		return "", fmt.Errorf("llm not configured: no llm config provider")
+	}
+	baseURL, apiKey, model, err := g.llmCfg.LLMConfig()
+	if err != nil {
+		return "", fmt.Errorf("llm config unavailable: %w", err)
+	}
+	if baseURL == "" || apiKey == "" {
+		return "", fmt.Errorf("llm not configured: base_url and api_key required")
+	}
+	// Cap the source text the same way ExtractSubtasksJSON does: a plan-mode
+	// turn can emit tens of KB and the extractor only needs the step list.
+	const maxRunes = 24000
+	if runes := []rune(planMarkdown); len(runes) > maxRunes {
+		planMarkdown = string(runes[:maxRunes]) + "\n…（后文省略）"
+	}
+	out, _, err := chatCompletion(baseURL, apiKey, model, extractStepsSystemPrompt, planMarkdown, 8192)
+	if err != nil {
+		return "", err
+	}
+	return stripJSONFences(out), nil
+}
+
 func stripJSONFences(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "```json")

@@ -67,7 +67,11 @@ func (s *OrchestrationBatchService) Create(reqID, orchestratorSID, modelName, wo
 // instead of leaving an orphaned batch with zero children (or children with no
 // parent batch row). Returns the new batch id; the row is re-SELECTed by the
 // caller after Commit because reading through the tx is unnecessary here.
-func (s *OrchestrationBatchService) CreateWithTx(tx *db.Tx, reqID, orchestratorSID, modelName, workDir, cfgID string, totalChildren int) (string, error) {
+//
+// meta carries the raw step JSON the children were decomposed from (empty for
+// the legacy [SUBTASKS_READY] path and the manual re-split) — see
+// model.OrchestrationBatch.Meta.
+func (s *OrchestrationBatchService) CreateWithTx(tx *db.Tx, reqID, orchestratorSID, modelName, workDir, cfgID string, totalChildren int, meta string) (string, error) {
 	if tx == nil {
 		return "", errors.New("tx is required")
 	}
@@ -80,11 +84,11 @@ func (s *OrchestrationBatchService) CreateWithTx(tx *db.Tx, reqID, orchestratorS
 	id := util.NewID("ob")
 	_, err := tx.Exec(`INSERT INTO orchestration_batches (
 		id, requirement_id, orchestrator_session_id, model, work_dir, claude_config_id,
-		total_children, status, summary_status,
+		total_children, status, summary_status, meta,
 		created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, orchestratorSID, modelName, workDir, cfgID,
-		totalChildren, model.BatchDispatching, model.SummaryPending,
+		totalChildren, model.BatchDispatching, model.SummaryPending, meta,
 		time.Now(), time.Now())
 	if err != nil {
 		return "", fmt.Errorf("insert orchestration_batch (tx): %w", err)
@@ -419,7 +423,7 @@ func (s *OrchestrationBatchService) Recover() (int, error) {
 const batchSelectColumns = `SELECT id, requirement_id, orchestrator_session_id,
 	model, work_dir, claude_config_id, total_children,
 	status, summary_status, summary_job_id, summary_heartbeat_at,
-	summary_attempts,
+	summary_attempts, meta,
 	created_at, updated_at, completed_at
 	FROM orchestration_batches`
 
@@ -435,7 +439,7 @@ func scanBatch(rows *sql.Rows) (*model.OrchestrationBatch, error) {
 		&b.ID, &b.RequirementID, &b.OrchestratorSessionID,
 		&b.Model, &b.WorkDir, &b.ClaudeConfigID, &b.TotalChildren,
 		&b.Status, &b.SummaryStatus, &b.SummaryJobID, &heartbeat,
-		&b.SummaryAttempts,
+		&b.SummaryAttempts, &b.Meta,
 		&b.CreatedAt, &b.UpdatedAt, &completedAt,
 	); err != nil {
 		return nil, err
