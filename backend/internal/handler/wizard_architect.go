@@ -659,6 +659,22 @@ func (h *WizardHandler) finalizeArchitectRun(
 	}
 	_ = h.reqSvc.UpdateDesignJob(id, "")
 
+	// Auto-promote designing → designed on the success path. The wizard
+	// pipeline's gate for 「开始开发」 is `status=='designed'`, and the manual
+	// HTTP path (POST /api/wizard/requirements/{id}/architect-design) used to
+	// leave status stuck on 'designing' until the user clicked 「方案完成」
+	// explicitly — see bug report for the "跳过分析 + 设计完成后不自动完成"
+	// symptom. The immediate-design-coding path also passes through here, but
+	// its OnFinish callback will idempotently re-write 'designed' (and later
+	// 'developing') via UpdateStatus, so the extra write is a no-op.
+	// SkipDesign is intentionally not flipped here — its current status is
+	// 'draft', and the status-transition guard rejects draft→designed;
+	// SkipDesign callers flow through gateCodingEntry which writes
+	// 'developing' directly.
+	if _, perr := h.reqSvc.UpdateStatus(id, "designed"); perr != nil {
+		log.Printf("[architect-design] auto-promote %s to designed failed: %v", id, perr)
+	}
+
 	// Record the effective model + resolved Claude config for the architect
 	// stage (success path only) so a refresh re-hydrates both the model and the
 	// config dropdown, and the dev stage can fall back to a persisted config.
