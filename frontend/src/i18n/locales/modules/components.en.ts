@@ -253,6 +253,8 @@ export const components = {
     launchPlan: {
       title: '⚙ Launch plan (optional)',
       hint: 'Collapsed by default; behaviour matches today when not expanded',
+      manual: 'Manual',
+      manualHint: 'Start manually from the detail page after creation',
       immediate: 'Run immediately',
       scheduled: 'Schedule for later',
       fullFlowImmediateDisabled: 'Full-pipeline requirements must complete analysis before they can run immediately',

@@ -213,6 +213,23 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 		}
 	}
 
+	// Promote status to 'designing' before minting the job so the detail
+	// page's stage gate (stageFor('designing') → 'architect') renders the
+	// architect stream panel during the run. Only promote pre-design states;
+	// a re-run from designed/developing stays put so we never downgrade. The
+	// manual HTTP path already transitioned to 'designing' client-side, so
+	// this is a no-op there — it only actively changes the immediate-launch
+	// (launchDesignAndCoding) and scheduled (RunScheduledDesign) paths, which
+	// have no client-side transition and otherwise leave status='draft' for
+	// the whole run, hiding the architect panel behind the draft CTA.
+	switch req.Status {
+	case "draft", "analyzing":
+		if _, serr := h.reqSvc.UpdateStatus(id, "designing"); serr != nil {
+			log.Printf("[architect-design] failed to promote status to designing for %s: %v", id, serr)
+		}
+		req.Status = "designing"
+	}
+
 	// Create the job BEFORE resolveWorkDirLogged so the log echo closure can
 	// fan the worktree sync lines ("🔄 已同步 origin/<base>" etc.) into the SSE
 	// panel. We persist design_job_id now and clear it on terminal failure

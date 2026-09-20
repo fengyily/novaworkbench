@@ -263,6 +263,8 @@ export const components = {
     launchPlan: {
       title: '⚙ 启动计划（可选）',
       hint: '默认折叠；不展开时与今天的创建行为完全一致',
+      manual: '手动执行',
+      manualHint: '创建后到详情页手动启动',
       immediate: '立即执行',
       scheduled: '定时执行',
       fullFlowImmediateDisabled: '完整流程需求需先完成需求分析才能立即执行',
