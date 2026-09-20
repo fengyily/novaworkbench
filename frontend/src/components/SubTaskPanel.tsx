@@ -80,10 +80,24 @@ interface Props {
 // sub_task row whose `parent_subtask_id` points at the originating row, so
 // the panel can render a nested tree (roots = original manual / auto-
 // orchestrated rows; descendants = 续接/重做/调整 follow-ups). Trees are
-// built client-side from the flat list returned by `subTasksApi.list`,
-// sorted newest-first within every level, and a parent node's collapse
-// state hides its whole subtree. The empty string is the root bucket so
-// legacy rows pre-dating the column render unchanged as roots.
+// built client-side from the flat list returned by `subTasksApi.list`.
+//
+// Sort policy — mirrors the backend dispatch SQL
+// (`SubTaskService.ClaimNextPending` → `ORDER BY batch_seq ASC, created_at
+// ASC`):
+//   - ROOT bucket (depth === 0): sortByBatchSeq — batch_seq ASC primary,
+//     created_at ASC tiebreaker, id ASC final tiebreaker. Manual rows have
+//     no batch_seq (0) and fall back to created_at ASC, so a manual
+//     sub-task created after an orchestrated batch still renders AFTER
+//     the orchestrated children instead of jumping to the top.
+//   - DESCENDANT buckets (depth > 0): sortNewest — keep newest-first so
+//     the Adjust/Redo/Continue follow-up UX under any single root stays
+//     unchanged.
+//
+// `batch_seq ?? 0` falls back to 0 for legacy / hand-rolled rows that
+// pre-date the column; their create order still determines the order. The
+// empty string is the root bucket so legacy rows pre-dating the column
+// render unchanged as roots.
 type TreeNode = { node: SubTask; depth: number; children: TreeNode[] };
 
 function buildTree(items: SubTask[]): TreeNode[] {
@@ -94,16 +108,34 @@ function buildTree(items: SubTask[]): TreeNode[] {
     arr.push(it);
     byParent.set(k, arr);
   }
+  // Root-level sort: batch_seq ASC → created_at ASC → id ASC. Manual rows
+  // (batch_seq undefined / 0) and orchestrated rows compete on
+  // created_at so a manual sub-task created after an orchestrated batch
+  // lands AFTER the orchestrated children — matching the visual order of
+  // execution.
+  const sortByBatchSeq = (a: SubTask, b: SubTask) => {
+    const aSeq = a.batch_seq ?? 0;
+    const bSeq = b.batch_seq ?? 0;
+    if (aSeq !== bSeq) return aSeq - bSeq;
+    const at = new Date(a.created_at).getTime();
+    const bt = new Date(b.created_at).getTime();
+    if (at !== bt) return at - bt;
+    return (a.id ?? '').localeCompare(b.id ?? '');
+  };
+  // Descendant-level sort: newest-first (preserves Adjust/Redo/Continue
+  // lineage UX under a single root).
   const sortNewest = (a: SubTask, b: SubTask) => {
     const at = new Date(a.created_at).getTime();
     const bt = new Date(b.created_at).getTime();
     if (at !== bt) return bt - at;
     return (b.id ?? '').localeCompare(a.id ?? '');
   };
-  const build = (key: string, depth: number): TreeNode[] =>
-    (byParent.get(key) ?? []).slice().sort(sortNewest).map((n) => ({
+  const build = (key: string, depth: number): TreeNode[] => {
+    const sorter = depth === 0 ? sortByBatchSeq : sortNewest;
+    return (byParent.get(key) ?? []).slice().sort(sorter).map((n) => ({
       node: n, depth, children: build(n.id, depth + 1),
     }));
+  };
   return build('', 0);
 }
 

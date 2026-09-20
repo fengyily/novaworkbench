@@ -22,9 +22,16 @@ import (
 // many parallel Node.js children; on macOS this approaches the jetsam
 // threshold and on Linux it triggers the OOM killer — both manifest as an
 // unexpected SIGKILL on the parent nova process with no recoverable signal
-// handler (see plan-ancient-snail.md for the root-cause analysis). Tunable
-// via NOVA_SUBTASK_CONCURRENCY at construction time.
-const DefaultSubTaskConcurrency = 4
+// handler (see plan-ancient-snail.md for the root-cause analysis).
+//
+// Default = 1 (strict serial across projects) so sub-tasks always queue
+// behind one another regardless of which requirement / project owns them
+// — the per-project gate (DefaultSubTaskProjectConcurrency) already
+// serializes children within a project, this ceiling keeps cross-project
+// children from running in parallel. Deployments that want fan-out
+// parallelism can opt in explicitly via NOVA_SUBTASK_CONCURRENCY at
+// construction time.
+const DefaultSubTaskConcurrency = 1
 
 // SubTaskRunner is the shared sub-task executor. It holds the dependencies
 // required to spawn a child claude CLI subprocess for a sub_tasks row and

@@ -229,8 +229,10 @@ func main() {
 	// sub-task concurrency cap (env NOVA_SUBTASK_CONCURRENCY) prevents the
 	// "make run → SIGKILL on parent" symptom: too many parallel claude Node.js
 	// children trip macOS jetsam / Linux OOM killer on the parent nova process
-	// — a SIGKILL Go cannot intercept. Default 4 ≈ leaves ~1 GB headroom on a
-	// 4 GB jetsam threshold. See plan-ancient-snail.md.
+	// — a SIGKILL Go cannot intercept. Default 1 keeps sub-tasks strictly
+	// serial across projects so dispatch order matches the planned batch_seq
+	// order; deployments that want fan-out parallelism can opt in via
+	// NOVA_SUBTASK_CONCURRENCY. See plan-ancient-snail.md.
 	subTaskConcurrency := handler.DefaultSubTaskConcurrency
 	if env := os.Getenv("NOVA_SUBTASK_CONCURRENCY"); env != "" {
 		if n, perr := strconv.Atoi(env); perr == nil && n > 0 {
