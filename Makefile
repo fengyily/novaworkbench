@@ -41,7 +41,7 @@ LDFLAGS := -s -w \
 # Set SKIP_DEPS_CHECK=1 to bypass the check (CI cache, dev loop).
 #
 # If you change scripts/check-build-deps.sh, `make clean` first to re-verify.
-.PHONY: build build-frontend build-backend run clean doctor
+.PHONY: build build-frontend build-backend run clean doctor helloworld
 
 SENTINEL := .deps-checked
 $(SENTINEL): scripts/check-build-deps.sh scripts/node-env.sh
@@ -75,3 +75,6 @@ clean:
 
 doctor:
 	@scripts/check-build-deps.sh --with-frontend
+
+helloworld:
+	@scripts/gen-helloworld.sh
