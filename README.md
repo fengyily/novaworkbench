@@ -250,6 +250,13 @@ novaworkbench-windows-amd64.exe
 
 > 一键自检：`make doctor` 或 `scripts/check-build-deps.sh --with-frontend`
 > 自动安装缺失依赖：`INSTALL=1 make build`
+>
+> 系统自带的 `node` 常常还是 18.x（Debian/Ubuntu apt），Vite 8 会直接崩在
+> `ReferenceError: CustomEvent is not defined`。前端构建统一走
+> `scripts/with-node.sh`：它会在 nvm / fnm / volta / asdf / Homebrew 里挑一个
+> 满足 20.19+ / 22.12+ 的 Node 并加到 PATH 前面，所以默认 node 版本过低也能
+> `make build`。想指定某个安装：`NOVA_NODE_BIN=/path/to/node/bin make build`；
+> 直接手跑也可以：`cd frontend && ../scripts/with-node.sh npm run build`。
 
 ### 方式一：Docker Compose（推荐）
 
@@ -487,7 +494,7 @@ $HOME/workspace/              # 通过 docker-compose 挂载的项目根
 │   └── public/
 ├── deploy/                     # 生产 / 预览 compose 栈
 ├── terraform/                  # 生产基础设施
-├── scripts/                    # check-build-deps.sh 等
+├── scripts/                    # check-build-deps.sh / with-node.sh 等
 └── CLAUDE.md                   # 给 Claude Code 的项目指南
 ```
 
