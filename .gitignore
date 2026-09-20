@@ -4,3 +4,6 @@ dist/
 *.log
 .nova/
 .novaworkbench/
+
+# HelloWorld test artifacts (generated, timestamped)
+test/*.html
