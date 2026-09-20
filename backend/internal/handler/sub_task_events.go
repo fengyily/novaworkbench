@@ -19,6 +19,12 @@ import (
 // is 60s). The actual sub-task change signal travels on the dedicated chan
 // delivered by SubTaskEventHub.Subscribe.
 //
+// Uses http.NewResponseController (Go 1.22) instead of w.(http.Flusher)
+// type-assertion so the Flush call penetrates the middleware.Logger
+// wrappedWriter wrapper — the assertion fails on a wrapped ResponseWriter
+// that doesn't implement Flusher, returning a spurious 500. This mirrors
+// the existing streamJobSSE pump in sse.go.
+//
 // GET /api/requirements/{id}/sub-tasks/stream
 func (h *WizardHandler) StreamSubTasks(w http.ResponseWriter, r *http.Request) {
 	if h.subTaskSvc == nil || h.subTaskSvc.Events() == nil {
@@ -30,11 +36,10 @@ func (h *WizardHandler) StreamSubTasks(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "requirement_id required", http.StatusBadRequest)
 		return
 	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
+
+	// ResponseController penetrates middleware wrappers (Logger's
+	// wrappedWriter) to reach the underlying net/http Flusher.
+	rc := http.NewResponseController(w)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -47,7 +52,7 @@ func (h *WizardHandler) StreamSubTasks(w http.ResponseWriter, r *http.Request) {
 	// Hello frame so the client knows the connection is live and the
 	// server's reqID echoes back what the URL said (debug aid).
 	fmt.Fprintf(w, "data: {\"type\":\"hello\",\"req_id\":\"%s\"}\n\n", reqID)
-	flusher.Flush()
+	rc.Flush()
 
 	keepalive := time.NewTicker(15 * time.Second)
 	defer keepalive.Stop()
@@ -63,13 +68,13 @@ func (h *WizardHandler) StreamSubTasks(w http.ResponseWriter, r *http.Request) {
 			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
 				return
 			}
-			flusher.Flush()
+			rc.Flush()
 		case <-ch:
 			// A single change frame — frontend re-fetches on receipt.
 			if _, err := fmt.Fprint(w, "data: {\"type\":\"changed\"}\n\n"); err != nil {
 				return
 			}
-			flusher.Flush()
+			rc.Flush()
 		}
 	}
 }
