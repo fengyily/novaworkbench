@@ -31,7 +31,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strings"
 
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/service"
@@ -248,7 +247,7 @@ func (h *WizardHandler) immediateDesignCallback(reqID string, body designCodingI
 				RequirementID:    reqID,
 				RequirementTitle: req.Title,
 				RequirementDesc:  req.Description,
-				BranchName:       resolveImmediateBranch(body.BranchName, reqID),
+				BranchName:       resolveImmediateBranch(body.BranchName, reqID, req.Kind),
 				BaseBranch:       resolveImmediateBase(h, body.BaseBranch, req.ProjectID),
 				Model:            body.CodingModel,
 				ClaudeConfigID:   body.CodingConfigID,
@@ -296,17 +295,35 @@ func (h *WizardHandler) immediateCodingCallback(reqID string) *runCallbacks {
 	}
 }
 
+// branchPrefixForKind returns the conventional branch prefix for a
+// requirement kind: "fix" for issues, "feat" for everything else
+// (requirement / idea / legacy empty). Used by resolveImmediateBranch and
+// anchorWorktree so the dev branch matches the change type the user
+// declared when creating the requirement.
+func branchPrefixForKind(kind string) string {
+	if kind == service.KindIssue {
+		return "fix"
+	}
+	return "feat"
+}
+
 // resolveImmediateBranch returns the explicit body field when set, else
-// falls back to "feat/<id stripped of req_ prefix>" — the convention used
-// by the ScheduleModal / wizard detail page when the user doesn't pin a
-// branch name. Kept as a package-private helper (rather than a method on
+// falls back to "<prefix>/<id stripped of req_ prefix>" where the prefix
+// is "fix" for issues and "feat" otherwise — the convention used by the
+// ScheduleModal / wizard detail page when the user doesn't pin a branch
+// name. Kept as a package-private helper (rather than a method on
 // WizardHandler) so it's cheap to call from both the immediate callback
 // and any future caller.
-func resolveImmediateBranch(explicit, reqID string) string {
+func resolveImmediateBranch(explicit, reqID, kind string) string {
 	if explicit != "" {
 		return explicit
 	}
-	return "feat/" + strings.TrimPrefix(reqID, "req_")
+	// Keep the req_ prefix — matches anchorWorktree's design-branch convention
+	// and the user-stated "fix/req_xxx" / "feat/req_xxx" format. Design and
+	// coding stages share the same req id, so both resolve to the same branch
+	// and the coding stage reuses the design worktree (EnsureWorktree is
+	// idempotent per req+branch) instead of colliding.
+	return branchPrefixForKind(kind) + "/" + reqID
 }
 
 // resolveImmediateBase returns the explicit body field when set, else

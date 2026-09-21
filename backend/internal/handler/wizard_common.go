@@ -476,7 +476,7 @@ func (h *WizardHandler) anchorWorktree(req *model.Requirement, projectPath, defa
 	if defaultBranch == "" {
 		defaultBranch = "main"
 	}
-	branch := "feat/" + req.ID
+	branch := branchPrefixForKind(req.Kind) + "/" + req.ID
 	wtPath, err := ensureWorktreeFrom(projectPath, req.ID, branch, defaultBranch, skipSync, logf)
 	if err != nil {
 		if errors.Is(err, ErrNotAGitRepo) {

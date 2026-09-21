@@ -868,13 +868,24 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		// "基于方案开发" (dev_mode == "design") hand-feeds the stored design
 		// doc to the agent in the -p prompt so the new session has the plan
 		// even though it never joined the design/analysis conversation.
-		// designMarkdown is sourced from reqRow.DesignDocs (raw — plan Markdown
-		// or legacy JSON, both formats are appended verbatim and the
-		// leadIn tells the agent to treat it as the implementation plan).
+		// effectiveDesignDocs filters the legacy "[]" empty default — feeding
+		// "[]" as a real design produces an empty "## 技术方案" block that
+		// makes the agent conclude there is no plan and refuse to implement
+		// (req_9c63bda996bb6a99). When the filter collapses it to "", the
+		// leadIn below also falls back to the normal "read files + implement"
+		// wording instead of "依据方案直接实现".
 		designMarkdown := ""
 		if reqRow != nil && reqRow.DevMode == service.DevModeDesign {
-			designMarkdown = strings.TrimSpace(reqRow.DesignDocs)
+			designMarkdown = effectiveDesignDocs(reqRow)
 		}
+		log.Printf("[start-coding] %s: fresh-session prompt built reqID=%s title_len=%d desc_len=%d design_len=%d dev_mode=%s",
+			p.RequirementID, p.RequirementID, len(p.RequirementTitle), len(p.RequirementDesc), len(designMarkdown),
+			func() string {
+				if reqRow != nil {
+					return reqRow.DevMode
+				}
+				return p.DevMode
+			}())
 		if roleKey == "agent" {
 			// agent persona (Agent-Server remote OR local split_tasks=false):
 			// implement the requirement directly end-to-end. No decomposition
@@ -887,7 +898,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 				leadIn = "用户选择「基于方案开发」：不会接续原方案会话，而是把下面的方案作为唯一依据创建新会话直接实现。\n" +
 					"请先读取项目中的相关文件理解现有代码结构，再依据方案直接实现：\n"
 			}
-			prompt = agentDirectPrompt(p.RequirementTitle, leadIn, workDir)
+			prompt = agentDirectPrompt(p.RequirementID, p.RequirementTitle, leadIn, workDir)
 		} else {
 			// developer persona + fresh-session path + split_tasks=true.
 			// Keep the original decomposition trigger so the developer role
@@ -902,21 +913,23 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			}
 			prompt = developerDecomposePrompt(p.RequirementTitle, leadIn, workDir)
 		}
-		// Append the stored design doc to the prompt when dev_mode is
-		// "design". Both plan Markdown and legacy JSON formats are passed
-		// verbatim — the agent's tools will surface them. The block goes
-		// AFTER the leadIn so the developer persona's "开始开发/进入执行实
-		// 现阶段" trigger (preserved inside developerDecomposePrompt) stays
-		// at the top and the [SUBTASKS_READY] orchestration path still fires.
+		// Requirement description goes FIRST (it is the actual requirement
+		// text on the fresh-session path — immediate/scheduler callers set
+		// RequirementDesc = req.Description, the frontend sets it to the
+		// parsed design || description). Labeling it "追加说明" demoted it
+		// to a footnote and the agent ignored it in favor of the (empty)
+		// design block above (req_9c63bda996bb6a99). "## 需求描述" makes it
+		// the primary input. The fork/resume path below keeps "追加调整说明"
+		// because there the desc is genuinely a follow-up.
+		if desc := strings.TrimSpace(p.RequirementDesc); desc != "" {
+			prompt += "\n\n## 需求描述\n\n" + desc
+		}
+		// Append the stored design doc when dev_mode is "design" AND it
+		// carries real content (effectiveDesignDocs already filtered "[]").
+		// Goes after the requirement description so the agent reads the
+		// requirement first, then the plan.
 		if designMarkdown != "" {
 			prompt += "\n\n## 技术方案（来自 requirements.design_docs，原方案会话的最终产物）\n\n" + designMarkdown
-		}
-		if desc := strings.TrimSpace(p.RequirementDesc); desc != "" {
-			if roleKey == "agent" {
-				prompt += "\n\n用户在开发前的追加说明：\n" + desc
-			} else {
-				prompt += "\n\n用户在开发前的追加说明：\n" + desc
-			}
 		}
 		// Context-compression handoff (legacy fresh-session path): when
 		// the coding stage was previously compressed we still want the
@@ -949,7 +962,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			// fork/resume variant — the conversation already carries the
 			// requirement + analysis + design, so the leadIn references that
 			// history instead of asking the agent to re-read files.
-			prompt = agentDirectPrompt(p.RequirementTitle,
+			prompt = agentDirectPrompt(p.RequirementID, p.RequirementTitle,
 				"基于已完成的需求分析与技术方案，请直接实现需求：\n", workDir)
 		} else {
 			// developer persona + fork/resume path + split_tasks=true.

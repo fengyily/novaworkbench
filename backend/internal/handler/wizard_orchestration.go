@@ -513,12 +513,19 @@ func developerDecomposePrompt(title, leadIn, workDir string) string {
 		title, subTasksFilePath(workDir))
 }
 
-// agentDirectPrompt builds the -p prompt for the "agent" role on Agent-Server
-// execution. It deliberately omits the "开始开发/进入执行实现阶段" trigger that
-// the developer role keys its sub-task orchestration emission on — the agent
-// persona implements the requirement directly on the remote server in a single
-// session (no sub-task orchestration, no sentinel). leadIn mirrors
-// developerDecomposePrompt's wording so the two paths share intent.
+// agentDirectPrompt builds the -p prompt for the "agent" role (local
+// split_tasks=false OR Agent-Server execution). It deliberately omits the
+// "开始开发/进入执行实现阶段" trigger that the developer role keys its
+// sub-task orchestration emission on — the agent persona implements the
+// requirement directly in a single session (no sub-task orchestration, no
+// sentinel). leadIn mirrors developerDecomposePrompt's wording so the two
+// paths share intent.
+//
+// The header carries the requirement ID + title so the agent can reference
+// the requirement without re-deriving it (req_9c63bda996bb6a99: with only
+// the title in the header, Claude reported "需求 ID 未提供" and refused to
+// implement). The 工作目录：<path>） tail is what rewritePersonaWorkDir
+// keys off to swap the local path for the remote cwd on Agent-Server runs.
 //
 // NB: the literal sentinel string is intentionally NOT mentioned anywhere in
 // this prompt — past experience shows models occasionally honor an explicit
@@ -526,15 +533,37 @@ func developerDecomposePrompt(title, leadIn, workDir string) string {
 // Routing this prompt through the wizard is what guarantees no sentinel: the
 // orchestrator is short-circuited (see StartCoding) and the -p message
 // contains no trigger phrase.
-func agentDirectPrompt(title, leadIn, workDir string) string {
+func agentDirectPrompt(reqID, title, leadIn, workDir string) string {
 	return fmt.Sprintf(
-		"现在切换到「Agent 开发者」角色，正在执行需求（需求：%s，工作目录：%s）。\n"+
+		"现在切换到「Agent 开发者」角色，正在执行需求（需求 ID：%s，标题：%s，工作目录：%s）。\n"+
 			leadIn+
 			"直接使用 Read / Edit / Write / Bash 工具完成代码实现、构建与基础验证，并在结束时进行 git commit。\n"+
 			"完成后在最终回复里简要说明：做了什么、关键文件、验证方式。\n"+
 			promptpkg.GitCommitConvention+
 			"\n",
-		title, workDir)
+		reqID, title, workDir)
+}
+
+// effectiveDesignDocs returns the stored design doc only when it carries real
+// content. The legacy empty default "[]" (and "", "null", "{}") must NOT be
+// fed to the agent as a design — otherwise the agent sees an empty
+// "## 技术方案" block, concludes there is no plan, and refuses to implement
+// (req_9c63bda996bb6a99: design_docs="[]" but dev_mode="design" produced a
+// prompt that told Claude to "依据方案" with "[]" below it, while the real
+// requirement text was demoted to a "追加说明" tail — Claude refused to
+// code, the job reported done on an empty implementation, and autoPushPR
+// pushed nothing). Filtering the empty default here is what stops that
+// cascade at the source.
+func effectiveDesignDocs(reqRow *model.Requirement) string {
+	if reqRow == nil {
+		return ""
+	}
+	switch d := strings.TrimSpace(reqRow.DesignDocs); d {
+	case "", "[]", "null", "{}":
+		return ""
+	default:
+		return d
+	}
 }
 
 // rewritePersonaWorkDir rewrites the workDir path inside the persona

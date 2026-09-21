@@ -271,20 +271,29 @@ func (h *WizardHandler) runCodingPlanTurn(in *planSplitInput) (string, bool) {
 func (h *WizardHandler) buildPlanPrompt(in *planSplitInput) string {
 	// designMarkdown is only attached on the fresh-session path; on a fork the
 	// design is already in the conversation and re-feeding it wastes context.
+	// effectiveDesignDocs filters the legacy "[]" empty default — feeding "[]"
+	// as a real design makes the planner conclude there is no plan and stall
+	// (mirrors req_9c63bda996bb6a99 on the direct path).
 	designMarkdown := ""
 	if in.sourceSID == "" && in.reqRow != nil {
-		designMarkdown = strings.TrimSpace(in.reqRow.DesignDocs)
+		designMarkdown = effectiveDesignDocs(in.reqRow)
 	}
 
 	var b strings.Builder
 	if in.sourceSID == "" {
-		b.WriteString("请基于已确定的技术方案，把本需求拆解为可逐条执行的**实施步骤列表**。\n")
+		if designMarkdown != "" {
+			b.WriteString("请基于已确定的技术方案，把本需求拆解为可逐条执行的**实施步骤列表**。\n")
+		} else {
+			b.WriteString("请把本需求拆解为可逐条执行的**实施步骤列表**。\n")
+		}
 		b.WriteString("你处于 plan 模式：先读取项目中的相关文件核实方案涉及的文件与符号，再输出步骤，不要修改任何代码。\n\n")
 	} else {
 		b.WriteString("基于已完成的需求分析与技术方案，请把本需求拆解为可逐条执行的**实施步骤列表**。\n")
 		b.WriteString("你处于 plan 模式：可按需读取代码核实细节，但不要修改任何代码。\n\n")
 	}
-	b.WriteString("## 需求\n\n" + in.p.RequirementTitle + "\n\n")
+	b.WriteString("## 需求\n\n")
+	b.WriteString("ID: " + in.p.RequirementID + "\n")
+	b.WriteString("标题: " + in.p.RequirementTitle + "\n\n")
 	b.WriteString("## 工作目录\n\n" + in.workDir + "\n\n")
 	b.WriteString("## 输出\n\n")
 	b.WriteString("一份 Markdown 实施计划，包含编号的步骤列表。每个步骤写清：做什么 / 涉及文件 / 产物形式 / 验收点。\n")
@@ -292,11 +301,19 @@ func (h *WizardHandler) buildPlanPrompt(in *planSplitInput) string {
 	b.WriteString("完成后用 Write 工具把计划写入 `~/.claude/plans/<slug>.md`。\n")
 
 	prompt := b.String()
+	// Requirement description is the primary input on the fresh-session path
+	// (RequirementDesc = req.Description for scheduler/immediate callers). The
+	// fork path keeps the "追加说明" label since the resumed conversation
+	// already carries the requirement and desc is a follow-up adjustment.
+	if desc := strings.TrimSpace(in.p.RequirementDesc); desc != "" {
+		if in.sourceSID == "" {
+			prompt += "\n## 需求描述\n\n" + desc + "\n"
+		} else {
+			prompt += "\n## 用户在开发前的追加说明\n\n" + desc + "\n"
+		}
+	}
 	if designMarkdown != "" {
 		prompt += "\n## 技术方案（来自 requirements.design_docs）\n\n" + designMarkdown + "\n"
-	}
-	if desc := strings.TrimSpace(in.p.RequirementDesc); desc != "" {
-		prompt += "\n## 用户在开发前的追加说明\n\n" + desc + "\n"
 	}
 	// Kind-specific developer tail (currently only fires for kind=issue) keeps
 	// an Issue's plan anchored to "最小改动、修复根因" framing.

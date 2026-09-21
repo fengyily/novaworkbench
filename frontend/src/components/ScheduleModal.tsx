@@ -484,7 +484,7 @@ export function ScheduleModal({
                   className="form-input"
                   value={branchName}
                   onChange={e => setBranchName(e.target.value)}
-                  placeholder="feat/req-xxx"
+                  placeholder={defaultBranchName || 'feat/req-xxx'}
                   disabled={submitting}
                 />
               </div>

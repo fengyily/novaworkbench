@@ -861,6 +861,24 @@ export interface LaunchSpec {
 export const kindOf = (r: { kind?: Kind } | null | undefined): Kind =>
   (r && r.kind) || 'requirement';
 
+// Branch-name convention by requirement kind: issues get a "fix/" prefix,
+// everything else (requirement / idea / legacy) gets "feat/". The dev branch
+// is created by the backend's `git checkout -b` before Claude runs, so this is
+// a path-convention concern, NOT a prompt concern — the agent never creates
+// the branch. Kept alongside kindOf so the kind → prefix derivation lives in
+// one place (the backend mirrors this in branchPrefixForKind).
+export const branchPrefixForKind = (kind?: Kind): string =>
+  kind === 'issue' ? 'fix' : 'feat';
+
+// Default dev branch name for a requirement: "<prefix>/<full id>" (keeps the
+// req_ prefix — matches the backend's anchorWorktree convention and the
+// user-stated "fix/req_xxx" / "feat/req_xxx" format). The design and coding
+// stages key on the same req id, so both resolve to the same branch and the
+// coding stage reuses the design worktree (EnsureWorktree is idempotent per
+// req+branch) rather than colliding.
+export const defaultBranchName = (reqId: string, kind?: Kind): string =>
+  `${branchPrefixForKind(kind)}/${reqId}`;
+
 // ---- i18n label keys ------------------------------------------------------
 // The dictionaries below map backend enum codes onto *translation keys*
 // (resolved at render time via i18n/label.ts tLabel) instead of onto display

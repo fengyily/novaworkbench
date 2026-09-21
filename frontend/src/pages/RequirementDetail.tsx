@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode, type CSSProperties } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch, defaultBranchName } from '../api/client';
 import { tLabel } from '../i18n/label';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
@@ -2108,7 +2108,7 @@ export default function RequirementDetail() {
   const openBranchModal = (extraDesc = '') => {
     if (!req || !project) return;
     extraDescRef.current = extraDesc;
-    const defaultBranch = `feat/${req.id}`;
+    const defaultBranch = defaultBranchName(req.id, kindOf(req));
     const defaultBase = project.default_branch || 'main';
     setBranchName(defaultBranch);
     setBaseBranch(defaultBase);
@@ -2559,7 +2559,7 @@ export default function RequirementDetail() {
         // Derived values for the flight-strip status bar. Built once per
         // render so the strip stays consistent with the form state.
         const stripBase = baseBranch || 'main';
-        const stripNew = branchName || (req ? `feat/${req.id}` : '');
+        const stripNew = branchName || (req ? defaultBranchName(req.id, kindOf(req)) : '');
         const stripEnv = agentServerId
           ? (agentServers.find(s => s.id === agentServerId)?.name || 'remote')
           : 'local';
@@ -2627,7 +2627,7 @@ export default function RequirementDetail() {
                         list="branch-suggestions"
                         value={branchName}
                         onChange={e => setBranchName(e.target.value)}
-                        placeholder={`feat/${req.id}`}
+                        placeholder={defaultBranchName(req.id, kindOf(req))}
                       />
                     </div>
                     <datalist id="branch-suggestions">
@@ -4579,7 +4579,7 @@ export default function RequirementDetail() {
           }
           defaultBranchName={
             scheduleModal.taskType === 'coding' || scheduleModal.taskType === 'design_and_coding'
-              ? `feat/${req.id.replace(/^req_/, '')}`
+              ? defaultBranchName(req.id, kindOf(req))
               : undefined
           }
           defaultBaseBranch={
@@ -4611,7 +4611,7 @@ export default function RequirementDetail() {
         requirementTitle={req.title}
         initialDesignModel={architectModel}
         initialCodingModel={developerModel}
-        defaultBranchName={`feat/${req.id.replace(/^req_/, '')}`}
+        defaultBranchName={defaultBranchName(req.id, kindOf(req))}
         defaultBaseBranch={project?.default_branch ?? 'main'}
         agentServers={agentServers}
         onLaunched={(designJobId) => {
