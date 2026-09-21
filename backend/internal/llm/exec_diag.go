@@ -3,6 +3,7 @@ package llm
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -30,6 +31,12 @@ func FormatStartError(binPath string, err error) string {
 // host is not macOS.
 func diagnoseStartEINVAL(binPath string) string {
 	if runtime.GOOS != "darwin" {
+		return ""
+	}
+	// Gate: file must exist and be a regular executable, otherwise both
+	// xattr and codesign will fail for the wrong reason (file-not-found
+	// rather than quarantine/signature-problem), and we should not hint.
+	if info, err := os.Stat(binPath); err != nil || !info.Mode().IsRegular() {
 		return ""
 	}
 	var hints []string
