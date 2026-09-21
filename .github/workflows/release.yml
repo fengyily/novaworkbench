@@ -36,6 +36,7 @@ concurrency:
 permissions:
   contents: write   # create the GitHub Release
   packages: write    # push the multi-arch image to GHCR
+  pages: write       # push the apt repo to the gh-pages branch (Pages source)
 
 env:
   NAMESPACE: ${{ vars.GHCR_NAMESPACE || github.repository_owner }}
@@ -275,8 +276,9 @@ jobs:
       #
       # APT_REPO_TOKEN is optional: when the apt repo lives in the SAME
       # repository as this workflow, the default GITHUB_TOKEN (contents:
-      # write at the top of this file) already has push access to
-      # gh-pages. Set APT_REPO_TOKEN only if you ever split the repo.
+      # write + pages: write at the top of this file) already has push
+      # access to gh-pages. Set APT_REPO_TOKEN only if you ever split the
+      # repo into a separate apt repo that this workflow also publishes to.
       - name: Publish to apt repo (gh-pages)
         env:
           VERSION: ${{ steps.meta.outputs.version }}

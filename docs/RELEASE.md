@@ -122,9 +122,9 @@ Debian / Ubuntu 用户能直接 `apt install nova`。本仓库使用
 - **Settings → Pages**：Build from branch 选择 `gh-pages` / `(root)`，让仓库根目录
   直接作为 apt 源根（路径前缀 `/apt`）。首次发布前必须手动启用一次，否则
   `https://<owner>.github.io/novaworkbench/apt/dists/stable/Release` 会 404。
-- **Permissions**：workflow 已声明 `contents: write`，同仓库 push `gh-pages`
-  不需要额外 PAT。`secrets.APT_REPO_TOKEN` 仅在你想把 apt 仓库搬到独立 repo
-  时使用（fallback 到 `GITHUB_TOKEN`）。
+- **Permissions**：workflow 已声明 `contents: write` + `pages: write`，
+  同仓库 push `gh-pages` 不需要额外 PAT。`secrets.APT_REPO_TOKEN` 仅在你想
+  把 apt 仓库搬到独立 repo 时使用（fallback 到 `GITHUB_TOKEN`）。
 - **README 中的 `<PAGES_HOST>`**：根据实际 Pages 域名替换占位（默认
   `https://<owner>.github.io/novaworkbench`），用户执行
   `echo "deb [trusted=yes] https://<PAGES_HOST>/apt stable main" | sudo tee /etc/apt/sources.list.d/nova.list` 即可。
@@ -146,6 +146,16 @@ Debian / Ubuntu 用户能直接 `apt install nova`。本仓库使用
 apt-releaser 子 key，签名而非认证）。
 
 ### 验证
+
+推荐先用 CI 之后立刻跑一次自动检查：
+
+```bash
+OWNER=fengyily ./scripts/check-apt-publish.sh
+```
+
+退出码 0 表示 `gh-pages` 分支存在且所有关键文件（`Release`、`Packages`、
+两个 arch 的 `binary-*/Packages`、两个 arch 的 `pool/.../Packages`）都能
+从 `<owner>.github.io/<repo>/apt/...` 取到。
 
 ```bash
 # 1. release.yml 跑完后检查 GitHub Release 附件
