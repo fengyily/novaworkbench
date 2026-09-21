@@ -142,8 +142,17 @@ func TestFormatStartError_EINVAL_FallbackOnCleanBinary(t *testing.T) {
 		t.Fatalf("expected fallback hint section on a clean binary; got %q", got)
 	}
 	// The fallback hint should suggest the manual terminal verification.
-	if !strings.Contains(got, "请在终端手动验证") {
+	if !strings.Contains(got, "请手动验证") {
 		t.Fatalf("expected terminal-verification hint on fallback; got %q", got)
+	}
+	// The fallback hint should explicitly mention the "other stages work"
+	// scenario so a user who can run design/coding normally doesn't waste
+	// time restarting nova for a transient per-request failure.
+	if !strings.Contains(got, "其他 stage 能正常调用") {
+		t.Fatalf("expected transient-retry hint on fallback; got %q", got)
+	}
+	if !strings.Contains(got, "重试本步骤通常即可恢复") {
+		t.Fatalf("expected retry-recovery wording on fallback; got %q", got)
 	}
 }
 

@@ -106,14 +106,29 @@ func diagnoseStartEINVAL(binPath string) string {
 	if len(hints) == 0 {
 		// 6. Last-resort hint. The binary looks healthy on disk
 		//    (signed, unquarantined, right arch, sane size) but exec
-		//    still failed — the cause is almost certainly inherited
-		//    from the parent process (the shell that launched nova
-		//    may itself be running under a macOS sandbox profile, e.g.
-		//    inside an app that sandboxes its child processes). The only
-		//    actionable advice is to verify the binary works directly
-		//    from a clean terminal — if it does, restart nova from a
-		//    non-sandboxed shell.
-		return "可能原因与修复建议:\n  - 二进制文件本身似乎正常 (签名 / 隔离属性 / 架构 / 大小均通过)。请在终端手动验证: " + binPath + " --version；若终端可直接运行，请从一个普通终端 (而非被沙盒化的应用内置终端) 重启 Nova 后端。"
+		//    still failed. Two scenarios, ordered by likelihood:
+		//
+		//    a) Per-request transient sandbox / quarantine state. The
+		//       nova process can usually spawn claude fine (other wizard
+		//       stages like 方案设计 / 开发实现 work) but this one
+		//       specific spawn hit a transient kernel denial — retrying
+		//       the same wizard stage from the UI typically recovers.
+		//
+		//    b) The nova process itself is running under a macOS
+		//       sandbox profile inherited from the parent shell (e.g.
+		//       launched from inside an app that sandboxes its child
+		//       processes). In that case ALL stages fail — the only
+		//       actionable advice is to verify the binary works
+		//       directly from a clean terminal, then restart nova from
+		//       a non-sandboxed shell.
+		//
+		// We tell the user which scenario they're in by the wording of
+		// the manual-verification step ("terminal can run it" vs "all
+		// stages fail"), so they don't waste time restarting a
+		// already-healthy nova for a transient one-shot failure.
+		return "可能原因与修复建议:\n" +
+			"  - exec 调用在内核层被拒绝 (EINVAL)。如果方案设计 / 开发实现等其他 stage 能正常调用 Claude CLI，本次失败属于瞬态状态——直接重试本步骤通常即可恢复。\n" +
+			"  - 若所有 stage 都失败 (新建的需求、重启 Nova 仍然 EINVAL)，说明 Nova 进程本身继承了沙盒限制。请手动验证: " + binPath + " --version；若终端可直接运行，请从一个普通终端 (Terminal.app / iTerm2，而非任何应用的内置终端) 重启 Nova 后端。"
 	}
 	return "可能原因与修复建议:\n  - " + strings.Join(hints, "\n  - ")
 }
