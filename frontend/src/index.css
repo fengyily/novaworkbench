@@ -1451,7 +1451,23 @@ select.form-input { cursor: pointer; }
    `position:relative` wrapper. Items inherit the system font and render
    the skill slug in mono so it visually reads as code. The `.active`
    class paints the keyboard-focused item with the indigo-tint token. */
-.at-mention-wrapper { position: relative; }
+/* AtMentionTextarea wraps a plain <textarea> with an absolutely-positioned
+   skill-suggest popover. Inside `.chat-input-row` (a flex container) the
+   wrapper is the flex item; without an explicit fill, flex shrinks it to
+   the textarea's intrinsic width and the input looks cramped on PC. The
+   rules below make it claim the full row width and let the inner textarea
+   follow that width — independent of how many rows / which min-height the
+   panel CSS sets, so deep-refine / doc-refine / coding / adjust composers
+   all stay the same full width. */
+.at-mention-wrapper {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+.at-mention-wrapper > textarea {
+  width: 100%;
+  box-sizing: border-box;
+}
 .at-mention-popover {
   position: absolute;
   left: 0;
