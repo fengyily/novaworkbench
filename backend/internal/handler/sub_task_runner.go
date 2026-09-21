@@ -210,6 +210,51 @@ func (r *SubTaskRunner) NewPendingSubTask(reqID, title, prompt, modelDisplay, so
 	return st, job, newSID, nil
 }
 
+// AcquireGates takes the same two admission gates Run uses — the per-project
+// limiter then the process-wide runSem — so a non-Claude sub-task (the shell
+// push/PR job, see handler/push_pr_shell.go) honors the exact same project-
+// concurrency cap as LLM children. Without this, a parallel shell push could
+// race another requirement's git operations on the same checkout / git index
+// lock. The returned release func frees both gates (idempotent — safe to call
+// once). The job gets "⏳ 排队中…" frames while it waits, mirroring Run so the
+// SubTaskPanel card reads identically regardless of execution backend.
+//
+// Gate ORDER matters (limiter before runSem, same as Run) so this path can
+// never deadlock against the orchestration queue or Run. The cap is refreshed
+// from settings first so a just-saved subtask.concurrency value applies here
+// too.
+func (r *SubTaskRunner) AcquireGates(projectID string, job *store.Job) (release func()) {
+	if r.settingSvc != nil {
+		if conc, _, _, cerr := r.settingSvc.SubTaskConfig(); cerr == nil {
+			r.limiter.SetMax(conc)
+		} else {
+			log.Printf("[sub-task] read sub-task settings: %v (keeping cap %d)", cerr, r.limiter.Max())
+		}
+	}
+	if !r.limiter.TryAcquire(projectID) {
+		job.Append(store.LogLine{Type: "phase", Content: fmt.Sprintf("⏳ 排队中（当前项目并发上限 %d 已满）...", r.limiter.Max())})
+		for !r.limiter.TryAcquire(projectID) {
+			time.Sleep(750 * time.Millisecond)
+		}
+	}
+	select {
+	case r.runSem <- struct{}{}:
+		// slot acquired immediately
+	default:
+		job.Append(store.LogLine{Type: "phase", Content: fmt.Sprintf("⏳ 等待空闲 worker slot（进程并发上限 %d 已满）...", cap(r.runSem))})
+		r.runSem <- struct{}{}
+	}
+	once := false
+	return func() {
+		if once {
+			return
+		}
+		once = true
+		r.limiter.Release(projectID)
+		<-r.runSem
+	}
+}
+
 // resolveEffectiveAgentServer returns the environment a sub-task actually runs
 // in — the SINGLE source of truth for both dispatch paths (SubTaskRunner.Run
 // for manual / merge children and WizardHandler.ExecuteOrchestratedChild for

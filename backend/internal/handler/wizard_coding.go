@@ -878,6 +878,14 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		if reqRow != nil && reqRow.DevMode == service.DevModeDesign {
 			designMarkdown = effectiveDesignDocs(reqRow)
 		}
+		// Fix D: when the user picked 「基于方案开发」 but no real design doc
+		// exists (effectiveDesignDocs collapsed "[]" → ""), surface that the
+		// intent was silently ignored — the run still proceeds in direct-develop
+		// mode, but the user should know to run 「生成技术方案」 first if they
+		// genuinely wanted plan-driven development. Non-blocking by design.
+		if reqRow != nil && reqRow.DevMode == service.DevModeDesign && designMarkdown == "" {
+			job.Append(store.LogLine{Type: "message", Content: "⚠️ 你选择了「基于方案开发」，但未检测到技术方案（design_docs 为空）。已按直接开发模式启动；如需基于方案请先执行「生成技术方案」。"})
+		}
 		log.Printf("[start-coding] %s: fresh-session prompt built reqID=%s title_len=%d desc_len=%d design_len=%d dev_mode=%s",
 			p.RequirementID, p.RequirementID, len(p.RequirementTitle), len(p.RequirementDesc), len(designMarkdown),
 			func() string {
@@ -893,7 +901,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			// .novaworkbench/subtasks.json Write. The agent system prompt says
 			// "不要先拆分子任务" and "一次会话内完成端到端开发", so the model
 			// consistently implements instead of splitting.
-			leadIn := "请先读取项目中的相关文件理解现有代码结构与需求上下文，然后直接实现需求：\n"
+			// Fix C: scope the read-files instruction to files RELEVANT to the
+			// requirement — the previous "理解现有代码结构" wording was read as
+			// "survey the whole repo" and the agent spent turns poking the
+			// workbench's own runtime/DB/docker (req_7c04316f83837af6 ran
+			// sqlite3/psql/dbconfig.json/docker ps before coding the hello cmd).
+			leadIn := "请先按需求描述定位涉及的项目文件/目录并读取相关代码，不要遍历与需求无关的运行时/数据库/部署配置，然后直接实现需求：\n"
 			if designMarkdown != "" {
 				leadIn = "用户选择「基于方案开发」：不会接续原方案会话，而是把下面的方案作为唯一依据创建新会话直接实现。\n" +
 					"请先读取项目中的相关文件理解现有代码结构，再依据方案直接实现：\n"
@@ -906,10 +919,10 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			// and tryAutoOrchestrate dispatches children. The split_tasks=false
 			// fresh-session case is handled by the roleKey=="agent" branch
 			// above (we route those requests through the agent role entirely).
-			leadIn := "请先读取项目中的相关文件理解现有代码结构与需求上下文，然后立即完成**任务拆分**：\n"
+			leadIn := "请先按需求描述定位涉及的项目文件/目录并读取相关代码，不要遍历与需求无关的运行时/数据库/部署配置，然后立即完成**任务拆分**：\n"
 			if designMarkdown != "" {
 				leadIn = "用户选择「基于方案开发」：不会接续原方案会话，而是把下面的方案作为唯一依据创建新会话。\n" +
-					"请先读取项目中的相关文件理解现有代码结构，然后依据方案立即完成**任务拆分**：\n"
+					"请先读取与方案直接相关的项目文件，然后依据方案立即完成**任务拆分**：\n"
 			}
 			prompt = developerDecomposePrompt(p.RequirementTitle, leadIn, workDir)
 		}
@@ -1035,109 +1048,14 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// in wizard_orchestration.go) also embed this string — duplication is
 	// harmless: Claude just sees the same rule twice.
 	prompt += "\n" + promptpkg.GitCommitConvention + "\n"
-	// Inject the project's git committer identity (from its platform
-	// token) as GIT_AUTHOR_*/GIT_COMMITTER_* env into the claude
-	// subprocess. git reads these env vars over any config, so when the
-	// developer role runs `git commit` via its Bash tool it carries a
-	// real identity on hosts without ~/.gitconfig (e.g. the Docker
-	// container). Empty on miss → no injection, git falls back to its
-	// own config lookup (preserves dev-machine behaviour). Mirrors
-	// MergeHandler.gitIdentityForReq via the shared lookupGitIdentity.
-	var codingExtraEnv []string
-	name, email := lookupGitIdentity(h.projectSvc, h.platformSvc, reqRow)
-	if name != "" || email != "" {
-		if name != "" {
-			codingExtraEnv = append(codingExtraEnv, "GIT_AUTHOR_NAME="+name, "GIT_COMMITTER_NAME="+name)
-		}
-		if email != "" {
-			codingExtraEnv = append(codingExtraEnv, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
-		}
-	}
-	// HTTPS git credentials: when the project has a platform token bound
-	// and the remote is HTTPS, write a per-run GIT_ASKPASS script so the
-	// developer's `git push origin <branch>` via Bash tool authenticates
-	// without exposing the token to the model / prompt / .git/config.
-	// SSH remotes and unconfigured projects get (nil, no-op cleanup) from
-	// the helper and fall back to ambient credentials (preserves dev-
-	// machine behaviour). cleanup() is a no-op when no askpass script was
-	// written, so defer is always safe.
-	if credEnv, credCleanup := gitCredentialEnv(h.projectSvc, h.platformSvc, reqRow); len(credEnv) > 0 {
-		codingExtraEnv = append(codingExtraEnv, credEnv...)
+	// Local credential + GPG provisioning shared with the shell push/PR job
+	// (handler/push_pr_shell.go). Extracted so both the coding subprocess and
+	// the shell `git commit`/`git push` carry the same identity / askpass /
+	// signing setup — a divergence here would mean the coding agent's commits
+	// and the push job's merge commit sign under different identities.
+	codingExtraEnv, credCleanup := h.assembleGitCredEnv(reqRow, workDir, p.ProjectPath, job)
+	if credCleanup != nil {
 		defer credCleanup()
-	}
-	// GPG signing: when the project's platform token has GPG enabled and
-	// carries key material, lay down a per-run GNUPGHOME under the OS
-	// temp dir, import the armored key, and write user.name / user.email
-	// / commit.gpgsign / gpg.program into the worktree's per-worktree
-	// git config. Mirrors the remote path in spirit (handler/gpg_remote.go
-	// Step 2.5) but uses the local os.* helpers instead of SSH — see
-	// handler/gpg_local.go for the rationale.
-	//
-	// Failure policy differs from the remote path: the local branch is
-	// interactive dev on the developer's own machine, where silently
-	// dropping the signing requirement is far less costly than refusing
-	// to start. We log a precise warning (via classifyGitSignFailure)
-	// so the user can fix the token in 「设置 → 平台 Token」 and retry,
-	// then proceed without signing. The remote branch aborts because an
-	// unsigned push on a "Require signed commits" branch is strictly
-	// worse than no push at all.
-	//
-	// Skip entirely when:
-	//   - no requirement row (legacy quick-start path, no token to bind to)
-	//   - no platform token attached to the project
-	//   - the project's projectSvc lookup fails (treat as "no identity, no signing")
-	//   - GPGSigningMaterial returns enabled=false or an empty armored key
-	//     (configured-off path; identical to today's behavior)
-	if reqRow != nil {
-		if project, pErr := h.projectSvc.Get(reqRow.ProjectID); pErr == nil && project != nil && project.PlatformTokenID != "" {
-			enabled, _, armored, passphrase, gpgErr := h.platformSvc.GPGSigningMaterial(project.PlatformTokenID)
-			switch {
-			case gpgErr != nil:
-				// Decrypt failure usually means the master key went
-				// missing or was rotated — not something a retry fixes.
-				// Surface a precise warning so the user knows to check
-				// the token's stored private key.
-				job.Append(store.LogLine{Type: "message", Content: "⚠️ 读取 GPG 配置失败：" + gpgErr.Error() + "，本次提交将不签名"})
-			case enabled && armored != "":
-				job.Append(store.LogLine{Type: "phase", Content: "🔐 配置本地 GPG 签名..."})
-				// baseRepo is the project's main checkout — worktrees
-				// (when useWorktree=true) live under worktreeRoot(p.ProjectPath)
-				// but share p.ProjectPath's .git directory via `git
-				// worktree add`. buildGPGProvisionScript needs the main
-				// repo path to enable extensions.worktreeConfig. When
-				// useWorktree=false, workDir == p.ProjectPath and the
-				// script just writes user.name / commit.gpgsign / etc.
-				// to the main checkout's per-worktree config — same
-				// effect, the commits in workDir pick them up.
-				gnupgHome, keyID, cleanup, provErr := provisionLocalGPG(workDir, p.ProjectPath, armored, passphrase, name, email)
-				if provErr != nil {
-					if cleanup != nil {
-						cleanup()
-					}
-					// Local path: warn but DO NOT abort. The user can
-					// fix the GPG config and re-run; in the meantime a
-					// working local coding session is more valuable
-					// than a signed-but-not-runnable one. The remote
-					// branch aborts on the same error.
-					job.Append(store.LogLine{Type: "message", Content: "⚠️ " + provErr.Error() + "，本次提交将不签名"})
-				} else {
-					defer cleanup()
-					job.Append(store.LogLine{Type: "message", Content: "✅ 本地 GPG 已就绪（keyid=" + keyID + "）"})
-					// Back-fill the keyid so the UI shows it on the
-					// next list reload. Ignore errors — the key is
-					// already usable locally; a stale empty keyid is a
-					// UI-only nit (matches the remote branch's policy).
-					_ = h.platformSvc.UpdateGPGKeyID(project.PlatformTokenID, keyID)
-					_ = gnupgHome // path isn't needed after provisioning; cleanup() handles teardown
-				}
-			case enabled:
-				// Enabled but no key material — the user toggled the
-				// checkbox without uploading a private key. Continue
-				// without signing and warn loudly so the resulting
-				// unsigned push (if any) doesn't come as a surprise.
-				job.Append(store.LogLine{Type: "message", Content: "⚠️ 已启用 GPG 签名但未保存私钥，本次提交未签名"})
-			}
-		}
 	}
 	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         prompt,
@@ -1333,7 +1251,94 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	}
 }
 
-// AdjustCoding starts a background JobStore job that resumes the prior coding
+// assembleGitCredEnv builds the per-run git credential + signing environment
+// for a LOCAL coding or push/PR job, so both the Claude subprocess (coding)
+// and the shell `git commit`/`git push` (push_pr_shell.go) carry the SAME
+// identity, askpass, and GPG setup — a divergence would mean the coding
+// agent's commits and the push job's merge commit sign under different
+// identities.
+//
+// Returns:
+//   - env: GIT_AUTHOR_*/GIT_COMMITTER_* + GIT_ASKPASS env spliced into the
+//     subprocess env. Empty when no identity/askpass applies.
+//   - cleanup: tears down the askpass script + GPG GNUPGHOME + per-worktree
+//     git config writes. Always non-nil (no-op when nothing was provisioned);
+//     caller defers it.
+//
+// GPG provisioning writes user.name / commit.gpgsign / gpg.program into the
+// worktree's per-worktree git config (a side effect, not env) so plain `git`
+// commands run in workDir pick up signing automatically — that's why the shell
+// push job gets signing for free by calling this.
+//
+// Failure policy mirrors the historical local path: GPG decrypt/provision
+// failures WARN (via job.Append) but do NOT abort — a working run is more
+// valuable than a signed-but-broken one on the developer's own machine.
+func (h *WizardHandler) assembleGitCredEnv(reqRow *model.Requirement, workDir, projectPath string, job *store.Job) (env []string, cleanup func()) {
+	var cleanups []func()
+	cleanup = func() {
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			cleanups[i]()
+		}
+	}
+	if reqRow == nil {
+		return env, cleanup
+	}
+	// 1. Committer identity (GIT_AUTHOR_*/GIT_COMMITTER_*).
+	name, email := lookupGitIdentity(h.projectSvc, h.platformSvc, reqRow)
+	if name != "" {
+		env = append(env, "GIT_AUTHOR_NAME="+name, "GIT_COMMITTER_NAME="+name)
+	}
+	if email != "" {
+		env = append(env, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
+	}
+	// 2. HTTPS askpass (per-run script, token not echoed).
+	if credEnv, credCleanup := gitCredentialEnv(h.projectSvc, h.platformSvc, reqRow); len(credEnv) > 0 {
+		env = append(env, credEnv...)
+		cleanups = append(cleanups, credCleanup)
+	}
+	// 3. GPG signing — writes per-worktree git config (side effect) so plain
+	//    `git commit`/`git merge` in workDir sign automatically.
+	if project, pErr := h.projectSvc.Get(reqRow.ProjectID); pErr == nil && project != nil && project.PlatformTokenID != "" {
+		enabled, _, armored, passphrase, gpgErr := h.platformSvc.GPGSigningMaterial(project.PlatformTokenID)
+		switch {
+		case gpgErr != nil:
+			if job != nil {
+				job.Append(store.LogLine{Type: "message", Content: "⚠️ 读取 GPG 配置失败：" + gpgErr.Error() + "，本次提交将不签名"})
+			}
+		case enabled && armored != "":
+			if job != nil {
+				job.Append(store.LogLine{Type: "phase", Content: "🔐 配置本地 GPG 签名..."})
+			}
+			// baseRepo = projectPath (the main checkout). Worktrees share its
+			// .git dir; buildGPGProvisionScript needs the main repo path to
+			// enable extensions.worktreeConfig. When workDir == projectPath
+			// (no worktree) the script writes to the main checkout's config.
+			gnupgHome, keyID, gpgCleanup, provErr := provisionLocalGPG(workDir, projectPath, armored, passphrase, name, email)
+			if provErr != nil {
+				if gpgCleanup != nil {
+					gpgCleanup()
+				}
+				if job != nil {
+					job.Append(store.LogLine{Type: "message", Content: "⚠️ " + provErr.Error() + "，本次提交将不签名"})
+				}
+			} else {
+				cleanups = append(cleanups, gpgCleanup)
+				if job != nil {
+					job.Append(store.LogLine{Type: "message", Content: "✅ 本地 GPG 已就绪（keyid=" + keyID + "）"})
+				}
+				_ = h.platformSvc.UpdateGPGKeyID(project.PlatformTokenID, keyID)
+				_ = gnupgHome
+			}
+		case enabled:
+			if job != nil {
+				job.Append(store.LogLine{Type: "message", Content: "⚠️ 已启用 GPG 签名但未保存私钥，本次提交未签名"})
+			}
+		}
+	}
+	return env, cleanup
+}
+
+
 // session (--resume coding_session_id) to apply a follow-up adjustment to
 // already-implemented code. Because the resumed session already carries the
 // requirement, analysis, design, and the persona set by StartCoding

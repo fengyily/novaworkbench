@@ -672,15 +672,40 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 		commitLang = loadProjectCommitLang(h.db, reqRow.ProjectID)
 	}
 
-	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, "", pushModel, pushCfgID, commitLang, "auto")
-	if err != nil {
-		log.Printf("[auto-push] %s: dispatch failed: %v", reqRow.ID, err)
-		return
+	// Route by where the code physically lives:
+	//   - LOCAL (incl. local-sync Agent requirements whose code was synced
+	//     back to the local worktree) → runPushPRShellJob: a deterministic
+	//     git+gh shell sequence in a JobStore job, no LLM turn. Saves the
+	//     ~59K-input-token Claude turn the LLM path burned just to run 4 git
+	//     commands (req_7c04316f83837af6). Merge conflicts fall back to the
+	//     LLM sub-task inside the shell job.
+	//   - REMOTE (origin-transport Agent requirements) → dispatchPushPRSubTask
+	//     (LLM): the push must run on the agent host, which a local shell
+	//     can't reach.
+	var jobID, subTaskID string
+	if codeLivesOnAgent(reqRow) {
+		var derr error
+		jobID, subTaskID, derr = dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, "", pushModel, pushCfgID, commitLang, "auto")
+		if derr != nil {
+			log.Printf("[auto-push] %s: remote LLM dispatch failed: %v", reqRow.ID, derr)
+			return
+		}
+		log.Printf("[auto-push] %s: remote → LLM sub-task %s job %s branch=%s model=%q", reqRow.ID, subTaskID, jobID, dev, pushModel)
+	} else {
+		var serr error
+		jobID, subTaskID, serr = h.runPushPRShellJob(reqRow, dev, base, remote, platformType, "", pushModel, pushCfgID, commitLang)
+		if serr != nil {
+			log.Printf("[auto-push] %s: local shell dispatch failed: %v", reqRow.ID, serr)
+			return
+		}
+		log.Printf("[auto-push] %s: local → shell job %s sub_task=%s branch=%s", reqRow.ID, jobID, subTaskID, dev)
 	}
-	log.Printf("[auto-push] %s: dispatched push+PR sub-task %s job %s branch=%s model=%q inherited-config=%q", reqRow.ID, subTaskID, jobID, dev, pushModel, reqRow.DeveloperConfigID)
 
 	// Bump parent requirement last-active time so the auto-push dispatch shows
-	// up in RequirementsList / ProjectDetail "更新时间" columns.
+	// up in RequirementsList / ProjectDetail "更新时间" columns. (The shell
+	// path also Touches in its defer; the double-touch is harmless — idempotent
+	// updated_at write. Kept here so the remote LLM path still bumps when it
+	// returns immediately without running a job body here.)
 	if perr := h.reqSvc.Touch(reqRow.ID); perr != nil {
 		log.Printf("[wizard] touch requirement %s after auto-push: %v", reqRow.ID, perr)
 	}
