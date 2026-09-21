@@ -683,7 +683,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	if err := cmd.Start(); err != nil {
 		logClaudeExecDiag(scope, cmd)
 		log.Printf("[%s] exec diag: cmd.Start() failed: %T %v", scope, err, err)
-		return claudeStreamOutcome{errMsg: "启动 Claude 失败: " + err.Error()}
+		return claudeStreamOutcome{errMsg: llm.FormatStartError(cmd.Path, err)}
 	}
 	logClaudeEnvConfig(scope, cmd)
 	logClaudeCmd(scope, cmd)
