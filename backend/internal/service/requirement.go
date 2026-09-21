@@ -60,6 +60,31 @@ func normalizeKind(k string) string {
 	return k
 }
 
+// stripMarkdownHeader removes a leading Markdown ATX heading prefix ("##",
+// "###", …) from a title so a value like "## 需求背景" is stored/displayed as
+// "需求背景". The title field is a one-line identifier, not Markdown body, so
+// leaving the "#" sigils in confused both the UI badge and the coding agent —
+// req_7c04316f83837af6 had title="## 需求背景" and Claude wasted turns grepping
+// its own requirement id to confirm what it was. Only a single leading run of
+// '#' followed by spaces is stripped; a title with '#' mid-string is untouched.
+// Returns the original when stripping would yield an empty string (don't
+// destroy a user's "###"-only edge input — leave it as-is instead).
+func stripMarkdownHeader(s string) string {
+	trimmed := strings.TrimLeft(s, " \t")
+	if !strings.HasPrefix(trimmed, "#") {
+		return s
+	}
+	// Strip the leading '#' run and any spaces immediately after it.
+	stripped := strings.TrimLeft(trimmed, "#")
+	stripped = strings.TrimLeft(stripped, " \t")
+	if stripped == "" {
+		// All sigils / whitespace — leave the original alone rather than
+		// producing an empty title.
+		return s
+	}
+	return stripped
+}
+
 // Valid status transitions — two-role stage-gate lifecycle:
 // draft → analyzing → designing → designed → developing → done
 // (any state → archived). Each gate is completed by a manual user action.
@@ -434,6 +459,9 @@ func (s *RequirementService) Create(req model.CreateRequirementReq) (*model.Requ
 	if req.Priority == "" {
 		req.Priority = "medium"
 	}
+	// Normalize a leading Markdown heading out of the title so a pasted
+	// "## 需求背景" is stored as "需求背景" (see stripMarkdownHeader).
+	req.Title = stripMarkdownHeader(req.Title)
 	// Validate kind at the boundary; reject unknown values so a typo in the
 	// frontend or a future API consumer doesn't silently misclassify a
 	// requirement. Empty is allowed here and normalized below.
@@ -500,6 +528,9 @@ func (s *RequirementService) Touch(id string) error {
 }
 
 func (s *RequirementService) Update(id string, req model.CreateRequirementReq) (*model.Requirement, error) {
+	// Normalize a leading Markdown heading out of the title (see
+	// stripMarkdownHeader).
+	req.Title = stripMarkdownHeader(req.Title)
 	// skip_analysis is a *bool: nil preserves the stored value (COALESCE keeps
 	// the existing column when the param is NULL), a non-nil pointer updates it.
 	// This lets the edit modal toggle the flag while other callers that only
@@ -1216,6 +1247,10 @@ func (s *RequirementService) PromoteFromIdea(sourceID string, summarizer Summari
 	if title == "（未达成共识）" || strings.TrimSpace(title) == "" || strings.TrimSpace(markdown) == "" {
 		return nil, promoteSummaryErrUnconverged
 	}
+
+	// Normalize a leading Markdown heading out of the LLM-summarized title
+	// (the summarizer occasionally emits "## <title>" — see stripMarkdownHeader).
+	title = stripMarkdownHeader(title)
 
 	// Marshal criteria back into the JSON-array-string shape the schema stores.
 	criteriaJSON := "[]"
