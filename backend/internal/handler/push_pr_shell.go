@@ -105,12 +105,40 @@ func (h *WizardHandler) runPushPRShellJob(reqRow *model.Requirement, dev, base, 
 // exit path calls job.Finish and the deferred Save/panic-recovery mirrors
 // SubTaskRunner.Run's scaffolding (copied, not shared, to avoid refactoring
 // the working Run path).
+//
+// sub-task row status: NewPendingSubTask inserts the row in 'pending'; this
+// function flips it to 'running' once it has won its admission gate, then to
+// 'done' | 'error' on exit. Without those flips the SubTaskPanel chip would
+// read "排队中 · 等待项目空闲" forever (the LLM path's equivalent is
+// Run → MarkRunning → finishSubTask → subTaskSvc.Finish). The artifact body
+// is the full JobStore log rendered as Markdown so the user can reopen it
+// from the SubTaskPanel card even after the in-memory ring buffer evicts.
 func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.SubTask, job *store.Job, dir, projectPath, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang string) {
+	var runStartTime time.Time
 	defer func() {
 		lines, status, exitCode := job.Snapshot()
 		log.Printf("[push-pr-shell] defer-Save job_id=%s req_id=%s sub_task_id=%s status=%s exit=%d lines=%d", job.ID, st.RequirementID, st.ID, status, exitCode, len(lines))
 		if perr := h.jobLogSvc.Save(job.ID, st.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, ""); perr != nil {
 			log.Printf("[push-pr-shell] failed to persist job log %s: %v", job.ID, perr)
+		}
+		// Mirror the LLM path: persist a final sub_tasks row state so the
+		// SubTaskPanel chip leaves "排队中" and the artifact lands in the DB.
+		// runStartTime stays zero when the job never made it past the
+		// gate/stopped-check (those exits call job.Finish(0, JobDone)
+		// directly); zero is the documented "skip duration" sentinel per
+		// SubTaskService.Finish, so duration_seconds stays at the column
+		// default — matching the LLM path's behavior for stopped-while-queued
+		// children.
+		if h.subTaskSvc != nil {
+			finalStatus := model.SubTaskStatusDone
+			if status == store.JobError {
+				finalStatus = model.SubTaskStatusError
+			}
+			artifactBody := renderShellJobLog(lines)
+			artifact := buildSubTaskArtifact(st, "", artifactBody, time.Now())
+			if ferr := h.subTaskSvc.Finish(st.ID, finalStatus, artifact, "", model.SubTaskTokens{}, 0, runStartTime); ferr != nil {
+				log.Printf("[push-pr-shell] failed to finish sub_task %s: %v", st.ID, ferr)
+			}
 		}
 		// Bump the parent requirement's updated_at so the auto-push shows up
 		// in RequirementsList (mirrors autoPushPR's Touch).
@@ -139,6 +167,14 @@ func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.Sub
 		job.Append(store.LogLine{Type: "message", Content: "⏹ 排队期间已被停止，未启动执行"})
 		job.Finish(0, store.JobDone)
 		return
+	}
+	// Flip the row to "running" — same gate the LLM path uses
+	// (sub_task_runner.go: MarkRunning). Without this the SubTaskPanel chip
+	// renders "排队中 · 等待项目空闲" for the entire shell lifetime, even
+	// after the job has finished. runStartTime feeds sub_tasks.duration_seconds.
+	runStartTime, mErr := h.subTaskSvc.MarkRunning(st.ID)
+	if mErr != nil {
+		log.Printf("[push-pr-shell] failed to mark running for %s: %v", st.ID, mErr)
 	}
 	job.Append(store.LogLine{Type: "phase", Content: "🚀 本地 shell 推送流程启动（dev=" + dev + ", base=" + base + "）"})
 
@@ -305,6 +341,51 @@ func (h *WizardHandler) createPRShell(job *store.Job, git func(...string) (strin
 	default:
 		return compareURL(remote, base, dev)
 	}
+}
+
+// renderShellJobLog renders the JobStore's full log as the sub_task.artifact
+// Markdown body. Mirrors the "full transcript" affordance the LLM child path
+// already gives users — open the SubTaskPanel card after the run and you
+// see every line the shell produced, phase / message / error / result all
+// preserved. Empty input falls through to a single "（无日志）" so the
+// Markdown body is never blank.
+func renderShellJobLog(lines []store.LogLine) string {
+	if len(lines) == 0 {
+		return "（无日志）"
+	}
+	var b strings.Builder
+	for _, ln := range lines {
+		typ := strings.TrimSpace(ln.Type)
+		content := strings.TrimRight(ln.Content, "\n")
+		switch typ {
+		case "phase":
+			b.WriteString("\n## ")
+			b.WriteString(content)
+			b.WriteString("\n")
+		case "error":
+			b.WriteString("\n- ")
+			b.WriteString(content)
+		case "tool_call", "message", "tool_result":
+			b.WriteString("\n- ")
+			b.WriteString(content)
+		case "result":
+			b.WriteString("\n### 结果\n\n")
+			b.WriteString(content)
+			b.WriteString("\n")
+		case "done":
+			b.WriteString("\n**")
+			b.WriteString(content)
+			b.WriteString("**\n")
+		case "conflict":
+			b.WriteString("\n> ⚠️ ")
+			b.WriteString(content)
+			b.WriteString("\n")
+		default:
+			b.WriteString("\n")
+			b.WriteString(content)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // aheadBehindInfo is a thin wrapper over `git rev-list --left-right --count`
