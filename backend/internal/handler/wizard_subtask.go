@@ -343,12 +343,15 @@ func (h *WizardHandler) runSubTask(
 }
 
 // computeSubTaskCostCents resolves the run's USD-equivalent cost in cents
-// against the active claude config's per-model unit price (input / output
-// per million tokens, same convention the dashboard's usage rollup uses).
-// Cache creation + cache reads are billed as input. Returns 0 when there's
-// no active config, the model isn't priced, or the config hasn't
-// configured unit prices yet — the SubTaskPanel renders "—" rather than
-// "$0.00" in that case so the user knows pricing wasn't available.
+// against the active claude config's per-model unit price (input / output /
+// cache_read per million tokens, same convention the dashboard's usage rollup
+// uses). Cache reads are billed at the model's cache_read_price when set;
+// otherwise they fall back to input_price so older configs without an
+// explicit cache rate keep their pre-feature cost. Cache creation tokens
+// continue to bill at input_price (no separate cache_creation rate yet).
+// Returns 0 when there's no active config, the model isn't priced, or the
+// config hasn't configured unit prices yet — the SubTaskPanel renders "—"
+// rather than "$0.00" in that case so the user knows pricing wasn't available.
 //
 // Best-effort: failures are silently swallowed (the artifact / status /
 // tokens are the durable record; cost is decorative). The active config
@@ -366,12 +369,20 @@ func computeSubTaskCostCents(modelName string, tokens model.SubTaskTokens, claud
 		if p.Model != modelName {
 			continue
 		}
-		if p.InputPrice == 0 && p.OutputPrice == 0 {
+		if p.InputPrice == 0 && p.OutputPrice == 0 && p.CacheReadPrice == 0 {
 			return 0
 		}
-		inUSD := float64(tokens.Input+tokens.CacheCreation+tokens.CacheRead) / 1e6 * p.InputPrice
+		// Cache reads use cache_read_price; 0 falls back to input_price so
+		// legacy configs (and entries the operator never filled in) keep
+		// the old "cache counts as input" cost behavior.
+		cacheReadPrice := p.CacheReadPrice
+		if cacheReadPrice == 0 {
+			cacheReadPrice = p.InputPrice
+		}
+		inUSD := float64(tokens.Input+tokens.CacheCreation) / 1e6 * p.InputPrice
+		cacheUSD := float64(tokens.CacheRead) / 1e6 * cacheReadPrice
 		outUSD := float64(tokens.Output) / 1e6 * p.OutputPrice
-		cents := int((inUSD + outUSD) * 100)
+		cents := int((inUSD + cacheUSD + outUSD) * 100)
 		if cents < 0 {
 			return 0
 		}

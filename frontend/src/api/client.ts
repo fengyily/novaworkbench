@@ -1444,10 +1444,14 @@ export const platformApi = {
 
 // One model of a Claude config (platform) with per-million-token unit prices.
 // Binding prices to the config means each platform can carry different rates.
+// `cache_read_price` covers prompt-cache hits (cache_read tokens); 0 means
+// "fall back to input_price", so the legacy 2-field configs keep their old
+// cost behavior until an operator fills the new field in.
 export interface ModelEntry {
   model: string;
   input_price: number;
   output_price: number;
+  cache_read_price: number;
 }
 
 // Claude CLI configurations (multiple named configs; the active one is
