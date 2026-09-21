@@ -27,11 +27,11 @@ Section: utils
 Maintainer: NovaWorkbench <noreply@novaworkbench.dev>
 Installed-Size: 20760
 Filename: pool/main/n/nova/binary-amd64/nova_0.5.0_amd64.deb
-Size: 7919016
-MD5sum: 8a2744a4e3a0146cdc439d34eead51dc
-SHA1: 609361cdda170a5af1a2eb8ac60e9ada62aa0f40
-SHA256: cd2310a487c7216d732fed1b00df2a0d58ea9f134df247894a842e6ac96a1c8d
-SHA512: 4e744f86f0e587150442ca3163ff3211e809cbeb8c5e736210812314a72a9da2f2940594d4936fbbb4525e518f365b5bcfabeef48308ea919e2e9e404d3221ea
+Size: 7918948
+MD5sum: 84d73e44279e221e17d4c51e1db9d093
+SHA1: 1bbb72a7ee1f8deed104ecd628beccf791ffb805
+SHA256: e9544dafc55941914b99aaf279d013d06f407056022bd2c621ad2c8cfe3a2bb0
+SHA512: d02a696a146ac025f069ce348da3d1a5da6bbfd1335032063acd0db6a895d64aa205283ef088bcc75a3c67000d5b8f95d459c6a2a13352e98814880d6e92f1b0
 Homepage: https://github.com/novaworkbench/novaworkbench
 Description: NovaWorkbench — 本地优先、AI 原生的开发者工作台。
  .
