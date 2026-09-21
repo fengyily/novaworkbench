@@ -147,6 +147,16 @@ apt-releaser 子 key，签名而非认证）。
 
 ### 验证
 
+推荐先用 CI 之后立刻跑一次自动检查：
+
+```bash
+OWNER=fengyily ./scripts/check-apt-publish.sh
+```
+
+退出码 0 表示 `gh-pages` 分支存在且所有关键文件（`Release`、`Packages`、
+两个 arch 的 `binary-*/Packages`、两个 arch 的 `pool/.../Packages`）都能
+从 `<owner>.github.io/<repo>/apt/...` 取到。
+
 ```bash
 # 1. release.yml 跑完后检查 GitHub Release 附件
 gh release view vX.Y.Z --json assets --jq '.assets[].name' | grep '\.deb$'
