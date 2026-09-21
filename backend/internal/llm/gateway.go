@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,8 +35,17 @@ type LLMConfigProvider interface {
 }
 
 type Gateway struct {
-	binPath   string
-	timeout   time.Duration
+	// binPath is the resolved absolute path to the claude executable.
+	// Resolved once at New() and refreshed on demand by resolveBin() when
+	// the cached file vanishes (the claude CLI self-updates, deleting the
+	// version-pinned binary out from under long-lived Nova processes).
+	binPath string
+	// rawBin is the original CLAUDE_BIN value (or "claude"). Held so
+	// resolveBin() can re-resolve the binary on cache miss instead of
+	// becoming permanently locked to a deleted absolute path.
+	rawBin   string
+	mu       sync.Mutex // guards binPath re-resolution
+	timeout  time.Duration
 	claudeEnv ClaudeEnvProvider
 	llmCfg    LLMConfigProvider
 }
@@ -72,10 +83,85 @@ func New(claudeEnv ClaudeEnvProvider, llmCfg LLMConfigProvider) *Gateway {
 		}
 	}
 
-	return &Gateway{binPath: binPath, timeout: timeout, claudeEnv: claudeEnv, llmCfg: llmCfg}
+	return &Gateway{binPath: binPath, rawBin: binPath, timeout: timeout, claudeEnv: claudeEnv, llmCfg: llmCfg}
 }
 
-func (g *Gateway) GetBinPath() string { return g.binPath }
+// resolveBin returns the claude executable path, re-resolving when the
+// cached one has vanished. New() resolves `claude` down to a version-pinned
+// absolute path (e.g. ~/.local/share/claude/versions/2.1.220); the CLI
+// self-updates, which deletes that exact file and leaves a long-lived Nova
+// process holding a dangling path. Re-resolution is a couple of stats and
+// runs at most once per spawn. The fast path is a single os.Stat.
+func (g *Gateway) resolveBin() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if st, err := os.Stat(g.binPath); err == nil && st.Mode().IsRegular() {
+		return g.binPath
+	}
+	// Re-resolve from rawBin so we pick up the new version after a CLI
+	// self-update. EvalSymlinks unwraps the npm-shim → versions/X.Y.Z chain
+	// (or the macOS /usr/local/bin/claude → versions/... symlink). On any
+	// failure we KEEP the previous good value rather than fall back to an
+	// empty string — the caller (StreamCmd) will surface the ENOENT, which
+	// is more diagnosable than "empty Path".
+	if abs, err := exec.LookPath(g.rawBin); err == nil {
+		if real, err := filepath.EvalSymlinks(abs); err == nil {
+			g.binPath = real
+		} else {
+			g.binPath = abs
+		}
+		log.Printf("[llm] re-resolved claude binary to %q", g.binPath)
+	}
+	return g.binPath
+}
+
+// GetBinPath returns the resolved claude binary path. It transparently
+// self-heals when the cached version-pinned path has been replaced by a
+// self-update (see resolveBin).
+func (g *Gateway) GetBinPath() string { return g.resolveBin() }
+
+// sanitizeExecStrings strips NUL bytes from CLI argv / env entries. Go's
+// syscall.ByteSliceFromString rejects any string containing NUL and
+// exec.Cmd.Start() surfaces it as "fork/exec <bin>: invalid argument"
+// (EINVAL) — an error whose text points at the binary and gives no hint
+// that the real culprit is the payload. Content-level guards upstream
+// (collectProjectContext.looksBinary) are the primary defence; this is the
+// last line so no single stray byte can ever kill a run.
+//
+// On every strip we log the index, the previous token (i.e. the flag that
+// owns this argv slot, when detectable), and the NUL count so an upstream
+// regression can't silently pass through.
+func sanitizeExecStrings(scope string, ss []string) []string {
+	// First pass: scan for any NUL. The common path (clean input) skips
+	// allocation entirely and returns the original slice.
+	any := false
+	for _, s := range ss {
+		if strings.ContainsRune(s, 0) {
+			any = true
+			break
+		}
+	}
+	if !any {
+		return ss
+	}
+	out := make([]string, len(ss))
+	copy(out, ss)
+	for i, s := range out {
+		if !strings.ContainsRune(s, 0) {
+			continue
+		}
+		nul := strings.Count(s, "\x00")
+		cleaned := strings.ReplaceAll(s, "\x00", "")
+		out[i] = cleaned
+		prev := ""
+		if i > 0 {
+			prev = ss[i-1]
+		}
+		log.Printf("[llm] sanitize: stripped %d NUL byte(s) from %s[%d] (prev token=%q, len=%d→%d)",
+			nul, scope, i, prev, len(s), len(cleaned))
+	}
+	return out
+}
 
 // localEnv builds the claude subprocess's process env for a LOCAL run. It
 // inherits os.Environ() (PATH / HOME / LANG / … are still needed by the CLI
@@ -491,12 +577,19 @@ type StreamOpts struct {
 // stream is now a confirmation / safety net rather than the only source of the
 // id.
 func (g *Gateway) StreamCmd(ctx context.Context, opts StreamOpts) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, g.binPath, g.BuildStreamArgs(opts)...)
+	// Sanitize argv / env at the single construction exit point so no
+	// caller can forget. A stray NUL byte in either (which exec.Cmd.Start()
+	// rejects with EINVAL before fork, surfacing as "fork/exec <bin>:
+	// invalid argument") would kill the run; the upstream content guards
+	// (collectProjectContext.looksBinary + ToValidUTF8) are the primary
+	// line, this is the belt-and-braces fallback.
+	args := sanitizeExecStrings("args", g.BuildStreamArgs(opts))
+	cmd := exec.CommandContext(ctx, g.resolveBin(), args...)
 	// Process env keeps only host vars + ExtraEnv; the platform pins (auth /
 	// base URL / model / tier pins) travel in the --settings JSON that
 	// BuildStreamArgs already emitted. localEnv strips the inherited
 	// ANTHROPIC_* keys the settings block owns so there is exactly one source.
-	cmd.Env = g.localEnv(opts.Model, opts.ClaudeConfigID, opts.ExtraEnv...)
+	cmd.Env = sanitizeExecStrings("env", g.localEnv(opts.Model, opts.ClaudeConfigID, opts.ExtraEnv...))
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
 	}
@@ -516,8 +609,9 @@ func (g *Gateway) runClaudeStreamJSON(prompt, workDir, systemPrompt, model strin
 	ctx, cancel := context.WithTimeout(context.Background(), g.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, g.binPath, g.streamArgs(prompt, systemPrompt, model, "", "", false, false, "", nil, "", nil)...)
-	cmd.Env = g.localEnv(model, "")
+	cmd := exec.CommandContext(ctx, g.resolveBin(),
+		sanitizeExecStrings("args", g.streamArgs(prompt, systemPrompt, model, "", "", false, false, "", nil, "", nil))...)
+	cmd.Env = sanitizeExecStrings("env", g.localEnv(model, ""))
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
@@ -572,8 +666,8 @@ func (g *Gateway) runClaudeText(prompt string, timeout time.Duration) (string, e
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, g.binPath, g.textArgs(prompt)...)
-	cmd.Env = g.localEnv("", "")
+	cmd := exec.CommandContext(ctx, g.resolveBin(), sanitizeExecStrings("args", g.textArgs(prompt))...)
+	cmd.Env = sanitizeExecStrings("env", g.localEnv("", ""))
 
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
@@ -748,7 +842,7 @@ func (g *Gateway) GenerateProjectSummary(projectPath, claudeMD string) (string, 
 		return "", fmt.Errorf("CLAUDE.md content is empty")
 	}
 	// CLI missing → degrade to a CLAUDE.md extraction so a summary still exists.
-	if _, err := exec.LookPath(g.binPath); err != nil {
+	if _, err := os.Stat(g.resolveBin()); err != nil {
 		return summaryFallback(claudeMD), nil
 	}
 	prompt := "你是一名技术文案。请基于以下项目的 CLAUDE.md 内容，用中文生成一段不超过 120 字的项目简介。" +
@@ -758,8 +852,8 @@ func (g *Gateway) GenerateProjectSummary(projectPath, claudeMD string) (string, 
 	ctx, cancel := context.WithTimeout(context.Background(), g.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, g.binPath, g.textArgs(prompt)...)
-	cmd.Env = g.localEnv("", "")
+	cmd := exec.CommandContext(ctx, g.resolveBin(), sanitizeExecStrings("args", g.textArgs(prompt))...)
+	cmd.Env = sanitizeExecStrings("env", g.localEnv("", ""))
 	if projectPath != "" {
 		cmd.Dir = projectPath
 	}

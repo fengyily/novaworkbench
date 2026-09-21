@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,8 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
@@ -683,7 +686,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	if err := cmd.Start(); err != nil {
 		logClaudeExecDiag(scope, cmd)
 		log.Printf("[%s] exec diag: cmd.Start() failed: %T %v", scope, err, err)
-		return claudeStreamOutcome{errMsg: "启动 Claude 失败: " + err.Error()}
+		return claudeStreamOutcome{errMsg: explainExecError(err)}
 	}
 	logClaudeEnvConfig(scope, cmd)
 	logClaudeCmd(scope, cmd)
@@ -1284,12 +1287,48 @@ func logClaudeEnvConfig(scope string, cmd *exec.Cmd) {
 // When the next deploy hits this, we need enough raw state in the log to
 // pinpoint the cause without another round-trip. Always log BEFORE Start so
 // the failure case still gets the snapshot.
+//
+// NUL scan: the most subtle EINVAL comes from a NUL byte in argv/env/Dir
+// (syscall.ByteSliceFromString rejects NUL before fork). Go's error text
+// blames the binary, not the payload — so we walk the command surface
+// here and log the first NUL hit per slot (index, prev token, byte offset).
 func logClaudeExecDiag(scope string, cmd *exec.Cmd) {
 	if cmd.Path == "" {
 		log.Printf("[%s] exec diag: cmd.Path is empty (LookPath must have failed earlier)", scope)
 		return
 	}
-	log.Printf("[%s] exec diag: cmd.Path=%q args=%d env=%d", scope, cmd.Path, len(cmd.Args), len(cmd.Env))
+	// Total argv + env byte counts — distinguishes E2BIG (argv too large)
+	// from EINVAL (any NUL) when the kernel error alone is ambiguous.
+	argsBytes, envBytes := 0, 0
+	for _, a := range cmd.Args {
+		argsBytes += len(a)
+	}
+	for _, e := range cmd.Env {
+		envBytes += len(e)
+	}
+	log.Printf("[%s] exec diag: cmd.Path=%q args=%d (bytes=%d) env=%d (bytes=%d)", scope, cmd.Path, len(cmd.Args), argsBytes, len(cmd.Env), envBytes)
+
+	// NUL scan — first-hit-per-slot keeps the log readable on bad input.
+	for i, a := range cmd.Args {
+		if idx := strings.IndexByte(a, 0); idx >= 0 {
+			prev := ""
+			if i > 0 {
+				prev = cmd.Args[i-1]
+			}
+			log.Printf("[%s] exec diag: NUL in args[%d] (prev=%q) at byte offset %d, len=%d", scope, i, prev, idx, len(a))
+		}
+	}
+	for i, e := range cmd.Env {
+		if idx := strings.IndexByte(e, 0); idx >= 0 {
+			key, _, _ := strings.Cut(e, "=")
+			log.Printf("[%s] exec diag: NUL in env[%d] (key=%q) at byte offset %d, len=%d", scope, i, key, idx, len(e))
+		}
+	}
+	if cmd.Dir != "" {
+		if idx := strings.IndexByte(cmd.Dir, 0); idx >= 0 {
+			log.Printf("[%s] exec diag: NUL in cmd.Dir at byte offset %d, len=%d", scope, idx, len(cmd.Dir))
+		}
+	}
 
 	// 1. LookPath — does Go itself still find the path it just resolved?
 	if _, err := exec.LookPath(cmd.Path); err != nil {
@@ -1305,11 +1344,20 @@ func logClaudeExecDiag(scope string, cmd *exec.Cmd) {
 		log.Printf("[%s] exec diag: resolved=%q", scope, resolved)
 	}
 
-	// 3. stat the resolved file so we can see mode, size, mtime.
+	// 3. stat the resolved file so we can see mode (regular vs dir vs
+	// symlink loop), size, mtime.
 	if info, err := os.Stat(resolved); err != nil {
 		log.Printf("[%s] exec diag: stat(%q) failed: %v", scope, resolved, err)
 	} else {
-		log.Printf("[%s] exec diag: stat mode=%s size=%d mtime=%s", scope, info.Mode(), info.Size(), info.ModTime().Format(time.RFC3339))
+		mode := info.Mode()
+		kind := "other"
+		switch {
+		case mode.IsRegular():
+			kind = "regular"
+		case mode.IsDir():
+			kind = "DIRECTORY (exec will fail)"
+		}
+		log.Printf("[%s] exec diag: stat kind=%s mode=%s size=%d mtime=%s", scope, kind, mode, info.Size(), info.ModTime().Format(time.RFC3339))
 	}
 
 	// 4. Magic bytes — distinguish script (#!) from ELF (\\x7fELF) from junk.
@@ -1329,16 +1377,26 @@ func logClaudeExecDiag(scope string, cmd *exec.Cmd) {
 		log.Printf("[%s] exec diag: open(%q) failed: %v", scope, resolved, openErr)
 	}
 
-	// 5. ldd — surfaces missing shared libs (ENOENT-class) and the ELF PT_INTERP.
-	if lddOut, lddErr := exec.Command("ldd", resolved).CombinedOutput(); lddErr == nil {
-		out := strings.TrimSpace(string(lddOut))
-		if out == "" {
-			log.Printf("[%s] exec diag: ldd: (no output — binary not dynamic?)", scope)
+	// 5. Shared-library snapshot — surfaces missing dynamic libs and the
+	// ELF PT_INTERP. ldd is the Linux tool; macOS uses otool -L and the
+	// homebrew install doesn't ship ldd.
+	if runtime.GOOS == "darwin" {
+		if otoolOut, otoolErr := exec.Command("otool", "-L", resolved).CombinedOutput(); otoolErr == nil {
+			log.Printf("[%s] exec diag: otool -L:\n%s", scope, strings.TrimSpace(string(otoolOut)))
 		} else {
-			log.Printf("[%s] exec diag: ldd:\n%s", scope, out)
+			log.Printf("[%s] exec diag: otool -L failed (%v): %s", scope, otoolErr, strings.TrimSpace(string(otoolOut)))
 		}
 	} else {
-		log.Printf("[%s] exec diag: ldd failed (%v): %s", scope, lddErr, strings.TrimSpace(string(lddOut)))
+		if lddOut, lddErr := exec.Command("ldd", resolved).CombinedOutput(); lddErr == nil {
+			out := strings.TrimSpace(string(lddOut))
+			if out == "" {
+				log.Printf("[%s] exec diag: ldd: (no output — binary not dynamic?)", scope)
+			} else {
+				log.Printf("[%s] exec diag: ldd:\n%s", scope, out)
+			}
+		} else {
+			log.Printf("[%s] exec diag: ldd failed (%v): %s", scope, lddErr, strings.TrimSpace(string(lddOut)))
+		}
 	}
 
 	// 6. Critical env vars — PATH tells us where exec will look for the
@@ -1369,6 +1427,30 @@ func logClaudeExecDiag(scope string, cmd *exec.Cmd) {
 	// 8. uid/gid — the Go process is the same throughout, but past bugs have
 	// caught us when a service drops privileges. Cheap to log.
 	log.Printf("[%s] exec diag: uid=%d gid=%d euid=%d egid=%d", scope, os.Getuid(), os.Getgid(), os.Geteuid(), os.Getegid())
+}
+
+// explainExecError turns a raw cmd.Start() error into an actionable user-facing
+// message. The default ("fork/exec <bin>: invalid argument") blames the binary
+// and gives no hint that the real culprit is a NUL byte in argv/env (EINVAL)
+// or a missing binary (ENOENT). This helper keeps the actionable text in one
+// place so wizard_stream / report / review stay in sync.
+func explainExecError(err error) string {
+	if err == nil {
+		return ""
+	}
+	switch {
+	case errors.Is(err, syscall.EINVAL):
+		return "启动 Claude 失败: 传给 CLI 的参数中含有非法字节（NUL），通常来自项目里被预读到的" +
+			"二进制文件或需求描述中的控制字符。请重试本步骤；若持续失败，请查看服务端日志中" +
+			"「exec diag: NUL」一行定位具体来源。"
+	case errors.Is(err, syscall.ENOENT):
+		return "启动 Claude 失败: 找不到 Claude CLI。请安装: npm install -g @anthropic-ai/claude-code"
+	case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
+		return "启动 Claude 失败: 没有执行权限。请检查 Claude CLI 文件权限或执行 mount 是否禁用了 exec。"
+	case errors.Is(err, syscall.E2BIG):
+		return "启动 Claude 失败: 参数总长度超过内核 ARG_MAX 限制。请缩短项目预读文档或精简提示词后再试。"
+	}
+	return "启动 Claude 失败: " + err.Error()
 }
 
 // logClaudeCmd logs the actual claude CLI invocation as a shell command that
