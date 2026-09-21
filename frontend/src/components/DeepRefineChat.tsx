@@ -554,7 +554,17 @@ export default function DeepRefineChat({
         </div>
       </div>
 
-      <div className={`chat-panel ${isFullscreen ? 'is-fullscreen' : ''}`} ref={chatRef}>
+      {/* Stack container for the three panels that should appear together
+          when the user activates fullscreen mode (messages + composer +
+          context-usage bar). The `.is-fullscreen` class is moved from
+          `.chat-panel` to this wrapper so that immersive fullscreen includes
+          the composer — important so the user can keep discussing with the
+         AI without leaving the focused view. In normal flow the wrapper is
+          transparent (display:contents-style block) so the existing
+          per-section CSS (mobile 100dvh chat-panel height, composer sticky,
+          etc.) keeps working unchanged. */}
+      <div className={`chat-panel-stack ${isFullscreen ? 'is-fullscreen' : ''}`}>
+      <div className="chat-panel" ref={chatRef}>
         {isFullscreen && (
           <FullscreenButton isFullscreen={true} onClick={exitFullscreen} variant="floating" />
         )}
@@ -633,6 +643,7 @@ export default function DeepRefineChat({
         compressedAt={compressedAt}
         onShowSummary={handleShowSummary}
       />
+      </div>
 
       {/* Compressed-summary preview modal. Rendered as a simple overlay
           rather than reusing a generic modal library — kept inline so the

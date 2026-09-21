@@ -612,7 +612,18 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         </div>
       </div>
 
-      <div className={`chat-panel ${isFullscreen ? 'is-fullscreen' : ''}`} ref={chatRef}>
+      {/* Stack container for the three panels that should appear together
+          when the user activates fullscreen mode (messages + composer +
+          context-usage bar). The `.is-fullscreen` class is moved from
+          `.chat-panel` to this wrapper so that immersive fullscreen includes
+          the composer — important so the user can keep discussing with the
+          AI without leaving the focused view. In normal flow the wrapper is
+          a transparent block so the existing per-section CSS (mobile 100dvh
+          chat-panel height, composer sticky, etc.) keeps working unchanged.
+          The confirm-panel and action-row below stay outside the stack so
+          they don't accidentally fire from inside the fullscreen view. */}
+      <div className={`chat-panel-stack ${isFullscreen ? 'is-fullscreen' : ''}`}>
+      <div className="chat-panel" ref={chatRef}>
         {isFullscreen && (
           <FullscreenButton isFullscreen={true} onClick={exitFullscreen} variant="floating" />
         )}
@@ -671,6 +682,26 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         </button>
       </div>
 
+      {/* Live context-usage bar + compress-context entry point. Sits at the
+          bottom of the chat panel so it stays visible while the user
+          scrolls through messages / phase activity. Mirrors DeepRefineChat:
+          disabled while a refine or apply turn is running; tap opens
+          the summary modal when the stage has already been compressed. */}
+      <ContextUsageBar
+        usage={usage}
+        onCompress={handleCompress}
+        compressing={compressing}
+        disabled={working || applying || compressing}
+        stepLabel={stepLabel}
+        compressedAt={compressedAt}
+        onShowSummary={handleShowSummary}
+        // The design stage is excluded from compression: the design is a
+        // one-shot plan-mode artifact, the refine chat has no compression
+        // value — keep the usage bar but hide the compress button.
+        compressible={docType !== 'design'}
+      />
+      </div>
+
       {refineComplete && !applying && (
         <div className="confirm-panel" style={{ marginTop: 8 }}>
           <div className="confirm-panel-icon"><IconCheck size={22} /></div>
@@ -694,25 +725,6 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           </button>
         </div>
       )}
-
-      {/* Live context-usage bar + compress-context entry point. Sits at the
-          bottom of the chat panel so it stays visible while the user
-          scrolls through messages / phase activity. Mirrors DeepRefineChat:
-          disabled while a refine or apply turn is running; tap opens
-          the summary modal when the stage has already been compressed. */}
-      <ContextUsageBar
-        usage={usage}
-        onCompress={handleCompress}
-        compressing={compressing}
-        disabled={working || applying || compressing}
-        stepLabel={stepLabel}
-        compressedAt={compressedAt}
-        onShowSummary={handleShowSummary}
-        // The design stage is excluded from compression: the design is a
-        // one-shot plan-mode artifact, the refine chat has no compression
-        // value — keep the usage bar but hide the compress button.
-        compressible={docType !== 'design'}
-      />
 
       {/* Compressed-summary preview modal. Same shape as DeepRefineChat's
           modal so the visual treatment is consistent across stages. */}
