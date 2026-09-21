@@ -123,6 +123,8 @@ export const settings = {
       modelNamePlaceholder: '模型名，如 claude-sonnet-4-5',
       inputPricePlaceholder: '输入价',
       outputPricePlaceholder: '输出价',
+      cacheReadPricePlaceholder: '缓存读取价',
+      cacheReadPriceHint: 'Prompt cache 命中（cache_read）的单价；留 0 时按「输入价」计费，以兼容未填写缓存价的旧配置。',
       noModels: '尚未添加模型',
       modelInputPlaceholder: '输入模型名，如 claude-sonnet-4-5',
       addModel: '添加',

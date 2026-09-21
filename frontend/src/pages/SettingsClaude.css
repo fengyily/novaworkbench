@@ -112,21 +112,26 @@
   flex: 1;
 }
 
-/* Per-model pricing rows: name + input price + output price + remove. */
+/* Per-model pricing rows: name + input price + output price + cache-read price
+ * + remove. Three price columns means each input can be a bit narrower than
+ * before, so we drop the model-name flex from 2 to 1.6 to keep the row on
+ * one line at the default modal width. */
 .model-price-row {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 6px;
+  flex-wrap: wrap;
 }
 
 .model-name-input {
-  flex: 2;
+  flex: 1.6;
+  min-width: 140px;
 }
 
 .model-price-input {
   flex: 1;
-  min-width: 84px;
+  min-width: 72px;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 13px;
 }

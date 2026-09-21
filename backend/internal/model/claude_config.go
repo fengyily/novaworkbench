@@ -3,12 +3,19 @@ package model
 import "time"
 
 // ModelEntry is one model offered by a Claude config (platform), with its
-// per-million-token input/output unit prices. The models column stores an array
-// of these; a legacy string-array value is decoded as entries with 0 prices.
+// per-million-token unit prices. InputPrice covers fresh input tokens;
+// OutputPrice covers model output; CacheReadPrice covers cache_read tokens
+// (prompt-cache hits). The models column stores an array of these; a legacy
+// string-array value is decoded as entries with 0 prices. When
+// CacheReadPrice is zero, cost computation falls back to InputPrice so older
+// configs without an explicit cache rate keep working — setting a non-zero
+// CacheReadPrice lets operators match the (typically discounted) cache_read
+// rate their platform publishes.
 type ModelEntry struct {
-	Model       string  `json:"model"`
-	InputPrice  float64 `json:"input_price"`
-	OutputPrice float64 `json:"output_price"`
+	Model          string  `json:"model"`
+	InputPrice     float64 `json:"input_price"`
+	OutputPrice    float64 `json:"output_price"`
+	CacheReadPrice float64 `json:"cache_read_price"`
 }
 
 // ClaudeConfig is one saved Claude CLI configuration (auth token + base URL +

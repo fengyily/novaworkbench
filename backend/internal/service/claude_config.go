@@ -43,10 +43,12 @@ func NewClaudeConfigService(database *db.DB) *ClaudeConfigService {
 const fullCols = "id, name, base_url, auth_token, models, default_model, currency, is_active, created_at, updated_at"
 
 // DecodeModels parses the JSON stored in the models column: an array of
-// {model,input_price,output_price} objects, OR a legacy array of plain model-id
-// strings (recorded before pricing existed) converted to entries with 0 unit
-// prices. An empty or malformed value yields an empty (non-nil) slice so
-// callers never see null.
+// {model,input_price,output_price,cache_read_price} objects, OR a legacy
+// array of plain model-id strings (recorded before pricing existed) converted
+// to entries with 0 unit prices. cache_read_price is optional — older configs
+// written before the cache-read rate existed decode as 0, and cost
+// computation falls back to input_price in that case. An empty or malformed
+// value yields an empty (non-nil) slice so callers never see null.
 func DecodeModels(raw string) []model.ModelEntry {
 	raw = trimSpace(raw)
 	if raw == "" || raw == "null" {

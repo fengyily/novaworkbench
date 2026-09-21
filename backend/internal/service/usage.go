@@ -644,9 +644,14 @@ func (s *UsageService) ProjectSummary(projID string) (ProjectSummary, error) {
 // ---- Cost recomputation -----------------------------------------------------------
 
 // modelPrice holds one model's unit prices on a config, per million tokens.
+// cache is the cache_read rate; cache_creation tokens continue to bill at
+// input (Anthropic's published rate is "input + cache write surcharge", and
+// the UI only exposes input/output/cache_read fields — adding a separate
+// cache_creation rate is out of scope for the cache-read price feature).
 type modelPrice struct {
 	input  float64
 	output float64
+	cache  float64
 }
 
 // configPriceTable is the price lookup for one Claude config (platform): its
@@ -673,7 +678,7 @@ func (s *UsageService) loadPriceTables() (map[string]configPriceTable, error) {
 		}
 		t := configPriceTable{currency: currency, byModel: make(map[string]modelPrice)}
 		for _, e := range DecodeModels(modelsJSON) {
-			t.byModel[e.Model] = modelPrice{input: e.InputPrice, output: e.OutputPrice}
+			t.byModel[e.Model] = modelPrice{input: e.InputPrice, output: e.OutputPrice, cache: e.CacheReadPrice}
 		}
 		tables[id] = t
 	}
@@ -722,6 +727,14 @@ func (s *UsageService) costForRows(where string, args []any) []model.CostItem {
 // a per-currency cost bucket. Prices come from the config's CURRENT entries
 // ("设置后生效": edits recompute past rows), currency from the row snapshot
 // (falling back to the config's currency for pre-pricing rows).
+//
+// Cache_read tokens use the model's cache_read_price; when that is zero (older
+// configs that pre-date the cache-read rate, or an entry whose operator chose
+// not to fill it in) we fall back to input_price so legacy behavior is
+// preserved — setting a non-zero cache_read_price is what activates the
+// (typically discounted) cache-read rate. Cache_creation tokens continue to
+// bill at input_price (Anthropic's published rate is "input + cache write
+// surcharge"; a separate cache_creation rate is out of scope here).
 func accumulateCost(costByCur map[string]float64, rowCurrency, configID, modelName string, in, out, cc, cr int, tables map[string]configPriceTable) {
 	cfg, ok := tables[configID]
 	if !ok {
@@ -731,7 +744,7 @@ func accumulateCost(costByCur map[string]float64, rowCurrency, configID, modelNa
 	if !ok {
 		return // model not priced on this config (cost 0)
 	}
-	if p.input == 0 && p.output == 0 {
+	if p.input == 0 && p.output == 0 && p.cache == 0 {
 		return // legacy string-array entry with no unit prices → produces nothing
 	}
 	currency := rowCurrency
@@ -741,13 +754,32 @@ func accumulateCost(costByCur map[string]float64, rowCurrency, configID, modelNa
 	if currency == "" {
 		return // no currency to attribute cost under
 	}
-	costByCur[currency] += billedInput(in, cc, cr)*p.input + outputCost(out)*p.output
+	// Cache read uses the configured cache_read_price; 0 falls back to
+	// input_price so legacy configs (and entries the operator never filled
+	// in) keep the old "cache counts as input" cost behavior.
+	cacheReadPrice := p.cache
+	if cacheReadPrice == 0 {
+		cacheReadPrice = p.input
+	}
+	costByCur[currency] +=
+		billedInput(in, cc)*p.input +
+			cacheReadCost(cr)*cacheReadPrice +
+			outputCost(out)*p.output
 }
 
-// billedInput is (input + cache_creation + cache_read) / 1e6 — cache reads and
-// creations are billed as input tokens (mirrors the frontend usageTotalInput).
-func billedInput(in, cc, cr int) float64 {
-	return float64(in+cc+cr) / 1e6
+// billedInput is (input + cache_creation) / 1e6 — fresh input plus cache
+// writes are billed at the input rate. cache_read tokens are billed
+// separately via cacheReadCost at the model's cache_read_price (falling
+// back to input_price when the operator didn't set one). Mirrors the
+// frontend usageTotalInput for the input + cache_creation portion.
+func billedInput(in, cc int) float64 {
+	return float64(in+cc) / 1e6
+}
+
+// cacheReadCost returns cache_read tokens expressed in millions, ready to
+// multiply by the model's cache_read_price (or input_price as a fallback).
+func cacheReadCost(cr int) float64 {
+	return float64(cr) / 1e6
 }
 
 func outputCost(out int) float64 {

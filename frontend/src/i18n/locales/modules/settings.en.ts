@@ -120,6 +120,8 @@ export const settings = {
       modelNamePlaceholder: 'Model id, e.g. claude-sonnet-4-5',
       inputPricePlaceholder: 'Input price',
       outputPricePlaceholder: 'Output price',
+      cacheReadPricePlaceholder: 'Cache read price',
+      cacheReadPriceHint: 'Unit price for prompt-cache hits (cache_read). When left at 0, cache_read tokens fall back to the input price so older entries keep their previous cost.',
       noModels: 'No models added yet',
       modelInputPlaceholder: 'Enter a model id, e.g. claude-sonnet-4-5',
       addModel: 'Add',

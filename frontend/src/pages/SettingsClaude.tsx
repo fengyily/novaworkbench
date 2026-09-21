@@ -79,7 +79,7 @@ export default function SettingsClaude() {
     const m = modelInput.trim();
     if (!m) return;
     if (form.models.some(x => x.model === m)) { setModelInput(''); return; }
-    setForm(f => ({ ...f, models: [...f.models, { model: m, input_price: 0, output_price: 0 }] }));
+    setForm(f => ({ ...f, models: [...f.models, { model: m, input_price: 0, output_price: 0, cache_read_price: 0 }] }));
     setModelInput('');
   };
 
@@ -316,6 +316,16 @@ export default function SettingsClaude() {
                     placeholder={t('settings.claude.modal.outputPricePlaceholder')}
                     value={m.output_price}
                     onChange={e => updateModel(idx, { ...m, output_price: Number(e.target.value) || 0 })}
+                  />
+                  <input
+                    className="form-input model-price-input"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder={t('settings.claude.modal.cacheReadPricePlaceholder')}
+                    value={m.cache_read_price}
+                    onChange={e => updateModel(idx, { ...m, cache_read_price: Number(e.target.value) || 0 })}
+                    title={t('settings.claude.modal.cacheReadPriceHint')}
                   />
                   <button type="button" className="model-chip-remove" onClick={() => removeModel(m.model)}>×</button>
                 </div>
