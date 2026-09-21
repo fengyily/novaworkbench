@@ -12,6 +12,7 @@ package handler
 // refactor; behaviour is unchanged.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -150,10 +151,24 @@ func collectProjectContext(projectPath, requirementTitle string) (docBlock strin
 		if rerr != nil {
 			return
 		}
+		// A NUL byte anywhere would make exec.Cmd.Start() fail with EINVAL
+		// (syscall.ByteSliceFromString rejects NUL before fork), so a single
+		// stray binary file in the pre-read set would kill the whole analyst
+		// turn. Sniff the head instead of leaning on skipExts — the latter
+		// misses no-extension binaries and a long tail of binary formats.
+		if looksBinary(data) {
+			log.Printf("[context] skip binary-looking file %s (%d bytes)", f.relPath, len(data))
+			return
+		}
 		content := string(data)
 		if total+len(content) > maxDocBytes {
 			content = content[:maxDocBytes-total]
 		}
+		// The byte-slice above can cut mid-rune; drop the trailing partial
+		// rune so the prompt stays valid UTF-8 (the file IS text — we passed
+		// the binary sniff — but text files can still hold invalid UTF-8
+		// sequences which would propagate into argv as malformed bytes).
+		content = strings.ToValidUTF8(content, "")
 		buf.WriteString(fmt.Sprintf("### %s\n```\n%s\n```\n\n", f.relPath, content))
 		readFiles = append(readFiles, f.relPath)
 		total += len(content)
@@ -185,6 +200,19 @@ func collectProjectContext(projectPath, requirementTitle string) (docBlock strin
 		docBlock = "(未预读到关键文档，请基于下方结构概览，按需读取具体文件)"
 	}
 	return
+}
+
+// looksBinary reports whether data is not safe to embed verbatim in a CLI
+// argument. A NUL byte anywhere makes exec.Cmd.Start() fail with EINVAL
+// (syscall.ByteSliceFromString rejects NUL before fork), so a single stray
+// binary file in the pre-read set would kill the whole analyst turn.
+// Mirrors git's heuristic: sniff the first 8KB for NUL.
+func looksBinary(data []byte) bool {
+	head := data
+	if len(head) > 8*1024 {
+		head = head[:8*1024]
+	}
+	return bytes.IndexByte(head, 0) >= 0
 }
 
 // RefineDoc streams a multi-turn conversation to refine a design doc or a coding instruction.

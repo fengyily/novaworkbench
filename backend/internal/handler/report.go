@@ -611,7 +611,8 @@ func (h *ReportHandler) runGenerate(job *store.Job, projectID, projectName, proj
 		return
 	}
 	if err := cmd.Start(); err != nil {
-		job.Append(store.LogLine{Type: "error", Content: "Claude CLI 未找到，请安装: npm install -g @anthropic-ai/claude-code"})
+		logClaudeExecDiag("report", cmd)
+		job.Append(store.LogLine{Type: "error", Content: explainExecError(err)})
 		job.Finish(1, store.JobError)
 		return
 	}

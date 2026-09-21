@@ -380,7 +380,8 @@ func (h *ReviewHandler) runReview(job *store.Job, projectID, projectPath string,
 	}
 
 	if err := cmd.Start(); err != nil {
-		job.Append(store.LogLine{Type: "error", Content: "Claude CLI 未找到，请安装: npm install -g @anthropic-ai/claude-code"})
+		logClaudeExecDiag("review", cmd)
+		job.Append(store.LogLine{Type: "error", Content: explainExecError(err)})
 		job.Finish(1, store.JobError)
 		return
 	}
