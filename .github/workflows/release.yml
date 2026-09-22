@@ -36,7 +36,6 @@ concurrency:
 permissions:
   contents: write   # create the GitHub Release
   packages: write    # push the multi-arch image to GHCR
-  pages: write       # push the apt repo to the gh-pages branch (Pages source)
 
 env:
   NAMESPACE: ${{ vars.GHCR_NAMESPACE || github.repository_owner }}
@@ -269,48 +268,56 @@ jobs:
           完整使用说明见 [README](https://github.com/${GITHUB_REPOSITORY}#readme)。"
           gh release view "$VERSION" --json url --jq '.url'
 
-      # Self-hosted apt repo on the gh-pages branch. The repo is referenced
-      # via "[trusted=yes]" in /etc/apt/sources.list.d/nova.list (no GPG
-      # signing required) — see packaging/README and the apt install
-      # section in the top-level README for the user-side setup.
+      # Standalone apt repo at github.com/fengyily/linux-repo (mirrors the
+      # shield-cli distribution shape: a separate apt-only repo so the
+      # main codebase stays free of gh-pages noise). Referenced via
+      # "[trusted=yes]" in /etc/apt/sources.list.d/nova.list — no GPG
+      # signing required (see docs/RELEASE.md#apt-仓库发布).
       #
-      # APT_REPO_TOKEN is optional: when the apt repo lives in the SAME
-      # repository as this workflow, the default GITHUB_TOKEN (contents:
-      # write + pages: write at the top of this file) already has push
-      # access to gh-pages. Set APT_REPO_TOKEN only if you ever split the
-      # repo into a separate apt repo that this workflow also publishes to.
-      - name: Publish to apt repo (gh-pages)
+      # APT_REPO_TOKEN is REQUIRED: linux-repo is a different repository
+      # from this workflow's GITHUB_REPOSITORY, so the auto-injected
+      # GITHUB_TOKEN has zero access to it. The PAT must have `contents:
+      # write` on fengyily/linux-repo. Users consume the repo via GitHub
+      # Pages — Settings → Pages → Branch: main / root must be enabled on
+      # linux-repo for `https://fengyily.github.io/linux-repo/` to serve
+      # the apt tree.
+      - name: Publish to apt repo (fengyily/linux-repo)
         env:
           VERSION: ${{ steps.meta.outputs.version }}
-          APT_REPO_TOKEN: ${{ secrets.APT_REPO_TOKEN || secrets.GITHUB_TOKEN }}
+          APT_REPO_TOKEN: ${{ secrets.APT_REPO_TOKEN }}
         run: |
           # apt-ftparchive is part of the ubuntu-runner image (apt-utils).
           # If it ever disappears, install with: sudo apt-get install -y apt-utils
           command -v apt-ftparchive >/dev/null \
             || { echo "::error::apt-ftparchive not found (install apt-utils)"; exit 1; }
 
+          if [ -z "$APT_REPO_TOKEN" ]; then
+            echo "::error::secrets.APT_REPO_TOKEN is not configured — required to push to fengyily/linux-repo (see docs/RELEASE.md#apt-仓库发布)"
+            exit 1
+          fi
+
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
-          git config --global init.defaultBranch gh-pages
           git config --global advice.detachedHead false
 
           WORK="$(mktemp -d)"
-          REPO_URL="https://x-access-token:${APT_REPO_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          REPO_URL="https://x-access-token:${APT_REPO_TOKEN}@github.com/fengyily/linux-repo.git"
 
-          # First-time publish: gh-pages may not exist on origin yet (a repo
-          # that never enabled Pages / never had a docs branch). git clone
-          # --branch exits 128 when the remote ref is missing, so we fall
-          # back to an orphan-branch init and push -u to create the upstream
-          # ref. The `if ... else ... fi` pattern keeps stderr from the
-          # failing clone from being surfaced as a step error.
-          if git clone --branch gh-pages --depth 1 "$REPO_URL" "$WORK/apt" 2>/dev/null; then
+          # First-time publish: the repo may be entirely empty (no commits
+          # on the default branch yet). `git clone --depth 1` of an empty
+          # repo fails with "warning: Could not find remote branch", so we
+          # detect the failure and fall back to a local init + push -u to
+          # create the upstream ref. The `if ... else ... fi` pattern keeps
+          # stderr from the failing clone from being surfaced as a step
+          # error.
+          if git clone --depth 1 "$REPO_URL" "$WORK/apt" 2>/dev/null; then
             cd "$WORK/apt"
           else
-            echo "::notice::gh-pages branch missing on origin; initializing orphan branch"
+            echo "::notice::linux-repo is empty / no default branch; initializing orphan main"
             mkdir -p "$WORK/apt"
             cd "$WORK/apt"
             git init -q
-            git checkout -q --orphan gh-pages
+            git checkout -q --orphan main
             git remote add origin "$REPO_URL"
           fi
 
@@ -321,17 +328,10 @@ jobs:
           mkdir -p dists/stable/main/binary-amd64
           mkdir -p dists/stable/main/binary-arm64
 
-          # Per-arch pool subdirectories. The previous implementation called
-          # `apt-ftparchive packages --architecture "$ARCH" pool/...` but
-          # that flag is not supported by the apt-ftparchive shipped on
-          # ubuntu-latest (it only accepts `-a/--arch` for setting the
-          # metadata Architecture field, not for filtering, and rejects
-          # `--architecture` outright: "E: Command line option
-          # --architecture is not understood in combination with the other
-          # options"). Splitting debs into per-arch subdirs lets
-          # `apt-ftparchive packages <path>` scan only that arch and emit
-          # a clean Packages file without any filter flag — works across
-          # every apt-utils version we ship on.
+          # Per-arch pool subdirectories. Splitting debs into per-arch
+          # subdirs lets `apt-ftparchive packages <path>` scan only that
+          # arch and emit a clean Packages file without any filter flag —
+          # works across every apt-utils version we ship on.
           for ARCH in amd64 arm64; do
             ARCH_POOL="pool/main/n/nova/binary-${ARCH}"
             mkdir -p "$ARCH_POOL"
@@ -360,10 +360,23 @@ jobs:
           if git diff --cached --quiet; then
             echo "::notice::no apt repo changes; skipping commit"
           else
-            # --no-verify skips any pre-commit hooks shipped on gh-pages
+            # --no-verify skips any pre-commit hooks shipped on the repo
             # (there shouldn't be any, but be defensive).
             git commit --no-verify -m "apt: publish nova ${VERSION#v}"
-            # Retry once on transient network failures.
-            git push origin gh-pages \
-              || { sleep 5; git push origin gh-pages; }
+            # First push on an empty repo: use `-u` to set upstream. On a
+            # populated repo: a plain `push` to the current branch works
+            # because clone set up `origin/HEAD`. We use a single branch
+            # name (`HEAD:refs/heads/<branch>`) so the same command line
+            # works whether HEAD is on `main` (the local orphan we just
+            # created) or some other default branch.
+            BRANCH="$(git symbolic-ref --short HEAD 2>/dev/null || echo main)"
+            # Retry once on transient network failures; surface permanent
+            # failures (auth, branch protection, missing scope) as errors so
+            # the workflow run is visibly red instead of silently green.
+            if ! git push origin "HEAD:refs/heads/${BRANCH}"; then
+              echo "::warning::first push attempt failed; retrying after 5s"
+              sleep 5
+              git push origin "HEAD:refs/heads/${BRANCH}" \
+                || { echo "::error::push to fengyily/linux-repo failed twice — likely causes: (a) APT_REPO_TOKEN expired/revoked or missing 'contents: write' on fengyily/linux-repo; (b) branch protection on '$BRANCH' requires a PR; (c) linux-repo is read-only/fork-only. Fix the upstream cause; do NOT bypass by switching back to in-repo gh-pages."; exit 1; }
+            fi
           fi
