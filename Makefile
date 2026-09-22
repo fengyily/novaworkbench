@@ -68,7 +68,7 @@ build-backend:
 	@echo "Built: dist/nova (version=$(VERSION) commit=$(COMMIT))"
 
 run:
-	cd backend && NOVA_PORT=${PORT:-9527} go run ./cmd/server
+	cd backend && NOVA_PORT=$${PORT:-9527} go run ./cmd/server
 
 clean:
 	rm -rf backend/web/dist dist/nova $(SENTINEL)
