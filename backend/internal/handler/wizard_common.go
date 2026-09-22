@@ -660,6 +660,14 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 		log.Printf("[auto-push] %s: no dev branch (detached HEAD?), skip", reqRow.ID)
 		return
 	}
+	// dev == base 安全闸门：dev 与 base 相同意味着没有 worktree 隔离
+	// (开发在主 checkout 上直接做了),直推会把未隔离的改动推到 main,
+	// 且 gh pr create 必然失败 (head == base)。拒绝推送并说明原因
+	// (req_82e061807ef0372f: dev=main, base=main → 直推 main + commit "main")。
+	if dev == base {
+		log.Printf("[auto-push] %s: dev branch %q == base %q — refusing to push directly to base branch", reqRow.ID, dev, base)
+		return
+	}
 
 	// Need a remote to push to. Prefer the checkout's configured origin; fall
 	// back to the project's stored remote_url (Agent-server / freshly-cloned

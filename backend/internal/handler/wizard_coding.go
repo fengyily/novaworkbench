@@ -618,6 +618,20 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// the declaration here is intentionally omitted to keep the variable in
 	// exactly one scope so a future edit can't accidentally re-introduce the
 	// old hardcoded "main" fallback chain.
+	// branch_name 兜底：调用方（前端清空输入框 / 调度任务 / quick-start）
+	// 未传 branch_name 时，从 reqID + kind 派生默认分支名
+	// (feat/req_xxx 或 fix/req_xxx)。没有分支名 → worktree 守卫跳过 →
+	// 在主 checkout 上直接开发 → autoPushPR 把 dev 解析成 main →
+	// 直推 main + commit message 退化为 "main"（req_82e061807ef0372f）。
+	if p.BranchName == "" && p.RequirementID != "" {
+		kind := ""
+		if reqRow != nil {
+			kind = reqRow.Kind
+		}
+		p.BranchName = branchPrefixForKind(kind) + "/" + p.RequirementID
+		job.Append(store.LogLine{Type: "message", Content: "🌿 调用方未传 branch_name，已从需求 ID 派生默认分支: " + p.BranchName})
+		log.Printf("[start-coding] %s: derived default branch_name=%s (caller omitted it)", p.RequirementID, p.BranchName)
+	}
 	if p.BranchName != "" && p.RequirementID != "" {
 		wtPath, wtErr := EnsureWorktreeLogged(p.ProjectPath, p.RequirementID, p.BranchName, baseBranch, func(s string) {
 			job.Append(store.LogLine{Type: "message", Content: s})

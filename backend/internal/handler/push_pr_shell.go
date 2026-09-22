@@ -178,6 +178,15 @@ func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.Sub
 	}
 	job.Append(store.LogLine{Type: "phase", Content: "🚀 本地 shell 推送流程启动（dev=" + dev + ", base=" + base + "）"})
 
+	// dev == base 安全闸门：开发分支与目标分支相同时,推送会把未隔离的
+	// 改动直推 main,且 gh pr create 必然失败 (head == base)。拒绝执行
+	// 而不是产生一个 "✅ 完成" 的假成功 (req_82e061807ef0372f)。
+	if dev == base {
+		job.Append(store.LogLine{Type: "error", Content: "❌ 开发分支与目标分支相同（dev=" + dev + ", base=" + base + "），拒绝直推 base 分支。请检查 worktree 是否正常创建。"})
+		job.Finish(1, store.JobError)
+		return
+	}
+
 	// Credential + GPG env (shared with the coding path): GIT_AUTHOR_*,
 	// HTTPS askpass, and GPG worktree-config writes so `git commit`/`git
 	// merge` in dir sign under the project's identity. projectPath is the
@@ -204,7 +213,15 @@ func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.Sub
 		}
 		msg := strings.TrimSpace(commitMessage)
 		if msg == "" {
-			msg = dev // fall back to the branch name, matching the LLM prompt
+			// Fall back to the requirement title, not the branch name.
+			// Using dev (the branch name) produced meaningless commit
+			// messages like "main" when no worktree was created
+			// (req_82e061807ef0372f: commit -m "main").
+			if title := strings.TrimSpace(reqRow.Title); title != "" {
+				msg = title
+			} else {
+				msg = reqRow.ID
+			}
 		}
 		if _, cerr := git("commit", "-m", msg, "--no-verify"); cerr != nil {
 			// commit can fail benignly when add raced with another committer;
@@ -266,11 +283,13 @@ func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.Sub
 	}
 
 	// ── Step 5: create PR (gh / glab / tea) or surface a compare link.
-	prURL := h.createPRShell(job, git, dir, dev, base, platformType, remote, reqRow)
-	if prURL != "" {
+	prURL, prCreated := h.createPRShell(job, git, dir, dev, base, platformType, remote, reqRow)
+	if prCreated {
 		job.Append(store.LogLine{Type: "result", Content: "✅ 推送并创建 PR 完成\n\nPR: " + prURL})
+	} else if prURL != "" {
+		job.Append(store.LogLine{Type: "result", Content: "⚠️ 推送完成，但 PR 创建失败。请通过 compare 链接手动创建: " + prURL})
 	} else {
-		job.Append(store.LogLine{Type: "result", Content: "✅ 推送完成（未自动创建 PR，请通过 compare 链接手动创建）"})
+		job.Append(store.LogLine{Type: "result", Content: "⚠️ 推送完成，但未能自动创建 PR（无平台 CLI / 无 remote）。请手动创建 PR。"})
 	}
 	job.Append(store.LogLine{Type: "done", Content: "✅ 推送流程完成"})
 	job.Finish(0, store.JobDone)
@@ -279,10 +298,12 @@ func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.Sub
 
 // createPRShell runs the platform-appropriate PR-creation CLI, falling back to
 // a compare URL when the CLI is unavailable. Returns the PR URL (or compare
-// URL when no PR was created). It must never error-finish the job by itself —
-// a PR creation failure still leaves a successful push, which the caller
-// reports as success with a manual-create hint.
-func (h *WizardHandler) createPRShell(job *store.Job, git func(...string) (string, error), dir, dev, base, platformType, remote string, reqRow *model.Requirement) string {
+// URL when no PR was created) AND a bool reporting whether a real PR was
+// created. When prCreated=false, the URL is a best-effort compare link the
+// user can open manually — the caller must NOT report it as "✅ PR 创建完成"
+// (req_82e061807ef0372f: gh pr create failed on head==base but the shell still
+// reported "✅ 推送并创建 PR 完成 / PR: ...compare/main...main").
+func (h *WizardHandler) createPRShell(job *store.Job, git func(...string) (string, error), dir, dev, base, platformType, remote string, reqRow *model.Requirement) (string, bool) {
 	title := strings.TrimSpace(reqRow.Title)
 	if title == "" {
 		title = dev
@@ -319,27 +340,27 @@ func (h *WizardHandler) createPRShell(job *store.Job, git func(...string) (strin
 	case "github":
 		if out, err := run("gh", "pr", "create", "--base", base, "--head", dev, "--title", title, "--body", bodyStr); err != nil {
 			job.Append(store.LogLine{Type: "message", Content: "ℹ️ gh pr create 不可用/失败: " + err.Error()})
-			return compareURL(remote, base, dev)
+			return compareURL(remote, base, dev), false
 		} else {
 			// gh prints the PR URL to stdout.
-			return extractURL(out)
+			return extractURL(out), true
 		}
 	case "gitlab":
 		if out, err := run("glab", "mr", "create", "--target-branch", base, "--source-branch", dev, "--title", title, "--description", bodyStr); err != nil {
 			job.Append(store.LogLine{Type: "message", Content: "ℹ️ glab mr create 不可用/失败: " + err.Error()})
-			return compareURL(remote, base, dev)
+			return compareURL(remote, base, dev), false
 		} else {
-			return extractURL(out)
+			return extractURL(out), true
 		}
 	case "gitea":
 		if out, err := run("tea", "pr", "create", "--base", base, "--head", dev, "--title", title, "--description", bodyStr); err != nil {
 			job.Append(store.LogLine{Type: "message", Content: "ℹ️ tea pr create 不可用/失败: " + err.Error()})
-			return compareURL(remote, base, dev)
+			return compareURL(remote, base, dev), false
 		} else {
-			return extractURL(out)
+			return extractURL(out), true
 		}
 	default:
-		return compareURL(remote, base, dev)
+		return compareURL(remote, base, dev), false
 	}
 }
 
