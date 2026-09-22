@@ -4048,16 +4048,18 @@ export default function RequirementDetail() {
             </>
           )}
 
-          {req.status === 'designing' && hasDesign && (
+          {(req.status === 'designing' || req.status === 'designed') && hasDesign && (
             <>
-              <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-                <button className="btn btn-primary" onClick={() => transition('designed', '方案完成' /* i18n: protocol literal — state sentinel */
-                )} disabled={!!busy}>
-                  {busy === '方案完成' /* i18n: protocol literal — state sentinel */
-                    ? <><IconHourglass size={13} className="btn-icon" />...</>
-                    : <><IconTriangle size={13} className="btn-icon" />{t('requirements.detail2.designCompleteBtn')}</>}
-                </button>
-              </div>
+              {req.status === 'designing' && (
+                <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+                  <button className="btn btn-primary" onClick={() => transition('designed', '方案完成' /* i18n: protocol literal — state sentinel */
+                  )} disabled={!!busy}>
+                    {busy === '方案完成' /* i18n: protocol literal — state sentinel */
+                      ? <><IconHourglass size={13} className="btn-icon" />...</>
+                      : <><IconTriangle size={13} className="btn-icon" />{t('requirements.detail2.designCompleteBtn')}</>}
+                  </button>
+                </div>
+              )}
               {reqKind !== 'idea' && (
               <DocRefineChat
                 reqId={req.id}
