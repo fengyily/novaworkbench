@@ -180,7 +180,9 @@ sudo apt update
 sudo apt install nova
 ```
 
-deb 包会把 `nova` 二进制落到 `/usr/bin/nova`，但**不会**自动创建运行用户、不会自动注册 systemd 服务——这两步刻意保持独立，方便审计与回滚。
+deb 包会把 `nova` 二进制落到 `/usr/bin/nova`（mode 由 `packaging/nfpm.yaml` 显式固定为 0755），但**不会**自动创建运行用户、不会自动注册 systemd 服务——这两步刻意保持独立，方便审计与回滚。
+
+如果你的下载/解压过程导致 `/usr/bin/nova` 的 mode 退化为 0644，第 4 步的 `sudo nova install` 会自动把它修复为 0755，无需手工 `chmod +x`。
 
 ### 3. 创建 nova 用户（首次部署需要）
 
@@ -197,7 +199,15 @@ sudo nova install
 # 卸载：sudo nova uninstall
 ```
 
-`nova install` 会写入 `/etc/systemd/system/nova.service`（`Type=simple` / `User=nova` / `Restart=always`），执行 `systemctl daemon-reload` + `enable --now`。完成后访问 `http://<host>:9527/`。日志：`journalctl -u nova -f`。
+`nova install` 会：
+
+1. 把当前 `nova` 二进制复制到 `/usr/bin/nova` 并强制 mode `0755`（覆盖 apt 装的旧版本，保证 ExecStart 路径一定可执行）；
+2. 写入 `/etc/systemd/system/nova.service`（`Type=simple` / `User=nova` / `Restart=always`）；
+3. 执行 `systemctl daemon-reload` + `enable --now`。
+
+完成后访问 `http://<host>:9527/`。日志：`journalctl -u nova -f`。
+
+> 如果你是从 GitHub Release 直接下载二进制运行 `sudo ./novaworkbench-... install`，同样适用：`nova install` 会自动把它 cp 到 `/usr/bin/nova`，无需手动 `chmod +x`。
 
 > 默认端口 `9527` 是非特权端口，不需要额外权限。如果改用 < 1024 端口（如 80 / 443），需要给 systemd unit 加 `AmbientCapabilities=CAP_NET_BIND_SERVICE` 并以 root 运行（README 不展开，可直接编辑 `/etc/systemd/system/nova.service` 后 `systemctl daemon-reload`）。
 

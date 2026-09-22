@@ -25,6 +25,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -40,6 +41,14 @@ import (
 // without needing a logged-in user; see agent-worker/systemd for an example of
 // the user-side counterpart.
 const unitPath = "/etc/systemd/system/nova.service"
+
+// canonicalInstallPath 是 nova install 把运行中的二进制落到 / 期望
+// ExecStart 指向的路径。apt 包也是把 binary 放到这里；保证两条路径
+// 收敛到同一文件。
+//
+// 保留为包级 var（而不是 const）以便测试在临时目录中临时改写其值，
+// 避免对主机 /usr/bin 造成污染。生产代码中此值恒为 "/usr/bin/nova"。
+var canonicalInstallPath = "/usr/bin/nova"
 
 // InstallOptions controls how the systemd unit is rendered.
 type InstallOptions struct {
@@ -100,6 +109,52 @@ func RunVersion() {
 	fmt.Printf("nova %s (%s, %s)\n", version.Version, version.Commit, version.BuildDate)
 }
 
+// ensureBinaryInstalled 把当前运行中的 nova 复制到 canonicalInstallPath
+// 并强制 mode = 0755。幂等：重复运行结果一致。
+//
+// 为什么强制 cp（不只是 chmod）：用户场景既包括
+//   (a) apt install 之后二进制 mode 退化成 0644；
+//   (b) 下载 GitHub Release 二进制 / go build 后从 build dir 直接
+//       sudo ./nova install，systemd ExecStart 必须指向一个稳定路径。
+// 强制 cp 把 ExecStart 收敛到 /usr/bin/nova 这一个不变的位置。
+func ensureBinaryInstalled(source string) error {
+	if source == canonicalInstallPath {
+		// 已经在 /usr/bin/nova 运行，只修 mode 即可。
+		return os.Chmod(canonicalInstallPath, 0o755)
+	}
+	in, err := os.Open(source)
+	if err != nil {
+		return fmt.Errorf("open source binary %s: %w", source, err)
+	}
+	defer in.Close()
+
+	// tmp file + rename 做原子替换，避免 ExecStart 路径短暂不可用
+	// 导致 systemd 203/EXEC 风暴。
+	tmp := canonicalInstallPath + ".new"
+	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", tmp, err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("copy binary to %s: %w", tmp, err)
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("close %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, canonicalInstallPath); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("rename %s -> %s: %w", tmp, canonicalInstallPath, err)
+	}
+	// Rename 在 Linux 上保留原 file 的 mode；显式再 chmod 一次以防万一。
+	if err := os.Chmod(canonicalInstallPath, 0o755); err != nil {
+		return fmt.Errorf("chmod 0755 %s: %w", canonicalInstallPath, err)
+	}
+	return nil
+}
+
 // Install writes the nova.service unit, reloads systemd, and enables the
 // service. Steps are ordered so a partial failure leaves the host in a
 // recoverable state (a stale unit file is overwritten on the next retry).
@@ -124,6 +179,13 @@ func Install(ctx context.Context, opts InstallOptions) error {
 		}
 		opts.ExecStart = exe
 	}
+
+	// 把当前 nova 复制到 canonicalInstallPath 并 chmod 0755，让 unit ExecStart
+	// 永远指向一个稳定、可执行的位置；之后 ExecStart 必须用 canonicalInstallPath。
+	if err := ensureBinaryInstalled(opts.ExecStart); err != nil {
+		return err
+	}
+	opts.ExecStart = canonicalInstallPath
 
 	if os.Geteuid() != 0 {
 		return errors.New("nova install must be run as root (try `sudo nova install`)")
@@ -150,9 +212,7 @@ func Install(ctx context.Context, opts InstallOptions) error {
 	}
 
 	fmt.Println("✓ nova.service installed and started.")
-	if opts.ExecStart != "/usr/bin/nova" {
-		fmt.Printf("  ExecStart=%s (note: not /usr/bin/nova; apt install will normalize this)\n", opts.ExecStart)
-	}
+	fmt.Println("  Installed binary: " + canonicalInstallPath)
 	fmt.Println()
 	// Best-effort status snapshot. We never want install to fail because
 	// `systemctl status` printed a non-active line right after enable --now
