@@ -553,19 +553,6 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			}
 		}
 	}
-	// hadWorktree records whether the upstream stage had already persisted a
-	// worktree before THIS coding run — false means the design/analysis session
-	// we're about to fork was created in-place (un-isolated).
-	//
-	// Drift guard: a non-empty reqRow.WorktreePath alone is not enough — we
-	// also verify it matches WorktreePath(projectPath, reqID). A stale row
-	// pointing at another requirement's directory would otherwise be treated
-	// as "had a worktree" and the requireAnchoredFork gate below would let
-	// the run proceed, letting Claude edit the wrong checkout
-	// (req_c46e8d66491ae3a2 → req_cd5079181af7335a). p.ProjectPath is the
-	// post-resolveCodingProjectPath value, so it's safe to compare here.
-	hadWorktree := reqRow != nil && worktreeMatchesHere(reqRow, p.ProjectPath)
-
 	// Recover the project directory if a Docker rebuild / fresh workspace
 	// mount left it absent. Without this, EnsureWorktreeLogged below returns
 	// ErrNotAGitRepo and the in-place checkout fails with the user-facing
@@ -614,6 +601,26 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		job.Finish(1, store.JobError)
 		return
 	}
+
+	// hadWorktree records whether the upstream stage had already persisted a
+	// worktree before THIS coding run — false means the design/analysis session
+	// we're about to fork was created in-place (un-isolated).
+	//
+	// Drift guard: a non-empty reqRow.WorktreePath alone is not enough — we
+	// also verify it matches WorktreePath(projectPath, reqID). A stale row
+	// pointing at another requirement's directory would otherwise be treated
+	// as "had a worktree" and the requireAnchoredFork gate below would let
+	// the run proceed, letting Claude edit the wrong checkout
+	// (req_c46e8d66491ae3a2 → req_cd5079181af7335a).
+	//
+	// MUST run after resolveCodingProjectPath: p.ProjectPath is empty when the
+	// frontend / scheduler omits project_path, and worktreeMatchesHere("",
+	// reqRow) returns false — leaving the durable worktree_path undetected and
+	// tripping the requireAnchoredFork gate below on a perfectly valid fork
+	// (req_49e25a8f7ac24c4f: design ran in the worktree, worktree_path was
+	// persisted, but coding refused to fork because ProjectPath wasn't
+	// resolved yet at the old check site).
+	hadWorktree := reqRow != nil && worktreeMatchesHere(reqRow, p.ProjectPath)
 
 	// Resolve the working directory for coding. When a branch is requested
 	// AND the project is a git repo with a requirement id to key on, develop

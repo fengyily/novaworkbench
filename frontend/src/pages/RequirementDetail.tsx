@@ -4245,6 +4245,31 @@ export default function RequirementDetail() {
                       : t('requirements.detail2.codingWorkingHint')}
                 </div>
               )}
+              {/* Recovery from a stuck `designed` state: when a coding round
+                  failed at the gate (e.g. the fork-anchoring guard, or any
+                  pre-spawn error) the job's log is replayed into codingLines
+                  via last_coding_job_id, which hides the "开始开发" CTA above
+                  (it requires codingLines.length===0). Meanwhile status never
+                  promoted to `developing`, so the developing-state redo block
+                  below is also hidden — leaving the panel with just the error
+                  line and no way back (req_49e25a8f7ac24c4f). Surface a
+                  "重新开发" button right under the failed log so the operator
+                  can re-enter the preflight dialog without a manual DB wipe.
+                  Mirrors the developing-state redo (same openBranchModal entry),
+                  gated to `designed` only because `developing` already has its
+                  own redo button and `done` is a terminal gate. */}
+              {!coding && req.status === 'designed' && codingLines.length > 0 && reqKind !== 'idea' && (
+                <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+                  <button
+                    className="btn btn-primary"
+                    title={t('requirements.detail2.codingRedoTitle')}
+                    onClick={() => openBranchModal()}
+                    disabled={!!busy}
+                  >
+                    <IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.codingRedoBtn')}
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
