@@ -180,6 +180,38 @@ func (h *WizardHandler) resolveCodingProjectPath(p *codingRunParams, reqRow *mod
 	return nil
 }
 
+// backfillSkipDesignDescription fills p.RequirementDesc from reqRow.Description
+// when the caller left it empty — the skip-design direct-development path.
+//
+// Without this, a skip_design=1 (or design-mode-but-empty-design) requirement
+// reaches the fresh-session Claude with no `## 需求描述` block: the agent
+// persona header carries only the (often empty) title and the CLI never learns
+// what the requirement actually says. Sub-tasks forked from that session
+// inherit the same blind spot and bail out as "上下文缺失" (req_f1f71c2b2f2ef0c7).
+//
+// Scope: ONLY the fresh-session direct-development path. When any parent session
+// (design / analysis / legacy coding) is available, the forking branch
+// upstream at sourceSID/fork derivation already feeds the description through
+// the --resume conversation history — backfilling here would duplicate it.
+//
+// Returns true when the backfill fired (so the caller can log the length /
+// emit a phase line); false when no work was done (reqRow nil, or
+// RequirementDesc / req.Description both empty).
+func backfillSkipDesignDescription(p *codingRunParams, reqRow *model.Requirement) bool {
+	if reqRow == nil {
+		return false
+	}
+	if strings.TrimSpace(p.RequirementDesc) != "" {
+		return false
+	}
+	desc := strings.TrimSpace(reqRow.Description)
+	if desc == "" {
+		return false
+	}
+	p.RequirementDesc = desc
+	return true
+}
+
 // codingReentryLock reports whether a start-coding request must be refused
 // because the requirement is already mid-run in the plan-mode split path.
 // Returns the user-facing Chinese message on refusal, "" when the caller may
@@ -696,6 +728,18 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		if perr := h.reqSvc.UpdateWorktree(p.RequirementID, p.BranchName, workDir); perr != nil {
 			log.Printf("[start-coding] failed to persist worktree for %s: %v", p.RequirementID, perr)
 		}
+	}
+
+	// skip-design 直开兜底：当调用方未传 RequirementDesc 且无 design /
+	// analysis session 可 fork 时，主开发 session 会以空 persona header
+	// 启动，fork 出去的 sub_task 也拿不到需求正文
+	// （req_f1f71c2b2f2ef0c7：skip_design=1、dev_mode='design' 但
+	// design_session_id 为空，前端未带 requirement_desc 字段）。
+	// 回填 req.Description 到 p.RequirementDesc，仅作用于"无父会话"
+	// 直开场景；方案 → 开发那条链 sourceSID != ""，Description 由父
+	// jsonl 提供，不被本次兜底覆盖。
+	if filled := backfillSkipDesignDescription(p, reqRow); filled {
+		log.Printf("[start-coding] %s: skip-design 直开路径回填 RequirementDesc (len=%d)", p.RequirementID, len(p.RequirementDesc))
 	}
 
 	// Session threading: the developer stage forks off the design session
