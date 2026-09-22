@@ -1858,20 +1858,19 @@ export default function RequirementDetail() {
   // ── Developer phase: job streaming ────────────────────────────────────────
   // streamJob subscribes to a wizard job's SSE stream and appends events to
   // codingLines (the shared coding-panel). keepDone=true is used by the
-  // "Further adjust" rounds: on job_done it leaves the requirement
-  // status untouched (stays
-  // developing/done) and only refreshes, instead of flipping to developing and
-  // writing the localStorage "done" marker like the first coding pass. When
-  // keepDone is set, persistDone additionally writes the "done" marker so a
-  // refresh reloads THIS job's durable log — used by "Continue coding", whose job log
-  // becomes the new authoritative record replacing the one lost to a restart.
+  // "Further adjust" / "Continue coding" rounds: on job_done it leaves the
+  // requirement status untouched (stays developing/done) and only refreshes,
+  // instead of flipping to developing like the first coding pass. The durable
+  // replay hook is requirements.last_coding_job_id (written by the backend
+  // before spawn, never cleared), so a refresh reloads THIS job's log via the
+  // DB-backed restore effect above — no client-side marker needed.
   // skipFirst is used on reconnect (mount-time restore): the caller has just
   // hydrated codingLines from the job snapshot, so we drop the first N SSE
   // events the backend replays (they are already in codingLines) and only
   // append new lines from there on. Without this, reconnecting to a running
   // job doubles every historical line — once from the snapshot, once from
   // the replay.
-  const streamJob = useCallback((jobId: string, opts?: { keepDone?: boolean; persistDone?: boolean; skipFirst?: number }) => {
+  const streamJob = useCallback((jobId: string, opts?: { keepDone?: boolean; skipFirst?: number }) => {
     if (esRef.current) esRef.current.close();
     setCoding(true);
     // Fresh coding stream → drop the prior usage snapshot so the bar doesn't
@@ -1932,17 +1931,13 @@ export default function RequirementDetail() {
           const ok = evt.status === 'done' || evt.exit_code === 0;
           if (opts?.keepDone) {
             // Further adjust / continue coding: preserve current status, just refresh on success.
-            if (ok) {
-              if (opts.persistDone) {
-                localStorage.setItem(`coding_job_${id}`, `done:${jobId}`);
-              }
-              refresh();
-            }
+            // No localStorage pointer to maintain — the durable hook is
+            // requirements.last_coding_job_id, written by the backend before
+            // the goroutine spawned, so a refresh replays this job's log via
+            // the DB-backed restore effect above.
+            if (ok) refresh();
           } else if (id && ok) {
             requirementsApi.updateStatus(id, 'developing').then(() => refresh());
-            localStorage.setItem(`coding_job_${id}`, `done:${jobId}`);
-          } else {
-            localStorage.removeItem(`coding_job_${id}`);
           }
           // Server-pushed orchestration summary completion. The
           // OrchestrationQueue marks the batch via runOrchestratorSummary
@@ -1974,11 +1969,11 @@ export default function RequirementDetail() {
         // the UI out of sync with the real state (this was half of the
         // "stuck forever, refresh does not help" symptom). Reconcile by
         // re-reading the requirement from the server. Deliberately NOT
-        // writing a status here and NOT touching the `coding_job_<id>`
-        // localStorage marker — this is the error path, so we let the DB
-        // state stand. Fire-and-forget (never await: this callback must stay
-        // synchronous) with a no-op catch so a still-broken network does not
-        // surface an unhandled rejection.
+        // writing a status here and NOT touching the
+        // requirements.last_coding_job_id column — this is the error path,
+        // so we let the DB state stand. Fire-and-forget (never await: this
+        // callback must stay synchronous) with a no-op catch so a still-broken
+        // network does not surface an unhandled rejection.
         refresh().catch(() => {});
       },
     );
@@ -2097,7 +2092,8 @@ export default function RequirementDetail() {
       }
       const jobId = json.data?.job_id;
       if (!jobId) throw new Error(t('requirements.detail2.jobIdMissing'));
-      localStorage.setItem(`coding_job_${id}`, jobId);
+      // No localStorage pointer — the backend persists last_coding_job_id
+      // before spawning; the DB-backed restore effect replays it on refresh.
       streamJob(jobId);
     } catch (err: any) {
       setCodingLines([{ type: 'error', content: err.message }]);
@@ -2193,8 +2189,9 @@ export default function RequirementDetail() {
       const json = await res.json();
       const jobId = json.data?.job_id;
       if (!jobId) throw new Error(json.error?.message || t('requirements.detail2.jobIdMissing'));
-      localStorage.setItem(`coding_job_${id}`, jobId);
-      streamJob(jobId, { keepDone: true, persistDone: true });
+      // No localStorage pointer — see doStartCoding note. keepDone preserves
+      // the developing/done status across this continuation round.
+      streamJob(jobId, { keepDone: true });
     } catch (err: any) {
       setCodingLines([{ type: 'error', content: err.message }]);
       setCoding(false);
@@ -2388,42 +2385,47 @@ export default function RequirementDetail() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // Restore active coding job when returning to this page
+  // Replay the most recent coding job's log from the DB (durable hook) when
+  // entering the page with no live coding stream — survives a backend restart
+  // and works across browsers / scheduler-triggered runs. Replaces the old
+  // browser-localStorage `coding_job_<id>` hook, which was unreliable: gone on
+  // cache clear, missing when coding was triggered by the scheduler path, and
+  // only ever present on the browser that started the job. last_coding_job_id
+  // is written by the backend BEFORE the coding goroutine spawns and never
+  // cleared, so it is always present once a coding round has run. GET
+  // /api/wizard/jobs/{id} falls back to the job_logs table when the in-memory
+  // JobStore is gone (post-restart).
+  const restoredCodingJobRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!id) return;
-    const saved = localStorage.getItem(`coding_job_${id}`);
-    if (!saved) return;
+    const jobId = req?.last_coding_job_id;
+    if (!id || !jobId) return;
+    // A live stream owns codingLines while it's running — don't clobber it.
+    if (coding) return;
+    // Already replayed this exact job; don't re-fetch on every req refresh.
+    if (restoredCodingJobRef.current === jobId) return;
+    restoredCodingJobRef.current = jobId;
 
-    const isDone = saved.startsWith('done:');
-    const savedJobId = isDone ? saved.slice(5) : saved;
-
-    authedFetch(`${API_BASE}/api/wizard/jobs/${savedJobId}`)
+    authedFetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
       .then(r => r.json())
       .then(json => {
-        if (!json.success) {
-          // Job is neither in memory nor persisted (e.g. backend restarted
-          // mid-run before the log could be saved). Drop the stale pointer so
-          // we don't keep retrying a dead job.
-          localStorage.removeItem(`coding_job_${id}`);
-          return;
-        }
+        if (!json.success) return; // log never persisted (rare crash mid-run)
         const { status, log } = json.data as { status: string; log: LogLine[] };
         if (!log || log.length === 0) return;
         // rawCount = backend snapshot's total LogLine count, including
         // knowledge rows that extractKnowledge filters out of codingLines.
         // The SSE replay emits exactly `rawCount` events before the first
         // live one, so we pass this as skipFirst to streamJob — otherwise the
-        // replay would re-append every historical line that the snapshot
-        // already hydrated, doubling the entire history on the panel.
+        // replay would re-append every historical line the snapshot already
+        // hydrated, doubling the entire history on the panel.
         const rawCount = log.length;
         const kb = extractKnowledge(log);
         if (kb.items.length > 0 || kb.empty) { setKnowledgeItems(kb.items); setKnowledgeEmpty(kb.empty); }
         if (kb.lines.length > 0) setCodingLines(coalesceLogLines(kb.lines));
-        if (status === 'running') streamJob(savedJobId, { skipFirst: rawCount });
+        if (status === 'running') streamJob(jobId, { skipFirst: rawCount });
       })
       .catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [id, req?.last_coding_job_id]);
 
   useEffect(() => {
     return () => {

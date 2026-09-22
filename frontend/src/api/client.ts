@@ -643,7 +643,15 @@ export interface Requirement {
   // path) and schedule_executor.go (scheduler path). The detail page reads
   // it back after a refresh to attach to the live SSE stream when the
   // scheduled-task poll hasn't surfaced a job_id yet (cold start race).
+  // Cleared on terminal so the liveness badge doesn't get stuck.
   coding_job_id?: string;
+  // last_coding_job_id: DURABLE pointer to the most recent coding job — never
+  // cleared on terminal. The detail page reads it back to replay the finished
+  // coding log after a backend restart via GET /api/wizard/jobs/{id} (which
+  // falls back to the job_logs table when the in-memory JobStore is gone).
+  // Replaces the old browser-localStorage `coding_job_<id>` hook, which was
+  // unreliable across browser/cache/scheduler-triggered runs.
+  last_coding_job_id?: string;
   skip_analysis: boolean;
   skip_design: boolean;
   branch_name?: string;

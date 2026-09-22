@@ -487,6 +487,19 @@ var alterColumns = []string{
 	// and never surface it to the frontend, so a refreshed detail page had no
 	// way to attach to the live coding SSE stream.
 	`ALTER TABLE requirements ADD COLUMN coding_job_id TEXT NOT NULL DEFAULT ''`,
+	// last_coding_job_id: the most recent coding (start/adjust/continue) job id,
+	// DURABLE — never cleared on terminal. coding_job_id above is cleared when a
+	// job finishes so the liveness badge doesn't get stuck pointing at a dead
+	// in-memory job, but that left NO durable hook for the detail page to
+	// replay a finished coding log after a backend restart (the in-memory
+	// JobStore is gone, localStorage is browser-local and unreliable). This
+	// column is written alongside coding_job_id at every coding entry point
+	// (before the goroutine spawns, so it survives a mid-run crash) and left
+	// intact on terminal. The detail page reads it back, hits
+	// /api/wizard/jobs/{id} (which falls back to job_logs), and replays the
+	// completion summary. Fixes req_3f2f69dd900e0a30's "报告没落库 / 日志因
+	// 服务重启已清空" symptom.
+	`ALTER TABLE requirements ADD COLUMN last_coding_job_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN skip_analysis INTEGER NOT NULL DEFAULT 1`,
 	// skip_design: "直接开发" — when true, the requirement skips the analyst AND
 	// architect stages entirely and goes straight to coding (draft → developing).

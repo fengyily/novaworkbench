@@ -268,16 +268,31 @@ func (h *WizardHandler) StartCoding(w http.ResponseWriter, r *http.Request) {
 
 	job := h.jobs.Create(p.RequirementID)
 	job.SetType("start_coding")
-	// Persist the live coding job_id so a refreshed detail page can attach
-	// back to this SSE stream (mirrors UpdateDesignJob in the architect path).
-	if p.RequirementID != "" {
-		if uerr := h.reqSvc.UpdateCodingJob(p.RequirementID, job.ID); uerr != nil {
-			log.Printf("[start-coding] failed to persist coding_job_id for %s: %v", p.RequirementID, uerr)
-		}
-	}
+	// Persist the live coding job_id (for SSE reconnect after a refresh) AND
+	// the durable last_coding_job_id (for post-restart log replay). The live
+	// id is cleared on terminal; the durable id is never cleared so the detail
+	// page can always reach the finished log via /api/wizard/jobs/{id} +
+	// job_logs fallback.
+	h.persistCodingJobID(p.RequirementID, job.ID)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	go h.execStartCoding(&p, job, nil)
+}
+
+// persistCodingJobID writes both coding_job_id (live, cleared on terminal) and
+// last_coding_job_id (durable, never cleared) before the coding goroutine
+// spawns, so the durable pointer survives a mid-run crash. Called at every
+// coding entry point (start / scheduled start / adjust / continue).
+func (h *WizardHandler) persistCodingJobID(reqID, jobID string) {
+	if reqID == "" {
+		return
+	}
+	if uerr := h.reqSvc.UpdateCodingJob(reqID, jobID); uerr != nil {
+		log.Printf("[start-coding] failed to persist coding_job_id for %s: %v", reqID, uerr)
+	}
+	if uerr := h.reqSvc.UpdateLastCodingJob(reqID, jobID); uerr != nil {
+		log.Printf("[start-coding] failed to persist last_coding_job_id for %s: %v", reqID, uerr)
+	}
 }
 
 // RunScheduledCoding is the scheduler-facing entry point. It mirrors
@@ -292,17 +307,12 @@ func (h *WizardHandler) RunScheduledCoding(p *codingRunParams, cb *runCallbacks)
 	}
 	job := h.jobs.Create(p.RequirementID)
 	job.SetType("start_coding")
-	// Persist the live coding_job_id so a refreshed detail page can attach
-	// back to this SSE stream — mirrors StartCoding's UpdateCodingJob call.
-	// Without this, the immediate (design-and-coding) path never writes
-	// coding_job_id, so the frontend's activeSchedJobId poll never picks up
-	// the coding stage's SSE stream and the "开发实现" panel stays blank
-	// even while the coding-plan stage is actively running.
-	if p.RequirementID != "" {
-		if uerr := h.reqSvc.UpdateCodingJob(p.RequirementID, job.ID); uerr != nil {
-			log.Printf("[start-coding] failed to persist coding_job_id for %s: %v", p.RequirementID, uerr)
-		}
-	}
+	// Persist live + durable coding job ids — see persistCodingJobID. Without
+	// this, the immediate (design-and-coding) path never writes coding_job_id,
+	// so the frontend's activeSchedJobId poll never picks up the coding stage's
+	// SSE stream and the "开发实现" panel stays blank even while the coding-plan
+	// stage is actively running.
+	h.persistCodingJobID(p.RequirementID, job.ID)
 	go h.execStartCoding(p, job, cb)
 	return job.ID, nil
 }
@@ -1513,11 +1523,12 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 	job := h.jobs.Create(body.RequirementID)
 	job.SetType("adjust_coding")
 	job.SetModel(model)
-	// Persist the live coding_job_id so a refreshed detail page can reconnect
-	// to the adjust-coding SSE stream (mirrors StartCoding).
-	if uerr := h.reqSvc.UpdateCodingJob(body.RequirementID, job.ID); uerr != nil {
-		log.Printf("[adjust-coding] failed to persist coding_job_id for %s: %v", body.RequirementID, uerr)
-	}
+	// Persist live + durable coding job ids so a refreshed detail page can
+	// reconnect to the adjust-coding SSE stream AND a later restart can replay
+	// this round's log (mirrors StartCoding). The durable id overwrites the
+	// prior round's, so the detail page always replays the most recent coding
+	// job.
+	h.persistCodingJobID(body.RequirementID, job.ID)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	go func() {
@@ -1781,11 +1792,12 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 	job := h.jobs.Create(body.RequirementID)
 	job.SetType("continue_coding")
 	job.SetModel(model)
-	// Persist the live coding_job_id so a refreshed detail page can reconnect
-	// to the continue-coding SSE stream (mirrors StartCoding / AdjustCoding).
-	if uerr := h.reqSvc.UpdateCodingJob(body.RequirementID, job.ID); uerr != nil {
-		log.Printf("[continue-coding] failed to persist coding_job_id for %s: %v", body.RequirementID, uerr)
-	}
+	// Persist live + durable coding job ids so a refreshed detail page can
+	// reconnect to the continue-coding SSE stream AND a later restart can
+	// replay this round's log (mirrors StartCoding / AdjustCoding). The
+	// durable id overwrites the prior round's so the detail page always
+	// replays the most recent coding job.
+	h.persistCodingJobID(body.RequirementID, job.ID)
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 
 	go func() {
