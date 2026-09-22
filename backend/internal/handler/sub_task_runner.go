@@ -615,11 +615,11 @@ func (r *SubTaskRunner) Run(
 	// when the parent has no injectable context (empty description, no
 	// design docs, missing JSONL, no prior sub-task rows, no usage
 	// snapshot), buildParentContext returns "" and we still must drop the
-	// stale parent SID — otherwise runLocalSubTaskAttempt will forward it
-	// as StreamOpts.SessionID and the CLI's `else` branch in
-	// gateway.streamArgs emits `--session-id <stale-sid>` against a JSONL
-	// that does not exist on disk, surfacing as the misleading
-	// "❌ 源会话已失效（session 文件不存在）" error to the user.
+	// stale parent SID so runLocalSubTaskAttempt / the remote caller do not
+	// `--resume` a JSONL that does not exist on disk. They substitute newSID
+	// as `--session-id` instead (starting a fresh conversation keyed by the
+	// id we persisted), so the clear no longer risks the CLI seeing a stale
+	// sid — but keeping the clear is still what flips Resume=false.
 	if freshSession {
 		if ctx := buildParentContext(req, r.subTaskSvc, sourceSID); ctx != "" {
 			prompt = ctx + "\n" + prompt
@@ -698,6 +698,20 @@ func (r *SubTaskRunner) Run(
 		// / --fork-session from the worker argv. The session id we
 		// mint here still flows through to --session-id so the JSONL
 		// is named correctly on disk.
+		//
+		// BUT sourceSID was cleared above for freshSession/bare (stale-
+		// parent guard), so if we passed sourceSID as sessionArg the
+		// worker would receive SessionID="" → streamArgs emits no
+		// --session-id → the remote CLI mints a random id and the JSONL
+		// lands under an id the DB never recorded (same DB↔disk mismatch
+		// the local path fixes in runLocalSubTaskAttempt). Substitute
+		// newSID for the fresh/bare paths so the remote session is keyed
+		// by the id we persist. sourceSID stays "" so the SFTP-skip and
+		// resume=false logic in wizard_remote is unchanged.
+		remoteSessionArg := sourceSID
+		if freshSession || bare {
+			remoteSessionArg = newSID
+		}
 		out := r.remoteCoding(&remoteCodingInput{
 			job:      job,
 			serverID: effectiveServerID,
@@ -711,7 +725,7 @@ func (r *SubTaskRunner) Run(
 			prompt:         prompt,
 			sourceSID:      sourceSID,
 			fork:           fork,
-			sessionArg:     sourceSID,
+			sessionArg:     remoteSessionArg,
 			forkSessionID:  newSID,
 			model:          modelName,
 			claudeConfigID: finalConfigID,
@@ -843,9 +857,23 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 ) claudeStreamOutcome {
 	resumeFlag := true
 	forkFor := forkFlag
+	// sessionIDForCLI is the value the CLI sees for --session-id / --resume.
+	// On the fork / continue paths it's the parent's sourceSID. On the
+	// freshSession / bare paths sourceSID has already been cleared (to avoid
+	// forwarding a stale parent id), so we MUST substitute newSID here —
+	// otherwise streamArgs sees SessionID="" and emits NO --session-id at
+	// all, the CLI mints its own random session id, and the JSONL lands
+	// under an id the DB never recorded. That DB↔disk mismatch is exactly
+	// what makes a later AdjustSubTask's `--resume <parent.session_id>` fail
+	// with "session not found" and trigger the stale-session fallback (which
+	// then resumes the semantically-unrelated coding_session_id). Mirrors
+	// the architect fresh path (wizard_architect.go:484-490) which passes
+	// newDesignSID as sessionArg for the same reason.
+	sessionIDForCLI := sourceSID
 	if freshSession || bare {
 		resumeFlag = false
 		forkFor = false
+		sessionIDForCLI = newSID
 	}
 	cmd, cancel := r.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         prompt,
@@ -858,12 +886,13 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 		//     session derived from the parent's conversation
 		//   - fork=false → child reuses parent.SessionID via --resume (no
 		//     --fork-session), continuing the same JSONL in place
-		//   - freshSession=true → no --resume at all; the newSID is sent
-		//     as --session-id only so the JSONL is keyed correctly for
-		//     subsequent runs.
+		//   - freshSession/bare → no --resume; newSID is sent as --session-id
+		//     so the CLI starts a fresh conversation keyed by the id we
+		//     already persisted to sub_tasks.session_id — the JSONL lands
+		//     under newSID and a later --resume <newSID> finds it.
 		//   - bare=true → same argv shape as freshSession, but SystemPrompt=""
 		//     so the CLI uses its built-in defaults (no role persona).
-		SessionID:    sourceSID,
+		SessionID:    sessionIDForCLI,
 		Resume:       resumeFlag,
 		Fork:         forkFor,
 		ForkSessionID: newSID,
