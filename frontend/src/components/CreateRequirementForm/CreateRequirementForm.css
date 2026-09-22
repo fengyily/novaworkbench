@@ -365,7 +365,8 @@
   gap: 12px;
 }
 
-.create-req-form .launch-section__note {
+.create-req-form .launch-section__note,
+.create-req-form .launch-plan-section__note {
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
@@ -494,4 +495,419 @@
 @media (max-width: 640px) {
   .create-req-form details.launch-section > summary { font-size: 12px; }
   .create-req-form .launch-section__hint { display: none; }
+}
+
+/* ====================================================================
+   LaunchPlanSection — signature visual layer
+   --------------------------------------------------------------------
+   The launch plan is the one place where the user commits to running a
+   long task, so it gets its own visual vocabulary: a stage stepper at
+   the top, three mode cards with icons, and per-stage sections that
+   share the `.preflight-field-card` + chip pattern used by the dev
+   pre-flight modal. Three scopes here:
+
+     .launch-stages / .launch-stage-chip / .launch-stage-arrow
+       The signature element. A thin rail of "Design → Code" pills that
+       lights up to show which stages will dispatch. Manual mode dims
+       the whole rail.
+
+     .launch-mode-row / .launch-mode-card
+       The mode picker. Three side-by-side cards; the selected one gets
+       a tinted background + accent rail. Each card has icon + label +
+       consequence note.
+
+     .launch-stage-section / .launch-stage-section-label / …
+       The per-stage bodies (design / coding). Reuse `.preflight-field-
+       card` from RequirementDetail.css so a user moving between this
+       form and the dev pre-flight modal sees one family of UI.
+   ==================================================================== */
+
+/* --- Stage stepper (signature) ------------------------------------ */
+
+.create-req-form .launch-stages {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--color-hover, #F1F5F9);
+  border-radius: 999px;
+  align-self: flex-start;
+  margin: 0 0 12px;
+  transition: opacity 160ms ease;
+}
+
+.create-req-form .launch-stages.is-dimmed { opacity: 0.45; }
+
+.create-req-form .launch-stage-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  background: var(--color-surface, #fff);
+  color: var(--color-text-secondary, #64748B);
+  border: 1px solid var(--color-border, #E2E8F0);
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.create-req-form .launch-stage-chip--design.is-on {
+  background: #ede9fe;
+  color: #6d28d9;
+  border-color: rgba(139, 92, 246, 0.5);
+}
+
+.create-req-form .launch-stage-chip--coding.is-on {
+  background: #cffafe;
+  color: #0e7490;
+  border-color: rgba(6, 182, 212, 0.5);
+}
+
+.create-req-form .launch-stage-arrow {
+  display: inline-flex;
+  align-items: center;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+/* --- Mode picker (3 cards) ---------------------------------------- */
+
+.create-req-form .launch-mode-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  width: 100%;
+}
+
+.create-req-form .launch-mode-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 11px 12px 12px;
+  background: var(--color-surface, #fff);
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  position: relative;
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+  min-width: 0;
+}
+
+.create-req-form .launch-mode-card:hover:not(:disabled) {
+  border-color: var(--color-primary, #4F46E5);
+  background: var(--color-active, #EEF2FF);
+}
+
+.create-req-form .launch-mode-card.selected {
+  border-color: var(--color-primary, #4F46E5);
+  background: var(--color-active, #EEF2FF);
+  box-shadow: inset 3px 0 0 var(--color-primary, #4F46E5);
+}
+
+.create-req-form .launch-mode-card:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.create-req-form .launch-mode-card:focus-visible {
+  outline: 2px solid var(--color-primary, #4F46E5);
+  outline-offset: 2px;
+}
+
+.create-req-form .launch-mode-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  background: var(--color-hover, #F1F5F9);
+  color: var(--color-text-secondary, #64748B);
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.create-req-form .launch-mode-card.selected .launch-mode-card-icon {
+  background: var(--color-primary, #4F46E5);
+  color: #fff;
+}
+
+.create-req-form .launch-mode-card-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text, #1E293B);
+  line-height: 1.2;
+}
+
+.create-req-form .launch-mode-card.selected .launch-mode-card-label {
+  color: var(--color-primary, #4F46E5);
+}
+
+.create-req-form .launch-mode-card-note {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+/* --- Schedule sub-section (recurrence / datetime) ----------------- */
+
+.create-req-form .launch-schedule {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px dashed var(--color-border, #E2E8F0);
+  border-radius: 8px;
+  background: var(--color-surface, #fff);
+}
+
+.create-req-form .launch-schedule .modal-field { margin-bottom: 0; }
+
+.create-req-form .launch-segment {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--color-hover, #F1F5F9);
+  border-radius: 8px;
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+.create-req-form .launch-segment-tab {
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  padding: 6px 14px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary, #64748B);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.create-req-form .launch-segment-tab:hover:not(:disabled):not(.selected) {
+  color: var(--color-text, #1E293B);
+}
+
+.create-req-form .launch-segment-tab.selected {
+  background: var(--color-surface, #fff);
+  color: var(--color-primary, #4F46E5);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1);
+}
+
+.create-req-form .launch-segment-tab:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.create-req-form .launch-segment-tab:focus-visible {
+  outline: 2px solid var(--color-primary, #4F46E5);
+  outline-offset: 2px;
+}
+
+.create-req-form .launch-weekdays {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.create-req-form .launch-weekday {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--color-border, #E2E8F0);
+  background: var(--color-surface, #fff);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary, #64748B);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.create-req-form .launch-weekday:hover:not(:disabled):not(.selected) {
+  border-color: var(--color-primary, #4F46E5);
+  color: var(--color-primary, #4F46E5);
+}
+
+.create-req-form .launch-weekday.selected {
+  background: var(--color-primary, #4F46E5);
+  color: #fff;
+  border-color: var(--color-primary, #4F46E5);
+}
+
+.create-req-form .launch-weekday:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.create-req-form .launch-weekday:focus-visible {
+  outline: 2px solid var(--color-primary, #4F46E5);
+  outline-offset: 2px;
+}
+
+/* --- Per-stage sections ------------------------------------------- */
+
+.create-req-form .launch-stage-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 8px;
+  background: var(--color-surface, #fff);
+  position: relative;
+}
+
+/* Section-tinted accent rail — mirrors the preflight-field-card chip
+   pattern. Design = violet, Coding = cyan, same as the pre-flight
+   modal in RequirementDetail.css. */
+.create-req-form .launch-stage-section--design {
+  border-left: 3px solid rgba(139, 92, 246, 0.55);
+}
+
+.create-req-form .launch-stage-section--coding {
+  border-left: 3px solid rgba(6, 182, 212, 0.55);
+}
+
+.create-req-form .launch-stage-section .modal-field { margin-bottom: 0; }
+
+.create-req-form .launch-stage-section-label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.create-req-form .launch-stage-section-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.create-req-form .launch-stage-section--design .launch-stage-section-chip {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+.create-req-form .launch-stage-section--coding .launch-stage-section-chip {
+  background: #cffafe;
+  color: #0e7490;
+}
+
+.create-req-form .launch-stage-section-hint {
+  font-size: 11px;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+/* --- Radio card (single-select choices like dev-mode / sync-mode) - */
+
+.create-req-form .launch-radio-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 8px;
+  background: var(--color-surface, #fff);
+}
+
+.create-req-form .launch-radio-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text, #1E293B);
+  line-height: 1.3;
+}
+
+.create-req-form .launch-radio-card-desc {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+.create-req-form .launch-radio-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.create-req-form .launch-radio-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 999px;
+  background: var(--color-surface, #fff);
+  font-size: 12px;
+  color: var(--color-text-secondary, #64748B);
+  cursor: pointer;
+  user-select: none;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.create-req-form .launch-radio-option:hover:not(.selected):not(:has(input:disabled)) {
+  border-color: var(--color-primary, #4F46E5);
+  color: var(--color-primary, #4F46E5);
+}
+
+.create-req-form .launch-radio-option.selected {
+  background: var(--color-active, #EEF2FF);
+  border-color: var(--color-primary, #4F46E5);
+  color: var(--color-primary, #4F46E5);
+  font-weight: 600;
+}
+
+.create-req-form .launch-radio-option:has(input:disabled) {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.create-req-form .launch-radio-option input[type='radio'] {
+  /* Native radio, but kept small + accent-coloured so it visually pairs
+     with the pill. The visible chip + label carries the rest. */
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--color-primary, #4F46E5);
+  cursor: inherit;
+}
+
+.create-req-form .launch-radio-option:focus-within {
+  outline: 2px solid var(--color-primary, #4F46E5);
+  outline-offset: 2px;
+}
+
+/* --- Mobile ------------------------------------------------------ */
+
+@media (max-width: 640px) {
+  .create-req-form .launch-mode-row {
+    grid-template-columns: 1fr;
+  }
+  .create-req-form .launch-stages {
+    /* The stepper's a quick-read affordance, not a navigation; on
+       narrow screens we keep the two chips on one row rather than
+       wrapping awkwardly. */
+    font-size: 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .create-req-form .launch-mode-card,
+  .create-req-form .launch-stage-chip,
+  .create-req-form .launch-segment-tab,
+  .create-req-form .launch-weekday,
+  .create-req-form .launch-radio-option,
+  .create-req-form .launch-stages { transition: none; }
 }
