@@ -119,15 +119,17 @@ Debian / Ubuntu 用户能直接 `apt install nova`。本仓库使用
 
 ### 仓库前置设置
 
-- **Settings → Pages**：Build from branch 选择 `gh-pages` / `(root)`，让仓库根目录
-  直接作为 apt 源根（路径前缀 `/apt`）。首次发布前必须手动启用一次，否则
-  `https://<owner>.github.io/novaworkbench/apt/dists/stable/Release` 会 404。
-- **Permissions**：workflow 已声明 `contents: write` + `pages: write`，
-  同仓库 push `gh-pages` 不需要额外 PAT。`secrets.APT_REPO_TOKEN` 仅在你想
-  把 apt 仓库搬到独立 repo 时使用（fallback 到 `GITHUB_TOKEN`）。
-- **README 中的 `<PAGES_HOST>`**：根据实际 Pages 域名替换占位（默认
-  `https://<owner>.github.io/novaworkbench`），用户执行
-  `echo "deb [trusted=yes] https://<PAGES_HOST>/apt stable main" | sudo tee /etc/apt/sources.list.d/nova.list` 即可。
+- **Settings → Pages**：在 `fengyily/linux-repo` 的 Settings → Pages → Build
+  from branch 选择 `main` / `(root)`，让仓库根目录直接作为 apt 源根
+  （路径前缀 `/apt`）。首次发布前必须手动启用一次，否则
+  `https://fengyily.github.io/linux-repo/dists/stable/Release` 会 404。
+- **Permissions**：workflow 仅声明 `contents: write`（不需要 `pages: write`，
+  Pages 由 linux-repo 自己的 Settings 控制）。`secrets.APT_REPO_TOKEN` 是
+  REQUIRED（无 fallback 到 `GITHUB_TOKEN`），缺失时 workflow 立即报错退出；
+  该 PAT 必须在 `fengyily/linux-repo` 拥有 `Read and Write access to code`
+  scope（即 `contents: write`）。
+- **README 中的 `<PAGES_HOST>`**：用户执行
+  `echo "deb [trusted=yes] https://fengyily.github.io/linux-repo/apt stable main" | sudo tee /etc/apt/sources.list.d/nova.list` 即可。
 
 ### 迁移到正式 GPG 签名源（可选）
 
@@ -150,7 +152,7 @@ apt-releaser 子 key，签名而非认证）。
 推荐先用 CI 之后立刻跑一次自动检查：
 
 ```bash
-OWNER=fengyily ./scripts/check-apt-publish.sh
+./scripts/check-apt-publish.sh
 ```
 
 退出码 0 表示 `gh-pages` 分支存在且所有关键文件（`Release`、`Packages`、
