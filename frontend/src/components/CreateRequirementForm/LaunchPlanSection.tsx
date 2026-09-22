@@ -39,7 +39,7 @@ import { ExecEnvSelect, type ExecEnvServer } from '../ExecEnvSelect';
 import { toRFC3339Local, WEEK_LABELS } from '../../utils/time';
 import type { AgentServer, LaunchSpec, ScheduleSpec } from '../../api/client';
 
-type Flow = 'full' | 'skip-analysis' | 'direct';
+type Flow = 'skip-analysis' | 'direct';
 type Mode = 'manual' | 'immediate' | 'scheduled';
 type Recurrence = 'once' | 'daily' | 'weekly';
 
@@ -48,21 +48,18 @@ type Recurrence = 'once' | 'daily' | 'weekly';
 // utils/time.ts so this change stays self-contained.
 const WEEKDAY_INDEX_TO_DAYNUM: readonly number[] = [1, 2, 3, 4, 5, 6, 0];
 
-// Decides which stages should render and whether this combination is
-// launchable at all. `blocked` means the parent's submit should be
-// disabled and neither stage renders.
-type ResolvedTaskType = 'manual' | 'coding' | 'design_and_coding' | 'blocked';
+// Decides which stages should render. The remaining flows always map to a
+// valid combination — no flow/mode pair is launch-blocked.
+type ResolvedTaskType = 'manual' | 'coding' | 'design_and_coding';
 
 function resolveTaskType(flow: Flow, mode: Mode): ResolvedTaskType {
   // Manual = no dispatch at all; the requirement is created as-is and the
   // user manually triggers the stage from the detail page later. Valid for
-  // every flow (full + manual is allowed — the user just walks analyst →
-  // architect by hand), so short-circuit before the flow-specific mapping.
+  // every remaining flow, so short-circuit before the flow-specific mapping.
   if (mode === 'manual') return 'manual';
   if (flow === 'direct') return 'coding';
-  if (flow === 'skip-analysis') return 'design_and_coding';
-  // flow === 'full'
-  return mode === 'immediate' ? 'blocked' : 'design_and_coding';
+  // flow === 'skip-analysis' — both design + coding stages.
+  return 'design_and_coding';
 }
 
 function pad(n: number): string { return `${n}`.padStart(2, '0'); }
@@ -164,7 +161,6 @@ export default function LaunchPlanSection({
   const [devMode, setDevMode] = useState<'session' | 'design'>('design');
 
   const taskType = resolveTaskType(flow, mode);
-  const isFullImmediate = taskType === 'blocked';
   const showDesignSection = taskType === 'design_and_coding';
   const showCodingSection = taskType === 'coding' || taskType === 'design_and_coding';
 
@@ -179,10 +175,6 @@ export default function LaunchPlanSection({
     // skip-analysis, branch modal for skip-design). Functionally identical
     // to leaving the launch-plan section collapsed.
     if (mode === 'manual') {
-      onChange(null);
-      return;
-    }
-    if (isFullImmediate) {
       onChange(null);
       return;
     }
@@ -230,7 +222,7 @@ export default function LaunchPlanSection({
     // onChange intentionally omitted — see the effect comment above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    isFullImmediate, mode, recurrence, runAt, recurTime, recurDays,
+    mode, recurrence, runAt, recurTime, recurDays,
     designModel, designClaudeConfigId, designAgentServerId,
     codingModel, codingClaudeConfigId, codingAgentServerId,
     branchName, baseBranch, splitTasks, autoPushPR, readKnowledge,
@@ -248,10 +240,7 @@ export default function LaunchPlanSection({
     <div className="launch-plan-section">
       {/* Top-level mode toggle: "手动执行 / 立即执行 / 定时执行". Manual is
           the default so a stray submit never kicks off a 30-minute coding
-          job; the user must actively opt into immediate/scheduled. The
-          full+immediate radio stays visible but disabled so the user
-          understands why immediate is off (rather than silently dropping
-          the option). */}
+          job; the user must actively opt into immediate/scheduled. */}
       <div className="modal-field">
         <div
           className="schedule-freq-row"
@@ -274,12 +263,8 @@ export default function LaunchPlanSection({
             aria-checked={mode === 'immediate'}
             className={`schedule-freq-pill${mode === 'immediate' ? ' active' : ''}`}
             onClick={() => setMode('immediate')}
-            disabled={fieldDisabled || isFullImmediate}
-            title={
-              isFullImmediate
-                ? t('components.createRequirement.launchPlan.fullFlowImmediateDisabled')
-                : ''
-            }
+            disabled={fieldDisabled}
+            title=""
           >
             {t('components.createRequirement.launchPlan.immediate')}
           </button>
@@ -299,16 +284,7 @@ export default function LaunchPlanSection({
             {t('components.createRequirement.launchPlan.manualHint')}
           </small>
         )}
-        {isFullImmediate && (
-          <small className="launch-plan-section__note">
-            {t('components.createRequirement.launchPlan.fullFlowImmediateDisabled')}
-          </small>
-        )}
-        {flow === 'full' && mode === 'scheduled' && !isFullImmediate && (
-          <small className="launch-plan-section__note">
-            {t('components.createRequirement.launchPlan.fullFlowScheduledHint')}
-          </small>
-        )}
+        {/* `full` removed — no scheduled-with-analysis-pending hint needed. */}
       </div>
 
       {/* Schedule controls — rendered only when the user picked the

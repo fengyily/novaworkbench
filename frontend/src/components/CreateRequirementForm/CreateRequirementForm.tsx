@@ -29,18 +29,16 @@ import { tLabel } from '../../i18n/label';
 import { errorMessage } from '../../utils/errMsg';
 import './CreateRequirementForm.css';
 
-type Flow = 'full' | 'skip-analysis' | 'direct';
+type Flow = 'skip-analysis' | 'direct';
 
 // Workflow options hold translation KEYS, resolved during render — a
 // literal label here would freeze the language at import time.
 const FLOW_OPTIONS: { value: Flow; labelKey: string }[] = [
   { value: 'direct', labelKey: 'components.createRequirement.flowDirect' },
   { value: 'skip-analysis', labelKey: 'components.createRequirement.flowSkipAnalysis' },
-  { value: 'full', labelKey: 'components.createRequirement.flowFull' },
 ];
 
 const FLOW_NOTE_KEYS: Record<Flow, string> = {
-  full: 'components.createRequirement.flowNoteFull',
   'skip-analysis': 'components.createRequirement.flowNoteSkipAnalysis',
   direct: 'components.createRequirement.flowNoteDirect',
 };
@@ -138,7 +136,9 @@ export function CreateRequirementForm({
       // the analyst stage so they can talk to Claude about feasibility. The
       // architect/dev stages remain hidden in the UI, so the `flow` controls
       // (and any skip flags) only apply to issue/requirement.
-      const skipAnalysis = kind === 'idea' ? false : flow !== 'full';
+      // `full` removed — both remaining flows skip analysis, so the flag is
+      // now derived from `kind` alone (idea never skips).
+      const skipAnalysis = kind !== 'idea';
       const skipDesign = kind === 'idea' ? false : flow === 'direct';
       const created = await requirementsApi.create({
         project_id: projectId,
