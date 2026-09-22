@@ -40,6 +40,33 @@ func WorktreePath(projectPath, reqID string) string {
 	return filepath.Join(worktreeRoot(projectPath), reqID)
 }
 
+// WorktreePathMatches reports whether the persisted worktree_path on a
+// requirement row still corresponds to the path WorktreePath would compute
+// for (projectPath, reqID). The expected-path return value is what callers
+// should swap to when matches==false.
+//
+// This is the single chokepoint every wizard entry point uses to decide
+// whether to trust a persisted worktree_path or rebuild it. Without it,
+// a project that moved local_path (or a DB row whose path was written for a
+// different requirement) keeps pointing Claude at the previous host's
+// directory — which is exactly the cross-requirement contamination that
+// motivated this helper (req_c46e8d66491ae3a2 jumping into
+// req_cd5079181af7335a's directory because a stale worktree_path was
+// reused verbatim by anchorWorktree).
+//
+// Path comparison goes through filepath.Clean on both sides so trailing
+// slashes / redundant ".." don't cause false negatives. Both "" storedPath
+// (never anchored) and a foreign storedPath (different reqID / different
+// local_path lineage) report matches==false — the caller decides whether
+// to clear the DB row or just rebuild the worktree without touching the row.
+func WorktreePathMatches(reqID, storedPath, projectPath string) (matches bool, expected string) {
+	expected = WorktreePath(projectPath, reqID)
+	if storedPath == "" {
+		return false, expected
+	}
+	return filepath.Clean(storedPath) == filepath.Clean(expected), expected
+}
+
 // worktreeRegistered reports whether wtPath is a registered worktree of the
 // repo at projectPath (parsed from `git worktree list --porcelain`).
 //

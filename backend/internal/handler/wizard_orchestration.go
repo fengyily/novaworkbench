@@ -84,7 +84,25 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 			workDir = proj.LocalPath
 		}
 		if req.WorktreePath != "" {
-			if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
+			// Drift guard: same as sub_task_runner — a stale worktree_path
+			// would route the orchestration batch into another requirement's
+			// directory. project_local_path comes from proj.LocalPath when
+			// available, else stays "". When proj is nil we can't compute
+			// the expected path and conservatively skip the drift check
+			// (the workDir fallback below will surface a clear error).
+			projPath := ""
+			if proj != nil {
+				projPath = proj.LocalPath
+			}
+			if projPath != "" {
+				if matches, expected := WorktreePathMatches(req.ID, req.WorktreePath, projPath); !matches {
+					log.Printf("[orchestration] %s: drifted worktree_path %q (expected %q) — falling back to project dir",
+						req.ID, req.WorktreePath, expected)
+					job.Append(store.LogLine{Type: "warning", Content: fmt.Sprintf("⚠️ 编排：持久化的 worktree 路径 %q 与 reqID %s 不匹配，回退到项目目录 %q", req.WorktreePath, req.ID, projPath)})
+				} else if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
+					workDir = req.WorktreePath
+				}
+			} else if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
 				workDir = req.WorktreePath
 			}
 		}

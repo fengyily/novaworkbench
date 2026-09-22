@@ -468,10 +468,37 @@ func (h *WizardHandler) anchorWorktree(req *model.Requirement, projectPath, defa
 		return projectPath, nil
 	}
 	if req.WorktreePath != "" {
-		if _, err := os.Stat(req.WorktreePath); err == nil {
+		// Cross-requirement contamination guard: the persisted path must
+		// match what WorktreePath would compute for THIS reqID at the
+		// CURRENT projectPath. Without this check, a stale row whose
+		// worktree_path points at another requirement's directory (or at a
+		// project that has since moved) would be silently reused — see
+		// req_c46e8d66491ae3a2 / req_cd5079181af7335a. Path mismatch means
+		// the row is orphaned; clear it so the rebuild below can stamp the
+		// correct path back.
+		if matches, expected := WorktreePathMatches(req.ID, req.WorktreePath, projectPath); !matches {
+			log.Printf("[wizard] anchorWorktree %s: drifted worktree_path %q (expected %q) — clearing and rebuilding",
+				req.ID, req.WorktreePath, expected)
+			if cerr := h.reqSvc.ClearWorktree(req.ID); cerr != nil {
+				log.Printf("[wizard] anchorWorktree %s: ClearWorktree failed: %v", req.ID, cerr)
+			}
+			req.WorktreePath = ""
+			req.BranchName = ""
+		} else if _, err := os.Stat(req.WorktreePath); err == nil {
+			// Path matches AND directory is on disk → safe to reuse.
 			return req.WorktreePath, nil
+		} else {
+			// Path matches but directory is gone (host switch, manual
+			// cleanup, half-deleted clone). Mirror the pre-existing
+			// fall-through so we recreate instead of returning a dead path.
+			log.Printf("[wizard] anchorWorktree %s: matched worktree_path %q missing on disk — rebuilding",
+				req.ID, req.WorktreePath)
+			if cerr := h.reqSvc.ClearWorktree(req.ID); cerr != nil {
+				log.Printf("[wizard] anchorWorktree %s: ClearWorktree (missing-on-disk) failed: %v", req.ID, cerr)
+			}
+			req.WorktreePath = ""
+			req.BranchName = ""
 		}
-		// Persisted path is gone — fall through to recreate it.
 	}
 	if defaultBranch == "" {
 		defaultBranch = "main"

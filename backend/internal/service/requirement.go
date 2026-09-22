@@ -868,6 +868,30 @@ func (s *RequirementService) UpdateWorktree(id, branch, path string) error {
 	return err
 }
 
+// ClearWorktree wipes the persisted branch_name + worktree_path on the
+// requirement row so the next wizard entry point rebuilds them from scratch.
+// Used by:
+//
+//   - handler.WizardHandler.anchorWorktree when the stored path no longer
+//     matches WorktreePath(projectPath, reqID) (cross-requirement
+//     contamination guard — req_c46e8d66491ae3a2 jumping into another
+//     requirement's directory because a stale path was reused verbatim).
+//   - service.ProjectService.UpdateBasicInfo when the project's local_path
+//     changes (cascade so old paths don't outlive the project move).
+//
+// All wizard entry points (start/adjust/continue coding, merge, sub-task
+// runner, agent-server bundle) re-read these columns, so a single ClearWorktree
+// call propagates the reset everywhere on the next request. The
+// "drifted worktree" message is surfaced at the read site (where the job is
+// already streaming log lines) rather than here, so the user sees it in the
+// right SSE panel.
+func (s *RequirementService) ClearWorktree(id string) error {
+	_, err := s.db.Exec(
+		"UPDATE requirements SET branch_name='', worktree_path='', updated_at=? WHERE id=?",
+		time.Now(), id)
+	return err
+}
+
 // UpdateCodingPlan persists the auto-orchestrate summary Markdown produced by
 // the developer main agent after every child sub-task in a batch has
 // finished. The frontend renders it under the SubTaskPanel so the user can

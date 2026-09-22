@@ -1390,6 +1390,30 @@ func (s *ProjectService) UpdateBasicInfo(id, name, remoteURL, projectType, local
 	if n == 0 {
 		return fmt.Errorf("project not found: %s", id)
 	}
+	// Cascade: when the project's local_path actually moved (abs != old
+	// LocalPath), every requirement's persisted worktree_path now refers to
+	// the OLD worktreeRoot, which no longer corresponds to the new
+	// local_path. Without this cascade, the next coding/adjust/continue call
+	// would either land in a stale directory of the previous host (if still
+	// on disk) or fail the WorktreePathMatches drift guard on every entry
+	// point. Clearing the columns lets anchorWorktree rebuild a fresh
+	// worktree under the new root on the next wizard call.
+	//
+	// Scope: only requirements of THIS project (project_id = id), and only
+	// rows that still carry a non-empty worktree_path/branch_name (avoids
+	// a write that hits 0 rows for projects with no prior development).
+	// Errors here are logged and swallowed — a partial cascade is better
+	// than failing the whole PATCH (the drift guard will catch any leftover
+	// rows on the next entry point anyway).
+	if abs != current.LocalPath {
+		if _, cerr := s.db.Exec(
+			`UPDATE requirements SET branch_name = '', worktree_path = '', updated_at = ?
+			 WHERE project_id = ? AND (worktree_path != '' OR branch_name != '')`,
+			time.Now(), id); cerr != nil {
+			log.Printf("[project] %s: cascade-clear requirements worktree failed after local_path move %q → %q: %v",
+				id, current.LocalPath, abs, cerr)
+		}
+	}
 	return nil
 }
 

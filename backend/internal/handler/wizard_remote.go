@@ -223,6 +223,18 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		if localWt == "" {
 			localWt = in.reqRow.WorktreePath
 		}
+		// Drift guard: if localWt falls back to a persisted worktree_path that
+		// doesn't match WorktreePath(localRepoPath, reqID), drop it so the
+		// bundleTransport operates against the shared project checkout rather
+		// than another requirement's directory (req_c46e8d66491ae3a2 →
+		// req_cd5079181af7335a contamination).
+		if localWt != "" && localWt != in.workDir {
+			if matches, expected := WorktreePathMatches(in.reqRow.ID, localWt, localRepoPath); !matches {
+				log.Printf("[run-remote-coding] %s: drifted worktree_path %q (expected %q) — falling back to localRepo for bundle transport",
+					in.reqRow.ID, localWt, expected)
+				localWt = localRepoPath
+			}
+		}
 		tr = bundleTransport{localRepo: localRepoPath, localWt: localWt}
 	}
 
@@ -1703,9 +1715,18 @@ func (h *WizardHandler) claudeProjectsSlugDir(reqRow *model.Requirement) (string
 	// derives its slug from THAT cwd, not from the project root. Without
 	// this preference the wizard's project-local slug (root) and the CLI's
 	// actual slug (worktree) diverge and SyncDirUpMapped uploads 0 files.
+	//
+	// Drift guard: skip the worktree probe when the persisted path doesn't
+	// match WorktreePath(proj.LocalPath, reqID) — probing a foreign worktree
+	// could upload a stale slug for an unrelated requirement's directory.
 	probePaths := []string{proj.LocalPath}
 	if reqRow.WorktreePath != "" {
-		probePaths = append([]string{reqRow.WorktreePath}, probePaths...)
+		if matches, expected := WorktreePathMatches(reqRow.ID, reqRow.WorktreePath, proj.LocalPath); !matches {
+			log.Printf("[sync-claude-slug] %s: drifted worktree_path %q (expected %q) — skipping from probe list",
+				reqRow.ID, reqRow.WorktreePath, expected)
+		} else {
+			probePaths = append([]string{reqRow.WorktreePath}, probePaths...)
+		}
 	}
 	// 1) Cache hit — use the persisted slug verbatim.
 	if proj.ClaudeProjectSlug != "" {

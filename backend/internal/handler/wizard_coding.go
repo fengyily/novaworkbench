@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 
@@ -64,6 +65,27 @@ type projectPathResolver interface {
 // a real Job; production callers continue to pass *store.Job.
 type jobAppender interface {
 	Append(store.LogLine)
+}
+
+// worktreeMatchesHere reports whether reqRow.WorktreePath corresponds to the
+// path WorktreePath would compute for reqRow.ID at the given projectPath.
+// Thin wrapper over handler.WorktreePathMatches that hides the projectPath
+// plumbing from the call sites in this file (every entry point already has
+// p.ProjectPath / proj.LocalPath in scope, no need to thread it through the
+// requirement struct).
+//
+// Used by execStartCoding (hadWorktree flag), AdjustCoding, and
+// ContinueCoding as the cross-requirement contamination guard (see
+// req_c46e8d66491ae3a2 / req_cd5079181af7335a for the original symptom):
+// when this returns false we drop the persisted path and fall back to the
+// shared project checkout so Claude operates in the right directory even if
+// a stale worktree_path somehow survived on the requirement row.
+func worktreeMatchesHere(reqRow *model.Requirement, projectPath string) bool {
+	if reqRow == nil || projectPath == "" {
+		return false
+	}
+	ok, _ := WorktreePathMatches(reqRow.ID, reqRow.WorktreePath, projectPath)
+	return ok
 }
 
 type codingRunParams struct {
@@ -492,7 +514,15 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// hadWorktree records whether the upstream stage had already persisted a
 	// worktree before THIS coding run — false means the design/analysis session
 	// we're about to fork was created in-place (un-isolated).
-	hadWorktree := reqRow != nil && reqRow.WorktreePath != ""
+	//
+	// Drift guard: a non-empty reqRow.WorktreePath alone is not enough — we
+	// also verify it matches WorktreePath(projectPath, reqID). A stale row
+	// pointing at another requirement's directory would otherwise be treated
+	// as "had a worktree" and the requireAnchoredFork gate below would let
+	// the run proceed, letting Claude edit the wrong checkout
+	// (req_c46e8d66491ae3a2 → req_cd5079181af7335a). p.ProjectPath is the
+	// post-resolveCodingProjectPath value, so it's safe to compare here.
+	hadWorktree := reqRow != nil && worktreeMatchesHere(reqRow, p.ProjectPath)
 
 	// Recover the project directory if a Docker rebuild / fresh workspace
 	// mount left it absent. Without this, EnsureWorktreeLogged below returns
@@ -1465,9 +1495,23 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		// edits land in the same worktree as the first coding pass, keeping
 		// parallel requirements isolated); fall back to the project checkout
 		// for legacy requirements without a worktree.
+		//
+		// Drift guard: req.WorktreePath must match WorktreePath for THIS
+		// reqID at proj.LocalPath. A stale path (different requirement,
+		// different project local_path) is silently dropped here so this
+		// follow-up turn stays in the right checkout — see
+		// req_c46e8d66491ae3a2 / req_cd5079181af7335a. The persisted
+		// column is NOT cleared (AdjustCoding is not the right place to
+		// rewrite it — execStartCoding already did that or will on the
+		// next round); we just fall back to proj.LocalPath and surface a
+		// warning so the operator can see why.
 		workDir := proj.LocalPath
 		if req.WorktreePath != "" {
-			if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
+			if !worktreeMatchesHere(req, proj.LocalPath) {
+				job.Append(store.LogLine{Type: "warning", Content: fmt.Sprintf("⚠️ 追加调整：持久化的 worktree 路径 %q 与 reqID %s 不匹配，回退到项目目录 %q", req.WorktreePath, req.ID, proj.LocalPath)})
+				log.Printf("[adjust-coding] %s: drifted worktree_path %q (expected %q) — falling back to project dir",
+					req.ID, req.WorktreePath, filepath.Join(worktreeRoot(proj.LocalPath), req.ID))
+			} else if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
 				workDir = req.WorktreePath
 			}
 		}
@@ -1709,9 +1753,18 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		// developer persona, and prior coding progress, so the prompt is only a
 		// short "continue" instruction: re-inspect the workdir, finish whatever
 		// is incomplete, and report what was done. No project context re-feed.
+		//
+		// Drift guard: same as AdjustCoding — req.WorktreePath must match
+		// WorktreePath(proj.LocalPath, req.ID), otherwise the resumed session
+		// would continue editing in the wrong checkout
+		// (req_c46e8d66491ae3a2 / req_cd5079181af7335a).
 		workDir := proj.LocalPath
 		if req.WorktreePath != "" {
-			if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
+			if !worktreeMatchesHere(req, proj.LocalPath) {
+				job.Append(store.LogLine{Type: "warning", Content: fmt.Sprintf("⚠️ 续接开发：持久化的 worktree 路径 %q 与 reqID %s 不匹配，回退到项目目录 %q", req.WorktreePath, req.ID, proj.LocalPath)})
+				log.Printf("[continue-coding] %s: drifted worktree_path %q (expected %q) — falling back to project dir",
+					req.ID, req.WorktreePath, filepath.Join(worktreeRoot(proj.LocalPath), req.ID))
+			} else if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
 				workDir = req.WorktreePath
 			}
 		}

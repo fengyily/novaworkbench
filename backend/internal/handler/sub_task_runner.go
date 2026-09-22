@@ -544,7 +544,21 @@ func (r *SubTaskRunner) Run(
 		}
 	}
 	if req.WorktreePath != "" {
-		if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
+		// Drift guard: the persisted worktree_path must match the path for
+		// THIS reqID at the current project's local_path. Otherwise the
+		// sub-task would run in another requirement's directory
+		// (req_c46e8d66491ae3a2 → req_cd5079181af7335a). Log + drop the
+		// stale path; anchorWorktree on the next coding round will clear
+		// the persisted row.
+		projPath := ""
+		if proj != nil {
+			projPath = proj.LocalPath
+		}
+		if matches, expected := WorktreePathMatches(req.ID, req.WorktreePath, projPath); !matches {
+			log.Printf("[sub-task] %s (sub_task %s): drifted worktree_path %q (expected %q) — falling back to project dir",
+				req.ID, st.ID, req.WorktreePath, expected)
+			job.Append(store.LogLine{Type: "warning", Content: fmt.Sprintf("⚠️ 子任务：持久化的 worktree 路径 %q 与 reqID %s 不匹配，回退到项目目录 %q", req.WorktreePath, req.ID, projPath)})
+		} else if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
 			workDir = req.WorktreePath
 		}
 	}

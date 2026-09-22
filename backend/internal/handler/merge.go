@@ -197,11 +197,22 @@ func currentBranch(dir string) string {
 // worktree still exists this is the stored branch name + worktree path; in any
 // other case (legacy requirement, or a worktree that was removed out-of-band)
 // it falls back to the main checkout's current branch + the project directory.
+//
+// Drift guard: a non-empty reqRow.WorktreePath that does NOT match
+// WorktreePath(projectPath, reqID) is treated as a stale row pointing at
+// another requirement's directory. We log a warning and collapse to
+// projectPath so merge / push never runs git commands in the wrong checkout
+// (req_c46e8d66491ae3a2 → req_cd5079181af7335a symptom). The persisted row
+// is left alone here — anchorWorktree on the next coding run will clear it
+// once it notices the mismatch.
 func devBranchAndDir(reqRow *model.Requirement, projectPath string) (dev, dir string) {
 	dir = projectPath
 	dev = currentBranch(projectPath)
 	if reqRow.WorktreePath != "" {
-		if _, err := os.Stat(reqRow.WorktreePath); err == nil {
+		if matches, expected := WorktreePathMatches(reqRow.ID, reqRow.WorktreePath, projectPath); !matches {
+			log.Printf("[merge] %s: drifted worktree_path %q (expected %q) — collapsing to project dir",
+				reqRow.ID, reqRow.WorktreePath, expected)
+		} else if _, err := os.Stat(reqRow.WorktreePath); err == nil {
 			dir = reqRow.WorktreePath
 			dev = reqRow.BranchName
 		}
@@ -1604,6 +1615,19 @@ func (h *MergeHandler) Cleanup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wtPath := reqRow.WorktreePath
+	// Drift guard: refuse to remove a worktree whose path does not match the
+	// current reqID at the current project. Otherwise the cleanup endpoint
+	// could rm -rf an unrelated requirement's directory
+	// (req_c46e8d66491ae3a2 → req_cd5079181af7335a contamination).
+	if matches, expected := WorktreePathMatches(reqRow.ID, wtPath, dir); !matches {
+		log.Printf("[merge-cleanup] %s: refused to remove drifted worktree_path %q (expected %q) — clearing row and skipping",
+			reqRow.ID, wtPath, expected)
+		if cerr := h.reqSvc.ClearWorktree(reqRow.ID); cerr != nil {
+			log.Printf("[merge-cleanup] %s: ClearWorktree after drift refusal failed: %v", reqRow.ID, cerr)
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "message": "持久化的 worktree 路径与 reqID 不匹配，已清理，无 worktree 实际删除"})
+		return
+	}
 	// The worktree directory still exists → remove it via git. A dirty worktree
 	// is refused unless force is set, so an in-progress dev tree isn't dropped
 	// accidentally.

@@ -107,8 +107,17 @@ func buildParentContext(req *model.Requirement, subTaskSvc *service.SubTaskServi
 		designBlock = "\n### 设计方案\n\n" + truncateForContext(d, hardCap) + "\n"
 	}
 	// 3) Recent turns from jsonl (best-effort; missing file = empty block).
+	//
+	// Drift guard: buildParentContext doesn't have the project's local_path
+	// in scope, so we can't run WorktreePathMatches here. The persisted
+	// path is still checked on the worker side (sub_task_runner / execStartCoding)
+	// before Claude spawns, so a foreign jsonl read here is purely a
+	// context-quality issue, not a contamination one. We still skip the
+	// read when the persisted path doesn't even contain the reqID segment,
+	// since that's an obvious red flag for a row that was migrated / cleared
+	// and not yet rebuilt.
 	var turnsBlock string
-	if sourceSID != "" && req.WorktreePath != "" {
+	if sourceSID != "" && req.WorktreePath != "" && strings.Contains(req.WorktreePath, req.ID) {
 		if body := readParentJsonlTurns(req.WorktreePath, sourceSID); body != "" {
 			turnsBlock = "\n### 父会话近期对话\n\n" + body + "\n"
 		}
@@ -1159,6 +1168,19 @@ func (h *WizardHandler) GenerateSubTaskSummary(w http.ResponseWriter, r *http.Re
 		workDir = proj.LocalPath
 	}
 	if req.WorktreePath != "" {
+		// Drift guard: persisted path must match WorktreePath(proj.LocalPath, reqID).
+		// proj may be nil (projectSvc.Get failed) — in that case we skip the
+		// check and let the fallback to LocalPath / workDir == "" error below
+		// surface the misconfiguration.
+		if proj != nil {
+			if matches, expected := WorktreePathMatches(req.ID, req.WorktreePath, proj.LocalPath); !matches {
+				log.Printf("[subtask-api] %s: drifted worktree_path %q (expected %q) — falling back to project dir",
+					req.ID, req.WorktreePath, expected)
+				writeError(w, http.StatusConflict, "WORKTREE_PATH_DRIFTED",
+					fmt.Sprintf("持久化的 worktree 路径 %q 与 reqID %s 不匹配（期望 %q），请重新发起 start-coding 修复后再触发子任务", req.WorktreePath, req.ID, expected))
+				return
+			}
+		}
 		if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
 			workDir = req.WorktreePath
 		}
