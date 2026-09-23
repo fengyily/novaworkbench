@@ -645,9 +645,7 @@ func (r *SubTaskRunner) Run(
 		}
 	}
 	if r.skillSvc != nil {
-		if block := llm.BuildSkillsBlock(r.mentionedSkills(req.Title + " " + body)); block != "" {
-			prompt = block + prompt
-		}
+		prompt = llm.ApplyMentionedSkills(prompt, workDir, r.mentionedSkills(req.Title+" "+body))
 	}
 
 	execSystemPrompt, _, executorConfigID := r.roleConfig(executorRoleKey)
@@ -1091,7 +1089,7 @@ func (r *SubTaskRunner) usageCtxForConfig(step, requirementID, projectID, jobID,
 // mentionedSkills parses @slug mentions from text and returns the matching
 // skill rows. Same as WizardHandler.mentionedSkills but operates on the
 // runner's skillSvc so the runner stays decoupled from WizardHandler.
-func (r *SubTaskRunner) mentionedSkills(text string) []struct{ Slug, Content string } {
+func (r *SubTaskRunner) mentionedSkills(text string) []llm.MentionedSkill {
 	if r.skillSvc == nil {
 		return nil
 	}
@@ -1099,8 +1097,15 @@ func (r *SubTaskRunner) mentionedSkills(text string) []struct{ Slug, Content str
 	if len(slugs) == 0 {
 		return nil
 	}
-	skills, _ := r.skillSvc.SkillsBySlug(slugs)
-	return skills
+	rows, _ := r.skillSvc.SkillsBySlug(slugs)
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]llm.MentionedSkill, 0, len(rows))
+	for _, x := range rows {
+		out = append(out, llm.MentionedSkill{Slug: x.Slug, Description: x.Description, Content: x.Content})
+	}
+	return out
 }
 
 // activeConfigMetaFor is a free-function equivalent of the per-handler

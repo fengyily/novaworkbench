@@ -143,6 +143,33 @@ func (h *WizardHandler) RunRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	return h.runRemoteCoding(in)
 }
 
+// materializeRemoteSkills SFTPs the @slug-mentioned skills for a requirement
+// into the remote worktree as real SKILL.md files, mirroring the local
+// MaterializeSkillFiles so a remote Claude run auto-discovers the same skills
+// (.claude/ is gitignored, so git sync never carries them). Best-effort:
+// failures are logged into the job and swallowed — a missing skill file
+// degrades to "skill not invoked" rather than aborting the run.
+func (h *WizardHandler) materializeRemoteSkills(client *gossh.Client, job *store.Job, remoteWorkDir, reqTitle, reqDesc string) {
+	if h.skillSvc == nil || client == nil || remoteWorkDir == "" {
+		return
+	}
+	skills := h.mentionedSkills(reqTitle + " " + reqDesc)
+	if len(skills) == 0 {
+		return
+	}
+	for _, sk := range skills {
+		slug := strings.TrimSpace(sk.Slug)
+		if slug == "" {
+			continue
+		}
+		remotePath := remoteWorkDir + "/.claude/skills/" + slug + "/SKILL.md"
+		if err := client.WriteFile(remotePath, llm.RenderSkillMD(sk), 0o644); err != nil {
+			log.Printf("[run-remote] skill materialize %s failed: %v", remotePath, err)
+			job.Append(store.LogLine{Type: "warning", Content: "⚠️ 远端 skill 落盘失败: @" + slug + " (" + err.Error() + ")"})
+		}
+	}
+}
+
 // runRemoteCoding is the Agent-server equivalent of the local runClaudeStream
 // block in StartCoding. It opens an SSH session, ensures the project lives in
 // a per-requirement git worktree under /tmp/nova-agent/<projectID>/<reqID>,
@@ -241,6 +268,11 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	if perr := tr.PrepareRemote(ctx, client, in, baseRepo, wtPath, branch, baseBranch); perr != nil {
 		return claudeStreamOutcome{errMsg: perr.Error()}
 	}
+
+	// SFTP @slug-mentioned skills into the remote worktree so the remote
+	// claude run auto-discovers them (local worktree's .claude/skills/ does
+	// not travel via git). Mirrors MaterializeSkillFiles for the local path.
+	h.materializeRemoteSkills(client, in.job, wtPath, in.reqRow.Title, in.reqRow.Description)
 
 	// Step 2.5: configure git identity + (optionally) GPG signing in the
 	// remote worktree. This must run BEFORE Step 3 (session sync) and
@@ -719,6 +751,11 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 			"", nil, &jobWriter{job: in.job}, nil)
 	}
 	logRemoteLatestCommit(ctx, client, in.job, wtPath)
+
+	// SFTP @slug-mentioned skills into the remote worktree so the remote
+	// plan-mode / architect run auto-discovers them. Mirrors the local
+	// MaterializeSkillFiles call in the architect exec body.
+	h.materializeRemoteSkills(client, in.job, wtPath, in.reqRow.Title, in.reqRow.Description)
 
 	// Step 2.5: configure git identity + (optionally) GPG signing in the
 	// remote worktree. Failure policy mirrors runRemoteCoding: GPG enabled +

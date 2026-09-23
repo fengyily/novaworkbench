@@ -84,17 +84,17 @@ func (s *SkillService) Delete(id string) error {
 	return err
 }
 
-// EnabledSkills returns slug + content pairs for all enabled skills.
-func (s *SkillService) EnabledSkills() ([]struct{ Slug, Content string }, error) {
-	rows, err := s.db.Query("SELECT slug, content FROM skills WHERE enabled = 1 ORDER BY name ASC")
+// EnabledSkills returns slug + description + content for all enabled skills.
+func (s *SkillService) EnabledSkills() ([]struct{ Slug, Description, Content string }, error) {
+	rows, err := s.db.Query("SELECT slug, description, content FROM skills WHERE enabled = 1 ORDER BY name ASC")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []struct{ Slug, Content string }
+	var out []struct{ Slug, Description, Content string }
 	for rows.Next() {
-		var e struct{ Slug, Content string }
-		if err := rows.Scan(&e.Slug, &e.Content); err != nil {
+		var e struct{ Slug, Description, Content string }
+		if err := rows.Scan(&e.Slug, &e.Description, &e.Content); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -102,9 +102,11 @@ func (s *SkillService) EnabledSkills() ([]struct{ Slug, Content string }, error)
 	return out, nil
 }
 
-// SkillsBySlug returns slug + content pairs for the given slugs. Used to
-// inject only the skills @mentioned in a requirement's description.
-func (s *SkillService) SkillsBySlug(slugs []string) ([]struct{ Slug, Content string }, error) {
+// SkillsBySlug returns slug + description + content for the given slugs. Used
+// to materialize SKILL.md files for only the skills @mentioned in a
+// requirement's description. Description is needed for the SKILL.md frontmatter
+// that drives Claude's auto-invocation.
+func (s *SkillService) SkillsBySlug(slugs []string) ([]struct{ Slug, Description, Content string }, error) {
 	if len(slugs) == 0 {
 		return nil, nil
 	}
@@ -115,17 +117,17 @@ func (s *SkillService) SkillsBySlug(slugs []string) ([]struct{ Slug, Content str
 		args[i] = slug
 	}
 	rows, err := s.db.Query(
-		"SELECT slug, content FROM skills WHERE slug IN ("+placeholders+") ORDER BY name ASC",
+		"SELECT slug, description, content FROM skills WHERE slug IN ("+placeholders+") ORDER BY name ASC",
 		args...,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []struct{ Slug, Content string }
+	var out []struct{ Slug, Description, Content string }
 	for rows.Next() {
-		var e struct{ Slug, Content string }
-		if err := rows.Scan(&e.Slug, &e.Content); err != nil {
+		var e struct{ Slug, Description, Content string }
+		if err := rows.Scan(&e.Slug, &e.Description, &e.Content); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

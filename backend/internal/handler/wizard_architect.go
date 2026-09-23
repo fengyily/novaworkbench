@@ -488,9 +488,19 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 	} else if sourceSID == "" {
 		sessionArg = newDesignSID // skip-analysis fresh session
 	}
-	if block := llm.BuildSkillsBlock(h.mentionedSkills(req.Title + " " + req.Description)); block != "" {
-		prompt = block + prompt
+	// Skills referenced via @slug in the requirement are materialized as real
+	// SKILL.md files in the worktree (local branch; the remote branch SFTPs them
+	// separately in runRemoteArchitectDesign) and referenced in the prompt via
+	// /slug — Claude Code expands /slug to load the full body on demand. This
+	// replaces the legacy full-content BuildSkillsBlock dump for the design stage.
+	archSkills := h.mentionedSkills(req.Title + " " + req.Description)
+	if err := llm.MaterializeSkillFiles(workDir, archSkills); err != nil {
+		log.Printf("[architect-design] %s: best-effort skill materialize failed: %v", id, err)
 	}
+	if rb := llm.SkillRefBlock(archSkills); rb != "" {
+		prompt = rb + prompt
+	}
+	prompt = llm.TranslateAtToSlash(prompt, llm.SlugsOf(archSkills))
 
 	var out claudeStreamOutcome
 	if p.AgentServerID != "" && h.agentSvrSvc != nil {

@@ -367,9 +367,7 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	if requirement != nil {
 		skillText = requirement.Title + " " + requirement.Description + " " + req.UserMessage
 	}
-	if block := llm.BuildSkillsBlock(h.mentionedSkills(skillText)); block != "" {
-		prompt = block + prompt
-	}
+	prompt = h.applyMentionedSkills(prompt, workDir, skillText)
 
 	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
 		Prompt:         prompt,
@@ -519,9 +517,7 @@ func (h *WizardHandler) refineDocViaAgent(w http.ResponseWriter, r *http.Request
 
 	skillText := req.UserMessage
 	skillText = requirement.Title + " " + requirement.Description + " " + req.UserMessage
-	if block := llm.BuildSkillsBlock(h.mentionedSkills(skillText)); block != "" {
-		prompt = block + prompt
-	}
+	prompt = h.applyMentionedSkills(prompt, workDir, skillText)
 
 	// Same JobStore handoff shape as ApplyDoc: create the job, return the
 	// id immediately, run Claude on context.Background() in the goroutine
@@ -737,10 +733,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[apply-doc] job %s started for %s (doc_type=%s)", job.ID, reqID, docType)
 		job.Append(store.LogLine{Type: "phase", Content: fmt.Sprintf("🤖 Claude 正在基于对话整合修改%s…（预计需要几分钟）", docLabel)})
 
-		applyPrompt := prompt
-		if block := llm.BuildSkillsBlock(h.mentionedSkills(requirement.Title + " " + requirement.Description)); block != "" {
-			applyPrompt = block + prompt
-		}
+		applyPrompt := h.applyMentionedSkills(prompt, workDir, requirement.Title+" "+requirement.Description)
 
 		applyUsage := h.usageCtxFor("apply_doc", reqID, requirement.ProjectID, job.ID, model, fmt.Sprintf("{\"doc_type\":%q}", docType), "")
 		var out claudeStreamOutcome
@@ -876,7 +869,7 @@ func stageAgentServerID(req *model.Requirement, docType string) string {
 // mentionedSkills parses @slug mentions from text and returns the matching
 // skill files. Only skills present in the DB are returned; unknown slugs are
 // silently ignored. A nil skillSvc returns nil without error.
-func (h *WizardHandler) mentionedSkills(text string) []struct{ Slug, Content string } {
+func (h *WizardHandler) mentionedSkills(text string) []llm.MentionedSkill {
 	if h.skillSvc == nil {
 		return nil
 	}
@@ -884,8 +877,24 @@ func (h *WizardHandler) mentionedSkills(text string) []struct{ Slug, Content str
 	if len(slugs) == 0 {
 		return nil
 	}
-	skills, _ := h.skillSvc.SkillsBySlug(slugs)
-	return skills
+	rows, _ := h.skillSvc.SkillsBySlug(slugs)
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]llm.MentionedSkill, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, llm.MentionedSkill{Slug: r.Slug, Description: r.Description, Content: r.Content})
+	}
+	return out
+}
+
+// applyMentionedSkills materializes the @slug-mentioned skills in text as real
+// SKILL.md files in workDir, then rewrites prompt to reference them via /slug
+// (Claude Code expands /slug to load the full body on demand). Replaces the
+// legacy full-content BuildSkillsBlock dump for the design / coding / docs /
+// sub-task stages. Best-effort: a materialize failure is logged, not fatal.
+func (h *WizardHandler) applyMentionedSkills(prompt, workDir, text string) string {
+	return llm.ApplyMentionedSkills(prompt, workDir, h.mentionedSkills(text))
 }
 
 // parseAtMentions extracts unique @slug tokens from text.

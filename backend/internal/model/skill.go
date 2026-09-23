@@ -2,10 +2,12 @@ package model
 
 import "time"
 
-// Skill is a Claude Code skill file (agents/<slug>.md) managed by NovaWorkbench.
-// Before each claude CLI invocation the enabled skills are written into the
-// project's .claude/agents/ directory so they are available regardless of the
-// active --setting-sources value.
+// Skill is a Claude Code skill file managed by NovaWorkbench. When a
+// requirement's text @mentions a skill by slug, the wizard materializes it as a
+// real SKILL.md under <worktree>/.claude/skills/<slug>/ (local worktree write,
+// or SFTP for Agent-Server runs) and references it in the prompt via /slug,
+// which Claude Code expands to load the full body on demand. Forked sub-task
+// sessions in the same worktree inherit the file via CWD-based discovery.
 type Skill struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name"`

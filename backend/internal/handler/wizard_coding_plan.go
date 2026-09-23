@@ -330,9 +330,14 @@ func (h *WizardHandler) buildPlanPrompt(in *planSplitInput) string {
 			in.reqRow.CodingContextSummary + "\n\n" + prompt
 	}
 	if in.reqRow != nil {
-		if block := llm.BuildSkillsBlock(h.mentionedSkills(in.reqRow.Title + " " + in.reqRow.Description)); block != "" {
-			prompt = block + prompt
+		planSkills := h.mentionedSkills(in.reqRow.Title + " " + in.reqRow.Description)
+		if err := llm.MaterializeSkillFiles(in.workDir, planSkills); err != nil {
+			log.Printf("[coding-plan] %s: best-effort skill materialize failed: %v", in.p.RequirementID, err)
 		}
+		if rb := llm.SkillRefBlock(planSkills); rb != "" {
+			prompt = rb + prompt
+		}
+		prompt = llm.TranslateAtToSlash(prompt, llm.SlugsOf(planSkills))
 	}
 	return prompt
 }

@@ -1144,8 +1144,20 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	if reqRow != nil {
 		skillText = reqRow.Title + " " + reqRow.Description
 	}
-	if block := llm.BuildSkillsBlock(h.mentionedSkills(skillText)); block != "" {
-		prompt = block + prompt
+	codingSkills := h.mentionedSkills(skillText)
+	if err := llm.MaterializeSkillFiles(workDir, codingSkills); err != nil {
+		log.Printf("[start-coding] %s: best-effort skill materialize failed: %v", p.RequirementID, err)
+	}
+	if rb := llm.SkillRefBlock(codingSkills); rb != "" {
+		prompt = rb + prompt
+	}
+	prompt = llm.TranslateAtToSlash(prompt, llm.SlugsOf(codingSkills))
+	// On the decompose path (developer persona + split_tasks), tell the main
+	// agent to carry /slug into each sub-task prompt it writes so children
+	// inherit the skill. The agent-direct path (roleKey=="agent") doesn't
+	// decompose, so the instruction is omitted there.
+	if roleKey == "developer" {
+		prompt += llm.DecomposeSkillPropagation(codingSkills)
 	}
 	// Append the git commit / push convention (no AI signature trailers,
 	// no token echoed in commands) to every coding -p prompt. The helpers
@@ -1592,9 +1604,14 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		adjustPrompt := body.Message
-		if block := llm.BuildSkillsBlock(h.mentionedSkills(req.Title + " " + req.Description + " " + body.Message)); block != "" {
-			adjustPrompt = block + body.Message
+		adjustSkills := h.mentionedSkills(req.Title + " " + req.Description + " " + body.Message)
+		if err := llm.MaterializeSkillFiles(workDir, adjustSkills); err != nil {
+			log.Printf("[adjust-coding] %s: best-effort skill materialize failed: %v", req.ID, err)
 		}
+		if rb := llm.SkillRefBlock(adjustSkills); rb != "" {
+			adjustPrompt = rb + body.Message
+		}
+		adjustPrompt = llm.TranslateAtToSlash(adjustPrompt, llm.SlugsOf(adjustSkills))
 		// Tail the kind-specific developer block so a resumed Issue session
 		// stays anchored to "最小改动、修复根因" framing on every follow-up
 		// turn. For requirement rows it's a no-op.

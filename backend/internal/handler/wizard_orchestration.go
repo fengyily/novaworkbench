@@ -161,6 +161,12 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 				prompt += "\n\n需求描述：\n" + d
 			}
 		}
+		// Materialize @slug-mentioned skills into the worktree and rewrite the
+		// prompt to reference them via /slug; tell the main agent to propagate
+		// /slug into each sub-task prompt it writes so children inherit them.
+		reOrchSkills := h.mentionedSkills(req.Title + " " + req.Description)
+		prompt = llm.ApplyMentionedSkills(prompt, workDir, reOrchSkills)
+		prompt += llm.DecomposeSkillPropagation(reOrchSkills)
 
 		job.Append(store.LogLine{Type: "phase", Content: "🔄 主 Agent 重新拆分任务中…"})
 		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
