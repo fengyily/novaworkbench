@@ -76,7 +76,10 @@ jobs:
           tags: |
             ghcr.io/${{ env.NAMESPACE }}/nova:sha-${{ github.sha }}
             ghcr.io/${{ env.NAMESPACE }}/nova:${{ steps.tag.outputs.ref_tag }}
-          cache-from: type=gha
+          cache-from: |
+            type=gha
+            type=registry,ref=ghcr.io/${{ env.NAMESPACE }}/nova-buildcache:node-22-alpine
+            type=registry,ref=ghcr.io/${{ env.NAMESPACE }}/nova-buildcache:golang-1.25-alpine
           cache-to: type=gha,mode=max
 
   deploy-prod:

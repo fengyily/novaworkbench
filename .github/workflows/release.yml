@@ -22,8 +22,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to release (e.g. v0.2.0; must already exist in the repo)'
-        required: true
+        description: 'Existing tag to release (e.g. v0.2.0; must already exist in the repo). Pass "__refresh-base-cache__" instead to refresh the GHCR base-image cache (see refresh-base-cache job).'
+        required: false
         default: 'v0.0.0-test'
         type: string
 
@@ -41,6 +41,57 @@ env:
   NAMESPACE: ${{ vars.GHCR_NAMESPACE || github.repository_owner }}
 
 jobs:
+  # Initialise / refresh the GHCR mirror of the upstream Dockerfile base
+  # images (node:22-alpine, golang:1.25-alpine). Both `release` and
+  # `deploy` reference these via `cache-from:
+  # type=registry,ref=ghcr.io/<ns>/nova-buildcache:<base>` so the actual
+  # multi-arch build never has to talk to Cloudflare-fronted
+  # auth.docker.io — which 401-RSTs concurrent multi-arch pulls on
+  # hosted runners roughly every other run. Manual-only because the
+  # one-time setup needs the GHCR package to exist (run once after
+  # enabling GHCR on the repo); subsequent runs only matter when an
+  # upstream base image bumps (alpine patch release).
+  #
+  # Implementation: use `docker buildx imagetools create` with
+  # `--tag` multi-arch, which under the hood pulls each arch's manifest
+  # from docker.io once on the runner and pushes a single multi-arch
+  # manifest list to GHCR. Downstream `cache-from` then matches per-arch
+  # digest against the buildx build context. `docker manifest create
+  # + annotate` (the alternative) requires per-arch digest lookups and
+  # rejects `BASE` image refs without `manifest inspect`-style prior
+  # resolution, so we sidestep it here.
+  refresh-base-cache:
+    if: github.event_name == 'workflow_dispatch' && inputs.tag == '__refresh-base-cache__'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Pull multi-arch base and push to GHCR
+        env:
+          NS: ${{ vars.GHCR_NAMESPACE || github.repository_owner }}
+        run: |
+          # Lowercase owner — GHCR image names must be all-lowercase.
+          NS="$(printf '%s' "$NS" | tr '[:upper:]' '[:lower:]')"
+          set -euo pipefail
+          # Each BASE goes once through buildx imagetools, which expands
+          # the multi-arch manifest into per-arch digests under the hood.
+          # Tag-safe variant: replace ':' with '-' so the GHCR tag is
+          # `node-22-alpine` instead of `node:22-alpine`.
+          docker buildx imagetools create \
+            --tag "ghcr.io/${NS}/nova-buildcache:node-22-alpine" \
+            "docker.io/library/node:22-alpine"
+          docker buildx imagetools create \
+            --tag "ghcr.io/${NS}/nova-buildcache:golang-1.25-alpine" \
+            "docker.io/library/golang:1.25-alpine"
+
   release:
     runs-on: ubuntu-latest
     steps:
@@ -222,7 +273,10 @@ jobs:
             COMMIT=${{ steps.meta.outputs.commit }}
             BUILD_DATE=${{ steps.meta.outputs.date }}
           tags: ${{ steps.imgtags.outputs.tags }}
-          cache-from: type=gha
+          cache-from: |
+            type=gha
+            type=registry,ref=ghcr.io/${{ steps.meta.outputs.namespace }}/nova-buildcache:node-22-alpine
+            type=registry,ref=ghcr.io/${{ steps.meta.outputs.namespace }}/nova-buildcache:golang-1.25-alpine
           cache-to: type=gha,mode=max
 
       - name: Create GitHub Release
