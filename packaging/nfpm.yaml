@@ -50,7 +50,7 @@ contents:
     dst: /usr/bin/nova
     expand: true
     file_info:
-      mode: "0755" # apt 路径必须可执行；nfpm 的 umask 不影响 contents.src 的文件 mode
+      mode: 0755 # apt 路径必须可执行；nfpm 的 umask 不影响 contents.src 的文件 mode
 
 # umask 0077 只对 package scripts 创建的目录/文件生效，
 # binary 文件 mode 由上方 contents.mode 显式控制。
