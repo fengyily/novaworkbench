@@ -340,6 +340,7 @@ export const settings = {
     testLabel: 'Test Connection',
     testInProgress: 'Validating…',
     testSuccess: 'Token is valid ({platform}) · {username}',
+    testSuccessNoUser: 'Token is valid ({platform})',
     testFailed: 'Validation failed: {code}',
     modal: {
       createTitle: 'Add platform token',

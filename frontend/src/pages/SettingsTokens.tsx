@@ -327,14 +327,17 @@ export default function SettingsTokens() {
                     {deleteId === tok.id ? t('settings.tokens.deleting') : t('settings.tokens.delete')}
                   </button>
                   {testResults[tok.id] && (
-                    testResults[tok.id].ok ? (
-                      <span className="test-result test-result--ok">
-                        {t('settings.tokens.testSuccess', {
-                          platform: tok.platform,
-                          username: (testResults[tok.id] as { ok: true; username?: string }).username ?? '',
-                        })}
-                      </span>
-                    ) : (
+                    testResults[tok.id].ok ? (() => {
+                      const result = testResults[tok.id] as { ok: true; username?: string | null };
+                      const username = result.username ?? null;
+                      return (
+                        <span className="test-result test-result--ok">
+                          {username
+                            ? t('settings.tokens.testSuccess', { platform: tok.platform, username })
+                            : t('settings.tokens.testSuccessNoUser', { platform: tok.platform })}
+                        </span>
+                      );
+                    })() : (
                       <details className="test-result test-result--err">
                         <summary>{t('settings.tokens.testFailed', {
                           code: (testResults[tok.id] as { ok: false; code: string; message: string }).code,

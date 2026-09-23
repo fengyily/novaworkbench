@@ -343,6 +343,7 @@ export const settings = {
     testLabel: '测试连接',
     testInProgress: '正在验证…',
     testSuccess: 'Token 有效（{platform}）· {username}',
+    testSuccessNoUser: 'Token 有效（{platform}）',
     testFailed: '验证失败：{code}',
     modal: {
       createTitle: '添加平台 Token',

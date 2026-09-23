@@ -507,8 +507,8 @@ func TestService_TestPlatformToken_GitHub(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if username != "fengyi" {
-		t.Errorf("expected fengyi, got %q", username)
+	if username == nil || *username != "fengyi" {
+		t.Errorf("expected fengyi, got %v", username)
 	}
 }
 
@@ -520,8 +520,8 @@ func TestService_TestPlatformToken_GitLab(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if username != "alice" {
-		t.Errorf("expected alice, got %q", username)
+	if username == nil || *username != "alice" {
+		t.Errorf("expected alice, got %v", username)
 	}
 }
 
@@ -540,8 +540,8 @@ func TestService_TestPlatformToken_Gitea(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if username != "bob" {
-		t.Errorf("expected bob, got %q", username)
+	if username == nil || *username != "bob" {
+		t.Errorf("expected bob, got %v", username)
 	}
 }
 
@@ -560,8 +560,8 @@ func TestService_TestPlatformToken_Bitbucket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if username != "carol" {
-		t.Errorf("expected carol, got %q", username)
+	if username == nil || *username != "carol" {
+		t.Errorf("expected carol, got %v", username)
 	}
 }
 

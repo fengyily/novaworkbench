@@ -1450,10 +1450,12 @@ export const platformApi = {
   delete: (id: string) => api.delete<{ status: string }>(`/api/settings/tokens/${id}`),
   // Probe the saved PAT end-to-end against its base_url — covers github,
   // gitlab, gitea, and bitbucket. On success returns the platform username
-  // (parsed from /user). Failures carry the same {code, message} envelope as
-  // every other endpoint so the UI can render an inline <details> block.
+  // (parsed from /user) or null when the username probe failed (network glitch
+  // after token-probe succeeded). Failures carry the same {code, message}
+  // envelope as every other endpoint so the UI can render an inline <details>
+  // block.
   test: (id: string) =>
-    api.post<{ ok: boolean; username?: string }>(`/api/settings/tokens/${id}/test`, {}),
+    api.post<{ ok: boolean; username?: string | null }>(`/api/settings/tokens/${id}/test`, {}),
 };
 
 // One model of a Claude config (platform) with per-million-token unit prices.

@@ -395,25 +395,32 @@ func boolToInt(b bool) int {
 //
 // ctx is currently unused but kept in the signature so future probing paths
 // (SSH-style remotes, network policies) can be added without a breaking change.
-func (s *PlatformTokenService) TestPlatformToken(ctx context.Context, id string) (string, error) {
+func (s *PlatformTokenService) TestPlatformToken(ctx context.Context, id string) (*string, error) {
 	_ = ctx
 	var platform, baseURL, token string
 	err := s.db.QueryRow(
 		`SELECT platform, base_url, token FROM platform_tokens WHERE id = ?`, id,
 	).Scan(&platform, &baseURL, &token)
 	if err == sql.ErrNoRows {
-		return "", fmt.Errorf("TOKEN_NOT_FOUND: token %s 不存在", id)
+		return nil, fmt.Errorf("TOKEN_NOT_FOUND: token %s 不存在", id)
 	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if platform != "github" && platform != "gitlab" && platform != "gitea" && platform != "bitbucket" {
-		return "", fmt.Errorf("PLATFORM_UNSUPPORTED: 不支持的平台 kind=%s", platform)
+		return nil, fmt.Errorf("PLATFORM_UNSUPPORTED: 不支持的平台 kind=%s", platform)
 	}
 	if err := validatePlatformToken(platform, baseURL, token, ""); err != nil {
-		return "", err
+		return nil, err
 	}
-	return probePlatformUsername(platform, baseURL, token), nil
+	username := probePlatformUsername(platform, baseURL, token)
+	// Return a pointer: nil when the /user probe failed (network glitch after
+	// the token-probe itself succeeded), non-nil when we got a username.
+	// JSON encoding: nil → null, non-nil → the string.
+	if username == "" {
+		return nil, nil
+	}
+	return &username, nil
 }
 
 // probePlatformUsername performs a single /user lookup to extract a
