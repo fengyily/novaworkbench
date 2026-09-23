@@ -612,7 +612,7 @@ func validateGitLabToken(baseURL, token, remoteURL string) error {
 
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return platformTokenInvalidError("gitlab", resp.StatusCode, body, cleanedBase)
+		return platformTokenInvalidError("gitlab", resp.StatusCode, body, cleanedBase, token)
 	case resp.StatusCode != http.StatusOK:
 		return fmt.Errorf("TOKEN_INVALID: GitLab /user 响应异常 (HTTP %d): %s",
 			resp.StatusCode, truncateForLog(body, 200))
@@ -640,7 +640,7 @@ func validateGitLabToken(baseURL, token, remoteURL string) error {
 	case resp2.StatusCode == http.StatusNotFound:
 		return fmt.Errorf("TOKEN_INVALID: 在 GitLab 上找不到项目 %q — 请确认 token 已加入该项目（至少 Reporter）且 remote_url 拼写正确", projPath)
 	case resp2.StatusCode == http.StatusUnauthorized, resp2.StatusCode == http.StatusForbidden:
-		return platformTokenInvalidError("gitlab", resp2.StatusCode, projBody, cleanedBase)
+		return platformTokenInvalidError("gitlab", resp2.StatusCode, projBody, cleanedBase, token)
 	case resp2.StatusCode != http.StatusOK:
 		return fmt.Errorf("TOKEN_INVALID: GitLab /projects 响应异常 (HTTP %d): %s",
 			resp2.StatusCode, truncateForLog(projBody, 200))
@@ -679,7 +679,7 @@ func validateGitHubToken(baseURL, token, remoteURL string) error {
 
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return platformTokenInvalidError("github", resp.StatusCode, body, cleanedBase)
+		return platformTokenInvalidError("github", resp.StatusCode, body, cleanedBase, token)
 	case resp.StatusCode != http.StatusOK:
 		return fmt.Errorf("TOKEN_INVALID: GitHub /user 响应异常 (HTTP %d): %s",
 			resp.StatusCode, truncateForLog(body, 200))
@@ -706,7 +706,7 @@ func validateGitHubToken(baseURL, token, remoteURL string) error {
 	case resp2.StatusCode == http.StatusNotFound:
 		return fmt.Errorf("TOKEN_INVALID: 在 GitHub 上找不到仓库 %s/%s — 请确认 token 已加入该仓库且 remote_url 拼写正确", owner, repo)
 	case resp2.StatusCode == http.StatusUnauthorized, resp2.StatusCode == http.StatusForbidden:
-		return platformTokenInvalidError("github", resp2.StatusCode, repoBody, cleanedBase)
+		return platformTokenInvalidError("github", resp2.StatusCode, repoBody, cleanedBase, token)
 	case resp2.StatusCode != http.StatusOK:
 		return fmt.Errorf("TOKEN_INVALID: GitHub /repos 响应异常 (HTTP %d): %s",
 			resp2.StatusCode, truncateForLog(repoBody, 200))
@@ -740,7 +740,7 @@ func validateGiteaToken(baseURL, token, remoteURL string) error {
 
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return platformTokenInvalidError("gitea", resp.StatusCode, body, cleanedBase)
+		return platformTokenInvalidError("gitea", resp.StatusCode, body, cleanedBase, token)
 	case resp.StatusCode != http.StatusOK:
 		return fmt.Errorf("TOKEN_INVALID: Gitea /user 响应异常 (HTTP %d): %s",
 			resp.StatusCode, truncateForLog(body, 200))
@@ -766,7 +766,7 @@ func validateGiteaToken(baseURL, token, remoteURL string) error {
 	case resp2.StatusCode == http.StatusNotFound:
 		return fmt.Errorf("TOKEN_INVALID: 在 Gitea 上找不到仓库 %s/%s — 请确认 token 已加入该仓库且 remote_url 拼写正确", owner, repo)
 	case resp2.StatusCode == http.StatusUnauthorized, resp2.StatusCode == http.StatusForbidden:
-		return platformTokenInvalidError("gitea", resp2.StatusCode, repoBody, cleanedBase)
+		return platformTokenInvalidError("gitea", resp2.StatusCode, repoBody, cleanedBase, token)
 	case resp2.StatusCode != http.StatusOK:
 		return fmt.Errorf("TOKEN_INVALID: Gitea /repos 响应异常 (HTTP %d): %s",
 			resp2.StatusCode, truncateForLog(repoBody, 200))
@@ -821,7 +821,7 @@ func validateBitbucketToken(baseURL, token, remoteURL string) error {
 
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return platformTokenInvalidError("bitbucket", resp.StatusCode, body, cleanedBase)
+		return platformTokenInvalidError("bitbucket", resp.StatusCode, body, cleanedBase, token)
 	case resp.StatusCode != http.StatusOK:
 		return fmt.Errorf("TOKEN_INVALID: Bitbucket /user 响应异常 (HTTP %d): %s",
 			resp.StatusCode, truncateForLog(body, 200))
@@ -856,7 +856,7 @@ func validateBitbucketToken(baseURL, token, remoteURL string) error {
 	case resp2.StatusCode == http.StatusNotFound:
 		return fmt.Errorf("TOKEN_INVALID: 在 Bitbucket 上找不到仓库 %s/%s — 请确认 token 已加入该仓库且 remote_url 拼写正确", workspace, repo)
 	case resp2.StatusCode == http.StatusUnauthorized, resp2.StatusCode == http.StatusForbidden:
-		return platformTokenInvalidError("bitbucket", resp2.StatusCode, repoBody, cleanedBase)
+		return platformTokenInvalidError("bitbucket", resp2.StatusCode, repoBody, cleanedBase, token)
 	case resp2.StatusCode != http.StatusOK:
 		return fmt.Errorf("TOKEN_INVALID: Bitbucket /repos 响应异常 (HTTP %d): %s",
 			resp2.StatusCode, truncateForLog(repoBody, 200))
@@ -1905,7 +1905,15 @@ func truncateForLog(b []byte, n int) string {
 // URL, and a 3-item list of common root causes (password vs PAT, missing
 // user-scope, expired/revoked). cleanedBase MUST already be TrimRight'd +
 // redactUserinfo'd to avoid the double-slash bug the previous message had.
-func platformTokenInvalidError(platform string, status int, body []byte, cleanedBase string) error {
+//
+// The token is inspected for format characteristics (never logged) so we can
+// append a "this looks like a password" warning when the token is short
+// and missing every prefix we know this platform issues. The previous
+// 3-cause list already mentioned the password/PAT distinction, but it
+// buries the lede — when we have direct evidence the user pasted a password
+// (e.g. a 26-byte string with no ghp_/glpat-/ATATT prefix), we surface it
+// up-front so they don't keep re-checking scopes that aren't the problem.
+func platformTokenInvalidError(platform string, status int, body []byte, cleanedBase, token string) error {
 	excerpt := truncateForLog(body, 200)
 	var parsed struct {
 		Message string `json:"message"`
@@ -1958,15 +1966,86 @@ func platformTokenInvalidError(platform string, status int, body []byte, cleaned
 	}
 	displayPlatform := strings.ToUpper(platform[:1]) + platform[1:]
 
+	// Format sniff — only the LENGTH and prefix family are inspected; the
+	// token value itself is never echoed. When the token looks nothing like
+	// any prefix this platform issues AND is shorter than the typical PAT
+	// length, prepend a "this is probably your password" warning so the user
+	// doesn't go chasing scope toggles that aren't the cause.
+	formatWarning := tokenFormatWarning(platform, token)
+
+	formatLine := ""
+	if formatWarning != "" {
+		formatLine = formatWarning + " "
+	}
+
 	return fmt.Errorf(
-		"TOKEN_INVALID: %s 拒绝此 token (HTTP %d) — %s "+
+		"TOKEN_INVALID: %s 拒绝此 token (HTTP %d) — %s"+
+			"%s"+
 			"最常见原因：(1) 你保存的是平台登录密码而不是 Personal Access Token — git pull 走 HTTP Basic 认证（用户名+密码）能通，但 /user 等 API 需要 Authorization 请求头携带 PAT；"+
 			"(2) token 仅勾选了仓库/仓库读权限而缺少用户读取作用域 — 仅 git 操作的 PAT 不能调用 /user 接口；"+
 			"(3) token 已被撤销或过期。"+
 			"请在 %s 重新生成 PAT，%s。"+
 			"响应片段：%s",
-		displayPlatform, status, bodyStr, hintURL, scopes, excerpt,
+		displayPlatform, status, bodyStr, formatLine, hintURL, scopes, excerpt,
 	)
+}
+
+// tokenFormatWarning returns a short, user-facing warning when the saved
+// token doesn't match any known prefix family for the given platform AND
+// is shorter than the typical PAT length. Returns "" when the format looks
+// plausible — in that case the cause is more likely scope or revocation,
+// and the standard 3-cause list already covers it.
+//
+// Heuristics (intentionally conservative; false negatives are fine):
+//   - github:    recognise ghp_/gho_/ghu_/ghs_/ghr_ (classic) and
+//                github_pat_ (fine-grained). PATs are ≥40 chars.
+//   - gitlab:    recognise glpat- (modern) and the legacy "long hex"
+//                prefix family. PATs are ≥20 chars after glpat-.
+//   - gitea:     Gitea issues opaque tokens (no fixed prefix). The
+//                baseline check is length (≥40 chars is the common case).
+//   - bitbucket: ATATT (Cloud PAT) or "user:app_password" (App Password
+//                form) — both are recognised.
+//
+// The length floor is intentionally well below a real PAT's length so we
+// only fire on truly suspicious input (e.g. a 26-byte string from a
+// password manager) and not on legitimate short-lived tokens.
+func tokenFormatWarning(platform, token string) string {
+	if token == "" {
+		return ""
+	}
+	switch platform {
+	case "github":
+		if strings.HasPrefix(token, "ghp_") ||
+			strings.HasPrefix(token, "gho_") ||
+			strings.HasPrefix(token, "ghu_") ||
+			strings.HasPrefix(token, "ghs_") ||
+			strings.HasPrefix(token, "ghr_") ||
+			strings.HasPrefix(token, "github_pat_") {
+			return ""
+		}
+		if len(token) < 30 {
+			return fmt.Sprintf("⚠️ 你粘贴的 token 仅 %d 字符、且不以 ghp_/github_pat_ 等 GitHub PAT 前缀开头 — 极有可能保存的是 GitHub 登录密码（PAT 通常 ≥40 字符）。", len(token))
+		}
+	case "gitlab":
+		if strings.HasPrefix(token, "glpat-") {
+			return ""
+		}
+		if len(token) < 20 {
+			return fmt.Sprintf("⚠️ 你粘贴的 token 仅 %d 字符、且不以 glpat- 开头 — 极有可能保存的是 GitLab 登录密码。", len(token))
+		}
+	case "gitea":
+		// Gitea tokens have no public prefix; rely on the length floor only.
+		if len(token) < 30 {
+			return fmt.Sprintf("⚠️ 你粘贴的 token 仅 %d 字符 — Gitea 应用令牌通常 ≥40 字符，可能保存的是登录密码。", len(token))
+		}
+	case "bitbucket":
+		if strings.HasPrefix(token, "ATATT") {
+			return ""
+		}
+		// App Passwords are stored as "user:password" — both halves are
+		// user-defined, so we can't sniff by length alone. Skip the warning.
+	}
+	return ""
 }
 
 // resolveGitHubAPIBase returns the GitHub API root for the given configuration.

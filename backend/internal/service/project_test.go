@@ -617,6 +617,148 @@ func TestTruncateForLog_StripsControlChars(t *testing.T) {
 }
 
 // --------------------------------------------------------------------
+// tokenFormatWarning
+// --------------------------------------------------------------------
+
+// 26
+func TestTokenFormatWarning_GitHub(t *testing.T) {
+	// Cases that should NOT emit a warning (the token looks like a real
+	// PAT of some kind, or it has the canonical prefix family).
+	plausible := []string{
+		"ghp_" + strings.Repeat("a", 36),                  // classic PAT (40 chars total)
+		"github_pat_" + strings.Repeat("x", 82-len("github_pat_")), // fine-grained PAT
+		"gho_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",   // OAuth
+		"ghu_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",   // GitHub App user token
+		"ghs_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",   // GitHub App server token
+		"ghr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",   // refresh token
+		strings.Repeat("a", 40),                          // 40 chars, no prefix (legacy / fine-grained without prefix)
+	}
+	for _, tok := range plausible {
+		if w := tokenFormatWarning("github", tok); w != "" {
+			t.Errorf("github: unexpected warning for plausible token: %q → %q", tok, w)
+		}
+	}
+
+	// The 26-byte "password" case from the bug report MUST emit a warning
+	// that calls out both the suspicious length and the missing prefix.
+	pwdLike := "MyP@ssw0rd-2026-jan-30!!"
+	if len(pwdLike) >= 30 {
+		t.Fatalf("test fixture drift: expected <30 chars, got %d", len(pwdLike))
+	}
+	w := tokenFormatWarning("github", pwdLike)
+	if w == "" {
+		t.Fatalf("github: expected warning for short password-like token, got empty")
+	}
+	for _, want := range []string{
+		"⚠️", "token 仅", "字符", "ghp_", "登录密码",
+	} {
+		if !strings.Contains(w, want) {
+			t.Errorf("github warning missing %q: %q", want, w)
+		}
+	}
+
+	// Empty token: silently skip (no length to inspect).
+	if w := tokenFormatWarning("github", ""); w != "" {
+		t.Errorf("github: empty token should not warn, got %q", w)
+	}
+}
+
+// 27
+func TestTokenFormatWarning_GitLab(t *testing.T) {
+	// glpat- prefix is the modern PAT form.
+	if w := tokenFormatWarning("gitlab", "glpat-xxxxxxxxxxxxxxxxxxxx"); w != "" {
+		t.Errorf("gitlab: unexpected warning for glpat-: %q", w)
+	}
+	// Short non-glpat token → warning.
+	w := tokenFormatWarning("gitlab", "supersecret")
+	if !strings.Contains(w, "⚠️") || !strings.Contains(w, "glpat-") {
+		t.Errorf("gitlab: weak warning: %q", w)
+	}
+	// ≥20 chars without prefix: skip (legacy PATs can be plain hex of any
+	// length, hard to disambiguate from a long password — better to stay
+	// quiet than false-positive).
+	if w := tokenFormatWarning("gitlab", strings.Repeat("a", 25)); w != "" {
+		t.Errorf("gitlab: 25-char unprefixed token should not warn, got %q", w)
+	}
+}
+
+// 28
+func TestTokenFormatWarning_Gitea(t *testing.T) {
+	// Gitea tokens have no public prefix — only length is sniffed.
+	if w := tokenFormatWarning("gitea", strings.Repeat("a", 40)); w != "" {
+		t.Errorf("gitea: 40-char token should not warn, got %q", w)
+	}
+	w := tokenFormatWarning("gitea", "hunter2")
+	if !strings.Contains(w, "⚠️") {
+		t.Errorf("gitea: short token should warn, got %q", w)
+	}
+}
+
+// 29
+func TestTokenFormatWarning_Bitbucket(t *testing.T) {
+	// ATATT prefix is recognised.
+	if w := tokenFormatWarning("bitbucket", "ATATTxxxxxxxxxxxxxxxxxxxxxxxx"); w != "" {
+		t.Errorf("bitbucket: ATATT should not warn, got %q", w)
+	}
+	// App Passwords are "user:password" — neither half is prefixed. We
+	// deliberately skip the warning rather than false-positive on
+	// short usernames.
+	if w := tokenFormatWarning("bitbucket", "alice:shortpw"); w != "" {
+		t.Errorf("bitbucket: app-password form should not warn, got %q", w)
+	}
+}
+
+// 30
+func TestTokenFormatWarning_UnknownPlatform(t *testing.T) {
+	if w := tokenFormatWarning("fake", "anything"); w != "" {
+		t.Errorf("unknown platform should not warn, got %q", w)
+	}
+}
+
+// 31 — end-to-end: validateGitHubToken 401 with a short password-shaped
+// token must surface the warning inline in the error message.
+func TestValidateGitHubToken_401_PasswordShape_Warns(t *testing.T) {
+	srv := newGitHubMux(t, 401, 0, "", "", `{"message":"Bad credentials"}`, "")
+	_ = srv
+	// 26-char token (matches the bug-report log: "token_len=26"). Build it
+	// dynamically so the assertion can never drift with character math.
+	pwdLike := "pwd" + strings.Repeat("a", 23) // 26 bytes, no PAT prefix
+	if len(pwdLike) != 26 {
+		t.Fatalf("fixture drift: expected 26 chars, got %d", len(pwdLike))
+	}
+	err := validateGitHubToken("https://api.github.com", pwdLike, "")
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	msg := err.Error()
+	for _, want := range []string{"⚠️", "字符", "登录密码", "ghp_"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("end-to-end error missing %q: %q", want, msg)
+		}
+	}
+}
+
+// 32 — the format warning must NOT fire for a token that already has a
+// canonical GitHub PAT prefix, even when 401 has another root cause
+// (e.g. wrong scope, revoked).
+func TestValidateGitHubToken_401_RealPAT_NoWarning(t *testing.T) {
+	srv := newGitHubMux(t, 401, 0, "", "", `{"message":"Bad credentials"}`, "")
+	_ = srv
+	const realPAT = "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789" // 40 chars
+	err := validateGitHubToken("https://api.github.com", realPAT, "")
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if strings.Contains(err.Error(), "⚠️") {
+		t.Errorf("real-PAT 401 should not include password warning: %q", err.Error())
+	}
+	// The standard 3-cause hint still applies.
+	if !strings.Contains(err.Error(), "Personal Access Token") {
+		t.Errorf("real-PAT 401 should keep the standard PAT-vs-password hint: %q", err.Error())
+	}
+}
+
+// --------------------------------------------------------------------
 // writeServiceError is tested in handler/errcode_test.go (it lives in the
 // handler package, not service).
 // --------------------------------------------------------------------
