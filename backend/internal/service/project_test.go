@@ -277,10 +277,13 @@ func TestValidateGitHubToken_ResolveBase_GHE(t *testing.T) {
 	if pubHint != "https://api.github.com" {
 		t.Fatalf("public resolution: got %q, want %q", pubHint, "https://api.github.com")
 	}
-	// Empty both: returns "" (caller surfaces "base_url not configured").
+	// Empty both: falls back to the public GitHub API. This is the implicit
+	// default for tokens whose owner forgot to (or never needed to) set a
+	// base_url — the common case for github.com, which previously errored
+	// out at the "Test Connection" button on the settings page.
 	emptyHint := resolveGitHubAPIBase("", "")
-	if emptyHint != "" {
-		t.Fatalf("empty resolution: got %q, want \"\"", emptyHint)
+	if emptyHint != "https://api.github.com" {
+		t.Fatalf("empty resolution: got %q, want %q", emptyHint, "https://api.github.com")
 	}
 }
 
@@ -423,22 +426,38 @@ func TestValidateBitbucketToken_DC_HintURL(t *testing.T) {
 func TestValidatePlatformToken_Dispatcher(t *testing.T) {
 	tests := []struct {
 		platform string
-		wantErr  bool
+		// nil = any non-nil error is OK (network/auth). We can't rely on a
+		// stable error from the live api.github.com probe; we just verify the
+		// dispatcher picks the right validator and surfaces SOMETHING.
+		wantPrefix string
 	}{
-		{"gitlab", true},   // baseURL="" → error
-		{"github", true},   // baseURL="" → error
-		{"gitea", true},    // baseURL="" → error
-		{"bitbucket", true}, // DC baseURL=""
-		{"fake", false},    // unknown → silent nil
+		{"gitlab", "TOKEN_INVALID: GitLab base_url"},        // baseURL="" → validator says so
+		{"gitea", "TOKEN_INVALID: Gitea 必须填写 base_url"},    // baseURL="" → validator says so
+		{"bitbucket", "TOKEN_INVALID: Bitbucket Data Center"}, // DC baseURL="" → validator says so
+		{"github", ""},                                       // baseURL="" → falls back to https://api.github.com; will fail at network layer with a real error
+		{"fake", ""},                                         // unknown → silent nil
 	}
 	for _, tt := range tests {
 		t.Run(tt.platform, func(t *testing.T) {
 			err := validatePlatformToken(tt.platform, "", "t", "")
-			if tt.wantErr && err == nil {
-				t.Errorf("expected error for %s", tt.platform)
-			}
-			if !tt.wantErr && err != nil {
-				t.Errorf("unexpected error for %s: %v", tt.platform, err)
+			switch {
+			case tt.platform == "fake":
+				if err != nil {
+					t.Errorf("unexpected error for %s: %v", tt.platform, err)
+				}
+			case tt.wantPrefix != "":
+				if err == nil || !strings.HasPrefix(err.Error(), tt.wantPrefix) {
+					t.Errorf("expected prefix %q for %s, got %v", tt.wantPrefix, tt.platform, err)
+				}
+			default:
+				// github: must NOT surface the old "base_url 未配置" message —
+				// the public API is the implicit fallback now.
+				if err == nil {
+					t.Errorf("expected some error from network probe for %s, got nil", tt.platform)
+				}
+				if strings.Contains(err.Error(), "GitHub base_url 未配置") {
+					t.Errorf("github should not require base_url; got %v", err)
+				}
 			}
 		})
 	}

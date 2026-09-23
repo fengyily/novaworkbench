@@ -141,8 +141,8 @@ export default function SettingsTokens() {
       setError(t('settings.tokens.errTokenRequired'));
       return;
     }
-    if (!editingId && (form.platform === 'gitea') && !form.base_url) {
-      setError(t('settings.tokens.errGiteaNeedsUrl'));
+    if (!editingId && (form.platform === 'gitea' || form.platform === 'gitlab' || form.platform === 'bitbucket') && !form.base_url) {
+      setError(t('settings.tokens.errBaseUrlRequired', { platform: form.platform }));
       return;
     }
     // GPG validation: enabling requires a key on create (server stores the
@@ -234,7 +234,12 @@ export default function SettingsTokens() {
     }
   };
 
-  const needsBaseUrl = !editingId && (form.platform === 'gitea' || form.platform === 'gitlab' || form.platform === 'bitbucket');
+  // Whether the modal exposes the Base URL input. For self-hosted variants
+  // (gitea / gitlab / bitbucket) it's required; for github it's optional and
+  // only used when targeting GitHub Enterprise (the public https://api.github.com
+  // is the implicit fallback when the field is blank).
+  const supportsBaseUrl = !editingId;
+  const baseUrlRequired = !editingId && (form.platform === 'gitea' || form.platform === 'gitlab' || form.platform === 'bitbucket');
   const isEdit = !!editingId;
   // Derive the token under edit from the live list so the modal can show its
   // current key id next to the rotation textarea. We avoid mirroring it in
@@ -378,25 +383,40 @@ export default function SettingsTokens() {
                   </select>
                 </div>
 
-                {needsBaseUrl && (
+                {supportsBaseUrl && (
                   <div className="modal-field">
-                    <label>Base URL</label>
+                    <label>
+                      {t('settings.tokens.modal.baseUrlLabel')}
+                      {baseUrlRequired ? ' *' : ''}
+                    </label>
                     <input
                       className="form-input"
-                      placeholder={form.platform === 'gitlab' ? t('settings.tokens.modal.baseUrlPlaceholderGitlab') : t('settings.tokens.modal.baseUrlPlaceholderGitea')}
+                      placeholder={
+                        form.platform === 'gitlab' ? t('settings.tokens.modal.baseUrlPlaceholderGitlab')
+                          : form.platform === 'gitea' ? t('settings.tokens.modal.baseUrlPlaceholderGitea')
+                          : form.platform === 'bitbucket' ? t('settings.tokens.modal.baseUrlPlaceholderGitea')
+                          : form.platform === 'github' ? t('settings.tokens.modal.baseUrlPlaceholderGithub')
+                          : ''
+                      }
                       value={form.base_url}
                       onChange={e => setForm(f => ({ ...f, base_url: e.target.value }))}
                     />
+                    {form.platform === 'github' && (
+                      <div className="form-hint">
+                        {t('settings.tokens.modal.baseUrlPlaceholderGithub')}
+                      </div>
+                    )}
                   </div>
                 )}
               </>
             )}
 
-            {isEdit && form.base_url && (
+            {isEdit && (
               <div className="modal-field">
-                <label>Base URL</label>
+                <label>{t('settings.tokens.modal.baseUrlLabel')}</label>
                 <input
                   className="form-input"
+                  placeholder={t('settings.tokens.modal.baseUrlPlaceholderGithub')}
                   value={form.base_url}
                   onChange={e => setForm(f => ({ ...f, base_url: e.target.value }))}
                 />

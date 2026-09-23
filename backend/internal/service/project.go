@@ -651,10 +651,14 @@ func validateGitLabToken(baseURL, token, remoteURL string) error {
 // validateGitHubToken mirrors validateGitLabToken for GitHub / GitHub
 // Enterprise. /user validates the token; /repos/{owner}/{repo} validates
 // project-level access when a remote URL is supplied.
+//
+// baseURL is optional — for github.com tokens it's left blank and we fall
+// back to https://api.github.com. Only GitHub Enterprise deployments need a
+// base_url (their /api/v3 root).
 func validateGitHubToken(baseURL, token, remoteURL string) error {
 	apiBase := resolveGitHubAPIBase(baseURL, remoteURL)
 	if apiBase == "" {
-		return fmt.Errorf("TOKEN_INVALID: GitHub base_url 未配置 — 请在「平台 Token」中填写 base_url（如 https://github.com 或 GitHub Enterprise 的 https://github.acme.com）")
+		return fmt.Errorf("TOKEN_INVALID: 无法解析 GitHub API 根 — 请在「平台 Token」中填写 base_url（如 https://github.com 或 GitHub Enterprise 的 https://github.acme.com/api/v3）")
 	}
 	cleanedBase := strings.TrimRight(redactUserinfo(apiBase), "/")
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -1966,16 +1970,22 @@ func platformTokenInvalidError(platform string, status int, body []byte, cleaned
 }
 
 // resolveGitHubAPIBase returns the GitHub API root for the given configuration.
-// If baseURL is set, it's used verbatim (after TrimRight). Otherwise, the host
-// of remoteURL is inspected: github.com → public API; anything else → assume
-// GitHub Enterprise's /api/v3 convention. Returns "" when neither is usable.
+//   - baseURL is set → use it verbatim (after TrimRight) — typically points at
+//     GitHub Enterprise's /api/v3 root.
+//   - baseURL is empty and remoteURL points at github.com → public API.
+//   - baseURL is empty and remoteURL points at any other host → assume that
+//     host is a GitHub Enterprise instance (URL path /api/v3).
+//   - both empty → fall back to the public GitHub API (the common case for
+//     "Test Connection" probes and rows created before the base_url field
+//     became optional). This is the only platform where the default makes
+//     sense; Gitea / GitLab / Bitbucket DC all still require base_url.
 func resolveGitHubAPIBase(baseURL, remoteURL string) string {
 	if baseURL != "" {
 		return strings.TrimRight(baseURL, "/")
 	}
 	host, _ := urlHost(remoteURL)
 	if host == "" {
-		return ""
+		return "https://api.github.com"
 	}
 	if host == "github.com" {
 		return "https://api.github.com"
