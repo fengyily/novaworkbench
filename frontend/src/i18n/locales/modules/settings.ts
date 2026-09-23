@@ -342,9 +342,13 @@ export const settings = {
     gpgBadgePending: 'GPG · 待生成',
     testLabel: '测试连接',
     testInProgress: '正在验证…',
-    testSuccess: 'Token 有效（{platform}）· {username}',
-    testSuccessNoUser: 'Token 有效（{platform}）',
-    testFailed: '验证失败：{code}',
+    // i18next ships with `{{var}}` (double braces) as the substitution
+    // delimiter; single braces are returned as literal text, which made the
+    // settings UI render "Token 有效（{platform}）· {username}" verbatim
+    // when a token validated. Keep these in the double-brace form.
+    testSuccess: 'Token 有效（{{platform}}）· {{username}}',
+    testSuccessNoUser: 'Token 有效（{{platform}}）',
+    testFailed: '验证失败：{{code}}',
     modal: {
       createTitle: '添加平台 Token',
       editTitle: '编辑平台 Token',
