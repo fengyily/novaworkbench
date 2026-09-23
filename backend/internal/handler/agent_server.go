@@ -262,13 +262,14 @@ func (h *AgentServerHandler) runCheck(job *store.Job, serverID string) {
 			if first == "" {
 				first = "ls-remote 失败"
 			}
-			job.Append(store.LogLine{Type: "error", Content: "git 远程访问失败: " + first})
-			status = model.AgentServerStatusError
-			if summary == "所有依赖已就绪" {
-				summary = "git 远程访问失败: " + first
-			} else {
-				summary += "; git 远程访问失败: " + first
-			}
+			// 软失败:git 远程不可达 ≠ Agent Server 不可用。
+			// - status 保持 AgentServerStatusReady(由 deps + settings.json + worker 决定)
+			// - summary 不污染,仅在日志里给出明确语义清晰的提示
+			// - 后续真正的执行(wizard 远程执行 / 项目 clone/push)若依赖 github 访问,
+			//   会走自己的 gitRunWithTimeout(已在 worktree.go:156 / push_pr_shell.go:202 等处
+			//   有独立 ctx 与超时),由各自负责。
+			job.Append(store.LogLine{Type: "warning", Content: "⚠ git 远程访问失败: " + first +
+				"（仅影响从本地控制器拉取/推送项目代码;Agent Server 自身环境仍可正常用于远程执行任务）"})
 		} else {
 			job.Append(store.LogLine{Type: "message", Content: "✓ git 远程可访问"})
 		}
