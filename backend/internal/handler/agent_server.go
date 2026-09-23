@@ -105,6 +105,25 @@ func (h *AgentServerHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// TestConnection performs a one-shot SSH handshake against the saved
+// credential. Unlike Check (which runs `uname` + dep probes in the
+// background and streams logs), this returns synchronously so the settings
+// UI can render a "✅ connected to <host>" badge without setting up an SSE
+// stream. POST /api/settings/agent-servers/{id}/test.
+func (h *AgentServerHandler) TestConnection(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_ID", "缺少 agent server id")
+		return
+	}
+	version, err := h.svc.TestConnection(r.Context(), id)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": version})
+}
+
 // ---- POST /api/settings/agent-servers/{id}/check ---------------------------
 // Returns { job_id } immediately; the goroutine below SSHs into the target
 // host, runs `uname -s` + per-dep probes, and writes the result back via

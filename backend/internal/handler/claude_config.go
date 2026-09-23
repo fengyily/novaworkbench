@@ -182,3 +182,22 @@ func (h *ClaudeConfigHandler) Active(w http.ResponseWriter, r *http.Request) {
 		"base_url":      baseURL,
 	})
 }
+
+// TestConnection validates the saved Claude/OpenAI-compatible endpoint by
+// hitting {base_url}/v1/models. Synchronous; on success returns the model's
+// configured name so the UI can render "✅ LLM endpoint 可连接：claude-…".
+//
+// POST /api/settings/claude/configs/{id}/test
+func (h *ClaudeConfigHandler) TestConnection(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_ID", "缺少 claude config id")
+		return
+	}
+	model, err := h.svc.TestConnection(r.Context(), id)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": model})
+}

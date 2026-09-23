@@ -1448,6 +1448,14 @@ export const platformApi = {
     clear_gpg?: boolean;
   }) => api.put<PlatformToken>(`/api/settings/tokens/${id}`, data),
   delete: (id: string) => api.delete<{ status: string }>(`/api/settings/tokens/${id}`),
+  // Probe the saved PAT end-to-end against its base_url — covers github,
+  // gitlab, gitea, and bitbucket. On success returns the platform username
+  // (parsed from /user) or null when the username probe failed (network glitch
+  // after token-probe succeeded). Failures carry the same {code, message}
+  // envelope as every other endpoint so the UI can render an inline <details>
+  // block.
+  test: (id: string) =>
+    api.post<{ ok: boolean; username?: string | null }>(`/api/settings/tokens/${id}/test`, {}),
 };
 
 // One model of a Claude config (platform) with per-million-token unit prices.
@@ -1524,6 +1532,11 @@ export const claudeApi = {
   remove: (id: string) => api.delete<{ status: string }>(`/api/settings/claude/configs/${id}`),
   activate: (id: string) => api.post<ClaudeActivateResult>(`/api/settings/claude/configs/${id}/activate`, {}),
   active: () => api.get<ClaudeActiveModels | null>('/api/settings/claude/configs/active'),
+  // Synchronous /v1/models probe against the saved base_url. Used by the
+  // settings UI "测试连接" button so users can confirm a freshly entered
+  // bearer token works without waiting for a Claude invocation.
+  test: (id: string) =>
+    api.post<{ ok: boolean; model?: string }>(`/api/settings/claude/configs/${id}/test`, {}),
 };
 
 // Direct HTTP LLM channel config (OpenAI-compatible, e.g. DeepSeek). Used for
@@ -2086,6 +2099,11 @@ export const agentServersApi = {
     api.post<{ job_id: string }>(`/api/settings/agent-servers/${id}/check`, {}),
   install: (id: string) =>
     api.post<{ job_id: string }>(`/api/settings/agent-servers/${id}/install`, {}),
+  // Synchronous SSH handshake — confirms the stored credential can still log
+  // into the host. Distinct from check (which runs dep probes in the
+  // background) so the UI can render a quick green/red badge without SSE.
+  test: (id: string) =>
+    api.post<{ ok: boolean; version?: string }>(`/api/settings/agent-servers/${id}/test`, {}),
   jobUrl: (jobId: string) => `${API_BASE}/api/settings/agent-servers/jobs/${jobId}`,
   jobStreamUrl: (jobId: string) => `${API_BASE}/api/settings/agent-servers/jobs/${jobId}/stream`,
 };

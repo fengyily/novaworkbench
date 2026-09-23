@@ -36,6 +36,12 @@ export default function SettingsClaude() {
   const [form, setForm] = useState<ConfigForm>(emptyForm);
   const [modelInput, setModelInput] = useState('');
   const [busyId, setBusyId] = useState<string>('');
+  // Per-row "测试连接" state for the /v1/models probe.
+  const [testingId, setTestingId] = useState<string>('');
+  const [testResults, setTestResults] = useState<Record<string,
+    { ok: true; model?: string } |
+    { ok: false; code: string; message: string }
+  >>({});
 
   const load = useCallback(() => {
     setLoading(true);
@@ -98,6 +104,26 @@ export default function SettingsClaude() {
       const default_model = f.default_model === m ? '' : f.default_model;
       return { ...f, models, default_model };
     });
+  };
+
+  const handleTest = async (id: string) => {
+    setTestingId(id);
+    setTestResults(prev => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    try {
+      const res = await claudeApi.test(id);
+      setTestResults(prev => ({ ...prev, [id]: { ok: true, model: res.model } }));
+    } catch (err: unknown) {
+      const e = err as { error?: { code?: string; message?: string }; message?: string };
+      const code = e?.error?.code ?? 'UNKNOWN';
+      const message = e?.error?.message ?? e?.message ?? String(err);
+      setTestResults(prev => ({ ...prev, [id]: { ok: false, code, message } }));
+    } finally {
+      setTestingId('');
+    }
   };
 
   const handleSave = async () => {
@@ -228,6 +254,13 @@ export default function SettingsClaude() {
                       {busyId === c.id ? t('settings.claude.activating') : t('settings.claude.activate')}
                     </button>
                   )}
+                  <button
+                    className="btn btn-sm btn-secondary"
+                    onClick={() => handleTest(c.id)}
+                    disabled={!!busyId || testingId === c.id}
+                  >
+                    {testingId === c.id ? t('settings.claude.testInProgress') : t('settings.claude.testLabel')}
+                  </button>
                   <button className="btn btn-sm btn-secondary" onClick={() => openEdit(c)} disabled={!!busyId}>
                     {t('settings.claude.edit')}
                   </button>
@@ -239,6 +272,16 @@ export default function SettingsClaude() {
                   >
                     {busyId === c.id ? t('settings.claude.deleting') : t('settings.claude.delete')}
                   </button>
+                  {testResults[c.id] && (
+                    testResults[c.id].ok ? (
+                      <span className="test-result test-result--ok">{t('settings.claude.testSuccess', { model: (testResults[c.id] as { ok: true; model?: string }).model ?? '' })}</span>
+                    ) : (
+                      <details className="test-result test-result--err">
+                        <summary>{t('settings.claude.testFailed', { code: (testResults[c.id] as { ok: false; code: string; message: string }).code })}</summary>
+                        <pre>{(testResults[c.id] as { ok: false; code: string; message: string }).message}</pre>
+                      </details>
+                    )
+                  )}
                 </td>
               </tr>
             ))}

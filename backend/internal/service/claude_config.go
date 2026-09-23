@@ -1,10 +1,13 @@
 package service
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -565,4 +568,51 @@ func (s *ClaudeConfigService) MigrateLegacy() error {
 		return fmt.Errorf("seed legacy claude config: %w", err)
 	}
 	return nil
+}
+
+// TestConnection probes a saved Claude / OpenAI-compatible endpoint by hitting
+// GET {base_url}/v1/models with the stored bearer token. Returns the
+// configured model name on success so the UI can echo it back. Errors are
+// prefixed with:
+//
+//   LLM_CONFIG_NOT_FOUND — id doesn't exist
+//   BASE_URL_MISSING      — base_url is empty
+//   LLM_CONNECT_FAILED    — TCP / DNS / TLS error reaching the endpoint
+//   LLM_TOKEN_INVALID     — 401/403 returned
+//   LLM_PROBE_FAILED      — other non-200 response (with body excerpt)
+//
+// These prefixes are routed to HTTP codes by handler/errcode.go::mapServiceErr.
+func (s *ClaudeConfigService) TestConnection(ctx context.Context, id string) (string, error) {
+	_ = ctx
+	var baseURL, authToken, defaultModel string
+	err := s.db.QueryRow(
+		`SELECT base_url, auth_token, default_model FROM claude_configs WHERE id = ?`, id,
+	).Scan(&baseURL, &authToken, &defaultModel)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("LLM_CONFIG_NOT_FOUND: 配置 %s 不存在", id)
+	}
+	if err != nil {
+		return "", err
+	}
+	if baseURL == "" {
+		return "", fmt.Errorf("BASE_URL_MISSING: base_url 为空")
+	}
+	apiBase := strings.TrimRight(baseURL, "/")
+	client := &http.Client{Timeout: 8 * time.Second}
+	req, _ := http.NewRequest(http.MethodGet, apiBase+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+authToken)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("LLM_CONNECT_FAILED: 无法连接 %s — %w", apiBase, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return "", fmt.Errorf("LLM_TOKEN_INVALID: LLM endpoint 拒绝 token (HTTP %d)", resp.StatusCode)
+	}
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("LLM_PROBE_FAILED: /v1/models 返回 %d: %s",
+			resp.StatusCode, truncateForLog(body, 200))
+	}
+	return defaultModel, nil
 }

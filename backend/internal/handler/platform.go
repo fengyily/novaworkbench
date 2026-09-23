@@ -63,8 +63,8 @@ func (h *PlatformHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "MISSING_FIELDS", "name、platform、token 不能为空")
 		return
 	}
-	if req.Platform != "github" && req.Platform != "gitlab" && req.Platform != "gitea" {
-		writeError(w, http.StatusBadRequest, "INVALID_PLATFORM", "platform 必须是 github、gitlab 或 gitea")
+	if req.Platform != "github" && req.Platform != "gitlab" && req.Platform != "gitea" && req.Platform != "bitbucket" {
+		writeError(w, http.StatusBadRequest, "INVALID_PLATFORM", "platform 必须是 github、gitlab、gitea 或 bitbucket")
 		return
 	}
 	if req.GPGEnabled {
@@ -173,4 +173,25 @@ func validateArmoredKey(armored string) (string, bool) {
 		return "GPG 私钥格式不正确，请粘贴 ASCII-armored 私钥（gpg --armor --export-secret-keys 的输出）", false
 	}
 	return "", true
+}
+
+// TestPlatformToken validates an already-saved PAT against its configured
+// platform (github / gitlab / gitea / bitbucket). The settings UI exposes it
+// as a "测试连接" button next to each token row; on success it returns the
+// platform username, on failure the standard writeServiceError envelope so
+// the frontend can render a <details>-collapsed diagnostic.
+//
+// POST /api/settings/tokens/{id}/test
+func (h *PlatformHandler) TestPlatformToken(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_ID", "缺少 token id")
+		return
+	}
+	username, err := h.svc.TestPlatformToken(r.Context(), id)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": username})
 }

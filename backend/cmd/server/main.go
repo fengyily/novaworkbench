@@ -419,6 +419,7 @@ func main() {
 	mux.HandleFunc("POST /api/settings/tokens", platformH.Create)
 	mux.HandleFunc("PUT /api/settings/tokens/{id}", platformH.Update)
 	mux.HandleFunc("DELETE /api/settings/tokens/{id}", platformH.Delete)
+	mux.HandleFunc("POST /api/settings/tokens/{id}/test", platformH.TestPlatformToken)
 
 	// Agent servers (settings) — remote Linux/macOS execution targets with
 	// AES-256-GCM-encrypted credentials. CRUD + Check/Install (background
@@ -430,6 +431,7 @@ func main() {
 	mux.HandleFunc("DELETE /api/settings/agent-servers/{id}", agentSvrH.Delete)
 	mux.HandleFunc("POST /api/settings/agent-servers/{id}/check", agentSvrH.Check)
 	mux.HandleFunc("POST /api/settings/agent-servers/{id}/install", agentSvrH.Install)
+	mux.HandleFunc("POST /api/settings/agent-servers/{id}/test", agentSvrH.TestConnection)
 	mux.HandleFunc("GET /api/settings/agent-servers/jobs/{id}", agentSvrH.GetJob)
 	mux.HandleFunc("GET /api/settings/agent-servers/jobs/{id}/stream", agentSvrH.StreamJob)
 
@@ -462,6 +464,7 @@ func main() {
 	mux.HandleFunc("DELETE /api/settings/claude/configs/{id}", claudeCfgH.Delete)
 	mux.HandleFunc("POST /api/settings/claude/configs/{id}/activate", claudeCfgH.Activate)
 	mux.HandleFunc("GET /api/settings/claude/configs/active", claudeCfgH.Active)
+	mux.HandleFunc("POST /api/settings/claude/configs/{id}/test", claudeCfgH.TestConnection)
 
 	// Direct HTTP LLM channel (settings) — base URL + API key + model for
 	// lightweight tasks (requirement title distillation). Bypasses claude CLI.

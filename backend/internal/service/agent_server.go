@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"github.com/novaworkbench/backend/internal/db"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/secret"
+	gossh "github.com/novaworkbench/backend/internal/ssh"
 	"github.com/novaworkbench/backend/internal/util"
 )
 
@@ -252,6 +254,44 @@ func (s *AgentServerService) UpdateWorkerVersion(id, version string) error {
 		version, time.Now(), id,
 	)
 	return err
+}
+
+// TestConnection performs a one-shot SSH handshake against the stored
+// credential to confirm the configured host/port/auth triplet is still
+// usable. It does NOT run any remote command beyond what ssh.TestConn does
+// internally (a TCP dial + SSH handshake, then close). The returned string
+// describes the connection in human-readable form so the UI can surface
+// "connected to <host>:<port> as <user>". Errors carry one of:
+//
+//   AGENT_NOT_FOUND       — row id doesn't exist
+//   AUTH_DECRYPT_FAILED   — AES-256-GCM ciphertext can't be decrypted
+//                            (master key changed or stored value corrupted)
+//   SSH_CONNECT_FAILED    — TCP dial or SSH handshake rejected the credential
+//
+// These prefixes are routed to HTTP codes by handler/errcode.go::mapServiceErr.
+func (s *AgentServerService) TestConnection(ctx context.Context, id string) (string, error) {
+	var host, username, authType, authCipher string
+	var port int
+	err := s.db.QueryRow(
+		`SELECT host, port, username, auth_type, auth_value FROM agent_servers WHERE id = ?`, id,
+	).Scan(&host, &port, &username, &authType, &authCipher)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("AGENT_NOT_FOUND: agent server %s 不存在", id)
+	}
+	if err != nil {
+		return "", err
+	}
+	plaintext, err := secret.Decrypt(authCipher)
+	if err != nil {
+		return "", fmt.Errorf("AUTH_DECRYPT_FAILED: 无法解密凭据 — %w", err)
+	}
+	if username == "" {
+		username = "root"
+	}
+	if err := gossh.TestConn(ctx, host, port, username, authType, plaintext); err != nil {
+		return "", fmt.Errorf("SSH_CONNECT_FAILED: 无法连接 %s:%d — %w", host, port, err)
+	}
+	return fmt.Sprintf("connected to %s:%d as %s", host, port, username), nil
 }
 
 // --- helpers ---
