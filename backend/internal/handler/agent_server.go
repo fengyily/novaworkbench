@@ -245,7 +245,16 @@ func (h *AgentServerHandler) runCheck(job *store.Job, serverID string) {
 		// The env slice disables git's terminal prompt so a missing/unauthorized
 		// credential fails fast instead of blocking on stdin.
 		if _, gerr := gitRunWithTimeout(".", 15*time.Second,
-			[]string{"GIT_TERMINAL_PROMPT=0"}, "ls-remote", "--heads", rawURL); gerr != nil {
+			[]string{
+				"GIT_TERMINAL_PROMPT=0",
+				// libcurl low-speed cutoff: when the network blocks github.com (no SYN-ACK),
+				// git-remote-https normally hangs for ~75s on its own TCP-connect timer.
+				// Pinning low-speed to 5s/1B makes it give up in ~5s, so the 15s Go ctx
+				// still has headroom for subsequent SSH-bound checks in runCheck.
+				"GIT_HTTP_LOW_SPEED_TIME=5",
+				"GIT_HTTP_LOW_SPEED_LIMIT=1",
+			},
+			"ls-remote", "--heads", rawURL); gerr != nil {
 			// Take the first line of stderr (which gitRunWithTimeout prefixes
 			// to the error) for a human-readable failure reason. Fall back to
 			// a generic hint if it's empty.
