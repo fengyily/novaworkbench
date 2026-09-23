@@ -224,57 +224,6 @@ func (h *AgentServerHandler) runCheck(job *store.Job, serverID string) {
 	status := model.AgentServerStatusReady
 	summary := "所有依赖已就绪"
 
-	// Git remote reachability probe — uses any project's remote_url as a
-	// smoke target so a Check run can catch a broken credential / DNS /
-	// network before the user starts a real coding job. Server-scoped (no
-	// project context), so "no probeable remote" is not an error; only a
-	// failed probe is. Run on the LOCAL host (the probe targets the project's
-	// remote_url, which the remote agent doesn't carry anyway) and bound to
-	// 15s so a slow DNS hang can't stall the whole Check.
-	job.Append(store.LogLine{Type: "phase", Content: "🔍 检查 git 远程访问..."})
-	if h.projectSvc == nil {
-		job.Append(store.LogLine{Type: "message", Content: "ℹ️ ProjectService 未注入，跳过 git 远程探测"})
-	} else if rawURL, perr := h.projectSvc.FirstOriginURLForProbe(); perr != nil {
-		// DB error → not a hard block; the rest of the check still runs.
-		job.Append(store.LogLine{Type: "message", Content: "⚠️ 无法读取项目列表以探测 git 远程: " + perr.Error()})
-	} else if rawURL == "" {
-		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 无可探测的 git 远程（尚无项目配置 remote_url），跳过"})
-	} else {
-		job.Append(store.LogLine{Type: "message", Content: "📡 探测: " + redactOriginForLog(rawURL)})
-		// 15s timeout via the shared gitRunWithTimeout helper (worktree.go).
-		// The env slice disables git's terminal prompt so a missing/unauthorized
-		// credential fails fast instead of blocking on stdin.
-		if _, gerr := gitRunWithTimeout(".", 15*time.Second,
-			[]string{
-				"GIT_TERMINAL_PROMPT=0",
-				// libcurl low-speed cutoff: when the network blocks github.com (no SYN-ACK),
-				// git-remote-https normally hangs for ~75s on its own TCP-connect timer.
-				// Pinning low-speed to 5s/1B makes it give up in ~5s, so the 15s Go ctx
-				// still has headroom for subsequent SSH-bound checks in runCheck.
-				"GIT_HTTP_LOW_SPEED_TIME=5",
-				"GIT_HTTP_LOW_SPEED_LIMIT=1",
-			},
-			"ls-remote", "--heads", rawURL); gerr != nil {
-			// Take the first line of stderr (which gitRunWithTimeout prefixes
-			// to the error) for a human-readable failure reason. Fall back to
-			// a generic hint if it's empty.
-			first := strings.TrimSpace(strings.SplitN(gerr.Error(), "\n", 2)[0])
-			if first == "" {
-				first = "ls-remote 失败"
-			}
-			// 软失败:git 远程不可达 ≠ Agent Server 不可用。
-			// - status 保持 AgentServerStatusReady(由 deps + settings.json + worker 决定)
-			// - summary 不污染,仅在日志里给出明确语义清晰的提示
-			// - 后续真正的执行(wizard 远程执行 / 项目 clone/push)若依赖 github 访问,
-			//   会走自己的 gitRunWithTimeout(已在 worktree.go:156 / push_pr_shell.go:202 等处
-			//   有独立 ctx 与超时),由各自负责。
-			job.Append(store.LogLine{Type: "warning", Content: "⚠ git 远程访问失败: " + first +
-				"（仅影响从本地控制器拉取/推送项目代码;Agent Server 自身环境仍可正常用于远程执行任务）"})
-		} else {
-			job.Append(store.LogLine{Type: "message", Content: "✓ git 远程可访问"})
-		}
-	}
-
 	if len(missing) > 0 {
 		status = model.AgentServerStatusError
 		summary = "缺少依赖: " + strings.Join(missing, ", ") + "，请点「安装依赖」"
@@ -323,6 +272,60 @@ func (h *AgentServerHandler) runCheck(job *store.Job, serverID string) {
 			summary = workerMsg
 		} else {
 			summary += "; " + workerMsg
+		}
+	}
+
+	// Git remote reachability probe — moved to AFTER SSH-bound checks so the
+	// 30s runCheck ctx always has full budget for connection / deps /
+	// settings.json / worker. Server-scoped (no project context), so
+	// "no probeable remote" is not an error; only a failed probe is.
+	// Run on the LOCAL host and bound to 15s; with GIT_HTTP_LOW_SPEED_*
+	// set above, even network-blocked remotes give up in ~5s.
+	job.Append(store.LogLine{Type: "phase", Content: "🔍 检查 git 远程访问..."})
+	if h.projectSvc == nil {
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ ProjectService 未注入，跳过 git 远程探测"})
+	} else if rawURL, perr := h.projectSvc.FirstOriginURLForProbe(); perr != nil {
+		// DB error → not a hard block; the rest of the check still runs.
+		job.Append(store.LogLine{Type: "message", Content: "⚠️ 无法读取项目列表以探测 git 远程: " + perr.Error()})
+	} else if rawURL == "" {
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 无可探测的 git 远程（尚无项目配置 remote_url），跳过"})
+	} else {
+		job.Append(store.LogLine{Type: "message", Content: "📡 探测: " + redactOriginForLog(rawURL)})
+		// 15s timeout via the shared gitRunWithTimeout helper (worktree.go).
+		// The env slice disables git's terminal prompt so a missing/unauthorized
+		// credential fails fast instead of blocking on stdin; the
+		// GIT_HTTP_LOW_SPEED_* pair tells libcurl to give up after 5s of
+		// throughput <1B/s — critical when the network blocks github.com
+		// (otherwise libcurl's default TCP-connect timer is ~75s and burns
+		// the whole runCheck ctx before SSH-bound checks can finish).
+		if _, gerr := gitRunWithTimeout(".", 15*time.Second,
+			[]string{
+				"GIT_TERMINAL_PROMPT=0",
+				// libcurl low-speed cutoff: when the network blocks github.com (no SYN-ACK),
+				// git-remote-https normally hangs for ~75s on its own TCP-connect timer.
+				// Pinning low-speed to 5s/1B makes it give up in ~5s, so the 15s Go ctx
+				// still has headroom for subsequent SSH-bound checks in runCheck.
+				"GIT_HTTP_LOW_SPEED_TIME=5",
+				"GIT_HTTP_LOW_SPEED_LIMIT=1",
+			},
+			"ls-remote", "--heads", rawURL); gerr != nil {
+			// Take the first line of stderr (which gitRunWithTimeout prefixes
+			// to the error) for a human-readable failure reason. Fall back to
+			// a generic hint if it's empty.
+			first := strings.TrimSpace(strings.SplitN(gerr.Error(), "\n", 2)[0])
+			if first == "" {
+				first = "ls-remote 失败"
+			}
+			// 软失败:git 远程不可达 ≠ Agent Server 不可用。
+			// - status 保持 AgentServerStatusReady(由 deps + settings.json + worker 决定)
+			// - summary 不污染,仅在日志里给出明确语义清晰的提示
+			// - 后续真正的执行(wizard 远程执行 / 项目 clone/push)若依赖 github 访问,
+			//   会走自己的 gitRunWithTimeout(已在 worktree.go:156 / push_pr_shell.go:202 等处
+			//   有独立 ctx 与超时),由各自负责。
+			job.Append(store.LogLine{Type: "warning", Content: "⚠ git 远程访问失败: " + first +
+				"（仅影响从本地控制器拉取/推送项目代码;Agent Server 自身环境仍可正常用于远程执行任务）"})
+		} else {
+			job.Append(store.LogLine{Type: "message", Content: "✓ git 远程可访问"})
 		}
 	}
 
