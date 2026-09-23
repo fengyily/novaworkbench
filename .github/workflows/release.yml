@@ -26,6 +26,14 @@ on:
         required: false
         default: 'v0.0.0-test'
         type: string
+      # NOTE: dispatch inputs are surfaced as STRINGS ('true' / 'false'), not
+      # YAML booleans — keep the comparison `inputs.build_image == 'true'`
+      # in the image steps in sync with this convention.
+      build_image:
+        description: 'Build & push the multi-arch (linux/amd64 + linux/arm64) Docker image to GHCR as part of this release. Default false: push-tag runs and the default dispatch path produce only binaries + archives + apt packages + GitHub Release, with no GHCR image. Set true only when the release should also ship a container image.'
+        required: false
+        default: 'false'
+        type: boolean
 
 # Serialize per tag: a re-pushed tag or a dispatch replay must never run
 # concurrently with a live release for the same version.
@@ -144,6 +152,23 @@ jobs:
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           echo "Releasing ${VERSION} @ ${COMMIT}"
 
+      # Surface the build_image gate decision to the operator before any
+      # work begins. Intentionally NOT gated with `if:` — its job is to
+      # announce when the image step was *skipped*, so a green-but-
+      # image-less run can be distinguished from a green run that
+      # actually pushed to GHCR. push-tag runs surface as SKIPPED here
+      # because inputs.build_image is null and `|| 'false'` falls
+      # through to the SKIPPED branch.
+      - name: Report image-build gate state
+        env:
+          GATE: ${{ inputs.build_image || 'false' }}
+        run: |
+          if [ "$GATE" = "true" ]; then
+            echo "::notice::image build ENABLED (build_image=true) — multi-arch GHCR image will be pushed"
+          else
+            echo "::notice::image build SKIPPED (build_image unset or false) — no GHCR image will be produced for this release"
+          fi
+
       - name: Build all platform binaries
         env:
           VERSION: ${{ steps.meta.outputs.version }}
@@ -219,6 +244,7 @@ jobs:
 
       - name: Compute image tags
         id: imgtags
+        if: github.event_name == 'workflow_dispatch' && inputs.build_image == 'true'
         run: |
           IMAGE="ghcr.io/${{ steps.meta.outputs.namespace }}/nova"
           {
@@ -235,6 +261,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
+        if: github.event_name == 'workflow_dispatch' && inputs.build_image == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -244,9 +271,11 @@ jobs:
       # QEMU is required to execute the arm64 build stages (npm/go RUN
       # commands) on the amd64 hosted runner.
       - name: Set up QEMU
+        if: github.event_name == 'workflow_dispatch' && inputs.build_image == 'true'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
+        if: github.event_name == 'workflow_dispatch' && inputs.build_image == 'true'
         uses: docker/setup-buildx-action@v3
         with:
           # mirror.gcr.io is Google's read-only Docker Hub cache; routes
@@ -260,6 +289,7 @@ jobs:
               mirrors = ["https://mirror.gcr.io"]
 
       - name: Build & push release image (multi-arch)
+        if: github.event_name == 'workflow_dispatch' && inputs.build_image == 'true'
         uses: docker/build-push-action@v5
         with:
           # Same root context as deploy.yml — the Dockerfile's COPY paths
@@ -284,12 +314,27 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.meta.outputs.version }}
           NS: ${{ steps.meta.outputs.namespace }}
+          BUILD_IMAGE: ${{ inputs.build_image || 'false' }}
         run: |
           # Re-run safety: drop a previous release for this tag but keep the
           # tag itself, so `gh release create` re-attaches to the same commit.
           if gh release view "$VERSION" >/dev/null 2>&1; then
             echo "::warning::Release ${VERSION} already exists — recreating it"
             gh release delete "$VERSION" --yes
+          fi
+          # Conditionally append a Docker pull block to release notes — only
+          # when the image was actually pushed to GHCR. Default
+          # build_image=false leaves a clean notes body without a `docker
+          # pull` line that would 404 against a tag that was never published
+          # as a container image.
+          DOCKER_NOTE=""
+          if [ "$BUILD_IMAGE" = "true" ]; then
+            DOCKER_NOTE="
+
+          Docker 镜像（amd64 / arm64 自动匹配）：
+          \`\`\`bash
+          docker pull ghcr.io/${NS}/nova:${VERSION}
+          \`\`\`"
           fi
           gh release create "$VERSION" \
             dist/novaworkbench-*.tar.gz \
@@ -321,12 +366,7 @@ jobs:
           \`\`\`bash
           tar -xzf novaworkbench-${VERSION}-<os>-<arch>.tar.gz
           ./novaworkbench-<os>-<arch>   # 监听 :9527
-          \`\`\`
-
-          Docker 镜像（amd64 / arm64 自动匹配）：
-          \`\`\`bash
-          docker pull ghcr.io/${NS}/nova:${VERSION}
-          \`\`\`
+          \`\`\`${DOCKER_NOTE}
 
           校验下载：\`sha256sum -c novaworkbench-${VERSION}-checksums.txt\`
           完整使用说明见 [README](https://github.com/${GITHUB_REPOSITORY}#readme)。"
