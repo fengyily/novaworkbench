@@ -74,7 +74,7 @@ export default function SettingsTokens() {
   // collapsed <details> with the backend's TOKEN_INVALID diagnostic.
   const [testing, setTesting] = useState<string>('');
   const [testResults, setTestResults] = useState<Record<string,
-    { ok: true; username?: string } |
+    { ok: true; username?: string | null } |
     { ok: false; code: string; message: string }
   >>({});
 
