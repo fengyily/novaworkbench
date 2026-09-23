@@ -3,20 +3,21 @@ package service
 import (
 	"context"
 	"database/sql"
-
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
-	"regexp"
-	"github.com/novaworkbench/backend/internal/db"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/novaworkbench/backend/internal/db"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/util"
 )
@@ -230,14 +231,16 @@ func (s *ProjectService) Add(req model.AddProjectRequest) (*model.Project, error
 		return nil, err
 	}
 
-	// Pre-clone token validation: GitLab's git HTTP basic auth and the
-	// `/api/v4/user` endpoint use different auth paths, so a token that's
-	// valid for the API may still be rejected on `git clone` (e.g. missing
-	// `read_repository` scope, or the GitLab admin disabled basic auth on
+	// Pre-clone token validation: each platform's git HTTP basic auth and the
+	// `/user` endpoint use different auth paths, so a token that's valid for
+	// the API may still be rejected on `git clone` (e.g. missing
+	// `read_repository` scope, or the platform admin disabled basic auth on
 	// the git endpoints). Validate up-front and return a specific error
-	// instead of the cryptic "HTTP Basic: Access denied" from git.
-	if req.RemoteURL != "" && tokenSecret != "" && tokenPlatform == "gitlab" {
-		if vErr := validateGitLabToken(tokenBaseURL, tokenSecret, req.RemoteURL); vErr != nil {
+	// instead of the cryptic "HTTP Basic: Access denied" from git. The
+	// dispatcher in validatePlatformToken handles github / gitlab / gitea /
+	// bitbucket uniformly.
+	if req.RemoteURL != "" && tokenSecret != "" && tokenPlatform != "" {
+		if vErr := validatePlatformToken(tokenPlatform, tokenBaseURL, tokenSecret, req.RemoteURL); vErr != nil {
 			return nil, vErr
 		}
 	}
@@ -583,29 +586,36 @@ func isMissingExecutable(err error) bool {
 //
 // All errors are prefixed with `TOKEN_INVALID:` so the handler can map
 // them to a dedicated HTTP status. The token is never echoed back; URLs
-// are passed through redactUserinfo.
+// are passed through redactUserinfo, then TrimRight'd, so the resulting hint
+// URL never carries the double-slash bug the previous version had.
 func validateGitLabToken(baseURL, token, remoteURL string) error {
 	if baseURL == "" {
-		return fmt.Errorf("TOKEN_INVALID: GitLab base_url 未配置 — 请在「平台 Token」中重新保存 videocut-Gitlab，并填写 base_url（如 http://172.20.210.36）")
+		return fmt.Errorf("TOKEN_INVALID: GitLab base_url 未配置 — 请在「平台 Token」中填写 base_url（如 http://172.20.210.36）")
 	}
-	apiBase := strings.TrimRight(baseURL, "/") + "/api/v4"
+	cleanedBase := strings.TrimRight(redactUserinfo(baseURL), "/")
+	apiBase := cleanedBase + "/api/v4"
 	client := &http.Client{Timeout: 10 * time.Second}
 
 	// 1. /user — basic token validity.
-	req, _ := http.NewRequest(http.MethodGet, apiBase+"/user", nil)
+	userURL := apiBase + "/user"
+	log.Printf("[gitlab-debug] probe start: GET %s (platform=gitlab token_len=%d, remote=%s)",
+		userURL, len(token), redactUserinfo(remoteURL))
+	req, _ := http.NewRequest(http.MethodGet, userURL, nil)
 	req.Header.Set("PRIVATE-TOKEN", token)
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("TOKEN_INVALID: 无法连接 GitLab %s — %w", redactUserinfo(baseURL), err)
+		return fmt.Errorf("TOKEN_INVALID: 无法连接 GitLab %s — %w", cleanedBase, err)
 	}
-	userBody, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	log.Printf("[gitlab-debug] /user response: status=%d body=%s", resp.StatusCode, truncateForLog(body, 500))
+
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return fmt.Errorf("TOKEN_INVALID: GitLab 拒绝此 token (HTTP %d) — token 可能过期、被撤销或权限不足。请在 %s/-/user_settings/personal_access_tokens 重新生成 token，并确保勾选 api 和 read_repository (或 write_repository) 权限",
-			resp.StatusCode, redactUserinfo(baseURL))
+		return platformTokenInvalidError("gitlab", resp.StatusCode, body, cleanedBase)
 	case resp.StatusCode != http.StatusOK:
-		return fmt.Errorf("TOKEN_INVALID: GitLab /user 响应异常 (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(userBody)))
+		return fmt.Errorf("TOKEN_INVALID: GitLab /user 响应异常 (HTTP %d): %s",
+			resp.StatusCode, truncateForLog(body, 200))
 	}
 
 	// 2. /projects/{path} — project-level access. Skipped if we can't
@@ -615,6 +625,7 @@ func validateGitLabToken(baseURL, token, remoteURL string) error {
 		return nil
 	}
 	projURL := apiBase + "/projects/" + url.PathEscape(projPath)
+	log.Printf("[gitlab-debug] probe start: GET %s", projURL)
 	req2, _ := http.NewRequest(http.MethodGet, projURL, nil)
 	req2.Header.Set("PRIVATE-TOKEN", token)
 	resp2, err := client.Do(req2)
@@ -622,17 +633,259 @@ func validateGitLabToken(baseURL, token, remoteURL string) error {
 		return fmt.Errorf("TOKEN_INVALID: 无法连接 GitLab 验证项目访问 — %w", err)
 	}
 	projBody, _ := io.ReadAll(resp2.Body)
-	resp2.Body.Close()
+	_ = resp2.Body.Close()
+	log.Printf("[gitlab-debug] /projects response: status=%d body=%s",
+		resp2.StatusCode, truncateForLog(projBody, 500))
 	switch {
-	case resp2.StatusCode == http.StatusUnauthorized, resp2.StatusCode == http.StatusForbidden:
-		return fmt.Errorf("TOKEN_INVALID: token 鉴权通过，但无法访问项目 %s (HTTP %d) — token 没有该项目的 read_repository 权限，或 token 已被吊销对该项目的访问。请在 GitLab 项目设置 → Members 确认 token 对应用户已被授予 Reporter 及以上角色",
-			projPath, resp2.StatusCode)
 	case resp2.StatusCode == http.StatusNotFound:
-		return fmt.Errorf("TOKEN_INVALID: 项目 %s 在 GitLab 上不存在，或 token 没有该项目访问权限 (HTTP 404)。请确认 URL 拼写或为 token 授予项目访问权", projPath)
+		return fmt.Errorf("TOKEN_INVALID: 在 GitLab 上找不到项目 %q — 请确认 token 已加入该项目（至少 Reporter）且 remote_url 拼写正确", projPath)
+	case resp2.StatusCode == http.StatusUnauthorized, resp2.StatusCode == http.StatusForbidden:
+		return platformTokenInvalidError("gitlab", resp2.StatusCode, projBody, cleanedBase)
 	case resp2.StatusCode != http.StatusOK:
-		return fmt.Errorf("TOKEN_INVALID: GitLab /projects 响应异常 (HTTP %d): %s", resp2.StatusCode, strings.TrimSpace(string(projBody)))
+		return fmt.Errorf("TOKEN_INVALID: GitLab /projects 响应异常 (HTTP %d): %s",
+			resp2.StatusCode, truncateForLog(projBody, 200))
 	}
 	return nil
+}
+
+// validateGitHubToken mirrors validateGitLabToken for GitHub / GitHub
+// Enterprise. /user validates the token; /repos/{owner}/{repo} validates
+// project-level access when a remote URL is supplied.
+func validateGitHubToken(baseURL, token, remoteURL string) error {
+	apiBase := resolveGitHubAPIBase(baseURL, remoteURL)
+	if apiBase == "" {
+		return fmt.Errorf("TOKEN_INVALID: GitHub base_url 未配置 — 请在「平台 Token」中填写 base_url（如 https://github.com 或 GitHub Enterprise 的 https://github.acme.com）")
+	}
+	cleanedBase := strings.TrimRight(redactUserinfo(apiBase), "/")
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	userURL := cleanedBase + "/user"
+	log.Printf("[gitlab-debug] probe start: GET %s (platform=github token_len=%d, remote=%s)",
+		userURL, len(token), redactUserinfo(remoteURL))
+	req, _ := http.NewRequest(http.MethodGet, userURL, nil)
+	req.Header.Set("Authorization", "token "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("TOKEN_INVALID: 无法连接 GitHub %s — %w", cleanedBase, err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	log.Printf("[gitlab-debug] /user response: status=%d body=%s", resp.StatusCode, truncateForLog(body, 500))
+
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
+		return platformTokenInvalidError("github", resp.StatusCode, body, cleanedBase)
+	case resp.StatusCode != http.StatusOK:
+		return fmt.Errorf("TOKEN_INVALID: GitHub /user 响应异常 (HTTP %d): %s",
+			resp.StatusCode, truncateForLog(body, 200))
+	}
+
+	owner, repo := extractGitHubRepoPath(remoteURL)
+	if owner == "" || repo == "" {
+		return nil
+	}
+	repoURL := cleanedBase + "/repos/" + owner + "/" + repo
+	log.Printf("[gitlab-debug] probe start: GET %s", repoURL)
+	req2, _ := http.NewRequest(http.MethodGet, repoURL, nil)
+	req2.Header.Set("Authorization", "token "+token)
+	req2.Header.Set("Accept", "application/vnd.github+json")
+	resp2, err := client.Do(req2)
+	if err != nil {
+		return fmt.Errorf("TOKEN_INVALID: 无法连接 GitHub 验证项目访问 — %w", err)
+	}
+	repoBody, _ := io.ReadAll(resp2.Body)
+	_ = resp2.Body.Close()
+	log.Printf("[gitlab-debug] /repos response: status=%d body=%s",
+		resp2.StatusCode, truncateForLog(repoBody, 500))
+	switch {
+	case resp2.StatusCode == http.StatusNotFound:
+		return fmt.Errorf("TOKEN_INVALID: 在 GitHub 上找不到仓库 %s/%s — 请确认 token 已加入该仓库且 remote_url 拼写正确", owner, repo)
+	case resp2.StatusCode == http.StatusUnauthorized, resp2.StatusCode == http.StatusForbidden:
+		return platformTokenInvalidError("github", resp2.StatusCode, repoBody, cleanedBase)
+	case resp2.StatusCode != http.StatusOK:
+		return fmt.Errorf("TOKEN_INVALID: GitHub /repos 响应异常 (HTTP %d): %s",
+			resp2.StatusCode, truncateForLog(repoBody, 200))
+	}
+	return nil
+}
+
+// validateGiteaToken probes the configured Self-hosted Gitea /user and (when a
+// remote URL is supplied) /repos/{owner}/{repo}. base_url is REQUIRED — unlike
+// github.com, there's no implicit fallback for Gitea.
+func validateGiteaToken(baseURL, token, remoteURL string) error {
+	if baseURL == "" {
+		return fmt.Errorf("TOKEN_INVALID: Gitea 必须填写 base_url — 请在「平台 Token」中填写（如 http://gitea.local:3000）")
+	}
+	cleanedBase := strings.TrimRight(redactUserinfo(baseURL), "/")
+	apiBase := cleanedBase + "/api/v1"
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	userURL := apiBase + "/user"
+	log.Printf("[gitlab-debug] probe start: GET %s (platform=gitea token_len=%d, remote=%s)",
+		userURL, len(token), redactUserinfo(remoteURL))
+	req, _ := http.NewRequest(http.MethodGet, userURL, nil)
+	req.Header.Set("Authorization", "token "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("TOKEN_INVALID: 无法连接 Gitea %s — %w", cleanedBase, err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	log.Printf("[gitlab-debug] /user response: status=%d body=%s", resp.StatusCode, truncateForLog(body, 500))
+
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
+		return platformTokenInvalidError("gitea", resp.StatusCode, body, cleanedBase)
+	case resp.StatusCode != http.StatusOK:
+		return fmt.Errorf("TOKEN_INVALID: Gitea /user 响应异常 (HTTP %d): %s",
+			resp.StatusCode, truncateForLog(body, 200))
+	}
+
+	owner, repo := extractGiteaRepoPath(remoteURL)
+	if owner == "" || repo == "" {
+		return nil
+	}
+	repoURL := apiBase + "/repos/" + owner + "/" + repo
+	log.Printf("[gitlab-debug] probe start: GET %s", repoURL)
+	req2, _ := http.NewRequest(http.MethodGet, repoURL, nil)
+	req2.Header.Set("Authorization", "token "+token)
+	resp2, err := client.Do(req2)
+	if err != nil {
+		return fmt.Errorf("TOKEN_INVALID: 无法连接 Gitea 验证项目访问 — %w", err)
+	}
+	repoBody, _ := io.ReadAll(resp2.Body)
+	_ = resp2.Body.Close()
+	log.Printf("[gitlab-debug] /repos response: status=%d body=%s",
+		resp2.StatusCode, truncateForLog(repoBody, 500))
+	switch {
+	case resp2.StatusCode == http.StatusNotFound:
+		return fmt.Errorf("TOKEN_INVALID: 在 Gitea 上找不到仓库 %s/%s — 请确认 token 已加入该仓库且 remote_url 拼写正确", owner, repo)
+	case resp2.StatusCode == http.StatusUnauthorized, resp2.StatusCode == http.StatusForbidden:
+		return platformTokenInvalidError("gitea", resp2.StatusCode, repoBody, cleanedBase)
+	case resp2.StatusCode != http.StatusOK:
+		return fmt.Errorf("TOKEN_INVALID: Gitea /repos 响应异常 (HTTP %d): %s",
+			resp2.StatusCode, truncateForLog(repoBody, 200))
+	}
+	return nil
+}
+
+// validateBitbucketToken probes Bitbucket Cloud / Data Center. Cloud PATs
+// starting with "ATATT" use Bearer auth; App Passwords and DC PATs use Basic
+// auth with the stored token (which the contract says is "username:password").
+//
+// Routing rule:
+//   - token starts with "ATATT"  → Cloud (api.bitbucket.org/2.0); baseURL optional
+//   - token is non-ATATT and baseURL is empty → DC intent but missing config → error
+//   - baseURL contains "bitbucket.org" → Cloud
+//   - otherwise → DC (baseURL + /rest/api/1.0)
+func validateBitbucketToken(baseURL, token, remoteURL string) error {
+	cloudPAT := strings.HasPrefix(token, "ATATT")
+	if baseURL == "" && !cloudPAT {
+		return fmt.Errorf("TOKEN_INVALID: Bitbucket Data Center 必须填写 base_url — 请在「平台 Token」中填写（如 https://bitbucket.acme.com）")
+	}
+	apiBase, isCloud := resolveBitbucketAPIBase(baseURL)
+	if cloudPAT {
+		// ATATT tokens always go to Cloud, even if the user typed a DC URL.
+		apiBase = "https://api.bitbucket.org/2.0"
+		isCloud = true
+	}
+	cleanedBase := strings.TrimRight(apiBase, "/")
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	var userURL string
+	if isCloud {
+		userURL = cleanedBase + "/user"
+	} else {
+		userURL = cleanedBase + "/users?current"
+	}
+	log.Printf("[gitlab-debug] probe start: GET %s (platform=bitbucket token_len=%d, remote=%s)",
+		userURL, len(token), redactUserinfo(remoteURL))
+	req, _ := http.NewRequest(http.MethodGet, userURL, nil)
+	if isCloud && strings.HasPrefix(token, "ATATT") { // Cloud PAT v1.0
+		req.Header.Set("Authorization", "Bearer "+token)
+	} else {
+		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(token)))
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("TOKEN_INVALID: 无法连接 Bitbucket %s — %w", cleanedBase, err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	log.Printf("[gitlab-debug] /user response: status=%d body=%s", resp.StatusCode, truncateForLog(body, 500))
+
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
+		return platformTokenInvalidError("bitbucket", resp.StatusCode, body, cleanedBase)
+	case resp.StatusCode != http.StatusOK:
+		return fmt.Errorf("TOKEN_INVALID: Bitbucket /user 响应异常 (HTTP %d): %s",
+			resp.StatusCode, truncateForLog(body, 200))
+	}
+
+	workspace, repo := extractBitbucketRepoPath(remoteURL)
+	if workspace == "" || repo == "" {
+		return nil
+	}
+	var repoURL string
+	if isCloud {
+		repoURL = cleanedBase + "/repositories/" + workspace + "/" + repo
+	} else {
+		repoURL = cleanedBase + "/projects/" + workspace + "/repos/" + repo
+	}
+	log.Printf("[gitlab-debug] probe start: GET %s", repoURL)
+	req2, _ := http.NewRequest(http.MethodGet, repoURL, nil)
+	if isCloud && strings.HasPrefix(token, "ATATT") {
+		req2.Header.Set("Authorization", "Bearer "+token)
+	} else {
+		req2.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(token)))
+	}
+	resp2, err := client.Do(req2)
+	if err != nil {
+		return fmt.Errorf("TOKEN_INVALID: 无法连接 Bitbucket 验证项目访问 — %w", err)
+	}
+	repoBody, _ := io.ReadAll(resp2.Body)
+	_ = resp2.Body.Close()
+	log.Printf("[gitlab-debug] /repos response: status=%d body=%s",
+		resp2.StatusCode, truncateForLog(repoBody, 500))
+	switch {
+	case resp2.StatusCode == http.StatusNotFound:
+		return fmt.Errorf("TOKEN_INVALID: 在 Bitbucket 上找不到仓库 %s/%s — 请确认 token 已加入该仓库且 remote_url 拼写正确", workspace, repo)
+	case resp2.StatusCode == http.StatusUnauthorized, resp2.StatusCode == http.StatusForbidden:
+		return platformTokenInvalidError("bitbucket", resp2.StatusCode, repoBody, cleanedBase)
+	case resp2.StatusCode != http.StatusOK:
+		return fmt.Errorf("TOKEN_INVALID: Bitbucket /repos 响应异常 (HTTP %d): %s",
+			resp2.StatusCode, truncateForLog(repoBody, 200))
+	}
+	return nil
+}
+
+// validatePlatformToken is the entry point used by ProjectService.Add and by
+// PlatformTokenService.TestPlatformToken. Unknown platform kinds are silently
+// skipped so legacy rows from before Bitbucket support don't break.
+//
+// When remoteURL is a non-SSH http(s) URL, a cheap HEAD probe runs first so
+// network-level unreachable errors surface with a distinct REMOTE_UNREACHABLE
+// prefix (the platform-specific probes that follow will also fail, but with
+// less actionable diagnostics).
+func validatePlatformToken(platform, baseURL, token, remoteURL string) error {
+	if remoteURL != "" && !isSSHRemote(remoteURL) {
+		if err := probeURLReachable(remoteURL); err != nil {
+			return fmt.Errorf("REMOTE_UNREACHABLE: 无法访问 %s — %w", redactUserinfo(remoteURL), err)
+		}
+	}
+	switch platform {
+	case "gitlab":
+		return validateGitLabToken(baseURL, token, remoteURL)
+	case "github":
+		return validateGitHubToken(baseURL, token, remoteURL)
+	case "gitea":
+		return validateGiteaToken(baseURL, token, remoteURL)
+	case "bitbucket":
+		return validateBitbucketToken(baseURL, token, remoteURL)
+	default:
+		return nil
+	}
 }
 
 // extractGitLabProjectPath turns a clone URL into the GitLab project
@@ -1611,4 +1864,187 @@ func (s *ProjectService) SetCommitLangOverride(id, override string) (*model.Proj
 // for callers that prefer the explicit semantic.
 func (s *ProjectService) ClearCommitLangOverride(id string) (*model.Project, error) {
 	return s.SetCommitLangOverride(id, "")
+}
+
+// ----- token probe infrastructure ------------------------------------------------
+
+// truncateForLog sanitizes an HTTP response body for log output. Newlines and
+// tabs are normalized to spaces; all other control characters (< 32 or == 127)
+// are dropped. The result is rune-truncated to n characters (appending "…" on
+// overflow) so a single log line never spans screen widths. The function is used
+// by validate*Token to record status / body excerpts in the [gitlab-debug]
+// channel without spamming them.
+func truncateForLog(b []byte, n int) string {
+	if len(b) == 0 {
+		return ""
+	}
+	s := string(b)
+	s = strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t':
+			return ' '
+		}
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, s)
+	runes := []rune(s)
+	if len(runes) > n {
+		return string(runes[:n]) + "…"
+	}
+	return s
+}
+
+// platformTokenInvalidError formats a TOKEN_INVALID error that includes the
+// platform's /v4/user API response body, the platform-specific token-creation
+// URL, and a 3-item list of common root causes (password vs PAT, missing
+// user-scope, expired/revoked). cleanedBase MUST already be TrimRight'd +
+// redactUserinfo'd to avoid the double-slash bug the previous message had.
+func platformTokenInvalidError(platform string, status int, body []byte, cleanedBase string) error {
+	excerpt := truncateForLog(body, 200)
+	var parsed struct {
+		Message string `json:"message"`
+		Error   string `json:"error"`
+	}
+	_ = json.Unmarshal(body, &parsed)
+	apiMessage := parsed.Message
+	if apiMessage == "" {
+		apiMessage = parsed.Error
+	}
+
+	var hint, hintURL, scopes string
+	switch platform {
+	case "gitlab":
+		hint = "GitLab 返回消息"
+		hintURL = cleanedBase + "/-/user_settings/personal_access_tokens"
+		scopes = "请勾选 api 作用域（访问具体仓库还需 read_repository 或 write_repository）"
+	case "github":
+		hint = "GitHub 返回消息"
+		u, _ := url.Parse(cleanedBase)
+		if u != nil && strings.Contains(u.Host, "api.github.com") {
+			hintURL = "https://github.com/settings/tokens"
+		} else if u != nil && u.Host != "" {
+			hintURL = u.Scheme + "://" + u.Host + "/settings/tokens"
+		} else {
+			hintURL = "https://github.com/settings/tokens"
+		}
+		scopes = "请勾选 read:user 作用域（Fine-grained PAT 需 Metadata: Read 权限）"
+	case "gitea":
+		hint = "Gitea 返回消息"
+		hintURL = cleanedBase + "/user/settings/applications"
+		scopes = "请勾选 user 作用域（访问具体仓库还需 repository 作用域）"
+	case "bitbucket":
+		hint = "Bitbucket 返回消息"
+		if strings.Contains(cleanedBase, "bitbucket.org") {
+			hintURL = "https://bitbucket.org/account/settings/app-passwords/"
+		} else {
+			hintURL = cleanedBase + "/plugins/servlet/account#api-keys"
+		}
+		scopes = "请勾选 account:read 与 repository:read 权限（DC）/ App Password 勾选至少 Read 权限（Cloud）"
+	default:
+		hintURL, scopes = "", ""
+	}
+
+	var bodyStr string
+	if apiMessage != "" {
+		bodyStr = fmt.Sprintf("%s：%s。", hint, apiMessage)
+	} else {
+		bodyStr = "token 可能过期、被撤销或权限不足。"
+	}
+	displayPlatform := strings.ToUpper(platform[:1]) + platform[1:]
+
+	return fmt.Errorf(
+		"TOKEN_INVALID: %s 拒绝此 token (HTTP %d) — %s "+
+			"最常见原因：(1) 你保存的是平台登录密码而不是 Personal Access Token — git pull 走 HTTP Basic 认证（用户名+密码）能通，但 /user 等 API 需要 Authorization 请求头携带 PAT；"+
+			"(2) token 仅勾选了仓库/仓库读权限而缺少用户读取作用域 — 仅 git 操作的 PAT 不能调用 /user 接口；"+
+			"(3) token 已被撤销或过期。"+
+			"请在 %s 重新生成 PAT，%s。"+
+			"响应片段：%s",
+		displayPlatform, status, bodyStr, hintURL, scopes, excerpt,
+	)
+}
+
+// resolveGitHubAPIBase returns the GitHub API root for the given configuration.
+// If baseURL is set, it's used verbatim (after TrimRight). Otherwise, the host
+// of remoteURL is inspected: github.com → public API; anything else → assume
+// GitHub Enterprise's /api/v3 convention. Returns "" when neither is usable.
+func resolveGitHubAPIBase(baseURL, remoteURL string) string {
+	if baseURL != "" {
+		return strings.TrimRight(baseURL, "/")
+	}
+	host, _ := urlHost(remoteURL)
+	if host == "" {
+		return ""
+	}
+	if host == "github.com" {
+		return "https://api.github.com"
+	}
+	return "https://" + host + "/api/v3"
+}
+
+// resolveBitbucketAPIBase maps a user-supplied base_url to the Bitbucket API
+// root. Empty baseURL or any URL containing "bitbucket.org" → Cloud
+// (https://api.bitbucket.org/2.0, isCloud=true). Otherwise treat it as
+// Bitbucket Data Center and append /rest/api/1.0, isCloud=false.
+func resolveBitbucketAPIBase(baseURL string) (apiBase string, isCloud bool) {
+	if baseURL == "" || strings.Contains(baseURL, "bitbucket.org") {
+		return "https://api.bitbucket.org/2.0", true
+	}
+	return strings.TrimRight(redactUserinfo(baseURL), "/") + "/rest/api/1.0", false
+}
+
+// extractGitHubRepoPath reuses extractGitLabProjectPath's URL-stripping logic
+// since both projects and repositories live at <host>/<owner>/<repo>. Returns
+// ("", "") when the URL is unparseable or doesn't contain at least 2 segments.
+func extractGitHubRepoPath(remoteURL string) (owner, repo string) {
+	p := extractGitLabProjectPath(remoteURL)
+	parts := strings.Split(p, "/")
+	if len(parts) >= 2 {
+		return parts[0], strings.TrimSuffix(parts[1], ".git")
+	}
+	return "", ""
+}
+
+// extractGiteaRepoPath is identical to extractGitHubRepoPath — Gitea uses the
+// same <owner>/<repo> URL shape as GitHub.
+func extractGiteaRepoPath(remoteURL string) (owner, repo string) {
+	return extractGitHubRepoPath(remoteURL)
+}
+
+// extractBitbucketRepoPath handles Bitbucket's workspace/repo shape. Some
+// URLs (DC) nest the repo under additional path segments, so the repo name is
+// always the last segment rather than parts[1].
+func extractBitbucketRepoPath(remoteURL string) (workspace, repo string) {
+	p := extractGitLabProjectPath(remoteURL)
+	parts := strings.Split(p, "/")
+	if len(parts) >= 2 {
+		return parts[0], strings.TrimSuffix(parts[len(parts)-1], ".git")
+	}
+	return "", ""
+}
+
+// probeURLReachable performs a cheap HEAD probe to surface network-level
+// unreachable errors before we burn a full /user round-trip. SSH-style remotes
+// are skipped (no HEAD probe makes sense).
+func probeURLReachable(remoteURL string) error {
+	u, err := url.Parse(remoteURL)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil // SSH form — no probe
+	}
+	host := u.Host
+	if host == "" {
+		return nil
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, _ := http.NewRequest(http.MethodHead, u.Scheme+"://"+host+"/", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+	return nil
 }

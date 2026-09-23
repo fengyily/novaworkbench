@@ -63,6 +63,36 @@ export default function SettingsAgentServers() {
   const [logs, setLogs] = useState<Record<string, string[]>>({});
   const [busy, setBusy] = useState<Record<string, string>>({}); // serverId → 'check'|'install'|''
   const abortRef = useRef<Record<string, AbortController>>({});
+  // Synchronous "测试连接" probe state. testingId is a single id (only one
+  // handshake at a time — the SSH dial can block for a few seconds, and
+  // letting the user spam-click creates needless churn). testResults maps
+  // serverId → { ok, version } | { ok:false, code, message } so each row
+  // can independently render a green badge or a <details> error.
+  const [testingId, setTestingId] = useState<string>('');
+  const [testResults, setTestResults] = useState<Record<string,
+    { ok: true; version?: string } |
+    { ok: false; code: string; message: string }
+  >>({});
+
+  const handleTest = async (id: string) => {
+    setTestingId(id);
+    setTestResults(prev => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    try {
+      const res = await agentServersApi.test(id);
+      setTestResults(prev => ({ ...prev, [id]: { ok: true, version: res.version } }));
+    } catch (err: unknown) {
+      const e = err as { error?: { code?: string; message?: string }; message?: string };
+      const code = e?.error?.code ?? 'UNKNOWN';
+      const message = e?.error?.message ?? e?.message ?? String(err);
+      setTestResults(prev => ({ ...prev, [id]: { ok: false, code, message } }));
+    } finally {
+      setTestingId('');
+    }
+  };
 
   const load = useCallback(() => {
     setLoading(true);
@@ -359,6 +389,9 @@ export default function SettingsAgentServers() {
               server={s}
               logs={logs[s.id] ?? []}
               busy={busy[s.id] || ''}
+              testing={testingId === s.id}
+              testResult={testResults[s.id]}
+              onTest={() => handleTest(s.id)}
               onEdit={() => openEdit(s)}
               onDelete={() => handleDelete(s.id)}
               onCheck={() => startJob(s.id, 'check')}
@@ -459,12 +492,15 @@ export default function SettingsAgentServers() {
 }
 
 function ServerCard({
-  server, logs, busy,
-  onEdit, onDelete, onCheck, onInstall, onCancel,
+  server, logs, busy, testing, testResult,
+  onTest, onEdit, onDelete, onCheck, onInstall, onCancel,
 }: {
   server: AgentServer;
   logs: string[];
   busy: string;
+  testing: boolean;
+  testResult?: { ok: true; version?: string } | { ok: false; code: string; message: string };
+  onTest: () => void;
   onEdit: () => void;
   onDelete: () => void;
   onCheck: () => void;
@@ -517,9 +553,22 @@ function ServerCard({
         <div className="server-card-actions">
           <button className="btn" onClick={onCheck} disabled={busy !== ''}>{t('settings.agentServersPage.btnCheck')}</button>
           <button className="btn" onClick={onInstall} disabled={busy !== ''}>{t('settings.agentServersPage.btnInstall')}</button>
+          <button className="btn" onClick={onTest} disabled={busy !== '' || testing}>
+            {testing ? t('settings.agentServersPage.testInProgress') : t('settings.agentServersPage.testLabel')}
+          </button>
           <button className="btn" onClick={onEdit} disabled={busy !== ''}>{t('settings.agentServersPage.btnEdit')}</button>
           <button className="btn btn-danger" onClick={onDelete} disabled={busy !== ''}>{t('settings.agentServersPage.btnDelete')}</button>
         </div>
+        {testResult && (
+          testResult.ok ? (
+            <span className="test-result test-result--ok">{t('settings.agentServersPage.testSuccess', { version: testResult.version ?? '' })}</span>
+          ) : (
+            <details className="test-result test-result--err">
+              <summary>{t('settings.agentServersPage.testFailed', { code: testResult.code })}</summary>
+              <pre>{testResult.message}</pre>
+            </details>
+          )
+        )}
       </div>
       {showLogs && (
         <div className="server-card-logs">

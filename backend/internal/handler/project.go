@@ -79,17 +79,7 @@ func (h *ProjectHandler) Add(w http.ResponseWriter, r *http.Request) {
 
 	p, err := h.svc.Add(req)
 	if err != nil {
-		msg := err.Error()
-		switch {
-		case strings.HasPrefix(msg, "TOKEN_NOT_FOUND"):
-			writeError(w, http.StatusBadRequest, "TOKEN_NOT_FOUND", msg)
-		case strings.HasPrefix(msg, "TOKEN_INVALID"):
-			writeError(w, http.StatusBadRequest, "TOKEN_INVALID", msg)
-		case strings.HasPrefix(msg, "PLATFORM_MISMATCH"):
-			writeError(w, http.StatusBadRequest, "PLATFORM_MISMATCH", msg)
-		default:
-			writeError(w, http.StatusBadRequest, "ADD_FAILED", msg)
-		}
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, p)
@@ -136,23 +126,7 @@ func (h *ProjectHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	p, err := h.svc.Restore(id)
 	if err != nil {
-		msg := err.Error()
-		switch {
-		case strings.HasPrefix(msg, "NO_REMOTE"):
-			writeError(w, http.StatusBadRequest, "NO_REMOTE", msg)
-		case strings.HasPrefix(msg, "DIR_EXISTS"):
-			writeError(w, http.StatusConflict, "DIR_EXISTS", msg)
-		case strings.HasPrefix(msg, "TOKEN_NOT_FOUND"):
-			writeError(w, http.StatusBadRequest, "TOKEN_NOT_FOUND", msg)
-		case strings.HasPrefix(msg, "TOKEN_INVALID"):
-			writeError(w, http.StatusBadRequest, "TOKEN_INVALID", msg)
-		case strings.HasPrefix(msg, "PLATFORM_MISMATCH"):
-			writeError(w, http.StatusBadRequest, "PLATFORM_MISMATCH", msg)
-		case strings.HasPrefix(msg, "RESTORE_FAILED"):
-			writeError(w, http.StatusInternalServerError, "RESTORE_FAILED", msg)
-		default:
-			writeError(w, http.StatusInternalServerError, "RESTORE_FAILED", msg)
-		}
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, p)

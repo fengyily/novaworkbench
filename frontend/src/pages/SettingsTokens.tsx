@@ -8,12 +8,14 @@ const platformLabels: Record<string, string> = {
   github: 'GitHub',
   gitlab: 'GitLab',
   gitea: 'Gitea',
+  bitbucket: 'Bitbucket',
 };
 
 const platformColors: Record<string, string> = {
   github: '#24292e',
   gitlab: '#FC6D26',
   gitea: '#609926',
+  bitbucket: '#2684FF',
 };
 
 // One form is reused for both the add and edit modals. The
@@ -66,6 +68,15 @@ export default function SettingsTokens() {
   // clear, no rotate) from "the user turned it off" (clear the stored
   // ciphertext).
   const [originalGpgEnabled, setOriginalGpgEnabled] = useState(false);
+  // Per-row "测试连接" state: which id is currently being probed, and the
+  // result for that row (success or structured error). Kept in a map so each
+  // row can independently show "验证中…", "✅ 远端可连接：fengyi", or a
+  // collapsed <details> with the backend's TOKEN_INVALID diagnostic.
+  const [testing, setTesting] = useState<string>('');
+  const [testResults, setTestResults] = useState<Record<string,
+    { ok: true; username?: string } |
+    { ok: false; code: string; message: string }
+  >>({});
 
   const reload = async () => {
     try {
@@ -197,7 +208,33 @@ export default function SettingsTokens() {
     }
   };
 
-  const needsBaseUrl = !editingId && (form.platform === 'gitea' || form.platform === 'gitlab');
+  // handleTest fires the /test endpoint for the token row; on success we
+  // keep the username from the response and surface a green badge, on
+  // failure we surface the structured {code, message} envelope so the user
+  // can read the backend's full diagnostic in a <details> block.
+  const handleTest = async (id: string) => {
+    setTesting(id);
+    setTestResults(prev => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    try {
+      const res = await platformApi.test(id);
+      setTestResults(prev => ({ ...prev, [id]: { ok: true, username: res.username } }));
+    } catch (err: unknown) {
+      // The api wrapper throws an object with `.error.code` and
+      // `.error.message`. Fall back to err.message for unknown shapes.
+      const e = err as { error?: { code?: string; message?: string }; message?: string };
+      const code = e?.error?.code ?? 'UNKNOWN';
+      const message = e?.error?.message ?? e?.message ?? String(err);
+      setTestResults(prev => ({ ...prev, [id]: { ok: false, code, message } }));
+    } finally {
+      setTesting('');
+    }
+  };
+
+  const needsBaseUrl = !editingId && (form.platform === 'gitea' || form.platform === 'gitlab' || form.platform === 'bitbucket');
   const isEdit = !!editingId;
   // Derive the token under edit from the live list so the modal can show its
   // current key id next to the rotation textarea. We avoid mirroring it in
@@ -262,6 +299,15 @@ export default function SettingsTokens() {
                 </td>
                 <td>{new Date(tok.created_at).toLocaleDateString('zh-CN')}</td>
                 <td className="row-actions">
+                  {(tok.platform === 'github' || tok.platform === 'gitlab' || tok.platform === 'gitea' || tok.platform === 'bitbucket') && (
+                    <button
+                      className="btn-link"
+                      onClick={() => handleTest(tok.id)}
+                      disabled={testing === tok.id}
+                    >
+                      {testing === tok.id ? t('settings.tokens.testInProgress') : t('settings.tokens.testLabel')}
+                    </button>
+                  )}
                   <button
                     className="btn-link"
                     onClick={() => openEditModal(tok)}
@@ -275,6 +321,23 @@ export default function SettingsTokens() {
                   >
                     {deleteId === tok.id ? t('settings.tokens.deleting') : t('settings.tokens.delete')}
                   </button>
+                  {testResults[tok.id] && (
+                    testResults[tok.id].ok ? (
+                      <span className="test-result test-result--ok">
+                        {t('settings.tokens.testSuccess', {
+                          platform: tok.platform,
+                          username: (testResults[tok.id] as { ok: true; username?: string }).username ?? '',
+                        })}
+                      </span>
+                    ) : (
+                      <details className="test-result test-result--err">
+                        <summary>{t('settings.tokens.testFailed', {
+                          code: (testResults[tok.id] as { ok: false; code: string; message: string }).code,
+                        })}</summary>
+                        <pre>{(testResults[tok.id] as { ok: false; code: string; message: string }).message}</pre>
+                      </details>
+                    )
+                  )}
                 </td>
               </tr>
             ))}
@@ -311,6 +374,7 @@ export default function SettingsTokens() {
                     <option value="github">GitHub</option>
                     <option value="gitlab">GitLab</option>
                     <option value="gitea">{t('settings.tokens.modal.platformGitea')}</option>
+                    <option value="bitbucket">{t('settings.tokens.modal.platformBitbucket')}</option>
                   </select>
                 </div>
 

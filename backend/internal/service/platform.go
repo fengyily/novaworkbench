@@ -1,10 +1,16 @@
 package service
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/db"
@@ -376,4 +382,113 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// TestPlatformToken probes an already-persisted platform token end-to-end. The
+// PAT is read directly from the platform_tokens row (it is stored in the
+// clear by historical convention — encryption would require a master-key
+// rotation path that is out of scope here). On success it returns the platform
+// username as reported by the /user endpoint so the settings UI can show
+// "connected as: fengyi" alongside the green check. Errors are prefixed with
+// the same TOKEN_* codes validatePlatformToken uses, so the handler can route
+// them through the shared mapServiceErr dispatcher.
+//
+// ctx is currently unused but kept in the signature so future probing paths
+// (SSH-style remotes, network policies) can be added without a breaking change.
+func (s *PlatformTokenService) TestPlatformToken(ctx context.Context, id string) (string, error) {
+	_ = ctx
+	var platform, baseURL, token string
+	err := s.db.QueryRow(
+		`SELECT platform, base_url, token FROM platform_tokens WHERE id = ?`, id,
+	).Scan(&platform, &baseURL, &token)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("TOKEN_NOT_FOUND: token %s 不存在", id)
+	}
+	if err != nil {
+		return "", err
+	}
+	if platform != "github" && platform != "gitlab" && platform != "gitea" && platform != "bitbucket" {
+		return "", fmt.Errorf("PLATFORM_UNSUPPORTED: 不支持的平台 kind=%s", platform)
+	}
+	if err := validatePlatformToken(platform, baseURL, token, ""); err != nil {
+		return "", err
+	}
+	return probePlatformUsername(platform, baseURL, token), nil
+}
+
+// probePlatformUsername performs a single /user lookup to extract a
+// human-readable identifier from the platform response. Best-effort: any
+// network failure or non-200 response yields "" (the caller still succeeds —
+// the token probe itself already validated auth).
+func probePlatformUsername(platform, baseURL, token string) string {
+	var apiBaseURL string
+	var isCloud bool
+	var userPath string
+	switch platform {
+	case "github":
+		apiBaseURL = resolveGitHubAPIBase(baseURL, "")
+		userPath = "/user"
+	case "gitlab":
+		apiBaseURL = strings.TrimRight(redactUserinfo(baseURL), "/") + "/api/v4"
+		userPath = "/user"
+	case "gitea":
+		apiBaseURL = strings.TrimRight(redactUserinfo(baseURL), "/") + "/api/v1"
+		userPath = "/user"
+	case "bitbucket":
+		apiBaseURL, isCloud = resolveBitbucketAPIBase(baseURL)
+		// ATATT Cloud PATs always hit Cloud's /user; everything else (App
+		// Passwords, DC) uses the DC /users?current endpoint.
+		if strings.HasPrefix(token, "ATATT") {
+			apiBaseURL = "https://api.bitbucket.org/2.0"
+			isCloud = true
+			userPath = "/user"
+		} else {
+			userPath = "/users?current"
+		}
+	default:
+		return ""
+	}
+	if apiBaseURL == "" {
+		return ""
+	}
+	req, _ := http.NewRequest(http.MethodGet, apiBaseURL+userPath, nil)
+	switch platform {
+	case "github", "gitea":
+		req.Header.Set("Authorization", "token "+token)
+	case "bitbucket":
+		if isCloud && strings.HasPrefix(token, "ATATT") {
+			req.Header.Set("Authorization", "Bearer "+token)
+		} else {
+			req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(token)))
+		}
+	case "gitlab":
+		req.Header.Set("PRIVATE-TOKEN", token)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var u struct {
+		Username string `json:"username"`
+		Login    string `json:"login"`
+		Display  string `json:"display_name"`
+		Name     string `json:"name"`
+	}
+	_ = json.Unmarshal(body, &u)
+	if u.Username != "" {
+		return u.Username
+	}
+	if u.Login != "" {
+		return u.Login
+	}
+	if u.Display != "" {
+		return u.Display
+	}
+	return u.Name
 }
