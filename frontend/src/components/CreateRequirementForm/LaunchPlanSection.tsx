@@ -9,14 +9,31 @@
 // picked a valid plan, onChange(null) is emitted so the parent's submit
 // button can be disabled.
 //
+// Visual language
+// ---------------
+//   * Top row: a stage stepper ("DESIGN → CODE" / "CODE") — the signature
+//     element. Mirrors the preflight flight strip in DesignCodingImmediate
+//     Modal so the user recognizes the same family across both surfaces.
+//   * Below the stepper: a 3-card mode picker (Manual / Immediate /
+//     Scheduled). Each card carries an icon, a label, and a 1-line
+//     consequence note so the cost of each choice is visible without
+//     opening a tooltip.
+//   * Stage sections (design / coding) reuse the established `.preflight-
+//     section` + `.preflight-field-card` vocabulary from RequirementDetail
+//     so a user moving between this form and the dev pre-flight modal sees
+//     one family of UI rather than two competing patterns.
+//   * Radio choices (dev-mode / sync-mode) use a dedicated `.launch-radio-
+//     card` rather than the checkbox-style `.preflight-toggle` so the
+//     affordance matches the input type.
+//   * Schedule recurrence pills stay inside the body as a compact
+//     segmented row (same visual family as the parent `flow` picker).
+//
 // Implementation notes
 // --------------------
 //   * Sections are gated by `resolveTaskType(flow, mode)`:
-//       direct           → only the coding stage renders.
-//       skip-analysis    → both design + coding stages render.
-//       full + immediate → blocked (radio disabled + onChange(null)).
-//       full + scheduled → both stages render with a "must finish analysis"
-//                          hint that survives into the UI.
+//       manual              → no section renders; parent emits null spec.
+//       direct + immediate  → coding stage only.
+//       skip-analysis + …   → both design + coding stages render.
 //
 //   * Every stage that actually runs renders BOTH <ModelSelect stage> and
 //     <ExecEnvSelect>. That's a project hard rule (the historical
@@ -36,10 +53,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import ModelSelect from '../ModelSelect';
 import { ExecEnvSelect, type ExecEnvServer } from '../ExecEnvSelect';
+import { IconClock, IconHand, IconPlay, IconRocket } from '../icons';
 import { toRFC3339Local, WEEK_LABELS } from '../../utils/time';
 import type { AgentServer, LaunchSpec, ScheduleSpec } from '../../api/client';
 
-type Flow = 'full' | 'skip-analysis' | 'direct';
+type Flow = 'skip-analysis' | 'direct';
 type Mode = 'manual' | 'immediate' | 'scheduled';
 type Recurrence = 'once' | 'daily' | 'weekly';
 
@@ -48,21 +66,18 @@ type Recurrence = 'once' | 'daily' | 'weekly';
 // utils/time.ts so this change stays self-contained.
 const WEEKDAY_INDEX_TO_DAYNUM: readonly number[] = [1, 2, 3, 4, 5, 6, 0];
 
-// Decides which stages should render and whether this combination is
-// launchable at all. `blocked` means the parent's submit should be
-// disabled and neither stage renders.
-type ResolvedTaskType = 'manual' | 'coding' | 'design_and_coding' | 'blocked';
+// Decides which stages should render. The remaining flows always map to a
+// valid combination — no flow/mode pair is launch-blocked.
+type ResolvedTaskType = 'manual' | 'coding' | 'design_and_coding';
 
 function resolveTaskType(flow: Flow, mode: Mode): ResolvedTaskType {
   // Manual = no dispatch at all; the requirement is created as-is and the
   // user manually triggers the stage from the detail page later. Valid for
-  // every flow (full + manual is allowed — the user just walks analyst →
-  // architect by hand), so short-circuit before the flow-specific mapping.
+  // every remaining flow, so short-circuit before the flow-specific mapping.
   if (mode === 'manual') return 'manual';
   if (flow === 'direct') return 'coding';
-  if (flow === 'skip-analysis') return 'design_and_coding';
-  // flow === 'full'
-  return mode === 'immediate' ? 'blocked' : 'design_and_coding';
+  // flow === 'skip-analysis' — both design + coding stages.
+  return 'design_and_coding';
 }
 
 function pad(n: number): string { return `${n}`.padStart(2, '0'); }
@@ -103,6 +118,28 @@ export interface LaunchPlanSectionProps {
   disabled?: boolean;
   onChange: (spec: LaunchSpec | null) => void;
 }
+
+// Mode card metadata — drives the 3-card mode picker below the stage
+// stepper. Each entry pairs a recognizable icon with a label + a 1-line
+// consequence note so the user reads the cost of each choice at a glance
+// rather than discovering it after submit.
+const MODE_CARDS: { value: Mode; Icon: typeof IconHand; labelKey: string; noteKey: string }[] = [
+  { value: 'manual',   Icon: IconHand,   labelKey: 'components.createRequirement.launchPlan.manual',   noteKey: 'components.createRequirement.launchPlan.manualNote' },
+  { value: 'immediate',Icon: IconRocket, labelKey: 'components.createRequirement.launchPlan.immediate',noteKey: 'components.createRequirement.launchPlan.immediateNote' },
+  { value: 'scheduled',Icon: IconClock,  labelKey: 'components.createRequirement.launchPlan.scheduled', noteKey: 'components.createRequirement.launchPlan.scheduledNote' },
+];
+
+// Dev-mode radio card metadata.
+const DEV_MODE_OPTIONS: { value: 'design' | 'session'; labelKey: string }[] = [
+  { value: 'design',  labelKey: 'requirements.detail2.preflightDevModeDesign' },
+  { value: 'session', labelKey: 'requirements.detail2.preflightDevModeSession' },
+];
+
+// Sync-mode radio card metadata.
+const SYNC_MODE_OPTIONS: { value: '' | 'local'; labelKey: string }[] = [
+  { value: '',     labelKey: 'requirements.detail2.syncModeRemote' },
+  { value: 'local', labelKey: 'requirements.detail2.syncModeLocal' },
+];
 
 export default function LaunchPlanSection({
   flow,
@@ -164,9 +201,9 @@ export default function LaunchPlanSection({
   const [devMode, setDevMode] = useState<'session' | 'design'>('design');
 
   const taskType = resolveTaskType(flow, mode);
-  const isFullImmediate = taskType === 'blocked';
   const showDesignSection = taskType === 'design_and_coding';
   const showCodingSection = taskType === 'coding' || taskType === 'design_and_coding';
+  const noStages = taskType === 'manual';
 
   // Build the LaunchSpec and emit on every dependency change. The
   // parent's onChange should be stable (useCallback) — emitting on
@@ -179,10 +216,6 @@ export default function LaunchPlanSection({
     // skip-analysis, branch modal for skip-design). Functionally identical
     // to leaving the launch-plan section collapsed.
     if (mode === 'manual') {
-      onChange(null);
-      return;
-    }
-    if (isFullImmediate) {
       onChange(null);
       return;
     }
@@ -230,7 +263,7 @@ export default function LaunchPlanSection({
     // onChange intentionally omitted — see the effect comment above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    isFullImmediate, mode, recurrence, runAt, recurTime, recurDays,
+    mode, recurrence, runAt, recurTime, recurDays,
     designModel, designClaudeConfigId, designAgentServerId,
     codingModel, codingClaudeConfigId, codingAgentServerId,
     branchName, baseBranch, splitTasks, autoPushPR, readKnowledge,
@@ -246,84 +279,80 @@ export default function LaunchPlanSection({
 
   return (
     <div className="launch-plan-section">
-      {/* Top-level mode toggle: "手动执行 / 立即执行 / 定时执行". Manual is
-          the default so a stray submit never kicks off a 30-minute coding
-          job; the user must actively opt into immediate/scheduled. The
-          full+immediate radio stays visible but disabled so the user
-          understands why immediate is off (rather than silently dropping
-          the option). */}
+      {/* ----- Signature: stage stepper --------------------------------
+          Visualizes the launch pipeline at a glance: a thin rail of stage
+          chips connected by chevrons. The active stages light up with their
+          section tint (violet for design, cyan for coding) so the user
+          knows which sections below will dispatch. Manual mode dims the
+          whole rail. */}
+      <div
+        className={`launch-stages${noStages ? ' is-dimmed' : ''}`}
+        aria-hidden={noStages}
+      >
+        <span
+          className={`launch-stage-chip launch-stage-chip--design${showDesignSection ? ' is-on' : ''}`}
+          title={t('components.createRequirement.launchPlan.designSection')}
+        >
+          {t('components.createRequirement.launchPlan.designSection')}
+        </span>
+        <span className="launch-stage-arrow" aria-hidden>
+          <IconPlay size={10} />
+        </span>
+        <span
+          className={`launch-stage-chip launch-stage-chip--coding${showCodingSection ? ' is-on' : ''}`}
+          title={t('components.createRequirement.launchPlan.codingSection')}
+        >
+          {t('components.createRequirement.launchPlan.codingSection')}
+        </span>
+      </div>
+
+      {/* ----- Mode picker (3 cards) ------------------------------------
+          Each card carries an icon, a label, and a 1-line consequence
+          note. The selected card gets a strong left rail + filled
+          surface; the unselected cards stay quiet with a hover state. */}
       <div className="modal-field">
         <div
-          className="schedule-freq-row"
+          className="launch-mode-row"
           role="radiogroup"
           aria-label={t('components.createRequirement.launchPlan.title')}
         >
-          <button
-            type="button"
-            role="radio"
-            aria-checked={mode === 'manual'}
-            className={`schedule-freq-pill${mode === 'manual' ? ' active' : ''}`}
-            onClick={() => setMode('manual')}
-            disabled={fieldDisabled}
-          >
-            {t('components.createRequirement.launchPlan.manual')}
-          </button>
-          <button
-            type="button"
-            role="radio"
-            aria-checked={mode === 'immediate'}
-            className={`schedule-freq-pill${mode === 'immediate' ? ' active' : ''}`}
-            onClick={() => setMode('immediate')}
-            disabled={fieldDisabled || isFullImmediate}
-            title={
-              isFullImmediate
-                ? t('components.createRequirement.launchPlan.fullFlowImmediateDisabled')
-                : ''
-            }
-          >
-            {t('components.createRequirement.launchPlan.immediate')}
-          </button>
-          <button
-            type="button"
-            role="radio"
-            aria-checked={mode === 'scheduled'}
-            className={`schedule-freq-pill${mode === 'scheduled' ? ' active' : ''}`}
-            onClick={() => setMode('scheduled')}
-            disabled={fieldDisabled}
-          >
-            {t('components.createRequirement.launchPlan.scheduled')}
-          </button>
+          {MODE_CARDS.map(({ value, Icon, labelKey, noteKey }) => {
+            const selected = mode === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                className={`launch-mode-card${selected ? ' selected' : ''}`}
+                onClick={() => setMode(value)}
+                disabled={fieldDisabled}
+                data-mode={value}
+              >
+                <span className="launch-mode-card-icon" aria-hidden>
+                  <Icon size={16} />
+                </span>
+                <span className="launch-mode-card-label">{t(labelKey)}</span>
+                <span className="launch-mode-card-note">{t(noteKey)}</span>
+              </button>
+            );
+          })}
         </div>
-        {mode === 'manual' && (
-          <small className="launch-plan-section__note">
-            {t('components.createRequirement.launchPlan.manualHint')}
-          </small>
-        )}
-        {isFullImmediate && (
-          <small className="launch-plan-section__note">
-            {t('components.createRequirement.launchPlan.fullFlowImmediateDisabled')}
-          </small>
-        )}
-        {flow === 'full' && mode === 'scheduled' && !isFullImmediate && (
-          <small className="launch-plan-section__note">
-            {t('components.createRequirement.launchPlan.fullFlowScheduledHint')}
-          </small>
-        )}
       </div>
 
-      {/* Schedule controls — rendered only when the user picked the
-          scheduled mode. Mirrors ScheduleModal.tsx:255-332 verbatim so
-          the behaviour and the conversion to RFC3339 stay identical. */}
+      {/* ----- Schedule controls (recurrence + datetime) ---------------
+          Renders only when the user picked the scheduled mode. Mirrors
+          ScheduleModal.tsx so the conversion + UX stay identical. */}
       {mode === 'scheduled' && (
-        <>
+        <div className="launch-schedule">
           <div className="modal-field">
             <label>{t('schedules.modal.recurrenceLabel')}</label>
-            <div className="schedule-freq-row">
+            <div className="launch-segment">
               {(['once', 'daily', 'weekly'] as Recurrence[]).map(r => (
                 <button
                   key={r}
                   type="button"
-                  className={`schedule-freq-pill${recurrence === r ? ' active' : ''}`}
+                  className={`launch-segment-tab${recurrence === r ? ' selected' : ''}`}
                   onClick={() => setRecurrence(r)}
                   disabled={fieldDisabled}
                 >
@@ -354,7 +383,7 @@ export default function LaunchPlanSection({
               {recurrence === 'weekly' && (
                 <div className="modal-field">
                   <label>{t('components.createRequirement.launchPlan.recurDays')}</label>
-                  <div className="schedule-weekday-row">
+                  <div className="launch-weekdays">
                     {WEEK_LABELS.map((label, idx) => {
                       const day = WEEKDAY_INDEX_TO_DAYNUM[idx];
                       const on = recurDays.has(day);
@@ -362,13 +391,14 @@ export default function LaunchPlanSection({
                         <button
                           key={day}
                           type="button"
-                          className={`schedule-weekday-pill${on ? ' active' : ''}`}
+                          className={`launch-weekday${on ? ' selected' : ''}`}
                           onClick={() => setRecurDays(prev => {
                             const next = new Set(prev);
                             if (next.has(day)) next.delete(day); else next.add(day);
                             return next;
                           })}
                           disabled={fieldDisabled}
+                          aria-pressed={on}
                         >
                           {label}
                         </button>
@@ -393,17 +423,23 @@ export default function LaunchPlanSection({
               </div>
             </>
           )}
-        </>
+        </div>
       )}
 
-      {/* Design stage — only when resolved task_type is design_and_coding
-          (skip-analysis, or full + scheduled). Re-uses the same
-          preflight section/card vocabulary as DesignCodingImmediateModal
-          so the UI feels like one family. */}
+      {/* ----- Design stage --------------------------------------------
+          Renders when resolved task_type is design_and_coding. Section
+          carries the violet rail that mirrors the architect-stage
+          ModelSelect + the EXEC accent on the dev pre-flight modal, so
+          the user reads this band as the "design" half of the pipeline. */}
       {showDesignSection && (
-        <div className="preflight-section">
-          <div className="preflight-section-label">
-            {t('schedules.modal.sectionDesignTitle')}
+        <div className="launch-stage-section launch-stage-section--design">
+          <div className="launch-stage-section-label">
+            <span className="launch-stage-section-chip" aria-hidden>
+              {t('components.createRequirement.launchPlan.designSection')}
+            </span>
+            <span className="launch-stage-section-hint">
+              {t('components.createRequirement.launchPlan.designSectionHint')}
+            </span>
           </div>
 
           <div className="modal-field">
@@ -439,20 +475,22 @@ export default function LaunchPlanSection({
           </label>
 
           <div className="modal-field">
-            <label>{t('schedules.modal.designAgentServerLabelMerged')}</label>
-            <ExecEnvSelect
-              className="form-input"
-              servers={servers}
-              value={designAgentServerId}
-              onChange={setDesignAgentServerId}
-              disabled={fieldDisabled}
-              title={
-                servers.length === 0
-                  ? t('requirements.detail2.preflightAgentEmptyTitle')
-                  : ''
-              }
-              localOptionLabel={t('schedules.modal.designAgentServerDefaultMerged')}
-            />
+            <div className="preflight-field-card preflight-field-card--exec">
+              <span className="preflight-field-chip" aria-hidden="true">ENV</span>
+              <ExecEnvSelect
+                className="form-input preflight-field-input"
+                servers={servers}
+                value={designAgentServerId}
+                onChange={setDesignAgentServerId}
+                disabled={fieldDisabled}
+                title={
+                  servers.length === 0
+                    ? t('requirements.detail2.preflightAgentEmptyTitle')
+                    : ''
+                }
+                localOptionLabel={t('schedules.modal.designAgentServerDefaultMerged')}
+              />
+            </div>
             {servers.length === 0 && (
               <small className="launch-plan-section__note">
                 {t('requirements.detail2.preflightNoAgentHint')}
@@ -462,13 +500,23 @@ export default function LaunchPlanSection({
         </div>
       )}
 
-      {/* Coding stage — renders for coding (flow=direct) and for the
-          coding half of design_and_coding. ModelSelect + ExecEnvSelect
-          are both required (project hard rule, see file header). */}
+      {/* ----- Coding stage --------------------------------------------
+          Renders for both task types (coding-only flow and the coding
+          half of design_and_coding). Section carries the cyan rail that
+          mirrors the developer-stage ModelSelect + the GIT accent on the
+          dev pre-flight modal. Branch / base inputs use the
+          `.preflight-field-card` + chip vocabulary established by
+          DesignCodingImmediateModal — the same family the user sees in
+          the dev pre-flight modal minutes later. */}
       {showCodingSection && (
-        <div className="preflight-section">
-          <div className="preflight-section-label">
-            {t('schedules.modal.sectionCodingTitle')}
+        <div className="launch-stage-section launch-stage-section--coding">
+          <div className="launch-stage-section-label">
+            <span className="launch-stage-section-chip" aria-hidden>
+              {t('components.createRequirement.launchPlan.codingSection')}
+            </span>
+            <span className="launch-stage-section-hint">
+              {t('components.createRequirement.launchPlan.codingSectionHint')}
+            </span>
           </div>
 
           <div className="modal-field">
@@ -487,20 +535,22 @@ export default function LaunchPlanSection({
           </div>
 
           <div className="modal-field">
-            <label>{t('schedules.modal.codingAgentServerLabel')}</label>
-            <ExecEnvSelect
-              className="form-input"
-              servers={servers}
-              value={codingAgentServerId}
-              onChange={setCodingAgentServerId}
-              disabled={fieldDisabled}
-              title={
-                servers.length === 0
-                  ? t('requirements.detail2.preflightAgentEmptyTitle')
-                  : ''
-              }
-              localOptionLabel={t('schedules.modal.codingAgentServerDefault')}
-            />
+            <div className="preflight-field-card preflight-field-card--git">
+              <span className="preflight-field-chip" aria-hidden="true">ENV</span>
+              <ExecEnvSelect
+                className="form-input preflight-field-input"
+                servers={servers}
+                value={codingAgentServerId}
+                onChange={setCodingAgentServerId}
+                disabled={fieldDisabled}
+                title={
+                  servers.length === 0
+                    ? t('requirements.detail2.preflightAgentEmptyTitle')
+                    : ''
+                }
+                localOptionLabel={t('schedules.modal.codingAgentServerDefault')}
+              />
+            </div>
             {servers.length === 0 && (
               <small className="launch-plan-section__note">
                 {t('requirements.detail2.preflightNoAgentHint')}
@@ -509,26 +559,29 @@ export default function LaunchPlanSection({
           </div>
 
           <div className="modal-field">
-            <label htmlFor="launch-plan-base-branch">{t('schedules.modal.baseBranchLabel')}</label>
-            <input
-              id="launch-plan-base-branch"
-              className="form-input"
-              value={baseBranch}
-              onChange={e => setBaseBranch(e.target.value)}
-              placeholder="main"
-              disabled={fieldDisabled}
-            />
+            <div className="preflight-field-card preflight-field-card--git">
+              <span className="preflight-field-chip" aria-hidden="true">BASE</span>
+              <input
+                className="form-input preflight-field-input"
+                value={baseBranch}
+                onChange={e => setBaseBranch(e.target.value)}
+                placeholder="main"
+                disabled={fieldDisabled}
+              />
+            </div>
           </div>
+
           <div className="modal-field">
-            <label htmlFor="launch-plan-new-branch">{t('schedules.modal.branchLabel')}</label>
-            <input
-              id="launch-plan-new-branch"
-              className="form-input"
-              value={branchName}
-              onChange={e => setBranchName(e.target.value)}
-              placeholder="feat/req-xxx"
-              disabled={fieldDisabled}
-            />
+            <div className="preflight-field-card preflight-field-card--git">
+              <span className="preflight-field-chip" aria-hidden="true">NEW</span>
+              <input
+                className="form-input preflight-field-input"
+                value={branchName}
+                onChange={e => setBranchName(e.target.value)}
+                placeholder="feat/req-xxx"
+                disabled={fieldDisabled}
+              />
+            </div>
           </div>
 
           <label className={`preflight-toggle ${splitTasks ? 'is-checked' : ''}`}>
@@ -565,78 +618,62 @@ export default function LaunchPlanSection({
             </div>
           </label>
 
-          {/* Dev-mode picker — radio group inside a preflight-toggle
-              card. Mirrors the developer-stage preflight panel. */}
-          <div className="preflight-toggle" style={{ display: 'block' }}>
-            <div className="preflight-toggle-body">
-              <div className="preflight-toggle-title">
-                {t('requirements.detail2.preflightDevModeTitle')}
-              </div>
-              <div className="preflight-toggle-desc" style={{ marginBottom: 8 }}>
-                {t('requirements.detail2.preflightDevModeHint')}
-              </div>
-              <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+          {/* Dev-mode picker — radio card (single-select among named
+              dev strategies). Wrapped in a dedicated `.launch-radio-card`
+              instead of the checkbox `.preflight-toggle` so the visual
+              affordance matches the input type (radio, not checkbox). */}
+          <div className="launch-radio-card">
+            <div className="launch-radio-card-title">
+              {t('requirements.detail2.preflightDevModeTitle')}
+            </div>
+            <div className="launch-radio-card-desc">
+              {t('requirements.detail2.preflightDevModeHint')}
+            </div>
+            <div className="launch-radio-options">
+              {DEV_MODE_OPTIONS.map(opt => (
+                <label
+                  key={opt.value}
+                  className={`launch-radio-option${devMode === opt.value ? ' selected' : ''}`}
+                >
                   <input
                     type="radio"
                     name="launchPlanDevMode"
-                    value="design"
-                    checked={devMode === 'design'}
-                    onChange={() => setDevMode('design')}
+                    value={opt.value}
+                    checked={devMode === opt.value}
+                    onChange={() => setDevMode(opt.value)}
                     disabled={fieldDisabled}
                   />
-                  {t('requirements.detail2.preflightDevModeDesign')}
+                  <span>{t(opt.labelKey)}</span>
                 </label>
-                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                  <input
-                    type="radio"
-                    name="launchPlanDevMode"
-                    value="session"
-                    checked={devMode === 'session'}
-                    onChange={() => setDevMode('session')}
-                    disabled={fieldDisabled}
-                  />
-                  {t('requirements.detail2.preflightDevModeSession')}
-                </label>
-              </div>
+              ))}
             </div>
           </div>
 
-          {/* sync_mode — radio group. The backend treats '' as the
-              default (remote Git sync); 'local' is the no-remote
-              fallback used for self-hosted repos. */}
-          <div className="preflight-toggle" style={{ display: 'block' }}>
-            <div className="preflight-toggle-body">
-              <div className="preflight-toggle-title">
-                {t('requirements.detail2.syncModeLabel')}
-              </div>
-              <div className="preflight-toggle-desc" style={{ marginBottom: 8 }}>
-                {t('requirements.detail2.syncModeRemoteHint')}
-              </div>
-              <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+          {/* Sync-mode picker — same radio-card treatment. */}
+          <div className="launch-radio-card">
+            <div className="launch-radio-card-title">
+              {t('requirements.detail2.syncModeLabel')}
+            </div>
+            <div className="launch-radio-card-desc">
+              {t('requirements.detail2.syncModeRemoteHint')}
+            </div>
+            <div className="launch-radio-options">
+              {SYNC_MODE_OPTIONS.map(opt => (
+                <label
+                  key={opt.value || 'remote'}
+                  className={`launch-radio-option${syncMode === opt.value ? ' selected' : ''}`}
+                >
                   <input
                     type="radio"
                     name="launchPlanSyncMode"
-                    value=""
-                    checked={syncMode === ''}
-                    onChange={() => setSyncMode('')}
+                    value={opt.value}
+                    checked={syncMode === opt.value}
+                    onChange={() => setSyncMode(opt.value)}
                     disabled={fieldDisabled}
                   />
-                  {t('requirements.detail2.syncModeRemote')}
+                  <span>{t(opt.labelKey)}</span>
                 </label>
-                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                  <input
-                    type="radio"
-                    name="launchPlanSyncMode"
-                    value="local"
-                    checked={syncMode === 'local'}
-                    onChange={() => setSyncMode('local')}
-                    disabled={fieldDisabled}
-                  />
-                  {t('requirements.detail2.syncModeLocal')}
-                </label>
-              </div>
+              ))}
             </div>
           </div>
         </div>
