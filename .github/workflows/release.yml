@@ -197,6 +197,16 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          # mirror.gcr.io is Google's read-only Docker Hub cache; routes
+          # pulls for `docker.io/*` through it to avoid auth.docker.io RST
+          # spikes on hosted runners (manifest-layer pull deadlocked ~50%
+          # of release runs before this was added — see release.yml git
+          # history). mirror failures fall back to the upstream registry
+          # automatically, so this is a pure latency / reliability win.
+          buildkitd-config: |
+            [registry."docker.io"]
+              mirrors = ["https://mirror.gcr.io"]
 
       - name: Build & push release image (multi-arch)
         uses: docker/build-push-action@v5
