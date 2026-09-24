@@ -57,21 +57,21 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, accessSync, realpathSync, constants as fsConstants } from 'node:fs';
 import { join, sep as pathSep } from 'node:path';
 
-// Extend PATH on the agent host so the spawned `claude` child can be
+// Extend PATH on the agent host so the spawned 'claude' child can be
 // located by name alone — regardless of how the worker process itself was
 // launched. systemd user units start with the bare PATH
 // (/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin), so an
-// `npm i -g @anthropic-ai/claude-code` install into ~/.local/bin (Linux
+// 'npm i -g @anthropic-ai/claude-code' install into ~/.local/bin (Linux
 // default) or /opt/homebrew/bin (macOS) becomes invisible to the child
 // even though SSH login shells see it via ~/.bashrc. The result is a
-// spawned child whose first action is `spawn claude ENOENT`, classified
-// as `cli_not_found` and surfaced in the wizard job panel as
+// spawned child whose first action is 'spawn claude ENOENT', classified
+// as 'cli_not_found' and surfaced in the wizard job panel as
 // "Claude CLI 未找到" — even though NovaWorkbench's Check flow (which
 // uses SSH RunCommand and therefore inherits the login-shell PATH)
-// reports `✓ claude <version>`.
+// reports '✓ claude <version>'.
 //
 // We don't replace PATH — we prepend a candidate list, dedup, and keep
-// the existing entries. Detection of `npm root -g` is wrapped so a
+// the existing entries. Detection of 'npm root -g' is wrapped so a
 // missing/broken npm install doesn't take down /v1/health.
 function resolveExtendedPath() {
   const home = process.env.HOME || process.env.USERPROFILE || '';
