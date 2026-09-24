@@ -19,13 +19,6 @@ const platformColors: Record<string, string> = {
   bitbucket: '#2684FF',
 };
 
-const platformRail: Record<string, string> = {
-  github:    '#181717',
-  gitlab:    '#FC6D26',
-  gitea:     '#21B071',
-  bitbucket: '#2684FF',
-};
-
 // One form is reused for both the add and edit modals. The
 // `editingId` state is empty in create mode and carries the token id in
 // edit mode, which swaps the title / button label and the role of the
