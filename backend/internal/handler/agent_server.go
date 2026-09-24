@@ -361,6 +361,16 @@ func (h *AgentServerHandler) runCheck(job *store.Job, serverID string) {
 	if infoJSON, _, ierr := h.collectSystemInfo(context.Background(), client, job); ierr == nil && infoJSON != "" {
 		_ = h.svc.UpdateSystemInfo(serverID, infoJSON)
 	}
+	// Backfill runtime paths on Check too. Previously install was the
+	// only writer of claude_bin / node_bin / extra_paths, so any server
+	// installed before this code shipped (or whose install ran on a
+	// pre-fix binary) kept those columns empty forever — even though
+	// every successful Check has all the inputs needed (the SSH session
+	// already resolved `command -v claude/node` for the dep probe, and
+	// `cat ~/.novaworkbench/extra-paths` is one extra fetch). Cheap,
+	// idempotent, matches user expectation that "Check success" implies
+	// the asset panel is up-to-date.
+	h.captureInstallRuntimeFacts(context.Background(), client, serverID, job)
 	job.Append(store.LogLine{Type: "done", Content: summary})
 	job.Finish(0, store.JobDone)
 }
@@ -1973,17 +1983,20 @@ printf '__CLAUDE_VERSION__=%s\n' "$(claude --version 2>/dev/null | head -n1 || t
 	return string(encoded), snap, nil
 }
 
-// captureInstallRuntimeFacts greps the install log for the [nova-agent]
-// RUNTIME_BIN marker the install scripts emit, parses the resolved bin
-// paths, and persists them into agent_servers (claude_bin / node_bin /
-// extra_paths). The on-disk ~/.novaworkbench/{extra-paths,node-bin}
-// files remain the authoritative PATH source for the worker process —
-// these DB columns mirror the same data for UI display + future
-// per-server env injection.
+// captureInstallRuntimeFacts persists the resolved `claude` / `node`
+// binary paths and the contents of ~/.novaworkbench/extra-paths into
+// agent_servers (claude_bin / node_bin / extra_paths). Despite the
+// name it's NOT install-only — runCheck also calls it so any successful
+// Check backfills the columns for hosts that were installed before
+// this code shipped (and so the asset panel reflects the current
+// reality even when the operator never re-runs install).
 //
-// Called at the end of installNodeWorker (both systemd-success and
-// nohup-success paths). Failure here is best-effort: a DB write error
-// doesn't abort the install result, just gets logged so an operator
+// The on-disk ~/.novaworkbench/{extra-paths,node-bin} files remain the
+// authoritative PATH source for the worker process — these DB columns
+// mirror the same data for UI display + future per-server env injection.
+//
+// Failure here is best-effort: a DB write error doesn't abort the
+// parent flow (Check / Install), just gets logged so an operator
 // investigating a "why is claude_bin empty in the UI" question can see
 // the underlying cause.
 func (h *AgentServerHandler) captureInstallRuntimeFacts(ctx context.Context, client *gossh.Client, serverID string, job *store.Job) {
@@ -2003,41 +2016,70 @@ func (h *AgentServerHandler) captureInstallRuntimeFacts(ctx context.Context, cli
 		return
 	}
 
-	var claudeBin, nodeBin string
-	extraPathsLines := []string{}
-	for _, line := range strings.Split(out.String(), "\n") {
-		line = strings.TrimSpace(line)
-		switch {
-		case line == "__RUNTIME_BIN__":
-			// separator — anything before this is extra-paths content
-			extraPathsLines = []string{}
-		case strings.HasPrefix(line, "[nova-agent] RUNTIME_BIN "):
-			// Format "CLAUDE_BIN=... NODE_BIN=..."
-			rest := strings.TrimPrefix(line, "[nova-agent] RUNTIME_BIN ")
-			for _, kv := range strings.Fields(rest) {
-				eq := strings.IndexByte(kv, '=')
-				if eq < 0 {
-					continue
-				}
-				k, v := kv[:eq], kv[eq+1:]
-				if k == "CLAUDE_BIN" {
-					claudeBin = v
-				} else if k == "NODE_BIN" {
-					nodeBin = v
-				}
-			}
-		case line != "":
-			extraPathsLines = append(extraPathsLines, line)
-		}
-	}
-	extraPaths := strings.Join(extraPathsLines, "\n")
+	claudeBin, nodeBin, extraPaths := parseRuntimeFactsOutput(out.String())
 
 	if err := h.svc.UpdateRuntime(serverID, claudeBin, nodeBin, extraPaths); err != nil {
 		job.Append(store.LogLine{Type: "message", Content: "⚠ 持久化 runtime 失败: " + err.Error()})
 		return
 	}
 	job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("✓ runtime 已持久化 (claude=%s node=%s extra_paths=%d 项)",
-		shortPathForLog(claudeBin), shortPathForLog(nodeBin), len(extraPathsLines))})
+		shortPathForLog(claudeBin), shortPathForLog(nodeBin), strings.Count(extraPaths, "\n")+1)})
+}
+
+// parseRuntimeFactsOutput turns the combined `cat extra-paths ; sentinel ;
+// RUNTIME_BIN marker` SSH output into (claudeBin, nodeBin, extraPaths).
+// Extracted as a pure function so the parser is unit-testable without
+// spinning up a fake SSH client.
+//
+// Format:
+//   <lines from cat extra-paths, one PATH dir per line>
+//   __RUNTIME_BIN__
+//   [nova-agent] RUNTIME_BIN CLAUDE_BIN=<path> NODE_BIN=<path>
+//
+// Anything past the sentinel is ignored unless it carries the marker
+// prefix; this keeps stray lines (echo noise, partial output from a
+// flaky SSH session) from polluting extraPaths.
+func parseRuntimeFactsOutput(out string) (claudeBin, nodeBin, extraPaths string) {
+	var extraPathsLines []string
+	sawSeparator := false
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if sawSeparator {
+			if strings.HasPrefix(line, "[nova-agent] RUNTIME_BIN ") {
+				rest := strings.TrimPrefix(line, "[nova-agent] RUNTIME_BIN ")
+				for _, kv := range strings.Fields(rest) {
+					eq := strings.IndexByte(kv, '=')
+					if eq < 0 {
+						continue
+					}
+					k, v := kv[:eq], kv[eq+1:]
+					if k == "CLAUDE_BIN" {
+						claudeBin = v
+					} else if k == "NODE_BIN" {
+						nodeBin = v
+					}
+				}
+			}
+			continue
+		}
+		if line == "__RUNTIME_BIN__" {
+			sawSeparator = true
+			continue
+		}
+		if line == "" {
+			continue
+		}
+		// Anything before the sentinel is a line of extra-paths content
+		// (one PATH dir per line, as written by linuxInstallScript /
+		// darwinInstallScript). Pre-existing bug: a previous revision
+		// used a switch with a `case line == "__RUNTIME_BIN__"` arm
+		// that reset extraPathsLines = []string{}, which wiped the
+		// already-appended previous line(s). The collapsed/skip-after
+		// flag pattern here is the cleaner fix.
+		extraPathsLines = append(extraPathsLines, line)
+	}
+	extraPaths = strings.Join(extraPathsLines, "\n")
+	return
 }
 
 // shortPathForLog returns the basename of p for install-panel log lines,
