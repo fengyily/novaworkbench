@@ -1337,7 +1337,7 @@ select.form-input { cursor: pointer; }
   margin-top: 20px;
 }
 /* Header / body sections inside a `.modal-box` for modals that need a
-   sticky header (e.g. the CodingChat context-summary modal, which
+   sticky header (e.g. the DeepRefineChat context-summary modal, which
    keeps the close button reachable while the body scrolls). Header is
    flex with the close button on the right; body is just normal flow. */
 .modal-header {

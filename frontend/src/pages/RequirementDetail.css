@@ -211,8 +211,9 @@
 .detail-section p { font-size: 14px; color: var(--color-text-secondary); line-height: 1.7; }
 
 /* The "追加调整" chat panel renders directly below the action buttons (开发完成 /
-   重新运行); give it breathing room so it doesn't crowd them. */
-.coding-chat-panel { margin-top: 20px; }
+   重新运行); give it breathing room so it doesn't crowd them. The
+   CodingChat component that used this rule was removed in the
+   developing-stage refactor. */
 
 .analysis-section { border-left: 3px solid var(--color-primary); }
 .analysis-summary {
@@ -2474,7 +2475,8 @@ allowed so the row collapses cleanly on every viewport. */
 }
 
 /* ── Sub-task panel ──────────────────────────────────────────────
-   Sits inside the developer stage after CodingChat / adjust-coder.
+   Sits inside the developer stage after the shared JobLogView /
+   adjust-coder.
    Visual signature: a 3px left accent stripe per card that mirrors the
    status color, evoking a git-branch reference — every child agent is a
    fork off the main agent. Token system mirrors .detail-section (surface +

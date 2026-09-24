@@ -1,0 +1,245 @@
+/* DevelopingStage — single-row layout hosting the floating task-list
+ * sidebar on the left and the shared JobLogView on the right. The
+ * previous layout had N+1 stacked panels; this collapses them into one
+ * scroll area driven by the selected task.
+ *
+ * Breakpoints
+ *   - ≥1024px (default): sidebar 240px on the left, log panel fills the
+ *     remainder.
+ *   - <1024px: sidebar collapses to 48px (vertical rail).
+ *   - ≤768px: layout switches to a horizontal sticky task strip on top of
+ *     the log panel — small screens never see the floating list. */
+
+.dev-stage {
+  display: flex;
+  align-items: stretch;
+  gap: 16px;
+  width: 100%;
+  position: relative;
+}
+
+/* Floating task list. The sidebar is *floating* in the sense that it
+ * lives outside the main panel's flex flow visually (it has its own
+ * border + background) but uses flex for layout — the page's overall
+ * content column remains stable. */
+.dev-task-list {
+  flex: 0 0 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--color-surface, #f8fafc);
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 8px;
+  padding: 10px;
+  position: sticky;
+  top: 80px;
+  align-self: flex-start;
+  max-height: calc(100vh - 100px);
+  overflow-y: auto;
+}
+
+.dev-task-list.is-collapsed {
+  flex: 0 0 48px;
+  padding: 10px 4px;
+  align-items: center;
+}
+
+.dev-task-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding-bottom: 4px;
+}
+
+.dev-task-list-title {
+  display: inline-flex;
+  align-items: center;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--color-text, #0f172a);
+}
+
+.dev-task-list-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  background: var(--color-surface, #fff);
+  border-radius: 4px;
+  color: var(--color-text-muted, #64748b);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.15s ease;
+}
+.dev-task-list-toggle:hover {
+  background: var(--color-surface-hover, #f1f5f9);
+  color: var(--color-text, #0f172a);
+}
+
+.dev-task-list.is-collapsed .dev-task-list-toggle {
+  margin: 0 auto;
+}
+
+.dev-task-list-meta {
+  font-size: 11px;
+  color: var(--color-text-muted, #64748b);
+  padding: 0 4px 4px;
+  border-bottom: 1px dashed var(--color-border, #e2e8f0);
+}
+
+.dev-task-list-items {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-height: 0;
+}
+
+.dev-task-list.is-collapsed .dev-task-list-items {
+  gap: 8px;
+}
+
+.dev-task-list-empty {
+  padding: 16px 8px;
+  font-size: 12px;
+  color: var(--color-text-muted, #64748b);
+  font-style: italic;
+  text-align: center;
+}
+
+.dev-task-card {
+  position: relative;
+}
+
+.dev-task-card-btn {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  text-align: left;
+  background: var(--color-surface, #fff);
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-left: 3px solid transparent;
+  border-radius: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  color: var(--color-text, #0f172a);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.dev-task-card-btn:hover {
+  background: var(--color-surface-hover, #f1f5f9);
+  border-color: var(--color-border-hover, #cbd5e1);
+}
+
+.dev-task-card.is-selected .dev-task-card-btn {
+  border-left-color: var(--color-primary, #4f46e5);
+  background: var(--color-surface-selected, #eef2ff);
+}
+
+.dev-task-card-title {
+  font-size: 12px;
+  font-weight: 500;
+  word-break: break-word;
+  display: block;
+}
+
+/* Collapsed (rail) mode — rotate the card title 90° via writing-mode so
+ * the rail stays narrow (~48px wide). The status chip hides; the
+ * colored dot is implied by the per-status border color on the button. */
+.dev-task-list.is-collapsed .dev-task-card-btn {
+  width: 40px;
+  padding: 8px 4px;
+  align-items: center;
+  text-align: center;
+}
+
+.dev-task-list.is-collapsed .dev-task-card-title {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  max-height: 120px;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+}
+
+.dev-task-list.is-collapsed .sub-card-status-chip {
+  display: none;
+}
+
+/* Right column hosts the shared SSE panel. The panel itself reuses the
+ * existing .coding-panel styling so the visual treatment is identical to
+ * the pre-refactor single-coding-job layout. */
+.dev-stage-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* ── Responsive breakpoints ────────────────────────────────────────── */
+
+@media (max-width: 1024px) {
+  .dev-task-list:not(.is-collapsed) {
+    flex: 0 0 180px;
+  }
+}
+
+@media (max-width: 768px) {
+  /* Mobile: switch to a horizontal sticky task strip. The list slides
+   * sideways; each card becomes a 120px chip. */
+  .dev-stage {
+    flex-direction: column;
+  }
+  .dev-task-list {
+    flex: 0 0 auto;
+    flex-direction: row;
+    align-items: center;
+    overflow-x: auto;
+    overflow-y: hidden;
+    max-height: 64px;
+    width: 100%;
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    padding: 6px;
+  }
+  .dev-task-list.is-collapsed {
+    flex: 0 0 auto;
+  }
+  .dev-task-list-header,
+  .dev-task-list-meta,
+  .dev-task-list-empty {
+    display: none;
+  }
+  .dev-task-list-items {
+    flex-direction: row;
+    gap: 8px;
+  }
+  .dev-task-card {
+    flex: 0 0 120px;
+  }
+  .dev-task-card-btn {
+    border-left: 0;
+    border-bottom: 3px solid transparent;
+  }
+  .dev-task-card.is-selected .dev-task-card-btn {
+    border-left: 0;
+    border-bottom-color: var(--color-primary, #4f46e5);
+  }
+  .dev-task-list.is-collapsed .dev-task-card-btn {
+    width: auto;
+  }
+  .dev-task-list.is-collapsed .dev-task-card-title {
+    writing-mode: horizontal-tb;
+    max-height: none;
+  }
+}

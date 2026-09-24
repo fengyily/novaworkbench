@@ -222,6 +222,10 @@ export const components = {
     treeExpand: 'Show follow-ups',
     treeCollapse: 'Hide follow-ups',
     childCount: '{{count}} follow-up(s)',
+    // Inline affordance in each SubTaskCard header — forwards selection
+    // to DevelopingStage's shared JobLogView.
+    viewLogTitle: 'View this task in the shared panel',
+    viewingLogTitle: 'Currently shown in the shared panel',
   },
   createRequirement: {
     title: 'New requirement',
@@ -318,6 +322,18 @@ export const components = {
     compressedBadge: '📦 Compressed',
     compressedTitle: '{{stage}} stage was compressed',
     usageTitle: '{{stage}}: {{used}} / {{window}} tokens (raw {{pct}}%)',
+  },
+  devStage: {
+    title: 'Development',
+    collapse: 'Collapse task list',
+    expand: 'Expand task list',
+    mainTask: 'Main task',
+    taskCount: '{{n}} tasks',
+    empty: 'No sub-tasks yet',
+    running: 'Running',
+    done: 'Done',
+    error: 'Error',
+    pending: 'Queued',
   },
 } as const;
 

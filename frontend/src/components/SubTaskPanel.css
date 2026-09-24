@@ -1,17 +1,20 @@
-/* SubTaskPanel — sits inside the developer stage alongside CodingChat.
+/* SubTaskPanel — sits inside the developer stage alongside the shared
+ * JobLogView (used to live alongside the CodingChat component before the
+ * developing-stage refactor).
  *
  * Visual intent (per @frontend-design):
  *   - Panel surface, header, composer, cards all share the platform's
  *     white-card-on-slate-bg language (border / radius / shadow match the
- *     adjacent CodingChat panel so the eye reads this as another stage
+ *     adjacent shared JobLogView so the eye reads this as another stage
  *     sub-section, not a foreign surface).
  *   - Display copy (titles, hints, buttons) uses the platform sans stack
  *     so the panel doesn't read as "another product" sitting inside the
  *     detail page.
  *   - The CLI / terminal motif is preserved in exactly two places where
  *     it carries information:
- *       (a) the live log strip — it really is a claude terminal scrollback,
- *       (b) the "复制到终端继续" code block — it really is a shell command.
+ *       (a) the "复制到终端继续" code block — it really is a shell command.
+ *     (The previous "live log strip" lived here too but moved to the
+ *     shared JobLogView after the developing-stage refactor.)
  *     Everything else is sans + platform colors. The signature is the
  *     contrast between the calm white panel and these two dark strips.
  *   - Status tones reuse the platform palette: indigo (running / pending),
@@ -367,7 +370,7 @@
   border-radius: 6px;
   background: var(--color-surface);
   overflow: hidden;
-  transition: border-color 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 .sub-card:hover {
   border-color: var(--color-text-muted);
@@ -376,6 +379,45 @@
 .sub-card-done    { border-left-color: var(--color-success); }
 .sub-card-error   { border-left-color: var(--color-error); }
 .sub-card-pending { border-left-color: var(--color-text-muted); }
+/* Shared-panel mirror selection — when the floating task-list selects
+ * this card its logs are currently showing in the shared JobLogView.
+ * We paint a soft purple ring + slight inset shadow so the user can
+ * tell which card the right-hand panel is rendering without reading
+ * the sidebar. */
+.sub-card.is-selected {
+  box-shadow: 0 0 0 2px var(--color-primary, #4f46e5);
+  border-color: var(--color-primary, #4f46e5);
+}
+
+/* The "查看日志" affordance surfaced in each card header. Stays
+ * compact — a tiny chip that flips between a chevron and an eye glyph
+ * based on selection state — so it doesn't compete with the existing
+ * header metadata for vertical space. */
+.sub-card-view-log-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.sub-card-view-log-btn:hover {
+  background: var(--color-surface-hover, #f1f5f9);
+  color: var(--color-text);
+}
+.sub-card.is-selected .sub-card-view-log-btn {
+  background: var(--color-primary, #4f46e5);
+  border-color: var(--color-primary, #4f46e5);
+  color: #fff;
+}
 
 .sub-card-header {
   display: flex;
@@ -602,78 +644,11 @@
   padding: 8px;
 }
 
-/* Live log strip — the panel's CLI signature. Dark surface, mono font,
- * monospace "›" prompt gutter. Stays compact (~360px tall, scrolls) so
- * a long run doesn't push the artifact / token strip off-screen. */
-.sub-log {
-  background: #0F172A;
-  border: 1px solid #1E293B;
-  border-radius: 6px;
-  padding: 10px 12px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.55;
-  max-height: 360px;
-  overflow-y: auto;
-  color: #E2E8F0;
-}
-.sub-log-empty {
-  background: #0F172A;
-  border: 1px solid #1E293B;
-  border-radius: 6px;
-  padding: 18px;
-  color: #94A3B8;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  text-align: center;
-}
-.sub-log-phase-block {
-  border-left: 2px solid #475569;
-  padding-left: 10px;
-  margin-bottom: 6px;
-}
-.sub-log-row {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-  line-height: 1.5;
-}
-.sub-log-prompt {
-  color: #FB923C; /* kept as the lone accent — Claude's shell prompt */
-  flex-shrink: 0;
-  width: 14px;
-  text-align: center;
-  font-weight: 700;
-}
-.sub-log-text { flex: 1; min-width: 0; word-break: break-word; }
-.sub-log-phase   { color: #38BDF8; }
-.sub-log-tool_call { color: #A5B4FC; }
-.sub-log-message { color: #E2E8F0; }
-.sub-log-result  { color: #E2E8F0; }
-.sub-log-error   { color: #FCA5A5; }
-.sub-log-error .sub-log-prompt { color: #FCA5A5; }
-.sub-log-done    { color: #6EE7B7; }
-.sub-log-md {
-  margin: 6px 0 4px;
-  padding-left: 22px;
-  color: #E2E8F0;
-  word-break: break-word;
-}
-.sub-log-md p:first-child { margin-top: 0; }
-.sub-log-md p:last-child  { margin-bottom: 0; }
-.sub-log-md code {
-  background: #1E293B;
-  padding: 1px 4px;
-  border-radius: 2px;
-  font-size: 11px;
-}
-.sub-log-md pre {
-  background: #1E293B;
-  padding: 8px 10px;
-  border-radius: 3px;
-  overflow-x: auto;
-  margin: 6px 0;
-}
+/* Live log strip — REMOVED after the developing-stage refactor.
+ * Logs now render in the shared JobLogView driven by the floating
+ * DevelopingTaskList; per-card .sub-log rules are no longer referenced.
+ * The artifact block (.sub-card-artifact) below still ships finished
+ * sub-task reports, so the dark-theme treatment survives there. */
 
 /* Artifact (finished sub-task reports) — same dark surface so finished
  * cards keep the CLI feel but with typography tuned for reading prose,
@@ -1193,7 +1168,7 @@
 
 /* ─── Per-card context-usage bar ───
  * Slim wrapper around the shared ContextUsageBar so each sub-task card
- * can show the same usage metrics the parent CodingChat does. Sits
+ * can show the same usage metrics the parent JobLogView does. Sits
  * between the header and the collapsible body so the bar is visible
  * whether the card is expanded or collapsed. Reuses the global
  * `.usage-bar-band-ok|warn|critical` color classes defined in index.css

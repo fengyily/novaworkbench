@@ -232,6 +232,10 @@ export const components = {
     treeExpand: '展开后续操作',
     treeCollapse: '收起后续操作',
     childCount: '{{count}} 个后续操作',
+    // Inline "查看日志" affordance rendered in each SubTaskCard header to
+    // forward selection to DevelopingStage's shared JobLogView.
+    viewLogTitle: '在共享面板中查看此任务的日志',
+    viewingLogTitle: '当前正在共享面板中查看',
   },
   createRequirement: {
     title: '新需求',
@@ -328,6 +332,22 @@ export const components = {
     compressedBadge: '📦 已压缩',
     compressedTitle: '{{stage}}阶段已压缩',
     usageTitle: '{{stage}}: {{used}} / {{window}} tokens（原始 {{pct}}%）',
+  },
+  devStage: {
+    // Floating task-list sidebar shown on the left side of the developing
+    // stage. Renders a compact summary card per task (main + each
+    // sub-task) plus a collapse/expand toggle that turns the list into a
+    // narrow vertical rail.
+    title: '开发实现',
+    collapse: '收起任务列表',
+    expand: '展开任务列表',
+    mainTask: '主任务',
+    taskCount: '{{n}} 个任务',
+    empty: '暂无子任务',
+    running: '执行中',
+    done: '已完成',
+    error: '失败',
+    pending: '排队中',
   },
 } as const;
 
