@@ -25,6 +25,7 @@ func TestExecEnvSanity(t *testing.T) {
 
 	now := time.Now()
 	// Seed an agent_servers row + a project + a requirement bound to it.
+	seedProject(t, d, "proj_1", "proj_1", "/tmp/proj_1")
 	if _, err := d.Exec(`INSERT INTO agent_servers (id, name, host, port, username, auth_type, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`,
 		"as_1", "Prod Box", "10.0.0.1", 22, "root", "key", now, now); err != nil {
 		t.Fatalf("insert agent_server: %v", err)

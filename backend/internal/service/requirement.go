@@ -113,7 +113,13 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 	// LEFT JOIN against agent_servers (below) introduces same-named columns
 	// (status, created_at, updated_at) — unqualified references would be
 	// ambiguous on MySQL/Postgres and silently wrong on SQLite.
-	where := "WHERE 1=1"
+	// Requirements belong to a project; a project that has been soft-deleted
+	// (deleted_at set, sitting in the trash) or purged must not leak its
+	// requirements into the global list. EXISTS rather than an INNER JOIN so
+	// the predicate carries no placeholder and survives db.Rebind on every
+	// dialect, and so rows whose project row is gone entirely (legacy orphans
+	// from a purge that ran before FK cascade worked) are hidden too.
+	where := "WHERE EXISTS (SELECT 1 FROM projects p WHERE p.id = r.project_id AND p.deleted_at IS NULL)"
 	args := []interface{}{}
 
 	if projectID != "" {
@@ -258,7 +264,12 @@ func (s *RequirementService) createdAtDayExpr() string {
 
 // Archived rows are always excluded — same default as List().
 func (s *RequirementService) Calendar(from, to time.Time, projectID, kind string) ([]model.Requirement, error) {
-	where := "WHERE status != 'archived'"
+	// Mirror List(): hide requirements whose project is soft-deleted or gone.
+	// requirements has no alias in this query, so the project_id column is
+	// spelled out fully to avoid ambiguity. No placeholder → survives
+	// db.Rebind on every dialect.
+	where := "WHERE status != 'archived'" +
+		" AND EXISTS (SELECT 1 FROM projects p WHERE p.id = requirements.project_id AND p.deleted_at IS NULL)"
 	args := []interface{}{}
 
 	// Project filter — same convention as List: empty string = all visible.

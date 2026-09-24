@@ -14,6 +14,7 @@ import (
 // must stay in lockstep). Only a real migrate + Get/List catches that.
 func TestCodingStepPlanAndPhaseRoundTrip(t *testing.T) {
 	d := newTestDB(t)
+	seedProject(t, d, "proj_1", "proj_1", "/tmp/proj_1")
 	reqSvc := NewRequirementService(d)
 
 	created, err := reqSvc.Create(model.CreateRequirementReq{ProjectID: "proj_1", Title: "t", Description: "d"})
@@ -84,6 +85,7 @@ func TestCodingStepPlanAndPhaseRoundTrip(t *testing.T) {
 // was built from.
 func TestCodingStepPlanIsSeparateFromCodingPlan(t *testing.T) {
 	d := newTestDB(t)
+	seedProject(t, d, "proj_1", "proj_1", "/tmp/proj_1")
 	reqSvc := NewRequirementService(d)
 
 	created, err := reqSvc.Create(model.CreateRequirementReq{ProjectID: "proj_1", Title: "t", Description: "d"})
