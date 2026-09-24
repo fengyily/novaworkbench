@@ -313,6 +313,19 @@ func extractStreamError(evt map[string]interface{}) string {
 		msg += fmt.Sprintf("\n[exit_code] %v", code)
 	}
 
+	// Echo what the worker actually tried to spawn. Emitted by
+	// nova-agent-worker ≥0.4.0 on every cli_not_found; without it a
+	// "spawn claude ENOENT" is ambiguous between "NovaWorkbench sent no
+	// path", "the path it sent was wrong" and "the worker is too old to read
+	// the field at all" — and the first two look identical in the job log,
+	// which already printed the path we believe we sent.
+	if bin, ok := evt["resolvedClaudeBin"].(string); ok && strings.TrimSpace(bin) != "" {
+		msg += "\n[worker 实际执行] " + bin
+	}
+	if p, ok := evt["resolvedPath"].(string); ok && strings.TrimSpace(p) != "" {
+		msg += "\n[worker PATH] " + truncateStr(p, 500)
+	}
+
 	// Append nested cause (one level) — sometimes an upstream relay wraps
 	// a transport error inside a higher-level Error and only the inner
 	// one names the host. Kept for forward-compat with the previous
@@ -329,6 +342,15 @@ func extractStreamError(evt map[string]interface{}) string {
 	if cat, _ := evt["errorCategory"].(string); cat != "" {
 		if hint := workerCategoryHint(cat, msg); hint != "" {
 			msg += "\n[诊断] " + hint
+		}
+		// A cli_not_found whose resolved command is the bare name, on a path
+		// that always sends an absolute one, means the worker dropped the
+		// field — i.e. its server.mjs predates agentWorkerVersion. Saying so
+		// beats leaving the operator to compare version strings across two
+		// panels, and it's the one diagnosis the generic hint above can't make.
+		if bin, _ := evt["resolvedClaudeBin"].(string); cat == "cli_not_found" && strings.TrimSpace(bin) == "claude" {
+			msg += "\n[诊断] worker 落在 PATH 解析而非下发的绝对路径上，说明它的 server.mjs 早于 " +
+				agentWorkerVersion + "——「检查」会自动热升级它。"
 		}
 	}
 
@@ -363,7 +385,7 @@ func workerCategoryHint(cat, msg string) string {
 		// path so later runs pin it directly), not verifying the CLI by hand.
 		return "Claude CLI 未找到。注意：SSH 登录后 `claude --version` 能跑通并不代表 worker 能跑通 —— " +
 			"worker 进程的 PATH 在启动时就固定了，看不到 nvm 等只在登录 shell 里生效的目录。" +
-			"请在「设置 → Agent 服务器」点「检查」（会自动尝试用新 PATH 重启 worker）或「安装依赖」。"
+			"请在「设置 → Agent 服务器」点「检查」（会自动热升级 worker 并用新 PATH 重启）或「安装依赖」。"
 	case "auth_failed":
 		return "鉴权失败（401）。请在「设置 → Claude 配置」检查 ANTHROPIC_AUTH_TOKEN 是否已填写并生效。"
 	case "auth_forbidden":
