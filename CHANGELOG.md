@@ -5,6 +5,66 @@ All notable changes to NovaWorkbench will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/fengyily/novaworkbench/compare/v0.5.0...v0.6.0) (2026-09-24)
+
+
+### Features
+
+* **chat:** 修复 PC 端输入框宽度 + 全屏包含输入框/上下文条 ([8a1322c](https://github.com/fengyily/novaworkbench/commit/8a1322c963f1377aa8e3445802990933630532ca))
+* **skills:** [@slug](https://github.com/slug) skill 从 prompt 全量注入改为落盘 SKILL.md + /slug 引用 ([fd293a2](https://github.com/fengyily/novaworkbench/commit/fd293a294189e86e0ea0ce40077719ab3fc915a9))
+* **tokens:** add justVerifiedId state for connection-test success flash ([449f62c](https://github.com/fengyily/novaworkbench/commit/449f62c876523bdd50f10151f0c40c5b34ca5e76))
+* **tokens:** i18n: 新增 deleteConfirm / retryTest / retestLabel 三个 key ([eb96006](https://github.com/fengyily/novaworkbench/commit/eb96006d2344dc492e853a2f66b32b09301e4feb))
+* **tokens:** import row-action icons and add platform rail palette ([066f3fc](https://github.com/fengyily/novaworkbench/commit/066f3fcb0bb64710565844b4223be82aff204501))
+* **token:** unified platform / agent-server / LLM 'test connection' + Bitbucket support ([4c971f1](https://github.com/fengyily/novaworkbench/commit/4c971f14ed44aa0814efa44fa383ad4a05213371))
+
+
+### Bug Fixes
+
+* adjust role prompt ([1c309f5](https://github.com/fengyily/novaworkbench/commit/1c309f5af44612540955a4e04adc596f58df9705))
+* **agent-server:** backfill runtime paths on Check + retain multi-line extra_paths ([6d4c5b7](https://github.com/fengyily/novaworkbench/commit/6d4c5b79c5f0a618e870d9124d64406622545181))
+* **agent-server:** demote git remote probe failure to warning ([20a0e49](https://github.com/fengyily/novaworkbench/commit/20a0e4989784e9fbb63628fc2fbacd523a14e1a3))
+* **agent-server:** nvm-aware runtime capture + locale-formatted timestamp ([6cf1693](https://github.com/fengyily/novaworkbench/commit/6cf1693f57aa5ab1e8ce2000785dde9b705d0b99))
+* **agent-server:** pin libcurl low-speed cutoff on git remote probe ([4cb0598](https://github.com/fengyily/novaworkbench/commit/4cb05982fdc7afc0a89a7988a1a31aa4a834d10c))
+* **agent-server:** 每次远端运行前按项目平台 Token 刷新 origin 凭据 ([6825470](https://github.com/fengyily/novaworkbench/commit/68254702294353eb2b414fdda9a7a0e7694145d7))
+* **agent-server:** 远端 worker 陈旧时自动热升级，修复下发绝对路径仍 spawn claude ENOENT ([a34f88d](https://github.com/fengyily/novaworkbench/commit/a34f88dd3fd1eb8bf128401d171dac65068a12a6))
+* **agent-server:** 远端 worker 陈旧时自动热升级，修复下发绝对路径仍 spawn claude ENOENT ([4c0833d](https://github.com/fengyily/novaworkbench/commit/4c0833d60fa7d3f44f6da8100a4313db86999109))
+* **agent-worker:** extend PATH at boot so spawned claude child is locatable ([df5e453](https://github.com/fengyily/novaworkbench/commit/df5e45350cb091d29464d1f8654c2aa9ee967993))
+* **agent-worker:** inject install PATH into worker launch + asset inventory ([c0ff043](https://github.com/fengyily/novaworkbench/commit/c0ff043ca6c1d67e7cfb1d2230b5aa30da33fd91))
+* **agent-worker:** pin claude 绝对路径下发，修复运行时路径已探测仍 spawn claude ENOENT ([0753160](https://github.com/fengyily/novaworkbench/commit/07531608cef5a510adc163184bdadfc3086925fa))
+* **agent-worker:** preflight 不再把 unrecognized_model 诊断当失败 ([f9eccff](https://github.com/fengyily/novaworkbench/commit/f9eccff48a636997edf4af2d758a3547393a72ca))
+* **agent-worker:** 替换嵌入 JS 中的 backtick 以防止 Go raw-string 提前结束 ([fb1c4be](https://github.com/fengyily/novaworkbench/commit/fb1c4bee57eeb718f2a2d2927285cefc0740a90a))
+* **chat:** 修复 PC 端输入框宽度 + 全屏包含输入框/上下文条 ([8dab6df](https://github.com/fengyily/novaworkbench/commit/8dab6dfd2c06cdde538bd8a8a732bce6262730f0))
+* **ci:** pull Dockerfile base images from a GHCR cache, not auth.docker.io ([cd10d47](https://github.com/fengyily/novaworkbench/commit/cd10d47b1963d5b0e76cab7ba03e6fa9a3c6d61e))
+* **frontend:** remove unused platformRail constant in SettingsTokens ([8115f76](https://github.com/fengyily/novaworkbench/commit/8115f763d6568c4e70a8fda5175cdf754458bbad))
+* **frontend:** 需求列表状态 chip 在「方案完成 / 开发完成 / 待确认」时不再换行 ([18ef2a6](https://github.com/fengyily/novaworkbench/commit/18ef2a6ef085d64dd9c68447403b1c7f06778633))
+* **make:** PORT 变量被 make 自身 \${} 语法吞掉,改用 \$\$ 转义交由 shell 展开 ([5c43be5](https://github.com/fengyily/novaworkbench/commit/5c43be54fef456121f30054c8fc4bc30191d2827))
+* **packaging:** move contents.mode under file_info for nfpm v2 schema ([f099508](https://github.com/fengyily/novaworkbench/commit/f0995088933eb930dfd0e013e24ef8788029c91e))
+* **packaging:** write file_info.mode as int 0755, not string ([8d86551](https://github.com/fengyily/novaworkbench/commit/8d86551ac1f96fd02aa377cbb37fc8fdbda32408))
+* **push-pr-shell:** flip sub_task row to running/done so SubTaskPanel leaves "排队中" ([243cee5](https://github.com/fengyily/novaworkbench/commit/243cee58202969498b6d380eed9e4c6d518a8002))
+* **release:** gate Docker image build behind build_image input (default off) ([d0755c1](https://github.com/fengyily/novaworkbench/commit/d0755c1b0467d69e587c629d0bf5c5856a743aea))
+* **release:** grant pages: write so apt publish can push to gh-pages ([b6d7fa8](https://github.com/fengyily/novaworkbench/commit/b6d7fa8b84fff1d19cad79076a1d870d3ffafdf1))
+* **release:** restore apt publishing to fengyily/linux-repo ([7fd1c40](https://github.com/fengyily/novaworkbench/commit/7fd1c40a8a2ce0d7581b96ef4e6df1750da5f32f))
+* **release:** restore apt publishing to fengyily/linux-repo ([5caf4c8](https://github.com/fengyily/novaworkbench/commit/5caf4c8b915051543c77eb0fc9eee747b4a3dbf6))
+* **release:** route docker.io pulls through mirror.gcr.io in buildx ([41f92f0](https://github.com/fengyily/novaworkbench/commit/41f92f0246b0eaced5466bda8324eb6e6ac57471))
+* **requirement:** 项目删除后需求仍留在列表/日历中 ([2e87f72](https://github.com/fengyily/novaworkbench/commit/2e87f72a3d92f2ada1da02d276e5ad62a21437cf))
+* **requirement:** 项目删除后需求仍留在列表/日历中 ([3518e3c](https://github.com/fengyily/novaworkbench/commit/3518e3c5a0d27f10c85d90ab5ad6ebea3346b26c))
+* **token:** 401 错误新增 token 格式嗅探，提示「可能保存了登录密码」 ([9b1cdf9](https://github.com/fengyily/novaworkbench/commit/9b1cdf9b2a724e04c90d2ed2dc03aa945e76c320))
+* **token:** GitHub 测试连接不再要求 base_url ([9200822](https://github.com/fengyily/novaworkbench/commit/9200822ba1ec8fd9e94b9a6594d0d49fa9a9cf36))
+* **tokens:** 删除改用 setError 而非 alert()，清理残留测试结果 ([8904ec0](https://github.com/fengyily/novaworkbench/commit/8904ec0295f29becea726bcd790663659402aade))
+* **token:** TestResult state 类型允许 username 为 null ([c09a854](https://github.com/fengyily/novaworkbench/commit/c09a854c2cae18d24fd9a982ae8648f909699a14))
+* **token:** 修复用户名探测失败时前端显示占位符的问题 ([9a41e5f](https://github.com/fengyily/novaworkbench/commit/9a41e5fa0e26274c7b63254c7737242886eeeadf))
+* **token:** 测试连接模板改用双花括号插值 ([646af7e](https://github.com/fengyily/novaworkbench/commit/646af7ef2951ad32ad4044dc1de6a11c210d92e6))
+* **wizard:** coding 日志重启后无法回放 — 加 last_coding_job_id 常驻列 (req_3f2f69dd900e0a30) ([63e5e5e](https://github.com/fengyily/novaworkbench/commit/63e5e5e6bdae3635d1a51ad25851318ba43a94e9))
+* **wizard:** keep design-doc 微调 dialog mounted after 设计 auto-promotes to designed ([5f50af6](https://github.com/fengyily/novaworkbench/commit/5f50af609fbc57ae483a553cb84598ad1319493b))
+* **wizard:** kill EINVAL on idea first-turn by sniffing binary file content ([b26378a](https://github.com/fengyily/novaworkbench/commit/b26378ab3e0f10898b5bdd779aa4ae3777598804))
+* **wizard:** kill EINVAL on idea first-turn by sniffing binary file content ([91649e0](https://github.com/fengyily/novaworkbench/commit/91649e07d23afe1da5af533cd0b1e589fe254781))
+* **wizard:** skip-design 直开路径回填 RequirementDesc (req_f1f71c2b2f2ef0c7) ([4d9925e](https://github.com/fengyily/novaworkbench/commit/4d9925e7481713f54d3a09a4a1bcd4328688e40c))
+* **wizard:** with_context/bare 子任务 newSID 未传 CLI 致 session 不落盘 (req_49e25a8f7ac24c4f) ([d559b84](https://github.com/fengyily/novaworkbench/commit/d559b84bbd19e985b342f1acf3b2c0cb5bb4a86b))
+* **wizard:** worktree 隔离缺失 + 推送直推 main + PR 假成功 (req_82e061807ef0372f) ([c86aaed](https://github.com/fengyily/novaworkbench/commit/c86aaed076b7c6885e11058bff446896ce1b6b1c))
+* **wizard:** 修复 hadWorktree 顺序错误致 fork 守卫误判 + designed 死锁恢复入口 ([a739c39](https://github.com/fengyily/novaworkbench/commit/a739c39ff4000a82c392421842c6bcbde404a4f7))
+* **wizard:** 焊死 worktree 路径,防止跨需求污染 (req_c46e8d66491ae3a2) ([183e9a1](https://github.com/fengyily/novaworkbench/commit/183e9a1fc3d23e2cf4ba4fc422e7506fe6b55a7f))
+* **wizard:** 移除创建需求表单的「完整流程」开发流程选项 ([698f2f1](https://github.com/fengyily/novaworkbench/commit/698f2f167e48ec9bad6501f3cf2afda7ede1feca))
+
 ## [0.5.0](https://github.com/fengyily/novaworkbench/compare/v0.4.0...v0.5.0) (2026-09-21)
 
 
