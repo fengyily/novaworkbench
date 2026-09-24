@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { platformApi, type PlatformToken } from '../api/client';
 import { errorMessage } from '../utils/errMsg';
+import { IconPlug, IconRefresh, IconCog, IconTrash, IconCheck } from '../components/icons';
 import './Settings.css';
 
 const platformLabels: Record<string, string> = {
@@ -15,6 +16,13 @@ const platformColors: Record<string, string> = {
   github: '#24292e',
   gitlab: '#FC6D26',
   gitea: '#609926',
+  bitbucket: '#2684FF',
+};
+
+const platformRail: Record<string, string> = {
+  github:    '#181717',
+  gitlab:    '#FC6D26',
+  gitea:     '#21B071',
   bitbucket: '#2684FF',
 };
 
@@ -77,6 +85,11 @@ export default function SettingsTokens() {
     { ok: true; username?: string | null } |
     { ok: false; code: string; message: string }
   >>({});
+  // Tracks the row id whose "测试连接" just succeeded. Consumed by the
+  // row's CSS class (`.token-row--pulse`) for the 360ms success flash;
+  // auto-cleared by handleTest's setTimeout so a second test on a
+  // different row can't be wiped out by an earlier row's timeout.
+  const [justVerifiedId, setJustVerifiedId] = useState<string>('');
 
   const reload = async () => {
     try {
@@ -197,12 +210,16 @@ export default function SettingsTokens() {
   };
 
   const handleDelete = async (id: string) => {
-    setDeleteId(id);
     try {
       await platformApi.delete(id);
       setTokens(prev => prev.filter(t => t.id !== id));
+      setTestResults(prev => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : String(err));
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setDeleteId('');
     }
@@ -222,6 +239,10 @@ export default function SettingsTokens() {
     try {
       const res = await platformApi.test(id);
       setTestResults(prev => ({ ...prev, [id]: { ok: true, username: res.username } }));
+      setJustVerifiedId(id);
+      setTimeout(() => {
+        setJustVerifiedId(prev => (prev === id ? '' : prev));
+      }, 400);
     } catch (err: unknown) {
       // The api wrapper throws an object with `.error.code` and
       // `.error.message`. Fall back to err.message for unknown shapes.
@@ -271,6 +292,7 @@ export default function SettingsTokens() {
         <table className="project-table">
           <thead>
             <tr>
+              <th />
               <th>{t('settings.tokens.colName')}</th>
               <th>{t('settings.tokens.colPlatform')}</th>
               <th>Base URL</th>
@@ -282,7 +304,19 @@ export default function SettingsTokens() {
           </thead>
           <tbody>
             {tokens.map(tok => (
-              <tr key={tok.id}>
+              <tr
+                key={tok.id}
+                className={
+                  `token-row ${testing === tok.id ? 'token-row--testing' : ''} ` +
+                  `${justVerifiedId === tok.id ? 'token-row--pulse' : ''}`
+                }
+              >
+                <td className="token-rail-cell">
+                  <span
+                    className={`token-row-rail token-row-rail--${tok.platform}`}
+                    aria-hidden="true"
+                  />
+                </td>
                 <td className="project-name">{tok.name}</td>
                 <td>
                   <span className="platform-badge" style={{ background: platformColors[tok.platform] ?? '#64748b' }}>
@@ -303,49 +337,71 @@ export default function SettingsTokens() {
                   ) : '—'}
                 </td>
                 <td>{new Date(tok.created_at).toLocaleDateString('zh-CN')}</td>
-                <td className="row-actions">
+                <td className="row-actions token-row-actions">
                   {(tok.platform === 'github' || tok.platform === 'gitlab' || tok.platform === 'gitea' || tok.platform === 'bitbucket') && (
                     <button
                       className="btn-link"
                       onClick={() => handleTest(tok.id)}
                       disabled={testing === tok.id}
                     >
-                      {testing === tok.id ? t('settings.tokens.testInProgress') : t('settings.tokens.testLabel')}
+                      {testing === tok.id ? (
+                        <>
+                          <IconRefresh className="token-icon-spin" />
+                          {t('settings.tokens.testInProgress')}
+                        </>
+                      ) : testResults[tok.id]?.ok ? (
+                        <>{t('settings.tokens.retestLabel')}</>
+                      ) : (
+                        <>
+                          <IconPlug />
+                          {t('settings.tokens.testLabel')}
+                        </>
+                      )}
                     </button>
                   )}
-                  <button
-                    className="btn-link"
-                    onClick={() => openEditModal(tok)}
-                  >
+                  <button className="btn-link" onClick={() => openEditModal(tok)}>
+                    <IconCog />
                     {t('settings.tokens.edit')}
                   </button>
-                  <button
-                    className="btn-link btn-danger-link"
-                    onClick={() => handleDelete(tok.id)}
-                    disabled={deleteId === tok.id}
-                  >
-                    {deleteId === tok.id ? t('settings.tokens.deleting') : t('settings.tokens.delete')}
-                  </button>
-                  {testResults[tok.id] && (
-                    testResults[tok.id].ok ? (() => {
-                      const result = testResults[tok.id] as { ok: true; username?: string | null };
-                      const username = result.username ?? null;
-                      return (
-                        <span className="test-result test-result--ok">
-                          {username
-                            ? t('settings.tokens.testSuccess', { platform: tok.platform, username })
-                            : t('settings.tokens.testSuccessNoUser', { platform: tok.platform })}
-                        </span>
-                      );
-                    })() : (
-                      <details className="test-result test-result--err">
-                        <summary>{t('settings.tokens.testFailed', {
-                          code: (testResults[tok.id] as { ok: false; code: string; message: string }).code,
-                        })}</summary>
-                        <pre>{(testResults[tok.id] as { ok: false; code: string; message: string }).message}</pre>
-                      </details>
-                    )
+                  {deleteId === tok.id ? (
+                    <span className="token-delete-confirm" role="alertdialog">
+                      {t('settings.tokens.deleteConfirm')}
+                      <button className="btn-link" onClick={() => setDeleteId('')}>
+                        {t('settings.tokens.modal.cancel')}
+                      </button>
+                      <button className="btn-link btn-danger-link" onClick={() => handleDelete(tok.id)}>
+                        {t('settings.tokens.delete')}
+                      </button>
+                    </span>
+                  ) : (
+                    <button className="btn-link btn-danger-link" onClick={() => setDeleteId(tok.id)}>
+                      <IconTrash />
+                      {t('settings.tokens.delete')}
+                    </button>
                   )}
+                  {testResults[tok.id]?.ok && (() => {
+                    const r = testResults[tok.id] as { ok: true; username?: string | null };
+                    const username = r.username ?? null;
+                    return (
+                      <span className="token-test-pill">
+                        <IconCheck />
+                        {username ? `@${username}` : t('settings.tokens.testSuccessNoUser', { platform: tok.platform })}
+                      </span>
+                    );
+                  })()}
+                  {testResults[tok.id] && !testResults[tok.id].ok && (() => {
+                    const r = testResults[tok.id] as { ok: false; code: string; message: string };
+                    return (
+                      <div className="token-test-banner" role="alert">
+                        <strong>{r.code}</strong>
+                        {' · '}
+                        {r.message}
+                        <button className="btn-link token-test-banner-retry" onClick={() => handleTest(tok.id)}>
+                          {t('settings.tokens.retryTest')}
+                        </button>
+                      </div>
+                    );
+                  })()}
                 </td>
               </tr>
             ))}
