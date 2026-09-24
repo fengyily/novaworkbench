@@ -210,12 +210,16 @@ export default function SettingsTokens() {
   };
 
   const handleDelete = async (id: string) => {
-    setDeleteId(id);
     try {
       await platformApi.delete(id);
       setTokens(prev => prev.filter(t => t.id !== id));
+      setTestResults(prev => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : String(err));
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setDeleteId('');
     }
