@@ -85,6 +85,11 @@ export default function SettingsTokens() {
     { ok: true; username?: string | null } |
     { ok: false; code: string; message: string }
   >>({});
+  // Tracks the row id whose "测试连接" just succeeded. Consumed by the
+  // row's CSS class (`.token-row--pulse`) for the 360ms success flash;
+  // auto-cleared by handleTest's setTimeout so a second test on a
+  // different row can't be wiped out by an earlier row's timeout.
+  const [justVerifiedId, setJustVerifiedId] = useState<string>('');
 
   const reload = async () => {
     try {
@@ -230,6 +235,10 @@ export default function SettingsTokens() {
     try {
       const res = await platformApi.test(id);
       setTestResults(prev => ({ ...prev, [id]: { ok: true, username: res.username } }));
+      setJustVerifiedId(id);
+      setTimeout(() => {
+        setJustVerifiedId(prev => (prev === id ? '' : prev));
+      }, 400);
     } catch (err: unknown) {
       // The api wrapper throws an object with `.error.code` and
       // `.error.message`. Fall back to err.message for unknown shapes.
