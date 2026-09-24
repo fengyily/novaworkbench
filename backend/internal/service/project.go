@@ -1436,17 +1436,42 @@ func (s *ProjectService) Purge(id string) error {
 		}
 	}
 
-	// Drop the billing-log rows first. token_usage has no FK to projects,
-	// so the cascade below wouldn't touch them.
-	if _, err := s.db.Exec(`DELETE FROM token_usage WHERE project_id = ?`, id); err != nil {
-		return fmt.Errorf("PURGE_FAILED: token_usage cleanup: %w", err)
+	// Delete every child row explicitly, child-first, inside one transaction.
+	// The schema declares ON DELETE CASCADE on the projects FK, but SQLite —
+	// the default store — never has PRAGMA foreign_keys enabled, so the
+	// cascade silently no-ops there and leaves orphan rows behind. Doing the
+	// deletes by hand makes purge behave identically on SQLite / MySQL /
+	// PostgreSQL (on MySQL/PG the CASCADE already ran, so these are harmless
+	// no-ops). token_usage has no FK at all and always needed manual cleanup.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("PURGE_FAILED: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Grandchildren keyed off the project's requirements — delete before the
+	// requirements rows they reference.
+	reqScoped := []string{"sub_tasks", "orchestration_batches", "scheduled_tasks", "refinement_chats", "coding_chats"}
+	for _, tbl := range reqScoped {
+		q := `DELETE FROM ` + tbl + ` WHERE requirement_id IN (SELECT id FROM requirements WHERE project_id = ?)`
+		if _, err := tx.Exec(q, id); err != nil {
+			return fmt.Errorf("PURGE_FAILED: %s: %w", tbl, err)
+		}
 	}
 
-	// CASCADE deletes everything else (memories, requirements, knowledge,
-	// conversations, project_run_configs, weekly_reports, user_projects,
-	// refinement_chats). Token-usage cleanup already done.
-	if _, err := s.db.Exec(`DELETE FROM projects WHERE id = ?`, id); err != nil {
-		return fmt.Errorf("PURGE_FAILED: %w", err)
+	// Direct children keyed off project_id.
+	projScoped := []string{"token_usage", "memories", "knowledge", "conversations", "project_run_configs", "weekly_reports", "user_projects", "requirements"}
+	for _, tbl := range projScoped {
+		if _, err := tx.Exec(`DELETE FROM `+tbl+` WHERE project_id = ?`, id); err != nil {
+			return fmt.Errorf("PURGE_FAILED: %s: %w", tbl, err)
+		}
+	}
+
+	if _, err := tx.Exec(`DELETE FROM projects WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("PURGE_FAILED: projects: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("PURGE_FAILED: commit: %w", err)
 	}
 	return nil
 }
