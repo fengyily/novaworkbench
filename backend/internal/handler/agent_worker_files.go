@@ -7,11 +7,21 @@ package handler
 // shipping a new worker version; the install flow will redeploy on the next
 // runInstall.
 //
-// Keep in sync with the files under agent-worker/ in the repo root. Any
-// change there must be mirrored here, otherwise remote servers will drift.
+// DO NOT EDIT agentWorkerServerMJS BY HAND. agent-worker/server.mjs in the
+// repo root is the single source of truth; run scripts/sync-agent-worker.sh
+// to regenerate this const (and deploy/agent-worker/server.mjs) from it, and
+// scripts/sync-agent-worker.sh --check to verify they match.
+//
+// This matters because workerSourceServerMJS (agent_server.go) is DISK-FIRST:
+// a NovaWorkbench started from a repo checkout uploads agent-worker/server.mjs
+// while a packaged binary uploads this const. When the two drift, which worker
+// a remote host ends up running depends on how NovaWorkbench itself was
+// launched — invisible from the UI, and a reliable way to make remote-execution
+// bugs unreproducible.
 //
 // Note: the JS bodies below use single quotes only (no backticks) so the
-// Go raw-string literals (delimited by backticks) stay well-formed.
+// Go raw-string literals (delimited by backticks) stay well-formed. The sync
+// script enforces this.
 
 // agentWorkerVersion is the single source of truth for the nova-agent-worker
 // version. The install flow stamps it into the uploaded server.mjs (replacing
@@ -19,7 +29,11 @@ package handler
 // on the agent_servers row; the check flow compares the running worker's
 // reported workerVersion against it to detect a stale process that survived a
 // restart. Bump it whenever agent-worker/server.mjs changes.
-const agentWorkerVersion = "0.3.5"
+//
+// 0.4.0: /v1/run accepts claudeBin + extraPaths so NovaWorkbench can pin the
+// claude binary per request instead of relying on the worker's frozen PATH;
+// /v1/health additionally reports the resolved PATH.
+const agentWorkerVersion = "0.4.0"
 
 // agentWorkerServerMJS is the body of nova-agent-worker/server.mjs that gets
 // uploaded to the remote agent host during install. It's the same content
@@ -80,10 +94,13 @@ const agentWorkerServerMJS = `// nova-agent-worker — HTTP/NDJSON bridge betwee
 //      error into a coarse errorCategory the Go side maps to a user-facing
 //      fix hint (see backend/internal/handler/wizard.go:workerCategoryHint).
 import express from 'express';
-import { spawn } from 'node:child_process';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, accessSync, constants as fsConstants } from 'node:fs';
-import { join } from 'node:path';
+import { spawn, execFileSync } from 'node:child_process';
+import { mkdtempSync, accessSync, realpathSync, constants as fsConstants } from 'node:fs';
+// pathSep ('/') splits a filesystem path into segments; pathDelim (':')
+// splits $PATH into directories. Mixing them up silently corrupts PATH —
+// splitting '/usr/bin:/bin' on '/' and rejoining yields garbage — so they are
+// imported under names that cannot be confused for one another.
+import { join, sep as pathSep, delimiter as pathDelim } from 'node:path';
 
 // Extend PATH on the agent host so the spawned 'claude' child can be
 // located by name alone — regardless of how the worker process itself was
@@ -136,17 +153,17 @@ function resolveExtendedPath() {
   // actually ran the install, before any user re-dial, so they reflect
   // where 'claude' was actually written to disk.
   const extra = (process.env.NOVA_AGENT_WORKER_EXTRA_PATHS || '')
-    .split(':')
+    .split(pathDelim)
     .map((s) => s.trim())
     .filter(Boolean);
   for (const d of extra) candidates.push(d);
-  const existing = (process.env.PATH || '').split(':').filter(Boolean);
+  const existing = (process.env.PATH || '').split(pathDelim).filter(Boolean);
   const seen = new Set(existing);
   const merged = [...existing];
   for (const d of candidates) {
     if (!seen.has(d)) { seen.add(d); merged.push(d); }
   }
-  const finalPath = merged.join(':');
+  const finalPath = merged.join(pathDelim);
   // Surface the resolved PATH to the worker log so an operator diagnosing
   // 'spawn claude ENOENT' can confirm whether the install-supplied bin dir
   // actually landed on PATH. Cheap (one line per process start), and the
@@ -155,6 +172,46 @@ function resolveExtendedPath() {
   return finalPath;
 }
 process.env.PATH = resolveExtendedPath();
+
+// resolveClaudeCommand decides WHAT to spawn for a claude invocation.
+// Priority: caller-supplied absolute path > extraPaths-widened PATH > bare
+// 'claude'.
+//
+// Why this exists: the worker process's own PATH is frozen at process start
+// (systemd Environment=PATH=..., launchd EnvironmentVariables.PATH=..., or
+// the nohup env line — all computed by the install flow). Nothing that
+// happens afterwards can change it. But NovaWorkbench re-resolves the real
+// claude location on every Check and stores it in agent_servers.claude_bin,
+// so a host whose worker was launched with a stale PATH (the classic case:
+// claude installed under ~/.nvm/versions/node/<ver>/bin, which only exists
+// on a PATH that sourced nvm.sh) shows "runtime paths detected" in the UI
+// while every run dies with 'spawn claude ENOENT'. Passing the absolute
+// path per-request closes that gap without requiring a worker restart.
+//
+// The fallback chain is deliberate: an nvm node upgrade invalidates the
+// stored absolute path, and in that case we must degrade to PATH lookup
+// rather than hard-fail a host that would otherwise work. X_OK (not F_OK)
+// because a path that exists but isn't executable is just as fatal to
+// spawn() as a missing one.
+function resolveClaudeCommand(claudeBin, extraPaths, baseEnv) {
+  const env = { ...baseEnv };
+  if (claudeBin) {
+    try {
+      accessSync(claudeBin, fsConstants.X_OK);
+      return { cmd: claudeBin, env };
+    } catch (e) {
+      console.error('[nova-agent-worker] claudeBin 不可执行，回退 PATH 解析: '
+        + claudeBin + ' (' + (e && (e.code || e.message)) + ')');
+    }
+  }
+  const extra = String(extraPaths || '').split(pathDelim).map((s) => s.trim()).filter(Boolean);
+  if (extra.length) {
+    const cur = (env.PATH || '').split(pathDelim).filter(Boolean);
+    const seen = new Set(extra);
+    env.PATH = [...extra, ...cur.filter((d) => !seen.has(d))].join(pathDelim);
+  }
+  return { cmd: 'claude', env };
+}
 
 // WORKER_VERSION is a placeholder that NovaWorkbench's install flow stamps
 // with the binary's own agentWorkerVersion before uploading this file to a
@@ -172,6 +229,14 @@ app.use(express.json({ limit: '50mb' }));
 // /v1/health — used by NovaWorkbench's Check flow to verify the worker is
 // alive before starting a coding run. Returns the claude CLI version (best
 // effort) so we can alert on stale installs.
+//
+// claudeVersion is the ONLY signal that reflects whether this worker
+// process — with its frozen PATH — can actually spawn claude. The Go-side
+// Check probe compares it against the SSH-shell probe: SSH sees a
+// login-ish PATH (and sources nvm.sh), the worker does not, so "SSH finds
+// claude" never implies "the worker can spawn it". 'path' is echoed back
+// so an operator diagnosing that split can see the worker's actual PATH
+// without SSH-ing in and reading /proc/<pid>/environ.
 app.get('/v1/health', async (_req, res) => {
   let claudeVersion = 'unknown';
   try {
@@ -181,7 +246,12 @@ app.get('/v1/health', async (_req, res) => {
     // deps" path is the one that surfaces that, not the per-run health
     // probe. An unknown version is a soft signal, not an error.
   }
-  res.json({ status: 'ok', claudeVersion, workerVersion: WORKER_VERSION });
+  res.json({
+    status: 'ok',
+    claudeVersion,
+    workerVersion: WORKER_VERSION,
+    path: process.env.PATH || '',
+  });
 });
 
 // /v1/run — primary endpoint. Streams 'claude -p ... --output-format
@@ -206,6 +276,33 @@ app.post('/v1/run', async (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders?.();
+
+  // Defense-in-depth: verify workDir is strictly inside
+  // /tmp/nova-agent/<projectID>/<reqID> before any spawn. NovaWorkbench's
+  // runRemoteCoding already does this on the Go side via
+  // RequireRemoteDevWorkDir; this worker-side check is the last gate against
+  // any path escaping the per-requirement isolation. Fail fast with an
+  // explicit 4xx so a misconfigured request doesn't spend 5s on preflight
+  // before being rejected. Wire format matches the rest of /v1/run: a
+  // single NDJSON error event then res.end() — Go-side parseStreamJSONFromReader
+  // already handles 'type:"error"' and surfaces 'error' to the user.
+  const reqBody = req.body ?? {};
+  const workDirReqId = (typeof reqBody.reqId === 'string' && reqBody.reqId)
+    || (typeof opts.workDir === 'string' ? opts.workDir.split('/').filter(Boolean).pop() : '');
+  try {
+    assertWorkDirInScope(opts.workDir, workDirReqId);
+  } catch (e) {
+    const status = e.status || 500;
+    res.status(status);
+    res.write(JSON.stringify({
+      type: 'error',
+      errorCategory: 'workdir_out_of_scope',
+      error: e.message,
+      code: status,
+    }) + '\n');
+    res.end();
+    return;
+  }
 
   // Early bailout: if the worker itself is running as root (uid 0), the
   // Claude CLI refuses --dangerously-skip-permissions with a hard error
@@ -240,8 +337,8 @@ app.post('/v1/run', async (req, res) => {
   // can't be shadowed by a stale ~/.claude/settings.json or an inherited
   // ANTHROPIC_API_KEY.
   // process.env.PATH was already rewritten at module load (see
-  // resolveExtendedPath at the top of this file) so the spawn child can
-  // resolve 'claude' even when systemd launched us with a stripped PATH.
+  // resolveExtendedPath above) so the spawn child can resolve 'claude' even
+  // when systemd launched us with a stripped PATH.
   const childEnv = { ...process.env };
   // Ensure TMPDIR (and the TMP/TEMP aliases) point at a writable location
   // before we hand the env to claude. On macOS, agent users provisioned
@@ -293,7 +390,17 @@ app.post('/v1/run', async (req, res) => {
   res.write(JSON.stringify({ type: 'log', content: '准备执行主命令: ' + realRendered }) + '\n');
   if (typeof res.flush === 'function') res.flush();
 
-  const pf = await preflight(opts.workDir, childEnv, settingsArg);
+  // Resolve the claude command ONCE and use the same {cmd, env} for both
+  // the preflight probe and the real run — otherwise a preflight that
+  // passed via the absolute path could be followed by a real run that
+  // fell back to PATH (or vice versa), and the probe would stop being
+  // predictive of the thing it's supposed to gate.
+  const claudeCmd = resolveClaudeCommand(opts.claudeBin, opts.extraPaths, childEnv);
+  if (claudeCmd.cmd !== 'claude') {
+    res.write(JSON.stringify({ type: 'log', content: '使用下发的 claude 绝对路径: ' + claudeCmd.cmd }) + '\n');
+  }
+
+  const pf = await preflight(opts.workDir, claudeCmd, settingsArg);
   if (!pf.ok) {
     res.write(JSON.stringify({
       type: 'error',
@@ -302,6 +409,12 @@ app.post('/v1/run', async (req, res) => {
       stderr: pf.stderr || '',
       code: pf.code,
       preflight: true,
+      // Echo what we actually tried. Without these two fields a
+      // cli_not_found is indistinguishable between "no path was sent",
+      // "the sent path was wrong" and "PATH lookup missed" — which is
+      // exactly the ambiguity that made this class of bug hard to pin down.
+      resolvedClaudeBin: claudeCmd.cmd,
+      resolvedPath: claudeCmd.env.PATH || '',
     }) + '\n');
     res.end();
     return;
@@ -314,9 +427,9 @@ app.post('/v1/run', async (req, res) => {
   if (typeof res.flush === 'function') res.flush();
   let proc;
   try {
-    proc = spawn('claude', args, {
+    proc = spawn(claudeCmd.cmd, args, {
       cwd: opts.workDir,
-      env: childEnv,
+      env: claudeCmd.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
   } catch (e) {
@@ -327,6 +440,8 @@ app.post('/v1/run', async (req, res) => {
       errorCategory: 'cli_not_found',
       error: String(e && e.message || e),
       code: -1,
+      resolvedClaudeBin: claudeCmd.cmd,
+      resolvedPath: claudeCmd.env.PATH || '',
     }) + '\n');
     res.end();
     return;
@@ -352,6 +467,8 @@ app.post('/v1/run', async (req, res) => {
       error: String(e.message || e),
       stderr: String(e.message || e),
       code: e.code,
+      resolvedClaudeBin: claudeCmd.cmd,
+      resolvedPath: claudeCmd.env.PATH || '',
     }) + '\n');
     res.end();
   });
@@ -399,8 +516,13 @@ app.post('/v1/run', async (req, res) => {
 // immediately and SIGTERMs the hung child. The Go side already has
 // tailored fix hints for those categories (workerCategoryHint), so a
 // sub-second failure is also a much more actionable error message.
+//
+// 'claudeCmd' is the {cmd, env} pair returned by resolveClaudeCommand — the
+// caller resolves it once and passes the SAME pair here and to the real
+// run, so the probe exercises byte-for-byte the binary and PATH the real
+// spawn will use.
 const PREFLIGHT_TIMEOUT_MS = 15000;
-function preflight(workDir, env, settingsArg) {
+function preflight(workDir, claudeCmd, settingsArg) {
   return new Promise((resolve) => {
     let proc;
     let settled = false;
@@ -429,9 +551,9 @@ function preflight(workDir, env, settingsArg) {
       if (settingsArg) {
         pingArgs.push('--settings', settingsArg);
       }
-      proc = spawn('claude', pingArgs, {
+      proc = spawn(claudeCmd.cmd, pingArgs, {
         cwd: workDir,
-        env,
+        env: claudeCmd.env,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (e) {
@@ -453,7 +575,7 @@ function preflight(workDir, env, settingsArg) {
       // stderr the moment it rejects the config, then keeps the process
       // alive doing internal bookkeeping — the next chunk won't come for
       // seconds. classifyError's regexes match the partial stderr
-      // (e.g. literal 'unrecognized_model'), so a single tagged line is
+      // (e.g. literal "unrecognized_model"), so a single tagged line is
       // enough. 'unknown' is intentionally skipped: a CLI that just
       // happens to print something category-shaped shouldn't poison an
       // otherwise-healthy run.
@@ -602,6 +724,11 @@ function resolveTmpdir(env) {
 // health probe shouldn't drag the user-visible badge into a "loading" state.
 function readClaudeVersion() {
   return new Promise((resolve, reject) => {
+    // Deliberately NO claudeBin override here: /v1/health must report what
+    // this worker resolves on its OWN frozen PATH, because that is exactly
+    // the property the Go-side Check needs to test. Resolving via a
+    // caller-supplied path would make health report 'ok' for a worker that
+    // still can't run anything the moment a request arrives without one.
     const proc = spawn('claude', ['--version'], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -760,6 +887,9 @@ function buildRunRequest(body) {
     permissionMode,
     overrideSettingSources,
     ignoreLocalSettings,
+    claudeConfigId,
+    claudeBin,
+    extraPaths,
   } = body;
 
   if (!workDir) {
@@ -814,6 +944,18 @@ function buildRunRequest(body) {
     allowedTools: Array.isArray(allowedTools) ? allowedTools : [],
     disallowedTools: Array.isArray(disallowedTools) ? disallowedTools : [],
     permissionMode: permissionMode === 'plan' ? 'plan' : '',
+    // The Go side passes the resolved claude_config_id so future tweaks
+    // (e.g. surfacing the active gateway in the SSE log) can read it
+    // without a second round-trip. Today it's informational.
+    claudeConfigId: typeof claudeConfigId === 'string' ? claudeConfigId : '',
+    // Runtime location of the claude CLI, resolved by NovaWorkbench's
+    // Check/Install and mirrored from agent_servers.claude_bin /
+    // .extra_paths. Both optional — an older NovaWorkbench omits them and
+    // resolveClaudeCommand falls back to bare PATH lookup, which is the
+    // pre-existing behaviour. extraPaths is ':'-separated (the Go side
+    // joins the newline-separated DB column before sending).
+    claudeBin: typeof claudeBin === 'string' ? claudeBin : '',
+    extraPaths: typeof extraPaths === 'string' ? extraPaths : '',
     settingSources,
   };
 }
@@ -974,6 +1116,47 @@ function buildClaudeArgs(opts, settingsArg) {
   }
 
   return args;
+}
+
+// assertWorkDirInScope: NovaWorkbench 后端的 runRemoteCoding 严格把 wtPath 锁在
+// /tmp/nova-agent/<projectID>/<reqID> 下；本 worker 端做 defense-in-depth 校验，
+// 防止任何路径错误在远端被放大。即便 Go 侧所有校验都被绕过，worker 也会拒绝。
+//
+// 校验三层：
+//   1. workDir 必须是非空字符串
+//   2. realpathSync 必须成功（路径必须真实存在，否则抛 ENOENT → 400）
+//   3. 解析后的真实路径必须在 /tmp/nova-agent/ 下，且 reqId 必须出现在路径段中
+//
+// 任何一层失败抛出带 status 的 Error，handler 转成对应 4xx + JSON {error}。
+function assertWorkDirInScope(workDir, reqId) {
+  if (!workDir || typeof workDir !== 'string') {
+    throw httpError(400, 'workDir is required');
+  }
+  // 路径必须存在；realpathSync 不存在则抛 ENOENT
+  let real;
+  try {
+    real = realpathSync(workDir);
+  } catch (e) {
+    throw httpError(400, 'workDir ' + workDir + ' cannot be resolved: ' + e.message);
+  }
+  // reqId 必须出现在路径中（防止跨需求路径串台）
+  const segs = real.split(pathSep);
+  if (!reqId || !segs.includes(reqId)) {
+    throw httpError(403, 'workDir ' + real + ' does not contain reqId ' + reqId);
+  }
+  // 强约束：必须在 /tmp/nova-agent/ 下
+  if (!real.startsWith('/tmp/nova-agent/')) {
+    throw httpError(403, 'workDir ' + real + ' is outside /tmp/nova-agent/');
+  }
+  return real;
+}
+
+// httpError attaches an HTTP status to an Error so the /v1/run handler can
+// emit the right status code when an assertWorkDirInScope check fails.
+function httpError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
 }
 
 // Bind 127.0.0.1 only — the worker is reached via SSH direct-tcpip channel

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
@@ -505,7 +507,7 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// The pairs come from the SAME settingsEnvOverrides map the local path
 	// serializes into its --settings JSON, so the two surfaces cannot drift.
 	envPairs := h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, in.claudeConfigID)
-	runBody := workerRunRequest(opts, envPairs)
+	runBody := workerRunRequest(opts, envPairs, srv)
 
 	// Step 5: POST to nova-agent-worker via SSH direct-tcpip channel. The
 	// HTTPTransport opens one channel per request through the existing SSH
@@ -523,27 +525,8 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	workerAddr := "127.0.0.1:7000"
 	httpClient := &http.Client{Transport: client.HTTPTransport(workerAddr)}
 
-	// Pre-flight: GET /v1/health. The previous direct-CLI path had a
-	// `command -v claude` probe that surfaced "ENOENT" up front; this is
-	// its worker equivalent. A failed health probe is the most likely cause
-	// of "stream interrupted, 0 events" right now (the worker is new and
-	// a pre-existing Agent server without it would otherwise look like an
-	// opaque failure).
-	healthCtx, healthCancel := context.WithTimeout(ctx, 10*time.Second)
-	healthReq, hReqErr := http.NewRequestWithContext(healthCtx, http.MethodGet, "http://"+workerAddr+"/v1/health", nil)
-	if hReqErr != nil {
-		healthCancel()
-		return claudeStreamOutcome{errMsg: "构造健康检查请求失败: " + hReqErr.Error()}
-	}
-	healthResp, healthErr := httpClient.Do(healthReq)
-	if healthErr != nil {
-		healthCancel()
-		return claudeStreamOutcome{errMsg: "无法连接 nova-agent-worker（" + workerAddr + "）。请在「设置 → Agent 服务器」对该服务器点「安装依赖」后再试。详细: " + healthErr.Error()}
-	}
-	healthResp.Body.Close()
-	healthCancel()
-	if healthResp.StatusCode != http.StatusOK {
-		return claudeStreamOutcome{errMsg: fmt.Sprintf("nova-agent-worker 健康检查失败: HTTP %d", healthResp.StatusCode)}
+	if err := ensureRemoteWorkerReady(ctx, client, srv, in.job); err != nil {
+		return claudeStreamOutcome{errMsg: err.Error()}
 	}
 
 	// POST /v1/run with the JSON body. No overall http.Client timeout —
@@ -871,7 +854,7 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 		OverrideSettingSources: &ignoreLocal,
 	}
 	envPairs := h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, in.claudeConfigID)
-	runBody := workerRunRequest(opts, envPairs)
+	runBody := workerRunRequest(opts, envPairs, srv)
 
 	// Step 5: POST to nova-agent-worker via SSH direct-tcpip channel.
 	in.job.Append(store.LogLine{Type: "phase", Content: "🤖 Agent 服务器开始执行（nova-agent-worker）..."})
@@ -879,21 +862,8 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 	workerAddr := "127.0.0.1:7000"
 	httpClient := &http.Client{Transport: client.HTTPTransport(workerAddr)}
 
-	healthCtx, healthCancel := context.WithTimeout(ctx, 10*time.Second)
-	healthReq, hReqErr := http.NewRequestWithContext(healthCtx, http.MethodGet, "http://"+workerAddr+"/v1/health", nil)
-	if hReqErr != nil {
-		healthCancel()
-		return claudeStreamOutcome{errMsg: "构造健康检查请求失败: " + hReqErr.Error()}, cleanup, nil
-	}
-	healthResp, healthErr := httpClient.Do(healthReq)
-	if healthErr != nil {
-		healthCancel()
-		return claudeStreamOutcome{errMsg: "无法连接 nova-agent-worker（" + workerAddr + "）。请在「设置 → Agent 服务器」对该服务器点「安装依赖」后再试。详细: " + healthErr.Error()}, cleanup, nil
-	}
-	healthResp.Body.Close()
-	healthCancel()
-	if healthResp.StatusCode != http.StatusOK {
-		return claudeStreamOutcome{errMsg: fmt.Sprintf("nova-agent-worker 健康检查失败: HTTP %d", healthResp.StatusCode)}, cleanup, nil
+	if err := ensureRemoteWorkerReady(ctx, client, srv, in.job); err != nil {
+		return claudeStreamOutcome{errMsg: err.Error()}, cleanup, nil
 	}
 
 	bodyBytes, mErr := json.Marshal(runBody)
@@ -1451,6 +1421,89 @@ type workerRunBody struct {
 	// install script seeds ~/.claude/settings.json with a placeholder
 	// token, and any stale value there would silently shadow the active row.
 	IgnoreLocalSettings bool `json:"ignoreLocalSettings,omitempty"`
+	// ClaudeBin / ExtraPaths pin where the worker should look for the claude
+	// CLI, mirrored from agent_servers.claude_bin / .extra_paths (refreshed by
+	// every Check via captureInstallRuntimeFacts).
+	//
+	// They exist because the worker process's PATH is frozen at process start
+	// — baked into the systemd unit / launchd plist / nohup env line by the
+	// install flow — so a claude installed somewhere that PATH doesn't cover
+	// (classically ~/.nvm/versions/node/<ver>/bin, visible only to a shell
+	// that sourced nvm.sh) makes every run die with `spawn claude ENOENT`
+	// while the settings UI happily shows the detected runtime paths. Sending
+	// the absolute path per request closes that gap without needing a worker
+	// restart; the worker falls back to PATH lookup when the value is empty
+	// or no longer executable (e.g. after an nvm node upgrade).
+	//
+	// ExtraPaths is ":"-separated here; agent_servers.extra_paths is
+	// newline-separated (it mirrors the on-disk ~/.novaworkbench/extra-paths).
+	ClaudeBin  string `json:"claudeBin,omitempty"`
+	ExtraPaths string `json:"extraPaths,omitempty"`
+}
+
+// workerRepairMu serializes repairWorkerPATH per agent server. Concurrent
+// sub-tasks can target the same host (subtask.concurrency is per-project, so
+// two projects can dispatch at once), and two goroutines restarting the same
+// worker would race each other's pkill. Keyed by server id; entries are never
+// evicted, which is fine — one mutex per configured agent server.
+var workerRepairMu sync.Map // serverID -> *sync.Mutex
+
+// ensureRemoteWorkerReady probes GET /v1/health before a run and, when the
+// worker reports it cannot spawn claude, tries to restart it with a correct
+// PATH.
+//
+// The previous direct-CLI path had a `command -v claude` probe that surfaced
+// ENOENT up front; this is its worker equivalent. An unreachable worker is
+// fatal (nothing can run), but a worker that is up and merely can't resolve
+// claude on its own PATH is NOT: since 0.4.0 the run body pins
+// agent_servers.claude_bin, which bypasses the worker's PATH entirely. So a
+// failed repair downgrades to a warning rather than blocking a run that would
+// have succeeded.
+//
+// Restarting mid-flight is safe here precisely because of the condition: a
+// worker that reports it can't spawn claude is already failing every request
+// it is serving, so there is no healthy work to interrupt.
+func ensureRemoteWorkerReady(ctx context.Context, client *gossh.Client, srv *model.AgentServer, job *store.Job) error {
+	const workerAddr = "127.0.0.1:7000"
+	health, err := probeWorkerHealth(ctx, client)
+	if err != nil {
+		return errors.New("无法连接 nova-agent-worker（" + workerAddr +
+			"）。请在「设置 → Agent 服务器」对该服务器点「安装依赖」后再试。详细: " + err.Error())
+	}
+	if health.ClaudeResolvable() {
+		return nil
+	}
+
+	serverID := ""
+	if srv != nil {
+		serverID = srv.ID
+	}
+	muAny, _ := workerRepairMu.LoadOrStore(serverID, &sync.Mutex{})
+	mu := muAny.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Re-probe under the lock: a concurrent run may have just repaired it.
+	if h, perr := probeWorkerHealth(ctx, client); perr == nil && h.ClaudeResolvable() {
+		return nil
+	}
+
+	job.Append(store.LogLine{Type: "message", Content: "⚠ worker 进程自身找不到 claude（其 PATH 在启动时已冻结），尝试用新 PATH 重启..."})
+	var homeBuf strings.Builder
+	_, _ = client.Exec(ctx, "echo $HOME", "", nil, &homeBuf, nil)
+	homeDir := strings.TrimSpace(homeBuf.String())
+	if homeDir == "" {
+		homeDir = "/root"
+	}
+	if repaired, rerr := repairWorkerPATH(ctx, client, homeDir); rerr == nil {
+		job.Append(store.LogLine{Type: "message", Content: "✓ worker 已用新 PATH 重启，claude " + repaired.ClaudeVersion})
+		return nil
+	} else if srv != nil && strings.TrimSpace(srv.ClaudeBin) != "" {
+		job.Append(store.LogLine{Type: "message", Content: "⚠ worker PATH 修复失败(" + rerr.Error() + ")，改为按已记录的绝对路径执行: " + srv.ClaudeBin})
+		return nil
+	} else {
+		return errors.New("nova-agent-worker 找不到 claude，且未记录 claude 绝对路径。请在「设置 → Agent 服务器」点「安装依赖」后再试。详细: " + rerr.Error())
+	}
 }
 
 // workerRunRequest builds the POST body for /v1/run from the NovaWorkbench
@@ -1473,7 +1526,11 @@ type workerRunBody struct {
 // This helper depends only on opts (not on a stage-specific input struct)
 // so both runRemoteCoding and prepareRemoteAgentRun can call it without
 // each needing to project their input into a different shape.
-func workerRunRequest(opts llm.StreamOpts, envPairs []string) workerRunBody {
+//
+// srv supplies the per-server runtime paths (claude_bin / extra_paths) and
+// may be nil — in that case both fields stay empty and, being omitempty,
+// never reach the wire, so the worker behaves exactly as it did before.
+func workerRunRequest(opts llm.StreamOpts, envPairs []string, srv *model.AgentServer) workerRunBody {
 	envMap := make(map[string]string, len(envPairs))
 	for _, kv := range envPairs {
 		eq := strings.IndexByte(kv, '=')
@@ -1485,6 +1542,11 @@ func workerRunRequest(opts llm.StreamOpts, envPairs []string) workerRunBody {
 	override := false
 	if opts.OverrideSettingSources != nil {
 		override = *opts.OverrideSettingSources
+	}
+	var claudeBin, extraPaths string
+	if srv != nil {
+		claudeBin = strings.TrimSpace(srv.ClaudeBin)
+		extraPaths = strings.Join(splitExtraPathLines(srv.ExtraPaths), ":")
 	}
 	return workerRunBody{
 		WorkDir:        opts.WorkDir,
@@ -1510,6 +1572,11 @@ func workerRunRequest(opts llm.StreamOpts, envPairs []string) workerRunBody {
 		// settings files). The platform env passed via `env` above is the
 		// sole source of auth / base URL / model pinning.
 		IgnoreLocalSettings: true,
+		// Where to find claude on this particular agent host. See the field
+		// comments on workerRunBody for why the worker can't be trusted to
+		// work this out from its own PATH.
+		ClaudeBin:  claudeBin,
+		ExtraPaths: extraPaths,
 	}
 }
 

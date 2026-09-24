@@ -1,15 +1,15 @@
 // nova-agent-worker — HTTP/NDJSON bridge between NovaWorkbench (Go backend)
-// and the `claude` CLI on a remote Agent host.
+// and the 'claude' CLI on a remote Agent host.
 //
 // Why this is a service (not a per-invocation script):
 //   * Node startup adds ~300-500ms; doing it per coding pass is noticeable.
 //   * The Go side reuses one SSH connection (direct-tcpip channel) to talk
 //     here, no new ports opened to the network — bind 127.0.0.1 only.
 //
-// Earlier revisions routed calls through `@anthropic-ai/claude-agent-sdk`,
-// but the SDK's `query()` API is opaque about child-process failures (the
+// Earlier revisions routed calls through '@anthropic-ai/claude-agent-sdk',
+// but the SDK's 'query()' API is opaque about child-process failures (the
 // thrown Error often collapses to "Claude Code process exited with code 1",
-// losing the real CLI stderr). Spawing `claude` directly gives us the raw
+// losing the real CLI stderr). Spawing 'claude' directly gives us the raw
 // exit code, stderr, and stream-json events without an extra abstraction
 // layer, and avoids the SDK's own auth / settings-state machinery leaking
 // into the wizard flow.
@@ -17,8 +17,8 @@
 // Protocol:
 //   GET  /v1/health   → 200 {status, claudeVersion}
 //   POST /v1/run      → application/x-ndjson of stream-json events emitted
-//                       by `claude -p ... --output-format stream-json
-//                       --verbose --dangerously-skip-permissions`. One JSON
+//                       by 'claude -p ... --output-format stream-json
+//                       --verbose --dangerously-skip-permissions'. One JSON
 //                       event per line, flushed immediately. NovaWorkbench's
 //                       Go-side parseStreamJSONFromReader consumes them
 //                       line-by-line unchanged.
@@ -26,24 +26,25 @@
 // Body fields for POST /v1/run map directly to the CLI flags we build:
 //   workDir     → cmd.Dir
 //   prompt      → -p <prompt>
-//   model       → --model <id>
+//   model       → ANTHROPIC_MODEL inside --settings '{"env":{...}}'
 //   systemPrompt→ --system-prompt (or --append-system-prompt in plan mode)
 //   sessionId   → --session-id (new) or --resume (existing)
 //   resume      → --resume when true
 //   fork        → --fork-session (with --resume)
 //   forkSessionId → --session-id on a forked run (pre-mint the id)
-//   env         → process env for the child
+//   env         → merged into --settings '{"env":{...}}' (auth / base URL /
+//                 tier-model pins); NOT the child process env
 //   allowedTools→ --allowedTools "Tool1 Tool2 ..."
 //   disallowedTools → --disallowedTools "Tool1 Tool2 ..."
 //   permissionMode  → "plan" → --permission-mode plan; "" → --dangerously-skip-permissions
 //   ignoreLocalSettings (default true) → --setting-sources "" (drop all
-//                       settings files; the platform's `env` is the only
+//                       settings files; the --settings env block is the only
 //                       source of auth / base URL / model pinning).
 //   overrideSettingSources (legacy) → --setting-sources project,local
 //                       (drop only the user source).
 //
 // Two reliability layers:
-//   1) Preflight — before invoking claude we spawn `claude --print ping`
+//   1) Preflight — before invoking claude we spawn 'claude --print ping'
 //      ourselves with the same env + cwd. The CLI's own output surfaces the
 //      actual cause (401 / ENOTFOUND / unrecognized model / etc.), which we
 //      hand to classifyError so the Go side can show a tailored fix hint
@@ -52,26 +53,29 @@
 //      error into a coarse errorCategory the Go side maps to a user-facing
 //      fix hint (see backend/internal/handler/wizard.go:workerCategoryHint).
 import express from 'express';
-import { spawn } from 'node:child_process';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, accessSync, constants as fsConstants } from 'node:fs';
-import { join } from 'node:path';
+import { spawn, execFileSync } from 'node:child_process';
+import { mkdtempSync, accessSync, realpathSync, constants as fsConstants } from 'node:fs';
+// pathSep ('/') splits a filesystem path into segments; pathDelim (':')
+// splits $PATH into directories. Mixing them up silently corrupts PATH —
+// splitting '/usr/bin:/bin' on '/' and rejoining yields garbage — so they are
+// imported under names that cannot be confused for one another.
+import { join, sep as pathSep, delimiter as pathDelim } from 'node:path';
 
-// Extend PATH on the agent host so the spawned `claude` child can be
+// Extend PATH on the agent host so the spawned 'claude' child can be
 // located by name alone — regardless of how the worker process itself was
 // launched. systemd user units start with the bare PATH
 // (/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin), so an
-// `npm i -g @anthropic-ai/claude-code` install into ~/.local/bin (Linux
+// 'npm i -g @anthropic-ai/claude-code' install into ~/.local/bin (Linux
 // default) or /opt/homebrew/bin (macOS) becomes invisible to the child
 // even though SSH login shells see it via ~/.bashrc. The result is a
-// spawned child whose first action is `spawn claude ENOENT`, classified
-// as `cli_not_found` and surfaced in the wizard job panel as
+// spawned child whose first action is 'spawn claude ENOENT', classified
+// as 'cli_not_found' and surfaced in the wizard job panel as
 // "Claude CLI 未找到" — even though NovaWorkbench's Check flow (which
 // uses SSH RunCommand and therefore inherits the login-shell PATH)
-// reports `✓ claude <version>`.
+// reports '✓ claude <version>'.
 //
 // We don't replace PATH — we prepend a candidate list, dedup, and keep
-// the existing entries. Detection of `npm root -g` is wrapped so a
+// the existing entries. Detection of 'npm root -g' is wrapped so a
 // missing/broken npm install doesn't take down /v1/health.
 function resolveExtendedPath() {
   const home = process.env.HOME || process.env.USERPROFILE || '';
@@ -108,25 +112,72 @@ function resolveExtendedPath() {
   // actually ran the install, before any user re-dial, so they reflect
   // where 'claude' was actually written to disk.
   const extra = (process.env.NOVA_AGENT_WORKER_EXTRA_PATHS || '')
-    .split(':')
+    .split(pathDelim)
     .map((s) => s.trim())
     .filter(Boolean);
   for (const d of extra) candidates.push(d);
-  const existing = (process.env.PATH || '').split(':').filter(Boolean);
+  const existing = (process.env.PATH || '').split(pathDelim).filter(Boolean);
   const seen = new Set(existing);
   const merged = [...existing];
   for (const d of candidates) {
     if (!seen.has(d)) { seen.add(d); merged.push(d); }
   }
-  const finalPath = merged.join(':');
+  const finalPath = merged.join(pathDelim);
   // Surface the resolved PATH to the worker log so an operator diagnosing
   // 'spawn claude ENOENT' can confirm whether the install-supplied bin dir
   // actually landed on PATH. Cheap (one line per process start), and the
   // only way to know whether NOVA_AGENT_WORKER_EXTRA_PATHS reached us.
-  console.error(`[nova-agent-worker] resolved PATH: ${finalPath}`);
+  console.error('[nova-agent-worker] resolved PATH: ' + finalPath);
   return finalPath;
 }
 process.env.PATH = resolveExtendedPath();
+
+// resolveClaudeCommand decides WHAT to spawn for a claude invocation.
+// Priority: caller-supplied absolute path > extraPaths-widened PATH > bare
+// 'claude'.
+//
+// Why this exists: the worker process's own PATH is frozen at process start
+// (systemd Environment=PATH=..., launchd EnvironmentVariables.PATH=..., or
+// the nohup env line — all computed by the install flow). Nothing that
+// happens afterwards can change it. But NovaWorkbench re-resolves the real
+// claude location on every Check and stores it in agent_servers.claude_bin,
+// so a host whose worker was launched with a stale PATH (the classic case:
+// claude installed under ~/.nvm/versions/node/<ver>/bin, which only exists
+// on a PATH that sourced nvm.sh) shows "runtime paths detected" in the UI
+// while every run dies with 'spawn claude ENOENT'. Passing the absolute
+// path per-request closes that gap without requiring a worker restart.
+//
+// The fallback chain is deliberate: an nvm node upgrade invalidates the
+// stored absolute path, and in that case we must degrade to PATH lookup
+// rather than hard-fail a host that would otherwise work. X_OK (not F_OK)
+// because a path that exists but isn't executable is just as fatal to
+// spawn() as a missing one.
+function resolveClaudeCommand(claudeBin, extraPaths, baseEnv) {
+  const env = { ...baseEnv };
+  if (claudeBin) {
+    try {
+      accessSync(claudeBin, fsConstants.X_OK);
+      return { cmd: claudeBin, env };
+    } catch (e) {
+      console.error('[nova-agent-worker] claudeBin 不可执行，回退 PATH 解析: '
+        + claudeBin + ' (' + (e && (e.code || e.message)) + ')');
+    }
+  }
+  const extra = String(extraPaths || '').split(pathDelim).map((s) => s.trim()).filter(Boolean);
+  if (extra.length) {
+    const cur = (env.PATH || '').split(pathDelim).filter(Boolean);
+    const seen = new Set(extra);
+    env.PATH = [...extra, ...cur.filter((d) => !seen.has(d))].join(pathDelim);
+  }
+  return { cmd: 'claude', env };
+}
+
+// WORKER_VERSION is a placeholder that NovaWorkbench's install flow stamps
+// with the binary's own agentWorkerVersion before uploading this file to a
+// remote Agent host (see backend/internal/handler/agent_worker_files.go).
+// Running the worker directly via 'npm start' in dev reports the raw
+// placeholder, which is harmless — no dev flow depends on this value.
+const WORKER_VERSION = '__WORKER_VERSION__';
 
 const app = express();
 // 50MB cap: the prompt can carry pre-read project context (~40KB) plus
@@ -137,6 +188,14 @@ app.use(express.json({ limit: '50mb' }));
 // /v1/health — used by NovaWorkbench's Check flow to verify the worker is
 // alive before starting a coding run. Returns the claude CLI version (best
 // effort) so we can alert on stale installs.
+//
+// claudeVersion is the ONLY signal that reflects whether this worker
+// process — with its frozen PATH — can actually spawn claude. The Go-side
+// Check probe compares it against the SSH-shell probe: SSH sees a
+// login-ish PATH (and sources nvm.sh), the worker does not, so "SSH finds
+// claude" never implies "the worker can spawn it". 'path' is echoed back
+// so an operator diagnosing that split can see the worker's actual PATH
+// without SSH-ing in and reading /proc/<pid>/environ.
 app.get('/v1/health', async (_req, res) => {
   let claudeVersion = 'unknown';
   try {
@@ -146,24 +205,29 @@ app.get('/v1/health', async (_req, res) => {
     // deps" path is the one that surfaces that, not the per-run health
     // probe. An unknown version is a soft signal, not an error.
   }
-  res.json({ status: 'ok', claudeVersion });
+  res.json({
+    status: 'ok',
+    claudeVersion,
+    workerVersion: WORKER_VERSION,
+    path: process.env.PATH || '',
+  });
 });
 
-// /v1/run — primary endpoint. Streams `claude -p ... --output-format
-// stream-json --verbose ...` events as NDJSON (one JSON object per line,
+// /v1/run — primary endpoint. Streams 'claude -p ... --output-format
+// stream-json --verbose ...' events as NDJSON (one JSON object per line,
 // flushed immediately) so NovaWorkbench's Go-side parseStreamJSONFromReader
 // can consume them line-by-line unchanged.
 //
-// Why NDJSON instead of SSE: SSE wraps each event in `data: <json>\n\n`,
-// but our parser does a straight `json.Unmarshal` per line. Keeping the wire
-// format identical to `claude --output-format stream-json --verbose` output
+// Why NDJSON instead of SSE: SSE wraps each event in 'data: <json>\n\n',
+// but our parser does a straight 'json.Unmarshal' per line. Keeping the wire
+// format identical to 'claude --output-format stream-json --verbose' output
 // means zero parser changes on the Go side.
 //
 // Streaming: the response stays open for the lifetime of the child process.
-// One JSON event per line, flushed after each `write`. Errors surface as
-// `{type:"error", errorCategory, error, stderr?, code?, cause?}` lines
-// followed by response close — Go parser handles `type:"error"` and
-// surfaces the `errorCategory` for a tailored fix-hint.
+// One JSON event per line, flushed after each 'write'. Errors surface as
+// '{type:"error", errorCategory, error, stderr?, code?, cause?}' lines
+// followed by response close — Go parser handles 'type:"error"' and
+// surfaces the 'errorCategory' for a tailored fix-hint.
 app.post('/v1/run', async (req, res) => {
   const opts = buildRunRequest(req.body ?? {});
 
@@ -172,21 +236,69 @@ app.post('/v1/run', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders?.();
 
+  // Defense-in-depth: verify workDir is strictly inside
+  // /tmp/nova-agent/<projectID>/<reqID> before any spawn. NovaWorkbench's
+  // runRemoteCoding already does this on the Go side via
+  // RequireRemoteDevWorkDir; this worker-side check is the last gate against
+  // any path escaping the per-requirement isolation. Fail fast with an
+  // explicit 4xx so a misconfigured request doesn't spend 5s on preflight
+  // before being rejected. Wire format matches the rest of /v1/run: a
+  // single NDJSON error event then res.end() — Go-side parseStreamJSONFromReader
+  // already handles 'type:"error"' and surfaces 'error' to the user.
+  const reqBody = req.body ?? {};
+  const workDirReqId = (typeof reqBody.reqId === 'string' && reqBody.reqId)
+    || (typeof opts.workDir === 'string' ? opts.workDir.split('/').filter(Boolean).pop() : '');
+  try {
+    assertWorkDirInScope(opts.workDir, workDirReqId);
+  } catch (e) {
+    const status = e.status || 500;
+    res.status(status);
+    res.write(JSON.stringify({
+      type: 'error',
+      errorCategory: 'workdir_out_of_scope',
+      error: e.message,
+      code: status,
+    }) + '\n');
+    res.end();
+    return;
+  }
+
+  // Early bailout: if the worker itself is running as root (uid 0), the
+  // Claude CLI refuses --dangerously-skip-permissions with a hard error
+  // before doing any work. We don't want to wait through the 5s preflight
+  // + the real-run timeout to surface that — the Go side already maps the
+  // 'running_as_root' category to a tailored fix hint telling the operator
+  // to provision a non-root SSH user. The check is 'typeof process.getuid
+  // === 'function'' so platforms without a uid (Windows) silently skip —
+  // Windows doesn't have the root/sudo concept the CLI is rejecting here.
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    res.write(JSON.stringify({
+      type: 'error',
+      errorCategory: 'running_as_root',
+      error: 'Agent 服务器以 root 身份运行，Claude CLI 不允许 root/sudo 使用 --dangerously-skip-permissions',
+      stderr: '--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons',
+      code: -1,
+    }) + '\n');
+    res.end();
+    return;
+  }
+
   // Preflight — validate the claude CLI works in this env+cwd before
   // launching the real run. Without this probe, a misconfigured environment
   // would surface as the real run emitting one "error" event and then
   // exiting silently — indistinguishable from a successful empty run. 5s
   // budget keeps the round-trip short on the failure path; the success
   // path adds ~1-2s which is dominated by Node + claude cold-start anyway.
-  //
-  // The preflight env mirrors what we hand the real run so auth + base URL
-  // + model-pinning are identical. Merge process.env first so PATH + locale
-  // + DISPLAY survive even when options.env overrides only a handful of
-  // keys.
+  // The child process env is the agent host's own environment only. The
+  // platform-pinned keys (auth token / base URL / model / tier pins) are NOT
+  // merged here — they're delivered via --settings '{"env":{...}}' (see
+  // buildSettingsArg) so they land at the top of the CLI's settings stack and
+  // can't be shadowed by a stale ~/.claude/settings.json or an inherited
+  // ANTHROPIC_API_KEY.
   // process.env.PATH was already rewritten at module load (see
-  // resolveExtendedPath at the top of this file) so the spawn child can
-  // resolve `claude` even when systemd launched us with a stripped PATH.
-  const mergedEnv = { ...process.env, ...opts.env };
+  // resolveExtendedPath above) so the spawn child can resolve 'claude' even
+  // when systemd launched us with a stripped PATH.
+  const childEnv = { ...process.env };
   // Ensure TMPDIR (and the TMP/TEMP aliases) point at a writable location
   // before we hand the env to claude. On macOS, agent users provisioned
   // only via SSH often inherit $TMPDIR=/var/folders/<random>/T from the
@@ -197,10 +309,10 @@ app.post('/v1/run', async (req, res) => {
   // --print ping even starts. We walk a fallback chain (existing TMPDIR →
   // $HOME → /tmp → cwd → bare /tmp) so the CLI always has a writable
   // scratch dir regardless of how the SSH user was provisioned.
-  const tmpdir = resolveTmpdir(mergedEnv);
-  mergedEnv.TMPDIR = tmpdir;
-  mergedEnv.TMP = tmpdir;
-  mergedEnv.TEMP = tmpdir;
+  const tmpdir = resolveTmpdir(childEnv);
+  childEnv.TMPDIR = tmpdir;
+  childEnv.TMP = tmpdir;
+  childEnv.TEMP = tmpdir;
   // Also export the resolved value back into this worker's own env so any
   // node-side libraries (e.g. any future fs.mkdtemp call inside the worker
   // itself, or a downstream SDK that we don't currently use) inherit the
@@ -209,44 +321,74 @@ app.post('/v1/run', async (req, res) => {
   process.env.TMPDIR = tmpdir;
   process.env.TMP = tmpdir;
   process.env.TEMP = tmpdir;
-  // Strip model-pinning env vars from the preflight env. gateway.go's
-  // BuildEnvPairs injects ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL so
-  // a real /v1/run call has every tier pinned to the user's model. But the
-  // preflight passes no --model — the CLI then reads those env vars and
-  // tries to use them, only to emit `[claude-code:unrecognized_model]` for
-  // any custom model id (MiniMax-M3 etc.) and either fail the ping or hang
-  // retrying. Locally the user sees `claude --print ping` work because
-  // their local env doesn't have ANTHROPIC_DEFAULT_*_MODEL set, so the CLI
-  // falls back to its built-in catalog model. We mirror that on the
-  // preflight by stripping these three vars +
-  // CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT (which only
-  // matters when a custom model is in play). Auth + base URL + TMPDIR
-  // override are preserved so the probe still validates connectivity.
-  const preflightEnv = { ...mergedEnv };
-  delete preflightEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL;
-  delete preflightEnv.ANTHROPIC_DEFAULT_SONNET_MODEL;
-  delete preflightEnv.ANTHROPIC_DEFAULT_OPUS_MODEL;
-  delete preflightEnv.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT;
-  const pf = await preflight(opts.workDir, preflightEnv);
+  // Build the --settings block once and hand the SAME string to both the
+  // preflight probe and the real run, so the ping validates byte-for-byte
+  // the auth / base URL / model the real run will use (instead of the agent
+  // host's CLI defaults, which a third-party endpoint may not serve).
+  const settingsArg = buildSettingsArg(opts);
+
+  // Log BOTH the preflight command and the planned real-run command up front
+  // — before any spawn. The previous shape only logged after preflight
+  // succeeded, so a preflight failure (timeout / unrecognized_model /
+  // network unreachable) left the journal and the wizard job panel with
+  // nothing but 'preflight 失败' — operators couldn't tell whether the
+  // settings JSON was wrong, the model name was wrong, or the auth token was
+  // missing. We now write three lines to stderr + the NDJSON stream so a
+  // failure shows the exact arg list the CLI was invoked with.
+  const realArgs = buildClaudeArgs(opts, settingsArg);
+  const realRendered = renderCommand(realArgs);
+  // The preflight uses its own (smaller) pingArgs list — render it the same
+  // way so the logged command is copy-pasteable, then append the same
+  // --settings JSON so the two logs diff cleanly on auth / base URL / model.
+  const pingArgs = ['--print', 'ping', '--output-format', 'text', '--setting-sources', 'project,local'];
+  if (settingsArg) pingArgs.push('--settings', settingsArg);
+  const pingRendered = renderCommand(pingArgs);
+  console.error('[nova-agent-worker] exec preflight: ' + pingRendered);
+  console.error('[nova-agent-worker] exec planned:  ' + realRendered);
+  res.write(JSON.stringify({ type: 'log', content: '准备 preflight: ' + pingRendered }) + '\n');
+  res.write(JSON.stringify({ type: 'log', content: '准备执行主命令: ' + realRendered }) + '\n');
+  if (typeof res.flush === 'function') res.flush();
+
+  // Resolve the claude command ONCE and use the same {cmd, env} for both
+  // the preflight probe and the real run — otherwise a preflight that
+  // passed via the absolute path could be followed by a real run that
+  // fell back to PATH (or vice versa), and the probe would stop being
+  // predictive of the thing it's supposed to gate.
+  const claudeCmd = resolveClaudeCommand(opts.claudeBin, opts.extraPaths, childEnv);
+  if (claudeCmd.cmd !== 'claude') {
+    res.write(JSON.stringify({ type: 'log', content: '使用下发的 claude 绝对路径: ' + claudeCmd.cmd }) + '\n');
+  }
+
+  const pf = await preflight(opts.workDir, claudeCmd, settingsArg);
   if (!pf.ok) {
     res.write(JSON.stringify({
       type: 'error',
       errorCategory: pf.errorCategory,
-      error: `preflight 失败（${pf.errorCategory}）`,
+      error: 'preflight 失败（' + pf.errorCategory + '）',
       stderr: pf.stderr || '',
       code: pf.code,
       preflight: true,
+      // Echo what we actually tried. Without these two fields a
+      // cli_not_found is indistinguishable between "no path was sent",
+      // "the sent path was wrong" and "PATH lookup missed" — which is
+      // exactly the ambiguity that made this class of bug hard to pin down.
+      resolvedClaudeBin: claudeCmd.cmd,
+      resolvedPath: claudeCmd.env.PATH || '',
     }) + '\n');
     res.end();
     return;
   }
 
-  const args = buildClaudeArgs(opts);
+  const args = realArgs;
+  // Real-run entry log — preflight already passed, just record the boundary.
+  console.error('[nova-agent-worker] exec: ' + realRendered);
+  res.write(JSON.stringify({ type: 'log', content: '执行命令: ' + realRendered }) + '\n');
+  if (typeof res.flush === 'function') res.flush();
   let proc;
   try {
-    proc = spawn('claude', args, {
+    proc = spawn(claudeCmd.cmd, args, {
       cwd: opts.workDir,
-      env: mergedEnv,
+      env: claudeCmd.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
   } catch (e) {
@@ -257,6 +399,8 @@ app.post('/v1/run', async (req, res) => {
       errorCategory: 'cli_not_found',
       error: String(e && e.message || e),
       code: -1,
+      resolvedClaudeBin: claudeCmd.cmd,
+      resolvedPath: claudeCmd.env.PATH || '',
     }) + '\n');
     res.end();
     return;
@@ -282,6 +426,8 @@ app.post('/v1/run', async (req, res) => {
       error: String(e.message || e),
       stderr: String(e.message || e),
       code: e.code,
+      resolvedClaudeBin: claudeCmd.cmd,
+      resolvedPath: claudeCmd.env.PATH || '',
     }) + '\n');
     res.end();
   });
@@ -292,7 +438,7 @@ app.post('/v1/run', async (req, res) => {
     }
     // Non-zero exit — emit a single error event with the captured stderr so
     // the Go parser (which already knows how to surface errorCategory +
-    // stderr) can render a tailored fix hint. `serializeError` mirrors the
+    // stderr) can render a tailored fix hint. 'serializeError' mirrors the
     // shape classifyError expects.
     const payload = serializeCLIError({ code, signal, stderr });
     res.write(JSON.stringify({ type: 'error', ...payload }) + '\n');
@@ -300,43 +446,77 @@ app.post('/v1/run', async (req, res) => {
   });
 });
 
-// preflight spawns `claude --print ping` with the same env+cwd as the real
+// preflight spawns 'claude --print ping' with the same env+cwd as the real
 // call and returns {ok, errorCategory, stderr, stdout, code}. Catches the
 // actual CLI failure the Go side would otherwise see as a generic "exit 1".
 //
-// 5s timeout: `claude --print ping` round-trips through the Anthropic API
-// and normally completes in <2s on a healthy host. A timeout here is
-// indistinguishable from "API hung" — we surface it as its own category so
-// the Go side can show a network-unreachable hint without conflating it
-// with a 30s-deep hang the real run would otherwise expose.
-function preflight(workDir, env) {
+// 15s timeout: 'claude --print ping' round-trips through the Anthropic API
+// and normally completes in <2s on a healthy host, but custom base URLs
+// (e.g. minimax, deepseek proxies) can run the CLI's TLS handshake +
+// first-call model catalog lookup in 5-8s on a cold cache, and a
+// freshly-restarted systemd --user worker adds another second of node
+// startup before the spawn even happens. 5s (the previous value) was
+// empirically too aggressive — even a healthy host with MiniMax-M3 on a
+// private base URL would surface as 'preflight_timeout' because the ping
+// takes ~6s end-to-end, masking the real CLI behaviour behind an opaque
+// timeout. 15s still distinguishes "API hung" from "slow first call"
+// without dragging the failure path into the 30s-deep territory a real
+// run exposes. Keep this in sync with the [preflight timeout after Xs]
+// string injected into the stderr below.
+//
+// Fast-fail on classified stderr: the CLI's 'unrecognized_model' (and a
+// few other well-known patterns — see classifyError) is emitted to stderr
+// as soon as the CLI rejects a config (model id, auth token, base URL),
+// but the CLI then hangs waiting on something else (catalog refresh,
+// retry) and never exits on its own. Without fast-fail, those errors
+// would surface as 'preflight_timeout' after 15s, hiding the real reason
+// behind a misleading "Agent 服务器无法访问 API". classifyError runs on
+// every stderr chunk; any non-'unknown' category resolves the promise
+// immediately and SIGTERMs the hung child. The Go side already has
+// tailored fix hints for those categories (workerCategoryHint), so a
+// sub-second failure is also a much more actionable error message.
+//
+// 'claudeCmd' is the {cmd, env} pair returned by resolveClaudeCommand — the
+// caller resolves it once and passes the SAME pair here and to the real
+// run, so the probe exercises byte-for-byte the binary and PATH the real
+// spawn will use.
+const PREFLIGHT_TIMEOUT_MS = 15000;
+function preflight(workDir, claudeCmd, settingsArg) {
   return new Promise((resolve) => {
     let proc;
+    let settled = false;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      try { if (proc) proc.kill('SIGTERM'); } catch {}
+      resolve(result);
+    };
     try {
-      // --setting-sources "project,local" drops the user source so the
-      // preflight mirrors the wizard remote path (which sets
-      // IgnoreLocalSettings=true on the wire). Without this, the
-      // preflight reads the seeded ~/.claude/settings.json — placed
-      // there by the install script with a placeholder
-      // ANTHROPIC_AUTH_TOKEN and ANTHROPIC_DEFAULT_*_MODEL=MiniMax-M3
-      // but WITHOUT CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT.
-      // The CLI's settings.json `env` block applies OVER the process env
-      // we pass in, so the placeholder token would shadow the platform's
-      // real auth, the unknown model would trigger
-      // [claude-code:unrecognized_model], and the ping call would hang /
-      // fail — making the preflight useless as an early-warning probe.
+      // The --settings block (built by buildSettingsArg, the same string the
+      // real run uses) is the PRIMARY source of auth / base URL / model: it
+      // sits at the top of the CLI's settings stack, above the seeded
+      // ~/.claude/settings.json the install script places on the agent host
+      // (placeholder token + MiniMax-M3 model pins), so the ping round-trips
+      // the platform's real config instead of the host's stale defaults.
       //
-      // CLI quirk: `--setting-sources` only accepts combinations of
-      // {user, project, local} — no "drop ALL" value. We pick project+local
-      // because the install only seeds the user source, so this gives us
-      // the platform-env-wins behavior the wizard wants.
-      proc = spawn('claude', ['--print', 'ping', '--output-format', 'text', '--setting-sources', 'project,local'], {
+      // --setting-sources "project,local" is kept as defense-in-depth: it
+      // drops the user source so other stray user-settings keys (permissions,
+      // hooks, a top-level 'model') can't leak into the probe. CLI quirk:
+      // '--setting-sources' only accepts combinations of {user, project,
+      // local} — no "drop ALL" value — so project+local is the best we can do;
+      // a fresh agent host only seeds the user source, so this is equivalent
+      // to "drop everything" in practice.
+      const pingArgs = ['--print', 'ping', '--output-format', 'text', '--setting-sources', 'project,local'];
+      if (settingsArg) {
+        pingArgs.push('--settings', settingsArg);
+      }
+      proc = spawn(claudeCmd.cmd, pingArgs, {
         cwd: workDir,
-        env,
+        env: claudeCmd.env,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (e) {
-      resolve({
+      settle({
         ok: false,
         errorCategory: 'cli_not_found',
         stderr: String(e && e.message || e),
@@ -347,16 +527,37 @@ function preflight(workDir, env) {
     let stderr = '';
     let stdout = '';
     proc.stdout.on('data', (d) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.stderr.on('data', (d) => {
+      stderr += d.toString();
+      // Fast-fail on classifier-detected errors. The CLI emits
+      // '[claude-code:unrecognized_model]' (and similar tagged errors) on
+      // stderr the moment it rejects the config, then keeps the process
+      // alive doing internal bookkeeping — the next chunk won't come for
+      // seconds. classifyError's regexes match the partial stderr
+      // (e.g. literal "unrecognized_model"), so a single tagged line is
+      // enough. 'unknown' is intentionally skipped: a CLI that just
+      // happens to print something category-shaped shouldn't poison an
+      // otherwise-healthy run.
+      const cat = classifyError(null, stderr);
+      if (cat !== 'unknown') {
+        settle({
+          ok: false,
+          errorCategory: cat,
+          stderr,
+          stdout,
+          code: null,
+        });
+      }
+    });
     proc.on('error', (e) => {
       const cat = (e && e.code === 'ENOENT') ? 'cli_not_found' : classifyError(null, String(e.message || e));
-      resolve({ ok: false, errorCategory: cat, stderr: String(e.message || e), code: e.code });
+      settle({ ok: false, errorCategory: cat, stderr: String(e.message || e), stdout, code: e.code });
     });
     proc.on('close', (code) => {
       if (code === 0) {
-        resolve({ ok: true });
+        settle({ ok: true });
       } else {
-        resolve({
+        settle({
           ok: false,
           errorCategory: classifyError(null, stderr || stdout),
           stderr,
@@ -366,32 +567,32 @@ function preflight(workDir, env) {
       }
     });
     setTimeout(() => {
-      try { proc.kill('SIGTERM'); } catch {}
       // SIGTERM gives the CLI ~1s to flush stderr before our exit
       // resolves; the final stderr we read from above already has the
       // early output and is usually enough to classify the failure.
-      resolve({
+      settle({
         ok: false,
         errorCategory: 'preflight_timeout',
-        stderr: (stderr || '') + '\n[preflight timeout after 5s]',
+        stderr: (stderr || '') + '\n[preflight timeout after ' + (PREFLIGHT_TIMEOUT_MS / 1000) + 's]',
+        stdout,
         code: 143,
       });
-    }, 5000);
+    }, PREFLIGHT_TIMEOUT_MS);
   });
 }
 
 // resolveTmpdir returns a writable tmpdir path to inject into the child
 // env. Always returns a path — even on total failure we fall back to bare
-// `/tmp`, which is world-writable on every Linux distro (and where the
+// '/tmp', which is world-writable on every Linux distro (and where the
 // only failure mode is a full disk, which is its own problem).
 //
 // Why we override TMPDIR: on macOS, SSH-only users (e.g. the nova-agent
 // SSH user provisioned by our install flow) often have $TMPDIR inherited
 // from the per-user temp dir launchd creates at graphical login — but
 // if the user has never logged in graphically, that dir doesn't exist.
-// `claude` then tries to mkdir '/var/folders' (root-owned) and the whole
+// 'claude' then tries to mkdir '/var/folders' (root-owned) and the whole
 // process exits with EACCES before --print ping can do anything. The
-// same shape hits an SSH session forwarded by `SendEnv TMPDIR` from a
+// same shape hits an SSH session forwarded by 'SendEnv TMPDIR' from a
 // macOS dev box — the SSH user on a Linux agent never has a
 // /var/folders/<uuid>/T/ tree.
 //
@@ -399,7 +600,7 @@ function preflight(workDir, env) {
 //   1. Existing $TMPDIR — but ONLY if it's not the macOS-only
 //      /var/folders/<uuid>/T path AND we can stat + write to it.
 //   2. $HOME/.nova-agent-worker-XXXX — the SSH user's home is always
-//      writable for the user itself, and survives a `chmod 0700 $HOME`
+//      writable for the user itself, and survives a 'chmod 0700 $HOME'
 //      that some hardening guides apply (the per-process mkdtempSync
 //      runs as the user, so it inherits the user's own write perms).
 //   3. /tmp/.nova-agent-worker-XXXX — Linux always grants world-write
@@ -408,7 +609,7 @@ function preflight(workDir, env) {
 //      a read-only mount).
 //   4. process.cwd() — last resort before the bare /tmp fallback; only
 //      fails if cwd was deleted out from under us mid-flight.
-//   5. Bare `/tmp` — never fails on Linux. Not ideal (multi-tenant
+//   5. Bare '/tmp' — never fails on Linux. Not ideal (multi-tenant
 //      visibility) but always functional, and the CLI only uses it for
 //      scratch during one turn, so the noise is bounded.
 //
@@ -429,11 +630,11 @@ function resolveTmpdir(env) {
       accessSync(cur, fsConstants.W_OK | fsConstants.X_OK);
       return cur;
     } catch (e) {
-      console.error(`[nova-agent-worker] existing TMPDIR=${cur} not usable: ${e.code || e.message}; falling back`);
+      console.error('[nova-agent-worker] existing TMPDIR=' + cur + ' not usable: ' + (e.code || e.message) + '; falling back');
     }
   }
   if (cur) {
-    console.error(`[nova-agent-worker] ignoring macOS-shaped TMPDIR=${cur} (would EACCES on Linux)`);
+    console.error('[nova-agent-worker] ignoring macOS-shaped TMPDIR=' + cur + ' (would EACCES on Linux)');
   }
 
   // 2) HOME-based tmpdir
@@ -441,10 +642,10 @@ function resolveTmpdir(env) {
   if (home) {
     try {
       const p = mkdtempSync(join(home, '.nova-agent-worker-'));
-      console.error(`[nova-agent-worker] resolved TMPDIR via $HOME: ${p}`);
+      console.error('[nova-agent-worker] resolved TMPDIR via $HOME: ' + p);
       return p;
     } catch (e) {
-      console.error(`[nova-agent-worker] mkdtempSync under $HOME=${home} failed: ${e.code || e.message}; trying /tmp`);
+      console.error('[nova-agent-worker] mkdtempSync under $HOME=' + home + ' failed: ' + (e.code || e.message) + '; trying /tmp');
     }
   } else {
     console.error('[nova-agent-worker] $HOME not set; trying /tmp');
@@ -453,19 +654,19 @@ function resolveTmpdir(env) {
   // 3) /tmp-based tmpdir
   try {
     const p = mkdtempSync('/tmp/.nova-agent-worker-');
-    console.error(`[nova-agent-worker] resolved TMPDIR via /tmp: ${p}`);
+    console.error('[nova-agent-worker] resolved TMPDIR via /tmp: ' + p);
     return p;
   } catch (e) {
-    console.error(`[nova-agent-worker] mkdtempSync under /tmp failed: ${e.code || e.message}; trying cwd`);
+    console.error('[nova-agent-worker] mkdtempSync under /tmp failed: ' + (e.code || e.message) + '; trying cwd');
   }
 
   // 4) cwd-based tmpdir
   try {
     const p = mkdtempSync(join(process.cwd(), '.nova-agent-worker-'));
-    console.error(`[nova-agent-worker] resolved TMPDIR via cwd: ${p}`);
+    console.error('[nova-agent-worker] resolved TMPDIR via cwd: ' + p);
     return p;
   } catch (e) {
-    console.error(`[nova-agent-worker] mkdtempSync under cwd=${process.cwd()} failed: ${e.code || e.message}; using bare /tmp`);
+    console.error('[nova-agent-worker] mkdtempSync under cwd=' + process.cwd() + ' failed: ' + (e.code || e.message) + '; using bare /tmp');
   }
 
   // 5) Last resort — bare /tmp. Always exists on Linux. The CLI will
@@ -475,13 +676,18 @@ function resolveTmpdir(env) {
   return '/tmp';
 }
 
-// readClaudeVersion shells out to `claude --version` and returns the first
+// readClaudeVersion shells out to 'claude --version' and returns the first
 // non-empty line. Used by /v1/health to surface the installed CLI version
 // to the Go side (so an operator can tell at a glance whether a remote
 // agent server is on a stale claude). Bounded 3s — if the CLI hangs the
 // health probe shouldn't drag the user-visible badge into a "loading" state.
 function readClaudeVersion() {
   return new Promise((resolve, reject) => {
+    // Deliberately NO claudeBin override here: /v1/health must report what
+    // this worker resolves on its OWN frozen PATH, because that is exactly
+    // the property the Go-side Check needs to test. Resolving via a
+    // caller-supplied path would make health report 'ok' for a worker that
+    // still can't run anything the moment a request arrives without one.
     const proc = spawn('claude', ['--version'], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -490,7 +696,7 @@ function readClaudeVersion() {
     proc.on('error', reject);
     proc.on('close', (code) => {
       if (code !== 0) {
-        reject(new Error(`claude --version exit ${code}`));
+        reject(new Error('claude --version exit ' + code));
         return;
       }
       const first = out.split('\n').map(l => l.trim()).find(Boolean);
@@ -509,13 +715,13 @@ function readClaudeVersion() {
 // → "检查设置 → Claude 配置里的 model 名" instead of the generic "exit 1").
 //
 // Pattern sources:
-//   - Claude Code CLI's own error tags: `[claude-code:unrecognized_model]`,
-//     `[claude-code:not_logged_in]` etc.
+//   - Claude Code CLI's own error tags: '[claude-code:unrecognized_model]',
+//     '[claude-code:not_logged_in]' etc.
 //   - Node / undici / DNS error codes: ENOTFOUND, ECONNREFUSED, etc.
 //   - HTTP-status hints in stderr: 401, 403, 404, 429, 5xx.
 //
 // Order matters — more specific patterns come first so e.g.
-// "401 Unauthorized" classifies as `auth_failed` instead of falling
+// "401 Unauthorized" classifies as 'auth_failed' instead of falling
 // through to a generic "unauthorized" bucket.
 function classifyError(err, stderr) {
   const msg = (err && err.message) || '';
@@ -531,6 +737,17 @@ function classifyError(err, stderr) {
   // "Authentication failed" and "not logged in" because Claude Code
   // changes wording between versions.
   if (/401|unauthorized|authentication failed|not logged in|invalid.{0,4}token|invalid.{0,4}api.{0,4}key|invalid.{0,4}auth/.test(text)) return 'auth_failed';
+
+  // Running as root — Claude CLI rejects --dangerously-skip-permissions
+  // with a hard error before any tool/API call when the effective uid is
+  // 0 or sudo is in effect. The exact stderr is "cannot be used with
+  // root/sudo privileges for security reasons"; we also accept the
+  // "must not be run as root" / "running with root" wordings some
+  // versions use, so a CLI wording change doesn't silently fall through
+  // to the 'unknown' bucket. Keep this BEFORE the generic permission
+  // categories so it wins over a coincidental "permission" match in the
+  // same stderr.
+  if (/cannot be used with root|root\s*\/\s*sudo privileges|running with root|must not be run as root|running as root/.test(text)) return 'running_as_root';
 
   // Forbidden — token valid but lacks scope / region. Different fix from
   // auth_failed (token is right; permission is wrong).
@@ -580,15 +797,15 @@ function classifyError(err, stderr) {
 
 // serializeCLIError shapes a {code, signal, stderr} view of a non-zero
 // child-process exit into the error-payload shape the Go parser already
-// understands. The Go side looks at `errorCategory` to pick a fix hint
-// and at `stderr` to show the actual CLI failure line; the other fields
+// understands. The Go side looks at 'errorCategory' to pick a fix hint
+// and at 'stderr' to show the actual CLI failure line; the other fields
 // are diagnostic sugar.
 function serializeCLIError({ code, signal, stderr }) {
   const trimmed = (stderr || '').trim();
   const out = {
     error: trimmed
       ? trimmed.split('\n').slice(-1)[0].slice(0, 800)
-      : `claude 进程退出码 ${code}${signal ? `（信号 ${signal}）` : ''}`,
+      : 'claude 进程退出码 ' + code + (signal ? '（信号 ' + signal + '）' : ''),
     errorCategory: classifyError(null, stderr || ''),
   };
   if (code != null) out.code = code;
@@ -629,6 +846,9 @@ function buildRunRequest(body) {
     permissionMode,
     overrideSettingSources,
     ignoreLocalSettings,
+    claudeConfigId,
+    claudeBin,
+    extraPaths,
   } = body;
 
   if (!workDir) {
@@ -657,7 +877,7 @@ function buildRunRequest(body) {
   //                                   ~/.claude/settings.json the install
   //                                   script places on the agent host.
   //
-  // CLI quirk: `--setting-sources` only accepts combinations of
+  // CLI quirk: '--setting-sources' only accepts combinations of
   // {user, project, local} — there is no "drop ALL" value, so the
   // semantic of "drop everything" maps to dropping just the user
   // source. Project + local are typically empty on a fresh agent
@@ -683,12 +903,106 @@ function buildRunRequest(body) {
     allowedTools: Array.isArray(allowedTools) ? allowedTools : [],
     disallowedTools: Array.isArray(disallowedTools) ? disallowedTools : [],
     permissionMode: permissionMode === 'plan' ? 'plan' : '',
+    // The Go side passes the resolved claude_config_id so future tweaks
+    // (e.g. surfacing the active gateway in the SSE log) can read it
+    // without a second round-trip. Today it's informational.
+    claudeConfigId: typeof claudeConfigId === 'string' ? claudeConfigId : '',
+    // Runtime location of the claude CLI, resolved by NovaWorkbench's
+    // Check/Install and mirrored from agent_servers.claude_bin /
+    // .extra_paths. Both optional — an older NovaWorkbench omits them and
+    // resolveClaudeCommand falls back to bare PATH lookup, which is the
+    // pre-existing behaviour. extraPaths is ':'-separated (the Go side
+    // joins the newline-separated DB column before sending).
+    claudeBin: typeof claudeBin === 'string' ? claudeBin : '',
+    extraPaths: typeof extraPaths === 'string' ? extraPaths : '',
     settingSources,
   };
 }
 
-// buildClaudeArgs assembles the `claude -p ... --output-format stream-json
-// --verbose ...` flag list from buildRunRequest output. The mapping mirrors
+// buildSettingsArg renders the inline JSON for 'claude --settings'. Claude Code
+// accepts either a settings file path OR an inline JSON string; the inline form
+// lands at the top of the non-managed settings stack, so its 'env' block
+// overrides both the process environment and any ~/.claude/settings.json the
+// install script seeded on the agent host. That's where we now deliver the
+// platform-pinned keys (auth token / base URL / model / tier pins) instead of
+// leaking them into the child's process env or relying on --setting-sources to
+// suppress a stale user settings file.
+//
+// The 'env' block mirrors what BuildRemoteEnvPairs sends (ANTHROPIC_AUTH_TOKEN,
+// ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL,
+// CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT); we additionally fold
+// opts.model in as ANTHROPIC_MODEL — the CLI's documented env var for the
+// session model, equivalent to the old --model flag but settable here so the
+// model travels with the rest of the platform config.
+//
+// Returns null when there's nothing to pin (no env keys and no model) so the
+// caller can omit --settings entirely and leave the CLI defaults untouched.
+function buildSettingsArg(opts) {
+  const envBlock = { ...(opts.env || {}) };
+  if (opts.model) {
+    envBlock.ANTHROPIC_MODEL = opts.model;
+  }
+  if (Object.keys(envBlock).length === 0) {
+    return null;
+  }
+  return JSON.stringify({ env: envBlock });
+}
+
+// renderCommand joins a spawn argv into one shell-style line for the worker log
+// and the coding job panel. Two flags are special-cased so the line stays useful
+// without leaking secrets or flooding the log:
+//   --settings <json> → the value is re-serialized with the auth token
+//                        (ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY) blanked; the
+//                        rest (base URL / model / tier pins) is shown in full.
+//   -p <prompt>       → truncated to a short prefix (the prompt can carry ~40KB
+//                        of pre-read project context).
+// Everything else is single-quoted so the line can be copy-pasted to a shell.
+function renderCommand(args) {
+  const parts = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--settings' && i + 1 < args.length) {
+      parts.push('--settings ' + shellQuote(redactSettings(args[i + 1])));
+      i++;
+    } else if (a === '-p' && i + 1 < args.length) {
+      parts.push('-p ' + shellQuote(truncate(args[i + 1], 200)));
+      i++;
+    } else {
+      parts.push(shellQuote(a));
+    }
+  }
+  return parts.join(' ');
+}
+
+// redactSettings blanks the auth token inside a --settings JSON string so
+// secrets never reach a log. Parses + re-serializes; on parse failure returns
+// the raw string unchanged (better to log the raw JSON than hide the whole line).
+function redactSettings(jsonStr) {
+  try {
+    const obj = JSON.parse(jsonStr);
+    if (obj && obj.env && typeof obj.env === 'object') {
+      if (obj.env.ANTHROPIC_AUTH_TOKEN) obj.env.ANTHROPIC_AUTH_TOKEN = '***';
+      if (obj.env.ANTHROPIC_API_KEY) obj.env.ANTHROPIC_API_KEY = '***';
+    }
+    return JSON.stringify(obj);
+  } catch {
+    return jsonStr;
+  }
+}
+
+// shellQuote single-quotes a string so a logged command can be copy-pasted.
+function shellQuote(s) {
+  return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+// truncate clips a string to n chars and appends a length note when clipped.
+function truncate(s, n) {
+  s = String(s);
+  return s.length <= n ? s : s.slice(0, n) + '…(+' + (s.length - n) + ' chars)';
+}
+
+// buildClaudeArgs assembles the 'claude -p ... --output-format stream-json
+// --verbose ...' flag list from buildRunRequest output. The mapping mirrors
 // backend/internal/llm/gateway.go:streamArgs so the local and remote paths
 // produce the same CLI invocation; differences are spelled out below.
 //
@@ -696,7 +1010,7 @@ function buildRunRequest(body) {
 // --permission-mode / --dangerously-skip-permissions per the CLI's flag
 // parser. We follow the same ordering as gateway.go so a regression in one
 // doesn't slip past the other.
-function buildClaudeArgs(opts) {
+function buildClaudeArgs(opts, settingsArg) {
   const args = ['-p', opts.prompt, '--output-format', 'stream-json', '--verbose'];
   // Setting-sources always present so the user can't accidentally land on
   // the CLI default (which loads ~/.claude/settings.json over process env
@@ -710,10 +1024,12 @@ function buildClaudeArgs(opts) {
     args.push('--dangerously-skip-permissions');
   }
 
-  if (opts.model) {
-    // Prepend --model so it lands before the -p block; gateway.go does
-    // the same to keep the relative ordering stable for diff debugging.
-    args.unshift('--model', opts.model);
+  if (settingsArg) {
+    // Prepend --settings so it lands before the -p block (mirrors how --model
+    // used to be prepended; gateway.go does the same to keep the relative
+    // ordering stable for diff debugging). The model + auth + base URL travel
+    // inside this JSON 'env' block instead of a --model flag + process env.
+    args.unshift('--settings', settingsArg);
   }
 
   if (opts.systemPrompt) {
@@ -761,6 +1077,47 @@ function buildClaudeArgs(opts) {
   return args;
 }
 
+// assertWorkDirInScope: NovaWorkbench 后端的 runRemoteCoding 严格把 wtPath 锁在
+// /tmp/nova-agent/<projectID>/<reqID> 下；本 worker 端做 defense-in-depth 校验，
+// 防止任何路径错误在远端被放大。即便 Go 侧所有校验都被绕过，worker 也会拒绝。
+//
+// 校验三层：
+//   1. workDir 必须是非空字符串
+//   2. realpathSync 必须成功（路径必须真实存在，否则抛 ENOENT → 400）
+//   3. 解析后的真实路径必须在 /tmp/nova-agent/ 下，且 reqId 必须出现在路径段中
+//
+// 任何一层失败抛出带 status 的 Error，handler 转成对应 4xx + JSON {error}。
+function assertWorkDirInScope(workDir, reqId) {
+  if (!workDir || typeof workDir !== 'string') {
+    throw httpError(400, 'workDir is required');
+  }
+  // 路径必须存在；realpathSync 不存在则抛 ENOENT
+  let real;
+  try {
+    real = realpathSync(workDir);
+  } catch (e) {
+    throw httpError(400, 'workDir ' + workDir + ' cannot be resolved: ' + e.message);
+  }
+  // reqId 必须出现在路径中（防止跨需求路径串台）
+  const segs = real.split(pathSep);
+  if (!reqId || !segs.includes(reqId)) {
+    throw httpError(403, 'workDir ' + real + ' does not contain reqId ' + reqId);
+  }
+  // 强约束：必须在 /tmp/nova-agent/ 下
+  if (!real.startsWith('/tmp/nova-agent/')) {
+    throw httpError(403, 'workDir ' + real + ' is outside /tmp/nova-agent/');
+  }
+  return real;
+}
+
+// httpError attaches an HTTP status to an Error so the /v1/run handler can
+// emit the right status code when an assertWorkDirInScope check fails.
+function httpError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
+
 // Bind 127.0.0.1 only — the worker is reached via SSH direct-tcpip channel
 // from NovaWorkbench, never directly from the network. Override via env if
 // a deployment really needs another bind (e.g. inside a container with port
@@ -768,5 +1125,5 @@ function buildClaudeArgs(opts) {
 const port = parseInt(process.env.NOVA_AGENT_WORKER_PORT ?? '7000', 10);
 const host = process.env.NOVA_AGENT_WORKER_HOST ?? '127.0.0.1';
 app.listen(port, host, () => {
-  console.log(`nova-agent-worker listening on http://${host}:${port}`);
+  console.log('nova-agent-worker listening on http://' + host + ':' + port);
 });

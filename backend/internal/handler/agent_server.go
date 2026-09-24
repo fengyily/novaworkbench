@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -285,7 +286,12 @@ func (h *AgentServerHandler) runCheck(job *store.Job, serverID string) {
 	if homeDir == "" {
 		homeDir = "/root"
 	}
-	workerStatus, workerMsg := h.probeWorkerAndAppend(ctx, client, homeDir, job)
+	// srv.ClaudeBin is whatever the LAST Check/Install resolved. This Check
+	// refreshes it further down (captureInstallRuntimeFacts), but the worker
+	// probe runs first, so we use the previously-persisted value — which is
+	// also the value the wizard would pin on a run started right now.
+	claudeInstalled := !slices.Contains(missing, "claude")
+	workerStatus, workerMsg := h.probeWorkerAndAppend(ctx, client, homeDir, claudeInstalled, strings.TrimSpace(srv.ClaudeBin) != "", job)
 	if workerStatus == model.AgentServerStatusError {
 		status = model.AgentServerStatusError
 		if summary == "所有依赖已就绪" {
@@ -687,22 +693,61 @@ func probeDepsAndUpdateStatus(ctx context.Context, svc *service.AgentServerServi
 //
 // homeDir is used as the install root when auto-reviving a down worker
 // (via startWorkerIfDown). Pass the resolved $HOME from the caller.
+//
+// claudeInstalled is whether the SSH-side dep probe found claude at all. When
+// it didn't, no amount of PATH repair can help, and attempting one would burn
+// ~20s of runCheck's 30s budget on a host that simply needs 「安装依赖」.
+//
+// claudeBinPinned tells the probe whether agent_servers.claude_bin holds a
+// usable absolute path. It decides the severity of "the worker is up but
+// can't find claude": with a pinned path the wizard sends it on every
+// /v1/run and the host still works, so that's a warning; without one every
+// run will ENOENT, so it's an error.
 func (h *AgentServerHandler) probeWorkerAndAppend(
-	ctx context.Context, client *gossh.Client, homeDir string, job *store.Job,
+	ctx context.Context, client *gossh.Client, homeDir string, claudeInstalled, claudeBinPinned bool, job *store.Job,
 ) (status string, summary string) {
 	job.Append(store.LogLine{Type: "phase", Content: "🔍 检查 nova-agent-worker..."})
-	if ver, err := probeWorkerHealth(ctx, client); err == nil {
+	if health, err := probeWorkerHealth(ctx, client); err == nil {
 		// The worker is listening, but it may be a stale process that survived
 		// a previous install (an old worker still bound to 7000). Compare the
 		// reported version against what this binary expects; a mismatch means
 		// the deployed worker predates this build and must be re-installed.
-		if ver != agentWorkerVersion {
-			msg := "运行中的 worker 版本为 " + workerVersionDisplay(ver) +
+		if health.WorkerVersion != agentWorkerVersion {
+			msg := "运行中的 worker 版本为 " + workerVersionDisplay(health.WorkerVersion) +
 				"，与当前期望 " + agentWorkerVersion + " 不一致：旧进程可能仍占用 7000 端口，请重新点「安装依赖」"
 			job.Append(store.LogLine{Type: "error", Content: "❌ " + msg})
 			return model.AgentServerStatusError, msg
 		}
-		job.Append(store.LogLine{Type: "message", Content: "✓ nova-agent-worker 已就绪（版本 " + ver + "）"})
+		job.Append(store.LogLine{Type: "message", Content: "✓ nova-agent-worker 已就绪（版本 " + health.WorkerVersion + "）"})
+		// The port answering is NOT the same as the worker being able to run
+		// anything. The dep probe above found claude through a fresh SSH
+		// shell (which widens PATH and sources nvm.sh); the worker spawns
+		// from its own frozen process PATH. When those disagree the host
+		// looks perfectly healthy here and then fails every single run with
+		// `spawn claude ENOENT` — so ask the worker itself.
+		if !health.ClaudeResolvable() {
+			if !claudeInstalled {
+				// claude is missing host-wide; the dep probe above already
+				// flagged it. Restarting the worker cannot conjure a binary,
+				// so don't spend the Check budget trying.
+				job.Append(store.LogLine{Type: "message", Content: "ℹ️ worker 也找不到 claude —— claude 本身就没装，见上面的依赖检查结果"})
+				return model.AgentServerStatusReady, ""
+			}
+			job.Append(store.LogLine{Type: "message", Content: "⚠ worker 进程自身找不到 claude（SSH 能找到 ≠ worker 能找到），尝试用新 PATH 重启 worker..."})
+			if repaired, rerr := repairWorkerPATH(ctx, client, homeDir); rerr == nil {
+				job.Append(store.LogLine{Type: "message", Content: "✓ worker 已用新 PATH 重启，claude " + repaired.ClaudeVersion})
+				return model.AgentServerStatusReady, ""
+			} else if claudeBinPinned {
+				// Runs still work: the wizard pins claude_bin on every
+				// /v1/run, which bypasses the worker's PATH entirely.
+				job.Append(store.LogLine{Type: "message", Content: "⚠ worker PATH 修复失败(" + rerr.Error() + ")，但已记录 claude 绝对路径，执行时会按该路径下发，不影响开发"})
+				return model.AgentServerStatusReady, ""
+			} else {
+				msg := "worker 进程的 PATH 里没有 claude，且未记录 claude 绝对路径 —— 每次开发都会 spawn claude ENOENT。请点「安装依赖」重装"
+				job.Append(store.LogLine{Type: "error", Content: "❌ " + msg + "（worker PATH: " + health.Path + "）"})
+				return model.AgentServerStatusError, msg
+			}
+		}
 		return model.AgentServerStatusReady, ""
 	}
 
@@ -1174,15 +1219,15 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 	// if it's down we fall through to a nohup launch and re-probe. Only
 	// if BOTH paths fail do we report an error.
 	job.Append(store.LogLine{Type: "phase", Content: "🔍 worker 健康检查..."})
-	if ver, err := probeWorkerHealth(ctx, client); err == nil {
-		if ver != agentWorkerVersion {
+	if health, err := probeWorkerHealth(ctx, client); err == nil {
+		if health.WorkerVersion != agentWorkerVersion {
 			// Worker is up but running stale code — the systemd restart was a
 			// silent no-op and an old process still holds 7000. Fall through to
 			// the nohup path, whose pkill kills the stale process before
 			// relaunching from the freshly-written server.mjs.
-			job.Append(store.LogLine{Type: "message", Content: "⚠ systemd 路径上的 worker 仍是旧版本 " + workerVersionDisplay(ver) + "，回落到 nohup（会先 kill 旧进程）"})
+			job.Append(store.LogLine{Type: "message", Content: "⚠ systemd 路径上的 worker 仍是旧版本 " + workerVersionDisplay(health.WorkerVersion) + "，回落到 nohup（会先 kill 旧进程）"})
 		} else {
-			job.Append(store.LogLine{Type: "message", Content: "✓ worker 健康检查通过（版本 " + ver + "）"})
+			job.Append(store.LogLine{Type: "message", Content: "✓ worker 健康检查通过（版本 " + health.WorkerVersion + "）"})
 			if err := h.svc.UpdateWorkerVersion(serverID, agentWorkerVersion); err != nil {
 				job.Append(store.LogLine{Type: "message", Content: "⚠ 记录 worker 版本失败（不影响安装）: " + err.Error()})
 			}
@@ -1221,36 +1266,10 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 	// path, not the generic `node`, so other node processes on the host
 	// (vite / npm / etc.) are untouched.
 	//
-	// The `grep -vx "$$"` is not optional: `pgrep -f` regex-matches the full
-	// command line, and this shell's own argv contains the literal string
-	// `nova-agent-worker/server.mjs` (in the `node .../server.mjs` line and
-	// the trailing echo). Without excluding our own PID, OLD_PID resolves to
-	// this shell and `kill "$OLD_PID"` SIGTERMs ourselves → exit 143, which
-	// surfaces as a spurious "nohup 启动失败" even though nothing was wrong.
-	launchCmd := `export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"; ` +
-		`if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh" 2>/dev/null; fi; ` +
-		`hash -r 2>/dev/null; ` +
-		`OLD_PID=$(pgrep -f nova-agent-worker/server.mjs | grep -vx "$$" | head -n1); ` +
-		`if [ -n "$OLD_PID" ]; then kill "$OLD_PID" 2>/dev/null; sleep 1; kill -9 "$OLD_PID" 2>/dev/null || true; fi; ` +
-		// TMPDIR=/tmp on the nohup env line guards against the macOS dev
-		// box's SendEnv forwarding /var/folders/... into the SSH session
-		// (which the nohup-launched worker would otherwise inherit).
-		// server.mjs's resolveTmpdir also patches this per-spawn for the
-		// claude child, but pinning it on the worker itself means Node's
-		// own os.tmpdir() is sane before any user code runs.
-		//
-		// NOVA_AGENT_WORKER_EXTRA_PATHS is read by server.mjs's
-		// resolveExtendedPath so the worker's spawn('claude') can locate
-		// the CLI when systemd --user didn't take over. The leading PATH=
-		// on this env line is belt-and-braces: even if a future server.mjs
-		// forgets to honor NOVA_AGENT_WORKER_EXTRA_PATHS, the worker
-		// process still has PATH for this launch.
-		`nohup env NOVA_AGENT_WORKER_HOST=127.0.0.1 NOVA_AGENT_WORKER_PORT=7000 TMPDIR=/tmp ` +
-		`NOVA_AGENT_WORKER_EXTRA_PATHS=` + shellQuote(workerPATH) + ` ` +
-		`PATH=` + shellQuote(workerPATH) + ` ` +
-		`node ` + installDir + `/server.mjs > ` + installDir + `/worker.log 2>&1 & ` +
-		`disown 2>/dev/null || true; ` +
-		`sleep 1; echo "[nova-agent] nohup launched, pid=$(pgrep -f nova-agent-worker/server.mjs | grep -vx "$$" | head -n1), killed_old=${OLD_PID:-none}"`
+	// See nohupLaunchWorker for the PATH plumbing and the `grep -vx "$$"`
+	// self-PID exclusion; killOld=true because we have just overwritten
+	// server.mjs and a surviving process would keep serving the old code.
+	launchCmd := nohupLaunchWorker(installDir, workerPATH, true)
 	if exit, err := client.Exec(ctx, launchCmd, "", nil, jobLineWriter(job), nil); err != nil || exit != 0 {
 		return fmt.Errorf("nohup 启动失败（exit=%d err=%v）", exit, err)
 	}
@@ -1267,14 +1286,14 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 	// report agentWorkerVersion. Anything else means a stale process is still
 	// serving 7000 — a hard failure, not a silent "success" that would leave
 	// the old worker handling every coding run.
-	ver, err := probeWorkerHealth(ctx, client)
+	health, err := probeWorkerHealth(ctx, client)
 	if err != nil {
 		return fmt.Errorf("读取 worker 版本失败: %w", err)
 	}
-	if ver != agentWorkerVersion {
-		return fmt.Errorf("worker 已就绪但版本仍为 %s（应为 %s）：旧进程可能仍占用 7000 端口，请 SSH 到服务器执行 `ps aux | grep server.mjs` 手动 kill 后重试", workerVersionDisplay(ver), agentWorkerVersion)
+	if health.WorkerVersion != agentWorkerVersion {
+		return fmt.Errorf("worker 已就绪但版本仍为 %s（应为 %s）：旧进程可能仍占用 7000 端口，请 SSH 到服务器执行 `ps aux | grep server.mjs` 手动 kill 后重试", workerVersionDisplay(health.WorkerVersion), agentWorkerVersion)
 	}
-	job.Append(store.LogLine{Type: "message", Content: "✓ worker 健康检查通过 (nohup，版本 " + ver + ")"})
+	job.Append(store.LogLine{Type: "message", Content: "✓ worker 健康检查通过 (nohup，版本 " + health.WorkerVersion + ")"})
 	if err := h.svc.UpdateWorkerVersion(serverID, agentWorkerVersion); err != nil {
 		job.Append(store.LogLine{Type: "message", Content: "⚠ 记录 worker 版本失败（不影响安装）: " + err.Error()})
 	}
@@ -1295,27 +1314,50 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 // workerVersion (empty for a worker predating version reporting). Used by both
 // install and check flows. Lives here (not in runCheck) so the install flow has
 // its own copy without tangling the Check goroutine's status logic.
-func probeWorkerHealth(ctx context.Context, client *gossh.Client) (string, error) {
+func probeWorkerHealth(ctx context.Context, client *gossh.Client) (workerHealth, error) {
 	hc, hcCancel := context.WithTimeout(ctx, 8*time.Second)
 	defer hcCancel()
 	req, _ := http.NewRequestWithContext(hc, http.MethodGet, "http://127.0.0.1:7000/v1/health", nil)
 	resp, err := (&http.Client{Transport: client.HTTPTransport("127.0.0.1:7000")}).Do(req)
 	if err != nil {
-		return "", err
+		return workerHealth{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+		return workerHealth{}, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	var health struct {
-		Status        string `json:"status"`
-		ClaudeVersion string `json:"claudeVersion"`
-		WorkerVersion string `json:"workerVersion"`
-	}
+	var health workerHealth
 	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
-		return "", err
+		return workerHealth{}, err
 	}
-	return health.WorkerVersion, nil
+	return health, nil
+}
+
+// workerHealth is the decoded GET /v1/health payload.
+//
+// ClaudeVersion is the load-bearing field and the reason this is a struct
+// rather than a bare version string: the worker produces it by running
+// `claude --version` through its OWN spawn path, so it is the only signal
+// that reflects whether the worker process — whose PATH was frozen when it
+// started — can actually launch the CLI. Every other probe in this file
+// opens a fresh SSH shell (and sources nvm.sh), which answers a different
+// question entirely. That gap is exactly how a host reports "所有依赖已就绪"
+// and then fails every run with `spawn claude ENOENT`.
+type workerHealth struct {
+	Status        string `json:"status"`
+	ClaudeVersion string `json:"claudeVersion"`
+	WorkerVersion string `json:"workerVersion"`
+	// Path is the worker's resolved process PATH, echoed back for diagnostics
+	// (workers older than 0.4.0 omit it).
+	Path string `json:"path"`
+}
+
+// ClaudeResolvable reports whether the worker could spawn claude by name.
+// The worker reports "unknown" when `claude --version` errored, timed out,
+// or ENOENT'd; pre-0.4.0 workers may omit the field entirely.
+func (h workerHealth) ClaudeResolvable() bool {
+	v := strings.TrimSpace(h.ClaudeVersion)
+	return v != "" && v != "unknown"
 }
 
 // workerVersionDisplay returns a human-readable version label; an empty
@@ -1327,21 +1369,21 @@ func workerVersionDisplay(v string) string {
 	return v
 }
 
-// probeClaudeExecutable runs `claude --version` inside the SSH session the
-// worker will spawn from (i.e. same $PATH the worker's spawn('claude') will
-// see) and surfaces a hard error if it fails. This catches the exact class
-// of "ready but cli_not_found" install that motivated this whole flow: the
-// Check command in runCheck runs through SSH with an augmented PATH and
-// passes, but the worker process — launched under systemd --user or nohup
-// — does NOT see the install's actual claude bin dir because of cross-user
-// npm prefix / stripped PATH issues. Without this probe the install reports
-// `ready` and the user only learns the truth on their first wizard run,
-// surfacing as `preflight cli_not_found` mid-coding.
+// probeClaudeExecutable runs `claude --version` in a fresh SSH session with
+// the install-time PATH augmentations (nvm source + user-local bin dirs) and
+// surfaces a hard error if it fails. It answers "is claude installed and
+// runnable on this host at all", which is a genuine question — but NOT the
+// one an operator debugging `spawn claude ENOENT` actually has.
 //
-// We do NOT trust `which claude` here (it would only mirror what Check
-// already does — fail at exactly the same point). Instead we exercise the
-// worker's spawn surface area: same augmentations, same `command -v` style,
-// then `claude --version` with stderr captured.
+// CORRECTION (this comment previously claimed the probe "exercises the
+// worker's spawn surface area" — it does not, and believing it did is how a
+// whole class of bug stayed hidden): this runs in an SSH shell that widens
+// PATH and sources nvm.sh. The worker spawns from its own process PATH,
+// frozen at launch by the systemd unit / launchd plist / nohup env line. The
+// two environments routinely disagree — that disagreement IS the bug — so
+// this probe passing tells you nothing about whether a run will work. The
+// worker-side question is answered by the /v1/health claudeVersion check in
+// probeWorkerAndAppend, which asks the worker process itself.
 //
 // Bounded 8s: claude --version is a fast no-API call, so this is plenty
 // even on a slow VM. If the user's install path was wrong the failure
@@ -1377,7 +1419,24 @@ func (h *AgentServerHandler) probeClaudeExecutable(ctx context.Context, client *
 	if v == "" {
 		v = "(unknown)"
 	}
-	job.Append(store.LogLine{Type: "message", Content: "✓ claude " + v})
+	job.Append(store.LogLine{Type: "message", Content: "✓ claude " + v + "（SSH 会话内）"})
+
+	// The check that actually predicts whether a run will work: ask the
+	// worker process, which we just (re)started with a freshly-composed
+	// PATH. If it still can't resolve claude, the install has produced a
+	// host that passes every SSH-side probe and fails every wizard run —
+	// the exact silent failure this whole flow exists to prevent. Not fatal
+	// to the install (the per-request claudeBin pin, recorded moments later
+	// by captureInstallRuntimeFacts, still rescues the run), but it must be
+	// visible in the install log rather than discovered mid-coding.
+	if health, herr := probeWorkerHealth(ctx, client); herr == nil {
+		if health.ClaudeResolvable() {
+			job.Append(store.LogLine{Type: "message", Content: "✓ worker 进程内也能解析 claude " + health.ClaudeVersion})
+		} else {
+			job.Append(store.LogLine{Type: "message", Content: "⚠ worker 进程自身仍解析不到 claude（PATH: " + health.Path +
+				"）—— 执行时将按下发的 claude 绝对路径运行"})
+		}
+	}
 	return nil
 }
 
@@ -1441,26 +1500,159 @@ func startWorkerIfDown(ctx context.Context, client *gossh.Client, homeDir string
 	// to a worker restart without persisted state.
 	extraPathDirs := readExtraPaths(ctx, client, homeDir)
 	workerPATH := composeWorkerPATH(ctx, client, extraPathDirs)
-	launchCmd := `export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"; ` +
-		`if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh" 2>/dev/null; fi; ` +
-		`hash -r 2>/dev/null; ` +
-		// TMPDIR=/tmp guards against a macOS dev box's SendEnv forwarding
-		// /var/folders/... into the SSH session. server.mjs also patches
-		// this per-spawn for the claude child; pinning it on the worker
-		// itself means Node's own os.tmpdir() is sane before any user
-		// code runs.
-		`nohup env NOVA_AGENT_WORKER_HOST=127.0.0.1 NOVA_AGENT_WORKER_PORT=7000 TMPDIR=/tmp ` +
-		`NOVA_AGENT_WORKER_EXTRA_PATHS=` + shellQuote(workerPATH) + ` ` +
-		`PATH=` + shellQuote(workerPATH) + ` ` +
-		`node ` + installDir + `/server.mjs > ` + installDir + `/worker.log 2>&1 & ` +
-		`disown 2>/dev/null || true`
-	if exit, err := client.Exec(ctx, launchCmd, "", nil, nil, nil); err != nil || exit != 0 {
+	if exit, err := client.Exec(ctx, nohupLaunchWorker(installDir, workerPATH, false), "", nil, nil, nil); err != nil || exit != 0 {
 		return fmt.Errorf("nohup 启动失败（exit=%d err=%v）", exit, err)
 	}
 	if err := waitForWorkerHealth(ctx, client, 6*time.Second); err != nil {
 		return fmt.Errorf("启动后仍无法连通: %w", err)
 	}
 	return nil
+}
+
+// nohupLaunchWorker renders the shell line that starts the worker as a
+// detached nohup process with an explicit PATH. Shared by installNodeWorker,
+// startWorkerIfDown and repairWorkerPATH — the PATH plumbing on this line is
+// the whole point of the fallback, so three hand-maintained copies of it was
+// an obvious way to fix one and miss the others.
+//
+// killOld pkills any existing worker first. The install path needs that (it
+// has just rewritten server.mjs and a surviving process would keep serving
+// the old code); the plain revive path does not, since it only runs when the
+// port is already unreachable.
+//
+// The `grep -vx "$$"` is not optional: `pgrep -f` regex-matches the full
+// command line, and this shell's own argv contains the literal string
+// `nova-agent-worker/server.mjs`. Without excluding our own PID, OLD_PID
+// resolves to this shell and `kill "$OLD_PID"` SIGTERMs ourselves → exit 143,
+// which surfaces as a spurious "nohup 启动失败" even though nothing was wrong.
+func nohupLaunchWorker(installDir, workerPATH string, killOld bool) string {
+	cmd := `export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"; ` +
+		`if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh" 2>/dev/null; fi; ` +
+		`hash -r 2>/dev/null; `
+	if killOld {
+		cmd += `OLD_PID=$(pgrep -f nova-agent-worker/server.mjs | grep -vx "$$" | head -n1); ` +
+			`if [ -n "$OLD_PID" ]; then kill "$OLD_PID" 2>/dev/null; sleep 1; kill -9 "$OLD_PID" 2>/dev/null || true; fi; `
+	}
+	// TMPDIR=/tmp guards against a macOS dev box's SendEnv forwarding
+	// /var/folders/... into the SSH session. server.mjs also patches this
+	// per-spawn for the claude child; pinning it on the worker itself means
+	// Node's own os.tmpdir() is sane before any user code runs.
+	//
+	// NOVA_AGENT_WORKER_EXTRA_PATHS is read by server.mjs's
+	// resolveExtendedPath so the worker's spawn('claude') can locate the CLI;
+	// the leading PATH= is belt-and-braces for a server.mjs that predates
+	// (or drops) that support.
+	cmd += `nohup env NOVA_AGENT_WORKER_HOST=127.0.0.1 NOVA_AGENT_WORKER_PORT=7000 TMPDIR=/tmp ` +
+		`NOVA_AGENT_WORKER_EXTRA_PATHS=` + shellQuote(workerPATH) + ` ` +
+		`PATH=` + shellQuote(workerPATH) + ` ` +
+		`node ` + installDir + `/server.mjs > ` + installDir + `/worker.log 2>&1 & ` +
+		`disown 2>/dev/null || true`
+	if killOld {
+		cmd += `; sleep 1; echo "[nova-agent] nohup launched, pid=$(pgrep -f nova-agent-worker/server.mjs | grep -vx "$$" | head -n1), killed_old=${OLD_PID:-none}"`
+	}
+	return cmd
+}
+
+// repairWorkerPATH restarts the remote worker with a freshly-computed PATH.
+//
+// This is the recovery path for a worker that is UP and answering /v1/health
+// but cannot spawn claude — the state that produced "运行时路径都检测到了，
+// 但开发时 spawn claude ENOENT". The worker's PATH is fixed at process start,
+// so once it has been launched from a shell that couldn't see
+// ~/.nvm/versions/node/<ver>/bin, nothing short of a restart with a corrected
+// environment will fix it.
+//
+// startWorkerIfDown deliberately cannot do this job: its first move is
+// `systemctl --user restart`, which re-reads the OLD unit file and therefore
+// the OLD Environment=PATH=, then sees a healthy port and returns success. So
+// we rewrite that line in the unit BEFORE restarting, and only fall through
+// to nohup (which carries PATH on the command line) when systemd isn't
+// actually managing the worker. Relaunching under nohup while an active
+// systemd unit has Restart=always would just race the manager — by the time
+// we get there the unit has been corrected, so whoever wins has the right PATH.
+//
+// Best-effort by design: every failure mode here leaves the worker no worse
+// off than it was, and the caller treats a non-nil error as a warning, not a
+// hard stop (a run can still succeed via the per-request claudeBin pin).
+func repairWorkerPATH(ctx context.Context, client *gossh.Client, homeDir string) (workerHealth, error) {
+	installDir := homeDir + "/nova-agent-worker"
+	extraPathDirs := readExtraPaths(ctx, client, homeDir)
+	workerPATH := composeWorkerPATH(ctx, client, extraPathDirs)
+
+	// Rewrite Environment=PATH= in the systemd --user unit, then reload +
+	// restart. Scoped to that one line so a hand-edited unit keeps its other
+	// customizations; a missing unit makes this a no-op, reported via the
+	// sentinel so we don't then spend 8s waiting for a restart that never
+	// happened (nohup-managed hosts are the common case on containers and on
+	// any box where enable-linger never took).
+	unitPath := homeDir + "/.config/systemd/user/nova-agent-worker.service"
+	var sysOut strings.Builder
+	_, _ = client.Exec(ctx,
+		`if [ -f `+shellQuote(unitPath)+` ]; then `+
+			`sed -i.novabak "s|^Environment=PATH=.*|Environment=PATH=`+sedReplacementEscape(workerPATH)+`|" `+shellQuote(unitPath)+` 2>/dev/null || true; `+
+			`XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" systemctl --user daemon-reload 2>/dev/null || true; `+
+			`XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" systemctl --user restart nova-agent-worker.service 2>/dev/null || true; `+
+			`echo __NOVA_UNIT_RESTARTED__; `+
+			`fi`,
+		"", nil, &sysOut, nil)
+
+	if strings.Contains(sysOut.String(), "__NOVA_UNIT_RESTARTED__") {
+		if h, err := waitForWorkerHealthResolvable(ctx, client, 8*time.Second); err == nil {
+			return h, nil
+		}
+	}
+
+	// systemd either isn't managing this worker or didn't fix it — relaunch
+	// under nohup with PATH on the command line.
+	if exit, err := client.Exec(ctx, nohupLaunchWorker(installDir, workerPATH, true), "", nil, nil, nil); err != nil || exit != 0 {
+		return workerHealth{}, fmt.Errorf("nohup 重启失败（exit=%d err=%v）", exit, err)
+	}
+	h, err := waitForWorkerHealthResolvable(ctx, client, 10*time.Second)
+	if err != nil {
+		return h, fmt.Errorf("重启后 worker 仍无法解析 claude: %w", err)
+	}
+	return h, nil
+}
+
+// waitForWorkerHealthResolvable is waitForWorkerHealth with the stronger
+// success condition this repair path needs: not just "the port answers" but
+// "the worker reports it can run claude". A worker that binds 7000 while
+// still unable to spawn the CLI is precisely the state we're trying to leave.
+func waitForWorkerHealthResolvable(ctx context.Context, client *gossh.Client, total time.Duration) (workerHealth, error) {
+	deadline := time.Now().Add(total)
+	var last workerHealth
+	var lastErr error
+	for time.Now().Before(deadline) {
+		h, err := probeWorkerHealth(ctx, client)
+		if err == nil {
+			last = h
+			if h.ClaudeResolvable() {
+				return h, nil
+			}
+			lastErr = errors.New("worker 报告 claude 不可用（claudeVersion=" + workerVersionDisplay(h.ClaudeVersion) + "）")
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			return last, ctx.Err()
+		case <-time.After(1500 * time.Millisecond):
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("timeout")
+	}
+	return last, lastErr
+}
+
+// sedReplacementEscape escapes the characters that are special on the
+// right-hand side of a `sed s|…|…|` expression. PATH values are
+// colon-separated absolute paths, so in practice only a literal `|`, `&` or
+// backslash could appear (via an exotic directory name), but an unescaped one
+// would corrupt the unit file rather than fail loudly.
+func sedReplacementEscape(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `|`, `\|`, `&`, `\&`)
+	return r.Replace(s)
 }
 
 // ---- install scripts ------------------------------------------------------
@@ -2137,9 +2329,23 @@ func readExtraPaths(ctx context.Context, client *gossh.Client, homeDir string) [
 	var out strings.Builder
 	// exit!=0 (missing file) is fine — return empty list silently.
 	_, _ = client.Exec(ctx, "cat "+path+" 2>/dev/null || true", "", nil, &out, nil)
+	return splitExtraPathLines(out.String())
+}
+
+// splitExtraPathLines parses the newline-separated extra-paths format into a
+// deduped list of absolute directories. Blank lines and `#` comments are
+// dropped, as are relative paths (noise — a PATH entry that isn't absolute
+// can't reliably locate a binary for a process whose cwd we don't control).
+//
+// Extracted as a pure function because the same text reaches us two ways:
+// read off the agent host by readExtraPaths, and read out of
+// agent_servers.extra_paths by workerRunRequest. Both must agree on what
+// counts as a usable directory, and this way the parsing is unit-testable
+// without an SSH client.
+func splitExtraPathLines(raw string) []string {
 	seen := map[string]bool{}
 	dirs := []string{}
-	for _, line := range strings.Split(out.String(), "\n") {
+	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
