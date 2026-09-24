@@ -2004,11 +2004,24 @@ func (h *AgentServerHandler) captureInstallRuntimeFacts(ctx context.Context, cli
 	// resolved paths back from the marker line instead of re-doing
 	// `command -v` here. That keeps the DB column in lockstep with the
 	// disk file the worker will actually use.
+	//
+	// PATH augmentation is non-optional: SSH non-interactive non-login
+	// shells do NOT source ~/.bashrc, so nvm's ~/.nvm/versions/node/*/bin
+	// (and Homebrew's /opt/homebrew/bin) are invisible to plain lookups.
+	// Without this prefix `command -v claude` returns nothing on a fresh
+	// nvm install — exactly the bug Tencent-SG002 hit: extra_paths got
+	// /home/ubuntu/.nvm/.../bin (nvm source worked), but claude_bin /
+	// node_bin were empty because the default PATH didn't include that
+	// dir. Mirroring runCheck's dep-probe PATH augmentation (line ~232)
+	// keeps captureInstallRuntimeFacts in lockstep with what Check sees.
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	var out strings.Builder
 	if _, err := client.Exec(probeCtx,
-		`cat $HOME/.novaworkbench/extra-paths 2>/dev/null; `+
+		`export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"; `+
+			`if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh" 2>/dev/null; fi; `+
+			`hash -r 2>/dev/null; `+
+			`cat $HOME/.novaworkbench/extra-paths 2>/dev/null; `+
 			`printf '__RUNTIME_BIN__\n'; `+
 			`echo "[nova-agent] RUNTIME_BIN CLAUDE_BIN=$(command -v claude 2>/dev/null || true) NODE_BIN=$(command -v node 2>/dev/null || true)"`,
 		"", nil, &out, nil); err != nil {

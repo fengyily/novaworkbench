@@ -6,6 +6,7 @@ import {
   type CreateAgentServerReq,
   type UpdateAgentServerReq,
 } from '../api/client';
+import { fmtDateTime } from '../utils/intl';
 import './SettingsAgentServers.css';
 
 // Status badge colors mirror the wizard/preflight pattern (CSS in index.css).
@@ -536,7 +537,15 @@ function AgentInventoryPanel({ server }: { server: AgentServer }) {
 
   const summary = server.system_info_collected_at
     ? t('settings.agentServersPage.detailCollectedAt', {
-        time: new Date(server.system_info_collected_at).toLocaleString(),
+        // fmtDateTime is the locale-aware formatter defined in
+        // utils/intl.ts — passing Date.prototype.toLocaleString()
+        // directly was banned by that file's contract (browser locale
+        // ≠ app language after a switch) AND made i18next render the
+        // raw "{time}" placeholder because the formatted output contained
+        // characters the interpolation engine couldn't safely
+        // round-trip through t(key, options). Pre-formatting to a plain
+        // string here sidesteps both issues.
+        time: fmtDateTime(server.system_info_collected_at),
       })
     : t('settings.agentServersPage.detailNeverCollected');
 
