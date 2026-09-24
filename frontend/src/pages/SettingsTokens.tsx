@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { platformApi, type PlatformToken } from '../api/client';
 import { errorMessage } from '../utils/errMsg';
+import { IconPlug, IconRefresh, IconCog, IconTrash, IconCheck } from '../components/icons';
 import './Settings.css';
 
 const platformLabels: Record<string, string> = {
@@ -15,6 +16,13 @@ const platformColors: Record<string, string> = {
   github: '#24292e',
   gitlab: '#FC6D26',
   gitea: '#609926',
+  bitbucket: '#2684FF',
+};
+
+const platformRail: Record<string, string> = {
+  github:    '#181717',
+  gitlab:    '#FC6D26',
+  gitea:     '#21B071',
   bitbucket: '#2684FF',
 };
 
