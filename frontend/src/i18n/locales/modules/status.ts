@@ -18,8 +18,18 @@ export const status = {
   // (multi-chip badge that overlays status + skip_design + dev_ended_at).
   // Distinct from status.req.* on purpose: these are intermediate, no emoji,
   // and composed alongside a primary status chip at render time.
+  //
+  // `designed` is keyed here (alongside `devDone` / `pendingConfirm`) so all
+  // three chips in the [方案完成][开发完成][待确认] group share one typographic
+  // register — no emoji prefix, plain CJK glyphs only. The emoji-bearing
+  // `status.req.designed` still ships for the single-badge surfaces (filter
+  // chips / Detail header) where "📐 方案完成" reads as one atomic unit.
+  // Mixing the two there caused the multi-chip group to exceed the column
+  // min-width and wrap onto two lines; the dual-key split keeps each surface
+  // visually tuned without losing the emoji on the detail page.
   reqChip: {
     skipDesign: '跳过方案',
+    designed: '方案完成',
     devDone: '开发完成',
     pendingConfirm: '待确认',
   },

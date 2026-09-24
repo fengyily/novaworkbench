@@ -959,21 +959,28 @@ export const statusLabelKeys: Record<string, string> = {
   archived: 'status.req.archived',
 };
 
-// Code vocabulary for the combined-chips badge on the requirements list.
+// Combined-chip label keys for StatusChips.tsx. The `designed` chip is
+//   deliberately keyed under status.reqChip.* (no emoji), not status.req.*
+//   — see module status.ts reqChip comment for the rationale (visual
+//   consistency with devDone / pendingConfirm in the multi-chip group +
+//   keeping the 3-chip "方案完成 / 开发完成 / 待确认" row from wrapping to
+//   two lines on tight columns). status.req.designed (with the 📐 glyph)
+//   still drives the single-badge surfaces via statusLabelKeys above.
 // Keys here are the chip codes consumed by components/StatusChips.tsx; they
 // resolve at render time via i18n/label.ts tLabel().
-//   - skipDesign / devDone / pendingConfirm reuse the new status.reqChip.* keys
-//   - draft / analyzing / designing / designed / developing / done / archived
+//   - skipDesign / designed / devDone / pendingConfirm reuse the new
+//     status.reqChip.* keys (no-emoji register, parallel chip widths)
+//   - draft / analyzing / designing / developing / done / archived
 //     are reused from status.req.* so the chip text stays in lockstep with the
 //     single-badge list filter.
 export const statusChipLabelKeys: Record<string, string> = {
   skipDesign: 'status.reqChip.skipDesign',
+  designed: 'status.reqChip.designed',
   devDone: 'status.reqChip.devDone',
   pendingConfirm: 'status.reqChip.pendingConfirm',
   draft: 'status.req.draft',
   analyzing: 'status.req.analyzing',
   designing: 'status.req.designing',
-  designed: 'status.req.designed',
   developing: 'status.req.developing',
   done: 'status.req.done',
   archived: 'status.req.archived',

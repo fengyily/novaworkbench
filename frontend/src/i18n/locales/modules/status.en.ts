@@ -10,8 +10,13 @@ export const status = {
     archived: '📦 Archived',
   },
   // Combined-chip labels — must mirror status.ts reqChip key-for-key.
+  // `designed` is keyed here so the [Designed][Coding done][Awaiting confirm]
+  // group stays typographically consistent (no emoji glyph prefix). The
+  // emoji-bearing `📐 Designed` still ships under `req.designed` for the
+  // single-badge surfaces where the full label reads as one unit.
   reqChip: {
     skipDesign: 'Design skipped',
+    designed: 'Designed',
     devDone: 'Coding done',
     pendingConfirm: 'Awaiting confirm',
   },
