@@ -323,7 +323,17 @@ export function DevelopingStage({
   // We deliberately use job_id as the dep so a Redo / Continue that mints
   // a new job_id reopens the stream, while a status flip (running → done)
   // without a new job_id does not.
+  //
+  // We mirror the main-task effect above: hydrate the bus from the
+  // durable job_logs snapshot BEFORE opening the SSE stream. Without this
+  // step a finished sub-task whose JobStore ring-buffer slot has already
+  // been evicted (cap 50) makes the SSE endpoint return 404, leaving the
+  // right pane blank — the user could click the sub-task in the floating
+  // list and see nothing. The snapshot endpoint falls back to the durable
+  // jobLogSvc.Get path server-side, so the lines surface even across a
+  // backend restart.
   useEffect(() => {
+    let cancelled = false;
     const desired = new Map<string, string>();
     for (const st of subTasks) {
       if (st.job_id) desired.set(st.id, st.job_id);
@@ -336,7 +346,9 @@ export function DevelopingStage({
         streamsRef.current.delete(key);
       }
     }
-    // Seed bus entries for sub-tasks we haven't seen yet.
+    // Seed bus entries for sub-tasks we haven't seen yet, and hydrate
+    // from the durable log snapshot so a finished sub-task renders its
+    // lines immediately when the user clicks it in the floating list.
     for (const st of subTasks) {
       if (!bus[st.id]) {
         writeBus(st.id, {
@@ -349,12 +361,49 @@ export function DevelopingStage({
         // in sync between SSE-driven writes.
         writeBus(st.id, { status: initialStatusFor('sub-task', st) });
       }
-      if (st.job_id) subscribe(st.id, st.job_id);
+      if (!st.job_id) continue;
+      // Hydrate from snapshot first, then subscribe for live updates.
+      // The subscription writes `skipRemaining = currentBusRef.current[key]?.lines.length`
+      // on the first frame, so any lines we just pushed via the snapshot
+      // are dropped from the SSE replay — preventing a double-render when
+      // the ring buffer still holds the job.
+      const stId = st.id;
+      const stJobId = st.job_id;
+      wizardApi.getJob(stJobId)
+        .then((snap) => {
+          if (cancelled) return;
+          if (snap.log && snap.log.length > 0) {
+            const lines = (snap.log ?? []).map((l) => ({
+              type: l.type as LogLine['type'],
+              content: l.content,
+              at: 0,
+            }));
+            const filtered = coalesceLogLines(
+              lines.filter((l) => l.type !== 'knowledge' && l.type !== 'knowledge_result'),
+            );
+            setBus((prev) => {
+              const cur = prev[stId];
+              if (!cur) return prev;
+              // Don't overwrite a bus entry that already accumulated live
+              // SSE frames since the snapshot was requested — the live
+              // frames are newer than the snapshot, so they'd be lost.
+              if (cur.lines.length >= filtered.length) return prev;
+              return { ...prev, [stId]: { ...cur, lines: filtered } };
+            });
+          }
+          subscribe(stId, stJobId);
+        })
+        .catch(() => {
+          // Snapshot fetch failed — still subscribe so we at least get
+          // the SSE frames; the user may see a brief empty state.
+          subscribe(stId, stJobId);
+        });
     }
     // We deliberately exclude `bus` from the dep array — it would loop
     // every render. The inner `bus[st.id]` read is fine because we never
     // mutate the bus shape, only patch entries via writeBus/setBus.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => { cancelled = true; };
   }, [subTasks, subscribe, writeBus]);
 
   // Cleanup on unmount — close every active stream.

@@ -25,7 +25,7 @@ import { modelContextWindow } from '../utils/modelWindow';
 import AtMentionTextarea from './AtMentionTextarea';
 import ModelSelect from './ModelSelect';
 import ContextUsageBar from './ContextUsageBar';
-import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck } from './icons';
+import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck, IconPlus } from './icons';
 import './SubTaskPanel.css';
 
 // The header-right quickstats block (cost + ⏱) reads the persisted
@@ -1114,6 +1114,23 @@ export default function SubTaskPanel({
   // re-runs on periodic poll + after every create / adjust) doesn't fire
   // onSubTasksChange on every tick. Only emit on actual transitions.
   const lastReportedCountRef = useRef<number>(-1);
+  // Composer-open flag — the manual sub-task creation form is hidden
+  // behind a "+ 新建子任务" button so the panel body stays focused on the
+  // list. The modal reuses the existing `prompt / submitting / error /
+  // createModel / createConfigId / createAgentServerId / sessionMode`
+  // state below; toggling `composerOpen` mounts/unmounts the form.
+  const [composerOpen, setComposerOpen] = useState(false);
+  // Reset composer state on close so reopening always starts blank.
+  // Keeping stale text across opens read as "I closed it but my prompt
+  // came back" in early iterations — the user expected a fresh form.
+  const closeComposer = useCallback(() => {
+    setComposerOpen(false);
+    setPrompt('');
+    setError(null);
+  }, []);
+  // Escape closes the modal (mirrors the global behaviour of
+  // DocRefineChat / DeepRefineChat modals). Wired below in the modal
+  // JSX so we can keep the listener local to the component subtree.
   // Manual / early-summary round-trip state. Distinct from the per-card
   // `adjustBusy` so the composer submit lock doesn't accidentally disable
   // the orchestrator banner's summary CTA. `summaryToast` mirrors the
@@ -1166,6 +1183,21 @@ export default function SubTaskPanel({
   useEffect(() => () => {
     if (summaryCopyTimerRef.current) window.clearTimeout(summaryCopyTimerRef.current);
   }, []);
+
+  // Escape closes the composer modal — mirrors the global modal pattern
+  // used by DocRefineChat / DeepRefineChat. Bound only while the modal
+  // is open so the rest of the page keeps its normal key handling.
+  useEffect(() => {
+    if (!composerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !submitting) {
+        e.stopPropagation();
+        closeComposer();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [composerOpen, submitting, closeComposer]);
 
   // Reset the collapse state when the underlying requirement / coding_plan
   // changes. Mirrors RequirementDetail.tsx:897-902 (design doc surface):
@@ -1519,6 +1551,10 @@ export default function SubTaskPanel({
         agent_server_id: createAgentServerId,
       });
       setPrompt('');
+      // Close the composer modal on success — the new sub-task appears
+      // in the list on the next loadList tick, so reopening the modal
+      // and creating another is just one click away.
+      setComposerOpen(false);
       await loadList();
     } catch (e: any) {
       setError(e?.message || t('components.subTaskPanel.errCreate'));
@@ -1610,7 +1646,12 @@ export default function SubTaskPanel({
   // hooks block) so handleSummaryCopy and the [requirement?.id,
   // summaryReport] effect can read them. See the declaration near the top
   // of the component body for the JSDoc explaining the data source.
-  const activeChildCount = activeBatch?.childIds.length ?? 0;
+  // activeBatch is still tracked by loadList() so the orchestrator's
+  // child-id set can drive future surfaces (count badge in the header,
+  // "re-split disabled while orchestrating" guard, etc.) without
+  // re-deriving from scratch. The previous "in-flight" banner that
+  // displayed `activeChildCount` inline was removed when the composer
+  // moved behind a "+ 新建子任务" modal.
 
   // Session-mode segmented control contents. Ordered most→least inherited so
   // the default (继承主任务会话) sits left, where the eye lands first. Each
@@ -1648,102 +1689,93 @@ export default function SubTaskPanel({
           <span className="sub-panel-title-icon" aria-hidden="true"><IconRobot size={16} /></span>
           <span>{t('components.subTaskPanel.title')}</span>
         </h3>
-        <span className="sub-panel-meta">
-          {t('components.subTaskPanel.shareSession')} <code>{truncate(codingSessionId, 12)}</code>
-          {' · '}
-          <span className="sub-panel-count">{items?.length ?? 0}</span> {t('components.subTaskPanel.countSuffix')}
-        </span>
+        <div className="sub-panel-header-actions">
+          {/* Summary CTAs (early / manual / progress / retry) used to live
+              in the auto-orchestrate banner that was removed from this
+              panel. The floating task list now carries the in-flight
+              indication, so we keep only the manual / early / retry
+              actions here — surfaced next to the count so the user can
+              still trigger a summary round without scrolling. */}
+          {summaryCta.mode === 'early' && (
+            <button
+              type="button"
+              className="btn btn-sm sub-panel-summary-cta"
+              onClick={() => onGenerateSummary('early')}
+              disabled={summaryBusy}
+              title={t('components.subTaskPanel.summaryCtaEarlyTitle')}
+            >
+              {summaryBusy ? t('components.subTaskPanel.summarySending') : t('components.subTaskPanel.summaryCtaEarlyBtn')}
+            </button>
+          )}
+          {summaryCta.mode === 'manual' && (
+            <button
+              type="button"
+              className="btn btn-sm btn-primary sub-panel-summary-cta"
+              onClick={() => onGenerateSummary('manual')}
+              disabled={summaryBusy}
+              title={t('components.subTaskPanel.summaryCtaManualTitle')}
+            >
+              {summaryBusy ? t('components.subTaskPanel.summarySending') : t('components.subTaskPanel.summaryCtaManualBtn')}
+            </button>
+          )}
+          {summaryCta.mode === 'progress' && (
+            <button
+              type="button"
+              className="btn btn-sm sub-panel-summary-cta"
+              disabled
+              title={t('components.subTaskPanel.summaryCtaProgressTitle')}
+            >
+              {t('components.subTaskPanel.summaryCtaProgressBtn')}
+            </button>
+          )}
+          {batch?.status === 'summarizing' && batch?.summary_status === 'error' && (
+            <button
+              type="button"
+              className="btn btn-sm btn-primary sub-panel-summary-cta"
+              onClick={() => onGenerateSummary('manual')}
+              disabled={summaryBusy}
+              title={t('components.subTaskPanel.summaryCtaManualTitle')}
+            >
+              {summaryBusy
+                ? t('components.subTaskPanel.summarySending')
+                : t('components.subTaskPanel.summaryRetryBtn')}
+            </button>
+          )}
+          {summaryToast && (
+            <span
+              className="merge-hint-toast sub-panel-summary-toast"
+              role="status"
+              data-kind={summaryToast.kind}
+            >
+              {summaryToast.text}
+            </span>
+          )}
+          <span className="sub-panel-meta">
+            {t('components.subTaskPanel.shareSession')} <code>{truncate(codingSessionId, 12)}</code>
+            {' · '}
+            <span className="sub-panel-count">{items?.length ?? 0}</span> {t('components.subTaskPanel.countSuffix')}
+          </span>
+          {/* "+ 新建子任务" button — opens the composer modal. The button
+              is the SINGLE entry point for manual sub-task creation now;
+              the in-place composer that used to live between the banner
+              and the list was removed in the same refactor. */}
+          <button
+            type="button"
+            className="btn btn-sm btn-primary sub-panel-new-btn"
+            onClick={() => setComposerOpen(true)}
+            title={t('components.subTaskPanel.newSubTaskBtnTitle')}
+            aria-label={t('components.subTaskPanel.newSubTaskBtnTitle')}
+          >
+            <IconPlus size={13} className="btn-icon" />
+            {t('components.subTaskPanel.newSubTaskBtn')}
+          </button>
+        </div>
       </header>
 
-      {/* Auto-orchestrate: ask the main agent to decompose + dispatch + summarize.
-          Distinct from the manual composer below — orchestrate is a SINGLE click
-          that creates N children AND a summary report, while the composer is for
-          ad-hoc one-off children. */}
-      {/* Auto-orchestrate status: the manual "Start execution" button was
-          removed — StartCoding's main agent now does the decomposition +
-          dispatch automatically when the user kicks off development.
-          What remains is the in-flight badge (so the user knows the
-          main agent is dispatching children) and the summary report
-          surface (each completed batch refreshes requirements.coding_plan).
-          The CTA cluster on the right drives the manual / early-summary
-          round-trips against /api/requirements/{id}/sub-tasks/summary
-          (creating summarizing batches → OrchestrationQueue tick handoff). */}
-      {(activeChildCount > 0 || summaryCta.mode !== null || (batch && (batch.status === 'summarizing' || batch.status === 'dispatching'))) && (
-        <div className="sub-orchestrator-status sub-orchestrator-status--with-cta">
-          <div className="sub-orchestrator-status-row">
-            <span className="sub-orchestrator-status-text">
-              {activeChildCount > 0
-                ? t('components.subTaskPanel.autoOrchestrateRunning', { n: activeChildCount })
-                : batch?.status === 'summarizing'
-                  ? (batch?.summary_status === 'error'
-                      ? t('components.subTaskPanel.bannerSummaryFailed')
-                      : t('components.subTaskPanel.bannerSummarizing'))
-                  : batch?.status === 'dispatching'
-                    ? t('components.subTaskPanel.bannerDispatchingStatus')
-                    : t('components.subTaskPanel.bannerAllDoneManual')}
-            </span>
-            <span className="sub-orchestrator-status-actions">
-              {summaryCta.mode === 'early' && (
-                <button
-                  type="button"
-                  className="btn btn-sm sub-orchestrator-cta"
-                  onClick={() => onGenerateSummary('early')}
-                  disabled={summaryBusy}
-                  title={t('components.subTaskPanel.summaryCtaEarlyTitle')}
-                >
-                  {summaryBusy ? t('components.subTaskPanel.summarySending') : t('components.subTaskPanel.summaryCtaEarlyBtn')}
-                </button>
-              )}
-              {summaryCta.mode === 'manual' && (
-                <button
-                  type="button"
-                  className="btn btn-sm btn-primary sub-orchestrator-cta"
-                  onClick={() => onGenerateSummary('manual')}
-                  disabled={summaryBusy}
-                  title={t('components.subTaskPanel.summaryCtaManualTitle')}
-                >
-                  {summaryBusy ? t('components.subTaskPanel.summarySending') : t('components.subTaskPanel.summaryCtaManualBtn')}
-                </button>
-              )}
-              {summaryCta.mode === 'progress' && (
-                <button
-                  type="button"
-                  className="btn btn-sm sub-orchestrator-cta"
-                  disabled
-                  title={t('components.subTaskPanel.summaryCtaProgressTitle')}
-                >
-                  {t('components.subTaskPanel.summaryCtaProgressBtn')}
-                </button>
-              )}
-              {batch?.status === 'summarizing' && batch?.summary_status === 'error' && (
-                <button
-                  type="button"
-                  className="btn btn-sm btn-primary sub-orchestrator-cta"
-                  onClick={() => onGenerateSummary('manual')}
-                  disabled={summaryBusy}
-                  title={t('components.subTaskPanel.summaryCtaManualTitle')}
-                >
-                  {summaryBusy
-                    ? t('components.subTaskPanel.summarySending')
-                    : t('components.subTaskPanel.summaryRetryBtn')}
-                </button>
-              )}
-              {summaryToast && (
-                <span
-                  className="merge-hint-toast sub-orchestrator-toast"
-                  role="status"
-                  data-kind={summaryToast.kind}
-                >
-                  {summaryToast.text}
-                </span>
-              )}
-            </span>
-          </div>
-        </div>
-      )}
-
       {/* Manual re-split progress: streams the main agent's re-decomposition
-          turn so a click never looks dead. */}
+          turn so a click never looks dead. Kept here because re-split is a
+          user-triggered, short-lived action (not the always-on auto-
+          orchestrate banner that the floating task list now replaces). */}
       {(reSplitBusy || reSplitLines.length > 0) && (
         <div className="sub-orchestrator-status sub-resplit-status">
           {reSplitBusy ? t('components.subTaskPanel.reSplitRunning') : t('components.subTaskPanel.reSplitDone')}
@@ -1803,144 +1835,183 @@ export default function SubTaskPanel({
         </div>
       )}
 
-      <div className="sub-composer">
-        {/* Composer textarea — title field removed; opening a sub-task
-            only needs a description. The backend auto-derives a card-header
-            title from the prompt's first 40 chars when title is omitted. */}
-        <AtMentionTextarea
-          value={prompt}
-          onChange={setPrompt}
-          placeholder={t('components.subTaskPanel.composerPlaceholder')}
-          rows={4}
-          disabled={submitting}
-          className="sub-composer-textarea"
-        />
-        {/* Sub-task model picker — the SINGLE picker for the panel's
-            composer row. It applies to BOTH the "Start sub-task" and
-            "Re-split" buttons (they share the same claude_configs
-            list, and dispatching a re-split with a different model
-            would just create a confusing mixed batch). Per-stage
-            (developer) so the dropdown shows the same model list as the
-            main "Start coding" picker on RequirementDetail. Empty selection
-            = let the backend fall back to the developer-role effective
-            model; "Default model (X)" shows what that fallback actually is. */}
-        <ModelSelect
-          value={createModel}
-          onChange={(m) => { touchedModelRef.current = true; setCreateModel(m); }}
-          label={t('components.subTaskPanel.modelLabel')}
-          stage="developer"
-          defaultModelName={developerDefaultModel}
-          disabled={submitting || reSplitBusy}
-          working={submitting || reSplitBusy}
-          configId={createConfigId || undefined}
-          onConfigChange={(c) => { touchedConfigRef.current = true; setCreateConfigId(c); }}
-        />
-        {!createModel && !developerDefaultModel && (
-          <div className="sub-model-warning" role="note">
-            {t('components.subTaskPanel.modelEmptyWarning')}
-          </div>
-        )}
-        {/* Per-sub-task execution environment. Only shown when at least one
-            ready Agent Server exists (otherwise the sole option is 本地).
-            Defaults to the parent requirement's environment; switching to a
-            different one runs the child from a fresh origin checkout of the
-            requirement branch (see execEnvHint). */}
-        {agentServers.length > 0 && (
-          <label className="sub-composer-env" style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--color-text-muted)' }}>
-            <span>{t('components.subTaskPanel.execEnvLabel')}</span>
-            <ExecEnvSelect
-              servers={agentServers}
-              value={createAgentServerId}
-              onChange={(v) => { touchedEnvRef.current = true; setCreateAgentServerId(v); }}
-              disabled={submitting || reSplitBusy}
-              style={{ minWidth: 160 }}
-            />
-            {createAgentServerId !== parentAgentServerId && (
-              <span className="sub-composer-env-hint" role="note">{t('components.subTaskPanel.execEnvHint')}</span>
-            )}
-          </label>
-        )}
-        {/* Session-mode selector — a segmented control, always visible on
-            manual sub-task creation (the old `showFreshOption` gate hid it on
-            local happy-path development, which read as "missing a knob").
-            Three options, ordered most→least inherited:
-
-              resume       继承主任务会话 (default) — fork the parent coding
-                           session via --fork-session.
-              with_context 带上下文 — new session, buildParentContext()
-                           injected into the prompt, executor role prompt kept.
-              bare         新会话 — new session, no context block, no role
-                           system prompt (CLI built-in defaults).
-
-            Layout note: one segment row + ONE description line for the
-            selected mode. Descriptions used to live inside every option as
-            full-width hint spans, which made the block wrap into a ragged
-            multi-row grid that looked unrelated to the rest of the composer. */}
-        <div className="sub-session-mode">
-          <span className="sub-session-mode-label" id="sub-session-mode-label">
-            {t('components.subTaskPanel.sessionMode.label')}
-          </span>
-          <div className="sub-session-mode-segments" role="radiogroup" aria-labelledby="sub-session-mode-label">
-            {sessionModeOptions.map((opt) => {
-              const active = sessionMode === opt.key;
-              const isDisabled = submitting || reSplitBusy || !!opt.unavailable;
-              return (
-                <label
-                  key={opt.key}
-                  className={`sub-session-mode-option${active ? ' is-active' : ''}${isDisabled ? ' is-disabled' : ''}`}
-                  title={opt.desc}
-                >
-                  <input
-                    type="radio"
-                    name="sessionMode"
-                    value={opt.key}
-                    checked={active}
-                    onChange={() => {
-                      // Mark the radio as user-touched so the
-                      // latestArtifactStale auto-promote effect below
-                      // stops stomping on a deliberate pick on the next
-                      // 5s poll refresh.
-                      sessionModeTouchedRef.current = true;
-                      setSessionMode(opt.key);
-                    }}
-                    disabled={isDisabled}
-                  />
-                  <span className="sub-session-mode-option-text">{opt.label}</span>
-                </label>
-              );
-            })}
-          </div>
-          <span className="sub-session-mode-desc" role="note">{activeSessionMode.desc}</span>
-          {latestArtifactStale && latestArtifactStale.isStale && (
-            <span className="sub-session-mode-warn" role="note">
-              {t('components.subTaskPanel.sessionMode.freshHint')}
-            </span>
-          )}
-        </div>
-        <div className="sub-composer-toolbar">
-          <span className="sub-composer-hint">
-            {t('components.subTaskPanel.composerHint')}
-          </span>
-          {error && <span className="sub-composer-err">{error}</span>}
-          <button
-            type="button"
-            className="btn btn-secondary sub-composer-resplit"
-            onClick={onReSplit}
-            disabled={reSplitBusy || submitting || anyAlive}
-            title={anyAlive ? t('components.subTaskPanel.reSplitTitleBusy') : t('components.subTaskPanel.reSplitTitle')}
+      {/* Composer modal — opens when the user clicks "+ 新建子任务" in the
+          panel header. Reuses the same composer state (prompt / model /
+          config / env / session mode) that used to live inline above the
+          list. submit reuses onCreate() unchanged; the modal just moves
+          the form off the page and behind a single click. */}
+      {composerOpen && (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="sub-composer-modal-title"
+          onClick={() => { if (!submitting) closeComposer(); }}
+        >
+          <div
+            className="modal-box sub-composer-modal"
+            onClick={(e) => e.stopPropagation()}
           >
-            {reSplitBusy ? t('components.subTaskPanel.reSplitBusy') : t('components.subTaskPanel.reSplitBtn')}
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary sub-composer-submit"
-            onClick={onCreate}
-            disabled={submitting || reSplitBusy || !prompt.trim()}
-          >
-            {submitting ? t('components.subTaskPanel.submitBusy') : t('components.subTaskPanel.submitBtn')}
-          </button>
+            <div className="modal-header">
+              <h3 id="sub-composer-modal-title">{t('components.subTaskPanel.composerModalTitle')}</h3>
+              <button
+                className="btn btn-sm"
+                onClick={closeComposer}
+                disabled={submitting}
+                aria-label={t('components.subTaskPanel.composerClose')}
+              >×</button>
+            </div>
+            <div className="modal-body">
+              <div className="sub-composer">
+                {/* Composer textarea — title field removed; opening a sub-task
+                    only needs a description. The backend auto-derives a card-header
+                    title from the prompt's first 40 chars when title is omitted. */}
+                <AtMentionTextarea
+                  value={prompt}
+                  onChange={setPrompt}
+                  placeholder={t('components.subTaskPanel.composerPlaceholder')}
+                  rows={4}
+                  disabled={submitting}
+                  className="sub-composer-textarea"
+                />
+                {/* Sub-task model picker — the SINGLE picker for the panel's
+                    composer row. It applies to BOTH the "Start sub-task" and
+                    "Re-split" buttons (they share the same claude_configs
+                    list, and dispatching a re-split with a different model
+                    would just create a confusing mixed batch). Per-stage
+                    (developer) so the dropdown shows the same model list as the
+                    main "Start coding" picker on RequirementDetail. Empty selection
+                    = let the backend fall back to the developer-role effective
+                    model; "Default model (X)" shows what that fallback actually is. */}
+                <ModelSelect
+                  value={createModel}
+                  onChange={(m) => { touchedModelRef.current = true; setCreateModel(m); }}
+                  label={t('components.subTaskPanel.modelLabel')}
+                  stage="developer"
+                  defaultModelName={developerDefaultModel}
+                  disabled={submitting || reSplitBusy}
+                  working={submitting || reSplitBusy}
+                  configId={createConfigId || undefined}
+                  onConfigChange={(c) => { touchedConfigRef.current = true; setCreateConfigId(c); }}
+                />
+                {!createModel && !developerDefaultModel && (
+                  <div className="sub-model-warning" role="note">
+                    {t('components.subTaskPanel.modelEmptyWarning')}
+                  </div>
+                )}
+                {/* Per-sub-task execution environment. Only shown when at least one
+                    ready Agent Server exists (otherwise the sole option is 本地).
+                    Defaults to the parent requirement's environment; switching to a
+                    different one runs the child from a fresh origin checkout of the
+                    requirement branch (see execEnvHint). */}
+                {agentServers.length > 0 && (
+                  <label className="sub-composer-env" style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                    <span>{t('components.subTaskPanel.execEnvLabel')}</span>
+                    <ExecEnvSelect
+                      servers={agentServers}
+                      value={createAgentServerId}
+                      onChange={(v) => { touchedEnvRef.current = true; setCreateAgentServerId(v); }}
+                      disabled={submitting || reSplitBusy}
+                      style={{ minWidth: 160 }}
+                    />
+                    {createAgentServerId !== parentAgentServerId && (
+                      <span className="sub-composer-env-hint" role="note">{t('components.subTaskPanel.execEnvHint')}</span>
+                    )}
+                  </label>
+                )}
+                {/* Session-mode selector — a segmented control, always visible on
+                    manual sub-task creation (the old `showFreshOption` gate hid it on
+                    local happy-path development, which read as "missing a knob").
+                    Three options, ordered most→least inherited:
+
+                      resume       继承主任务会话 (default) — fork the parent coding
+                                   session via --fork-session.
+                      with_context 带上下文 — new session, buildParentContext()
+                                   injected into the prompt, executor role prompt kept.
+                      bare         新会话 — new session, no context block, no role
+                                   system prompt (CLI built-in defaults).
+
+                    Layout note: one segment row + ONE description line for the
+                    selected mode. Descriptions used to live inside every option as
+                    full-width hint spans, which made the block wrap into a ragged
+                    multi-row grid that looked unrelated to the rest of the composer. */}
+                <div className="sub-session-mode">
+                  <span className="sub-session-mode-label" id="sub-session-mode-label">
+                    {t('components.subTaskPanel.sessionMode.label')}
+                  </span>
+                  <div className="sub-session-mode-segments" role="radiogroup" aria-labelledby="sub-session-mode-label">
+                    {sessionModeOptions.map((opt) => {
+                      const active = sessionMode === opt.key;
+                      const isDisabled = submitting || reSplitBusy || !!opt.unavailable;
+                      return (
+                        <label
+                          key={opt.key}
+                          className={`sub-session-mode-option${active ? ' is-active' : ''}${isDisabled ? ' is-disabled' : ''}`}
+                          title={opt.desc}
+                        >
+                          <input
+                            type="radio"
+                            name="sessionMode"
+                            value={opt.key}
+                            checked={active}
+                            onChange={() => {
+                              // Mark the radio as user-touched so the
+                              // latestArtifactStale auto-promote effect below
+                              // stops stomping on a deliberate pick on the next
+                              // 5s poll refresh.
+                              sessionModeTouchedRef.current = true;
+                              setSessionMode(opt.key);
+                            }}
+                            disabled={isDisabled}
+                          />
+                          <span className="sub-session-mode-option-text">{opt.label}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <span className="sub-session-mode-desc" role="note">{activeSessionMode.desc}</span>
+                  {latestArtifactStale && latestArtifactStale.isStale && (
+                    <span className="sub-session-mode-warn" role="note">
+                      {t('components.subTaskPanel.sessionMode.freshHint')}
+                    </span>
+                  )}
+                </div>
+                <div className="sub-composer-toolbar">
+                  <span className="sub-composer-hint">
+                    {t('components.subTaskPanel.composerHint')}
+                  </span>
+                  {error && <span className="sub-composer-err">{error}</span>}
+                  <button
+                    type="button"
+                    className="btn btn-secondary sub-composer-resplit"
+                    onClick={onReSplit}
+                    disabled={reSplitBusy || submitting || anyAlive}
+                    title={anyAlive ? t('components.subTaskPanel.reSplitTitleBusy') : t('components.subTaskPanel.reSplitTitle')}
+                  >
+                    {reSplitBusy ? t('components.subTaskPanel.reSplitBusy') : t('components.subTaskPanel.reSplitBtn')}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={closeComposer}
+                    disabled={submitting || reSplitBusy}
+                  >
+                    {t('components.subTaskPanel.cancelBtn')}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary sub-composer-submit"
+                    onClick={onCreate}
+                    disabled={submitting || reSplitBusy || !prompt.trim()}
+                  >
+                    {submitting ? t('components.subTaskPanel.submitBusy') : t('components.subTaskPanel.submitBtn')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="sub-list">
         {items === null && <div className="sub-list-loading">{t('components.subTaskPanel.loading')}</div>}

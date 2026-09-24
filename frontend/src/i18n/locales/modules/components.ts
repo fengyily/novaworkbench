@@ -74,6 +74,13 @@ export const components = {
     summaryCopiedHint: '已复制',
     summaryExpandShow: '展开全部',
     summaryExpandCollapse: '收起',
+    // Composer is hidden behind a "+ 新建子任务" button so the panel
+    // body stays focused on the list. The modal reuses the same
+    // i18n keys as the in-place composer.
+    newSubTaskBtn: '+ 新建子任务',
+    newSubTaskBtnTitle: '弹出一个新窗口，手动创建一个子任务',
+    composerModalTitle: '新建子任务',
+    composerClose: '关闭',
     composerPlaceholder: '描述这个子任务要做什么…输入 @ 引用 Skill',
     modelLabel: '子任务模型',
     // Execution-environment selector in the sub-task composer. Defaults to the
@@ -88,8 +95,9 @@ export const components = {
     reSplitBtn: '🔄 重新拆分',
     submitBusy: '启动中…',
     submitBtn: '🚀 启动子任务',
+    cancelBtn: '取消',
     loading: '加载中…',
-    empty: '暂无子任务。可点击「🔄 重新拆分」让主 Agent 拆分并自动派发，或在上方手动创建。',
+    empty: '暂无子任务。点击右上角「+ 新建子任务」手动创建，或让主 Agent 自动拆分派发。',
     errLoad: '加载子任务失败',
     errCreate: '启动子任务失败',
     errReSplit: '重新拆分失败',

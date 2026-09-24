@@ -40,6 +40,37 @@
   padding: 16px 20px;
   border-bottom: 1px solid var(--color-border);
 }
+/* Right-side cluster of actions that grew out of the in-place composer:
+   the "+ 新建子任务" button, the inline summary CTAs that used to live
+   in the removed auto-orchestrate banner, and the count / session meta
+   strip. Stacks under 720px so the header never grows taller than the
+   neighbouring job panels. */
+.sub-panel-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.sub-panel-summary-cta {
+  /* Reuse the size of the small button but pull the colour back toward
+     neutral so it doesn't compete visually with the primary
+     "+ 新建子任务" affordance on the right. */
+  font-size: 12px;
+  padding: 4px 10px;
+}
+.sub-panel-summary-toast {
+  /* Inline next to the summary CTA — global .merge-hint-toast already
+     provides the background / border / animation. */
+  white-space: nowrap;
+}
+.sub-panel-new-btn {
+  /* The "+ 新建子任务" affordance. Kept slightly larger than the summary
+     CTA so the eye lands here first — the modal opens less often than
+     the summary round-trip, but creating a manual sub-task is the more
+     common flow once the orchestrator is done. */
+  white-space: nowrap;
+}
 .sub-panel-title {
   display: flex;
   align-items: center;
@@ -78,6 +109,28 @@
 .sub-panel-count {
   color: var(--color-primary);
   font-weight: 600;
+}
+
+/* ─── Composer modal ───
+ * The manual sub-task creation form used to live inline above the list.
+ * After the developing-stage refactor it moved behind a "+ 新建子任务"
+ * button, rendered through the global `.modal-overlay / .modal-box`
+ * primitives. The internal `.sub-composer` block is unchanged from its
+ * pre-modal layout (textarea + model picker + env selector + session
+ * mode radio + toolbar); the modal just gives it a stable width and a
+ * close affordance. */
+.sub-composer-modal {
+  width: min(640px, calc(100vw - 32px));
+}
+.sub-composer-modal .modal-body {
+  padding-top: 4px;
+}
+/* Inside the modal the composer no longer needs the inline bottom
+   divider — the modal's own rounded corners frame it. */
+.sub-composer-modal .sub-composer {
+  padding: 0;
+  border-bottom: none;
+  background: transparent;
 }
 
 /* Pre-flight hint (when coding session hasn't been started yet) */
@@ -900,6 +953,7 @@
 /* Responsive: tighten padding on narrow screens. */
 @media (max-width: 640px) {
   .sub-panel-header { padding: 12px 16px; flex-wrap: wrap; }
+  .sub-panel-header-actions { flex-basis: 100%; justify-content: flex-start; }
   .sub-composer { padding: 12px 16px; }
   .sub-list { padding: 12px 16px 16px; }
   .sub-composer-toolbar { flex-wrap: wrap; }
@@ -917,52 +971,19 @@
 }
 
 /* ─── Orchestrator (主 Agent 自动编排) ───
- * Sits above the manual composer. The input + button live on a single row
- * so "开始执行" can't drift into the textarea — without this flex row the
- * browser falls back to native inline layout and the button renders
- * inside the text input area. Background uses a faint indigo wash so the
- * user reads it as the "primary" affordance; the manual composer below
- * stays neutral.
+ * The auto-orchestrate banner that used to live above the composer
+ * (`.sub-orchestrator` + `.sub-orchestrator-status--with-cta` + the
+ * status-row / CTA / toast cluster) was removed in the same refactor
+ * that moved the manual composer behind a "+ 新建子任务" modal. The
+ * floating DevelopingTaskList sidebar now carries the in-flight
+ * indication, so the always-on banner became redundant noise.
+ *
+ * What remains: `.sub-orchestrator-status` is the base background used
+ * by the transient re-split indicator (`.sub-resplit-status` below) —
+ * keeping that single rule avoids rewriting the re-split styles. The
+ * old `*-with-cta` / status-row / cta / toast / reply rules are gone
+ * since their only consumer was the removed banner.
  */
-.sub-orchestrator {
-  padding: 16px 20px;
-  border-bottom: 1px solid var(--color-border);
-  background: rgba(79, 70, 229, 0.04);
-}
-.sub-orchestrator-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.sub-orchestrator-input {
-  flex: 1;
-  min-width: 0;
-  padding: 8px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-surface);
-  color: var(--color-text);
-  font-family: var(--font-sans);
-  font-size: 13px;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-.sub-orchestrator-input:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
-}
-.sub-orchestrator-input:disabled {
-  background: var(--color-hover);
-  color: var(--color-text-muted);
-  cursor: not-allowed;
-}
-.sub-orchestrator-input::placeholder {
-  color: var(--color-text-muted);
-}
-.sub-orchestrator-btn {
-  flex-shrink: 0;
-  white-space: nowrap;
-}
 .sub-orchestrator-status {
   margin-top: 10px;
   padding: 8px 12px;
@@ -970,59 +991,6 @@
   border-radius: 6px;
   font-size: 12px;
   color: var(--color-primary);
-}
-/* Orchestrator banner with the new manual / early-summary CTAs.
-   Layout: a single flex row that keeps the status text on the left and
-   the CTA cluster (button + toast) on the right, wrapping gracefully on
-   narrow viewports. The base `.sub-orchestrator-status` styles above
-   still apply (background / padding / color). */
-.sub-orchestrator-status--with-cta {
-  padding: 10px 14px;
-}
-.sub-orchestrator-status-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.sub-orchestrator-status-text {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.sub-orchestrator-status-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-.sub-orchestrator-cta {
-  font-size: 12px;
-  padding: 4px 10px;
-}
-.sub-orchestrator-toast {
-  /* Local tweak so the toast sits inline with the button instead of
-     taking its own line — the global `.merge-hint-toast` rule already
-     provides background / border / animation. */
-  white-space: nowrap;
-}
-.sub-orchestrator-reply {
-  margin-top: 10px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-surface);
-  padding: 8px 12px;
-}
-.sub-orchestrator-reply summary {
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  user-select: none;
-}
-.sub-orchestrator-reply-body {
-  margin-top: 8px;
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--color-text);
 }
 
 /* ─── Summary report (主 Agent 汇总报告) ───
