@@ -19,7 +19,7 @@ package handler
 // on the agent_servers row; the check flow compares the running worker's
 // reported workerVersion against it to detect a stale process that survived a
 // restart. Bump it whenever agent-worker/server.mjs changes.
-const agentWorkerVersion = "0.3.4"
+const agentWorkerVersion = "0.3.5"
 
 // agentWorkerServerMJS is the body of nova-agent-worker/server.mjs that gets
 // uploaded to the remote agent host during install. It's the same content
@@ -81,8 +81,54 @@ const agentWorkerServerMJS = `// nova-agent-worker — HTTP/NDJSON bridge betwee
 //      fix hint (see backend/internal/handler/wizard.go:workerCategoryHint).
 import express from 'express';
 import { spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, accessSync, constants as fsConstants } from 'node:fs';
 import { join } from 'node:path';
+
+// Extend PATH on the agent host so the spawned `claude` child can be
+// located by name alone — regardless of how the worker process itself was
+// launched. systemd user units start with the bare PATH
+// (/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin), so an
+// `npm i -g @anthropic-ai/claude-code` install into ~/.local/bin (Linux
+// default) or /opt/homebrew/bin (macOS) becomes invisible to the child
+// even though SSH login shells see it via ~/.bashrc. The result is a
+// spawned child whose first action is `spawn claude ENOENT`, classified
+// as `cli_not_found` and surfaced in the wizard job panel as
+// "Claude CLI 未找到" — even though NovaWorkbench's Check flow (which
+// uses SSH RunCommand and therefore inherits the login-shell PATH)
+// reports `✓ claude <version>`.
+//
+// We don't replace PATH — we prepend a candidate list, dedup, and keep
+// the existing entries. Detection of `npm root -g` is wrapped so a
+// missing/broken npm install doesn't take down /v1/health.
+function resolveExtendedPath() {
+  const home = process.env.HOME || process.env.USERPROFILE || '';
+  const candidates = [
+    home && join(home, '.local', 'bin'),
+    home && join(home, '.npm-global', 'bin'),
+    home && join(home, 'bin'),
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+  ].filter(Boolean);
+  // npm root -g on its own can hang for ~1s on a cold cache; cap it.
+  try {
+    const npmGlobalBin = execFileSync('npm', ['root', '-g'], {
+      timeout: 1500,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).toString().trim();
+    if (npmGlobalBin) candidates.push(join(npmGlobalBin, 'bin'));
+  } catch {
+    // npm not installed / slow / broken — skip silently.
+  }
+  const existing = (process.env.PATH || '').split(':').filter(Boolean);
+  const seen = new Set(existing);
+  const merged = [...existing];
+  for (const d of candidates) {
+    if (!seen.has(d)) { seen.add(d); merged.push(d); }
+  }
+  return merged.join(':');
+}
+process.env.PATH = resolveExtendedPath();
 
 // WORKER_VERSION is a placeholder that NovaWorkbench's install flow stamps
 // with the binary's own agentWorkerVersion before uploading this file to a
@@ -167,6 +213,9 @@ app.post('/v1/run', async (req, res) => {
   // buildSettingsArg) so they land at the top of the CLI's settings stack and
   // can't be shadowed by a stale ~/.claude/settings.json or an inherited
   // ANTHROPIC_API_KEY.
+  // process.env.PATH was already rewritten at module load (see
+  // resolveExtendedPath at the top of this file) so the spawn child can
+  // resolve `claude` even when systemd launched us with a stripped PATH.
   const childEnv = { ...process.env };
   // Ensure TMPDIR (and the TMP/TEMP aliases) point at a writable location
   // before we hand the env to claude. On macOS, agent users provisioned
