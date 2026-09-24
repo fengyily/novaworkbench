@@ -689,6 +689,16 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 			return claudeStreamOutcome{errMsg: "git clone 失败（exit=" + fmtInt(exit) + "），请检查 origin 凭据"}, cleanup, nil
 		}
 	}
+	// The clone above only runs once per project; baseRepo is a long-lived
+	// scratch dir, so on every later run its origin still carries whatever
+	// credential was current when it was first created. Re-point it at the
+	// project's CURRENT platform token before the fetch/push below — otherwise
+	// a rotated (or wrong-platform) PAT never reaches the agent host.
+	// Non-fatal: a failure here leaves the old origin in place, which is no
+	// worse than the previous behaviour.
+	if oErr := ensureRemoteOrigin(ctx, client, in.job, baseRepo, originURL, remoteOriginAuthed(h.projectSvc, in.reqRow.ProjectID)); oErr != nil {
+		in.job.Append(store.LogLine{Type: "message", Content: "⚠️ " + oErr.Error()})
+	}
 	// Hard-sync the remote scratch repo to origin/<baseBranch>: auto-correct
 	// HEAD (scratch dir → reset, not reject), fetch under timeout, fast-
 	// forward, then emit NOVA_BASE_SHA= on its own line for the caller to
@@ -1032,6 +1042,13 @@ func (t originTransport) PrepareRemote(ctx context.Context, client *gossh.Client
 		if exit, _ := client.Exec(ctx, "git clone "+shellQuoteSingle(t.originURL)+" "+shellQuoteSingle(baseRepo), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
 			return fmt.Errorf("git clone 失败（exit=%d），请检查 origin 凭据", exit)
 		}
+	}
+	// Refresh origin against the project's CURRENT platform token — see the
+	// same call in prepareRemoteAgentRun. This is the path that ends in a
+	// `git push origin` (CollectResult), so a stale credential here is what
+	// surfaces as "Invalid username or token" at the end of a 30-minute run.
+	if oErr := ensureRemoteOrigin(ctx, client, in.job, baseRepo, t.originURL, remoteOriginAuthed(t.projectSvc, t.projectID)); oErr != nil {
+		in.job.Append(store.LogLine{Type: "message", Content: "⚠️ " + oErr.Error()})
 	}
 	// Hard-sync the scratch repo onto origin/<baseBranch> via the shared
 	// script (mirror of prepareRemoteAgentRun): auto-correct HEAD, fetch
