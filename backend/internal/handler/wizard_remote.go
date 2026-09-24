@@ -1448,21 +1448,30 @@ type workerRunBody struct {
 // evicted, which is fine — one mutex per configured agent server.
 var workerRepairMu sync.Map // serverID -> *sync.Mutex
 
-// ensureRemoteWorkerReady probes GET /v1/health before a run and, when the
-// worker reports it cannot spawn claude, tries to restart it with a correct
-// PATH.
+// ensureRemoteWorkerReady probes GET /v1/health before a run and repairs the
+// two states in which the worker is up but cannot actually execute anything:
+// it is running code too old to understand the per-request claudeBin pin, or
+// its frozen PATH cannot resolve claude.
 //
 // The previous direct-CLI path had a `command -v claude` probe that surfaced
 // ENOENT up front; this is its worker equivalent. An unreachable worker is
 // fatal (nothing can run), but a worker that is up and merely can't resolve
-// claude on its own PATH is NOT: since 0.4.0 the run body pins
-// agent_servers.claude_bin, which bypasses the worker's PATH entirely. So a
-// failed repair downgrades to a warning rather than blocking a run that would
-// have succeeded.
+// claude on its own PATH is NOT — provided it is new enough to honour the
+// claudeBin field in the run body, which bypasses its PATH entirely.
 //
-// Restarting mid-flight is safe here precisely because of the condition: a
-// worker that reports it can't spawn claude is already failing every request
-// it is serving, so there is no healthy work to interrupt.
+// That proviso is the whole reason the version check happens here and not only
+// in Check. A pre-0.4.0 worker silently drops claudeBin, so the job log shows
+// NovaWorkbench announcing "改为按已记录的绝对路径执行 /home/.../bin/claude"
+// and the very next line is still `spawn claude ENOENT` — the fix looks
+// applied and isn't. Check does report the version mismatch, but only as
+// "请重新点「安装依赖」", so until someone reads that and clicks, every run on
+// the host fails identically. Hot-swapping server.mjs here (one SFTP write +
+// a restart, see upgradeWorkerCode) makes the host self-heal on the path that
+// actually notices the problem.
+//
+// Restarting mid-flight is safe precisely because of the entry condition: a
+// worker that can neither resolve claude nor honour the pin is already failing
+// every request it is serving, so there is no healthy work to interrupt.
 func ensureRemoteWorkerReady(ctx context.Context, client *gossh.Client, srv *model.AgentServer, job *store.Job) error {
 	const workerAddr = "127.0.0.1:7000"
 	health, err := probeWorkerHealth(ctx, client)
@@ -1470,7 +1479,21 @@ func ensureRemoteWorkerReady(ctx context.Context, client *gossh.Client, srv *mod
 		return errors.New("无法连接 nova-agent-worker（" + workerAddr +
 			"）。请在「设置 → Agent 服务器」对该服务器点「安装依赖」后再试。详细: " + err.Error())
 	}
-	if health.ClaudeResolvable() {
+	hints := runtimeHintsFor(srv)
+	pinned := strings.HasPrefix(hints.ClaudeBin, "/")
+	// Nothing to do when the worker can find claude by itself AND is current.
+	// A stale-but-working worker is deliberately left alone: upgrading it would
+	// buy nothing for this run and would interrupt any other run in flight on
+	// the same host. Check is where that host gets brought forward.
+	if health.ClaudeResolvable() && !workerCodeStale(health) {
+		return nil
+	}
+	// Current worker + a recorded absolute path: the pin already covers this
+	// run. Returning straight away keeps us from paying the ~18s restart dance
+	// before every single run on a host whose PATH we cannot fix (claude
+	// installed somewhere no login-shell-free environment will ever see).
+	if pinned && !workerCodeStale(health) {
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ worker 自身 PATH 找不到 claude，本次按已记录的绝对路径执行: " + hints.ClaudeBin})
 		return nil
 	}
 
@@ -1483,27 +1506,66 @@ func ensureRemoteWorkerReady(ctx context.Context, client *gossh.Client, srv *mod
 	mu.Lock()
 	defer mu.Unlock()
 
-	// Re-probe under the lock: a concurrent run may have just repaired it.
-	if h, perr := probeWorkerHealth(ctx, client); perr == nil && h.ClaudeResolvable() {
-		return nil
+	// Re-probe under the lock: a concurrent run may have just fixed it.
+	if h, perr := probeWorkerHealth(ctx, client); perr == nil {
+		health = h
+		if !workerCodeStale(h) && (h.ClaudeResolvable() || pinned) {
+			return nil
+		}
 	}
 
-	job.Append(store.LogLine{Type: "message", Content: "⚠ worker 进程自身找不到 claude（其 PATH 在启动时已冻结），尝试用新 PATH 重启..."})
 	var homeBuf strings.Builder
 	_, _ = client.Exec(ctx, "echo $HOME", "", nil, &homeBuf, nil)
 	homeDir := strings.TrimSpace(homeBuf.String())
 	if homeDir == "" {
 		homeDir = "/root"
 	}
-	if repaired, rerr := repairWorkerPATH(ctx, client, homeDir); rerr == nil {
+
+	// Stale code first: an old worker ignores claudeBin, so no amount of PATH
+	// repair makes the pin work, and the upgrade restart doubles as the PATH
+	// repair (upgradeWorkerCode relaunches with the same freshly-composed PATH).
+	if workerCodeStale(health) {
+		job.Append(store.LogLine{Type: "message", Content: "⚠ worker 版本 " + workerVersionDisplay(health.WorkerVersion) +
+			" 过旧（不认识下发的 claude 绝对路径），正在热升级到 " + agentWorkerVersion + "..."})
+		if upgraded, uerr := upgradeWorkerCode(ctx, client, homeDir, hints); uerr == nil {
+			health = upgraded
+			job.Append(store.LogLine{Type: "message", Content: "✓ worker 已热升级到 " + upgraded.WorkerVersion})
+			if upgraded.ClaudeResolvable() {
+				job.Append(store.LogLine{Type: "message", Content: "✓ 重启后 worker 自身已能解析 claude " + upgraded.ClaudeVersion})
+				return nil
+			}
+			if pinned {
+				job.Append(store.LogLine{Type: "message", Content: "ℹ️ worker 自身 PATH 仍找不到 claude，本次按已记录的绝对路径执行: " + hints.ClaudeBin})
+				return nil
+			}
+		} else {
+			job.Append(store.LogLine{Type: "message", Content: "⚠ worker 热升级失败(" + uerr.Error() + ")，继续尝试修复 PATH"})
+		}
+	}
+
+	job.Append(store.LogLine{Type: "message", Content: "⚠ worker 进程自身找不到 claude（其 PATH 在启动时已冻结），尝试用新 PATH 重启..."})
+	if repaired, rerr := repairWorkerPATH(ctx, client, homeDir, hints); rerr == nil {
 		job.Append(store.LogLine{Type: "message", Content: "✓ worker 已用新 PATH 重启，claude " + repaired.ClaudeVersion})
 		return nil
-	} else if srv != nil && strings.TrimSpace(srv.ClaudeBin) != "" {
-		job.Append(store.LogLine{Type: "message", Content: "⚠ worker PATH 修复失败(" + rerr.Error() + ")，改为按已记录的绝对路径执行: " + srv.ClaudeBin})
+	} else if pinned && !workerCodeStale(health) {
+		job.Append(store.LogLine{Type: "message", Content: "⚠ worker PATH 修复失败(" + rerr.Error() + ")，改为按已记录的绝对路径执行: " + hints.ClaudeBin})
 		return nil
+	} else if pinned {
+		// Pinned but the worker is still too old to honour the pin — say so
+		// instead of promising a path the worker will drop on the floor.
+		return errors.New("nova-agent-worker 版本为 " + workerVersionDisplay(health.WorkerVersion) +
+			"，不支持按绝对路径执行，且自动热升级与 PATH 修复均失败。请在「设置 → Agent 服务器」点「安装依赖」后再试。详细: " + rerr.Error())
 	} else {
 		return errors.New("nova-agent-worker 找不到 claude，且未记录 claude 绝对路径。请在「设置 → Agent 服务器」点「安装依赖」后再试。详细: " + rerr.Error())
 	}
+}
+
+// workerCodeStale reports whether the deployed worker predates this binary's
+// agentWorkerVersion (an empty version means a worker old enough not to report
+// one at all). Stale workers silently ignore run-body fields they don't know,
+// so this gates every decision that depends on one being honoured.
+func workerCodeStale(h workerHealth) bool {
+	return h.WorkerVersion != agentWorkerVersion
 }
 
 // workerRunRequest builds the POST body for /v1/run from the NovaWorkbench
