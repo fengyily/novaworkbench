@@ -501,9 +501,18 @@ body.no-scroll {
 /* ── Status badges (shared: requirement list, project list, weekly report) ── */
 .status-badge {
   display: inline-block;
-  padding: 3px 10px;
+  /* Tightened from 3px/10px → 2px/8px so the 3-chip
+     [方案完成][开发完成][待确认] group fits inside the Status column's 200px
+     min-width on one line at 12px font. Each chip saves 4px on the width
+     axis (8px total) without losing visual breathing room: 8px horizontal
+     padding still reads as a discrete chip rather than a token. The other
+     callers (Dashboard / Project list / Schedules) hold the same badge so
+     nothing else changes shape; the painted label stays 12px/600 so
+     weight contrast against the surrounding body text is preserved. */
+  padding: 2px 8px;
   border-radius: 4px;
   font-size: 12px;
+  line-height: 1.4;
   font-weight: 600;
   background: var(--color-active);
   color: var(--color-primary);
@@ -525,7 +534,11 @@ body.no-scroll {
   display: inline-flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px;
+  /* Tighter 3px gap (was 4px) to keep the combined chip group visually
+     cohesive — the painted labels are short CJK strings sitting side by
+     side, so 3px reads as "one row of three" without merging into a run;
+     4px pushed the total width just past the Status column's 200px min. */
+  gap: 3px;
   vertical-align: middle;
   line-height: 1.4;
 }
