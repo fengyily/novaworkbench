@@ -342,6 +342,9 @@ export const settings = {
     gpgBadgePending: 'GPG · 待生成',
     testLabel: '测试连接',
     testInProgress: '正在验证…',
+    deleteConfirm: '确认删除？',
+    retryTest: '再试一次',
+    retestLabel: '重新测试',
     // i18next ships with `{{var}}` (double braces) as the substitution
     // delimiter; single braces are returned as literal text, which made the
     // settings UI render "Token 有效（{platform}）· {username}" verbatim
