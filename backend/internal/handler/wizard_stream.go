@@ -354,7 +354,16 @@ func extractStreamError(evt map[string]interface{}) string {
 func workerCategoryHint(cat, msg string) string {
 	switch cat {
 	case "cli_not_found":
-		return "Claude CLI 未找到。请在 Agent 服务器上确认 `claude --version` 可执行，或重新「安装依赖」。"
+		// Deliberately warns against the obvious-but-wrong diagnostic step:
+		// SSH-ing in and running `claude --version` succeeds on exactly the
+		// hosts that hit this error, because an interactive shell sources
+		// nvm.sh / ~/.bashrc while the worker process's PATH was frozen at
+		// launch without them. The actionable knob is re-running install
+		// (which recomputes the worker's PATH and records claude's absolute
+		// path so later runs pin it directly), not verifying the CLI by hand.
+		return "Claude CLI 未找到。注意：SSH 登录后 `claude --version` 能跑通并不代表 worker 能跑通 —— " +
+			"worker 进程的 PATH 在启动时就固定了，看不到 nvm 等只在登录 shell 里生效的目录。" +
+			"请在「设置 → Agent 服务器」点「检查」（会自动尝试用新 PATH 重启 worker）或「安装依赖」。"
 	case "auth_failed":
 		return "鉴权失败（401）。请在「设置 → Claude 配置」检查 ANTHROPIC_AUTH_TOKEN 是否已填写并生效。"
 	case "auth_forbidden":
