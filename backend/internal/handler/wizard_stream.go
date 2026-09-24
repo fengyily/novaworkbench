@@ -393,20 +393,21 @@ func workerCategoryHint(cat, msg string) string {
 	case "model_not_found":
 		return "上游 API 不认识这个 model（404）。请检查「设置 → Claude 配置」里的 model 与 base URL，或确认模型名拼写正确。"
 	case "unrecognized_model":
-		// We pin MiniMax-M3 (or a similar custom id) via the --settings env
-		// block together with CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_
-		// ENFORCEMENT=1, which suppresses Claude Code's "model isn't in my
-		// local catalog, I'll assume 200k context and might fail" warning —
-		// see gateway.go: settingsEnvOverrides. If the warning still surfaces
-		// here, either the env block didn't reach the worker (stale
-		// server.mjs) or the CLI version on the agent server doesn't honor
-		// that knob.
+		// IMPORTANT: the bare stderr line
+		//   [claude-code:unrecognized_model] {"model":"…","query_source":"sdk"}
+		// is a print-mode DIAGNOSTIC, not a failure — Claude Code prints it on
+		// every request for a model id outside its local catalog (i.e. every
+		// custom model on a private base URL) and the request still succeeds.
+		// nova-agent-worker ≥0.4.1 strips it before classifying, so reaching
+		// this hint means the run actually failed: either the upstream endpoint
+		// rejected the model ("issue with the selected model …") or nothing
+		// else on stderr explained the non-zero exit.
 		//
 		// The `[1m]` / `[0m]` markers in the stderr are Claude Code's
 		// own ANSI color escapes leaking into the JSON it emits — a CLI
 		// bug, not our model name. The actual id is whatever's set in
 		// 「设置 → Claude 配置」.
-		return "Claude Code 不在本地 model 目录里认识这个 model（自定义 model 走私有 base URL 时常见）。gateway.go 已自动注入 CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1 让 CLI 跳过 catalog 检查，但本机仍报此错通常意味着：(1) worker 还在跑旧版 server.mjs，没拿到新的 env（请在「设置 → Agent 服务器」点「安装依赖」）；(2) Agent 服务器上的 Claude Code 版本过旧不识别该 env 变量（请运行 `claude --version` 升级）。详细：stderr 里的 `[1m]`/`[0m` 是 Claude Code CLI 自带的 ANSI 颜色控制符泄漏进 JSON，不是 model 名真的带这些字符。"
+		return "这次执行确实失败了，且失败信息指向 model：通常是「设置 → Claude 配置」里的 model 名与 base URL 不匹配（上游端点不提供该模型），请核对模型名拼写与所选配置。注意：stderr 里单独一行 `[claude-code:unrecognized_model]` 只是 Claude Code 对「本地目录里没有这个 model id」的诊断提示，自定义模型走私有 base URL 时必然出现，本身不代表失败。若怀疑 worker 仍把该诊断当失败（报 preflight 失败且 exit_code 为空），说明它在跑旧版 server.mjs：请在「设置 → Agent 服务器」点「检查」自动热升级，或点「安装依赖」。stderr 里的 `[1m]`/`[0m` 是 CLI 自带的 ANSI 颜色控制符泄漏进 JSON，不是 model 名真的带这些字符。"
 	case "rate_limited":
 		return "上游限流（429）。请稍候几分钟重试，或降低并发。"
 	case "quota_exceeded":
