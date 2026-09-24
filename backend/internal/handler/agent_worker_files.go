@@ -33,7 +33,13 @@ package handler
 // 0.4.0: /v1/run accepts claudeBin + extraPaths so NovaWorkbench can pin the
 // claude binary per request instead of relying on the worker's frozen PATH;
 // /v1/health additionally reports the resolved PATH.
-const agentWorkerVersion = "0.4.0"
+// 0.4.1: preflight no longer fast-fails on Claude Code's
+// '[claude-code:unrecognized_model]' stderr line — that is a print-mode
+// diagnostic emitted for every custom model on a private base URL, and the
+// probe it was killing exits 0. Bumping forces a hot-upgrade of agent hosts
+// still running 0.4.0, which would keep failing every run with
+// 'preflight 失败（unrecognized_model）'.
+const agentWorkerVersion = "0.4.1"
 
 // agentWorkerServerMJS is the body of nova-agent-worker/server.mjs that gets
 // uploaded to the remote agent host during install. It's the same content
@@ -401,6 +407,15 @@ app.post('/v1/run', async (req, res) => {
   }
 
   const pf = await preflight(opts.workDir, claudeCmd, settingsArg);
+  if (pf.ok && pf.warning) {
+    // Non-fatal preflight noise (today: the model-catalog diagnostic). Surfaced
+    // once per run so an operator reading the job panel knows the line in the
+    // journal is expected for custom models, instead of hunting a failure that
+    // isn't there.
+    console.error('[nova-agent-worker] ' + pf.warning);
+    res.write(JSON.stringify({ type: 'log', content: '⚠ ' + pf.warning }) + '\n');
+    if (typeof res.flush === 'function') res.flush();
+  }
   if (!pf.ok) {
     res.write(JSON.stringify({
       type: 'error',
@@ -505,17 +520,31 @@ app.post('/v1/run', async (req, res) => {
 // run exposes. Keep this in sync with the [preflight timeout after Xs]
 // string injected into the stderr below.
 //
-// Fast-fail on classified stderr: the CLI's 'unrecognized_model' (and a
-// few other well-known patterns — see classifyError) is emitted to stderr
-// as soon as the CLI rejects a config (model id, auth token, base URL),
-// but the CLI then hangs waiting on something else (catalog refresh,
-// retry) and never exits on its own. Without fast-fail, those errors
-// would surface as 'preflight_timeout' after 15s, hiding the real reason
-// behind a misleading "Agent 服务器无法访问 API". classifyError runs on
-// every stderr chunk; any non-'unknown' category resolves the promise
-// immediately and SIGTERMs the hung child. The Go side already has
+// Fast-fail on classified stderr: a well-known failure pattern (see
+// classifyError) is emitted to stderr as soon as the CLI rejects a config
+// (auth token, base URL), but the CLI then hangs waiting on something else
+// (catalog refresh, retry) and never exits on its own. Without fast-fail,
+// those errors would surface as 'preflight_timeout' after 15s, hiding the
+// real reason behind a misleading "Agent 服务器无法访问 API". classifyError
+// runs on every stderr chunk; any non-'unknown' category resolves the
+// promise immediately and SIGTERMs the hung child. The Go side already has
 // tailored fix hints for those categories (workerCategoryHint), so a
 // sub-second failure is also a much more actionable error message.
+//
+// What fast-fail must NOT do is kill a healthy run: Claude Code writes
+// '[claude-code:unrecognized_model] {"model":"...","query_source":"sdk"}' to
+// stderr whenever a request goes out for a model id that is not in its local
+// catalog — which is EVERY request for a custom model on a private base URL
+// (MiniMax-M3, DeepSeek, …). That line is a print-mode DIAGNOSTIC, not a
+// rejection: the request still goes out, the answer still comes back, and
+// 'claude --print ping' still exits 0. Fast-failing on it SIGTERM'd a
+// working preflight and reported 'preflight 失败（unrecognized_model）' with
+// a null exit code. The fast-fail path therefore classifies through
+// classifyFatalError, which strips those diagnostic lines, so they can never
+// resolve the probe early; if the probe really does fail with nothing else
+// on stderr, the close handler still classifies it as 'unrecognized_model'
+// via classifyError's end-of-function fallback and the tailored hint is
+// preserved.
 //
 // 'claudeCmd' is the {cmd, env} pair returned by resolveClaudeCommand — the
 // caller resolves it once and passes the SAME pair here and to the real
@@ -567,19 +596,22 @@ function preflight(workDir, claudeCmd, settingsArg) {
     }
     let stderr = '';
     let stdout = '';
+    let sawModelDiagnostic = false;
     proc.stdout.on('data', (d) => { stdout += d.toString(); });
     proc.stderr.on('data', (d) => {
       stderr += d.toString();
-      // Fast-fail on classifier-detected errors. The CLI emits
-      // '[claude-code:unrecognized_model]' (and similar tagged errors) on
-      // stderr the moment it rejects the config, then keeps the process
-      // alive doing internal bookkeeping — the next chunk won't come for
-      // seconds. classifyError's regexes match the partial stderr
-      // (e.g. literal "unrecognized_model"), so a single tagged line is
-      // enough. 'unknown' is intentionally skipped: a CLI that just
-      // happens to print something category-shaped shouldn't poison an
-      // otherwise-healthy run.
-      const cat = classifyError(null, stderr);
+      if (hasClaudeModelDiagnostic(stderr)) sawModelDiagnostic = true;
+      // Fast-fail on classifier-detected errors. The CLI emits a tagged
+      // error line on stderr the moment it rejects the config, then keeps
+      // the process alive doing internal bookkeeping — the next chunk won't
+      // come for seconds. classifyError's regexes match the partial stderr,
+      // so a single tagged line is enough. 'unknown' is intentionally
+      // skipped: a CLI that just happens to print something category-shaped
+      // shouldn't poison an otherwise-healthy run. classifyFatalError drops
+      // the diagnostic-only lines (the model-catalog notice) entirely, so a
+      // chunk carrying nothing else reads as 'unknown' and the probe runs to
+      // completion — the process is still alive and may well exit 0.
+      const cat = classifyFatalError(null, stderr);
       if (cat !== 'unknown') {
         settle({
           ok: false,
@@ -596,7 +628,12 @@ function preflight(workDir, claudeCmd, settingsArg) {
     });
     proc.on('close', (code) => {
       if (code === 0) {
-        settle({ ok: true });
+        settle({
+          ok: true,
+          warning: sawModelDiagnostic
+            ? 'Claude Code 不认识该 model id（自定义 model 走私有 base URL 时正常现象），stderr 里的 [claude-code:unrecognized_model] 仅为诊断提示；preflight 已通过，执行不受影响。'
+            : '',
+        });
       } else {
         settle({
           ok: false,
@@ -756,8 +793,10 @@ function readClaudeVersion() {
 // → "检查设置 → Claude 配置里的 model 名" instead of the generic "exit 1").
 //
 // Pattern sources:
-//   - Claude Code CLI's own error tags: '[claude-code:unrecognized_model]',
-//     '[claude-code:not_logged_in]' etc.
+//   - Claude Code CLI's own error tags: '[claude-code:not_logged_in]' etc.
+//     ('[claude-code:unrecognized_model]' is NOT one of them — it is a
+//     diagnostic the CLI prints on successful runs too; see
+//     stripClaudeDiagnostics below.)
 //   - Node / undici / DNS error codes: ENOTFOUND, ECONNREFUSED, etc.
 //   - HTTP-status hints in stderr: 401, 403, 404, 429, 5xx.
 //
@@ -767,12 +806,19 @@ function readClaudeVersion() {
 function classifyError(err, stderr) {
   const msg = (err && err.message) || '';
   const code = err && err.code;
-  const text = (msg + '\n' + (stderr || '')).toLowerCase();
+  const raw = (msg + '\n' + (stderr || '')).toLowerCase();
+  // Classify on the stderr MINUS Claude Code's diagnostic-only lines. The
+  // model-catalog notice rides along with every request for a custom model,
+  // including successful ones, so leaving it in would (a) fast-fail healthy
+  // preflights and (b) shadow the real category when a run fails for an
+  // unrelated reason (a 401 preceded by the notice used to classify as
+  // 'unrecognized_model' and produce the wrong fix hint).
+  const text = stripClaudeDiagnostics(raw);
 
   // Model catalog issues — Claude Code ships a hardcoded model list and
-  // warns (sometimes fatally) when an unknown model id is passed via
-  // --model. Custom models on private base URLs always hit this.
-  if (/unrecognized_model|model.{0,4}catalog|behavesas|modelpicker/.test(text)) return 'unrecognized_model';
+  // refuses to run when the selected model is neither in it nor served by
+  // the configured endpoint.
+  if (/model.{0,4}catalog|behavesas|modelpicker|issue with the selected model/.test(text)) return 'unrecognized_model';
 
   // Auth — 401 / not-logged-in / token-shaped rejections. We accept both
   // "Authentication failed" and "not logged in" because Claude Code
@@ -833,7 +879,48 @@ function classifyError(err, stderr) {
   // Go side that still pattern-matches max_turns continues to work).
   if (/max.{0,4}turns|maximum.{0,4}turns/.test(text)) return 'max_turns';
 
+  // Last resort: nothing above matched, but the run did emit the model
+  // diagnostic. On a FAILED run (this function is only consulted for one)
+  // that's the only signal we have, so keep the old category — the Go side's
+  // hint for it covers the "custom model on a private base URL" case. On a
+  // successful run classifyError is never called, so this cannot turn a
+  // healthy preflight into a failure.
+  if (hasClaudeModelDiagnostic(raw)) return 'unrecognized_model';
+
   return 'unknown';
+}
+
+// CLAUDE_MODEL_DIAGNOSTIC_RE matches Claude Code's print-mode model notice:
+//   [claude-code:unrecognized_model] {"model":"MiniMax-M3","query_source":"sdk"}
+// Written to stderr whenever a request goes out for a model id that is not in
+// the CLI's local catalog. Per the CLI's own release notes it is a diagnostic
+// ("map it with modelOverrides to silence"), not a rejection — verified
+// against a stub Anthropic endpoint: the line is printed, the answer still
+// streams back and 'claude --print ping' exits 0.
+const CLAUDE_MODEL_DIAGNOSTIC_RE = /^.*\[claude-code:unrecognized_model\].*$/gim;
+
+// hasClaudeModelDiagnostic reports whether the text carries that notice.
+// Uses .test on a fresh regex because CLAUDE_MODEL_DIAGNOSTIC_RE is /g and
+// therefore stateful across calls.
+function hasClaudeModelDiagnostic(text) {
+  return /\[claude-code:unrecognized_model\]/i.test(String(text || ''));
+}
+
+// stripClaudeDiagnostics removes the diagnostic-only lines so the remaining
+// text is the failure evidence and nothing else.
+function stripClaudeDiagnostics(text) {
+  return String(text || '').replace(CLAUDE_MODEL_DIAGNOSTIC_RE, '');
+}
+
+// classifyFatalError is classifyError for callers that classify a STILL-RUNNING
+// process from a partial stderr chunk (the preflight fast-fail). Those callers
+// must never act on the model diagnostic: the process that printed it is alive
+// and usually on its way to exiting 0, so the diagnostic is dropped before
+// classification instead of falling through to classifyError's last-resort
+// 'unrecognized_model'. Post-mortem callers (non-zero exit) keep using
+// classifyError, where that fallback is the correct read.
+function classifyFatalError(err, stderr) {
+  return classifyError(err, stripClaudeDiagnostics(stderr));
 }
 
 // serializeCLIError shapes a {code, signal, stderr} view of a non-zero
@@ -843,10 +930,17 @@ function classifyError(err, stderr) {
 // are diagnostic sugar.
 function serializeCLIError({ code, signal, stderr }) {
   const trimmed = (stderr || '').trim();
+  // The one-line 'error' summary is the last MEANINGFUL stderr line: the
+  // model diagnostic is dropped first so a failure whose output happens to
+  // end with it still names the actual failure. 'stderr' below keeps the
+  // full text (diagnostic included) for the job panel.
+  const meaningful = stripClaudeDiagnostics(trimmed).split('\n').map((l) => l.trim()).filter(Boolean);
   const out = {
-    error: trimmed
-      ? trimmed.split('\n').slice(-1)[0].slice(0, 800)
-      : 'claude 进程退出码 ' + code + (signal ? '（信号 ' + signal + '）' : ''),
+    error: meaningful.length
+      ? meaningful[meaningful.length - 1].slice(0, 800)
+      : (trimmed
+        ? trimmed.split('\n').slice(-1)[0].slice(0, 800)
+        : 'claude 进程退出码 ' + code + (signal ? '（信号 ' + signal + '）' : '')),
     errorCategory: classifyError(null, stderr || ''),
   };
   if (code != null) out.code = code;

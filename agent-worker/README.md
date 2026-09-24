@@ -43,12 +43,27 @@ it via SSH direct-tcpip channel (see `backend/internal/ssh/client.go`'s
 ### `GET /v1/health`
 
 ```json
-{ "status": "ok", "claudeVersion": "1.x.y" }
+{ "status": "ok", "claudeVersion": "1.x.y", "workerVersion": "0.4.0", "path": "/usr/bin:/bin" }
 ```
 
-Used by the `Check` flow to verify the worker is alive before a coding run.
-Returns the installed `claude` CLI version (best effort) so an operator
-can spot stale installs at a glance.
+Used by the `Check` flow and by every remote run to verify the worker is
+alive and able to work before starting.
+
+`claudeVersion` is produced by running `claude --version` through the
+worker's *own* spawn path, so it is the only signal that reflects whether
+this process — whose `PATH` was frozen when it started — can actually launch
+the CLI. `"unknown"` means it could not. An SSH shell that finds `claude`
+proves nothing here: it sources `nvm.sh` and widens `PATH`, the worker does
+not. `path` echoes the worker's resolved `PATH` so that split is diagnosable
+without reading `/proc/<pid>/environ`.
+
+`workerVersion` is stamped into `server.mjs` at install time from the Go
+binary's `agentWorkerVersion`. NovaWorkbench compares it on every Check and
+before every remote run; a mismatch means the deployed `server.mjs` predates
+the running backend and will silently ignore request fields it has never
+heard of (`claudeBin` being the load-bearing one), so both flows hot-swap
+`server.mjs` and restart the worker rather than waiting for a manual
+「安装依赖」.
 
 ### `POST /v1/run`
 
@@ -70,6 +85,18 @@ Request body:
 | `permissionMode` | string | no | `"plan"` → `--permission-mode plan`; empty → `--dangerously-skip-permissions` |
 | `overrideSettingSources` | bool | no | `true` → `--setting-sources project,local` (drop user) |
 | `ignoreLocalSettings` | bool | no | default `true` → `--setting-sources ""` (drop ALL settings files) |
+| `claudeBin` | string | no | absolute path to the `claude` CLI; spawned directly, bypassing `PATH` |
+| `extraPaths` | string | no | `:`-separated dirs prepended to the child's `PATH` when `claudeBin` is unusable |
+
+`claudeBin` / `extraPaths` mirror `agent_servers.claude_bin` /
+`.extra_paths`, which every Check refreshes. They exist because the worker's
+own `PATH` is frozen at process start, so a `claude` installed somewhere that
+`PATH` doesn't cover (classically `~/.nvm/versions/node/<ver>/bin`, visible
+only to a shell that sourced `nvm.sh`) makes every run die with
+`spawn claude ENOENT` while the settings UI happily shows the detected
+runtime paths. `claudeBin` is used only if it passes an `X_OK` check, so an
+nvm node upgrade degrades to `PATH` lookup rather than hard-failing a host
+that would otherwise work.
 
 Response: `application/x-ndjson`. One JSON object per line (the same shape
 the CLI's `--output-format stream-json --verbose` emits). NovaWorkbench's
@@ -85,7 +112,11 @@ existing `parseStreamJSONFromReader` reads this line-by-line unchanged.
 ```
 
 Errors come through as `{type:"error", errorCategory, error, stderr?, code?, signal?}`
-frames, then the response closes.
+frames, then the response closes. A `cli_not_found` additionally carries
+`resolvedClaudeBin` / `resolvedPath` — what the worker actually tried to
+spawn and with which `PATH` — which is what distinguishes "no path was sent"
+from "the sent path was wrong" from "this worker is too old to read the
+field".
 
 ## Why not `@anthropic-ai/claude-agent-sdk`?
 
