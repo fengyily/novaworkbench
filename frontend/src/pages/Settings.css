@@ -331,3 +331,108 @@
 .perm-module { margin-bottom: 12px; }
 .perm-module-title { font-size: 13px; font-weight: 600; color: var(--color-text-secondary); margin-bottom: 4px; }
 .perm-key-hint { display: block; font-size: 11px; color: var(--color-text-muted); }
+
+/* === SettingsTokens row polish (req_2dc8082fca31763f) === */
+
+/* Left rail — anchored by platform brand color */
+.token-rail-cell { width: 12px; padding-right: 0; }
+.token-row-rail {
+  display: inline-block;
+  width: 4px;
+  height: 24px;
+  border-radius: 2px;
+  vertical-align: middle;
+}
+.token-row-rail--github    { background: #181717; }
+.token-row-rail--gitlab    { background: #FC6D26; }
+.token-row-rail--gitea     { background: #21B071; }
+.token-row-rail--bitbucket { background: #2684FF; }
+
+/* Row pulse on successful test */
+@keyframes token-row-pulse {
+  0%   { background-color: transparent; box-shadow: inset 4px 0 0 transparent; }
+  35%  { background-color: var(--color-success-soft); box-shadow: inset 4px 0 0 var(--color-success); }
+  100% { background-color: transparent; box-shadow: inset 4px 0 0 transparent; }
+}
+.token-row--pulse { animation: token-row-pulse 360ms ease-out; }
+.token-row--testing { background-color: var(--color-hover); }
+
+/* Action group */
+.token-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.token-row-actions .btn-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.token-row-actions svg { width: 14px; height: 14px; }
+
+/* Spinning refresh icon while verifying */
+.token-icon-spin { animation: token-icon-rotate 1s linear infinite; }
+@keyframes token-icon-rotate { to { transform: rotate(360deg); } }
+
+/* Test result — success pill */
+.token-test-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--color-success-soft);
+  color: var(--color-success-deep);
+  font-size: 11px;
+  font-weight: 600;
+}
+.token-test-pill svg { width: 12px; height: 12px; }
+
+/* Test result — failure banner */
+.token-test-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-error);
+  border-radius: 6px;
+  background: var(--color-error-soft);
+  color: var(--color-error-deep);
+  font-size: 12px;
+}
+.token-test-banner-retry {
+  color: var(--color-error-deep);
+  text-decoration: underline;
+}
+
+/* Inline delete confirmation */
+.token-delete-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--color-error-soft);
+  font-size: 12px;
+  color: var(--color-error-deep);
+}
+.token-delete-confirm .btn-link { color: inherit; }
+
+/* Mobile (<768px): rail becomes top horizontal bar in card layout */
+@media (max-width: 768px) {
+  .token-row-rail {
+    display: block;
+    width: 100%;
+    height: 3px;
+    border-radius: 0;
+    margin-bottom: 4px;
+  }
+  .token-rail-cell {
+    display: block;
+    width: 100%;
+    padding: 0;
+  }
+}
