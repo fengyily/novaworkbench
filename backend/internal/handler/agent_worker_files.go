@@ -111,6 +111,15 @@ function resolveExtendedPath() {
     '/usr/local/bin',
   ].filter(Boolean);
   // npm root -g on its own can hang for ~1s on a cold cache; cap it.
+  // CAUTION: this returns the GLOBAL PREFIX for whichever user the worker
+  // runs as, which is NOT necessarily the user that ran 'npm install -g
+  // @anthropic-ai/claude-code' during install. On the install → worker
+  // hand-off the SSH re-dials as nova/ubuntu, so 'npm root -g' resolves to
+  // nova's prefix (often empty /usr/lib/node_modules) and misses the
+  // root-installed claude entirely. The NOVA_AGENT_WORKER_EXTRA_PATHS env
+  // below is the cross-user override: installNodeWorker writes the
+  // actual path of the installed claude CLI there so this branch picks it
+  // up regardless of which user the worker is running under.
   try {
     const npmGlobalBin = execFileSync('npm', ['root', '-g'], {
       timeout: 1500,
@@ -120,13 +129,30 @@ function resolveExtendedPath() {
   } catch {
     // npm not installed / slow / broken — skip silently.
   }
+  // Install-supplied extra paths. Forwarded by the install flow in
+  // agent_server.go installNodeWorker (systemd Environment=PATH=..., launchd
+  // EnvironmentVariables.PATH=..., and the nohup env line). Always treat
+  // these as authoritative: they were computed on the SSH session that
+  // actually ran the install, before any user re-dial, so they reflect
+  // where 'claude' was actually written to disk.
+  const extra = (process.env.NOVA_AGENT_WORKER_EXTRA_PATHS || '')
+    .split(':')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const d of extra) candidates.push(d);
   const existing = (process.env.PATH || '').split(':').filter(Boolean);
   const seen = new Set(existing);
   const merged = [...existing];
   for (const d of candidates) {
     if (!seen.has(d)) { seen.add(d); merged.push(d); }
   }
-  return merged.join(':');
+  const finalPath = merged.join(':');
+  // Surface the resolved PATH to the worker log so an operator diagnosing
+  // 'spawn claude ENOENT' can confirm whether the install-supplied bin dir
+  // actually landed on PATH. Cheap (one line per process start), and the
+  // only way to know whether NOVA_AGENT_WORKER_EXTRA_PATHS reached us.
+  console.error('[nova-agent-worker] resolved PATH: ' + finalPath);
+  return finalPath;
 }
 process.env.PATH = resolveExtendedPath();
 
@@ -1007,6 +1033,16 @@ Environment=NOVA_AGENT_WORKER_PORT=7000
 # server.mjs:resolveTmpdir), but this belt-and-braces ensures Node's
 # own os.tmpdir() is sane before any user code runs.
 Environment=TMPDIR=/tmp
+# PATH is set explicitly because the systemd --user manager inherits
+# a stripped PATH (/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin)
+# that does NOT include nvm / Homebrew / npm-global bin dirs. Without this
+# override the worker's spawn('claude', ...) fails with ENOENT even when the
+# install script reports 'claude <ver>' (the Check flow runs in an SSH
+# shell with the augmented PATH - see agent_server.go runCheck:228). The
+# install flow replaces the __WORKER_PATH__ placeholder with the actual
+# PATH (SSH session PATH + ~/.novaworkbench/extra-paths) computed on the
+# remote host.
+Environment=PATH=__WORKER_PATH__
 WorkingDirectory=/opt/nova-agent-worker
 ExecStart=/usr/bin/env node server.mjs
 Restart=always
@@ -1040,6 +1076,12 @@ const agentWorkerLaunchdPlist = `<?xml version="1.0" encoding="UTF-8"?>
     <key>NOVA_AGENT_WORKER_HOST</key><string>127.0.0.1</string>
     <key>NOVA_AGENT_WORKER_PORT</key><string>7000</string>
     <key>TMPDIR</key><string>/tmp</string>
+    <!-- PATH placeholder — replaced at install time with the resolved
+         launchd PATH (SSH session PATH + extra-paths) so the worker's
+         spawn('claude', …) can find the CLI even when launchd started
+         the agent with a stripped PATH that misses /opt/homebrew/bin
+         or ~/.npm-global/bin. launchd honors EnvironmentVariables.PATH. -->
+    <key>PATH</key><string>__WORKER_PATH__</string>
   </dict>
   <key>WorkingDirectory</key><string>/opt/nova-agent-worker</string>
   <key>RunAtLoad</key><true/>

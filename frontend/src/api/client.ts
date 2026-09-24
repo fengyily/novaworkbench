@@ -2066,6 +2066,20 @@ export interface AgentServer {
   // nova-agent-worker version the last successful install deployed; empty
   // until the first install that stamps it (see backend agentWorkerVersion).
   worker_version: string;
+  // Runtime facts persisted at install time so the settings UI can show
+  // "actually installed here" without SSH-ing back. Empty until the first
+  // install that captures them. claude_bin / node_bin are absolute paths;
+  // extra_paths is a newline-separated list of PATH dirs the worker was
+  // launched with.
+  claude_bin: string;
+  node_bin: string;
+  extra_paths: string;
+  // Asset-inventory snapshot (OS / kernel / hostname / CPUs / memory /
+  // disk / IPs / uptime / claude_version) as a JSON string. Empty until
+  // the first successful collection. The UI parses it on the fly into
+  // the "资产详情" details panel — see SettingsAgentServers.tsx.
+  system_info: string;
+  system_info_collected_at: string | null;
   created_at: string;
   updated_at: string;
 }

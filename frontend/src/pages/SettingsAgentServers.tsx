@@ -491,6 +491,168 @@ export default function SettingsAgentServers() {
   );
 }
 
+// AgentInventoryPanel — collapsible "资产详情" panel inside each server card.
+// Renders three sections (runtime paths / system info / last-collected time).
+// Each field falls back to the i18n "—" placeholder when the DB column is
+// empty (e.g. before the first install completes). The system_info column
+// is parsed as JSON on render — see backend collectSystemInfo for the shape.
+function AgentInventoryPanel({ server }: { server: AgentServer }) {
+  const { t } = useTranslation();
+  const empty = t('settings.agentServersPage.detailEmpty');
+
+  // Parse system_info on the fly. The backend wraps everything in json
+  // tags; a failed parse (e.g. legacy row with raw text) yields an empty
+  // struct so the panel renders placeholders rather than blowing up.
+  let sys: {
+    os?: string; kernel?: string; hostname?: string;
+    cpus?: string; mem_total?: string; disk_usage?: string;
+    ips?: string[]; uptime?: string; claude_version?: string;
+  } = {};
+  if (server.system_info) {
+    try {
+      sys = JSON.parse(server.system_info);
+    } catch {
+      sys = {};
+    }
+  }
+
+  const hasAnyData =
+    server.claude_bin ||
+    server.node_bin ||
+    server.extra_paths ||
+    sys.os ||
+    sys.kernel ||
+    sys.hostname;
+  if (!hasAnyData) {
+    // Nothing to show — render a tiny hint line instead of an empty
+    // <details> so the user knows the feature is wired up but waiting on
+    // a Check / Install run.
+    return (
+      <div className="server-card-inventory server-card-inventory--empty">
+        {t('settings.agentServersPage.detailNeverCollected')}
+      </div>
+    );
+  }
+
+  const summary = server.system_info_collected_at
+    ? t('settings.agentServersPage.detailCollectedAt', {
+        time: new Date(server.system_info_collected_at).toLocaleString(),
+      })
+    : t('settings.agentServersPage.detailNeverCollected');
+
+  const copy = (value: string) => {
+    if (!value) return;
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(value).catch(() => undefined);
+    }
+  };
+
+  const field = (label: string, value: string) => (
+    <div className="inv-row">
+      <span className="inv-label">{label}</span>
+      {value ? (
+        <button
+          type="button"
+          className="inv-value inv-value--copyable"
+          title={value}
+          onClick={() => copy(value)}
+        >
+          {value}
+        </button>
+      ) : (
+        <span className="inv-value inv-value--empty">{empty}</span>
+      )}
+    </div>
+  );
+
+  const extraPathList = server.extra_paths
+    ? server.extra_paths.split('\n').filter(Boolean)
+    : [];
+
+  return (
+    <details className="server-card-inventory">
+      <summary className="server-card-inventory-summary">
+        <span className="inv-glyph">🔍</span>
+        <span>{t('settings.agentServersPage.detailSummary')}</span>
+        <span className="inv-time">· {summary}</span>
+      </summary>
+      <div className="server-card-inventory-body">
+        <div className="inv-section">
+          <div className="inv-section-title">
+            {t('settings.agentServersPage.detailSectionRuntime')}
+          </div>
+          {field(t('settings.agentServersPage.detailClaudeBin'), server.claude_bin)}
+          {field(t('settings.agentServersPage.detailNodeBin'), server.node_bin)}
+          {extraPathList.length > 0 ? (
+            <div className="inv-row">
+              <span className="inv-label">{t('settings.agentServersPage.detailExtraPaths')}</span>
+              <ul className="inv-paths">
+                {extraPathList.map((p) => (
+                  <li key={p}>
+                    <button
+                      type="button"
+                      className="inv-value inv-value--copyable"
+                      title={p}
+                      onClick={() => copy(p)}
+                    >
+                      {p}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <div className="inv-row">
+              <span className="inv-label">{t('settings.agentServersPage.detailExtraPaths')}</span>
+              <span className="inv-value inv-value--empty">{empty}</span>
+            </div>
+          )}
+        </div>
+        <div className="inv-section">
+          <div className="inv-section-title">
+            {t('settings.agentServersPage.detailSectionSystem')}
+          </div>
+          {field(t('settings.agentServersPage.sysOS'), sys.os || '')}
+          {field(t('settings.agentServersPage.sysKernel'), sys.kernel || '')}
+          {field(t('settings.agentServersPage.sysHostname'), sys.hostname || '')}
+          {field(t('settings.agentServersPage.sysCPUs'), sys.cpus || '')}
+          {field(t('settings.agentServersPage.sysMem'), sys.mem_total || '')}
+          {field(t('settings.agentServersPage.sysDisk'), sys.disk_usage || '')}
+          {field(
+            t('settings.agentServersPage.sysUptime'),
+            sys.uptime || '',
+          )}
+          {field(t('settings.agentServersPage.sysClaudeVersion'), sys.claude_version || '')}
+          {sys.ips && sys.ips.length > 0 ? (
+            <div className="inv-row">
+              <span className="inv-label">{t('settings.agentServersPage.sysIPs')}</span>
+              <ul className="inv-paths">
+                {sys.ips.map((ip) => (
+                  <li key={ip}>
+                    <button
+                      type="button"
+                      className="inv-value inv-value--copyable"
+                      title={ip}
+                      onClick={() => copy(ip)}
+                    >
+                      {ip}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <div className="inv-row">
+              <span className="inv-label">{t('settings.agentServersPage.sysIPs')}</span>
+              <span className="inv-value inv-value--empty">{empty}</span>
+            </div>
+          )}
+        </div>
+      </div>
+    </details>
+  );
+}
+
 function ServerCard({
   server, logs, busy, testing, testResult,
   onTest, onEdit, onDelete, onCheck, onInstall, onCancel,
@@ -549,6 +711,7 @@ function ServerCard({
           {server.check_result && (
             <div className="server-card-result">{server.check_result}</div>
           )}
+          <AgentInventoryPanel server={server} />
         </div>
         <div className="server-card-actions">
           <button className="btn" onClick={onCheck} disabled={busy !== ''}>{t('settings.agentServersPage.btnCheck')}</button>

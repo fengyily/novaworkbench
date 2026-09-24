@@ -10,6 +10,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -349,6 +350,17 @@ func (h *AgentServerHandler) runCheck(job *store.Job, serverID string) {
 	}
 
 	_ = h.svc.UpdateStatus(serverID, status, summary)
+	// Asset-inventory snapshot. Best-effort — never aborts the Check.
+	// Persisted into agent_servers.system_info so the settings panel can
+	// render OS / kernel / CPU / IPs / uptime without SSH'ing back.
+	// We re-derive a background ctx here because runCheck is called from
+	// a goroutine that doesn't carry a request ctx (see the ctx created
+	// at the top of runCheck) and the SSH client's underlying conn has
+	// its own deadline — collectSystemInfo will internally cap itself at
+	// 12s.
+	if infoJSON, _, ierr := h.collectSystemInfo(context.Background(), client, job); ierr == nil && infoJSON != "" {
+		_ = h.svc.UpdateSystemInfo(serverID, infoJSON)
+	}
 	job.Append(store.LogLine{Type: "done", Content: summary})
 	job.Finish(0, store.JobDone)
 }
@@ -984,6 +996,31 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 		}
 	}
 
+	// Read the install-time extra-paths file written by linuxInstallScript /
+	// darwinInstallScript. Each line is a directory that contains the
+	// actually-installed `claude` binary (e.g. /root/.npm-global/bin,
+	// /root/.nvm/versions/node/22/bin, /opt/homebrew/bin). Without merging
+	// these into the worker launch PATH, the worker process — which runs
+	// under nova/ubuntu after provisionNonRootUser, NOT under the user that
+	// ran npm install -g — cannot resolve `claude` by name and /v1/run's
+	// preflight fails with `spawn claude ENOENT` (`cli_not_found`).
+	//
+	// We read this BEFORE writing the unit / plist so we can substitute the
+	// final PATH into the systemd Environment=PATH=__WORKER_PATH__ /
+	// launchd <key>PATH</key> placeholders. The nohup fallback below uses
+	// the same value via the inline `env PATH=...` line.
+	extraPathDirs := readExtraPaths(ctx, client, homeDir)
+	if len(extraPathDirs) > 0 {
+		job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("✓ 额外 PATH 段: %s", strings.Join(extraPathDirs, ":"))})
+	} else {
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️  未发现额外 PATH 段（extra-paths 为空 / 不存在），将依赖默认 PATH"})
+	}
+	// Compose the worker PATH = (current SSH PATH, with extra dirs prepended)
+	// + safe fallbacks. systemd --user starts with the bare PATH so the
+	// extras MUST be present or spawn('claude') ENOENTs.
+	workerPATH := composeWorkerPATH(ctx, client, extraPathDirs)
+	job.Append(store.LogLine{Type: "message", Content: "✓ worker PATH = " + workerPATH})
+
 	// Platform-specific service registration. systemd --user on Linux,
 	// LaunchAgent on macOS. Both bind 127.0.0.1 via the worker env so the
 	// service is only reachable through NovaWorkbench's SSH direct-tcpip
@@ -1001,6 +1038,15 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 		// differ. Bake the resolved absolute path into the unit instead.
 		unitBody := strings.ReplaceAll(agentWorkerSystemdUnit,
 			"/opt/nova-agent-worker", installDir)
+		// Bake the resolved PATH into the Environment=PATH=__WORKER_PATH__
+		// placeholder. Without this the systemd --user manager gives the
+		// worker the bare PATH
+		// (/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin)
+		// and the worker's spawn('claude', …) ENOENTs — see the comment
+		// on workerPATH / extraPathDirs above.
+		unitBody = strings.ReplaceAll(unitBody,
+			"Environment=PATH=__WORKER_PATH__",
+			"Environment=PATH="+workerPATH)
 		// Bake the resolved node path into ExecStart too — see the nodeBin
 		// comment above. `/usr/bin/env node` would consult the user manager's
 		// own PATH, which misses nvm/brew node and leaves the service in a
@@ -1081,6 +1127,13 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 		// dir into the plist before writing.
 		plistBody := strings.ReplaceAll(agentWorkerLaunchdPlist,
 			"/opt/nova-agent-worker", installDir)
+		// Bake the resolved PATH into the EnvironmentVariables.PATH
+		// placeholder. Without this launchd starts the agent with the
+		// system PATH (no /opt/homebrew/bin, no $HOME/.npm-global/bin) and
+		// the worker's spawn('claude', …) ENOENTs.
+		plistBody = strings.ReplaceAll(plistBody,
+			"<key>PATH</key><string>__WORKER_PATH__</string>",
+			"<key>PATH</key><string>"+workerPATH+"</string>")
 		// launchd runs agents with the system PATH too, so `/usr/bin/env
 		// node` misses Homebrew's /opt/homebrew/bin. Bake the resolved node
 		// path into ProgramArguments the same way we do for systemd.
@@ -1123,6 +1176,21 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 			if err := h.svc.UpdateWorkerVersion(serverID, agentWorkerVersion); err != nil {
 				job.Append(store.LogLine{Type: "message", Content: "⚠ 记录 worker 版本失败（不影响安装）: " + err.Error()})
 			}
+			// Real claude probe. /v1/health only verifies the worker
+			// bound 7000; if spawn('claude') inside the worker still
+			// ENOENTs the user will see it as "preflight cli_not_found"
+			// on the first wizard run. Surfacing the failure here (via
+			// the worker's own SSH user so the test runs in the same env
+			// the worker will spawn claude from) turns that into a hard
+			// error NOW, with the actual stderr attached.
+			if err := h.probeClaudeExecutable(ctx, client, serverID, job); err != nil {
+				return err
+			}
+			// Asset inventory + claude/node bin persistence. Best-effort.
+			h.captureInstallRuntimeFacts(ctx, client, serverID, job)
+			if infoJSON, _, ierr := h.collectSystemInfo(ctx, client, job); ierr == nil && infoJSON != "" {
+				_ = h.svc.UpdateSystemInfo(serverID, infoJSON)
+			}
 			return nil
 		}
 	} else {
@@ -1160,7 +1228,16 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 		// server.mjs's resolveTmpdir also patches this per-spawn for the
 		// claude child, but pinning it on the worker itself means Node's
 		// own os.tmpdir() is sane before any user code runs.
+		//
+		// NOVA_AGENT_WORKER_EXTRA_PATHS is read by server.mjs's
+		// resolveExtendedPath so the worker's spawn('claude') can locate
+		// the CLI when systemd --user didn't take over. The leading PATH=
+		// on this env line is belt-and-braces: even if a future server.mjs
+		// forgets to honor NOVA_AGENT_WORKER_EXTRA_PATHS, the worker
+		// process still has PATH for this launch.
 		`nohup env NOVA_AGENT_WORKER_HOST=127.0.0.1 NOVA_AGENT_WORKER_PORT=7000 TMPDIR=/tmp ` +
+		`NOVA_AGENT_WORKER_EXTRA_PATHS=` + shellQuote(workerPATH) + ` ` +
+		`PATH=` + shellQuote(workerPATH) + ` ` +
 		`node ` + installDir + `/server.mjs > ` + installDir + `/worker.log 2>&1 & ` +
 		`disown 2>/dev/null || true; ` +
 		`sleep 1; echo "[nova-agent] nohup launched, pid=$(pgrep -f nova-agent-worker/server.mjs | grep -vx "$$" | head -n1), killed_old=${OLD_PID:-none}"`
@@ -1190,6 +1267,15 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 	job.Append(store.LogLine{Type: "message", Content: "✓ worker 健康检查通过 (nohup，版本 " + ver + ")"})
 	if err := h.svc.UpdateWorkerVersion(serverID, agentWorkerVersion); err != nil {
 		job.Append(store.LogLine{Type: "message", Content: "⚠ 记录 worker 版本失败（不影响安装）: " + err.Error()})
+	}
+	// Real claude probe (see the systemd branch for rationale).
+	if err := h.probeClaudeExecutable(ctx, client, serverID, job); err != nil {
+		return err
+	}
+	// Asset inventory + claude/node bin persistence (best-effort).
+	h.captureInstallRuntimeFacts(ctx, client, serverID, job)
+	if infoJSON, _, ierr := h.collectSystemInfo(ctx, client, job); ierr == nil && infoJSON != "" {
+		_ = h.svc.UpdateSystemInfo(serverID, infoJSON)
 	}
 	return nil
 }
@@ -1229,6 +1315,60 @@ func workerVersionDisplay(v string) string {
 		return "未知"
 	}
 	return v
+}
+
+// probeClaudeExecutable runs `claude --version` inside the SSH session the
+// worker will spawn from (i.e. same $PATH the worker's spawn('claude') will
+// see) and surfaces a hard error if it fails. This catches the exact class
+// of "ready but cli_not_found" install that motivated this whole flow: the
+// Check command in runCheck runs through SSH with an augmented PATH and
+// passes, but the worker process — launched under systemd --user or nohup
+// — does NOT see the install's actual claude bin dir because of cross-user
+// npm prefix / stripped PATH issues. Without this probe the install reports
+// `ready` and the user only learns the truth on their first wizard run,
+// surfacing as `preflight cli_not_found` mid-coding.
+//
+// We do NOT trust `which claude` here (it would only mirror what Check
+// already does — fail at exactly the same point). Instead we exercise the
+// worker's spawn surface area: same augmentations, same `command -v` style,
+// then `claude --version` with stderr captured.
+//
+// Bounded 8s: claude --version is a fast no-API call, so this is plenty
+// even on a slow VM. If the user's install path was wrong the failure
+// surfaces within 1-2s; we keep the headroom so a momentarily slow node
+// startup doesn't trigger a false negative.
+func (h *AgentServerHandler) probeClaudeExecutable(ctx context.Context, client *gossh.Client, serverID string, job *store.Job) error {
+	job.Append(store.LogLine{Type: "phase", Content: "🔍 真实 spawn claude 校验..."})
+	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	var out strings.Builder
+	var stderrBuf bytes.Buffer
+	// Mirrors the augmentations installNodeWorker applies elsewhere in
+	// this file: install-time PATH widening + nvm source + hash -r.
+	cmd := `export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"; ` +
+		`if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh" 2>/dev/null; fi; ` +
+		`hash -r 2>/dev/null; ` +
+		`claude --version`
+	exit, _ := client.Exec(probeCtx, cmd, "", nil, &out, &stderrBuf)
+	v := strings.TrimSpace(out.String())
+	if exit != 0 {
+		// Echo both stdout and stderr to the install panel verbatim. The
+		// SSH-session stderr from claude usually contains the real failure
+		// reason (e.g. "command not found", "permission denied") and the
+		// operator can act on it without SSH-ing in separately.
+		msg := fmt.Sprintf("worker 已就绪，但 claude 仍不可达（exit=%d）：%s",
+			exit, strings.TrimSpace(stderrBuf.String()))
+		job.Append(store.LogLine{Type: "error", Content: "❌ " + msg})
+		if serverID != "" {
+			_ = h.svc.UpdateStatus(serverID, model.AgentServerStatusError, msg)
+		}
+		return fmt.Errorf("%s", msg)
+	}
+	if v == "" {
+		v = "(unknown)"
+	}
+	job.Append(store.LogLine{Type: "message", Content: "✓ claude " + v})
+	return nil
 }
 
 // waitForWorkerHealth retries probeWorkerHealth until it succeeds or
@@ -1284,6 +1424,13 @@ func startWorkerIfDown(ctx context.Context, client *gossh.Client, homeDir string
 	// nohup fallback. The launch line mirrors installNodeWorker's, including
 	// PATH augmentation + nvm source so the same node binary the install
 	// flow put on PATH is reachable here.
+	//
+	// Resolve workerPATH at this call site too so a Check-driven revive
+	// (startWorkerIfDown) carries the same claude-bin-dir fixup install did.
+	// Re-reading extra-paths is cheap and lets a later install propagate
+	// to a worker restart without persisted state.
+	extraPathDirs := readExtraPaths(ctx, client, homeDir)
+	workerPATH := composeWorkerPATH(ctx, client, extraPathDirs)
 	launchCmd := `export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"; ` +
 		`if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh" 2>/dev/null; fi; ` +
 		`hash -r 2>/dev/null; ` +
@@ -1293,6 +1440,8 @@ func startWorkerIfDown(ctx context.Context, client *gossh.Client, homeDir string
 		// itself means Node's own os.tmpdir() is sane before any user
 		// code runs.
 		`nohup env NOVA_AGENT_WORKER_HOST=127.0.0.1 NOVA_AGENT_WORKER_PORT=7000 TMPDIR=/tmp ` +
+		`NOVA_AGENT_WORKER_EXTRA_PATHS=` + shellQuote(workerPATH) + ` ` +
+		`PATH=` + shellQuote(workerPATH) + ` ` +
 		`node ` + installDir + `/server.mjs > ` + installDir + `/worker.log 2>&1 & ` +
 		`disown 2>/dev/null || true`
 	if exit, err := client.Exec(ctx, launchCmd, "", nil, nil, nil); err != nil || exit != 0 {
@@ -1349,6 +1498,77 @@ fi
 echo "[nova-agent] 安装 @anthropic-ai/claude-code..."
 npm install -g @anthropic-ai/claude-code
 echo "[nova-agent] 安装完成"
+
+# --- 暴露 claude 真实 bin 路径到 worker ---------------------------------
+# npm install -g 把 claude 装到 root (当前用户) 的 npm prefix 下：
+#   * apt 安装的 npm: prefix=/usr → bin 在 /usr/local/bin 或 /usr/bin
+#   * nvm 回落:        prefix=$HOME/.nvm/versions/node/<v>
+#   * npm 10+ sudo-less: prefix=$HOME/.npm-global → bin 在 $HOME/.npm-global/bin
+#
+# worker 是以 nova/ubuntu 身份（provisionNonRootUser）启动的，看不到 root-only
+# 的 bin 目录，所以 installNodeWorker 需要被告知"claude 真实在哪"。
+#
+# 我们解析出 CLAUDE_BIN 的绝对路径，把 dirname 写入
+# $HOME/.novaworkbench/extra-paths（每行一个目录，幂等），供 installNodeWorker
+# 读取并注入到 systemd Environment=PATH / launchd EnvironmentVariables.PATH /
+# nohup env PATH=... 三处启动方式。
+CLAUDE_BIN="$(command -v claude || true)"
+if [ -z "$CLAUDE_BIN" ]; then
+  # command -v 找不到的兜底（nvm 下 source 之后才在 PATH 上）
+  if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh" 2>/dev/null; fi
+  CLAUDE_BIN="$(command -v claude || true)"
+fi
+if [ -z "$CLAUDE_BIN" ]; then
+  # 最后一道兜底——按常见 npm 安装位置盲扫
+  for cand in /usr/local/bin/claude /usr/bin/claude \
+              "$HOME/.npm-global/bin/claude" "$HOME/.local/bin/claude" \
+              "$HOME/bin/claude" \
+              /opt/homebrew/bin/claude; do
+    if [ -x "$cand" ]; then CLAUDE_BIN="$cand"; break; fi
+  done
+fi
+if [ -n "$CLAUDE_BIN" ]; then
+  CLAUDE_DIR="$(dirname "$CLAUDE_BIN")"
+  echo "[nova-agent] claude 真实路径 = $CLAUDE_BIN → PATH 段 = $CLAUDE_DIR"
+  mkdir -p "$HOME/.novaworkbench"
+  # 写入"额外 PATH 段"清单（去重 / 忽略空行 / 忽略已存在项），installNodeWorker 读取。
+  EXISTING=""
+  [ -f "$HOME/.novaworkbench/extra-paths" ] && EXISTING="$(cat "$HOME/.novaworkbench/extra-paths")"
+  case ":$EXISTING:" in
+    *":$CLAUDE_DIR:"*) ;;  # already present
+    *)
+      {
+        [ -n "$EXISTING" ] && printf '%s\n' "$EXISTING"
+        printf '%s\n' "$CLAUDE_DIR"
+      } > "$HOME/.novaworkbench/extra-paths"
+      echo "[nova-agent] 已写入 $HOME/.novaworkbench/extra-paths"
+      ;;
+  esac
+  # 顺手把 node 实际路径也记一下（systemd unit 的 ExecStart 想要绝对路径）
+  if command -v node >/dev/null 2>&1; then
+    NODE_BIN="$(command -v node)"
+    echo "$NODE_BIN" > "$HOME/.novaworkbench/node-bin"
+    echo "[nova-agent] node 真实路径 = $NODE_BIN"
+  fi
+  # Machine-readable marker for the install goroutine to grep + persist
+  # into agent_servers (claude_bin / node_bin / extra_paths columns). The
+  # Go side resolves the same paths via 'command -v' and would otherwise
+  # disagree with what this script wrote to disk if a non-default PATH
+  # changed between runs — going through the script's own output keeps the
+  # DB row and the on-disk file in lockstep. Emitted LAST so 'grep' picks
+  # the freshest line in the install SSE log.
+  echo "[nova-agent] RUNTIME_BIN CLAUDE_BIN=$CLAUDE_BIN NODE_BIN=${NODE_BIN:-}"
+else
+  echo "[nova-agent] ⚠️  无法定位 claude 二进制，installNodeWorker 将仅依赖默认 PATH"
+  # Even when claude is missing we still want the marker line so Go can
+  # parse safely (claude_bin defaults to empty). node_bin is best-effort
+  # since systemd unit still wants an absolute path if we have one.
+  if command -v node >/dev/null 2>&1; then
+    echo "[nova-agent] RUNTIME_BIN CLAUDE_BIN= NODE_BIN=$(command -v node)"
+  else
+    echo "[nova-agent] RUNTIME_BIN CLAUDE_BIN= NODE_BIN="
+  fi
+fi
 `
 }
 
@@ -1381,6 +1601,52 @@ brew install gnupg || true
 echo "[nova-agent] 安装 @anthropic-ai/claude-code..."
 npm install -g @anthropic-ai/claude-code
 echo "[nova-agent] 安装完成"
+
+# --- 暴露 claude 真实 bin 路径到 worker ---------------------------------
+# launchd 在系统域运行 LaunchAgent 时给的 PATH 不含 /opt/homebrew/bin；worker
+# 进程 spawn('claude', …) 就会 ENOENT。把 claude 实际所在的目录写入
+# $HOME/.novaworkbench/extra-paths，供 installNodeWorker 拼接到 launchd plist
+# 的 EnvironmentVariables.PATH / nohup env 的 PATH=...。
+CLAUDE_BIN="$(command -v claude || true)"
+if [ -z "$CLAUDE_BIN" ]; then
+  for cand in /opt/homebrew/bin/claude /usr/local/bin/claude \
+              "$HOME/.npm-global/bin/claude" "$HOME/.local/bin/claude"; do
+    if [ -x "$cand" ]; then CLAUDE_BIN="$cand"; break; fi
+  done
+fi
+if [ -n "$CLAUDE_BIN" ]; then
+  CLAUDE_DIR="$(dirname "$CLAUDE_BIN")"
+  echo "[nova-agent] claude 真实路径 = $CLAUDE_BIN → PATH 段 = $CLAUDE_DIR"
+  mkdir -p "$HOME/.novaworkbench"
+  EXISTING=""
+  [ -f "$HOME/.novaworkbench/extra-paths" ] && EXISTING="$(cat "$HOME/.novaworkbench/extra-paths")"
+  case ":$EXISTING:" in
+    *":$CLAUDE_DIR:"*) ;;
+    *)
+      {
+        [ -n "$EXISTING" ] && printf '%s\n' "$EXISTING"
+        printf '%s\n' "$CLAUDE_DIR"
+      } > "$HOME/.novaworkbench/extra-paths"
+      echo "[nova-agent] 已写入 $HOME/.novaworkbench/extra-paths"
+      ;;
+  esac
+  if command -v node >/dev/null 2>&1; then
+    NODE_BIN="$(command -v node)"
+    echo "$NODE_BIN" > "$HOME/.novaworkbench/node-bin"
+    echo "[nova-agent] node 真实路径 = $NODE_BIN"
+  fi
+  # Machine-readable marker for the install goroutine to grep + persist
+  # into agent_servers (claude_bin / node_bin / extra_paths columns). See
+  # linuxInstallScript for the rationale; darwin uses the same shape.
+  echo "[nova-agent] RUNTIME_BIN CLAUDE_BIN=$CLAUDE_BIN NODE_BIN=${NODE_BIN:-}"
+else
+  echo "[nova-agent] ⚠️  无法定位 claude 二进制，installNodeWorker 将仅依赖默认 PATH"
+  if command -v node >/dev/null 2>&1; then
+    echo "[nova-agent] RUNTIME_BIN CLAUDE_BIN= NODE_BIN=$(command -v node)"
+  else
+    echo "[nova-agent] RUNTIME_BIN CLAUDE_BIN= NODE_BIN="
+  fi
+fi
 `
 }
 
@@ -1577,4 +1843,310 @@ func buildLatestPackageJSON(expressVer string) string {
   }
 }
 `, expressVer)
+}
+
+// ---- asset inventory / runtime facts --------------------------------------
+//
+// collectSystemInfo / captureInstallRuntimeFacts persist the install-time
+// truth (claude / node bin paths, OS / kernel / CPU / mem / IP / disk /
+// uptime) into agent_servers columns so the settings UI can render an
+// "Asset Inventory" panel without SSH-ing back to the host. Called from
+// the runCheck goroutine (every successful check) and from runInstall
+// (once on success). Both flows treat these writes as best-effort: a
+// failure here never aborts the parent flow.
+
+// systemInfoSnapshot is the in-memory shape collectSystemInfo produces
+// before JSON-encoding it into agent_servers.system_info. Fields are all
+// strings so the JSON shape is predictable for the frontend parser
+// (missing / unreadable -> "").
+type systemInfoSnapshot struct {
+	OS            string   `json:"os"`
+	Kernel        string   `json:"kernel"`
+	Hostname      string   `json:"hostname"`
+	CPUs          string   `json:"cpus"`
+	MemTotal      string   `json:"mem_total"`
+	DiskUsage     string   `json:"disk_usage"`
+	IPs           []string `json:"ips"`
+	Uptime        string   `json:"uptime"`
+	ClaudeVersion string   `json:"claude_version"`
+}
+
+// collectSystemInfo runs a single SSH exec that gathers OS / kernel /
+// hostname / CPU / mem / disk / IPs / uptime / claude_version. Each block
+// is independent — a failure in one leaves that field empty rather than
+// failing the whole collection. The Claude version probe is separate
+// (and capped at 5s) so a slow network doesn't drag the snapshot out.
+//
+// Returns the JSON-encoded string ready for agent_servers.system_info +
+// the parsed struct (the caller can also use the struct directly).
+func (h *AgentServerHandler) collectSystemInfo(ctx context.Context, client *gossh.Client, job *store.Job) (string, *systemInfoSnapshot, error) {
+	job.Append(store.LogLine{Type: "phase", Content: "🔍 系统盘点中..."})
+	// 12s overall budget — most fields are local reads; the only network
+	// round-trip is `ip` (no), and `cat /etc/os-release` which is tiny.
+	// We keep headroom for slow VMs without holding the parent flow hostage.
+	probeCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+
+	snap := &systemInfoSnapshot{IPs: []string{}}
+
+	// Single shell script keeps the SSH round-trips to 1 (vs. 10+). Each
+	// section is wrapped in its own `if … fi` so a command failure (eg.
+	// /etc/os-release missing on Alpine) leaves just that field empty.
+	// `printf '__SECTION__=%s\n' "$value"` lets us split the combined
+	// stdout back into named sections deterministically.
+	script := `export LC_ALL=C PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh" 2>/dev/null; fi
+printf '__UNAME__=%s\n' "$(uname -s 2>/dev/null || true)"
+printf '__KERNEL__=%s\n' "$(uname -r 2>/dev/null || true)"
+printf '__HOSTNAME__=%s\n' "$(hostname 2>/dev/null || true)"
+printf '__CPUS__=%s\n' "$(nproc 2>/dev/null || echo '')"
+printf '__MEM__=%s\n' "$(free -h 2>/dev/null | awk '/^Mem:/{print $2}' || echo '')"
+printf '__DISK__=%s\n' "$(df -h / 2>/dev/null | awk 'NR==2{print $3"/"$2" ("$5")"}' || echo '')"
+printf '__UPTIME__=%s\n' "$(uptime -p 2>/dev/null || uptime | sed -E 's/^[^,]+, +//; s/,.*//' || echo '')"
+printf '__OS__=%s\n' "$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-} (${VERSION_CODENAME:-})" || echo '')"
+printf '__IPS__=%s\n' "$(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | paste -sd, - || echo '')"
+printf '__CLAUDE_VERSION__=%s\n' "$(claude --version 2>/dev/null | head -n1 || true)"`
+
+	var out strings.Builder
+	if _, err := client.Exec(probeCtx, script, "", nil, &out, nil); err != nil {
+		job.Append(store.LogLine{Type: "message", Content: "⚠ 系统盘点命令执行失败: " + err.Error()})
+		// Still return what we have — partial data is better than nothing.
+	}
+
+	for _, line := range strings.Split(out.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if len(line) < 4 || !strings.HasPrefix(line, "__") {
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 {
+			continue
+		}
+		key, val := line[:eq], line[eq+1:]
+		switch key {
+		case "__UNAME__":
+			if snap.OS == "" && val != "" {
+				snap.OS = val
+			}
+		case "__KERNEL__":
+			snap.Kernel = val
+		case "__HOSTNAME__":
+			snap.Hostname = val
+		case "__CPUS__":
+			snap.CPUs = val
+		case "__MEM__":
+			snap.MemTotal = val
+		case "__DISK__":
+			snap.DiskUsage = val
+		case "__UPTIME__":
+			snap.Uptime = val
+		case "__OS__":
+			if val != "" {
+				snap.OS = val
+			}
+		case "__IPS__":
+			if val != "" {
+				snap.IPs = strings.Split(val, ",")
+			}
+		case "__CLAUDE_VERSION__":
+			snap.ClaudeVersion = val
+		}
+	}
+
+	encoded, err := json.Marshal(snap)
+	if err != nil {
+		job.Append(store.LogLine{Type: "message", Content: "⚠ 系统盘点 JSON 序列化失败: " + err.Error()})
+		return "", snap, err
+	}
+
+	// Surface a human-readable one-line summary so the install panel
+	// shows progress without forcing the user to open the asset panel.
+	summary := snap.OS
+	if summary == "" {
+		summary = snap.Hostname
+	}
+	if summary != "" {
+		job.Append(store.LogLine{Type: "message", Content: "✓ 系统盘点完成（" + summary + "）"})
+	} else {
+		job.Append(store.LogLine{Type: "message", Content: "⚠ 系统盘点完成，但所有字段为空（agent 端命令可能受限）"})
+	}
+	return string(encoded), snap, nil
+}
+
+// captureInstallRuntimeFacts greps the install log for the [nova-agent]
+// RUNTIME_BIN marker the install scripts emit, parses the resolved bin
+// paths, and persists them into agent_servers (claude_bin / node_bin /
+// extra_paths). The on-disk ~/.novaworkbench/{extra-paths,node-bin}
+// files remain the authoritative PATH source for the worker process —
+// these DB columns mirror the same data for UI display + future
+// per-server env injection.
+//
+// Called at the end of installNodeWorker (both systemd-success and
+// nohup-success paths). Failure here is best-effort: a DB write error
+// doesn't abort the install result, just gets logged so an operator
+// investigating a "why is claude_bin empty in the UI" question can see
+// the underlying cause.
+func (h *AgentServerHandler) captureInstallRuntimeFacts(ctx context.Context, client *gossh.Client, serverID string, job *store.Job) {
+	// Re-run the same resolver the install script used — but read the
+	// resolved paths back from the marker line instead of re-doing
+	// `command -v` here. That keeps the DB column in lockstep with the
+	// disk file the worker will actually use.
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var out strings.Builder
+	if _, err := client.Exec(probeCtx,
+		`cat $HOME/.novaworkbench/extra-paths 2>/dev/null; `+
+			`printf '__RUNTIME_BIN__\n'; `+
+			`echo "[nova-agent] RUNTIME_BIN CLAUDE_BIN=$(command -v claude 2>/dev/null || true) NODE_BIN=$(command -v node 2>/dev/null || true)"`,
+		"", nil, &out, nil); err != nil {
+		job.Append(store.LogLine{Type: "message", Content: "⚠ 读取运行时路径失败: " + err.Error()})
+		return
+	}
+
+	var claudeBin, nodeBin string
+	extraPathsLines := []string{}
+	for _, line := range strings.Split(out.String(), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "__RUNTIME_BIN__":
+			// separator — anything before this is extra-paths content
+			extraPathsLines = []string{}
+		case strings.HasPrefix(line, "[nova-agent] RUNTIME_BIN "):
+			// Format "CLAUDE_BIN=... NODE_BIN=..."
+			rest := strings.TrimPrefix(line, "[nova-agent] RUNTIME_BIN ")
+			for _, kv := range strings.Fields(rest) {
+				eq := strings.IndexByte(kv, '=')
+				if eq < 0 {
+					continue
+				}
+				k, v := kv[:eq], kv[eq+1:]
+				if k == "CLAUDE_BIN" {
+					claudeBin = v
+				} else if k == "NODE_BIN" {
+					nodeBin = v
+				}
+			}
+		case line != "":
+			extraPathsLines = append(extraPathsLines, line)
+		}
+	}
+	extraPaths := strings.Join(extraPathsLines, "\n")
+
+	if err := h.svc.UpdateRuntime(serverID, claudeBin, nodeBin, extraPaths); err != nil {
+		job.Append(store.LogLine{Type: "message", Content: "⚠ 持久化 runtime 失败: " + err.Error()})
+		return
+	}
+	job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("✓ runtime 已持久化 (claude=%s node=%s extra_paths=%d 项)",
+		shortPathForLog(claudeBin), shortPathForLog(nodeBin), len(extraPathsLines))})
+}
+
+// shortPathForLog returns the basename of p for install-panel log lines,
+// or "<未找到>" when p is empty (so the user immediately sees which
+// binaries the install flow failed to resolve).
+func shortPathForLog(p string) string {
+	if p == "" {
+		return "<未找到>"
+	}
+	if idx := strings.LastIndex(p, "/"); idx >= 0 {
+		return p[idx+1:]
+	}
+	return p
+}
+
+// ---- worker launch PATH plumbing -----------------------------------------
+//
+// readExtraPaths / composeWorkerPATH / shellQuote are the helpers
+// installNodeWorker + startWorkerIfDown use to inject the actual
+// `claude` binary location into every worker-launch path
+// (systemd --user Environment=PATH=..., launchd EnvironmentVariables.PATH=...,
+// and the nohup env line). The directory list comes from
+// $HOME/.novaworkbench/extra-paths, which linuxInstallScript /
+// darwinInstallScript populate at install time by resolving
+// `command -v claude` (with a fallback blind-scan of common npm prefix
+// locations) — see those scripts for the populate-side rationale.
+
+// readExtraPaths returns the list of directories written by the install
+// scripts to $HOME/.novaworkbench/extra-paths. One directory per line;
+// blank lines and lines starting with `#` are ignored. A missing or
+// unreadable file yields an empty slice (not a hard error) so a partial
+// install / non-Linux setup doesn't break the worker launch path.
+//
+// The SSH `homeDir` argument is used to build the path so a re-dialed
+// non-root session (provisionNonRootUser) still finds the same file the
+// root install session wrote.
+func readExtraPaths(ctx context.Context, client *gossh.Client, homeDir string) []string {
+	if homeDir == "" {
+		homeDir = "/root"
+	}
+	path := homeDir + "/.novaworkbench/extra-paths"
+	var out strings.Builder
+	// exit!=0 (missing file) is fine — return empty list silently.
+	_, _ = client.Exec(ctx, "cat "+path+" 2>/dev/null || true", "", nil, &out, nil)
+	seen := map[string]bool{}
+	dirs := []string{}
+	for _, line := range strings.Split(out.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !strings.HasPrefix(line, "/") {
+			continue // relative paths are noise; absolute required
+		}
+		if seen[line] {
+			continue
+		}
+		seen[line] = true
+		dirs = append(dirs, line)
+	}
+	return dirs
+}
+
+// composeWorkerPATH returns the colon-separated PATH value to give the
+// worker process. Order: SSH session PATH (whatever the launcher can see
+// right now, which usually already has nvm/brew), then install-supplied
+// extra-paths (the directories that hold `claude`), then a safe fallback
+// so systemd --user's bare PATH (`/usr/local/sbin:/usr/local/bin:/usr/bin:…`)
+// is at least complete even when nothing else applies.
+//
+// We deliberately prepend rather than append: an SSH session PATH that
+// already includes the right bin dir wins (e.g. on macOS where
+// /opt/homebrew/bin is on every login shell's PATH), and the extras are
+// there only as a safety net.
+//
+// On any failure the function still returns a usable PATH — never an
+// empty one, since spawning `claude` with PATH="" guarantees ENOENT.
+func composeWorkerPATH(ctx context.Context, client *gossh.Client, extra []string) string {
+	const fallback = "/usr/local/bin:/usr/bin:/bin"
+	var sessOut strings.Builder
+	_, _ = client.Exec(ctx, "echo \"$PATH\"", "", nil, &sessOut, nil)
+	sessPath := strings.TrimSpace(sessOut.String())
+	if sessPath == "" {
+		sessPath = fallback
+	}
+
+	merged := []string{}
+	seen := map[string]bool{}
+	add := func(d string) {
+		if d == "" || seen[d] {
+			return
+		}
+		seen[d] = true
+		merged = append(merged, d)
+	}
+	// 1) extras first — they're the authoritative answer to "where did
+	// install actually drop claude". Putting them at the front means the
+	// spawn resolves to our binary even if some older install left a
+	// different `claude` further down the SSH PATH.
+	for _, d := range extra {
+		add(d)
+	}
+	// 2) SSH session PATH (which has nvm / brew / apt paths).
+	for _, d := range strings.Split(sessPath, ":") {
+		add(d)
+	}
+	// 3) Safe fallback if both lists were empty.
+	for _, d := range strings.Split(fallback, ":") {
+		add(d)
+	}
+	return strings.Join(merged, ":")
 }

@@ -36,11 +36,14 @@ func scanRow(row interface {
 	var a model.AgentServer
 	var authValue sql.NullString
 	var lastCheck sql.NullString
+	var systemInfoAt sql.NullString
 	err := row.Scan(
 		&a.ID, &a.Name, &a.Host, &a.Port, &a.Username,
 		&a.AuthType, &authValue, &a.AuthValueAlgo,
 		&a.Status, &lastCheck, &a.CheckResult,
 		&a.InstallJobID, &a.WorkerVersion,
+		&a.ClaudeBin, &a.NodeBin, &a.ExtraPaths,
+		&a.SystemInfo, &systemInfoAt,
 		&a.CreatedAt, &a.UpdatedAt,
 	)
 	if err != nil {
@@ -54,10 +57,14 @@ func scanRow(row interface {
 		ts := lastCheck.String
 		a.LastCheckAt = &ts
 	}
+	if systemInfoAt.Valid && systemInfoAt.String != "" {
+		ts := systemInfoAt.String
+		a.SystemInfoAt = &ts
+	}
 	return &a, nil
 }
 
-const selectColumns = `id, name, host, port, username, auth_type, auth_value, auth_value_algo, status, last_check_at, check_result, install_job_id, worker_version, created_at, updated_at`
+const selectColumns = `id, name, host, port, username, auth_type, auth_value, auth_value_algo, status, last_check_at, check_result, install_job_id, worker_version, claude_bin, node_bin, extra_paths, system_info, system_info_collected_at, created_at, updated_at`
 
 // List returns all servers ordered by creation time. Credentials are NOT
 // decrypted — callers must use GetWithCredential for the plaintext.
@@ -252,6 +259,50 @@ func (s *AgentServerService) UpdateWorkerVersion(id, version string) error {
 	_, err := s.db.Exec(
 		`UPDATE agent_servers SET worker_version = ?, updated_at = ? WHERE id = ?`,
 		version, time.Now(), id,
+	)
+	return err
+}
+
+// UpdateRuntime persists the install-time facts the agent-server install flow
+// resolved: where the `claude` and `node` binaries actually live on disk, and
+// the newline-separated list of PATH dirs the worker will be launched with.
+//
+// These mirror the on-disk ~/.novaworkbench/{extra-paths,node-bin} so the
+// settings UI can show "actually installed here" without SSH-ing back, and so
+// a future "per-server env injection" feature can read the same source of
+// truth as the worker process itself (the file remains authoritative on the
+// host side; this DB column is the UI mirror).
+//
+// Written at the end of runInstall on success. The CLI checks (runCheck /
+// startWorkerIfDown) intentionally do NOT touch these columns — once captured
+// they're stable, and overwriting with a Check-time resolver could regress to
+// an SSH-shell-only path that's invisible to the worker process.
+func (s *AgentServerService) UpdateRuntime(id, claudeBin, nodeBin, extraPaths string) error {
+	_, err := s.db.Exec(
+		`UPDATE agent_servers
+		 SET claude_bin = ?, node_bin = ?, extra_paths = ?, updated_at = ?
+		 WHERE id = ?`,
+		claudeBin, nodeBin, extraPaths, time.Now(), id,
+	)
+	return err
+}
+
+// UpdateSystemInfo stores a JSON-encoded snapshot of OS / kernel / hostname /
+// CPUs / memory / disk usage / IPs / uptime / claude_version, plus the
+// timestamp the snapshot was captured. Empty infoJSON means "reset to never
+// collected" — the caller (handler) usually passes a non-empty JSON built by
+// collectSystemInfo.
+//
+// Called from runCheck (every successful check) and once at the end of
+// runInstall (so the very first UI render after install already has a
+// snapshot). Errors are best-effort: callers log + continue, never fail the
+// parent Check/Install flow on a snapshot write failure.
+func (s *AgentServerService) UpdateSystemInfo(id, infoJSON string) error {
+	_, err := s.db.Exec(
+		`UPDATE agent_servers
+		 SET system_info = ?, system_info_collected_at = ?, updated_at = ?
+		 WHERE id = ?`,
+		infoJSON, time.Now(), time.Now(), id,
 	)
 	return err
 }

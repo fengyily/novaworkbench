@@ -35,8 +35,33 @@ type AgentServer struct {
 	// The check flow compares the running worker's reported version against this
 	// to detect a stale process that survived a restart.
 	WorkerVersion string `json:"worker_version"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
+	// ClaudeBin / NodeBin are the absolute paths the install flow resolved for
+	// the 'claude' and 'node' binaries (mirrors the on-disk
+	// ~/.novaworkbench/{extra-paths,node-bin}). Empty until the first install
+	// captures them; once captured they survive across Check / startWorkerIfDown
+	// runs unless a re-install overwrites them. Surfaced in the settings UI
+	// so operators can audit "where is claude actually coming from" without
+	// SSH-ing back to the agent host.
+	ClaudeBin string `json:"claude_bin"`
+	NodeBin   string `json:"node_bin"`
+	// ExtraPaths is a newline-separated list of PATH dirs the install flow
+	// captured into ~/.novaworkbench/extra-paths (root's npm-global/bin,
+	// nvm's ~/.nvm/versions/node/*/bin, brew's /opt/homebrew/bin, ...). The
+	// worker process still reads the file directly (so this is a mirror for
+	// UI display + future per-server env injection); we keep the column as
+	// plain TEXT rather than JSON-encoded to match the file's own format.
+	ExtraPaths string `json:"extra_paths"`
+	// SystemInfo is a JSON-encoded snapshot of OS / kernel / hostname / CPUs /
+	// memory / disk usage / IPs / uptime / claude_version, captured at the
+	// end of runCheck (and once after runInstall). Empty string until the
+	// first successful collection. UI parses on the fly into the asset
+	// details panel.
+	SystemInfo string `json:"system_info"`
+	// SystemInfoAt is the timestamp of the last system_info collection, or
+	// nil when never collected. UI uses it to render "last inventory N min ago".
+	SystemInfoAt *string `json:"system_info_collected_at"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
 }
 
 // CreateAgentServerReq is the create payload. AuthValue is the plaintext

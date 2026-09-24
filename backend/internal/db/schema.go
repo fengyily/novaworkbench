@@ -326,7 +326,13 @@ CREATE TABLE IF NOT EXISTS agent_servers (
 	status          TEXT NOT NULL DEFAULT 'unknown',
 	last_check_at   DATETIME,
 	check_result    TEXT NOT NULL DEFAULT '',
-	worker_version  TEXT NOT NULL DEFAULT '',
+	-- install_job_id is added by alterColumns below (legacy column).
+	-- worker_version is added by alterColumns below (legacy column).
+	claude_bin      TEXT NOT NULL DEFAULT '',
+	node_bin      TEXT NOT NULL DEFAULT '',
+	extra_paths     TEXT NOT NULL DEFAULT '',
+	system_info     TEXT NOT NULL DEFAULT '',
+	system_info_collected_at DATETIME,
 	created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -470,6 +476,22 @@ var alterColumns = []string{
 	// agentWorkerVersion). The check flow compares the running worker's reported
 	// version against this to detect a stale process that survived a restart.
 	`ALTER TABLE agent_servers ADD COLUMN worker_version TEXT NOT NULL DEFAULT ''`,
+	// claude_bin / node_bin / extra_paths: persisted install-time facts so the
+	// settings UI can show the actually-installed CLI locations without SSH'ing
+	// back. The on-disk ~/.novaworkbench/extra-paths file remains the worker
+	// process's PATH source — these DB columns mirror it for UI display +
+	// future per-server env injection (see handler/agent_server.go
+	// collectSystemInfo / UpdateRuntime). Captured at the end of runInstall;
+	// claude_bin / node_bin stay stable across Check / startWorkerIfDown.
+	`ALTER TABLE agent_servers ADD COLUMN claude_bin TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE agent_servers ADD COLUMN node_bin TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE agent_servers ADD COLUMN extra_paths TEXT NOT NULL DEFAULT ''`,
+	// system_info: JSON snapshot of OS / kernel / hostname / CPUs / mem /
+	// disk / IPs / uptime / claude_version collected at end of runCheck
+	// (and once after runInstall). Nullable DATETIME so the UI can show
+	// "上次盘点 N 分钟前"; empty string means "never collected yet".
+	`ALTER TABLE agent_servers ADD COLUMN system_info TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE agent_servers ADD COLUMN system_info_collected_at DATETIME`,
 	`ALTER TABLE requirements ADD COLUMN analysis_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN design_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN design_job_id TEXT NOT NULL DEFAULT ''`,

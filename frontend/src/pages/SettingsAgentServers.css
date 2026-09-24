@@ -463,3 +463,118 @@
   from { transform: translateY(100%); }
   to   { transform: translateY(0); }
 }
+
+/* ── Asset inventory panel ─────────────────────────────────────────────
+   Collapsed <details> inside each server card. Two stacked sections
+   (runtime paths + system info). Field values are buttons so a click
+   copies the path to the clipboard (handy for SSH-from-elsewhere). The
+   empty hint shows when the server has never been Checked / Installed,
+   so users immediately understand "you need to run a Check to populate
+   this" rather than seeing an empty box and thinking the feature is
+   broken. */
+.server-card-inventory {
+  margin-top: 10px;
+  border-top: 1px dashed rgba(226, 232, 240, 0.7);
+  padding-top: 8px;
+}
+.server-card-inventory--empty {
+  font-size: 12px;
+  color: var(--color-text-muted, #94A3B8);
+  font-style: italic;
+  border-top: none;
+  padding-top: 0;
+}
+.server-card-inventory-summary {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #475569);
+  user-select: none;
+  list-style: none;
+}
+.server-card-inventory-summary::-webkit-details-marker { display: none; }
+.server-card-inventory-summary .inv-glyph { font-size: 12px; }
+.server-card-inventory-summary .inv-time {
+  font-weight: 400;
+  color: var(--color-text-muted, #94A3B8);
+}
+
+.server-card-inventory-body {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.inv-section {
+  background: rgba(248, 250, 252, 0.6);
+  border: 1px solid rgba(226, 232, 240, 0.85);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.inv-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-text-muted, #94A3B8);
+  margin-bottom: 6px;
+}
+.inv-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 3px 0;
+  line-height: 1.4;
+}
+.inv-label {
+  flex: 0 0 90px;
+  color: var(--color-text-secondary, #475569);
+  font-weight: 500;
+}
+.inv-value {
+  flex: 1 1 auto;
+  font-family: var(--font-mono, ui-monospace, 'SF Mono', Consolas, monospace);
+  font-size: 11.5px;
+  color: var(--color-text, #1E293B);
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: text;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.inv-value--copyable {
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 1px 4px;
+  transition: background 0.12s;
+}
+.inv-value--copyable:hover {
+  background: rgba(79, 70, 229, 0.08);
+  color: var(--color-primary, #4F46E5);
+}
+.inv-value--empty {
+  color: var(--color-text-muted, #94A3B8);
+  font-family: inherit;
+}
+.inv-paths {
+  flex: 1 1 auto;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+@media (max-width: 720px) {
+  .server-card-inventory-body { grid-template-columns: 1fr; }
+}

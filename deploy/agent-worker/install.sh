@@ -43,6 +43,15 @@ PORT="${NOVA_AGENT_WORKER_PORT:-7000}"
 HEALTH_URL="http://${HOST}:${PORT}/v1/health"
 SYSTEMD_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# EXTRA_PATHS — optional one-dir-per-line file consumed by both the systemd
+# unit and the nohup fallback. Operators running install.sh by hand (instead
+# of via the NovaWorkbench Go install flow) can point this at a list of
+# directories that contain the claude / node binaries; the script will bake
+# them into the unit's Environment=PATH=@WORKER_PATH@ and the nohup env
+# line. Defaults to the standard location used by the Go install flow so
+# a hybrid install (Go wrote extra-paths, operator runs install.sh later)
+# still picks them up.
+EXTRA_PATHS="${NOVA_AGENT_WORKER_EXTRA_PATHS:-$HOME/.novaworkbench/extra-paths}"
 
 log()  { printf '%s\n' "$*"; }
 fail() { printf '!! %s\n' "$*" >&2; exit 1; }
@@ -112,14 +121,26 @@ ensure_systemd_unit() {
   local src="${SCRIPT_DIR}/nova-agent-worker.service"
   [[ -f "${src}" ]] || fail "missing ${src}"
 
-  # Substitute the @INSTALL_DIR@/@HOST@/@PORT@ placeholders so the unit's
-  # WorkingDirectory and listen address match the actual deploy targets (the
-  # repo copy is a portable template, not a per-host file).
+  # Compose a PATH that covers the install-time locations of node + claude.
+  # Without this, systemd --user starts the worker with a stripped PATH that
+  # misses /opt/homebrew/bin / ~/.nvm/versions/node/*/bin / ~/.npm-global/bin,
+  # and the worker's spawn('claude', …) ENOENTs. We prepend whatever extra
+  # dirs the operator recorded (via $EXTRA_PATHS, one per line) to the
+  # shell's current PATH, falling back to a sane default if both are empty.
+  local worker_path
+  worker_path="$(awk 'NF && substr($1,1,1) != "#"' "${EXTRA_PATHS:-/dev/null}" 2>/dev/null | paste -sd: -)"
+  worker_path="${worker_path}${worker_path:+:}${PATH}"
+  worker_path="${worker_path:-/usr/local/bin:/usr/bin:/bin}"
+
+  # Substitute the @INSTALL_DIR@/@HOST@/@PORT@/@WORKER_PATH@ placeholders so
+  # the unit's WorkingDirectory, listen address, and PATH match the actual
+  # deploy targets (the repo copy is a portable template, not a per-host file).
   local rendered
   rendered="$(sed \
     -e "s|@INSTALL_DIR@|${INSTALL_DIR}|g" \
     -e "s|@HOST@|${HOST}|g" \
     -e "s|@PORT@|${PORT}|g" \
+    -e "s|@WORKER_PATH@|${worker_path}|g" \
     "${src}")"
 
   if [[ ! -f "${dst}" ]] || [[ "$(cat "${dst}")" != "${rendered}" ]]; then
@@ -197,10 +218,20 @@ try_nohup() {
   # stops the shell from re-sending it; `</dev/null` + log redirect detach
   # stdio. TMPDIR=/tmp stops a macOS-shaped TMPDIR forwarded via SendEnv
   # from reaching the worker/claude child.
+  #
+  # NOVA_AGENT_WORKER_EXTRA_PATHS + PATH= mirror what the Go install flow
+  # does (see backend/internal/handler/agent_server.go installNodeWorker).
+  # Without them the worker process would inherit only this shell's PATH,
+  # which on a bare systemd-style session misses the directory holding
+  # the `claude` binary installed by `npm i -g` — leading to spawn ENOENT.
+  local extra_paths
+  extra_paths="$(awk 'NF && substr($1,1,1) != "#"' "${EXTRA_PATHS:-/dev/null}" 2>/dev/null | paste -sd: -)"
   nohup env \
     TMPDIR=/tmp TMP=/tmp TEMP=/tmp \
     NOVA_AGENT_WORKER_HOST="${HOST}" \
     NOVA_AGENT_WORKER_PORT="${PORT}" \
+    NOVA_AGENT_WORKER_EXTRA_PATHS="${extra_paths}" \
+    PATH="${worker_path}" \
     node "${INSTALL_DIR}/server.mjs" >>"${logfile}" 2>&1 </dev/null &
   local pid=$!
   echo "${pid}" >"${pidfile}"

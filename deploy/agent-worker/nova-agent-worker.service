@@ -18,6 +18,13 @@ Environment=NOVA_AGENT_WORKER_PORT=@PORT@
 # server.mjs:resolveTmpdir), but this belt-and-braces ensures Node's
 # own os.tmpdir() is sane before any user code runs.
 Environment=TMPDIR=/tmp
+# systemd --user starts with the bare PATH
+# (/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin) which
+# misses nvm/Homebrew/npm-global bin dirs, leading to spawn('claude') ENOENT.
+# @WORKER_PATH@ is substituted by install.sh with a PATH that includes
+# /opt/homebrew/bin + ~/.nvm/versions/node/*/bin + ~/.npm-global/bin so
+# the worker can find `claude` regardless of how it was installed.
+Environment=PATH=@WORKER_PATH@
 # @INSTALL_DIR@ is substituted by install.sh with the target directory.
 WorkingDirectory=@INSTALL_DIR@
 ExecStart=/usr/bin/env node server.mjs
