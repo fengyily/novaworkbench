@@ -1,17 +1,20 @@
-/* SubTaskPanel — sits inside the developer stage alongside CodingChat.
+/* SubTaskPanel — sits inside the developer stage alongside the shared
+ * JobLogView (used to live alongside the CodingChat component before the
+ * developing-stage refactor).
  *
  * Visual intent (per @frontend-design):
  *   - Panel surface, header, composer, cards all share the platform's
  *     white-card-on-slate-bg language (border / radius / shadow match the
- *     adjacent CodingChat panel so the eye reads this as another stage
+ *     adjacent shared JobLogView so the eye reads this as another stage
  *     sub-section, not a foreign surface).
  *   - Display copy (titles, hints, buttons) uses the platform sans stack
  *     so the panel doesn't read as "another product" sitting inside the
  *     detail page.
  *   - The CLI / terminal motif is preserved in exactly two places where
  *     it carries information:
- *       (a) the live log strip — it really is a claude terminal scrollback,
- *       (b) the "复制到终端继续" code block — it really is a shell command.
+ *       (a) the "复制到终端继续" code block — it really is a shell command.
+ *     (The previous "live log strip" lived here too but moved to the
+ *     shared JobLogView after the developing-stage refactor.)
  *     Everything else is sans + platform colors. The signature is the
  *     contrast between the calm white panel and these two dark strips.
  *   - Status tones reuse the platform palette: indigo (running / pending),
@@ -36,6 +39,37 @@
   gap: 12px;
   padding: 16px 20px;
   border-bottom: 1px solid var(--color-border);
+}
+/* Right-side cluster of actions that grew out of the in-place composer:
+   the "+ 新建子任务" button, the inline summary CTAs that used to live
+   in the removed auto-orchestrate banner, and the count / session meta
+   strip. Stacks under 720px so the header never grows taller than the
+   neighbouring job panels. */
+.sub-panel-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.sub-panel-summary-cta {
+  /* Reuse the size of the small button but pull the colour back toward
+     neutral so it doesn't compete visually with the primary
+     "+ 新建子任务" affordance on the right. */
+  font-size: 12px;
+  padding: 4px 10px;
+}
+.sub-panel-summary-toast {
+  /* Inline next to the summary CTA — global .merge-hint-toast already
+     provides the background / border / animation. */
+  white-space: nowrap;
+}
+.sub-panel-new-btn {
+  /* The "+ 新建子任务" affordance. Kept slightly larger than the summary
+     CTA so the eye lands here first — the modal opens less often than
+     the summary round-trip, but creating a manual sub-task is the more
+     common flow once the orchestrator is done. */
+  white-space: nowrap;
 }
 .sub-panel-title {
   display: flex;
@@ -75,6 +109,28 @@
 .sub-panel-count {
   color: var(--color-primary);
   font-weight: 600;
+}
+
+/* ─── Composer modal ───
+ * The manual sub-task creation form used to live inline above the list.
+ * After the developing-stage refactor it moved behind a "+ 新建子任务"
+ * button, rendered through the global `.modal-overlay / .modal-box`
+ * primitives. The internal `.sub-composer` block is unchanged from its
+ * pre-modal layout (textarea + model picker + env selector + session
+ * mode radio + toolbar); the modal just gives it a stable width and a
+ * close affordance. */
+.sub-composer-modal {
+  width: min(640px, calc(100vw - 32px));
+}
+.sub-composer-modal .modal-body {
+  padding-top: 4px;
+}
+/* Inside the modal the composer no longer needs the inline bottom
+   divider — the modal's own rounded corners frame it. */
+.sub-composer-modal .sub-composer {
+  padding: 0;
+  border-bottom: none;
+  background: transparent;
 }
 
 /* Pre-flight hint (when coding session hasn't been started yet) */
@@ -367,7 +423,7 @@
   border-radius: 6px;
   background: var(--color-surface);
   overflow: hidden;
-  transition: border-color 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 .sub-card:hover {
   border-color: var(--color-text-muted);
@@ -376,6 +432,45 @@
 .sub-card-done    { border-left-color: var(--color-success); }
 .sub-card-error   { border-left-color: var(--color-error); }
 .sub-card-pending { border-left-color: var(--color-text-muted); }
+/* Shared-panel mirror selection — when the floating task-list selects
+ * this card its logs are currently showing in the shared JobLogView.
+ * We paint a soft purple ring + slight inset shadow so the user can
+ * tell which card the right-hand panel is rendering without reading
+ * the sidebar. */
+.sub-card.is-selected {
+  box-shadow: 0 0 0 2px var(--color-primary, #4f46e5);
+  border-color: var(--color-primary, #4f46e5);
+}
+
+/* The "查看日志" affordance surfaced in each card header. Stays
+ * compact — a tiny chip that flips between a chevron and an eye glyph
+ * based on selection state — so it doesn't compete with the existing
+ * header metadata for vertical space. */
+.sub-card-view-log-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.sub-card-view-log-btn:hover {
+  background: var(--color-surface-hover, #f1f5f9);
+  color: var(--color-text);
+}
+.sub-card.is-selected .sub-card-view-log-btn {
+  background: var(--color-primary, #4f46e5);
+  border-color: var(--color-primary, #4f46e5);
+  color: #fff;
+}
 
 .sub-card-header {
   display: flex;
@@ -602,78 +697,11 @@
   padding: 8px;
 }
 
-/* Live log strip — the panel's CLI signature. Dark surface, mono font,
- * monospace "›" prompt gutter. Stays compact (~360px tall, scrolls) so
- * a long run doesn't push the artifact / token strip off-screen. */
-.sub-log {
-  background: #0F172A;
-  border: 1px solid #1E293B;
-  border-radius: 6px;
-  padding: 10px 12px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.55;
-  max-height: 360px;
-  overflow-y: auto;
-  color: #E2E8F0;
-}
-.sub-log-empty {
-  background: #0F172A;
-  border: 1px solid #1E293B;
-  border-radius: 6px;
-  padding: 18px;
-  color: #94A3B8;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  text-align: center;
-}
-.sub-log-phase-block {
-  border-left: 2px solid #475569;
-  padding-left: 10px;
-  margin-bottom: 6px;
-}
-.sub-log-row {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-  line-height: 1.5;
-}
-.sub-log-prompt {
-  color: #FB923C; /* kept as the lone accent — Claude's shell prompt */
-  flex-shrink: 0;
-  width: 14px;
-  text-align: center;
-  font-weight: 700;
-}
-.sub-log-text { flex: 1; min-width: 0; word-break: break-word; }
-.sub-log-phase   { color: #38BDF8; }
-.sub-log-tool_call { color: #A5B4FC; }
-.sub-log-message { color: #E2E8F0; }
-.sub-log-result  { color: #E2E8F0; }
-.sub-log-error   { color: #FCA5A5; }
-.sub-log-error .sub-log-prompt { color: #FCA5A5; }
-.sub-log-done    { color: #6EE7B7; }
-.sub-log-md {
-  margin: 6px 0 4px;
-  padding-left: 22px;
-  color: #E2E8F0;
-  word-break: break-word;
-}
-.sub-log-md p:first-child { margin-top: 0; }
-.sub-log-md p:last-child  { margin-bottom: 0; }
-.sub-log-md code {
-  background: #1E293B;
-  padding: 1px 4px;
-  border-radius: 2px;
-  font-size: 11px;
-}
-.sub-log-md pre {
-  background: #1E293B;
-  padding: 8px 10px;
-  border-radius: 3px;
-  overflow-x: auto;
-  margin: 6px 0;
-}
+/* Live log strip — REMOVED after the developing-stage refactor.
+ * Logs now render in the shared JobLogView driven by the floating
+ * DevelopingTaskList; per-card .sub-log rules are no longer referenced.
+ * The artifact block (.sub-card-artifact) below still ships finished
+ * sub-task reports, so the dark-theme treatment survives there. */
 
 /* Artifact (finished sub-task reports) — same dark surface so finished
  * cards keep the CLI feel but with typography tuned for reading prose,
@@ -925,6 +953,7 @@
 /* Responsive: tighten padding on narrow screens. */
 @media (max-width: 640px) {
   .sub-panel-header { padding: 12px 16px; flex-wrap: wrap; }
+  .sub-panel-header-actions { flex-basis: 100%; justify-content: flex-start; }
   .sub-composer { padding: 12px 16px; }
   .sub-list { padding: 12px 16px 16px; }
   .sub-composer-toolbar { flex-wrap: wrap; }
@@ -942,52 +971,19 @@
 }
 
 /* ─── Orchestrator (主 Agent 自动编排) ───
- * Sits above the manual composer. The input + button live on a single row
- * so "开始执行" can't drift into the textarea — without this flex row the
- * browser falls back to native inline layout and the button renders
- * inside the text input area. Background uses a faint indigo wash so the
- * user reads it as the "primary" affordance; the manual composer below
- * stays neutral.
+ * The auto-orchestrate banner that used to live above the composer
+ * (`.sub-orchestrator` + `.sub-orchestrator-status--with-cta` + the
+ * status-row / CTA / toast cluster) was removed in the same refactor
+ * that moved the manual composer behind a "+ 新建子任务" modal. The
+ * floating DevelopingTaskList sidebar now carries the in-flight
+ * indication, so the always-on banner became redundant noise.
+ *
+ * What remains: `.sub-orchestrator-status` is the base background used
+ * by the transient re-split indicator (`.sub-resplit-status` below) —
+ * keeping that single rule avoids rewriting the re-split styles. The
+ * old `*-with-cta` / status-row / cta / toast / reply rules are gone
+ * since their only consumer was the removed banner.
  */
-.sub-orchestrator {
-  padding: 16px 20px;
-  border-bottom: 1px solid var(--color-border);
-  background: rgba(79, 70, 229, 0.04);
-}
-.sub-orchestrator-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.sub-orchestrator-input {
-  flex: 1;
-  min-width: 0;
-  padding: 8px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-surface);
-  color: var(--color-text);
-  font-family: var(--font-sans);
-  font-size: 13px;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-.sub-orchestrator-input:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
-}
-.sub-orchestrator-input:disabled {
-  background: var(--color-hover);
-  color: var(--color-text-muted);
-  cursor: not-allowed;
-}
-.sub-orchestrator-input::placeholder {
-  color: var(--color-text-muted);
-}
-.sub-orchestrator-btn {
-  flex-shrink: 0;
-  white-space: nowrap;
-}
 .sub-orchestrator-status {
   margin-top: 10px;
   padding: 8px 12px;
@@ -995,59 +991,6 @@
   border-radius: 6px;
   font-size: 12px;
   color: var(--color-primary);
-}
-/* Orchestrator banner with the new manual / early-summary CTAs.
-   Layout: a single flex row that keeps the status text on the left and
-   the CTA cluster (button + toast) on the right, wrapping gracefully on
-   narrow viewports. The base `.sub-orchestrator-status` styles above
-   still apply (background / padding / color). */
-.sub-orchestrator-status--with-cta {
-  padding: 10px 14px;
-}
-.sub-orchestrator-status-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.sub-orchestrator-status-text {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.sub-orchestrator-status-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-.sub-orchestrator-cta {
-  font-size: 12px;
-  padding: 4px 10px;
-}
-.sub-orchestrator-toast {
-  /* Local tweak so the toast sits inline with the button instead of
-     taking its own line — the global `.merge-hint-toast` rule already
-     provides background / border / animation. */
-  white-space: nowrap;
-}
-.sub-orchestrator-reply {
-  margin-top: 10px;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
-  background: var(--color-surface);
-  padding: 8px 12px;
-}
-.sub-orchestrator-reply summary {
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  user-select: none;
-}
-.sub-orchestrator-reply-body {
-  margin-top: 8px;
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--color-text);
 }
 
 /* ─── Summary report (主 Agent 汇总报告) ───
@@ -1193,7 +1136,7 @@
 
 /* ─── Per-card context-usage bar ───
  * Slim wrapper around the shared ContextUsageBar so each sub-task card
- * can show the same usage metrics the parent CodingChat does. Sits
+ * can show the same usage metrics the parent JobLogView does. Sits
  * between the header and the collapsible body so the bar is visible
  * whether the card is expanded or collapsed. Reuses the global
  * `.usage-bar-band-ok|warn|critical` color classes defined in index.css

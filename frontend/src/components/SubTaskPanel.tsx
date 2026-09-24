@@ -20,12 +20,12 @@ import {
 import { ExecEnvSelect } from './ExecEnvSelect';
 import { ExecEnvBadge } from './ExecEnvBadge';
 import { createEventStream, type EventStream } from '../api/stream';
-import { appendLogLine, computeUsage, type LogLine, type UsageInfo } from '../utils/logLines';
+import { appendLogLine, computeUsage, type LogLine } from '../utils/logLines';
 import { modelContextWindow } from '../utils/modelWindow';
 import AtMentionTextarea from './AtMentionTextarea';
 import ModelSelect from './ModelSelect';
 import ContextUsageBar from './ContextUsageBar';
-import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck } from './icons';
+import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck, IconPlus } from './icons';
 import './SubTaskPanel.css';
 
 // The header-right quickstats block (cost + ⏱) reads the persisted
@@ -74,6 +74,22 @@ interface Props {
   // The composer defaults the choice to the parent requirement's
   // agent_server_id (inheritance) but lets the user override per sub-task.
   agentServers?: AgentServer[];
+  // Shared-panel selection — sourced by DevelopingStage from its
+  // DevelopingTaskList. When a card matches the selected key the panel
+  // paints an "is-selected" highlight + a "查看日志" button so the user
+  // can tell which sub-task is currently visible in the shared
+  // JobLogView.
+  selectedTaskKey?: string;
+  onTaskSelect?: (id: string) => void;
+  // Lifted-list callback: each successful /sub-tasks fetch emits the
+  // current list upward so the parent (RequirementDetail →
+  // DevelopingStage) can render the floating task list and attach the
+  // shared SSE bus per child. The handler MUST be stable (parent uses
+  // useState's setState) so the panel's polling effect does not loop.
+  // We deliberately keep `onSubTasksChange` as the count-only callback
+  // for backward compatibility with the page-level hide-of-Follow-up
+  // composer logic.
+  onSubTasksLoaded?: (items: SubTask[]) => void;
 }
 
 // Tree-form lineage marker — Adjust / Redo / Continue produce a NEW
@@ -221,63 +237,12 @@ async function writeClipboard(text: string): Promise<boolean> {
   } catch { return false; }
 }
 
-// Inline log renderer — a compact, terminal-styled variant. We can't
-// import CodingLines (it lives inside RequirementDetail.tsx as a private
-// component) so this is a stripped-down equivalent that renders the same
-// {type, content} event shape the SSE pipeline emits.
-function SubTaskLogView({ lines }: { lines: LogLine[] }) {
-  const { t } = useTranslation();
-  if (lines.length === 0) {
-    return <div className="sub-log-empty">{t('components.subTaskCard.logEmpty')}</div>;
-  }
-  const rendered: React.ReactNode[] = [];
-  let phaseBucket: LogLine[] = [];
-  const flush = (k: number) => {
-    if (phaseBucket.length === 0) return;
-    rendered.push(
-      <div key={`p-${k}`} className="sub-log-phase-block">
-        {phaseBucket.map((l, i) => (
-          <div key={i} className={`sub-log-row sub-log-${l.type}`}>
-            <span className="sub-log-prompt">$</span>
-            <span className="sub-log-text">{l.content}</span>
-          </div>
-        ))}
-      </div>,
-    );
-    phaseBucket = [];
-  };
-  lines.forEach((line, i) => {
-    if (line.type === 'phase' || line.type === 'tool_call') {
-      phaseBucket.push(line);
-      return;
-    }
-    flush(i);
-    if (line.type === 'message' || line.type === 'result') {
-      rendered.push(
-        <div key={`m-${i}`} className="sub-log-md">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{line.content}</ReactMarkdown>
-        </div>,
-      );
-    } else if (line.type === 'error') {
-      rendered.push(
-        <div key={`e-${i}`} className="sub-log-row sub-log-error"><span className="sub-log-prompt">!</span><span>{line.content}</span></div>,
-      );
-    } else if (line.type === 'done') {
-      rendered.push(
-        <div key={`d-${i}`} className="sub-log-row sub-log-done"><span className="sub-log-prompt">$</span><span>{line.content}</span></div>,
-      );
-    } else {
-      rendered.push(
-        <div key={`r-${i}`} className={`sub-log-row sub-log-${line.type}`}>
-          <span className="sub-log-prompt">·</span>
-          <span>{line.content}</span>
-        </div>,
-      );
-    }
-  });
-  flush(lines.length);
-  return <div className="sub-log">{rendered}</div>;
-}
+// SubTaskLogView was the inline SSE log renderer for each card's body.
+// After the developing-stage refactor logs are rendered in the shared
+// JobLogView driven by the DevelopingTaskList selection. The component
+// is intentionally removed — its dependencies (ReactMarkdown, logLines
+// type imports) are still used elsewhere in the panel, so the imports
+// above remain.
 
 // launchSettingsRef caches the --settings prefix for the copy-paste CLI
 // commands (one /active fetch per page load). Empty string = nothing to pin
@@ -387,6 +352,14 @@ interface CardProps {
   // instead of a bare count. 0 = not known yet / failed to read; the badge
   // then falls back to the count-only wording.
   retryMax?: number;
+  // Selected task key (from DevelopingStage). When this matches st.id the
+  // card renders an "is-selected" highlight so the user can tell which
+  // sub-task is currently visible in the shared JobLogView. Defaults to
+  // '' (no selection).
+  selectedKey?: string;
+  // Forwarded from DevelopingStage's DevelopingTaskList — clicking a card
+  // in either surface keeps both highlights in sync.
+  onSelect?: (id: string) => void;
 }
 
 // useRestartSubTask encapsulates the "原地翻转" semantics shared by the
@@ -395,42 +368,37 @@ interface CardProps {
 // On any error we revert the optimistic update and re-throw so the caller
 // can surface a localized toast.
 //
-// We deliberately do NOT close the SSE here: the parent owns SSE lifetime
-// via the onRestarted hook (it re-subscribes when the new job_id lands).
-// The card's local `streaming` state is flipped back to true so the live
-// log panel reopens while waiting for the new frames.
+// After the developing-stage refactor the SSE bus is owned by
+// DevelopingStage. The hook no longer manages a local log panel — it
+// just flips the row's status and lets the parent re-subscribe the
+// shared stream on the new job_id.
 function useRestartSubTask(args: {
   st: SubTask;
   requirementId: string;
   onChanged: (next: SubTask) => void;
   onRestarted?: (subTaskId: string, newJobId: string) => void;
-  setStreaming: (b: boolean) => void;
-  setLines: (l: LogLine[]) => void;
 }) {
-  const { st, requirementId, onChanged, onRestarted, setStreaming, setLines } = args;
+  const { st, requirementId, onChanged, onRestarted } = args;
   return useCallback(async (kind: 'redo' | 'continue', model?: string) => {
     // Snapshot for rollback on error.
     const snapshot = { ...st };
-    // Optimistic: card flips to running UI + parent gets a synthetic
-    // running row. The empty job_id keeps the SSE effect gated until
-    // onRestarted lands with the real one.
-    setStreaming(true);
-    setLines([]);
+    // Optimistic: row flips to running UI + parent gets a synthetic
+    // running row. The empty job_id keeps the shared stream gated
+    // until onRestarted lands with the real one.
     onChanged({ ...st, status: 'running', job_id: '', artifact: '' });
     try {
       const resp = kind === 'redo'
         ? await subTasksApi.redo(requirementId, st.id, model ? { model } : {})
         : await subTasksApi.continue(requirementId, st.id, model ? { model } : {});
-      // Hand off to the parent: it stamps job_id on the row and
-      // subscribes the SSE stream for the new job.
+      // Hand off to the parent: it stamps job_id on the row and the
+      // DevelopingStage subscribes the SSE stream for the new job.
       onRestarted?.(st.id, resp.job_id);
     } catch (e) {
-      // Rollback: revert parent state + close the live log panel.
+      // Rollback: revert parent state.
       onChanged(snapshot);
-      setStreaming(false);
       throw e;
     }
-  }, [st, requirementId, onChanged, onRestarted, setStreaming, setLines]);
+  }, [st, requirementId, onChanged, onRestarted]);
 }
 
 function SubTaskCard({
@@ -449,39 +417,27 @@ function SubTaskCard({
   adjustModel = '',
   onAdjustModelChange,
   retryMax = 0,
+  selectedKey,
+  onSelect,
 }: CardProps) {
   const { t } = useTranslation();
   // The card uses a layout that mirrors an issue tracker detail view:
   //   ┌─ terminal-style header line ────────────────────────────────┐
   //   │  ▶ $ sub-task [01/03] · claude-sonnet · 12s ago         ⌄  │
   //   └─────────────────────────────────────────────────────────────┘
-  //   ┌─ body (when expanded): live log OR artifact md ─────────────┐
-  //   │  ─ running: phase + tool_call + message stream              │
+  //   ┌─ body (when expanded): artifact md + adjust buttons ─────────┐
   //   │  ─ done:    copy CLI block + markdown artifact              │
   //   └─────────────────────────────────────────────────────────────┘
-  // Default expansion rule: only ACTIVE sub-tasks (running/pending) open
-  // automatically — finished cards (done/error) stay collapsed so a long
-  // history doesn't take over the page. The user can still click any
-  // header to expand / collapse; the rule just sets the initial state.
+  //
+  // After the developing-stage refactor the SSE log panel lives in
+  // DevelopingStage's JobLogView — each card is now an "操作面板":
+  // title + status + meta + adjust/continue/redo buttons. The card
+  // surface stays the same so existing affordances (copy CLI, view
+  // artifact, model picker for Redo) keep working unchanged.
   const [expanded, setExpanded] = useState<boolean>(
     st.status === 'running' || st.status === 'pending',
   );
-  const [streaming, setStreaming] = useState<boolean>(st.status === 'running' || st.status === 'pending');
-  const [lines, setLines] = useState<LogLine[]>([]);
-  const [artifact, setArtifact] = useState<string>(st.artifact);
-  // Mirror the parent's st.artifact into local state on every prop
-  // change. useState alone only captures the mount-time value, so a
-  // list-poll that refreshes the row (e.g. after SSE job_done causes
-  // the parent to re-fetch /sub-tasks) wouldn't update the rendered
-  // artifact unless the SSE-driven subTasksApi.get also completes.
-  // This effect closes that gap: any newer artifact coming through
-  // props wins, and we deliberately skip the SSE-derived setArtifact
-  // callback that fights with this — see the job_done branch below
-  // (it still sets local state when SSE arrives faster than the next
-  // list poll, which is the common path).
-  useEffect(() => {
-    setArtifact(st.artifact);
-  }, [st.artifact]);
+  const artifact = st.artifact;
   const [adjusting, setAdjusting] = useState(false);
   const [adjustInput, setAdjustInput] = useState('');
   const [adjustBusy, setAdjustBusy] = useState(false);
@@ -519,12 +475,12 @@ function SubTaskCard({
   // flight. On success the panel prunes the row (and its subtree) from the
   // list, so this card unmounts; on error we clear the flag and alert.
   const [deleting, setDeleting] = useState(false);
-  // Live usage snapshot — driven by SSE `usage` frames (step="sub_task")
-  // OR computed client-side from the persisted sub_tasks.*_tokens columns
-  // when the card has finished and SSE has gone quiet. We display
-  // `live ?? fallback` so refresh-after-finish still shows the same bar.
-  const [usage, setUsage] = useState<UsageInfo | undefined>(undefined);
-  const esRef = useRef<EventStream | null>(null);
+  // Context usage is now derived purely from the persisted
+  // sub_tasks.*_tokens columns (st.input_tokens / output_tokens / etc.).
+  // SSE `usage` frames used to push a live snapshot here, but the
+  // DevelopingStage owns the shared SSE bus now and the per-card bar
+  // shows the row's terminal totals via computeUsage(...) — see the
+  // <ContextUsageBar usage={computeUsage(...)} /> below.
   // 'pending' now always means "queued behind the project's concurrency gate":
   // the orchestration tick deliberately leaves a row pending rather than
   // claiming one it can't run, and the manual runner flips to running only
@@ -543,74 +499,19 @@ function SubTaskCard({
   // both submitRedo and submitContinue close over the same function and
   // any future entry point (e.g. a bulk action on the panel header) can
   // call it without duplicating the optimistic-flip / rollback dance.
+  //
+  // After the developing-stage refactor the SSE bus lives in
+  // DevelopingStage — this hook no longer needs to manage local
+  // streaming / lines state, since logs are rendered in the shared
+  // JobLogView. It still flips the row to running optimistically and
+  // hands the new job_id back via onRestarted so DevelopingStage can
+  // attach the SSE stream.
   const restartSubTask = useRestartSubTask({
     st,
     requirementId: st.requirement_id,
     onChanged,
     onRestarted,
-    setStreaming,
-    setLines,
   });
-
-  // Open / close the SSE stream. Re-subscribes on each status flip; the
-  // createEventStream handle is kept in a ref so we can close on unmount
-  // and on premature drop.
-  useEffect(() => {
-    if (!streaming || !st.job_id) return;
-    esRef.current = createEventStream(
-      `/api/wizard/jobs/${st.job_id}/stream`,
-      (evt) => {
-        if (!evt || typeof evt !== 'object') return;
-        const evtType = evt.type as string;
-        if (evtType === 'usage') {
-          try {
-            const raw = typeof evt.content === 'string' ? JSON.parse(evt.content) : null;
-            if (raw) setUsage(computeUsage(raw, 'sub_task'));
-          } catch { /* malformed payload — ignore */ }
-          // usage frames do NOT go into lines[] — SubTaskLogView treats
-          // unknown types as plain log rows, which would render the JSON
-          // payload as terminal scrollback and confuse the user.
-          return;
-        }
-        if (evtType === 'job_done') {
-          setStreaming(false);
-          // Stalled runs (watchdog killed the subprocess) get an extra hint
-          // line appended to the visible log so the user can tell "流静默
-          // 超时" apart from a hard crash. The retry/continue buttons below
-          // already work the same way for both kinds — this is purely
-          // diagnostic. We use the existing 'phase' type so it picks up the
-          // phase styling already wired in SubTaskLogView without needing a
-          // new CSS class.
-          if (evt && (evt as any).error_kind === 'stalled') {
-            setLines((prev) => appendLogLine(prev, {
-              type: 'phase',
-              content: '⚠️ ' + t('components.subTaskPanel.stalledHint'),
-              at: Date.now(),
-            }));
-          }
-          subTasksApi.get(st.requirement_id, st.id)
-            .then((next) => { setArtifact(next.artifact); onChanged(next); })
-            .catch(() => { /* keep last-known state */ });
-          return;
-        }
-        setLines((prev) => appendLogLine(prev, {
-          type: evtType,
-          content: typeof evt.content === 'string' ? evt.content : (evt.content ? JSON.stringify(evt.content) : ''),
-          at: typeof evt.at === 'number' ? evt.at : Date.now(),
-        }));
-      },
-      () => {
-        setStreaming(false);
-        subTasksApi.get(st.requirement_id, st.id)
-          .then((next) => { setArtifact(next.artifact); onChanged(next); })
-          .catch(() => {});
-      },
-    );
-    return () => { esRef.current?.close(); esRef.current = null; };
-  // We deliberately use the minimal dep set — parent re-renders shouldn't
-  // re-subscribe. (See ESLint exhaustive-deps guidance in the codebase.)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [streaming, st.job_id, st.id, st.requirement_id]);
 
   const submitAdjust = useCallback(async () => {
     const p = adjustInput.trim();
@@ -683,7 +584,7 @@ function SubTaskCard({
     setContinueBusy(true);
     try {
       await restartSubTask('continue');
-    } catch (e: any) {
+    } catch {
       // Rollback already done by the hook; surface a localized message.
       window.alert(t('components.subTaskCard.errContinue'));
     } finally {
@@ -758,9 +659,18 @@ function SubTaskCard({
     onToggleCollapse?.();
   };
 
+  // Mirror the DevelopingTaskList selection. `selectedKey` is sourced
+  // from the page-level DevelopingStage; when it matches st.id the
+  // card paints an "is-selected" highlight so the user can tell which
+  // sub-task is currently visible in the shared JobLogView.
+  const isSelected = !!selectedKey && selectedKey === st.id;
+  const handleSelectClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onSelect?.(st.id);
+  };
   return (
     <article
-      className={`sub-card sub-card-${st.status}${depth > 0 ? ' sub-card-child' : ''}`}
+      className={`sub-card sub-card-${st.status}${depth > 0 ? ' sub-card-child' : ''}${isSelected ? ' is-selected' : ''}`}
       style={depth > 0 ? { marginLeft: treeIndent } : undefined}
     >
       <header
@@ -770,6 +680,21 @@ function SubTaskCard({
         tabIndex={0}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setExpanded(v => !v); } }}
       >
+        {/* Quick "查看日志" affordance — forwards selection to
+            DevelopingStage so the shared panel rerenders this card's
+            log. Stoppropagation keeps expand/collapse independent. */}
+        {onSelect && (
+          <button
+            type="button"
+            className="sub-card-view-log-btn"
+            onClick={handleSelectClick}
+            title={isSelected ? t('components.subTaskCard.viewingLogTitle') : t('components.subTaskCard.viewLogTitle')}
+            aria-label={isSelected ? t('components.subTaskCard.viewingLogTitle') : t('components.subTaskCard.viewLogTitle')}
+            aria-pressed={isSelected}
+          >
+            {isSelected ? '👁' : '›'}
+          </button>
+        )}
         {/* Meta line: status chip + source badge + counter + model + time.
             Sits ABOVE the title so a long user-supplied title never
             competes for horizontal space with the metadata row. */}
@@ -904,15 +829,15 @@ function SubTaskCard({
       </header>
 
       {/* Per-card ContextUsageBar — mirrors the bar shown on the parent
-          CodingChat. Sits between the header and the collapsible body so
+          JobLogView. Sits between the header and the collapsible body so
           it's visible whether the card is expanded or collapsed. Drives
-          off (live SSE `usage` frames) ?? (client-side recompute from
-          the persisted sub_tasks.*_tokens columns). compressible={false}
+          off the persisted sub_tasks.*_tokens columns (the SSE bus
+          migrated to DevelopingStage). compressible={false}
           hides the "compress context" button — sub-tasks don't expose
           compression to the user. */}
       <div className="sub-card-usage">
         <ContextUsageBar
-          usage={usage ?? computeUsage({
+          usage={computeUsage({
             input_tokens: st.input_tokens,
             output_tokens: st.output_tokens,
             cache_creation_tokens: st.cache_creation_tokens,
@@ -928,11 +853,10 @@ function SubTaskCard({
 
       {expanded && (
         <div className="sub-card-body">
-          {/* Live log (streaming) — full-width terminal scrollback. */}
-          {streaming && <SubTaskLogView lines={lines} />}
-
+          {/* The live SSE log moved to DevelopingStage's JobLogView. The
+              card body now focuses on the artifact + adjust affordances. */}
           {/* Artifact (finished) — full-width Markdown report. */}
-          {!streaming && (st.status === 'done' || st.status === 'error') && artifact && (
+          {(st.status === 'done' || st.status === 'error') && artifact && (
             <div className="sub-card-artifact">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{artifact}</ReactMarkdown>
             </div>
@@ -940,31 +864,30 @@ function SubTaskCard({
 
           {/* Only show "no artifact" once the row is actually terminal —
               between the SSE job_done frame and the next /sub-tasks list
-              poll, the local `artifact` state is still the empty string
-              captured at mount (before claude finished) while `streaming`
-              has already flipped to false. Showing "无产物" in that
-              window is misleading: the row IS done, we just haven't
-              fetched the artifact Markdown yet. The guard below matches
-              the one above so the two branches stay symmetric. */}
-          {!streaming && (st.status === 'done' || st.status === 'error') && !artifact && (
+              poll, the prop's `artifact` is still the empty string while
+              status has already flipped. Showing "无产物" in that window
+              is misleading: the row IS done, we just haven't fetched the
+              artifact Markdown yet. The guard below matches the one above
+              so the two branches stay symmetric. */}
+          {(st.status === 'done' || st.status === 'error') && !artifact && (
             <div className="sub-card-empty">{t('components.subTaskCard.noArtifact')}</div>
           )}
 
           {/* 🪙 Token + cost strip — moved to the header-right quickstats
               (sub-card-quickstats) so the user always sees the totals without
-              expanding the card. The expanded body still has SubTaskLogView
-              (live log) and the artifact Markdown for full detail. */}
+              expanding the card. The expanded body now hosts the artifact +
+              adjust/redo controls. */}
 
           {/* Terminal CLI copy: visible only when the sub-task has a session id,
               or can suggest a fork-session variant from the source. */}
-          {!streaming && st.session_id && (
+          {st.session_id && (
             <div className="sub-card-cli">
               <div className="sub-card-cli-label">{t('components.subTaskCard.copyCliContinue')}</div>
               <CopyCliBlock st={st} variant="continue" />
             </div>
           )}
 
-          {!streaming && !st.session_id && st.source_session_id && (
+          {!st.session_id && st.source_session_id && (
             <div className="sub-card-cli">
               <div className="sub-card-cli-label">{t('components.subTaskCard.copyCliAdjust')}</div>
               <CopyCliBlock st={st} variant="adjust" />
@@ -981,7 +904,7 @@ function SubTaskCard({
           {/* A failed row is always shown even without a session_id so its
               delete affordance stays reachable; the other actions keep their
               own inner guards (Adjust/Continue/Redo require a session). */}
-          {!streaming && (((st.status === 'done' || st.status === 'error' || st.status === 'stopped') && st.session_id) || st.status === 'error') && (
+          {(((st.status === 'done' || st.status === 'error' || st.status === 'stopped') && st.session_id) || st.status === 'error') && (
             <div className="sub-card-adjust">
               {/* Toggle row: Adjust / Continue / Redo collapse to a single
                   row when no drawer is open. Continue sits before Redo so
@@ -1096,7 +1019,19 @@ function isLongSummary(raw: string | undefined): boolean {
   return lines > 12 || chars > 1200;
 }
 
-export default function SubTaskPanel({ requirementId, codingSessionId, requirement, onSubTasksChange, developerDefaultModel = '', batch, onBatchChange, agentServers = [] }: Props) {
+export default function SubTaskPanel({
+  requirementId,
+  codingSessionId,
+  requirement,
+  onSubTasksChange,
+  onSubTasksLoaded,
+  developerDefaultModel = '',
+  batch,
+  onBatchChange,
+  agentServers = [],
+  selectedTaskKey,
+  onTaskSelect,
+}: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<SubTask[] | null>(null);
   // Configured automatic-redo cap (设置 → 子任务). Read once per mount purely to
@@ -1179,6 +1114,23 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // re-runs on periodic poll + after every create / adjust) doesn't fire
   // onSubTasksChange on every tick. Only emit on actual transitions.
   const lastReportedCountRef = useRef<number>(-1);
+  // Composer-open flag — the manual sub-task creation form is hidden
+  // behind a "+ 新建子任务" button so the panel body stays focused on the
+  // list. The modal reuses the existing `prompt / submitting / error /
+  // createModel / createConfigId / createAgentServerId / sessionMode`
+  // state below; toggling `composerOpen` mounts/unmounts the form.
+  const [composerOpen, setComposerOpen] = useState(false);
+  // Reset composer state on close so reopening always starts blank.
+  // Keeping stale text across opens read as "I closed it but my prompt
+  // came back" in early iterations — the user expected a fresh form.
+  const closeComposer = useCallback(() => {
+    setComposerOpen(false);
+    setPrompt('');
+    setError(null);
+  }, []);
+  // Escape closes the modal (mirrors the global behaviour of
+  // DocRefineChat / DeepRefineChat modals). Wired below in the modal
+  // JSX so we can keep the listener local to the component subtree.
   // Manual / early-summary round-trip state. Distinct from the per-card
   // `adjustBusy` so the composer submit lock doesn't accidentally disable
   // the orchestrator banner's summary CTA. `summaryToast` mirrors the
@@ -1231,6 +1183,21 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   useEffect(() => () => {
     if (summaryCopyTimerRef.current) window.clearTimeout(summaryCopyTimerRef.current);
   }, []);
+
+  // Escape closes the composer modal — mirrors the global modal pattern
+  // used by DocRefineChat / DeepRefineChat. Bound only while the modal
+  // is open so the rest of the page keeps its normal key handling.
+  useEffect(() => {
+    if (!composerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !submitting) {
+        e.stopPropagation();
+        closeComposer();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [composerOpen, submitting, closeComposer]);
 
   // Reset the collapse state when the underlying requirement / coding_plan
   // changes. Mirrors RequirementDetail.tsx:897-902 (design doc surface):
@@ -1332,6 +1299,11 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         lastReportedCountRef.current = list.length;
         onSubTasksChange(list.length);
       }
+      // Forward the full list upward so the parent (DevelopingStage) can
+      // render the floating task list and attach the shared SSE bus per
+      // child. We call this unconditionally — DevelopingStage uses its
+      // own refs to dedupe work and the list is small.
+      onSubTasksLoaded?.(list);
       // Detect a brand-new auto-orchestrate batch: any "running" child
       // whose created_at is within the last 10 minutes AND that we don't
       // yet have a local activeBatch marker for gets folded into the
@@ -1361,7 +1333,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     } catch (e: any) {
       setError(e?.message || t('components.subTaskPanel.errLoad'));
     }
-  }, [requirementId, activeBatch, onSubTasksChange, t]);
+  }, [requirementId, activeBatch, onSubTasksChange, onSubTasksLoaded, t]);
 
   useEffect(() => {
     loadList();
@@ -1579,6 +1551,10 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         agent_server_id: createAgentServerId,
       });
       setPrompt('');
+      // Close the composer modal on success — the new sub-task appears
+      // in the list on the next loadList tick, so reopening the modal
+      // and creating another is just one click away.
+      setComposerOpen(false);
       await loadList();
     } catch (e: any) {
       setError(e?.message || t('components.subTaskPanel.errCreate'));
@@ -1670,7 +1646,12 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // hooks block) so handleSummaryCopy and the [requirement?.id,
   // summaryReport] effect can read them. See the declaration near the top
   // of the component body for the JSDoc explaining the data source.
-  const activeChildCount = activeBatch?.childIds.length ?? 0;
+  // activeBatch is still tracked by loadList() so the orchestrator's
+  // child-id set can drive future surfaces (count badge in the header,
+  // "re-split disabled while orchestrating" guard, etc.) without
+  // re-deriving from scratch. The previous "in-flight" banner that
+  // displayed `activeChildCount` inline was removed when the composer
+  // moved behind a "+ 新建子任务" modal.
 
   // Session-mode segmented control contents. Ordered most→least inherited so
   // the default (继承主任务会话) sits left, where the eye lands first. Each
@@ -1708,102 +1689,93 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           <span className="sub-panel-title-icon" aria-hidden="true"><IconRobot size={16} /></span>
           <span>{t('components.subTaskPanel.title')}</span>
         </h3>
-        <span className="sub-panel-meta">
-          {t('components.subTaskPanel.shareSession')} <code>{truncate(codingSessionId, 12)}</code>
-          {' · '}
-          <span className="sub-panel-count">{items?.length ?? 0}</span> {t('components.subTaskPanel.countSuffix')}
-        </span>
+        <div className="sub-panel-header-actions">
+          {/* Summary CTAs (early / manual / progress / retry) used to live
+              in the auto-orchestrate banner that was removed from this
+              panel. The floating task list now carries the in-flight
+              indication, so we keep only the manual / early / retry
+              actions here — surfaced next to the count so the user can
+              still trigger a summary round without scrolling. */}
+          {summaryCta.mode === 'early' && (
+            <button
+              type="button"
+              className="btn btn-sm sub-panel-summary-cta"
+              onClick={() => onGenerateSummary('early')}
+              disabled={summaryBusy}
+              title={t('components.subTaskPanel.summaryCtaEarlyTitle')}
+            >
+              {summaryBusy ? t('components.subTaskPanel.summarySending') : t('components.subTaskPanel.summaryCtaEarlyBtn')}
+            </button>
+          )}
+          {summaryCta.mode === 'manual' && (
+            <button
+              type="button"
+              className="btn btn-sm btn-primary sub-panel-summary-cta"
+              onClick={() => onGenerateSummary('manual')}
+              disabled={summaryBusy}
+              title={t('components.subTaskPanel.summaryCtaManualTitle')}
+            >
+              {summaryBusy ? t('components.subTaskPanel.summarySending') : t('components.subTaskPanel.summaryCtaManualBtn')}
+            </button>
+          )}
+          {summaryCta.mode === 'progress' && (
+            <button
+              type="button"
+              className="btn btn-sm sub-panel-summary-cta"
+              disabled
+              title={t('components.subTaskPanel.summaryCtaProgressTitle')}
+            >
+              {t('components.subTaskPanel.summaryCtaProgressBtn')}
+            </button>
+          )}
+          {batch?.status === 'summarizing' && batch?.summary_status === 'error' && (
+            <button
+              type="button"
+              className="btn btn-sm btn-primary sub-panel-summary-cta"
+              onClick={() => onGenerateSummary('manual')}
+              disabled={summaryBusy}
+              title={t('components.subTaskPanel.summaryCtaManualTitle')}
+            >
+              {summaryBusy
+                ? t('components.subTaskPanel.summarySending')
+                : t('components.subTaskPanel.summaryRetryBtn')}
+            </button>
+          )}
+          {summaryToast && (
+            <span
+              className="merge-hint-toast sub-panel-summary-toast"
+              role="status"
+              data-kind={summaryToast.kind}
+            >
+              {summaryToast.text}
+            </span>
+          )}
+          <span className="sub-panel-meta">
+            {t('components.subTaskPanel.shareSession')} <code>{truncate(codingSessionId, 12)}</code>
+            {' · '}
+            <span className="sub-panel-count">{items?.length ?? 0}</span> {t('components.subTaskPanel.countSuffix')}
+          </span>
+          {/* "+ 新建子任务" button — opens the composer modal. The button
+              is the SINGLE entry point for manual sub-task creation now;
+              the in-place composer that used to live between the banner
+              and the list was removed in the same refactor. */}
+          <button
+            type="button"
+            className="btn btn-sm btn-primary sub-panel-new-btn"
+            onClick={() => setComposerOpen(true)}
+            title={t('components.subTaskPanel.newSubTaskBtnTitle')}
+            aria-label={t('components.subTaskPanel.newSubTaskBtnTitle')}
+          >
+            <IconPlus size={13} className="btn-icon" />
+            {t('components.subTaskPanel.newSubTaskBtn')}
+          </button>
+        </div>
       </header>
 
-      {/* Auto-orchestrate: ask the main agent to decompose + dispatch + summarize.
-          Distinct from the manual composer below — orchestrate is a SINGLE click
-          that creates N children AND a summary report, while the composer is for
-          ad-hoc one-off children. */}
-      {/* Auto-orchestrate status: the manual "Start execution" button was
-          removed — StartCoding's main agent now does the decomposition +
-          dispatch automatically when the user kicks off development.
-          What remains is the in-flight badge (so the user knows the
-          main agent is dispatching children) and the summary report
-          surface (each completed batch refreshes requirements.coding_plan).
-          The CTA cluster on the right drives the manual / early-summary
-          round-trips against /api/requirements/{id}/sub-tasks/summary
-          (creating summarizing batches → OrchestrationQueue tick handoff). */}
-      {(activeChildCount > 0 || summaryCta.mode !== null || (batch && (batch.status === 'summarizing' || batch.status === 'dispatching'))) && (
-        <div className="sub-orchestrator-status sub-orchestrator-status--with-cta">
-          <div className="sub-orchestrator-status-row">
-            <span className="sub-orchestrator-status-text">
-              {activeChildCount > 0
-                ? t('components.subTaskPanel.autoOrchestrateRunning', { n: activeChildCount })
-                : batch?.status === 'summarizing'
-                  ? (batch?.summary_status === 'error'
-                      ? t('components.subTaskPanel.bannerSummaryFailed')
-                      : t('components.subTaskPanel.bannerSummarizing'))
-                  : batch?.status === 'dispatching'
-                    ? t('components.subTaskPanel.bannerDispatchingStatus')
-                    : t('components.subTaskPanel.bannerAllDoneManual')}
-            </span>
-            <span className="sub-orchestrator-status-actions">
-              {summaryCta.mode === 'early' && (
-                <button
-                  type="button"
-                  className="btn btn-sm sub-orchestrator-cta"
-                  onClick={() => onGenerateSummary('early')}
-                  disabled={summaryBusy}
-                  title={t('components.subTaskPanel.summaryCtaEarlyTitle')}
-                >
-                  {summaryBusy ? t('components.subTaskPanel.summarySending') : t('components.subTaskPanel.summaryCtaEarlyBtn')}
-                </button>
-              )}
-              {summaryCta.mode === 'manual' && (
-                <button
-                  type="button"
-                  className="btn btn-sm btn-primary sub-orchestrator-cta"
-                  onClick={() => onGenerateSummary('manual')}
-                  disabled={summaryBusy}
-                  title={t('components.subTaskPanel.summaryCtaManualTitle')}
-                >
-                  {summaryBusy ? t('components.subTaskPanel.summarySending') : t('components.subTaskPanel.summaryCtaManualBtn')}
-                </button>
-              )}
-              {summaryCta.mode === 'progress' && (
-                <button
-                  type="button"
-                  className="btn btn-sm sub-orchestrator-cta"
-                  disabled
-                  title={t('components.subTaskPanel.summaryCtaProgressTitle')}
-                >
-                  {t('components.subTaskPanel.summaryCtaProgressBtn')}
-                </button>
-              )}
-              {batch?.status === 'summarizing' && batch?.summary_status === 'error' && (
-                <button
-                  type="button"
-                  className="btn btn-sm btn-primary sub-orchestrator-cta"
-                  onClick={() => onGenerateSummary('manual')}
-                  disabled={summaryBusy}
-                  title={t('components.subTaskPanel.summaryCtaManualTitle')}
-                >
-                  {summaryBusy
-                    ? t('components.subTaskPanel.summarySending')
-                    : t('components.subTaskPanel.summaryRetryBtn')}
-                </button>
-              )}
-              {summaryToast && (
-                <span
-                  className="merge-hint-toast sub-orchestrator-toast"
-                  role="status"
-                  data-kind={summaryToast.kind}
-                >
-                  {summaryToast.text}
-                </span>
-              )}
-            </span>
-          </div>
-        </div>
-      )}
-
       {/* Manual re-split progress: streams the main agent's re-decomposition
-          turn so a click never looks dead. */}
+          turn so a click never looks dead. Kept here because re-split is a
+          user-triggered, short-lived action (not the always-on auto-
+          orchestrate banner that the floating task list now replaces). */}
       {(reSplitBusy || reSplitLines.length > 0) && (
         <div className="sub-orchestrator-status sub-resplit-status">
           {reSplitBusy ? t('components.subTaskPanel.reSplitRunning') : t('components.subTaskPanel.reSplitDone')}
@@ -1863,144 +1835,183 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         </div>
       )}
 
-      <div className="sub-composer">
-        {/* Composer textarea — title field removed; opening a sub-task
-            only needs a description. The backend auto-derives a card-header
-            title from the prompt's first 40 chars when title is omitted. */}
-        <AtMentionTextarea
-          value={prompt}
-          onChange={setPrompt}
-          placeholder={t('components.subTaskPanel.composerPlaceholder')}
-          rows={4}
-          disabled={submitting}
-          className="sub-composer-textarea"
-        />
-        {/* Sub-task model picker — the SINGLE picker for the panel's
-            composer row. It applies to BOTH the "Start sub-task" and
-            "Re-split" buttons (they share the same claude_configs
-            list, and dispatching a re-split with a different model
-            would just create a confusing mixed batch). Per-stage
-            (developer) so the dropdown shows the same model list as the
-            main "Start coding" picker on RequirementDetail. Empty selection
-            = let the backend fall back to the developer-role effective
-            model; "Default model (X)" shows what that fallback actually is. */}
-        <ModelSelect
-          value={createModel}
-          onChange={(m) => { touchedModelRef.current = true; setCreateModel(m); }}
-          label={t('components.subTaskPanel.modelLabel')}
-          stage="developer"
-          defaultModelName={developerDefaultModel}
-          disabled={submitting || reSplitBusy}
-          working={submitting || reSplitBusy}
-          configId={createConfigId || undefined}
-          onConfigChange={(c) => { touchedConfigRef.current = true; setCreateConfigId(c); }}
-        />
-        {!createModel && !developerDefaultModel && (
-          <div className="sub-model-warning" role="note">
-            {t('components.subTaskPanel.modelEmptyWarning')}
-          </div>
-        )}
-        {/* Per-sub-task execution environment. Only shown when at least one
-            ready Agent Server exists (otherwise the sole option is 本地).
-            Defaults to the parent requirement's environment; switching to a
-            different one runs the child from a fresh origin checkout of the
-            requirement branch (see execEnvHint). */}
-        {agentServers.length > 0 && (
-          <label className="sub-composer-env" style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--color-text-muted)' }}>
-            <span>{t('components.subTaskPanel.execEnvLabel')}</span>
-            <ExecEnvSelect
-              servers={agentServers}
-              value={createAgentServerId}
-              onChange={(v) => { touchedEnvRef.current = true; setCreateAgentServerId(v); }}
-              disabled={submitting || reSplitBusy}
-              style={{ minWidth: 160 }}
-            />
-            {createAgentServerId !== parentAgentServerId && (
-              <span className="sub-composer-env-hint" role="note">{t('components.subTaskPanel.execEnvHint')}</span>
-            )}
-          </label>
-        )}
-        {/* Session-mode selector — a segmented control, always visible on
-            manual sub-task creation (the old `showFreshOption` gate hid it on
-            local happy-path development, which read as "missing a knob").
-            Three options, ordered most→least inherited:
-
-              resume       继承主任务会话 (default) — fork the parent coding
-                           session via --fork-session.
-              with_context 带上下文 — new session, buildParentContext()
-                           injected into the prompt, executor role prompt kept.
-              bare         新会话 — new session, no context block, no role
-                           system prompt (CLI built-in defaults).
-
-            Layout note: one segment row + ONE description line for the
-            selected mode. Descriptions used to live inside every option as
-            full-width hint spans, which made the block wrap into a ragged
-            multi-row grid that looked unrelated to the rest of the composer. */}
-        <div className="sub-session-mode">
-          <span className="sub-session-mode-label" id="sub-session-mode-label">
-            {t('components.subTaskPanel.sessionMode.label')}
-          </span>
-          <div className="sub-session-mode-segments" role="radiogroup" aria-labelledby="sub-session-mode-label">
-            {sessionModeOptions.map((opt) => {
-              const active = sessionMode === opt.key;
-              const isDisabled = submitting || reSplitBusy || !!opt.unavailable;
-              return (
-                <label
-                  key={opt.key}
-                  className={`sub-session-mode-option${active ? ' is-active' : ''}${isDisabled ? ' is-disabled' : ''}`}
-                  title={opt.desc}
-                >
-                  <input
-                    type="radio"
-                    name="sessionMode"
-                    value={opt.key}
-                    checked={active}
-                    onChange={() => {
-                      // Mark the radio as user-touched so the
-                      // latestArtifactStale auto-promote effect below
-                      // stops stomping on a deliberate pick on the next
-                      // 5s poll refresh.
-                      sessionModeTouchedRef.current = true;
-                      setSessionMode(opt.key);
-                    }}
-                    disabled={isDisabled}
-                  />
-                  <span className="sub-session-mode-option-text">{opt.label}</span>
-                </label>
-              );
-            })}
-          </div>
-          <span className="sub-session-mode-desc" role="note">{activeSessionMode.desc}</span>
-          {latestArtifactStale && latestArtifactStale.isStale && (
-            <span className="sub-session-mode-warn" role="note">
-              {t('components.subTaskPanel.sessionMode.freshHint')}
-            </span>
-          )}
-        </div>
-        <div className="sub-composer-toolbar">
-          <span className="sub-composer-hint">
-            {t('components.subTaskPanel.composerHint')}
-          </span>
-          {error && <span className="sub-composer-err">{error}</span>}
-          <button
-            type="button"
-            className="btn btn-secondary sub-composer-resplit"
-            onClick={onReSplit}
-            disabled={reSplitBusy || submitting || anyAlive}
-            title={anyAlive ? t('components.subTaskPanel.reSplitTitleBusy') : t('components.subTaskPanel.reSplitTitle')}
+      {/* Composer modal — opens when the user clicks "+ 新建子任务" in the
+          panel header. Reuses the same composer state (prompt / model /
+          config / env / session mode) that used to live inline above the
+          list. submit reuses onCreate() unchanged; the modal just moves
+          the form off the page and behind a single click. */}
+      {composerOpen && (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="sub-composer-modal-title"
+          onClick={() => { if (!submitting) closeComposer(); }}
+        >
+          <div
+            className="modal-box sub-composer-modal"
+            onClick={(e) => e.stopPropagation()}
           >
-            {reSplitBusy ? t('components.subTaskPanel.reSplitBusy') : t('components.subTaskPanel.reSplitBtn')}
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary sub-composer-submit"
-            onClick={onCreate}
-            disabled={submitting || reSplitBusy || !prompt.trim()}
-          >
-            {submitting ? t('components.subTaskPanel.submitBusy') : t('components.subTaskPanel.submitBtn')}
-          </button>
+            <div className="modal-header">
+              <h3 id="sub-composer-modal-title">{t('components.subTaskPanel.composerModalTitle')}</h3>
+              <button
+                className="btn btn-sm"
+                onClick={closeComposer}
+                disabled={submitting}
+                aria-label={t('components.subTaskPanel.composerClose')}
+              >×</button>
+            </div>
+            <div className="modal-body">
+              <div className="sub-composer">
+                {/* Composer textarea — title field removed; opening a sub-task
+                    only needs a description. The backend auto-derives a card-header
+                    title from the prompt's first 40 chars when title is omitted. */}
+                <AtMentionTextarea
+                  value={prompt}
+                  onChange={setPrompt}
+                  placeholder={t('components.subTaskPanel.composerPlaceholder')}
+                  rows={4}
+                  disabled={submitting}
+                  className="sub-composer-textarea"
+                />
+                {/* Sub-task model picker — the SINGLE picker for the panel's
+                    composer row. It applies to BOTH the "Start sub-task" and
+                    "Re-split" buttons (they share the same claude_configs
+                    list, and dispatching a re-split with a different model
+                    would just create a confusing mixed batch). Per-stage
+                    (developer) so the dropdown shows the same model list as the
+                    main "Start coding" picker on RequirementDetail. Empty selection
+                    = let the backend fall back to the developer-role effective
+                    model; "Default model (X)" shows what that fallback actually is. */}
+                <ModelSelect
+                  value={createModel}
+                  onChange={(m) => { touchedModelRef.current = true; setCreateModel(m); }}
+                  label={t('components.subTaskPanel.modelLabel')}
+                  stage="developer"
+                  defaultModelName={developerDefaultModel}
+                  disabled={submitting || reSplitBusy}
+                  working={submitting || reSplitBusy}
+                  configId={createConfigId || undefined}
+                  onConfigChange={(c) => { touchedConfigRef.current = true; setCreateConfigId(c); }}
+                />
+                {!createModel && !developerDefaultModel && (
+                  <div className="sub-model-warning" role="note">
+                    {t('components.subTaskPanel.modelEmptyWarning')}
+                  </div>
+                )}
+                {/* Per-sub-task execution environment. Only shown when at least one
+                    ready Agent Server exists (otherwise the sole option is 本地).
+                    Defaults to the parent requirement's environment; switching to a
+                    different one runs the child from a fresh origin checkout of the
+                    requirement branch (see execEnvHint). */}
+                {agentServers.length > 0 && (
+                  <label className="sub-composer-env" style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                    <span>{t('components.subTaskPanel.execEnvLabel')}</span>
+                    <ExecEnvSelect
+                      servers={agentServers}
+                      value={createAgentServerId}
+                      onChange={(v) => { touchedEnvRef.current = true; setCreateAgentServerId(v); }}
+                      disabled={submitting || reSplitBusy}
+                      style={{ minWidth: 160 }}
+                    />
+                    {createAgentServerId !== parentAgentServerId && (
+                      <span className="sub-composer-env-hint" role="note">{t('components.subTaskPanel.execEnvHint')}</span>
+                    )}
+                  </label>
+                )}
+                {/* Session-mode selector — a segmented control, always visible on
+                    manual sub-task creation (the old `showFreshOption` gate hid it on
+                    local happy-path development, which read as "missing a knob").
+                    Three options, ordered most→least inherited:
+
+                      resume       继承主任务会话 (default) — fork the parent coding
+                                   session via --fork-session.
+                      with_context 带上下文 — new session, buildParentContext()
+                                   injected into the prompt, executor role prompt kept.
+                      bare         新会话 — new session, no context block, no role
+                                   system prompt (CLI built-in defaults).
+
+                    Layout note: one segment row + ONE description line for the
+                    selected mode. Descriptions used to live inside every option as
+                    full-width hint spans, which made the block wrap into a ragged
+                    multi-row grid that looked unrelated to the rest of the composer. */}
+                <div className="sub-session-mode">
+                  <span className="sub-session-mode-label" id="sub-session-mode-label">
+                    {t('components.subTaskPanel.sessionMode.label')}
+                  </span>
+                  <div className="sub-session-mode-segments" role="radiogroup" aria-labelledby="sub-session-mode-label">
+                    {sessionModeOptions.map((opt) => {
+                      const active = sessionMode === opt.key;
+                      const isDisabled = submitting || reSplitBusy || !!opt.unavailable;
+                      return (
+                        <label
+                          key={opt.key}
+                          className={`sub-session-mode-option${active ? ' is-active' : ''}${isDisabled ? ' is-disabled' : ''}`}
+                          title={opt.desc}
+                        >
+                          <input
+                            type="radio"
+                            name="sessionMode"
+                            value={opt.key}
+                            checked={active}
+                            onChange={() => {
+                              // Mark the radio as user-touched so the
+                              // latestArtifactStale auto-promote effect below
+                              // stops stomping on a deliberate pick on the next
+                              // 5s poll refresh.
+                              sessionModeTouchedRef.current = true;
+                              setSessionMode(opt.key);
+                            }}
+                            disabled={isDisabled}
+                          />
+                          <span className="sub-session-mode-option-text">{opt.label}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <span className="sub-session-mode-desc" role="note">{activeSessionMode.desc}</span>
+                  {latestArtifactStale && latestArtifactStale.isStale && (
+                    <span className="sub-session-mode-warn" role="note">
+                      {t('components.subTaskPanel.sessionMode.freshHint')}
+                    </span>
+                  )}
+                </div>
+                <div className="sub-composer-toolbar">
+                  <span className="sub-composer-hint">
+                    {t('components.subTaskPanel.composerHint')}
+                  </span>
+                  {error && <span className="sub-composer-err">{error}</span>}
+                  <button
+                    type="button"
+                    className="btn btn-secondary sub-composer-resplit"
+                    onClick={onReSplit}
+                    disabled={reSplitBusy || submitting || anyAlive}
+                    title={anyAlive ? t('components.subTaskPanel.reSplitTitleBusy') : t('components.subTaskPanel.reSplitTitle')}
+                  >
+                    {reSplitBusy ? t('components.subTaskPanel.reSplitBusy') : t('components.subTaskPanel.reSplitBtn')}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={closeComposer}
+                    disabled={submitting || reSplitBusy}
+                  >
+                    {t('components.subTaskPanel.cancelBtn')}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary sub-composer-submit"
+                    onClick={onCreate}
+                    disabled={submitting || reSplitBusy || !prompt.trim()}
+                  >
+                    {submitting ? t('components.subTaskPanel.submitBusy') : t('components.subTaskPanel.submitBtn')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="sub-list">
         {items === null && <div className="sub-list-loading">{t('components.subTaskPanel.loading')}</div>}
@@ -2036,6 +2047,12 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             adjustModel={adjustModel}
             onAdjustModelChange={setAdjustModel}
             retryMax={retryMax}
+            // Shared-panel selection plumbing. The parent DevelopingStage
+            // owns the selected task id; we forward it here so the card
+            // can paint the matching highlight + the dedicated view-log
+            // button.
+            selectedKey={selectedTaskKey}
+            onSelect={onTaskSelect}
           />
         ))}
       </div>

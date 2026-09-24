@@ -20,7 +20,7 @@
  * Layout
  *   - Label row (model + step) and value row (percent) are each one line,
  *     the bar hugs the bottom; the whole block is compact enough to fit
- *     under the DeepRefineChat / DocRefineChat / CodingChat headers.
+ *     under the DeepRefineChat / DocRefineChat headers.
  *   - Colors reuse the Design System's primary / warning / error tokens.
  */
 

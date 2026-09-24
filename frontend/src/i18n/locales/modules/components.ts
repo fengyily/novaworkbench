@@ -74,6 +74,13 @@ export const components = {
     summaryCopiedHint: '已复制',
     summaryExpandShow: '展开全部',
     summaryExpandCollapse: '收起',
+    // Composer is hidden behind a "+ 新建子任务" button so the panel
+    // body stays focused on the list. The modal reuses the same
+    // i18n keys as the in-place composer.
+    newSubTaskBtn: '+ 新建子任务',
+    newSubTaskBtnTitle: '弹出一个新窗口，手动创建一个子任务',
+    composerModalTitle: '新建子任务',
+    composerClose: '关闭',
     composerPlaceholder: '描述这个子任务要做什么…输入 @ 引用 Skill',
     modelLabel: '子任务模型',
     // Execution-environment selector in the sub-task composer. Defaults to the
@@ -88,8 +95,9 @@ export const components = {
     reSplitBtn: '🔄 重新拆分',
     submitBusy: '启动中…',
     submitBtn: '🚀 启动子任务',
+    cancelBtn: '取消',
     loading: '加载中…',
-    empty: '暂无子任务。可点击「🔄 重新拆分」让主 Agent 拆分并自动派发，或在上方手动创建。',
+    empty: '暂无子任务。点击右上角「+ 新建子任务」手动创建，或让主 Agent 自动拆分派发。',
     errLoad: '加载子任务失败',
     errCreate: '启动子任务失败',
     errReSplit: '重新拆分失败',
@@ -232,6 +240,10 @@ export const components = {
     treeExpand: '展开后续操作',
     treeCollapse: '收起后续操作',
     childCount: '{{count}} 个后续操作',
+    // Inline "查看日志" affordance rendered in each SubTaskCard header to
+    // forward selection to DevelopingStage's shared JobLogView.
+    viewLogTitle: '在共享面板中查看此任务的日志',
+    viewingLogTitle: '当前正在共享面板中查看',
   },
   createRequirement: {
     title: '新需求',
@@ -328,6 +340,22 @@ export const components = {
     compressedBadge: '📦 已压缩',
     compressedTitle: '{{stage}}阶段已压缩',
     usageTitle: '{{stage}}: {{used}} / {{window}} tokens（原始 {{pct}}%）',
+  },
+  devStage: {
+    // Floating task-list sidebar shown on the left side of the developing
+    // stage. Renders a compact summary card per task (main + each
+    // sub-task) plus a collapse/expand toggle that turns the list into a
+    // narrow vertical rail.
+    title: '开发实现',
+    collapse: '收起任务列表',
+    expand: '展开任务列表',
+    mainTask: '主任务',
+    taskCount: '{{n}} 个任务',
+    empty: '暂无子任务',
+    running: '执行中',
+    done: '已完成',
+    error: '失败',
+    pending: '排队中',
   },
 } as const;
 

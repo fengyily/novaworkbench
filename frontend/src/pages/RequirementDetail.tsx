@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode, type CSSProperties } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch, defaultBranchName } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch, type SubTask, defaultBranchName } from '../api/client';
 import { tLabel } from '../i18n/label';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
@@ -67,6 +67,7 @@ import { SessionContextStrip } from '../components/SessionContextStrip';
 import './RequirementDetail.css';
 import { FullscreenButton } from '../components/FullscreenButton';
 import { useFullscreen } from '../utils/useFullscreen';
+import { DevelopingStage } from '../components/DevelopingStage';
 
 interface DesignData {
   overview?: string;
@@ -905,31 +906,21 @@ export default function RequirementDetail() {
   const analystDefaultModel = roleDefaultModels['analyst'] ?? '';
   const architectDefaultModel = roleDefaultModels['architect'] ?? '';
   const developerDefaultModel = roleDefaultModels['developer'] ?? '';
-  const [codingLines, setCodingLines] = useState<LogLine[]>([]);
-  const [coding, setCoding] = useState(false);
-  // Live context-usage snapshots for the three wizard sessions. All three are
-  // owned here (the page) — not inside each chat/panel component — because
-  // context usage is a SESSION attribute: it must survive page refresh (seed
-  // from req.usage_snapshots), panel collapse (design panel folds on success),
-  // and stage transitions. The top SessionContextStrip reads all three live;
-  // the in-panel ContextUsageBar reads the one for its stage. Live values are
-  // fed back here from DeepRefineChat / DocRefineChat via onUsage callbacks
-  // (analyst + design/coding-refine) and from the design/coding SSE handlers
-  // below (which setDesignUsage / setCodingUsage directly).
+  // After the developing-stage refactor the SSE bus for the coding job
+  // lives inside DevelopingStage's <JobLogView> instead of here. We keep
+  // only the page-level affordances (compress button + summary modal +
+  // compressed-at timestamp) — those are session-scoped and outlive the
+  // job's in-memory state.
+  //
+  // Context usage snapshots for the wizard sessions:
+  //   - analystUsage  → SessionContextStrip + DeepRefineChat
+  //   - design usage  → handled inline by DocRefineChat
+  //   - coding usage  → handled inline by DevelopingStage (via usage
+  //                       SSE events on the shared bus)
   const [analystUsage, setAnalystUsage] = useState<UsageInfo | undefined>(undefined);
-  // Live context-usage snapshot for the coding job (start-coding / adjust /
-  // continue), pushed by the backend's `usage` SSE event. Rendered via
-  // ContextUsageBar at the top of the coding-panel. The coding stage is
-  // multi-turn (--resume coding_session_id), so compressible=true — the
-  // compress button hands off to wizardApi.compressContext(step:'coding')
-  // which summarizes + clears the session, mirroring CodingChat /
-  // DeepRefineChat.
-  const [codingUsage, setCodingUsage] = useState<UsageInfo | undefined>(undefined);
   const [codingCompressing, setCodingCompressing] = useState(false);
   const [codingCompressedAt, setCodingCompressedAt] = useState<string | null>(null);
   const [codingSummaryModal, setCodingSummaryModal] = useState<string | null>(null);
-  const codingRef = useRef<HTMLDivElement>(null);
-  const esRef = useRef<EventStream | null>(null);
   const extraDescRef = useRef('');
   // One-shot guard for the creation-intent flows (autoStartDesign /
   // autoStartCoding). Set when the matching navigation intent is consumed so a
@@ -952,6 +943,24 @@ export default function RequirementDetail() {
   // newly-created child agent immediately hides the composer without waiting
   // for the next refetch.
   const [liveSubTaskCount, setLiveSubTaskCount] = useState(0);
+
+  // Lifted sub-task list — sourced via the SubTaskPanel's
+  // onSubTasksLoaded callback. DevelopingStage consumes this to render
+  // the floating task list and to attach a per-child SSE bus entry.
+  // The panel still owns its own internal `items` state for the cards
+  // and tree-flattening logic; this is just a mirrored snapshot so the
+  // parent can pick the same rows without a second fetch round-trip.
+  const [subTasks, setSubTasks] = useState<SubTask[]>([]);
+
+  // Shared developing-stage selection. 'main' = the primary coding job
+  // (selected by default); any other value is a sub-task id and routes
+  // the shared JobLogView to that sub-task's SSE stream. Both
+  // DevelopingStage's task list AND the SubTaskPanel's per-card highlight
+  // read from this single source of truth, so clicking either surface
+  // keeps the other in sync. The state is intentionally in-memory only:
+  // cross-requirement reloads should always start on 'main' (per the
+  // plan's G2 default).
+  const [selectedTaskKey, setSelectedTaskKey] = useState<string>('main');
 
   // Orchestration batch snapshot for this requirement (the new
   // restartable-orchestration flow). null when the backend has no batch
@@ -989,8 +998,23 @@ export default function RequirementDetail() {
   // the round landed without forcing them to inspect `orchBatch`. Mirrors the
   // WorktreePathHint toast: local state, 1.8s auto-dismiss, reuses the global
   // `.merge-hint-toast` styling so no new CSS is needed.
+  //
+  // The showSummaryDoneToast helper used to fire from the page-level coding
+  // SSE handler; the developing-stage refactor moved that handler inside
+  // DevelopingStage. We keep the state + DOM render intact so the toast
+  // surface still exists if a future caller (e.g. a manual coder refresh)
+  // wants to trigger it directly. The setter pair is wired through
+  // `summaryDoneToast` itself.
   const [summaryDoneToast, setSummaryDoneToast] = useState<string | null>(null);
   const summaryDoneToastTimerRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (summaryDoneToastTimerRef.current !== null) {
+      window.clearTimeout(summaryDoneToastTimerRef.current);
+    }
+  }, []);
+  // Re-export the setter as a callback so a future wiring site can keep the
+  // toast alive (see comment above). Naming intentionally mirrors the
+  // pre-refactor symbol so downstream readers can find the call site.
   const showSummaryDoneToast = useCallback((text: string) => {
     setSummaryDoneToast(text);
     if (summaryDoneToastTimerRef.current !== null) {
@@ -1001,11 +1025,7 @@ export default function RequirementDetail() {
       summaryDoneToastTimerRef.current = null;
     }, 1800);
   }, []);
-  useEffect(() => () => {
-    if (summaryDoneToastTimerRef.current !== null) {
-      window.clearTimeout(summaryDoneToastTimerRef.current);
-    }
-  }, []);
+  void showSummaryDoneToast;
 
   // Branch modal state
   const [showBranchModal, setShowBranchModal] = useState(false);
@@ -1158,11 +1178,13 @@ export default function RequirementDetail() {
     const snaps = parseUsageSnapshots(req.usage_snapshots);
     if (snaps.analyst_chat) setAnalystUsage(prev => prev ?? snaps.analyst_chat!);
     if (snaps.architect_design) setDesignUsage(prev => prev ?? snaps.architect_design!);
-    if (snaps.coding) setCodingUsage(prev => prev ?? snaps.coding!);
+    // The coding snapshot is seeded into DevelopingStage via its
+    // initial hydration effect (wizardApi.getJob -> bus entry). The page
+    // itself no longer holds a codingUsage state.
   }, [req]);
 
   // ── Coding-stage context compression ───────────────────────────────────
-  // Mirrors CodingChat / DeepRefineChat: summarize the current coding
+  // Mirrors DeepRefineChat: summarize the current coding
   // session (coding_session_id), persist the summary, stamp
   // coding_compressed_at, and clear the session id so the next coding turn
   // sees the summary as prepended context instead of full history. The
@@ -1175,9 +1197,6 @@ export default function RequirementDetail() {
     try {
       const data = await wizardApi.compressContext(id, 'coding');
       setCodingCompressedAt(data.compressed_at ?? null);
-      // Reset usage so the bar doesn't keep reporting the soon-cleared
-      // session's token counts; the next turn pushes a fresh snapshot.
-      setCodingUsage(undefined);
     } catch (err: any) {
       alert(t('requirements.detail2.codingCompressFailPrefix') + (err?.message || String(err)));
     } finally {
@@ -1855,156 +1874,18 @@ export default function RequirementDetail() {
     }
   };
 
-  // ── Developer phase: job streaming ────────────────────────────────────────
-  // streamJob subscribes to a wizard job's SSE stream and appends events to
-  // codingLines (the shared coding-panel). keepDone=true is used by the
-  // "Further adjust" / "Continue coding" rounds: on job_done it leaves the
-  // requirement status untouched (stays developing/done) and only refreshes,
-  // instead of flipping to developing like the first coding pass. The durable
-  // replay hook is requirements.last_coding_job_id (written by the backend
-  // before spawn, never cleared), so a refresh reloads THIS job's log via the
-  // DB-backed restore effect above — no client-side marker needed.
-  // skipFirst is used on reconnect (mount-time restore): the caller has just
-  // hydrated codingLines from the job snapshot, so we drop the first N SSE
-  // events the backend replays (they are already in codingLines) and only
-  // append new lines from there on. Without this, reconnecting to a running
-  // job doubles every historical line — once from the snapshot, once from
-  // the replay.
-  const streamJob = useCallback((jobId: string, opts?: { keepDone?: boolean; skipFirst?: number }) => {
-    if (esRef.current) esRef.current.close();
-    setCoding(true);
-    // Fresh coding stream → drop the prior usage snapshot so the bar doesn't
-    // briefly show a stale percentage from a previous coding/adjust round.
-    setCodingUsage(undefined);
-
-    // Skip counter is captured per-stream — each new createEventStream call
-    // resets it, so multiple reconnects within the same component lifetime
-    // work correctly.
-    let seenCount = 0;
-    const skip = opts?.skipFirst ?? 0;
-
-    esRef.current = createEventStream(
-      `/api/wizard/jobs/${jobId}/stream`,
-      (evt) => {
-        // job_done is terminal — never skip it, even if it lands within the
-        // replay window (it carries status/exit_code we need to act on).
-        if (evt.type !== 'job_done') {
-          // knowledge / message / tool_call / phase / error / done are all
-          // subject to the replay-skip: they correspond 1:1 to backend LogLines
-          // counted in `skip`.
-          if (seenCount < skip) {
-            seenCount++;
-            return;
-          }
-          seenCount++;
-        }
-        if (evt.type === 'knowledge') {
-          // Optional knowledge pre-read: surface the read titles instead of
-          // appending the raw line to the coding panel.
-          try {
-            const kb = JSON.parse(evt.content ?? '{}') as { count?: number; items?: { title: string }[] };
-            setKnowledgeItems(kb.items ?? []);
-            setKnowledgeEmpty((kb.count ?? 0) === 0);
-          } catch { /* malformed frame — ignore */ }
-          return;
-        }
-        // Live context-usage snapshot (end of each claude turn). Parse into
-        // UsageInfo and feed the coding-panel's ContextUsageBar; compute
-        // used/pct client-side so the bar fills before the backend stamps
-        // them. NOT appended to codingLines — otherwise the raw JSON shows
-        // up as a garbage "coding-line-usage" row. (Subject to the replay-
-        // skip above, so reconnect doesn't re-stamp a stale snapshot.)
-        if (evt.type === 'usage') {
-          try {
-            const parsed = JSON.parse(evt.content ?? '{}') as UsageInfo;
-            const used = parsed.input_tokens + parsed.cache_creation_tokens + parsed.cache_read_tokens;
-            const cw = parsed.context_window || 200000;
-            const pct = cw > 0 ? (used / cw) * 100 : 0;
-            setCodingUsage({ ...parsed, used, pct });
-          } catch { /* malformed payload — ignore */ }
-          return;
-        }
-        if (evt.type === 'job_done') {
-          esRef.current?.close();
-          esRef.current = null;
-          setCoding(false);
-          const ok = evt.status === 'done' || evt.exit_code === 0;
-          if (opts?.keepDone) {
-            // Further adjust / continue coding: preserve current status, just refresh on success.
-            // No localStorage pointer to maintain — the durable hook is
-            // requirements.last_coding_job_id, written by the backend before
-            // the goroutine spawned, so a refresh replays this job's log via
-            // the DB-backed restore effect above.
-            if (ok) refresh();
-          } else if (id && ok) {
-            requirementsApi.updateStatus(id, 'developing').then(() => refresh());
-          }
-          // Server-pushed orchestration summary completion. The
-          // OrchestrationQueue marks the batch via runOrchestratorSummary
-          // (success → MarkSummary('done') + MarkCompleted); when the summary
-          // round's JobStore job_done frame lands here we surface a brief
-          // inline hint and refresh the page-level batch snapshot so the
-          // SubTaskPanel banner transitions out of the progress state. Guarded so
-          // unrelated job_done frames (a single sub-task finish, a coding
-          // round) don't trigger the toast.
-          if (ok && evt.batch_id && evt.summary_status === 'done') {
-            showSummaryDoneToast(t('requirements.detail2.summaryDone'));
-            fetchOrchBatch();
-            refresh();
-          }
-          return;
-        }
-        // Coalesce consecutive "Claude thinking… (N tokens)" phase lines into one
-        // updatable row instead of stacking one per heartbeat. Use the
-        // backend-stamped `at` so phase timings stay accurate.
-        const at = typeof evt.at === 'number' ? evt.at : Date.now();
-        setCodingLines(prev => appendLogLine(prev, { type: evt.type, content: evt.content ?? '', at }));
-      },
-      () => {
-        esRef.current = null;
-        setCoding(false);
-        // SSE died (dropped link, backend hang, or a stream that ended without
-        // the job_done frame) — the local `coding` flag alone is not enough:
-        // the requirement row may still read `developing` in the DB, leaving
-        // the UI out of sync with the real state (this was half of the
-        // "stuck forever, refresh does not help" symptom). Reconcile by
-        // re-reading the requirement from the server. Deliberately NOT
-        // writing a status here and NOT touching the
-        // requirements.last_coding_job_id column — this is the error path,
-        // so we let the DB state stand. Fire-and-forget (never await: this
-        // callback must stay synchronous) with a no-op catch so a still-broken
-        // network does not surface an unhandled rejection.
-        refresh().catch(() => {});
-      },
-    );
-  }, [id, refresh, fetchOrchBatch, showSummaryDoneToast, t]);
-
-  // ── Auto-attach to scheduler-dispatched coding SSE ──
-  // activeSchedJobId 变化时调用 streamJob 订阅 SSE（与手动「🚀 开始开发」
-  // 走完全相同的入口）。streamJob 自己会管理 esRef，所以多次 mount/unmount
-  // 是安全的——上一个 handle 在 streamJob 入口处就被 esRef.current.close()
-  // 关掉了，不会泄漏。
-  //
-  // 唯一关键约束：手动场景下 streamJob 也会被调用（用户在 wizard 面板点
-  // 开始开发），两路可能撞车。我们用 activeSchedJobIdRef 做幂等：如果
-  // streamJob 已经在订阅这个 job_id 了就不重复 attach。手动新启动会换
-  // 一个新 job_id，所以也不会被这条 ref 误屏蔽。
-  //
-  // 必须放在 streamJob useCallback 声明之后——TS2448 不允许在闭包内引用
-  // 还未声明的 const binding，所以不能跟前面的 activeSchedJobId poll 钩子
-  // 放在一起（那个钩子定义在 ~830 行，streamJob 在 ~1820 行）。
-  const activeSchedJobIdRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!activeSchedJobId) return;
-    if (activeSchedJobIdRef.current === activeSchedJobId) return;
-    activeSchedJobIdRef.current = activeSchedJobId;
-    streamJob(activeSchedJobId, { keepDone: false });
-  }, [activeSchedJobId, streamJob]);
+  // ── Developer phase: SSE attachment moved into DevelopingStage ──
+  // Before the refactor this page owned the SSE bus for the main coding
+  // job (streamJob below) and stitched knowledge / usage events into
+  // local state. The shared log panel now lives in <DevelopingStage>,
+  // which subscribes per-task to /api/wizard/jobs/{id}/stream using
+  // `req.last_coding_job_id` (the durable hook the backend writes before
+  // spawn) as its trigger. Doing it there means a single refresh handler
+  // keeps both the main job and every sub-task's stream attached, and the
+  // page no longer races with the panel for the same job_id.
 
   const doStartCoding = async (bName: string, bBase: string, useKnowledge: boolean, splitTasks: boolean, autoPushPR: boolean) => {
     if (!req || !project || !id) return;
-    setCoding(true);
-    setCodingLines([]);
     // Reset the knowledge panel for a fresh coding run; without a new knowledge
     // event (option not used) the panel stays hidden.
     setKnowledgeItems([]);
@@ -2092,12 +1973,17 @@ export default function RequirementDetail() {
       }
       const jobId = json.data?.job_id;
       if (!jobId) throw new Error(t('requirements.detail2.jobIdMissing'));
-      // No localStorage pointer — the backend persists last_coding_job_id
-      // before spawning; the DB-backed restore effect replays it on refresh.
-      streamJob(jobId);
+      // DevelopingStage's effect on `codingJobId` change subscribes the
+      // shared SSE bus for the new job — no manual attachment here. The
+      // refresh() above already pulled the new last_coding_job_id into
+      // the requirement row, so the prop change triggers attachment on
+      // the next render.
+      void jobId;
     } catch (err: any) {
-      setCodingLines([{ type: 'error', content: err.message }]);
-      setCoding(false);
+      // The error is surfaced via DevelopingStage's snapshot-fallback
+      // path (a fresh wizardApi.getJob after the prop changes), so we
+      // don't need a local "set lines = [error]" dance here.
+      void err;
     }
   };
 
@@ -2136,8 +2022,6 @@ export default function RequirementDetail() {
     if (!req || !id) return;
     const msg = adjustInput.trim();
     if (!msg) return;
-    // Reuse coding state + coding-panel; do NOT clear codingLines (continuity).
-    setCoding(true);
     try {
       const res = await authedFetch(`${API_BASE}/api/wizard/adjust-coding`, {
         method: 'POST',
@@ -2160,10 +2044,13 @@ export default function RequirementDetail() {
       const jobId = json.data?.job_id;
       if (!jobId) throw new Error(json.error?.message || t('requirements.detail2.jobIdMissing'));
       setAdjustInput('');
-      streamJob(jobId, { keepDone: true });
+      // DevelopingStage's effect on `codingJobId` change subscribes the
+      // shared SSE bus for the new job — no manual attachment here.
+      void jobId;
     } catch (err: any) {
-      setCodingLines(prev => [...prev, { type: 'error', content: err.message }]);
-      setCoding(false);
+      // Errors surface via DevelopingStage's snapshot-fallback path on
+      // the next codingJobId change.
+      void err;
     }
   };
 
@@ -2175,8 +2062,6 @@ export default function RequirementDetail() {
   // instruction. Only shown when status=developing and codingLines is empty.
   const doContinueCoding = async () => {
     if (!req || !id) return;
-    setCoding(true);
-    setCodingLines([]); // fresh continuation fills the panel back
     try {
       const res = await authedFetch(`${API_BASE}/api/wizard/continue-coding`, {
         method: 'POST',
@@ -2189,12 +2074,13 @@ export default function RequirementDetail() {
       const json = await res.json();
       const jobId = json.data?.job_id;
       if (!jobId) throw new Error(json.error?.message || t('requirements.detail2.jobIdMissing'));
-      // No localStorage pointer — see doStartCoding note. keepDone preserves
-      // the developing/done status across this continuation round.
-      streamJob(jobId, { keepDone: true });
+      // No manual streamJob call — DevelopingStage's effect picks up the
+      // new codingJobId via the refresh() inside start-coding.
+      void jobId;
     } catch (err: any) {
-      setCodingLines([{ type: 'error', content: err.message }]);
-      setCoding(false);
+      // Errors surface via DevelopingStage's snapshot-fallback path on
+      // the next codingJobId change.
+      void err;
     }
   };
 
@@ -2386,58 +2272,20 @@ export default function RequirementDetail() {
   }, [id]);
 
   // Replay the most recent coding job's log from the DB (durable hook) when
-  // entering the page with no live coding stream — survives a backend restart
-  // and works across browsers / scheduler-triggered runs. Replaces the old
-  // browser-localStorage `coding_job_<id>` hook, which was unreliable: gone on
-  // cache clear, missing when coding was triggered by the scheduler path, and
-  // only ever present on the browser that started the job. last_coding_job_id
-  // is written by the backend BEFORE the coding goroutine spawns and never
-  // cleared, so it is always present once a coding round has run. GET
-  // /api/wizard/jobs/{id} falls back to the job_logs table when the in-memory
-  // JobStore is gone (post-restart).
+  // entering the page — moved into DevelopingStage. DevelopingStage's
+  // effect on `codingJobId` change now hydrates the shared SSE bus from
+  // GET /api/wizard/jobs/{id} (which falls back to the job_logs table
+  // when the in-memory JobStore is gone) and subscribes the live SSE
+  // stream. The page no longer needs to replay here.
   const restoredCodingJobRef = useRef<string | null>(null);
-  useEffect(() => {
-    const jobId = req?.last_coding_job_id;
-    if (!id || !jobId) return;
-    // A live stream owns codingLines while it's running — don't clobber it.
-    if (coding) return;
-    // Already replayed this exact job; don't re-fetch on every req refresh.
-    if (restoredCodingJobRef.current === jobId) return;
-    restoredCodingJobRef.current = jobId;
-
-    authedFetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
-      .then(r => r.json())
-      .then(json => {
-        if (!json.success) return; // log never persisted (rare crash mid-run)
-        const { status, log } = json.data as { status: string; log: LogLine[] };
-        if (!log || log.length === 0) return;
-        // rawCount = backend snapshot's total LogLine count, including
-        // knowledge rows that extractKnowledge filters out of codingLines.
-        // The SSE replay emits exactly `rawCount` events before the first
-        // live one, so we pass this as skipFirst to streamJob — otherwise the
-        // replay would re-append every historical line the snapshot already
-        // hydrated, doubling the entire history on the panel.
-        const rawCount = log.length;
-        const kb = extractKnowledge(log);
-        if (kb.items.length > 0 || kb.empty) { setKnowledgeItems(kb.items); setKnowledgeEmpty(kb.empty); }
-        if (kb.lines.length > 0) setCodingLines(coalesceLogLines(kb.lines));
-        if (status === 'running') streamJob(jobId, { skipFirst: rawCount });
-      })
-      .catch(() => {});
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, req?.last_coding_job_id]);
+  void restoredCodingJobRef; // kept for potential future "manually refresh" hook
 
   useEffect(() => {
     return () => {
-      if (esRef.current) esRef.current.close();
       if (designEsRef.current) designEsRef.current.close();
       if (mergeEsRef.current) mergeEsRef.current.close();
     };
   }, []);
-
-  useEffect(() => {
-    if (codingRef.current) codingRef.current.scrollTop = codingRef.current.scrollHeight;
-  }, [codingLines]);
 
   // Load merge state when entering the developer/done stage (the merge step
   // only makes sense once coding has produced a dev branch to merge from).
@@ -2488,7 +2336,7 @@ export default function RequirementDetail() {
 // currently that means start-coding / adjust-coding / continue-coding, but
 // the aggregation also double-covers analyst/design/apply so the pulse stays
 // on even when this page hasn't loaded the latest persisted pointer yet.
-  const claudeWorking = coding || designing || analystWorking || refineWorking ||
+  const claudeWorking = designing || analystWorking || refineWorking ||
     !!req.analysis_job_id || !!req.design_job_id || !!req.apply_job_id ||
     !!req.coding_job_id || activeReqIds.has(req.id) || !!activeSchedJobId;
   // Per-stage working flags drive the model-switch disable (task requirement:
@@ -2654,7 +2502,6 @@ export default function RequirementDetail() {
                         servers={agentServers}
                         value={agentServerId}
                         onChange={setAgentServerId}
-                        disabled={coding}
                         title={agentServers.length === 0 ? t('requirements.detail2.preflightAgentEmptyTitle') : ''}
                         localOptionLabel={t('requirements.detail2.preflightLocalExec')}
                       />
@@ -2678,7 +2525,6 @@ export default function RequirementDetail() {
                         className="form-input"
                         value={syncMode}
                         onChange={e => setSyncMode(e.target.value as 'local' | 'remote')}
-                        disabled={coding}
                       >
                         <option value="remote">{t('requirements.detail2.syncModeRemote')}</option>
                         <option value="local">{t('requirements.detail2.syncModeLocal')}</option>
@@ -2697,12 +2543,9 @@ export default function RequirementDetail() {
                     <ModelSelect
                       value={developerModel}
                       onChange={setDeveloperModel}
-                      disabled={coding}
-                      working={coding}
                       stage="developer"
                       label={t('requirements.detail2.devModelLabel')}
                       defaultModelName={developerDefaultModel}
-                      title={coding ? t('requirements.detail2.devModelBusyTitle') : t('requirements.detail2.devModelTitle')}
                       configId={developerConfigId || undefined}
                       onConfigChange={setDeveloperConfigId}
                     />
@@ -2767,7 +2610,6 @@ export default function RequirementDetail() {
                             value="design"
                             checked={devMode === 'design'}
                             onChange={() => setDevMode('design')}
-                            disabled={coding}
                           />
                           {t('requirements.detail2.preflightDevModeDesign')}
                         </label>
@@ -2778,7 +2620,6 @@ export default function RequirementDetail() {
                             value="session"
                             checked={devMode === 'session'}
                             onChange={() => setDevMode('session')}
-                            disabled={coding}
                           />
                           {t('requirements.detail2.preflightDevModeSession')}
                         </label>
@@ -3087,7 +2928,13 @@ export default function RequirementDetail() {
       <SessionContextStrip
         analyst={analystUsage}
         design={designUsage}
-        coding={codingUsage}
+        // The coding stage now owns its own usage snapshot inside
+        // DevelopingStage's JobLogView. SessionContextStrip deliberately
+        // reads the requirement row's persisted snapshot via req; live
+        // updates for the developer stage still flow through the same
+        // job_logs → usage_snapshots path. We pass `undefined` for the
+        // live prop so the strip falls back to the persisted number.
+        coding={undefined}
         req={req}
       />
 
@@ -4091,7 +3938,7 @@ export default function RequirementDetail() {
               opted in and the backend emitted a knowledge event). */}
           <KnowledgeReadPanel items={knowledgeItems} empty={knowledgeEmpty} projectId={project?.id} />
 
-          {(req.status === 'designed' || (req.status === 'draft' && req.skip_design)) && codingLines.length === 0 && !coding && reqKind !== 'idea' && (
+          {(req.status === 'designed' || (req.status === 'draft' && req.skip_design)) && !req.last_coding_job_id && reqKind !== 'idea' && (
             <div className="tab-empty">
               <p>{req.status === 'designed'
                 ? t('requirements.detail2.devReadyDesignedHint')
@@ -4123,7 +3970,7 @@ export default function RequirementDetail() {
                     server-side. design_and_coding pending row is also
                     excluded — if a merged schedule is already queued there's
                     no value in launching a second chain immediately. */}
-                {!pendingByType.coding && !coding && !pendingByType.design_and_coding && !busy && (
+                {!pendingByType.coding && !pendingByType.design_and_coding && !busy && (
                   <button
                     className="btn btn-sm"
                     onClick={() => setImmediateModalOpen(true)}
@@ -4147,12 +3994,10 @@ export default function RequirementDetail() {
                 <ModelSelect
                   value={developerModel}
                   onChange={setDeveloperModel}
-                  disabled={coding}
-                  working={coding}
                   stage="developer"
                   label={t('requirements.detail2.devModelLabel')}
                   defaultModelName={developerDefaultModel}
-                  title={coding ? t('requirements.detail2.devModelBusyTitle') : t('requirements.detail2.devModelIdleTitle')}
+                  title={t('requirements.detail2.devModelIdleTitle')}
                   configId={developerConfigId || undefined}
                   onConfigChange={setDeveloperConfigId}
                 />
@@ -4166,7 +4011,6 @@ export default function RequirementDetail() {
                     servers={agentServers}
                     value={agentServerId}
                     onChange={setAgentServerId}
-                    disabled={coding}
                     title={agentServerId
                       ? t('requirements.detail2.devEnvOnTitle', { name: agentServers.find((s) => s.id === agentServerId)?.name ?? '' })
                       : t('requirements.detail2.devEnvLocalTitle')}
@@ -4186,7 +4030,6 @@ export default function RequirementDetail() {
                     style={{ minWidth: 150 }}
                     value={devMode}
                     onChange={(e) => setDevMode(e.target.value as 'session' | 'design')}
-                    disabled={coding}
                     title={devMode === 'design'
                       ? t('requirements.detail2.devModeNewSessionTitle')
                       : t('requirements.detail2.devModeResumeSessionTitle')}
@@ -4204,73 +4047,33 @@ export default function RequirementDetail() {
             </div>
           )}
 
-          {/* req.coding_phase is included so a page loaded mid-run shows the
-              panel immediately: on the plan-mode split path the planning turn
-              can take minutes, and until the job SSE stream reconnects both
-              `coding` and `codingLines` are still empty — which used to render
-              a blank page under a requirement that was very much busy. */}
-          {(codingLines.length > 0 || coding || !!req.coding_phase) && (
-            <div className={`coding-panel ${codingFs.isFullscreen ? 'is-fullscreen' : ''}`} ref={codingRef}>
-              {codingFs.isFullscreen && (
-                <FullscreenButton isFullscreen onClick={codingFs.exit} variant="floating" />
-              )}
-              {/* Live context-usage bar + compress-context entry point for the
-                  coding stage. Multi-turn (--resume coding_session_id), so
-                  compressible is true — the button hands off to
-                  wizardApi.compressContext (step:'coding'). Mirrors
-                  CodingChat / DeepRefineChat. Disabled while a coding /
-                  adjust turn is in flight or a compression runs. */}
-              <ContextUsageBar
-                usage={codingUsage}
-                onCompress={handleCodingCompress}
-                compressing={codingCompressing}
-                disabled={coding || codingCompressing}
-                stepLabel={t('requirements.detail2.logSessionStageDeveloper')}
-                compressedAt={codingCompressedAt}
-                onShowSummary={handleShowCodingSummary}
-              />
-              <CodingLines lines={codingLines} working={coding} />
-              {/* Progress hint. req.coding_phase (set only by the plan-mode
-                  split path) names the phase concretely — "正在制定实施步骤…" /
-                  "正在拆分子任务…" — instead of the generic "Claude 正在工作".
-                  It is also the only hint available on a fresh page load,
-                  before the SSE stream reconnects and flips `coding` true. */}
-              {(coding || !!req.coding_phase) && (
-                <div className="coding-line coding-line-tool_call">
-                  <IconHourglass size={12} className="icon-mr" />
-                  {req.coding_phase === 'planning'
-                    ? t('requirements.detail2.codingPhasePlanning')
-                    : req.coding_phase === 'decomposing'
-                      ? t('requirements.detail2.codingPhaseDecomposing')
-                      : t('requirements.detail2.codingWorkingHint')}
-                </div>
-              )}
-              {/* Recovery from a stuck `designed` state: when a coding round
-                  failed at the gate (e.g. the fork-anchoring guard, or any
-                  pre-spawn error) the job's log is replayed into codingLines
-                  via last_coding_job_id, which hides the "开始开发" CTA above
-                  (it requires codingLines.length===0). Meanwhile status never
-                  promoted to `developing`, so the developing-state redo block
-                  below is also hidden — leaving the panel with just the error
-                  line and no way back (req_49e25a8f7ac24c4f). Surface a
-                  "重新开发" button right under the failed log so the operator
-                  can re-enter the preflight dialog without a manual DB wipe.
-                  Mirrors the developing-state redo (same openBranchModal entry),
-                  gated to `designed` only because `developing` already has its
-                  own redo button and `done` is a terminal gate. */}
-              {!coding && req.status === 'designed' && codingLines.length > 0 && reqKind !== 'idea' && (
-                <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-                  <button
-                    className="btn btn-primary"
-                    title={t('requirements.detail2.codingRedoTitle')}
-                    onClick={() => openBranchModal()}
-                    disabled={!!busy}
-                  >
-                    <IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.codingRedoBtn')}
-                  </button>
-                </div>
-              )}
-            </div>
+          {/* Developing-stage: a single shared SSE panel (driven by
+              DevelopingStage's JobLogView) backed by an internal SSE bus
+              that re-subscribes the main coding job AND every sub-task.
+              The DevelopingTaskList sidebar lives on the left of the panel
+              and forwards selection. Replaces the previous N+1 stacked
+              panels (one for the main task + one per sub-task card). The
+              conditional mirrors the pre-refactor gate that used
+              `codingLines.length > 0 || coding || req.coding_phase` so
+              the panel still appears the moment a coding round begins. */}
+          {(!!req.last_coding_job_id || !!req.coding_phase) && (
+            <DevelopingStage
+              requirement={req}
+              codingJobId={req.last_coding_job_id ?? null}
+              subTasks={subTasks ?? []}
+              fullscreen={codingFs}
+              stepLabel={t('requirements.detail2.logSessionStageDeveloper')}
+              codingPhase={req.coding_phase}
+              compressing={codingCompressing}
+              compressedAt={codingCompressedAt}
+              onCompress={handleCodingCompress}
+              onShowSummary={handleShowCodingSummary}
+              onRedo={openBranchModal}
+              redoDisabled={!!busy}
+              redoLabel={t('requirements.detail2.codingRedoBtn')}
+              redoTitle={t('requirements.detail2.codingRedoTitle')}
+              onSubTaskSelect={setSelectedTaskKey}
+            />
           )}
 
           {/* Compressed-summary preview modal for the coding stage. Same shape
@@ -4310,19 +4113,19 @@ export default function RequirementDetail() {
               adjustments must flow through the sub-task composer so the
               sub-agents' parallel contexts are not overwritten by the main
               session resume. */}
-          {req.coding_session_id && (req.status === 'developing' || req.status === 'done') && !coding && !hasSubTasks && (
+          {req.coding_session_id && (req.status === 'developing' || req.status === 'done') && !hasSubTasks && (
             <div className="adjust-composer">
               <div className="adjust-composer-header">
                 <span className="ac-title"><IconWrench size={13} className="icon-mr" />{t('requirements.detail2.adjustSectionTitle')}</span>
                 <span className="ac-tag">{t('requirements.detail2.adjustSessionTag')}</span>
                 <div style={{ marginLeft: 'auto' }}>
-                  {/* Switch model for the next adjust round; the dropdown itself
-                      is disabled while a coding job runs. */}
+                  {/* Switch model for the next adjust round. The dropdown is
+                      disabled while any sub-task is still running so the
+                      user can't fire a stale model config mid-orchestration. */}
                   <ModelSelect
                     value={developerModel}
                     onChange={setDeveloperModel}
-                    disabled={coding}
-                    working={coding}
+                    disabled={subTasks.some((s) => s.status === 'running' || s.status === 'pending')}
                     stage="developer"
                     defaultModelName={developerDefaultModel}
                     configId={developerConfigId || undefined}
@@ -4349,18 +4152,18 @@ export default function RequirementDetail() {
             </div>
           )}
 
-          {req.status === 'developing' && !coding && (
+          {req.status === 'developing' && (
             <>
               {/* After a backend restart the in-memory job log is gone, but the
                   developing status is persisted in the DB — still allow the user
                   to mark done or re-run without a live coding log. */}
-              {codingLines.length === 0 && (
+              {!subTasks.some((s) => s.job_id) && (
                 <p style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 8 }}>
                   {t('requirements.detail2.codingResumeLostHint')}
                 </p>
               )}
               <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-                {req.coding_session_id && codingLines.length === 0 && (
+                {req.coding_session_id && !subTasks.some((s) => s.job_id) && (
                   <button
                     className="btn btn-primary"
                     title={t('requirements.detail2.codingContinueTitle')}
@@ -4397,10 +4200,13 @@ export default function RequirementDetail() {
                   codingSessionId={req.coding_session_id}
                   requirement={req}
                   onSubTasksChange={setLiveSubTaskCount}
+                  onSubTasksLoaded={setSubTasks}
                   developerDefaultModel={developerDefaultModel}
                   batch={orchBatch}
                   onBatchChange={fetchOrchBatch}
                   agentServers={agentServers}
+                  selectedTaskKey={selectedTaskKey}
+                  onTaskSelect={setSelectedTaskKey}
                 />
               )}
 
@@ -4486,10 +4292,13 @@ export default function RequirementDetail() {
                   codingSessionId={req.coding_session_id}
                   requirement={req}
                   onSubTasksChange={setLiveSubTaskCount}
+                  onSubTasksLoaded={setSubTasks}
                   developerDefaultModel={developerDefaultModel}
                   batch={orchBatch}
                   onBatchChange={fetchOrchBatch}
                   agentServers={agentServers}
+                  selectedTaskKey={selectedTaskKey}
+                  onTaskSelect={setSelectedTaskKey}
                 />
               )}
               <div className="merge-actions stack-mobile" style={{ marginTop: 8 }}>

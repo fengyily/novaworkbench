@@ -69,6 +69,13 @@ export const components = {
     summaryExpandCollapse: 'Collapse',
     composerPlaceholder: 'Describe what this sub-task should do… type @ to reference a Skill',
     modelLabel: 'Sub-task model',
+    // Composer is hidden behind a "+ New sub-task" button so the panel
+    // body stays focused on the list. The modal reuses the same
+    // i18n keys as the in-place composer.
+    newSubTaskBtn: '+ New sub-task',
+    newSubTaskBtnTitle: 'Open a dialog to manually create a sub-task',
+    composerModalTitle: 'New sub-task',
+    composerClose: 'Close',
     execEnvLabel: 'Environment',
     execEnvHint: 'Defaults to the main task\'s environment; switching to a different one checks out this requirement\'s branch fresh from origin (unpushed local changes won\'t come along).',
     modelEmptyWarning: '⚠️ No models available in the current Claude config. Configure one under Settings → Claude Configs before starting a sub-task.',
@@ -79,8 +86,9 @@ export const components = {
     reSplitBtn: '🔄 Re-split',
     submitBusy: 'Starting…',
     submitBtn: '🚀 Start sub-task',
+    cancelBtn: 'Cancel',
     loading: 'Loading…',
-    empty: 'No sub-tasks yet. Click "🔄 Re-split" to have the main agent decompose and dispatch, or create one manually above.',
+    empty: 'No sub-tasks yet. Click "+ New sub-task" to create one manually, or wait for the main agent to auto-dispatch.',
     errLoad: 'Failed to load sub-tasks',
     errCreate: 'Failed to start sub-task',
     errReSplit: 'Failed to re-split',
@@ -222,6 +230,10 @@ export const components = {
     treeExpand: 'Show follow-ups',
     treeCollapse: 'Hide follow-ups',
     childCount: '{{count}} follow-up(s)',
+    // Inline affordance in each SubTaskCard header — forwards selection
+    // to DevelopingStage's shared JobLogView.
+    viewLogTitle: 'View this task in the shared panel',
+    viewingLogTitle: 'Currently shown in the shared panel',
   },
   createRequirement: {
     title: 'New requirement',
@@ -318,6 +330,18 @@ export const components = {
     compressedBadge: '📦 Compressed',
     compressedTitle: '{{stage}} stage was compressed',
     usageTitle: '{{stage}}: {{used}} / {{window}} tokens (raw {{pct}}%)',
+  },
+  devStage: {
+    title: 'Development',
+    collapse: 'Collapse task list',
+    expand: 'Expand task list',
+    mainTask: 'Main task',
+    taskCount: '{{n}} tasks',
+    empty: 'No sub-tasks yet',
+    running: 'Running',
+    done: 'Done',
+    error: 'Error',
+    pending: 'Queued',
   },
 } as const;
 
