@@ -262,13 +262,13 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	job.SetModel(model)
 
 	return &designRunParams{
-		Req:            req,
-		ProjectPath:    projectPath,
-		DefaultBranch:  defaultBranch,
-		SourceSID:      sourceSID,
-		Fork:           fork,
-		SkipAnalysis:   skipAnalysis,
-		NewDesignSID:   newDesignSID,
+		Req:           req,
+		ProjectPath:   projectPath,
+		DefaultBranch: defaultBranch,
+		SourceSID:     sourceSID,
+		Fork:          fork,
+		SkipAnalysis:  skipAnalysis,
+		NewDesignSID:  newDesignSID,
 		// WorkDir + Prompt are populated by prepareDesignWorkspace inside
 		// execArchitectDesign's goroutine — they live off the HTTP request
 		// thread so the SSE panel can surface the hard-sync phase events
@@ -390,7 +390,7 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 	prompt := "## 需求标题\n" + p.Req.Title + "\n\n" +
 		"现在切换到「架构师」角色。基于我们刚才完成的需求分析对话，" +
 		"请阅读项目相关源文件核实技术细节，制定具体可执行的技术实现方案（plan）。" +
-		"方案应涵盖：整体实现思路、需要新增或修改的文件、具体实现步骤、数据模型/数据库变更、实现风险及应对。"
+		"方案应涵盖：整体实现思路、需要新增或修改的文件、数据模型/数据库变更、实现风险及应对。"
 	if p.SkipAnalysis && p.SourceSID == "" {
 		docBlock, _, treeSummary := collectProjectContext(workDir, p.Req.Title)
 		prompt = "现在切换到「架构师」角色。请基于以下需求与项目信息，阅读相关源文件核实技术细节，" +
@@ -398,7 +398,7 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 			"## 需求标题\n" + p.Req.Title + "\n\n" +
 			"## 需求描述\n" + p.Req.Description + "\n\n" +
 			"## 项目上下文\n" + docBlock + "\n" + treeSummary + "\n\n" +
-			"方案应涵盖：整体实现思路、需要新增或修改的文件、具体实现步骤、数据模型/数据库变更、实现风险及应对。" +
+			"方案应涵盖：整体实现思路、需要新增或修改的文件、数据模型/数据库变更、实现风险及应对。" +
 			"请先复述你对需求的理解，再给出方案。"
 		// Context-compression handoff (fresh-session path only): when the
 		// design stage was previously compressed, the requirement carries a
