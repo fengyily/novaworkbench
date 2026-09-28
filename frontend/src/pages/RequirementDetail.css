@@ -498,12 +498,15 @@
   line-height: 1.6;
 }
 .coding-line { padding: 1px 0; white-space: pre-wrap; word-break: break-word; }
-.coding-line-phase { color: #cbd5e1; }
+.coding-line-phase { color: #7dd3fc; }
 .coding-line-message { color: #e2e8f0; }
-.coding-line-tool_call { color: #7dd3fc; font-style: italic; }
+.coding-line-tool_call { color: #a78bfa; font-weight: 600; }
 .coding-line-tool_result { color: #94a3b8; font-size: 12px; }
-.coding-line-error { color: #fca5a5; }
-.coding-line-done { color: #86efac; font-weight: 600; }
+.coding-line-error { color: #fca5a5; font-weight: 600; border-left: 3px solid #ef4444; padding-left: 6px; }
+.coding-line-done { color: #6ee7b7; font-weight: 600; }
+.coding-line-warning    { color: #fbbf24; font-weight: 600; }
+.coding-line-user_input { color: #94a3b8; }
+.coding-line-knowledge  { color: #5eead4; }
 
 /* Phase grouping for the wizard's tool-log / coding-panel activity feed.
    `phase` events open a new group; `tool_call` events under it render as
@@ -2743,8 +2746,10 @@ allowed so the row collapses cleanly on every viewport. */
   text-align: center;
 }
 
-/* Live log mirror — keep parity with CodingLines' color palette so the
-   user reads the running card and the artifact the same way. */
+/* Live log mirror — keep parity with SubTaskPanel's palette so the user
+   reads the running card and the artifact the same way. Single source of
+   truth lives in SubTaskPanel.css (see palette doc-comment block);
+   any new event type added there MUST be mirrored here. */
 .subtask-log {
   padding: 12px 14px;
   background: #0F172A;
@@ -2757,14 +2762,17 @@ allowed so the row collapses cleanly on every viewport. */
   overflow-y: auto;
 }
 
-.subtask-log-phase { color: #94A3B8; margin-bottom: 6px; }
+.subtask-log-phase { color: #7DD3FC; margin-bottom: 6px; }
 .subtask-log-phase .subtask-log-phase { margin-bottom: 2px; }
-.subtask-log-tool_call { color: #7DD3FC; font-style: italic; }
+.subtask-log-tool_call { color: #A78BFA; font-weight: 600; }
 .subtask-log-tool_result { color: #94A3B8; }
 .subtask-log-message { color: #E2E8F0; margin: 6px 0; white-space: pre-wrap; }
-.subtask-log-result  { color: #86EFAC; font-weight: 500; margin: 6px 0; }
-.subtask-log-error   { color: #FCA5A5; margin: 6px 0; }
-.subtask-log-done    { color: #86EFAC; font-weight: 600; margin: 6px 0; }
+.subtask-log-result  { color: #FDE68A; font-style: italic; margin: 6px 0; }
+.subtask-log-error   { color: #FCA5A5; font-weight: 600; border-left: 3px solid #EF4444; padding-left: 6px; margin: 6px 0; }
+.subtask-log-done    { color: #6EE7B7; font-weight: 600; margin: 6px 0; }
+.subtask-log-warning    { color: #FBBF24; font-weight: 600; margin: 6px 0; }
+.subtask-log-user_input { color: #94A3B8; margin: 6px 0; }
+.subtask-log-knowledge  { color: #5EEAD4; margin: 6px 0; }
 .subtask-log-empty   {
   padding: 14px;
   color: #94A3B8;
