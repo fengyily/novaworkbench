@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -388,6 +389,168 @@ func (h *AgentServerHandler) runCheck(job *store.Job, serverID string) {
 	// the asset panel is up-to-date.
 	h.captureInstallRuntimeFacts(context.Background(), client, serverID, job)
 	job.Append(store.LogLine{Type: "done", Content: summary})
+	job.Finish(0, store.JobDone)
+}
+
+// ---- POST /api/settings/agent-servers/{id}/cleanup -------------------------
+// Returns { job_id } immediately; the goroutine below SSHs into the target
+// host, scans for requirements bound to this server whose worktree hasn't
+// been touched in >7 days (DB pre-filter + SSH mtime filter), and removes
+// each worktree + its dev branch. The frontend subscribes via StreamJob to
+// render the live "🧹 清理 worktrees" panel.
+//
+// Mirrors Check / Install's "create job → detach goroutine" shape exactly;
+// the goroutine body follows the same recover-guard + GetWithCredential +
+// Dial skeleton, only the main loop diverges (per-row stat + remove instead
+// of dep probes).
+
+// Cleanup triggers a best-effort bulk sweep of stale worktrees on this
+// Agent server. POST /api/settings/agent-servers/{id}/cleanup.
+func (h *AgentServerHandler) Cleanup(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	a, err := h.svc.Get(id)
+	if err != nil {
+		writeError(w, 404, "NOT_FOUND", err.Error())
+		return
+	}
+	job := h.jobs.Create(a.ID)
+	writeJSON(w, 200, map[string]string{"job_id": job.ID})
+	go h.runCleanup(job, a.ID)
+}
+
+// runCleanup is the goroutine started by Cleanup. It performs the actual
+// scan-and-sweep: SSH into the host, DB-pre-filter candidate requirements
+// (status=done, dev_source=agent, this server, no pending sub_tasks), then
+// for each candidate take an SSH `stat -c %Y` of the worktree, skip rows
+// still touched within the last 7 days, and `git worktree remove --force`
+// (with an `rm -rf + prune` fallback) the rest. On FS success only do we
+// clear `worktree_path` / `branch_name` via reqSvc.UpdateWorktree so the DB
+// never claims a worktree that's gone.
+//
+// 30-minute total budget — the inner loop is N stat + 2-3 SSH Exec per
+// candidate, so even 100 stale rows fit comfortably. The agent-server-wide
+// scale is what it is (the user is asking to clean them all), and a run
+// truncated by ctx deadline would leave some old rows for the next click.
+func (h *AgentServerHandler) runCleanup(job *store.Job, serverID string) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[agent-server] cleanup panic for %s: %v", serverID, rec)
+			job.Append(store.LogLine{Type: "error", Content: fmt.Sprintf("panic: %v", rec)})
+			job.Finish(1, store.JobError)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	job.Append(store.LogLine{Type: "phase", Content: "🧹 开始扫描 7 天前的 worktree..."})
+
+	srv, plain, err := h.svc.GetWithCredential(serverID)
+	if err != nil {
+		job.Append(store.LogLine{Type: "error", Content: "❌ 凭据解析失败: " + err.Error()})
+		job.Finish(1, store.JobError)
+		return
+	}
+
+	client, err := gossh.Dial(ctx, srv.Host, srv.Port, srv.Username, srv.AuthType, plain)
+	if err != nil {
+		job.Append(store.LogLine{Type: "error", Content: fmt.Sprintf("❌ SSH 连接失败: %v", err)})
+		job.Finish(1, store.JobError)
+		return
+	}
+	defer client.Close()
+
+	// DB pre-filter. The NOT EXISTS(...) guard is the safety floor: a done
+	// requirement with a still-running sub-task MUST stay on disk, since
+	// sub-task orchestration may be reading / writing its worktree at this
+	// very moment. Without this guard a sweeping cleanup would corrupt
+	// active batches (see req_8dd76049ca0bbe8c design Risks & Mitigations).
+	candidates, err := h.reqSvc.CleanupCandidates(serverID)
+	if err != nil {
+		job.Append(store.LogLine{Type: "error", Content: "❌ 查询候选失败: " + err.Error()})
+		job.Finish(1, store.JobError)
+		return
+	}
+
+	cutoff := time.Now().Add(-7 * 24 * time.Hour).Unix()
+	job.Append(store.LogLine{Type: "phase", Content: fmt.Sprintf("发现 %d 个候选 worktree，正在过滤 >7 天的...", len(candidates))})
+
+	cleaned, skipped := 0, 0
+	for _, row := range candidates {
+		// Per-row stat — mtime on the worktree directory itself. If the
+		// directory is already gone the stat fails and we treat it as
+		// already-cleaned (DB still claims worktree_path != '' but FS is
+		// empty): in that case we clear the DB row and move on, instead of
+		// leaving a phantom DB entry pointing at nothing.
+		qwt := shellQuoteSingle(row.WorktreePath)
+		var statOut strings.Builder
+		statExit, _ := client.Exec(ctx,
+			fmt.Sprintf("stat -c %%Y %s 2>/dev/null || echo MISSING", qwt),
+			"", nil, &statOut, nil)
+		statRaw := strings.TrimSpace(statOut.String())
+		if statExit != 0 || statRaw == "" || statRaw == "MISSING" {
+			// FS already empty — clear the DB row so a future UI query
+			// doesn't keep surfacing it as a candidate. Not counted as
+			// "cleaned" because there was nothing to remove.
+			if uerr := h.reqSvc.UpdateWorktree(row.ID, "", ""); uerr != nil {
+				log.Printf("[agent-server] cleanup DB clear (already-empty FS) failed for %s: %v", row.ID, uerr)
+			}
+			job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("⏭ FS 已无目录，仅清 DB: %s", row.WorktreePath)})
+			continue
+		}
+		mtime, perr := strconv.ParseInt(statRaw, 10, 64)
+		if perr != nil {
+			job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("⚠ mtime 解析失败 %s: %v", row.WorktreePath, perr)})
+			continue
+		}
+		if mtime >= cutoff {
+			skipped++
+			job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("⏭ 跳过 %s (mtime 在 %d 天内)", row.WorktreePath, (cutoff-mtime)/86400+1)})
+			continue
+		}
+
+		baseRepo := "/tmp/nova-agent/" + row.ProjectID + "/base"
+		qb := shellQuoteSingle(baseRepo)
+		qbr := shellQuoteSingle(row.BranchName)
+
+		// Primary path: git worktree remove --force (the user already
+		// confirmed this sweep; we don't pay the dirty-tree price
+		// MergeHandler.remoteCleanup pays).
+		script := "cd " + qb + " && git worktree remove --force " + qwt + " && git worktree prune"
+		exit, _ := client.Exec(ctx, script, "", nil, nil, nil)
+		if exit != 0 {
+			// Fallback: a worktree whose metadata is already broken can't
+			// be removed by git, but the directory still has to go. raw
+			// rm -rf + prune, mirroring remoteCleanup's recovery branch.
+			fallback := "rm -rf " + qwt + " && cd " + qb + " && git worktree prune"
+			if fexit, _ := client.Exec(ctx, fallback, "", nil, nil, nil); fexit != 0 {
+				job.Append(store.LogLine{Type: "error", Content: fmt.Sprintf("❌ 清理失败 %s (exit=%d)", row.WorktreePath, fexit)})
+				continue
+			}
+		}
+		// Best-effort branch delete — failures here (unmerged tip,
+		// permission glitch, etc.) are not worth failing the whole row
+		// over; the worktree itself is already gone, which is the user's
+		// actual ask.
+		if row.BranchName != "" {
+			client.Exec(ctx,
+				"cd "+qb+" && git branch -D "+qbr+" || true",
+				"", nil, nil, nil)
+		}
+
+		// Sync DB → cleared only after FS succeeded, so the DB never
+		// claims a worktree that's already gone (phantom reference) or
+		// keeps one we've actually removed (stale reference).
+		if uerr := h.reqSvc.UpdateWorktree(row.ID, "", ""); uerr != nil {
+			log.Printf("[agent-server] cleanup DB clear failed for %s: %v", row.ID, uerr)
+			job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("⚠ FS 已清理但 DB 残留 %s: %v", row.ID, uerr)})
+			continue
+		}
+		cleaned++
+		job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("✓ 已清理 %s (mtime %d 天前)", row.WorktreePath, (time.Now().Unix()-mtime)/86400)})
+	}
+
+	job.Append(store.LogLine{Type: "done", Content: fmt.Sprintf("清理完成: 共清理 %d 个, 跳过 %d 个活跃", cleaned, skipped)})
 	job.Finish(0, store.JobDone)
 }
 

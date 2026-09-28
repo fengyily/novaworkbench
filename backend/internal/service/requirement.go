@@ -919,6 +919,59 @@ func (s *RequirementService) ClearWorktree(id string) error {
 	return err
 }
 
+// CleanupCandidates returns requirements whose worktree on the named Agent
+// server is a candidate for the bulk "cleanup worktrees older than 1 week"
+// flow (handler.AgentServerHandler.runCleanup). The DB-level filter is the
+// safety floor — the SSH-side mtime check filters the rest.
+//
+// Selection criteria (all conditions must hold):
+//   - agent_server_id = ?           → only worktrees on this server
+//   - dev_source = 'agent'          → local worktrees go through MergeHandler.Cleanup
+//   - status = 'done'               → active development is never auto-cleaned
+//   - worktree_path != ''           → rows predating the worktree column are skipped
+//   - NOT EXISTS pending|running sub_task for this requirement → an in-flight
+//     sub-task may still be reading or mutating the worktree, so dropping the
+//     directory under it would corrupt the running batch
+//
+// Only id / project_id / worktree_path / branch_name are SELECTed — the
+// caller reads nothing else. The struct's other fields stay at their zero
+// state, which is fine because nothing downstream of this method looks at
+// them.
+//
+// Sub-select contains no `?` placeholders (the in-list is literal) so the
+// entire query survives db.Rebind unchanged on every dialect
+// (SQLite / MySQL / PostgreSQL), mirroring the comment on RequirementService.List.
+func (s *RequirementService) CleanupCandidates(serverID string) ([]model.Requirement, error) {
+	const q = `SELECT id, project_id, worktree_path, branch_name
+	           FROM requirements
+	           WHERE agent_server_id = ?
+	             AND dev_source = 'agent'
+	             AND status = 'done'
+	             AND worktree_path != ''
+	             AND NOT EXISTS (
+	                 SELECT 1 FROM sub_tasks
+	                 WHERE requirement_id = requirements.id
+	                   AND status IN ('pending','running')
+	             )`
+	rows, err := s.db.Query(q, serverID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Requirement
+	for rows.Next() {
+		var r model.Requirement
+		if err := rows.Scan(&r.ID, &r.ProjectID, &r.WorktreePath, &r.BranchName); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	if out == nil {
+		out = []model.Requirement{}
+	}
+	return out, nil
+}
+
 // UpdateCodingPlan persists the auto-orchestrate summary Markdown produced by
 // the developer main agent after every child sub-task in a batch has
 // finished. The frontend renders it under the SubTaskPanel so the user can
