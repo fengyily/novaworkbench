@@ -31,12 +31,13 @@ import (
 
 type AgentServerHandler struct {
 	svc        *service.AgentServerService
+	reqSvc     *service.RequirementService
 	jobs       *store.JobStore
 	projectSvc *service.ProjectService
 }
 
-func NewAgentServerHandler(svc *service.AgentServerService, jobs *store.JobStore, projectSvc *service.ProjectService) *AgentServerHandler {
-	return &AgentServerHandler{svc: svc, jobs: jobs, projectSvc: projectSvc}
+func NewAgentServerHandler(svc *service.AgentServerService, reqSvc *service.RequirementService, jobs *store.JobStore, projectSvc *service.ProjectService) *AgentServerHandler {
+	return &AgentServerHandler{svc: svc, reqSvc: reqSvc, jobs: jobs, projectSvc: projectSvc}
 }
 
 // ---- CRUD -----------------------------------------------------------------

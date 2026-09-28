@@ -324,7 +324,7 @@ func main() {
 	// credential is sealed by internal/secret (AES-256-GCM); the wizard's
 	// StartCoding remote branch consumes this service when a request carries
 	// agent_server_id.
-	agentSvrH := handler.NewAgentServerHandler(agentSvrSvc, sharedJobs, projectSvc)
+	agentSvrH := handler.NewAgentServerHandler(agentSvrSvc, reqSvc, sharedJobs, projectSvc)
 
 	// Router
 	mux := http.NewServeMux()

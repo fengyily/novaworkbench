@@ -58,18 +58,20 @@ func remoteBranchFor(reqRow *model.Requirement) string {
 	return "requirement-" + reqRow.ID
 }
 
-// dialAgentForReq opens an SSH connection to the Agent server this requirement
-// was developed on. Returns (nil, name, err) when the requirement isn't an
-// agent-developed one, the service isn't wired, or the credential/connection
-// fails. The returned name is used for user-facing log lines.
-func (h *MergeHandler) dialAgentForReq(ctx context.Context, reqRow *model.Requirement) (*gossh.Client, string, error) {
-	if reqRow == nil || reqRow.AgentServerID == "" {
-		return nil, "", fmt.Errorf("需求未标记 Agent 服务器")
+// dialAgent opens an SSH connection to the Agent server identified by serverID.
+// Returns (nil, name, err) when the service isn't wired, or the credential /
+// connection fails. The returned name is used for user-facing log lines.
+// Extracted from dialAgentForReq so callers that already hold a serverID (e.g.
+// AgentServerHandler.Cleanup) can reuse the same dial flow without going via a
+// *model.Requirement row.
+func (h *MergeHandler) dialAgent(ctx context.Context, serverID string) (*gossh.Client, string, error) {
+	if serverID == "" {
+		return nil, "", fmt.Errorf("缺少 agent_server_id")
 	}
 	if h.agentSvrSvc == nil {
 		return nil, "", fmt.Errorf("Agent 服务器服务未初始化")
 	}
-	srv, plain, err := h.agentSvrSvc.GetWithCredential(reqRow.AgentServerID)
+	srv, plain, err := h.agentSvrSvc.GetWithCredential(serverID)
 	if err != nil {
 		return nil, "", fmt.Errorf("无法读取 Agent 服务器凭据: %w", err)
 	}
@@ -78,6 +80,17 @@ func (h *MergeHandler) dialAgentForReq(ctx context.Context, reqRow *model.Requir
 		return nil, srv.Name, fmt.Errorf("SSH 连接 %s (%s) 失败: %w", srv.Name, srv.Host, err)
 	}
 	return client, srv.Name, nil
+}
+
+// dialAgentForReq opens an SSH connection to the Agent server this requirement
+// was developed on. Returns (nil, name, err) when the requirement isn't an
+// agent-developed one, the service isn't wired, or the credential/connection
+// fails. The returned name is used for user-facing log lines.
+func (h *MergeHandler) dialAgentForReq(ctx context.Context, reqRow *model.Requirement) (*gossh.Client, string, error) {
+	if reqRow == nil || reqRow.AgentServerID == "" {
+		return nil, "", fmt.Errorf("需求未标记 Agent 服务器")
+	}
+	return h.dialAgent(ctx, reqRow.AgentServerID)
 }
 
 // usesAgentServer reports whether follow-up actions for this requirement must
