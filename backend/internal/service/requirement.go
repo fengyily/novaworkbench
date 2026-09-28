@@ -1332,6 +1332,24 @@ func (s *RequirementService) PromoteFromIdea(sourceID string, summarizer Summari
 	return s.Get(id)
 }
 
+// UpdateSkipAnalysis flips the requirements.skip_analysis flag. Used by
+// PromoteFromIdea after the row is INSERTed when the caller has asked for
+// the architect stage to be kicked off automatically — the freshly
+// INSERTed row has no AnalysisSessionID, so the architect fresh-session
+// skip-analysis branch (wizard_architect.go:189-192) is the only path
+// that won't fail with NO_SESSION.
+func (s *RequirementService) UpdateSkipAnalysis(skip bool, id string) error {
+	v := 0
+	if skip {
+		v = 1
+	}
+	_, err := s.db.Exec(
+		"UPDATE requirements SET skip_analysis=?, updated_at=? WHERE id=?",
+		v, time.Now().UTC(), id,
+	)
+	return err
+}
+
 // assemblePromotePayload builds the user-content string the summarizer sees:
 // the original description, the analyst-accumulated acceptance_criteria, and
 // the multi-turn chat transcript. Format is plain Markdown so the model can
