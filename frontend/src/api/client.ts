@@ -2158,6 +2158,8 @@ export const agentServersApi = {
     api.post<{ job_id: string }>(`/api/settings/agent-servers/${id}/check`, {}),
   install: (id: string) =>
     api.post<{ job_id: string }>(`/api/settings/agent-servers/${id}/install`, {}),
+  cleanup: (id: string) =>
+    api.post<{ job_id: string }>(`/api/settings/agent-servers/${id}/cleanup`, {}),
   // Synchronous SSH handshake — confirms the stored credential can still log
   // into the host. Distinct from check (which runs dep probes in the
   // background) so the UI can render a quick green/red badge without SSE.
