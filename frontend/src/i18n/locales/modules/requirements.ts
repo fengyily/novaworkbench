@@ -106,6 +106,10 @@ export const requirements = {
     retry: '🔄 重试',
     runningCta: '总结中…',
     startCta: '✨ 开始总结',
+    autoDesign: '同时生成技术方案',
+    autoDesignHint: '勾选后会在需求创建完成后自动进入方案设计阶段',
+    designStageLabel: '方案模型与执行环境',
+    designLaunchError: '需求已创建，但方案生成失败：{{error}}',
   },
   // detail2 — RequirementDetail page (header / worktree path / wizard
   // pipeline / merge step / sub-task panel integration / usage tables).
