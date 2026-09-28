@@ -21,6 +21,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
@@ -129,11 +130,37 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		// Anchor the analyst stage to the isolated worktree (created here if
 		// missing) so the whole session chain — analysis → design → coding — is
 		// rooted in the worktree and never leaks original-dir absolute paths.
-		workDir, err := h.resolveWorkDir(context.Background(), requirement, projectPath, defaultBranch)
-		if err != nil {
-			job.Append(store.LogLine{Type: "error", Content: "❌ " + err.Error()})
-			job.Finish(1, store.JobError)
-			return
+		//
+		// Idea-kind requirements need the latest main-branch source to discuss
+		// "can it be done with existing code" (analyst-chat concept phase),
+		// so we hard-sync origin/<base> first via resolveWorkDirSynced —
+		// same path the architect stage uses. Requirement / Issue kinds keep
+		// the legacy resolveWorkDir call (no origin sync, pre-read is enough).
+		var workDir string
+		if requirement.Kind == "idea" {
+			job.Append(store.LogLine{Type: "phase", Content: "🔄 同步仓库基线到 origin/" + defaultBranch + "…"})
+			timeout, _ := h.settingSvc.GitSyncTimeout()
+			syncLogf := func(s string) {
+				job.Append(store.LogLine{Type: "message", Content: s})
+			}
+			wd, baseSHA, err := h.resolveWorkDirSynced(context.Background(), requirement, projectPath, defaultBranch, timeout, syncLogf)
+			if err != nil {
+				job.Append(store.LogLine{Type: "error", Content: "❌ " + err.Error()})
+				job.Finish(1, store.JobError)
+				return
+			}
+			if baseSHA != "" {
+				job.Append(store.LogLine{Type: "phase", Content: "📌 设计基线已锁定: " + baseSHA[:7]})
+			}
+			workDir = wd
+		} else {
+			wd, err := h.resolveWorkDir(context.Background(), requirement, projectPath, defaultBranch)
+			if err != nil {
+				job.Append(store.LogLine{Type: "error", Content: "❌ " + err.Error()})
+				job.Finish(1, store.JobError)
+				return
+			}
+			workDir = wd
 		}
 
 		// firstTurnPrompt pre-reads a BOUNDED slice of the project (AI docs +
@@ -177,7 +204,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 			resumePrompt = skillsBlock + resumePrompt
 		}
 		analystUsage := h.usageCtxForConfig("analyst_chat", req.RequirementID, requirement.ProjectID, job.ID, model, "", "", claudeConfigID)
-		finalResult, newSessionID, err := h.runAnalystTurn(context.Background(), firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sessionID, !isFirstRound, sink, analystUsage)
+		finalResult, newSessionID, err := h.runAnalystTurn(context.Background(), requirement.Kind, firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sessionID, !isFirstRound, sink, analystUsage)
 		if err != nil {
 			log.Printf("[analyst-chat] turn failed: %v", err)
 			job.Append(store.LogLine{Type: "error", Content: err.Error()})
@@ -428,12 +455,26 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 	rc.Flush()
 }
 
-// analystFirstTurnDisallowedTools blocks file/code tools on the analyst first
-// turn so Claude answers from the pre-read context without tool use. The
-// atlascloud proxy mangles multi-turn tool-use streaming ("Content block not
-// found"); the first turn already has the pre-read docs + tree, so it doesn't
-// need to read files. Resume turns keep all tools.
-var analystFirstTurnDisallowedTools = []string{"Read", "Glob", "Grep", "Bash", "Write", "Edit"}
+// ideaAnalystStallTimeout 放宽 Idea 类型首轮探索的 stall 看门狗
+// （与 wizard_architect.go:44 architectStallTimeout 同值 10m）。
+// Idea 中文标题关键词命中源码概率低，Claude 可能需要较长时间
+// 自助 Read / Glob / Grep 来定位代码；3min 默认超时容易被误杀。
+const ideaAnalystStallTimeout = 10 * time.Minute
+
+// analystFirstTurnDisallowedToolsForKind returns the tools to block on the
+// analyst first turn, depending on requirement.Kind. The atlascloud proxy
+// mangles multi-turn tool-use streaming ("Content block not found"), so the
+// first turn has stricter tool gating than resume turns (which keep all
+// tools). Idea is the exception: it discusses concepts based on existing
+// code, so Read / Glob / Grep / Bash are allowed; only Write / Edit are
+// blocked to keep the analyst phase discussion-only.
+func analystFirstTurnDisallowedToolsForKind(kind string) []string {
+	if kind == "idea" {
+		return []string{"Write", "Edit"}
+	}
+	// requirement / issue / 兜底：维持旧行为
+	return []string{"Read", "Glob", "Grep", "Bash", "Write", "Edit"}
+}
 
 // runAnalystTurn runs one analyst-chat turn with automatic stale-session
 // recovery. firstTurnPrompt is a lazy builder for the first-turn prompt (it
@@ -448,7 +489,7 @@ var analystFirstTurnDisallowedTools = []string{"Read", "Glob", "Grep", "Bash", "
 // JobStore flow it is a jobSink so the lines survive a page refresh via the job's
 // replay buffer. Returns the final result text and the session id that actually
 // landed on disk (which the caller persists).
-func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, claudeConfigID, sessionID string, resume bool, sink streamSink, uctx *usageCtx) (finalResult, newSessionID string, err error) {
+func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTurnPrompt func() string, resumePrompt, projectPath, systemPrompt, model, claudeConfigID, sessionID string, resume bool, sink streamSink, uctx *usageCtx) (finalResult, newSessionID string, err error) {
 	prompt := resumePrompt
 	if !resume {
 		prompt = firstTurnPrompt()
@@ -463,7 +504,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 	// verify specific code in follow-up).
 	var disallowed []string
 	if !resume {
-		disallowed = analystFirstTurnDisallowedTools
+		disallowed = analystFirstTurnDisallowedToolsForKind(kind)
 	}
 	cmd := h.llm.StreamCmd(ctx, llm.StreamOpts{
 		Prompt:          prompt,
@@ -475,7 +516,11 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 		Resume:          resume,
 		DisallowedTools: disallowed,
 	})
-	out := runClaudeStream(sink, cmd, "analyst-chat", uctx)
+	var stallOverride []time.Duration
+	if kind == "idea" {
+		stallOverride = append(stallOverride, ideaAnalystStallTimeout)
+	}
+	out := runClaudeStream(sink, cmd, "analyst-chat", uctx, stallOverride...)
 
 	if out.staleSession && resume {
 		// Stale --resume: the session file is gone (typically a stale id left by
@@ -493,9 +538,9 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, firstTurnPrompt func
 			Model:           cliModelArg(model),
 			ClaudeConfigID:  claudeConfigID,
 			SessionID:       freshID,
-			DisallowedTools: analystFirstTurnDisallowedTools,
+			DisallowedTools: analystFirstTurnDisallowedToolsForKind(kind),
 		})
-		out = runClaudeStream(sink, cmd, "analyst-chat", uctx)
+		out = runClaudeStream(sink, cmd, "analyst-chat", uctx, stallOverride...)
 		sessionID = freshID
 	}
 
@@ -637,11 +682,24 @@ func buildAnalystFirstPrompt(req *model.Requirement, description, currentAnalysi
 		b.WriteString(treeSummary)
 		b.WriteString("\n\n")
 	}
-	b.WriteString("请**仅基于以上预读上下文**完成工作。**禁止调用工具读取任何文件**——预读已提供关键文档与项目结构；" +
-		"若信息不足以判断某点，把该缺失点作为关键问题提给用户，让用户来回答，而不是自己去读文件。\n\n" +
-		"1. **分析现有代码**：基于预读内容指出与本需求直接相关的文件、函数、数据结构\n" +
-		"2. **识别实现路径**：需要新增或修改哪些部分，有哪些可复用\n" +
-		"3. **提出关键问题**：2-3 个你从预读信息中无法确定、必须由用户决策的问题（纯业务/产品决策）\n\n" +
-		"先给出你的分析与实现思路，再提问题。\n")
+	if req != nil && req.Kind == "idea" {
+		// Idea 探讨需要看源码才能讨论可行性 / 思路方向 / 风险；允许 Claude
+		// 自助 Read / Glob / Grep / Bash 核实细节，但禁 Write / Edit——
+		// 分析师阶段只讨论、不落代码。
+		b.WriteString("预读块已提供 AI 配置文档与顶层结构。**可以使用 Read / Glob / Grep / Bash 按需阅读工作目录下的源文件核实技术细节**，挑选对回答本想法最相关的代码片段引用。" +
+			"**仍不要 Write / Edit**——分析师阶段只讨论、不落代码。\n\n" +
+			"1. **分析现有代码**：基于预读内容 + 自助 Read 指出与本想法直接相关的文件、函数、数据结构、关键调用路径\n" +
+			"2. **识别思路方向**：依赖现有代码能做到吗？给出 2-3 个可行方向的对比（性能 / 复杂度 / 风险）\n" +
+			"3. **提出关键问题**：从预读 + 自助读仍无法确定的 1-2 个核心问题（业务方向性 / 取舍）\n\n" +
+			"先给出你的思路与方案对比，再提问题。\n")
+	} else {
+		// Requirement / Issue 维持旧行为——保护 Issue 根因排查场景不自助读无关源码。
+		b.WriteString("请**仅基于以上预读上下文**完成工作。**禁止调用工具读取任何文件**——预读已提供关键文档与项目结构；" +
+			"若信息不足以判断某点，把该缺失点作为关键问题提给用户，让用户来回答，而不是自己去读文件。\n\n" +
+			"1. **分析现有代码**：基于预读内容指出与本需求直接相关的文件、函数、数据结构\n" +
+			"2. **识别实现路径**：需要新增或修改哪些部分，有哪些可复用\n" +
+			"3. **提出关键问题**：2-3 个你从预读信息中无法确定、必须由用户决策的问题（纯业务/产品决策）\n\n" +
+			"先给出你的分析与实现思路，再提问题。\n")
+	}
 	return b.String()
 }
