@@ -566,6 +566,13 @@ type StreamOpts struct {
 	//   *false → never override: always let the CLI load user + project +
 	//           local sources (default when no auth override is present).
 	OverrideSettingSources *bool
+	// HardTimeout is an optional caller-asserted minimum ctx duration for this
+	// stream. When > 0, GenerateCode takes max(codingTimeout, HardTimeout)
+	// before applying the 30m floor, so callers (e.g. Agent Server remote SSE,
+	// sub-task runner) can guarantee their declared deadline is honored even
+	// when CLAUDE_TIMEOUT is configured short. 0 means "follow the gateway's
+	// default policy" (current behavior).
+	HardTimeout time.Duration
 }
 
 // StreamCmd returns an unstarted *exec.Cmd configured for stream-json output
