@@ -185,7 +185,7 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		return claudeStreamOutcome{errMsg: "Agent 服务器服务未初始化"}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), agentTimeout())
 	defer cancel()
 
 	// Load the (decrypted) credential before anything else — a missing master
@@ -626,7 +626,7 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 		return claudeStreamOutcome{errMsg: "Agent 服务器服务未初始化"}, func() {}, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), agentTimeout())
 	defer cancel()
 
 	// Step 1: load the (decrypted) credential before anything else — a missing
@@ -1937,4 +1937,22 @@ func (h *WizardHandler) claudeProjectsSlugDir(reqRow *model.Requirement) (string
 		return "", lastErr
 	}
 	return "", nil
+}
+
+// agentTimeout returns the maximum wall-clock duration the remote Agent
+// Server SSE ctx may run. Defaults to 35m (the previous hard-coded value).
+// Process-startup only: NOVA_AGENT_TIMEOUT is read from the process env on
+// each call; changes require restarting nova. Deliberately decoupled from
+// CLAUDE_TIMEOUT (which controls short LLM calls) and from
+// setting.git_sync_timeout (KV-backed, dynamic, scopes only the git fetch step).
+func agentTimeout() time.Duration {
+	const defaultAgentTimeout = 35 * time.Minute
+	raw := os.Getenv("NOVA_AGENT_TIMEOUT")
+	if raw == "" {
+		return defaultAgentTimeout
+	}
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	return defaultAgentTimeout
 }
