@@ -110,6 +110,28 @@ body {
   border-radius: 4px;
 }
 
+/* Global <a> baseline. The app usually wraps links in dedicated styles
+   (.nav-item, .settings-tab, .pr-link-btn, .app-header-settings), but any
+   raw <a> sitting in body text gets the same indigo + hover/active feedback
+   the rest of the UI uses. Avoids the user-agent default #0000EE blue that
+   lands "深蓝色 + 点击效果不清". */
+a {
+  color: var(--color-primary);
+  text-decoration: none;
+  transition: color 0.15s, background 0.15s;
+}
+a:hover {
+  color: var(--color-primary-hover);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+a:active {
+  color: var(--color-primary-hover);
+}
+a:visited {
+  color: var(--color-primary);
+}
+
 /* Inputs must be ≥16px to stop iOS Safari from zooming the page on focus.
    Buttons/textarea keep their native size (no zoom). */
 @media (max-width: 768px) {

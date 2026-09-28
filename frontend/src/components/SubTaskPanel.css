@@ -42,9 +42,10 @@
   align-items: center;
   gap: 8px;
   margin: 0;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 700;
   color: var(--color-text);
+  letter-spacing: -0.005em;
 }
 .sub-panel-title-icon {
   display: inline-flex;
@@ -794,6 +795,14 @@
   color: #38BDF8;
   word-break: break-all;
   white-space: pre-wrap;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.sub-cli-cmd:hover {
+  color: #7DD3FC;
+  text-decoration: underline;
+  text-decoration-color: rgba(125, 211, 252, 0.5);
+  text-underline-offset: 2px;
 }
 .sub-cli-copy {
   background: transparent;
