@@ -1069,8 +1069,17 @@ export const requirementsApi = {
   // into a concrete feature yet — the modal turns that into a friendlier
   // "not converged yet" message and lets the user keep chatting before
   // retrying.
-  promoteFromIdea: (id: string) =>
-    api.post<Requirement>(`/api/requirements/${id}/promote`, {}),
+  //
+  // When opts.design is supplied, the backend flips skip_analysis on the new
+  // row and kicks off the architect-design stage immediately, terminaling at
+  // status='designed'. The dispatched JobStore job id lands on
+  // Requirement.design_job_id; dispatch failure surfaces on
+  // Requirement.launch_error (mirroring Create's launch-error pattern). See
+  // PromoteDesignConfig for the body shape.
+  promoteFromIdea: (id: string, opts?: { design?: PromoteDesignConfig }) => {
+    const body = opts?.design ? { design: opts.design } : {};
+    return api.post<Requirement>(`/api/requirements/${id}/promote`, body);
+  },
   // Calendar view: 瘦 SELECT + 日期范围过滤 + scheduled_run_at 派生字段。
   // from/to 接受 "YYYY-MM-DD" 或 RFC3339；不传则后端默认当月窗口。返回
   // 数组只包含「与 [from, to) 窗口」有交集的需求（包含跨天条）。
@@ -1201,6 +1210,35 @@ export interface DesignCodingImmediateResp {
    * land on `requirements.coding_job_id` once coding kicks off, and the
    * existing active-jobs poll picks it up without further round-trips. */
   design_job_id: string;
+}
+
+/**
+ * Body sent to POST /api/requirements/{id}/promote when the user opts into
+ * 「同时生成技术方案」. Mirrors DesignCodingImmediateReq's design_* fields;
+ * the backend's promoteFromIdeaReq actually accepts the full
+ * designCodingImmediateReq struct but ignores the Coding-star / Branch-star /
+ * SplitTasks / AutoPushPR / DevMode / SyncMode fields on this path — we expose
+ * only the four relevant inputs here so callers (the SummarizeToRequirementModal)
+ * can't accidentally request a chained coding stage they didn't ask for.
+ */
+export interface PromoteDesignConfig {
+  read_knowledge?: boolean;
+  design_model?: string;
+  /** design stage's claude_configs row id; '' = backend resolves. */
+  design_claude_config_id?: string;
+  /** design stage Agent server; '' = local execution. */
+  design_agent_server_id?: string;
+}
+
+/**
+ * Response shape for promote. The backend writes 201 with {data: Requirement};
+ * extra fields (DesignJobID, LaunchError) live on the Requirement row itself,
+ * mirroring Create's LaunchMode/LaunchScheduleID/LaunchError pattern.
+ * PromoteFromIdeaResp is provided as a top-level mirror for callers that
+ * prefer not to unwrap `data`; the modal currently reads `data.*` directly.
+ */
+export interface PromoteFromIdeaResp {
+  data: Requirement;
 }
 
 export const wizardApi = {

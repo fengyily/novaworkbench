@@ -1007,6 +1007,31 @@ export default function RequirementDetail() {
     }
   }, []);
 
+  // Page-level design-launch-error toast. Fired when PromoteFromIdea returns
+  // launch_error (e.g. bad agent_server_id, prepareArchitectDesign rejected).
+  // The new requirement row was already INSERTed — the user is now on its
+  // detail page with status='designing' and a broken job; the toast surfaces
+  // the failure context without blocking manual retry. Same pattern as
+  // summaryDoneToast: local state, 1.8s auto-dismiss, reuses the global
+  // `.merge-hint-toast` styling.
+  const [designLaunchErrorToast, setDesignLaunchErrorToast] = useState<string | null>(null);
+  const designLaunchErrorTimerRef = useRef<number | null>(null);
+  const showDesignLaunchErrorToast = useCallback((text: string) => {
+    setDesignLaunchErrorToast(text);
+    if (designLaunchErrorTimerRef.current !== null) {
+      window.clearTimeout(designLaunchErrorTimerRef.current);
+    }
+    designLaunchErrorTimerRef.current = window.setTimeout(() => {
+      setDesignLaunchErrorToast(null);
+      designLaunchErrorTimerRef.current = null;
+    }, 1800); // longer than summary toast is fine; user might want to read it
+  }, []);
+  useEffect(() => () => {
+    if (designLaunchErrorTimerRef.current !== null) {
+      window.clearTimeout(designLaunchErrorTimerRef.current);
+    }
+  }, []);
+
   // Branch modal state
   const [showBranchModal, setShowBranchModal] = useState(false);
   const [branchName, setBranchName] = useState('');
@@ -2535,6 +2560,13 @@ export default function RequirementDetail() {
           'done', confirming an OrchestrationQueue summary round landed. */}
       {summaryDoneToast && (
         <span className="merge-hint-toast" role="status">{summaryDoneToast}</span>
+      )}
+      {/* PromoteFromIdea dispatch-failure toast — surfaces launch_error
+          returned by POST /api/requirements/{id}/promote. The new requirement
+          is still created; the user can manually re-trigger design from the
+          detail page once they read the hint. */}
+      {designLaunchErrorToast && (
+        <span className="merge-hint-toast" role="status">{designLaunchErrorToast}</span>
       )}
       {/* Optional "read project knowledge" confirm modal for the design stage */}
       {showDesignKnowledgeModal && (
@@ -4538,9 +4570,22 @@ export default function RequirementDetail() {
           sourceId={req.id}
           sourceTitle={req.title}
           onClose={() => setSummarizeOpen(false)}
-          onCreated={newId => {
+          onCreated={(newId, opts) => {
             setSummarizeOpen(false);
             navigate(`/requirements/${newId}`);
+            if (opts?.designJobId) {
+              // Reuse existing SSE consumer — mirrors DesignCodingImmediateModal's
+              // pattern at line 4650.
+              streamDesignJob(opts.designJobId);
+            }
+            if (opts?.launchError) {
+              // Mirror summaryDoneToast pattern (lines 985-1008, 2532-2537): set
+              // page-level toast, auto-dismiss after 1.8s. Use the
+              // requirements.promote.designLaunchError i18n key for the text.
+              showDesignLaunchErrorToast(
+                t('requirements.promote.designLaunchError', { error: opts.launchError }),
+              );
+            }
           }}
         />
       )}

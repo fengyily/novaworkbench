@@ -106,6 +106,10 @@ export const requirements = {
     retry: '🔄 Retry',
     runningCta: 'Summarizing…',
     startCta: '✨ Summarize',
+    autoDesign: 'Also generate technical design',
+    autoDesignHint: 'When checked, the design stage runs automatically after the requirement is created',
+    designStageLabel: 'Design model and execution env',
+    designLaunchError: 'Requirement created, but design generation failed: {{error}}',
   },
   // detail2 — RequirementDetail page (header / worktree path / wizard
   // pipeline / merge step / sub-task panel integration / usage tables).

@@ -12,9 +12,16 @@
 // job — the parent receives the new requirement id and routes to the detail
 // page.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { authedFetch, API_BASE } from '../api/client';
+import {
+  requirementsApi,
+  agentServersApi,
+  type AgentServer,
+  type PromoteDesignConfig,
+} from '../api/client';
+import ModelSelect from './ModelSelect';
+import ExecEnvSelect, { type ExecEnvServer } from './ExecEnvSelect';
 
 type Phase = 'idle' | 'running' | 'error';
 
@@ -22,44 +29,86 @@ interface Props {
   sourceId: string;
   sourceTitle: string;
   onClose: () => void;
-  onCreated: (newId: string) => void;
+  onCreated: (
+    newId: string,
+    opts?: { designJobId?: string; launchError?: string },
+  ) => void;
 }
 
 export function SummarizeToRequirementModal({ sourceId, sourceTitle, onClose, onCreated }: Props) {
   const { t } = useTranslation();
   const [phase, setPhase] = useState<Phase>('idle');
   const [errorMsg, setErrorMsg] = useState('');
+  // Optional "同时生成技术方案" stage. Default off — the legacy behavior
+  // (just create the requirement row) stays the default. When enabled, the
+  // promote POST forwards the picked design-stage overrides and the backend
+  // kicks off the architect stage immediately; the dispatched JobStore job
+  // id lands on Requirement.design_job_id and is forwarded to onCreated so
+  // the detail page can attach the SSE stream right away.
+  const [autoDesign, setAutoDesign] = useState(false);
+  const [designConfig, setDesignConfig] = useState<PromoteDesignConfig>({});
+  // Agent servers filtered to ready status — mirrors the design-toolbar
+  // integration in RequirementDetail (settings tab is the source of truth,
+  // we silently degrade on list failure so the modal never blocks on a
+  // transient settings-tab hiccup).
+  const [agentServers, setAgentServers] = useState<ExecEnvServer[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    agentServersApi
+      .list()
+      .then((rows: AgentServer[] | null | undefined) => {
+        if (cancelled) return;
+        const ready = (rows ?? []).filter((s) => s.status === 'ready');
+        // Project down to the structural shape ExecEnvSelect consumes — its
+        // contract is {id, name, host}; passing the full AgentServer would
+        // still type-check (per ExecEnvSelect's doc comment) but the slim
+        // projection keeps the modal's footprint explicit.
+        setAgentServers(ready.map((s) => ({ id: s.id, name: s.name, host: s.host })));
+      })
+      .catch(() => {
+        /* settings tab is the source of truth — silently ignore */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleConfirm = async () => {
     setPhase('running');
     setErrorMsg('');
     try {
-      const res = await authedFetch(`${API_BASE}/api/requirements/${sourceId}/promote`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
+      // api.post<Requirement> wraps the response envelope; on non-success it
+      // throws ApiError whose `code` is the backend's error.code. We forward
+      // the optional design-stage config only when autoDesign is checked so
+      // un-ticked submissions stay byte-for-byte equivalent to the legacy
+      // empty-body POST (the backend's "no design" branch is preserved).
+      const item = await requirementsApi.promoteFromIdea(
+        sourceId,
+        autoDesign ? { design: designConfig } : undefined,
+      );
+      // design_job_id is `string` on the Requirement row (empty when no job
+      // was dispatched) — collapse the empty-string sentinel to undefined so
+      // downstream consumers can use a single truthy check. launch_error is
+      // already optional and only set when the wizard dispatch failed.
+      onCreated(item.id, {
+        designJobId: item.design_job_id || undefined,
+        launchError: item.launch_error,
       });
-      const json = await res.json();
-      if (!res.ok || !json.success) {
-        // 422 NOT_CONVERGED — the discussion has not converged. Render the
-        // friendly message (the prompt already encodes that semantic) and let
-        // the user keep chatting before retrying.
-        if (res.status === 422 || json.error?.code === 'NOT_CONVERGED') {
-          setPhase('error');
-          setErrorMsg(t('requirements.promote.notConverged'));
-          return;
-        }
+    } catch (err: any) {
+      // 422 NOT_CONVERGED — the discussion has not converged. Render the
+      // friendly message (the prompt already encodes that semantic) and let
+      // the user keep chatting before retrying. ApiError exposes `code` as
+      // a top-level field, populated from the backend's error.code.
+      const code = err?.code;
+      if (code === 'NOT_CONVERGED') {
         setPhase('error');
-        setErrorMsg(json.error?.message || t('requirements.promote.requestFailed', { status: res.status }));
+        setErrorMsg(t('requirements.promote.notConverged'));
         return;
       }
-      // requirementsApi.promoteFromIdea could be used instead, but this modal
-      // handles the 422 case itself and consumes json.data directly.
-      const newReq = json.data as { id: string };
-      onCreated(newReq.id);
-    } catch (err: any) {
       setPhase('error');
-      setErrorMsg(err?.message || t('requirements.promote.networkError'));
+      setErrorMsg(
+        err?.message || t('requirements.promote.requestFailed', { status: err?.status ?? '?' }),
+      );
     }
   };
 
@@ -91,6 +140,52 @@ export function SummarizeToRequirementModal({ sourceId, sourceTitle, onClose, on
                 <li>{t('requirements.promote.bullet2Prefix')}<strong>{t('requirements.promote.bullet2Bold')}</strong>{t('requirements.promote.bullet2Suffix')}</li>
                 <li>{t('requirements.promote.bullet3')}</li>
               </ul>
+              {/*
+                Optional "同时生成技术方案" toggle. Default off — keeps legacy
+                "just create the row" behavior as the default. When enabled,
+                forwards the picked design-stage overrides to the backend and
+                surfaces the dispatched JobStore job id to onCreated so the
+                detail page can attach the SSE stream immediately.
+              */}
+              <label className="summarize-auto-design">
+                <input
+                  type="checkbox"
+                  checked={autoDesign}
+                  onChange={e => setAutoDesign(e.target.checked)}
+                />
+                <span>{t('requirements.promote.autoDesign')}</span>
+              </label>
+              {autoDesign && (
+                <div className="summarize-design-stage">
+                  <ModelSelect
+                    stage="architect"
+                    value={designConfig.design_model ?? ''}
+                    onChange={m =>
+                      setDesignConfig(c => ({
+                        ...c,
+                        design_model: m || undefined,
+                      }))
+                    }
+                    configId={designConfig.design_claude_config_id ?? ''}
+                    onConfigChange={id =>
+                      setDesignConfig(c => ({
+                        ...c,
+                        design_claude_config_id: id || undefined,
+                      }))
+                    }
+                  />
+                  <ExecEnvSelect
+                    servers={agentServers}
+                    value={designConfig.design_agent_server_id ?? ''}
+                    onChange={id =>
+                      setDesignConfig(c => ({
+                        ...c,
+                        design_agent_server_id: id || undefined,
+                      }))
+                    }
+                  />
+                </div>
+              )}
             </>
           )}
 

@@ -509,6 +509,19 @@ func (h *RequirementHandler) ClearAnalysisSession(w http.ResponseWriter, r *http
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
+// promoteFromIdeaReq is the optional body for POST /api/requirements/{id}/promote.
+// Empty body (no Design) preserves the legacy behavior — only the new requirement
+// is created. With Design set, the architect stage is dispatched immediately after
+// the row is INSERTed (terminal state: designed).
+//
+// Design reuses the wizard_immediate.go designCodingImmediateReq struct verbatim —
+// the Coding*/Branch*/SplitTasks/AutoPushPR/DevMode/SyncMode fields are accepted but
+// ignored on this path (the frontend TS type PromoteDesignConfig only exposes the
+// four design_* / read_knowledge fields to users).
+type promoteFromIdeaReq struct {
+	Design *designCodingImmediateReq `json:"design,omitempty"`
+}
+
 // PromoteFromIdea summarizes an idea's accumulated discussion (description +
 // analyst-accumulated acceptance_criteria + multi-turn chat) into a brand-new
 // requirement row, leaving the original idea intact (its kind stays "idea").
@@ -517,12 +530,27 @@ func (h *RequirementHandler) ClearAnalysisSession(w http.ResponseWriter, r *http
 // Returns 422 when the LLM judges the discussion didn't converge into a
 // concrete feature (returns the empty-markdown sentinel) — the frontend turns
 // this into "讨论还没有达成共识，请继续完善".
+//
+// Optional body {design: designCodingImmediateReq}: when Design is set, the
+// architect stage is dispatched immediately after the new requirement row is
+// INSERTed. The terminal state is "designed" (no chained coding); on dispatch
+// failure the error is surfaced via item.LaunchError and the response is still
+// 201 — the user can manually retry design from the detail page.
 func (h *RequirementHandler) PromoteFromIdea(w http.ResponseWriter, r *http.Request) {
 	if h.llm == nil {
 		writeError(w, 500, "INTERNAL", "llm gateway not configured")
 		return
 	}
-	item, err := h.svc.PromoteFromIdea(r.PathValue("id"), h.llm)
+	id := r.PathValue("id")
+
+	// Body parse is best-effort: an empty/missing body falls back to legacy behavior
+	// (no design dispatch). EOF from r.Body == nil is swallowed via _ =.
+	var body promoteFromIdeaReq
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+
+	item, err := h.svc.PromoteFromIdea(id, h.llm)
 	if err != nil {
 		if err.Error() == "discussion did not converge into a concrete requirement" {
 			writeError(w, 422, "NOT_CONVERGED", err.Error())
@@ -531,5 +559,33 @@ func (h *RequirementHandler) PromoteFromIdea(w http.ResponseWriter, r *http.Requ
 		writeError(w, 500, "PROMOTE_FAILED", err.Error())
 		return
 	}
+
+	// Optional design dispatch: only when the caller explicitly opts in
+	// AND the wizard handler is wired. Mirror Create's launchErrorMessage
+	// pattern: any failure inside design dispatch becomes LaunchError on
+	// the returned Requirement — we still write 201 so the new requirement
+	// is visible (the user can manually retry design from the detail page).
+	if body.Design != nil && h.wizardH != nil {
+		// 2a: flip skip_analysis BEFORE launchDesignOnly, so the architect's
+		// fresh-session branch (wizard_architect.go:189-192) doesn't fail
+		// with NO_SESSION. INSERT just hardcoded skip_analysis=0 above.
+		if uerr := h.svc.UpdateSkipAnalysis(true, item.ID); uerr != nil {
+			item.LaunchError = "设置 skip_analysis 失败: " + uerr.Error()
+		} else {
+			jid, af := h.wizardH.launchDesignOnly(item.ID, body.Design)
+			if af != nil {
+				item.LaunchError = af.Msg
+			} else {
+				// Re-fetch to pick up the freshly-written design_job_id and
+				// status='designing' / design_agent_server_id / etc.
+				if refreshed, gerr := h.svc.Get(item.ID); gerr == nil {
+					item = refreshed
+				}
+				// item.DesignJobID is now the job id; frontend reads it.
+				_ = jid // already on item.DesignJobID via re-fetch
+			}
+		}
+	}
+
 	writeJSON(w, 201, item)
 }

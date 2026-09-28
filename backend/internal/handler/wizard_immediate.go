@@ -162,6 +162,46 @@ func (h *WizardHandler) launchDesignAndCoding(reqID string, body *designCodingIm
 	return job.ID, nil
 }
 
+// launchDesignOnly is the design-only sibling of launchDesignAndCoding.
+// It shares the immediatePreGate → prepareArchitectDesign → execArchitectDesign
+// chain but spawns execArchitectDesign with a nil callback so the terminal
+// state is "designed" (no chained coding). Used by PromoteFromIdea when the
+// caller opts into "同时生成技术方案".
+//
+// Same pre-flight rejection codes as launchDesignAndCoding
+// (TERMINAL / DESIGN_JOB_ACTIVE / CODING_JOB_ACTIVE / IDEA_NOT_DEVELOPABLE /
+// INVALID_STATUS) — the only difference is that success returns the JobStore
+// design-stage job id WITHOUT spawning a coding stage.
+func (h *WizardHandler) launchDesignOnly(reqID string, body *designCodingImmediateReq) (string, *apiFailure) {
+	reqRow, err := h.reqSvc.Get(reqID)
+	if err != nil {
+		return "", fail(404, immediateErrRequirementNotFound, "requirement not found")
+	}
+	if af := h.immediatePreGate(reqRow); af != nil {
+		return "", af
+	}
+	// NOTE: prepareArchitectDesign takes ctx as first arg, requirementID as
+	// string (NOT the requirement row), and returns 3 values including
+	// *store.Job. Reuses the same gating as the HTTP /api/wizard/architect-design
+	// and scheduler paths.
+	p, job, af := h.prepareArchitectDesign(
+		context.Background(),
+		reqID,
+		body.DesignModel,
+		body.DesignConfigID,
+		body.DesignAgentServerID,
+		body.ReadKnowledge,
+	)
+	if af != nil {
+		return "", af
+	}
+	// nil cb: finalizeArchitectRun still auto-promotes designing → designed
+	// (wizard_architect.go:701) but does NOT dispatch a chained coding stage,
+	// because OnFinish is the only place coding is launched.
+	go h.execArchitectDesign(p, job, nil)
+	return job.ID, nil
+}
+
 // immediatePreGate centralizes the synchronous state checks before the
 // design goroutine fires. A non-nil *apiFailure means the request was
 // rejected; the caller writes it verbatim to the HTTP response.
