@@ -628,10 +628,29 @@
   text-align: center;
 }
 .sub-log-phase-block {
-  border-left: 2px solid #475569;
+  border-left: 2px solid #64748B; /* slate-500, CR 3.75:1 (non-text ≥ 3:1) */
   padding-left: 10px;
   margin-bottom: 6px;
 }
+/* ──────────────────────────────────────────────────────────────────────
+ * SubTaskPanel log palette (slate-900 panel, `#0F172A`)
+ * WCAG: all CR ≥ 6.96:1 on the dark base — text/iconography safe by AA.
+ * Update this block as the single source of truth; render path goes
+ * `sub-log-row sub-log-${line.type}` (SubTaskPanel.tsx L271).
+ *
+ *   type         | color     | tailwind   | extra
+ *   -------------|-----------|------------|--------------------------------
+ *   phase        | #7DD3FC   | sky-300    | —
+ *   tool_call    | #C4B5FD   | violet-300 | —
+ *   message      | #E2E8F0   | slate-200  | —
+ *   result       | #FDE68A   | amber-200  | font-style: italic
+ *   error        | #FCA5A5   | red-300    | font-weight: 600; border-left: 3px solid #EF4444; padding-left: 6px
+ *   done         | #6EE7B7   | emerald-300| font-weight: 600
+ *   warning      | #FBBF24   | amber-400  | — (catch-all branch; · gutter)
+ *   user_input   | #94A3B8   | slate-400  | — (catch-all branch)
+ *   knowledge    | #5EEAD4   | teal-300   | — (catch-all branch)
+ *   prompt gutter| #FB923C   | orange-400 | (overridden to #FCA5A5 inside .sub-log-error)
+ * ────────────────────────────────────────────────────────────────────── */
 .sub-log-row {
   display: flex;
   gap: 8px;
@@ -646,13 +665,16 @@
   font-weight: 700;
 }
 .sub-log-text { flex: 1; min-width: 0; word-break: break-word; }
-.sub-log-phase   { color: #38BDF8; }
-.sub-log-tool_call { color: #A5B4FC; }
+.sub-log-phase   { color: #7DD3FC; }
+.sub-log-tool_call { color: #C4B5FD; }
 .sub-log-message { color: #E2E8F0; }
-.sub-log-result  { color: #E2E8F0; }
-.sub-log-error   { color: #FCA5A5; }
+.sub-log-result  { color: #FDE68A; font-style: italic; }
+.sub-log-error   { color: #FCA5A5; font-weight: 600; border-left: 3px solid #EF4444; padding-left: 6px; }
 .sub-log-error .sub-log-prompt { color: #FCA5A5; }
-.sub-log-done    { color: #6EE7B7; }
+.sub-log-done    { color: #6EE7B7; font-weight: 600; }
+.sub-log-warning    { color: #FBBF24; }
+.sub-log-user_input { color: #94A3B8; }
+.sub-log-knowledge  { color: #5EEAD4; }
 .sub-log-md {
   margin: 6px 0 4px;
   padding-left: 22px;

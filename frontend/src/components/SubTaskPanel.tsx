@@ -578,12 +578,13 @@ function SubTaskCard({
           // line appended to the visible log so the user can tell "流静默
           // 超时" apart from a hard crash. The retry/continue buttons below
           // already work the same way for both kinds — this is purely
-          // diagnostic. We use the existing 'phase' type so it picks up the
-          // phase styling already wired in SubTaskLogView without needing a
-          // new CSS class.
+          // diagnostic. 'warning' (not 'phase') so the hint picks up
+          // amber-400 via .sub-log-warning and renders as its own row
+          // in the catch-all branch — better visual delimiter than a
+          // phase-bucket tail.
           if (evt && (evt as any).error_kind === 'stalled') {
             setLines((prev) => appendLogLine(prev, {
-              type: 'phase',
+              type: 'warning',
               content: '⚠️ ' + t('components.subTaskPanel.stalledHint'),
               at: Date.now(),
             }));
