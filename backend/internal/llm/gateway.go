@@ -912,7 +912,15 @@ func summaryFallback(claudeMD string) string {
 // analysis+design context instead of being re-fed it.
 func (g *Gateway) GenerateCode(opts StreamOpts) (*exec.Cmd, context.CancelFunc) {
 	// Use a long timeout for coding tasks — real implementations can take many minutes.
+	// opts.HardTimeout is a caller-asserted minimum (e.g. Agent Server remote SSE,
+	// sub-task runner). 0 means "follow the gateway default" and the math below
+	// degenerates to the legacy behavior.
 	codingTimeout := g.timeout
+	if opts.HardTimeout > codingTimeout {
+		codingTimeout = opts.HardTimeout
+	}
+	// Floor still applies: callers cannot make a coding run shorter than
+	// 30 minutes (HardTimeout < 30m gets floored back).
 	if codingTimeout < 30*time.Minute {
 		codingTimeout = 30 * time.Minute
 	}
