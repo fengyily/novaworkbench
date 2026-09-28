@@ -1167,9 +1167,8 @@ func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platfo
 		b.WriteString(remote)
 		b.WriteString(" 上的 compare 链接创建 PR。\n")
 	}
-	b.WriteString("\n## PR 摘要要求\n")
-	b.WriteString("- PR 标题使用中文，一句话概括本次改动（不超过 40 字，不要以 `feat:` 等前缀开头）。\n")
-	b.WriteString("- PR 正文使用 Markdown，按「改动概述 / 主要变更 / 关键文件 / 验证方式」组织，简洁有重点。\n")
+	b.WriteString("\n")
+	b.WriteString(service.PRLangRules(commitLang))
 	b.WriteString("- 可执行 `git log origin/")
 	b.WriteString(base)
 	b.WriteString("..")
@@ -1373,14 +1372,18 @@ func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflic
 // generatePRSummary runs Claude (pr_author role) to organize a PR title + body
 // from the dev...base diff. Falls back to ("", "", model) on failure so the
 // caller degrades to reqRow.Title / reqRow.Description without blocking.
-func (h *MergeHandler) generatePRSummary(job *store.Job, devDir, base, dev string, reqRow *model.Requirement) (title, body, modelOut string) {
+// commitLang is the project's resolved commit language ("" / "zh" / "en" /
+// "mixed"); passed to service.PRLangRules so the user prompt carries an
+// explicit language block that overrides the pr_author role's hardcoded
+// Chinese instructions.
+func (h *MergeHandler) generatePRSummary(job *store.Job, devDir, base, dev string, reqRow *model.Requirement, commitLang string) (title, body, modelOut string) {
 	systemPrompt, model, claudeConfigID := h.roleConfig("pr_author")
 	modelOut = model
 	job.Append(store.LogLine{Type: "phase", Content: "📝 Claude 正在生成 PR 摘要..."})
 	prompt := fmt.Sprintf("请为本次开发分支的改动撰写 PR 描述。\n\n开发分支：%s\n主分支（base）：%s\n需求标题：%s\n需求描述：\n%s\n\n"+
 		"操作步骤：\n1. 运行 git diff origin/%s...%s 查看本次相对主分支的全部改动\n2. 必要时运行 git log 查看提交历史\n"+
-		"3. 结合需求理解改动意图\n4. 按 system prompt 要求的 JSON 格式输出 PR 标题与正文",
-		dev, base, reqRow.Title, reqRow.Description, base, dev)
+		"3. 结合需求理解改动意图\n4. 按 system prompt 要求的 JSON 格式输出 PR 标题与正文\n\n%s",
+		dev, base, reqRow.Title, reqRow.Description, base, dev, service.PRLangRules(commitLang))
 	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        devDir,

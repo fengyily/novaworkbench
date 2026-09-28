@@ -170,6 +170,47 @@ func TestResolveCommitLang(t *testing.T) {
 	}
 }
 
+// TestPRLangRules asserts the four language branches of PRLangRules:
+//   - en    → English title + Summary/Changes/Key Files/How Verified block
+//   - mixed → 中英混用, with both Chinese keywords
+//   - zh    → 改动概述 / 主要变更 / 关键文件 / 验证方式 中文块
+//   - ""    → identical to zh (zero regression for unresolved style)
+func TestPRLangRules(t *testing.T) {
+	en := PRLangRules("en")
+	if !strings.Contains(en, "English") {
+		t.Fatalf("en block must contain English, got: %q", en)
+	}
+	for _, kw := range []string{"Summary", "Changes", "Key Files", "How Verified"} {
+		if !strings.Contains(en, kw) {
+			t.Fatalf("en block must contain %q, got: %q", kw, en)
+		}
+	}
+	if strings.Contains(en, "改动概述") {
+		t.Fatalf("en block must not contain 中文 schema 改动概述, got: %q", en)
+	}
+
+	mixed := PRLangRules("mixed")
+	if !strings.Contains(mixed, "中英混用") {
+		t.Fatalf("mixed block must contain 中英混用, got: %q", mixed)
+	}
+	if !strings.Contains(mixed, "改动概述") {
+		t.Fatalf("mixed block must keep 中文 schema 改动概述, got: %q", mixed)
+	}
+
+	zh := PRLangRules("zh")
+	if !strings.Contains(zh, "中文") || !strings.Contains(zh, "改动概述") {
+		t.Fatalf("zh block must contain 中文/改动概述, got: %q", zh)
+	}
+	if !strings.Contains(zh, "PR 摘要要求") {
+		t.Fatalf("zh block must keep legacy heading PR 摘要要求 (zero regression), got: %q", zh)
+	}
+
+	empty := PRLangRules("")
+	if empty != zh {
+		t.Fatalf("empty block must equal zh block (zero regression), got: %q vs %q", empty, zh)
+	}
+}
+
 // mustRun is a helper that runs a git command in dir and fails the test on
 // error, surfacing stderr for easier debugging.
 func mustRun(t *testing.T, dir string, args ...string) {

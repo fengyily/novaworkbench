@@ -74,21 +74,49 @@ func containsHan(s string) bool {
 // StyleHint 根据 DB 读取的 lang 与 UI 上的 override 返回展示文本。
 // override 优先；lang 为空时返回空字符串。返回结果形如：
 //
-//	"📝 项目提交风格：中文"
-//	"📝 项目提交风格：English"
-//	"📝 项目提交风格：中英混用"
+//	"📝 项目提交风格：中文 — 强制要求：commit 信息、PR 标题、PR 正文必须全部使用中文"
+//	"📝 项目提交风格：English — 强制要求：commit messages, PR title, and PR body MUST all be in English"
+//	"📝 项目提交风格：中英混用 — commit 信息、PR 标题、PR 正文允许中英文混用，与项目历史风格保持一致"
 //
-// 两者皆空时返回空字符串，调用方应自行决定是否渲染。
+// 文案改成硬性指令（含"必须全部使用..."），用于在 prompt 末尾对 PRLangRules
+// 进行二次强化。两者皆空时返回空字符串，调用方应自行决定是否渲染。
 func StyleHint(lang, override string) string {
 	switch ResolveCommitLang(lang, override) {
 	case "zh":
-		return "📝 项目提交风格：中文"
+		return "📝 项目提交风格：中文 — 强制要求：commit 信息、PR 标题、PR 正文必须全部使用中文"
 	case "en":
-		return "📝 项目提交风格：English"
+		return "📝 项目提交风格：English — 强制要求：commit messages, PR title, and PR body MUST all be in English"
 	case "mixed":
-		return "📝 项目提交风格：中英混用"
+		return "📝 项目提交风格：中英混用 — commit 信息、PR 标题、PR 正文允许中英文混用，与项目历史风格保持一致"
 	default:
 		return ""
+	}
+}
+
+// PRLangRules 返回"PR 摘要语言规则"片段，注入到 buildPushSubTaskPrompt 与
+// generatePRSummary 的 user prompt 中。该片段强于 pr_author 角色 system
+// prompt 中的"中文/改动概述..."等硬编码指令；空值返回默认中文块，与未检测
+// 到语言时的现有行为一致（零回归）。
+//
+// 三种返回值：
+//   - en    — 强制英文 PR 标题 + Markdown 正文（## Summary / Changes / Key
+//     Files / How Verified）
+//   - mixed — 中英混用，与项目历史风格一致
+//   - "" / "zh" — 默认中文块（与旧硬编码指令同语义）
+func PRLangRules(lang string) string {
+	switch ResolveCommitLang(lang, "") {
+	case "en":
+		return "## PR 摘要语言规则（强制，覆盖 pr_author 角色默认中文规则）\n" +
+			"- PR title: one sentence in English, no more than 80 characters, no Conventional Commits prefix (`feat:`, `fix:`, etc.).\n" +
+			"- PR body: Markdown in English, organized as `## Summary / ## Changes / ## Key Files / ## How Verified`. Keep it concise.\n"
+	case "mixed":
+		return "## PR 摘要语言规则（强制，覆盖 pr_author 角色默认中文规则）\n" +
+			"- PR 标题：可用中文或英文，与项目既有提交历史风格保持一致（不超过 40 字，不要 Conventional Commits 前缀）。\n" +
+			"- PR 正文：Markdown，结构按「改动概述 / 主要变更 / 关键文件 / 验证方式」组织，可中英混用。\n"
+	default: // "" 或 "zh"：保持现有中文默认行为
+		return "## PR 摘要要求\n" +
+			"- PR 标题使用中文，一句话概括本次改动（不超过 40 字，不要以 `feat:` 等前缀开头）。\n" +
+			"- PR 正文使用 Markdown，按「改动概述 / 主要变更 / 关键文件 / 验证方式」组织，简洁有重点。\n"
 	}
 }
 
