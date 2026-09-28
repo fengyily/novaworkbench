@@ -324,15 +324,16 @@ export default function SettingsAgentServers() {
   // stream → parse `data:` lines → append to log. The actual SSE pump lives
   // in subscribeToJob so the mount-time reconnect path can reuse it without
   // clearing the log buffer (which would drop the history replay).
-  const startJob = useCallback(async (serverId: string, action: 'check' | 'install') => {
+  const startJob = useCallback(async (serverId: string, action: 'check' | 'install' | 'cleanup') => {
     setBusy((b) => ({ ...b, [serverId]: action }));
     setLogs((l) => ({ ...l, [serverId]: [] }));
 
     let jobId = '';
     try {
-      const res = action === 'check'
-        ? await agentServersApi.check(serverId)
-        : await agentServersApi.install(serverId);
+      let res;
+      if (action === 'check') res = await agentServersApi.check(serverId);
+      else if (action === 'install') res = await agentServersApi.install(serverId);
+      else res = await agentServersApi.cleanup(serverId);
       jobId = res.job_id;
     } catch (err) {
       setLogs((l) => ({ ...l, [serverId]: [...(l[serverId] ?? []), t('settings.agentServersPage.submitFailPrefix') + (err instanceof Error ? err.message : String(err))] }));
@@ -397,6 +398,10 @@ export default function SettingsAgentServers() {
               onDelete={() => handleDelete(s.id)}
               onCheck={() => startJob(s.id, 'check')}
               onInstall={() => startJob(s.id, 'install')}
+              onCleanup={() => {
+                if (!window.confirm(t('settings.agentServersPage.cleanupConfirm', { host: s.host }))) return;
+                void startJob(s.id, 'cleanup');
+              }}
               onCancel={() => cancelJob(s.id)}
             />
           ))}
@@ -664,7 +669,7 @@ function AgentInventoryPanel({ server }: { server: AgentServer }) {
 
 function ServerCard({
   server, logs, busy, testing, testResult,
-  onTest, onEdit, onDelete, onCheck, onInstall, onCancel,
+  onTest, onEdit, onDelete, onCheck, onInstall, onCleanup, onCancel,
 }: {
   server: AgentServer;
   logs: string[];
@@ -676,6 +681,7 @@ function ServerCard({
   onDelete: () => void;
   onCheck: () => void;
   onInstall: () => void;
+  onCleanup: () => void;
   onCancel: () => void;
 }) {
   const { t } = useTranslation();
@@ -725,6 +731,7 @@ function ServerCard({
         <div className="server-card-actions">
           <button className="btn" onClick={onCheck} disabled={busy !== ''}>{t('settings.agentServersPage.btnCheck')}</button>
           <button className="btn" onClick={onInstall} disabled={busy !== ''}>{t('settings.agentServersPage.btnInstall')}</button>
+          <button className="btn" onClick={onCleanup} disabled={busy !== ''}>{t('settings.agentServersPage.btnCleanup')}</button>
           <button className="btn" onClick={onTest} disabled={busy !== '' || testing}>
             {testing ? t('settings.agentServersPage.testInProgress') : t('settings.agentServersPage.testLabel')}
           </button>
