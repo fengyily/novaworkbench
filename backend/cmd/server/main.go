@@ -324,7 +324,7 @@ func main() {
 	// credential is sealed by internal/secret (AES-256-GCM); the wizard's
 	// StartCoding remote branch consumes this service when a request carries
 	// agent_server_id.
-	agentSvrH := handler.NewAgentServerHandler(agentSvrSvc, sharedJobs, projectSvc)
+	agentSvrH := handler.NewAgentServerHandler(agentSvrSvc, reqSvc, sharedJobs, projectSvc)
 
 	// Router
 	mux := http.NewServeMux()
@@ -432,6 +432,11 @@ func main() {
 	mux.HandleFunc("POST /api/settings/agent-servers/{id}/check", agentSvrH.Check)
 	mux.HandleFunc("POST /api/settings/agent-servers/{id}/install", agentSvrH.Install)
 	mux.HandleFunc("POST /api/settings/agent-servers/{id}/test", agentSvrH.TestConnection)
+	// Cleanup: scan + reclaim worktrees older than 7 days on this Agent server.
+	// TODO(per-route-permission): like its siblings, this route is not wrapped
+	// in middleware.RequirePermission; flag for maintainers to decide whether
+	// to gate the entire /api/settings/agent-servers block on a permission key.
+	mux.HandleFunc("POST /api/settings/agent-servers/{id}/cleanup", agentSvrH.Cleanup)
 	mux.HandleFunc("GET /api/settings/agent-servers/jobs/{id}", agentSvrH.GetJob)
 	mux.HandleFunc("GET /api/settings/agent-servers/jobs/{id}/stream", agentSvrH.StreamJob)
 
