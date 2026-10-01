@@ -420,6 +420,7 @@ func main() {
 	mux.HandleFunc("PUT /api/settings/tokens/{id}", platformH.Update)
 	mux.HandleFunc("DELETE /api/settings/tokens/{id}", platformH.Delete)
 	mux.HandleFunc("POST /api/settings/tokens/{id}/test", platformH.TestPlatformToken)
+	mux.HandleFunc("POST /api/settings/tokens/{id}/gpg/generate", platformH.GenerateGPGKey)
 
 	// Agent servers (settings) — remote Linux/macOS execution targets with
 	// AES-256-GCM-encrypted credentials. CRUD + Check/Install (background

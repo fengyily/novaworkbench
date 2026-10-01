@@ -366,6 +366,51 @@ func (s *PlatformTokenService) UpdateGPGKeyID(tokenID, keyID string) error {
 	return err
 }
 
+// SaveGeneratedGPGKey persists a key pair Nova just generated on behalf
+// of the user: it encrypts the armored private key, writes it together
+// with the key id, blanks the passphrase column and flips gpg_enabled on
+// — all in one statement, so a row can never end up "enabled with the
+// previous key id but the new ciphertext".
+//
+// The passphrase is cleared (not left as-is) because a generated key is
+// unprotected: keeping a stale passphrase from a previously pasted key
+// would make the runtime wrapper pass --passphrase-file to a key that
+// doesn't want one, which gpg rejects outright.
+//
+// Why the generation itself does not live here: the gpg script builders
+// and the exec plumbing sit in internal/handler (gpg.go / gpg_local.go,
+// shared with the provision path) and handler already imports service,
+// so a service → handler call would be an import cycle. The handler
+// therefore generates and calls this method to persist, which keeps the
+// DB write + AES-256-GCM encryption on this side of the layering exactly
+// like Create / Update do.
+func (s *PlatformTokenService) SaveGeneratedGPGKey(tokenID, keyID, armoredPrivateKey string) error {
+	if tokenID == "" {
+		return fmt.Errorf("token id is empty")
+	}
+	if armoredPrivateKey == "" {
+		return fmt.Errorf("armored private key is empty")
+	}
+	encKey, err := secret.Encrypt(armoredPrivateKey)
+	if err != nil {
+		return fmt.Errorf("encrypt gpg private key: %w", err)
+	}
+	res, err := s.db.Exec(
+		`UPDATE platform_tokens SET
+		   gpg_enabled = 1, gpg_key_id = ?, gpg_private_key = ?, gpg_passphrase = '',
+		   updated_at = ?
+		 WHERE id = ?`,
+		keyID, encKey, time.Now(), tokenID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("token not found: %s", tokenID)
+	}
+	return nil
+}
+
 // --- helpers ------------------------------------------------------------
 
 // encryptOptional returns "" unchanged (empty GPG fields are stored as

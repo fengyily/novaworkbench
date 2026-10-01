@@ -1501,7 +1501,24 @@ export const platformApi = {
   // block.
   test: (id: string) =>
     api.post<{ ok: boolean; username?: string | null }>(`/api/settings/tokens/${id}/test`, {}),
+  // Have the server generate a GPG key pair for this token (gpg runs on the
+  // Nova host). The private key is stored AES-256-GCM encrypted and the
+  // response is the ONLY time either half is readable — the public key is
+  // not persisted at all, so the caller must show it to the user straight
+  // away and must never write it to session/localStorage.
+  generateGpgKey: (id: string, data: { name: string; email: string }) =>
+    api.post<GeneratedGPGKey>(`/api/settings/tokens/${id}/gpg/generate`, data),
 };
+
+// One-time payload of POST /api/settings/tokens/{id}/gpg/generate. Lives
+// only in React state for as long as the disclosure modal is mounted.
+export interface GeneratedGPGKey {
+  private_key: string;
+  public_key: string;
+  key_id: string;
+  fingerprint: string;
+  uid: string;
+}
 
 // One model of a Claude config (platform) with per-million-token unit prices.
 // Binding prices to the config means each platform can carry different rates.

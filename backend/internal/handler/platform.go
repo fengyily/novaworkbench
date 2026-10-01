@@ -67,11 +67,21 @@ func (h *PlatformHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_PLATFORM", "platform 必须是 github、gitlab、gitea 或 bitbucket")
 		return
 	}
+	// Two-step GPG check: the cheap header match first (clear message for
+	// an obviously wrong paste), then a real `gpg --import` dry-run so a
+	// truncated / corrupt block is rejected now instead of at push time.
+	verifiedKeyID := ""
 	if req.GPGEnabled {
 		if msg, ok := validateArmoredKey(req.GPGPrivateKey); !ok {
 			writeError(w, http.StatusBadRequest, "INVALID_GPG_KEY", msg)
 			return
 		}
+		kid, _, _, vErr := verifyImportedGPGKey(req.GPGPrivateKey, req.GPGPassphrase)
+		if vErr != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_GPG_KEY", vErr.Error())
+			return
+		}
+		verifiedKeyID = kid
 	}
 
 	tok, err := h.svc.Create(
@@ -82,6 +92,15 @@ func (h *PlatformHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
+	}
+	// Back-fill the key id the dry-run already resolved so the UI shows the
+	// badge immediately rather than waiting for the first signed commit.
+	// Empty means the host has no gpg (verification skipped) — the runtime
+	// provision step still fills it in later.
+	if verifiedKeyID != "" {
+		if err := h.svc.UpdateGPGKeyID(tok.ID, verifiedKeyID); err == nil {
+			tok.GPGKeyID = verifiedKeyID
+		}
 	}
 	writeJSON(w, http.StatusCreated, tok.Redact())
 }
@@ -134,11 +153,18 @@ func (h *PlatformHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only validate the armored block when the user is actually replacing
 	// the key. clear_gpg=true intentionally ignores any new key material.
+	verifiedKeyID := ""
 	if !req.ClearGPG && req.GPGPrivateKey != "" {
 		if msg, ok := validateArmoredKey(req.GPGPrivateKey); !ok {
 			writeError(w, http.StatusBadRequest, "INVALID_GPG_KEY", msg)
 			return
 		}
+		kid, _, _, vErr := verifyImportedGPGKey(req.GPGPrivateKey, req.GPGPassphrase)
+		if vErr != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_GPG_KEY", vErr.Error())
+			return
+		}
+		verifiedKeyID = kid
 	}
 
 	if err := h.svc.Update(
@@ -152,12 +178,80 @@ func (h *PlatformHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
 	}
+	// The key id belongs to the key that was just stored — refresh it in the
+	// same request so the list badge never shows the previous key's id.
+	if verifiedKeyID != "" {
+		_ = h.svc.UpdateGPGKeyID(id, verifiedKeyID)
+	}
 	tok, err := h.svc.Get(id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, tok.Redact())
+}
+
+// GenerateGPGKey creates a brand-new GPG key pair for an existing token
+// row: Nova runs gpg locally, stores the private half AES-256-GCM
+// encrypted plus the key id, and returns both armored halves to the
+// caller ONE TIME so the user can back up the private key and upload the
+// public key to GitHub/GitLab/Gitea. Nothing in the response is ever
+// readable again — List/Get redact the key and the public half is not
+// persisted at all.
+//
+// POST /api/settings/tokens/{id}/gpg/generate
+//
+//	body: {name, email}
+func (h *PlatformHandler) GenerateGPGKey(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_ID", "缺少 token id")
+		return
+	}
+	var req struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.Email = strings.TrimSpace(req.Email)
+	if req.Name == "" || req.Email == "" {
+		writeError(w, http.StatusBadRequest, "MISSING_FIELDS", "name 和 email 不能为空")
+		return
+	}
+	// The UID goes verbatim into `gpg --quick-generate-key <uid>`; angle
+	// brackets and parentheses are gpg's own UID syntax, so a name
+	// containing them would silently produce a different UID than the user
+	// sees in the modal.
+	if strings.ContainsAny(req.Name, "<>()") || strings.ContainsAny(req.Email, "<>() ") {
+		writeError(w, http.StatusBadRequest, "INVALID_GPG_UID", "姓名不能包含 < > ( )，邮箱不能包含空格或 < > ( )")
+		return
+	}
+	if _, err := h.svc.Get(id); err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+		return
+	}
+
+	uid := req.Name + " <" + req.Email + ">"
+	privateKey, publicKey, keyID, fingerprint, parsedUID, err := generateLocalGPGKey(r.Context(), uid)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "GPG_GENERATE_FAILED", err.Error())
+		return
+	}
+	if err := h.svc.SaveGeneratedGPGKey(id, keyID, privateKey); err != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"private_key": privateKey,
+		"public_key":  publicKey,
+		"key_id":      keyID,
+		"fingerprint": fingerprint,
+		"uid":         parsedUID,
+	})
 }
 
 // validateArmoredKey returns (message, ok=false) when the supplied block

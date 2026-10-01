@@ -2,11 +2,14 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
+	"time"
 )
 
 // provisionLocalGPG mirrors provisionRemoteGPG for the local coding path:
@@ -127,6 +130,153 @@ func provisionLocalGPG(
 
 	cleanup = makeLocalGPGCleanup(home)
 	return home, parsedKeyID, cleanup, nil
+}
+
+// gpgGenerateTimeout caps the key-generation subprocess. Generation is
+// normally sub-second, but on a freshly booted VM with a drained entropy
+// pool gpg will block in the kernel's getrandom() instead of failing, and
+// an un-capped exec would hang the HTTP handler until the client gives
+// up. 30s is far beyond the happy path and short enough to return a
+// useful "entropy" hint while the user is still looking at the modal.
+const gpgGenerateTimeout = 30 * time.Second
+
+// generateLocalGPGKey creates a fresh GPG key pair for the given UID on
+// the local machine and returns both halves as ASCII-armored text.
+//
+// Everything happens in a throw-away GNUPGHOME that is removed before the
+// function returns — unlike provisionLocalGPG there is nothing to keep
+// alive afterwards, because the caller immediately encrypts the private
+// armor into platform_tokens and the runtime provision path re-imports it
+// into its own per-run home. That is why this function neither returns
+// the home path nor a cleanup closure (the plan sketched both): a secret
+// that only needs to live for the length of one request should not
+// outlive it.
+//
+// Errors are already user-facing Chinese strings — the HTTP layer maps
+// them straight into the GPG_GENERATE_FAILED envelope.
+func generateLocalGPGKey(ctx context.Context, uid string) (armoredPrivate, armoredPublic, keyID, fingerprint, parsedUID string, err error) {
+	if runtime.GOOS == "windows" {
+		return "", "", "", "", "", fmt.Errorf("本机生成 GPG 密钥暂不支持 Windows（缺少 /bin/sh），请手动生成后粘贴私钥")
+	}
+	if _, lookErr := exec.LookPath("gpg"); lookErr != nil {
+		return "", "", "", "", "", fmt.Errorf("本机未安装 gpg，请先安装 gnupg（macOS: brew install gnupg；Debian/Ubuntu: apt install gnupg）后重试")
+	}
+
+	home, mkErr := os.MkdirTemp("", "nova-gpg-gen-")
+	if mkErr != nil {
+		return "", "", "", "", "", fmt.Errorf("创建 GPG 临时目录失败：%w", mkErr)
+	}
+	// The key material written by the script (private.asc) must not
+	// survive the request, so the removal is unconditional and runs on
+	// every return path including the error ones.
+	defer func() { _ = os.RemoveAll(home) }()
+	if chmodErr := os.Chmod(home, 0700); chmodErr != nil {
+		return "", "", "", "", "", fmt.Errorf("设置 GPG 临时目录权限失败：%w", chmodErr)
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, gpgGenerateTimeout)
+	defer cancel()
+
+	script := buildGPGGenerateScript(home, uid)
+	cmd := exec.CommandContext(runCtx, "/bin/sh", "-c", script)
+	cmd.Env = append(os.Environ(), "GNUPGHOME="+home)
+	var outBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &outBuf
+	runErr := cmd.Run()
+	if runCtx.Err() == context.DeadlineExceeded {
+		return "", "", "", "", "", fmt.Errorf("生成 GPG 密钥超时（%s），通常是系统熵不足；请稍后重试，或在服务器上安装 haveged/rng-tools", gpgGenerateTimeout)
+	}
+	if runErr != nil {
+		return "", "", "", "", "", fmt.Errorf("生成 GPG 密钥失败（exit=%s）：%s",
+			exitCodeString(cmd), truncateForLog(strings.TrimSpace(outBuf.String()), 500))
+	}
+
+	keyID, fingerprint, parsedUID = parseGPGKeyInfoFromScriptOutput(outBuf.String())
+	if keyID == "" {
+		return "", "", "", "", "", fmt.Errorf("生成 GPG 密钥后未解析出 key id，请检查本机 gpg 是否能正常运行")
+	}
+	if parsedUID == "" {
+		// gpg echoes the uid back with colon-format escaping; when that
+		// parse comes back empty the requested uid is still the truth.
+		parsedUID = uid
+	}
+
+	priv, readErr := os.ReadFile(home + "/private.asc")
+	if readErr != nil {
+		return "", "", "", "", "", fmt.Errorf("读取生成的 GPG 私钥失败：%w", readErr)
+	}
+	pub, readErr := os.ReadFile(home + "/public.asc")
+	if readErr != nil {
+		return "", "", "", "", "", fmt.Errorf("读取生成的 GPG 公钥失败：%w", readErr)
+	}
+	if msg, ok := validateArmoredKey(string(priv)); !ok {
+		return "", "", "", "", "", fmt.Errorf("生成的 GPG 私钥格式异常：%s", msg)
+	}
+	return string(priv), string(pub), keyID, fingerprint, parsedUID, nil
+}
+
+// verifyImportedGPGKey is the save-time dry-run behind the Tokens form:
+// it imports the armored block into a throw-away GNUPGHOME and reports
+// what gpg found, without writing any git config or leaving state behind.
+// A corrupt / truncated / public-key-only paste fails here, at save time,
+// instead of hours later when a push is rejected.
+//
+// Two "cannot verify" cases return (all-empty, nil) rather than an error,
+// so saving still works:
+//
+//   - **Windows** — the script targets /bin/sh.
+//   - **No local gpg** — Nova can be driving an Agent Server that has gpg
+//     while the Nova host itself does not. Refusing the save would break
+//     that (previously working) setup, so we skip the check instead.
+//
+// The caller treats an empty keyID as "unverified, carry on" and only
+// back-fills gpg_key_id when it is non-empty.
+//
+// passphrase is accepted but intentionally unused: an armored private key
+// is encrypted inside itself and gpg only needs the passphrase at signing
+// time, so an import cannot tell a right passphrase from a wrong one.
+// Wrong passphrases stay covered at runtime by classifyGitSignFailure.
+func verifyImportedGPGKey(armoredKey, passphrase string) (keyID, fingerprint, uid string, err error) {
+	_ = passphrase
+
+	if runtime.GOOS == "windows" {
+		return "", "", "", nil
+	}
+	if _, lookErr := exec.LookPath("gpg"); lookErr != nil {
+		return "", "", "", nil
+	}
+
+	home, mkErr := os.MkdirTemp("", "nova-gpg-verify-")
+	if mkErr != nil {
+		return "", "", "", fmt.Errorf("创建 GPG 临时目录失败：%w", mkErr)
+	}
+	defer func() { _ = os.RemoveAll(home) }()
+	if chmodErr := os.Chmod(home, 0700); chmodErr != nil {
+		return "", "", "", fmt.Errorf("设置 GPG 临时目录权限失败：%w", chmodErr)
+	}
+	keyPath := home + "/key.asc"
+	if wfErr := os.WriteFile(keyPath, []byte(armoredKey), 0600); wfErr != nil {
+		return "", "", "", fmt.Errorf("写入 GPG 私钥文件失败：%w", wfErr)
+	}
+
+	runCtx, cancel := context.WithTimeout(context.Background(), gpgGenerateTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, "/bin/sh", "-c", buildGPGVerifyScript(home, keyPath))
+	cmd.Env = append(os.Environ(), "GNUPGHOME="+home)
+	var outBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &outBuf
+	if runErr := cmd.Run(); runErr != nil {
+		return "", "", "", fmt.Errorf("%s", gpgImportErrorMessage(outBuf.String()))
+	}
+
+	keyID, fingerprint, uid = parseGPGKeyInfoFromScriptOutput(outBuf.String())
+	if keyID == "" {
+		return "", "", "", fmt.Errorf("%s", gpgImportErrorMessage("gpg 未在导入结果中报告任何私钥"))
+	}
+	return keyID, fingerprint, uid, nil
 }
 
 // makeLocalGPGCleanup returns an idempotent rm-rf closure for the local

@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { platformApi, type PlatformToken } from '../api/client';
+import { platformApi, type PlatformToken, type GeneratedGPGKey } from '../api/client';
 import { errorMessage } from '../utils/errMsg';
 import { IconPlug, IconRefresh, IconCog, IconTrash, IconCheck } from '../components/icons';
+import GeneratedGPGKeyModal from '../components/GeneratedGPGKeyModal';
 import './Settings.css';
 
 const platformLabels: Record<string, string> = {
@@ -83,6 +84,18 @@ export default function SettingsTokens() {
   // auto-cleared by handleTest's setTimeout so a second test on a
   // different row can't be wiped out by an earlier row's timeout.
   const [justVerifiedId, setJustVerifiedId] = useState<string>('');
+  // GPG key source. 'paste' keeps the historical flow (user brings their
+  // own armored key); 'generate' hides those inputs and lets the server
+  // create the pair. The two are mutually exclusive so a half-filled
+  // textarea can never be submitted alongside a generated key.
+  const [gpgSource, setGpgSource] = useState<'paste' | 'generate'>('paste');
+  const [genName, setGenName] = useState('');
+  const [genEmail, setGenEmail] = useState('');
+  const [generating, setGenerating] = useState(false);
+  // The generated pair, held in React state only for as long as the
+  // disclosure modal is open — never written to any storage API.
+  const [generatedKey, setGeneratedKey] = useState<GeneratedGPGKey | null>(null);
+  const [showGenModal, setShowGenModal] = useState(false);
 
   const reload = async () => {
     try {
@@ -101,8 +114,20 @@ export default function SettingsTokens() {
     setEditingId('');
     setOriginalGpgEnabled(false);
     setForm(emptyForm);
+    resetGpgSource('', '');
     setError('');
     setShowModal(true);
+  };
+
+  // The generate form defaults to the token's git identity, since that is
+  // the identity the signed commits will carry — a UID email that differs
+  // from it (or is unverified on the platform) makes every commit show up
+  // as Unverified.
+  const resetGpgSource = (name: string, email: string) => {
+    setGpgSource('paste');
+    setGenName(name);
+    setGenEmail(email);
+    setGenerating(false);
   };
 
   const openEditModal = (tok: PlatformToken) => {
@@ -125,6 +150,7 @@ export default function SettingsTokens() {
       gpg_private_key: '',
       gpg_passphrase: '',
     });
+    resetGpgSource(tok.git_user_name ?? '', tok.git_user_email ?? '');
     setError('');
     setShowModal(true);
   };
@@ -133,22 +159,31 @@ export default function SettingsTokens() {
     setShowModal(false);
     setEditingId('');
     setOriginalGpgEnabled(false);
+    resetGpgSource('', '');
     setError('');
   };
 
-  const handleSave = async () => {
-    if (!form.name) {
-      setError(t('settings.tokens.errNameRequired'));
-      return;
-    }
+  // validateCommonFields covers the checks both "保存" and the generate
+  // button need: a generate on an unsaved row has to create the token
+  // first, and that INSERT has the same required-field contract as a
+  // normal save. Returns an error message, or '' when the form is usable.
+  const validateCommonFields = (): string => {
+    if (!form.name) return t('settings.tokens.errNameRequired');
     if (!editingId && !form.token) {
       // New token rows must carry a PAT; edits can leave it blank to keep
       // the existing secret.
-      setError(t('settings.tokens.errTokenRequired'));
-      return;
+      return t('settings.tokens.errTokenRequired');
     }
     if (!editingId && (form.platform === 'gitea' || form.platform === 'gitlab' || form.platform === 'bitbucket') && !form.base_url) {
-      setError(t('settings.tokens.errBaseUrlRequired', { platform: form.platform }));
+      return t('settings.tokens.errBaseUrlRequired', { platform: form.platform });
+    }
+    return '';
+  };
+
+  const handleSave = async () => {
+    const invalid = validateCommonFields();
+    if (invalid) {
+      setError(invalid);
       return;
     }
     // GPG validation: enabling requires a key on create (server stores the
@@ -157,7 +192,11 @@ export default function SettingsTokens() {
     const enablingGpg = !originalGpgEnabled && form.gpg_enabled;
     const disablingGpg = originalGpgEnabled && !form.gpg_enabled;
     if (enablingGpg && !form.gpg_private_key.trim()) {
-      setError(t('settings.tokens.errGpgKeyRequired'));
+      // In generate mode there is no textarea to fill — the key only exists
+      // once the user has actually pressed the generate button.
+      setError(gpgSource === 'generate'
+        ? t('settings.tokens.errGpgGenerateFirst')
+        : t('settings.tokens.errGpgKeyRequired'));
       return;
     }
 
@@ -200,6 +239,73 @@ export default function SettingsTokens() {
     } finally {
       setSaving(false);
     }
+  };
+
+  // handleGenerate asks the server to create a key pair for this token and
+  // opens the one-time disclosure modal with the result.
+  //
+  // Generation targets a persisted row (the server writes the ciphertext
+  // straight into platform_tokens), so on an unsaved form we create the
+  // token first — with GPG off, because there is no key yet — and then
+  // generate against the new id. The modal stays open in edit mode so the
+  // user can finish the rest of the form afterwards.
+  const handleGenerate = async () => {
+    const invalid = validateCommonFields();
+    if (invalid) {
+      setError(invalid);
+      return;
+    }
+    if (!genName.trim() || !genEmail.trim()) {
+      setError(t('settings.tokens.errGpgGenFieldsRequired'));
+      return;
+    }
+
+    setGenerating(true);
+    setError('');
+    try {
+      let tokenId = editingId;
+      if (!tokenId) {
+        const created = await platformApi.create({
+          name: form.name,
+          platform: form.platform,
+          base_url: form.base_url,
+          token: form.token,
+          git_user_name: form.git_user_name,
+          git_user_email: form.git_user_email,
+          gpg_enabled: false,
+        });
+        setTokens(prev => [created, ...prev]);
+        tokenId = created.id;
+        setEditingId(created.id);
+        // The PAT is now stored; blank the field so a later save doesn't
+        // re-send it as a rotation.
+        setForm(f => ({ ...f, token: '' }));
+      }
+
+      const payload = await platformApi.generateGpgKey(tokenId, {
+        name: genName.trim(),
+        email: genEmail.trim(),
+      });
+      setGeneratedKey(payload);
+      setShowGenModal(true);
+      // The server turned gpg_enabled on as part of the generate; mirror
+      // that locally (both as "current" and as "original") so a subsequent
+      // 保存 can't read as "the user just switched GPG off".
+      setForm(f => ({ ...f, gpg_enabled: true, gpg_private_key: '', gpg_passphrase: '' }));
+      setOriginalGpgEnabled(true);
+      await reload();
+    } catch (err: unknown) {
+      setError(`${t('settings.tokens.errGpgGenerateFailed')}${errorMessage(err)}`);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  // Closing the disclosure modal is the moment the plaintext key pair
+  // stops existing on the client — drop it from state immediately.
+  const closeGeneratedModal = () => {
+    setShowGenModal(false);
+    setGeneratedKey(null);
   };
 
   const handleDelete = async (id: string) => {
@@ -534,6 +640,75 @@ export default function SettingsTokens() {
 
             {(form.gpg_enabled || originalGpgEnabled) && (
               <>
+                {/* Key source. The two branches are mutually exclusive on
+                    purpose: 'generate' hides the paste inputs (and keeps
+                    them empty, so the save request never carries half of
+                    one flow and half of the other), 'paste' hides the
+                    generate inputs. */}
+                <div className="modal-field">
+                  <label className="checkbox-label">
+                    <input
+                      type="radio"
+                      name="gpg-source"
+                      checked={gpgSource === 'paste'}
+                      onChange={() => setGpgSource('paste')}
+                    />
+                    {' '}{t('settings.tokens.modal.gpgSourcePaste')}
+                  </label>
+                  <label className="checkbox-label">
+                    <input
+                      type="radio"
+                      name="gpg-source"
+                      checked={gpgSource === 'generate'}
+                      onChange={() => {
+                        setGpgSource('generate');
+                        setForm(f => ({ ...f, gpg_private_key: '', gpg_passphrase: '' }));
+                      }}
+                    />
+                    {' '}{t('settings.tokens.modal.gpgSourceGenerate')}
+                  </label>
+                </div>
+
+                {gpgSource === 'generate' && (
+                  <>
+                    <div className="modal-field">
+                      <label>{t('settings.tokens.modal.gpgGenNameLabel')}</label>
+                      <input
+                        className="form-input"
+                        placeholder={t('settings.tokens.modal.gpgGenNamePlaceholder')}
+                        value={genName}
+                        onChange={e => setGenName(e.target.value)}
+                      />
+                    </div>
+                    <div className="modal-field">
+                      <label>{t('settings.tokens.modal.gpgGenEmailLabel')}</label>
+                      <input
+                        className="form-input"
+                        placeholder={t('settings.tokens.modal.gpgGenEmailPlaceholder')}
+                        value={genEmail}
+                        onChange={e => setGenEmail(e.target.value)}
+                      />
+                      <div className="form-hint">
+                        {t('settings.tokens.modal.gpgGenHint')}
+                      </div>
+                    </div>
+                    <div className="modal-field">
+                      <button className="btn" onClick={handleGenerate} disabled={generating}>
+                        {generating
+                          ? t('settings.tokens.modal.gpgGenerating')
+                          : t('settings.tokens.modal.gpgGenerateBtn')}
+                      </button>
+                      {isEdit && originalGpgEnabled && (
+                        <div className="form-hint">
+                          {t('settings.tokens.modal.gpgGenOverwriteHint')}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+
+                {gpgSource === 'paste' && (
+                  <>
                 <div className="modal-field">
                   <label>
                     {t('settings.tokens.modal.gpgKeyLabel')}
@@ -561,6 +736,8 @@ export default function SettingsTokens() {
                     onChange={e => setForm(f => ({ ...f, gpg_passphrase: e.target.value }))}
                   />
                 </div>
+                  </>
+                )}
 
                 {isEdit && editingToken?.gpg_key_id && (
                   <div className="modal-field">
@@ -590,6 +767,17 @@ export default function SettingsTokens() {
           </div>
         </div>
       )}
+
+      {/* One-time plaintext disclosure of a generated key pair. Rendered
+          outside the edit modal so it stays on top of it, and unmounted
+          (payload dropped) the moment the user acknowledges. */}
+      <GeneratedGPGKeyModal
+        open={showGenModal}
+        payload={generatedKey}
+        platform={editingToken?.platform ?? form.platform}
+        baseUrl={editingToken?.base_url ?? form.base_url}
+        onClose={closeGeneratedModal}
+      />
     </div>
   );
 }
