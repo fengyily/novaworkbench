@@ -490,6 +490,15 @@ func main() {
 	mux.HandleFunc("GET /api/settings/git-sync", settingH.GetGitSyncConfig)
 	mux.HandleFunc("PUT /api/settings/git-sync", settingH.UpdateGitSyncConfig)
 
+	// Orchestration behaviour (settings) — global flag controlling whether
+	// the orchestration queue automatically flips a batch to "summarizing"
+	// once every child is terminal. Read live at the top of each tick
+	// (≤10s cadence), so a change needs no restart. Defaults to off when
+	// the key is missing, so freshly-upgraded installations start in the
+	// manual-summary mode without any operator action.
+	mux.HandleFunc("GET /api/settings/orchestration", settingH.GetOrchestration)
+	mux.HandleFunc("PUT /api/settings/orchestration", settingH.UpdateOrchestration)
+
 	// Database (settings) — driver info, connection test, save (takes effect
 	// on restart), and one-shot SQLite → MySQL/Postgres data migration.
 	mux.HandleFunc("GET /api/settings/database", databaseH.Get)

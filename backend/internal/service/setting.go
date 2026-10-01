@@ -63,6 +63,22 @@ const (
 	settingGitSyncTimeout = "git.sync_timeout_seconds"
 )
 
+// Setting key for the auto-summary trigger. Read on every orchestration tick
+// (10s cadence), so toggling it in the UI takes effect without restarting
+// the backend — same hot-reload pattern as the subtask settings above.
+//
+//   - orchestration.auto_summary: when true, an orchestration batch flips
+//     to "summarizing" automatically once every child is terminal (the
+//     pre-feature behaviour). When false (the product default), the batch
+//     stops at the new "awaiting_summary" state and waits for the user to
+//     click "📝 生成汇总" in the sub-task panel. Missing key / unparsable
+//     value / DB error all fail-safe to false so a broken row can never
+//     re-introduce the silent auto-trigger this whole flag exists to make
+//     configurable.
+const (
+	settingOrchestrationAutoSummary = "orchestration.auto_summary"
+)
+
 // Defaults + clamp limits for the design-stage sync timeout. The default 60s
 // matches the architecture decision; the [10, 600] envelope is enforced at
 // both read and write time so a bad payload can never be persisted in a
@@ -216,6 +232,35 @@ func (s *SettingService) SetSubTaskConfig(concurrency int, autoRetry bool, retry
 		return err
 	}
 	return s.Set(settingSubTaskRetryMax, strconv.Itoa(retryMax))
+}
+
+// AutoSummaryEnabled reports whether the orchestration queue should
+// automatically run a summary round after every batch's children reach
+// a terminal state. Missing key / unparsable value / DB error all
+// fail-safe to false (matches the product default: manual). The DB error
+// is still surfaced so callers can keep the last known good state in their
+// own logging, but the returned bool is always the safe value.
+func (s *SettingService) AutoSummaryEnabled() (bool, error) {
+	v, err := s.Get(settingOrchestrationAutoSummary)
+	if err != nil {
+		return false, err
+	}
+	if v == "" {
+		return false, nil
+	}
+	b, perr := strconv.ParseBool(strings.TrimSpace(v))
+	if perr != nil {
+		return false, nil
+	}
+	return b, nil
+}
+
+// SetAutoSummary upserts the orchestration.auto_summary flag. Stored as
+// the canonical "true"/"false" string via strconv.FormatBool (matches the
+// other boolean settings — subtask.auto_retry — so a SELECT scan stays
+// trivial).
+func (s *SettingService) SetAutoSummary(enabled bool) error {
+	return s.Set(settingOrchestrationAutoSummary, strconv.FormatBool(enabled))
 }
 
 // GitSyncTimeout returns the design-stage hard-sync timeout. Missing or
