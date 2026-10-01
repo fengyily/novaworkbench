@@ -29,7 +29,7 @@ func TestVerifyImportedGPGKey_HappyPath(t *testing.T) {
 	if err := os.Chmod(setupHome, 0700); err != nil {
 		t.Fatalf("chmod setupHome: %v", err)
 	}
-	setupScript := buildGPGGenerateScript(setupHome, "Verify Test", "verify@example.com")
+	setupScript := buildGPGGenerateScript(setupHome, "Verify Test <verify@example.com>")
 	t.Logf("script:\n%s", setupScript)
 	// Show what env we have for diagnostic
 	for _, kv := range os.Environ() {
@@ -44,7 +44,7 @@ func TestVerifyImportedGPGKey_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup --gen-key failed: %v\n%s", err, out)
 	}
-	setupKeyID, setupFPR, setupUID, _ := parseKeyIDFromScriptOutput(string(out))
+	setupKeyID, setupFPR, setupUID := parseGPGKeyInfoFromScriptOutput(string(out))
 	if setupKeyID == "" {
 		t.Fatalf("setup script did not emit NOVA_GPG_KEYID; output:\n%s", out)
 	}

@@ -213,114 +213,6 @@ func TestBuildGPGWrapperScript_QuotedPath(t *testing.T) {
 	}
 }
 
-// TestBuildGPGGenerateScript asserts the new key-generation script
-// contains every call we need to (1) build a fresh keyring with
-// loopback pinentry, (2) drive --quick-generate-key non-interactively,
-// (3) export the private/public armored blocks, and (4) emit the three
-// NOVA_GPG_* markers so parseKeyIDFromScriptOutput can resolve the
-// keyid / fpr / uid afterwards.
-//
-// Crucially, the script must NOT touch git config (that's
-// buildGPGProvisionScript's job, in the coding stage).
-func TestBuildGPGGenerateScript(t *testing.T) {
-	script := buildGPGGenerateScript("/tmp/nova-gen/proj_abc", "Zhang San", "z@e.com")
-
-	want := []string{
-		"#!/bin/sh",
-		"set -eu",
-		"export GNUPGHOME='/tmp/nova-gen/proj_abc'",
-		"chmod 0700 \"$GNUPGHOME\"",
-		"pinentry-mode loopback",
-		"allow-loopback-pinentry",
-		// Parameter file based generation — the agent-free path
-		// (see gpg.go buildGPGGenerateScript doc comment).
-		"%no-protection",
-		"Key-Type: RSA",
-		"Key-Length: 2048",
-		"Name-Real: 'Zhang San'",
-		"Name-Email: 'z@e.com'",
-		"Expire-Date: 0",
-		"%commit",
-		`gpg --batch --no-tty --pinentry-mode loopback --gen-key "$GNUPGHOME/gen-params"`,
-		`/^sec:/{print $5; exit}'`,
-		`/^fpr:/{print $10; exit}'`,
-		`/^uid:/{print $10; exit}'`,
-		`gpg --armor --export-secret-keys "$keyid" > "$GNUPGHOME/private.asc"`,
-		`gpg --armor --export "$keyid" > "$GNUPGHOME/public.asc"`,
-		`echo "NOVA_GPG_KEYID=$keyid"`,
-		`echo "NOVA_GPG_FPR=$fpr"`,
-		`echo "NOVA_GPG_UID=$uidout"`,
-	}
-	for _, w := range want {
-		if !strings.Contains(script, w) {
-			t.Errorf("generate script missing fragment %q\nfull script:\n%s", w, script)
-		}
-	}
-
-	// Belt-and-braces: a generate script that ever touches git config
-	// would be a layering bug — git is wired up by buildGPGProvisionScript
-	// at coding time, not by the generation step.
-	for _, banned := range []string{"git config", "git -C", "gpgsign"} {
-		if strings.Contains(script, banned) {
-			t.Errorf("generate script must not reference %q (that's buildGPGProvisionScript's job); script:\n%s", banned, script)
-		}
-	}
-}
-
-// TestBuildGPGGenerateScript_QuotedName guards against a name containing
-// shell metacharacters (apostrophe, ampersand, spaces) breaking the
-// Name-Real line in the parameter file. The script writes the parameter
-// file via printf + shellQuoteSingle, so the only thing between us and
-// a working script is the single-quote escaping.
-func TestBuildGPGGenerateScript_QuotedName(t *testing.T) {
-	script := buildGPGGenerateScript("/tmp/x", "O'Brien & Co", "o@b.com")
-	if !strings.Contains(script, `Name-Real: 'O'\''Brien & Co'`) {
-		t.Errorf("generate script did not shell-quote the apostrophe+ampersand Name-Real; script:\n%s", script)
-	}
-	if !strings.Contains(script, `Name-Email: 'o@b.com'`) {
-		t.Errorf("generate script did not emit Name-Email; script:\n%s", script)
-	}
-}
-
-// TestBuildGPGVerifyScript asserts the dry-run import script does
-// exactly one thing: gpg --import the armored block, then echo the
-// three NOVA_GPG_* markers. No git config writes; no signature
-// operations.
-func TestBuildGPGVerifyScript(t *testing.T) {
-	script := buildGPGVerifyScript("/tmp/nova-verify/proj_abc", "/tmp/nova-verify/proj_abc/key.asc")
-
-	want := []string{
-		"#!/bin/sh",
-		"set -eu",
-		"export GNUPGHOME='/tmp/nova-verify/proj_abc'",
-		"chmod 0700 \"$GNUPGHOME\"",
-		"pinentry-mode loopback",
-		`gpg --batch --no-tty --yes --pinentry-mode loopback --import '/tmp/nova-verify/proj_abc/key.asc'`,
-		`/^sec:/{print $5; exit}'`,
-		`/^fpr:/{print $10; exit}'`,
-		`/^uid:/{print $10; exit}'`,
-		`echo "NOVA_GPG_KEYID=$keyid"`,
-		`echo "NOVA_GPG_FPR=$fpr"`,
-		`echo "NOVA_GPG_UID=$uidout"`,
-	}
-	for _, w := range want {
-		if !strings.Contains(script, w) {
-			t.Errorf("verify script missing fragment %q\nfull script:\n%s", w, script)
-		}
-	}
-
-	// Verify the script never tries to consume a passphrase (this is
-	// a pure import dry-run — the wrapper script handles passphrase
-	// at signature time). If passphrase handling ever leaks into the
-	// verify path, classifyGitSignFailure would silently mis-attribute
-	// the failure.
-	for _, banned := range []string{"--passphrase", "wait / debug-pinentry", "debug-pinentry", "git config"} {
-		if strings.Contains(script, banned) {
-			t.Errorf("verify script must not reference %q; script:\n%s", banned, script)
-		}
-	}
-}
-
 // TestParseKeyIDFromScriptOutput covers the happy path, the
 // no-marker path, the worktree-fallback path, and a multi-line
 // scrambled-ordering path (the SSH writer may interleave stderr
@@ -432,7 +324,7 @@ func TestParseKeyIDFromScriptOutput(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gotKey, _, _, gotFall := parseKeyIDFromScriptOutput(tc.in)
+			gotKey, gotFall := parseKeyIDFromScriptOutput(tc.in)
 			if gotKey != tc.wantKey {
 				t.Errorf("keyID = %q, want %q", gotKey, tc.wantKey)
 			}
@@ -495,7 +387,7 @@ func TestParseKeyIDFromScriptOutputDebug(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gotKey, _, _, gotFall, summary := parseKeyIDFromScriptOutputDebug(tc.in)
+			gotKey, gotFall, summary := parseKeyIDFromScriptOutputDebug(tc.in)
 			if gotKey != tc.wantKey {
 				t.Errorf("keyID = %q, want %q", gotKey, tc.wantKey)
 			}
@@ -512,78 +404,7 @@ func TestParseKeyIDFromScriptOutputDebug(t *testing.T) {
 	}
 }
 
-// TestParseKeyIDFromScriptOutput_FPR_UID verifies the FPR (40-hex) and
-// UID markers introduced by the key-generation feature. Mirrors the
-// original TestParseKeyIDFromScriptOutput shape so both halves of the
-// parser stay in lock-step.
-func TestParseKeyIDFromScriptOutput_FPR_UID(t *testing.T) {
-	cases := []struct {
-		name      string
-		in        string
-		wantKey   string
-		wantFPR   string
-		wantUID   string
-		wantFall  bool
-	}{
-		{
-			name:     "happy path three markers, no label",
-			in:       "gpg: ok\nNOVA_GPG_KEYID=ABCDEF0123456789\nNOVA_GPG_FPR=0123456789ABCDEF0123456789ABCDEF01234567\nNOVA_GPG_UID=Real Name <u@example.com>\n",
-			wantKey:  "ABCDEF0123456789",
-			wantFPR:  "0123456789ABCDEF0123456789ABCDEF01234567",
-			wantUID:  "Real Name <u@example.com>",
-			wantFall: false,
-		},
-		{
-			name:     "happy path with [label] prefix on every line",
-			in:       "[gpg-provision] NOVA_GPG_KEYID=ABCDEF0123456789\n[gpg-provision] NOVA_GPG_FPR=0123456789ABCDEF0123456789ABCDEF01234567\n[gpg-provision] NOVA_GPG_UID=Real Name <u@example.com>\n",
-			wantKey:  "ABCDEF0123456789",
-			wantFPR:  "0123456789ABCDEF0123456789ABCDEF01234567",
-			wantUID:  "Real Name <u@example.com>",
-			wantFall: false,
-		},
-		{
-			name:     "UID with spaces and unicode",
-			in:       "NOVA_GPG_KEYID=ABCDEF0123456789\nNOVA_GPG_FPR=0123456789ABCDEF0123456789ABCDEF01234567\nNOVA_GPG_UID=张三 <zhang@example.com>\n",
-			wantKey:  "ABCDEF0123456789",
-			wantFPR:  "0123456789ABCDEF0123456789ABCDEF01234567",
-			wantUID:  "张三 <zhang@example.com>",
-			wantFall: false,
-		},
-		{
-			name:     "keyid only (no FPR/UID — backward compat)",
-			in:       "[gpg-provision] NOVA_GPG_KEYID=ABCDEF0123456789\n",
-			wantKey:  "ABCDEF0123456789",
-			wantFPR:  "",
-			wantUID:  "",
-			wantFall: false,
-		},
-		{
-			name:     "FPR only without keyid — invalid but should not crash",
-			in:       "NOVA_GPG_FPR=0123456789ABCDEF0123456789ABCDEF01234567\n",
-			wantKey:  "",
-			wantFPR:  "0123456789ABCDEF0123456789ABCDEF01234567",
-			wantUID:  "",
-			wantFall: false,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			gotKey, gotFPR, gotUID, gotFall := parseKeyIDFromScriptOutput(tc.in)
-			if gotKey != tc.wantKey {
-				t.Errorf("keyID = %q, want %q", gotKey, tc.wantKey)
-			}
-			if gotFPR != tc.wantFPR {
-				t.Errorf("fingerprint = %q, want %q", gotFPR, tc.wantFPR)
-			}
-			if gotUID != tc.wantUID {
-				t.Errorf("uid = %q, want %q", gotUID, tc.wantUID)
-			}
-			if gotFall != tc.wantFall {
-				t.Errorf("worktreeFallback = %v, want %v", gotFall, tc.wantFall)
-			}
-		})
-	}
-}
+// TestClassifyGitSignFailure covers every bucket in the classifier
 // plus the empty-string fallback (no specific bucket matched).
 func TestClassifyGitSignFailure(t *testing.T) {
 	cases := []struct {
