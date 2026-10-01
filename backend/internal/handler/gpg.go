@@ -161,18 +161,168 @@ func buildGPGWrapperScript(gnupgHome string) string {
 	return b.String()
 }
 
-// parseKeyIDFromScriptOutput extracts the key id and the worktree
-// fallback marker from the combined stdout of buildGPGProvisionScript.
-// Returns ("", false) when neither marker is present (caller treats
-// that as "script did not reach the success path"). Multi-line output
-// is supported — line ordering does not matter — because the SSH
-// runner concatenates command stdout/stderr into the writer in
-// arbitrary chunks.
+// buildGPGGenerateScript emits the body which produces a new gpg key
+// pair inside a fresh GNUPGHOME, then exports both private (with
+// secret subkeys) and public blocks to two ASCII-armored files the
+// caller can read back from the host filesystem.
+//
+// Parameters:
+//   - gnupgHome: directory the keyring / loopback config / exports
+//     live in. Caller owns the chmod 0700 (the script re-applies it
+//     as a belt-and-braces measure).
+//   - uid: the OpenPGP User-ID to bake into the key, formatted as
+//     `Real Name <email@example.com>`. Empty UID is rejected by gpg
+//     itself with a non-zero exit; the caller should validate first.
+//
+// The script writes three files for the caller:
+//   - $GNUPGHOME/private.asc — ASCII-armored private key block
+//     (gpg --armor --export-secret-keys)
+//   - $GNUPGHOME/public.asc  — ASCII-armored public key block
+//     (gpg --armor --export)
+//   - $GNUPGHOME/keyid/fpr/uid lines (NOVA_GPG_* markers, parsed by
+//     parseKeyIDFromScriptOutput)
+//
+// `default default never` is gpg's documented syntax for "RSA / RSA
+// / never expire" in --quick-generate-key. UID is quoted via
+// shellQuoteSingle so a name containing spaces / shell metachars
+// can't break the script.
+//
+// No passphrase is set — generateLocalGPGKey's caller stores the
+// passphrase column as '' in platform_tokens to keep the UX uniform
+// with the existing "无密码则留空" semantics. If a future revision
+// opts in to passphrase-protected generation, the easy extension is
+// to add `echo "$passphrase" | gpg --batch --pinentry-mode loopback
+// --passphrase-fd 0 --quick-add-uid ...` won't take (quick-generate-key
+// does not accept passphrase) — the user would have to drop down to
+// full `--batch --gen-key` with a parameter file.
+func buildGPGGenerateScript(gnupgHome, realName, email string) string {
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString("set -eu\n")
+	b.WriteString("export GNUPGHOME=" + shellQuoteSingle(gnupgHome) + "\n")
+	// Force gpg to skip the user's interactive gpg-agent. Without this,
+	// macOS (and any Linux host with a stale GPG_AGENT_INFO) refuses to
+	// generate keys because the agent's socket path no longer exists.
+	// Generating fresh material does not need an agent at all; the
+	// wrapper script (buildGPGWrapperScript) re-engages the agent at
+	// signature time on the coding host.
+	b.WriteString("unset GPG_AGENT_INFO\n")
+	b.WriteString("mkdir -p \"$GNUPGHOME\" && chmod 0700 \"$GNUPGHOME\"\n")
+	// Loopback pinentry so gpg never tries to spawn a curses UI; this
+	// is the same loopback config used by buildGPGProvisionScript and
+	// has to be present BEFORE --quick-generate-key runs.
+	b.WriteString("printf 'pinentry-mode loopback\\n' > \"$GNUPGHOME/gpg.conf\"\n")
+	b.WriteString("printf 'allow-loopback-pinentry\\n' > \"$GNUPGHOME/gpg-agent.conf\"\n")
+	// Parameter file: %no-protection disables passphrase; Key-Type +
+	// Key-Length mirrors --quick-generate-key's "default default"
+	// (RSA 2048-bit on gpg 2.x); Expire-Date: 0 == "never". realName /
+	// email are shellQuoteSingle'd so a name containing apostrophe /
+	// ampersand / spaces does not break the parameter file (which is
+	// then fed to gpg via redirection — escaping is a shell concern,
+	// not a gpg one). We use --batch --gen-key here (NOT
+	// --quick-generate-key) because the latter requires a running
+	// gpg-agent, which is fragile on macOS / hosts with stale
+	// GPG_AGENT_INFO.
+	b.WriteString("printf '%%no-protection\\nKey-Type: RSA\\nKey-Length: 2048\\nName-Real: " + shellQuoteSingle(realName) + "\\nName-Email: " + shellQuoteSingle(email) + "\\nExpire-Date: 0\\n%%commit\\n' > \"$GNUPGHOME/gen-params\"\n")
+	b.WriteString("gpg --batch --no-tty --pinentry-mode loopback --gen-key \"$GNUPGHOME/gen-params\"\n")
+	// Same 3-field column dump we rely on elsewhere; fpr is column 10 of
+	// the `fpr:` lines (always exactly 40 chars). Exit early if no
+	// secret key landed — gpg --quick-generate-key can silently noop
+	// on hosts with no entropy (rare, but `--version` does not
+	// pre-flight it).
+	b.WriteString("keyid=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/{print $5; exit}')\n")
+	b.WriteString("fpr=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')\n")
+	b.WriteString("uidout=$(gpg --list-secret-keys --with-colons | awk -F: '/^uid:/{print $10; exit}')\n")
+	b.WriteString("if [ -z \"$keyid\" ]; then\n")
+	b.WriteString("  echo \"[nova-gpg-gen] --gen-key 未产出 sec 行，可能熵不足或 Name-Real / Name-Email 非法\" >&2\n")
+	b.WriteString("  exit 1\n")
+	b.WriteString("fi\n")
+	// Export private (with secret subkeys) and public blocks. The
+	// caller reads both back via os.ReadFile; failure here bubbles
+	// up as gpg's own stderr ("can't export secret key: ... usually
+	// permission denied / missing trustdb).
+	b.WriteString("gpg --armor --export-secret-keys \"$keyid\" > \"$GNUPGHOME/private.asc\"\n")
+	b.WriteString("gpg --armor --export \"$keyid\" > \"$GNUPGHOME/public.asc\"\n")
+	// Markers last, so a non-zero exit anywhere above skips them and
+	// the caller can detect the failure by absence.
+	b.WriteString("echo \"NOVA_GPG_KEYID=$keyid\"\n")
+	b.WriteString("echo \"NOVA_GPG_FPR=$fpr\"\n")
+	b.WriteString("echo \"NOVA_GPG_UID=$uidout\"\n")
+	return b.String()
+}
+
+// buildGPGVerifyScript emits the body that imports an already-existing
+// ASCII-armored private key file into a fresh GNUPGHOME, then echoes
+// the keyid / fingerprint / UID markers so the caller can confirm the
+// block is parseable.
+//
+// Parameters:
+//   - gnupgHome: temp dir for the keyring + loopback config.
+//   - armoredKeyPath: absolute path to the armored block. The caller
+//     writes the block to a 0600 file inside gnupgHome and passes the
+//     path here, so the script does NOT need to embed the key.
+//
+// This script does NOT touch git config or run any signature
+// operations — it is a pure "can gpg parse this block" check, used as
+// a dry-run before persisting the ciphertext. The wrapper-script
+// provision step (buildGPGProvisionScript) does the real work.
+//
+// No passphrase is verified here — the armored block's passphrase
+// protection only matters at use time (gpg-agent / loopback prompt).
+// Wrong passphrase will surface later via classifyGitSignFailure
+// during the actual signature operation, which is consistent with
+// the existing pre-generation UX (no upfront passphrase check).
+func buildGPGVerifyScript(gnupgHome, armoredKeyPath string) string {
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString("set -eu\n")
+	b.WriteString("export GNUPGHOME=" + shellQuoteSingle(gnupgHome) + "\n")
+	// Force gpg to skip the user's interactive gpg-agent — see the
+	// matching comment in buildGPGGenerateScript for why this matters.
+	b.WriteString("unset GPG_AGENT_INFO\n")
+	b.WriteString("mkdir -p \"$GNUPGHOME\" && chmod 0700 \"$GNUPGHOME\"\n")
+	b.WriteString("printf 'pinentry-mode loopback\\n' > \"$GNUPGHOME/gpg.conf\"\n")
+	b.WriteString("printf 'allow-loopback-pinentry\\n' > \"$GNUPGHOME/gpg-agent.conf\"\n")
+	// --yes makes gpg accept "trust ultimately" without an interactive
+	// prompt, otherwise a new keyring always requires ownertrust = 5.
+	b.WriteString("gpg --batch --no-tty --yes --pinentry-mode loopback --import " + shellQuoteSingle(armoredKeyPath) + "\n")
+	b.WriteString("keyid=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/{print $5; exit}')\n")
+	b.WriteString("fpr=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')\n")
+	b.WriteString("uidout=$(gpg --list-secret-keys --with-colons | awk -F: '/^uid:/{print $10; exit}')\n")
+	b.WriteString("if [ -z \"$keyid\" ]; then\n")
+	b.WriteString("  echo \"[nova-gpg-verify] --import 未产出 sec 行，armored 私钥块可能损坏或不完整\" >&2\n")
+	b.WriteString("  exit 1\n")
+	b.WriteString("fi\n")
+	b.WriteString("echo \"NOVA_GPG_KEYID=$keyid\"\n")
+	b.WriteString("echo \"NOVA_GPG_FPR=$fpr\"\n")
+	b.WriteString("echo \"NOVA_GPG_UID=$uidout\"\n")
+	return b.String()
+}
+
+// parseKeyIDFromScriptOutput extracts the key id, fingerprint, UID and
+// the worktree fallback marker from the combined stdout of
+// buildGPGProvisionScript / buildGPGGenerateScript / buildGPGVerifyScript.
+// Returns ("", "", "", false) when none of the key-material markers are
+// present (caller treats that as "script did not reach the success
+// path"). Multi-line output is supported — line ordering does not
+// matter — because the SSH runner concatenates command stdout/stderr
+// into the writer in arbitrary chunks.
+//
+// Three markers share the same prefix/marker grammar so a single
+// line-walk handles all three:
+//
+//	NOVA_GPG_KEYID=<16+ hex chars>     — required, must always be emitted
+//	NOVA_GPG_FPR=<40 hex chars>        — fingerprint (optional, generated by
+//	                                     buildGPGGenerateScript / buildGPGVerifyScript;
+//	                                     absent in buildGPGProvisionScript which
+//	                                     predates this field)
+//	NOVA_GPG_UID=<uid line>            — the user-id string of the key
+//	                                     (optional, same scope as FPR)
 //
 // Remote path note: the SSH `pump` helper prepends `[<label>]` to every
 // line (see ssh/client.go `pump`). Without stripping that prefix here
-// the KEYID and FALLBACK markers would never match in the remote
-// provision flow — every line would look like
+// the KEYID / FPR / UID / FALLBACK markers would never match in the
+// remote provision flow — every line would look like
 // `[gpg-provision] NOVA_GPG_KEYID=…` and `strings.HasPrefix` against
 // the bare marker would silently miss.
 //
@@ -181,7 +331,7 @@ func buildGPGWrapperScript(gnupgHome string) string {
 //  1. Strip a leading `[<label>]` token when present; this normalises
 //     the remote flow into the same shape the local flow already has
 //     (no label).
-//  2. As a belt-and-braces fallback, also try to find `NOVA_GPG_KEYID=`
+//  2. As a belt-and-braces fallback, also try to find `NOVA_GPG_*=`
 //     anywhere in the (un-stripped) line. This protects against edge
 //     cases where the prefix didn't land cleanly (e.g. a stray leading
 //     whitespace, a future pump change, or a non-standard label) and
@@ -192,7 +342,11 @@ func buildGPGWrapperScript(gnupgHome string) string {
 // call failed and the script fell back to `--local`. Concurrent reqs
 // against the same base repo may then interfere; the caller should
 // surface this as a single warning to the user.
-func parseKeyIDFromScriptOutput(out string) (keyID string, worktreeFallback bool) {
+//
+// Callers that only care about the key id (e.g. provisionLocalGPG /
+// provisionRemoteGPG, which only set signingkey) destructure the new
+// return with `_` for fingerprint / uid.
+func parseKeyIDFromScriptOutput(out string) (keyID, fingerprint, uid string, worktreeFallback bool) {
 	// Match `NOVA_GPG_KEYID=` followed by 16+ hex chars. The leading
 	// "NOVA_GPG_KEYID=" prefix is unique to our marker (gpg itself
 	// never emits that string), so we don't risk a false positive.
@@ -200,6 +354,17 @@ func parseKeyIDFromScriptOutput(out string) (keyID string, worktreeFallback bool
 	// matching a value that happens to contain the substring
 	// "NOVA_GPG_KEYID=" inside a longer identifier.
 	keyIDRe := regexp.MustCompile(`(?:^|\s|[\[\(])NOVA_GPG_KEYID=([0-9A-Fa-f]{16,})`)
+	// FPR: 40 lowercase / uppercase hex chars (gpg emits uppercase by
+	// default, but we accept both). Anchoring follows the same word-
+	// boundary rule as KEYID.
+	fprRe := regexp.MustCompile(`(?:^|\s|[\[\(])NOVA_GPG_FPR=([0-9A-Fa-f]{40})`)
+	// UID: gpg prints UID strings in the form `Real Name <email>`. We
+	// deliberately allow spaces / angle brackets / `@` / hyphens — UID
+	// can include unicode. We anchor on the prefix and TrimSpace the
+	// captured group. Using a non-greedy "rest of the line" pattern
+	// keeps us safe against a stray newline embedded in a malformed
+	// UID (which gpg would already have rejected upstream).
+	uidRe := regexp.MustCompile(`(?:^|\s|[\[\(])NOVA_GPG_UID=(\S.*)`)
 	for _, line := range strings.Split(out, "\n") {
 		stripped := strings.TrimSpace(line)
 		// Strip a leading `[label]` token when present (remote path
@@ -213,8 +378,15 @@ func parseKeyIDFromScriptOutput(out string) (keyID string, worktreeFallback bool
 		// Pass 1: exact prefix match on the (possibly stripped) line —
 		// the happy path for both local (no prefix) and remote (label
 		// stripped).
-		if strings.HasPrefix(strippedForMatch, "NOVA_GPG_KEYID=") {
+		switch {
+		case strings.HasPrefix(strippedForMatch, "NOVA_GPG_KEYID="):
 			keyID = strings.TrimSpace(strings.TrimPrefix(strippedForMatch, "NOVA_GPG_KEYID="))
+			continue
+		case strings.HasPrefix(strippedForMatch, "NOVA_GPG_FPR="):
+			fingerprint = strings.TrimSpace(strings.TrimPrefix(strippedForMatch, "NOVA_GPG_FPR="))
+			continue
+		case strings.HasPrefix(strippedForMatch, "NOVA_GPG_UID="):
+			uid = strings.TrimSpace(strings.TrimPrefix(strippedForMatch, "NOVA_GPG_UID="))
 			continue
 		}
 		// Pass 2: regex fallback so a stray prefix / mid-line marker
@@ -225,6 +397,14 @@ func parseKeyIDFromScriptOutput(out string) (keyID string, worktreeFallback bool
 			keyID = m[1]
 			continue
 		}
+		if m := fprRe.FindStringSubmatch(line); len(m) == 2 {
+			fingerprint = m[1]
+			continue
+		}
+		if m := uidRe.FindStringSubmatch(line); len(m) == 2 {
+			uid = strings.TrimSpace(m[1])
+			continue
+		}
 		// Fallback marker is a single literal line. After stripping
 		// `[label]` (if present), equality match is enough; we don't
 		// need a regex because the marker has a unique suffix
@@ -233,7 +413,7 @@ func parseKeyIDFromScriptOutput(out string) (keyID string, worktreeFallback bool
 			worktreeFallback = true
 		}
 	}
-	return keyID, worktreeFallback
+	return keyID, fingerprint, uid, worktreeFallback
 }
 
 // parseKeyIDFromScriptOutputDebug is the diagnostic twin of
@@ -243,12 +423,16 @@ func parseKeyIDFromScriptOutput(out string) (keyID string, worktreeFallback bool
 // no marker? a stray `[` without `]`?) so the caller can log a
 // targeted hint when the provision fails. Keep this in lock-step
 // with the pure function above — both must agree on every input.
-func parseKeyIDFromScriptOutputDebug(out string) (keyID string, worktreeFallback bool, summary string) {
+func parseKeyIDFromScriptOutputDebug(out string) (keyID, fingerprint, uid string, worktreeFallback bool, summary string) {
 	keyIDRe := regexp.MustCompile(`(?:^|\s|[\[\(])NOVA_GPG_KEYID=([0-9A-Fa-f]{16,})`)
+	fprRe := regexp.MustCompile(`(?:^|\s|[\[\(])NOVA_GPG_FPR=([0-9A-Fa-f]{40})`)
+	uidRe := regexp.MustCompile(`(?:^|\s|[\[\(])NOVA_GPG_UID=(\S.*)`)
 	var (
 		nonEmptyLines int
 		strippedLines int
 		keyidHits     int
+		fprHits       int
+		uidHits       int
 		fallbackHits  int
 		oddLabels     int
 		lastNonEmpty  string
@@ -272,12 +456,27 @@ func parseKeyIDFromScriptOutputDebug(out string) (keyID string, worktreeFallback
 			// half-formed label.
 			oddLabels++
 		}
-		if strings.HasPrefix(stripped, "NOVA_GPG_KEYID=") {
+		switch {
+		case strings.HasPrefix(stripped, "NOVA_GPG_KEYID="):
 			keyidHits++
 			keyID = strings.TrimSpace(strings.TrimPrefix(stripped, "NOVA_GPG_KEYID="))
-		} else if m := keyIDRe.FindStringSubmatch(trimmed); len(m) == 2 {
-			keyidHits++
-			keyID = m[1]
+		case strings.HasPrefix(stripped, "NOVA_GPG_FPR="):
+			fprHits++
+			fingerprint = strings.TrimSpace(strings.TrimPrefix(stripped, "NOVA_GPG_FPR="))
+		case strings.HasPrefix(stripped, "NOVA_GPG_UID="):
+			uidHits++
+			uid = strings.TrimSpace(strings.TrimPrefix(stripped, "NOVA_GPG_UID="))
+		default:
+			if m := keyIDRe.FindStringSubmatch(trimmed); len(m) == 2 {
+				keyidHits++
+				keyID = m[1]
+			} else if m := fprRe.FindStringSubmatch(trimmed); len(m) == 2 {
+				fprHits++
+				fingerprint = m[1]
+			} else if m := uidRe.FindStringSubmatch(trimmed); len(m) == 2 {
+				uidHits++
+				uid = strings.TrimSpace(m[1])
+			}
 		}
 		if stripped == "NOVA_GPG_WORKTREE_FALLBACK=1" {
 			fallbackHits++
@@ -294,9 +493,9 @@ func parseKeyIDFromScriptOutputDebug(out string) (keyID string, worktreeFallback
 	case keyidHits == 0:
 		summary = fmt.Sprintf("脚本输出 %d 行但均不含 NOVA_GPG_KEYID=；最后一行: %q", nonEmptyLines, truncateForLog(lastNonEmpty, 120))
 	default:
-		summary = fmt.Sprintf("命中 NOVA_GPG_KEYID=%d 次", keyidHits)
+		summary = fmt.Sprintf("命中 NOVA_GPG_KEYID=%d 次 / FPR=%d 次 / UID=%d 次", keyidHits, fprHits, uidHits)
 	}
-	return keyID, worktreeFallback, summary
+	return keyID, fingerprint, uid, worktreeFallback, summary
 }
 
 // shortSHA256 returns the first 12 hex chars of the SHA-256 of s —

@@ -127,7 +127,7 @@ func provisionRemoteGPG(
 
 	// 4. Parse the marker line out of the script output.
 	captured := stdoutBuf.String()
-	parsedKeyID, worktreeFallback, parseSummary := parseKeyIDFromScriptOutputDebug(captured)
+	parsedKeyID, _, _, worktreeFallback, parseSummary := parseKeyIDFromScriptOutputDebug(captured)
 	if job != nil {
 		job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("🛠 [nova-gpg-debug] parser: keyID=%q worktreeFallback=%v summary=%s", parsedKeyID, worktreeFallback, parseSummary)})
 	}
@@ -219,7 +219,7 @@ func provisionRemoteGitIdentity(ctx context.Context, client *gossh.Client, job *
 	if exit != 0 || err != nil {
 		return fmt.Errorf("远程写入 git 身份失败（exit=%d）：%w", exit, err)
 	}
-	if _, fb := parseKeyIDFromScriptOutput(stdoutBuf.String()); fb {
+	if _, _, _, fb := parseKeyIDFromScriptOutput(stdoutBuf.String()); fb {
 		job.Append(store.LogLine{Type: "message", Content: "⚠️ 当前 git 不支持 worktree 级配置，已回落到仓库级（同项目并发开发时可能相互影响）"})
 	}
 	return nil

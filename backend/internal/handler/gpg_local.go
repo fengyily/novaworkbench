@@ -118,7 +118,7 @@ func provisionLocalGPG(
 	}
 
 	// 4. Parse the marker line out of the script output.
-	parsedKeyID, worktreeFallback := parseKeyIDFromScriptOutput(stdoutBuf.String())
+	parsedKeyID, _, _, worktreeFallback := parseKeyIDFromScriptOutput(stdoutBuf.String())
 	if parsedKeyID == "" {
 		_ = os.RemoveAll(home)
 		return "", "", noopCleanup, &gpgProvisionError{msg: "GPG provision 脚本未输出 keyid，请检查本机 gpg 是否能正常运行"}
@@ -153,4 +153,93 @@ func exitCodeString(cmd *exec.Cmd) string {
 		return "?"
 	}
 	return fmt.Sprintf("%d", cmd.ProcessState.ExitCode())
+}
+
+// verifyImportedGPGKey performs a dry-run import of an ASCII-armored
+// GPG private key into a fresh GNUPGHOME and returns the parsed
+// key id / fingerprint / UID. It deliberately does NOT touch git
+// config or run any signature operations — the caller's only goal is
+// to confirm that gpg itself can parse the supplied block, before we
+// persist it as AES-256-GCM ciphertext on platform_tokens.
+//
+// Why this lives in the handler package and not in service/ — it
+// shells out to the local `gpg` binary, which is exactly what
+// provisionLocalGPG does. Keeping the two together means the temp-home
+// choreography (MkdirTemp + chmod 0700 + sync.Once cleanup + Windows
+// guard) stays in lock-step.
+//
+// Windows note: same stance as provisionLocalGPG — /bin/sh is not on
+// PATH by default, so we surface a typed error rather than silently
+// falling back to cmd.exe.
+//
+// Passphrase handling: the armored block's passphrase protection only
+// matters at use time (gpg-agent / loopback prompt at signature time).
+// Wrong passphrase therefore does NOT cause this function to fail —
+// classifyGitSignFailure covers the runtime signature failure. Adding a
+// passphrase check here would require either a `gpgconf --kill gpg-
+// agent` race against the user's interactive agent, or a heavyweight
+// `gpg --decrypt <dummy>` call; both are out of scope for a save-time
+// dry-run.
+func verifyImportedGPGKey(armoredKey, passphrase string) (keyID, fingerprint, uid string, err error) {
+	_ = passphrase // documented unused: see function comment
+
+	if runtime.GOOS == "windows" {
+		return "", "", "", fmt.Errorf("GPG 私钥验证暂不支持 Windows（缺少 /bin/sh）")
+	}
+
+	// 1. Temp GNUPGHOME — sibling-of-worktree pattern, MkdirTemp picks
+	//    a unique name under the OS temp dir; we chmod 0700 as
+	//    belt-and-braces even though MkdirTemp already does it on POSIX.
+	home, mkErr := os.MkdirTemp("", "nova-gpg-verify-")
+	if mkErr != nil {
+		return "", "", "", fmt.Errorf("创建 GPG 临时目录失败：%w", mkErr)
+	}
+	if chmodErr := os.Chmod(home, 0700); chmodErr != nil {
+		_ = os.RemoveAll(home)
+		return "", "", "", fmt.Errorf("设置 GPG 临时目录权限失败：%w", chmodErr)
+	}
+
+	// 2. Write the armored block to a 0600 file inside GNUPGHOME.
+	//    The script reads from $GNUPGHOME/key.asc.
+	if wfErr := os.WriteFile(home+"/key.asc", []byte(armoredKey), 0600); wfErr != nil {
+		_ = os.RemoveAll(home)
+		return "", "", "", fmt.Errorf("写入 GPG 私钥文件失败：%w", wfErr)
+	}
+
+	// 3. Run the verify script. We capture stdout/stderr into the same
+	//    Buffer so the NOVA_GPG_* markers can be parsed without losing
+	//    any diagnostic context. The script completes in a few hundred
+	//    ms on a healthy host — we do NOT need a timeout here; a
+	//    genuinely hung gpg --import is itself the error path.
+	script := buildGPGVerifyScript(home, home+"/key.asc")
+	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd.Env = append(os.Environ(), "GNUPGHOME="+home)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if runErr := cmd.Run(); runErr != nil {
+		msg := gpgImportErrorMessage(buf.String())
+		if msg == "" {
+			msg = "❌ GPG 私钥导入失败（exit=" + exitCodeString(cmd) + "）"
+		}
+		_ = os.RemoveAll(home)
+		return "", "", "", fmt.Errorf("%s", msg)
+	}
+
+	// 4. Parse the markers — parseKeyIDFromScriptOutput handles the
+	//    KEYID / FPR / UID trio; if KEYID is empty the script reported
+	//    "未产出 sec 行" and exited non-zero, but we guard against it
+	//    here in case a future script variant emits FPR/UID without
+	//    KEYID (unlikely, but cheap to defend).
+	parsedKeyID, parsedFPR, parsedUID, _ := parseKeyIDFromScriptOutput(buf.String())
+	if parsedKeyID == "" {
+		_ = os.RemoveAll(home)
+		return "", "", "", fmt.Errorf("GPG 私钥导入失败：脚本未输出 keyid，armored 私钥块可能损坏")
+	}
+
+	// 5. Idempotent cleanup. The caller doesn't hold the cleanup
+	//    closure — this is a one-shot dry-run, the temp dir's lifetime
+	//    is exactly the duration of the script run.
+	_ = os.RemoveAll(home)
+	return parsedKeyID, parsedFPR, parsedUID, nil
 }
