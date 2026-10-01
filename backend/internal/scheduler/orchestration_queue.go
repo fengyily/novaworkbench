@@ -49,6 +49,14 @@ type SubTaskExecutor interface {
 	// and the terminal MarkSummary('done'|'error') + MarkCompleted() on
 	// success.
 	RunOrchestratorSummary(batchID string)
+	// OnBatchDrained fires once when an orchestration batch's children all
+	// reach a terminal state ("dispatching" + all sub-tasks terminal). The
+	// wizard handler uses this hook to dispatch the auto-push PR sub-task
+	// independently of the (now opt-in) summary round, so the split path's
+	// auto_push doesn't silently regress when auto_summary is off. The queue
+	// calls this in a goroutine so the tick itself stays short; callers may
+	// also freely block on whatever they need (DB reads, sub-task creation).
+	OnBatchDrained(batchID string)
 }
 
 // OrchestrationQueue polls orchestration_batches for active rows and
@@ -154,6 +162,22 @@ func NewOrchestrationQueue(
 		runSem:       globalSem,
 		staleAfter:   staleAfter,
 	}
+}
+
+// autoSummaryEnabled reads the orchestration.auto_summary flag for this
+// tick. Defaults to false (manual) when no setting service is wired or the
+// read fails — matches the product default and makes a settings hiccup
+// fail-safe to "user clicks the button", which is the same behavior the
+// UI ships with on a fresh install.
+func (q *OrchestrationQueue) autoSummaryEnabled() bool {
+	if q.settingSvc == nil {
+		return false
+	}
+	v, err := q.settingSvc.AutoSummaryEnabled()
+	if err != nil || !v {
+		return false
+	}
+	return true
 }
 
 // subTaskPolicy reads the current sub-task execution policy, pushing the
@@ -314,6 +338,10 @@ func (q *OrchestrationQueue) loop() {
 // ever invoked from the loop above, so this is defensive documentation
 // (matches scheduler.tick()).
 func (q *OrchestrationQueue) tick() {
+	// Read the auto_summary flag once per tick so a settings flip lands
+	// within one interval without a restart. Cheap KV hit; cheaper than
+	// re-reading per batch.
+	autoSummary := q.autoSummaryEnabled()
 	// Pull up to 20 active batches per tick. ListActive orders by updated_at
 	// ASC so a backlog drains FIFO; the limit caps per-tick work and the
 	// next tick picks up whatever didn't fit.
@@ -351,7 +379,7 @@ func (q *OrchestrationQueue) tick() {
 			// backend reboot. See selfHealStaleRunning docstring for the
 			// cutoff-vs-heartbeat safety reasoning.
 			q.selfHealStaleRunning(&batch)
-			q.tickDispatching(&batch, projectID, autoRetry, retryMax)
+			q.tickDispatching(&batch, projectID, autoRetry, retryMax, autoSummary)
 		case model.BatchSummarizing:
 			q.tickSummarizing(&batch, projectID)
 		}
@@ -381,8 +409,17 @@ func (q *OrchestrationQueue) tick() {
 //
 // On "no pending rows AND slot was released" we first give failed children a
 // chance to be re-armed (when the user enabled subtask.auto_retry), and only
-// then run the terminal-count path that flips the batch into summarizing.
-func (q *OrchestrationQueue) tickDispatching(batch *model.OrchestrationBatch, projectID string, autoRetry bool, retryMax int) {
+// then run the terminal-count path that flips the batch. When every child
+// is terminal, the next state depends on the autoSummary flag passed by tick():
+//
+//	autoSummary=true  → MarkSummarizing (legacy path; the queue then drives
+//	                    RunOrchestratorSummary on the next tick, whose
+//	                    tail-end push is what triggers autoPushPR).
+//	autoSummary=false → MarkAwaitingSummary; OnBatchDrained is fired
+//	                    asynchronously to drive autoPushPR from this same
+//	                    terminal-state moment, decoupling the push from the
+//	                    (now manual) summary round.
+func (q *OrchestrationQueue) tickDispatching(batch *model.OrchestrationBatch, projectID string, autoRetry bool, retryMax int, autoSummary bool) {
 	// (1) Non-blocking admission. If full, defer until the next tick — the DB
 	// row stays 'pending' so the UI shows "排队中" instead of a misleading
 	// "运行中".
@@ -441,11 +478,31 @@ func (q *OrchestrationQueue) tickDispatching(batch *model.OrchestrationBatch, pr
 		return
 	}
 	if batch.TotalChildren > 0 && done+errored >= batch.TotalChildren {
-		if err := q.batchSvc.MarkSummarizing(batch.ID); err != nil {
-			log.Printf("[orch] markSummarizing %s: %v", batch.ID, err)
-			return
+		if autoSummary {
+			// Legacy path: keep auto-firing the summary round. The tail-end
+			// autoPushPR inside RunOrchestratorSummary is responsible for
+			// triggering the "提交 → 推送 → 创建 PR" sub-task here.
+			if err := q.batchSvc.MarkSummarizing(batch.ID); err != nil {
+				log.Printf("[orch] markSummarizing %s: %v", batch.ID, err)
+				return
+			}
+			log.Printf("[orch] batch %s -> summarizing (%d done / %d errored)", batch.ID, done, errored)
+		} else {
+			// Manual-summary path: pause here, leave the batch in
+			// 'awaiting_summary' so the user can click "📝 生成汇总" on the
+			// sub-task panel. autoPushPR is decoupled from the summary round
+			// to avoid the regression where auto_summary=off silently disabled
+			// auto_push on the split path. Order matters: flip status first so
+			// OnBatchDrained reads a consistent state if it races with itself
+			// (it doesn't, but defensive).
+			if err := q.batchSvc.MarkAwaitingSummary(batch.ID); err != nil {
+				log.Printf("[orch] markAwaitingSummary %s: %v", batch.ID, err)
+				return
+			}
+			log.Printf("[orch] batch %s -> awaiting_summary (%d done / %d errored); queued OnBatchDrained",
+				batch.ID, done, errored)
+			go q.wizardH.OnBatchDrained(batch.ID)
 		}
-		log.Printf("[orch] batch %s -> summarizing (%d done / %d errored)", batch.ID, done, errored)
 	}
 }
 

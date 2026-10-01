@@ -43,6 +43,11 @@ type OrchestrationBatch struct {
 	// re-running the planning turn. Empty for batches created by the legacy
 	// [SUBTASKS_READY] path or the manual re-split.
 	Meta string
+	// AutoPushedAt records when this batch's auto-push PR dispatch fired.
+	// Set by ClaimAutoPush under an atomic UPDATE; subsequent attempts
+	// (e.g. the manual-summary round's tail-end push) see the non-NULL
+	// timestamp and no-op. Nullable so existing rows are valid.
+	AutoPushedAt          *time.Time
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
 	CompletedAt           *time.Time
@@ -54,6 +59,13 @@ const (
 	BatchSummarizing = "summarizing"
 	BatchCompleted   = "completed"
 	BatchErrored     = "errored"
+	// BatchAwaitingSummary means every child is terminal but no summary
+	// round has been kicked yet — the global setting auto_summary is off
+	// and the user must click "📝 生成汇总" manually. ListActive and
+	// GetActiveByRequirement deliberately skip this status so the tick
+	// loop doesn't churn on it and manual summary's 409 gate doesn't
+	// block it.
+	BatchAwaitingSummary = "awaiting_summary"
 
 	// Summary-round status (orthogonal to batch.Status).
 	SummaryPending = "pending"
