@@ -1142,6 +1142,32 @@ func (h *WizardHandler) GenerateSubTaskSummary(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Reuse branch: if the orchestration queue parked this requirement's
+	// latest batch in awaiting_summary (every child is terminal but
+	// auto_summary is off), flip that batch in place to summarizing and
+	// hand it back. We deliberately skip the new-batch path below because
+	// it would create a total_children=0 row whose existing children
+	// already carry the old batch_id, which makes ListByRange empty,
+	// which trips RunOrchestratorSummary's len(children)==0 early
+	// return — the UI would say "summary started" but coding_plan would
+	// never get the Markdown. The original batch's WorkDir,
+	// OrchestratorSessionID, and ClaudeConfigID are already persisted, so
+	// the summary goroutine can read them via batchSvc.Get on entry.
+	if pending, perr := h.batchSvc.GetAwaitingSummaryByRequirement(id); perr == nil && pending != nil {
+		if serr := h.batchSvc.MarkSummarizing(pending.ID); serr != nil {
+			writeError(w, http.StatusInternalServerError, "DB_ERROR", serr.Error())
+			return
+		}
+		if h.orchQueue != nil {
+			h.orchQueue.Kick()
+		}
+		writeJSON(w, http.StatusOK, map[string]string{
+			"job_id":   "",
+			"batch_id": pending.ID,
+		})
+		return
+	}
+
 	// Resolve the same runtime params tryAutoOrchestrate uses — the model +
 	// claude config the requirement was developed with (falling back to the
 	// developer role's), plus the requirement's worktree path so the summary
