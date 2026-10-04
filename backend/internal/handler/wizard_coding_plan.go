@@ -28,12 +28,25 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	promptpkg "github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
+)
+
+// Step-extraction retry budget. The HTTP LLM channel (llm/httpchat.go:175) is
+// hard-capped at 30s — once a 24KB plan + 8192 maxTokens overshoots that on
+// some providers we get "context deadline exceeded" and the whole split path
+// degrades to one coarse child. Three attempts is enough to absorb a single
+// transient blip without burning a multi-minute wait on a broken endpoint.
+// The fallback after exhaustion is unchanged: dispatch the whole plan as one
+// child (decomposePlanIntoSteps.fallback).
+const (
+	splitRetryMax       = 3
+	splitRetryBaseDelay = 1 * time.Second
 )
 
 // planSplitInput carries the state execStartCoding already resolved into
@@ -367,9 +380,53 @@ func (h *WizardHandler) decomposePlanIntoSteps(
 		return &orchestratorPayload{Subtasks: []orchestratedSubtask{{Title: title, Prompt: prompt}}}, ""
 	}
 
-	raw, err := h.llm.ExtractStepsFromPlan(planMarkdown)
-	if err != nil {
-		return fallback(err.Error())
+	// isRetryableSplitErr decides whether a failure from ExtractStepsFromPlan is
+	// worth retrying. Whitelist (not blacklist) — anything not explicitly a
+	// transient network/server-side hiccup is treated as terminal so config
+	// errors (e.g. "llm not configured: base_url and api_key required") short-
+	// circuit instead of wasting 90s of timeout + backoff on a problem that
+	// won't fix itself.
+	isRetryableSplitErr := func(errStr string) bool {
+		s := strings.ToLower(errStr)
+		return strings.Contains(s, "context deadline exceeded") ||
+			strings.Contains(s, "connection refused") ||
+			strings.Contains(s, "connection reset") ||
+			strings.Contains(s, "eof") ||
+			strings.Contains(s, "status 5") || // 5xx — covers 500/501/502/503/504 in one match
+			strings.Contains(s, "status 502") ||
+			strings.Contains(s, "status 503") ||
+			strings.Contains(s, "status 504") ||
+			strings.Contains(s, "empty response")
+	}
+
+	var (
+		raw   string
+		err   error
+		rawOK bool
+	)
+	for attempt := 1; attempt <= splitRetryMax; attempt++ {
+		raw, err = h.llm.ExtractStepsFromPlan(planMarkdown)
+		if err == nil {
+			rawOK = true
+			break
+		}
+		errStr := err.Error()
+		log.Printf("[coding-plan] %s: step extraction attempt %d/%d failed: %v", reqID, attempt, splitRetryMax, err)
+		if !isRetryableSplitErr(errStr) {
+			return fallback(errStr)
+		}
+		if attempt == splitRetryMax {
+			return fallback(fmt.Sprintf("重试 %d 次后仍失败：%s", splitRetryMax, errStr))
+		}
+		job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("🔄 步骤解析第 %d/%d 次重试（上次错误：%s）", attempt+1, splitRetryMax, truncateForLog(errStr, 120))})
+		// Exponential backoff: 1s, 2s, 4s (only sleeps 1s + 2s because the third
+		// attempt is the last and has nowhere to wait for).
+		time.Sleep(splitRetryBaseDelay << (attempt - 1))
+	}
+	if !rawOK {
+		// Defensive — every error branch already returned, so this is
+		// unreachable, but keeps the compiler happy and the intent obvious.
+		return fallback("步骤解析未返回结果")
 	}
 	payload := normalizePayload(decodeSubtasksPayload(extractJSON(raw)))
 	if payload == nil || len(payload.Subtasks) == 0 {
