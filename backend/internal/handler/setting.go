@@ -149,6 +149,55 @@ func (h *SettingHandler) UpdateSubTaskConfig(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, 200, SubTaskConfigResponse{Concurrency: concurrency, AutoRetry: autoRetry, RetryMax: retryMax})
 }
 
+// OrchestrationConfigResponse is the API shape for the orchestration
+// behaviour settings — currently only the auto-summary toggle. Mirrors
+// service.SettingService.AutoSummaryEnabled. The handler re-reads after
+// write so the response reflects the persisted state — same pattern as
+// the LLM / sub-task / git-sync handlers.
+type OrchestrationConfigResponse struct {
+	// AutoSummary controls whether an orchestration batch flips to
+	// "summarizing" automatically once every child is terminal. Default
+	// false: the batch stops at the new "awaiting_summary" state and
+	// waits for the user to click "📝 生成汇总" in the sub-task panel.
+	AutoSummary bool `json:"auto_summary"`
+}
+
+// GetOrchestration returns the current orchestration behaviour settings.
+func (h *SettingHandler) GetOrchestration(w http.ResponseWriter, r *http.Request) {
+	enabled, err := h.svc.AutoSummaryEnabled()
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, OrchestrationConfigResponse{AutoSummary: enabled})
+}
+
+// UpdateOrchestration persists the orchestration.auto_summary flag. The
+// write only touches the settings table — the orchestration tick re-reads
+// the value at the top of every loop, so the new value takes effect within
+// ≤10s without a restart and without this handler holding a reference to
+// the queue.
+func (h *SettingHandler) UpdateOrchestration(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		AutoSummary bool `json:"auto_summary"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	if err := h.svc.SetAutoSummary(req.AutoSummary); err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	// Re-read so the response reflects the persisted state.
+	enabled, err := h.svc.AutoSummaryEnabled()
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, OrchestrationConfigResponse{AutoSummary: enabled})
+}
+
 // UpdateLLM upserts the direct LLM channel configuration. An empty api_key
 // means "keep the existing secret" (so base-URL/model-only edits don't wipe
 // the key); set clear_api_key=true to explicitly remove the stored key.

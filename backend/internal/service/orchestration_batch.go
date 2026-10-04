@@ -142,6 +142,39 @@ func (s *OrchestrationBatchService) GetActiveByRequirement(reqID string) (*model
 	return scanBatch(rows)
 }
 
+// GetAwaitingSummaryByRequirement returns the most recent batch in the
+// awaiting_summary state for a requirement, or (nil, nil) when none
+// exists. Used by the manual-summary endpoint (GenerateSubTaskSummary) to
+// decide whether to reuse the existing batch in place — without this
+// check the endpoint would create a fresh total_children=0 batch whose
+// children all carry the OLD batch_id, tripping the len(children)==0
+// early return in RunOrchestratorSummary and silently producing no
+// summary while the UI reports success.
+//
+// Mirrors GetActiveByRequirement's contract: (nil, nil) for "no row",
+// a real error only when the SQL itself fails.
+func (s *OrchestrationBatchService) GetAwaitingSummaryByRequirement(reqID string) (*model.OrchestrationBatch, error) {
+	if reqID == "" {
+		return nil, errors.New("requirement_id is required")
+	}
+	rows, err := s.db.Query(batchSelectColumns+`
+		WHERE requirement_id=? AND status=?
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`,
+		reqID, model.BatchAwaitingSummary)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	return scanBatch(rows)
+}
+
 // GetLatestByRequirement returns the most recently created batch for a
 // requirement regardless of status (active OR terminal), or (nil, nil) when
 // no batch has ever been committed. Powers the
@@ -218,20 +251,87 @@ func (s *OrchestrationBatchService) MarkStatus(id, status string) error {
 	return err
 }
 
-// MarkSummarizing flips a dispatching batch into summarizing, resets the
-// summary heartbeat, and queues the next summary round. The AND status=
+// MarkAwaitingSummary flips a dispatching batch into awaiting_summary, which
+// means "every child is terminal but no summary round has been kicked yet."
+// The OrchestrationQueue calls it on the auto_summary=off path so the user can
+// manually trigger the summary round via the sub-task panel. The AND status=
 // 'dispatching' guard makes the transition atomic — a concurrent tick that
-// has already flipped the row to errored (e.g. user cancellation) won't have
-// its work silently overwritten.
+// has already flipped the row to errored (e.g. user cancellation) or to
+// summarizing (a manually-clicked summary racing the tick) won't have its
+// work silently overwritten.
+func (s *OrchestrationBatchService) MarkAwaitingSummary(id string) error {
+	if id == "" {
+		return errors.New("batch id is required")
+	}
+	_, err := s.db.Exec(`UPDATE orchestration_batches
+		SET status=?, updated_at=CURRENT_TIMESTAMP
+		WHERE id=? AND status=?`,
+		model.BatchAwaitingSummary, id, model.BatchDispatching)
+	return err
+}
+
+// MarkSummarizing flips a dispatching (or awaiting_summary) batch into
+// summarizing, resets the summary heartbeat, and queues the next summary
+// round. The AND status IN ('dispatching','awaiting_summary') guard makes
+// the transition atomic — a concurrent tick that has already flipped the
+// row to errored (e.g. user cancellation) won't have its work silently
+// overwritten. The two allowed source states reflect the two legitimate
+// call sites:
+//
+//   - OrchestrationQueue.tickDispatching, when auto_summary is on and every
+//     child is terminal (source status='dispatching')
+//   - GenerateSubTaskSummary (manual-summary endpoint), when reusing an
+//     existing awaiting_summary batch instead of creating a fresh one
+//     (source status='awaiting_summary')
 func (s *OrchestrationBatchService) MarkSummarizing(id string) error {
 	if id == "" {
 		return errors.New("batch id is required")
 	}
 	_, err := s.db.Exec(`UPDATE orchestration_batches
 		SET status=?, summary_status=?, updated_at=CURRENT_TIMESTAMP, summary_heartbeat_at=NULL
-		WHERE id=? AND status=?`,
-		model.BatchSummarizing, model.SummaryPending, id, model.BatchDispatching)
+		WHERE id=? AND status IN (?, ?)`,
+		model.BatchSummarizing, model.SummaryPending, id, model.BatchDispatching, model.BatchAwaitingSummary)
 	return err
+}
+
+// ClaimAutoPush atomically marks the batch's auto-push slot as taken by
+// setting auto_pushed_at = CURRENT_TIMESTAMP, but only when it's currently
+// NULL — the AND auto_pushed_at IS NULL guard makes this a one-shot
+// race-free claim. Returns (true, nil) when THIS caller won the race and
+// is responsible for dispatching the auto-push sub-task; (false, nil)
+// when a previous caller already claimed it.
+//
+// Used to collapse three independent call sites that all want to fire
+// "提交 → 推送 → 创建 PR" exactly once per orchestration batch:
+//   - OnBatchDrained (sub-task handler hook fired when every child
+//     reaches a terminal state — runs independently of the summary round
+//     so the default-off auto_summary setting doesn't silently regress
+//     auto_push)
+//   - the RunOrchestratorSummary early-exit branch (len(children)==0)
+//   - the RunOrchestratorSummary tail branch (after a successful summary)
+//
+// Without this guard, the OnBatchDrained path and the manual summary round
+// would each dispatch their own push sub-task, leaving the panel with two
+// "提交→推送→PR" rows for one requirement. The same guard also closes
+// the long-standing risk of a Recover()-restarted summary round
+// triggering a second push for an already-pushed batch.
+//
+// Requires the orchestration_batches.auto_pushed_at column added by the
+// data-model migration; missing-column errors surface here as a normal
+// SQL error so callers can log + bail.
+func (s *OrchestrationBatchService) ClaimAutoPush(id string) (bool, error) {
+	if id == "" {
+		return false, errors.New("batch id is required")
+	}
+	res, err := s.db.Exec(`UPDATE orchestration_batches
+		SET auto_pushed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+		WHERE id=? AND auto_pushed_at IS NULL`,
+		id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
 }
 
 // MarkSummary updates the summary_status column (pending | running | done |
@@ -423,23 +523,24 @@ func (s *OrchestrationBatchService) Recover() (int, error) {
 const batchSelectColumns = `SELECT id, requirement_id, orchestrator_session_id,
 	model, work_dir, claude_config_id, total_children,
 	status, summary_status, summary_job_id, summary_heartbeat_at,
-	summary_attempts, meta,
+	summary_attempts, meta, auto_pushed_at,
 	created_at, updated_at, completed_at
 	FROM orchestration_batches`
 
-// scanBatch maps one row to model.OrchestrationBatch. summary_heartbeat_at
-// and completed_at are nullable DATETIME columns, so we read them into
-// sql.NullTime and unwrap when present — that keeps the Go side a plain
-// *time.Time without forcing callers to handle sql.NullTime.
+// scanBatch maps one row to model.OrchestrationBatch. summary_heartbeat_at,
+// auto_pushed_at, and completed_at are nullable DATETIME columns, so we
+// read them into sql.NullTime and unwrap when present — that keeps the Go
+// side a plain *time.Time without forcing callers to handle sql.NullTime.
 func scanBatch(rows *sql.Rows) (*model.OrchestrationBatch, error) {
 	var b model.OrchestrationBatch
 	var heartbeat sql.NullTime
+	var autoPushedAt sql.NullTime
 	var completedAt sql.NullTime
 	if err := rows.Scan(
 		&b.ID, &b.RequirementID, &b.OrchestratorSessionID,
 		&b.Model, &b.WorkDir, &b.ClaudeConfigID, &b.TotalChildren,
 		&b.Status, &b.SummaryStatus, &b.SummaryJobID, &heartbeat,
-		&b.SummaryAttempts, &b.Meta,
+		&b.SummaryAttempts, &b.Meta, &autoPushedAt,
 		&b.CreatedAt, &b.UpdatedAt, &completedAt,
 	); err != nil {
 		return nil, err
@@ -447,6 +548,10 @@ func scanBatch(rows *sql.Rows) (*model.OrchestrationBatch, error) {
 	if heartbeat.Valid {
 		t := heartbeat.Time
 		b.SummaryHeartbeatAt = &t
+	}
+	if autoPushedAt.Valid {
+		t := autoPushedAt.Time
+		b.AutoPushedAt = &t
 	}
 	if completedAt.Valid {
 		t := completedAt.Time

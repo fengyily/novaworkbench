@@ -401,6 +401,7 @@ CREATE TABLE IF NOT EXISTS orchestration_batches (
 	meta                    TEXT NOT NULL DEFAULT '',
 	created_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
+	auto_pushed_at          DATETIME,
 	completed_at            DATETIME,
 	FOREIGN KEY (requirement_id) REFERENCES requirements(id) ON DELETE CASCADE
 );
@@ -858,6 +859,15 @@ var alterColumns = []string{
 	// (attempts >= SummaryMaxAttempts). Bumped atomically by RunOrchestratorSummary
 	// right after MarkSummary('running'), so a crash mid-round still counts.
 	`ALTER TABLE orchestration_batches ADD COLUMN summary_attempts INTEGER NOT NULL DEFAULT 0`,
+	// Auto-push claim timestamp: ClaimAutoPush atomically sets it when a
+	// caller wins the right to dispatch the "提交 → 推送 → PR" sub-task.
+	// Once non-NULL, later autoPushPR attempts (e.g. the manual summary
+	// round's tail-end push) see it and no-op, collapsing the long-standing
+	// risk of duplicate PR creation across OnBatchDrained + summary round.
+	// Nullable so legacy rows stay valid until the next claim; canonical
+	// DDL keeps it next to the other process-state timestamps
+	// (summary_heartbeat_at / completed_at).
+	`ALTER TABLE orchestration_batches ADD COLUMN auto_pushed_at DATETIME`,
 	// Per-project commit-message language for the "提交/PR 遵循项目历史风格"
 	// feature. commit_lang holds the auto-detected value (zh/en/mixed/'');
 	// commit_lang_override is the user-pinned value, always winning over the

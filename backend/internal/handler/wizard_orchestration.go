@@ -1392,6 +1392,55 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	log.Printf("[orchestrate] child %s (batch %s seq %d) finished status=%s", st.ID, batch.ID, st.BatchSeq, status)
 }
 
+// OnBatchDrained is the SubTaskExecutor hook fired by
+// scheduler.OrchestrationQueue.tick once every orchestration_batches row
+// reaches "all children terminal". Its job is to dispatch the auto-push
+// PR sub-task INDEPENDENTLY of whether a summary round runs, so the
+// split path's auto_push doesn't silently regress when the user has
+// disabled the (now opt-in) auto_summary setting.
+//
+// Why a dedicated hook (rather than reusing the existing tail-end
+// autoPushPR inside RunOrchestratorSummary): with auto_summary off the
+// summary round never fires, but the requirement's development is still
+// complete — children are done, code is on disk, the user just wants to
+// inspect the diff before letting the orchestrator spend another full
+// resume-session on a summary. Pushing the PR sub-task at this moment
+// keeps the "提交 → 推送 → 创建 PR" UX identical to today's behavior
+// while leaving the summary step to user discretion.
+//
+// Dedup contract: ClaimAutoPush is the SINGLE point that prevents
+// duplicate pushes. When auto_summary is on, this method fires first
+// (tick → MarkAwaitingSummary is also off, so we MarkSummarizing and
+// RunOrchestratorSummary's tail-end autoPushPR is the FIRST claim point);
+// the OnBatchDrained path is no-op in that case because it isn't called
+// (tickDispatching only calls OnBatchDrained on the awaiting_summary arm).
+// When auto_summary is off, this method fires at "all children
+// terminal"; if the user later triggers a manual summary round, that
+// round's tail-end autoPushPR will see auto_pushed_at != NULL and no-op
+// — no duplicate "提交→推送→PR" row on the user's panel.
+//
+// Best-effort: every dependency is nil-checked. A missing batchSvc,
+// reqSvc, or requirement row silently no-ops (the queue may have raced
+// with a cancel); a DB error on ClaimAutoPush is logged at the caller.
+func (h *WizardHandler) OnBatchDrained(batchID string) {
+	if h.batchSvc == nil || h.reqSvc == nil || batchID == "" {
+		return
+	}
+	batch, err := h.batchSvc.Get(batchID)
+	if err != nil || batch == nil {
+		return
+	}
+	req, err := h.reqSvc.Get(batch.RequirementID)
+	if err != nil || req == nil || !req.AutoPush {
+		return
+	}
+	claimed, cerr := h.batchSvc.ClaimAutoPush(batchID)
+	if cerr != nil || !claimed {
+		return
+	}
+	go h.autoPushPR(req)
+}
+
 // RunOrchestratorSummary is the summary-round entry point invoked from
 // scheduler.OrchestrationQueue.tick when a batch is in 'summarizing' state
 // with summary_status='pending'. Responsibilities:
@@ -1467,11 +1516,18 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 		log.Printf("[orchestrate] summary %s: no children found; mark done", batchID)
 		_ = h.batchSvc.MarkSummary(batchID, model.SummaryDone)
 		_ = h.batchSvc.MarkCompleted(batchID)
-		// Auto-push收尾: even with no children the batch is complete, so honor
-		// the auto_push intent. req is loaded below on the normal path; here we
-		// fetch it directly (best-effort) so this early exit ships too.
-		if r, rerr := h.reqSvc.Get(batch.RequirementID); rerr == nil && r != nil && r.AutoPush {
-			go h.autoPushPR(r)
+		// Auto-push收尾 (after ClaimAutoPush 抢占): when auto_summary is on this
+		// is the first claim point and we run autoPushPR as before. When
+		// auto_summary is off the OnBatchDrained hook has already claimed the
+		// slot by this point (see WizardHandler.OnBatchDrained), so
+		// ClaimAutoPush returns false and this branch no-ops — no duplicate
+		// "提交→推送→PR" sub-task row on the panel. req is loaded below on
+		// the normal path; here we fetch it directly (best-effort) so this
+		// early exit ships too.
+		if claimed, _ := h.batchSvc.ClaimAutoPush(batch.ID); claimed {
+			if r, rerr := h.reqSvc.Get(batch.RequirementID); rerr == nil && r != nil && r.AutoPush {
+				go h.autoPushPR(r)
+			}
 		}
 		return
 	}
@@ -1615,8 +1671,12 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 	// when the requirement opted in. This is the split counterpart to the
 	// non-split trigger in execStartCoding. Idempotent + goroutine-based, so a
 	// summary re-run after a restart can't corrupt anything (git push -u / PR
-	// creation both no-op when already applied).
+	// creation both no-op when already applied). ClaimAutoPush 抢占 — 见
+	// WizardHandler.OnBatchDrained 注释：auto_summary 关闭时 OnBatchDrained
+	// 已在「全部终态」时刻抢过槽位，此处 no-op，避免重复推送子任务行。
 	if req != nil && req.AutoPush {
-		go h.autoPushPR(req)
+		if claimed, _ := h.batchSvc.ClaimAutoPush(batch.ID); claimed {
+			go h.autoPushPR(req)
+		}
 	}
 }
