@@ -429,7 +429,7 @@
    so it reads as "intentional" rather than "broken"). */
 .sub-card-status-stopped {
   background: rgba(100, 116, 139, 0.12);
-  color: var(--color-text-secondary, #475569);
+  color: var(--color-text-secondary, #64748B);
 }
 
 /* Stop button — sits in the header-right next to the quickstats block
@@ -444,8 +444,8 @@
   padding: 2px 8px;
   border-radius: 6px;
   border: 1px solid var(--color-border, #e2e8f0);
-  background: var(--color-bg, #fff);
-  color: var(--color-text-secondary, #475569);
+  background: var(--color-bg, #F8FAFC);
+  color: var(--color-text-secondary, #64748B);
   cursor: pointer;
 }
 .sub-card-stop-btn:hover:not(:disabled) {
@@ -1233,3 +1233,291 @@
 .sub-card-usage .usage-bar { margin-bottom: 0; }
 .sub-card-usage .usage-bar-header { font-size: 11px; }
 .sub-card-usage .usage-bar-track { height: 3px; }
+
+/* === 手动子任务完成报告(per-card) ===
+ * 与 .sub-summary 同源的白底报告卡,但承载 phaseEmitted 三段折叠 — 结构
+ * = 横向 phase stepper + 三段 panel + 报告 header 元数据条 + artifact body
+ * (剥除头部 4 行)。与 .sub-summary 共享 --color-* 皮肤词汇。
+ */
+.sub-report {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-primary);
+  border-radius: 8px;
+  box-shadow: var(--shadow-card);
+  margin-top: 8px;
+  overflow: hidden;
+}
+.sub-report.is-status-error { border-left-color: var(--color-error); }
+.sub-report.is-status-stopped { border-left-color: var(--color-text-muted); }
+
+.sub-report-header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 20px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+.sub-report-header-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 28px;
+  flex-wrap: wrap;
+}
+.sub-report-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sub-report-status {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.sub-report-source {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  background: var(--color-hover);
+}
+.sub-report-source.is-auto {
+  border-color: var(--color-primary);
+  background: var(--color-active);
+  color: var(--color-primary);
+}
+.sub-report-spacer { flex: 1 1 auto; }
+
+.sub-report-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px 20px;
+  padding: 12px 20px;
+  background: var(--color-active);
+  border-bottom: 1px solid var(--color-border);
+}
+.sub-report-meta dl {
+  display: contents;       /* let dt/dd participate in grid */
+  margin: 0;
+}
+.sub-report-meta dt {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 2px;
+}
+.sub-report-meta dd {
+  font-size: 13px;
+  color: var(--color-text);
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sub-report-meta dd.is-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.sub-report-body {
+  padding: 16px 20px 20px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--color-text);
+}
+/* 与 .sub-summary-body 同步的 prose 规则 — 镜像 MarkdownViewer.css 的字号层级 */
+.sub-report-body > :first-child { margin-top: 0; }
+.sub-report-body > :last-child { margin-bottom: 0; }
+.sub-report-body h1, .sub-report-body h2,
+.sub-report-body h3, .sub-report-body h4 {
+  margin: 1.1em 0 0.4em;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--color-text);
+}
+.sub-report-body h1 { font-size: 18px; }
+.sub-report-body h2 { font-size: 15px; border-bottom: 1px solid var(--color-border); padding-bottom: 4px; }
+.sub-report-body h3 { font-size: 14px; }
+.sub-report-body h4 { font-size: 13px; }
+.sub-report-body p { margin: 6px 0; }
+.sub-report-body ul, .sub-report-body ol { padding-left: 20px; margin: 6px 0; }
+.sub-report-body li { margin: 2px 0; }
+.sub-report-body strong { font-weight: 600; color: var(--color-text); }
+.sub-report-body code {
+  background: var(--color-active);
+  color: var(--color-primary);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+.sub-report-body pre {
+  background: #0F172A;
+  color: #E2E8F0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 0.8em 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.sub-report-body pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: 12px;
+}
+.sub-report-body blockquote {
+  border-left: 3px solid var(--color-primary);
+  margin: 0.8em 0;
+  padding: 4px 14px;
+  color: var(--color-text-secondary);
+  background: var(--color-active);
+  border-radius: 0 6px 6px 0;
+}
+.sub-report-body table { border-collapse: collapse; margin: 0.8em 0; width: 100%; font-size: 12px; }
+.sub-report-body th, .sub-report-body td { border: 1px solid var(--color-border); padding: 6px 10px; text-align: left; }
+.sub-report-body th { background: var(--color-hover); font-weight: 600; }
+.sub-report-body a { color: var(--color-primary); text-decoration: underline; text-underline-offset: 2px; }
+.sub-report-body hr { border: none; border-top: 1px solid var(--color-border); margin: 1.2em 0; }
+
+/* 长 artifact 折叠淡出遮罩 — 复用 .sub-summary-body-wrap 模式 */
+.sub-report-body-wrap {
+  position: relative;
+  overflow: hidden;
+  max-height: none;
+  transition: max-height 0.25s ease;
+}
+.sub-report-body-wrap.is-collapsed { max-height: 320px; }
+.sub-report-body-wrap.is-collapsed::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 80px;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0), var(--color-surface, #ffffff));
+  pointer-events: none;
+}
+.sub-report-body-wrap.is-collapsed .sub-report-body > :last-child { padding-bottom: 16px; }
+
+.sub-report-toggle-btn {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--color-primary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.sub-report-toggle-btn:hover {
+  background: var(--color-hover);
+  border-color: var(--color-primary);
+}
+
+.sub-report-empty {
+  padding: 24px 20px;
+  color: var(--color-text-muted);
+  font-style: italic;
+  text-align: center;
+  font-size: 13px;
+}
+
+/* === 三段 phase stepper === */
+.sub-phase-stepper {
+  display: flex;
+  align-items: center;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+  gap: 0;
+}
+.sub-phase-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.sub-phase-step:hover {
+  background: var(--color-hover);
+  color: var(--color-text);
+}
+.sub-phase-step.is-complete {
+  color: var(--color-success-deep);
+  border-color: var(--color-success-soft);
+  background: var(--color-success-soft);
+}
+.sub-phase-step.is-active {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  background: var(--color-active);
+}
+.sub-phase-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-text-muted);
+  flex: 0 0 auto;
+}
+.sub-phase-step.is-complete .sub-phase-dot { background: var(--color-success); }
+.sub-phase-step.is-active .sub-phase-dot {
+  background: var(--color-primary);
+  animation: sub-phase-pulse 1.4s ease-in-out infinite;
+}
+.sub-phase-step.is-pending .sub-phase-dot {
+  background: var(--color-text-muted);
+  opacity: 0.5;
+}
+@keyframes sub-phase-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.85); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sub-phase-step.is-active .sub-phase-dot { animation: none; }
+}
+.sub-phase-rail {
+  flex: 0 0 24px;
+  height: 1px;
+  background: var(--color-border);
+  margin: 0 4px;
+}
+.sub-phase-rail.is-prev-complete { background: var(--color-success); }
+
+/* Phase panel container — 容纳 PhaseSection 渲染的折叠块。 */
+.sub-phase-panel {
+  border-bottom: 1px solid var(--color-border);
+}
+.sub-phase-panel:last-child { border-bottom: none; }
+.sub-phase-panel-body {
+  padding: 12px 20px 16px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--color-text);
+}

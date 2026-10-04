@@ -26,6 +26,7 @@ import AtMentionTextarea from './AtMentionTextarea';
 import ModelSelect from './ModelSelect';
 import ContextUsageBar from './ContextUsageBar';
 import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck } from './icons';
+import { fmtDateTime } from '../utils/intl';
 import './SubTaskPanel.css';
 
 // The header-right quickstats block (cost + ⏱) reads the persisted
@@ -143,6 +144,30 @@ const statusChipClass: Record<SubTaskStatus, string> = {
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   return s.slice(0, max) + '…';
+}
+
+// stripArtifactHeader removes the 4-line Markdown header that
+// `buildSubTaskArtifact` (backend/internal/handler/wizard_subtask.go:1329-1351)
+// prepends to every artifact. The structured ReportHeader renders those
+// fields itself, so the body only carries Claude's raw output.
+//
+// Header shape (note \n\n between fields):
+//   # 子任务: <title>
+//   <blank>
+//   **提示词**: <prompt>
+//   <blank>
+//   **完成时间**: YYYY-MM-DD HH:MM:SS  **模型**: <model>
+//   <blank>
+//   ---
+//   <blank>
+//   <body>
+//
+// If the regex does not match (older artifact without # 子任务: line),
+// return md unchanged so the UI degrades to the legacy inline-bold view.
+function stripArtifactHeader(md: string): string {
+  if (!md) return md;
+  const header = /^# 子任务:[^\n]*\n\n(?:\*\*提示词\*\*:[^\n]*\n\n)?(?:\*\*完成时间\*\*:[^\n]*\*\*模型\*\*:[^\n]*\n\n)?---\n+/;
+  return md.replace(header, '');
 }
 
 // timeAgo renders a small "N seconds ago / N minutes ago / N hours ago"
@@ -303,23 +328,81 @@ function PhaseSection({
   const [open, setOpen] = useState<boolean>(defaultOpen);
   if (!markdown) return null;
   return (
-    <div className="sub-card-phase-section">
+    <div className={`sub-phase-panel${active ? ' is-active' : ''}`}>
       <button
         type="button"
-        className="sub-card-phase-toggle"
+        className={`sub-phase-step${active ? ' is-active' : ''}${open ? ' is-open' : ''}`}
         onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
       >
-        <span className="sub-card-phase-title">
-          <span className="sub-card-phase-emoji">{emoji}</span> {title}
-          {active && <span className="sub-card-phase-spinner"> ⏳</span>}
-        </span>
-        <span className="sub-card-phase-arrow">{open ? '▾' : '▸'}</span>
+        <span className="sub-phase-dot" aria-hidden="true" />
+        <span className="sub-phase-emoji">{emoji}</span>
+        <span className="sub-phase-title">{title}</span>
+        {active && <span className="sub-phase-spinner"> ⏳</span>}
+        <span className="sub-phase-arrow">{open ? '▾' : '▸'}</span>
       </button>
       {open && (
-        <div className="sub-card-phase-body">
+        <div className="sub-phase-panel-body">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
         </div>
       )}
+    </div>
+  );
+}
+
+// ReportHeader renders the structured metadata strip ABOVE the artifact
+// body. It replaces the inline-bold `**提示词** / **完成时间** / **模型**`
+// fields that `buildSubTaskArtifact` prepends — those are now stripped by
+// `stripArtifactHeader` and re-presented as a labeled dl/dt/dd grid.
+function ReportHeader({ st }: { st: SubTask }) {
+  const { t } = useTranslation();
+
+  // Cost: mirror the inline pattern at SubTaskPanel.tsx:848-850
+  const costText =
+    st.cost_cents > 0
+      ? st.cost_cents >= 100
+        ? `$${(st.cost_cents / 100).toFixed(2)}`
+        : `$${(st.cost_cents / 100).toFixed(3)}`
+      : '—';
+
+  const completedAt = st.completed_at ?? st.started_at;
+
+  return (
+    <div className="sub-report-meta">
+      <dl>
+        <div>
+          <dt>{t('components.subTaskCard.reportMetaPrompt')}</dt>
+          <dd className="is-mono" title={st.prompt ?? ''}>
+            {st.prompt ? truncate(st.prompt, 80) : '—'}
+          </dd>
+        </div>
+        <div>
+          <dt>{t('components.subTaskCard.reportMetaCompletedAt')}</dt>
+          <dd className="is-mono">
+            {completedAt ? fmtDateTime(completedAt) : '—'}
+          </dd>
+        </div>
+        <div>
+          <dt>{t('components.subTaskCard.reportMetaModel')}</dt>
+          <dd className="is-mono">{st.model ?? '—'}</dd>
+        </div>
+        <div>
+          <dt>{t('components.subTaskCard.reportMetaDuration')}</dt>
+          <dd className="is-mono">
+            {st.duration_seconds && st.duration_seconds > 0 ? fmtDuration(st.duration_seconds) : '—'}
+          </dd>
+        </div>
+        <div>
+          <dt>{t('components.subTaskCard.reportMetaCost')}</dt>
+          <dd className="is-mono">{costText}</dd>
+        </div>
+        {(st.retry_count ?? 0) > 0 && (
+          <div>
+            <dt>{t('components.subTaskCard.reportMetaRetry')}</dt>
+            <dd className="is-mono">×{st.retry_count}</dd>
+          </div>
+        )}
+      </dl>
     </div>
   );
 }
@@ -864,6 +947,18 @@ function SubTaskCard({
     onToggleCollapse?.();
   };
 
+  // Report-header derivations: status chip + source badge classes & i18n
+  // keys. Reuses the module-level `statusLabelKeys` (L120-126) and
+  // `statusChipClass` (L134-140) — both fully-qualified i18n keys + chip
+  // class names that the rest of the panel already uses. The source
+  // badge matches the inline pattern at L916-925.
+  const reportStatusKey = statusLabelKeys[st.status] ?? statusLabelKeys.pending;
+  const reportChipClass = statusChipClass[st.status] ?? statusChipClass.pending;
+  const isAutoSource = st.source === 'auto' || (!st.source && !!st.batch_id);
+  const sourceKey = isAutoSource ? 'sourceAuto' : 'sourceManual';
+  const sourceTitleKey = isAutoSource ? 'sourceAutoTitle' : 'sourceManualTitle';
+  const sourceClass = `sub-report-source${isAutoSource ? ' is-auto' : ''}`;
+
   return (
     <article
       className={`sub-card sub-card-${st.status}${depth > 0 ? ' sub-card-child' : ''}`}
@@ -1083,10 +1178,33 @@ function SubTaskCard({
           {/* Live log (streaming) — full-width terminal scrollback. */}
           {streaming && <SubTaskLogView lines={lines} />}
 
-          {/* Artifact (finished) — full-width Markdown report. */}
-          {!streaming && (st.status === 'done' || st.status === 'error') && artifact && (
-            <div className="sub-card-artifact">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{artifact}</ReactMarkdown>
+          {/* Finished-report card — replaces the legacy .sub-card-artifact
+              dark slab with a structured white card: report header → metadata
+              strip → body. stopped rows also flow through this branch since
+              they have an artifact (with the "⏹ 用户中止" banner prefix). */}
+          {!streaming && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && artifact && (
+            <div className={`sub-report is-status-${st.status}`}>
+              <div className="sub-report-header">
+                <div className="sub-report-header-row">
+                  <h3 className="sub-report-title">
+                    {st.title || t('components.subTaskCard.noTitle')}
+                  </h3>
+                  <span className={reportChipClass}>
+                    {t(reportStatusKey)}
+                  </span>
+                  {isAutoSource && (
+                    <span className={sourceClass} title={t(`components.subTaskCard.${sourceTitleKey}`)}>
+                      🪄 {t(`components.subTaskCard.${sourceKey}`)}
+                    </span>
+                  )}
+                </div>
+                <ReportHeader st={st} />
+              </div>
+              <div className="sub-report-body">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {stripArtifactHeader(artifact)}
+                </ReactMarkdown>
+              </div>
             </div>
           )}
 
@@ -1098,8 +1216,8 @@ function SubTaskCard({
               window is misleading: the row IS done, we just haven't
               fetched the artifact Markdown yet. The guard below matches
               the one above so the two branches stay symmetric. */}
-          {!streaming && (st.status === 'done' || st.status === 'error') && !artifact && (
-            <div className="sub-card-empty">{t('components.subTaskCard.noArtifact')}</div>
+          {!streaming && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && !artifact && (
+            <div className="sub-report-empty">{t('components.subTaskCard.noArtifact')}</div>
           )}
 
           {/* 🪙 Token + cost strip — moved to the header-right quickstats
@@ -1973,39 +2091,43 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           has produced one. Only renders when requirement.coding_plan is
           non-empty (manual-only flows leave it blank). */}
       {hasSummary && (
-        <div className="sub-summary">
-          <header className="sub-summary-header">
-            <span className="sub-summary-icon" aria-hidden="true"><IconDashboard size={14} /></span>
-            <span className="sub-summary-title">{t('components.subTaskPanel.summaryTitle')}</span>
-            <span className="sub-summary-actions">
-              <button
-                type="button"
-                className="sub-summary-action-btn"
-                onClick={handleSummaryCopy}
-                title={t('components.subTaskPanel.summaryCopyBtn')}
-                aria-label={t('components.subTaskPanel.summaryCopyBtn')}
-                data-copied={summaryCopied ? 'true' : 'false'}
-              >
-                {summaryCopied ? <IconCheck size={13} /> : <IconCopy size={13} />}
-              </button>
-            </span>
+        <div className="sub-report is-status-done">
+          <header className="sub-report-header">
+            <div className="sub-report-header-row">
+              <span className="sub-summary-icon" aria-hidden="true"><IconDashboard size={14} /></span>
+              <span className="sub-summary-title">{t('components.subTaskPanel.summaryTitle')}</span>
+              <span className="sub-report-spacer" />
+              <span className="sub-summary-actions">
+                <button
+                  type="button"
+                  className="sub-summary-action-btn"
+                  onClick={handleSummaryCopy}
+                  title={t('components.subTaskPanel.summaryCopyBtn')}
+                  aria-label={t('components.subTaskPanel.summaryCopyBtn')}
+                  data-copied={summaryCopied ? 'true' : 'false'}
+                >
+                  {summaryCopied ? <IconCheck size={13} /> : <IconCopy size={13} />}
+                </button>
+              </span>
+            </div>
           </header>
           <div
             className={
-              'sub-summary-body-wrap' +
+              'sub-report-body-wrap' +
               (isLongSummaryState && !summaryExpanded ? ' is-collapsed' : '')
             }
           >
-            <div className="sub-summary-body">
+            <div className="sub-report-body">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{summaryReport!}</ReactMarkdown>
             </div>
           </div>
           {isLongSummaryState && (
             <button
               type="button"
-              className="sub-summary-toggle-btn"
+              className="sub-report-toggle-btn"
               onClick={() => setSummaryExpanded(v => !v)}
               aria-expanded={summaryExpanded}
+              style={{ marginLeft: 20, marginBottom: 12 }}
             >
               {summaryExpanded
                 ? t('components.subTaskPanel.summaryExpandCollapse')

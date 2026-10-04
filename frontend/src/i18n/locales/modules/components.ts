@@ -242,6 +242,20 @@ export const components = {
     phaseUnderstandingLabel: '任务理解',
     phaseImplementationLabel: '实施',
     phaseSummaryLabel: '小结',
+    // v0.5.x: 完成报告 ReportHeader 元数据条 — 与 phase panel title 区分,
+    // 这里用于 dl/dt/dd 结构化标签(uppercase + letter-spacing)。
+    reportMetaPrompt: '提示词',
+    reportMetaCompletedAt: '完成时间',
+    reportMetaModel: '模型',
+    reportMetaDuration: '耗时',
+    reportMetaCost: '成本',
+    reportMetaRetry: '重试次数',
+    // "无产物" 升级版 — 同样在 per-card 报告块顶部使用 .sub-report-empty。
+    reportEmpty: '任务已结束,但 Claude 没有产生输出。',
+    // Stepper 节点的 aria-label(可访问性)
+    phaseStepComplete: '已完成',
+    phaseStepActive: '进行中',
+    phaseStepPending: '待开始',
   },
   createRequirement: {
     title: '新需求',
