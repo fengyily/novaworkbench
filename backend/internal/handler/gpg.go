@@ -137,6 +137,141 @@ func buildGPGProvisionScript(gnupgHome, wtPath, baseRepo, gitName, gitEmail stri
 	return b.String()
 }
 
+// buildGPGGenerateScript emits the shell script that creates a brand new
+// RSA/ed25519 key pair (gpg's own `default` algorithm, no expiry) inside a
+// throw-away GNUPGHOME and exports both halves as ASCII-armored blocks.
+//
+// It is the "Nova generates the key for you" counterpart of
+// buildGPGProvisionScript: same loopback/batch posture so no pinentry
+// dialog can ever appear on a headless server, same NOVA_GPG_* marker
+// convention on stdout so the caller parses one well-known shape.
+//
+// Two deliberate choices:
+//
+//  1. **`--passphrase ''` + loopback.** The generated key is left
+//     unprotected. A passphrase would have to be echoed back to the
+//     browser and stored alongside the key, which buys nothing — both
+//     live in the same AES-256-GCM-encrypted column and are read by the
+//     same server process. Leaving the key unprotected also keeps the
+//     runtime wrapper on its `[ -s "$GNUPGHOME/passphrase" ]` empty
+//     branch (see buildGPGWrapperScript).
+//
+//  2. **Export happens inside the same script.** Writing private.asc /
+//     public.asc under GNUPGHOME (rather than echoing the armor to
+//     stdout) keeps the secret out of the combined stdout buffer that
+//     the error path may surface in a log line.
+//
+// The caller is responsible for deleting gnupgHome afterwards — nothing
+// in the generated key pair needs to survive the request.
+func buildGPGGenerateScript(gnupgHome, uid string) string {
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString("set -eu\n")
+	b.WriteString("export GNUPGHOME=" + shellQuoteSingle(gnupgHome) + "\n")
+	b.WriteString("mkdir -p \"$GNUPGHOME\" && chmod 0700 \"$GNUPGHOME\"\n")
+	b.WriteString("printf 'pinentry-mode loopback\\n' > \"$GNUPGHOME/gpg.conf\"\n")
+	b.WriteString("printf 'allow-loopback-pinentry\\n' > \"$GNUPGHOME/gpg-agent.conf\"\n")
+	// `default default never` = gpg's own default algorithm/usage with no
+	// expiry date. We don't pin an algorithm so the key stays whatever the
+	// installed gpg considers current (ed25519 on 2.2+), which is what
+	// GitHub/GitLab/Gitea all accept.
+	b.WriteString("gpg --batch --no-tty --yes --pinentry-mode loopback --passphrase '' " +
+		"--quick-generate-key " + shellQuoteSingle(uid) + " default default never\n")
+	b.WriteString(gpgKeyInfoSnippet())
+	b.WriteString("if [ -z \"$keyid\" ]; then\n")
+	b.WriteString("  echo \"[nova-gpg] 密钥生成后未在钥匙串中找到私钥，请检查本机 gpg 是否正常\" >&2\n")
+	b.WriteString("  exit 1\n")
+	b.WriteString("fi\n")
+	b.WriteString("gpg --batch --no-tty --yes --pinentry-mode loopback --passphrase '' " +
+		"--armor --export-secret-keys \"$keyid\" > \"$GNUPGHOME/private.asc\"\n")
+	b.WriteString("gpg --batch --no-tty --yes --armor --export \"$keyid\" > \"$GNUPGHOME/public.asc\"\n")
+	b.WriteString(gpgKeyInfoMarkers())
+	return b.String()
+}
+
+// buildGPGVerifyScript emits the save-time dry-run: import the armored
+// private key into a throw-away GNUPGHOME and echo back what gpg made of
+// it. Unlike buildGPGProvisionScript it writes NO git config and touches
+// no worktree — the only question it answers is "would this block import
+// at commit time?", which is exactly the failure users used to discover
+// only when a push was rejected.
+//
+// The passphrase is deliberately NOT consulted here: the armored block is
+// encrypted inside itself and gpg only asks for the passphrase at *use*
+// time, so a wrong passphrase cannot be detected by an import. That case
+// stays covered at runtime by classifyGitSignFailure("bad passphrase").
+func buildGPGVerifyScript(gnupgHome, armoredKeyPath string) string {
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString("set -eu\n")
+	b.WriteString("export GNUPGHOME=" + shellQuoteSingle(gnupgHome) + "\n")
+	b.WriteString("mkdir -p \"$GNUPGHOME\" && chmod 0700 \"$GNUPGHOME\"\n")
+	b.WriteString("printf 'pinentry-mode loopback\\n' > \"$GNUPGHOME/gpg.conf\"\n")
+	b.WriteString("printf 'allow-loopback-pinentry\\n' > \"$GNUPGHOME/gpg-agent.conf\"\n")
+	b.WriteString("gpg --batch --no-tty --yes --pinentry-mode loopback --import " + shellQuoteSingle(armoredKeyPath) + "\n")
+	b.WriteString(gpgKeyInfoSnippet())
+	b.WriteString("if [ -z \"$keyid\" ]; then\n")
+	b.WriteString("  echo \"[nova-gpg] 导入后未找到私钥，请确认粘贴的是完整的 ASCII-armored 私钥块\" >&2\n")
+	b.WriteString("  exit 1\n")
+	b.WriteString("fi\n")
+	b.WriteString(gpgKeyInfoMarkers())
+	return b.String()
+}
+
+// gpgKeyInfoSnippet / gpgKeyInfoMarkers are the two halves the generate
+// and verify scripts share: read keyid / fingerprint / uid out of the
+// keyring, then print them as NOVA_GPG_* marker lines. Split in two so
+// each script can insert its own "is the keyring actually populated?"
+// guard between them.
+//
+// Colon-format field numbers (see gpg's doc/DETAILS): sec:…:$5 = long
+// key id, fpr:…:$10 = fingerprint, uid:…:$10 = the user id string.
+func gpgKeyInfoSnippet() string {
+	return "info=$(gpg --list-secret-keys --with-colons)\n" +
+		"keyid=$(printf '%s\\n' \"$info\" | awk -F: '/^sec:/{print $5; exit}')\n" +
+		"fpr=$(printf '%s\\n' \"$info\" | awk -F: '/^fpr:/{print $10; exit}')\n" +
+		"uid=$(printf '%s\\n' \"$info\" | awk -F: '/^uid:/{print $10; exit}')\n"
+}
+
+func gpgKeyInfoMarkers() string {
+	// Markers go last so a non-zero exit anywhere above skips them and the
+	// caller detects "did not reach the success path" by their absence.
+	return "echo \"NOVA_GPG_KEYID=$keyid\"\n" +
+		"echo \"NOVA_GPG_FPR=$fpr\"\n" +
+		"echo \"NOVA_GPG_UID=$uid\"\n"
+}
+
+// parseGPGKeyInfoFromScriptOutput pulls the three NOVA_GPG_* markers out
+// of the combined stdout of buildGPGGenerateScript / buildGPGVerifyScript.
+//
+// It reuses parseKeyIDFromScriptOutput for the key id (so the `[label]`
+// prefix stripping and the regex fallback stay in exactly one place) and
+// adds the two extra fields. Fingerprint is hex like the key id;
+// NOVA_GPG_UID carries free-form text ("Zhang San <z@example.com>") so it
+// is matched by prefix only — a regex would have to allow almost any
+// character and buy nothing.
+func parseGPGKeyInfoFromScriptOutput(out string) (keyID, fingerprint, uid string) {
+	keyID, _ = parseKeyIDFromScriptOutput(out)
+	fprRe := regexp.MustCompile(`(?:^|\s|[\[\(])NOVA_GPG_FPR=([0-9A-Fa-f]{32,})`)
+	for _, line := range strings.Split(out, "\n") {
+		stripped := strings.TrimSpace(line)
+		if i := strings.LastIndexByte(stripped, ']'); i > 0 && strings.HasPrefix(stripped, "[") {
+			stripped = strings.TrimSpace(stripped[i+1:])
+		}
+		switch {
+		case strings.HasPrefix(stripped, "NOVA_GPG_FPR="):
+			fingerprint = strings.TrimSpace(strings.TrimPrefix(stripped, "NOVA_GPG_FPR="))
+		case strings.HasPrefix(stripped, "NOVA_GPG_UID="):
+			uid = strings.TrimSpace(strings.TrimPrefix(stripped, "NOVA_GPG_UID="))
+		default:
+			if m := fprRe.FindStringSubmatch(line); len(m) == 2 {
+				fingerprint = m[1]
+			}
+		}
+	}
+	return keyID, fingerprint, uid
+}
+
 // buildGPGWrapperScript emits the executable that `git` invokes when
 // it needs a signature (git calls `gpg.program` with arguments like
 // `--status-fd=2 -bsau <keyid>`). The wrapper's job is to:

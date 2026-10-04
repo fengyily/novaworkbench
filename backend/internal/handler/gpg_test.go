@@ -1,6 +1,9 @@
 package handler
 
 import (
+	"context"
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -25,8 +28,8 @@ func TestBuildGPGProvisionScript_HappyWorktree(t *testing.T) {
 		"set -eu",
 		"export GNUPGHOME='/tmp/nova-agent/proj_abc/req_xyz.gnupg'",
 		"chmod 0700 \"$GNUPGHOME\"",
-		"pinentry-mode loopback",     // gpg.conf
-		"allow-loopback-pinentry",    // gpg-agent.conf (compat)
+		"pinentry-mode loopback",  // gpg.conf
+		"allow-loopback-pinentry", // gpg-agent.conf (compat)
 		`gpg --batch --no-tty --yes --pinentry-mode loopback --import "$GNUPGHOME/key.asc"`,
 		`rm -f "$GNUPGHOME/key.asc"`,
 		`awk -F: '/^sec:/{print $5; exit}'`,
@@ -55,8 +58,10 @@ func TestBuildGPGProvisionScript_HappyWorktree(t *testing.T) {
 // `config --local` back into the main path.
 //
 // The script is structurally `if ! ... --worktree ...; then
-//   echo FALLBACK
-//   git ... --local ...
+//
+//	echo FALLBACK
+//	git ... --local ...
+//
 // fi`, so any `config --local` line that is *not* 2-space indented
 // (i.e. sits at top level) is a bug.
 func TestBuildGPGProvisionScript_NoLocalInHappyPath(t *testing.T) {
@@ -133,7 +138,7 @@ func TestBuildGPGProvisionScript_EmptyIdentity(t *testing.T) {
 // TestBuildGPGProvisionScript_ShellQuoteSafe verifies that a
 // GNUPGHOME path containing a single quote (a pathological but legal
 // value) still survives shellQuoteSingle escaping. Single quotes
-// inside the path must be encoded as `'\''` rather than terminating
+// inside the path must be encoded as `'\”` rather than terminating
 // the surrounding quoted string prematurely.
 func TestBuildGPGProvisionScript_ShellQuoteSafe(t *testing.T) {
 	// Path with embedded single quote: /tmp/o'connor/.gnupg
@@ -214,39 +219,39 @@ func TestBuildGPGWrapperScript_QuotedPath(t *testing.T) {
 // chunks, so we don't assume line order).
 func TestParseKeyIDFromScriptOutput(t *testing.T) {
 	cases := []struct {
-		name      string
-		in        string
-		wantKey   string
-		wantFall  bool
+		name     string
+		in       string
+		wantKey  string
+		wantFall bool
 	}{
 		{
-			name:    "happy path",
-			in:      "...stuff...\nNOVA_GPG_KEYID=ABCDEF1234567890\n...more...",
-			wantKey: "ABCDEF1234567890",
+			name:     "happy path",
+			in:       "...stuff...\nNOVA_GPG_KEYID=ABCDEF1234567890\n...more...",
+			wantKey:  "ABCDEF1234567890",
 			wantFall: false,
 		},
 		{
-			name:    "no markers at all",
-			in:      "gpg: imported: 1\nNOVA_GPG_FALLBACK_ON_USER_FLAG=1",
-			wantKey: "",
+			name:     "no markers at all",
+			in:       "gpg: imported: 1\nNOVA_GPG_FALLBACK_ON_USER_FLAG=1",
+			wantKey:  "",
 			wantFall: false,
 		},
 		{
-			name:    "fallback marker only",
-			in:      "NOVA_GPG_WORKTREE_FALLBACK=1\nother log",
-			wantKey: "",
+			name:     "fallback marker only",
+			in:       "NOVA_GPG_WORKTREE_FALLBACK=1\nother log",
+			wantKey:  "",
 			wantFall: true,
 		},
 		{
-			name:    "both markers, fallback printed before keyid",
-			in:      "NOVA_GPG_WORKTREE_FALLBACK=1\ngpg: ok\nNOVA_GPG_KEYID=DEADBEEFCAFEBABE",
-			wantKey: "DEADBEEFCAFEBABE",
+			name:     "both markers, fallback printed before keyid",
+			in:       "NOVA_GPG_WORKTREE_FALLBACK=1\ngpg: ok\nNOVA_GPG_KEYID=DEADBEEFCAFEBABE",
+			wantKey:  "DEADBEEFCAFEBABE",
 			wantFall: true,
 		},
 		{
-			name:    "whitespace tolerance",
-			in:      "   NOVA_GPG_KEYID=  \t  0123ABC \n",
-			wantKey: "0123ABC",
+			name:     "whitespace tolerance",
+			in:       "   NOVA_GPG_KEYID=  \t  0123ABC \n",
+			wantKey:  "0123ABC",
 			wantFall: false,
 		},
 		{
@@ -256,24 +261,24 @@ func TestParseKeyIDFromScriptOutput(t *testing.T) {
 			// silently misses both markers and surfaces as
 			// "GPG provision 脚本未输出 keyid". The remote flow is
 			// what Agent Server users actually exercise.
-			name:    "remote path: [label] prefix on keyid line",
-			in:      "[gpg-provision] NOVA_GPG_KEYID=ABCDEF0123456789\n",
-			wantKey: "ABCDEF0123456789",
+			name:     "remote path: [label] prefix on keyid line",
+			in:       "[gpg-provision] NOVA_GPG_KEYID=ABCDEF0123456789\n",
+			wantKey:  "ABCDEF0123456789",
 			wantFall: false,
 		},
 		{
-			name:    "remote path: [label] prefix on fallback line",
-			in:      "[gpg-provision] NOVA_GPG_WORKTREE_FALLBACK=1\n",
-			wantKey: "",
+			name:     "remote path: [label] prefix on fallback line",
+			in:       "[gpg-provision] NOVA_GPG_WORKTREE_FALLBACK=1\n",
+			wantKey:  "",
 			wantFall: true,
 		},
 		{
-			name:    "remote path: mixed [label] lines, scrambled order",
-			in:      "[gpg-provision] gpg: imported: 1\n" +
+			name: "remote path: mixed [label] lines, scrambled order",
+			in: "[gpg-provision] gpg: imported: 1\n" +
 				"[gpg-provision] NOVA_GPG_WORKTREE_FALLBACK=1\n" +
 				"some other host log\n" +
 				"[gpg-provision] NOVA_GPG_KEYID=DEADBEEFCAFEBABE\n",
-			wantKey: "DEADBEEFCAFEBABE",
+			wantKey:  "DEADBEEFCAFEBABE",
 			wantFall: true,
 		},
 		{
@@ -281,16 +286,16 @@ func TestParseKeyIDFromScriptOutput(t *testing.T) {
 			// to miss (e.g. the line starts with whitespace or the
 			// label format changes upstream), the regex fallback
 			// still picks up the keyid from inside the line.
-			name:    "remote path: regex fallback, marker mid-line",
-			in:      "prefix noise NOVA_GPG_KEYID=0123ABCD4567EF89 suffix\n",
-			wantKey: "0123ABCD4567EF89",
+			name:     "remote path: regex fallback, marker mid-line",
+			in:       "prefix noise NOVA_GPG_KEYID=0123ABCD4567EF89 suffix\n",
+			wantKey:  "0123ABCD4567EF89",
 			wantFall: false,
 		},
 		{
 			// V5 keyids are 40 hex chars; the regex requires 16+.
-			name:    "remote path: regex fallback, v5 40-char keyid",
-			in:      "[gpg-provision] NOVA_GPG_KEYID=ABCDEF0123456789ABCDEF0123456789ABCDEF01\n",
-			wantKey: "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+			name:     "remote path: regex fallback, v5 40-char keyid",
+			in:       "[gpg-provision] NOVA_GPG_KEYID=ABCDEF0123456789ABCDEF0123456789ABCDEF01\n",
+			wantKey:  "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
 			wantFall: false,
 		},
 		{
@@ -300,20 +305,20 @@ func TestParseKeyIDFromScriptOutput(t *testing.T) {
 			// "FOO_NOVA_GPG_KEYID=..." which is not our marker.
 			// The regex anchors on a non-identifier char before
 			// the marker, so this stays a no-op.
-			name:    "remote path: regex does NOT false-positive on identifier substring",
-			in:      "prefix: SOME_NOVA_GPG_KEYID=DEADBEEFCAFEBABE extra\n",
-			wantKey: "",
+			name:     "remote path: regex does NOT false-positive on identifier substring",
+			in:       "prefix: SOME_NOVA_GPG_KEYID=DEADBEEFCAFEBABE extra\n",
+			wantKey:  "",
 			wantFall: false,
 		},
 		{
 			// Two distinct [label] lines on the same output where
 			// the marker line follows extra noise.
-			name:    "remote path: marker after multi-line noise",
+			name: "remote path: marker after multi-line noise",
 			in: "[gpg-provision] gpg: keybox created\n" +
 				"[gpg-provision] gpg: ABCDEF...: public key imported\n" +
 				"[gpg-provision] gpg: ABCDEF...: secret key imported\n" +
 				"[gpg-provision] NOVA_GPG_KEYID=ABCDEF0123456789\n",
-			wantKey: "ABCDEF0123456789",
+			wantKey:  "ABCDEF0123456789",
 			wantFall: false,
 		},
 	}
@@ -338,10 +343,10 @@ func TestParseKeyIDFromScriptOutput(t *testing.T) {
 // hint when the provision fails).
 func TestParseKeyIDFromScriptOutputDebug(t *testing.T) {
 	cases := []struct {
-		name      string
-		in        string
-		wantKey   string
-		wantFall  bool
+		name       string
+		in         string
+		wantKey    string
+		wantFall   bool
 		summaryHas string
 	}{
 		{
@@ -562,7 +567,7 @@ func TestGPGImportErrorMessage(t *testing.T) {
 
 // TestShellQuoteSingle confirms the helper we depend on behaves the
 // way the test assertions assume (single-quotes wrap the value, embedded
-// quotes become `'\''`). gpg_test.go is colocated with shellQuoteSingle
+// quotes become `'\”`). gpg_test.go is colocated with shellQuoteSingle
 // in the handler package, so the test sees the unexported function.
 func TestShellQuoteSingle(t *testing.T) {
 	cases := []struct {
@@ -577,5 +582,179 @@ func TestShellQuoteSingle(t *testing.T) {
 		if got := shellQuoteSingle(tc.in); got != tc.want {
 			t.Errorf("shellQuoteSingle(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestBuildGPGGenerateScript asserts the generate script's contract: a
+// batch/loopback posture (no pinentry can appear on a headless host), an
+// empty passphrase (generated keys are unprotected — see
+// buildGPGGenerateScript), both armor exports landing as files under
+// GNUPGHOME rather than on stdout, and all three NOVA_GPG_* markers.
+func TestBuildGPGGenerateScript(t *testing.T) {
+	script := buildGPGGenerateScript("/tmp/nova-gpg-gen-1", "Zhang San <z@example.com>")
+
+	for _, want := range []string{
+		"#!/bin/sh",
+		"set -eu",
+		"export GNUPGHOME='/tmp/nova-gpg-gen-1'",
+		"chmod 0700 \"$GNUPGHOME\"",
+		"pinentry-mode loopback",
+		"--passphrase '' --quick-generate-key 'Zhang San <z@example.com>' default default never",
+		`--armor --export-secret-keys "$keyid" > "$GNUPGHOME/private.asc"`,
+		`--armor --export "$keyid" > "$GNUPGHOME/public.asc"`,
+		`echo "NOVA_GPG_KEYID=$keyid"`,
+		`echo "NOVA_GPG_FPR=$fpr"`,
+		`echo "NOVA_GPG_UID=$uid"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("generate script missing fragment:\n  %q\nfull script:\n%s", want, script)
+		}
+	}
+	// The generate path must never touch git config — that is the
+	// provision script's job and doing it here would rewrite the config of
+	// whatever directory the server happens to run in.
+	if strings.Contains(script, "git config") {
+		t.Errorf("generate script must not write git config:\n%s", script)
+	}
+}
+
+// TestBuildGPGGenerateScript_UIDQuoting makes sure a UID carrying a
+// single quote cannot break out of the argument into shell code.
+func TestBuildGPGGenerateScript_UIDQuoting(t *testing.T) {
+	script := buildGPGGenerateScript("/tmp/g", `O'Connor <o@example.com>; rm -rf /`)
+	if !strings.Contains(script, `--quick-generate-key 'O'\''Connor <o@example.com>; rm -rf /'`) {
+		t.Errorf("uid not shell-quoted:\n%s", script)
+	}
+}
+
+// TestBuildGPGVerifyScript pins the dry-run's two defining properties:
+// it imports, and it changes nothing else (no git config, no wrapper, no
+// rm of the caller's key file — the caller owns the temp dir).
+func TestBuildGPGVerifyScript(t *testing.T) {
+	script := buildGPGVerifyScript("/tmp/nova-gpg-verify-1", "/tmp/nova-gpg-verify-1/key.asc")
+
+	for _, want := range []string{
+		"export GNUPGHOME='/tmp/nova-gpg-verify-1'",
+		`gpg --batch --no-tty --yes --pinentry-mode loopback --import '/tmp/nova-gpg-verify-1/key.asc'`,
+		`echo "NOVA_GPG_KEYID=$keyid"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("verify script missing fragment:\n  %q\nfull script:\n%s", want, script)
+		}
+	}
+	for _, unwanted := range []string{"git config", "git-gpg-wrapper", "--passphrase"} {
+		if strings.Contains(script, unwanted) {
+			t.Errorf("verify script must not contain %q:\n%s", unwanted, script)
+		}
+	}
+}
+
+// TestParseGPGKeyInfoFromScriptOutput covers the bare local shape, the
+// `[label]`-prefixed remote shape, a UID containing spaces/brackets, and
+// the "script died before the markers" case.
+func TestParseGPGKeyInfoFromScriptOutput(t *testing.T) {
+	cases := []struct {
+		name                    string
+		out                     string
+		keyID, fingerprint, uid string
+	}{
+		{
+			name: "local",
+			out: "gpg: key created\n" +
+				"NOVA_GPG_KEYID=35C022C79FD68101\n" +
+				"NOVA_GPG_FPR=84DAB9C998575B2A618D964435C022C79FD68101\n" +
+				"NOVA_GPG_UID=Zhang San <z@example.com>\n",
+			keyID:       "35C022C79FD68101",
+			fingerprint: "84DAB9C998575B2A618D964435C022C79FD68101",
+			uid:         "Zhang San <z@example.com>",
+		},
+		{
+			name: "labelled",
+			out: "[gpg-generate] NOVA_GPG_KEYID=35C022C79FD68101\n" +
+				"[gpg-generate] NOVA_GPG_FPR=84DAB9C998575B2A618D964435C022C79FD68101\n" +
+				"[gpg-generate] NOVA_GPG_UID=Zhang San <z@example.com>\n",
+			keyID:       "35C022C79FD68101",
+			fingerprint: "84DAB9C998575B2A618D964435C022C79FD68101",
+			uid:         "Zhang San <z@example.com>",
+		},
+		{
+			name:  "no markers",
+			out:   "gpg: agent_genkey failed: No pinentry\n",
+			keyID: "", fingerprint: "", uid: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			keyID, fpr, uid := parseGPGKeyInfoFromScriptOutput(tc.out)
+			if keyID != tc.keyID || fpr != tc.fingerprint || uid != tc.uid {
+				t.Errorf("parse = (%q, %q, %q), want (%q, %q, %q)",
+					keyID, fpr, uid, tc.keyID, tc.fingerprint, tc.uid)
+			}
+		})
+	}
+}
+
+// TestGenerateAndVerifyLocalGPGKey_RoundTrip is the one test that shells
+// out to a real gpg: generate a key, then feed the exported armor back
+// through the save-time dry-run and assert both agree on the key id and
+// fingerprint. Skipped when the host has no gpg (CI images without
+// gnupg still pass the rest of the file).
+func TestGenerateAndVerifyLocalGPGKey_RoundTrip(t *testing.T) {
+	if _, err := exec.LookPath("gpg"); err != nil {
+		t.Skip("gpg not installed; skipping round-trip test")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("local gpg generation is POSIX-only")
+	}
+
+	priv, pub, keyID, fpr, uid, err := generateLocalGPGKey(context.Background(), "Nova Test <nova-test@example.com>")
+	if err != nil {
+		t.Fatalf("generateLocalGPGKey: %v", err)
+	}
+	if !strings.Contains(priv, "-----BEGIN PGP PRIVATE KEY BLOCK-----") {
+		t.Errorf("private key is not ASCII-armored: %.60q", priv)
+	}
+	if !strings.Contains(pub, "-----BEGIN PGP PUBLIC KEY BLOCK-----") {
+		t.Errorf("public key is not ASCII-armored: %.60q", pub)
+	}
+	if len(keyID) < 16 {
+		t.Errorf("key id %q looks too short", keyID)
+	}
+	if len(fpr) < 32 {
+		t.Errorf("fingerprint %q looks too short", fpr)
+	}
+	if uid != "Nova Test <nova-test@example.com>" {
+		t.Errorf("uid = %q, want the requested uid", uid)
+	}
+
+	vKeyID, vFpr, vUID, err := verifyImportedGPGKey(priv, "")
+	if err != nil {
+		t.Fatalf("verifyImportedGPGKey on a freshly generated key: %v", err)
+	}
+	if vKeyID != keyID || vFpr != fpr {
+		t.Errorf("verify = (%q, %q), want (%q, %q)", vKeyID, vFpr, keyID, fpr)
+	}
+	if vUID != uid {
+		t.Errorf("verify uid = %q, want %q", vUID, uid)
+	}
+}
+
+// TestVerifyImportedGPGKey_Corrupt asserts the dry-run actually rejects
+// a block that passes the cheap header check but is not importable —
+// precisely the case that used to surface only as a rejected push.
+func TestVerifyImportedGPGKey_Corrupt(t *testing.T) {
+	if _, err := exec.LookPath("gpg"); err != nil {
+		t.Skip("gpg not installed; skipping corrupt-key test")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("local gpg verification is POSIX-only")
+	}
+
+	corrupt := "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nbm90LWEta2V5\n-----END PGP PRIVATE KEY BLOCK-----\n"
+	if msg, ok := validateArmoredKey(corrupt); !ok {
+		t.Fatalf("precondition: corrupt block should pass the cheap header check, got %q", msg)
+	}
+	if _, _, _, err := verifyImportedGPGKey(corrupt, ""); err == nil {
+		t.Fatal("verifyImportedGPGKey accepted a corrupt armored block")
 	}
 }
