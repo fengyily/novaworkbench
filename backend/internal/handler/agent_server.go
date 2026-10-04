@@ -482,7 +482,19 @@ func (h *AgentServerHandler) runCleanup(job *store.Job, serverID string) {
 		// already-cleaned (DB still claims worktree_path != '' but FS is
 		// empty): in that case we clear the DB row and move on, instead of
 		// leaving a phantom DB entry pointing at nothing.
-		qwt := shellQuoteSingle(row.WorktreePath)
+		//
+		// CRITICAL: requirements.worktree_path holds the LOCAL path
+		// (set by EnsureWorktreeLogged on the local coding branch). For
+		// dev_source='agent' rows the actual worktree lives on the Agent
+		// server at the path returned by remoteWorktreePaths — the same
+		// helper runRemoteCoding uses to lay it down. Stating the local
+		// path on the remote host always misses, which is why the old code
+		// silently left every remote worktree behind while clearing DB
+		// rows. SSH operations must therefore use the remote paths; the
+		// local WorktreePath is kept only in diagnostic log lines.
+		baseRepo, wtPath := remoteWorktreePaths(row.ProjectID, row.ID)
+		qb := shellQuoteSingle(baseRepo)
+		qwt := shellQuoteSingle(wtPath)
 		var statOut strings.Builder
 		statExit, _ := client.Exec(ctx,
 			fmt.Sprintf("stat -c %%Y %s 2>/dev/null || echo MISSING", qwt),
@@ -495,22 +507,20 @@ func (h *AgentServerHandler) runCleanup(job *store.Job, serverID string) {
 			if uerr := h.reqSvc.UpdateWorktree(row.ID, "", ""); uerr != nil {
 				log.Printf("[agent-server] cleanup DB clear (already-empty FS) failed for %s: %v", row.ID, uerr)
 			}
-			job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("⏭ FS 已无目录，仅清 DB: %s", row.WorktreePath)})
+			job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("⏭ 远端 FS 已无目录 (%s)，仅清 DB: %s", wtPath, row.WorktreePath)})
 			continue
 		}
 		mtime, perr := strconv.ParseInt(statRaw, 10, 64)
 		if perr != nil {
-			job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("⚠ mtime 解析失败 %s: %v", row.WorktreePath, perr)})
+			job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("⚠ mtime 解析失败 %s: %v", wtPath, perr)})
 			continue
 		}
 		if mtime >= cutoff {
 			skipped++
-			job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("⏭ 跳过 %s (mtime 在 %d 天内)", row.WorktreePath, (cutoff-mtime)/86400+1)})
+			job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("⏭ 跳过 %s (mtime 在 %d 天内)", wtPath, (cutoff-mtime)/86400+1)})
 			continue
 		}
 
-		baseRepo := "/tmp/nova-agent/" + row.ProjectID + "/base"
-		qb := shellQuoteSingle(baseRepo)
 		qbr := shellQuoteSingle(row.BranchName)
 
 		// Primary path: git worktree remove --force (the user already
@@ -524,7 +534,7 @@ func (h *AgentServerHandler) runCleanup(job *store.Job, serverID string) {
 			// rm -rf + prune, mirroring remoteCleanup's recovery branch.
 			fallback := "rm -rf " + qwt + " && cd " + qb + " && git worktree prune"
 			if fexit, _ := client.Exec(ctx, fallback, "", nil, nil, nil); fexit != 0 {
-				job.Append(store.LogLine{Type: "error", Content: fmt.Sprintf("❌ 清理失败 %s (exit=%d)", row.WorktreePath, fexit)})
+				job.Append(store.LogLine{Type: "error", Content: fmt.Sprintf("❌ 清理失败 %s (exit=%d)", wtPath, fexit)})
 				continue
 			}
 		}
@@ -543,11 +553,11 @@ func (h *AgentServerHandler) runCleanup(job *store.Job, serverID string) {
 		// keeps one we've actually removed (stale reference).
 		if uerr := h.reqSvc.UpdateWorktree(row.ID, "", ""); uerr != nil {
 			log.Printf("[agent-server] cleanup DB clear failed for %s: %v", row.ID, uerr)
-			job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("⚠ FS 已清理但 DB 残留 %s: %v", row.ID, uerr)})
+			job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("⚠ 远端 FS 已清理但 DB 残留 %s: %v", row.ID, uerr)})
 			continue
 		}
 		cleaned++
-		job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("✓ 已清理 %s (mtime %d 天前)", row.WorktreePath, (time.Now().Unix()-mtime)/86400)})
+		job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("✓ 已清理 %s (mtime %d 天前)", wtPath, (time.Now().Unix()-mtime)/86400)})
 	}
 
 	job.Append(store.LogLine{Type: "done", Content: fmt.Sprintf("清理完成: 共清理 %d 个, 跳过 %d 个活跃", cleaned, skipped)})
