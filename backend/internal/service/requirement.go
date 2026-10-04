@@ -172,6 +172,15 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		args = append(args, "%\""+safe+"\"%", "%\""+safe+",%")
 	}
 
+	// "已完成" 快捷筛选 (status=done) 改为只按完成时间倒序：完成得越晚的越靠前。
+	// 其他场景维持原本的 done 沉底 + 标记置顶 + created_at DESC 行为。
+	// NULL 行（理论上 completed_at 永远会被 stamp 上，但兼容历史脏数据）
+	// 通过 CASE WHEN 显式排到末尾，跨 SQLite / MySQL / PostgreSQL 一致。
+	orderBy := "ORDER BY CASE WHEN r.status = 'done' THEN 1 ELSE 0 END ASC, CASE WHEN r.marks IS NULL OR r.marks = '' OR r.marks = '[]' THEN 1 ELSE 0 END ASC, r.created_at DESC"
+	if status == "done" {
+		orderBy = "ORDER BY CASE WHEN r.completed_at IS NULL THEN 1 ELSE 0 END ASC, r.completed_at DESC, r.id ASC"
+	}
+
 	rows, err := s.db.Query(
 		// DevEndedAt is a derived read-only column — emitted only when the
 		// requirement has been decomposed into sub_tasks AND every linked
@@ -196,7 +205,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,"+
 			"(SELECT st.completed_at FROM sub_tasks st WHERE st.requirement_id = r.id AND NOT EXISTS(SELECT 1 FROM sub_tasks o WHERE o.requirement_id = r.id AND o.completed_at IS NULL) ORDER BY st.completed_at DESC LIMIT 1) AS dev_ended_at"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
-			" "+where+" ORDER BY CASE WHEN r.status = 'done' THEN 1 ELSE 0 END ASC, CASE WHEN r.marks IS NULL OR r.marks = '' OR r.marks = '[]' THEN 1 ELSE 0 END ASC, r.created_at DESC",
+			" "+where+" "+orderBy,
 		args...)
 	if err != nil {
 		return nil, err

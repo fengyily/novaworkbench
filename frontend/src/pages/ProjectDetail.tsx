@@ -933,8 +933,26 @@ export default function ProjectDetail() {
   // `reqSortDir` (flip the sign for DESC). The list is shallow-copied first
   // so we never mutate `filteredReqs` (it'd poison the next render's
   // reference equality).
+  // Special case: the "已完成" quick filter only contains status='done' rows,
+  // and the user expects them ordered by completion time descending — newest
+  // completions first. The backend List() endpoint already returns the right
+  // order when called with status=done, but ProjectDetail fetches without a
+  // status filter and trims client-side, so we re-sort here to match the
+  // cross-project RequirementsList behavior.
   const sortedReqs = useMemo(() => {
-    if (reqSortColumn === null) return filteredReqs;
+    if (reqSortColumn === null) {
+      if (reqStatusFilter === 'done') {
+        return [...filteredReqs].sort((a, b) => {
+          // ISO-8601 strings sort correctly lexicographically; missing
+          // completed_at sinks to the bottom.
+          const aTs = a.completed_at || '';
+          const bTs = b.completed_at || '';
+          if (aTs === bTs) return (b.id || '').localeCompare(a.id || '');
+          return bTs.localeCompare(aTs);
+        });
+      }
+      return filteredReqs;
+    }
     const sign = reqSortDir === 'asc' ? 1 : -1;
     return [...filteredReqs].sort((a, b) => {
       const cmp = compareRequirements(a, b, reqSortColumn);
@@ -944,7 +962,7 @@ export default function ProjectDetail() {
       // the user saw before clicking.
       return (b.created_at || '').localeCompare(a.created_at || '');
     });
-  }, [filteredReqs, reqSortColumn, reqSortDir]);
+  }, [filteredReqs, reqSortColumn, reqSortDir, reqStatusFilter]);
 
   // Header-click handler. Same column flips direction; new column resets to
   // that column's natural default (REQ_SORT_DEFAULT_DIR). The page reset is
