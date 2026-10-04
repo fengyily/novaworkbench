@@ -151,6 +151,14 @@ type SubTask struct {
 	EffectiveAgentServerName string     `json:"effective_agent_server_name,omitempty"`
 	CreatedAt                time.Time  `json:"created_at"`
 	UpdatedAt                time.Time  `json:"updated_at"`
+	// StartedAt is the wall-clock instant the row first transitioned
+	// pending → running. Persisted by MarkRunning / ClaimNextPending via
+	// COALESCE so it survives a later error → pending → running re-arm
+	// (Finish's duration_seconds still measures from this first stamp).
+	// NULL on legacy rows (running before the column existed) — the UI
+	// falls back to created_at so existing cards look identical pre- and
+	// post-upgrade.
+	StartedAt                *time.Time `json:"started_at,omitempty"`
 	CompletedAt              *time.Time `json:"completed_at,omitempty"`
 	// PhaseUnderstanding / PhaseImplementation / PhaseSummary are the
 	// three Markdown buffers captured during a manually-triggered sub-task

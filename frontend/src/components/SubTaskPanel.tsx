@@ -559,14 +559,26 @@ function SubTaskCard({
   const [redoModel, setRedoModel] = useState<string>(st.model);
   const [redoBusy, setRedoBusy] = useState(false);
   const [redoError, setRedoError] = useState<string | null>(null);
-  // Live ticker for the header-right "⏱ 0:42" badge: starts when the card
-  // mounts in "running" status and stops on terminal status. Replaced by
-  // the persisted duration_seconds once the row finishes, so the badge
-  // stays stable across a page refresh.
-  const [liveSeconds, setLiveSeconds] = useState<number>(0);
+  // Live ticker for the header-right "⏱ 0:42" badge: anchored to
+  // st.started_at (the wall-clock instant the row first transitioned
+  // pending → running, written by MarkRunning / ClaimNextPending on the
+  // backend) so the count survives a page refresh. We compute an offset
+  // from started_at instead of resetting to 0 on mount, then add 1 every
+  // second. When the row reaches a terminal status the effect tears down
+  // and duration_seconds takes over, so the badge stays stable post-Finish.
+  // started_at is null on legacy rows (running before the column shipped);
+  // we fall back to created_at so pre-upgrade cards don't visibly regress
+  // — the offset just measures "since created" in that case, which is the
+  // pre-fix behaviour for those rows.
+  const startElapsed = (() => {
+    const anchor = st.started_at ?? st.created_at;
+    if (!anchor) return 0;
+    const delta = Math.floor((Date.now() - new Date(anchor).getTime()) / 1000);
+    return delta > 0 ? delta : 0;
+  })();
+  const [liveSeconds, setLiveSeconds] = useState<number>(startElapsed);
   useEffect(() => {
     if (st.status !== 'running' && st.status !== 'pending') return;
-    setLiveSeconds(0);
     const t = setInterval(() => setLiveSeconds((v) => v + 1), 1000);
     return () => clearInterval(t);
   }, [st.status]);
@@ -953,8 +965,12 @@ function SubTaskCard({
           {st.model && st.model !== DefaultModelLabel && (
             <span className="sub-card-model">{st.model}</span>
           )}
-          {st.created_at && (
-            <span className="sub-card-time">{timeAgo(st.created_at)}</span>
+          {/* Prefer started_at (the real execution start) so the "Xs ago"
+              pill reads "how long since Claude actually started", not "since
+              the row was created". Legacy rows where started_at is null fall
+              back to created_at — pre-upgrade cards look identical. */}
+          {(st.started_at || st.created_at) && (
+            <span className="sub-card-time">{timeAgo(st.started_at ?? st.created_at)}</span>
           )}
           {/* Header-right quick-glance summary: cost / duration. The
               detailed context-usage bar lives in its own row below the

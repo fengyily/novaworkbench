@@ -961,6 +961,17 @@ var alterColumns = []string{
 	// MySQL 上的 TEXT DEFAULT '' 转成 TEXT DEFAULT (''),isIgnorableDDLError 吞
 	// 掉"duplicate column"以便历史 DB 平滑升级。
 	`ALTER TABLE requirements ADD COLUMN design_base_sha TEXT NOT NULL DEFAULT ''`,
+	// Sub-task execution start timestamp: written by MarkRunning (manual path)
+	// and ClaimNextPending (orchestration path) via COALESCE(started_at, ?) so
+	// it captures the FIRST pending → running transition. Drives the
+	// SubTaskPanel live ticker across page refreshes — without this column the
+	// frontend could only compute duration from page-mount time, which resets
+	// on every refresh. Nullable on purpose so legacy rows (running before
+	// migration) keep their pre-existing semantics: the UI falls back to
+	// created_at when started_at IS NULL. isIgnorableDDLError swallows
+	// "duplicate column" so the ALTER is safe to ship before all DBs have
+	// caught up.
+	`ALTER TABLE sub_tasks ADD COLUMN started_at DATETIME`,
 }
 
 var (

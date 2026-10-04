@@ -230,7 +230,7 @@ func (s *SubTaskService) FindRecentPushForReq(reqID string, lookbackSec int) (*m
 		session_id, source_session_id, job_id, artifact, model, claude_config_id,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
-		created_at, updated_at, completed_at,
+		created_at, updated_at, completed_at, started_at,
 		batch_id, batch_seq, batch_id_seq_run, source,
 		agent_server_id, '' AS agent_server_name,
 		session_mode, retry_count,
@@ -270,7 +270,7 @@ func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 		session_id, source_session_id, job_id, artifact, model, claude_config_id,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
-		created_at, updated_at, completed_at,
+		created_at, updated_at, completed_at, started_at,
 		batch_id, batch_seq, batch_id_seq_run, source,
 		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
 		session_mode, retry_count,
@@ -309,7 +309,7 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 		session_id, source_session_id, job_id, artifact, model, claude_config_id,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
-		created_at, updated_at, completed_at,
+		created_at, updated_at, completed_at, started_at,
 		batch_id, batch_seq, batch_id_seq_run, source,
 		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
 		session_mode, retry_count,
@@ -367,7 +367,7 @@ func (s *SubTaskService) Subtree(rootID string) ([]model.SubTask, error) {
 			session_id, source_session_id, job_id, artifact, model, claude_config_id,
 			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 			cost_cents, duration_seconds,
-			created_at, updated_at, completed_at,
+			created_at, updated_at, completed_at, started_at,
 			batch_id, batch_seq, batch_id_seq_run, source,
 			agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
 			session_mode, retry_count,
@@ -426,7 +426,7 @@ func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
 		session_id, source_session_id, job_id, artifact, model, claude_config_id,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		cost_cents, duration_seconds,
-		created_at, updated_at, completed_at,
+		created_at, updated_at, completed_at, started_at,
 		batch_id, batch_seq, batch_id_seq_run, source,
 		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
 		session_mode, retry_count,
@@ -705,10 +705,14 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 		// hb is UTC (see docstring); updated_at keeps the local-zone convention
 		// the rest of this table's writes use, since nothing compares it in SQL.
 		hb := now.UTC()
+		// COALESCE(started_at, ?) keeps the original first-start stamp when an
+		// auto-retry (error → pending → running) re-claims the row, so
+		// duration_seconds at Finish still covers the cumulative elapsed time
+		// from the very first attempt — same invariant as MarkRunning above.
 		res, err := s.db.Exec(`UPDATE sub_tasks
-			SET status=?, updated_at=?, batch_id_seq_run=?
+			SET status=?, started_at=COALESCE(started_at, ?), updated_at=?, batch_id_seq_run=?
 			WHERE id=? AND status=?`,
-			model.SubTaskStatusRunning, now, hb,
+			model.SubTaskStatusRunning, now, now, hb,
 			candidateID, model.SubTaskStatusPending)
 		if err != nil {
 			return nil, false, fmt.Errorf("claim pending sub_task: %w", err)
@@ -726,7 +730,7 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 			session_id, source_session_id, job_id, artifact, model, claude_config_id,
 			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 			cost_cents, duration_seconds,
-			created_at, updated_at, completed_at,
+			created_at, updated_at, completed_at, started_at,
 			batch_id, batch_seq, batch_id_seq_run, source,
 			agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
 			session_mode, retry_count,
@@ -885,8 +889,15 @@ func (s *SubTaskService) UpdateClaudeConfigID(id, configID string) error {
 // into Finish() to compute DurationSeconds without re-reading the row.
 func (s *SubTaskService) MarkRunning(id string) (time.Time, error) {
 	now := time.Now()
-	_, err := s.db.Exec(`UPDATE sub_tasks SET status=?, updated_at=? WHERE id=?`,
-		model.SubTaskStatusRunning, now, id)
+	// started_at is COALESCE'd so a second manual Run on a row that already
+	// has a stamped start (a "继续开发" against a previously-finished child)
+	// preserves the original first-start timestamp — Finish's
+	// duration_seconds is computed from that stamp, so flipping it would
+	// silently drop the elapsed time of every earlier attempt.
+	_, err := s.db.Exec(`UPDATE sub_tasks
+		SET status=?, started_at=COALESCE(started_at, ?), updated_at=?
+		WHERE id=?`,
+		model.SubTaskStatusRunning, now, now, id)
 	if err == nil {
 		// Fan-out to per-requirement SSE subscribers so the SubTaskPanel
 		// re-fetches and shows the row as "running" the moment it transitions,
@@ -1602,6 +1613,7 @@ func (s *SubTaskService) RecoverStaleRunningInBatch(batchID string, staleAfter t
 func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 	var st model.SubTask
 	var completedAt sql.NullTime
+	var startedAt sql.NullTime
 	var heartbeat sql.NullTime
 	var agentServerID sql.NullString
 	if err := rows.Scan(
@@ -1609,7 +1621,7 @@ func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 		&st.SessionID, &st.SourceSessionID, &st.JobID, &st.Artifact, &st.Model, &st.ClaudeConfigID,
 		&st.InputTokens, &st.OutputTokens, &st.CacheCreationTokens, &st.CacheReadTokens,
 		&st.CostCents, &st.DurationSeconds,
-		&st.CreatedAt, &st.UpdatedAt, &completedAt,
+		&st.CreatedAt, &st.UpdatedAt, &completedAt, &startedAt,
 		&st.BatchID, &st.BatchSeq, &heartbeat,
 		&st.Source,
 		&agentServerID, &st.AgentServerName,
@@ -1630,6 +1642,13 @@ func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 	if completedAt.Valid {
 		t := completedAt.Time
 		st.CompletedAt = &t
+	}
+	// started_at is nullable: NULL on legacy rows (running before the column
+	// shipped) and on rows that have never left 'pending'. Frontend falls back
+	// to created_at when this is nil so pre-upgrade cards render identically.
+	if startedAt.Valid {
+		t := startedAt.Time
+		st.StartedAt = &t
 	}
 	return &st, nil
 }
