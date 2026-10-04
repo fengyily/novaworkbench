@@ -267,7 +267,7 @@ func TestGenerateCodeHardTimeoutZeroUsesDefault(t *testing.T) {
 	if g.timeout != 120*time.Second {
 		t.Skipf("gateway default changed (now %v); matrix rebuilt around 120s", g.timeout)
 	}
-	cmd, cancel := g.GenerateCode(StreamOpts{Prompt: "hi"})
+	cmd, cancel, _ := g.GenerateCode(StreamOpts{Prompt: "hi"})
 	defer cancel()
 	// We can't read the ctx back from the public API; assert via deadline.
 	// GenerateCode returns g.StreamCmd(ctx, opts); the ctx flows into
@@ -288,7 +288,7 @@ func TestGenerateCodeHardTimeoutOverridesCodingTimeout(t *testing.T) {
 	if g.timeout != 120*time.Second {
 		t.Skipf("gateway default changed (now %v); matrix rebuilt around 120s", g.timeout)
 	}
-	cmd, cancel := g.GenerateCode(StreamOpts{Prompt: "hi", HardTimeout: 45 * time.Minute})
+	cmd, cancel, _ := g.GenerateCode(StreamOpts{Prompt: "hi", HardTimeout: 45 * time.Minute})
 	defer cancel()
 	if cmd == nil {
 		t.Fatal("GenerateCode returned nil cmd")
@@ -302,7 +302,7 @@ func TestGenerateCodeHardTimeoutBelowFloorIsFloored(t *testing.T) {
 	if g.timeout != 120*time.Second {
 		t.Skipf("gateway default changed (now %v); matrix rebuilt around 120s", g.timeout)
 	}
-	cmd, cancel := g.GenerateCode(StreamOpts{Prompt: "hi", HardTimeout: 10 * time.Minute})
+	cmd, cancel, _ := g.GenerateCode(StreamOpts{Prompt: "hi", HardTimeout: 10 * time.Minute})
 	defer cancel()
 	if cmd == nil {
 		t.Fatal("GenerateCode returned nil cmd")

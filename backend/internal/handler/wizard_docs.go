@@ -390,7 +390,7 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 		refineProjectID = requirement.ProjectID
 	}
 	refineUsage := h.usageCtxFor("refine_doc", req.RequirementID, refineProjectID, "", model, fmt.Sprintf("{\"doc_type\":%q}", req.DocType), "")
-	out := runClaudeStream(sseSink{w: w, rc: rc}, cmd, "refine-doc", refineUsage, nil)
+	out := runClaudeStream(sseSink{w: w, rc: rc}, cmd, "refine-doc", refineUsage, nil, nil)
 
 	if out.errMsg != "" || out.finalResult == "" {
 		// Stale --resume: the prior conversation file is gone. Clear the stored
@@ -775,7 +775,7 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 				SessionID:      sourceSID,
 				Resume:         true,
 			})
-			out = runClaudeStream(jobSink{job}, cmd, "apply-doc", applyUsage, nil, codingStallTimeout)
+			out = runClaudeStream(jobSink{job}, cmd, "apply-doc", applyUsage, nil, nil, codingStallTimeout)
 		}
 
 		if out.staleSession {
@@ -1067,7 +1067,7 @@ func (h *WizardHandler) CompressContext(w http.ResponseWriter, r *http.Request) 
 	sink := sseSink{w: w, rc: rc}
 	sink.emit(store.LogLine{Type: "phase", Content: "📦 正在压缩上下文..."})
 
-	out := runClaudeStream(sink, cmd, "compress-context", uctx, nil)
+	out := runClaudeStream(sink, cmd, "compress-context", uctx, nil, nil)
 
 	if out.staleSession {
 		// Disk session is gone (cleaned up, container restart, etc.). We can't

@@ -573,6 +573,12 @@ type StreamOpts struct {
 	// when CLAUDE_TIMEOUT is configured short. 0 means "follow the gateway's
 	// default policy" (current behavior).
 	HardTimeout time.Duration
+	// IdleTimeout, when > 0, makes the ctx stay alive as long as the spawned
+	// claude produces stdout events. GenerateCode returns a heartbeats channel
+	// the caller can pump (typically via runClaudeStream) to reset the idle
+	// timer. HardTimeout still serves as an absolute cap for runaway protection.
+	// 0 = legacy fixed-deadline behavior (HardTimeout still honored as minimum).
+	IdleTimeout time.Duration
 }
 
 // StreamCmd returns an unstarted *exec.Cmd configured for stream-json output
@@ -903,14 +909,18 @@ func summaryFallback(claudeMD string) string {
 
 // GenerateCode invokes Claude CLI to implement a requirement.
 // Uses stream-json + dangerously-skip-permissions so Claude can read and write files.
-// Returns the command and its cancel function; the caller MUST invoke the cancel
-// function when the run completes (the coding handler does so via `defer cancel()`)
-// so the long timeout's timer is released rather than held until the deadline.
+// Returns the command, its cancel function, and an optional heartbeats channel.
+// The caller MUST invoke the cancel function when the run completes (the coding
+// handler does so via `defer cancel()`) so the long timeout's timer is released
+// rather than held until the deadline. When opts.IdleTimeout > 0 the heartbeats
+// channel is non-nil; the caller should pump it (typically via runClaudeStream)
+// so the rolling idle timer resets on every stdout event. nil heartbeats means
+// legacy fixed-deadline ctx (back-compat path).
 // Caller streams stdout. systemPrompt/model come from the "developer" role config.
 // When opts.SessionID is set with Resume/Fork, the coding turn continues (or forks
 // from) the design conversation so the developer inherits the full
 // analysis+design context instead of being re-fed it.
-func (g *Gateway) GenerateCode(opts StreamOpts) (*exec.Cmd, context.CancelFunc) {
+func (g *Gateway) GenerateCode(opts StreamOpts) (*exec.Cmd, context.CancelFunc, chan struct{}) {
 	// Use a long timeout for coding tasks — real implementations can take many minutes.
 	// opts.HardTimeout is a caller-asserted minimum (e.g. Agent Server remote SSE,
 	// sub-task runner). 0 means "follow the gateway default" and the math below
@@ -924,9 +934,61 @@ func (g *Gateway) GenerateCode(opts StreamOpts) (*exec.Cmd, context.CancelFunc) 
 	if codingTimeout < 30*time.Minute {
 		codingTimeout = 30 * time.Minute
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), codingTimeout)
 
-	return g.StreamCmd(ctx, opts), cancel
+	if opts.IdleTimeout <= 0 {
+		// Legacy fixed-deadline behavior — preserves byte-identical semantics
+		// for callers that haven't opted into rolling timeouts.
+		ctx, cancel := context.WithTimeout(context.Background(), codingTimeout)
+		return g.StreamCmd(ctx, opts), cancel, nil
+	}
+
+	// Rolling: idle watcher resets IdleTimeout on heartbeat; absolute cap
+	// (codingTimeout) prevents runaway runs. The cancel closure fans out to
+	// both the absolute-cap timer and the rolling ctx's cancel so callers
+	// only need to invoke one function on stop/complete.
+	rollingCtx, rollingCancel, hb := rollingCtx("code", opts.IdleTimeout)
+	absCtx, absCancel := context.WithTimeout(rollingCtx, codingTimeout)
+	combinedCancel := func() {
+		absCancel()
+		rollingCancel()
+	}
+	return g.StreamCmd(absCtx, opts), combinedCancel, hb
+}
+
+// rollingCtx is the llm-package's package-private twin of handler.newRollingCtx.
+// It exists here so the gateway can produce rolling-ctx-with-heartbeats without
+// dragging the handler package into the llm import graph. The shape (timer
+// reset on heartbeat, cancel on expiry, exit on channel close) mirrors
+// handler.newRollingCtx exactly.
+func rollingCtx(scope string, idleTimeout time.Duration) (context.Context, context.CancelFunc, chan struct{}) {
+	parent, cancel := context.WithCancel(context.Background())
+	heartbeats := make(chan struct{}, 1)
+	go func() {
+		timer := time.NewTimer(idleTimeout)
+		if !timer.Stop() {
+			<-timer.C
+		}
+		for {
+			select {
+			case _, ok := <-heartbeats:
+				if !ok {
+					return
+				}
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(idleTimeout)
+			case <-timer.C:
+				log.Printf("[%s] idle %v with no stdout event; cancelling ctx", scope, idleTimeout)
+				cancel()
+				return
+			}
+		}
+	}()
+	return parent, cancel, heartbeats
 }
 
 // usageInt coereces a JSON-decoded numeric value (float64 / int / int64 /

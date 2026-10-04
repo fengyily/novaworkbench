@@ -126,6 +126,11 @@ type remoteRunInput struct {
 	// then "main". Dev callers already resolve this on their side and
 	// pre-populate it.
 	baseBranch string
+	// heartbeats is the rolling-ctx heartbeat channel produced by
+	// prepareRemoteAgentRun; passed to parseStreamJSONFromReader so the
+	// idle timer resets on every NDJSON line. Populated by the helper
+	// (caller leaves it nil).
+	heartbeats chan<- struct{}
 }
 
 // remoteArchitectInput is the architect-stage wrapper around remoteRunInput.
@@ -185,8 +190,15 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		return claudeStreamOutcome{errMsg: "Agent 服务器服务未初始化"}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), agentTimeout())
+	// Rolling ctx: idle window (default 30m, NOVA_AGENT_IDLE_TIMEOUT) resets
+	// every time the remote stream emits an NDJSON line; absolute cap
+	// (default 8h, NOVA_AGENT_MAX_TOTAL_TIMEOUT) prevents zombie workers
+	// from holding memory forever.
+	ctx, cancel, hb := newRollingCtx("remote-coding", agentIdleTimeout())
 	defer cancel()
+	absCtx, absCancel := context.WithTimeout(ctx, agentMaxTotalTimeout())
+	defer absCancel()
+	ctx = absCtx
 
 	// Load the (decrypted) credential before anything else — a missing master
 	// key surfaces here as a clear error instead of a generic SSH failure.
@@ -566,7 +578,7 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		return claudeStreamOutcome{errMsg: fmt.Sprintf("worker 返回 HTTP %d: %s", resp.StatusCode, truncateStr(string(errBody), 600))}
 	}
 
-	out := parseStreamJSONFromReader(resp.Body, jobSink{in.job}, "start-coding", in.usage)
+	out := parseStreamJSONFromReader(ctx, resp.Body, jobSink{in.job}, "start-coding", in.usage, hb)
 	// Stamp the pre-flight session-missing classification onto the
 	// outcome so finishSubTask / ExecuteOrchestratedChild can pick the
 	// right artifact text. Only meaningful when staleSession is true
@@ -626,8 +638,20 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 		return claudeStreamOutcome{errMsg: "Agent 服务器服务未初始化"}, func() {}, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), agentTimeout())
+	// Rolling ctx: idle window (default 30m, NOVA_AGENT_IDLE_TIMEOUT) resets
+	// every time the remote stream emits an NDJSON line; absolute cap
+	// (default 8h, NOVA_AGENT_MAX_TOTAL_TIMEOUT) prevents zombie workers
+	// from holding memory forever.
+	ctx, cancel, hb := newRollingCtx("remote-run", agentIdleTimeout())
 	defer cancel()
+	absCtx, absCancel := context.WithTimeout(ctx, agentMaxTotalTimeout())
+	defer absCancel()
+	ctx = absCtx
+
+	// Stash hb on the input so the caller (runRemoteCoding / runRemoteArchitectDesign)
+	// can pass it to parseStreamJSONFromReader as the rolling-ctx heartbeat
+	// channel. nil when ctx is the legacy fixed-deadline one.
+	in.heartbeats = hb
 
 	// Step 1: load the (decrypted) credential before anything else — a missing
 	// master key surfaces here as a clear error instead of a generic SSH failure.
@@ -907,7 +931,7 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 		return claudeStreamOutcome{errMsg: fmt.Sprintf("worker 返回 HTTP %d: %s", resp.StatusCode, truncateStr(string(errBody), 600))}, cleanup, nil
 	}
 
-	out := parseStreamJSONFromReader(resp.Body, jobSink{in.job}, "architect-design", in.usage)
+	out := parseStreamJSONFromReader(ctx, resp.Body, jobSink{in.job}, "architect-design", in.usage, in.heartbeats)
 	out.SessionFileMissingSide = sessionMissingSide
 
 	// Step 6: session sync (down) — copy any new session jsonl back to local.
@@ -1955,4 +1979,29 @@ func agentTimeout() time.Duration {
 		return d
 	}
 	return defaultAgentTimeout
+}
+
+// agentIdleTimeout is the rolling-window size: an Agent-server stream whose
+// stdout goes idle for this duration has its rolling ctx cancelled. Long-
+// running tool calls (npm install, go build, etc.) survive as long as they
+// keep emitting stdout. Defaults to 30m; tunable via NOVA_AGENT_IDLE_TIMEOUT.
+func agentIdleTimeout() time.Duration {
+	const def = 30 * time.Minute
+	raw := os.Getenv("NOVA_AGENT_IDLE_TIMEOUT")
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	return def
+}
+
+// agentMaxTotalTimeout is the absolute cap on an Agent-server run, layered
+// on top of the rolling idle timer so a zombie worker never holds memory
+// forever. Defaults to 8h; tunable via NOVA_AGENT_MAX_TOTAL_TIMEOUT.
+func agentMaxTotalTimeout() time.Duration {
+	const def = 8 * time.Hour
+	raw := os.Getenv("NOVA_AGENT_MAX_TOTAL_TIMEOUT")
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	return def
 }

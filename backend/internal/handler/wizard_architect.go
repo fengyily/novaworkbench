@@ -553,6 +553,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 		out = runClaudeStream(jobSink{job}, cmd, "architect-design",
 			h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 			nil,
+			nil,
 			architectStallTimeout)
 	}
 
