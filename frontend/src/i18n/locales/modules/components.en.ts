@@ -234,6 +234,19 @@ export const components = {
     phaseUnderstandingLabel: 'Understanding',
     phaseImplementationLabel: 'Implementation',
     phaseSummaryLabel: 'Summary',
+    // v0.5.x: Report completion metadata strip — uppercase labels for the
+    // dl/dt/dd grid. Keep terse (under ~14 chars) so dt fits in the 160px
+    // minmax column without wrapping.
+    reportMetaPrompt: 'Prompt',
+    reportMetaCompletedAt: 'Completed',
+    reportMetaModel: 'Model',
+    reportMetaDuration: 'Duration',
+    reportMetaCost: 'Cost',
+    reportMetaRetry: 'Retries',
+    reportEmpty: 'Task ended but Claude produced no output.',
+    phaseStepComplete: 'Done',
+    phaseStepActive: 'In progress',
+    phaseStepPending: 'Pending',
   },
   createRequirement: {
     title: 'New requirement',
