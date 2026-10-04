@@ -180,7 +180,7 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 		})
 		defer cancel()
 		usage := h.usageCtxForConfig("re_orchestrate", id, req.ProjectID, job.ID, modelName, "", "", claudeConfigID)
-		out := runClaudeStream(jobSink{job}, cmd, "re-orchestrate", usage)
+		out := runClaudeStream(jobSink{job}, cmd, "re-orchestrate", usage, nil)
 
 		switch {
 		case out.staleSession:
@@ -1304,7 +1304,7 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 			usage:         childUsage,
 		})
 	} else {
-		out = runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage, codingStallTimeout)
+		out = runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage, nil, codingStallTimeout)
 	}
 
 	// Stop the heartbeat BEFORE Finish so a slow MarkHeartbeat can't race
@@ -1579,7 +1579,7 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 	defer cancel()
 
 	summaryUsage := h.usageCtxForConfig("orchestrate_summary", batch.RequirementID, req.ProjectID, job.ID, batch.Model, "", "auto-summary", batch.ClaudeConfigID)
-	out := runClaudeStream(jobSink{job}, cmd, "orchestrate-summary", summaryUsage)
+	out := runClaudeStream(jobSink{job}, cmd, "orchestrate-summary", summaryUsage, nil)
 
 	// Stale-session recovery：会话文件可能已被清理/失效。镜像 re-orchestrate
 	// 的 134-142：清空 OrchestratorSessionID、铸新 SID、用 Resume=false 再来一次。
@@ -1605,7 +1605,7 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 		})
 		if cmd2 != nil {
 			defer cancel2()
-			out = runClaudeStream(jobSink{job}, cmd2, "orchestrate-summary-retry", summaryUsage)
+			out = runClaudeStream(jobSink{job}, cmd2, "orchestrate-summary-retry", summaryUsage, nil)
 		}
 	}
 

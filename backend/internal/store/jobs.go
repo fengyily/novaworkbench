@@ -14,6 +14,14 @@ type LogLine struct {
 	Type    string `json:"type"` // "tool_call" | "tool_result" | "message" | "error" | "done"
 	Content string `json:"content"`
 	At      int64  `json:"at,omitempty"` // Unix ms; set automatically by Job.Append / sseSink.emit / sendStatus
+	// Phase carries an optional phase discriminator when Type is "phase" or
+	// "phase_section": one of "understanding" / "implementation" / "summary".
+	// The frontend SubTaskPanel uses Type=="phase" + Phase to flip its
+	// activePhase spinner, and Type=="phase_section" + Phase + Content to
+	// render the just-flushed Markdown into the matching collapsible section.
+	// Absent on every other event type. JSON omitted when empty so legacy
+	// clients see no field change.
+	Phase string `json:"phase,omitempty"`
 }
 
 type JobStatus string

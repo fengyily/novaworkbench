@@ -152,6 +152,25 @@ type SubTask struct {
 	CreatedAt                time.Time  `json:"created_at"`
 	UpdatedAt                time.Time  `json:"updated_at"`
 	CompletedAt              *time.Time `json:"completed_at,omitempty"`
+	// PhaseUnderstanding / PhaseImplementation / PhaseSummary are the
+	// three Markdown buffers captured during a manually-triggered sub-task
+	// run, bucketed by the `<<<UNDERSTANDING>>>` / `<<<IMPLEMENTATION>>>` /
+	// `<<<SUMMARY>>>` sentinels the prompt asks Claude to emit. Empty when
+	// the row was auto-orchestrated (source='auto'), when it predates the
+	// feature, or when the model's output happened to skip the markers
+	// (tracker is best-effort and never fails the run). Persisted on Finish
+	// (FinishWithPhases) so the SubTaskCard can render all three sections
+	// above the live log even after JobStore eviction.
+	PhaseUnderstanding string `json:"phase_understanding,omitempty"`
+	PhaseImplementation string `json:"phase_implementation,omitempty"`
+	PhaseSummary       string `json:"phase_summary,omitempty"`
+	// PhaseEmitted is the front-end switch: 1 when this row went through the
+	// phase tracking pipeline (manually triggered rows where the tracker ran,
+	// regardless of whether every marker was matched), 0 when it predates the
+	// feature or the auto-orchestrated branch. SubTaskCard only renders the
+	// three sections when PhaseEmitted is true so old / auto rows stay
+	// visually identical to pre-feature renders.
+	PhaseEmitted bool `json:"phase_emitted"`
 }
 
 // Sub-task status values, kept as plain string constants so they line up with

@@ -689,7 +689,16 @@ func (silentSink) emit(line store.LogLine) {}
 // sites keep the 3-minute behaviour without being touched — only stages that
 // have a documented reason to wait longer opt in. Non-positive values and
 // extra elements are ignored.
-func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCtx, stallTimeoutOverride ...time.Duration) claudeStreamOutcome {
+//
+// phaseSink, when non-nil, receives every assistant text-delta chunk in the
+// same order it is emitted (text_delta stream events + batched assistant
+// fallback text). It runs synchronously inside the stream loop, so heavy
+// work should be off-loaded. Nil is the safe default — every existing call
+// site passes nil and behaves identically to before this parameter existed.
+// SubTaskRunner is the only consumer that supplies a non-nil value, to drive
+// the 3-phase (理解 / 实施 / 小结) marker parser for source='manual' rows;
+// all other wizard stages stay decoupled from the phase tracker.
+func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCtx, phaseSink func(textDelta string), stallTimeoutOverride ...time.Duration) claudeStreamOutcome {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return claudeStreamOutcome{errMsg: "启动 Claude 失败: " + err.Error()}
@@ -826,6 +835,9 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 					}
 					out.hadStreamEvents = true
 					sink.emit(store.LogLine{Type: "message", Content: text})
+					if phaseSink != nil {
+						phaseSink(text)
+					}
 				case "input_json_delta":
 					// tool input being assembled — not surfaced to the client
 				}
@@ -919,6 +931,9 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 						text, _ := b["text"].(string)
 						if text != "" {
 							sink.emit(store.LogLine{Type: "message", Content: text})
+							if phaseSink != nil {
+								phaseSink(text)
+							}
 						}
 					}
 				}

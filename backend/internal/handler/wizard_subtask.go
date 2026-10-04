@@ -344,6 +344,15 @@ func (h *WizardHandler) runSubTask(
 		job.Finish(1, store.JobError)
 		return
 	}
+	// v0.5.x 兜底：StartSubTask 通过 NewPendingSubTask 写入 source=''，
+	// Adjust/Redo/Continue 走 service.CreateAdjustment / RedoAsNew /
+	// ContinueAsNew 已经硬编码 source='manual'。这里统一把空串视作 manual，
+	// 让三阶段 tracker 在 Run 入口的 phaseEnabledForSource 判断里被打开。
+	// schema DEFAULT 'manual' 是底线（存量空串之外的 INSERT），本兜底不会
+	// 影响那条路径，且不修 DB 数据。
+	if st.Source == "" {
+		st.Source = model.SubTaskSourceManual
+	}
 	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, adjust, fork, freshSession, bare, parentSourceSID)
 	// (The agent-server routing branch previously inlined here moved to
 	// SubTaskRunner.Run so that every sub-task path — manual children,

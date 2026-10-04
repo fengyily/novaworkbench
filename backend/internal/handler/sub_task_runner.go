@@ -26,12 +26,292 @@ import (
 // via NOVA_SUBTASK_CONCURRENCY at construction time.
 const DefaultSubTaskConcurrency = 4
 
+// phaseTracker recognizes `<<<UNDERSTANDING>>>` / `<<<IMPLEMENTATION>>>` /
+// `<<<SUMMARY>>>` sentinels in the assistant text stream and buckets the
+// output into three Markdown buffers that SubTaskRunner.Run persists to
+// sub_tasks.phase_understanding / phase_implementation / phase_summary at
+// finish time. Only enabled for manual sub-tasks (source='manual' or ''):
+// auto-orchestrated children stay on the legacy single-artifact path.
+//
+// The tracker is best-effort: missing or out-of-order markers never error out
+// the run. The summaryGuard rejects an unusually early `<<<SUMMARY>>>` marker
+// (before summaryGuardMinBytes of IMPLEMENTATION text), which protects
+// against a prompt body that itself embeds a sentinel — the literal
+// `<<<SUMMARY>>>` then stays in the implementation buffer where it can be
+// debugged, and the run progresses normally. R2 / R9 from the design doc.
+type phaseTracker struct {
+	active       string // "" | "understanding" | "implementation" | "summary"
+	emitEmitted  bool // whether at least one sentinel was ever matched
+	understanding string
+	implementation string
+	summary       string
+	// implementationBytes counts bytes fed into the IMPLEMENTATION buffer; used
+	// for the R9 summaryGuard threshold. Reset only on UNKNOWN→UNDERSTANDING
+	// transition so a "revisit implementation" loop still counts the new text.
+	implementationBytes int
+}
+
+// phaseTrackerSummaryGuardMinBytes is the minimum IMPLEMENTATION buffer
+// length (in bytes) that must accumulate before a SUMMARY sentinel is
+// accepted. Tunable; 200 bytes is well under "completed one real edit" so
+// the guard only catches the prompt-injection edge case where the user body
+// happens to contain the literal `<<<SUMMARY>>>`.
+const phaseTrackerSummaryGuardMinBytes = 200
+
+// phaseInstructionsBlock is the per-prompt block that asks Claude to emit the
+// three sentinels in order. Inserted between the `## 子任务 / ## 继续执行 /
+// ## 追加调整` header and the "你是执行者…" line so the order of prompts
+// stays: title block → role context (built upstream) → 三段标题 instruction →
+// 执行指令契约 → git commit convention. The block is unconditional on the
+// prompt string; the runner's phaseEnabled gate decides whether the
+// tracker actually consumes the markers. Keeping the same string for every
+// manual run ensures Claude's behavior is consistent and easy to debug.
+const phaseInstructionsBlock = `
+
+## 执行阶段
+
+请按下列顺序用三个围栏块输出三段内容，每段以 <<<NAME>>> 开始（<<<END>>> 可选）：
+
+- <<<UNDERSTANDING>>>  任务目标、关键约束、拟定实施步骤
+- <<<IMPLEMENTATION>>>  实施过程叙述（工具调用结果不在这里展示）
+- <<<SUMMARY>>>         改了哪些文件、遗留风险、下一步建议
+
+三个围栏块必须按顺序完整输出，不可省略。围栏块外的工具调用视为实施阶段。
+`
+
+// phaseEnabledForSource gates the per-row tracker. Only the manual path is
+// enabled; auto-orchestrated children (source='auto') and push/PR sub-tasks
+// (source='push_pr') keep the legacy single-artifact behavior. The empty-
+// string case covers StartSubTask's historical rows where the schema
+// DEFAULT never fired because the INSERT wrote "" explicitly.
+func phaseEnabledForSource(source string) bool {
+	return source == model.SubTaskSourceManual || source == ""
+}
+
+// feed a single text delta into the tracker. The callback hooks let the
+// caller react to phase transitions synchronously — flushing the just-
+// closed buffer to DB and pushing the matching SSE event to the job — without
+// the tracker needing to know about either. Both callbacks may be nil during
+// tests.
+//
+// OnFlush(prevPhase, markdown) fires once when the tracker transitions AWAY
+// from a phase whose buffer has content. The summary phase uses an empty
+// onFlush because the buffers are already persisted by FinishWithPhases;
+// the same empty onFlush is what keeps understanding/implementation flushes
+// happening in lockstep with the live SSE marker the user sees.
+//
+// OnPhase(newPhase) fires on every transition INTO a new phase, including
+// the first marker, so the caller can push a "🧠 任务理解…" / "🔨 实施…" /
+// "📋 小结…" header line that the SubTaskPanel uses to flip its
+// activePhase spinner.
+//
+// Markers are matched case-insensitively (the design docs write them in
+// uppercase but allow lower) and tolerate surrounding whitespace + a
+// leading newline. A marker can be split across two consecutive deltas: the
+// tracker keeps a small tail buffer for that case (see matchSentinel). The
+// end marker `<<<END>>>` is optional and not actively parsed; the phase
+// buffer naturally ends when the next sentinel opens the next phase.
+func (p *phaseTracker) feed(delta string, onFlush func(prevPhase, markdown string), onPhase func(newPhase string)) {
+	if delta == "" {
+		return
+	}
+	for _, raw := range splitOnSentinels(delta) {
+		matched := phaseSentinelKey(raw)
+		switch matched {
+		case "":
+			// Plain text chunk — append to the current phase buffer.
+			switch p.active {
+			case "":
+				// No marker has fired yet. Best-effort R-9-style fallback
+				// documented in the design doc: dump any pre-marker text
+				// into IMPLEMENTATION so a model that forgets the sentinels
+				// entirely still keeps its content visible in the
+				// implementation section (rather than the user staring at
+				// an empty implementation card).
+				p.implementation += raw
+				p.implementationBytes += len(raw)
+			case "understanding":
+				p.understanding += raw
+			case "implementation":
+				p.implementation += raw
+				p.implementationBytes += len(raw)
+			case "summary":
+				p.summary += raw
+			}
+		default:
+			// Saw a phase marker. summaryGuard short-circuits SUMMARY if
+			// the implementation buffer is suspiciously short — see R9.
+			if matched == "summary" && p.implementationBytes < phaseTrackerSummaryGuardMinBytes {
+				// Treat the matched sentinel as plain text so the literal
+				// `<<<SUMMARY>>>` shows up in the buffer where the user can
+				// see it; don't transition.
+				switch p.active {
+				case "":
+					p.implementation += raw
+					p.implementationBytes += len(raw)
+				case "understanding":
+					p.understanding += raw
+				case "implementation":
+					p.implementation += raw
+					p.implementationBytes += len(raw)
+				case "summary":
+					p.summary += raw
+				}
+				continue
+			}
+			// Flush the previous phase if it has content.
+			prev := p.active
+			if prev != "" {
+				switch prev {
+				case "understanding":
+					if onFlush != nil {
+						onFlush("understanding", p.understanding)
+					}
+				case "implementation":
+					if onFlush != nil {
+						onFlush("implementation", p.implementation)
+					}
+				case "summary":
+					if onFlush != nil {
+						onFlush("summary", p.summary)
+					}
+				}
+			}
+			p.active = matched
+			p.emitEmitted = true
+			if onPhase != nil {
+				onPhase(matched)
+			}
+		}
+	}
+}
+
+// flushBuffers returns a copy of the three buffers (caller may persist).
+// emitted reports whether any sentinel was ever matched (so the caller can
+// set phase_emitted=1 even when the buffers are all empty — a model that
+// emitted markers but no real text is still a "phase path" run).
+func (p *phaseTracker) flushBuffers() (understanding, implementation, summary string, emitted bool) {
+	return p.understanding, p.implementation, p.summary, p.emitEmitted
+}
+
+// phaseSentinelKey returns "understanding" / "implementation" / "summary"
+// when raw matches the corresponding `<<<NAME>>>` sentinel (case-insensitive,
+// allowing a trailing newline). Returns "" for plain text. Splitting on
+// markers is done by splitOnSentinels first, so this function only ever
+// sees clean chunks that START with a sentinel — it doesn't have to hunt
+// for substrings.
+func phaseSentinelKey(raw string) string {
+	trim := strings.TrimSpace(raw)
+	low := strings.ToLower(trim)
+	switch low {
+	case "<<<understanding>>>":
+		return "understanding"
+	case "<<<implementation>>>":
+		return "implementation"
+	case "<<<summary>>>":
+		return "summary"
+	}
+	return ""
+}
+
+// splitOnSentinels walks delta looking for `<<<NAME>>>` markers and splits
+// the text around them. The returned chunks are either plain text (no
+// marker) or a clean sentinel line. Markers are detected case-insensitively
+// and must be preceded by whitespace or the start of the string (so the
+// literal `<<<SUMMARY>>>` written by a user body doesn't accidentally
+// trigger inside a run of text — it must be on its own line / segment).
+//
+// The implementation is intentionally regex-free: stream-json text deltas
+// can be many per turn and a per-delta regex would be wasted overhead. We
+// just look for the byte sequence `<<<` and probe forward for a known
+// sentinel name. The performance cost is one byte-walk per delta.
+func splitOnSentinels(delta string) []string {
+	const open = "<<<"
+	var chunks []string
+	rest := delta
+	for {
+		idx := strings.Index(rest, open)
+		if idx < 0 {
+			if rest != "" {
+				chunks = append(chunks, rest)
+			}
+			return chunks
+		}
+		// The character before `<<<` must be a newline or the start of the
+		// buffer; otherwise it's an embedded literal (e.g. user body) and we
+		// keep it as plain text.
+		if idx > 0 && rest[idx-1] != '\n' && rest[idx-1] != ' ' && rest[idx-1] != '\t' {
+			chunks = append(chunks, rest[:idx+len(open)])
+			rest = rest[idx+len(open):]
+			continue
+		}
+		// Emit the prefix as a plain text chunk (only if non-empty).
+		if idx > 0 {
+			chunks = append(chunks, rest[:idx])
+		}
+		// Probe the candidate name between `<<<` and the next `>>>`.
+		closeIdx := strings.Index(rest[idx+len(open):], ">>>")
+		if closeIdx < 0 {
+			// No closing `>>>` — treat the rest of the buffer as plain
+			// text so we don't drop it. The next delta may complete the
+			// marker (the stream-json layer chunks per text_delta, and the
+			// split point can fall mid-marker).
+			chunks = append(chunks, rest[idx:])
+			return chunks
+		}
+		name := rest[idx+len(open) : idx+len(open)+closeIdx]
+		low := strings.ToLower(strings.TrimSpace(name))
+		switch low {
+		case "understanding", "implementation", "summary":
+			// Look for the newline that closes the marker line (so a
+			// hypothetical `<<<SUMMARY>>>foo` doesn't match).
+			end := idx + len(open) + closeIdx + 3
+			if end < len(rest) && rest[end] != '\n' && rest[end] != ' ' && rest[end] != '\t' {
+				// Suffix junk — keep as plain text.
+				chunks = append(chunks, rest[:idx])
+				rest = rest[idx:]
+				continue
+			}
+			chunks = append(chunks, rest[idx:end])
+			rest = rest[end:]
+		default:
+			// Some other `<<<...>>>` shape — treat as plain.
+			chunks = append(chunks, rest[:idx+len(open)])
+			rest = rest[idx+len(open):]
+		}
+	}
+}
+
+// phaseSectionEvent / phaseEvent are LogLine shapes the SubTaskPanel uses
+// to identify which section is filling live. They live as constants so the
+// frontend (which mirrors them in components/SubTaskPanel.tsx) and the
+// backend agree on the magic strings.
+const (
+	logTypePhaseSection = "phase_section"
+)
+
+// phaseLabelFor returns the SSE label string the SubTaskPanel matches against
+// to flip its activePhase spinner. Emoji prefixes are the discriminator;
+// SubTaskPanel parses the FIRST byte-prefix to decide which card is active.
+// Keep these in lockstep with components/SubTaskPanel.tsx's emoji map.
+func phaseLabelFor(phase string) string {
+	switch phase {
+	case "understanding":
+		return "🧠 任务理解"
+	case "implementation":
+		return "🔨 实施"
+	case "summary":
+		return "📋 小结"
+	}
+	return ""
+}
+
 // SubTaskRunner is the shared sub-task executor. It holds the dependencies
 // required to spawn a child claude CLI subprocess for a sub_tasks row and
 // persist the terminal artifact. Both WizardHandler (manual sub-tasks / auto-
 // orchestrated children) and MergeHandler (push + PR sub-task) inject this so
-// the runtime semantics stay in one place: any caller creating a sub-task row
-// can launch it via Run without re-implementing the goroutine.
+// the runtime semantics stay in one place: any caller creating a
+// sub-task row can launch it via Run without re-implementing the goroutine.
 //
 // Lifecycle (the same as the original WizardHandler.runSubTask):
 //  1. Caller inserts a pending sub_tasks row + pre-mints a session id + creates
@@ -578,6 +858,16 @@ func (r *SubTaskRunner) Run(
 		return
 	}
 
+	// v0.5.x: 三阶段（理解 / 实施 / 小结）只在手动触发路径打开。auto / push_pr
+	// 子任务的 live log 渲染和自动批派逻辑保持不变——它们依然走单一的 artifact
+	// 路径，phase_* 列保持空、phase_emitted=0、前端不渲染三段区。
+	phaseEnabled := phaseEnabledForSource(st.Source)
+	var phaseTrack *phaseTracker
+	if phaseEnabled {
+		phaseTrack = &phaseTracker{}
+	}
+	log.Printf("[sub-task] phaseEnabled=%v source=%q id=%s", phaseEnabled, st.Source, st.ID)
+
 	var prompt string
 	switch {
 	case !fork:
@@ -586,6 +876,9 @@ func (r *SubTaskRunner) Run(
 		prompt = "## 追加调整\n\n" + body + "\n"
 	default:
 		prompt = "## 子任务\n\n" + body + "\n"
+	}
+	if phaseEnabled {
+		prompt += phaseInstructionsBlock
 	}
 	prompt += "\n> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
 	prompt += "\n" + promptpkg.GitCommitConvention + "\n"
@@ -731,7 +1024,8 @@ func (r *SubTaskRunner) Run(
 			FreshSession:   freshSession,
 			Bare:           bare,
 		})
-		r.finishSubTask(st, job, out, modelName, startTime)
+		// v0.5.x: 远端 Agent 服务器路径暂未接入 phase tracker；保持单一 artifact 落库。
+		r.finishSubTask(st, job, out, modelName, startTime, nil)
 		return
 	}
 
@@ -755,11 +1049,11 @@ func (r *SubTaskRunner) Run(
 		// --resume-in-place are preserved — a stale parent JSONL here
 		// means the user must "重做" rather than auto-recover.
 		out = r.runLocalSubTaskAttempt(
-			job, prompt, systemPromptForRun, modelName,
+			st, job, prompt, systemPromptForRun, modelName,
 			sourceSID, newSID,
 			adjust, /*forkFlag*/ false,
 			freshSession, bare,
-			workDir, subUsage, finalConfigID, credEnv,
+			workDir, subUsage, finalConfigID, credEnv, phaseTrack,
 		)
 	} else {
 		// fork=true (StartSubTask / AdjustSubTask / RedoSubTask): try the
@@ -800,12 +1094,12 @@ func (r *SubTaskRunner) Run(
 					Content: fmt.Sprintf("🔄 子任务源会话=%s (回退第 %d 层)", src, idx)})
 			}
 			out = r.runLocalSubTaskAttempt(
-				job, prompt, systemPromptForRun, modelName,
+				st, job, prompt, systemPromptForRun, modelName,
 				src, sidForThisAttempt,
 				/*adjustFlag*/ idx == 0 && adjust,
 				/*forkFlag*/  true,
 				freshSession, bare,
-				workDir, subUsage, finalConfigID, credEnv,
+				workDir, subUsage, finalConfigID, credEnv, phaseTrack,
 			)
 			// Success: claude returned a real finalResult without stale error.
 			if !out.staleSession && out.errMsg == "" && out.finalResult != "" {
@@ -827,7 +1121,7 @@ func (r *SubTaskRunner) Run(
 				Content: "🔄 源会话已过期，自动尝试上一级会话..."})
 		}
 	}
-	r.finishSubTask(st, job, out, modelName, startTime)
+	r.finishSubTask(st, job, out, modelName, startTime, phaseTrack)
 }
 
 // runLocalSubTaskAttempt launches a single claude subprocess for the local
@@ -843,6 +1137,7 @@ func (r *SubTaskRunner) Run(
 // returning), and the per-call cancel() defers fire when this function
 // returns.
 func (r *SubTaskRunner) runLocalSubTaskAttempt(
+	st *model.SubTask,
 	job *store.Job,
 	prompt, systemPromptForRun, modelName string,
 	sourceSID, newSID string,
@@ -852,6 +1147,7 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 	subUsage *usageCtx,
 	finalConfigID string,
 	credEnv []string,
+	tracker *phaseTracker,
 ) claudeStreamOutcome {
 	resumeFlag := true
 	forkFor := forkFlag
@@ -903,7 +1199,29 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 	// here and the deferred cleanup.
 	job.SetCmd(cmd, cancel)
 	defer cancel()
-	return runClaudeStream(jobSink{job}, cmd, "sub-task", subUsage, codingStallTimeout)
+	// v0.5.x: phase tracker sink. nil unless the row is manual-triggered
+	// (phaseEnabled gate). The closure also streams SSE markers + DB writes
+	// synchronously inside the stream loop — fine because tracker.feed is
+	// O(n) in delta length and the writes are cheap single-row UPDATEs.
+	var phaseSinkFn func(string)
+	if tracker != nil {
+		phaseSinkFn = func(delta string) {
+			tracker.feed(delta,
+				func(prevPhase, markdown string) {
+					// Live-flush the just-closed buffer to DB so a refresh
+					// mid-run already shows the previous phase's content.
+					if perr := r.subTaskSvc.UpdatePhaseOutput(st.ID, prevPhase, markdown); perr != nil {
+						log.Printf("[sub-task] phase-flush %s for %s: %v", prevPhase, st.ID, perr)
+					}
+					job.Append(store.LogLine{Type: logTypePhaseSection, Phase: prevPhase, Content: markdown})
+				},
+				func(newPhase string) {
+					job.Append(store.LogLine{Type: "phase", Content: phaseLabelFor(newPhase)})
+				},
+			)
+		}
+	}
+	return runClaudeStream(jobSink{job}, cmd, "sub-task", subUsage, phaseSinkFn, codingStallTimeout)
 }
 
 // staleSourceCandidates builds the fallback chain of source session IDs to
@@ -949,7 +1267,7 @@ func staleSourceCandidates(sourceSID, parentSourceSID, reqCodingSID string) []st
 // "stopped". Instead we just stamp token / cost / duration / completed_at /
 // model via UpdateRunStatsOnStop so the dashboard still sees the resolved
 // usage numbers, and finish the JobStore job so SSE subscribers unblock.
-func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out claudeStreamOutcome, modelName string, startTime time.Time) {
+func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out claudeStreamOutcome, modelName string, startTime time.Time, phaseTrack *phaseTracker) {
 	tokens := model.SubTaskTokens{
 		Input:         out.lastUsage.InputTokens,
 		Output:        out.lastUsage.OutputTokens,
@@ -1016,8 +1334,34 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 	job.Append(store.LogLine{Type: "done", Content: "✅ 子任务完成！"})
 
 	artifact := buildSubTaskArtifact(st, modelName, artifactBody, time.Now())
-	if perr := r.subTaskSvc.Finish(st.ID, finalStatus, artifact, modelName, tokens, costCents, startTime); perr != nil {
-		log.Printf("[sub-task] failed to persist finish for %s: %v", st.ID, perr)
+	// v0.5.x: 三阶段落库分支。仅手动触发且 tracker 走过 phase 路径时，
+	// 调 FinishWithPhases 一次性写齐 4 列；其它路径继续走 Finish 保持行为不变。
+	// phase_emitted 也只在这里被写为 1——StartSubTask / Adjust / Redo / Continue
+	// 都走这条分支；auto / push_pr 路径上的 Finish 不动这列。
+	usePhaseFinish := phaseEnabledForSource(st.Source) && phaseTrack != nil
+	understanding, implementation, summary, phaseEmitted := func() (string, string, string, bool) {
+		if phaseTrack == nil {
+			return "", "", "", false
+		}
+		u, i, s, e := phaseTrack.flushBuffers()
+		return u, i, s, e
+	}()
+	if usePhaseFinish && phaseEmitted {
+		if perr := r.subTaskSvc.FinishWithPhases(
+			st.ID, finalStatus, artifact,
+			struct{ Understanding, Implementation, Summary string }{understanding, implementation, summary},
+			modelName, tokens, costCents, startTime, "",
+		); perr != nil {
+			log.Printf("[sub-task] failed to persist finish-with-phases for %s: %v", st.ID, perr)
+			// Fallback to legacy Finish so the row isn't left stuck in 'running'.
+			if perr2 := r.subTaskSvc.Finish(st.ID, finalStatus, artifact, modelName, tokens, costCents, startTime); perr2 != nil {
+				log.Printf("[sub-task] failed to persist fallback Finish for %s: %v", st.ID, perr2)
+			}
+		}
+	} else {
+		if perr := r.subTaskSvc.Finish(st.ID, finalStatus, artifact, modelName, tokens, costCents, startTime); perr != nil {
+			log.Printf("[sub-task] failed to persist finish for %s: %v", st.ID, perr)
+		}
 	}
 	// Best-effort bump parent requirement updated_at on terminal sub-task
 	// transitions (done/error/stopped). A touch failure never blocks the

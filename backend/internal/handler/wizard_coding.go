@@ -1270,7 +1270,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		return
 	}
 
-	out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage, codingStallTimeout)
+	out := runClaudeStream(jobSink{job}, cmd, "start-coding", codingUsage, nil, codingStallTimeout)
 
 	// The coding session id is already persisted upfront. Correct it only if
 	// the CLI reported a different id than the one we pre-minted (a safety
@@ -1658,7 +1658,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 		})
 		defer cancel()
 		adjustUsage := h.usageCtxForConfig("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message, claudeConfigID)
-		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding", adjustUsage, codingStallTimeout)
+		out := runClaudeStream(jobSink{job}, cmd, "adjust-coding", adjustUsage, nil, codingStallTimeout)
 
 		// Stale --resume: the coding session file is gone (~/.claude/ cleaned
 		// or too old). Surface a clear error rather than silently starting a
@@ -1904,7 +1904,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		})
 		defer cancel()
 		continueUsage := h.usageCtxForConfig("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "", claudeConfigID)
-		out := runClaudeStream(jobSink{job}, cmd, "continue-coding", continueUsage, codingStallTimeout)
+		out := runClaudeStream(jobSink{job}, cmd, "continue-coding", continueUsage, nil, codingStallTimeout)
 
 		// Stale --resume: the coding session file is gone. Surface a clear error
 		// rather than silently starting fresh — the user can still 重新开发

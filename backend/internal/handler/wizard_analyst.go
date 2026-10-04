@@ -520,7 +520,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTu
 	if kind == "idea" {
 		stallOverride = append(stallOverride, ideaAnalystStallTimeout)
 	}
-	out := runClaudeStream(sink, cmd, "analyst-chat", uctx, stallOverride...)
+	out := runClaudeStream(sink, cmd, "analyst-chat", uctx, nil, stallOverride...)
 
 	if out.staleSession && resume {
 		// Stale --resume: the session file is gone (typically a stale id left by
@@ -540,7 +540,7 @@ func (h *WizardHandler) runAnalystTurn(ctx context.Context, kind string, firstTu
 			SessionID:       freshID,
 			DisallowedTools: analystFirstTurnDisallowedToolsForKind(kind),
 		})
-		out = runClaudeStream(sink, cmd, "analyst-chat", uctx, stallOverride...)
+		out = runClaudeStream(sink, cmd, "analyst-chat", uctx, nil, stallOverride...)
 		sessionID = freshID
 	}
 
@@ -601,7 +601,7 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 		ForkSessionID:   forkSessionID,
 		DisallowedTools: developerChatDisallowedTools,
 	})
-	out := runClaudeStream(sseSink{w, rc}, cmd, "developer-chat", uctx)
+	out := runClaudeStream(sseSink{w, rc}, cmd, "developer-chat", uctx, nil)
 
 	if out.staleSession && resume {
 		// Stale --resume: the target conversation no longer exists on disk.
@@ -621,7 +621,7 @@ func (h *WizardHandler) runDeveloperTurn(ctx context.Context, firstTurnPrompt fu
 			SessionID:       freshID,
 			DisallowedTools: developerChatDisallowedTools,
 		})
-		out = runClaudeStream(sseSink{w, rc}, cmd, "developer-chat", uctx)
+		out = runClaudeStream(sseSink{w, rc}, cmd, "developer-chat", uctx, nil)
 		sessionID = freshID
 	}
 
