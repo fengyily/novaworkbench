@@ -227,6 +227,10 @@ async function writeClipboard(text: string): Promise<boolean> {
 // {type, content} event shape the SSE pipeline emits.
 function SubTaskLogView({ lines }: { lines: LogLine[] }) {
   const { t } = useTranslation();
+  const logRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [lines]);
   if (lines.length === 0) {
     return <div className="sub-log-empty">{t('components.subTaskCard.logEmpty')}</div>;
   }
@@ -276,7 +280,7 @@ function SubTaskLogView({ lines }: { lines: LogLine[] }) {
     }
   });
   flush(lines.length);
-  return <div className="sub-log">{rendered}</div>;
+  return <div className="sub-log" ref={logRef}>{rendered}</div>;
 }
 
 // launchSettingsRef caches the --settings prefix for the copy-paste CLI
