@@ -232,6 +232,16 @@ export const components = {
     treeExpand: '展开后续操作',
     treeCollapse: '收起后续操作',
     childCount: '{{count}} 个后续操作',
+    // v0.5.x: 三段折叠区文案。每段 Title 携带 emoji；Label 用于活动阶段指示
+    // 之外的次级场景。phaseEmpty 在 markdown 为空时理论上不会触发（PhaseSection
+    // 会在空 markdown 时整体不渲染），保留以防未来 inline summary 形式展开。
+    phaseUnderstandingTitle: '🧠 任务理解',
+    phaseImplementationTitle: '🔨 实施',
+    phaseSummaryTitle: '📋 小结',
+    phaseEmpty: '（该阶段无输出）',
+    phaseUnderstandingLabel: '任务理解',
+    phaseImplementationLabel: '实施',
+    phaseSummaryLabel: '小结',
   },
   createRequirement: {
     title: '新需求',

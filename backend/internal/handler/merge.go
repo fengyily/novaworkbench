@@ -866,7 +866,7 @@ func (h *MergeHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 			Model:          model,
 			ClaudeConfigID: configID,
 			Currency:       currency,
-		})
+		}, nil)
 
 		// After the run, inspect the repo: a concluded merge no longer has
 		// MERGE_HEAD. If it's gone, the AI finished; otherwise surface a hint
@@ -1365,7 +1365,7 @@ func (h *MergeHandler) aiResolveConflicts(job *store.Job, devDir string, conflic
 		Model:          model,
 		ClaudeConfigID: configID,
 		Currency:       currency,
-	})
+	}, nil)
 	return !midMerge(devDir) && len(conflictedFiles(devDir)) == 0
 }
 
@@ -1401,7 +1401,7 @@ func (h *MergeHandler) generatePRSummary(job *store.Job, devDir, base, dev strin
 		Model:          model,
 		ClaudeConfigID: configID,
 		Currency:       currency,
-	})
+	}, nil)
 	raw := strings.TrimSpace(out.finalResult)
 	if out.errMsg != "" {
 		job.Append(store.LogLine{Type: "message", Content: "ℹ️ PR 摘要生成异常，将使用默认标题: " + out.errMsg})

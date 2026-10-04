@@ -851,6 +851,14 @@ var alterColumns = []string{
 	// 空串 = 根任务（手动创建或自动编排的行），DEFAULT '' 让存量数据自动成为根，
 	// 无需 backfill。SubTaskPanel 据此递归构建树。
 	`ALTER TABLE sub_tasks ADD COLUMN parent_subtask_id TEXT NOT NULL DEFAULT ''`,
+	// v0.5.x: 手动子任务的三阶段输出（理解 / 实施 / 小结）。仅手动触发路径会写入，
+	// 自动编排（source='auto'）保持 phase_emitted=0 不渲染三段区。phase_emitted
+	// 是前端判定「是否折叠三段区」的开关；旧数据全 0、零侵入。四个列均 NOT NULL +
+	// DEFAULT 空 / 0，迁移期无需 backfill。isIgnorableDDLError 会吞 "duplicate column"。
+	`ALTER TABLE sub_tasks ADD COLUMN phase_understanding TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE sub_tasks ADD COLUMN phase_implementation TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE sub_tasks ADD COLUMN phase_summary         TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE sub_tasks ADD COLUMN phase_emitted         INTEGER NOT NULL DEFAULT 0`,
 	// 父子查询索引：未来「列出某个父任务的所有子任务」按此索引即可。
 	`CREATE INDEX IF NOT EXISTS idx_sub_tasks_parent ON sub_tasks(parent_subtask_id)`,
 	// Orchestration summary retry cap: the tick loop's case SummaryError branch

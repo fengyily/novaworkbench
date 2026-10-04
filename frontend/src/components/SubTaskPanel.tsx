@@ -283,6 +283,47 @@ function SubTaskLogView({ lines }: { lines: LogLine[] }) {
   return <div className="sub-log" ref={logRef}>{rendered}</div>;
 }
 
+// v0.5.x: 三段折叠区组件——理解 / 实施 / 小结每段都是一个本地小组件。
+// 默认展开（defaultOpen=true），空 markdown 时整个 section 不渲染避免视觉噪音；
+// active=true 时标题旁显示一个 spinner 提示「正在生成...」，phase_section 事件
+// 到达后通过 props.active 切换为 false（由父组件 phaseOutputs.activePhase 控制）。
+function PhaseSection({
+  emoji,
+  title,
+  markdown,
+  active,
+  defaultOpen,
+}: {
+  emoji: string;
+  title: string;
+  markdown: string;
+  active: boolean;
+  defaultOpen: boolean;
+}) {
+  const [open, setOpen] = useState<boolean>(defaultOpen);
+  if (!markdown) return null;
+  return (
+    <div className="sub-card-phase-section">
+      <button
+        type="button"
+        className="sub-card-phase-toggle"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="sub-card-phase-title">
+          <span className="sub-card-phase-emoji">{emoji}</span> {title}
+          {active && <span className="sub-card-phase-spinner"> ⏳</span>}
+        </span>
+        <span className="sub-card-phase-arrow">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <div className="sub-card-phase-body">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // launchSettingsRef caches the --settings prefix for the copy-paste CLI
 // commands (one /active fetch per page load). Empty string = nothing to pin
 // (no active config with base URL / model) → commands render without the flag.
@@ -472,6 +513,27 @@ function SubTaskCard({
   );
   const [streaming, setStreaming] = useState<boolean>(st.status === 'running' || st.status === 'pending');
   const [lines, setLines] = useState<LogLine[]>([]);
+  // v0.5.x: 三阶段（理解 / 实施 / 小结）渲染缓冲。SSE phase / phase_section
+  // 事件直接写这里；job_done 后 subTasksApi.get 拉到的 phase_* 字段通过
+  // useEffect 同步过来。phase_emitted=false 的行（旧后端 / auto / push_pr）
+  // 永远不会渲染三段区——保持与改动前完全一致的视觉。
+  const [phaseOutputs, setPhaseOutputs] = useState<{
+    understanding?: string;
+    implementation?: string;
+    summary?: string;
+    activePhase?: 'understanding' | 'implementation' | 'summary';
+  }>({});
+  // Prop → state 同步：list-poll 拉回最新 row 时把已落库的 phase_* 灌入 state。
+  // 留个 fallback——SSE 没跑完就被刷新页面时，st 自带的 phase_* 是唯一信息源。
+  useEffect(() => {
+    if (!st.phase_emitted) return;
+    setPhaseOutputs((prev) => ({
+      understanding: prev.understanding ?? st.phase_understanding ?? '',
+      implementation: prev.implementation ?? st.phase_implementation ?? '',
+      summary: prev.summary ?? st.phase_summary ?? '',
+      activePhase: undefined,
+    }));
+  }, [st.phase_emitted, st.phase_understanding, st.phase_implementation, st.phase_summary]);
   const [artifact, setArtifact] = useState<string>(st.artifact);
   // Mirror the parent's st.artifact into local state on every prop
   // change. useState alone only captures the mount-time value, so a
@@ -596,6 +658,33 @@ function SubTaskCard({
           subTasksApi.get(st.requirement_id, st.id)
             .then((next) => { setArtifact(next.artifact); onChanged(next); })
             .catch(() => { /* keep last-known state */ });
+          return;
+        }
+        // v0.5.x: 三阶段事件路由。phase 事件带 emoji 前缀（🧠/🔨/📋）
+        // 标记当前活跃段；phase_section 事件携带已完成的 Markdown 落到
+        // 对应 phaseOutputs 字段。这两条事件都不进 lines[]，避免污染
+        // Live log。
+        if (evtType === 'phase') {
+          const label = typeof evt.content === 'string' ? evt.content : '';
+          let next: typeof phaseOutputs['activePhase'];
+          if (label.startsWith('🧠')) next = 'understanding';
+          else if (label.startsWith('🔨')) next = 'implementation';
+          else if (label.startsWith('📋')) next = 'summary';
+          if (next) {
+            setPhaseOutputs((prev) => ({ ...prev, activePhase: next }));
+          }
+          return;
+        }
+        if (evtType === 'phase_section') {
+          const key = typeof evt.phase === 'string' ? evt.phase : '';
+          const md = typeof evt.content === 'string' ? evt.content : '';
+          if (key === 'understanding' || key === 'implementation' || key === 'summary') {
+            setPhaseOutputs((prev) => ({
+              ...prev,
+              [key]: md,
+              activePhase: undefined,
+            }));
+          }
           return;
         }
         setLines((prev) => appendLogLine(prev, {
@@ -933,6 +1022,48 @@ function SubTaskCard({
 
       {expanded && (
         <div className="sub-card-body">
+          {/* v0.5.x: 三段（理解 / 实施 / 小结）折叠区，仅手动触发路径
+              （phase_emitted=true）渲染。位于 Live log 之上、Artifact 之下。
+              每段默认展开（用户首次看到的是完整三段而不是折叠）；活动阶段
+              （activePhase 命中）显示内嵌 spinner 直到 phase_section 事件到达。 */}
+          {st.phase_emitted && (
+            <div className="sub-card-phases">
+              <PhaseSection
+                emoji="🧠"
+                title={t('components.subTaskCard.phaseUnderstandingTitle')}
+                markdown={
+                  phaseOutputs.understanding !== undefined
+                    ? phaseOutputs.understanding
+                    : st.phase_understanding ?? ''
+                }
+                active={phaseOutputs.activePhase === 'understanding'}
+                defaultOpen
+              />
+              <PhaseSection
+                emoji="🔨"
+                title={t('components.subTaskCard.phaseImplementationTitle')}
+                markdown={
+                  phaseOutputs.implementation !== undefined
+                    ? phaseOutputs.implementation
+                    : st.phase_implementation ?? ''
+                }
+                active={phaseOutputs.activePhase === 'implementation'}
+                defaultOpen
+              />
+              <PhaseSection
+                emoji="📋"
+                title={t('components.subTaskCard.phaseSummaryTitle')}
+                markdown={
+                  phaseOutputs.summary !== undefined
+                    ? phaseOutputs.summary
+                    : st.phase_summary ?? ''
+                }
+                active={phaseOutputs.activePhase === 'summary'}
+                defaultOpen
+              />
+            </div>
+          )}
+
           {/* Live log (streaming) — full-width terminal scrollback. */}
           {streaming && <SubTaskLogView lines={lines} />}
 

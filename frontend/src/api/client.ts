@@ -400,6 +400,16 @@ export interface SubTask {
   // group rows into a parent → children tree with the empty string as the
   // root key. Undefined on older backends — the panel treats them as roots.
   parent_subtask_id?: string;
+  // v0.5.x: 三阶段（理解 / 实施 / 小结）输出。仅手动触发路径（source 为
+  // 'manual' 或 ''）会产生非空内容；auto / push_pr 行永远是空串且
+  // phase_emitted=false —— SubTaskCard 据此决定是否渲染三段折叠区。三个内容
+  // 字段与后端 sub_tasks.phase_understanding/implementation/summary 列一一对应。
+  phase_understanding?: string;
+  phase_implementation?: string;
+  phase_summary?: string;
+  // phase_emitted 是前端唯一判定「是否走三段路径」的开关；老后端不返回时为
+  // undefined（falsy），卡片沿用旧的 artifact 渲染，体验与改动前一致。
+  phase_emitted?: boolean;
 }
 
 export const subTasksApi = {

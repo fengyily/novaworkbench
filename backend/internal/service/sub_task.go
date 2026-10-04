@@ -233,7 +233,8 @@ func (s *SubTaskService) FindRecentPushForReq(reqID string, lookbackSec int) (*m
 		created_at, updated_at, completed_at,
 		batch_id, batch_seq, batch_id_seq_run, source,
 		agent_server_id, '' AS agent_server_name,
-		session_mode, retry_count
+		session_mode, retry_count,
+		phase_understanding, phase_implementation, phase_summary, phase_emitted
 		FROM sub_tasks
 		WHERE requirement_id = ?
 		  AND source = ?
@@ -272,7 +273,8 @@ func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 		created_at, updated_at, completed_at,
 		batch_id, batch_seq, batch_id_seq_run, source,
 		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-		session_mode, retry_count
+		session_mode, retry_count,
+		phase_understanding, phase_implementation, phase_summary, phase_emitted
 		FROM sub_tasks WHERE requirement_id = ? ORDER BY created_at DESC, id DESC`, reqID)
 	if err != nil {
 		return nil, err
@@ -310,7 +312,8 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 		created_at, updated_at, completed_at,
 		batch_id, batch_seq, batch_id_seq_run, source,
 		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-		session_mode, retry_count
+		session_mode, retry_count,
+		phase_understanding, phase_implementation, phase_summary, phase_emitted
 		FROM sub_tasks WHERE id = ?`, id)
 	if err != nil {
 		return nil, err
@@ -367,7 +370,8 @@ func (s *SubTaskService) Subtree(rootID string) ([]model.SubTask, error) {
 			created_at, updated_at, completed_at,
 			batch_id, batch_seq, batch_id_seq_run, source,
 			agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-			session_mode, retry_count
+			session_mode, retry_count,
+			phase_understanding, phase_implementation, phase_summary, phase_emitted
 			FROM sub_tasks WHERE parent_subtask_id IN (` + strings.Join(placeholders, ",") + `)`
 		rows, err := s.db.Query(q, args...)
 		if err != nil {
@@ -425,7 +429,8 @@ func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
 		created_at, updated_at, completed_at,
 		batch_id, batch_seq, batch_id_seq_run, source,
 		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-		session_mode, retry_count
+		session_mode, retry_count,
+		phase_understanding, phase_implementation, phase_summary, phase_emitted
 		FROM sub_tasks WHERE batch_id = ?
 		ORDER BY batch_seq ASC, created_at ASC, id ASC`, batchID)
 	if err != nil {
@@ -724,7 +729,8 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 			created_at, updated_at, completed_at,
 			batch_id, batch_seq, batch_id_seq_run, source,
 			agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
-			session_mode, retry_count
+			session_mode, retry_count,
+			phase_understanding, phase_implementation, phase_summary, phase_emitted
 			FROM sub_tasks WHERE id=?`, candidateID)
 		if err != nil {
 			return nil, false, fmt.Errorf("re-select claimed sub_task: %w", err)
@@ -1244,6 +1250,120 @@ func (s *SubTaskService) UpdateRunStatsOnStop(id, expectedSessionID, modelName s
 	return err
 }
 
+// UpdatePhaseOutput persists a single phase buffer to its dedicated column
+// during a manually-triggered sub-task run. Called from the phaseTracker the
+// SubTaskRunner installs on the text stream, so this happens at most a few
+// times per run (once per phase transition — typically 2 transitions from
+// understanding → implementation → summary). The stream-side intermediate
+// flush is what makes the live log "this section just finished" event
+// show up promptly in the SubTaskCard; the terminal Finish call later
+// re-writes the same columns via `FinishWithPhases` so the persisted value
+// always equals the tracker's final buffers (this is best-effort).
+//
+// Allowed phase values: "understanding" / "implementation" / "summary".
+// Anything else returns an error and writes nothing — the tracker should
+// never produce an invalid phase, but rejecting it here keeps the contract
+// explicit and prevents arbitrary column names from being interpolated
+// into the SQL. Pass markdown="" to clear a buffer (e.g. on error recovery).
+func (s *SubTaskService) UpdatePhaseOutput(id, phase, markdown string) error {
+	var col string
+	switch phase {
+	case "understanding":
+		col = "phase_understanding"
+	case "implementation":
+		col = "phase_implementation"
+	case "summary":
+		col = "phase_summary"
+	default:
+		return fmt.Errorf("sub_task: invalid phase %q", phase)
+	}
+	sql := fmt.Sprintf("UPDATE sub_tasks SET %s=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+		s.db.Ident(col))
+	_, err := s.db.Exec(sql, markdown, id)
+	return err
+}
+
+// FinishWithPhases is the terminal write for a manually-triggered sub-task
+// that ran the phase tracker. Behaves like finishInternal (same duration /
+// token / cost / artifact / status writes, same session-id-conditional path
+// when expectedSessionID is non-empty) and additionally stamps the four
+// phase columns in one UPDATE so we don't pay the 4-round-trip cost of
+// Finish + UpdatePhaseOutput × 3.
+//
+// phaseEmitted is hard-set to 1 here — the only caller is SubTaskRunner on
+// rows that actually went through the tracker (gated by st.Source ==
+// "manual" || ""), so flipping the switch is correct by construction. Auto
+// orchestrator rows never call this path; their Finish/FinishForSession
+// keep phase_emitted=0 and the three phase_* columns stay empty strings.
+//
+// expectedSessionID follows the FinishForSession contract: pass "" for the
+// unconditional write. The session-conditional branch means a stale
+// post-stop reconcile (where SubTaskRunner already observed status=stopped
+// and is now writing terminal stats) cannot clobber a row that a re-claim
+// has finished under a fresh session.
+func (s *SubTaskService) FinishWithPhases(
+	id, status, artifact string,
+	phases struct {
+		Understanding string
+		Implementation string
+		Summary       string
+	},
+	modelName string,
+	tokens model.SubTaskTokens,
+	costCents int,
+	startTime time.Time,
+	expectedSessionID string,
+) error {
+	now := time.Now()
+	duration := 0
+	if !startTime.IsZero() {
+		duration = int(now.Sub(startTime).Round(time.Second).Seconds())
+		if duration < 0 {
+			duration = 0
+		}
+	}
+	if expectedSessionID != "" {
+		_, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, model=?,
+			input_tokens=?, output_tokens=?, cache_creation_tokens=?, cache_read_tokens=?,
+			cost_cents=?, duration_seconds=?,
+			completed_at=?, updated_at=?,
+			phase_understanding=?, phase_implementation=?, phase_summary=?, phase_emitted=1
+			WHERE id=? AND session_id=?`,
+			status, artifact, modelName,
+			tokens.Input, tokens.Output, tokens.CacheCreation, tokens.CacheRead,
+			costCents, duration,
+			now, now,
+			phases.Understanding, phases.Implementation, phases.Summary,
+			id, expectedSessionID)
+		if err == nil {
+			if st, gerr := s.Get(id); gerr == nil && st != nil {
+				s.notifyChanged(st.RequirementID)
+				log.Printf("[sub-task-event] %s: sub_task=%s status=%s notify (phase terminal, session-conditional)", st.RequirementID, id, status)
+			}
+		}
+		return err
+	}
+	_, err := s.db.Exec(`UPDATE sub_tasks SET status=?, artifact=?, model=?,
+		input_tokens=?, output_tokens=?, cache_creation_tokens=?, cache_read_tokens=?,
+		cost_cents=?, duration_seconds=?,
+		completed_at=?, updated_at=?,
+		phase_understanding=?, phase_implementation=?, phase_summary=?, phase_emitted=1
+		WHERE id=?`,
+		status, artifact, modelName,
+		tokens.Input, tokens.Output, tokens.CacheCreation, tokens.CacheRead,
+		costCents, duration,
+		now, now,
+		phases.Understanding, phases.Implementation, phases.Summary,
+		id)
+	if err == nil {
+		if st, gerr := s.Get(id); gerr == nil && st != nil {
+			s.notifyChanged(st.RequirementID)
+			log.Printf("[sub-task-event] %s: sub_task=%s status=%s notify (phase terminal)", st.RequirementID, id, status)
+		}
+	}
+	return err
+}
+
 // RecoverInterrupted reconciles sub-task state with the freshly-booted
 // backend. It runs in two passes so the manual path keeps its "mark error and
 // tell the user to redo" behavior while the auto-orchestrated path gets the
@@ -1494,6 +1614,7 @@ func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 		&st.Source,
 		&agentServerID, &st.AgentServerName,
 		&st.SessionMode, &st.RetryCount,
+		&st.PhaseUnderstanding, &st.PhaseImplementation, &st.PhaseSummary, &st.PhaseEmitted,
 	); err != nil {
 		return nil, err
 	}

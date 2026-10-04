@@ -222,6 +222,18 @@ export const components = {
     treeExpand: 'Show follow-ups',
     treeCollapse: 'Hide follow-ups',
     childCount: '{{count}} follow-up(s)',
+    // v0.5.x: 3-phase section titles for manual sub-tasks (Understanding →
+    // Implementation → Summary). phaseEmpty is the inline fallback the
+    // collapsible section shows when its markdown is the empty string (the
+    // component currently hides the entire section instead, but the key is
+    // here so a future inline summary form has a ready-made label).
+    phaseUnderstandingTitle: '🧠 Understanding',
+    phaseImplementationTitle: '🔨 Implementation',
+    phaseSummaryTitle: '📋 Summary',
+    phaseEmpty: '(no output for this phase)',
+    phaseUnderstandingLabel: 'Understanding',
+    phaseImplementationLabel: 'Implementation',
+    phaseSummaryLabel: 'Summary',
   },
   createRequirement: {
     title: 'New requirement',
