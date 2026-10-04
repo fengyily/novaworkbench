@@ -270,7 +270,7 @@ export const components = {
     priority: '优先级',
     flow: '开发流程',
     flowDirect: '直接开发',
-    flowSkipAnalysis: '跳过分析',
+    flowSkipAnalysis: '方案开发',
     flowNoteDirect: '小改动，创建后立即进入开发',
     flowNoteSkipAnalysis: '需求已经清楚，直接出方案再开发',
     submitHintIssue: '提交后 AI 整理为 Bug 报告：现象 / 复现步骤 / 期望行为 / 实际行为。',

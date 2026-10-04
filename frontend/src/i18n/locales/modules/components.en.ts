@@ -261,7 +261,7 @@ export const components = {
     priority: 'Priority',
     flow: 'Workflow',
     flowDirect: 'Code now',
-    flowSkipAnalysis: 'Skip analysis',
+    flowSkipAnalysis: 'Plan + dev',
     flowNoteDirect: 'Small change — start coding right after creation',
     flowNoteSkipAnalysis: 'Requirement is clear — go straight to design and coding',
     submitHintIssue: 'AI turns it into a bug report: symptom / repro / expected / actual.',
