@@ -353,6 +353,15 @@ export interface SubTask {
   created_at: string;
   updated_at: string;
   completed_at?: string;
+  // Wall-clock instant the row FIRST transitioned pending → running, written
+  // by the backend's MarkRunning / ClaimNextPending via COALESCE so re-runs
+  // (manual 继续开发 / auto-retry) keep the original first-start stamp.
+  // Drives the live ticker across navigations: liveSeconds is initialized to
+  // floor((now - started_at) / 1000) so a page refresh on a long-running
+  // sub-task resumes at the true elapsed count rather than restarting from 0.
+  // NULL on legacy rows (running before the column shipped) — UI falls back
+  // to created_at so those cards render identically pre- and post-upgrade.
+  started_at?: string;
   // Orchestration batch membership (restartable orchestration redesign).
   // batch_id is the parent orchestration_batches.id for auto-dispatched children;
   // empty for both manually-created sub-tasks AND legacy rows predating the
