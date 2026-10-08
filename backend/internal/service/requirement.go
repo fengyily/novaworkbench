@@ -928,6 +928,34 @@ func (s *RequirementService) ClearWorktree(id string) error {
 	return err
 }
 
+// Exists reports whether a requirement row with the given id is present in
+// the local DB. This is the cheap "is this id known anywhere" probe used by
+// AgentServerHandler.runCleanup's reverse-scan phase: after the per-row
+// forward sweep we enumerate /tmp/nova-agent/<projID>/<reqID> on the agent
+// host, and any directory whose reqID has no row at all is an orphan (a
+// requirement that was deleted, or a layout left behind by a renamed
+// schema). The forward Get() pulls 50+ columns and joins two tables; this
+// helper does a single SELECT 1 with the primary key, which is what we
+// actually want to ask.
+//
+// Returns (true, nil) on a hit, (false, nil) on a clean miss
+// (sql.ErrNoRows), and (false, err) on any transport / driver failure so
+// the caller can distinguish "no such row" from "couldn't ask".
+func (s *RequirementService) Exists(id string) (bool, error) {
+	if id == "" {
+		return false, nil
+	}
+	var one int
+	err := s.db.QueryRow("SELECT 1 FROM requirements WHERE id=? LIMIT 1", id).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // CleanupCandidates returns requirements whose worktree on the named Agent
 // server is a candidate for the bulk "cleanup worktrees older than 1 week"
 // flow (handler.AgentServerHandler.runCleanup). The DB-level filter is the

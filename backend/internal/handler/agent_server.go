@@ -560,8 +560,148 @@ func (h *AgentServerHandler) runCleanup(job *store.Job, serverID string) {
 		job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("✓ 已清理 %s (mtime %d 天前)", wtPath, (time.Now().Unix()-mtime)/86400)})
 	}
 
+	// Reverse-scan: the forward loop only sees requirements still in the DB.
+	// Worktrees left behind by a row that was deleted (or by a failed run
+	// that wiped the row before clearing the disk) never enter
+	// CleanupCandidates, so the forward pass leaves them behind. Sweep
+	// /tmp/nova-agent for any req_* directory whose owning row is gone and
+	// reclaim it. Folded into the same `cleaned` tally so the summary line
+	// reports the total disk-claim count the user actually asked for.
+	job.Append(store.LogLine{Type: "phase", Content: "🔍 反向扫描远端孤儿目录..."})
+	orphanCleaned := h.cleanupRemoteOrphans(ctx, client, job)
+	cleaned += orphanCleaned
+
 	job.Append(store.LogLine{Type: "done", Content: fmt.Sprintf("清理完成: 共清理 %d 个, 跳过 %d 个活跃", cleaned, skipped)})
 	job.Finish(0, store.JobDone)
+}
+
+// cleanupRemoteOrphans sweeps /tmp/nova-agent on the agent host for
+// directories that look like remote worktrees (basename matches `req_*`)
+// but have no matching row in the local requirements table. The forward
+// pass in runCleanup only sees rows that still exist, so a directory left
+// behind by a deleted requirement, or by an aborted run that wiped its
+// row before clearing the disk, would otherwise sit on the host forever.
+//
+// The base repo under /tmp/nova-agent/<projectID>/base is intentionally
+// left in place: it's a per-project cache (not tied to one requirement)
+// and the user's ask here is requirement-level, not project-level.
+//
+// Returns the number of orphan worktree directories actually reclaimed.
+// Log lines are appended to job for the live SSE panel.
+func (h *AgentServerHandler) cleanupRemoteOrphans(
+	ctx context.Context,
+	client *gossh.Client,
+	job *store.Job,
+) int {
+	const root = "/tmp/nova-agent"
+	// `find` (POSIX, present on every host we target) gives us only
+	// directories at exactly depth 2 and the `req_*` name filter. Bundles
+	// and gnupg siblings are deliberately excluded from this listing — they
+	// are picked up by cleanupOrphanWorktree once we've decided the
+	// owning worktree is an orphan.
+	cmd := fmt.Sprintf("find %s -mindepth 2 -maxdepth 2 -type d -name 'req_*' 2>/dev/null", shellQuoteSingle(root))
+	out, _ := remoteCapture(ctx, client, cmd)
+	if out == "" {
+		job.Append(store.LogLine{Type: "message", Content: "   远端 /tmp/nova-agent 无 req_* 目录"})
+		return 0
+	}
+
+	candidates := strings.Split(out, "\n")
+	seen := make(map[string]struct{}, len(candidates))
+	var orphan, cleaned, owned int
+	for _, wtPath := range candidates {
+		wtPath = strings.TrimSpace(wtPath)
+		if wtPath == "" {
+			continue
+		}
+		if _, dup := seen[wtPath]; dup {
+			continue
+		}
+		seen[wtPath] = struct{}{}
+		reqID := filepath.Base(wtPath)
+		if !strings.HasPrefix(reqID, "req_") {
+			continue
+		}
+		// If a row exists at all (any status, any agent_server_id, any
+		// project) the directory is owned and must be left for the
+		// forward pass / a future sub-task dispatch — this sweep only
+		// acts when there is genuinely no row anywhere.
+		exists, qerr := h.reqSvc.Exists(reqID)
+		if qerr != nil {
+			job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("⚠ 查询 %s 是否存在失败: %v", reqID, qerr)})
+			continue
+		}
+		if exists {
+			owned++
+			continue
+		}
+		orphan++
+		if h.cleanupOrphanWorktree(ctx, client, wtPath, reqID, job) {
+			cleaned++
+		}
+	}
+	switch {
+	case orphan == 0 && owned == 0:
+		// find returned lines but none looked like worktrees (unlikely
+		// given the `req_*` filter, but possible on a hostile FS).
+		job.Append(store.LogLine{Type: "message", Content: "   没有可清理的远端 worktree"})
+	case orphan == 0:
+		job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("   扫描 %d 个远端 worktree，均有对应 DB 行", owned)})
+	default:
+		job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("   发现 %d 个孤儿目录，清理 %d 个（另有 %d 个有主）", orphan, cleaned, owned)})
+	}
+	return cleaned
+}
+
+// cleanupOrphanWorktree removes a single /tmp/nova-agent/<projectID>/<reqID>
+// directory and the side artifacts that share the same reqID prefix. It
+// mirrors runCleanup's git worktree remove / rm -rf fallback, minus the
+// DB update (no row to clear) and the branch delete (we don't know which
+// branch the orphan was on; the base repo's worktree list is pruned so
+// any orphaned reference is gone too). Returns true on a successful
+// removal of the worktree directory itself.
+func (h *AgentServerHandler) cleanupOrphanWorktree(
+	ctx context.Context,
+	client *gossh.Client,
+	wtPath, reqID string,
+	job *store.Job,
+) bool {
+	_ = reqID
+	baseRepo := filepath.Dir(wtPath) + "/base"
+	qb := shellQuoteSingle(baseRepo)
+	qwt := shellQuoteSingle(wtPath)
+
+	// If the base repo isn't there (e.g. an agent host that was wiped but
+	// somehow the worktree dirs survived) we can't use the clean git
+	// path; fall straight to rm -rf. Otherwise try the proper git
+	// worktree remove first so refs and metadata stay consistent.
+	if client.Exists(baseRepo) {
+		script := "cd " + qb + " && git worktree remove --force " + qwt + " 2>/dev/null; cd " + qb + " && git worktree prune"
+		if exit, _ := client.Exec(ctx, script, "", nil, nil, nil); exit != 0 {
+			if fexit, _ := client.Exec(ctx, "rm -rf "+qwt+" && cd "+qb+" && git worktree prune", "", nil, nil, nil); fexit != 0 {
+				job.Append(store.LogLine{Type: "error", Content: fmt.Sprintf("❌ 清理孤儿失败 %s (exit=%d)", wtPath, fexit)})
+				return false
+			}
+		}
+	} else {
+		// No base repo — just yank the directory.
+		if fexit, _ := client.Exec(ctx, "rm -rf "+qwt, "", nil, nil, nil); fexit != 0 {
+			job.Append(store.LogLine{Type: "error", Content: fmt.Sprintf("❌ 清理孤儿失败 %s (exit=%d)", wtPath, fexit)})
+			return false
+		}
+	}
+
+	// Side artifacts keyed by reqID — these aren't worktrees so they're a
+	// straight rm -rf. Each is best-effort: the goal is to free the disk
+	// space; if any one is already gone the others still get processed.
+	for _, suffix := range []string{".gnupg", ".up.bundle", ".down.bundle"} {
+		artifact := wtPath + suffix
+		if client.Exists(artifact) {
+			client.Exec(ctx, "rm -rf "+shellQuoteSingle(artifact), "", nil, nil, nil)
+		}
+	}
+	job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("🧹 清理孤儿 %s (无对应 DB 行)", wtPath)})
+	return true
 }
 
 // ensureClaudeSettings inspects (and if missing seeds) the agent host's
