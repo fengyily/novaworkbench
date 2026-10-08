@@ -598,7 +598,10 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// exhausted channel budget blocked forever and the coding job never
 	// reached its terminal state — the remote claude had already finished,
 	// while Nova stayed pinned to this phase line.
-	h.syncSessionDownWithTimeout(ctx, client, in.job, in.reqRow, remoteSlugDir)
+	// runFailed flips the helper into "upstream already failed" mode so it
+	// suppresses the misleading "✅ 会话结果已同步回本地" line on a stale or
+	// errored coding run (see wizard_remote.go:964).
+	h.syncSessionDownWithTimeout(ctx, out.staleSession || out.errMsg != "", client, in.job, in.reqRow, remoteSlugDir)
 
 	// Step 7: collect the result. Skip when the run errored out (no real
 	// result) so we don't propagate half-broken state. The user can always
@@ -936,7 +939,10 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 
 	// Step 6: session sync (down) — copy any new session jsonl back to local.
 	in.job.Append(store.LogLine{Type: "phase", Content: "📥 同步会话结果回本地..."})
-	h.syncSessionDownWithTimeout(ctx, client, in.job, in.reqRow, remoteSlugDir)
+	// runFailed flips the helper into "upstream already failed" mode so it
+	// suppresses the misleading "✅ 会话结果已同步回本地" line on a stale or
+	// errored architect run (see wizard_remote.go:964).
+	h.syncSessionDownWithTimeout(ctx, out.staleSession || out.errMsg != "", client, in.job, in.reqRow, remoteSlugDir)
 
 	return out, cleanup, nil
 }
@@ -956,12 +962,20 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 // message line, so that phase line can never be the last thing the user sees.
 // A stall becomes a visible conclusion instead of a silent hang.
 //
+// runFailed: when true the upstream Claude run is already known to have
+// failed (stale session / non-empty errMsg) by the time we get here. We
+// still kick off the SFTP download as a best-effort — the remote jsonl may
+// contain partial work worth keeping for forensics — but we suppress the
+// "✅ 会话结果已同步回本地" success line and append a "⚠️ 上游失败" hint
+// instead, so the user doesn't read a misleading "sync succeeded" message
+// right before the terminal error appears.
+//
 // Note: the timeout only stops US waiting. Go cannot safely cancel the SFTP
 // call itself, so the worker goroutine may finish its transfer in the
 // background after the timeout has already been reported. That is acceptable
 // here — the download is forward-only and idempotent, so a late-completing
 // transfer just lands the same files.
-func (h *WizardHandler) syncSessionDownWithTimeout(ctx context.Context, client *gossh.Client, job *store.Job, reqRow *model.Requirement, remoteSlugDir string) {
+func (h *WizardHandler) syncSessionDownWithTimeout(ctx context.Context, runFailed bool, client *gossh.Client, job *store.Job, reqRow *model.Requirement, remoteSlugDir string) {
 	done := make(chan string, 1)
 	sctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
@@ -982,6 +996,14 @@ func (h *WizardHandler) syncSessionDownWithTimeout(ctx context.Context, client *
 		}
 		if sftpErr := client.SyncDirDownMapped(remoteSlugDir, slugDir); sftpErr != nil {
 			done <- "⚠️ 会话下行失败: " + sftpErr.Error()
+			return
+		}
+		if runFailed {
+			// Upstream run already errored; don't claim "sync succeeded".
+			// Best-effort download still completed so the partial jsonl is
+			// on disk for postmortem, but the user-visible line should
+			// point them at the upstream failure rather than this step.
+			done <- "⚠️ 上游会话失败，已跳过同步回本地（远端会话文件已保留，可联系管理员排查）"
 			return
 		}
 		done <- "✅ 会话结果已同步回本地"

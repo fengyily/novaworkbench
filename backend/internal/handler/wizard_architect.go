@@ -554,6 +554,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 			h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 			nil,
 			nil,
+			0,
 			architectStallTimeout)
 	}
 
@@ -608,14 +609,35 @@ func (h *WizardHandler) finalizeArchitectRun(
 		// hint, and clear the active job pointer. On the skip-analysis path
 		// there is no source session to be stale, so this branch is a
 		// no-op guard; we still surface a generic recovery hint.
+		//
+		// On the Agent-server path, prepareRemoteAgentRun stamps
+		// out.SessionFileMissingSide with one of "remote" | "local" |
+		// "sync-failed" so we can point the user at the actual cause
+		// (file got cleaned up on the agent host / never existed locally /
+		// SFTP upload itself failed) instead of a one-size-fits-all
+		// "会话已过期". Mirrors the same three-way split in sub_task_runner.go
+		// and wizard_orchestration.go so the wording stays consistent
+		// across surfaces.
 		if sourceSID == "" {
 			job.Append(store.LogLine{Type: "error", Content: "会话异常，请重试生成技术方案。"})
 		} else if p.Fork {
 			_ = h.reqSvc.UpdateAnalysisSession(id, "")
 			job.Append(store.LogLine{Type: "error", Content: "需求分析会话已过期。请重新进行「需求分析」后再生成技术方案。"})
 		} else {
+			// Design-session branch. Always reset design_session_id so the
+			// next run mints a fresh id rather than resuming a stale one —
+			// the symmetric counterpart of the pre-mint cleanup below.
 			_ = h.reqSvc.UpdateDesignSession(id, "")
-			job.Append(store.LogLine{Type: "error", Content: "技术方案会话已过期。请重新生成技术方案。"})
+			switch out.SessionFileMissingSide {
+			case "remote":
+				job.Append(store.LogLine{Type: "error", Content: "远端 Agent Server 上未找到会话文件。请检查 Agent Server ~/.claude/projects/<slug>/ 是否被清理，或换一个 Agent Server 后重试。"})
+			case "local":
+				job.Append(store.LogLine{Type: "error", Content: "本地会话文件缺失，无法继续。请重新生成技术方案。"})
+			case "sync-failed":
+				job.Append(store.LogLine{Type: "error", Content: "会话上行同步失败（SFTP/网络）。本次运行未能在远端继续，已重置会话；请重试或检查 Agent Server 连通性。"})
+			default:
+				job.Append(store.LogLine{Type: "error", Content: "技术方案会话已过期。请重新生成技术方案。"})
+			}
 		}
 		_ = h.reqSvc.UpdateDesignJob(id, "")
 		job.Finish(1, store.JobError)
@@ -628,7 +650,21 @@ func (h *WizardHandler) finalizeArchitectRun(
 	// remote branch's parseStreamJSONFromReader emits session_id on the same
 	// `--session-id` events as the local CLI, so the correction path applies
 	// to both surfaces uniformly.
-	if out.sessionID != "" && out.sessionID != newDesignSID && out.sessionID != sourceSID {
+	//
+	// Edge case (Agent-server path): when neither run established a session
+	// (out.sessionID == "") — typically the remote CLI exited before
+	// emitting system/init, so no jsonl exists anywhere — the pre-minted
+	// newDesignSID is dangling. Leaving it on the row makes the next run
+	// treat it as a valid resume source and immediately hit the
+	// "会话已过期" branch again. Drop it here so the next attempt mints
+	// a fresh id (and won't stale on first contact).
+	if out.sessionID == "" {
+		if newDesignSID != "" {
+			if perr := h.reqSvc.UpdateDesignSession(id, ""); perr != nil {
+				log.Printf("[architect-design] failed to clear unestablished design session for %s: %v", id, perr)
+			}
+		}
+	} else if out.sessionID != newDesignSID && out.sessionID != sourceSID {
 		if perr := h.reqSvc.UpdateDesignSession(id, out.sessionID); perr != nil {
 			log.Printf("[architect-design] failed to persist design session for %s: %v", id, perr)
 		}
