@@ -1,7 +1,6 @@
 package llm
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -13,9 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	promptpkg "github.com/novaworkbench/backend/internal/prompt"
-	"github.com/novaworkbench/backend/internal/service"
 )
 
 // ClaudeEnvProvider supplies the Claude CLI subprocess env vars (auth token /
