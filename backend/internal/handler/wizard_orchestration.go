@@ -1531,8 +1531,16 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 		// the normal path; here we fetch it directly (best-effort) so this
 		// early exit ships too.
 		if claimed, _ := h.batchSvc.ClaimAutoPush(batch.ID); claimed {
-			if r, rerr := h.reqSvc.Get(batch.RequirementID); rerr == nil && r != nil && r.AutoPush {
-				go h.autoPushPR(r)
+			if r, rerr := h.reqSvc.Get(batch.RequirementID); rerr == nil && r != nil {
+				allow := r.AutoPush
+				if !allow && h.subTaskSvc != nil {
+					if has, _ := h.subTaskSvc.HasCommitPushChild(batch.ID); has {
+						allow = true
+					}
+				}
+				if allow {
+					go h.autoPushPR(r)
+				}
 			}
 		}
 		return
@@ -1680,7 +1688,13 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 	// creation both no-op when already applied). ClaimAutoPush 抢占 — 见
 	// WizardHandler.OnBatchDrained 注释：auto_summary 关闭时 OnBatchDrained
 	// 已在「全部终态」时刻抢过槽位，此处 no-op，避免重复推送子任务行。
-	if req != nil && req.AutoPush {
+	allow := req != nil && req.AutoPush
+	if !allow && req != nil && h.subTaskSvc != nil {
+		if has, _ := h.subTaskSvc.HasCommitPushChild(batch.ID); has {
+			allow = true
+		}
+	}
+	if allow {
 		if claimed, _ := h.batchSvc.ClaimAutoPush(batch.ID); claimed {
 			go h.autoPushPR(req)
 		}
