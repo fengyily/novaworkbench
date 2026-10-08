@@ -247,6 +247,12 @@ export const components = {
     phaseStepComplete: 'Done',
     phaseStepActive: 'In progress',
     phaseStepPending: 'Pending',
+    // v0.5.x: tool_result collapsible row in the manual sub-task log
+    // (SubTaskPanel.ToolResultRow). Defaults to collapsed; shows a 200-char
+    // preview plus this hint, then renders full Markdown on expand.
+    toolResultExpand: 'Expand tool result',
+    toolResultCollapse: 'Collapse tool result',
+    toolResultTruncated: '(truncated — click to expand)',
   },
   createRequirement: {
     title: 'New requirement',

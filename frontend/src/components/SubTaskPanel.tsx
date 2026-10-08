@@ -283,21 +283,45 @@ function SubTaskLogView({ lines }: { lines: LogLine[] }) {
     flush(i);
     if (line.type === 'message' || line.type === 'result') {
       rendered.push(
-        <div key={`m-${i}`} className="sub-log-md">
+        <div key={`m-${i}`} className={`sub-log-md sub-log-md-${line.type}`}>
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{line.content}</ReactMarkdown>
         </div>,
       );
+    } else if (line.type === 'tool_result') {
+      // tool_result carries the full text of a Read / Bash / Grep output.
+      // Default-collapsed so a long Bash `npm install` doesn't drown the
+      // stream; the user clicks "展开工具结果" to see the rendered Markdown.
+      rendered.push(<ToolResultRow key={`tr-${i}`} content={line.content} />);
     } else if (line.type === 'error') {
+      // Errors often carry diagnostic Markdown (lists / headings / code).
+      // Route through ReactMarkdown so the analysis renders properly;
+      // .sub-log-error-md carries the red left-border + red text visual.
       rendered.push(
-        <div key={`e-${i}`} className="sub-log-row sub-log-error"><span className="sub-log-prompt">!</span><span>{line.content}</span></div>,
+        <div key={`e-${i}`} className="sub-log-md sub-log-error-md">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{line.content}</ReactMarkdown>
+        </div>,
       );
     } else if (line.type === 'done') {
+      // 'done' is the terminal completion frame. Render as Markdown so a
+      // short final summary (if any) shows headings / lists properly;
+      // .sub-log-done-md carries the green-text visual.
       rendered.push(
-        <div key={`d-${i}`} className="sub-log-row sub-log-done"><span className="sub-log-prompt">$</span><span>{line.content}</span></div>,
+        <div key={`d-${i}`} className="sub-log-md sub-log-done-md">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{line.content}</ReactMarkdown>
+        </div>,
       );
     } else {
+      // Catch-all for unknown / non-Markdown types (warning / user_input /
+      // knowledge / …). Deliberately NOT routed through ReactMarkdown to
+      // (a) keep escape-by-default for untrusted content and (b) avoid
+      // future surprise if a new backend type lands. white-space: pre-wrap
+      // preserves user-inserted newlines, word-break handles long tokens.
       rendered.push(
-        <div key={`r-${i}`} className={`sub-log-row sub-log-${line.type}`}>
+        <div
+          key={`r-${i}`}
+          className={`sub-log-row sub-log-${line.type}`}
+          style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+        >
           <span className="sub-log-prompt">·</span>
           <span>{line.content}</span>
         </div>,
@@ -345,6 +369,46 @@ function PhaseSection({
         <div className="sub-phase-panel-body">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
         </div>
+      )}
+    </div>
+  );
+}
+
+// ToolResultRow renders a tool_result SSE event (Read / Bash / Grep
+// output) inside SubTaskLogView. Default-collapsed to a 200-char preview
+// so a long `npm install` or grep sweep doesn't push the live stream off
+// screen; clicking the toggle expands to the full Markdown-rendered body.
+// Mirrors the PhaseSection useState + aria-expanded + arrow pattern.
+function ToolResultRow({ content }: { content: string }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState<boolean>(false);
+  const previewLimit = 200;
+  const truncated = content.length > previewLimit;
+  const preview = truncated ? content.slice(0, previewLimit) + '…' : content;
+  return (
+    <div className="sub-log-md sub-log-tool-result-md">
+      <button
+        type="button"
+        className="sub-log-tool-result-toggle"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        <span className="sub-log-prompt">›</span>
+        <span className="sub-log-tool-result-label">
+          {open ? t('components.subTaskCard.toolResultCollapse') : t('components.subTaskCard.toolResultExpand')}
+        </span>
+        {truncated && !open && (
+          <span className="sub-log-tool-result-truncated">
+            {t('components.subTaskCard.toolResultTruncated')}
+          </span>
+        )}
+      </button>
+      {open ? (
+        <div className="sub-log-tool-result-body">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+        </div>
+      ) : (
+        <pre className="sub-log-tool-result-preview">{preview}</pre>
       )}
     </div>
   );
