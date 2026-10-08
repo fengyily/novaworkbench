@@ -58,6 +58,13 @@ type phaseTracker struct {
 // happens to contain the literal `<<<SUMMARY>>>`.
 const phaseTrackerSummaryGuardMinBytes = 200
 
+// defaultSubTaskToolResultMaxBytes is the truncation ceiling for tool_result
+// blocks surfaced as `tool_result` log lines in the SubTaskRunner's Claude
+// stream. 4096 is large enough to surface the body of a typical Read of a
+// source file or a `go build` summary line, while still small enough to keep
+// the JobStore ring buffer from bloating on verbose `npm install` output.
+const defaultSubTaskToolResultMaxBytes = 4096
+
 // phaseInstructionsBlock is the per-prompt block that asks Claude to emit the
 // three sentinels in order. Inserted between the `## 子任务 / ## 继续执行 /
 // ## 追加调整` header and the "你是执行者…" line so the order of prompts
@@ -1221,7 +1228,7 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 			)
 		}
 	}
-	return runClaudeStream(jobSink{job}, cmd, "sub-task", subUsage, phaseSinkFn, hb, codingStallTimeout)
+	return runClaudeStream(jobSink{job}, cmd, "sub-task", subUsage, phaseSinkFn, hb, defaultSubTaskToolResultMaxBytes, codingStallTimeout)
 }
 
 // staleSourceCandidates builds the fallback chain of source session IDs to

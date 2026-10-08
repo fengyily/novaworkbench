@@ -213,7 +213,7 @@ func (h *WizardHandler) runCodingPlanTurn(in *planSplitInput) (string, bool) {
 	// codingStallTimeout (20m) rather than architectStallTimeout (10m): the
 	// planner may sit silent while Explore sub-agents work, and this phase
 	// shares the coding stage's budget by design.
-	out := runClaudeStream(jobSink{job}, cmd, "coding-plan", usage, nil, nil, codingStallTimeout)
+	out := runClaudeStream(jobSink{job}, cmd, "coding-plan", usage, nil, nil, 0, codingStallTimeout)
 
 	// Correct the session id only if the CLI reported one different from what
 	// we pre-minted (safety net for --session-id override semantics changing).

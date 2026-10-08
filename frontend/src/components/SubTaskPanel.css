@@ -684,9 +684,37 @@
   padding-left: 22px;
   color: #E2E8F0;
   word-break: break-word;
+  white-space: normal;
 }
+.sub-log-md h1, .sub-log-md h2, .sub-log-md h3, .sub-log-md h4 {
+  margin: 10px 0 4px;
+  font-weight: 600;
+  color: #F1F5F9;
+}
+.sub-log-md h1 { font-size: 14px; padding-bottom: 4px; border-bottom: 1px solid #1E293B; }
+.sub-log-md h2 { font-size: 13px; color: #38BDF8; }
+.sub-log-md h3 { font-size: 12px; }
+.sub-log-md h4 { font-size: 12px; color: #94A3B8; }
+.sub-log-md p { margin: 4px 0; line-height: 1.6; }
 .sub-log-md p:first-child { margin-top: 0; }
 .sub-log-md p:last-child  { margin-bottom: 0; }
+.sub-log-md ul, .sub-log-md ol { margin: 4px 0 6px 18px; padding: 0; }
+.sub-log-md li { margin-bottom: 2px; }
+.sub-log-md blockquote {
+  border-left: 3px solid #475569;
+  padding-left: 8px;
+  color: #94A3B8;
+  margin: 4px 0;
+}
+.sub-log-md table { border-collapse: collapse; margin: 6px 0; font-size: 11px; }
+.sub-log-md table th, .sub-log-md table td {
+  border: 1px solid #334155;
+  padding: 3px 6px;
+  color: #E2E8F0;
+}
+.sub-log-md table th { background: #1E293B; font-weight: 600; }
+.sub-log-md a { color: #93C5FD; text-decoration: underline; }
+.sub-log-md hr { border: none; border-top: 1px solid #334155; margin: 8px 0; }
 .sub-log-md code {
   background: #1E293B;
   padding: 1px 4px;
@@ -699,6 +727,50 @@
   border-radius: 3px;
   overflow-x: auto;
   margin: 6px 0;
+}
+.sub-log-md pre code { background: none; padding: 0; }
+
+/* Type-discriminated sub-classes for `.sub-log-md` wrappers. The base
+ * `.sub-log-md` block above covers shared Markdown element styling; these
+ * rules only override color / accent so each event kind reads distinct at
+ * a glance without leaving the dark surface. */
+.sub-log-md-result    { color: #FBBF24; font-style: italic; }
+.sub-log-error-md     { border-left: 3px solid #EF4444; padding-left: 6px; color: #FCA5A5; }
+.sub-log-done-md      { color: #6EE7B7; }
+
+/* tool_result line is rendered by <ToolResultRow>. The wrapper carries the
+ * shared `.sub-log-md` for typography + `.sub-log-tool-result-md` for the
+ * accent / spacing, and the toggle / preview / body classes below style
+ * the collapsible UI inside. */
+.sub-log-tool-result-md {
+  border-left: 2px solid #475569;
+  padding: 4px 0 4px 8px;
+  margin: 4px 0;
+}
+.sub-log-tool-result-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  color: #94A3B8;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+}
+.sub-log-tool-result-toggle:hover { color: #CBD5E1; }
+.sub-log-tool-result-label { color: #CBD5E1; }
+.sub-log-tool-result-truncated { color: #64748B; font-size: 10px; }
+.sub-log-tool-result-body { margin-top: 4px; }
+.sub-log-tool-result-preview {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #94A3B8;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  max-height: 120px;
+  overflow: hidden;
 }
 
 /* Artifact (finished sub-task reports) — same dark surface so finished

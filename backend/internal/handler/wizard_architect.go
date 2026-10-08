@@ -554,6 +554,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 			h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 			nil,
 			nil,
+			0,
 			architectStallTimeout)
 	}
 

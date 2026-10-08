@@ -208,11 +208,24 @@ func isExitPlanTool(toolName string) bool {
 	return toolName == "ExitPlanMode" || toolName == "ExitPlan"
 }
 
-// toolResultContent extracts and truncates the content of a tool_result block.
-func toolResultContent(b map[string]interface{}) string {
+// toolResultContentDefault returns the truncated content of a tool_result block
+// using the historical 200-byte ceiling (used by every caller except the
+// sub-task log, which sets its own higher ceiling via runClaudeStream's
+// toolResultMax parameter).
+func toolResultContentDefault(b map[string]interface{}) string {
+	return toolResultContentMax(b, 0)
+}
+
+// toolResultContentMax extracts the content of a tool_result block and
+// truncates it to `max` bytes. When max <= 0 the helper falls back to a
+// 200-byte ceiling (the pre-existing default).
+func toolResultContentMax(b map[string]interface{}, max int) string {
+	if max <= 0 {
+		max = 200
+	}
 	switch v := b["content"].(type) {
 	case string:
-		return truncateStr(v, 200)
+		return truncateStr(v, max)
 	case []interface{}:
 		var parts []string
 		for _, item := range v {
@@ -222,7 +235,7 @@ func toolResultContent(b map[string]interface{}) string {
 				}
 			}
 		}
-		return truncateStr(strings.Join(parts, " "), 200)
+		return truncateStr(strings.Join(parts, " "), max)
 	}
 	return ""
 }
@@ -745,7 +758,12 @@ func (silentSink) emit(line store.LogLine) {}
 // SubTaskRunner is the only consumer that supplies a non-nil value, to drive
 // the 3-phase (理解 / 实施 / 小结) marker parser for source='manual' rows;
 // all other wizard stages stay decoupled from the phase tracker.
-func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCtx, phaseSink func(textDelta string), externalHeartbeats chan struct{}, stallTimeoutOverride ...time.Duration) claudeStreamOutcome {
+// toolResultMax bounds the size of tool_result blocks surfaced as
+// "tool_result" log lines in the assistant dispatch loop. <=0 falls back to
+// the historical 200-byte ceiling inside toolResultContentMax. SubTaskRunner
+// passes 4096 so a Read of a large Markdown file or a Bash `npm install`
+// summary is at least partially visible to the user.
+func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCtx, phaseSink func(textDelta string), externalHeartbeats chan struct{}, toolResultMax int, stallTimeoutOverride ...time.Duration) claudeStreamOutcome {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return claudeStreamOutcome{errMsg: "启动 Claude 失败: " + err.Error()}
@@ -994,6 +1012,17 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 								phaseSink(text)
 							}
 						}
+					}
+				case "tool_result":
+					// Anthropic stream-json emits tool_use and tool_result
+					// blocks in array order: every tool_use is followed by its
+					// matching tool_result. Surface the result so the user can
+					// see what the tool returned (not just the label emitted
+					// by the tool_use branch above). toolResultMax<=0 falls
+					// back to the historical 200-byte ceiling; SubTaskRunner
+					// passes 4096.
+					if c := toolResultContentMax(b, toolResultMax); c != "" {
+						sink.emit(store.LogLine{Type: "tool_result", Content: c})
 					}
 				}
 			}
@@ -1313,6 +1342,10 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 						if text, _ := b["text"].(string); text != "" {
 							sink.emit(store.LogLine{Type: "message", Content: text})
 						}
+					}
+				case "tool_result":
+					if c := toolResultContentDefault(b); c != "" {
+						sink.emit(store.LogLine{Type: "tool_result", Content: c})
 					}
 				}
 			}

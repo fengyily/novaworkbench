@@ -256,6 +256,11 @@ export const components = {
     phaseStepComplete: '已完成',
     phaseStepActive: '进行中',
     phaseStepPending: '待开始',
+    // v0.5.x: 手动子任务 tool_result 折叠组件(SubTaskPanel.ToolResultRow)。
+    // 默认折叠仅展示前 200 字符预览,展开后渲染 Markdown 全文。
+    toolResultExpand: '展开工具结果',
+    toolResultCollapse: '收起工具结果',
+    toolResultTruncated: '（已截断，点击展开）',
   },
   createRequirement: {
     title: '新需求',
