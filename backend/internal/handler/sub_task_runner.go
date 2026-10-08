@@ -1169,7 +1169,7 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 		forkFor = false
 		sessionIDForCLI = newSID
 	}
-	cmd, cancel := r.llm.GenerateCode(llm.StreamOpts{
+	cmd, cancel, hb := r.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        workDir,
 		SystemPrompt:   systemPromptForRun,
@@ -1191,7 +1191,8 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 		Fork:         forkFor,
 		ForkSessionID: newSID,
 		ExtraEnv:     credEnv, // HTTPS git creds + committer identity
-		HardTimeout:  subtaskTimeout(), // v0.5.x: caller-asserted minimum ctx duration
+		HardTimeout:  subtaskTimeout(),    // v0.5.x: caller-asserted absolute cap
+		IdleTimeout:  subtaskIdleTimeout(), // v0.5.x: rolling idle window — survives long stdout
 	})
 	// Hand the subprocess + cancel to the JobStore so StopSubTask can SIGTERM
 	// it (gateway's exec.CommandContext chains SIGTERM → WaitDelay 5s →
@@ -1221,7 +1222,7 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 			)
 		}
 	}
-	return runClaudeStream(jobSink{job}, cmd, "sub-task", subUsage, phaseSinkFn, codingStallTimeout)
+	return runClaudeStream(jobSink{job}, cmd, "sub-task", subUsage, phaseSinkFn, hb, codingStallTimeout)
 }
 
 // staleSourceCandidates builds the fallback chain of source session IDs to
@@ -1320,7 +1321,12 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 		finalStatus = model.SubTaskStatusError
 		artifactBody = "❌ " + out.errMsg
 		job.Append(store.LogLine{Type: "error", Content: artifactBody})
-		if out.stalledByWatchdog != nil && out.stalledByWatchdog.Load() {
+		if out.IdleTimeoutHit {
+			// v0.5.x: rolling idle ctx fired (streamEventCount > 0, then SIGKILL).
+			// Distinct from "stalled" so the UI / batch retries can choose
+			// between resuming (idle) and investigating the proxy (stalled).
+			job.SetErrorKind("idle-timeout")
+		} else if out.stalledByWatchdog != nil && out.stalledByWatchdog.Load() {
 			job.SetErrorKind("stalled")
 		}
 	case out.finalResult == "":
@@ -1483,4 +1489,19 @@ func subtaskTimeout() time.Duration {
 		return d
 	}
 	return defaultSubtaskTimeout
+}
+
+// subtaskIdleTimeout is the rolling-window size: a sub-task whose stdout goes
+// idle for this duration has its rolling ctx cancelled (and is therefore
+// surfaced as error_kind="idle-timeout" rather than "stalled"). Defaults to
+// 30m; tunable via NOVA_SUBTASK_IDLE_TIMEOUT. Long-running tool calls
+// (npm install, go build, etc.) can survive as long as they keep emitting
+// stdout.
+func subtaskIdleTimeout() time.Duration {
+	const def = 30 * time.Minute
+	raw := os.Getenv("NOVA_SUBTASK_IDLE_TIMEOUT")
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	return def
 }

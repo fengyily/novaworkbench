@@ -191,7 +191,7 @@ func (h *WizardHandler) runCodingPlanTurn(in *planSplitInput) (string, bool) {
 	// turns it into a read-only plan run — StreamOpts already carries the
 	// field through to --permission-mode plan, and the persona switches to
 	// --append-system-prompt automatically (llm.Gateway.streamArgs).
-	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
+	cmd, cancel, _ := h.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         prompt,
 		WorkDir:        in.workDir,
 		SystemPrompt:   in.systemPrompt,
@@ -213,7 +213,7 @@ func (h *WizardHandler) runCodingPlanTurn(in *planSplitInput) (string, bool) {
 	// codingStallTimeout (20m) rather than architectStallTimeout (10m): the
 	// planner may sit silent while Explore sub-agents work, and this phase
 	// shares the coding stage's budget by design.
-	out := runClaudeStream(jobSink{job}, cmd, "coding-plan", usage, nil, codingStallTimeout)
+	out := runClaudeStream(jobSink{job}, cmd, "coding-plan", usage, nil, nil, codingStallTimeout)
 
 	// Correct the session id only if the CLI reported one different from what
 	// we pre-minted (safety net for --session-id override semantics changing).

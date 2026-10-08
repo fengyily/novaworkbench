@@ -79,7 +79,7 @@ func TestRunClaudeStream_CapturesExitPlanModePlan(t *testing.T) {
 				assistantToolUse(t, toolName, map[string]interface{}{"plan": plan}),
 				successResultEvent,
 			)
-			out := runClaudeStream(&captureSink{}, cmd, "test-"+toolName, nil, nil)
+			out := runClaudeStream(&captureSink{}, cmd, "test-"+toolName, nil, nil, nil)
 			if out.errMsg != "" {
 				t.Fatalf("unexpected errMsg: %q", out.errMsg)
 			}
@@ -104,7 +104,7 @@ func TestRunClaudeStream_PlanFileWriteWinsOverExitPlanMode(t *testing.T) {
 		assistantToolUse(t, "ExitPlanMode", map[string]interface{}{"plan": "摘要版方案"}),
 		successResultEvent,
 	)
-	out := runClaudeStream(&captureSink{}, cmd, "test-precedence", nil, nil)
+	out := runClaudeStream(&captureSink{}, cmd, "test-precedence", nil, nil, nil)
 	if out.planContent != full {
 		t.Errorf("planContent = %q, want the Write content %q", out.planContent, full)
 	}
@@ -118,7 +118,7 @@ func TestRunClaudeStream_ExitPlanModeWithoutPlanInput(t *testing.T) {
 		assistantToolUse(t, "ExitPlanMode", map[string]interface{}{"plan": ""}),
 		successResultEvent,
 	)
-	out := runClaudeStream(&captureSink{}, cmd, "test-empty-plan", nil, nil)
+	out := runClaudeStream(&captureSink{}, cmd, "test-empty-plan", nil, nil, nil)
 	if out.planContent != "" {
 		t.Errorf("planContent = %q, want empty", out.planContent)
 	}
@@ -138,7 +138,7 @@ func TestRunClaudeStream_StallTimeoutOverride(t *testing.T) {
 	cmd := exec.Command("sh", "-c", `printf '%s\n' '{"type":"system","subtype":"init","session_id":"sid-1"}'; sleep 30`)
 
 	start := time.Now()
-	out := runClaudeStream(&captureSink{}, cmd, "test-stall", nil, nil, 300*time.Millisecond)
+	out := runClaudeStream(&captureSink{}, cmd, "test-stall", nil, nil, nil, 300*time.Millisecond)
 	elapsed := time.Since(start)
 
 	if elapsed > 10*time.Second {
@@ -161,7 +161,7 @@ func TestRunClaudeStream_StallTimeoutOverride(t *testing.T) {
 func TestRunClaudeStream_NonPositiveOverrideFallsBackToDefault(t *testing.T) {
 	for _, d := range []time.Duration{0, -time.Second} {
 		cmd := ndjsonCmd(t, successResultEvent)
-		out := runClaudeStream(&captureSink{}, cmd, "test-fallback", nil, nil, d)
+		out := runClaudeStream(&captureSink{}, cmd, "test-fallback", nil, nil, nil, d)
 		// If the override had been honoured the watchdog would fire at once;
 		// the run completing normally with the result event is the signal.
 		if out.finalResult != "done" {

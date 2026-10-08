@@ -3,6 +3,7 @@ package handler
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -119,6 +120,45 @@ func runStallWatchdog(scope string, stallTimeout time.Duration, heartbeats <-cha
 		}
 	}()
 	return stalled
+}
+
+// newRollingCtx returns a cancellable context plus a heartbeat channel.
+// The watchdog goroutine resets a timer every time a value arrives on the
+// channel; if the timer fires (idleTimeout since last beat) it cancels
+// the context. Used to make stream readers survive "long thinking" runs
+// by counting silence rather than wall-clock since start.
+//
+// Caller MUST close the heartbeat channel when the stream ends so the
+// watchdog goroutine can exit cleanly.
+func newRollingCtx(scope string, idleTimeout time.Duration) (context.Context, context.CancelFunc, chan<- struct{}) {
+	parent, cancel := context.WithCancel(context.Background())
+	heartbeats := make(chan struct{}, 1)
+	go func() {
+		timer := time.NewTimer(idleTimeout)
+		if !timer.Stop() {
+			<-timer.C
+		}
+		for {
+			select {
+			case _, ok := <-heartbeats:
+				if !ok {
+					return
+				}
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(idleTimeout)
+			case <-timer.C:
+				log.Printf("[%s] idle %v with no SSE event; cancelling ctx", scope, idleTimeout)
+				cancel()
+				return
+			}
+		}
+	}()
+	return parent, cancel, heartbeats
 }
 
 // toolCallLabel returns a human-readable Chinese label for a tool call event.
@@ -515,6 +555,13 @@ type claudeStreamOutcome struct {
 	// to the frontend. Using *atomic.Bool (rather than a plain bool) lets the
 	// watchdog goroutine flip it without holding the outer mutex.
 	stalledByWatchdog *atomic.Bool
+	// IdleTimeoutHit is set by parseStreamJSONFromReader (and runClaudeStream)
+	// when the surrounding rolling ctx fired while streamEventCount > 0. The
+	// EOF branch uses it to emit a dedicated "idle 超时" message; sub-task
+	// finishing then maps it to Job.ErrorKind="idle-timeout" so the UI can
+	// distinguish "Claude truly went silent" from "stall watchdog killed the
+	// process group".
+	IdleTimeoutHit bool
 }
 
 // lastUsageSnapshot is the token-count view of a single claude turn, derived
@@ -698,7 +745,7 @@ func (silentSink) emit(line store.LogLine) {}
 // SubTaskRunner is the only consumer that supplies a non-nil value, to drive
 // the 3-phase (理解 / 实施 / 小结) marker parser for source='manual' rows;
 // all other wizard stages stay decoupled from the phase tracker.
-func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCtx, phaseSink func(textDelta string), stallTimeoutOverride ...time.Duration) claudeStreamOutcome {
+func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCtx, phaseSink func(textDelta string), externalHeartbeats chan struct{}, stallTimeoutOverride ...time.Duration) claudeStreamOutcome {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return claudeStreamOutcome{errMsg: "启动 Claude 失败: " + err.Error()}
@@ -752,7 +799,19 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	// a real subprocess.
 	stallTimeout := resolveStallTimeout(stallTimeoutOverride)
 	log.Printf("[%s] stall watchdog window=%v", scope, stallTimeout)
-	heartbeats := make(chan struct{}, 1)
+	var heartbeats chan struct{}
+	var ownHeartbeats bool
+	if externalHeartbeats != nil {
+		// Caller (typically sub_task_runner via llm.GenerateCode's rolling ctx)
+		// owns the heartbeat channel; we only drive beats into it and close it
+		// explicitly below so the watcher's select{ok} branch fires.
+		heartbeats = externalHeartbeats
+	} else {
+		// Legacy / standalone path: allocate locally and close on the way out
+		// so the watcher goroutine exits cleanly.
+		heartbeats = make(chan struct{}, 1)
+		ownHeartbeats = true
+	}
 	watchdogDone := make(chan struct{})
 	go func() {
 		defer close(watchdogDone)
@@ -1049,9 +1108,17 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	// still be alive (proxy held the connection open), and tool/MCP
 	// grandchildren may still hold the stdout pipe open; killing the group
 	// unblocks cmd.Wait() and lets us return what we captured.
-	close(heartbeats)
+	if ownHeartbeats {
+		close(heartbeats)
+	}
 	<-watchdogDone
 	killProcessGroup(cmd)
+	// If the caller passed in an external heartbeats channel (rolling ctx
+	// from llm.GenerateCode), close it now so the watcher's select{ok}
+	// branch fires and the goroutine exits cleanly.
+	if externalHeartbeats != nil {
+		close(externalHeartbeats)
+	}
 
 	if err := cmd.Wait(); err != nil {
 		stderrTrim := strings.TrimSpace(stderrBuf.String())
@@ -1062,7 +1129,30 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 		// over the generic "signal: terminated" so the user (and the UI's
 		// stalled-banner branch) can tell the two cases apart.
 		if out.finalResult == "" && out.errMsg == "" {
-			out.errMsg = stallErrorMessage(out.stalledByWatchdog.Load(), stallTimeout, err, stderrTrim)
+			wasStalled := out.stalledByWatchdog.Load()
+			// Idle-timeout heuristic: the rolling ctx in llm.GenerateCode
+			// propagates cancel via exec.CommandContext → SIGKILL → exit code
+			// 137 (128+SIGKILL). If we never tripped the stall watchdog but
+			// the kernel signaled SIGKILL and there was genuine stream
+			// activity before the silence, surface the "idle 超时" message
+			// instead of "异常退出" so the UI's banner / error_kind branch
+			// can pick a dedicated diagnostic.
+			idleHit := false
+			if !wasStalled && out.streamEventCount > 0 {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+						if ws.Signaled() && ws.Signal() == syscall.SIGKILL {
+							idleHit = true
+						}
+					}
+				}
+			}
+			if idleHit {
+				out.IdleTimeoutHit = true
+				out.errMsg = fmt.Sprintf("本地 Claude 在收到 %d 个 stream_event 后连续静默，触发 idle 超时；最后事件类型=%q", out.streamEventCount, out.lastEventType)
+			} else {
+				out.errMsg = stallErrorMessage(wasStalled, stallTimeout, err, stderrTrim)
+			}
 		}
 	}
 	// Re-check staleness against stderr in case the CLI printed the error there
@@ -1088,11 +1178,17 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 // claudeStreamOutcome is interchangeable. The differences are:
 //   - no process group / killProcessGroup — the remote shell is the parent's
 //     equivalent and we don't have access to its pgid over SSH
-//   - no stall watchdog — a stuck remote claude is killed by closing the
-//     SSH session from the caller's defer (client.Close kills the channel)
+//   - no stall watchdog — rolling ctx is enforced in the caller via
+//     newRollingCtx; parseStreamJSONFromReader sends one heartbeat per
+//     NDJSON line so the caller's idle timer resets on activity. The
+//     caller still owns closing the underlying io.Reader on cancel.
 //   - no stderr fallback for staleness detection (we never see the remote
 //     stderr in this scope)
-func parseStreamJSONFromReader(r io.Reader, sink streamSink, scope string, uctx *usageCtx) claudeStreamOutcome {
+//
+// ctx is consulted only in the EOF branch to differentiate an idle-timeout
+// cancel from a real remote crash. heartbeats may be nil (legacy callers);
+// the EOF branch treats nil heartbeats as "no rolling ctx in play".
+func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink, scope string, uctx *usageCtx, heartbeats chan<- struct{}) claudeStreamOutcome {
 	var out claudeStreamOutcome
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
@@ -1101,7 +1197,21 @@ func parseStreamJSONFromReader(r io.Reader, sink streamSink, scope string, uctx 
 	// emits a warning or an error message on stdout/stderr that isn't valid
 	// NDJSON — e.g. "NotLoggedIn", "SyntaxError", or proxy banner lines).
 	var firstNonJSON []string
+	// Close heartbeats on return so the caller's watchdog goroutine exits
+	// even when we never reach the EOF branch (e.g. an early result event).
+	defer func() {
+		if heartbeats != nil {
+			close(heartbeats)
+		}
+	}()
 	for scanner.Scan() {
+		// Non-blocking heartbeat: only "new events arriving" matters, not beat rate.
+		if heartbeats != nil {
+			select {
+			case heartbeats <- struct{}{}:
+			default:
+			}
+		}
 		out.eventCount++
 		line := scanner.Text()
 		if line == "" {
@@ -1282,10 +1392,19 @@ func parseStreamJSONFromReader(r io.Reader, sink streamSink, scope string, uctx 
 	// stream-event count + last event type + any non-JSON preamble so the
 	// user can tell "API hung silently after init" from "claude crashed
 	// before producing anything".
+	//
+	// When ctx was cancelled while we still had stream activity (idle
+	// rolling-ctx fired), surface a dedicated "idle 超时" message so the
+	// user can distinguish "the remote Claude actually went silent" from
+	// "the upstream truly died (OOM, network, argv truncation)".
 	scanErr := scanner.Err()
+	idleTimeoutHit := ctx != nil && ctx.Err() == context.Canceled && out.streamEventCount > 0
 	if out.finalResult == "" && out.errMsg == "" {
 		var summary string
-		if out.streamEventCount == 0 {
+		if idleTimeoutHit {
+			summary = fmt.Sprintf("远程 Claude 在收到 %d 个 stream_event 后连续静默，触发 idle 超时（context.Canceled）；最后事件类型=%q", out.streamEventCount, out.lastEventType)
+			out.IdleTimeoutHit = true
+		} else if out.streamEventCount == 0 {
 			summary = fmt.Sprintf("已收到 %d 个 NDJSON 事件（system/init 也未出现），最后类型=%q", out.eventCount, out.lastEventType)
 		} else {
 			summary = fmt.Sprintf("已收到 %d 个 NDJSON 事件，含 %d 个 stream_event（Claude 在输出文本/工具过程中断），最后类型=%q", out.eventCount, out.streamEventCount, out.lastEventType)
@@ -1296,7 +1415,11 @@ func parseStreamJSONFromReader(r io.Reader, sink streamSink, scope string, uctx 
 		if scanErr != nil {
 			summary += "；scanner 错误: " + scanErr.Error()
 		}
-		out.errMsg = "远程 Claude 未返回结果（流中断 — " + summary + "）。最常见原因：Agent 服务器无法访问 api.anthropic.com（超时/DNS/防火墙），或 claude 进程崩溃/被 OOM kill，或 sshd exec argv 限制触发命令字符串被截断。"
+		closer := "）。最常见原因：Agent 服务器无法访问 api.anthropic.com（超时/DNS/防火墙），或 claude 进程崩溃/被 OOM kill，或 sshd exec argv 限制触发命令字符串被截断。"
+		if idleTimeoutHit {
+			closer = "）。可能原因：Agent 服务器侧 claude 进程输出阻塞；调高 NOVA_AGENT_IDLE_TIMEOUT 或 NOVA_AGENT_MAX_TOTAL_TIMEOUT。"
+		}
+		out.errMsg = "远程 Claude 未返回结果（流中断 — " + summary + closer
 	}
 	return out
 }

@@ -169,7 +169,7 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 		prompt += llm.DecomposeSkillPropagation(reOrchSkills)
 
 		job.Append(store.LogLine{Type: "phase", Content: "🔄 主 Agent 重新拆分任务中…"})
-		cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
+		cmd, cancel, _ := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:         prompt,
 			WorkDir:        workDir,
 			SystemPrompt:   systemPrompt,
@@ -180,7 +180,7 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 		})
 		defer cancel()
 		usage := h.usageCtxForConfig("re_orchestrate", id, req.ProjectID, job.ID, modelName, "", "", claudeConfigID)
-		out := runClaudeStream(jobSink{job}, cmd, "re-orchestrate", usage, nil)
+		out := runClaudeStream(jobSink{job}, cmd, "re-orchestrate", usage, nil, nil)
 
 		switch {
 		case out.staleSession:
@@ -1254,7 +1254,7 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	// 路径不动 —— 远端 push 认证已通过 origin URL 完成，Part B 不动远端）。
 	credEnv, credCleanup := gitCredentialEnv(h.projectSvc, h.platformSvc, req)
 	defer credCleanup()
-	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
+	cmd, cancel, _ := h.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         executorPrompt,
 		WorkDir:        batch.WorkDir,
 		SystemPrompt:   execSystemPrompt,
@@ -1304,7 +1304,7 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 			usage:         childUsage,
 		})
 	} else {
-		out = runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage, nil, codingStallTimeout)
+		out = runClaudeStream(jobSink{job}, cmd, "sub-task", childUsage, nil, nil, codingStallTimeout)
 	}
 
 	// Stop the heartbeat BEFORE Finish so a slow MarkHeartbeat can't race
@@ -1566,7 +1566,7 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 	job.Append(store.LogLine{Type: "phase", Content: "📊 主 Agent 正在汇总子任务产物..."})
 	job.SetModel(batch.Model)
 
-	cmd, cancel := h.llm.GenerateCode(llm.StreamOpts{
+	cmd, cancel, _ := h.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         summaryB.String(),
 		WorkDir:        batch.WorkDir,
 		SystemPrompt:   "", // resumed session already has developer persona
@@ -1579,7 +1579,7 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 	defer cancel()
 
 	summaryUsage := h.usageCtxForConfig("orchestrate_summary", batch.RequirementID, req.ProjectID, job.ID, batch.Model, "", "auto-summary", batch.ClaudeConfigID)
-	out := runClaudeStream(jobSink{job}, cmd, "orchestrate-summary", summaryUsage, nil)
+	out := runClaudeStream(jobSink{job}, cmd, "orchestrate-summary", summaryUsage, nil, nil)
 
 	// Stale-session recovery：会话文件可能已被清理/失效。镜像 re-orchestrate
 	// 的 134-142：清空 OrchestratorSessionID、铸新 SID、用 Resume=false 再来一次。
@@ -1593,7 +1593,7 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 		if uerr := h.batchSvc.UpdateOrchestratorSession(batchID, freshSID); uerr != nil {
 			log.Printf("[orchestrate] summary %s persist fresh sid: %v", batchID, uerr)
 		}
-		cmd2, cancel2 := h.llm.GenerateCode(llm.StreamOpts{
+		cmd2, cancel2, _ := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:         summaryB.String(),
 			WorkDir:        batch.WorkDir,
 			SystemPrompt:   "",
@@ -1605,7 +1605,7 @@ func (h *WizardHandler) RunOrchestratorSummary(batchID string) {
 		})
 		if cmd2 != nil {
 			defer cancel2()
-			out = runClaudeStream(jobSink{job}, cmd2, "orchestrate-summary-retry", summaryUsage, nil)
+			out = runClaudeStream(jobSink{job}, cmd2, "orchestrate-summary-retry", summaryUsage, nil, nil)
 		}
 	}
 
