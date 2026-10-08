@@ -1431,7 +1431,13 @@ func (h *WizardHandler) OnBatchDrained(batchID string) {
 		return
 	}
 	req, err := h.reqSvc.Get(batch.RequirementID)
-	if err != nil || req == nil || !req.AutoPush {
+	canAutoPush := req != nil && req.AutoPush
+	if !canAutoPush && h.subTaskSvc != nil {
+		if has, _ := h.subTaskSvc.HasCommitPushChild(batch.ID); has {
+			canAutoPush = true
+		}
+	}
+	if err != nil || req == nil || !canAutoPush {
 		return
 	}
 	claimed, cerr := h.batchSvc.ClaimAutoPush(batchID)
