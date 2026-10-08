@@ -286,7 +286,8 @@ func TestGenerateCodeHardTimeoutZeroUsesDefault(t *testing.T) {
 }
 
 // TestGenerateCodeHardTimeoutOverridesCodingTimeout: HardTimeout=45m > g.timeout=120s
-// → ctx deadline = 45m. Mirrors the sub-task runner case (NOVA_SUBTASK_TIMEOUT=45m).
+// → ctx deadline = 45m. Mirrors the legacy sub-task-runner caller passing
+// HardTimeout=45m alongside IdleTimeout=NOVA_SUBTASK_IDLE_TIMEOUT.
 func TestGenerateCodeHardTimeoutOverridesCodingTimeout(t *testing.T) {
 	g := New(fakeClaudeEnv{}, nil)
 	if g.timeout != 120*time.Second {
@@ -314,7 +315,8 @@ func TestGenerateCodeHardTimeoutBelowFloorIsFloored(t *testing.T) {
 }
 
 // TestGenerateCodeRollingIdleNoHardTimeoutHasNoWallClockCap: IdleTimeout>0 + HardTimeout=0
-// (the sub-task path after NOVA_SUBTASK_TIMEOUT removal) must produce a rolling
+// (the sub-task path: NOVA_SUBTASK_IDLE_TIMEOUT=30m with no wall-clock cap asserted)
+// must produce a rolling
 // ctx with NO wall-clock cap. The rolling idle timer alone decides liveness;
 // a long-running tool call that keeps emitting stdout survives indefinitely.
 // The stall watchdog in runClaudeStream is the safety net for true process hangs.
