@@ -78,7 +78,12 @@ func Dial(ctx context.Context, host string, port int, user, authType, authValue 
 	}
 
 	addr := fmt.Sprintf("%s:%d", host, port)
-	d := net.Dialer{Timeout: 15 * time.Second}
+	// KeepAlive probes the TCP connection every 30s so that an idle long
+	// session doesn't sit undetected behind a NAT/firewall that has silently
+	// reaped the 4-tuple. Without this, the next channel-open read after
+	// reap can block until the OS-level TCP timeout (75-120s on Linux)
+	// instead of failing fast.
+	d := net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 	if dl, ok := ctx.Deadline(); ok {
 		d.Deadline = dl
 	}
@@ -523,7 +528,18 @@ func (c *Client) expandHome(path string) (string, error) {
 	}
 	if c.homeDir == "" {
 		var buf strings.Builder
-		if _, err := c.Exec(context.Background(), "echo $HOME", "", nil, &buf, nil); err != nil {
+		// Bound the $HOME round-trip: a stale SSH session can wedge
+		// c.conn.NewSession() at the channel-open read for the OS
+		// default TCP timeout (~75-120s on Linux). Callers (e.g.
+		// syncSessionDownWithTimeout) already impose a 60s outer
+		// window, but expandHome receives no ctx today, so that
+		// budget never reaches the SSH layer. This inner cap turns
+		// the failure into a fast, deterministic one with a
+		// "context deadline exceeded" message that points at our
+		// own budget rather than a generic OS timeout.
+		hctx, hcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer hcancel()
+		if _, err := c.Exec(hctx, "echo $HOME", "", nil, &buf, nil); err != nil {
 			return "", fmt.Errorf("ssh: resolve $HOME: %w", err)
 		}
 		home := strings.TrimSpace(buf.String())
