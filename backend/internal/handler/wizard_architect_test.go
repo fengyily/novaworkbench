@@ -494,3 +494,186 @@ func renderExpr(e ast.Expr) string {
 var _ = context.Background
 var _ = errors.New
 var _ = model.Project{}
+
+// TestArchitectRemoteMissingSessionIDClearsDesignSession pins the
+// "remote CLI exited before emitting system/init" cleanup contract.
+//
+// Defect story (req_d6947f626957b7c4): prepareArchitectDesign pre-mints a
+// design session id and persists it BEFORE spawning claude (so a mid-run
+// crash can be resumed). When the agent-server run ends with
+// out.sessionID == "" (CLI exited before system/init — e.g. upstream 5xx,
+// ssh jitter, worker timeout) but out.staleSession == false and
+// out.errMsg == "" (no explicit "No conversation found" yet because the
+// run was silently aborted), the pre-minted id used to survive on the row.
+// The next run then read it back as req.DesignSessionID and either:
+//   - treated it as a fresh resume source and degraded the prompt to
+//     "基于我们刚才完成的需求分析对话…" with no requirement content (when
+//     sourceSID got reused), or
+//   - sent `--resume <id>` against a conversation that never existed and
+//     immediately hit `isStaleSessionError` on the next iteration, which
+//     finalizeArchitectRun then surfaced as "技术方案会话已过期。请重新
+//     生成技术方案。"
+//
+// The corrected-write block in finalizeArchitectRun must drop the dangling
+// pre-minted id (UpdateDesignSession(id, "")) so the next attempt mints
+// a fresh one and won't stale on first contact. We assert that contract
+// here. (The job still routes through the planMarkdown=="" branch and is
+// marked JobError with "Claude 未返回结果" — that's correct: Claude really
+// did fail to produce a plan. The important invariant is that the next
+// run starts from a clean slate rather than immediately re-hitting the
+// stale branch.)
+func TestArchitectRemoteMissingSessionIDClearsDesignSession(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "remote-missingsid-")
+	defer os.RemoveAll(dir)
+	d, err := db.Init(db.Config{Driver: "sqlite", SQLitePath: filepath.Join(dir, "test.db")})
+	if err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	defer d.Close()
+
+	reqID := seedRequirementForSchedule(t, d)
+	reqSvc := service.NewRequirementService(d)
+	if err := reqSvc.UpdateDesignSession(reqID, "sid-pre-minted"); err != nil {
+		t.Fatalf("seed design_session_id: %v", err)
+	}
+
+	jobs := store.NewJobStore(8)
+	job := jobs.Create(reqID)
+	// Pin a design_job_id so we can assert finalizeArchitectRun clears it.
+	if uerr := reqSvc.UpdateDesignJob(reqID, job.ID); uerr != nil {
+		t.Fatalf("seed design_job_id: %v", uerr)
+	}
+
+	h := &WizardHandler{reqSvc: reqSvc, jobs: jobs}
+
+	req, err := reqSvc.Get(reqID)
+	if err != nil {
+		t.Fatalf("reload req: %v", err)
+	}
+	p := &designRunParams{
+		Req:           req,
+		NewDesignSID:  "sid-pre-minted", // exactly the row currently on disk
+		SourceSID:     "sid-pre-minted", // simulating a re-run that resumed it
+		Fork:          false,
+		SkipAnalysis:  false,
+		ClaudeConfigID: "",
+		Model:         "sonnet",
+	}
+
+	// Remote-CLI-silent-exit shape: no session_id, no error string, no
+	// stale flag (because the CLI never reached the `--resume` failure
+	// point — it just exited silently upstream).
+	h.finalizeArchitectRun(
+		claudeStreamOutcome{sessionID: "", staleSession: false, errMsg: ""},
+		p, job, nil,
+		"", "sid-pre-minted", reqID, "sonnet",
+	)
+
+	// design_session_id must be cleared so the next run mints a fresh id.
+	got, err := reqSvc.Get(reqID)
+	if err != nil {
+		t.Fatalf("reload req: %v", err)
+	}
+	if got.DesignSessionID != "" {
+		t.Fatalf("DesignSessionID = %q, want \"\" (dangling pre-mint must be cleared)", got.DesignSessionID)
+	}
+	// design_job_id must also be cleared on the terminal-error path.
+	if got.DesignJobID != "" {
+		t.Fatalf("DesignJobID = %q, want \"\" (terminal-error path)", got.DesignJobID)
+	}
+}
+
+// TestArchitectRemoteStaleSessionHasSideTargetedMessage pins the new
+// 3-way diagnostic split introduced for req_d6947f626957b7c4.
+//
+// Defect story: when prepareRemoteAgentRun stamped out.staleSession=true
+// and out.SessionFileMissingSide="remote", the architect handler used to
+// surface a generic "技术方案会话已过期" — same wording as the local-CLI
+// path — and the user had no idea whether the problem was a missing
+// jsonl on the agent host, a missing local jsonl, or an SFTP failure.
+// The fix branches on SessionFileMissingSide and emits a side-specific
+// hint. This test asserts the three side-specific messages land in the
+// job log and that the design_session_id is cleared in every branch so
+// the next attempt mints a fresh id.
+func TestArchitectRemoteStaleSessionHasSideTargetedMessage(t *testing.T) {
+	cases := []struct {
+		side     string
+		contains string
+	}{
+		{"remote", "远端 Agent Server 上未找到会话文件"},
+		{"local", "本地会话文件缺失，无法继续"},
+		{"sync-failed", "会话上行同步失败（SFTP/网络）"},
+	}
+	for _, c := range cases {
+		t.Run(c.side, func(t *testing.T) {
+			dir, _ := os.MkdirTemp("", "remote-stale-")
+			defer os.RemoveAll(dir)
+			d, err := db.Init(db.Config{Driver: "sqlite", SQLitePath: filepath.Join(dir, "test.db")})
+			if err != nil {
+				t.Fatalf("init db: %v", err)
+			}
+			defer d.Close()
+
+			reqID := seedRequirementForSchedule(t, d)
+			reqSvc := service.NewRequirementService(d)
+			if err := reqSvc.UpdateDesignSession(reqID, "sid-stale"); err != nil {
+				t.Fatalf("seed design_session_id: %v", err)
+			}
+
+			jobs := store.NewJobStore(8)
+			job := jobs.Create(reqID)
+
+			h := &WizardHandler{reqSvc: reqSvc, jobs: jobs}
+
+			req, err := reqSvc.Get(reqID)
+			if err != nil {
+				t.Fatalf("reload req: %v", err)
+			}
+			p := &designRunParams{
+				Req:          req,
+				NewDesignSID: "sid-stale",
+				SourceSID:    "sid-stale", // simulating a re-run that resumed the stale id
+				Fork:         false,
+				SkipAnalysis: true,
+				Model:        "sonnet",
+			}
+
+			h.finalizeArchitectRun(
+				claudeStreamOutcome{
+					sessionID:            "sid-stale",
+					staleSession:         true,
+					errMsg:               "",
+					SessionFileMissingSide: c.side,
+				},
+				p, job, nil,
+				"sid-stale", "sid-stale", reqID, "sonnet",
+			)
+
+			got, err := reqSvc.Get(reqID)
+			if err != nil {
+				t.Fatalf("reload req: %v", err)
+			}
+			if got.DesignSessionID != "" {
+				t.Fatalf("DesignSessionID = %q, want \"\" on stale (must mint fresh next run)", got.DesignSessionID)
+			}
+			if got.DesignJobID != "" {
+				t.Fatalf("DesignJobID = %q, want \"\" on terminal error", got.DesignJobID)
+			}
+
+			lines, status, _ := job.Snapshot()
+			if status != store.JobError {
+				t.Fatalf("status = %q, want JobError", status)
+			}
+			var found bool
+			for _, l := range lines {
+				if l.Type == "error" && strings.Contains(l.Content, c.contains) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("expected error line containing %q, got lines: %+v", c.contains, lines)
+			}
+		})
+	}
+}
