@@ -120,6 +120,106 @@ func PRLangRules(lang string) string {
 	}
 }
 
+// DetectTextLanguage 检测单个字符串的主导语言。
+//
+//   - CJK 字符数 > ASCII 字母数 * 1.5 → "zh"
+//   - ASCII 字母数 > CJK 字符数 * 1.5 → "en"
+//   - 比例相近 → "mixed"
+//   - 空白 / 无 CJK 也无字母 → ""
+//
+// 与 DetectCommitLanguage（多行 commit 扫描）语义对齐，但接受单个字符串，
+// 用于判定单条标题 / PR 文案的语言。
+func DetectTextLanguage(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return ""
+	}
+	var han, asciiAlpha int
+	for _, r := range s {
+		if unicode.Is(unicode.Han, r) {
+			han++
+		} else if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			asciiAlpha++
+		}
+	}
+	total := han + asciiAlpha
+	if total == 0 {
+		return ""
+	}
+	if float64(han) > float64(asciiAlpha)*1.5 {
+		return "zh"
+	}
+	if float64(asciiAlpha) > float64(han)*1.5 {
+		return "en"
+	}
+	return "mixed"
+}
+
+// ShouldRegenerateForLang 判定 commitLang 与 title 标题是否语言冲突、
+// 是否需要走 LLM 重新生成文案。
+//
+// 规则：
+//   - commitLang 与 DetectTextLanguage(title) 都非空 / 非 mixed 且互不等 → true
+//     （例如 "en" 项目 + 中文标题；"zh" 项目 + 英文标题）
+//   - commitLang == "mixed" → false（项目本就允许中英混用）
+//   - 其它（commitLang 空 / 标题为空 / mixed）→ false
+func ShouldRegenerateForLang(commitLang, title string) bool {
+	if commitLang == "" || commitLang == "mixed" {
+		return false
+	}
+	titleLang := DetectTextLanguage(title)
+	if titleLang == "" || titleLang == "mixed" {
+		return false
+	}
+	return commitLang != titleLang
+}
+
+// PRShellTemplates 集中提供「本地 shell 自动推送」路径所需的本地化模板
+// 字符串。这些是 git/gh 用的直接文案（不是给 LLM 看的指令），所以不能
+// 复用 PRLangRules / StyleHint。
+//
+//   - "en"            → 英文 commit fallback + 英文 PR 标题回退 + 英文
+//                       PR 正文段落与 section 标题。
+//   - "" / "zh" /
+//     "mixed"         → 默认中文，与现有硬编码内容同语义（零回归）。
+type PRShellTemplates struct {
+	CommitMessageDefaultFmt string // e.g. "NovaWorkbench auto-push: update %s"
+	PRTitleFallback         string // e.g. "NovaWorkbench auto-push: %s"
+	PRBodyIntroFmt          string // e.g. "Auto-created by ... (based on requirement %s)."
+	PRBodySummaryHeading    string // e.g. "## Summary"
+	PRBodyCommitsHeading    string // e.g. "## Commits"
+	PRBodyStatsHeading      string // e.g. "## Diff Stats"
+}
+
+// NewPRShellTemplates 根据 lang 返回本地化模板。分支解析走 ResolveCommitLang：
+//
+//	"en" → 英文模板
+//	"" / "zh" / "mixed" → 中文模板（与现有硬编码内容同语义，零回归）
+//
+// 函数名采用 `New<Struct>` 构造函数惯例，因为类型 PRShellTemplates 与
+// 构造函数同名会与 Go 同包命名空间冲突。
+func NewPRShellTemplates(lang string) PRShellTemplates {
+	switch ResolveCommitLang(lang, "") {
+	case "en":
+		return PRShellTemplates{
+			CommitMessageDefaultFmt: "NovaWorkbench auto-push: update %s",
+			PRTitleFallback:         "NovaWorkbench auto-push: %s",
+			PRBodyIntroFmt:          "Auto-created by NovaWorkbench auto-push (based on requirement %s).",
+			PRBodySummaryHeading:    "## Summary",
+			PRBodyCommitsHeading:    "## Commits",
+			PRBodyStatsHeading:      "## Diff Stats",
+		}
+	default: // "" / "zh" / "mixed" — 中文默认，保持现有硬编码内容
+		return PRShellTemplates{
+			CommitMessageDefaultFmt: "NovaWorkbench auto-push 更新 %s",
+			PRTitleFallback:         "NovaWorkbench auto-push: %s",
+			PRBodyIntroFmt:          "由 NovaWorkbench auto-push 自动创建（基于需求 %s）。",
+			PRBodySummaryHeading:    "## 改动概述",
+			PRBodyCommitsHeading:    "## 提交",
+			PRBodyStatsHeading:      "## 变更统计",
+		}
+	}
+}
+
 // ResolveCommitLang 决策项目提交风格的最终值。优先级：
 //  1. 用户覆盖值（override 非空）
 //  2. 自动检测值（stored）

@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,6 +13,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	promptpkg "github.com/novaworkbench/backend/internal/prompt"
+	"github.com/novaworkbench/backend/internal/service"
 )
 
 // ClaudeEnvProvider supplies the Claude CLI subprocess env vars (auth token /
@@ -84,6 +88,28 @@ func New(claudeEnv ClaudeEnvProvider, llmCfg LLMConfigProvider) *Gateway {
 	}
 
 	return &Gateway{binPath: binPath, rawBin: binPath, timeout: timeout, claudeEnv: claudeEnv, llmCfg: llmCfg}
+}
+
+// CommitArtifacts is the structured result of `GenerateCommitArtifacts`. A
+// single Claude call returns both the commit message and the PR title so we
+// avoid paying the cost of two LLM round-trips when an auto-push-PR path
+// needs to regenerate both fields to match `project.CommitLang`. Fields are
+// trimmed before being handed out — no AI attribution trailers survive.
+type CommitArtifacts struct {
+	CommitMessage string `json:"commit_message"`
+	PRTitle       string `json:"pr_title"`
+}
+
+// GenerateCommitArtifactsOpts configures a single-shot LLM call that rewrites
+// a requirement's title into a (commit_message, pr_title) pair. CommitLang has
+// already been run through `service.ResolveCommitLang` by the caller — empty
+// is treated as "no language preference" and produces the Chinese default.
+type GenerateCommitArtifactsOpts struct {
+	ReqTitle       string // original title (may not match project language)
+	ReqDescription string // optional context — "(无需求描述)" if absent
+	CommitLang     string // "en" / "zh" / "mixed" / ""
+	Model          string // model id passed via --model / ANTHROPIC_MODEL
+	CfgID          string // claude_configs row id for auth + base URL pinning
 }
 
 // resolveBin returns the claude executable path, re-resolving when the

@@ -221,3 +221,84 @@ func mustRun(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v: %v\n%s", strings.Join(args, " "), err, out)
 	}
 }
+
+// TestDetectTextLanguage covers the single-string language detector used by
+// the shell auto-push path to decide whether to LLM-regenerate commit / PR
+// titles. The detector must distinguish zh / en / mixed and treat pure
+// digits/whitespace as empty. Expected values are derived from the actual
+// algorithm (CJK vs ASCII alpha count with a 1.5x dominance threshold):
+//
+//   - 15 ASCII + 4 Han ("Fix login bug with 用户认证") -> "en" (15 > 4*1.5)
+//   - 4 ASCII + 4 Han ("feat: 新增功能") -> "mixed" (neither side > 1.5x the other)
+func TestDetectTextLanguage(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"hello world", "en"},
+		{"你好世界", "zh"},
+		{"Fix login bug with 用户认证", "en"},
+		{"", ""},
+		{"1234567890", ""},
+		{"feat: 新增功能", "mixed"},
+	}
+	for _, c := range cases {
+		if got := DetectTextLanguage(c.in); got != c.want {
+			t.Errorf("DetectTextLanguage(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestShouldRegenerateForLang covers the conflict rule used by
+// execPushPRShell to decide whether to invoke the LLM fallback. The matrix
+// verifies both the obvious mismatch (en project + zh title, zh project +
+// en title) and the no-op cases (mixed / empty / matching language).
+func TestShouldRegenerateForLang(t *testing.T) {
+	cases := []struct {
+		commitLang, title string
+		want              bool
+	}{
+		{"en", "你好世界", true},
+		{"zh", "hello world", true},
+		{"en", "hello world", false},
+		{"zh", "你好世界", false},
+		{"mixed", "hello world", false},
+		{"mixed", "你好世界", false},
+		{"", "hello world", false},
+		{"en", "", false},
+		{"en", "Fix login", false},
+	}
+	for _, c := range cases {
+		if got := ShouldRegenerateForLang(c.commitLang, c.title); got != c.want {
+			t.Errorf("ShouldRegenerateForLang(%q, %q) = %v, want %v", c.commitLang, c.title, got, c.want)
+		}
+	}
+}
+
+// TestPRShellTemplates guards the localized text used by the shell-path PR
+// body. The "en" branch must produce English section headings + intro; the
+// zero-regression branches ("" / "zh" / "mixed") must keep the existing
+// hardcoded Chinese strings verbatim.
+func TestPRShellTemplates(t *testing.T) {
+	en := NewPRShellTemplates("en")
+	if en.PRBodySummaryHeading != "## Summary" {
+		t.Errorf("en.PRBodySummaryHeading = %q, want %q", en.PRBodySummaryHeading, "## Summary")
+	}
+	if en.PRBodyStatsHeading != "## Diff Stats" {
+		t.Errorf("en.PRBodyStatsHeading = %q, want %q", en.PRBodyStatsHeading, "## Diff Stats")
+	}
+	if en.PRBodyIntroFmt != "Auto-created by NovaWorkbench auto-push (based on requirement %s)." {
+		t.Errorf("en.PRBodyIntroFmt = %q, want %q", en.PRBodyIntroFmt,
+			"Auto-created by NovaWorkbench auto-push (based on requirement %s).")
+	}
+
+	for _, lang := range []string{"", "zh", "mixed"} {
+		got := NewPRShellTemplates(lang)
+		if got.PRBodySummaryHeading != "## 改动概述" {
+			t.Errorf("lang=%q PRBodySummaryHeading = %q, want 中文零回归 %q", lang, got.PRBodySummaryHeading, "## 改动概述")
+		}
+		if got.PRBodyIntroFmt != "由 NovaWorkbench auto-push 自动创建（基于需求 %s）。" {
+			t.Errorf("lang=%q PRBodyIntroFmt = %q, want 中文零回归 %q", lang, got.PRBodyIntroFmt,
+				"由 NovaWorkbench auto-push 自动创建（基于需求 %s）。")
+		}
+	}
+}
