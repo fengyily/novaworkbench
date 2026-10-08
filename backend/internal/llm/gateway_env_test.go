@@ -1,10 +1,14 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
+	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // hostShapedEnvKeys are the keys that must NEVER leak into a remote Agent-server
@@ -307,4 +311,73 @@ func TestGenerateCodeHardTimeoutBelowFloorIsFloored(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("GenerateCode returned nil cmd")
 	}
+}
+
+// TestGenerateCodeRollingIdleNoHardTimeoutHasNoWallClockCap: IdleTimeout>0 + HardTimeout=0
+// (the sub-task path after NOVA_SUBTASK_TIMEOUT removal) must produce a rolling
+// ctx with NO wall-clock cap. The rolling idle timer alone decides liveness;
+// a long-running tool call that keeps emitting stdout survives indefinitely.
+// The stall watchdog in runClaudeStream is the safety net for true process hangs.
+func TestGenerateCodeRollingIdleNoHardTimeoutHasNoWallClockCap(t *testing.T) {
+	g := New(fakeClaudeEnv{}, nil)
+	if g.timeout != 120*time.Second {
+		t.Skipf("gateway default changed (now %v); matrix rebuilt around 120s", g.timeout)
+	}
+	cmd, cancel, hb := g.GenerateCode(StreamOpts{
+		Prompt:      "x",
+		IdleTimeout: 5 * time.Second,
+		HardTimeout: 0,
+	})
+	defer cancel()
+	if hb == nil {
+		t.Fatal("expected non-nil heartbeat channel when IdleTimeout>0")
+	}
+	ctx := cmdCtxForTest(t, cmd)
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		t.Errorf("IdleTimeout>0 + HardTimeout=0 should have no wall-clock cap, but ctx has a deadline")
+	}
+}
+
+// TestGenerateCodeRollingIdleWithHardTimeoutStillCaps: IdleTimeout>0 + HardTimeout>0
+// must still impose a wall-clock cap (with the 30m floor for caller-typo
+// protection). This pins the contract that HardTimeout=0 vs HardTimeout>0
+// are semantically different when IdleTimeout>0 — the former opts out of the
+// wall-clock cap entirely, the latter keeps the absolute deadline.
+func TestGenerateCodeRollingIdleWithHardTimeoutStillCaps(t *testing.T) {
+	g := New(fakeClaudeEnv{}, nil)
+	if g.timeout != 120*time.Second {
+		t.Skipf("gateway default changed (now %v); matrix rebuilt around 120s", g.timeout)
+	}
+	cmd, cancel, _ := g.GenerateCode(StreamOpts{
+		Prompt:      "x",
+		IdleTimeout: 5 * time.Second,
+		HardTimeout: 45 * time.Minute,
+	})
+	defer cancel()
+	deadline, ok := cmdCtxForTest(t, cmd).Deadline()
+	if !ok {
+		t.Fatal("HardTimeout>0 should impose a wall-clock cap; expected ctx.Deadline() to return ok=true")
+	}
+	remaining := time.Until(deadline)
+	if remaining < 44*time.Minute || remaining > 46*time.Minute {
+		t.Errorf("HardTimeout=45m should yield ~45m deadline; got remaining=%v (deadline=%v, now=%v)", remaining, deadline, time.Now())
+	}
+}
+
+// cmdCtxForTest returns the context that exec.CommandContext was called
+// with for this *exec.Cmd, so timeout tests can assert whether a wall-clock
+// cap was applied. Implemented via reflection on the unexported ctx field
+// because the Go toolchain in use does not expose (*exec.Cmd).Context()
+// publicly (the method is in upstream stdlib but missing from this build).
+// If the field name ever changes, this helper fails the test with a clear
+// message instead of silently passing.
+func cmdCtxForTest(t *testing.T, cmd *exec.Cmd) context.Context {
+	t.Helper()
+	v := reflect.ValueOf(cmd).Elem()
+	f := v.FieldByName("ctx")
+	if !f.IsValid() {
+		t.Fatalf("*exec.Cmd has no ctx field (Go toolchain changed?); cannot verify wall-clock cap")
+	}
+	// Reading an unexported field via reflection requires unsafe.Pointer.
+	return reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem().Interface().(context.Context)
 }
