@@ -260,6 +260,49 @@ func (s *SubTaskService) FindRecentPushForReq(reqID string, lookbackSec int) (*m
 	return st, nil
 }
 
+// HasCommitPushChild reports whether batchID contains a user/AI-authored
+// child sub-task whose title or prompt describes the commit-push action
+// (提交 / 推送 / push / commit / pr). Rows with source='push_pr' are
+// excluded so the auto-dispatched row can't satisfy its own predicate
+// (i.e. prevent the "auto-dispatch → self-bypass" feedback loop).
+//
+// Used by the split-orchestrator auto-push gates (see
+// backend/internal/handler/wizard_orchestration.go OnBatchDrained +
+// RunOrchestratorSummary) to honor the user intent "auto_push=false but
+// my batch already has a commit-push card" — when this returns true, the
+// caller treats the batch as if auto_push were enabled for that single
+// dispatch. The actual dedup is still owned by
+// OrchestrationBatchService.ClaimAutoPush (one batch = one auto-push) and
+// SubTaskService.FindRecentPushForReq (90s idempotency window), so adding
+// this bypass does not introduce a new race window.
+//
+// Returns (false, nil) when batchID is empty — an empty batch can never
+// contain a commit-push card, so callers can short-circuit without a DB
+// round-trip. SQL keyword matching intentionally uses broad LIKE patterns
+// (high-signal terms only) and is scoped to rows that share a batch_id
+// AND have a non-push_pr source, keeping the false-positive surface
+// (e.g. "提交代码评审") low while still matching both Chinese and English
+// user/AI authoring.
+func (s *SubTaskService) HasCommitPushChild(batchID string) (bool, error) {
+	if batchID == "" {
+		return false, nil
+	}
+	var exists int
+	err := s.db.QueryRow(`SELECT EXISTS(
+		SELECT 1 FROM sub_tasks
+		WHERE batch_id = ? AND source <> ? AND (
+		  title LIKE '%提交%' OR title LIKE '%推送%' OR
+		  title LIKE '%push%' OR title LIKE '%commit%' OR title LIKE '%pr%' OR
+		  prompt LIKE '%提交%' OR prompt LIKE '%推送%' OR
+		  prompt LIKE '%push%' OR prompt LIKE '%commit%' OR prompt LIKE '%pr%'
+		))`,
+		batchID, model.SubTaskSourcePushPR).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists == 1, nil
+}
+
 // List returns every sub-task attached to reqID, **newest first** —
 // matching the SubTaskPanel sort and the user's expectation that the most
 // recently created card sits at the top. id DESC is the tie-breaker so
