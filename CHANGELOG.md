@@ -5,6 +5,12 @@ All notable changes to NovaWorkbench will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+* **sub-task:** 移除子任务执行的 30m 硬超时（`NOVA_SUBTASK_TIMEOUT` 及其 gateway 内的 30m floor）。子任务超时**仅**由 `NOVA_SUBTASK_IDLE_TIMEOUT`（默认 30m）滚动 idle 窗口控制：任意 stdout 行重置 timer，长跑工具调用（npm install、go build 等）只要持续输出就不会被杀；静默达到 `NOVA_SUBTASK_IDLE_TIMEOUT` 时以既有 `error_kind="idle-timeout"` 终止。
+
 ## [0.5.0](https://github.com/fengyily/novaworkbench/compare/v0.4.0...v0.5.0) (2026-09-21)
 
 

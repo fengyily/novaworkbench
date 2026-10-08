@@ -944,9 +944,17 @@ func summaryFallback(claudeMD string) string {
 // analysis+design context instead of being re-fed it.
 func (g *Gateway) GenerateCode(opts StreamOpts) (*exec.Cmd, context.CancelFunc, chan struct{}) {
 	// Use a long timeout for coding tasks — real implementations can take many minutes.
-	// opts.HardTimeout is a caller-asserted minimum (e.g. Agent Server remote SSE,
-	// sub-task runner). 0 means "follow the gateway default" and the math below
-	// degenerates to the legacy behavior.
+	//
+	// opts.HardTimeout controls behavior depending on IdleTimeout:
+	//   - IdleTimeout <= 0 (legacy fixed-deadline path): HardTimeout is the
+	//     minimum ctx duration, floored to 30m. 0 means "use g.timeout
+	//     (default 120s) floored to 30m" — the legacy behavior.
+	//   - IdleTimeout > 0 (rolling idle path): HardTimeout is the absolute
+	//     wall-clock cap, still floored to 30m to prevent caller typos.
+	//     HardTimeout=0 means "no wall-clock cap; rely on IdleTimeout alone",
+	//     which is what sub-task runners want — a long-running tool call
+	//     that keeps emitting stdout survives indefinitely. The stall
+	//     watchdog in runClaudeStream is the safety net for true process hangs.
 	codingTimeout := g.timeout
 	if opts.HardTimeout > codingTimeout {
 		codingTimeout = opts.HardTimeout
@@ -964,17 +972,29 @@ func (g *Gateway) GenerateCode(opts StreamOpts) (*exec.Cmd, context.CancelFunc, 
 		return g.StreamCmd(ctx, opts), cancel, nil
 	}
 
-	// Rolling: idle watcher resets IdleTimeout on heartbeat; absolute cap
-	// (codingTimeout) prevents runaway runs. The cancel closure fans out to
-	// both the absolute-cap timer and the rolling ctx's cancel so callers
+	// Rolling: idle watcher resets IdleTimeout on heartbeat. An optional
+	// absolute wall-clock cap (opts.HardTimeout) prevents runaway runs.
+	// When HardTimeout=0, no wall-clock cap is applied — IdleTimeout alone
+	// determines liveness. The cancel closure fans out to both the
+	// absolute-cap timer (if any) and the rolling ctx's cancel so callers
 	// only need to invoke one function on stop/complete.
 	rollingCtx, rollingCancel, hb := rollingCtx("code", opts.IdleTimeout)
-	absCtx, absCancel := context.WithTimeout(rollingCtx, codingTimeout)
-	combinedCancel := func() {
-		absCancel()
-		rollingCancel()
+	absCap := opts.HardTimeout
+	if absCap > 0 && absCap < 30*time.Minute {
+		// Caller-typo guard: when HardTimeout is used as a wall-clock cap,
+		// values < 30m are floored to 30m. (No effect when HardTimeout=0;
+		// we skip the absolute cap entirely below.)
+		absCap = 30 * time.Minute
 	}
-	return g.StreamCmd(absCtx, opts), combinedCancel, hb
+	if absCap > 0 {
+		absCtx, absCancel := context.WithTimeout(rollingCtx, absCap)
+		combinedCancel := func() {
+			absCancel()
+			rollingCancel()
+		}
+		return g.StreamCmd(absCtx, opts), combinedCancel, hb
+	}
+	return g.StreamCmd(rollingCtx, opts), rollingCancel, hb
 }
 
 // rollingCtx is the llm-package's package-private twin of handler.newRollingCtx.

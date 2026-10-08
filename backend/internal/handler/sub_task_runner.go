@@ -1191,8 +1191,7 @@ func (r *SubTaskRunner) runLocalSubTaskAttempt(
 		Fork:         forkFor,
 		ForkSessionID: newSID,
 		ExtraEnv:     credEnv, // HTTPS git creds + committer identity
-		HardTimeout:  subtaskTimeout(),    // v0.5.x: caller-asserted absolute cap
-		IdleTimeout:  subtaskIdleTimeout(), // v0.5.x: rolling idle window — survives long stdout
+		IdleTimeout:  subtaskIdleTimeout(), // SSE-activity based timeout: any stdout line resets the rolling idle timer, so a long-running tool call (npm install, go build, etc.) survives as long as it keeps emitting output. NOVA_SUBTASK_IDLE_TIMEOUT (default 30m).
 	})
 	// Hand the subprocess + cancel to the JobStore so StopSubTask can SIGTERM
 	// it (gateway's exec.CommandContext chains SIGTERM → WaitDelay 5s →
@@ -1472,23 +1471,6 @@ func activeConfigMetaFor(claudeCfg *service.ClaudeConfigService) (id, currency s
 		return "", ""
 	}
 	return c.ID, c.Currency
-}
-
-// subtaskTimeout returns the HardTimeout that the sub-task runner asks
-// Gateway.GenerateCode to honor. Defaults to 30m — the floor that the
-// existing coding path also enforces, so the no-config behavior is
-// byte-identical. Configured via NOVA_SUBTASK_TIMEOUT (e.g. "45m"); values
-// shorter than 30m are still floored by Gateway to 30m, by design.
-func subtaskTimeout() time.Duration {
-	const defaultSubtaskTimeout = 30 * time.Minute
-	raw := os.Getenv("NOVA_SUBTASK_TIMEOUT")
-	if raw == "" {
-		return defaultSubtaskTimeout
-	}
-	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
-		return d
-	}
-	return defaultSubtaskTimeout
 }
 
 // subtaskIdleTimeout is the rolling-window size: a sub-task whose stdout goes
