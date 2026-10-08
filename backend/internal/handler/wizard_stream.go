@@ -545,6 +545,14 @@ type claudeStreamOutcome struct {
 	// generic artifact text, which contains the literal substring
 	// "session 文件不存在" that downstream log-grep alerts key off.
 	SessionFileMissingSide string
+	// MissingSIDs lists the session IDs that the up-sync pass failed to
+	// locate on the local filesystem. Only populated on the
+	// Agent-server path where prepareRemoteAgentRun (or runRemoteCoding)
+	// pre-flighted the jsonl. Carried alongside SessionFileMissingSide so
+	// the user-visible error in finalizeArchitectRun can name the
+	// missing IDs verbatim. Empty / nil on the local-CLI path or when
+	// every SID landed on disk.
+	MissingSIDs []string
 	// subTasksJSON is the authoritative sub-task decomposition payload,
 	// captured from a Write tool_use whose target path ends with
 	// /.novaworkbench/subtasks.json. Unlike the free-text JSON block +

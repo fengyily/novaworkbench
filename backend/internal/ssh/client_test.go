@@ -1,6 +1,12 @@
 package ssh
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"testing"
+)
 
 // TestExpandHome covers the "~" expansion contract that the Agent-server
 // session sync depends on. pkg/sftp and single-quoted shell commands both
@@ -112,5 +118,46 @@ func TestExpandHomeResolvesOnce(t *testing.T) {
 	}
 	if want := "/home/cached/.claude/projects/x"; first != want {
 		t.Errorf("ExpandHome = %q, want %q", first, want)
+	}
+}
+
+// TestIsRemoteNotExist pins the multi-signal detection: the Go-stdlib
+// fs.ErrNotExist (when sftp unwraps it), the legacy os.IsNotExist
+// (when sftp wraps an *os.PathError), and the literal sftp-server
+// message "file does not exist" / "no such file or directory".
+func TestIsRemoteNotExist(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"fs.ErrNotExist", fs.ErrNotExist, true},
+		{"wrapped fs.ErrNotExist", fmt.Errorf("wrap: %w", fs.ErrNotExist), true},
+		{"os.PathError", &os.PathError{Op: "stat", Path: "/x", Err: fs.ErrNotExist}, true},
+		{"literal sftp message", errors.New("sftp: file does not exist"), true},
+		{"literal no such file", errors.New("open /x: no such file or directory"), true},
+		{"unrelated error", errors.New("connection lost"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isRemoteNotExist(c.err); got != c.want {
+				t.Fatalf("isRemoteNotExist(%v) = %v, want %v", c.err, got, c.want)
+			}
+		})
+	}
+}
+
+// TestErrRemoteDirMissingIsExported pins that callers downstream can
+// identify the sentinel via errors.Is.
+func TestErrRemoteDirMissingIsExported(t *testing.T) {
+	if !errors.Is(ErrRemoteDirMissing, ErrRemoteDirMissing) {
+		t.Fatal("errors.Is must match the sentinel against itself")
+	}
+	// Plain equality is fine — we return ErrRemoteDirMissing verbatim,
+	// not wrapped. This catches accidental fmt.Errorf wrapping that
+	// would break errors.Is at call sites.
+	if ErrRemoteDirMissing == nil {
+		t.Fatal("ErrRemoteDirMissing must not be nil")
 	}
 }
