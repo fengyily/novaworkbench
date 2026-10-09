@@ -107,7 +107,7 @@ func TestRequirementClearWorktree(t *testing.T) {
 func TestProjectUpdateBasicInfoCascadesWorktreeClear(t *testing.T) {
 	d := newTestDB(t)
 	platformSvc := NewPlatformTokenService(d)
-	projSvc := NewProjectService(d, platformSvc)
+	projSvc := NewProjectService(d, platformSvc, nil)
 	reqSvc := NewRequirementService(d, nil)
 
 	oldDir := t.TempDir()
@@ -177,7 +177,7 @@ func TestProjectUpdateBasicInfoCascadesWorktreeClear(t *testing.T) {
 func TestProjectUpdateBasicInfoNoMoveDoesNotClear(t *testing.T) {
 	d := newTestDB(t)
 	platformSvc := NewPlatformTokenService(d)
-	projSvc := NewProjectService(d, platformSvc)
+	projSvc := NewProjectService(d, platformSvc, nil)
 	reqSvc := NewRequirementService(d, nil)
 
 	dir := t.TempDir()

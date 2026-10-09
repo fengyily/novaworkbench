@@ -84,7 +84,15 @@ type GitSyncResult struct {
 // rejection leaves any uncommitted changes exactly where they were. ctx is
 // used both as the parent deadline and as the per-fetch timeout (the fetch
 // itself caps at `timeout`).
-func SyncToOriginBase(ctx context.Context, repoPath, baseBranch string, timeout time.Duration, logf func(string)) (GitSyncResult, error) {
+//
+// projectID, when non-empty, is used to look up the project's bound platform
+// token and inject a GIT_ASKPASS env on the Step C fetch so HTTPS private
+// repos with a project-bound token actually authenticate. Empty projectID
+// (or a nil gitCredSvc) keeps the historical GIT_TERMINAL_PROMPT=0-only
+// behaviour — preserves the unit tests' shape (projectID="") and the
+// historical best-effort fallback for callers that haven't threaded a
+// projectID through.
+func (s *ProjectService) SyncToOriginBase(ctx context.Context, projectID, repoPath, baseBranch string, timeout time.Duration, logf func(string)) (GitSyncResult, error) {
 	var res GitSyncResult
 	if repoPath == "" {
 		return res, fmt.Errorf("repoPath is empty")
@@ -174,11 +182,22 @@ func SyncToOriginBase(ctx context.Context, repoPath, baseBranch string, timeout 
 	// Step C: fetch origin <base> under GIT_TERMINAL_PROMPT=0 so a stalled
 	// network / missing creds can never hang us past `timeout`. We DON'T
 	// update origin/<base> from a stale local snapshot — fetch is the only
-	// source of truth for what the upstream currently is.
+	// source of truth for what the upstream currently is. When the project
+	// is bound to a platform token, layer the askpass env on top so the
+	// fetch actually authenticates against HTTPS remotes — credEnv is
+	// non-empty only when a token was found.
 	fctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	fetchCmd := exec.CommandContext(fctx, "git", "-C", repoPath, "fetch", "origin", baseBranch)
-	fetchCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	fetchEnv := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if projectID != "" && s.gitCredSvc != nil {
+		credEnv, credCleanup, _ := s.gitCredSvc.BuildEnv(ctx, projectID)
+		if credCleanup != nil {
+			defer credCleanup()
+		}
+		fetchEnv = append(fetchEnv, credEnv...)
+	}
+	fetchCmd.Env = fetchEnv
 	var fetchErrOut strings.Builder
 	fetchCmd.Stderr = &fetchErrOut
 	if err := fetchCmd.Run(); err != nil {
@@ -321,7 +340,7 @@ func (s *ProjectService) SyncDesignBase(ctx context.Context, projectID string, t
 		}
 	}
 
-	res, err = SyncToOriginBase(ctx, p.LocalPath, p.DefaultBranch, timeout, logf)
+	res, err = s.SyncToOriginBase(ctx, p.ID, p.LocalPath, p.DefaultBranch, timeout, logf)
 	if err != nil {
 		// *SyncGateError is the design-stage rejection signal we EXPECT to
 		// see; everything else is an unexpected DB / git plumbing error.

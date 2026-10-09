@@ -60,6 +60,13 @@ func TestSyncToOriginBase_GatesAndSkips(t *testing.T) {
 		return work
 	}
 
+	// svc is a zero-value *ProjectService. SyncToOriginBase is now a method
+	// that, when projectID == "" (the value the gate tests pass), short-
+	// circuits the credential-injection block — so a nil gitCredSvc and
+	// empty projectID keep the historical gate-only behaviour the tests
+	// are asserting against.
+	svc := &ProjectService{}
+
 	// (a) DIRTY_WORKTREE: an untracked file blocks the gate; the porcelain
 	// listing must come back verbatim so the user sees exactly what git sees.
 	t.Run("DirtyWorktree_Rejected", func(t *testing.T) {
@@ -67,7 +74,7 @@ func TestSyncToOriginBase_GatesAndSkips(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(work, "untracked.txt"), []byte("x"), 0644); err != nil {
 			t.Fatalf("write untracked: %v", err)
 		}
-		res, err := SyncToOriginBase(context.Background(), work, baseBranch, 10*time.Second, nil)
+		res, err := svc.SyncToOriginBase(context.Background(), "", work, baseBranch, 10*time.Second, nil)
 		if err == nil {
 			t.Fatalf("expected DIRTY_WORKTREE error, got nil (res=%+v)", res)
 		}
@@ -91,7 +98,7 @@ func TestSyncToOriginBase_GatesAndSkips(t *testing.T) {
 	t.Run("HeadNotOnBase_Rejected", func(t *testing.T) {
 		work := freshWorkdir(t)
 		mustGit(t, work, "git", "checkout", "-b", "feature/tmp")
-		res, err := SyncToOriginBase(context.Background(), work, baseBranch, 10*time.Second, nil)
+		res, err := svc.SyncToOriginBase(context.Background(), "", work, baseBranch, 10*time.Second, nil)
 		if err == nil {
 			t.Fatalf("expected HEAD_NOT_ON_BASE error, got nil (res=%+v)", res)
 		}
@@ -116,7 +123,7 @@ func TestSyncToOriginBase_GatesAndSkips(t *testing.T) {
 		}
 		mustGit(t, work, "git", "add", "ahead.txt")
 		mustGit(t, work, "git", "commit", "-m", "ahead commit")
-		res, err := SyncToOriginBase(context.Background(), work, baseBranch, 10*time.Second, nil)
+		res, err := svc.SyncToOriginBase(context.Background(), "", work, baseBranch, 10*time.Second, nil)
 		if err == nil {
 			t.Fatalf("expected UNPUSHED_COMMITS error, got nil (res=%+v)", res)
 		}
@@ -142,7 +149,7 @@ func TestSyncToOriginBase_GatesAndSkips(t *testing.T) {
 		mustGit(t, work, "git", "remote", "set-url", "origin", "https://127.0.0.1:1/dead.git")
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		res, err := SyncToOriginBase(ctx, work, baseBranch, 5*time.Second, nil)
+		res, err := svc.SyncToOriginBase(ctx, "", work, baseBranch, 5*time.Second, nil)
 		if err == nil {
 			t.Fatalf("expected FETCH_FAILED error, got nil (res=%+v)", res)
 		}
@@ -207,7 +214,7 @@ func TestSyncToOriginBase_GatesAndSkips(t *testing.T) {
 		// succeeds, origin is ahead; D (rev-list origin/main..HEAD) is
 		// 0 (HEAD is at the older tip); E (merge --ff-only) refuses
 		// because the local SHA != origin/main tip. → FF_FAILED.
-		res, err := SyncToOriginBase(context.Background(), work, baseBranch, 10*time.Second, nil)
+		res, err := svc.SyncToOriginBase(context.Background(), "", work, baseBranch, 10*time.Second, nil)
 		if err == nil {
 			t.Fatalf("expected FF_FAILED error, got nil (res=%+v)", res)
 		}
@@ -232,7 +239,7 @@ func TestSyncToOriginBase_GatesAndSkips(t *testing.T) {
 	// scratch dir hits this — gate must short-circuit, not error.
 	t.Run("Skip_NonGitDir", func(t *testing.T) {
 		notGit := t.TempDir()
-		res, err := SyncToOriginBase(context.Background(), notGit, baseBranch, 5*time.Second, nil)
+		res, err := svc.SyncToOriginBase(context.Background(), "", notGit, baseBranch, 5*time.Second, nil)
 		if err != nil {
 			t.Fatalf("expected nil error for non-git dir, got: %v", err)
 		}
@@ -256,7 +263,7 @@ func TestSyncToOriginBase_GatesAndSkips(t *testing.T) {
 		}
 		mustGit(t, noOrigin, "git", "add", "f.txt")
 		mustGit(t, noOrigin, "git", "commit", "-m", "init")
-		res, err := SyncToOriginBase(context.Background(), noOrigin, baseBranch, 5*time.Second, nil)
+		res, err := svc.SyncToOriginBase(context.Background(), "", noOrigin, baseBranch, 5*time.Second, nil)
 		if err != nil {
 			t.Fatalf("expected nil error for no-origin, got: %v", err)
 		}
@@ -275,7 +282,7 @@ func TestSyncToOriginBase_GatesAndSkips(t *testing.T) {
 		// this case would be testing the wrong thing.
 		mustGit(t, empty, "git", "remote", "add", "origin", upstreamDir)
 		// Deliberately do NOT create any commit so HEAD is unborn.
-		res, err := SyncToOriginBase(context.Background(), empty, baseBranch, 5*time.Second, nil)
+		res, err := svc.SyncToOriginBase(context.Background(), "", empty, baseBranch, 5*time.Second, nil)
 		if err != nil {
 			t.Fatalf("expected nil error for unborn HEAD, got: %v", err)
 		}
@@ -289,7 +296,7 @@ func TestSyncToOriginBase_GatesAndSkips(t *testing.T) {
 	// UpdateDesignBaseSHA is going to stamp onto the requirement.
 	t.Run("Happy_FastForward_Success", func(t *testing.T) {
 		work := freshWorkdir(t)
-		res, err := SyncToOriginBase(context.Background(), work, baseBranch, 10*time.Second, nil)
+		res, err := svc.SyncToOriginBase(context.Background(), "", work, baseBranch, 10*time.Second, nil)
 		if err != nil {
 			t.Fatalf("expected nil error, got: %v", err)
 		}
@@ -308,7 +315,7 @@ func TestSyncToOriginBase_GatesAndSkips(t *testing.T) {
 // (and matching the user-facing "已同步" badge in the UI).
 func TestSyncDesignBase_StampsSyncStatus(t *testing.T) {
 	d := newTestDB(t)
-	svc := NewProjectService(d, nil)
+	svc := NewProjectService(d, nil, nil)
 	ctx := context.Background()
 
 	const baseBranch = "main"
@@ -379,7 +386,7 @@ func TestSyncDesignBase_StampsSyncStatus(t *testing.T) {
 // Contrast with EnsureClonedAndSynced which swallows the same failure.
 func TestSyncDesignBase_FetchFailureStampsErrorStatus(t *testing.T) {
 	d := newTestDB(t)
-	svc := NewProjectService(d, nil)
+	svc := NewProjectService(d, nil, nil)
 	ctx := context.Background()
 
 	work := filepath.Join(t.TempDir(), "work")
@@ -435,7 +442,7 @@ func TestSyncDesignBase_FetchFailureStampsErrorStatus(t *testing.T) {
 // no error).
 func TestSyncDesignBase_NoOriginSkips(t *testing.T) {
 	d := newTestDB(t)
-	svc := NewProjectService(d, nil)
+	svc := NewProjectService(d, nil, nil)
 
 	// A real git repo, no origin remote.
 	work := filepath.Join(t.TempDir(), "work")

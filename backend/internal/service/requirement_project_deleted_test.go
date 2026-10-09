@@ -16,7 +16,7 @@ func TestListHidesRequirementsOfDeletedProject(t *testing.T) {
 	d := newTestDB(t)
 	seedProject(t, d, "proj_live", "proj_live", "/tmp/proj_live")
 	reqSvc := NewRequirementService(d, nil)
-	projSvc := NewProjectService(d, nil)
+	projSvc := NewProjectService(d, nil, nil)
 
 	if _, err := reqSvc.Create(model.CreateRequirementReq{ProjectID: "proj_live", Title: "a", Description: ""}); err != nil {
 		t.Fatalf("create r1: %v", err)
@@ -68,7 +68,7 @@ func TestPurgeDeletesRequirementRows(t *testing.T) {
 	d := newTestDB(t)
 	seedProject(t, d, "proj_purge", "proj_purge", "/tmp/proj_purge")
 	reqSvc := NewRequirementService(d, nil)
-	projSvc := NewProjectService(d, nil)
+	projSvc := NewProjectService(d, nil, nil)
 
 	if _, err := reqSvc.Create(model.CreateRequirementReq{ProjectID: "proj_purge", Title: "x", Description: ""}); err != nil {
 		t.Fatalf("create: %v", err)
