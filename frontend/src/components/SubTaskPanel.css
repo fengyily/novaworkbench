@@ -1289,6 +1289,55 @@
   color: var(--color-success);
 }
 
+/* ArchiveButton — icon + short-text pill. Sits next to the 24×24 icon-only
+ * "copy" button in the dev-summary card and as the sole archive affordance
+ * in the per-sub-task report header. Three states via data-state:
+ *   idle:     subtle outlined pill — neutral
+ *   archived: emerald pill — already in the knowledge base, click to undo
+ *   busy:     disabled, hourglass
+ * The pill is intentionally a touch larger / more verbose than the copy
+ * button because the affordance writes a knowledge entry; the extra
+ * visual weight mirrors the heavier semantic.
+ */
+.sub-archive-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+.sub-archive-action-btn .sub-archive-action-label {
+  line-height: 1;
+}
+.sub-archive-action-btn[data-state='idle']:hover {
+  background: var(--color-hover);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+.sub-archive-action-btn[data-state='archived'] {
+  background: rgba(16, 185, 129, 0.10);
+  border-color: var(--color-success);
+  color: var(--color-success);
+}
+.sub-archive-action-btn[data-state='archived']:hover {
+  background: rgba(16, 185, 129, 0.18);
+  color: var(--color-success);
+}
+.sub-archive-action-btn[data-state='busy'],
+.sub-archive-action-btn:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
 /* ─── Per-card context-usage bar ───
  * Slim wrapper around the shared ContextUsageBar so each sub-task card
  * can show the same usage metrics the parent CodingChat does. Sits
