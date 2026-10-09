@@ -35,7 +35,7 @@ func TestExecEnvSanity(t *testing.T) {
 		t.Fatalf("insert requirement: %v", err)
 	}
 
-	reqSvc := NewRequirementService(d)
+	reqSvc := NewRequirementService(d, nil)
 	got, err := reqSvc.Get("req_1")
 	if err != nil {
 		t.Fatalf("req Get: %v", err)
@@ -54,7 +54,7 @@ func TestExecEnvSanity(t *testing.T) {
 		t.Fatalf("List design name not attached: %q", list[0].DesignAgentServerName)
 	}
 
-	stSvc := NewSubTaskService(d)
+	stSvc := NewSubTaskService(d, nil)
 	// Explicit remote sub-task.
 	remote, err := stSvc.Create("req_1", "remote task", "do X", "", "", "", 0, "as_1", "", "", "")
 	if err != nil {
@@ -189,7 +189,7 @@ func TestAttachEffectiveEnvLocalParent(t *testing.T) {
 		"req_2", "proj_2", "R2", "", "developing", "medium", "requirement", "[]", "[]", "[]", "user", false, false, "", "", now, now); err != nil {
 		t.Fatalf("insert requirement: %v", err)
 	}
-	stSvc := NewSubTaskService(d)
+	stSvc := NewSubTaskService(d, nil)
 	legacy, err := stSvc.Create("req_2", "legacy task", "do L", "", "", "", 0, "", "", "", "")
 	if err != nil {
 		t.Fatalf("create child: %v", err)

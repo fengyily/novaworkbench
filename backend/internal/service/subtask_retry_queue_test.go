@@ -40,7 +40,7 @@ func TestReArmErroredForRetry_RespectsCapAndStatus(t *testing.T) {
 	seedBatchChild(t, d, "st_stopped", "batch_1", model.SubTaskStatusStopped, 4, 0)
 	seedBatchChild(t, d, "st_other_batch", "batch_2", model.SubTaskStatusError, 1, 0)
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	n, err := svc.ReArmErroredForRetry("batch_1", 2)
 	if err != nil {
 		t.Fatalf("ReArmErroredForRetry: %v", err)
@@ -97,7 +97,7 @@ func TestReArmErroredForRetry_DisabledCap(t *testing.T) {
 	d := newTestDB(t)
 	seedBatchChild(t, d, "st_err", "batch_1", model.SubTaskStatusError, 1, 0)
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	n, err := svc.ReArmErroredForRetry("batch_1", 0)
 	if err != nil {
 		t.Fatalf("ReArmErroredForRetry: %v", err)

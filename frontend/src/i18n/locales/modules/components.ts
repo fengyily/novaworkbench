@@ -136,6 +136,15 @@ export const components = {
       bareHint: '什么都不带，也不带角色系统提示词，直接用 claude 默认',
       freshHint: '上次会话在 Agent 服务器上找不到，建议用「带上下文」模式（会自动带上需求 + 设计文档 + 上一会话最近 10 轮作为上下文）',
     },
+    // Report-archive (主 Agent 汇总报告 + 子任务报告 → knowledge). The
+    // button sits in both the dev-summary card header and each done sub-task
+    // card header; same icon / label pair keeps the affordance consistent.
+    archiveBtn: '归档到知识库',
+    archiveBusy: '归档中…',
+    archivedTitle: '已归档到知识库，点击撤销',
+    archiveOk: '✅ 已归档到知识库',
+    archiveErrPrefix: '❌ 归档失败：',
+    unarchiveOk: '✅ 已从知识库移除',
   },
   subTaskCard: {
     statusPending: '排队中',

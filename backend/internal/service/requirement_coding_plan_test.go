@@ -15,7 +15,7 @@ import (
 func TestCodingStepPlanAndPhaseRoundTrip(t *testing.T) {
 	d := newTestDB(t)
 	seedProject(t, d, "proj_1", "proj_1", "/tmp/proj_1")
-	reqSvc := NewRequirementService(d)
+	reqSvc := NewRequirementService(d, nil)
 
 	created, err := reqSvc.Create(model.CreateRequirementReq{ProjectID: "proj_1", Title: "t", Description: "d"})
 	if err != nil {
@@ -86,7 +86,7 @@ func TestCodingStepPlanAndPhaseRoundTrip(t *testing.T) {
 func TestCodingStepPlanIsSeparateFromCodingPlan(t *testing.T) {
 	d := newTestDB(t)
 	seedProject(t, d, "proj_1", "proj_1", "/tmp/proj_1")
-	reqSvc := NewRequirementService(d)
+	reqSvc := NewRequirementService(d, nil)
 
 	created, err := reqSvc.Create(model.CreateRequirementReq{ProjectID: "proj_1", Title: "t", Description: "d"})
 	if err != nil {

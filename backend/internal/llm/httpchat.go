@@ -85,6 +85,24 @@ const extractStepsSystemPrompt = `你是一位软件项目调度助手。用户�
 - 如果这份文本里确实没有任何可执行的步骤列表，输出 {"subtasks":[]}。
 只输出该 JSON 对象，不要任何前后缀说明。`
 
+// extractReportKnowledgePrompt distills a development report (主 Agent 汇总报告
+// or 子任务报告) into a reusable knowledge-base entry. The output is
+// {title, markdown} only — caller appends a source-of-origin footer and a
+// knowledge row gets persisted. Output must be JSON without code fences; the
+// "no fabrication" rule keeps AI hallucination out of the next requirement's
+// prompt (the knowledge base is injected into analyst / architect / coding
+// stages verbatim, so garbage in = garbage out).
+const extractReportKnowledgePrompt = `你是 NovaWorkbench 的知识库整理助手。
+用户会给一份开发报告（主 Agent 汇总报告或子任务报告）的原始 Markdown。请提炼为可复用的项目知识条目。
+只输出一个 JSON 对象，不要输出任何其他文字、解释或 markdown 代码围栏。
+格式严格为：{"title":"<不超过 30 字的知识标题>","markdown":"<提炼后的 Markdown 正文>"}
+提炼规则：
+- 保留：实现了什么能力、关键文件与模块路径（绝对路径或 repo 相对路径）、技术决策与取舍理由、踩到的坑 / 约束 / 后续注意事项、对外接口或配置变更。
+- 丢弃：进度播报、重试 / 失败过程、token 用量、"我将要…" 这类过程性叙述、纯寒暄、上下无关的代码块。
+- 禁止臆造报告里没有的信息；如报告没有任何可沉淀内容，markdown 返回空串，title 返回一个描述性短句。
+- 输出纯 Markdown，建议章节：## 实现概述 / ## 涉及文件 / ## 关键决策 / ## 注意事项。
+只输出该 JSON 对象，不要任何前后缀说明。`
+
 // summarizeIdeaToRequirementResult is the JSON shape summarizeIdeaToRequirementPrompt
 // produces. The service treats an empty Markdown as "discussion didn't converge"
 // and refuses to create a new requirement.

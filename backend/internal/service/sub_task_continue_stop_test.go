@@ -74,7 +74,7 @@ func TestContinueAsNew_NewChildRow(t *testing.T) {
 		withBatchID bool
 	}{id: "st_cont", reqID: "req_1", status: "stopped", sessionID: "sid_x", sourceSID: "sid_src", artifact: "原报告内容"})
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	got, err := svc.ContinueAsNew("st_cont", "")
 	if err != nil {
 		t.Fatalf("ContinueAsNew: %v", err)
@@ -158,7 +158,7 @@ func TestContinueAsNew_RejectsWrongParentStatus(t *testing.T) {
 		withBatchID bool
 	}{id: "st_done", reqID: "req_1", status: "done", sessionID: "sid_x", sourceSID: "sid_src", artifact: "已完成报告"})
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	if _, err := svc.ContinueAsNew("st_done", ""); err == nil {
 		t.Fatal("ContinueAsNew on a 'done' parent succeeded; want error")
 	}
@@ -188,7 +188,7 @@ func TestMarkStopped_PrependsBanner(t *testing.T) {
 		withBatchID bool
 	}{id: "st_stop", reqID: "req_1", status: "done", sessionID: "sid_y", sourceSID: "sid_src", artifact: "原报告"})
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	if err := svc.MarkStopped("st_stop", "原报告"); err != nil {
 		t.Fatalf("MarkStopped: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestRecoverInterrupted_PreservesExistingArtifact(t *testing.T) {
 		withBatchID bool
 	}{id: "st_keep", reqID: "req_1", status: "running", sessionID: "sid_z", sourceSID: "sid_src", artifact: "用户已写到一半的报告"})
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	affected, err := svc.RecoverInterrupted()
 	if err != nil {
 		t.Fatalf("RecoverInterrupted: %v", err)
@@ -274,7 +274,7 @@ func TestRecoverInterrupted_ExcludesChildRows(t *testing.T) {
 		id, reqID, parentID, status string
 	}{id: "st_child", reqID: "req_1", parentID: "st_root", status: "running"})
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	affected, err := svc.RecoverInterrupted()
 	if err != nil {
 		t.Fatalf("RecoverInterrupted: %v", err)

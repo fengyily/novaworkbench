@@ -58,7 +58,7 @@ func TestCreateAdjustment_InheritsParentSession(t *testing.T) {
 	d := newTestDB(t)
 	seedSubTaskRowForAdjust(t, d, "st_adj", "sid_parent", "sid_grandparent")
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	res, err := svc.CreateAdjustment("req_1", "st_adj", "再补一行单元测试")
 	if err != nil {
 		t.Fatalf("CreateAdjustment: %v", err)
@@ -141,7 +141,7 @@ func TestCreateAdjustment_EmptyParentSessionGuard(t *testing.T) {
 	d := newTestDB(t)
 	seedSubTaskRowForAdjust(t, d, "st_adj_empty", "", "")
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	res, err := svc.CreateAdjustment("req_1", "st_adj_empty", "follow-up")
 	if err != nil {
 		t.Fatalf("CreateAdjustment: %v", err)

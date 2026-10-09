@@ -2324,6 +2324,21 @@ export const schedulesApi = {
   remove: (id: string) => api.delete<{ id: string; status: string }>(`/api/schedules/${id}`),
 };
 
+// ── Report archive (主 Agent 汇总报告 + 子任务报告 → knowledge) ───────────────
+// Two POST routes archive a finished report into the project knowledge base;
+// the GET route returns the {source_ref: knowledge_id} map for the
+// requirement so the SubTaskPanel can render the "已归档" badge without
+// waiting for the next list query. Unarchive reuses knowledgeApi.delete(kbId)
+// — no method here.
+export const reportArchiveApi = {
+  devReport: (reqId: string) =>
+    api.post<KnowledgeItem>(`/api/requirements/${reqId}/dev-report/archive`, {}),
+  subTask: (reqId: string, sid: string) =>
+    api.post<KnowledgeItem>(`/api/requirements/${reqId}/sub-tasks/${sid}/archive`, {}),
+  list: (reqId: string) =>
+    api.get<{ items: Record<string, string> }>(`/api/requirements/${reqId}/report-archives`),
+};
+
 // ── Requirement marks ─────────────────────────────────────────────────────────
 // 标记预设。前端用 preset 颜色渲染 chip；后端 service.MarkWhitelist
 // 是权威白名单，UI 只展示这几项，绕过 UI 直接 PUT 也会被服务端 normalizeMarks

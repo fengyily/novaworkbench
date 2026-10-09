@@ -32,6 +32,9 @@ export const knowledge = {
     technical_debt: '技术债务',
     design_rationale: '设计决策',
     code_explanation: '代码说明',
+    // Report-archive categories (主 Agent 汇总报告 + 子任务报告).
+    dev_report: '开发报告',
+    subtask_report: '子任务报告',
   },
   dialog: {
     editTitle: '编辑记忆',

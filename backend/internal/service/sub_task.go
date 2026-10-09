@@ -29,12 +29,13 @@ import (
 // worktree path / branch isolation that prevents the children from stomping on
 // each other's file edits.
 type SubTaskService struct {
-	db     *db.DB
-	events *SubTaskEventHub
+	db         *db.DB
+	events     *SubTaskEventHub
+	archiveSvc *ReportArchiveService
 }
 
-func NewSubTaskService(database *db.DB) *SubTaskService {
-	return &SubTaskService{db: database}
+func NewSubTaskService(database *db.DB, archiveSvc *ReportArchiveService) *SubTaskService {
+	return &SubTaskService{db: database, archiveSvc: archiveSvc}
 }
 
 // SetEvents wires a SubTaskEventHub so MarkRunning / Finish /
@@ -445,9 +446,21 @@ func (s *SubTaskService) Subtree(rootID string) ([]model.SubTask, error) {
 // active rows in the subtree). token_usage rows and in-memory JobStore jobs are
 // intentionally left untouched — usage stays for accounting and jobs age out of
 // the ring buffer on their own. A nil/empty id list is a no-op.
+//
+// Also clears any matching subtask_report knowledge rows BEFORE deleting the
+// sub_tasks themselves: the knowledge.source_ref FK is application-level
+// (no ON DELETE CASCADE), so a delete of the parent row would otherwise leave
+// a dangling knowledge entry pointing at a non-existent sub_task. The
+// archive-svc injection is optional — main.go wires the real one, tests can
+// pass nil to keep the unit test isolated from the knowledge table.
 func (s *SubTaskService) DeleteByIDs(ids []string) error {
 	if len(ids) == 0 {
 		return nil
+	}
+	if s.archiveSvc != nil {
+		if err := s.archiveSvc.DeleteBySourceRefs(SourceTypeSubtaskReport, ids); err != nil {
+			return fmt.Errorf("cleanup subtask_report knowledge: %w", err)
+		}
 	}
 	placeholders := make([]string, len(ids))
 	args := make([]any, len(ids))

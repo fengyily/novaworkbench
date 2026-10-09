@@ -126,6 +126,13 @@ export const components = {
       bareHint: 'Nothing carried — no context, no role system prompt; claude CLI defaults only',
       freshHint: 'The previous session was not found on the Agent Server. We recommend the "With context" mode — it auto-injects the requirement title, design docs, and the last 10 turns of the previous session as context.',
     },
+    // Report archive (主 Agent 汇总报告 + 子任务报告 → knowledge).
+    archiveBtn: 'Archive to knowledge base',
+    archiveBusy: 'Archiving…',
+    archivedTitle: 'Archived — click to remove',
+    archiveOk: '✅ Archived to knowledge base',
+    archiveErrPrefix: '❌ Archive failed: ',
+    unarchiveOk: '✅ Removed from knowledge base',
   },
   subTaskCard: {
     statusPending: 'Queued',
