@@ -1895,6 +1895,48 @@ func (s *ProjectService) ClearCommitLangOverride(id string) (*model.Project, err
 	return s.SetCommitLangOverride(id, "")
 }
 
+// SetCommitPushConfig persists the project's commit-message sourcing
+// strategy + the optional shell snippet whose stdout becomes the commit
+// message. Validates `mode` against the four recognised values
+// (model.IsValidCommitMode) and enforces "mode requires a script" for
+// the two script-aware modes (script_only / script_first) — those
+// columns are not nullable and the older rows have an empty script,
+// so a UI race that flips a project to script_* without a snippet
+// surfaces INVALID_MODE rather than silently calling the LLM.
+//
+// Empty mode is rejected (INVALID_MODE) rather than coerced to the
+// persisted default — the handler should treat "" as "user cleared
+// the dropdown" and pick the right default itself; coercing here would
+// hide UI bugs.
+//
+// Returns the refreshed project row so the handler can echo it back
+// to the client. Idempotent — re-saving the same values is a no-op
+// apart from updated_at.
+func (s *ProjectService) SetCommitPushConfig(id, mode, script string) (*model.Project, error) {
+	mode = strings.TrimSpace(mode)
+	script = strings.TrimSpace(script)
+	if !model.IsValidCommitMode(mode) {
+		return nil, fmt.Errorf("INVALID_MODE: mode must be one of script_only/llm_only/script_first/llm_first")
+	}
+	if (mode == model.CommitModeScriptOnly || mode == model.CommitModeScriptFirst) && script == "" {
+		return nil, fmt.Errorf("INVALID_SCRIPT: script is required when mode=%s", mode)
+	}
+	if len(script) > 8192 {
+		return nil, fmt.Errorf("INVALID_SCRIPT: script too long (max 8192 chars)")
+	}
+	res, err := s.db.Exec(
+		`UPDATE projects SET commit_mode = ?, commit_script = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
+		mode, script, time.Now(), id)
+	if err != nil {
+		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return nil, fmt.Errorf("project not found: %s", id)
+	}
+	return s.Get(id)
+}
+
 // ----- token probe infrastructure ------------------------------------------------
 
 // truncateForLog sanitizes an HTTP response body for log output. Newlines and

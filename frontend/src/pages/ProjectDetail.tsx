@@ -148,6 +148,102 @@ function SortHeader({
   );
 }
 
+// CommitPushConfigSection renders the project's commit-mode selector +
+// (conditional) script textarea. Kept inline in ProjectDetail.tsx
+// rather than promoted to components/ because the save logic is
+// project-state-bound: project.commit_mode + project.commit_script
+// round-trip through setCommitPushConfig. A standalone component
+// would have lifted state for no real reuse.
+//
+// Layout mirrors the commitLang section above: select + optional
+// textarea + per-mode hint + "保存" button. Saving is debounced via
+// the parent's commitPushSaving guard — the in-component commitDraft
+// state lets the user pause between mode changes without a save
+// round-trip on every keystroke.
+function CommitPushConfigSection({
+  mode,
+  script,
+  saving,
+  onSave,
+}: {
+  mode: string;
+  script: string;
+  saving: boolean;
+  onSave: (mode: string, script: string) => Promise<void> | void;
+}) {
+  const { t } = useTranslation();
+  const [draftMode, setDraftMode] = useState(mode);
+  const [draftScript, setDraftScript] = useState(script);
+
+  // Re-sync when the parent re-loads the project row (e.g. after a
+  // scanner refresh) so the form doesn't get stuck on a stale value.
+  useEffect(() => {
+    setDraftMode(mode);
+  }, [mode]);
+  useEffect(() => {
+    setDraftScript(script);
+  }, [script]);
+
+  const scriptRequired =
+    draftMode === 'script_only' || draftMode === 'script_first';
+  const dirty = draftMode !== mode || draftScript !== script;
+  const disabled = saving || !dirty || (scriptRequired && !draftScript.trim());
+
+  const handleSave = () => {
+    void onSave(draftMode, draftScript);
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <select
+          className="form-input"
+          style={{ flex: '1 1 220px', maxWidth: 320 }}
+          value={draftMode}
+          onChange={e => setDraftMode(e.target.value)}
+          disabled={saving}
+          aria-label={t('projects.detail.commitPush.label')}
+        >
+          <option value="script_only">{t('projects.detail.commitPush.modeScriptOnly')}</option>
+          <option value="llm_only">{t('projects.detail.commitPush.modeLLMOnly')}</option>
+          <option value="script_first">{t('projects.detail.commitPush.modeScriptFirst')}</option>
+          <option value="llm_first">{t('projects.detail.commitPush.modeLLMFirst')}</option>
+        </select>
+        <button
+          type="button"
+          className="btn btn-secondary"
+          disabled={disabled}
+          onClick={handleSave}
+        >
+          {saving
+            ? t('projects.detail.basicSaving')
+            : t('projects.detail.commitPush.save')}
+        </button>
+      </div>
+      {scriptRequired && (
+        <textarea
+          className="form-input"
+          rows={4}
+          style={{ fontFamily: 'ui-monospace, SFMono-Regular, monospace', fontSize: 12 }}
+          placeholder={t('projects.detail.commitPush.scriptPlaceholder')}
+          value={draftScript}
+          onChange={e => setDraftScript(e.target.value)}
+          disabled={saving}
+          aria-label={t('projects.detail.commitPush.scriptLabel')}
+        />
+      )}
+      <div style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
+        {t(`projects.detail.commitPush.modeHint.${draftMode}`)}
+        {scriptRequired && !draftScript.trim() && (
+          <div style={{ marginTop: 6, color: 'var(--color-warning, #d97706)' }}>
+            ⚠ {t('projects.detail.commitPush.scriptMissingWarn')}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function ProjectDetail() {
   const { t } = useTranslation();
   const { id } = useParams<{ id: string }>();
@@ -231,6 +327,14 @@ export default function ProjectDetail() {
   // (fall back to commit_lang detected from git history).
   const [commitLangSaving, setCommitLangSaving] = useState(false);
   const [commitLangMsg, setCommitLangMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Overview: commit-push strategy (only-script / only-LLM / script-first /
+  // LLM-first). Drives which path handler.mergeGenerate takes on
+  // /merge/local and /merge/push when the user leaves the commit_message
+  // field empty. Mirrors the commitLang state shape so the save
+  // pattern is identical.
+  const [commitPushSaving, setCommitPushSaving] = useState(false);
+  const [commitPushMsg, setCommitPushMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Requirements (shared by the requirements tab and the overview recent list)
   const [reqs, setReqs] = useState<Requirement[]>([]);
@@ -606,6 +710,42 @@ export default function ProjectDetail() {
       });
     } finally {
       setCommitLangSaving(false);
+    }
+  };
+
+  // ── Overview: commit-push strategy ────────────────────────────────────────
+  // When the user submits /merge/local or /merge/push WITHOUT a manual
+  // commit_message, the backend dispatches handler.mergeGenerate using
+  // the project's commit_mode + commit_script. Single save call covers
+  // both the mode select and the optional shell script — keeps the
+  // round-trip to one PUT regardless of which input changed.
+  const handleCommitPushSave = async (
+    nextMode: string,
+    nextScript: string
+  ) => {
+    if (!id || commitPushSaving) return;
+    setCommitPushSaving(true);
+    setCommitPushMsg(null);
+    try {
+      const updated = await projectsApi.setCommitPushConfig(
+        id,
+        nextMode,
+        nextScript
+      );
+      setProject(updated);
+      setCommitPushMsg({
+        ok: true,
+        text: t('projects.detail.commitPush.saved'),
+      });
+    } catch (e: unknown) {
+      setCommitPushMsg({
+        ok: false,
+        text: t('projects.detail.commitPush.saveFailed', {
+          msg: e instanceof Error ? e.message : String(e),
+        }),
+      });
+    } finally {
+      setCommitPushSaving(false);
     }
   };
 
@@ -1395,6 +1535,31 @@ export default function ProjectDetail() {
             {commitLangMsg && (
               <div style={{ marginTop: 8, fontSize: 12, color: commitLangMsg.ok ? 'var(--color-success)' : 'var(--color-error)' }}>
                 {commitLangMsg.ok ? '✅ ' : '❌ '}{commitLangMsg.text}
+              </div>
+            )}
+          </div>
+
+          {/* Commit / push strategy — choose which path the merge pipeline
+              takes to source the commit message when the user leaves the
+              field empty in the merge modal. The four strategies are
+              documented inline; the script textarea only appears when the
+              chosen mode requires it. Default = llm_only (legacy). */}
+          <div className="detail-section" style={{ marginTop: 16 }}>
+            <div className="section-header" style={{ marginBottom: 12 }}>
+              <span style={{ fontWeight: 600, fontSize: 14 }}>{t('projects.detail.commitPush.label')}</span>
+              <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                {t('projects.detail.commitPush.hint')}
+              </span>
+            </div>
+            <CommitPushConfigSection
+              mode={project.commit_mode ?? 'llm_only'}
+              script={project.commit_script ?? ''}
+              saving={commitPushSaving}
+              onSave={handleCommitPushSave}
+            />
+            {commitPushMsg && (
+              <div style={{ marginTop: 8, fontSize: 12, color: commitPushMsg.ok ? 'var(--color-success)' : 'var(--color-error)' }}>
+                {commitPushMsg.ok ? '✅ ' : '❌ '}{commitPushMsg.text}
               </div>
             )}
           </div>

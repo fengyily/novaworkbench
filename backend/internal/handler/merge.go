@@ -588,6 +588,25 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 		target = defaultBranch
 	}
 	commitMsg := body.CommitMessage
+	// Strategy dispatch (only when the user left the merge-modal field
+	// empty). Loads the project row to read commit_mode / commit_script
+	// and routes via the four-mode contract; the surfaced strategy
+	// string is logged into the in-memory job (and thus into the JobLog
+	// snapshot at Finish time) so the UI can render "提交信息：策略 X"
+	// without any extra round-trip. Failures here degrade to the
+	// legacy dev-branch fallback so a misconfigured mode never turns
+	// a local merge into a hard error.
+	commitStrategy := commitStrategyUser
+	if commitMsg == "" {
+		if proj, _ := h.loadProjectNoWrite(reqRow.ID); proj != nil {
+			if generated, strategy, gerr := generateCommitMessage(r.Context(), h.llm, reqRow, proj, commitMsg, ""); gerr == nil && generated != "" {
+				commitMsg = generated
+				commitStrategy = strategy
+			} else if gerr != nil {
+				log.Printf("[merge/local] %s: commit-mode dispatch failed (%v), falling back to dev branch name", reqRow.ID, gerr)
+			}
+		}
+	}
 	// Worktree isolation: when the dev branch lives in its own worktree, the
 	// merge into target must happen in the main checkout (a branch can only be
 	// checked out in one worktree). We commit inside the worktree, then check
@@ -600,6 +619,14 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer h.persistJob(job, reqRow.ID, "")
 		log.Printf("[merge/local] job %s req %s: %s → %s", job.ID, reqRow.ID, dev, target)
+
+		// Surface the commit-message strategy so the UI's job_done
+		// handler can render "提交信息：策略 X". The line is plain info
+		// (not an error) so the toolbar / timeline picks it up
+		// uniformly across the four modes + the user-supplied path.
+		if commitStrategy != "" && commitStrategy != commitStrategyUser {
+			job.Append(store.LogLine{Type: "info", Content: "提交信息：策略 " + commitStrategy + "（已自动生成）"})
+		}
 
 		// Pull the project's git identity from its platform token (best-effort;
 		// empty values fall back to host git config so existing behaviour is
@@ -972,12 +999,29 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	_, prModel, prCfgID := h.roleConfig("pr_author")
 	effectiveModel, roleConfigID := pushPRRuntimeModel(reqRow, body.Model, prModel, prCfgID)
 
+	// Commit-message strategy dispatch. The user-typed path
+	// (`commitStrategyUser`) is preserved by passing body.CommitMessage
+	// through to dispatchPushPRSubTask unchanged; the four
+	// strategy modes run only when the field is empty. Failures
+	// here degrade to the legacy "let the sub-task invent a
+	// message" path rather than blocking the push.
+	pushCommitMsg := body.CommitMessage
+	_ = commitStrategyUser // reserved: future sub-task metadata when the dispatch layer reports it back to the frontend
+	if pushCommitMsg == "" {
+		if generated, strategy, gerr := generateCommitMessage(r.Context(), h.llm, reqRow, project, pushCommitMsg, ""); gerr == nil && generated != "" {
+			pushCommitMsg = generated
+			log.Printf("[merge/push] %s: commit-mode strategy=%s", reqRow.ID, strategy)
+		} else if gerr != nil {
+			log.Printf("[merge/push] %s: commit-mode dispatch failed (%v), falling back to sub-task generated message", reqRow.ID, gerr)
+		}
+	}
+
 	// Dispatch the push+PR child agent through the shared core so the manual
 	// path here and the automatic WizardHandler.autoPushPR path never diverge.
 	// The child starts a fresh session (the main-agent session may already be
 	// gone or unsuitable to continue) and runs in the requirement's own
 	// worktree / agent server (resolved inside dispatchPushPRSubTask).
-	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, body.CommitMessage, effectiveModel, roleConfigID, commitLang, "manual")
+	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, pushCommitMsg, effectiveModel, roleConfigID, commitLang, "manual")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
