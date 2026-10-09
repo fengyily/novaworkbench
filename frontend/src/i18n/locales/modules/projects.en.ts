@@ -179,6 +179,32 @@ export const projects = {
       detectedLabel: 'Detected: ',
       noDetect: 'Not yet detected',
     },
+    // Overview — commit / push strategy (which path the merge pipeline
+    // takes when the user leaves the merge-modal commit_message field
+    // empty). The four modes match model.CommitMode* in
+    // backend/internal/model/project_commit_mode.go. scriptPlaceholder
+    // / scriptHint are shown only when the chosen mode requires a
+    // script; an empty script on those modes gates the "Save" button.
+    commitPush: {
+      label: 'Commit / push strategy',
+      hint: 'When the commit_message field is left empty, the chosen strategy sources it. LLM-only matches legacy behavior; other modes enable a project-level script or fallback.',
+      save: 'Save',
+      saved: 'Saved',
+      saveFailed: 'Save failed: {{msg}}',
+      modeScriptOnly: 'Script only',
+      modeLLMOnly: 'LLM only (default)',
+      modeScriptFirst: 'Script first (fallback to LLM on language mismatch)',
+      modeLLMFirst: 'LLM first (fallback to script on failure)',
+      modeHint: {
+        script_only: 'Script only: stdout becomes the commit message. The LLM is never called. A broken script is reported as a hard error.',
+        llm_only: 'LLM only: identical to legacy behavior. LLM failure surfaces as an error.',
+        script_first: 'Run the script first; if its output language does not match the project\'s commit language, fall back to LLM. Short output (<10 chars) skips the language check.',
+        llm_first: 'Call the LLM first; any failure (timeout / API error / parse) automatically falls back to the script.',
+      },
+      scriptLabel: 'Script (stdout becomes the commit message)',
+      scriptPlaceholder: '# Runs in the worktree root; stdout is the commit message\n# Env vars: NOVA_COMMIT_REQUIREMENT_ID / NOVA_COMMIT_PROJECT_DIR / NOVA_COMMIT_WORKTREE\necho "fix: $(date +%Y%m%d)"',
+      scriptMissingWarn: 'This mode requires a script, but the field is empty. Cannot save until provided.',
+    },
     platformTitle: 'Platform config',
     platformCurrent: 'Current: {{platform}}',
     platformUnbound: '(no token bound)',

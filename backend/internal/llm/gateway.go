@@ -106,6 +106,145 @@ type GenerateCommitArtifactsOpts struct {
 	CommitLang     string // "en" / "zh" / "mixed" / ""
 	Model          string // model id passed via --model / ANTHROPIC_MODEL
 	CfgID          string // claude_configs row id for auth + base URL pinning
+	// Diff is the (already capped) staged/working diff the requirement
+	// produced. Pass "" when no diff is available; the prompt will still
+	// work from title+description alone with marginally worse quality.
+	Diff string
+	// MaxOutputTokens overrides the chatCompletion max_tokens budget; 0
+	// uses the package default (512 — a commit subject is well under that).
+	MaxOutputTokens int
+}
+
+// generateCommitArtifactsResult is the JSON shape the model returns.
+// PRTitle is reserved for a follow-up — the strategy dispatcher
+// currently only consumes CommitMessage; keeping the field on the
+// wire means callers / future code don't have to rewire the prompt
+// when PR-title generation lands.
+type generateCommitArtifactsResult struct {
+	CommitMessage string `json:"commit_message"`
+	PRTitle       string `json:"pr_title"`
+}
+
+// GenerateCommitArtifacts calls the OpenAI-compatible HTTP channel to
+// produce a (commit_message, pr_title) pair for a requirement. The
+// caller is handler.mergeGenerate / the legacy shell-push sub-task;
+// they pass the resolved CommitLang (post ResolveCommitLang) so this
+// function does not need the *db.DB.
+//
+// Returns the parsed artefacts and the token usage (nil if the model
+// did not report it). On failure the error is wrapped with the
+// underlying chatCompletion error so callers can distinguish
+// timeout / API / parse / empty categories and decide whether to
+// fall back (script_first / llm_first modes).
+//
+// Currently only CommitMessage is consumed by the strategy
+// dispatcher; PRTitle is parsed for forward compatibility (a future
+// iteration will need a paired PR title when CommitArtifacts is
+// plumbed into the auto-push-PR wizard sub-task).
+func (g *Gateway) GenerateCommitArtifacts(opts GenerateCommitArtifactsOpts) (*CommitArtifacts, *Usage, error) {
+	if g.llmCfg == nil {
+		return nil, nil, fmt.Errorf("llm not configured: no llm config provider")
+	}
+	baseURL, apiKey, model, err := g.llmCfg.LLMConfig()
+	if err != nil {
+		return nil, nil, fmt.Errorf("llm config unavailable: %w", err)
+	}
+	if baseURL == "" || apiKey == "" {
+		return nil, nil, fmt.Errorf("llm not configured: base_url and api_key required")
+	}
+	if opts.ReqTitle == "" {
+		return nil, nil, fmt.Errorf("llm commit: empty requirement title")
+	}
+
+	// Resolve language rule — mirrors the gateway's other tasks: "" / "en"
+	// fall through to the English prompt; "zh" gets the Chinese one. Other
+	// values ("mixed") are treated as English default so a mixed project
+	// keeps parity with the legacy shell PR templates.
+	langRule := commitMessageLangRuleEn
+	if opts.CommitLang == "zh" {
+		langRule = commitMessageLangRuleZh
+	}
+	systemPrompt := strings.Replace(commitMessageSystemPrompt, "{{LANG_RULE}}", langRule, 1)
+
+	description := strings.TrimSpace(opts.ReqDescription)
+	if description == "" {
+		description = "(无需求描述)"
+	}
+	diff := opts.Diff
+	const maxDiffRunes = 12000
+	if runes := []rune(diff); len(runes) > maxDiffRunes {
+		// Keep both ends so the model sees the structural intro and the
+		// final touched files; drop the middle. The marker is in the
+		// system prompt's user template so the model interprets it
+		// correctly.
+		diff = string(runes[:maxDiffRunes/2]) + "\n…（diff 中段省略）…\n" + string(runes[len(runes)-maxDiffRunes/2:])
+	}
+	userPrompt := strings.NewReplacer(
+		"{{TITLE}}", strings.TrimSpace(opts.ReqTitle),
+		"{{DESCRIPTION}}", description,
+		"{{DIFF}}", diff,
+	).Replace(commitMessageUserTemplate)
+
+	maxTokens := opts.MaxOutputTokens
+	if maxTokens <= 0 {
+		maxTokens = 512
+	}
+	out, usage, err := chatCompletion(baseURL, apiKey, model, systemPrompt, userPrompt, maxTokens)
+	if err != nil {
+		return nil, nil, fmt.Errorf("llm commit: %w", err)
+	}
+	var res generateCommitArtifactsResult
+	if jerr := json.Unmarshal([]byte(stripJSONFences(out)), &res); jerr != nil {
+		return nil, nil, fmt.Errorf("llm commit: decode json: %w", jerr)
+	}
+	// Trim aggressively. Commit subjects must be a single line of sane
+	// length — anything containing a newline is either a body line that
+	// needs to be dropped or a model emission bug. The strategy
+	// dispatcher pipes the result straight into `git commit -m` (or
+	// /merge/local body) so leaving newlines in would break that path.
+	res.CommitMessage = trimToSubject(res.CommitMessage)
+	res.PRTitle = strings.TrimSpace(res.PRTitle)
+	if res.CommitMessage == "" {
+		return nil, nil, fmt.Errorf("llm commit: empty result")
+	}
+	return &CommitArtifacts{CommitMessage: res.CommitMessage, PRTitle: res.PRTitle}, usage, nil
+}
+
+// GenerateCommitMessage is the convenience wrapper around
+// GenerateCommitArtifacts that returns just the commit subject. It
+// exists so the strategy dispatcher can stay readable (one value,
+// not a struct), and so callers that don't care about the future
+// PR-title field don't have to destructure.
+//
+// The returned string is already trimmed to a single subject line
+// (GenerateCommitArtifacts does the work) — callers can pass it
+// straight to git / merge / dispatch.
+func (g *Gateway) GenerateCommitMessage(opts GenerateCommitArtifactsOpts) (string, error) {
+	a, _, err := g.GenerateCommitArtifacts(opts)
+	if err != nil {
+		return "", err
+	}
+	return a.CommitMessage, nil
+}
+
+// trimToSubject reduces a model-emitted commit message to a single
+// subject line. It drops everything after the first newline, then
+// strips surrounding quotes / whitespace that some models slap on
+// despite instructions. The remaining prefix (≤120 chars) is what's
+// piped into git. The cap is loose — git itself enforces the
+// 72-char convention, but a model that emits paragraphs is broken
+// enough that we'd rather hard-truncate than pass the raw
+// multi-line string into the merge pipeline.
+func trimToSubject(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.Trim(s, "\"'` \t")
+	if runes := []rune(s); len(runes) > 120 {
+		s = string(runes[:120])
+	}
+	return strings.TrimSpace(s)
 }
 
 // resolveBin returns the claude executable path, re-resolving when the

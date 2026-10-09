@@ -40,6 +40,16 @@ type Project struct {
 	CommitLangOverride string     `json:"commit_lang_override,omitempty"`
 	CommitLangSource   string     `json:"commit_lang_source,omitempty"`
 	CommitLangUpdatedAt *time.Time `json:"commit_lang_updated_at,omitempty"`
+	// Commit-message source strategy for the "完成开发 → 提交推送" pipeline.
+	// CommitMode is one of the values in project_commit_mode.go (script_only /
+	// llm_only / script_first / llm_first). CommitScript is the user-configured
+	// shell snippet whose stdout becomes the commit message in script_only +
+	// script_first paths; empty in llm_only mode. Read by
+	// handler.mergeGenerate (strategy dispatch) when the user hasn't filled
+	// body.commit_message on /merge/local or /merge/push. Persisted to the
+	// projects row by service.ProjectService.SetCommitPushConfig.
+	CommitMode   string `json:"commit_mode,omitempty"`
+	CommitScript string `json:"commit_script,omitempty"`
 	// Repo-sync trail for the "方案设计前同步仓库到工作目录" wizard prologue.
 	// LastSyncedAt is the timestamp of the most recent clone/fetch attempt
 	// (best-effort — failure still stamps the column). LastSyncedCommit is the

@@ -412,6 +412,13 @@ func main() {
 	// the scanner's auto-detection when generating commit messages, push
 	// summaries, and PR titles/bodies.
 	mux.HandleFunc("PUT /api/projects/{id}/commit-lang-override", projectH.SetCommitLangOverride)
+	// Project commit-push-config — choose the per-project commit-message
+	// sourcing strategy (script_only / llm_only / script_first / llm_first)
+	// used by handler.mergeGenerate on /merge/local and /merge/push. The
+	// optional "script" field is the shell snippet whose stdout becomes
+	// the commit message in script_* / llm_first modes; "" + mode=llm_only
+	// is the default behaviour with zero effect on legacy callers.
+	mux.HandleFunc("PUT /api/projects/{id}/commit-push-config", projectH.SetCommitPushConfig)
 
 	// Weekly reports (AI-generated from git log + requirement data)
 	mux.HandleFunc("GET /api/projects/{id}/reports", reportH.List)
