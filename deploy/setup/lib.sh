@@ -52,18 +52,19 @@ ensure_docker_access() {
 
     # The convenience script starts dockerd on systemd hosts; on hosts
     # without systemd (rare for our cloud-VM targets) start it explicitly.
-    if ! docker info >/dev/null 2>&1; then
-      sudo systemctl start docker 2>/dev/null \
-        || sudo service docker start 2>/dev/null \
-        || true
-    fi
-    if ! docker info >/dev/null 2>&1; then
-      echo "!! docker installed but 'docker info' still fails — aborting" >&2
-      exit 1
-    fi
+    # Do NOT pre-verify with `docker info` here — the SSH user isn't in
+    # the 'docker' group yet (the install created the group; we attach
+    # the user below), so the call would fail with permission-denied on
+    # /var/run/docker.sock and we'd abort before reaching the
+    # usermod + `sg` re-exec that actually fixes access. Fall through
+    # to that path; the re-execed invocation will pass the very first
+    # `docker info` check at the top of this function.
+    sudo systemctl start docker 2>/dev/null \
+      || sudo service docker start 2>/dev/null \
+      || true
   fi
 
-  echo ">>> docker.sock not reachable — attempting to add ${USER} to the 'docker' group"
+  echo ">>> docker not reachable — adding ${USER} to the 'docker' group"
 
   # Try sudo first (typical cloud VMs have passwordless sudo), then bare
   # usermod (works when invoked as root).
