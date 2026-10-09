@@ -23,6 +23,7 @@ import SettingsUsers from './pages/SettingsUsers';
 import SettingsACLRoles from './pages/SettingsACLRoles';
 import SettingsSkills from './pages/SettingsSkills';
 import KnowledgePage from './pages/KnowledgePage';
+import KnowledgeViewPage from './pages/KnowledgeViewPage';
 import RequirementDetail from './pages/RequirementDetail';
 import RequirementsCalendar from './pages/RequirementsCalendar';
 import WizardPage from './pages/WizardPage';
@@ -55,6 +56,13 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />
+          {/* `/knowledge/view/:id` 独立阅读视图 — RequireAuth 之内（必须
+              登录）但 Layout 之外（独占清爽视口，新窗口打开体验更接近
+              一篇"网页/文章"）。同源 SPA 走 BrowserRouter 自动解析。 */}
+          <Route
+            path="/knowledge/view/:id"
+            element={<RequireAuth><KnowledgeViewPage /></RequireAuth>}
+          />
           <Route element={<RequireAuth><Layout /></RequireAuth>}>
             <Route index element={<Dashboard />} />
             <Route path="wizard" element={<WizardPage />} />

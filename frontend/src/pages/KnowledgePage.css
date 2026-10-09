@@ -93,6 +93,8 @@
   border-radius: 8px;
   padding: 14px 16px;
   margin-bottom: 10px;
+  position: relative;
+  transition: box-shadow 0.15s, border-color 0.15s;
 }
 .kb-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .kb-card-title { font-weight: 600; font-size: 14px; }
@@ -167,3 +169,56 @@
    Memory dialog uses `modal-fullscreen-overlay` / `modal-fullscreen` so
    the same component reads as a sheet on phones and a centered card on
    desktop. */
+
+/* Knowledge card as a whole-card link — opens `/knowledge/view/:id` in a new
+   tab. The inner .kb-card keeps the original visual chrome; we only restyle
+   the link wrapper (no underline, inherit color, block-level for full click
+   surface) plus a hover affordance on the inner card so users feel the
+   card is "alive". The inner icon button (.kb-card-viewlink) handles the
+   explicit "open in new tab" gesture; deleting inside still bubbles through
+   stopPropagation in the JSX. */
+.kb-card-link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  margin-bottom: 10px;
+}
+.kb-card-link:last-child { margin-bottom: 0; }
+.kb-card-link:hover .kb-card {
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
+  border-color: var(--color-primary);
+}
+.kb-card-link:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+/* Right-top icon button — gives the user an explicit "open in new tab"
+   affordance that doesn't depend on them realizing the whole card is
+   clickable. 14×14 glyph aligned with the kb-card-header row. */
+.kb-card-viewlink {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+.kb-card-link:hover .kb-card-viewlink,
+.kb-card-viewlink:focus-visible {
+  opacity: 1;
+}
+.kb-card-viewlink:hover {
+  background: var(--color-active);
+  color: var(--color-primary);
+}

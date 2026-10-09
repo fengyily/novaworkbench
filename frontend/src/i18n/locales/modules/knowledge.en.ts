@@ -49,6 +49,30 @@ export const knowledge = {
     save: 'Save',
     saving: 'Saving…',
   },
+  // view.* — reading-view page (`/knowledge/view/:id`, opened in a new tab).
+  // Kept distinct from list-page strings: the list uses "To review" / "Rejected"
+  // short labels; the reading view spells out the full review verdict
+  // ("Pending review / Approved / Rejected") so the new tab reads as an
+  // article, not a control panel.
+  view: {
+    openInNewTab: 'Open in new tab',
+    openInNewTabHint: 'Open the full content in a reading view in a new tab',
+    backToList: 'Back to knowledge base',
+    closeTab: 'Close tab',
+    loading: 'Loading knowledge entry…',
+    loadFailed: 'Failed to load: {{msg}}',
+    notFound: 'This knowledge entry no longer exists',
+    noTitle: '(Untitled)',
+    retry: 'Retry',
+    metaSource: 'Source: {{type}}',
+    metaProject: 'Project: {{id}}',
+    metaCreated: 'Created {{date}}',
+    metaUpdated: 'Updated {{date}}',
+    reviewStatus: 'Status: {{status}}',
+    statusApproved: 'Approved',
+    statusPending: 'Pending review',
+    statusRejected: 'Rejected',
+  },
 } as const;
 
 export default knowledge;
