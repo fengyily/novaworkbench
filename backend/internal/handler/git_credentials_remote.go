@@ -115,6 +115,28 @@ func remoteOriginAuthed(projectSvc *service.ProjectService, projectID string) bo
 	return p.PlatformTokenID != "" && !isSSHRemoteURL(p.RemoteURL)
 }
 
+// isSSHRemoteURL is a small local duplicate of the equivalent helper that
+// lives inside service.GitCredentialService. The service-side copy is
+// unexported, and the SSH check is pure string parsing — promoting the
+// service version to a public method just for this one call site would
+// be over-engineering. Kept in lockstep with service/git_credentials.go.
+func isSSHRemoteURL(raw string) bool {
+	s := strings.TrimSpace(raw)
+	if strings.HasPrefix(s, "ssh://") || strings.HasPrefix(s, "git+ssh://") {
+		return true
+	}
+	if strings.Contains(s, "://") {
+		return false
+	}
+	if i := strings.Index(s, "@"); i > 0 {
+		rest := s[i+1:]
+		if j := strings.Index(rest, ":"); j > 0 && !strings.Contains(rest[:j], "/") {
+			return true
+		}
+	}
+	return false
+}
+
 // remoteURLUserinfo matches the `scheme://userinfo@` prefix of any URL in a
 // blob of text. Unlike service.userinfoPattern it does not require a
 // `user:password` split, because github / gitea remotes carry the token as a

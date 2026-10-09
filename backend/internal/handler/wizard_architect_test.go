@@ -150,7 +150,7 @@ func TestPrepareDesignWorkspace_GateFailure(t *testing.T) {
 	}
 
 	reqSvc := service.NewRequirementService(d, nil)
-	projSvc := service.NewProjectService(d, nil)
+	projSvc := service.NewProjectService(d, nil, nil)
 	settingSvc := service.NewSettingService(d)
 	jobs := store.NewJobStore(8)
 
@@ -286,7 +286,7 @@ func TestPrepareDesignWorkspace_SuccessStampsBaseline(t *testing.T) {
 	}
 
 	reqSvc := service.NewRequirementService(d, nil)
-	projSvc := service.NewProjectService(d, nil)
+	projSvc := service.NewProjectService(d, nil, nil)
 	settingSvc := service.NewSettingService(d)
 	jobs := store.NewJobStore(8)
 
