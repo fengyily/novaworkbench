@@ -38,7 +38,20 @@ import (
 // job store, so the coding panel shows live progress instead of a frozen blank
 // until the turn's batched assistant event. Subscribe via
 // GET /api/wizard/jobs/{id}/stream; snapshot via GET /api/wizard/jobs/{id}.
-//
+
+// projectIDForCreds returns the requirement's projectID for credential
+// lookup. Centralised here so the multiple git-credential injection points
+// in execStartCoding (syncBaseBranch, two git pull invocations) all degrade
+// identically to "no credentials" when reqRow is nil — exactly what the
+// pre-WorktreeHandler behaviour did. Kept as a tiny pure helper so the
+// call sites read like English.
+func projectIDForCreds(reqRow *model.Requirement) string {
+	if reqRow == nil {
+		return ""
+	}
+	return reqRow.ProjectID
+}
+
 // codingRunParams is the named request-body shape used by StartCoding (HTTP)
 // and RunScheduledCoding (scheduler). The HTTP path decodes the body into
 // this struct and passes it directly; the scheduler path constructs one with
@@ -650,7 +663,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		log.Printf("[start-coding] %s: derived default branch_name=%s (caller omitted it)", p.RequirementID, p.BranchName)
 	}
 	if p.BranchName != "" && p.RequirementID != "" {
-		wtPath, wtErr := EnsureWorktreeLogged(p.ProjectPath, p.RequirementID, p.BranchName, baseBranch, func(s string) {
+		wtPath, wtErr := EnsureWorktreeLogged(context.Background(), projectIDForCreds(reqRow), p.ProjectPath, p.RequirementID, p.BranchName, baseBranch, func(s string) {
 			job.Append(store.LogLine{Type: "message", Content: s})
 		})
 		switch {
@@ -688,7 +701,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		if _, gerr := gitRun(branchDir, "rev-parse", "--is-inside-work-tree"); gerr != nil {
 			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，跳过分支切换，在项目目录直接开发: " + branchDir})
 		} else {
-			syncBaseBranch(branchDir, baseBranch, func(s string) {
+			h.worktreeH.syncBaseBranch(context.Background(), projectIDForCreds(reqRow), branchDir, baseBranch, func(s string) {
 				job.Append(store.LogLine{Type: "message", Content: s})
 			})
 			checkoutOK := false
@@ -732,8 +745,16 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// upstream tracking info, in which case there is simply nothing to
 	// pull and we proceed on the already-checked-out branch.
 	if p.BranchName != "" {
+		// Inject the project's platform token into both `git pull` invocations
+		// (defect point 2). BuildEnv returns (nil, noop, nil) when the project
+		// has no token / SSH remote / missing fields, so a misconfigured
+		// project degrades to ambient-credential behaviour instead of erroring.
+		credEnv, credCleanup, _ := h.gitCredSvc.BuildEnv(context.Background(), projectIDForCreds(reqRow))
+		defer credCleanup()
+		pullEnv := append(os.Environ(), append([]string{"GIT_TERMINAL_PROMPT=0"}, credEnv...)...)
 		pullCmd := exec.Command("git", "pull", "--ff-only")
 		pullCmd.Dir = branchDir
+		pullCmd.Env = pullEnv
 		pullOut, pullErr := pullCmd.CombinedOutput()
 		if pullErr != nil {
 			// No upstream on the current branch — retry against origin/<base>
@@ -741,6 +762,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			// "nothing to pull"; log it and keep going.
 			fallbackCmd := exec.Command("git", "pull", "--ff-only", "origin", baseBranch)
 			fallbackCmd.Dir = branchDir
+			fallbackCmd.Env = pullEnv
 			fbOut, fbErr := fallbackCmd.CombinedOutput()
 			if fbErr != nil {
 				job.Append(store.LogLine{Type: "message", Content: "ℹ️ 跳过 git pull（无远程跟踪或已分叉），继续在当前分支开发: branchDir=" + branchDir + " | " + strings.TrimSpace(string(append(pullOut, fbOut...)))})
@@ -1454,7 +1476,6 @@ func (h *WizardHandler) assembleGitCredEnv(reqRow *model.Requirement, workDir, p
 	}
 	return env, cleanup
 }
-
 
 // session (--resume coding_session_id) to apply a follow-up adjustment to
 // already-implemented code. Because the resumed session already carries the

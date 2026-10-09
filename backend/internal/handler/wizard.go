@@ -28,6 +28,17 @@ type WizardHandler struct {
 	usageSvc     usageRecorder
 	skillSvc     *service.SkillService
 	platformSvc  *service.PlatformTokenService
+	// worktreeH bundles the per-requirement worktree helpers with the
+	// service-layer credential service so execStartCoding's
+	// `git fetch`/`git pull` calls (defect points 2 & 4) can inject the
+	// project's platform token instead of relying on ambient credentials.
+	worktreeH *WorktreeHandler
+	// gitCredSvc is a direct handle to the same service for the two
+	// in-line `git pull` invocations in execStartCoding (line 735, 742).
+	// Sharing the field with worktreeH would work too, but exposing both
+	// keeps the call sites flat — each pull can be wrapped without an
+	// extra method hop through WorktreeHandler.
+	gitCredSvc *service.GitCredentialService
 	// subTaskSvc handles persistence for sub-tasks (manually-triggered child
 	// agents that fork the requirement's main-agent session). Optional — when
 	// nil the sub-task endpoints are not registered (legacy / standalone
@@ -73,7 +84,7 @@ type WizardHandler struct {
 	summaryKickIntervalSec int
 }
 
-func NewWizardHandler(database *db.DB, projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, agentSvrSvc *service.AgentServerService, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, batchSvc *service.OrchestrationBatchService, settingSvc *service.SettingService) *WizardHandler {
+func NewWizardHandler(database *db.DB, projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, agentSvrSvc *service.AgentServerService, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, batchSvc *service.OrchestrationBatchService, settingSvc *service.SettingService, worktreeH *WorktreeHandler, gitCredSvc *service.GitCredentialService) *WizardHandler {
 	return &WizardHandler{
 		db:                     database,
 		projectSvc:             projectSvc,
@@ -87,6 +98,8 @@ func NewWizardHandler(database *db.DB, projectSvc *service.ProjectService, reqSv
 		usageSvc:               usageSvc,
 		skillSvc:               skillSvc,
 		platformSvc:            platformSvc,
+		worktreeH:              worktreeH,
+		gitCredSvc:             gitCredSvc,
 		subTaskSvc:             subTaskSvc,
 		agentSvrSvc:            agentSvrSvc,
 		subTaskRunner:          subTaskRunner,

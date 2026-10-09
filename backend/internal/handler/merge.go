@@ -37,7 +37,7 @@ import (
 // branch, mid-merge MERGE_HEAD) lives on disk, so a backend restart between
 // steps is recoverable: /merge/state reads the real git state.
 type MergeHandler struct {
-	db           *db.DB
+	db            *db.DB
 	projectSvc    *service.ProjectService
 	reqSvc        *service.RequirementService
 	llm           *llm.Gateway
@@ -53,11 +53,17 @@ type MergeHandler struct {
 	// Non-nil enables the remote push / cleanup paths (see merge_agent.go);
 	// nil keeps every requirement on the local git path.
 	agentSvrSvc *service.AgentServerService
+	// gitCredSvc injects the project's platform token into the merge-stage
+	// `git fetch origin <base>` (defect point 3). BuildEnv returns
+	// (nil, noop, nil) for SSH remotes / projects without a token so a
+	// misconfigured project degrades to ambient credentials instead of
+	// erroring.
+	gitCredSvc *service.GitCredentialService
 }
 
-func NewMergeHandler(database *db.DB, projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, agentSvrSvc *service.AgentServerService) *MergeHandler {
+func NewMergeHandler(database *db.DB, projectSvc *service.ProjectService, reqSvc *service.RequirementService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, platformSvc *service.PlatformTokenService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, agentSvrSvc *service.AgentServerService, gitCredSvc *service.GitCredentialService) *MergeHandler {
 	return &MergeHandler{
-		db:           database,
+		db:            database,
 		projectSvc:    projectSvc,
 		reqSvc:        reqSvc,
 		llm:           llmGateway,
@@ -70,6 +76,7 @@ func NewMergeHandler(database *db.DB, projectSvc *service.ProjectService, reqSvc
 		subTaskSvc:    subTaskSvc,
 		subTaskRunner: subTaskRunner,
 		agentSvrSvc:   agentSvrSvc,
+		gitCredSvc:    gitCredSvc,
 	}
 }
 
@@ -175,6 +182,29 @@ func gitRunIdentity(dir, gitName, gitEmail string, args ...string) (string, erro
 	}
 	full = append(full, args...)
 	cmd := exec.Command("git", full...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return stdout.String(), fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// gitRunWithEnv is gitRun with an arbitrary extra-env slice ("KEY=VALUE"
+// pairs) appended after os.Environ(). Used by mergeAndResolveBase to inject
+// the project's platform token (via GIT_ASKPASS) into the merge-stage
+// `git fetch origin <base>` call so private HTTPS repos can be fetched
+// without falling back to ambient credentials. Failures return trimmed
+// stderr so the caller can surface them; best-effort semantics are the
+// caller's responsibility (the merge stage logs the failure and skips the
+// merge gate).
+func gitRunWithEnv(dir string, env []string, args ...string) (string, error) {
+	full := append([]string{"-C", dir}, args...)
+	cmd := exec.Command("git", full...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -1298,8 +1328,16 @@ func (h *MergeHandler) mergeAndResolveBase(job *store.Job, devDir, base, dev str
 	}
 
 	// 2. fetch origin/base (best-effort; a fetch failure just skips the merge).
+	//    Inject the project's platform token (defect point 3) so private
+	//    HTTPS repos can be fetched without falling back to ambient
+	//    credentials. BuildEnv returns (nil, noop, nil) for SSH / unbound
+	//    projects, so the env slice is empty and gitRunWithEnv behaves
+	//    exactly like gitRun.
 	job.Append(store.LogLine{Type: "phase", Content: "⬇️ 拉取主分支 origin/" + base + " ..."})
-	if out, ferr := gitRun(devDir, "fetch", "origin", base); ferr != nil {
+	credEnv, credCleanup, _ := h.gitCredSvc.BuildEnv(context.Background(), reqRow.ProjectID)
+	defer credCleanup()
+	fetchEnv := append([]string{"GIT_TERMINAL_PROMPT=0"}, credEnv...)
+	if out, ferr := gitRunWithEnv(devDir, fetchEnv, "fetch", "origin", base); ferr != nil {
 		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 拉取主分支失败，跳过合并主分支检查: " + strings.TrimSpace(out+" "+ferr.Error())})
 		return model, false
 	} else if out = strings.TrimSpace(out); out != "" {

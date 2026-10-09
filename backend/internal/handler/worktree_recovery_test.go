@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,7 +93,7 @@ func TestEnsureWorktreeFrom_StaleBranchRecovery(t *testing.T) {
 
 	// 3. First call: register the worktree normally. This simulates a
 	//    previous run on another host having created feat/<id>.
-	wtPath, err := EnsureWorktreeLogged(projectDir, reqID, branch, "main", nil)
+	wtPath, err := EnsureWorktreeLogged(context.Background(), "", projectDir, reqID, branch, "main", nil)
 	if err != nil {
 		t.Fatalf("first EnsureWorktreeLogged failed: %v", err)
 	}
@@ -147,7 +148,7 @@ func TestEnsureWorktreeFrom_StaleBranchRecovery(t *testing.T) {
 	}
 
 	var logLines []string
-	wtPath2, err := EnsureWorktreeLogged(projectDir, reqID, branch, "main", func(s string) {
+	wtPath2, err := EnsureWorktreeLogged(context.Background(), "", projectDir, reqID, branch, "main", func(s string) {
 		logLines = append(logLines, s)
 	})
 	if err != nil {
@@ -244,7 +245,7 @@ func TestEnsureWorktreeFrom_DirtyCheckoutStillFails(t *testing.T) {
 	// rev-parse check sees the branch as present locally.
 	runGit("branch", branch, seedSHA)
 
-	wtPath, err := EnsureWorktreeLogged(projectDir, reqID, branch, "main", nil)
+	wtPath, err := EnsureWorktreeLogged(context.Background(), "", projectDir, reqID, branch, "main", nil)
 	if err != nil {
 		t.Fatalf("seed EnsureWorktreeLogged failed: %v", err)
 	}
@@ -283,7 +284,7 @@ func TestEnsureWorktreeFrom_DirtyCheckoutStillFails(t *testing.T) {
 	//   4. detect refs/heads/feat/<id> STILL exists locally (we created
 	//      it explicitly) → return the wrapped checkout error WITHOUT
 	//      removing the worktree.
-	_, err = EnsureWorktreeLogged(projectDir, reqID, branch, "main", nil)
+	_, err = EnsureWorktreeLogged(context.Background(), "", projectDir, reqID, branch, "main", nil)
 	if err == nil {
 		t.Fatalf("expected non-nil error from dirty checkout; got nil (wtPath=%s)", wtPath)
 	}

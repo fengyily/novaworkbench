@@ -25,6 +25,12 @@ import (
 type ProjectService struct {
 	db         *db.DB
 	platforms  *PlatformTokenService
+	// gitCredSvc resolves the project's platform token into a GIT_ASKPASS
+	// env for any git fetch / pull triggered on the project checkout. nil is
+	// tolerated (the methods below short-circuit on empty projectID or
+	// nil service so unit tests don't have to wire a full credential
+	// service just to exercise the gate logic).
+	gitCredSvc *GitCredentialService
 }
 
 // SyncStatus* constants drive the projects.sync_status column (see schema.go's
@@ -47,8 +53,8 @@ type ProjectRef struct {
 	LocalPath string
 }
 
-func NewProjectService(db *db.DB, platforms *PlatformTokenService) *ProjectService {
-	return &ProjectService{db: db, platforms: platforms}
+func NewProjectService(db *db.DB, platforms *PlatformTokenService, gitCredSvc *GitCredentialService) *ProjectService {
+	return &ProjectService{db: db, platforms: platforms, gitCredSvc: gitCredSvc}
 }
 
 func (s *ProjectService) List() ([]model.Project, error) {
@@ -1202,7 +1208,14 @@ const fetchTimeout = 30 * time.Second
 // Best-effort by design: no remote / offline / missing ref / fetch failure
 // all surface as a non-nil error wrapped with the trimmed stderr — the caller
 // (EnsureClonedAndSynced) decides whether to swallow or propagate.
-func syncBaseBranchService(ctx context.Context, projectPath, baseBranch string, logf func(string)) (oldSHA, newSHA string, err error) {
+//
+// projectID, when non-empty, is used to look up the project's bound
+// platform token and inject a GIT_ASKPASS env on the fetch subprocess so
+// HTTPS private repos with a project-bound token actually authenticate.
+// An empty projectID (or a nil gitCredSvc) keeps the historical
+// GIT_TERMINAL_PROMPT=0-only behaviour — useful for unit tests and for
+// any future caller that hasn't yet threaded a projectID through.
+func (s *ProjectService) syncBaseBranchService(ctx context.Context, projectID, projectPath, baseBranch string, logf func(string)) (oldSHA, newSHA string, err error) {
 	if projectPath == "" || baseBranch == "" {
 		return "", "", nil
 	}
@@ -1222,11 +1235,23 @@ func syncBaseBranchService(ctx context.Context, projectPath, baseBranch string, 
 		oldSHA = strings.TrimSpace(head)
 	}
 	// GIT_TERMINAL_PROMPT=0 disables interactive auth (private repos with
-	// missing credentials would otherwise hang forever).
+	// missing credentials would otherwise hang forever). When the project is
+	// bound to a platform token, layer the askpass env on top so the fetch
+	// actually authenticates against HTTPS remotes. credEnv is non-empty only
+	// when a token was found — empty projectID / nil service / SSH remote /
+	// missing token all fall through to the historical prompt-disabled path.
 	fctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(fctx, "git", "-C", projectPath, "fetch", "origin", baseBranch)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	baseEnv := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if projectID != "" && s.gitCredSvc != nil {
+		credEnv, credCleanup, _ := s.gitCredSvc.BuildEnv(ctx, projectID)
+		if credCleanup != nil {
+			defer credCleanup()
+		}
+		baseEnv = append(baseEnv, credEnv...)
+	}
+	cmd.Env = baseEnv
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if runErr := cmd.Run(); runErr != nil {
@@ -1340,7 +1365,7 @@ func (s *ProjectService) EnsureClonedAndSynced(ctx context.Context, id string, l
 	if logf != nil {
 		logf("🔄 同步仓库到最新版本…")
 	}
-	oldSHA, newSHA, ferr := syncBaseBranchService(ctx, p.LocalPath, p.DefaultBranch, logf)
+	oldSHA, newSHA, ferr := s.syncBaseBranchService(ctx, p.ID, p.LocalPath, p.DefaultBranch, logf)
 	if ferr != nil {
 		res.Err = ferr
 		if logf != nil {

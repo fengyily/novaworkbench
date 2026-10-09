@@ -91,7 +91,14 @@ func main() {
 
 	// Services
 	platformSvc := service.NewPlatformTokenService(database)
-	projectSvc := service.NewProjectService(database, platformSvc)
+	gitCredSvc := service.NewGitCredentialService(database)
+	projectSvc := service.NewProjectService(database, platformSvc, gitCredSvc)
+	// Inject the credential service into the handler package so the
+	// package-level gitCredentialEnv / gitCredentialEnvForProject helpers
+	// (used by sub-task runner, auto-push PR, and worktree sync) can resolve
+	// project → platform token lookups without each caller holding the
+	// service directly.
+	handler.SetGitCredentialService(gitCredSvc)
 	memorySvc := service.NewMemoryService(database)
 	knowledgeSvc := service.NewKnowledgeService(database)
 	// reportArchiveSvc must be constructed BEFORE reqSvc / subTaskSvc so it
@@ -270,7 +277,8 @@ func main() {
 	} else if n > 0 {
 		log.Printf("[main] orchestration batch recovery: reset %d stale summaries", n)
 	}
-	wizardH := handler.NewWizardHandler(database, projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, subTaskSvc, subTaskRunner, batchSvc, settingSvc)
+	worktreeH := handler.NewWorktreeHandler(projectSvc, gitCredSvc)
+	wizardH := handler.NewWizardHandler(database, projectSvc, reqSvc, knowledgeSvc, llmGateway, sharedJobs, roleSvc, jobLogSvc, claudeCfgSvc, usageSvc, skillSvc, platformSvc, agentSvrSvc, subTaskSvc, subTaskRunner, batchSvc, settingSvc, worktreeH, gitCredSvc)
 	// Wire the remote-coding entrypoint AFTER both are built: children of an
 	// Agent-server-developed requirement run on that server, so every sub-task
 	// dispatch (manual / orchestrated / push+PR) routes through it.
@@ -319,7 +327,7 @@ func main() {
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
-	mergeH := handler.NewMergeHandler(database, projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc)
+	mergeH := handler.NewMergeHandler(database, projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc, gitCredSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)
 	roleH := handler.NewRoleHandler(roleSvc, claudeCfgSvc)
 	settingH := handler.NewSettingHandler(settingSvc)

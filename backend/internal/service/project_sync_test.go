@@ -27,7 +27,7 @@ import (
 // dev server + clicking through the wizard panel.
 func TestEnsureClonedAndSynced_FourScenarios(t *testing.T) {
 	d := newTestDB(t)
-	svc := NewProjectService(d, nil)
+	svc := NewProjectService(d, nil, nil)
 	ctx := context.Background()
 
 	// upstream: a real bare repo on disk; we push commits to it across cases.
