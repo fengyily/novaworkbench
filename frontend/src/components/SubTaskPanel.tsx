@@ -804,6 +804,11 @@ function SubTaskCard({
   useEffect(() => {
     setArtifact(st.artifact);
   }, [st.artifact]);
+  // v0.5.x: 自拟方案折叠状态。仅当 prompt 超过 .sub-plan-body-wrap.is-collapsed
+  // 的视觉阈值时由下面的 isPlanLong 决定是否显示「展开方案」按钮。模式上与
+  // summaryExpanded (L1727) 一致——都是长内容默认折叠、点按钮展开。
+  const [planExpanded, setPlanExpanded] = useState(false);
+  const isPlanLong = (st.prompt?.length ?? 0) > 320;
   const [adjusting, setAdjusting] = useState(false);
   const [adjustInput, setAdjustInput] = useState('');
   const [adjustBusy, setAdjustBusy] = useState(false);
@@ -1131,6 +1136,8 @@ function SubTaskCard({
   const sourceKey = isAutoSource ? 'sourceAuto' : 'sourceManual';
   const sourceTitleKey = isAutoSource ? 'sourceAutoTitle' : 'sourceManualTitle';
   const sourceClass = `sub-report-source${isAutoSource ? ' is-auto' : ''}`;
+  // v0.5.x: 反向派生,供 .sub-plan 自拟方案渲染分支复用。
+  const isManualSource = !isAutoSource;
 
   return (
     <article
@@ -1346,6 +1353,44 @@ function SubTaskCard({
                 defaultOpen
               />
             </div>
+          )}
+
+          {/* v0.5.x: 自拟方案渲染块。仅手动子任务且 prompt 非空、未 streaming
+              时显示。位置紧接 phase 面板之下、Live log 之上，让用户优先看到
+              自己写的方案、再看 Claude 输出/汇总。折叠逻辑镜像 .sub-report。 */}
+          {!streaming && isManualSource && (st.prompt?.trim() ?? '') !== '' && (
+            <section className="sub-plan">
+              <div className="sub-plan-eyebrow" aria-hidden="true">
+                <span className="sub-plan-eyebrow-icon">📝</span>
+                <span className="sub-plan-eyebrow-label">
+                  {t('components.subTaskCard.planEyebrow')}
+                </span>
+              </div>
+              <div
+                className={
+                  'sub-plan-body-wrap' +
+                  (isPlanLong && !planExpanded ? ' is-collapsed' : '')
+                }
+              >
+                <div className="sub-plan-body">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {String(st.prompt).trim().replace(/\n{3,}/g, '\n\n')}
+                  </ReactMarkdown>
+                </div>
+              </div>
+              {isPlanLong && (
+                <button
+                  type="button"
+                  className="sub-plan-toggle-btn"
+                  onClick={() => setPlanExpanded((v) => !v)}
+                  aria-expanded={planExpanded}
+                >
+                  {planExpanded
+                    ? t('components.subTaskCard.planExpandCollapse')
+                    : t('components.subTaskCard.planExpandShow')}
+                </button>
+              )}
+            </section>
           )}
 
           {/* Live log (streaming) — full-width terminal scrollback. */}

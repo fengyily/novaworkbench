@@ -1642,3 +1642,143 @@
   line-height: 1.65;
   color: var(--color-text);
 }
+
+/* ============================================================
+ *  Manual sub-task plan block — 把作者 prompt 以 Markdown 渲染
+ *  在展开卡片内部,位于 phase 面板下方、Live log 上方。视觉上
+ *  比状态行静、比 artifact body 重——手动子任务 prompt 本身
+ *  即「方案交付物」。配色复用 emerald 调色板与 .sub-card-source-manual
+ *  chip 同源,使「手动」属性在视觉上自洽。
+ * ============================================================ */
+.sub-plan {
+  margin: 0 16px 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-left: 2px solid var(--color-success);
+  border-radius: var(--radius-md);
+  background: var(--color-hover);
+}
+.sub-plan-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-success-deep, #047857);
+  background: var(--color-success-soft);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+}
+.sub-plan-eyebrow-icon { font-size: 11px; line-height: 1; }
+
+.sub-plan-body {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--color-text);
+}
+/* Prose typography — 与 .sub-report-body 同源,保证同一详情页
+   内手动子任务方案与 artifact body 阅读体验一致。 */
+.sub-plan-body > :first-child { margin-top: 0; }
+.sub-plan-body > :last-child  { margin-bottom: 0; }
+.sub-plan-body p { margin: 6px 0; }
+.sub-plan-body h1,
+.sub-plan-body h2,
+.sub-plan-body h3 {
+  margin: 12px 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+.sub-plan-body h1 { font-size: 15px; }
+.sub-plan-body h2 { font-size: 15px; border-bottom: 1px solid var(--color-border); padding-bottom: 4px; }
+.sub-plan-body h3 { font-size: 14px; }
+.sub-plan-body h4 { font-size: 13px; font-weight: 600; }
+.sub-plan-body ul,
+.sub-plan-body ol { padding-left: 20px; margin: 6px 0; }
+.sub-plan-body li { margin: 2px 0; }
+.sub-plan-body strong { font-weight: 600; color: var(--color-text); }
+.sub-plan-body code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+.sub-plan-body pre {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  overflow-x: auto;
+}
+.sub-plan-body pre code { background: transparent; padding: 0; }
+.sub-plan-body blockquote {
+  margin: 6px 0;
+  padding: 4px 10px;
+  border-left: 2px solid var(--color-border);
+  color: var(--color-text-secondary);
+}
+.sub-plan-body hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 1.2em 0;
+}
+.sub-plan-body table {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+  width: 100%;
+  font-size: 12px;
+}
+.sub-plan-body th,
+.sub-plan-body td {
+  border: 1px solid var(--color-border);
+  padding: 6px 10px;
+  text-align: left;
+}
+.sub-plan-body th { background: var(--color-surface); font-weight: 600; }
+.sub-plan-body a {
+  color: var(--color-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Collapsed state — 长 prompt 默认折叠,底部渐隐遮罩指向同色 hover 底色
+   实现视觉融合。 */
+.sub-plan-body-wrap {
+  position: relative;
+  overflow: hidden;
+  max-height: none;
+  transition: max-height 0.25s ease;
+}
+.sub-plan-body-wrap.is-collapsed { max-height: 160px; }
+.sub-plan-body-wrap.is-collapsed::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 32px;
+  background: linear-gradient(180deg, transparent, var(--color-hover));
+  pointer-events: none;
+}
+.sub-plan-body-wrap.is-collapsed .sub-plan-body > :last-child { padding-bottom: 16px; }
+
+.sub-plan-toggle-btn {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--color-primary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.sub-plan-toggle-btn:hover {
+  background: var(--color-surface);
+  border-color: var(--color-primary);
+}

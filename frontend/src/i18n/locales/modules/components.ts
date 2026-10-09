@@ -81,7 +81,7 @@ export const components = {
     execEnvLabel: '执行环境',
     execEnvHint: '默认与主任务一致；切换到不同环境时，将从 origin 检出该需求分支执行（未推送的本地改动不会带过来）。',
     modelEmptyWarning: '⚠️ 当前 Claude 配置中没有可用模型，请前往「设置 → Claude 配置」配置后再开启子任务。',
-    composerHint: '启动后子 Agent 将 fork 主会话上下文，所有子任务共享同一项目认知',
+    composerHint: '支持 Markdown：## 标题、- 列表、```代码块``` 等。输入 @ 引用 Skill',
     reSplitTitleBusy: '有子任务正在执行，完成后才能重新拆分',
     reSplitTitle: '让主 Agent 重新进行任务拆分并自动派发子任务',
     reSplitBusy: '拆分中…',
@@ -274,6 +274,11 @@ export const components = {
     toolResultExpand: '展开工具结果',
     toolResultCollapse: '收起工具结果',
     toolResultTruncated: '（已截断，点击展开）',
+    // v0.5.x: 手动子任务作者自拟方案渲染块。提示该卡片 markdown 内容是用户
+    // 手写,非 Claude 输出,与 sub-card-source-manual chip 同色系。
+    planEyebrow: '自拟方案',
+    planExpandShow: '展开方案',
+    planExpandCollapse: '收起方案',
   },
   createRequirement: {
     title: '新需求',

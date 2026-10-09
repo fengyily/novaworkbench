@@ -72,7 +72,7 @@ export const components = {
     execEnvLabel: 'Environment',
     execEnvHint: 'Defaults to the main task\'s environment; switching to a different one checks out this requirement\'s branch fresh from origin (unpushed local changes won\'t come along).',
     modelEmptyWarning: '⚠️ No models available in the current Claude config. Configure one under Settings → Claude Configs before starting a sub-task.',
-    composerHint: 'Sub-agents fork the main session context — every sub-task shares the same project knowledge',
+    composerHint: 'Markdown supported: ## headings, - lists, ```code```. Type @ to reference Skills.',
     reSplitTitleBusy: 'A sub-task is still running — wait until it finishes before re-splitting',
     reSplitTitle: 'Have the main agent re-split and auto-dispatch the sub-tasks',
     reSplitBusy: 'Splitting…',
@@ -263,6 +263,11 @@ export const components = {
     toolResultExpand: 'Expand tool result',
     toolResultCollapse: 'Collapse tool result',
     toolResultTruncated: '(truncated — click to expand)',
+    // v0.5.x: author-authored plan block rendered on manual sub-task cards.
+    // Same emerald motif as the .sub-card-source-manual chip.
+    planEyebrow: 'Your plan',
+    planExpandShow: 'Show plan',
+    planExpandCollapse: 'Hide plan',
   },
   createRequirement: {
     title: 'New requirement',
