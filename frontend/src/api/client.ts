@@ -293,6 +293,7 @@ export const knowledgeApi = {
   },
   search: (q: string, project_id?: string) =>
     api.get<KnowledgeItem[]>(`/api/knowledge/search?q=${encodeURIComponent(q)}${project_id ? '&project_id=' + project_id : ''}`),
+  get: (id: string) => api.get<KnowledgeItem>(`/api/knowledge/${id}`),
   create: (data: { project_id: string; title: string; content: string; category: string; source_type?: string; source_ref?: string }) =>
     api.post<KnowledgeItem>('/api/knowledge', data),
   update: (id: string, data: Partial<KnowledgeItem>) => api.put<KnowledgeItem>(`/api/knowledge/${id}`, data),

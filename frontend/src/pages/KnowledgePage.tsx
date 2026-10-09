@@ -5,6 +5,7 @@ import { errorMessage } from '../utils/errMsg';
 import { fmtDate } from '../utils/intl';
 import { projectsApi } from '../api/client';
 import { stripMarkdownPreview } from '../utils/preview';
+import { IconExternalLink } from '../components/icons';
 import './KnowledgePage.css';
 
 type Tab = 'memories' | 'knowledge' | 'review';
@@ -172,25 +173,59 @@ export default function KnowledgePage() {
             <div className="kb-empty">{t('knowledge.knowledgeEmpty')}</div>
           ) : (
             knowledge.map(k => (
-              <div key={k.id} className="kb-card">
-                <div className="kb-card-header">
-                  <span className={`kb-type-badge type-${k.category || 'general'}`}>
-                    {t(`knowledge.memType.${k.category}` as any, { defaultValue: k.category }) || 'general'}
-                  </span>
-                  {!k.is_reviewed && <span className="kb-unreviewed">{t('knowledge.unreviewed')}</span>}
-                  {!k.is_approved && <span className="kb-rejected">{t('knowledge.rejected')}</span>}
-                  <span className="kb-card-title">{k.title}</span>
-                </div>
-                <div className="kb-card-content kb-clamp">{stripMarkdownPreview(k.content)}</div>
-                <div className="kb-card-meta">
-                  <span className="kb-source">{t('knowledge.sourceLabel', { type: k.source_type })}</span>
-                  {k.source_ref && <span className="kb-ref">{k.source_ref}</span>}
-                  <span className="kb-date">{fmtDate(k.created_at)}</span>
-                  <div className="kb-actions">
-                    <button className="btn btn-sm" onClick={async () => { await knowledgeApi.delete(k.id); loadTabData(); }}>{t('knowledge.delete')}</button>
+              // 外层 <a target="_blank">：浏览器对原生超链接不会被弹窗拦截。
+              // 内层 .kb-card-viewlink 用 <button> + 同步 window.open：
+              // - 不嵌套 <a> 避免非法 HTML；
+              // - 同步 window.open 不被浏览器拦截；
+              // - 删除按钮的 onClick 加 preventDefault + stopPropagation
+              //   防止冒泡到外层 <a> 误触发新标签页跳转。
+              <a
+                key={k.id}
+                className="kb-card-link"
+                href={`/knowledge/view/${k.id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={t('knowledge.view.openInNewTabHint')}
+              >
+                <div className="kb-card">
+                  <div className="kb-card-header">
+                    <span className={`kb-type-badge type-${k.category || 'general'}`}>
+                      {t(`knowledge.memType.${k.category}` as any, { defaultValue: k.category }) || 'general'}
+                    </span>
+                    {!k.is_reviewed && <span className="kb-unreviewed">{t('knowledge.unreviewed')}</span>}
+                    {!k.is_approved && <span className="kb-rejected">{t('knowledge.rejected')}</span>}
+                    <span className="kb-card-title">{k.title}</span>
+                    <button
+                      className="kb-card-viewlink"
+                      aria-label={t('knowledge.view.openInNewTab')}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        window.open(`/knowledge/view/${k.id}`, '_blank', 'noopener,noreferrer');
+                      }}
+                    >
+                      <IconExternalLink size={14} />
+                    </button>
+                  </div>
+                  <div className="kb-card-content kb-clamp">{stripMarkdownPreview(k.content)}</div>
+                  <div className="kb-card-meta">
+                    <span className="kb-source">{t('knowledge.sourceLabel', { type: k.source_type })}</span>
+                    {k.source_ref && <span className="kb-ref">{k.source_ref}</span>}
+                    <span className="kb-date">{fmtDate(k.created_at)}</span>
+                    <div className="kb-actions">
+                      <button
+                        className="btn btn-sm"
+                        onClick={async (e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          await knowledgeApi.delete(k.id);
+                          loadTabData();
+                        }}
+                      >{t('knowledge.delete')}</button>
+                    </div>
                   </div>
                 </div>
-              </div>
+              </a>
             ))
           )}
         </div>

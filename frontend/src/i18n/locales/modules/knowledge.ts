@@ -50,6 +50,28 @@ export const knowledge = {
     save: '保存',
     saving: '保存中...',
   },
+  // view.* — 阅读视图 (`/knowledge/view/:id`，新窗口打开) 专用文案。
+  // 独立 key 避免与列表页文案混用 (列表页用「待审」「未Review」，
+  // 这里给阅读视图更明确的「待审核 / 已通过审核 / 已驳回」措辞)。
+  view: {
+    openInNewTab: '在新标签页打开',
+    openInNewTabHint: '在新标签页中以阅读视图查看完整内容',
+    backToList: '返回知识库',
+    closeTab: '关闭标签页',
+    loading: '正在加载知识条目…',
+    loadFailed: '加载失败：{{msg}}',
+    notFound: '知识条目不存在或已被删除',
+    noTitle: '（无标题）',
+    retry: '重试',
+    metaSource: '来源：{{type}}',
+    metaProject: '项目 ID：{{id}}',
+    metaCreated: '创建于 {{date}}',
+    metaUpdated: '最后更新 {{date}}',
+    reviewStatus: '状态：{{status}}',
+    statusApproved: '已通过审核',
+    statusPending: '待审核',
+    statusRejected: '已驳回',
+  },
 } as const;
 
 export default knowledge;
