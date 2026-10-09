@@ -1455,6 +1455,52 @@ func humanSize(n int64) string {
 	}
 }
 
+// findSessionJsonlFallback scans <claude-home>/projects/*/<sid>.jsonl once and
+// returns the path of the most-recently-modified hit. Used as a last-resort
+// recovery when the candidate list derived from project metadata
+// (claudeProjectsSlugDir) misses the cwd-encoded slug the analyst actually
+// used — e.g. analyst ran in a subdir / workspace symlink / drifted project
+// path that the upstream probe list doesn't enumerate.
+//
+// Returns ("", false) when sid is empty or the projects directory cannot be
+// read or contains no matching jsonl.
+//
+// Why mtime-based preference: multiple hits are rare but possible when a
+// project was renamed or a worktree recycled. The freshest file is
+// overwhelmingly likely to be the right one (the most recent analyst turn),
+// and the remote CLI is the ultimate arbiter — even if we pick wrong, the
+// user can recover in the next turn.
+//
+// Why not error-out: this is best-effort. An unreadable projects dir should
+// not abort the up-sync; the caller treats a miss the same as any other miss.
+func findSessionJsonlFallback(sid string) (string, bool) {
+	if sid == "" {
+		return "", false
+	}
+	root := filepath.Join(claudeSessionHome(), "projects")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", false
+	}
+	var bestPath string
+	var bestMtime time.Time
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		candidate := filepath.Join(root, e.Name(), sid+".jsonl")
+		fi, statErr := os.Stat(candidate)
+		if statErr != nil {
+			continue
+		}
+		if bestPath == "" || fi.ModTime().After(bestMtime) {
+			bestPath = candidate
+			bestMtime = fi.ModTime()
+		}
+	}
+	return bestPath, bestPath != ""
+}
+
 // syncRequirementSessionsUp uploads the requirement-relevant <sid>.jsonl
 // files (wantSIDs) to the remote slug dir, printing a per-file detail line so
 // the user can see exactly which sessions were synced.
@@ -1509,7 +1555,6 @@ func (h *WizardHandler) syncRequirementSessionsUp(client *gossh.Client, job *sto
 		var (
 			localPath string
 			fi        os.FileInfo
-			hit       bool
 		)
 		for _, dir := range candidateDirs {
 			candidate := filepath.Join(dir, sid+".jsonl")
@@ -1519,11 +1564,28 @@ func (h *WizardHandler) syncRequirementSessionsUp(client *gossh.Client, job *sto
 			}
 			localPath = candidate
 			fi = statFi
-			hit = true
 			break
 		}
-		if !hit {
-			job.Append(store.LogLine{Type: "message", Content: "  • 跳过 " + sid + ".jsonl（本地 " + strconv.Itoa(len(candidateDirs)) + " 个候选 slug 目录均无）"})
+		if localPath == "" {
+			// Fallback: scan ALL claude project dirs for this sid. Catches
+			// cases where the candidate list missed the cwd-encoded slug the
+			// CLI actually used (e.g. analyst ran in a subdir / workspace
+			// symlink / drifted project path). Pick the most-recently-
+			// modified file when multiple exist so the user gets the
+			// freshest conversation history.
+			if fb, ok := findSessionJsonlFallback(sid); ok {
+				localPath = fb
+				// best-effort: try to grab the FileInfo for the size log
+				// below; if Stat fails (race / cleanup) just skip the size
+				// annotation but still upload the file.
+				if statFi, statErr := os.Stat(fb); statErr == nil {
+					fi = statFi
+				}
+				job.Append(store.LogLine{Type: "message", Content: "  • " + sid + ".jsonl 在标准候选之外命中（fallback 全表扫描）"})
+			}
+		}
+		if localPath == "" {
+			job.Append(store.LogLine{Type: "message", Content: "  • 跳过 " + sid + ".jsonl（本地 " + strconv.Itoa(len(candidateDirs)) + " 个候选 slug 目录均无，已做全表扫描仍无）"})
 			missingSIDs = append(missingSIDs, sid)
 			continue
 		}
@@ -2109,6 +2171,9 @@ func (h *WizardHandler) claudeProjectsSlugDir(reqRow *model.Requirement) ([]stri
 		if slug != "" {
 			push(slug)
 		}
+	}
+	if len(out) > 0 {
+		log.Printf("[sync-claude-slug] %s: candidate slug dirs: %v", reqRow.ID, out)
 	}
 	return out, nil
 }
