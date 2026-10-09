@@ -1354,8 +1354,10 @@ function SubTaskCard({
           {/* Finished-report card — replaces the legacy .sub-card-artifact
               dark slab with a structured white card: report header → metadata
               strip → body. stopped rows also flow through this branch since
-              they have an artifact (with the "⏹ 用户中止" banner prefix). */}
-          {!streaming && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && artifact && (
+              they have an artifact (with the "⏹ 用户中止" banner prefix).
+              手动子任务（phase_emitted=true）已通过上方三段卡片完整呈现内容，
+              此处隐藏 artifact body 以避免与三段卡片内容重复。 */}
+          {!streaming && !st.phase_emitted && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && artifact && (
             <div className={`sub-report is-status-${st.status}`}>
               <div className="sub-report-header">
                 <div className="sub-report-header-row">
@@ -1400,7 +1402,7 @@ function SubTaskCard({
               window is misleading: the row IS done, we just haven't
               fetched the artifact Markdown yet. The guard below matches
               the one above so the two branches stay symmetric. */}
-          {!streaming && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && !artifact && (
+          {!streaming && !st.phase_emitted && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && !artifact && (
             <div className="sub-report-empty">{t('components.subTaskCard.noArtifact')}</div>
           )}
 
