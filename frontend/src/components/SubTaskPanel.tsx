@@ -170,6 +170,33 @@ function stripArtifactHeader(md: string): string {
   return md.replace(header, '');
 }
 
+// stripArtifactCodeFence unwraps a single triple-backtick code fence when
+// the artifact body is entirely wrapped in one. The LLM sometimes emits
+// its full response inside ```...``` (a formatting slip that's especially
+// common when the user asked for a Markdown table — the model wraps the
+// table "as code" to preserve column alignment). Without this, ReactMarkdown
+// treats the whole body as a single code block: tables, headings, lists all
+// collapse into monospace text and the user's "表格的形式输出" never renders
+// as a real <table>.
+//
+// Heuristic: the (trimmed) body must start with a single opening fence
+// (``` with optional language identifier) and end with a single closing
+// fence. We strip both, leaving the inner content — including any nested
+// ```code blocks``` from the assistant's thinking — untouched. We do NOT
+// fire when the body opens with a fence but lacks the matching closing
+// fence (that's a real code block the user asked for).
+function stripArtifactCodeFence(body: string): string {
+  if (!body) return body;
+  const trimmed = body.replace(/^\s+|\s+$/g, '');
+  // Anchored to ^ and $; non-greedy *? combined with the $ anchor still
+  // finds the LAST closing ``` because the engine expands the inner match
+  // until the suffix fits. This is exactly what we want for artifacts that
+  // contain nested code blocks — we only strip the outermost wrapper.
+  const m = trimmed.match(/^```[^\n]*\n([\s\S]*?)\n```$/);
+  if (!m) return body;
+  return m[1];
+}
+
 // timeAgo renders a small "N seconds ago / N minutes ago / N hours ago"
 // label, falling back to a full localized timestamp for very old rows.
 // Plain i18next call (not a hook) so it can be reused from non-React
@@ -1266,7 +1293,7 @@ function SubTaskCard({
               </div>
               <div className="sub-report-body">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {stripArtifactHeader(artifact)}
+                  {stripArtifactCodeFence(stripArtifactHeader(artifact))}
                 </ReactMarkdown>
               </div>
             </div>
