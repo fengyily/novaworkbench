@@ -972,6 +972,28 @@ var alterColumns = []string{
 	// "duplicate column" so the ALTER is safe to ship before all DBs have
 	// caught up.
 	`ALTER TABLE sub_tasks ADD COLUMN started_at DATETIME`,
+	// Per-project commit-message *source strategy*. Drives the
+	// "完成开发 → 提交推送" pipeline's 4-way commit-mode dispatch:
+	//   - "script_only"  → run the project's commit_script and use stdout
+	//                       as the commit message (no LLM involved)
+	//   - "llm_only"     → default: ask the OpenAI-compatible HTTP channel
+	//                       to write a commit message (current behavior)
+	//   - "script_first" → run the script first; if its output's language
+	//                       doesn't match the project's commit_lang, fall
+	//                       back to LLM. <10-char script output is accepted
+	//                       as-is (language detection is unreliable on short
+	//                       strings).
+	//   - "llm_first"    → ask the LLM first; on any failure (timeout / API
+	//                       error / parse error) fall back to the script.
+	// The mode column is defaulted to 'llm_only' so legacy rows keep working
+	// with zero behavior change. commit_script defaults to '' so a project
+	// that hasn't been configured yet degrades to "no script available" —
+	// script_* modes that hit an empty script will surface a 400 to the UI
+	// instead of silently calling the LLM. TEXT NOT NULL DEFAULT '' keeps
+	// parity with the adjacent commit_lang* columns; the duplicate-column
+	// error from isIgnorableDDLError swallows preexisting DBs.
+	`ALTER TABLE projects ADD COLUMN commit_mode TEXT NOT NULL DEFAULT 'llm_only'`,
+	`ALTER TABLE projects ADD COLUMN commit_script TEXT NOT NULL DEFAULT ''`,
 }
 
 var (

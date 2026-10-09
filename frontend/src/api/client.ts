@@ -157,6 +157,15 @@ export interface Project {
   commit_lang_override?: string;
   commit_lang_source?: string;
   commit_lang_updated_at?: string;
+  // Commit-message sourcing strategy. Mirrors model.CommitMode* in
+  // backend/internal/model/project_commit_mode.go (script_only /
+  // llm_only / script_first / llm_first). commit_script is the shell
+  // snippet whose stdout becomes the commit message in script_* /
+  // llm_first modes; "" in llm_only mode. Read by
+  // ProjectDetail's commit-push strategy section + by
+  // mergeApi.push / mergeApi.local at submit time.
+  commit_mode?: string;
+  commit_script?: string;
   // Wizard pre-stage repo sync: stamped by the backend the moment it clones
   // or fetches origin before architect-design runs. sync_status reflects the
   // last attempt (idle = never synced, ok = last sync succeeded, error =
@@ -246,6 +255,16 @@ export const projectsApi = {
   // is still stamped so the badge reflects reality. Pair with the manual
   // "立即同步" button in ProjectDetail overview.
   syncNow: (id: string) => api.post<Project>(`/api/projects/${id}/sync`, {}),
+  // Pick the project's commit-push sourcing strategy used by the
+  // "完成开发 → 提交推送" pipeline. mode ∈ script_only | llm_only |
+  // script_first | llm_first; script is the shell snippet whose stdout
+  // becomes the commit message in script_only / script_first / llm_first
+  // modes (pass "" when mode=llm_only). Backend rejects invalid mode with
+  // 400 INVALID_MODE and missing script when mode requires it with 400
+  // INVALID_SCRIPT. The server returns the refreshed Project row so callers
+  // can update local state.
+  setCommitPushConfig: (projectId: string, mode: string, script: string) =>
+    api.put<Project>(`/api/projects/${projectId}/commit-push-config`, { mode, script }),
 };
 
 export const dashboardApi = {

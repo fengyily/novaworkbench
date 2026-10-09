@@ -380,3 +380,44 @@ func (h *ProjectHandler) SetCommitLangOverride(w http.ResponseWriter, r *http.Re
 	}
 	writeJSON(w, http.StatusOK, p)
 }
+
+// SetCommitPushConfig updates the project's commit-message sourcing
+// strategy ("仅脚本"/"仅LLM"/"脚本优先"/"LLM优先") and the optional
+// shell snippet whose stdout becomes the commit message in
+// script_only / script_first / llm_first modes. The chosen mode is
+// honoured by handler.mergeGenerate (strategy dispatcher) the next
+// time the user submits a requirement without a manual commit_message.
+//
+// PUT /api/projects/{id}/commit-push-config
+// body: {"mode": "script_only|llm_only|script_first|llm_first", "script": "echo ..."}
+func (h *ProjectHandler) SetCommitPushConfig(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "缺少项目 ID")
+		return
+	}
+	var body struct {
+		Mode   string `json:"mode"`
+		Script string `json:"script"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "请求体格式错误")
+		return
+	}
+	p, err := h.svc.SetCommitPushConfig(id, body.Mode, body.Script)
+	if err != nil {
+		msg := err.Error()
+		switch {
+		case strings.HasPrefix(msg, "INVALID_MODE"):
+			writeError(w, http.StatusBadRequest, "INVALID_MODE", msg)
+		case strings.HasPrefix(msg, "INVALID_SCRIPT"):
+			writeError(w, http.StatusBadRequest, "INVALID_SCRIPT", msg)
+		case strings.HasPrefix(msg, "project not found"):
+			writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", msg)
+		default:
+			writeError(w, http.StatusInternalServerError, "UPDATE_FAILED", msg)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}

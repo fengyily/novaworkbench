@@ -187,6 +187,32 @@ export const projects = {
       detectedLabel: '当前检测值：',
       noDetect: '尚未检测',
     },
+    // Overview — commit / push strategy (which path the merge pipeline
+    // takes when the user leaves the merge-modal commit_message field
+    // empty). The four modes match model.CommitMode* in
+    // backend/internal/model/project_commit_mode.go. scriptPlaceholder
+    // / scriptHint are shown only when the chosen mode requires a
+    // script; an empty script on those modes gates the "保存" button.
+    commitPush: {
+      label: '提交推送模式',
+      hint: '完成开发后，如未手动填写 commit 信息，按所选策略生成。仅 LLM 与现有行为一致；其它模式启用项目级脚本或回退。',
+      save: '保存',
+      saved: '已保存',
+      saveFailed: '保存失败：{{msg}}',
+      modeScriptOnly: '仅脚本',
+      modeLLMOnly: '仅 LLM（默认）',
+      modeScriptFirst: '脚本优先（语言不对再 LLM）',
+      modeLLMFirst: 'LLM 优先（失败再脚本）',
+      modeHint: {
+        script_only: '纯脚本：stdout 即为 commit 信息，绝不调用 LLM。脚本失败将直接报错。',
+        llm_only: 'LLM 默认：与旧行为完全一致。LLM 失败将报错。',
+        script_first: '先跑脚本，若输出语言与项目语言不一致则兜底走 LLM。短输出（<10 字）跳过校验。',
+        llm_first: '先调 LLM，任何失败（超时 / API / 解析）均自动回退到脚本。',
+      },
+      scriptLabel: '脚本（stdout 即 commit 信息）',
+      scriptPlaceholder: '# 在工作区根目录执行；stdout 即 commit 信息\n# 可用环境变量：NOVA_COMMIT_REQUIREMENT_ID / NOVA_COMMIT_PROJECT_DIR / NOVA_COMMIT_WORKTREE\necho "fix: $(date +%Y%m%d)"',
+      scriptMissingWarn: '当前模式需要脚本，但内容为空，无法保存。',
+    },
     // Overview — platform config.
     platformTitle: '平台配置',
     platformCurrent: '当前：{{platform}}',
