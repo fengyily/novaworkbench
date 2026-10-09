@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -660,6 +661,19 @@ func (c *Client) SyncDirDownMapped(remoteDir, localDir string) error {
 	return walkAndDownload(sftpCli, expandedRemote, localDir)
 }
 
+// ErrRemoteDirMissing is returned by walkAndDownload (and therefore by
+// SyncDirDownMapped) when the remote directory does not exist. Callers
+// distinguish this case from genuine SFTP errors so the job log can
+// suppress the misleading "上游会话失败" line when there was simply
+// nothing on the remote to download in the first place (e.g. the agent
+// host never created a slug dir because the local up-sync silently
+// uploaded 0 files due to a slug mismatch).
+//
+// Identify it via errors.Is:
+//
+//	if errors.Is(err, ssh.ErrRemoteDirMissing) { ... }
+var ErrRemoteDirMissing = errors.New("ssh: remote directory missing")
+
 // sftp opens a new SFTP session on the underlying SSH connection. The caller
 // must Close it. Returns nil + error on transport failure.
 func (c *Client) sftp() (*sftp.Client, error) {
@@ -710,8 +724,14 @@ func walkAndUpload(sftpCli *sftp.Client, localDir, remoteDir string) error {
 func walkAndDownload(sftpCli *sftp.Client, remoteDir, localDir string) error {
 	entries, err := sftpCli.ReadDir(remoteDir)
 	if err != nil {
-		// Missing remote dir is fine — nothing to download.
-		return nil
+		if isRemoteNotExist(err) {
+			// Surface the "no remote dir" case as a typed sentinel so
+			// SyncDirDownMapped callers can suppress the misleading
+			// "upstream session failed" hint when the remote simply
+			// had nothing to download. See ErrRemoteDirMissing.
+			return ErrRemoteDirMissing
+		}
+		return fmt.Errorf("ssh: readdir %s: %w", remoteDir, err)
 	}
 	for _, e := range entries {
 		name := e.Name()
@@ -739,6 +759,23 @@ func walkAndDownload(sftpCli *sftp.Client, remoteDir, localDir string) error {
 func shouldSync(name string) bool {
 	low := strings.ToLower(name)
 	return strings.HasSuffix(low, ".jsonl") || strings.HasSuffix(low, ".md")
+}
+
+// isRemoteNotExist matches the "directory does not exist" error surfaced
+// by pkg/sftp. The Go-stdlib fs.ErrNotExist unwrap is unreliable across
+// sftp versions, so we accept both stdlib signals AND the literal
+// sftp-server message: "file does not exist" or the underlying syscall
+// "no such file or directory".
+func isRemoteNotExist(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, fs.ErrNotExist) || os.IsNotExist(err) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "file does not exist") ||
+		strings.Contains(msg, "no such file or directory")
 }
 
 func uploadFile(sftpCli *sftp.Client, localPath, remotePath string, mode os.FileMode) error {
