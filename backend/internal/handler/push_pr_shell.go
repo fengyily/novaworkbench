@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/novaworkbench/backend/internal/model"
+	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 )
 
@@ -55,7 +56,7 @@ const pushShellStepTimeout = 10 * time.Minute
 //
 // Returns (jobID, subTaskID, error) like dispatchPushPRSubTask so autoPushPR
 // can log symmetrically.
-func (h *WizardHandler) runPushPRShellJob(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang string) (jobID, subTaskID string, err error) {
+func (h *WizardHandler) runPushPRShellJob(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle string) (jobID, subTaskID string, err error) {
 	if h.subTaskRunner == nil || h.subTaskSvc == nil {
 		log.Printf("[push-pr-shell] %s: sub-task runner not wired, skip", reqRow.ID)
 		return "", "", nil
@@ -97,7 +98,7 @@ func (h *WizardHandler) runPushPRShellJob(reqRow *model.Requirement, dev, base, 
 	}
 	log.Printf("[push-pr-shell] %s: dispatched shell sub_task=%s job_id=%s dir=%s dev=%s base=%s", reqRow.ID, st.ID, job.ID, dir, dev, base)
 
-	go h.execPushPRShell(reqRow, st, job, dir, proj.LocalPath, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang)
+	go h.execPushPRShell(reqRow, st, job, dir, proj.LocalPath, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle)
 	return job.ID, st.ID, nil
 }
 
@@ -113,7 +114,7 @@ func (h *WizardHandler) runPushPRShellJob(reqRow *model.Requirement, dev, base, 
 // Run → MarkRunning → finishSubTask → subTaskSvc.Finish). The artifact body
 // is the full JobStore log rendered as Markdown so the user can reopen it
 // from the SubTaskPanel card even after the in-memory ring buffer evicts.
-func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.SubTask, job *store.Job, dir, projectPath, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang string) {
+func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.SubTask, job *store.Job, dir, projectPath, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle string) {
 	var runStartTime time.Time
 	defer func() {
 		lines, status, exitCode := job.Snapshot()
@@ -283,7 +284,7 @@ func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.Sub
 	}
 
 	// ── Step 5: create PR (gh / glab / tea) or surface a compare link.
-	prURL, prCreated := h.createPRShell(job, git, dir, dev, base, platformType, remote, reqRow)
+	prURL, prCreated := h.createPRShell(job, git, dir, dev, base, platformType, remote, commitLang, prTitle, reqRow)
 	if prCreated {
 		job.Append(store.LogLine{Type: "result", Content: "✅ 推送并创建 PR 完成\n\nPR: " + prURL})
 	} else if prURL != "" {
@@ -296,6 +297,26 @@ func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.Sub
 	log.Printf("[push-pr-shell] job %s finished for %s", job.ID, reqRow.ID)
 }
 
+// buildPRShellBody is the pure helper that assembles the 2-section PR body
+// for the local-shell auto-push path. Extracted so the body shape is testable
+// without mocking exec.Command (see push_pr_shell_test.go).
+//
+// shell 路径只能填 5-section 模板的 2 个子集：## 改了什么 / ## What changed
+// （commits + diff stat）和 ## 备注 / ## Notes（固定 2 条 checklist）。
+// 其余 3 个 section（关联 Issue / 怎么验证 / 检查清单）因 shell 路径无上下文
+// 整段省略。Body 不含 AI 署名 / auto-push 描述 / 占位文本。
+func buildPRShellBody(tmpl service.PRShellTemplates, logOut, diffOut string) string {
+	var body strings.Builder
+	body.WriteString(tmpl.PRBodyWhatChangedHeading + "\n\n```\n")
+	body.WriteString(logOut)
+	body.WriteString("\n```\n\n```\n")
+	body.WriteString(diffOut)
+	body.WriteString("\n```\n\n")
+	body.WriteString(tmpl.PRBodyNotesHeading + "\n")
+	body.WriteString(tmpl.PRBodyNotesChecklist)
+	return body.String()
+}
+
 // createPRShell runs the platform-appropriate PR-creation CLI, falling back to
 // a compare URL when the CLI is unavailable. Returns the PR URL (or compare
 // URL when no PR was created) AND a bool reporting whether a real PR was
@@ -303,26 +324,36 @@ func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.Sub
 // user can open manually — the caller must NOT report it as "✅ PR 创建完成"
 // (req_82e061807ef0372f: gh pr create failed on head==base but the shell still
 // reported "✅ 推送并创建 PR 完成 / PR: ...compare/main...main").
-func (h *WizardHandler) createPRShell(job *store.Job, git func(...string) (string, error), dir, dev, base, platformType, remote string, reqRow *model.Requirement) (string, bool) {
-	title := strings.TrimSpace(reqRow.Title)
-	if title == "" {
-		title = dev
+//
+// PR title priority (req_9ead19cd39f632fd):
+//   1. prTitle  — LLM-curated (e.g. via generateCommitMessage → callLLMForCommit
+//                 → GenerateCommitArtifacts.PRTitle in llm_only/llm_first/script_first
+//                 with LLM fallback paths)
+//   2. reqRow.Title — user-supplied requirement title (preserved when no LLM
+//                    ran, e.g. script_only or script_first with no fallback)
+//   3. tmpl.PRTitleFallback — localized fallback formatted with the dev branch
+//
+// PR body: 2-section subset (改了什么 + 备注) using service.NewPRShellTemplates
+// (locale-aware headings + fixed checklist). No AI attribution trailers, no
+// auto-push description, no placeholder text.
+func (h *WizardHandler) createPRShell(job *store.Job, git func(...string) (string, error), dir, dev, base, platformType, remote, commitLang, prTitle string, reqRow *model.Requirement) (string, bool) {
+	tmpl := service.NewPRShellTemplates(commitLang)
+
+	// Title: prTitle (LLM-curated) > reqRow.Title (user input) > PRTitleFallback (locale fallback).
+	title := strings.TrimSpace(prTitle)
+	if title == "" && reqRow != nil {
+		title = strings.TrimSpace(reqRow.Title)
 	}
-	// PR body: the commits on dev not on base, plus a diff stat. Deterministic
-	// and good enough for the auto-push happy path; the manual push button
-	// still routes through the LLM for a polished body.
+	if title == "" {
+		title = fmt.Sprintf(tmpl.PRTitleFallback, dev)
+	}
+
+	// Body: commits on dev not on base + diff stat, plus a fixed checklist.
+	// Deterministic — no LLM involvement. The 关联 Issue / 怎么验证 / 检查清单
+	// sections are intentionally omitted (shell path has no context for them).
 	logOut, _ := git("log", "origin/"+base+".."+dev, "--oneline", "--no-decorate")
 	diffOut, _ := git("diff", "--stat", "origin/"+base+"..."+dev)
-	var body strings.Builder
-	body.WriteString("## 改动概述\n\n")
-	body.WriteString("由 NovaWorkbench auto-push 自动创建（基于需求 ")
-	body.WriteString(reqRow.ID)
-	body.WriteString("）。\n\n## 提交\n```\n")
-	body.WriteString(logOut)
-	body.WriteString("\n```\n\n## 变更统计\n```\n")
-	body.WriteString(diffOut)
-	body.WriteString("\n```")
-	bodyStr := body.String()
+	bodyStr := buildPRShellBody(tmpl, logOut, diffOut)
 
 	run := func(name string, args ...string) (string, error) {
 		c := exec.Command(name, args...)

@@ -721,7 +721,7 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 	// commit_message travels through the same parameter the manual
 	// push uses — keeping the two paths interchangeable. Failures
 	// here degrade to "" (let the sub-task / shell runner decide).
-	autoCommitMsg, autoStrategy, autoErr := generateCommitMessage(context.Background(), h.llm, reqRow, proj, "", "")
+	autoCommitMsg, autoPRTitle, autoStrategy, autoErr := generateCommitMessage(context.Background(), h.llm, reqRow, proj, "", "")
 	if autoErr != nil {
 		log.Printf("[auto-push] %s: commit-mode dispatch failed (%v), falling back to sub-task generated message", reqRow.ID, autoErr)
 		autoCommitMsg = ""
@@ -741,7 +741,7 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 		log.Printf("[auto-push] %s: remote → LLM sub-task %s job %s branch=%s model=%q", reqRow.ID, subTaskID, jobID, dev, pushModel)
 	} else {
 		var serr error
-		jobID, subTaskID, serr = h.runPushPRShellJob(reqRow, dev, base, remote, platformType, autoCommitMsg, pushModel, pushCfgID, commitLang)
+		jobID, subTaskID, serr = h.runPushPRShellJob(reqRow, dev, base, remote, platformType, autoCommitMsg, pushModel, pushCfgID, commitLang, autoPRTitle)
 		if serr != nil {
 			log.Printf("[auto-push] %s: local shell dispatch failed: %v", reqRow.ID, serr)
 			return

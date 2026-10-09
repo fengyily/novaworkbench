@@ -629,7 +629,7 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 	commitStrategy := commitStrategyUser
 	if commitMsg == "" {
 		if proj, _ := h.loadProjectNoWrite(reqRow.ID); proj != nil {
-			if generated, strategy, gerr := generateCommitMessage(r.Context(), h.llm, reqRow, proj, commitMsg, ""); gerr == nil && generated != "" {
+			if generated, _, strategy, gerr := generateCommitMessage(r.Context(), h.llm, reqRow, proj, commitMsg, ""); gerr == nil && generated != "" {
 				commitMsg = generated
 				commitStrategy = strategy
 			} else if gerr != nil {
@@ -1038,7 +1038,7 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	pushCommitMsg := body.CommitMessage
 	_ = commitStrategyUser // reserved: future sub-task metadata when the dispatch layer reports it back to the frontend
 	if pushCommitMsg == "" {
-		if generated, strategy, gerr := generateCommitMessage(r.Context(), h.llm, reqRow, project, pushCommitMsg, ""); gerr == nil && generated != "" {
+		if generated, _, strategy, gerr := generateCommitMessage(r.Context(), h.llm, reqRow, project, pushCommitMsg, ""); gerr == nil && generated != "" {
 			pushCommitMsg = generated
 			log.Printf("[merge/push] %s: commit-mode strategy=%s", reqRow.ID, strategy)
 		} else if gerr != nil {

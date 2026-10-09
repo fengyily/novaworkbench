@@ -19,11 +19,11 @@ package handler
 // round-trip.
 //
 // Notes for future maintainers:
-//   - Don't add ANY LLM call to merge_generate.go that doesn't go
-//     through llm.Gateway.GenerateCommitMessage. The push sub-task's
-//     own prompt path (buildPushSubTaskPrompt) still generates its
-//     own commit text via Claude — that's a separate concern, not
-//     this layer's responsibility.
+//   - The LLM call goes through llm.Gateway.GenerateCommitArtifacts
+//     (not the GenerateCommitMessage convenience wrapper — that one
+//     drops the PR title, which the auto-push shell path now needs
+//     for req_9ead19cd39f632fd). Tests swap commitLLMFn to stub
+//     the gateway without spinning up a real Claude turn.
 //   - The script runner is intentionally single-shot. A multi-pass
 //     runner that re-runs on conflict would silently mutate the
 //     user's intent across attempts. If a future requirement asks
@@ -197,6 +197,12 @@ func boolToOneZero(b bool) string {
 // place is the whole point of this layer. The llm parameter is the
 // shared gateway; nil means LLM modes hard-fail (which is the
 // existing behaviour for the legacy code path).
+//
+// Returns (msg, prTitle, strategy, err). prTitle is non-empty only when the
+// LLM was actually invoked (callLLMForCommit returned a non-empty
+// PRTitle). For pure-script paths (script_only, script_first with no LLM
+// fallback, llm_first with LLM failure → script fallback) prTitle is "" so
+// the caller falls back to reqRow.Title (req_9ead19cd39f632fd).
 func generateCommitMessage(
 	ctx context.Context,
 	llmGateway *llm.Gateway,
@@ -204,18 +210,18 @@ func generateCommitMessage(
 	project *model.Project,
 	userMsg string,
 	diff string,
-) (msg string, strategy string, err error) {
+) (msg string, prTitle string, strategy string, err error) {
 	// User-supplied message always wins (this is the only path
 	// bypassing the strategy: the user typed a commit_message
 	// in the merge modal).
 	if strings.TrimSpace(userMsg) != "" {
-		return userMsg, commitStrategyUser, nil
+		return userMsg, "", commitStrategyUser, nil
 	}
 	if reqRow == nil {
 		// Defensive: should never happen (Push / LocalMerge /
 		// autoPushPR all validate reqRow first), but failing loud
 		// here is better than silently dropping the commit.
-		return "", "", fmt.Errorf("generateCommitMessage: missing requirement row")
+		return "", "", "", fmt.Errorf("generateCommitMessage: missing requirement row")
 	}
 
 	mode := model.CommitModeLLMOnly
@@ -236,7 +242,7 @@ func generateCommitMessage(
 	// pre-dating the UI. Either way, an opaque "script not found"
 	// beats silently switching modes.
 	if (mode == model.CommitModeScriptOnly || mode == model.CommitModeScriptFirst) && script == "" {
-		return "", "", fmt.Errorf("commit_script_required: mode=%s but the project's commit_script is empty", mode)
+		return "", "", "", fmt.Errorf("commit_script_required: mode=%s but the project's commit_script is empty", mode)
 	}
 
 	workDir := reqRow.WorktreePath
@@ -259,16 +265,16 @@ func generateCommitMessage(
 	case model.CommitModeScriptOnly:
 		out, serr := runScript()
 		if serr != nil {
-			return "", "", serr
+			return "", "", "", serr
 		}
-		return out, model.CommitModeScriptOnly, nil
+		return out, "", model.CommitModeScriptOnly, nil
 
 	case model.CommitModeLLMOnly:
-		out, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, diff)
+		out, pr, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, diff)
 		if gerr != nil {
-			return "", "", gerr
+			return "", "", "", gerr
 		}
-		return out, model.CommitModeLLMOnly, nil
+		return out, pr, model.CommitModeLLMOnly, nil
 
 	case model.CommitModeScriptFirst:
 		out, serr := runScript()
@@ -277,17 +283,17 @@ func generateCommitMessage(
 			// back to LLM (the user said "prefer script", but a
 			// broken script shouldn't block the merge entirely).
 			log.Printf("[commit-mode] %s: script_first script failed (%v), falling back to LLM", reqRow.ID, serr)
-			out2, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, diff)
+			out2, pr, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, diff)
 			if gerr != nil {
-				return "", "", fmt.Errorf("script (%v) and LLM (%w) both failed", serr, gerr)
+				return "", "", "", fmt.Errorf("script (%v) and LLM (%w) both failed", serr, gerr)
 			}
-			return out2, commitStrategyScriptLangMiss, nil
+			return out2, pr, commitStrategyScriptLangMiss, nil
 		}
 		// Short stdout: accept it without language detection
 		// (the threshold exists exactly so messages like "fix"
 		// don't bounce into LLM mode).
 		if len([]rune(out)) < scriptMinLengthForLangDetect {
-			return out, model.CommitModeScriptFirst, nil
+			return out, "", model.CommitModeScriptFirst, nil
 		}
 		// Long enough to detect language. If it matches the
 		// project's commit_lang, accept; otherwise fall back.
@@ -295,35 +301,37 @@ func generateCommitMessage(
 		if commitLang != "" && commitLang != "mixed" && scriptLang != "" && scriptLang != "mixed" && scriptLang != commitLang {
 			log.Printf("[commit-mode] %s: script_first output lang=%q != commit_lang=%q, falling back to LLM",
 				reqRow.ID, scriptLang, commitLang)
-			out2, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, diff)
+			out2, pr, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, diff)
 			if gerr != nil {
-				return "", "", fmt.Errorf("script lang mismatch and LLM fallback failed: %w", gerr)
+				return "", "", "", fmt.Errorf("script lang mismatch and LLM fallback failed: %w", gerr)
 			}
-			return out2, commitStrategyScriptLangMiss, nil
+			return out2, pr, commitStrategyScriptLangMiss, nil
 		}
-		return out, model.CommitModeScriptFirst, nil
+		return out, "", model.CommitModeScriptFirst, nil
 
 	case model.CommitModeLLMFirst:
-		out, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, diff)
+		out, pr, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, diff)
 		if gerr == nil {
-			return out, model.CommitModeLLMFirst, nil
+			return out, pr, model.CommitModeLLMFirst, nil
 		}
 		log.Printf("[commit-mode] %s: llm_first LLM call failed (%v), falling back to script", reqRow.ID, gerr)
 		out2, serr := runScript()
 		if serr != nil {
-			return "", "", fmt.Errorf("LLM (%v) and script (%w) both failed", gerr, serr)
+			return "", "", "", fmt.Errorf("LLM (%v) and script (%w) both failed", gerr, serr)
 		}
-		return out2, commitStrategyLLMFailed, nil
+		// Script-fallback path: no PR title is generated (scripts
+		// only produce commit subjects), so leave prTitle as "".
+		return out2, "", commitStrategyLLMFailed, nil
 	}
 
 	// Unreachable (model.IsValidCommitMode guards the switch
 	// above), but defensive: a mode that falls through becomes
 	// llm_only rather than panicking.
-	out, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, diff)
+	out, pr, gerr := callLLMForCommit(ctx, llmGateway, reqRow, commitLang, diff)
 	if gerr != nil {
-		return "", "", gerr
+		return "", "", "", gerr
 	}
-	return out, model.CommitModeLLMOnly, nil
+	return out, pr, model.CommitModeLLMOnly, nil
 }
 
 // callLLMForCommit is a thin wrapper over llm.Gateway that picks the
@@ -333,15 +341,24 @@ func generateCommitMessage(
 // level model override for the commit-message role, so we use the
 // gateway default; a future "commit.author role" model override
 // would slot in here.
+//
+// Returns (msg, prTitle, err). prTitle is what `llm.Gateway.GenerateCommitArtifacts`
+// produced; the auto-push shell path uses it directly for the PR title
+// (req_9ead19cd39f632fd — "创建PR的汇总报告，应该也按项目设置的提交风格格来").
+// The convenience wrapper `GenerateCommitMessage` only returns the commit
+// subject and drops the PR title, so we deliberately bypass it here.
+//
+// The actual LLM call is funneled through the package-level commitLLMFn
+// variable so tests can swap in a stub without standing up a real gateway.
 func callLLMForCommit(
 	ctx context.Context,
 	llmGateway *llm.Gateway,
 	reqRow *model.Requirement,
 	commitLang string,
 	diff string,
-) (string, error) {
+) (msg string, prTitle string, err error) {
 	if llmGateway == nil {
-		return "", fmt.Errorf("llm gateway not wired")
+		return "", "", fmt.Errorf("llm gateway not wired")
 	}
 	desc := ""
 	if reqRow != nil {
@@ -351,15 +368,25 @@ func callLLMForCommit(
 	if reqRow != nil {
 		title = reqRow.Title
 	}
-	out, err := llmGateway.GenerateCommitMessage(llm.GenerateCommitArtifactsOpts{
+	opts := llm.GenerateCommitArtifactsOpts{
 		ReqTitle:       title,
 		ReqDescription: desc,
 		CommitLang:     commitLang,
 		Diff:           diff,
-	})
-	if err != nil {
-		return "", err
 	}
 	_ = ctx // reserved: future cancellation wiring for abortable SSE
-	return out, nil
+	return commitLLMFn(llmGateway, opts)
+}
+
+// commitLLMFn is the single LLM entry point used by callLLMForCommit. It is
+// a package-level variable (not a method on the handler) so test files in
+// the same package can swap it for a stub during TestGenerateCommitMessage_*
+// runs. The default impl calls llm.Gateway.GenerateCommitArtifacts and
+// returns (CommitMessage, PRTitle, err).
+var commitLLMFn = func(llmGateway *llm.Gateway, opts llm.GenerateCommitArtifactsOpts) (string, string, error) {
+	out, _, err := llmGateway.GenerateCommitArtifacts(opts)
+	if err != nil {
+		return "", "", err
+	}
+	return out.CommitMessage, out.PRTitle, nil
 }

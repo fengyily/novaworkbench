@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+* **merge/shell-pr:** 本地自动推送（shell 路径）创建的 PR 标题与正文不再遵循项目「提交风格」设置（[req_9ead19cd39f632fd](https://github.com/fengyily/novaworkbench/issues/269)）
+  - PR body 段落标题按 `commit_lang` 本地化（中文 / English / 中英混用）；shell 路径只输出 2 section（`## 改了什么 / ## What changed` + `## 备注 / ## Notes`）
+  - `commit_mode` 涉及 LLM 的路径（`llm_only / llm_first / script_first 的 LLM 回退`），PR 标题由 LLM 整理（与 commit subject 风格一致）
+  - `script_only` 与 `script_first` 脚本直接成功时保留用户输入的 `reqRow.Title`
+  - PR 模板改为「自由 section」：LLM 按实际判断增删 5 个参考 section（改了什么 / 关联 Issue / 怎么验证 / 检查清单 / 备注）；「关联 Issue」section 仅在能识别 `Closes #xxx` 时输出
+  - 「备注」section 可选；如包含则末尾固定 2 条 checklist（`- [ ] 自测通过` / `- [ ] 无调试代码`，en 版为 `Self-tested` / `No debug code`）
+  - 模板指令由 `service.PRLangRules` 注入到 LLM 子任务 prompt；`pr_author` role 的 `SystemPrompt` 同步强调自由 section + 严禁项
+* **pr-templating:** 严格禁止出现在 PR 标题或正文
+  - AI 署名 trailer：`🤖 Generated with Claude Code`、`Co-Authored-By: Claude <...>`、`Co-authored-by: ...` 等
+  - auto-push 描述：「由 NovaWorkbench auto-push 自动创建」、「Auto-created by NovaWorkbench auto-push」等
+  - 占位文本：无关联 / N/A / 无 —— 完全空白的 section 整个省略
 * **sub-task:** 移除子任务执行的 30m 硬超时（`NOVA_SUBTASK_TIMEOUT` 及其 gateway 内的 30m floor）。子任务超时**仅**由 `NOVA_SUBTASK_IDLE_TIMEOUT`（默认 30m）滚动 idle 窗口控制：任意 stdout 行重置 timer，长跑工具调用（npm install、go build 等）只要持续输出就不会被杀；静默达到 `NOVA_SUBTASK_IDLE_TIMEOUT` 时以既有 `error_kind="idle-timeout"` 终止。
 
 ## [0.5.0](https://github.com/fengyily/novaworkbench/compare/v0.4.0...v0.5.0) (2026-09-21)
