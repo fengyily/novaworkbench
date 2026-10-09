@@ -95,28 +95,70 @@ func StyleHint(lang, override string) string {
 
 // PRLangRules 返回"PR 摘要语言规则"片段，注入到 buildPushSubTaskPrompt 与
 // generatePRSummary 的 user prompt 中。该片段强于 pr_author 角色 system
-// prompt 中的"中文/改动概述..."等硬编码指令；空值返回默认中文块，与未检测
-// 到语言时的现有行为一致（零回归）。
+// prompt 中的硬编码指令；空值返回默认中文规则块，与未检测到语言时的现有
+// 行为一致（零回归）。
 //
-// 三种返回值：
-//   - en    — 强制英文 PR 标题 + Markdown 正文（## Summary / Changes / Key
-//     Files / How Verified）
-//   - mixed — 中英混用，与项目历史风格一致
-//   - "" / "zh" — 默认中文块（与旧硬编码指令同语义）
+// 模板策略：自由 section。用户列出的 5 个 section 只是建议，LLM 按实际
+// 增删；只有有真实内容时才写对应 section。
+//
+// 显式禁止项（PR title + body 都不可含）：
+//   - AI 署名 trailer：🤖 Generated with Claude Code、Co-Authored-By: Claude <...>、
+//     Co-authored-by: ... 等
+//   - auto-push 描述：Auto-created by NovaWorkbench auto-push、由 NovaWorkbench
+//     auto-push 自动创建 等
+//   - 占位文本：无关联 / N/A / 无 —— 完全空白的 section 整段省略
+//
+// 三种返回值：en / mixed / "" (zh) —— 与 ResolveCommitLang 对齐。
 func PRLangRules(lang string) string {
 	switch ResolveCommitLang(lang, "") {
 	case "en":
-		return "## PR 摘要语言规则（强制，覆盖 pr_author 角色默认中文规则）\n" +
+		return "## PR Summary Template (overrides pr_author role default)\n" +
 			"- PR title: one sentence in English, no more than 80 characters, no Conventional Commits prefix (`feat:`, `fix:`, etc.).\n" +
-			"- PR body: Markdown in English, organized as `## Summary / ## Changes / ## Key Files / ## How Verified`. Keep it concise.\n"
+			"- PR body: Markdown in English. Use your judgment to include or omit sections based on what's actually relevant. The user listed 5 reference sections below; treat them as suggestions, not requirements — only include a section when you have real content for it:\n" +
+			"  - `## What changed`: concrete description of code changes (files, behaviors, why). Include when there are code changes to describe.\n" +
+			"  - `## Related issue`: ONLY when you can confidently identify a closing issue, format as `Closes #123`. Omit entirely if there is no closing issue.\n" +
+			"  - `## How to verify`: test steps / commands the reviewer can run. Omit if no test/verification is applicable.\n" +
+			"  - `## Checklist`: any test coverage / manual verification you performed. Omit if you did none.\n" +
+			"  - `## Notes`: free-form reviewer notes. When you include this section, end it with these two fixed items (do not change wording):\n" +
+			"    - [ ] Self-tested\n" +
+			"    - [ ] No debug code\n" +
+			"- Strictly FORBIDDEN in PR title or body:\n" +
+			"  - AI attribution trailers: 🤖 Generated with Claude Code, Co-Authored-By: Claude <...>, Co-authored-by: ..., etc.\n" +
+			"  - Auto-push notices: \"Auto-created by NovaWorkbench auto-push\", \"由 NovaWorkbench auto-push 自动创建\", etc.\n" +
+			"  - Placeholder text for missing data: 无关联 / N/A / 无 — omit the section entirely instead.\n" +
+			"- Keep it concise.\n"
 	case "mixed":
-		return "## PR 摘要语言规则（强制，覆盖 pr_author 角色默认中文规则）\n" +
+		return "## PR 摘要模板（强制，覆盖 pr_author 角色默认中文规则）\n" +
 			"- PR 标题：可用中文或英文，与项目既有提交历史风格保持一致（不超过 40 字，不要 Conventional Commits 前缀）。\n" +
-			"- PR 正文：Markdown，结构按「改动概述 / 主要变更 / 关键文件 / 验证方式」组织，可中英混用。\n"
-	default: // "" 或 "zh"：保持现有中文默认行为
+			"- PR 正文：Markdown，中英混用。section 按实际判断增删 —— 用户列出的 5 个参考 section 只是建议，不是强制；只有当有真实内容时才写：\n" +
+			"  - `## 改了什么`：具体说明代码改动（文件、行为、原因）。\n" +
+			"  - `## 关联 Issue`：仅当能明确识别到要关闭的 issue 时输出，格式为 `Closes #123`，否则整个 section 省略。\n" +
+			"  - `## 怎么验证`：审阅者可执行的测试步骤 / 命令。\n" +
+			"  - `## 检查清单`：你实际做的测试 / 验证。\n" +
+			"  - `## 备注`：自由文本 reviewer 备注。如包含此 section，末尾固定附以下两个检查项（不要修改措辞）：\n" +
+			"    - [ ] 自测通过\n" +
+			"    - [ ] 无调试代码\n" +
+			"- 严格禁止出现在 PR 标题或正文：\n" +
+			"  - AI 署名 trailer：🤖 Generated with Claude Code、Co-Authored-By: Claude <...>、Co-authored-by: ... 等\n" +
+			"  - auto-push 描述：「由 NovaWorkbench auto-push 自动创建」「Auto-created by NovaWorkbench auto-push」等\n" +
+			"  - 占位文本：无关联 / N/A / 无 —— 完全空白的 section 整个省略\n" +
+			"- 简洁有重点。\n"
+	default: // "" 或 "zh"：默认中文
 		return "## PR 摘要要求\n" +
 			"- PR 标题使用中文，一句话概括本次改动（不超过 40 字，不要以 `feat:` 等前缀开头）。\n" +
-			"- PR 正文使用 Markdown，按「改动概述 / 主要变更 / 关键文件 / 验证方式」组织，简洁有重点。\n"
+			"- PR 正文使用 Markdown。section 按实际判断增删 —— 用户列出的 5 个参考 section 只是建议，不是强制；只有当有真实内容时才写：\n" +
+			"  - `## 改了什么`：具体说明代码改动（文件、行为、原因）。\n" +
+			"  - `## 关联 Issue`：仅当能明确识别到要关闭的 issue 时输出，格式为 `Closes #123`，否则整个 section 省略。\n" +
+			"  - `## 怎么验证`：审阅者可执行的测试步骤 / 命令。\n" +
+			"  - `## 检查清单`：你实际做的测试 / 验证。\n" +
+			"  - `## 备注`：自由文本 reviewer 备注。如包含此 section，末尾固定附以下两个检查项（不要修改措辞）：\n" +
+			"    - [ ] 自测通过\n" +
+			"    - [ ] 无调试代码\n" +
+			"- 严格禁止出现在 PR 标题或正文：\n" +
+			"  - AI 署名 trailer：🤖 Generated with Claude Code、Co-Authored-By: Claude <...>、Co-authored-by: ... 等\n" +
+			"  - auto-push 描述：「由 NovaWorkbench auto-push 自动创建」「Auto-created by NovaWorkbench auto-push」等\n" +
+			"  - 占位文本：无关联 / N/A / 无 —— 完全空白的 section 整个省略\n" +
+			"- 简洁有重点。\n"
 	}
 }
 
@@ -177,23 +219,29 @@ func ShouldRegenerateForLang(commitLang, title string) bool {
 // 字符串。这些是 git/gh 用的直接文案（不是给 LLM 看的指令），所以不能
 // 复用 PRLangRules / StyleHint。
 //
-//   - "en"            → 英文 commit fallback + 英文 PR 标题回退 + 英文
-//                       PR 正文段落与 section 标题。
-//   - "" / "zh" /
-//     "mixed"         → 默认中文，与现有硬编码内容同语义（零回归）。
+// shell 路径是确定性的（不调 LLM），只能填 5-section 模板的 2 个子集：
+//   - ## 改了什么 / ## What changed → PRBodyWhatChangedHeading（commits + diff stat）
+//   - ## 备注 / ## Notes            → PRBodyNotesHeading + PRBodyNotesChecklist
+//
+// 其余 3 个 section（关联 Issue / 怎么验证 / 检查清单）shell 路径无 issue
+// 上下文、无验证步骤、无 checklist 内容，整段省略。这是数据驱动的"自由
+// section"——shell 路径只输出它有数据的 section。完全空白的 section
+// 整段省略，PR body 不含 AI 署名 / auto-push 描述。
+//
+//   - "en"    → 英文 commit fallback + 英文 PR 标题回退 + 英文 PR 正文。
+//   - "" / "zh" / "mixed" → 默认中文。
 type PRShellTemplates struct {
-	CommitMessageDefaultFmt string // e.g. "NovaWorkbench auto-push: update %s"
-	PRTitleFallback         string // e.g. "NovaWorkbench auto-push: %s"
-	PRBodyIntroFmt          string // e.g. "Auto-created by ... (based on requirement %s)."
-	PRBodySummaryHeading    string // e.g. "## Summary"
-	PRBodyCommitsHeading    string // e.g. "## Commits"
-	PRBodyStatsHeading      string // e.g. "## Diff Stats"
+	CommitMessageDefaultFmt  string // e.g. "NovaWorkbench auto-push: update %s"
+	PRTitleFallback          string // e.g. "NovaWorkbench auto-push: %s"
+	PRBodyWhatChangedHeading string // e.g. "## What changed" / "## 改了什么"
+	PRBodyNotesHeading       string // e.g. "## Notes" / "## 备注"
+	PRBodyNotesChecklist     string // 多行字符串：en "- [ ] Self-tested\n- [ ] No debug code" / zh "- [ ] 自测通过\n- [ ] 无调试代码"
 }
 
 // NewPRShellTemplates 根据 lang 返回本地化模板。分支解析走 ResolveCommitLang：
 //
 //	"en" → 英文模板
-//	"" / "zh" / "mixed" → 中文模板（与现有硬编码内容同语义，零回归）
+//	"" / "zh" / "mixed" → 中文模板
 //
 // 函数名采用 `New<Struct>` 构造函数惯例，因为类型 PRShellTemplates 与
 // 构造函数同名会与 Go 同包命名空间冲突。
@@ -201,21 +249,19 @@ func NewPRShellTemplates(lang string) PRShellTemplates {
 	switch ResolveCommitLang(lang, "") {
 	case "en":
 		return PRShellTemplates{
-			CommitMessageDefaultFmt: "NovaWorkbench auto-push: update %s",
-			PRTitleFallback:         "NovaWorkbench auto-push: %s",
-			PRBodyIntroFmt:          "Auto-created by NovaWorkbench auto-push (based on requirement %s).",
-			PRBodySummaryHeading:    "## Summary",
-			PRBodyCommitsHeading:    "## Commits",
-			PRBodyStatsHeading:      "## Diff Stats",
+			CommitMessageDefaultFmt:  "NovaWorkbench auto-push: update %s",
+			PRTitleFallback:          "NovaWorkbench auto-push: %s",
+			PRBodyWhatChangedHeading: "## What changed",
+			PRBodyNotesHeading:       "## Notes",
+			PRBodyNotesChecklist:     "- [ ] Self-tested\n- [ ] No debug code",
 		}
-	default: // "" / "zh" / "mixed" — 中文默认，保持现有硬编码内容
+	default: // "" / "zh" / "mixed" — 中文默认
 		return PRShellTemplates{
-			CommitMessageDefaultFmt: "NovaWorkbench auto-push 更新 %s",
-			PRTitleFallback:         "NovaWorkbench auto-push: %s",
-			PRBodyIntroFmt:          "由 NovaWorkbench auto-push 自动创建（基于需求 %s）。",
-			PRBodySummaryHeading:    "## 改动概述",
-			PRBodyCommitsHeading:    "## 提交",
-			PRBodyStatsHeading:      "## 变更统计",
+			CommitMessageDefaultFmt:  "NovaWorkbench auto-push 更新 %s",
+			PRTitleFallback:          "NovaWorkbench auto-push: %s",
+			PRBodyWhatChangedHeading: "## 改了什么",
+			PRBodyNotesHeading:       "## 备注",
+			PRBodyNotesChecklist:     "- [ ] 自测通过\n- [ ] 无调试代码",
 		}
 	}
 }

@@ -170,44 +170,81 @@ func TestResolveCommitLang(t *testing.T) {
 	}
 }
 
-// TestPRLangRules asserts the four language branches of PRLangRules:
-//   - en    → English title + Summary/Changes/Key Files/How Verified block
-//   - mixed → 中英混用, with both Chinese keywords
-//   - zh    → 改动概述 / 主要变更 / 关键文件 / 验证方式 中文块
+// TestPRLangRules asserts the three language branches of PRLangRules:
+//   - en    → English title + free-section guidance + explicit prohibitions
+//   - mixed → 中英混用, with both Chinese keywords and explicit prohibitions
+//   - zh    → 改了什么 / 关联 Issue / 怎么验证 / 检查清单 / 备注 中文块 + 显式禁止
 //   - ""    → identical to zh (zero regression for unresolved style)
+//
+// 模板策略：自由 section（5-section 是建议不是强制；LLM 按实际增删）。
+// 显式禁止：AI 署名 trailer / auto-push 描述 / 占位文本。
 func TestPRLangRules(t *testing.T) {
 	en := PRLangRules("en")
-	if !strings.Contains(en, "English") {
-		t.Fatalf("en block must contain English, got: %q", en)
-	}
-	for _, kw := range []string{"Summary", "Changes", "Key Files", "How Verified"} {
-		if !strings.Contains(en, kw) {
-			t.Fatalf("en block must contain %q, got: %q", kw, en)
-		}
-	}
-	if strings.Contains(en, "改动概述") {
-		t.Fatalf("en block must not contain 中文 schema 改动概述, got: %q", en)
-	}
+	// 自由 section 指引
+	mustContain(t, en, "PR Summary Template")
+	mustContain(t, en, "Use your judgment to include or omit sections")
+	mustContain(t, en, "treat them as suggestions, not requirements")
+	mustContain(t, en, "What changed")
+	mustContain(t, en, "Closes #")
+	mustContain(t, en, "How to verify")
+	mustContain(t, en, "Checklist")
+	mustContain(t, en, "Notes")
+	mustContain(t, en, "- [ ] Self-tested")
+	mustContain(t, en, "- [ ] No debug code")
+	// 显式禁止
+	mustContain(t, en, "Strictly FORBIDDEN")
+	mustContain(t, en, "🤖 Generated with Claude Code")
+	mustContain(t, en, "Co-Authored-By: Claude")
+	mustContain(t, en, "Co-authored-by")
+	mustContain(t, en, "Auto-created by NovaWorkbench auto-push")
+	mustContain(t, en, "由 NovaWorkbench auto-push 自动创建")
+	mustContain(t, en, "N/A")
 
 	mixed := PRLangRules("mixed")
-	if !strings.Contains(mixed, "中英混用") {
-		t.Fatalf("mixed block must contain 中英混用, got: %q", mixed)
-	}
-	if !strings.Contains(mixed, "改动概述") {
-		t.Fatalf("mixed block must keep 中文 schema 改动概述, got: %q", mixed)
-	}
+	mustContain(t, mixed, "按实际判断增删")
+	mustContain(t, mixed, "改了什么")
+	mustContain(t, mixed, "Closes #")
+	mustContain(t, mixed, "怎么验证")
+	mustContain(t, mixed, "检查清单")
+	mustContain(t, mixed, "备注")
+	mustContain(t, mixed, "- [ ] 自测通过")
+	mustContain(t, mixed, "- [ ] 无调试代码")
+	mustContain(t, mixed, "严格禁止")
+	mustContain(t, mixed, "🤖 Generated with Claude Code")
+	mustContain(t, mixed, "Co-Authored-By: Claude")
+	mustContain(t, mixed, "由 NovaWorkbench auto-push 自动创建")
+	mustContain(t, mixed, "Auto-created by NovaWorkbench auto-push")
+	mustContain(t, mixed, "无关联")
 
 	zh := PRLangRules("zh")
-	if !strings.Contains(zh, "中文") || !strings.Contains(zh, "改动概述") {
-		t.Fatalf("zh block must contain 中文/改动概述, got: %q", zh)
-	}
-	if !strings.Contains(zh, "PR 摘要要求") {
-		t.Fatalf("zh block must keep legacy heading PR 摘要要求 (zero regression), got: %q", zh)
-	}
+	mustContain(t, zh, "按实际判断增删")
+	mustContain(t, zh, "改了什么")
+	mustContain(t, zh, "Closes #")
+	mustContain(t, zh, "怎么验证")
+	mustContain(t, zh, "检查清单")
+	mustContain(t, zh, "备注")
+	mustContain(t, zh, "- [ ] 自测通过")
+	mustContain(t, zh, "- [ ] 无调试代码")
+	mustContain(t, zh, "严格禁止")
+	mustContain(t, zh, "🤖 Generated with Claude Code")
+	mustContain(t, zh, "Co-Authored-By: Claude")
+	mustContain(t, zh, "由 NovaWorkbench auto-push 自动创建")
+	mustContain(t, zh, "Auto-created by NovaWorkbench auto-push")
+	mustContain(t, zh, "无关联")
 
 	empty := PRLangRules("")
 	if empty != zh {
 		t.Fatalf("empty block must equal zh block (zero regression), got: %q vs %q", empty, zh)
+	}
+}
+
+// mustContain is a small test helper for PRLangRules substring assertions.
+// Using inline strings.Contains everywhere bloats the function; the helper
+// keeps each line short and makes missing-substring failures self-describing.
+func mustContain(t *testing.T, s, sub string) {
+	t.Helper()
+	if !strings.Contains(s, sub) {
+		t.Errorf("expected substring %q not found in:\n%s", sub, s)
 	}
 }
 
@@ -275,30 +312,64 @@ func TestShouldRegenerateForLang(t *testing.T) {
 }
 
 // TestPRShellTemplates guards the localized text used by the shell-path PR
-// body. The "en" branch must produce English section headings + intro; the
-// zero-regression branches ("" / "zh" / "mixed") must keep the existing
-// hardcoded Chinese strings verbatim.
+// body. The 5-field struct holds a 2-section subset (改了什么 + 备注):
+//   - "en" branch → English section headings + en checklist
+//   - "" / "zh" / "mixed" → Chinese section headings + zh checklist
+//
+// The legacy `PRBodyIntroFmt` / `PRBodySummaryHeading` / `PRBodyCommitsHeading` /
+// `PRBodyStatsHeading` fields are intentionally dropped — they encoded the
+// 3-section "由 NovaWorkbench auto-push 自动创建（基于需求 %s）" intro that
+// the user has asked to remove (req_9ead19cd39f632fd).
 func TestPRShellTemplates(t *testing.T) {
-	en := NewPRShellTemplates("en")
-	if en.PRBodySummaryHeading != "## Summary" {
-		t.Errorf("en.PRBodySummaryHeading = %q, want %q", en.PRBodySummaryHeading, "## Summary")
+	cases := []struct {
+		lang string
+		want PRShellTemplates
+	}{
+		{
+			lang: "en",
+			want: PRShellTemplates{
+				CommitMessageDefaultFmt:  "NovaWorkbench auto-push: update %s",
+				PRTitleFallback:          "NovaWorkbench auto-push: %s",
+				PRBodyWhatChangedHeading: "## What changed",
+				PRBodyNotesHeading:       "## Notes",
+				PRBodyNotesChecklist:     "- [ ] Self-tested\n- [ ] No debug code",
+			},
+		},
+		{
+			lang: "zh",
+			want: PRShellTemplates{
+				CommitMessageDefaultFmt:  "NovaWorkbench auto-push 更新 %s",
+				PRTitleFallback:          "NovaWorkbench auto-push: %s",
+				PRBodyWhatChangedHeading: "## 改了什么",
+				PRBodyNotesHeading:       "## 备注",
+				PRBodyNotesChecklist:     "- [ ] 自测通过\n- [ ] 无调试代码",
+			},
+		},
+		{
+			lang: "mixed",
+			want: PRShellTemplates{
+				CommitMessageDefaultFmt:  "NovaWorkbench auto-push 更新 %s",
+				PRTitleFallback:          "NovaWorkbench auto-push: %s",
+				PRBodyWhatChangedHeading: "## 改了什么",
+				PRBodyNotesHeading:       "## 备注",
+				PRBodyNotesChecklist:     "- [ ] 自测通过\n- [ ] 无调试代码",
+			},
+		},
+		{
+			lang: "",
+			want: PRShellTemplates{
+				CommitMessageDefaultFmt:  "NovaWorkbench auto-push 更新 %s",
+				PRTitleFallback:          "NovaWorkbench auto-push: %s",
+				PRBodyWhatChangedHeading: "## 改了什么",
+				PRBodyNotesHeading:       "## 备注",
+				PRBodyNotesChecklist:     "- [ ] 自测通过\n- [ ] 无调试代码",
+			},
+		},
 	}
-	if en.PRBodyStatsHeading != "## Diff Stats" {
-		t.Errorf("en.PRBodyStatsHeading = %q, want %q", en.PRBodyStatsHeading, "## Diff Stats")
-	}
-	if en.PRBodyIntroFmt != "Auto-created by NovaWorkbench auto-push (based on requirement %s)." {
-		t.Errorf("en.PRBodyIntroFmt = %q, want %q", en.PRBodyIntroFmt,
-			"Auto-created by NovaWorkbench auto-push (based on requirement %s).")
-	}
-
-	for _, lang := range []string{"", "zh", "mixed"} {
-		got := NewPRShellTemplates(lang)
-		if got.PRBodySummaryHeading != "## 改动概述" {
-			t.Errorf("lang=%q PRBodySummaryHeading = %q, want 中文零回归 %q", lang, got.PRBodySummaryHeading, "## 改动概述")
-		}
-		if got.PRBodyIntroFmt != "由 NovaWorkbench auto-push 自动创建（基于需求 %s）。" {
-			t.Errorf("lang=%q PRBodyIntroFmt = %q, want 中文零回归 %q", lang, got.PRBodyIntroFmt,
-				"由 NovaWorkbench auto-push 自动创建（基于需求 %s）。")
+	for _, c := range cases {
+		got := NewPRShellTemplates(c.lang)
+		if got != c.want {
+			t.Errorf("NewPRShellTemplates(%q):\n  got  %+v\n  want %+v", c.lang, got, c.want)
 		}
 	}
 }

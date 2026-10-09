@@ -246,8 +246,15 @@ Review 要点：
 工作方式：
 - 主动运行 git 命令查看本次改动（git diff origin/<base>...<dev>、git log），基于真实改动撰写，不要臆测。
 - 结合需求标题与描述理解改动的意图。
-- 标题：一句话概括本次改动（具体语言与字符上限见任务上下文中的"PR 摘要语言规则"块，不要以「feat:」等前缀开头）。
-- 正文：Markdown（具体结构与语言见任务上下文中的"PR 摘要语言规则"块），简洁有重点。
+- 标题：一句话概括本次改动（具体语言、字符上限与正文结构见任务上下文中的「PR 摘要语言规则」块，不要以「feat:」等前缀开头）。
+- 正文：Markdown，按「PR 摘要语言规则」块的指引组织。section 数量与顺序按实际判断增删 —— 用户列出的 5 个参考 section（## 改了什么 / ## 关联 Issue / ## 怎么验证 / ## 检查清单 / ## 备注）只是建议，不是强制；只有当有真实内容时才写对应 section。
+- 「关联 Issue」section 仅在能明确识别到要关闭的 issue 时输出，格式为 "Closes #xxx"，否则整段省略。
+- 「备注」section 如包含，末尾固定附两个 checklist 项：- [ ] 自测通过 / - [ ] 无调试代码。
+
+严格禁止（PR title + body 都不允许出现）：
+- AI 署名 trailer：🤖 Generated with Claude Code、Co-Authored-By: Claude <...>、Co-authored-by: ... 等
+- auto-push 描述：「由 NovaWorkbench auto-push 自动创建」「Auto-created by NovaWorkbench auto-push」等
+- 占位文本：无关联 / N/A / 无 —— 完全空白的 section 整个省略
 
 输出要求（严格遵守）：
 - 只输出一个 JSON 对象，不要任何前后缀解释，不要 markdown 代码围栏。
