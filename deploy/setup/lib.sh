@@ -4,6 +4,12 @@
 #   source "$(dirname "$0")/lib.sh"
 #
 # Provides:
+#   ensure_nginx_installed     - on a fresh server, apt-install the host
+#                                nginx package; idempotent (early-return
+#                                when nginx is already on PATH). Called
+#                                by every helper that runs `sudo nginx`
+#                                so a fresh host doesn't abort with
+#                                `sudo: 'nginx': command not found`.
 #   ensure_docker_access       - on a fresh server, install docker via
 #                                the official convenience script; then
 #                                add the SSH user to the docker group
@@ -27,6 +33,38 @@ NOVA_DOMAIN="nova.yishield.com"
 NOVA_CERT_DIR="/etc/nginx/ssl/${NOVA_DOMAIN}"
 NOVA_NGINX_PROXY_PORT="${NOVA_NGINX_PROXY_PORT:-9580}"
 NOVA_DEPLOY_DIR="${HOME}/nova/deploy"
+
+# ensure_nginx_installed — bootstrap the HOST nginx package on a fresh
+# server. ensure_wildcard_cert and ensure_nova_nginx_vhost both run
+# `sudo nginx -t` to validate config + `sudo nginx -s reload` to pick up
+# new certs/vhosts; on a server that ran only ensure_docker_access (and
+# possibly the docker install branch) those calls abort with
+# `sudo: 'nginx': command not found` and exit 1 in the Deploy to
+# production job. Idempotent: early-returns if nginx is already on PATH.
+ensure_nginx_installed() {
+  if command -v nginx >/dev/null 2>&1; then
+    return 0
+  fi
+  echo ">>> nginx not installed — installing"
+
+  # Same sudo gate as ensure_docker_access — we need root to install
+  # packages and to manage the daemon.
+  if ! sudo -n true 2>/dev/null && [[ "$(id -u)" -ne 0 ]]; then
+    echo "!! passwordless sudo not available — please install nginx manually:" >&2
+    echo "   sudo apt-get update && sudo apt-get install -y nginx" >&2
+    exit 1
+  fi
+
+  sudo apt-get update -y
+  sudo apt-get install -y nginx
+
+  # Start nginx (systemd host; fall back to legacy service for the rare
+  # non-systemd host that the convenience-script branch also covers).
+  sudo systemctl enable nginx 2>/dev/null || true
+  sudo systemctl start nginx 2>/dev/null \
+    || sudo service nginx start 2>/dev/null \
+    || true
+}
 
 ensure_docker_access() {
   # Already reachable → nothing to do.
@@ -116,6 +154,11 @@ ensure_nginx_proxy_container() {
 # Host to the matching backend. MUST run after ensure_wildcard_cert so the cert
 # files exist before `nginx -t` validates the ssl_certificate directives.
 ensure_nova_nginx_vhost() {
+  # `sudo mkdir -p /etc/nginx/...` and `sudo nginx -t` both need the
+  # host nginx package; bootstrap it on a fresh server so the rest of
+  # this function doesn't abort with `sudo: 'nginx': command not found`.
+  ensure_nginx_installed
+
   local avail="/etc/nginx/sites-available/nova"
   local enabled="/etc/nginx/sites-enabled/nova"
   sudo mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/vhost.d
@@ -183,7 +226,13 @@ EOF
   fi
   if [[ "${changed}" -eq 1 ]]; then
     echo ">>> (re)installed host nginx vhost for *.nova.yishield.com; reloading nginx"
-    sudo nginx -t && sudo nginx -s reload
+    # Two separate statements (not `sudo nginx -t && sudo nginx -s reload`)
+    # so `set -e` actually aborts when `nginx -t` fails — bash exempts the
+    # first command of an `&&` chain from set -e, which previously let
+    # the script fall through to ensure_nginx_proxy_sse_tuning and surface
+    # a misleading docker.sock permission error from `docker restart`.
+    sudo nginx -t
+    sudo nginx -s reload
   fi
 }
 
@@ -271,6 +320,12 @@ EOF
 #   - cert present but renewal fails, installed cert still valid       -> warn + continue
 #   - cert present but renewal fails, installed cert missing/expired    -> exit 1
 ensure_wildcard_cert() {
+  # `sudo mkdir -p /etc/nginx/ssl/...` and the `sudo nginx -t && reload`
+  # pair below both need the host nginx package; bootstrap it on a fresh
+  # server so the rest of this function doesn't abort with
+  # `sudo: 'nginx': command not found`.
+  ensure_nginx_installed
+
   local domain="nova.yishield.com"
   local cert_dir="/etc/nginx/ssl/${domain}"
   local installed_full="${cert_dir}/${domain}.crt"
@@ -368,7 +423,13 @@ ensure_wildcard_cert() {
     # the new cert. (The internal nginx-proxy is HTTP-only, no cert reload
     # needed there.) ensure_nova_nginx_vhost runs after this to write/reload
     # the vhost that references these files.
-    sudo nginx -t && sudo nginx -s reload
+    # Two separate statements (not `sudo nginx -t && sudo nginx -s reload`)
+    # so `set -e` actually aborts when `nginx -t` fails — bash exempts the
+    # first command of an `&&` chain from set -e, which previously let
+    # the script fall through to ensure_nginx_proxy_sse_tuning and surface
+    # a misleading docker.sock permission error from `docker restart`.
+    sudo nginx -t
+    sudo nginx -s reload
   else
     echo ">>> Wildcard cert up to date — no reload needed"
   fi
