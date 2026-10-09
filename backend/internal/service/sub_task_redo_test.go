@@ -62,7 +62,7 @@ func TestRedoAsNew_InsertsChildRow(t *testing.T) {
 		t.Fatalf("precondition: row count = %d, want 1", got)
 	}
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	res, err := svc.RedoAsNew("st_redo", "")
 	if err != nil {
 		t.Fatalf("RedoAsNew: %v", err)
@@ -140,7 +140,7 @@ func TestRedoAsNew_ModelOverride(t *testing.T) {
 	d := newTestDB(t)
 	seedSubTaskRowForRedo(t, d, "st_redo_m", "error", "sid_b", "sid_src", "job_old", "旧报告")
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	res, err := svc.RedoAsNew("st_redo_m", "claude-test")
 	if err != nil {
 		t.Fatalf("RedoAsNew: %v", err)

@@ -94,7 +94,12 @@ func main() {
 	projectSvc := service.NewProjectService(database, platformSvc)
 	memorySvc := service.NewMemoryService(database)
 	knowledgeSvc := service.NewKnowledgeService(database)
-	reqSvc := service.NewRequirementService(database)
+	// reportArchiveSvc must be constructed BEFORE reqSvc / subTaskSvc so it
+	// can be injected into their constructors — Delete / DeleteByIDs use it
+	// to clean up the knowledge table when a requirement or sub-task row is
+	// removed.
+	reportArchiveSvc := service.NewReportArchiveService(database)
+	reqSvc := service.NewRequirementService(database, reportArchiveSvc)
 	roleSvc := service.NewRoleService(database)
 	settingSvc := service.NewSettingService(database)
 	reportSvc := service.NewReportService(database)
@@ -103,7 +108,7 @@ func main() {
 	aclSvc := service.NewACLService(database)
 	skillSvc := service.NewSkillService(database)
 	agentSvrSvc := service.NewAgentServerService(database)
-	subTaskSvc := service.NewSubTaskService(database)
+	subTaskSvc := service.NewSubTaskService(database, reportArchiveSvc)
 	subTaskEvents := service.NewSubTaskEventHub()
 	subTaskSvc.SetEvents(subTaskEvents)
 	log.Printf("[sub-task-event] hub initialized")
@@ -275,6 +280,11 @@ func main() {
 	// run / scheduled task) atomically. See requirement_launch.go and
 	// requirement.go's Create method.
 	reqH := handler.NewRequirementHandler(reqSvc, llmGateway, sharedJobs, usageSvc, wizardH, schedSvc)
+	// Report-archive handler — turns finished dev / sub-task reports into
+	// knowledge rows. Sync HTTP endpoints (not JobStore-backed) so the click
+	// is round-trippable. No RequirePermission — same convention as
+	// /api/requirements/{id}/archive (auth middleware covers it).
+	reportArchiveH := handler.NewReportArchiveHandler(reqSvc, subTaskSvc, reportArchiveSvc, llmGateway, usageSvc)
 	// Scheduled-task executor (wizard bridge) and HTTP handler. The
 	// scheduler package polls scheduled_tasks rows and dispatches through
 	// the executor; both live in main.go so the lifecycle is the same as
@@ -546,6 +556,12 @@ func main() {
 	mux.HandleFunc("DELETE /api/requirements/{id}/analysis-session", reqH.ClearAnalysisSession)
 	mux.HandleFunc("POST /api/requirements/{id}/archive", reqH.Archive)
 	mux.HandleFunc("POST /api/requirements/{id}/unarchive", reqH.Unarchive)
+	// Report-archive endpoints (主 Agent 汇总报告 + 子任务报告 → knowledge).
+	// No RequirePermission — auth middleware is the gate, same as the
+	// /archive / /unarchive siblings above.
+	mux.HandleFunc("POST /api/requirements/{id}/dev-report/archive", reportArchiveH.ArchiveDevReport)
+	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks/{sid}/archive", reportArchiveH.ArchiveSubTaskReport)
+	mux.HandleFunc("GET /api/requirements/{id}/report-archives", reportArchiveH.ListArchives)
 
 	// Token usage (per-requirement / per-project aggregation; review rows
 	// are recorded but excluded from project totals — surfaced separately).

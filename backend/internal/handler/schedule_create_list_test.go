@@ -45,7 +45,7 @@ func TestScheduleCreateThenListRoundTrip(t *testing.T) {
 	reqID := seedRequirementForSchedule(t, d)
 
 	schedSvc := service.NewScheduledTaskService(d)
-	reqSvc := service.NewRequirementService(d)
+	reqSvc := service.NewRequirementService(d, nil)
 
 	h := NewScheduleHandler(schedSvc, reqSvc)
 	mux := http.NewServeMux()

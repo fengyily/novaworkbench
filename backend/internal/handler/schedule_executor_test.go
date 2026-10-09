@@ -45,7 +45,7 @@ func TestRunScheduledCoding_StatusTransition(t *testing.T) {
 	}
 	defer d.Close()
 
-	reqSvc := service.NewRequirementService(d)
+	reqSvc := service.NewRequirementService(d, nil)
 	schedSvc := service.NewScheduledTaskService(d)
 
 	// WizardHandler with ONLY reqSvc populated. The happy path of

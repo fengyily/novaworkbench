@@ -33,7 +33,7 @@ func seedProject(t *testing.T, d *db.DB, id, name, localPath string) {
 // idempotent.
 func TestRequirementClearWorktree(t *testing.T) {
 	d := newTestDB(t)
-	reqSvc := NewRequirementService(d)
+	reqSvc := NewRequirementService(d, nil)
 
 	seedProject(t, d, "proj_1", "p", t.TempDir())
 
@@ -108,7 +108,7 @@ func TestProjectUpdateBasicInfoCascadesWorktreeClear(t *testing.T) {
 	d := newTestDB(t)
 	platformSvc := NewPlatformTokenService(d)
 	projSvc := NewProjectService(d, platformSvc)
-	reqSvc := NewRequirementService(d)
+	reqSvc := NewRequirementService(d, nil)
 
 	oldDir := t.TempDir()
 	newDir := t.TempDir()
@@ -178,7 +178,7 @@ func TestProjectUpdateBasicInfoNoMoveDoesNotClear(t *testing.T) {
 	d := newTestDB(t)
 	platformSvc := NewPlatformTokenService(d)
 	projSvc := NewProjectService(d, platformSvc)
-	reqSvc := NewRequirementService(d)
+	reqSvc := NewRequirementService(d, nil)
 
 	dir := t.TempDir()
 	seedProject(t, d, "proj_p", "p", dir)

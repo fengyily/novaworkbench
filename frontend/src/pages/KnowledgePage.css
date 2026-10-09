@@ -134,6 +134,11 @@
 .type-business_context { background: #dbeafe; color: #2563eb; }
 .type-design_rationale { background: #ede9fe; color: #7c3aed; }
 .type-code_explanation { background: #d1fae5; color: #059669; }
+/* Report-archive categories (主 Agent 汇总报告 + 子任务报告). Distinct
+ * purple/blue so a glance separates the "user curated" types above from
+ * the "auto-distilled" reports. */
+.type-dev_report { background: #ede9fe; color: #6d28d9; }
+.type-subtask_report { background: #dbeafe; color: #1d4ed8; }
 
 .kb-unreviewed { padding: 2px 6px; background: #fef3c7; color: #d97706; border-radius: 3px; font-size: 11px; font-weight: 600; }
 .kb-rejected { padding: 2px 6px; background: #fee2e2; color: #dc2626; border-radius: 3px; font-size: 11px; font-weight: 600; }

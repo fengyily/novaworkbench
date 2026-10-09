@@ -29,7 +29,7 @@ func TestClaimNextPending_StampsHeartbeatComparableToCutoff(t *testing.T) {
 	d := newTestDB(t)
 	seedRunningRow(t, d, "st_claim", "batch_ts", "", "", model.SubTaskStatusPending, 0)
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	st, ok, err := svc.ClaimNextPending("batch_ts")
 	if err != nil {
 		t.Fatalf("ClaimNextPending: %v", err)
@@ -61,7 +61,7 @@ func TestClaimNextPending_HeartbeatRoundTripsAsInstant(t *testing.T) {
 	d := newTestDB(t)
 	seedRunningRow(t, d, "st_rt", "batch_rt", "", "", model.SubTaskStatusPending, 0)
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	before := time.Now()
 	if _, ok, err := svc.ClaimNextPending("batch_rt"); err != nil || !ok {
 		t.Fatalf("ClaimNextPending: ok=%v err=%v", ok, err)
@@ -93,7 +93,7 @@ func TestMarkHeartbeat_RefreshClearsStaleness(t *testing.T) {
 	d := newTestDB(t)
 	seedRunningRow(t, d, "st_live", "batch_hb", "sid-live", "job-live", model.SubTaskStatusRunning, 3*time.Minute)
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	if err := svc.MarkHeartbeat("st_live", "sid-live"); err != nil {
 		t.Fatalf("MarkHeartbeat: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestRecoverStaleRunningInBatch_LegacyCurrentTimestampRows(t *testing.T) {
 	seedLegacyHeartbeatRow(t, d, "st_legacy_fresh", "batch_lg", 1, 3)   // 3s old  -> live
 	seedLegacyHeartbeatRow(t, d, "st_legacy_stale", "batch_lg", 2, 600) // 10m old -> stale
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	rows, err := svc.RecoverStaleRunningInBatch("batch_lg", 2*time.Minute)
 	if err != nil {
 		t.Fatalf("RecoverStaleRunningInBatch: %v", err)
@@ -180,7 +180,7 @@ func TestRecoverStaleRunningInBatch_ReportsOnlyFlippedRows(t *testing.T) {
 	seedRunningRow(t, d, "st_aaa_stale", "batch_mix", "sid-stale", "job-stale", model.SubTaskStatusRunning, 5*time.Minute)
 	seedRunningRow(t, d, "st_zzz_live", "batch_mix", "", "", model.SubTaskStatusPending, 0)
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	if _, ok, err := svc.ClaimNextPending("batch_mix"); err != nil || !ok {
 		t.Fatalf("ClaimNextPending: ok=%v err=%v", ok, err)
 	}

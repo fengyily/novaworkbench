@@ -44,7 +44,7 @@ func TestRecoverStaleRunningInBatch_DoesNotTouchFreshHeartbeat(t *testing.T) {
 	seedRunningRow(t, d, "st_stale", "batch_dd", "sid-stale", "job-stale", model.SubTaskStatusRunning, 3*time.Minute)
 	seedRunningRow(t, d, "st_pending", "batch_dd", "", "", model.SubTaskStatusPending, 0)
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	rows, err := svc.RecoverStaleRunningInBatch("batch_dd", 2*time.Minute)
 	if err != nil {
 		t.Fatalf("RecoverStaleRunningInBatch: %v", err)
@@ -97,7 +97,7 @@ func TestRecoverStaleRunningInBatch_ReportsAffectedRowMetadata(t *testing.T) {
 	seedRunningRow(t, d, "st_a", "batch_dd", "sid-abc", "job-xyz", model.SubTaskStatusRunning, 5*time.Minute)
 	seedRunningRow(t, d, "st_b", "batch_dd", "", "", model.SubTaskStatusRunning, 7*time.Minute)
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	rows, err := svc.RecoverStaleRunningInBatch("batch_dd", 2*time.Minute)
 	if err != nil {
 		t.Fatalf("RecoverStaleRunningInBatch: %v", err)
@@ -139,7 +139,7 @@ func TestRecoverStaleRunningInBatch_EmptyWhenFresh(t *testing.T) {
 	seedRunningRow(t, d, "st_a", "batch_dd", "sid", "job", model.SubTaskStatusRunning, 1*time.Second)
 	seedRunningRow(t, d, "st_b", "batch_dd", "sid", "job", model.SubTaskStatusRunning, 10*time.Second)
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	rows, err := svc.RecoverStaleRunningInBatch("batch_dd", 2*time.Minute)
 	if err != nil {
 		t.Fatalf("RecoverStaleRunningInBatch: %v", err)
@@ -165,7 +165,7 @@ func TestMarkHeartbeat_SessionAware(t *testing.T) {
 	d := newTestDB(t)
 	seedRunningRow(t, d, "st_hb", "batch_dd", "sid-original", "job-original", model.SubTaskStatusRunning, 30*time.Second)
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 
 	// Stale-goroutine heartbeat: session mismatch MUST no-op. We can't
 	// directly observe the timestamp didn't move (RecoverStaleRunningInBatch
@@ -211,7 +211,7 @@ func TestFinishForSession_RefusesOnSessionMismatch(t *testing.T) {
 	d := newTestDB(t)
 	seedRunningRow(t, d, "st_fin", "batch_dd", "sid-original", "job-original", model.SubTaskStatusRunning, 30*time.Second)
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 
 	// Simulate the self-heal: a re-claim overwrites session_id.
 	if err := svc.UpdateSession("st_fin", "sid-RECLAIMED", "src"); err != nil {
@@ -267,7 +267,7 @@ func TestFinishForSession_EmptyExpectedSessionID_FallsThroughToUnconditional(t *
 	d := newTestDB(t)
 	seedRunningRow(t, d, "st_legacy", "batch_dd", "sid-original", "job-original", model.SubTaskStatusRunning, 30*time.Second)
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	tokens := model.SubTaskTokens{Input: 100, Output: 50}
 	if err := svc.FinishForSession("st_legacy", "", model.SubTaskStatusDone,
 		"legacy write", "claude-sonnet", tokens, 0, time.Now()); err != nil {

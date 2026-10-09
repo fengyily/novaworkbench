@@ -174,7 +174,9 @@ export default function KnowledgePage() {
             knowledge.map(k => (
               <div key={k.id} className="kb-card">
                 <div className="kb-card-header">
-                  <span className={`kb-type-badge cat-${k.category}`}>{k.category || 'general'}</span>
+                  <span className={`kb-type-badge type-${k.category || 'general'}`}>
+                    {t(`knowledge.memType.${k.category}` as any, { defaultValue: k.category }) || 'general'}
+                  </span>
                   {!k.is_reviewed && <span className="kb-unreviewed">{t('knowledge.unreviewed')}</span>}
                   {!k.is_approved && <span className="kb-rejected">{t('knowledge.rejected')}</span>}
                   <span className="kb-card-title">{k.title}</span>
@@ -205,8 +207,8 @@ export default function KnowledgePage() {
           </div>
           <div className="review-card">
             <div className="review-card-header">
-              <span className={`kb-type-badge cat-${reviewItems[reviewIndex].category}`}>
-                {reviewItems[reviewIndex].category || 'general'}
+              <span className={`kb-type-badge type-${reviewItems[reviewIndex].category || 'general'}`}>
+                {t(`knowledge.memType.${reviewItems[reviewIndex].category}` as any, { defaultValue: reviewItems[reviewIndex].category }) || 'general'}
               </span>
               <span className="kb-tag">{reviewItems[reviewIndex].source_type}</span>
               {reviewItems[reviewIndex].source_ref && <span className="kb-tag">{reviewItems[reviewIndex].source_ref}</span>}

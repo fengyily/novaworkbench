@@ -42,7 +42,7 @@ func TestClearUnestablishedDesignSession(t *testing.T) {
 	defer d.Close()
 
 	reqID := seedRequirementForSchedule(t, d)
-	reqSvc := service.NewRequirementService(d)
+	reqSvc := service.NewRequirementService(d, nil)
 	h := &WizardHandler{reqSvc: reqSvc}
 
 	const preexisting = "sid-preexisting-real-session"
@@ -149,7 +149,7 @@ func TestPrepareDesignWorkspace_GateFailure(t *testing.T) {
 		t.Fatalf("update project: %v", err)
 	}
 
-	reqSvc := service.NewRequirementService(d)
+	reqSvc := service.NewRequirementService(d, nil)
 	projSvc := service.NewProjectService(d, nil)
 	settingSvc := service.NewSettingService(d)
 	jobs := store.NewJobStore(8)
@@ -285,7 +285,7 @@ func TestPrepareDesignWorkspace_SuccessStampsBaseline(t *testing.T) {
 		t.Fatalf("update project: %v", err)
 	}
 
-	reqSvc := service.NewRequirementService(d)
+	reqSvc := service.NewRequirementService(d, nil)
 	projSvc := service.NewProjectService(d, nil)
 	settingSvc := service.NewSettingService(d)
 	jobs := store.NewJobStore(8)
@@ -532,7 +532,7 @@ func TestArchitectRemoteMissingSessionIDClearsDesignSession(t *testing.T) {
 	defer d.Close()
 
 	reqID := seedRequirementForSchedule(t, d)
-	reqSvc := service.NewRequirementService(d)
+	reqSvc := service.NewRequirementService(d, nil)
 	if err := reqSvc.UpdateDesignSession(reqID, "sid-pre-minted"); err != nil {
 		t.Fatalf("seed design_session_id: %v", err)
 	}
@@ -615,7 +615,7 @@ func TestArchitectRemoteStaleSessionHasSideTargetedMessage(t *testing.T) {
 			defer d.Close()
 
 			reqID := seedRequirementForSchedule(t, d)
-			reqSvc := service.NewRequirementService(d)
+			reqSvc := service.NewRequirementService(d, nil)
 			if err := reqSvc.UpdateDesignSession(reqID, "sid-stale"); err != nil {
 				t.Fatalf("seed design_session_id: %v", err)
 			}
@@ -703,7 +703,7 @@ func TestArchitectRemoteStaleSessionLocalSideStillReportsMissing(t *testing.T) {
 	defer d.Close()
 
 	reqID := seedRequirementForSchedule(t, d)
-	reqSvc := service.NewRequirementService(d)
+	reqSvc := service.NewRequirementService(d, nil)
 	if err := reqSvc.UpdateDesignSession(reqID, "sid-stale-local"); err != nil {
 		t.Fatalf("seed design_session_id: %v", err)
 	}

@@ -16,11 +16,12 @@ import (
 )
 
 type RequirementService struct {
-	db *db.DB
+	db         *db.DB
+	archiveSvc *ReportArchiveService
 }
 
-func NewRequirementService(db *db.DB) *RequirementService {
-	return &RequirementService{db: db}
+func NewRequirementService(db *db.DB, archiveSvc *ReportArchiveService) *RequirementService {
+	return &RequirementService{db: db, archiveSvc: archiveSvc}
 }
 
 // Requirement kind values. Broadens the legacy "需求" concept into three
@@ -1503,7 +1504,46 @@ func (s *RequirementService) UpdateKind(id, newKind string) (*model.Requirement,
 	return s.Get(id)
 }
 
+// Delete removes a requirement and all knowledge entries it owns. The
+// archive cleanup runs BEFORE the requirements DELETE so the source_ref
+// subquery for subtask_report rows is still resolvable; a failed cleanup
+// short-circuits the parent delete so a dangling knowledge row never
+// survives. Cleans:
+//   - dev_report rows with source_ref = id (this requirement's own summary)
+//   - subtask_report rows whose source_ref is one of this requirement's
+//     sub_tasks (children may have been archived before deletion)
+//
+// archiveSvc is optional (nil) for unit tests; the same nil-guard pattern
+// lives on SubTaskService.DeleteByIDs.
 func (s *RequirementService) Delete(id string) error {
+	if s.archiveSvc != nil {
+		if err := s.archiveSvc.DeleteBySourceRefs(SourceTypeDevReport, []string{id}); err != nil {
+			return fmt.Errorf("cleanup dev_report knowledge: %w", err)
+		}
+		rows, err := s.db.Query("SELECT id FROM sub_tasks WHERE requirement_id=?", id)
+		if err != nil {
+			return fmt.Errorf("query sub_tasks for cleanup: %w", err)
+		}
+		var subIDs []string
+		for rows.Next() {
+			var sid string
+			if err := rows.Scan(&sid); err != nil {
+				rows.Close()
+				return err
+			}
+			subIDs = append(subIDs, sid)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		if len(subIDs) > 0 {
+			if err := s.archiveSvc.DeleteBySourceRefs(SourceTypeSubtaskReport, subIDs); err != nil {
+				return fmt.Errorf("cleanup subtask_report knowledge: %w", err)
+			}
+		}
+	}
 	_, err := s.db.Exec("DELETE FROM requirements WHERE id = ?", id)
 	return err
 }

@@ -49,7 +49,7 @@ func TestClaimNextPending_ReturnsTheRowItClaimed(t *testing.T) {
 	seedPendingChild(t, d, "st_seq2", "batch_ci", 2)
 	seedPendingChild(t, d, "st_seq3", "batch_ci", 3)
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 
 	first, ok, err := svc.ClaimNextPending("batch_ci")
 	if err != nil || !ok {
@@ -103,7 +103,7 @@ func TestClaimNextPending_SkipsRunningRowsAfterSelfHeal(t *testing.T) {
 	seedPendingChild(t, d, "st_low", "batch_ci", 1)
 	seedPendingChild(t, d, "st_high", "batch_ci", 9)
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 
 	// st_high is already running (claimed on an earlier tick, then st_low was
 	// self-healed back to pending behind it).

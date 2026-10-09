@@ -816,6 +816,53 @@ func (g *Gateway) SummarizeIdeaToRequirement(content string) (markdown, title st
 	return res.Markdown, res.Title, res.AcceptanceCriteria, nil
 }
 
+// ExtractReportKnowledge distills a finished dev / sub-task report (raw
+// Markdown) into a reusable knowledge-base entry. The HTTP LLM channel is used
+// rather than the claude CLI because the task is single-shot text — no tool
+// use, fits in one round, and runs on the user's "归档" click (must be
+// fast/sync). On channel misconfiguration or model error, the call returns an
+// error so the handler can fall back to archiving the raw content (a graceful
+// degradation so the user's "归档" never fails just because the LLM is
+// unconfigured). The returned *Usage is non-nil only when the model reported
+// usage; the handler records it to token_usage for billing parity with the
+// claude CLI path.
+//
+// `reportKind` is "dev_report" or "subtask_report" — currently unused by the
+// prompt (the prompt is generic), kept as a parameter so future tuning can
+// diverge the two without changing the signature. `instruction` is appended
+// to the user content for caller-specific hints; pass "" for the default
+// behavior.
+func (g *Gateway) ExtractReportKnowledge(reportKind, content, instruction string) (title, markdown string, usage *Usage, err error) {
+	_ = reportKind
+	if g.llmCfg == nil {
+		return "", "", nil, fmt.Errorf("llm not configured: no llm config provider")
+	}
+	baseURL, apiKey, model, err := g.llmCfg.LLMConfig()
+	if err != nil {
+		return "", "", nil, fmt.Errorf("llm config unavailable: %w", err)
+	}
+	if baseURL == "" || apiKey == "" {
+		return "", "", nil, fmt.Errorf("llm not configured: base_url and api_key required")
+	}
+	promptContent := content
+	if instruction != "" {
+		promptContent = content + "\n\n附加提取要求：\n" + instruction
+	}
+	out, u, err := chatCompletion(baseURL, apiKey, model, extractReportKnowledgePrompt, promptContent, 4096)
+	if err != nil {
+		return "", "", nil, err
+	}
+	var res struct {
+		Title    string `json:"title"`
+		Markdown string `json:"markdown"`
+	}
+	if jerr := json.Unmarshal([]byte(stripJSONFences(out)), &res); jerr != nil {
+		return "", "", nil, fmt.Errorf("llm http: decode extract report json: %w", jerr)
+	}
+	res.Title = strings.Trim(res.Title, "\"'` \n\r\t")
+	res.Markdown = strings.TrimSpace(res.Markdown)
+	return res.Title, res.Markdown, u, nil
+}
 // ExtractStepsFromPlan converts the planner persona's plan-mode
 // implementation-steps Markdown into the {"subtasks":[{"title","prompt"}]}
 // envelope, over the direct HTTP LLM channel (OpenAI-compatible). This is the

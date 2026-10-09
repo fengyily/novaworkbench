@@ -9,6 +9,8 @@ import {
   subTaskAdjustCommand,
   claudeApi,
   subTaskConfigApi,
+  knowledgeApi,
+  reportArchiveApi,
   claudeSettingsPrefix,
   DefaultModelLabel,
   type SubTask,
@@ -25,7 +27,7 @@ import { modelContextWindow } from '../utils/modelWindow';
 import AtMentionTextarea from './AtMentionTextarea';
 import ModelSelect from './ModelSelect';
 import ContextUsageBar from './ContextUsageBar';
-import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck } from './icons';
+import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck, IconArchive, IconHourglass } from './icons';
 import { fmtDateTime } from '../utils/intl';
 import './SubTaskPanel.css';
 
@@ -606,6 +608,13 @@ interface CardProps {
   // instead of a bare count. 0 = not known yet / failed to read; the badge
   // then falls back to the count-only wording.
   retryMax?: number;
+  // Report-archive wiring. The panel owns the {source_ref: kb_id} map
+  // (one per requirement) and passes each card its own lookup so cards
+  // stay stateless; onArchive / onUnarchive fire and re-fetch the map.
+  archivedKbId?: string;
+  archiveBusy?: boolean;
+  onArchive: () => void;
+  onUnarchive: (kbId: string) => void;
 }
 
 // useRestartSubTask encapsulates the "原地翻转" semantics shared by the
@@ -652,6 +661,52 @@ function useRestartSubTask(args: {
   }, [st, requirementId, onChanged, onRestarted, setStreaming, setLines]);
 }
 
+// ArchiveButton is the shared "归档到知识库" / "已归档" toggle used in
+// both the per-sub-task report header and the dev summary card. Same icon
+// + same disabled-while-busy state in both places so the affordance reads
+// identically. The label is i18n via components.subTaskPanel.archiveBtn /
+// archivedTitle; the icon switches between IconArchive (idle, not archived)
+// and IconCheck (archived) and IconHourglass (in flight).
+function ArchiveButton({
+  archivedKbId,
+  busy,
+  onArchive,
+  onUnarchive,
+}: {
+  archivedKbId?: string;
+  busy: boolean;
+  onArchive: () => void;
+  onUnarchive: (kbId: string) => void;
+}) {
+  const { t } = useTranslation();
+  if (archivedKbId) {
+    return (
+      <button
+        type="button"
+        className="sub-summary-action-btn"
+        onClick={() => onUnarchive(archivedKbId)}
+        title={t('components.subTaskPanel.archivedTitle')}
+        aria-label={t('components.subTaskPanel.archivedTitle')}
+        disabled={busy}
+      >
+        {busy ? <IconHourglass size={13} /> : <IconCheck size={13} />}
+      </button>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="sub-summary-action-btn"
+      onClick={onArchive}
+      title={t('components.subTaskPanel.archiveBtn')}
+      aria-label={t('components.subTaskPanel.archiveBtn')}
+      disabled={busy}
+    >
+      {busy ? <IconHourglass size={13} /> : <IconArchive size={13} />}
+    </button>
+  );
+}
+
 function SubTaskCard({
   st,
   index,
@@ -668,6 +723,10 @@ function SubTaskCard({
   adjustModel = '',
   onAdjustModelChange,
   retryMax = 0,
+  archivedKbId,
+  archiveBusy = false,
+  onArchive,
+  onUnarchive,
 }: CardProps) {
   const { t } = useTranslation();
   // The card uses a layout that mirrors an issue tracker detail view:
@@ -1288,6 +1347,17 @@ function SubTaskCard({
                       🪄 {t(`components.subTaskCard.${sourceKey}`)}
                     </span>
                   )}
+                  {st.status === 'done' && (
+                    <>
+                      <span className="sub-report-spacer" />
+                      <ArchiveButton
+                        archivedKbId={archivedKbId}
+                        busy={!!archiveBusy}
+                        onArchive={onArchive}
+                        onUnarchive={onUnarchive}
+                      />
+                    </>
+                  )}
                 </div>
                 <ReportHeader st={st} />
               </div>
@@ -1556,6 +1626,60 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
       summaryToastTimerRef.current = null;
     }, 1800);
   }, []);
+
+  // Report-archive state. `archives` is the {source_ref: kb_id} map for the
+  // current requirement; `archiveBusy` is the in-flight mask keyed by the
+  // same source_ref (so a sub-task card and the dev summary card can't
+  // both fire at once for the same row). The map is refreshed on mount and
+  // after every archive / unarchive; per-card / per-summary rendering reads
+  // from the map (passing the value down as `archivedKbId`) so cards stay
+  // stateless.
+  const [archives, setArchives] = useState<Record<string, string>>({});
+  const [archiveBusy, setArchiveBusy] = useState<Record<string, boolean>>({});
+  const refreshArchives = useCallback(async () => {
+    if (!requirementId) return;
+    try {
+      const r = await reportArchiveApi.list(requirementId);
+      setArchives(r.items || {});
+    } catch {
+      // Silent — a missing / failed list query just leaves the badge in
+      // the "not archived" state until the next refresh. Surfacing the
+      // error would be more noise than signal.
+    }
+  }, [requirementId]);
+  useEffect(() => { refreshArchives(); }, [refreshArchives]);
+  const handleArchiveReport = useCallback(async (sourceRef: string, kind: 'dev' | 'sub', sid?: string) => {
+    if (!requirementId || archiveBusy[sourceRef]) return;
+    setArchiveBusy(b => ({ ...b, [sourceRef]: true }));
+    try {
+      if (kind === 'dev') {
+        await reportArchiveApi.devReport(requirementId);
+      } else {
+        await reportArchiveApi.subTask(requirementId, sid!);
+      }
+      await refreshArchives();
+      showSummaryToast('ok', t('components.subTaskPanel.archiveOk'));
+    } catch (e: any) {
+      const msg = e?.message || '';
+      showSummaryToast('err', `${t('components.subTaskPanel.archiveErrPrefix')}${msg}`);
+    } finally {
+      setArchiveBusy(b => { const n = { ...b }; delete n[sourceRef]; return n; });
+    }
+  }, [requirementId, archiveBusy, refreshArchives, showSummaryToast, t]);
+  const handleUnarchiveReport = useCallback(async (kbId: string) => {
+    if (archiveBusy[kbId]) return;
+    setArchiveBusy(b => ({ ...b, [kbId]: true }));
+    try {
+      await knowledgeApi.delete(kbId);
+      await refreshArchives();
+      showSummaryToast('ok', t('components.subTaskPanel.unarchiveOk'));
+    } catch (e: any) {
+      const msg = e?.message || '';
+      showSummaryToast('err', `${t('components.subTaskPanel.archiveErrPrefix')}${msg}`);
+    } finally {
+      setArchiveBusy(b => { const n = { ...b }; delete n[kbId]; return n; });
+    }
+  }, [archiveBusy, refreshArchives, showSummaryToast, t]);
   useEffect(() => () => {
     if (summaryToastTimerRef.current) window.clearTimeout(summaryToastTimerRef.current);
   }, []);
@@ -2199,6 +2323,14 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
                 >
                   {summaryCopied ? <IconCheck size={13} /> : <IconCopy size={13} />}
                 </button>
+                {requirementId && (
+                  <ArchiveButton
+                    archivedKbId={archives[requirementId]}
+                    busy={!!archiveBusy[requirementId]}
+                    onArchive={() => handleArchiveReport(requirementId, 'dev')}
+                    onUnarchive={handleUnarchiveReport}
+                  />
+                )}
               </span>
             </div>
           </header>
@@ -2401,6 +2533,10 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             adjustModel={adjustModel}
             onAdjustModelChange={setAdjustModel}
             retryMax={retryMax}
+            archivedKbId={archives[tn.node.id]}
+            archiveBusy={!!archiveBusy[tn.node.id]}
+            onArchive={() => handleArchiveReport(tn.node.id, 'sub', tn.node.id)}
+            onUnarchive={handleUnarchiveReport}
           />
         ))}
       </div>

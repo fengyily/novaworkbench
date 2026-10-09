@@ -74,7 +74,7 @@ func TestHasCommitPushChild_True(t *testing.T) {
 	}{id: "st_unrelated", reqID: "req_1", title: "登录功能", prompt: "实现登录页",
 		source: model.SubTaskSourceManual, batchID: "batch_1"})
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	has, err := svc.HasCommitPushChild("batch_1")
 	if err != nil {
 		t.Fatalf("HasCommitPushChild: %v", err)
@@ -97,7 +97,7 @@ func TestHasCommitPushChild_False_NoMatching(t *testing.T) {
 	}{id: "st_login", reqID: "req_1", title: "登录功能", prompt: "实现登录页",
 		source: model.SubTaskSourceManual, batchID: "batch_1"})
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	has, err := svc.HasCommitPushChild("batch_1")
 	if err != nil {
 		t.Fatalf("HasCommitPushChild: %v", err)
@@ -122,7 +122,7 @@ func TestHasCommitPushChild_False_OnlyPushPR(t *testing.T) {
 	}{id: "st_auto", reqID: "req_1", title: "提交并推送 PR", prompt: "git push + create pr",
 		source: model.SubTaskSourcePushPR, batchID: "batch_1"})
 
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	has, err := svc.HasCommitPushChild("batch_1")
 	if err != nil {
 		t.Fatalf("HasCommitPushChild: %v", err)
@@ -140,7 +140,7 @@ func TestHasCommitPushChild_EmptyBatchID(t *testing.T) {
 	d := newTestDB(t)
 	// No rows seeded — the early-return on empty batchID must not
 	// produce a SQL error and must not panic on a fresh DB.
-	svc := NewSubTaskService(d)
+	svc := NewSubTaskService(d, nil)
 	has, err := svc.HasCommitPushChild("")
 	if err != nil {
 		t.Fatalf("HasCommitPushChild(\"\"): %v", err)
