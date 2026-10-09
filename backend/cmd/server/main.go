@@ -403,6 +403,9 @@ func main() {
 	mux.HandleFunc("PATCH /api/projects/{id}", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.UpdateBasicInfo)).ServeHTTP)
 	mux.HandleFunc("PATCH /api/projects/{id}/platform", projectH.UpdatePlatform)
 
+	// Manual repo sync — pulls origin/<default_branch> and refreshes sync badge.
+	mux.HandleFunc("POST /api/projects/{id}/sync", projectH.SyncNow)
+
 	// Project description (AI-generated from CLAUDE.md, manual-edit lockable)
 	mux.HandleFunc("PUT /api/projects/{id}/description", projectH.UpdateDescription)
 	mux.HandleFunc("POST /api/projects/{id}/description/regenerate", projectH.RegenerateDescription)

@@ -162,6 +162,13 @@ export const projects = {
     syncStatusIdle: 'Awaiting sync',
     syncShortSHA: '(commit {sha})',
     syncStaleHint: 'Repo hasn\'t been synced in >24h — the system will auto-fetch the latest code before generating the design',
+    // Overview — manual sync button (calls POST /api/projects/{id}/sync).
+    syncNowBtn: 'Sync now',
+    syncNowBusy: 'Syncing…',
+    syncNowOk: 'Synced — origin/{{branch}} is at {{sha}}',
+    syncNowOkCloned: 'Repo cloned and synced for the first time',
+    syncNowSkipped: 'No remote configured, nothing to sync',
+    syncNowError: 'Sync failed: {{err}}',
     // Overview — commit / PR language override (pins the language used by
     // wizard-generated commit messages, push summaries, and PR titles/bodies;
     // unset → use the language auto-detected from git history).

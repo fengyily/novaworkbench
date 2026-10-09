@@ -163,6 +163,13 @@ export const projects = {
     syncStatusIdle: '待同步',
     syncShortSHA: '（提交 {sha}）',
     syncStaleHint: '仓库超过 24 小时未同步，系统将在生成技术方案前自动同步最新代码',
+    // Overview — manual sync button (calls POST /api/projects/{id}/sync).
+    syncNowBtn: '立即同步',
+    syncNowBusy: '同步中…',
+    syncNowOk: '同步完成，最新 origin/{{branch}} 提交 {{sha}}',
+    syncNowOkCloned: '仓库已克隆并完成首次同步',
+    syncNowSkipped: '项目未配置远程仓库，无需同步',
+    syncNowError: '同步失败：{{err}}',
     // Overview — commit / PR language override (pins the language used by
     // wizard-generated commit messages, push summaries, and PR titles/bodies;
     // unset → use the language auto-detected from git history).

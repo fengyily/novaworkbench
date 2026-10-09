@@ -249,6 +249,12 @@ export const projectsApi = {
   // returns the refreshed Project row so callers can update local state.
   setCommitLangOverride: (projectId: string, override: string) =>
     api.put<Project>(`/api/projects/${projectId}/commit-lang-override`, { override }),
+  // Pull origin/<default_branch> into the local repo and refresh the sync
+  // badge. Returns the updated Project row (with refreshed sync_status /
+  // last_synced_at / last_synced_commit); on fetch failure sync_status='error'
+  // is still stamped so the badge reflects reality. Pair with the manual
+  // "立即同步" button in ProjectDetail overview.
+  syncNow: (id: string) => api.post<Project>(`/api/projects/${id}/sync`, {}),
   // Pick the project's commit-push sourcing strategy used by the
   // "完成开发 → 提交推送" pipeline. mode ∈ script_only | llm_only |
   // script_first | llm_first; script is the shell snippet whose stdout

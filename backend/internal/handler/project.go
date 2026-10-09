@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/novaworkbench/backend/internal/middleware"
@@ -227,6 +229,47 @@ func (h *ProjectHandler) UpdateBasicInfo(w http.ResponseWriter, r *http.Request)
 	}
 
 	p, _ := h.svc.Get(id)
+	writeJSON(w, http.StatusOK, p)
+}
+
+// SyncNow fetches origin/<default_branch> into the project's local repo and
+// refreshes the sync badge columns. It is a soft sync — does not enforce
+// clean tree / HEAD-on-base / no-unpushed gates (those belong to the wizard's
+// architect stage via SyncDesignBase). Reuses EnsureClonedAndSynced so a
+// missing directory is auto-cloned and any fetch failure is still stamped to
+// sync_status=error.
+//
+// POST /api/projects/{id}/sync
+func (h *ProjectHandler) SyncNow(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var userID string
+	isAdmin := true
+	if u := middleware.CurrentUser(r); u != nil {
+		userID = u.UserID
+		isAdmin = u.IsAdmin
+	}
+	// Non-admins can only sync projects assigned to them (prevents ID
+	// enumeration). Admins / the auth-bypass pass through.
+	if !isAdmin && userID != "" {
+		ok, err := h.svc.CanAccess(userID, false, id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", "project not found")
+			return
+		}
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+	logf := func(msg string) { log.Printf("[project-sync %s] %s", id, msg) }
+	_, _ = h.svc.EnsureClonedAndSynced(ctx, id, logf) // result swallowed — service stamps sync_status
+	p, err := h.svc.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, p)
 }
 

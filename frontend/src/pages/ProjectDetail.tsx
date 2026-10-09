@@ -23,6 +23,7 @@ import { createEventStream, type EventStream } from '../api/stream';
 import './RequirementDetail.css';
 import './ProjectDetail.css';
 import './KnowledgePage.css';
+import { errorMessage as errMsg } from '../utils/errMsg';
 
 type Tab = 'overview' | 'knowledge' | 'run' | 'requirements' | 'review' | 'weekly' | 'usage';
 
@@ -327,6 +328,11 @@ export default function ProjectDetail() {
   // (fall back to commit_lang detected from git history).
   const [commitLangSaving, setCommitLangSaving] = useState(false);
   const [commitLangMsg, setCommitLangMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Manual repo sync (POST /api/projects/{id}/sync). syncMsg doubles as the
+  // transient toast that auto-clears after a few seconds.
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Overview: commit-push strategy (only-script / only-LLM / script-first /
   // LLM-first). Drives which path handler.mergeGenerate takes on
@@ -712,6 +718,49 @@ export default function ProjectDetail() {
       setCommitLangSaving(false);
     }
   };
+
+  // Manual repo sync — pulls origin/<default_branch> and refreshes the
+  // sync badge. Reuses the same backend path as the wizard's architect
+  // prologue (EnsureClonedAndSynced), but is non-blocking (no hard gates
+  // on dirty tree / detached HEAD — fetch only touches remote refs).
+  const handleSync = useCallback(async () => {
+    if (!project || syncBusy) return;
+    setSyncBusy(true);
+    setSyncMsg(null);
+    try {
+      const updated = await projectsApi.syncNow(project.id);
+      setProject(updated);
+      const branch = updated.default_branch || 'main';
+      const sha = (updated.last_synced_commit || '').slice(0, 7);
+      const ok = updated.sync_status === 'ok';
+      if (ok && !sha) {
+        setSyncMsg({
+          ok: true,
+          text: t('projects.detail.syncNowOkCloned'),
+        });
+      } else if (ok) {
+        setSyncMsg({
+          ok: true,
+          text: t('projects.detail.syncNowOk', { branch, sha }),
+        });
+      } else if (updated.sync_status === 'idle' && !updated.remote_url) {
+        setSyncMsg({
+          ok: false,
+          text: t('projects.detail.syncNowSkipped'),
+        });
+      } else {
+        setSyncMsg({
+          ok: false,
+          text: t('projects.detail.syncNowError', { err: t('projects.detail.syncStatusError') }),
+        });
+      }
+    } catch (e) {
+      setSyncMsg({ ok: false, text: t('projects.detail.syncNowError', { err: errMsg(e) }) });
+    } finally {
+      setSyncBusy(false);
+      setTimeout(() => setSyncMsg(null), 4000);
+    }
+  }, [project, syncBusy, t]);
 
   // ── Overview: commit-push strategy ────────────────────────────────────────
   // When the user submits /merge/local or /merge/push WITHOUT a manual
@@ -1366,8 +1415,17 @@ export default function ProjectDetail() {
               sync_status colour follows the existing CSS variables
               (--color-success / --color-error / --color-text-muted). */}
           <div className="detail-section" style={{ marginTop: 16 }}>
-            <div className="section-header" style={{ marginBottom: 12 }}>
+            <div className="section-header" style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ fontWeight: 600, fontSize: 14 }}>{t('projects.detail.syncTitle')}</span>
+              <button
+                className="btn btn-secondary"
+                onClick={handleSync}
+                disabled={syncBusy || !project.remote_url}
+                title={!project.remote_url ? t('projects.detail.syncNowSkipped') : ''}
+                style={{ fontSize: 12, padding: '4px 12px' }}
+              >
+                {syncBusy ? t('projects.detail.syncNowBusy') : `🔄 ${t('projects.detail.syncNowBtn')}`}
+              </button>
             </div>
             {(() => {
               const status = project.sync_status;
@@ -1409,6 +1467,11 @@ export default function ProjectDetail() {
                 </div>
               );
             })()}
+            {syncMsg && (
+              <div style={{ marginTop: 8, fontSize: 12, color: syncMsg.ok ? 'var(--color-success)' : 'var(--color-error)' }}>
+                {syncMsg.ok ? '✅ ' : '❌ '}{syncMsg.text}
+              </div>
+            )}
           </div>
 
           {/* Project description (AI-generated from CLAUDE.md, manual-edit lockable) */}
