@@ -4,10 +4,12 @@
 #   source "$(dirname "$0")/lib.sh"
 #
 # Provides:
-#   ensure_docker_access       - add the SSH user to the docker group on
-#                                demand and re-exec the current script
-#                                under that group so docker compose /
-#                                docker inspect just work.
+#   ensure_docker_access       - on a fresh server, install docker via
+#                                the official convenience script; then
+#                                add the SSH user to the docker group
+#                                and re-exec the current script under
+#                                that group so docker compose / docker
+#                                inspect just work.
 #   ensure_nginx_proxy_network - create the shared 'nginx-proxy' Docker
 #                                network if it doesn't already exist
 #                                (init-server.sh is the canonical bootstrap
@@ -30,6 +32,35 @@ ensure_docker_access() {
   # Already reachable → nothing to do.
   if docker info >/dev/null 2>&1; then
     return 0
+  fi
+
+  # Fresh server: docker itself may not be installed yet (binary missing,
+  # 'docker' group absent). Install via the official Docker convenience
+  # script before attempting the group-ensure below.
+  if ! command -v docker >/dev/null 2>&1; then
+    echo ">>> docker not installed — installing via get.docker.com"
+
+    # Same sudo gate as the group-ensure step below — we need root to
+    # install packages and to manage the docker daemon.
+    if ! sudo -n true 2>/dev/null && [[ "$(id -u)" -ne 0 ]]; then
+      echo "!! passwordless sudo not available — please install docker manually:" >&2
+      echo "   curl -fsSL https://get.docker.com | sh && exit && ssh back in" >&2
+      exit 1
+    fi
+
+    curl -fsSL https://get.docker.com | sudo sh -s -- -y docker
+
+    # The convenience script starts dockerd on systemd hosts; on hosts
+    # without systemd (rare for our cloud-VM targets) start it explicitly.
+    if ! docker info >/dev/null 2>&1; then
+      sudo systemctl start docker 2>/dev/null \
+        || sudo service docker start 2>/dev/null \
+        || true
+    fi
+    if ! docker info >/dev/null 2>&1; then
+      echo "!! docker installed but 'docker info' still fails — aborting" >&2
+      exit 1
+    fi
   fi
 
   echo ">>> docker.sock not reachable — attempting to add ${USER} to the 'docker' group"
