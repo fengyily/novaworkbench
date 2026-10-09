@@ -677,3 +677,90 @@ func TestArchitectRemoteStaleSessionHasSideTargetedMessage(t *testing.T) {
 		})
 	}
 }
+
+// TestArchitectRemoteStaleSessionLocalSideStillReportsMissing is a
+// regression pin for req_d92d397bb4ae6286.
+//
+// Background: when the analyst runs locally (not on the agent host) and
+// then the user triggers architect-design on an agent server, the
+// up-sync pre-flight in prepareRemoteAgentRun may classify
+// SessionFileMissingSide as "local" (e.g. analyst jsonl was in a slug
+// dir that claudeProjectsSlugDir didn't probe). The fallback in
+// syncRequirementSessionsUp is the primary fix; this test pins that
+// IF the fallback also fails to locate the file AND the remote still
+// reports staleSession=true, finalizeArchitectRun must continue to
+// surface the "本地会话文件缺失，无法继续" hint and clear
+// design_session_id so the next attempt mints a fresh id. Without
+// this pin, a refactor of the "local" branch could silently swallow
+// the error and leave the user staring at a generic "default" message.
+func TestArchitectRemoteStaleSessionLocalSideStillReportsMissing(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "remote-stale-local-")
+	defer os.RemoveAll(dir)
+	d, err := db.Init(db.Config{Driver: "sqlite", SQLitePath: filepath.Join(dir, "test.db")})
+	if err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	defer d.Close()
+
+	reqID := seedRequirementForSchedule(t, d)
+	reqSvc := service.NewRequirementService(d)
+	if err := reqSvc.UpdateDesignSession(reqID, "sid-stale-local"); err != nil {
+		t.Fatalf("seed design_session_id: %v", err)
+	}
+
+	jobs := store.NewJobStore(8)
+	job := jobs.Create(reqID)
+
+	h := &WizardHandler{reqSvc: reqSvc, jobs: jobs}
+
+	req, err := reqSvc.Get(reqID)
+	if err != nil {
+		t.Fatalf("reload req: %v", err)
+	}
+	p := &designRunParams{
+		Req:          req,
+		NewDesignSID: "sid-stale-local",
+		SourceSID:    "sid-stale-local", // design-session branch (Fork=false): SessionFileMissingSide switch applies
+		Fork:         false,
+		SkipAnalysis: true,
+		Model:        "sonnet",
+	}
+
+	h.finalizeArchitectRun(
+		claudeStreamOutcome{
+			sessionID:             "sid-stale-local",
+			staleSession:          true,
+			errMsg:                "",
+			SessionFileMissingSide: "local",
+		},
+		p, job, nil,
+		"sid-stale-local", "sid-stale-local", reqID, "sonnet",
+	)
+
+	got, err := reqSvc.Get(reqID)
+	if err != nil {
+		t.Fatalf("reload req: %v", err)
+	}
+	if got.DesignSessionID != "" {
+		t.Fatalf("DesignSessionID = %q, want \"\" on stale local (must mint fresh next run)", got.DesignSessionID)
+	}
+	if got.DesignJobID != "" {
+		t.Fatalf("DesignJobID = %q, want \"\" on terminal error", got.DesignJobID)
+	}
+
+	lines, status, _ := job.Snapshot()
+	if status != store.JobError {
+		t.Fatalf("status = %q, want JobError", status)
+	}
+	const wantSubstring = "本地会话文件缺失"
+	var found bool
+	for _, l := range lines {
+		if l.Type == "error" && strings.Contains(l.Content, wantSubstring) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected error line containing %q, got lines: %+v", wantSubstring, lines)
+	}
+}
