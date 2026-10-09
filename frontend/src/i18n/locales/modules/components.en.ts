@@ -128,6 +128,9 @@ export const components = {
     },
     // Report archive (主 Agent 汇总报告 + 子任务报告 → knowledge).
     archiveBtn: 'Archive to knowledge base',
+    // Shorter visible label for the pill button when the entry has been
+    // archived. The full archivedTitle stays in the tooltip.
+    archiveArchivedShort: 'Archived',
     archiveBusy: 'Archiving…',
     archivedTitle: 'Archived — click to remove',
     archiveOk: '✅ Archived to knowledge base',

@@ -140,6 +140,10 @@ export const components = {
     // button sits in both the dev-summary card header and each done sub-task
     // card header; same icon / label pair keeps the affordance consistent.
     archiveBtn: '归档到知识库',
+    // Shorter visible label for the pill button when the entry has been
+    // archived. Replaces the long-form archivedTitle tooltip so the
+    // compact pill stays readable; the tooltip still carries the full hint.
+    archiveArchivedShort: '已归档',
     archiveBusy: '归档中…',
     archivedTitle: '已归档到知识库，点击撤销',
     archiveOk: '✅ 已归档到知识库',

@@ -662,11 +662,18 @@ function useRestartSubTask(args: {
 }
 
 // ArchiveButton is the shared "归档到知识库" / "已归档" toggle used in
-// both the per-sub-task report header and the dev summary card. Same icon
-// + same disabled-while-busy state in both places so the affordance reads
-// identically. The label is i18n via components.subTaskPanel.archiveBtn /
-// archivedTitle; the icon switches between IconArchive (idle, not archived)
-// and IconCheck (archived) and IconHourglass (in flight).
+// both the per-sub-task report header and the dev summary card. Designed
+// as an icon + short-text pill so the affordance reads as "this writes to
+// the knowledge base" at a glance — sitting next to the 24×24 icon-only
+// "copy" button, the larger pill confirms the semantic weight of the
+// operation. Three states are encoded via the `data-state` attribute so
+// CSS can switch colors / borders without a className swap:
+//   - idle:     idle palette, IconArchive, label = "归档到知识库"
+//   - archived: success palette, IconCheck,  label = "已归档" (click to undo)
+//   - busy:     disabled,        IconHourglass, label = "归档中…"
+// Tooltips reuse the longer-form keys (archiveBtn / archivedTitle /
+// archiveBusy) so the hover hint stays informative even though the pill
+// shows a shorter label.
 function ArchiveButton({
   archivedKbId,
   busy,
@@ -683,26 +690,42 @@ function ArchiveButton({
     return (
       <button
         type="button"
-        className="sub-summary-action-btn"
+        className="sub-archive-action-btn"
+        data-state="archived"
         onClick={() => onUnarchive(archivedKbId)}
         title={t('components.subTaskPanel.archivedTitle')}
         aria-label={t('components.subTaskPanel.archivedTitle')}
         disabled={busy}
       >
-        {busy ? <IconHourglass size={13} /> : <IconCheck size={13} />}
+        {busy ? (
+          <IconHourglass size={13} />
+        ) : (
+          <IconCheck size={13} />
+        )}
+        <span className="sub-archive-action-label">
+          {busy
+            ? t('components.subTaskPanel.archiveBusy')
+            : t('components.subTaskPanel.archiveArchivedShort')}
+        </span>
       </button>
     );
   }
   return (
     <button
       type="button"
-      className="sub-summary-action-btn"
+      className="sub-archive-action-btn"
+      data-state={busy ? 'busy' : 'idle'}
       onClick={onArchive}
       title={t('components.subTaskPanel.archiveBtn')}
       aria-label={t('components.subTaskPanel.archiveBtn')}
       disabled={busy}
     >
       {busy ? <IconHourglass size={13} /> : <IconArchive size={13} />}
+      <span className="sub-archive-action-label">
+        {busy
+          ? t('components.subTaskPanel.archiveBusy')
+          : t('components.subTaskPanel.archiveBtn')}
+      </span>
     </button>
   );
 }
