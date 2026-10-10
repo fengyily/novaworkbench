@@ -1858,10 +1858,14 @@ export default function RequirementDetail() {
           // Mirror the architect design wiring: per-request model override
           // (empty = role's configured model) and the user-picked Claude
           // config id. The wiki backend re-uses roleConfig("wiki") for the
-          // system prompt + default model.
+          // system prompt + default model. Wiki is a plan-mode design-phase
+          // operation (knowledge doc generation), so it routes through the
+          // DESIGN-stage picker — the user gets a single design/coding split
+          // (req_* explicitly asked for 设计 vs 实现) and wiki rides on the
+          // design half.
           ...(architectModel ? { model: architectModel } : {}),
           ...(architectConfigId ? { claude_config_id: architectConfigId } : {}),
-          ...(agentServerId ? { agent_server_id: agentServerId } : {}),
+          ...(designAgentServerId ? { agent_server_id: designAgentServerId } : {}),
         }),
       });
       const json = await res.json();
