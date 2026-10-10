@@ -198,6 +198,9 @@ export const requirements = {
     draftActionRouteAria: 'Design-generation target',
     draftActionReady: 'READY',
     draftActionFallback: 'Or run requirement analysis first',
+    // Coding-stage action panel — mirrors the draft panel pattern.
+    codingActionEyebrow: 'Development',
+    codingActionRouteAria: 'Code-execution target',
     designAgentServerLabel: 'Design execution target',
     designAgentServerEmptyTitle: 'No ready Agent server. Add one under Settings → Agent Servers and complete the env check.',
     designAgentServerNoHint: 'No ready Agent server. Add one and run the env check under Settings → Agent Servers.',

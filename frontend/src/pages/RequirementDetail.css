@@ -583,35 +583,27 @@
   border: 1px solid var(--color-border);
 }
 /* Bottom row: the rare analyst-fallback affordance. Rendered as a
-   subdued text link (not a button) because clicking it is a digression
-   from the primary intent — the design-start CTAs are the call to
-   action, this is the "actually, change my mind" escape hatch. The
-   arrow + underline-on-hover mimics a terminal/console feel that
-   fits the engineer's vernacular. */
+   real .btn.btn-sm.btn-ghost so it lives in the same component family
+   as the four design-start CTAs; the .btn-ghost variant (transparent
+   surface, primary text) keeps it visually quieter so the user's eye
+   still anchors on the action row. The .draft-action-fallback-row
+   wrapper provides left-alignment + spacing from the action surface
+   above. The arrow spans 2px right on hover for a terminal/console
+   micro-interaction. */
+.draft-action-fallback-row {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: 10px;
+}
 .draft-action-fallback {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 8px;
-  padding: 4px 0;
-  font-size: 12px;
-  color: var(--color-text-muted);
-  background: none;
-  border: none;
-  cursor: pointer;
-  transition: color 120ms ease;
-}
-.draft-action-fallback:hover:not(:disabled) {
-  color: var(--color-primary);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-.draft-action-fallback:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+  /* The .btn / .btn-sm / .btn-ghost system handles padding, radius,
+     hover, focus and disabled states. We only add the
+     trailing-arrow micro-interaction. */
+  font-weight: 500;
 }
 .draft-action-fallback-arrow {
   display: inline-block;
+  margin-left: 4px;
   transition: transform 160ms ease;
 }
 .draft-action-fallback:hover:not(:disabled) .draft-action-fallback-arrow {

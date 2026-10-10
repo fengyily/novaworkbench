@@ -208,6 +208,14 @@ export const requirements = {
     draftActionRouteAria: '方案生成目标',
     draftActionReady: 'READY',
     draftActionFallback: '或先进行需求分析完善需求',
+    // Coding-stage action panel — mirrors the draft panel pattern.
+    // Shares `draftActionRouteLabel` / `draftActionReady` so the HUD
+    // vocabulary is unified across both panels; only the eyebrow /
+    // aria-label differ because the surface answers a different
+    // question ("where will the code run?" rather than "where will
+    // the design be generated?").
+    codingActionEyebrow: '开发实现',
+    codingActionRouteAria: '开发执行目标',
     designAgentServerLabel: '设计执行环境',
     designAgentServerEmptyTitle: '暂无可用的 Agent 服务器，请先在「设置 → Agent 服务器」中添加并完成环境检查。',
     designAgentServerNoHint: '未配置就绪的 Agent 服务器，请前往「设置 → Agent 服务器」添加并检查环境。',
