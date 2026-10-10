@@ -55,9 +55,9 @@ func TestSanitizeDesignDoc(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := sanitizeDesignDoc(tc.in)
+			got := SanitizeDesignDoc(tc.in)
 			if got != tc.want {
-				t.Errorf("sanitizeDesignDoc mismatch\n  got:  %q\n  want: %q", got, tc.want)
+				t.Errorf("SanitizeDesignDoc mismatch\n  got:  %q\n  want: %q", got, tc.want)
 			}
 		})
 	}
@@ -83,7 +83,7 @@ const realBuggySample = "" +
 	"```\n"
 
 func TestSanitizeDesignDoc_RealReq8801102ab514293d(t *testing.T) {
-	got := sanitizeDesignDoc(realBuggySample)
+	got := SanitizeDesignDoc(realBuggySample)
 	if strings.HasPrefix(got, "```") {
 		t.Fatalf("outer fence not stripped, output starts with %q", got[:min(20, len(got))])
 	}

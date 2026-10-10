@@ -14,7 +14,7 @@
 //   - Gateway.StreamCmd plan-mode + --disallowedTools
 //   - runClaudeStream → captures out.planContent (the Write tool_use body)
 //   - JobStore (cap 50) + SSE replay/live via /api/wizard/jobs/{id}/stream
-//   - sanitizeDesignDoc (only strips outer ```markdown``` fence; Mermaid
+//   - SanitizeDesignDoc (only strips outer ```markdown``` fence; Mermaid
 //     blocks survive untouched — the wiki block explicitly asks for them)
 //   - existing prepareDesignWorkspace pattern, duplicated locally to avoid
 //     coupling the wiki path to the architect path's status / session
@@ -372,10 +372,16 @@ func (h *WizardHandler) finalizeWikiRun(
 
 	// In plan mode, the full plan markdown is captured from the Write
 	// tool_use event that lands in ~/.claude/plans/*.md. Fall back to
-	// the result text if capture missed it.
+	// the result text if capture missed it, then to the cumulative
+	// streamed text as a last resort (see claudeStreamOutcome.streamText
+	// in wizard_stream.go — non-Anthropic proxies and ExitPlan exits in
+	// plan mode often leave planContent + finalResult both empty).
 	planMarkdown := out.planContent
 	if planMarkdown == "" {
 		planMarkdown = out.finalResult
+	}
+	if planMarkdown == "" {
+		planMarkdown = out.streamText
 	}
 	// Mid-stream failure with partial plan: persist the partial as a
 	// fallback so the exploration work isn't lost, but mark the job
@@ -393,17 +399,35 @@ func (h *WizardHandler) finalizeWikiRun(
 	if planMarkdown == "" {
 		errMsg := out.errMsg
 		if errMsg == "" {
-			errMsg = "Claude 未返回结果，请重试"
+			errMsg = "Claude 未返回可保存的知识库正文，请重试"
 		}
 		job.Append(store.LogLine{Type: "error", Content: errMsg})
 		job.Finish(1, store.JobError)
 		return
 	}
 
+	// Sanitize in-place BEFORE the SQL write so we can short-circuit on
+	// empty (e.g. planContent was a bare "```markdown\n```" fence or some
+	// other shape that SanitizeDesignDoc reduces to ""). Without this
+	// guard we used to write empty wiki_docs AND flip status to 'designed'
+	// — leaving the row in an unrecoverable inconsistent state where
+	// "归档到知识库" errors "wiki-kind requirement has no document yet".
+	// Doing it here (in addition to the same guard inside UpdateWikiDoc)
+	// is belt-and-braces: even if the service-level guard is removed in
+	// the future, the handler-side check still prevents the corruption.
+	cleaned := service.SanitizeDesignDoc(planMarkdown)
+	if cleaned == "" {
+		job.Append(store.LogLine{Type: "error", Content: "Claude 未返回可保存的知识库正文，请重试"})
+		job.Finish(1, store.JobError)
+		// Leave status at 'designing' so the user can retry from the CTA
+		// instead of staring at a permanently broken "归档" button.
+		return
+	}
+
 	// Persist the wiki doc (sets status=designing) and clear the active
 	// job pointer so a refresh shows the finished doc instead of
 	// "executing".
-	if _, err := h.reqSvc.UpdateWikiDoc(id, planMarkdown); err != nil {
+	if _, err := h.reqSvc.UpdateWikiDoc(id, cleaned); err != nil {
 		log.Printf("[wiki-generate] failed to save wiki doc for %s: %v", id, err)
 		job.Append(store.LogLine{Type: "error", Content: "保存知识库文档失败: " + err.Error()})
 		job.Finish(1, store.JobError)

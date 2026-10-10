@@ -527,6 +527,18 @@ type claudeStreamOutcome struct {
 	streamEventCount int    // subset that are stream_event
 	lastEventType    string // type field of the most recent event, used for EOF postmortem
 	planContent      string // full markdown captured from a plan-mode Write tool_use to ~/.claude/plans/*.md
+	// streamText accumulates every text fragment the assistant emits via
+	// stream_event text_delta or assistant-event text blocks. Populated as
+	// text lands so a plan-mode run whose model streamed the plan but did
+	// NOT write ~/.claude/plans/*.md AND did NOT populate the CLI's
+	// "result" event (common with non-Anthropic proxies and with plan-mode
+	// exits via ExitPlan) still surfaces the doc to callers that consume it
+	// (currently only finalizeWikiRun as a tier-3 fallback).
+	//
+	// NOT a replacement for finalResult — finalResult is consumed by the
+	// refine / sub-task flows where preamble accumulation would corrupt the
+	// refine history and break the [REFINE_COMPLETE] sentinel check.
+	streamText string
 	// SessionFileMissingSide, when non-empty AND staleSession is true,
 	// classifies the "源会话已失效" failure into one of three buckets so
 	// finishSubTask / ExecuteOrchestratedChild can surface a targeted
@@ -1019,6 +1031,10 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 							if phaseSink != nil {
 								phaseSink(text)
 							}
+							// Also accumulate into streamText as a tier-3 fallback
+							// for finalizeWikiRun (finalResult is the CLI's "result"
+							// event field, which is empty in plan mode).
+							out.streamText += text
 						}
 					}
 				case "tool_result":
@@ -1299,6 +1315,10 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 					if text != "" {
 						out.hadStreamEvents = true
 						sink.emit(store.LogLine{Type: "message", Content: text})
+						// Also accumulate into streamText as a tier-3 fallback
+						// for finalizeWikiRun (finalResult is the CLI's "result"
+						// event field, which is empty in plan mode).
+						out.streamText += text
 					}
 				}
 			case "content_block_start":
@@ -1349,6 +1369,10 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 					if !out.hadStreamEvents {
 						if text, _ := b["text"].(string); text != "" {
 							sink.emit(store.LogLine{Type: "message", Content: text})
+							// Also accumulate into streamText (mirror of the
+							// local-path text branch above) so the wiki tier-3
+							// fallback works for Agent Server runs too.
+							out.streamText += text
 						}
 					}
 				case "tool_result":

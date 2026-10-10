@@ -1805,7 +1805,7 @@ func (s *RequirementService) SaveCodingChat(reqID, messages string) error {
 // sometimes wraps its final plan in (see sanitizeDesignDoc).
 func (s *RequirementService) UpdateDesign(id, designJSON string) (*model.Requirement, error) {
 	now := time.Now()
-	cleaned := sanitizeDesignDoc(designJSON)
+	cleaned := SanitizeDesignDoc(designJSON)
 	// "生成技术方案" flips status directly to "designing" without going through
 	// UpdateStatus, so backfill analysis_started_at here too (idempotent via
 	// COALESCE) — otherwise the skip-analysis design path would never record an
@@ -1825,9 +1825,28 @@ func (s *RequirementService) UpdateDesign(id, designJSON string) (*model.Require
 // sanitizeDesignDoc is reused because it strips the same outer ```markdown```
 // fence Claude likes to wrap its plan in, without touching the Mermaid
 // / code-block content the wiki block instructs the model to emit.
+//
+// Empty-input guard: refuse to persist an empty wiki doc, and refuse to
+// overwrite a previously-good wiki doc with empty content. Without this,
+// finalizeWikiRun's success path could leave the row in the inconsistent
+// (status='designed', wiki_docs='') state that surfaces to the user as
+// "归档失败: wiki-kind requirement has no document yet" with no recovery
+// path. The apply-doc caller (wizard_docs.go:857) already pre-guards its own
+// persistVal, so this service-level check is unreachable from there.
 func (s *RequirementService) UpdateWikiDoc(id, md string) (*model.Requirement, error) {
 	now := time.Now()
-	cleaned := sanitizeDesignDoc(md)
+	cleaned := SanitizeDesignDoc(md)
+	if strings.TrimSpace(cleaned) == "" {
+		return nil, fmt.Errorf("refusing to persist empty wiki doc for %s", id)
+	}
+	// Defensive: do not overwrite a non-empty wiki doc with empty content.
+	// The above branch should already cover this, but a second-line guard
+	// costs nothing and prevents re-emergence if sanitization changes.
+	var existing string
+	_ = s.db.QueryRow("SELECT wiki_docs FROM requirements WHERE id=?", id).Scan(&existing)
+	if strings.TrimSpace(existing) != "" && strings.TrimSpace(cleaned) == "" {
+		return nil, fmt.Errorf("refusing to overwrite non-empty wiki doc with empty for %s", id)
+	}
 	_, err := s.db.Exec(
 		"UPDATE requirements SET wiki_docs=?, status='designing', updated_at=? WHERE id=?",
 		cleaned, now, id)
@@ -2084,7 +2103,7 @@ func (s *RequirementService) WikiUnarchive(id string) (*model.Requirement, error
 // plain Markdown are returned unchanged. The detection mirrors the
 // frontend's parseDesign whitelist so any change here must be kept in
 // sync with frontend/src/pages/RequirementDetail.tsx parseDesign.
-func sanitizeDesignDoc(raw string) string {
+func SanitizeDesignDoc(raw string) string {
 	if raw == "" {
 		return raw
 	}

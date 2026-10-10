@@ -4604,7 +4604,15 @@ export default function RequirementDetail() {
                 user sees the live SSE panel above (instead of the old
                 navigate(0) full-reload that hid the stream entirely). */}
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
-              {req.status === 'draft' || req.status === 'designing' ? (
+              {/* Generate / regenerate CTA.
+                  - draft | designing → primary generate (existing flow).
+                  - designed + empty wiki_docs → recovery path: this state is
+                    a legacy leftover from a run that completed but failed to
+                    persist content (the previous bug). Without this branch the
+                    user is stuck staring at a permanently-broken "归档" button
+                    because the design-doc-only CTA is gated to draft/designing.
+                  - designed + non-empty → no CTA here (refine + archive below). */}
+              {(req.status === 'draft' || req.status === 'designing' || (req.status === 'designed' && !wiki.plan_markdown)) && (
                 <button
                   className="btn btn-primary"
                   onClick={runWikiGenerate}
@@ -4613,9 +4621,11 @@ export default function RequirementDetail() {
                 >
                   {wikiGenerating
                     ? <><IconHourglass size={13} className="btn-icon" />{t('requirements.detail2.wikiGeneratingBtn')}</>
-                    : <><IconSparkles size={13} className="btn-icon" />{t('requirements.detail2.btnGenerateWiki')}</>}
+                    : <><IconSparkles size={13} className="btn-icon" />{(req.status === 'designed' && !wiki.plan_markdown)
+                        ? t('requirements.detail2.btnRegenerateWiki')
+                        : t('requirements.detail2.btnGenerateWiki')}</>}
                 </button>
-              ) : null}
+              )}
               {req.status === 'designed' && wiki.plan_markdown && (
                 <DocRefineChat
                   reqId={req.id}
@@ -4631,6 +4641,29 @@ export default function RequirementDetail() {
                   onUsage={setDesignUsage}
                 />
               )}
+              {/* Legacy dirty-state warning: status='designed' but wiki_docs
+                  empty. Once the backend guard (finalizeWikiRun tier-3
+                  fallback + UpdateWikiDoc empty-refuse) lands, new runs
+                  cannot produce this state — this hint only surfaces for
+                  pre-fix rows that already have it. */}
+              {req.status === 'designed' && !wiki.plan_markdown && (
+                <span
+                  className="status-hint-warn"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 4,
+                    color: '#b45309',
+                    background: '#fef3c7',
+                    padding: '4px 8px',
+                    borderRadius: 4,
+                    fontSize: 12,
+                  }}
+                >
+                  <IconAlert size={13} />
+                  {t('requirements.detail2.wikiInconsistentHint')}
+                </span>
+              )}
               {req.status === 'designed' && (
                 <button
                   className="btn"
@@ -4643,7 +4676,10 @@ export default function RequirementDetail() {
                       alert(t('requirements.detail2.archiveFailPrefix') + (err?.message || String(err)));
                     }
                   }}
-                  disabled={!!busy}
+                  disabled={!!busy || !wiki.plan_markdown}
+                  title={!wiki.plan_markdown
+                    ? t('requirements.detail2.archiveBlockedEmptyDoc')
+                    : t('requirements.detail2.btnArchiveToWiki')}
                 >
                   <IconArchive size={13} className="btn-icon" />{t('requirements.detail2.btnArchiveToWiki')}
                 </button>
