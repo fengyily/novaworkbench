@@ -585,12 +585,15 @@ func (h *WizardHandler) requireAnchoredFork(req *model.Requirement, projectPath 
 //
 //	design → design_session_id   / architect
 //	coding → coding_session_id   / developer
+//	wiki   → wiki_session_id     / wiki
 func docStageSession(req *model.Requirement, docType string) (sid, roleKey string) {
 	switch docType {
 	case "design":
 		return req.DesignSessionID, "architect"
 	case "coding":
 		return req.CodingSessionID, "developer"
+	case "wiki":
+		return req.WikiSessionID, "wiki"
 	}
 	return "", "analyst"
 }

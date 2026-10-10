@@ -34,6 +34,7 @@ const KIND_FILTERS: { value: Kind; labelKey: string; emoji: string }[] = [
   { value: 'issue', labelKey: 'requirements.list.kindFilters.issue', emoji: '🐛' },
   { value: 'requirement', labelKey: 'requirements.list.kindFilters.requirement', emoji: '📋' },
   { value: 'idea', labelKey: 'requirements.list.kindFilters.idea', emoji: '💡' },
+  { value: 'wiki', labelKey: 'requirements.list.kindFilters.wiki', emoji: '📚' },
 ];
 
 // MarksStrip renders the preset mark chip strip (重要 / 跟进 / 阻塞 / 风险)

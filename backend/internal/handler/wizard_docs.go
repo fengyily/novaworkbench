@@ -216,12 +216,12 @@ func looksBinary(data []byte) bool {
 }
 
 // RefineDoc streams a multi-turn conversation to refine a design doc or a coding instruction.
-// doc_type: "design" | "coding"
+// doc_type: "design" | "coding" | "wiki"
 func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RequirementID       string `json:"requirement_id"`
 		ProjectPath         string `json:"project_path"`
-		DocType             string `json:"doc_type"` // "design" | "coding"
+		DocType             string `json:"doc_type"` // "design" | "coding" | "wiki"
 		CurrentDoc          string `json:"current_doc"`
 		ConversationHistory string `json:"conversation_history"`
 		UserMessage         string `json:"user_message"`
@@ -268,6 +268,9 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	if req.DocType == "coding" {
 		docLabel = "开发指令"
 	}
+	if req.DocType == "wiki" {
+		docLabel = "知识库文档"
+	}
 
 	sourceSID, roleKey := "", "analyst"
 	if requirement != nil {
@@ -280,9 +283,12 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	// content and persist its id below so subsequent turns resume it. Coding
 	// instructions are never persisted server-side, so without a coding
 	// session there is nothing to anchor a fresh session to — keep the hint.
+	// Wiki docs mirror the design branch: persist wiki_session_id and let
+	// subsequent turns resume it.
 	freshSession := false
 	if sourceSID == "" {
-		if req.DocType == "design" && requirement != nil && requirement.DesignDocs != "" {
+		switch {
+		case req.DocType == "design" && requirement != nil && requirement.DesignDocs != "":
 			sourceSID = util.NewUUID()
 			freshSession = true
 			// Persist the freshly minted id BEFORE the refine run so it survives a
@@ -293,7 +299,15 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 					log.Printf("[refine-doc] failed to persist design session for %s: %v", req.RequirementID, perr)
 				}
 			}
-		} else {
+		case req.DocType == "wiki" && requirement != nil && requirement.WikiDocs != "":
+			sourceSID = util.NewUUID()
+			freshSession = true
+			if req.RequirementID != "" {
+				if perr := h.reqSvc.UpdateWikiSession(req.RequirementID, sourceSID); perr != nil {
+					log.Printf("[refine-doc] failed to persist wiki session for %s: %v", req.RequirementID, perr)
+				}
+			}
+		default:
 			sendStatus(w, rc, "error", "尚未找到该阶段的会话，请先生成"+docLabel+"后再 refine。")
 			fmt.Fprintf(w, "data: {\"type\":\"done\",\"success\":false}\n\n")
 			rc.Flush()
@@ -655,6 +669,9 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 	if req.DocType == "coding" {
 		docLabel = "开发指令"
 	}
+	if req.DocType == "wiki" {
+		docLabel = "知识库文档"
+	}
 	if sourceSID == "" {
 		writeError(w, 400, "NO_SESSION", "尚未找到该阶段的会话，请先生成"+docLabel+"后再 apply。")
 		return
@@ -683,12 +700,18 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 
 	// Build the prompt that asks Claude to emit the final doc. For design docs we
 	// detect plan-markdown vs legacy JSON from the DB-stored doc (the apply call
-	// doesn't send current_doc) and ask for the matching format.
+	// doesn't send current_doc) and ask for the matching format. Wiki docs are
+	// always plan-markdown (no legacy JSON path) and share the design branch's
+	// verbatim-markdown persistence model.
 	var prompt string
 	switch req.DocType {
 	case "coding":
 		prompt = "基于我们的对话，将用户的调整意见整理为给 Claude Code CLI 的开发指令。" +
 			"输出纯文本的开发指令，清晰描述需要实现或调整的内容。不要输出 JSON，不要添加额外说明。"
+	case "wiki":
+		prompt = "基于我们的对话，将知识库文档更新为最终版本。" +
+			"输出完整的 Markdown 知识库文档，涵盖：背景与目标、关键概念、相关源文件清单、" +
+			"典型使用方式 / 调用路径、风险与注意事项。直接输出 Markdown，不要添加额外说明。"
 	default: // "design"
 		if !isLikelyJSON(requirement.DesignDocs) {
 			prompt = "基于我们的对话，将技术方案（plan）更新为最终版本。" +
@@ -781,10 +804,13 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		if out.staleSession {
 			// The stage's conversation is gone. Clear its session id so the user
 			// can redo the stage, and surface a recovery hint.
-			if docType == "design" {
+			switch docType {
+			case "design":
 				_ = h.reqSvc.UpdateDesignSession(reqID, "")
-			} else if docType == "coding" {
+			case "coding":
 				_ = h.reqSvc.UpdateCodingSession(reqID, "")
+			case "wiki":
+				_ = h.reqSvc.UpdateWikiSession(reqID, "")
 			}
 			job.Append(store.LogLine{Type: "error", Content: docLabel + "会话已过期，请重新生成对应文档后再 apply。"})
 			_ = h.reqSvc.UpdateApplyJob(reqID, "")
@@ -817,8 +843,13 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 		// For design docs in plan-markdown format, persist the raw markdown (not
 		// extractJSON, which would mangle markdown containing { } chars). Use the
 		// DB-stored doc to detect format (apply call doesn't send current_doc).
+		// Wiki docs are always treated as plan-markdown: the kind itself has no
+		// legacy JSON shape, and UpdateWikiDoc writes to wiki_docs so the
+		// design_docs column is never touched on a wiki apply (R4 guard).
 		var persistVal string
-		if !isLikelyJSON(storedDesignDocs) {
+		if docType == "wiki" {
+			persistVal = finalText
+		} else if !isLikelyJSON(storedDesignDocs) {
 			persistVal = finalText
 		} else {
 			persistVal = extractJSON(out.finalResult)
@@ -829,7 +860,16 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 			job.Finish(1, store.JobError)
 			return
 		}
-		if _, saveErr := h.reqSvc.UpdateDesign(reqID, persistVal); saveErr != nil {
+		// Route persistence by doc type so wiki writes hit UpdateWikiDoc and
+		// never UpdateDesign (R4: design_docs would otherwise leak wiki content
+		// into the technical-design flow).
+		var saveErr error
+		if docType == "wiki" {
+			_, saveErr = h.reqSvc.UpdateWikiDoc(reqID, persistVal)
+		} else {
+			_, saveErr = h.reqSvc.UpdateDesign(reqID, persistVal)
+		}
+		if saveErr != nil {
 			log.Printf("[apply-doc] save failed: %v", saveErr)
 			job.Append(store.LogLine{Type: "error", Content: "保存失败: " + saveErr.Error()})
 			_ = h.reqSvc.UpdateApplyJob(reqID, "")

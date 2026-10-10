@@ -227,6 +227,14 @@ func (h *WizardHandler) immediatePreGate(reqRow *model.Requirement) *apiFailure 
 	if reqRow.Kind == service.KindIdea {
 		return fail(400, immediateErrIdeaNotDevelopable, "「想法」类需求暂不支持立即生成方案并开发，请先在详情页点击「📋 转为需求」升级")
 	}
+	// Wiki kind has no notion of "立即生成方案并开发" — wiki only ever
+	// generates a read-only knowledge doc, never code. The frontend hides
+	// this CTA when kind=wiki; we reject here for parity with the Idea
+	// branch so any out-of-band caller (curl, agent script) gets a clear
+	// 400 instead of an empty no-op.
+	if reqRow.Kind == service.KindWiki {
+		return fail(400, "WIKI", "「知识库」类需求不支持立即生成方案并开发，请在详情页生成知识库文档")
+	}
 	switch reqRow.Status {
 	case "draft", "designing", "designed", "developing":
 		// allowed set; fall through

@@ -580,6 +580,7 @@ body.no-scroll {
 .kind-badge.kind-issue       { background: #fee2e2; color: #b91c1c; }
 .kind-badge.kind-requirement { background: #e0e7ff; color: #4338ca; }
 .kind-badge.kind-idea        { background: #cffafe; color: #0e7490; }
+.kind-badge.kind-wiki        { background: #eef2ff; color: #4338ca; border-color: #c7d2fe; }
 
 /* ════════════════════════════════════════════════════════════════════
    MOBILE PATTERNS — bottom tab bar, FAB, bottom sheet, sticky composer.

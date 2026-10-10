@@ -14,7 +14,7 @@ import { IconCheck } from './icons';
 interface Props {
   reqId: string;
   projectPath: string;
-  docType: 'design' | 'coding';
+  docType: 'design' | 'coding' | 'wiki';
   currentDoc: string;
   // Effective model for this stage's refine/apply turns (server-persisted
   // stage model), used as the dropdown's default selection.
@@ -55,9 +55,10 @@ interface ChatMessage {
 
 // docLabelKeys maps docType → wizard.docLabels.* (resolved at render via
 // tLabel so the chip / header follow the active language).
-const docLabelKeys: Record<'design' | 'coding', string> = {
+const docLabelKeys: Record<'design' | 'coding' | 'wiki', string> = {
   design: 'wizard.docLabels.design',
   coding: 'wizard.docLabels.coding',
+  wiki: 'wizard.docLabels.wiki',
 };
 
 export default function DocRefineChat({ reqId, projectPath, docType, currentDoc, model, defaultModel, applyJobId, onTurnDone, onWorkingChange, usage, onUsage }: Props) {

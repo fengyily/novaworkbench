@@ -441,6 +441,40 @@ func (h *RequirementHandler) Unarchive(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, item)
 }
 
+// WikiArchive turns a wiki-kind requirement's Markdown body into a
+// knowledge-base entry. The requirement status moves to "archived"; the
+// knowledge row is created (or updated) with source_type="wiki_doc" and
+// category="wiki_doc" so the /knowledge page can list wiki entries
+// distinctly from completed-requirement entries. Rejects non-wiki rows
+// and rows without a generated wiki_docs body.
+func (h *RequirementHandler) WikiArchive(w http.ResponseWriter, r *http.Request) {
+	kb, err := h.svc.WikiArchive(r.PathValue("id"))
+	if err != nil {
+		code := "WIKI_ARCHIVE_FAILED"
+		if err.Error() == "only wiki-kind requirements can be wiki-archived (current kind: "+service.KindIssue+")" ||
+			err.Error() == "only wiki-kind requirements can be wiki-archived (current kind: "+service.KindRequirement+")" ||
+			err.Error() == "only wiki-kind requirements can be wiki-archived (current kind: "+service.KindIdea+")" {
+			code = "WIKI_KIND_REQUIRED"
+		}
+		writeError(w, 400, code, err.Error())
+		return
+	}
+	writeJSON(w, 200, kb)
+}
+
+// WikiUnarchive reverses WikiArchive: status returns to "designed" and
+// the wiki knowledge entry is removed. The wiki_docs body is preserved
+// on the requirement row, so a re-archive produces an identical
+// knowledge entry.
+func (h *RequirementHandler) WikiUnarchive(w http.ResponseWriter, r *http.Request) {
+	item, err := h.svc.WikiUnarchive(r.PathValue("id"))
+	if err != nil {
+		writeError(w, 400, "WIKI_UNARCHIVE_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, 200, item)
+}
+
 func (h *RequirementHandler) GetChatHistory(w http.ResponseWriter, r *http.Request) {
 	messages, err := h.svc.GetRefinementChat(r.PathValue("id"))
 	if err != nil {

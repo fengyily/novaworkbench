@@ -47,6 +47,7 @@ const KIND_SUBMIT_HINT_KEYS: Record<Kind, string> = {
   issue: 'components.createRequirement.submitHintIssue',
   idea: 'components.createRequirement.submitHintIdea',
   requirement: 'components.createRequirement.submitHintRequirement',
+  wiki: 'components.createRequirement.submitHintWiki',
 };
 
 export interface CreateRequirementFormProps {
@@ -138,8 +139,12 @@ export function CreateRequirementForm({
       // (and any skip flags) only apply to issue/requirement.
       // `full` removed — both remaining flows skip analysis, so the flag is
       // now derived from `kind` alone (idea never skips).
+      // Wiki kind is single-stage by design — no analyst, no architect.
+      // Both skip flags force true so a freshly-created wiki row lands on
+      // status='draft' with no analyst session / design session attached,
+      // and the detail page's 知识库文档 tab is the only next-step UI.
       const skipAnalysis = kind !== 'idea';
-      const skipDesign = kind === 'idea' ? false : flow === 'direct';
+      const skipDesign = kind === 'idea' ? false : kind === 'wiki' ? true : flow === 'direct';
       const created = await requirementsApi.create({
         project_id: projectId,
         description,

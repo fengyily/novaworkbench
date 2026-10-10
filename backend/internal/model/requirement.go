@@ -26,6 +26,15 @@ type Requirement struct {
 	// row is left untouched so the discussion thread stays intact.
 	SourceRequirementID string `json:"source_requirement_id"`
 	DesignSessionID     string `json:"design_session_id"`
+	// WikiDocs stores the Markdown document body for a wiki-kind requirement.
+	// Produced by the plan-mode "生成知识库文档" wizard stage (handler/wizard_wiki.go
+	// GenerateWikiDoc). Mirrors DesignDocs but is owned exclusively by the
+	// wiki kind so the two flows never collide. Empty string = no doc yet.
+	WikiDocs string `json:"wiki_docs"`
+	// WikiSessionID persists the plan-mode claude session ID across
+	// refine-doc / apply-doc stages so they can --resume the same conversation.
+	// Mirrors DesignSessionID; cleared by compress-context the same way.
+	WikiSessionID string `json:"wiki_session_id"`
 	DesignJobID         string `json:"design_job_id"`   // active architect-design JobStore job id; empty when no design job is running
 	AnalysisJobID       string `json:"analysis_job_id"` // active analyst-chat JobStore job id; empty when no analyst turn is running
 	ApplyJobID          string `json:"apply_job_id"`    // active apply-doc JobStore job id; empty when no apply is running

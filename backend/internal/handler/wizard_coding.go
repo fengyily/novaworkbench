@@ -609,6 +609,15 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		job.Finish(1, store.JobError)
 		return
 	}
+	// Defensive guard (wiki): a wiki row must never reach the coding
+	// stage either — wiki has no notion of "开始开发". Frontend hides
+	// the CTA; reject here for parity with the Idea guard so out-of-band
+	// callers get a clear error instead of a silent run.
+	if reqRow != nil && reqRow.Kind == service.KindWiki {
+		job.Append(store.LogLine{Type: "error", Content: "❌ 「知识库」类需求不进入开发阶段。请在详情页「知识库文档」tab 内生成 / 微调 / 归档文档。"})
+		job.Finish(1, store.JobError)
+		return
+	}
 
 	// ProjectPath fallback: ScheduledExecutor.RunScheduledCoding constructs
 	// codingRunParams with an empty ProjectPath (schedule_executor.go:124-136)

@@ -668,7 +668,7 @@ function escapeForShell(s: string): string {
 }
 
 // Requirements
-export type Kind = 'issue' | 'requirement' | 'idea';
+export type Kind = 'issue' | 'requirement' | 'idea' | 'wiki';
 
 export interface Requirement {
   id: string; project_id: string; title: string; description: string;
@@ -683,6 +683,13 @@ export interface Requirement {
   // user can jump back to the originating idea.
   source_requirement_id?: string;
   design_session_id: string; design_job_id: string; analysis_job_id: string; apply_job_id: string; coding_session_id: string;
+  // Wiki-kind requirement: Markdown body produced by the plan-mode
+  // "生成知识库文档" wizard stage, plus the persisted claude session id so
+  // refine-doc / apply-doc can --resume the same conversation. Mirrors
+  // design_docs / design_session_id but is owned exclusively by the wiki
+  // kind. Empty string = no doc yet / stage not yet run.
+  wiki_docs?: string;
+  wiki_session_id?: string;
   // coding_job_id: persisted JobStore job id for the running start-coding /
   // adjust-coding / continue-coding job, written by wizard_coding.go (HTTP
   // path) and schedule_executor.go (scheduler path). The detail page reads
@@ -921,7 +928,7 @@ export const kindOf = (r: { kind?: Kind } | null | undefined): Kind =>
 // the branch. Kept alongside kindOf so the kind → prefix derivation lives in
 // one place (the backend mirrors this in branchPrefixForKind).
 export const branchPrefixForKind = (kind?: Kind): string =>
-  kind === 'issue' ? 'fix' : 'feat';
+  kind === 'issue' ? 'fix' : kind === 'wiki' ? 'doc' : 'feat';
 
 // Default dev branch name for a requirement: "<prefix>/<full id>" (keeps the
 // req_ prefix — matches the backend's anchorWorktree convention and the
@@ -942,6 +949,7 @@ export const kindLabelKeys: Record<Kind, string> = {
   issue: 'status.kind.issue',
   requirement: 'status.kind.requirement',
   idea: 'status.kind.idea',
+  wiki: 'status.kind.wiki',
 };
 
 // Short plain-text label (no emoji) for chip-style filter buttons on the
@@ -950,6 +958,7 @@ export const kindShortLabelKeys: Record<Kind, string> = {
   issue: 'status.kindShort.issue',
   requirement: 'status.kindShort.requirement',
   idea: 'status.kindShort.idea',
+  wiki: 'status.kindShort.wiki',
 };
 
 // Hint text shown beneath each kind card in the create form.
@@ -957,6 +966,7 @@ export const kindHintKeys: Record<Kind, string> = {
   issue: 'status.kindHint.issue',
   requirement: 'status.kindHint.requirement',
   idea: 'status.kindHint.idea',
+  wiki: 'status.kindHint.wiki',
 };
 
 // Placeholder text for the create-form description textarea.
@@ -964,6 +974,7 @@ export const kindPlaceholderKeys: Record<Kind, string> = {
   issue: 'status.kindPlaceholder.issue',
   requirement: 'status.kindPlaceholder.requirement',
   idea: 'status.kindPlaceholder.idea',
+  wiki: 'status.kindPlaceholder.wiki',
 };
 
 // CTA button label for the create form, per kind.
@@ -971,6 +982,7 @@ export const kindCreateLabelKeys: Record<Kind, string> = {
   issue: 'status.kindCreate.issue',
   requirement: 'status.kindCreate.requirement',
   idea: 'status.kindCreate.idea',
+  wiki: 'status.kindCreate.wiki',
 };
 
 // Placeholder text for the analyst-chat composer textarea, per kind.
@@ -978,6 +990,7 @@ export const kindChatPlaceholderKeys: Record<Kind, string> = {
   issue: 'status.kindChatPlaceholder.issue',
   requirement: 'status.kindChatPlaceholder.requirement',
   idea: 'status.kindChatPlaceholder.idea',
+  wiki: 'status.kindChatPlaceholder.wiki',
 };
 
 // Stages visible in the detail-page stepper, per kind. An Idea only walks the
@@ -991,6 +1004,10 @@ export const STAGE_VISIBILITY: Record<Kind, ReadonlyArray<StageKey>> = {
   issue: ['analyst', 'architect', 'developer'],
   requirement: ['analyst', 'architect', 'developer'],
   idea: ['analyst'],
+  // Wiki kind has no analyst stage — it goes straight from draft to
+  // "generate knowledge doc" which the UI surfaces under the architect
+  // tab ("生成文档"). The detail page's 知识库文档 tab renders the result.
+  wiki: ['architect'],
 };
 
 export const requirementStatuses = ['draft', 'analyzing', 'designing', 'designed', 'developing', 'done'] as const;
@@ -1106,6 +1123,24 @@ export const requirementsApi = {
   // Reverse archive: status returns to "done" and the knowledge entry is removed.
   unarchive: (id: string) =>
     api.post<Requirement>(`/api/requirements/${id}/unarchive`, {}),
+  // Wiki-kind archive: persists the wiki_docs Markdown body into the
+  // project's knowledge table (source_type='wiki_doc', category='wiki_doc')
+  // and moves the requirement status to "archived". Distinct from
+  // archive() above (which is bound to status='done' + design_docs). The
+  // detail page wires this to the "归档到知识库" button on wiki rows.
+  wikiArchive: (id: string) =>
+    api.post<KnowledgeItem>(`/api/requirements/${id}/wiki-archive`, {}),
+  // Wiki unarchive: status returns to "designed", knowledge row deleted.
+  // The wiki_docs body is preserved on the requirement so a re-archive
+  // produces the same knowledge entry byte-for-byte.
+  wikiUnarchive: (id: string) =>
+    api.post<Requirement>(`/api/requirements/${id}/wiki-unarchive`, {}),
+  // Wiki generate: kicks off the plan-mode "生成知识库文档" claude run via
+  // a JobStore job. Returns { job_id } the caller streams via
+  // /api/wizard/jobs/{id}/stream. Same shape as the wizard's
+  // architect-design / start-coding entries.
+  generateWikiDoc: (id: string, opts: { model?: string; claude_config_id?: string; agent_server_id?: string; read_knowledge?: boolean } = {}) =>
+    api.post<{ job_id: string }>(`/api/wizard/wiki/generate`, { requirement_id: id, ...opts }),
   // PromoteFromIdea: summarize an idea's accumulated discussion (description +
   // chat history + acceptance_criteria) into a brand-new requirement row. The
   // original idea keeps its own kind + status; only the new row carries

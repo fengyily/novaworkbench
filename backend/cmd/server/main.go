@@ -574,6 +574,12 @@ func main() {
 	mux.HandleFunc("DELETE /api/requirements/{id}/analysis-session", reqH.ClearAnalysisSession)
 	mux.HandleFunc("POST /api/requirements/{id}/archive", reqH.Archive)
 	mux.HandleFunc("POST /api/requirements/{id}/unarchive", reqH.Unarchive)
+	// Wiki archive / unarchive — distinct from the regular archive above
+	// (which is bound to status='done' + design_docs). WikiArchive
+	// accepts status ∈ {designed, done} and writes source_type='wiki_doc'
+	// so the /knowledge page can list wiki entries distinctly.
+	mux.HandleFunc("POST /api/requirements/{id}/wiki-archive", reqH.WikiArchive)
+	mux.HandleFunc("POST /api/requirements/{id}/wiki-unarchive", reqH.WikiUnarchive)
 	// Report-archive endpoints (主 Agent 汇总报告 + 子任务报告 → knowledge).
 	// No RequirePermission — auth middleware is the gate, same as the
 	// /archive / /unarchive siblings above.
@@ -610,6 +616,11 @@ func main() {
 	mux.HandleFunc("GET /api/wizard/active-jobs", wizardH.GetActiveJobs)
 	mux.HandleFunc("POST /api/wizard/refine-doc", wizardH.RefineDoc)
 	mux.HandleFunc("POST /api/wizard/apply-doc", wizardH.ApplyDoc)
+	// Wiki-kind document generator — plan-mode claude that produces a
+	// read-only Markdown body, persisted to requirements.wiki_docs (NOT
+	// design_docs). Mirrors architect-design's prepare / exec / finalize
+	// shape; see handler/wizard_wiki.go for the full rationale.
+	mux.HandleFunc("POST /api/wizard/wiki/generate", wizardH.GenerateWikiDoc)
 
 	// Context compression (analyst / architect / coding) — see wizard
 	// CompressContext for the SSE protocol and persist semantics. The
