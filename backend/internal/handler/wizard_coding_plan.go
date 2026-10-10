@@ -400,38 +400,47 @@ func (h *WizardHandler) decomposePlanIntoSteps(
 	}
 
 	var (
-		raw   string
-		err   error
-		rawOK bool
+		raw      string
+		err      error
+		feedback string
 	)
 	for attempt := 1; attempt <= splitRetryMax; attempt++ {
-		raw, err = h.llm.ExtractStepsFromPlan(planMarkdown)
-		if err == nil {
-			rawOK = true
-			break
+		raw, err = h.llm.ExtractStepsFromPlan(planMarkdown, feedback)
+		// 用完即清，避免重试传输错误时把过期的 parse feedback 一起塞进去。
+		feedback = ""
+		if err != nil {
+			errStr := err.Error()
+			log.Printf("[coding-plan] %s: step extraction attempt %d/%d failed: %v", reqID, attempt, splitRetryMax, err)
+			if !isRetryableSplitErr(errStr) {
+				return fallback(errStr)
+			}
+			if attempt == splitRetryMax {
+				return fallback(fmt.Sprintf("重试 %d 次后仍失败：%s", splitRetryMax, errStr))
+			}
+			job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("🔄 步骤解析第 %d/%d 次重试（上次错误：%s）", attempt+1, splitRetryMax, truncateForLog(errStr, 120))})
+			// Exponential backoff: 1s, 2s, 4s (only sleeps 1s + 2s because the third
+			// attempt is the last and has nowhere to wait for).
+			time.Sleep(splitRetryBaseDelay << (attempt - 1))
+			continue
 		}
-		errStr := err.Error()
-		log.Printf("[coding-plan] %s: step extraction attempt %d/%d failed: %v", reqID, attempt, splitRetryMax, err)
-		if !isRetryableSplitErr(errStr) {
-			return fallback(errStr)
+		// 调用成功：尝试解析。
+		payload := normalizePayload(decodeSubtasksPayload(extractJSON(raw)))
+		if payload != nil && len(payload.Subtasks) > 0 {
+			log.Printf("[coding-plan] %s: extracted %d steps from the implementation plan", reqID, len(payload.Subtasks))
+			return payload, raw
 		}
+		// 解析失败（HTTP 200 但内容不是合法 JSON / normalize 后为空）：把上
+		// 一次的 raw 作为 feedback 喂回去，让模型 self-correct。这是改动前
+		// 缺失的分支——以前会直接 fallback("模型未返回可解析的步骤列表")。
+		log.Printf("[coding-plan] %s: step extraction attempt %d/%d parse failed: %s", reqID, attempt, splitRetryMax, truncateForLog(raw, 120))
 		if attempt == splitRetryMax {
-			return fallback(fmt.Sprintf("重试 %d 次后仍失败：%s", splitRetryMax, errStr))
+			return fallback("模型未返回可解析的步骤列表（已重试 3 次）")
 		}
-		job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("🔄 步骤解析第 %d/%d 次重试（上次错误：%s）", attempt+1, splitRetryMax, truncateForLog(errStr, 120))})
-		// Exponential backoff: 1s, 2s, 4s (only sleeps 1s + 2s because the third
-		// attempt is the last and has nowhere to wait for).
+		job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("🔄 步骤解析第 %d/%d 次重试（上次错误：parse: %s）", attempt+1, splitRetryMax, truncateForLog(raw, 120))})
+		feedback = truncateForLog(raw, 200)
 		time.Sleep(splitRetryBaseDelay << (attempt - 1))
 	}
-	if !rawOK {
-		// Defensive — every error branch already returned, so this is
-		// unreachable, but keeps the compiler happy and the intent obvious.
-		return fallback("步骤解析未返回结果")
-	}
-	payload := normalizePayload(decodeSubtasksPayload(extractJSON(raw)))
-	if payload == nil || len(payload.Subtasks) == 0 {
-		return fallback("模型未返回可解析的步骤列表")
-	}
-	log.Printf("[coding-plan] %s: extracted %d steps from the implementation plan", reqID, len(payload.Subtasks))
-	return payload, raw
+	// Defensive — every error / parse-failure branch already returned, so this
+	// is unreachable, but keeps the compiler happy and the intent obvious.
+	return fallback("步骤解析未返回结果")
 }

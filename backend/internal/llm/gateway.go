@@ -1019,7 +1019,16 @@ func (g *Gateway) ExtractReportKnowledge(reportKind, content, instruction string
 // returns garbage, the caller degrades to a single sub-task carrying the whole
 // plan, which keeps the pipeline moving instead of stalling at zero children.
 // The caller JSON-decodes the returned text — this method performs no validation.
-func (g *Gateway) ExtractStepsFromPlan(planMarkdown string) (string, error) {
+//
+// feedback carries the previous attempt's raw output (caller-truncated to a
+// couple hundred chars) so the model can self-correct on a parse failure.
+// Non-empty feedback is appended to the user message after the 24000-rune
+// plan cap; empty feedback skips the branch and behaves identically to the
+// pre-change single-arg signature. Consumed by
+// wizard_coding_plan.decomposePlanIntoSteps's retry loop to mirror the legacy
+// ExtractSubtasksJSON / extractSubtasksWithLLM "parse → feedback → retry"
+// pattern.
+func (g *Gateway) ExtractStepsFromPlan(planMarkdown, feedback string) (string, error) {
 	if g.llmCfg == nil {
 		return "", fmt.Errorf("llm not configured: no llm config provider")
 	}
@@ -1035,6 +1044,14 @@ func (g *Gateway) ExtractStepsFromPlan(planMarkdown string) (string, error) {
 	const maxRunes = 24000
 	if runes := []rune(planMarkdown); len(runes) > maxRunes {
 		planMarkdown = string(runes[:maxRunes]) + "\n…（后文省略）"
+	}
+	// Append the previous attempt's raw output so the model can self-correct
+	// on parse failure. Placed AFTER the rune cap so a long plan body + a long
+	// feedback still keeps the plan intact at the model's input limit.
+	if feedback != "" {
+		planMarkdown = planMarkdown +
+			"\n\n（你上一次的输出无法解析为合法 JSON 或未能生成有效步骤列表，错误信息：" +
+			feedback + "，这次请严格输出合法 JSON。）"
 	}
 	out, _, err := chatCompletion(baseURL, apiKey, model, extractStepsSystemPrompt, planMarkdown, 8192)
 	if err != nil {
