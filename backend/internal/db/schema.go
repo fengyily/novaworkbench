@@ -671,6 +671,15 @@ var alterColumns = []string{
 	// for the same rationale. Idempotent via isIgnorableDDLError.
 	`ALTER TABLE requirements ADD COLUMN wiki_docs        TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN wiki_session_id  TEXT NOT NULL DEFAULT ''`,
+	// Active wiki-generation JobStore job id — added in v0.5.x so a page
+	// refresh during an in-flight wiki run can reconnect to the live SSE
+	// stream. Mirrors design_job_id / analysis_job_id / apply_job_id /
+	// coding_job_id: persisted before the goroutine spawns, cleared on
+	// terminal (success / error / stale session) paths inside
+	// finalizeWikiRun, and self-healed on Get via healStaleJobs so a server
+	// restart between the DB write and the clearing call doesn't wedge
+	// the UI into a perpetual spinner. Idempotent via isIgnorableDDLError.
+	`ALTER TABLE requirements ADD COLUMN wiki_job_id      TEXT NOT NULL DEFAULT ''`,
 	// Source traceability for promoted / split-off requirements. Set when an
 	// idea (or another kind) is summarized into a brand-new requirement via the
 	// "总结转需求" action. The original row keeps its own kind (so discussions

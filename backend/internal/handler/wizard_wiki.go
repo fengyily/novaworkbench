@@ -174,13 +174,18 @@ func (h *WizardHandler) prepareWikiDoc(ctx context.Context, requirementID, model
 	}
 
 	// Job + job_id pre-mint, same shape as architect-design: persist
-	// wiki_job_id via a sentinel column. There is no WikiJobID on the
-	// model today (the column was deliberately not added to keep the
-	// schema minimal), so we only persist the job in JobStore; a
-	// server restart loses the active pointer, but the user can re-run
-	// from the wiki tab — the session is preserved.
+	// wiki_job_id BEFORE the goroutine spawns so a page refresh during
+	// the in-flight run can reconnect to the live SSE stream via the
+	// frontend's streamWikiJob-on-mount logic. Cleared on every terminal
+	// path (success / error / stale session) inside finalizeWikiRun so
+	// the next run can mint a fresh id. healStaleJobs also self-heals a
+	// stale pointer when the JobStore no longer holds the job (e.g. the
+	// server restarted between the DB write and the clearing call).
 	job := h.jobs.Create(id)
 	job.SetType("wiki_generate")
+	if perr := h.reqSvc.UpdateWikiJob(id, job.ID); perr != nil {
+		log.Printf("[wiki-generate] failed to persist wiki_job_id for %s: %v", id, perr)
+	}
 
 	// Persona: load the wiki role (system prompt + default model) via
 	// the shared roleConfig helper. roleConfig returns "" when the user
@@ -354,6 +359,19 @@ func (h *WizardHandler) finalizeWikiRun(
 	job *store.Job,
 	id, model string,
 ) {
+	// Clear wiki_job_id on every terminal path so a page refresh after the
+	// run finishes doesn't try to reconnect to a dead JobStore slot. The
+	// goroutine returns after this function, so a single defer covers every
+	// branch (success, stale session, error, preamble rejection, empty
+	// sanitize, UpdateWikiDoc failure). The persistent log on
+	// execWikiDoc's deferred line still fires independently — clearing
+	// wiki_job_id here doesn't disturb the job_logs persistence.
+	defer func() {
+		if cerr := h.reqSvc.UpdateWikiJob(id, ""); cerr != nil {
+			log.Printf("[wiki-generate] failed to clear wiki_job_id for %s: %v", id, cerr)
+		}
+	}()
+
 	if out.staleSession {
 		// Clear the stale wiki session id so the next run mints a fresh
 		// one. The wiki flow has no analyst stage to roll back to.

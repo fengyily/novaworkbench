@@ -696,6 +696,12 @@ export interface Requirement {
   // kind. Empty string = no doc yet / stage not yet run.
   wiki_docs?: string;
   wiki_session_id?: string;
+  // Active wiki-generation JobStore job id; mirrors design_job_id. Empty
+  // when no wiki job is running. The detail page reads it after a refresh
+  // to reconnect to the live SSE stream (the wiki section otherwise loses
+  // its streaming panel + busy state on every page load). Cleared on
+  // terminal by finalizeWikiRun; self-healed on Get via healStaleJobs.
+  wiki_job_id?: string;
   // coding_job_id: persisted JobStore job id for the running start-coding /
   // adjust-coding / continue-coding job, written by wizard_coding.go (HTTP
   // path) and schedule_executor.go (scheduler path). The detail page reads

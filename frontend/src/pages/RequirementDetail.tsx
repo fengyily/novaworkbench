@@ -1121,12 +1121,12 @@ export default function RequirementDetail() {
   const [showDesignProcess, setShowDesignProcess] = useState(false);
 
   // Streaming wiki-doc state (wiki phase). Mirrors the design state above:
-  // jobStore job → SSE stream → log lines → refresh on job_done. The wiki
-  // kind has no persisted wiki_job_id column (intentional — the schema stays
-  // minimal), so a refresh during an in-flight run loses the live SSE link;
-  // the wiki section's status gate (`draft|designing`) keeps the CTA
-  // available so the user can re-launch. Status moves to `designed`
-  // automatically once the backend's finalizeWikiRun persists wiki_docs.
+  // jobStore job → SSE stream → log lines → refresh on job_done. wiki_job_id
+  // is now persisted on the requirement row (mirrors design_job_id), so a
+  // page refresh during an in-flight run reconnects to the live SSE stream
+  // via the useEffect below — see the `if (req.wiki_job_id) ...` block that
+  // follows `pollWikiJob`. Status moves to `designed` automatically once the
+  // backend's finalizeWikiRun persists wiki_docs.
   const [wikiLines, setWikiLines] = useState<LogLine[]>([]);
   const [wikiGenerating, setWikiGenerating] = useState(false);
   const [wikiError, setWikiError] = useState(false);
@@ -1837,6 +1837,47 @@ export default function RequirementDetail() {
     }, 10000);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refresh]);
+
+  // Reconnect to an in-flight wiki job after a page refresh. Mirrors the
+  // architect-design pattern above: the requirement carries wiki_job_id
+  // (server truth, persisted in v0.5.x); on mount, if it's set, we query
+  // /api/wizard/jobs/{id} for status + historical log. If the job is still
+  // running we rehydrate wikiLines and resume the SSE stream so the user
+  // doesn't lose visibility into the live generation. If it's already
+  // finished (server restarted and the JobStore evicted the slot, or the
+  // job_done landed before we connected), healStaleJobs will clear
+  // wiki_job_id on the next Get and we drop into the idle state.
+  useEffect(() => {
+    if (!id || !req?.wiki_job_id) return;
+    const jobId = req.wiki_job_id;
+    authedFetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
+      .then(r => r.json())
+      .then(json => {
+        if (!json.success) { setWikiGenerating(false); refresh(); return; }
+        const { status, exit_code, log } = json.data as { status: string; exit_code: number; log: LogLine[] };
+        if (log && log.length > 0) {
+          // Rehydrate only non-knowledge frames into wikiLines; knowledge
+          // pre-read events have already been processed by the live stream
+          // (or are stale, and the backend has nothing more to send for
+          // this run anyway). We keep it simple: all log lines are valid
+          // wiki panel content.
+          setWikiLines(prev => coalesceLogLines([...prev, ...log]));
+        }
+        if (status === 'running') {
+          setWikiGenerating(true);
+          setWikiError(false);
+          streamWikiJob(jobId);
+        } else {
+          // Already finished (or evicted from JobStore on server restart).
+          // Drop into idle so the user sees the result or the CTA.
+          setWikiGenerating(false);
+          setWikiError(status === 'error' || exit_code !== 0);
+          refresh();
+        }
+      })
+      .catch(() => setWikiGenerating(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, req?.wiki_job_id]);
 
   // runWikiGenerate kicks off the plan-mode knowledge-doc job and subscribes
   // to its SSE stream. The backend's prepareWikiDoc promotes status

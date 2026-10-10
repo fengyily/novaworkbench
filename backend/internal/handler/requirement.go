@@ -71,6 +71,7 @@ func (h *RequirementHandler) healStaleJobs(req *model.Requirement) {
 		{req.DesignJobID, h.svc.UpdateDesignJob, &req.DesignJobID},
 		{req.AnalysisJobID, h.svc.UpdateAnalysisJob, &req.AnalysisJobID},
 		{req.ApplyJobID, h.svc.UpdateApplyJob, &req.ApplyJobID},
+		{req.WikiJobID, h.svc.UpdateWikiJob, &req.WikiJobID},
 	}
 	for _, c := range checks {
 		if c.val == "" {

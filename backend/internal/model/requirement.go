@@ -35,6 +35,7 @@ type Requirement struct {
 	// refine-doc / apply-doc stages so they can --resume the same conversation.
 	// Mirrors DesignSessionID; cleared by compress-context the same way.
 	WikiSessionID string `json:"wiki_session_id"`
+	WikiJobID     string `json:"wiki_job_id"`     // active wiki-generation JobStore job id; empty when no wiki job is running. Mirrors DesignJobID for reconnect-after-refresh.
 	DesignJobID         string `json:"design_job_id"`   // active architect-design JobStore job id; empty when no design job is running
 	AnalysisJobID       string `json:"analysis_job_id"` // active analyst-chat JobStore job id; empty when no analyst turn is running
 	ApplyJobID          string `json:"apply_job_id"`    // active apply-doc JobStore job id; empty when no apply is running
