@@ -782,12 +782,13 @@ export default function RequirementDetail() {
   // anyway, but the UI being upfront avoids the round-trip). Modal is
   // controlled by modalState — null when closed; otherwise carries the
   // taskType we want to create.
-  const [pendingByType, setPendingByType] = useState<Record<'design' | 'coding' | 'design_and_coding', ScheduledTask | null>>({
+  const [pendingByType, setPendingByType] = useState<Record<'design' | 'coding' | 'design_and_coding' | 'wiki', ScheduledTask | null>>({
     design: null,
     coding: null,
     design_and_coding: null,
+    wiki: null,
   });
-  const [scheduleModal, setScheduleModal] = useState<{ taskType: 'design' | 'coding' | 'design_and_coding' } | null>(null);
+  const [scheduleModal, setScheduleModal] = useState<{ taskType: 'design' | 'coding' | 'design_and_coding' | 'wiki' } | null>(null);
   // Immediate "design + coding" launch — opens DesignCodingImmediateModal and
   // on submit fires the backend's /api/wizard/requirements/{id}/design-and-coding
   // endpoint (wizard_immediate.go) instead of writing a scheduled_tasks row.
@@ -799,13 +800,14 @@ export default function RequirementDetail() {
     if (!req) return;
     try {
       const rows = await schedulesApi.list({ requirement_id: req.id, status: 'pending' });
-      const map: Record<'design' | 'coding' | 'design_and_coding', ScheduledTask | null> = {
+      const map: Record<'design' | 'coding' | 'design_and_coding' | 'wiki', ScheduledTask | null> = {
         design: null,
         coding: null,
         design_and_coding: null,
+        wiki: null,
       };
       for (const r of rows ?? []) {
-        if (r.task_type === 'design' || r.task_type === 'coding' || r.task_type === 'design_and_coding') {
+        if (r.task_type === 'design' || r.task_type === 'coding' || r.task_type === 'design_and_coding' || r.task_type === 'wiki') {
           map[r.task_type] = r;
         }
       }
@@ -1946,6 +1948,10 @@ export default function RequirementDetail() {
           ...(architectModel ? { model: architectModel } : {}),
           ...(architectConfigId ? { claude_config_id: architectConfigId } : {}),
           ...(designAgentServerId ? { agent_server_id: designAgentServerId } : {}),
+          // Code-transport mode, only meaningful alongside an Agent server
+          // (local execution never ships code over SFTP). Mirrors
+          // runArchitectDesign's identical guard.
+          ...(designAgentServerId && designSyncMode ? { sync_mode: designSyncMode } : {}),
         }),
       });
       const json = await res.json();
@@ -4643,10 +4649,29 @@ export default function RequirementDetail() {
         // last run errored (so the red error line stays visible), closed
         // on success.
         const wikiPanelOpen = wikiGenerating || wikiError;
+        // The config toolbar (model / exec env / sync mode) shows exactly
+        // when a run can still be started, i.e. the same gate as the
+        // generate CTA further down. Once a doc exists the section
+        // collapses to 微调 / 归档 and the toolbar would be dead weight.
+        const wikiConfigurable =
+          req.status === 'draft' || req.status === 'designing' ||
+          (req.status === 'designed' && !wiki.plan_markdown);
         return (
           <div className="detail-section wiki-section">
             <div className="section-header">
               <h3><IconBook size={16} className="icon-mr" />{t('requirements.detail2.tabWikiDoc')}</h3>
+              {/* Persisted execution environment: which Agent Server (or
+                  本地) the last wiki run used, read back from
+                  requirements.design_agent_server_id — a wiki row has no
+                  design stage, so that column carries the wiki stage's
+                  binding. Mirrors the architect section header. */}
+              {req.design_agent_server_id && (
+                <ExecEnvBadge
+                  serverId={req.design_agent_server_id}
+                  serverName={req.design_agent_server_name}
+                  compact
+                />
+              )}
               {/* Fullscreen toggle for the streaming panel — same pattern as
                   the design panel's FullscreenButton. Only meaningful while
                   the panel is rendered (job running / errored). */}
@@ -4654,6 +4679,74 @@ export default function RequirementDetail() {
                 <FullscreenButton isFullscreen={wikiFs.isFullscreen} onClick={wikiFs.toggle} />
               )}
             </div>
+            {/* ── Wiki configuration toolbar ──
+                Structurally identical to the architect design-toolbar, and
+                deliberately reusing the SAME state (architectModel /
+                architectConfigId / designAgentServerId / designSyncMode):
+                a wiki row never has an architect stage, so those four
+                pieces of state — and the four DB columns behind them —
+                belong to the wiki stage on this row.
+                ── Project rule ──
+                Any entry point that can start work against a specific
+                execution environment MUST render the environment selector
+                on the same screen (see the design-toolbar comment above).
+                The wiki CTA used to violate that rule: it posted
+                designAgentServerId while offering the user no way to set
+                it. This toolbar is what closes that gap. */}
+            {wikiConfigurable && (
+              <div className="design-toolbar">
+                <ModelSelect
+                  value={architectModel}
+                  onChange={setArchitectModel}
+                  disabled={wikiGenerating}
+                  working={wikiGenerating}
+                  stage="architect"
+                  label={t('requirements.detail2.wikiModelLabel')}
+                  defaultModelName={architectDefaultModel}
+                  title={wikiGenerating
+                    ? t('requirements.detail2.wikiModelBusyTitle')
+                    : t('requirements.detail2.wikiModelTitle')}
+                  configId={architectConfigId || undefined}
+                  onConfigChange={setArchitectConfigId}
+                />
+                <div className="design-env-cluster">
+                  <span className="design-env-cluster-caption">{t('requirements.detail2.execEnvCaption')}</span>
+                  <ExecEnvSelect
+                    servers={agentServers}
+                    value={designAgentServerId}
+                    onChange={setDesignAgentServerId}
+                    disabled={wikiGenerating}
+                    title={wikiGenerating
+                      ? t('requirements.detail2.designAgentServerBusyTitle')
+                      : (agentServers.length === 0 ? t('requirements.detail2.designAgentServerEmptyTitle') : '')}
+                    localOptionLabel={t('requirements.detail2.preflightLocalExec')}
+                    style={{ minWidth: 160 }}
+                  />
+                  {designAgentServerId && (
+                    <>
+                      <span className="design-env-cluster-divider" aria-hidden="true" />
+                      {/* Knowledge-base requirements often live in repos with
+                          no reachable remote, and remote execution requires
+                          one unless the transport is the git bundle. Keeping
+                          this picker adjacent and visible is the fix for that
+                          otherwise-cryptic git failure. */}
+                      <SyncModeSelect
+                        enabled={!!designAgentServerId}
+                        value={designSyncMode}
+                        onChange={setDesignSyncMode}
+                        disabled={wikiGenerating}
+                        style={{ minWidth: 140 }}
+                      />
+                    </>
+                  )}
+                </div>
+                {agentServers.length === 0 && (
+                  <div className="design-toolbar-hint">
+                    {t('requirements.detail2.designAgentServerNoHint')}
+                  </div>
+                )}
+              </div>
+            )}
             {/* Doc body — only when wiki_docs is non-empty. Mermaid code
                 blocks render as text under the default react-markdown 8
                 (no rehype-mermaid plugin); the WikiBlock in the prompt
@@ -4724,6 +4817,31 @@ export default function RequirementDetail() {
                         ? t('requirements.detail2.btnRegenerateWiki')
                         : t('requirements.detail2.btnGenerateWiki')}</>}
                 </button>
+              )}
+              {/* Scheduled generation — same gate as the immediate CTA, plus
+                  the "no pending wiki row yet" guard the design CTA uses
+                  (the backend's HasPendingConflict would 409 otherwise).
+                  The modal reuses the design-stage block since a wiki row
+                  carries exactly the same three knobs. */}
+              {wikiConfigurable && !pendingByType.wiki && (
+                <button
+                  className="btn"
+                  onClick={() => setScheduleModal({ taskType: 'wiki' })}
+                  disabled={wikiGenerating || !!busy}
+                  title={t('requirements.detail2.scheduleWikiTitle')}
+                >
+                  <IconClock size={13} className="btn-icon" />{t('requirements.detail2.scheduleWikiBtn')}
+                </button>
+              )}
+              {pendingByType.wiki && (
+                <PendingScheduleHint
+                  task={pendingByType.wiki}
+                  label={t('schedules.type.wiki')}
+                  onCancel={async () => {
+                    await schedulesApi.cancel(pendingByType.wiki!.id);
+                    loadPendingSchedules();
+                  }}
+                />
               )}
               {req.status === 'designed' && wiki.plan_markdown && (
                 <DocRefineChat
@@ -5419,11 +5537,10 @@ export default function RequirementDetail() {
           requirementId={req.id}
           requirementTitle={req.title}
           initialModel={
-            scheduleModal.taskType === 'design'
-              ? architectModel
-              : scheduleModal.taskType === 'design_and_coding'
-                ? architectModel
-                : developerModel
+            // design / design_and_coding / wiki all seed from the
+            // architect-stage model state — wiki reuses it because a wiki
+            // row has no architect stage of its own.
+            scheduleModal.taskType === 'coding' ? developerModel : architectModel
           }
           initialCodingModel={
             scheduleModal.taskType === 'design_and_coding' ? developerModel : undefined
@@ -5517,7 +5634,9 @@ function PendingScheduleHint({
       ? t('schedules.type.design')
       : task.task_type === 'design_and_coding'
         ? t('schedules.type.designCoding')
-        : t('schedules.type.coding'));
+        : task.task_type === 'wiki'
+          ? t('schedules.type.wiki')
+          : t('schedules.type.coding'));
   return (
     <span
       style={{

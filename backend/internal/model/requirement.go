@@ -50,6 +50,11 @@ type Requirement struct {
 	// (the --model value, or the display literal "默认模型" when neither the
 	// role nor the active claude config specified one). Written only on the
 	// success path; empty = the stage hasn't run yet (or predates this column).
+	//
+	// kind=wiki reuse: a wiki row never has an architect stage, so
+	// ArchitectModel / ArchitectConfigID below carry the KNOWLEDGE-BASE
+	// stage's effective model + config (written by finalizeWikiRun). Same
+	// reuse applies to DesignAgentServerID / SyncMode / DesignBaseSHA.
 	AnalystModel   string `json:"analyst_model"`
 	ArchitectModel string `json:"architect_model"`
 	DeveloperModel string `json:"developer_model"`
@@ -136,6 +141,9 @@ type Requirement struct {
 	// persisted badge accurately reflects what the user last chose — and
 	// follow-up "继续设计" actions don't accidentally inherit a stale server
 	// binding that the user has since cleared.
+	//
+	// kind=wiki: stamped by prepareWikiDoc instead — the knowledge-base
+	// stage IS the wiki row's only stage, so it owns this column.
 	DesignAgentServerID string `json:"design_agent_server_id"`
 	// DesignAgentServerName is a display-only join of agent_servers.name for
 	// DesignAgentServerID (NOT a requirements column). Populated by

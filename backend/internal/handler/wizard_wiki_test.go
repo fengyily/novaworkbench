@@ -1,8 +1,15 @@
 package handler
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/novaworkbench/backend/internal/db"
+	"github.com/novaworkbench/backend/internal/service"
+	"github.com/novaworkbench/backend/internal/store"
 )
 
 // TestLooksLikeWikiPreamble pins the existing short-progress-message
@@ -106,4 +113,210 @@ func TestLooksLikeWikiOutline(t *testing.T) {
 			}
 		})
 	}
+}
+// --------------------------------------------------------------------
+// Execution environment / model persistence (Agent Server alignment)
+// --------------------------------------------------------------------
+
+// TestPrepareWikiDocStampsExecEnv pins the prologue that brings the wiki
+// stage in line with architect-design: the picked Agent server and the
+// code-transport mode are persisted BEFORE any SSH / worktree work, so a
+// later failure still records what the user chose and a page refresh
+// re-hydrates the toolbar.
+//
+// kind=wiki rows reuse the design-stage columns (design_agent_server_id /
+// sync_mode) because a wiki row never has a design stage — see
+// wikiRunParams.AgentServerID.
+//
+// The sync_mode cases also pin Stamp-If-Non-Empty semantics: an empty
+// sync_mode keeps whatever is stored, and local execution never stamps at
+// all (nothing is shipped over SFTP).
+func TestPrepareWikiDocStampsExecEnv(t *testing.T) {
+	cases := []struct {
+		name          string
+		agentServerID string
+		syncMode      string
+		seedSyncMode  string
+		wantServer    string
+		wantSync      string
+	}{
+		{
+			name:          "agent server + bundle transport are both stamped",
+			agentServerID: "agent_1",
+			syncMode:      "local",
+			wantServer:    "agent_1",
+			wantSync:      "local",
+		},
+		{
+			name:          "empty sync_mode keeps the stored value",
+			agentServerID: "agent_1",
+			syncMode:      "",
+			seedSyncMode:  "local",
+			wantServer:    "agent_1",
+			wantSync:      "local",
+		},
+		{
+			name:          "local execution clears the server and never touches sync_mode",
+			agentServerID: "",
+			syncMode:      "local",
+			seedSyncMode:  "",
+			wantServer:    "",
+			wantSync:      "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d, reqID := seedWikiRequirement(t)
+			reqSvc := service.NewRequirementService(d, nil)
+			if c.seedSyncMode != "" {
+				if err := reqSvc.UpdateSyncMode(reqID, c.seedSyncMode); err != nil {
+					t.Fatalf("seed sync_mode: %v", err)
+				}
+			}
+			h := &WizardHandler{
+				reqSvc:     reqSvc,
+				projectSvc: service.NewProjectService(d, nil, nil),
+				jobs:       store.NewJobStore(8),
+				roleSvc:    service.NewRoleService(d),
+				claudeCfg:  service.NewClaudeConfigService(d),
+			}
+
+			p, job, af := h.prepareWikiDoc(context.Background(), reqID, "", "", c.agentServerID, false, c.syncMode)
+			if af != nil {
+				t.Fatalf("prepareWikiDoc failed: %+v", af)
+			}
+			if job == nil {
+				t.Fatal("prepareWikiDoc returned no job")
+			}
+			if p.AgentServerID != c.agentServerID {
+				t.Errorf("params.AgentServerID = %q, want %q", p.AgentServerID, c.agentServerID)
+			}
+			if p.SyncMode != c.syncMode {
+				t.Errorf("params.SyncMode = %q, want %q", p.SyncMode, c.syncMode)
+			}
+
+			got, err := reqSvc.Get(reqID)
+			if err != nil {
+				t.Fatalf("reload req: %v", err)
+			}
+			if got.DesignAgentServerID != c.wantServer {
+				t.Errorf("design_agent_server_id = %q, want %q", got.DesignAgentServerID, c.wantServer)
+			}
+			if got.SyncMode != c.wantSync {
+				t.Errorf("sync_mode = %q, want %q", got.SyncMode, c.wantSync)
+			}
+			// The job pointer must be live so a refresh mid-run reconnects.
+			if got.WikiJobID != job.ID {
+				t.Errorf("wiki_job_id = %q, want %q", got.WikiJobID, job.ID)
+			}
+		})
+	}
+}
+
+// TestPrepareWikiDocRejectsNonWikiKind pins the hard kind guard — the
+// scheduled path (RunScheduledWiki) and the launch-spec path both bottom
+// out here, so this is the last line of defense if either gate is ever
+// relaxed.
+func TestPrepareWikiDocRejectsNonWikiKind(t *testing.T) {
+	d, reqID := seedWikiRequirement(t)
+	if _, err := d.Exec(`UPDATE requirements SET kind='requirement' WHERE id=?`, reqID); err != nil {
+		t.Fatalf("flip kind: %v", err)
+	}
+	h := &WizardHandler{
+		reqSvc:     service.NewRequirementService(d, nil),
+		projectSvc: service.NewProjectService(d, nil, nil),
+		jobs:       store.NewJobStore(8),
+		roleSvc:    service.NewRoleService(d),
+		claudeCfg:  service.NewClaudeConfigService(d),
+	}
+	_, _, af := h.prepareWikiDoc(context.Background(), reqID, "", "", "", false, "")
+	if af == nil || af.Code != "WIKI" {
+		t.Fatalf("expected 400 WIKI, got %+v", af)
+	}
+}
+
+// TestFinalizeWikiRunPersistsModelAndConfig pins the success-path writes
+// that let the wiki toolbar re-hydrate its model + Claude-config dropdowns
+// after a refresh. kind=wiki reuses the architect columns (a wiki row has
+// no architect stage), mirroring finalizeArchitectRun.
+func TestFinalizeWikiRunPersistsModelAndConfig(t *testing.T) {
+	d, reqID := seedWikiRequirement(t)
+	reqSvc := service.NewRequirementService(d, nil)
+	jobs := store.NewJobStore(8)
+	job := jobs.Create(reqID)
+	if err := reqSvc.UpdateWikiJob(reqID, job.ID); err != nil {
+		t.Fatalf("seed wiki_job_id: %v", err)
+	}
+	h := &WizardHandler{reqSvc: reqSvc, jobs: jobs}
+
+	req, err := reqSvc.Get(reqID)
+	if err != nil {
+		t.Fatalf("reload req: %v", err)
+	}
+	p := &wikiRunParams{
+		Req:            req,
+		NewWikiSID:     "sid-wiki",
+		Model:          "claude-opus-5",
+		ClaudeConfigID: "ccfg_remote",
+		AgentServerID:  "agent_1",
+		SyncMode:       "local",
+	}
+
+	// A doc body that survives SanitizeDesignDoc and both rejection
+	// heuristics: a heading plus backticked file paths / function names.
+	// No fenced block — SanitizeDesignDoc unwraps an outer fence, and a
+	// doc whose only fence is the trailing one gets reduced to its body.
+	body := "# 模块总览\n\n" +
+		"核心入口在 `internal/handler/wizard_wiki.go` 的 `execWikiDoc`，" +
+		"远端分支走 `runRemoteWikiDoc`，两条路径汇合到 `finalizeWikiRun`。\n"
+	h.finalizeWikiRun(claudeStreamOutcome{sessionID: "sid-wiki", planContent: body}, p, job, reqID, p.Model)
+
+	got, err := reqSvc.Get(reqID)
+	if err != nil {
+		t.Fatalf("reload req: %v", err)
+	}
+	if got.ArchitectModel != "claude-opus-5" {
+		t.Errorf("architect_model = %q, want %q (wiki reuses the architect columns)", got.ArchitectModel, "claude-opus-5")
+	}
+	if got.ArchitectConfigID != "ccfg_remote" {
+		t.Errorf("architect_config_id = %q, want %q", got.ArchitectConfigID, "ccfg_remote")
+	}
+	if got.Status != "designed" {
+		t.Errorf("status = %q, want designed", got.Status)
+	}
+	// Terminal path must always clear the job pointer, remote or local.
+	if got.WikiJobID != "" {
+		t.Errorf("wiki_job_id = %q, want \"\" on the terminal path", got.WikiJobID)
+	}
+	if _, _, exit := job.Snapshot(); exit != 0 {
+		t.Errorf("job exit code = %d, want 0", exit)
+	}
+}
+
+// seedWikiRequirement spins up a throwaway SQLite DB holding one project +
+// one kind=wiki requirement, the minimum the wiki stage resolves through
+// RequirementService.Get.
+func seedWikiRequirement(t *testing.T) (*db.DB, string) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "wiki-exec-")
+	if err != nil {
+		t.Fatalf("tempdir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	d, err := db.Init(db.Config{Driver: "sqlite", SQLitePath: filepath.Join(dir, "test.db")})
+	if err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	const projID, reqID = "proj_wiki_exec", "req_wiki_exec"
+	if _, err := d.Exec(`INSERT INTO projects (id, name, local_path, status, default_branch) VALUES (?, ?, ?, ?, ?)`,
+		projID, "Seed", filepath.Join(dir, "proj"), "ready", "main"); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	if _, err := d.Exec(`INSERT INTO requirements (id, project_id, title, kind, status) VALUES (?, ?, ?, ?, ?)`,
+		reqID, projID, "Seed wiki", service.KindWiki, "draft"); err != nil {
+		t.Fatalf("insert requirement: %v", err)
+	}
+	return d, reqID
 }

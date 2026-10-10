@@ -19,7 +19,7 @@ import "time"
 // keeps the FK CASCADE behavior intact when the requirement is deleted.
 type ScheduledTask struct {
 	ID                  string     `json:"id"`
-	TaskType            string     `json:"task_type"`         // SchedTypeDesign | SchedTypeCoding | SchedTypeDesignCoding
+	TaskType            string     `json:"task_type"`         // SchedTypeDesign | SchedTypeCoding | SchedTypeDesignCoding | SchedTypeWiki
 	RequirementID       string     `json:"requirement_id"`
 	ProjectID           string     `json:"project_id"`
 	RequirementTitle    string     `json:"requirement_title"`
@@ -91,6 +91,15 @@ const (
 	SchedTypeDesign        = "design"
 	SchedTypeCoding        = "coding"
 	SchedTypeDesignCoding  = "design_and_coding"
+	// SchedTypeWiki is the knowledge-base document generator (kind=wiki
+	// requirements only). It is deliberately NOT folded into
+	// SchedTypeDesign: a wiki row writes requirements.wiki_docs, never
+	// design_docs, and the two are mutually exclusive per requirement
+	// (the kind guards in prepareWikiDoc / immediatePreGate / schedule.go
+	// make sure a row is only ever one or the other). Keeping the type
+	// separate also keeps HasPendingConflict's matrix honest — a wiki row
+	// only ever races another wiki row.
+	SchedTypeWiki = "wiki"
 
 	// Recurrence modes. "once" is the historical one-shot behavior; "daily"
 	// and "weekly" repeat via the re-arm model (see ScheduledTask.Recurrence).

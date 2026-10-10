@@ -46,8 +46,9 @@ func NewScheduledTaskService(database *db.DB) *ScheduledTaskService {
 // (requirement_id, task_type). Returns the persisted row so the handler can
 // surface the new id without a second round-trip.
 func (s *ScheduledTaskService) Create(t *model.ScheduledTask) (*model.ScheduledTask, error) {
-	if t.TaskType != model.SchedTypeDesign && t.TaskType != model.SchedTypeCoding && t.TaskType != model.SchedTypeDesignCoding {
-		return nil, fmt.Errorf("invalid task_type %q (want design|coding|design_and_coding)", t.TaskType)
+	if t.TaskType != model.SchedTypeDesign && t.TaskType != model.SchedTypeCoding &&
+		t.TaskType != model.SchedTypeDesignCoding && t.TaskType != model.SchedTypeWiki {
+		return nil, fmt.Errorf("invalid task_type %q (want design|coding|design_and_coding|wiki)", t.TaskType)
 	}
 	if t.RequirementID == "" {
 		return nil, errors.New("requirement_id is required")
@@ -563,6 +564,11 @@ func (s *ScheduledTaskService) HasPending(requirementID, taskType string) (bool,
 //	coding        no conflict     conflict        conflict
 //	design_and_coding conflict   conflict        conflict
 //
+// `wiki` sits outside that matrix entirely: a kind=wiki requirement never
+// reaches the design / coding stages (four kind guards reject it), and a
+// non-wiki requirement can never hold a wiki row (schedule.go rejects
+// that direction). So wiki only ever conflicts with itself.
+//
 // The rationale: a design_and_coding row dispatches BOTH stages in series;
 // any pending single-stage row for the same requirement would either
 // duplicate the same stage or fire concurrently, which is exactly the
@@ -589,6 +595,11 @@ func (s *ScheduledTaskService) HasPendingConflict(requirementID, taskType string
 			model.SchedTypeCoding,
 			model.SchedTypeDesignCoding,
 		}
+	case model.SchedTypeWiki:
+		// Wiki only races another wiki run on the same requirement — two
+		// concurrent plan-mode claude processes would fight over the same
+		// worktree and both try to overwrite wiki_docs.
+		conflicting = []string{model.SchedTypeWiki}
 	default:
 		return false, fmt.Errorf("HasPendingConflict: unknown task_type %q", taskType)
 	}

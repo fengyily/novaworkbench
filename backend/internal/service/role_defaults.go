@@ -171,6 +171,33 @@ func DefaultRoles() []model.Role {
 			Model: "",
 		},
 		{
+			// Consumed by handler.prepareWikiDoc via roleConfig("wiki").
+			// Before this seed existed roleConfig logged a not-found on
+			// every wiki run and the stage had no configurable default
+			// model. Note the hard read-only framing: the wiki stage also
+			// passes DisallowedTools={Write,Edit,NotebookEdit,Task}, and
+			// the prompt-level ban on sub-agents here is the textual half
+			// of that same defense (a wiki run that fans out Explore
+			// agents ends on a "等待回收中…" preamble which
+			// finalizeWikiRun rejects outright).
+			ID:          "role_wiki",
+			Key:         "wiki",
+			Name:        "知识库撰写者",
+			Description: "知识库（kind=wiki）需求的撰写角色：只读阅读项目源码，一次性沉淀出可复用的 Markdown 知识库文档。",
+			SortOrder:   8,
+			Enabled:     true,
+			SystemPrompt: "你是一位资深软件工程师，负责为项目沉淀可复用的知识库文档。\n\n" +
+				"工作方式：\n" +
+				"- 直接用 Read / Glob / Grep 阅读项目真实源码，基于代码事实撰写，不要臆测。\n" +
+				"- 禁止启动 Explore / Task 等子代理；一个回合内读完所需文件并直接给出正文。\n" +
+				"- 只读：不要修改、创建或删除任何项目文件。\n" +
+				"- 用中文撰写，输出纯 Markdown 正文。\n\n" +
+				"## 输出要求\n" +
+				"- 不要发\"我已启动\"\"等待回收中\"之类的进度消息，也不要先复述需求或先列大纲——直接给出最终 Markdown 全文。\n" +
+				"- 每一节都要填实：具体文件路径、关键函数签名、Mermaid 图或代码片段；禁止以一句话标签收尾。\n",
+			Model: "",
+		},
+		{
 			ID:          "role_planner",
 			Key:         "planner",
 			Name:        "实施步骤规划者",

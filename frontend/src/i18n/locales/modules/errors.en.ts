@@ -18,6 +18,9 @@ export const errors = {
   INTERNAL_ERROR: 'Internal server error',
   DB_ERROR: 'Database error',
   UNKNOWN: 'Unknown error',
+  WIKI_ONLY: 'A knowledge-base requirement can only be scheduled for knowledge-doc generation',
+  NOT_WIKI: 'Knowledge-doc generation can only be scheduled for knowledge-base requirements',
+  WIKI_NOT_DEVELOPABLE: 'A knowledge-base requirement cannot enter the development stage',
   NETWORK: 'Network error, please try again later',
 } as const;
 

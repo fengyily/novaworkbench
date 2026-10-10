@@ -370,6 +370,9 @@ export const requirements = {
     architectModelLabel: 'Design model',
     architectModelTitle: 'Model used for the design stage — selectable before generating the design',
     architectModelBusyTitle: 'Claude is producing the design — model is locked',
+    wikiModelLabel: 'Knowledge model',
+    wikiModelTitle: 'Model used to generate the knowledge doc — selectable before the run starts',
+    wikiModelBusyTitle: 'Claude is generating the knowledge doc — model is locked',
     analystModelLabel: 'Analysis model',
     analystModelTitle: 'Model used for the analysis stage — selectable before starting analysis',
     // Schedule (定时) entry points inside wizard sections.
@@ -379,6 +382,8 @@ export const requirements = {
     scheduleDesignCodingBtn: 'Schedule design + coding',
     scheduleCodingTitle: 'Schedule coding start at a future time (optional model + exec env)',
     scheduleCodingBtn: 'Schedule coding',
+    scheduleWikiTitle: 'Schedule knowledge-doc generation at a future time (model, environment and sync mode can be pre-selected)',
+    scheduleWikiBtn: 'Schedule knowledge doc',
     // Architect-stage CTAs.
     processToggleHide: '▼ Hide thinking process',
     processToggleShow: '▶ Show thinking process',

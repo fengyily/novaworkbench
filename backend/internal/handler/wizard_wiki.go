@@ -83,7 +83,18 @@ type wikiRunParams struct {
 	Model          string
 	ClaudeConfigID string
 	ReadKnowledge  bool
-	AgentServerID  string
+	// AgentServerID — agent_servers.id picked in the wiki toolbar's
+	// execution-environment selector. Empty keeps the local claude CLI
+	// branch; non-empty routes execWikiDoc through runRemoteWikiDoc.
+	// Persisted on requirements.design_agent_server_id: a wiki row never
+	// has a design stage, so the design-stage column IS the wiki stage's
+	// column (see the model/requirement.go field comment).
+	AgentServerID string
+	// SyncMode — code-transport mode ("" = origin clone/push, "local" =
+	// git bundle over SFTP). Only meaningful when AgentServerID is set;
+	// forwarded into the remote run as NOVA_SYNC_MODE. Mirrors
+	// designRunParams.SyncMode.
+	SyncMode string
 }
 
 // GenerateWikiDoc is the HTTP entry for the wiki-kind document generator.
@@ -94,7 +105,8 @@ type wikiRunParams struct {
 // GET /api/wizard/jobs/{job_id}/stream and re-queries GET /api/requirements/{id}
 // on terminal to fetch the persisted wiki_docs.
 //
-// Body: { requirement_id, model?, claude_config_id?, agent_server_id?, read_knowledge? }.
+// Body: { requirement_id, model?, claude_config_id?, agent_server_id?,
+// read_knowledge?, sync_mode? }.
 // 400 WIKI when the requirement is not kind=wiki; 404 NOT_FOUND when the id
 // doesn't resolve; 200 {job_id} on success.
 func (h *WizardHandler) GenerateWikiDoc(w http.ResponseWriter, r *http.Request) {
@@ -104,9 +116,14 @@ func (h *WizardHandler) GenerateWikiDoc(w http.ResponseWriter, r *http.Request) 
 		ClaudeConfigID string `json:"claude_config_id"`
 		AgentServerID string `json:"agent_server_id"`
 		ReadKnowledge bool   `json:"read_knowledge"`
+		// SyncMode — "" (origin clone/push, the legacy default) or "local"
+		// (git bundle over SFTP). Stamp-If-Non-Empty semantics identical to
+		// ArchitectDesign's field: empty means "keep the requirement's
+		// stored value". Only honored when AgentServerID is non-empty.
+		SyncMode string `json:"sync_mode"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	p, job, af := h.prepareWikiDoc(r.Context(), body.RequirementID, body.Model, body.ClaudeConfigID, body.AgentServerID, body.ReadKnowledge)
+	p, job, af := h.prepareWikiDoc(r.Context(), body.RequirementID, body.Model, body.ClaudeConfigID, body.AgentServerID, body.ReadKnowledge, body.SyncMode)
 	if writeIfAPIError(w, af) {
 		return
 	}
@@ -124,7 +141,7 @@ func (h *WizardHandler) GenerateWikiDoc(w http.ResponseWriter, r *http.Request) 
 // Unlike prepareArchitectDesign this function does NOT need a source
 // session to fork from — the wiki kind is the only kind whose first turn
 // starts a fresh plan-mode conversation with no analyst to inherit from.
-func (h *WizardHandler) prepareWikiDoc(ctx context.Context, requirementID, modelOverride, claudeConfigIDOverride string, agentServerID string, readKnowledge bool) (*wikiRunParams, *store.Job, *apiFailure) {
+func (h *WizardHandler) prepareWikiDoc(ctx context.Context, requirementID, modelOverride, claudeConfigIDOverride string, agentServerID string, readKnowledge bool, syncMode string) (*wikiRunParams, *store.Job, *apiFailure) {
 	id := requirementID
 	if id == "" {
 		return nil, nil, fail(400, "INVALID", "missing requirement id")
@@ -145,6 +162,32 @@ func (h *WizardHandler) prepareWikiDoc(ctx context.Context, requirementID, model
 	if project != nil {
 		projectPath = project.LocalPath
 		defaultBranch = project.DefaultBranch
+	}
+
+	// Prologue: persist the execution-environment binding BEFORE any SSH /
+	// worktree work so a later failure still records what the user picked.
+	// Mirrors prepareArchitectDesign's prologue verbatim — wiki reuses the
+	// design-stage columns because a wiki row never has a design stage
+	// (see wikiRunParams.AgentServerID). An empty agentServerID clears the
+	// column so flipping back to local execution doesn't leave follow-up
+	// runs routed at a stale server.
+	if uerr := h.reqSvc.UpdateDesignAgentServer(id, agentServerID); uerr != nil {
+		log.Printf("[wiki-generate] failed to persist design_agent_server_id for %s: %v", id, uerr)
+	}
+	// Stamp sync_mode alongside the server binding, but only when an Agent
+	// server was actually picked (local execution never ships code over
+	// SFTP). Stamp-If-Non-Empty: an empty body value keeps whatever is
+	// already stored, and a previously-empty row stays empty rather than
+	// gaining a value the user never chose.
+	if agentServerID != "" {
+		sm := model.NormalizeSyncMode(syncMode)
+		if sm != "" || req.SyncMode == "" {
+			if uerr := h.reqSvc.UpdateSyncMode(id, sm); uerr != nil {
+				log.Printf("[wiki-generate] failed to persist sync_mode for %s: %v", id, uerr)
+			} else {
+				req.SyncMode = sm
+			}
+		}
 	}
 
 	// Session threading: re-use the existing wiki session when one is
@@ -211,7 +254,28 @@ func (h *WizardHandler) prepareWikiDoc(ctx context.Context, requirementID, model
 		ClaudeConfigID: claudeConfigID,
 		ReadKnowledge:  readKnowledge,
 		AgentServerID:  agentServerID,
+		SyncMode:       syncMode,
 	}, job, nil
+}
+
+// RunScheduledWiki is the scheduler-facing entry point for the wiki stage,
+// the exact sibling of RunScheduledDesign (wizard_architect.go). It runs
+// the same prepare step the HTTP path runs — so the kind guard, the
+// agent-server / sync-mode stamps and the job pre-mint are shared — then
+// dispatches the exec body in a goroutine tagged with the scheduler's
+// callback. Returns the JobStore job id, which the scheduler records in
+// scheduled_tasks.job_id for the "查看日志" deep link.
+//
+// agentServerID / syncMode come off the scheduled_tasks row; empty
+// agentServerID means local execution and empty syncMode means "keep the
+// requirement's persisted value" (same convention as the HTTP body).
+func (h *WizardHandler) RunScheduledWiki(requirementID, model string, readKnowledge bool, agentServerID, syncMode string, cb *runCallbacks) (string, error) {
+	p, job, af := h.prepareWikiDoc(context.Background(), requirementID, model, "", agentServerID, readKnowledge, syncMode)
+	if af != nil {
+		return "", af
+	}
+	go h.execWikiDoc(p, job, cb)
+	return job.ID, nil
 }
 
 // prepareWikiWorkspace is the goroutine-side counterpart of prepareWikiDoc.
@@ -283,12 +347,18 @@ func (h *WizardHandler) prepareWikiWorkspace(p *wikiRunParams, job *store.Job) b
 	return true
 }
 
-// execWikiDoc runs the goroutine body of the wiki-doc stage. It is the
-// local-only counterpart of the architect pattern: there is no remote
-// branch today (wiki doesn't run on agent servers), so the body is a
-// single plan-mode claude invocation followed by persistence. Future
-// expansion to a remote branch is a drop-in `else if` next to the local
-// branch (mirroring runRemoteArchitectDesign).
+// execWikiDoc runs the goroutine body of the wiki-doc stage. It mirrors
+// execArchitectDesign's local / remote split: when wikiRunParams carries
+// an AgentServerID the plan-mode run is dispatched to that Agent server via
+// runRemoteWikiDoc, otherwise it runs against the local claude CLI. Both
+// branches converge on finalizeWikiRun so the terminal-state handling
+// (stale session / partial result / preamble + outline rejection /
+// wiki_docs write) exists in exactly one place.
+//
+// prepareWikiWorkspace runs for BOTH branches, including remote: workDir is
+// the source directory the SFTP session up-sync reads from and the anchor
+// rewritePersonaWorkDir rewrites against. Skipping it on the remote branch
+// would break session resume.
 func (h *WizardHandler) execWikiDoc(p *wikiRunParams, job *store.Job, cb *runCallbacks) {
 	defer func() {
 		lines, status, exitCode := job.Snapshot()
@@ -311,7 +381,7 @@ func (h *WizardHandler) execWikiDoc(p *wikiRunParams, job *store.Job, cb *runCal
 	req := p.Req
 	workDir := p.WorkDir
 
-	log.Printf("[wiki-generate] job %s started for %s", job.ID, id)
+	log.Printf("[wiki-generate] job %s started for %s (agent=%q)", job.ID, id, p.AgentServerID)
 
 	// Optional knowledge pre-read: inject the project knowledge relevant
 	// to this requirement and surface what was read via a "knowledge" SSE
@@ -332,27 +402,65 @@ func (h *WizardHandler) execWikiDoc(p *wikiRunParams, job *store.Job, cb *runCal
 		sessionArg = p.NewWikiSID
 	}
 
-	job.Append(store.LogLine{Type: "phase", Content: "📚 Claude 正在 plan 模式下阅读代码并生成知识库文档..."})
-	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-		Prompt:          prompt,
-		WorkDir:         workDir,
-		SystemPrompt:    p.SystemPrompt,
-		Model:           cliModelArg(model),
-		ClaudeConfigID:  claudeConfigID,
-		SessionID:       sessionArg,
-		Resume:          p.ResumeSID != "",
-		Fork:            false,
-		ForkSessionID:   forkSessionID,
-		PermissionMode:  "plan",
-		DisallowedTools: wikiDisallowedTools,
-	})
-	out := runClaudeStream(jobSink{job}, cmd, "wiki-generate",
-		h.usageCtxForConfig("wiki_generate", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
-		nil,
-		nil,
-		0,
-		wikiStallTimeout,
-	)
+	var out claudeStreamOutcome
+	if p.AgentServerID != "" && h.agentSvrSvc != nil {
+		// Remote branch — plan-mode claude on the picked Agent server.
+		// SystemPrompt + DisallowedTools MUST be threaded through:
+		// wikiDisallowedTools (notably the "Task" entry) is what stops the
+		// remote model from fanning out Explore sub-agents and ending its
+		// turn on a "等待回收中…" preamble that finalizeWikiRun then
+		// rejects. sourceSID is the REAL resume source (empty on a first
+		// run) — passing sessionArg instead would make
+		// prepareRemoteAgentRun set Resume=true against a session that was
+		// only just minted and never existed remotely.
+		job.Append(store.LogLine{Type: "phase", Content: "📚 Agent 服务器 plan 模式下阅读代码并生成知识库文档..."})
+		out = h.runRemoteWikiDoc(&remoteWikiInput{
+			remoteRunInput: &remoteRunInput{
+				job:             job,
+				serverID:        p.AgentServerID,
+				reqRow:          req,
+				prompt:          prompt,
+				workDir:         workDir,
+				sourceSID:       p.ResumeSID,
+				fork:            false,
+				sessionArg:      sessionArg,
+				forkSessionID:   forkSessionID,
+				model:           model,
+				claudeConfigID:  claudeConfigID,
+				usage:           h.usageCtxForConfig("wiki_generate", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
+				PermissionMode:  "plan",
+				SyncMode:        p.SyncMode,
+				SystemPrompt:    p.SystemPrompt,
+				DisallowedTools: wikiDisallowedTools,
+				stageLabel:      "wiki-generate",
+			},
+		})
+	} else {
+		// Local branch — direct claude CLI invocation on the NovaWorkbench
+		// host. context.Background(): the HTTP request already returned, so
+		// the subprocess must not be tied to r.Context().
+		job.Append(store.LogLine{Type: "phase", Content: "📚 Claude 正在 plan 模式下阅读代码并生成知识库文档..."})
+		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
+			Prompt:          prompt,
+			WorkDir:         workDir,
+			SystemPrompt:    p.SystemPrompt,
+			Model:           cliModelArg(model),
+			ClaudeConfigID:  claudeConfigID,
+			SessionID:       sessionArg,
+			Resume:          p.ResumeSID != "",
+			Fork:            false,
+			ForkSessionID:   forkSessionID,
+			PermissionMode:  "plan",
+			DisallowedTools: wikiDisallowedTools,
+		})
+		out = runClaudeStream(jobSink{job}, cmd, "wiki-generate",
+			h.usageCtxForConfig("wiki_generate", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
+			nil,
+			nil,
+			0,
+			wikiStallTimeout,
+		)
+	}
 
 	h.finalizeWikiRun(out, p, job, id, model)
 }
@@ -529,6 +637,19 @@ func (h *WizardHandler) finalizeWikiRun(
 	// finalizeArchitectRun's auto-promote.
 	if _, perr := h.reqSvc.UpdateStatus(id, "designed"); perr != nil {
 		log.Printf("[wiki-generate] auto-promote %s to designed failed: %v", id, perr)
+	}
+
+	// Record the effective model + resolved Claude config (success path
+	// only) so a page refresh re-hydrates both dropdowns in the wiki
+	// toolbar. kind=wiki rows reuse the architect columns — there is no
+	// architect stage on a wiki row, so the columns are free (see
+	// wikiRunParams.AgentServerID for the same reuse rationale). Mirrors
+	// finalizeArchitectRun.
+	if perr := h.reqSvc.UpdateArchitectModel(id, model); perr != nil {
+		log.Printf("[wiki-generate] failed to persist architect_model for %s: %v", id, perr)
+	}
+	if perr := h.reqSvc.UpdateArchitectConfig(id, p.ClaudeConfigID); perr != nil {
+		log.Printf("[wiki-generate] failed to persist architect_config_id for %s: %v", id, perr)
 	}
 
 	job.Append(store.LogLine{Type: "done", Content: "✅ 知识库文档已生成！"})

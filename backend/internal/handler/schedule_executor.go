@@ -66,6 +66,47 @@ func (e *ScheduledExecutor) RunScheduledDesign(ctx context.Context, p scheduler.
 	return jobID, nil
 }
 
+// RunScheduledWiki satisfies scheduler.Executor for the knowledge-base
+// path. Mirrors RunScheduledDesign's guards with two wiki-specific
+// differences:
+//
+//   - the anti-concurrency check reads req.WikiJobID (NOT DesignJobID) —
+//     a wiki row never has a design job, so checking the wrong column
+//     would let a scheduled run start on top of a live manual one and
+//     have two claude processes fight over the same worktree;
+//   - an extra kind guard rejects non-wiki rows. schedule.go's Create
+//     already refuses to write such a row, so reaching this branch means
+//     either a hand-crafted DB row or a kind change after scheduling;
+//     failing the task is the safe terminal state.
+func (e *ScheduledExecutor) RunScheduledWiki(ctx context.Context, p scheduler.WikiParams) (string, error) {
+	req, err := e.h.reqSvc.Get(p.RequirementID)
+	if err != nil {
+		return "", fmt.Errorf("加载需求失败: %w", err)
+	}
+	if req.Kind != service.KindWiki {
+		return "", fmt.Errorf("该需求不是「知识库」类型，定时任务取消执行")
+	}
+	// 终态门禁：已完成 / 已归档的需求不再生成知识库文档（归档后重跑会覆盖
+	// 已归档进知识库的正文）。
+	if req.Status == "done" || req.Status == "archived" {
+		return "", fmt.Errorf("需求已完成/归档，定时任务取消执行")
+	}
+	// 反并发：若有手动知识库任务正在执行，跳过避免双 claude 进程。
+	if req.WikiJobID != "" && e.h.jobs.Live(req.WikiJobID) {
+		return "", fmt.Errorf("已有手动知识库任务在执行，定时任务跳过")
+	}
+
+	jobID, schedID, err := e.dispatchFromCtx(ctx)
+	if err != nil {
+		return "", err
+	}
+	_, err = e.h.RunScheduledWiki(p.RequirementID, p.Model, p.ReadKnowledge, p.AgentServerID, p.SyncMode, e.callbackFor(schedID))
+	if err != nil {
+		return "", err
+	}
+	return jobID, nil
+}
+
 // RunScheduledCoding satisfies scheduler.Executor for the coding path.
 // Implements the state gates from plan §3.7:
 //

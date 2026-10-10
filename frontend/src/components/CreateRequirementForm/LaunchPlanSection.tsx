@@ -68,17 +68,25 @@ const WEEKDAY_INDEX_TO_DAYNUM: readonly number[] = [1, 2, 3, 4, 5, 6, 0];
 
 // Decides which stages should render. The remaining flows always map to a
 // valid combination — no flow/mode pair is launch-blocked.
-type ResolvedTaskType = 'manual' | 'coding' | 'design_and_coding';
+type ResolvedTaskType = 'manual' | 'coding' | 'design_and_coding' | 'wiki';
 
-function resolveTaskType(flow: Flow, mode: Mode): ResolvedTaskType {
+function resolveTaskType(flow: Flow, kind: LaunchKind, mode: Mode): ResolvedTaskType {
   // Manual = no dispatch at all; the requirement is created as-is and the
   // user manually triggers the stage from the detail page later. Valid for
   // every remaining flow, so short-circuit before the flow-specific mapping.
   if (mode === 'manual') return 'manual';
+  // Wiki has exactly one stage (generate the knowledge doc) and ignores
+  // `flow` entirely. The check must precede the flow mapping: the parent
+  // form forces skip_design=true for wiki, which renders flow='direct' and
+  // would otherwise route a wiki row onto the coding path. Mirrors the
+  // backend's resolveLaunchTaskType ordering.
+  if (kind === 'wiki') return 'wiki';
   if (flow === 'direct') return 'coding';
   // flow === 'skip-analysis' — both design + coding stages.
   return 'design_and_coding';
 }
+
+type LaunchKind = 'requirement' | 'issue' | 'idea' | 'wiki';
 
 function pad(n: number): string { return `${n}`.padStart(2, '0'); }
 
@@ -106,11 +114,12 @@ function defaultRecurTime(): string {
 export interface LaunchPlanSectionProps {
   flow: Flow;
   // The parent's `kind` value: requirement; issue; idea; wiki. The parent
-  // already hides this whole block for idea AND wiki, but we re-check as a
-  // defensive guard so a misconfigured caller can't dispatch a launch
-  // for an idea / wiki (the backend rejects anyway, but better UX to
-  // never show the form).
-  kind: 'requirement' | 'issue' | 'idea' | 'wiki';
+  // already hides this whole block for idea, but we re-check as a
+  // defensive guard so a misconfigured caller can't dispatch a launch for
+  // an idea (the backend rejects anyway, but better UX to never show the
+  // form). Wiki IS supported: it renders the design half only — see
+  // resolveTaskType.
+  kind: LaunchKind;
   // Caller pre-filters to status === 'ready'; the backend refuses any
   // other state. Re-project to the minimal ExecEnvServer shape so the
   // shared <ExecEnvSelect> renders without an extra cast.
@@ -200,8 +209,15 @@ export default function LaunchPlanSection({
   // RequirementDetail dev-mode picker default.
   const [devMode, setDevMode] = useState<'session' | 'design'>('design');
 
-  const taskType = resolveTaskType(flow, mode);
-  const showDesignSection = taskType === 'design_and_coding';
+  const taskType = resolveTaskType(flow, kind, mode);
+  const isWiki = taskType === 'wiki';
+  // Wiki reuses the "design stage" half of this panel — model + exec env +
+  // sync mode are exactly the three knobs a knowledge-doc run takes, and
+  // they travel on the same design_* LaunchSpec fields the backend's
+  // dispatchImmediateWiki / dispatchScheduled read. The coding half stays
+  // hidden: a wiki row never produces code, so branch name / split tasks /
+  // auto-push / dev-mode have no meaning.
+  const showDesignSection = taskType === 'design_and_coding' || isWiki;
   const showCodingSection = taskType === 'coding' || taskType === 'design_and_coding';
   const noStages = taskType === 'manual';
 
@@ -271,15 +287,17 @@ export default function LaunchPlanSection({
   ]);
 
   const fieldDisabled = !!disabled;
+  // The design rail / section chip reads "知识库" for a wiki row — the
+  // band renders the same three controls, but calling it "方案设计" would
+  // be a lie (it writes wiki_docs, not design_docs).
+  const stageLabel = isWiki
+    ? t('components.createRequirement.launchPlan.wikiSection')
+    : t('components.createRequirement.launchPlan.designSection');
 
   // Defensive: the parent already hides this component for idea, but
   // re-check so onChange can never emit a launch spec for an idea. This
   // runs AFTER every hook above so the hook order is stable.
   if (kind === 'idea') return null;
-  // Wiki kind has no launch plan either — wiki only ever generates a
-  // read-only knowledge doc, never a developer run. The detail page's
-  // 「知识库文档」tab has its own 归档 button for the post-doc step.
-  if (kind === 'wiki') return null;
 
   return (
     <div className="launch-plan-section">
@@ -295,19 +313,25 @@ export default function LaunchPlanSection({
       >
         <span
           className={`launch-stage-chip launch-stage-chip--design${showDesignSection ? ' is-on' : ''}`}
-          title={t('components.createRequirement.launchPlan.designSection')}
+          title={stageLabel}
         >
-          {t('components.createRequirement.launchPlan.designSection')}
+          {stageLabel}
         </span>
-        <span className="launch-stage-arrow" aria-hidden>
-          <IconPlay size={10} />
-        </span>
-        <span
-          className={`launch-stage-chip launch-stage-chip--coding${showCodingSection ? ' is-on' : ''}`}
-          title={t('components.createRequirement.launchPlan.codingSection')}
-        >
-          {t('components.createRequirement.launchPlan.codingSection')}
-        </span>
+        {/* Wiki is single-stage: no arrow, no CODE chip — the rail would
+            otherwise promise a developer run that can never happen. */}
+        {kind !== 'wiki' && (
+          <>
+            <span className="launch-stage-arrow" aria-hidden>
+              <IconPlay size={10} />
+            </span>
+            <span
+              className={`launch-stage-chip launch-stage-chip--coding${showCodingSection ? ' is-on' : ''}`}
+              title={t('components.createRequirement.launchPlan.codingSection')}
+            >
+              {t('components.createRequirement.launchPlan.codingSection')}
+            </span>
+          </>
+        )}
       </div>
 
       {/* ----- Mode picker (3 cards) ------------------------------------
@@ -439,10 +463,12 @@ export default function LaunchPlanSection({
         <div className="launch-stage-section launch-stage-section--design">
           <div className="launch-stage-section-label">
             <span className="launch-stage-section-chip" aria-hidden>
-              {t('components.createRequirement.launchPlan.designSection')}
+              {stageLabel}
             </span>
             <span className="launch-stage-section-hint">
-              {t('components.createRequirement.launchPlan.designSectionHint')}
+              {isWiki
+                ? t('components.createRequirement.launchPlan.wikiSectionHint')
+                : t('components.createRequirement.launchPlan.designSectionHint')}
             </span>
           </div>
 
@@ -454,7 +480,9 @@ export default function LaunchPlanSection({
               working={fieldDisabled}
               configId={designClaudeConfigId}
               onConfigChange={setDesignClaudeConfigId}
-              label={t('schedules.modal.designModelLabel')}
+              label={isWiki
+                ? t('schedules.modal.wikiModelLabel')
+                : t('schedules.modal.designModelLabel')}
             />
             <small className="launch-plan-section__note">
               {t('schedules.modal.modelHint')}

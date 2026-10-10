@@ -3,6 +3,8 @@ package scheduler
 import (
 	"context"
 	"testing"
+
+	"github.com/novaworkbench/backend/internal/model"
 )
 
 // capturingExec records the ctx the scheduler hands to the Executor and
@@ -18,6 +20,8 @@ type capturingExec struct {
 	design     bool
 	coding     bool
 	designCode bool
+	wiki       bool
+	wikiParams WikiParams
 }
 
 func (c *capturingExec) RunScheduledDesign(ctx context.Context, _ DesignParams) (string, error) {
@@ -40,6 +44,14 @@ func (c *capturingExec) RunScheduledCoding(ctx context.Context, _ CodingParams) 
 
 func (c *capturingExec) RunScheduledDesignAndCoding(ctx context.Context, _ DesignCodingParams) (string, error) {
 	c.gotCtx, c.called, c.designCode = ctx, true, true
+	if v, ok := ctx.Value(SchedCtxKey{}).(SchedCtxValue); ok {
+		return v.JobID, nil
+	}
+	return "", nil
+}
+
+func (c *capturingExec) RunScheduledWiki(ctx context.Context, p WikiParams) (string, error) {
+	c.gotCtx, c.called, c.wiki, c.wikiParams = ctx, true, true, p
 	if v, ok := ctx.Value(SchedCtxKey{}).(SchedCtxValue); ok {
 		return v.JobID, nil
 	}
@@ -92,5 +104,46 @@ func TestSchedCtxKeyRoundTripCoding(t *testing.T) {
 	v, ok := e.gotCtx.Value(SchedCtxKey{}).(SchedCtxValue)
 	if !ok || v.SchedID != "sched_y" {
 		t.Fatalf("ctx lookup failed: ok=%v v=%+v", ok, v)
+	}
+}
+
+// TestDispatchRoutesWikiRow pins that a scheduled_tasks row with
+// task_type="wiki" reaches Executor.RunScheduledWiki (and NOT
+// RunScheduledDesign, which would write design_docs on a row whose detail
+// page only ever renders wiki_docs). Also asserts the design-stage columns
+// — model / agent_server_id / sync_mode — map onto WikiParams, since a
+// wiki row has exactly one stage and reuses them.
+//
+// svc is left nil: the success path of dispatch never touches it (only the
+// error branch calls Finish), and capturingExec always succeeds.
+func TestDispatchRoutesWikiRow(t *testing.T) {
+	e := &capturingExec{}
+	s := &Scheduler{exec: e}
+
+	s.dispatch(model.ScheduledTask{
+		ID:            "sched_wiki",
+		TaskType:      model.SchedTypeWiki,
+		RequirementID: "req_wiki",
+		Model:         "claude-opus-5",
+		ReadKnowledge: true,
+		AgentServerID: "agent_1",
+		SyncMode:      "local",
+	})
+
+	if !e.wiki {
+		t.Fatalf("wiki row did not reach RunScheduledWiki (design=%v coding=%v designCode=%v)", e.design, e.coding, e.designCode)
+	}
+	if e.design || e.coding || e.designCode {
+		t.Fatalf("wiki row leaked into another executor path: %+v", e)
+	}
+	want := WikiParams{
+		RequirementID: "req_wiki",
+		Model:         "claude-opus-5",
+		ReadKnowledge: true,
+		AgentServerID: "agent_1",
+		SyncMode:      "local",
+	}
+	if e.wikiParams != want {
+		t.Fatalf("WikiParams: got %+v, want %+v", e.wikiParams, want)
 	}
 }

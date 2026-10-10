@@ -11,10 +11,15 @@
 package handler
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/novaworkbench/backend/internal/llm"
+	"github.com/novaworkbench/backend/internal/model"
 )
 
 // TestFindSessionJsonlFallback covers:
@@ -130,4 +135,98 @@ func TestFindSessionJsonlFallback(t *testing.T) {
 			t.Fatal("did not expect a hit for sid not present on disk")
 		}
 	})
+}
+
+// --------------------------------------------------------------------
+// workerRunRequest: systemPrompt / disallowedTools pass-through
+// --------------------------------------------------------------------
+
+// TestWorkerRunRequest_ForwardsWikiToolDenylist is the regression guard
+// for the remote-wiki failure mode: wikiDisallowedTools (notably "Task")
+// is what stops Claude from fanning out Explore sub-agents and ending its
+// turn on a one-line "等待回收中…" preamble — which finalizeWikiRun then
+// rejects, so dropping the field would make remote wiki fail every time.
+// The worker has understood `disallowedTools` since before this change
+// (agent-worker/server.mjs buildClaudeArgs); only the Go side was silent.
+func TestWorkerRunRequest_ForwardsWikiToolDenylist(t *testing.T) {
+	body := workerRunRequest(llm.StreamOpts{
+		WorkDir:         "/tmp/x",
+		Prompt:          "hi",
+		PermissionMode:  "plan",
+		SystemPrompt:    "你是一位资深软件工程师",
+		DisallowedTools: wikiDisallowedTools,
+	}, nil, nil)
+
+	if body.SystemPrompt != "你是一位资深软件工程师" {
+		t.Errorf("SystemPrompt not forwarded: got %q", body.SystemPrompt)
+	}
+	if len(body.DisallowedTools) != len(wikiDisallowedTools) {
+		t.Fatalf("DisallowedTools: got %#v, want %#v", body.DisallowedTools, wikiDisallowedTools)
+	}
+	hasTask := false
+	for _, tool := range body.DisallowedTools {
+		if tool == "Task" {
+			hasTask = true
+		}
+	}
+	if !hasTask {
+		t.Errorf("DisallowedTools must contain \"Task\" (sub-agent ban), got %#v", body.DisallowedTools)
+	}
+
+	// Both fields must survive JSON marshaling under the names the worker
+	// destructures (`systemPrompt` / `disallowedTools`).
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{`"systemPrompt"`, `"disallowedTools"`, `"Task"`} {
+		if !strings.Contains(string(raw), key) {
+			t.Errorf("wire format missing %s: %s", key, raw)
+		}
+	}
+}
+
+// TestWorkerRunRequest_OmitsToolFieldsForArchitect pins the "architect and
+// coding behaviour is byte-identical" half of the change: both callers
+// leave SystemPrompt / DisallowedTools at their zero values, and omitempty
+// must keep them off the wire entirely so an older worker destructuring a
+// fixed field list behaves exactly as before.
+func TestWorkerRunRequest_OmitsToolFieldsForArchitect(t *testing.T) {
+	body := workerRunRequest(llm.StreamOpts{
+		WorkDir:        "/tmp/x",
+		Prompt:         "hi",
+		PermissionMode: "plan",
+	}, nil, nil)
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, key := range []string{"systemPrompt", "disallowedTools"} {
+		if strings.Contains(string(raw), key) {
+			t.Errorf("%s leaked into the wire format for a non-wiki caller: %s", key, raw)
+		}
+	}
+}
+
+// TestRequirementSessionIDs_IncludesWikiSession pins that a kind=wiki
+// requirement's conversation id is part of the SFTP up-sync set. Wiki rows
+// never populate design_session_id, so without the explicit entry the
+// second and later remote wiki runs would find no jsonl to --resume and
+// silently restart with no prior context.
+func TestRequirementSessionIDs_IncludesWikiSession(t *testing.T) {
+	ids := requirementSessionIDs(&model.Requirement{
+		AnalysisSessionID: "sid-analysis",
+		WikiSessionID:     "sid-wiki",
+	}, "sid-wiki")
+
+	// sourceSID == WikiSessionID must dedupe to one entry.
+	want := []string{"sid-analysis", "sid-wiki"}
+	if len(ids) != len(want) {
+		t.Fatalf("got %#v, want %#v", ids, want)
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("index %d: got %q, want %q (full %#v)", i, ids[i], want[i], ids)
+		}
+	}
 }

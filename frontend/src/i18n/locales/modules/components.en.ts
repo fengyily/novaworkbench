@@ -349,6 +349,8 @@ export const components = {
       designSectionHint: 'Generate the implementation plan',
       codingSection: 'Code',
       codingSectionHint: 'Then write and commit the code',
+      wikiSection: 'Knowledge',
+      wikiSectionHint: 'Read the project code and distil a knowledge doc',
       submitImmediate: 'Create and start',
       submitScheduled: 'Create and schedule',
       launchFailed: 'Requirement created, but auto-start failed: {{reason}}. Please start it manually from the detail page.',

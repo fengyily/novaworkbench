@@ -92,8 +92,10 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "INVALID", "requirement_id is required")
 		return
 	}
-	if body.TaskType != model.SchedTypeDesign && body.TaskType != model.SchedTypeCoding && body.TaskType != model.SchedTypeDesignCoding {
-		writeError(w, 400, "INVALID", fmt.Sprintf("task_type must be %q, %q or %q", model.SchedTypeDesign, model.SchedTypeCoding, model.SchedTypeDesignCoding))
+	if body.TaskType != model.SchedTypeDesign && body.TaskType != model.SchedTypeCoding &&
+		body.TaskType != model.SchedTypeDesignCoding && body.TaskType != model.SchedTypeWiki {
+		writeError(w, 400, "INVALID", fmt.Sprintf("task_type must be %q, %q, %q or %q",
+			model.SchedTypeDesign, model.SchedTypeCoding, model.SchedTypeDesignCoding, model.SchedTypeWiki))
 		return
 	}
 	// Normalize + validate recurrence. Empty = "once" (backward compatible).
@@ -155,6 +157,22 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// clearer).
 	if (body.TaskType == model.SchedTypeCoding || body.TaskType == model.SchedTypeDesignCoding) && req.Kind == service.KindWiki {
 		writeError(w, 400, "WIKI_NOT_DEVELOPABLE", "「知识库」类需求不支持进入开发阶段")
+		return
+	}
+	// The kind ↔ task_type gate is bidirectional. A wiki row's ONLY legal
+	// task type is "wiki" (a scheduled `design` on a wiki row would run
+	// ArchitectDesign and write design_docs, which the detail page never
+	// renders for kind=wiki — the run would look successful and produce
+	// nothing the user can see). Conversely a non-wiki row can never hold
+	// a "wiki" task: prepareWikiDoc's kind guard would fail it at dispatch
+	// time, so rejecting at creation gives a clear error instead of a row
+	// that silently fails hours later.
+	if req.Kind == service.KindWiki && body.TaskType != model.SchedTypeWiki {
+		writeError(w, 400, "WIKI_ONLY", "「知识库」类需求的定时任务只能是「生成知识库文档」")
+		return
+	}
+	if req.Kind != service.KindWiki && body.TaskType == model.SchedTypeWiki {
+		writeError(w, 400, "NOT_WIKI", "「生成知识库文档」定时任务仅适用于「知识库」类需求")
 		return
 	}
 

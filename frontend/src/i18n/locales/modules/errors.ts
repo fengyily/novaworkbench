@@ -22,6 +22,10 @@ export const errors = {
   INTERNAL_ERROR: '服务器内部错误',
   DB_ERROR: '数据库错误',
   UNKNOWN: '未知错误',
+  // kind ↔ scheduled task_type gate (backend handler/schedule.go Create).
+  WIKI_ONLY: '「知识库」类需求的定时任务只能是「生成知识库文档」',
+  NOT_WIKI: '「生成知识库文档」定时任务仅适用于「知识库」类需求',
+  WIKI_NOT_DEVELOPABLE: '「知识库」类需求不支持进入开发阶段',
   NETWORK: '网络错误，请稍后重试',
 } as const;
 
