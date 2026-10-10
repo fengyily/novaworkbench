@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type Requirement struct {
 	ID                 string `json:"id"`
@@ -242,6 +245,10 @@ type CreateRequirementReq struct {
 	Kind         string `json:"kind"`          // "issue" | "requirement" | "idea"; empty → defaults to "requirement"
 	SkipAnalysis *bool  `json:"skip_analysis"` // pointer: nil omits the field so Create defaults to true (skip) and Update preserves the existing value
 	SkipDesign   *bool  `json:"skip_design"`   // pointer: nil → Create defaults to false; Update never references this column so it is preserved automatically
+	// NOTE: sync_mode is not a top-level field here — it travels through the
+	// embedded LaunchSpec.SyncMode (and through the wizard handler signature)
+	// because it only matters when an Agent server is selected. See
+	// model.NormalizeSyncMode for canonical values.
 	// SkipOrganize: when true, the handler skips the LLM-organized description
 	// pass that normally distills a title + structured Markdown body. Raw
 	// description is stored verbatim and a fallback title (first line, capped)
@@ -362,4 +369,27 @@ type TechnDesign struct {
 	Steps        []string `json:"steps"`
 	ModelChanges string   `json:"model_changes"`
 	Risks        []string `json:"risks"`
+}
+
+// NormalizeSyncMode canonicalizes the wire-format sync_mode value used to
+// transport code between the local repo and the Agent server.
+//
+//	"" / "remote" → "" (legacy default; the agent host clones origin)
+//	"local"       → "local" (git bundle over SFTP)
+//	anything else → "" (defensive; never let a bad client write garbage)
+//
+// Shared by the architect / coding / merge handler call sites so the
+// requirements.sync_mode column can never drift from the two canonical
+// values. Kept in the model package (rather than service) so callers don't
+// have to import service just to validate an input — the function is pure.
+func NormalizeSyncMode(s string) string {
+	s = strings.TrimSpace(s)
+	switch s {
+	case "", "remote":
+		return ""
+	case "local":
+		return "local"
+	default:
+		return ""
+	}
 }

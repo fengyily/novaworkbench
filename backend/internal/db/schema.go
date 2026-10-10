@@ -609,6 +609,12 @@ var alterColumns = []string{
 	`ALTER TABLE scheduled_tasks ADD COLUMN last_error TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE scheduled_tasks ADD COLUMN last_job_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE scheduled_tasks ADD COLUMN run_count INTEGER NOT NULL DEFAULT 0`,
+	// Code-transport mode for scheduled Agent-server runs. Mirrors
+	// requirements.sync_mode: "" = origin clone/push (legacy default),
+	// "local" = git bundle over SFTP. The schedule row carries the user's
+	// choice so the scheduler can forward it to the wizard handler at
+	// dispatch time, instead of forcing the UI to re-pick on every fire.
+	`ALTER TABLE scheduled_tasks ADD COLUMN sync_mode TEXT NOT NULL DEFAULT ''`,
 	// Per-role Claude-config binding: lets a role carry its own ANTHROPIC_BASE_URL
 	// + ANTHROPIC_AUTH_TOKEN pair (via claude_configs.id) so the role's chosen
 	// model runs against the role's chosen gateway, not just the global active

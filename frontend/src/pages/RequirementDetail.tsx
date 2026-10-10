@@ -12,6 +12,7 @@ import SubTaskPanel from '../components/SubTaskPanel';
 import { DevSourceBadge } from '../components/DevSourceBadge';
 import { ExecEnvBadge } from '../components/ExecEnvBadge';
 import { ExecEnvSelect } from '../components/ExecEnvSelect';
+import { SyncModeSelect } from '../components/SyncModeSelect';
 import { SummarizeToRequirementModal } from '../components/SummarizeToRequirementModal';
 import { ScheduleModal } from '../components/ScheduleModal';
 import { DesignCodingImmediateModal } from '../components/DesignCodingImmediateModal';
@@ -752,6 +753,20 @@ export default function RequirementDetail() {
       setSyncMode(project.remote_url ? 'remote' : 'local');
     }
   }, [req?.sync_mode, project?.remote_url]);
+
+  // design-stage sync_mode is a SEPARATE state slot: the architect toolbar's
+  // picker must not share the coding preflight's state, because the user can
+  // pick a different value for the design stage vs the coding stage of the
+  // same requirement (e.g. design on a bundle-only server, coding on a
+  // origin-reachable one — unusual but allowed). Seeding from the persisted
+  // value keeps a re-run consistent with what the coding stage is currently
+  // using.
+  const [designSyncMode, setDesignSyncMode] = useState<'' | 'local'>(
+    req?.sync_mode === 'local' ? 'local' : ''
+  );
+  useEffect(() => {
+    setDesignSyncMode(req?.sync_mode === 'local' ? 'local' : '');
+  }, [req?.sync_mode]);
 
   // ── Scheduled-task state ──
   // pendingByType[taskType] holds the pending row (if any) so the detail
@@ -1727,6 +1742,11 @@ export default function RequirementDetail() {
           // refuses servers that aren't in `ready` status, so an empty /
           // stale value here silently degrades to local without erroring.
           ...(agentServerId ? { agent_server_id: agentServerId } : {}),
+          // Code-transport mode for the Agent-server run. Only sent when
+          // the user actually picked a server AND a non-default value
+          // (the wizard's "stamp if non-empty" prologue keeps an empty
+          // sync_mode from silently overwriting a previous value).
+          ...(agentServerId && designSyncMode ? { sync_mode: designSyncMode } : {}),
         }),
       });
       const json = await res.json();
@@ -2706,15 +2726,12 @@ export default function RequirementDetail() {
                   {agentServerId && (
                     <div className="modal-field">
                       <label>{t('requirements.detail2.syncModeLabel')}</label>
-                      <select
-                        className="form-input"
-                        value={syncMode}
-                        onChange={e => setSyncMode(e.target.value as 'local' | 'remote')}
+                      <SyncModeSelect
+                        enabled={!!agentServerId}
+                        value={syncMode === 'local' ? 'local' : ''}
+                        onChange={(v) => setSyncMode(v === 'local' ? 'local' : 'remote')}
                         disabled={coding}
-                      >
-                        <option value="remote">{t('requirements.detail2.syncModeRemote')}</option>
-                        <option value="local">{t('requirements.detail2.syncModeLocal')}</option>
-                      </select>
+                      />
                       <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
                         {syncMode === 'local'
                           ? t('requirements.detail2.syncModeLocalHint')
@@ -3922,6 +3939,23 @@ export default function RequirementDetail() {
                   : (agentServers.length === 0 ? t('requirements.detail2.designAgentServerEmptyTitle') : '')}
                 localOptionLabel={t('requirements.detail2.preflightLocalExec')}
                 style={{ minWidth: 160 }}
+              />
+            </label>
+            {/* Sync-mode picker for the architect stage. Only renders when an
+                Agent server is picked; the SyncModeSelect returns null
+                otherwise so we don't need an extra wrapping conditional here.
+                Label reuses the same `designAgentServerLabel` wording minus
+                the server suffix so the design toolbar stays compact. */}
+            <label className="design-sync-mode" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                {t('requirements.detail2.syncModeLabel')}
+              </span>
+              <SyncModeSelect
+                enabled={!!agentServerId}
+                value={designSyncMode}
+                onChange={setDesignSyncMode}
+                disabled={architectWorking}
+                style={{ minWidth: 140 }}
               />
             </label>
             {/* Persisted design environment: shows which Agent Server (or 本地)

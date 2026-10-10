@@ -2309,6 +2309,11 @@ export interface CreateScheduleReq {
   // design_and_coding 专属：开发者阶段配置
   coding_model?: string;
   coding_agent_server_id?: string;
+  // Code-transport mode for the Agent-server run. '' (default) = origin
+  // clone/push; 'local' = git bundle over SFTP. Only honored when
+  // agent_server_id or coding_agent_server_id is non-empty. Persisted on
+  // scheduled_tasks.sync_mode and forwarded to the wizard at dispatch.
+  sync_mode?: '' | 'local';
   // Recurrence — omit or 'once' for a one-shot task. daily/weekly send
   // recur_time (HH:MM); weekly also sends recur_days (CSV 0-6, 0=Sunday);
   // both send recur_tz (IANA tz name) so the server projects the wall-clock

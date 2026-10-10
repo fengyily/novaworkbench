@@ -37,18 +37,23 @@ import (
 // Model == "" means "use the role default" — the wizard resolves it via
 // roleConfig at execution time so a config switch after the row was
 // scheduled still applies. AgentServerID == "" means local execution
-// (mirrors CodingParams.AgentServerID below).
+// (mirrors CodingParams.AgentServerID below). SyncMode == "" means "keep
+// the requirement row's existing sync_mode value"; "local" tells the
+// wizard to use the git-bundle transport when an Agent server is selected.
 type DesignParams struct {
 	RequirementID string
 	Model         string
 	ReadKnowledge bool
 	AgentServerID string
+	SyncMode      string
 }
 
 // CodingParams is the wizard-facing shape for a scheduled start-coding.
 // Same '' == role-default semantics for Model. AgentServerID == "" means
 // local execution. SplitTasks == false routes the wizard to the agent
-// persona (end-to-end implementation rather than decomposition).
+// persona (end-to-end implementation rather than decomposition). SyncMode
+// is the user-picked code-transport mode carried on the scheduled_tasks
+// row; "" / "local" — same semantics as DesignParams.SyncMode.
 type CodingParams struct {
 	RequirementID string
 	BranchName    string
@@ -57,6 +62,7 @@ type CodingParams struct {
 	AgentServerID string
 	SplitTasks    bool
 	ReadKnowledge bool
+	SyncMode      string
 }
 
 // DesignCodingParams is the wizard-facing shape for a merged
@@ -80,6 +86,10 @@ type DesignCodingParams struct {
 	BranchName          string
 	BaseBranch          string
 	SplitTasks          bool
+	// SyncMode is shared by the design and coding stages of a merged
+	// schedule (the user's choice at schedule creation applies to both
+	// halves of the chained run).
+	SyncMode string
 }
 
 // Executor is the wizard's adapter surface. The handler package provides
@@ -285,6 +295,7 @@ func (s *Scheduler) dispatch(t model.ScheduledTask) {
 			Model:         t.Model,
 			ReadKnowledge: t.ReadKnowledge,
 			AgentServerID: t.AgentServerID,
+			SyncMode:      t.SyncMode,
 		})
 	case model.SchedTypeCoding:
 		jobID, err = s.exec.RunScheduledCoding(ctx, CodingParams{
@@ -295,6 +306,7 @@ func (s *Scheduler) dispatch(t model.ScheduledTask) {
 			AgentServerID: t.AgentServerID,
 			SplitTasks:    t.SplitTasks,
 			ReadKnowledge: t.ReadKnowledge,
+			SyncMode:      t.SyncMode,
 		})
 	case model.SchedTypeDesignCoding:
 		// Merged two-stage task: design runs first; on success the executor
@@ -311,6 +323,7 @@ func (s *Scheduler) dispatch(t model.ScheduledTask) {
 			BranchName:          t.BranchName,
 			BaseBranch:          t.BaseBranch,
 			SplitTasks:          t.SplitTasks,
+			SyncMode:            t.SyncMode,
 		})
 	default:
 		// Defensive — DB guard at Create time already rejects bad types.

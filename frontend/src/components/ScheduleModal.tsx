@@ -37,6 +37,7 @@ import {
 } from '../api/client';
 import ModelSelect from './ModelSelect';
 import { ExecEnvSelect } from './ExecEnvSelect';
+import { SyncModeSelect } from './SyncModeSelect';
 import { toRFC3339Local, WEEK_LABELS } from '../utils/time';
 
 // WEEK_LABELS is Monday-first (一二三四五六日); the backend recur_days uses
@@ -133,6 +134,11 @@ export function ScheduleModal({
   // design_and_coding-only (developer stage)
   const [codingModel, setCodingModel] = useState(initialCodingModel || '');
   const [codingAgentServerId, setCodingAgentServerId] = useState('');
+  // Code-transport mode. Shared by all three task types because the wire
+  // field is one (createScheduleReq.sync_mode → scheduled_tasks.sync_mode)
+  // and a recurring schedule needs the same value to apply on every fire.
+  // '' = origin clone/push (default), 'local' = git bundle over SFTP.
+  const [syncMode, setSyncMode] = useState<'' | 'local'>('');
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
@@ -183,6 +189,12 @@ export function ScheduleModal({
       // only set the field when the user picked something.
       if (agentServerId) {
         body.agent_server_id = agentServerId;
+      }
+      // Code-transport mode. Only sent when the user actually picked a
+      // non-default value AND the schedule targets at least one Agent
+      // server (otherwise the server-side stamp is a no-op anyway).
+      if (syncMode && (agentServerId || codingAgentServerId)) {
+        body.sync_mode = syncMode;
       }
       if (isCoding) {
         body.branch_name = branchName;
@@ -407,6 +419,23 @@ export function ScheduleModal({
                   </small>
                 )}
               </div>
+              {/* Sync-mode picker — only renders when the design stage picked
+                  an Agent server. Mirrors the immediate-modal's behaviour:
+                  the same shared `syncMode` state covers both stages so a
+                  chained schedule never has one stage on origin and the
+                  other on bundle. */}
+              <div className="modal-field">
+                <label>{t('requirements.detail2.syncModeLabel')}</label>
+                <SyncModeSelect
+                  enabled={!!agentServerId}
+                  value={syncMode}
+                  onChange={setSyncMode}
+                  disabled={submitting}
+                />
+                <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
+                  {t('schedule.modal.syncModeHelp')}
+                </small>
+              </div>
             </>
           )}
 
@@ -475,6 +504,25 @@ export function ScheduleModal({
                     {t('schedules.modal.designAgentServerNoHint')}
                   </small>
                 )}
+              </div>
+
+              {/* Sync-mode picker — renders whenever the coding stage picked
+                  an Agent server. For merged schedules the gate is the
+                  coding-stage server (so a design-local + coding-remote run
+                  still shows the picker); for plain coding the gate is the
+                  single server id. The same shared `syncMode` state applies
+                  to both stages. */}
+              <div className="modal-field">
+                <label>{t('requirements.detail2.syncModeLabel')}</label>
+                <SyncModeSelect
+                  enabled={!!(isMerged ? codingAgentServerId : agentServerId)}
+                  value={syncMode}
+                  onChange={setSyncMode}
+                  disabled={submitting}
+                />
+                <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
+                  {t('schedule.modal.syncModeHelp')}
+                </small>
               </div>
 
               <div className="modal-field">

@@ -80,6 +80,12 @@ type designRunParams struct {
 	// runRemoteArchitectDesign which dispatches the plan-mode claude
 	// invocation to that Agent server over SSH.
 	AgentServerID string
+	// SyncMode — code-transport mode ("" / "local"). Forwarded into the
+	// remote run as NOVA_SYNC_MODE; empty = origin clone/push, "local" =
+	// git bundle over SFTP. Kept in designRunParams so the exec body can
+	// thread it through to runRemoteArchitectDesign without re-deriving it
+	// from reqRow.
+	SyncMode string
 }
 
 func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) {
@@ -96,9 +102,16 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		// (model / config / runtime env).
 		AgentServerID string `json:"agent_server_id"`
 		ReadKnowledge bool   `json:"read_knowledge"`
+		// SyncMode — "remote" (legacy default; agent clone/push via origin)
+		// or "local" (git bundle over SFTP). Empty string = keep the existing
+		// requirements.sync_mode value (Stamp-If-Non-Empty semantics so the
+		// design and coding stages share the same value when only one side
+		// is selected). Only honored when AgentServerID is non-empty; local
+		// execution ignores it.
+		SyncMode string `json:"sync_mode"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	p, job, af := h.prepareArchitectDesign(r.Context(), body.RequirementID, body.Model, body.ClaudeConfigID, body.AgentServerID, body.ReadKnowledge)
+	p, job, af := h.prepareArchitectDesign(r.Context(), body.RequirementID, body.Model, body.ClaudeConfigID, body.AgentServerID, body.ReadKnowledge, body.SyncMode)
 	if writeIfAPIError(w, af) {
 		return
 	}
@@ -116,8 +129,12 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 // already extracted at dispatch time (the scheduled task stores it on its
 // own row); empty = local execution. Empty today is the common case —
 // schedule_executor.go forwards p.AgentServerID directly.
-func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnowledge bool, agentServerID string, cb *runCallbacks) (string, error) {
-	p, job, af := h.prepareArchitectDesign(context.Background(), requirementID, model, "", agentServerID, readKnowledge)
+//
+// syncMode is the scheduled_tasks.sync_mode value the scheduler carries
+// forward; empty = keep the requirement's persisted value (Stamp-If-Non-Empty
+// semantics — same convention as the HTTP body).
+func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnowledge bool, agentServerID string, syncMode string, cb *runCallbacks) (string, error) {
+	p, job, af := h.prepareArchitectDesign(context.Background(), requirementID, model, "", agentServerID, readKnowledge, syncMode)
 	if af != nil {
 		return "", af
 	}
@@ -138,7 +155,7 @@ func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnow
 // line-for-line the same as the original synchronous section; only the
 // writeError calls have been replaced with returning *apiFailure so the
 // scheduler can reuse the same validation outcomes.
-func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementID, modelOverride, claudeConfigIDOverride string, agentServerID string, readKnowledge bool) (*designRunParams, *store.Job, *apiFailure) {
+func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementID, modelOverride, claudeConfigIDOverride string, agentServerID string, readKnowledge bool, syncMode string) (*designRunParams, *store.Job, *apiFailure) {
 	id := requirementID
 	if id == "" {
 		return nil, nil, fail(400, "INVALID", "missing requirement id")
@@ -164,6 +181,23 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	// routing follow-up "继续设计" actions to a stale server.
 	if uerr := h.reqSvc.UpdateDesignAgentServer(id, agentServerID); uerr != nil {
 		log.Printf("[architect-design] failed to persist design_agent_server_id for %s: %v", id, uerr)
+	}
+	// Stamp sync_mode alongside design_agent_server_id — but only when the
+	// user actually selected an Agent server (local execution never ships
+	// code over SFTP so sync_mode stays untouched). Empty body sync_mode is
+	// treated as "keep existing value" so the design stage alone never
+	// silently overwrites what the coding stage stamped earlier; we also
+	// keep a previously-empty row empty (don't introduce a value the user
+	// never picked). The non-empty branch writes the normalized form.
+	if agentServerID != "" {
+		sm := model.NormalizeSyncMode(syncMode)
+		if sm != "" || req.SyncMode == "" {
+			if uerr := h.reqSvc.UpdateSyncMode(id, sm); uerr != nil {
+				log.Printf("[architect-design] failed to persist sync_mode for %s: %v", id, uerr)
+			} else {
+				req.SyncMode = sm
+			}
+		}
 	}
 
 	// Session threading: the architect stage continues the SAME conversation
@@ -280,6 +314,7 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 		ClaudeConfigID: claudeConfigID,
 		ReadKnowledge:  readKnowledge,
 		AgentServerID:  agentServerID,
+		SyncMode:       syncMode,
 	}, job, nil
 }
 
@@ -530,6 +565,7 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 				claudeConfigID: claudeConfigID,
 				usage:          h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 				PermissionMode: "plan",
+				SyncMode:       p.SyncMode,
 			},
 		})
 	} else {

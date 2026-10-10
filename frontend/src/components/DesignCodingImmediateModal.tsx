@@ -30,6 +30,7 @@ import {
 import { ApiError } from '../api/client';
 import ModelSelect from './ModelSelect';
 import { ExecEnvSelect, type ExecEnvServer } from './ExecEnvSelect';
+import { SyncModeSelect } from './SyncModeSelect';
 import { IconArrowRight, IconBook, IconPin, IconRocket } from './icons';
 
 interface Props {
@@ -82,6 +83,13 @@ export function DesignCodingImmediateModal({
   const [devMode, setDevMode] = useState<'session' | 'design'>(
     initialDevMode === 'session' ? 'session' : 'design'
   );
+  // Code-transport mode for the Agent-server runs. Shared by both stages
+  // because the wire field is one — design and coding stages of the same
+  // chained run must agree on transport. '' = origin clone/push,
+  // 'local' = git bundle over SFTP. Initial value is '' so the server-side
+  // inference (project.remote_url) is the tie-breaker when nothing is
+  // picked.
+  const [syncMode, setSyncMode] = useState<'' | 'local'>('');
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
@@ -107,6 +115,11 @@ export function DesignCodingImmediateModal({
         // explicit value here so a stale row can't override the user's
         // modal choice.
         dev_mode: devMode,
+        // Single shared sync_mode for both stages of the chained run. Only
+        // sent when a non-default value is picked so a "I just opened the
+        // modal and clicked launch" run doesn't have to commit to a value
+        // (the server still infers from project.remote_url).
+        ...(syncMode ? { sync_mode: syncMode } : {}),
       };
       const resp = await wizardApi.startDesignAndCoding(requirementId, body);
       onLaunched(resp.design_job_id);
@@ -294,6 +307,25 @@ export function DesignCodingImmediateModal({
                 </div>
               )}
             </div>
+
+            {/* Sync-mode picker — only renders when the design stage picked
+                an Agent server. The picker is shared with the CODING section
+                below (single state) so both stages always agree on the
+                transport. */}
+            <div className="modal-field">
+              <label>{t('requirements.detail2.syncModeLabel')}</label>
+              <SyncModeSelect
+                enabled={!!designAgentServerId}
+                value={syncMode}
+                onChange={setSyncMode}
+                disabled={submitting}
+              />
+              <small style={{ color: 'var(--color-text-muted)', marginTop: 4, display: 'block' }}>
+                {syncMode === 'local'
+                  ? t('requirements.detail2.syncModeLocalHint')
+                  : t('requirements.detail2.syncModeRemoteHint')}
+              </small>
+            </div>
           </div>
 
           {/* Coding-stage section — cyan accent rail mirrors the developer
@@ -338,6 +370,26 @@ export function DesignCodingImmediateModal({
                   {t('requirements.detail2.preflightNoAgentHint')}
                 </div>
               )}
+            </div>
+
+            {/* Sync-mode picker mirrors the DESIGN section above — same
+                shared state. The gate here is the coding server (so it
+                appears even if the design server is local but the coding
+                stage goes remote, which is the common case for a
+                design-then-code-on-bundle run). */}
+            <div className="modal-field">
+              <label>{t('requirements.detail2.syncModeLabel')}</label>
+              <SyncModeSelect
+                enabled={!!codingAgentServerId}
+                value={syncMode}
+                onChange={setSyncMode}
+                disabled={submitting}
+              />
+              <small style={{ color: 'var(--color-text-muted)', marginTop: 4, display: 'block' }}>
+                {syncMode === 'local'
+                  ? t('requirements.detail2.syncModeLocalHint')
+                  : t('requirements.detail2.syncModeRemoteHint')}
+              </small>
             </div>
 
             <div className="modal-field">

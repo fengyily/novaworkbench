@@ -530,25 +530,36 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		}
 		// Stamp the code-transport (sync) mode alongside dev_source, but ONLY
 		// when this run targets an Agent server — local execution never ships
-		// code over SFTP so sync_mode stays "". Precedence: an explicit UI
-		// choice (p.SyncMode) wins; otherwise infer from the project's
-		// remote_url (empty remote_url = local self-hosted repo → bundle
-		// transport). Persisting it here means every follow-up action
-		// (追加调整 / 继续开发 / 子任务 / 合并 / 清理) reads the same value.
+		// code over SFTP so sync_mode stays "". Precedence:
+		//   1) explicit body choice (p.SyncMode non-empty) → normalize + write;
+		//   2) body empty → fall back to reqRow.SyncMode (the design stage
+		//      may have already stamped "local" for the same agent server);
+		//   3) both empty → infer from project.remote_url (legacy default).
+		// Persisting it here means every follow-up action (追加调整 /
+		// 继续开发 / 子任务 / 合并 / 清理) reads the same value, and the
+		// design+coding 一键启动 path can share body.SyncMode without
+		// overwriting a value the design stage already wrote.
 		if p.AgentServerID != "" && reqRow != nil {
-			syncMode := service.SyncModeRemote
-			switch p.SyncMode {
-			case service.SyncModeLocal:
-				syncMode = service.SyncModeLocal
-			case "", "remote":
-				if proj, _ := h.projectSvc.Get(reqRow.ProjectID); proj != nil && proj.RemoteURL == "" {
-					syncMode = service.SyncModeLocal
+			sm := strings.TrimSpace(p.SyncMode)
+			if sm == "" {
+				// Body 缺省：沿用设计阶段已经写入的值；如果 row 也空再走
+				// 老的 remote_url 推断兜底（与方案 A 路径兼容）。
+				sm = reqRow.SyncMode
+				if sm == "" {
+					if proj, _ := h.projectSvc.Get(reqRow.ProjectID); proj != nil && proj.RemoteURL == "" {
+						sm = service.SyncModeLocal
+					} else {
+						sm = service.SyncModeRemote
+					}
 				}
+			} else {
+				// Body 显式带值：规范化后落库（防止 client 端写入垃圾值）。
+				sm = model.NormalizeSyncMode(sm)
 			}
-			if perr := h.reqSvc.UpdateSyncMode(p.RequirementID, syncMode); perr != nil {
+			if perr := h.reqSvc.UpdateSyncMode(p.RequirementID, sm); perr != nil {
 				log.Printf("[start-coding] failed to persist sync_mode for %s: %v", p.RequirementID, perr)
 			} else if reqRow != nil {
-				reqRow.SyncMode = syncMode // same goroutine → runRemoteCoding sees it immediately
+				reqRow.SyncMode = sm // same goroutine → runRemoteCoding sees it immediately
 			}
 		}
 		// Stamp the auto-push intent from the preflight-dialog toggle. Pointer
@@ -1249,6 +1260,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			model:          model,
 			claudeConfigID: claudeConfigID,
 			usage:          codingUsage,
+			SyncMode:       p.SyncMode,
 		})
 		if out.staleSession {
 			job.Append(store.LogLine{Type: "error", Content: "❌ 源会话已失效，请重新发起对应阶段后再开发。"})
