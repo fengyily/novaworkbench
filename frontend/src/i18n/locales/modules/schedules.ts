@@ -118,6 +118,11 @@ export const schedules = {
     designAgentServerDefaultMerged: '默认（本地执行）',
     designAgentServerEmptyTitle: '暂无可用的 Agent 服务器，请先在「设置 → Agent 服务器」中添加并完成环境检查。',
     designAgentServerNoHint: '未配置就绪的 Agent 服务器，请前往「设置 → Agent 服务器」添加并检查环境。',
+    // Sync-mode picker hint (reused by both the DESIGN and CODING sections
+    // of the schedule modal). The actual picker label reuses
+    // requirements.detail2.syncModeLabel so it stays in sync with the
+    // architect toolbar / coding preflight wording.
+    syncModeHelp: '选择 Agent Server 后可指定代码同步方式',
     // design_and_coding 合并模式专属
     sectionDesignTitle: '方案设计',
     sectionCodingTitle: '开发',

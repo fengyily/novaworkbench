@@ -61,6 +61,12 @@ type ScheduledTask struct {
 	LastError           string     `json:"last_error"`           // last run error message
 	LastJobID           string     `json:"last_job_id"`          // last run JobStore job id (list "查看日志" deep link)
 	RunCount            int        `json:"run_count"`            // number of times this row has fired
+	// SyncMode is the user-picked code-transport mode for Agent-server
+	// runs. "" = origin clone/push (legacy default), "local" = git bundle
+	// over SFTP. Only honored when AgentServerID or CodingAgentServerID is
+	// non-empty. Forwarded to the wizard at dispatch time so the run uses
+	// the same transport the user picked at schedule creation.
+	SyncMode            string     `json:"sync_mode,omitempty"`
 	// RequirementStatus is the LIVE status of the linked requirement at the
 	// moment of query — populated by LEFT JOIN `requirements` so the
 	// /schedules list can render a status chip next to the requirement

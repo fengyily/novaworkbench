@@ -153,7 +153,7 @@ func (h *WizardHandler) launchDesignAndCoding(reqID string, body *designCodingIm
 	// is identical. prepareArchitectDesign mints the JobStore job and
 	// persists design_job_id on the requirement row before we return, so
 	// a second concurrent POST hits DESIGN_JOB_ACTIVE on the next call.
-	p, job, af := h.prepareArchitectDesign(context.Background(), reqID, body.DesignModel, body.DesignConfigID, body.DesignAgentServerID, body.ReadKnowledge)
+	p, job, af := h.prepareArchitectDesign(context.Background(), reqID, body.DesignModel, body.DesignConfigID, body.DesignAgentServerID, body.ReadKnowledge, body.SyncMode)
 	if af != nil {
 		return "", af
 	}
@@ -191,6 +191,7 @@ func (h *WizardHandler) launchDesignOnly(reqID string, body *designCodingImmedia
 		body.DesignConfigID,
 		body.DesignAgentServerID,
 		body.ReadKnowledge,
+		body.SyncMode,
 	)
 	if af != nil {
 		return "", af

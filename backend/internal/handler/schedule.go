@@ -60,6 +60,12 @@ type createScheduleReq struct {
 	SplitTasks          bool   `json:"split_tasks"`
 	CodingModel         string `json:"coding_model"`
 	CodingAgentServerID string `json:"coding_agent_server_id"`
+	// SyncMode — code-transport mode for Agent-server runs. "" (default)
+	// = origin clone/push; "local" = git bundle over SFTP. Only honored
+	// when AgentServerID or CodingAgentServerID is non-empty. Persisted on
+	// scheduled_tasks.sync_mode and forwarded to the wizard at dispatch
+	// time so a recurring schedule reuses the same transport every fire.
+	SyncMode            string `json:"sync_mode"`
 	// Recurrence fields — empty Recurrence defaults to "once" (the historical
 	// one-shot behavior, which requires RunAt). For "daily"/"weekly" the
 	// server derives RunAt from the rule, so RunAt may be omitted.
@@ -157,6 +163,7 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		SplitTasks:          body.SplitTasks,
 		CodingModel:         body.CodingModel,
 		CodingAgentServerID: body.CodingAgentServerID,
+		SyncMode:            model.NormalizeSyncMode(body.SyncMode),
 		Recurrence:          recurrence,
 		RecurTime:           body.RecurTime,
 		RecurDays:           body.RecurDays,

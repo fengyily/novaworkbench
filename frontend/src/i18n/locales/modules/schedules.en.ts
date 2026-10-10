@@ -111,6 +111,8 @@ export const schedules = {
     designAgentServerDefaultMerged: 'Default (this host)',
     designAgentServerEmptyTitle: 'No ready Agent server is available — add one in Settings → Agent servers and finish the environment check first.',
     designAgentServerNoHint: 'No ready Agent server is configured. Open Settings → Agent servers to add one.',
+    // Sync-mode picker hint. Label reuses requirements.detail2.syncModeLabel.
+    syncModeHelp: 'After picking an Agent server, choose how the code is shipped',
     // design_and_coding merged-mode only
     sectionDesignTitle: 'Design',
     sectionCodingTitle: 'Coding',

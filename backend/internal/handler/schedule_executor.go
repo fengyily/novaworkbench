@@ -59,7 +59,7 @@ func (e *ScheduledExecutor) RunScheduledDesign(ctx context.Context, p scheduler.
 	if err != nil {
 		return "", err
 	}
-	_, err = e.h.RunScheduledDesign(p.RequirementID, p.Model, p.ReadKnowledge, p.AgentServerID, e.callbackFor(schedID))
+	_, err = e.h.RunScheduledDesign(p.RequirementID, p.Model, p.ReadKnowledge, p.AgentServerID, p.SyncMode, e.callbackFor(schedID))
 	if err != nil {
 		return "", err
 	}
@@ -113,6 +113,7 @@ func (e *ScheduledExecutor) RunScheduledCoding(ctx context.Context, p scheduler.
 		ReadKnowledge:    p.ReadKnowledge,
 		AgentServerID:    p.AgentServerID,
 		SplitTasks:       p.SplitTasks,
+		SyncMode:         p.SyncMode,
 		// ProjectPath 由 wizard exec body 自身从 reqRow.ProjectID + projectSvc 解析
 		// （保留 HTTP 路径完全相同的逻辑），此处不传。
 	}
@@ -280,7 +281,7 @@ func (e *ScheduledExecutor) RunScheduledDesignAndCoding(ctx context.Context, p s
 	//    pre-gate and now). Pass the user-picked model + agent server
 	//    through the design-stage fields of the merged task; ReadKnowledge
 	//    is shared between the two stages per the merge-modal UI.
-	stage1JobID, err := e.h.RunScheduledDesign(p.RequirementID, p.DesignModel, p.ReadKnowledge, p.DesignAgentServerID, e.chainedDesignCallback(p.RequirementID, schedID, p))
+	stage1JobID, err := e.h.RunScheduledDesign(p.RequirementID, p.DesignModel, p.ReadKnowledge, p.DesignAgentServerID, p.SyncMode, e.chainedDesignCallback(p.RequirementID, schedID, p))
 	if err != nil {
 		// Synchronous failure (the prepare step rejected, no goroutine was
 		// spawned). Mark the row failed immediately.
@@ -346,10 +347,14 @@ func (e *ScheduledExecutor) chainedDesignCallback(reqID, schedID string, p sched
 				ReadKnowledge:    p.ReadKnowledge,
 				AgentServerID:    p.CodingAgentServerID,
 				SplitTasks:       p.SplitTasks,
-				// ProjectPath / ClaudeConfigID / AutoPushPR / DevMode / SyncMode
-				// stay empty so the wizard exec body resolves them via the
+				// ProjectPath / ClaudeConfigID / AutoPushPR / DevMode stay
+				// empty so the wizard exec body resolves them via the
 				// existing per-stage priority chain (same behavior as the
-				// manual coding flow with an empty prefill).
+				// manual coding flow with an empty prefill). SyncMode is
+				// forwarded from DesignCodingParams so the merged design +
+				// coding schedule carries the user's choice through both
+				// stages.
+				SyncMode: p.SyncMode,
 			}
 			codingJobID, cerr := e.h.RunScheduledCoding(cp, e.chainedCodingCallback(schedID))
 			if cerr != nil {

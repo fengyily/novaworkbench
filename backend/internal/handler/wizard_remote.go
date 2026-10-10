@@ -67,6 +67,13 @@ type remoteCodingInput struct {
 	// the SubTaskRunner.Run priority is bare > freshSession > fork so the
 	// audit trail matches whichever flag the caller actually set.
 	Bare bool
+	// SyncMode — code-transport mode ("" / "local") forwarded to the
+	// remote sync script as NOVA_SYNC_MODE. "" = origin clone/push,
+	// "local" = git bundle over SFTP. Populated by runRemoteCoding callers
+	// (StartCoding / schedule_executor / SubTaskRunner) from
+	// codingRunParams.SyncMode; see remoteRunInput.SyncMode for the
+	// architect-stage equivalent.
+	SyncMode string
 }
 
 // startCodingReq mirrors the anonymous struct StartCoding decodes so the
@@ -115,6 +122,14 @@ type remoteRunInput struct {
 	// Empty = worker uses --dangerously-skip-permissions (dev default).
 	// "plan" = worker uses --permission-mode plan (architect default).
 	PermissionMode string
+	// SyncMode is the code-transport mode for the run. "" (default) = origin
+	// clone/push (the agent host has to be able to reach the project's git
+	// remote); "local" = git bundle over SFTP (for self-hosted repos with no
+	// reachable remote). The value is passed into the remote sync script as
+	// NOVA_SYNC_MODE so the agent can pick between `git fetch` and the bundle
+	// path. The architect stage forwards it from the design toolbar; the
+	// coding stage forwards it from codingRunParams.SyncMode.
+	SyncMode string
 	// branch is the feature-branch name the helper should check out /
 	// create on the remote worktree. Only meaningful for dev; architect
 	// sets it to "" since the plan-mode run does not need a branch and
@@ -755,7 +770,7 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 	var syncStdout bytes.Buffer
 	var syncStderr bytes.Buffer
 	syncOut := io.MultiWriter(&syncStdout, &jobWriter{job: in.job})
-	if exit, _ := client.Exec(ctx, buildRemoteSyncScript(baseRepo, baseBranch, timeout), "", nil, syncOut, &syncStderr); exit != 0 {
+	if exit, _ := client.Exec(ctx, buildRemoteSyncScript(baseRepo, baseBranch, timeout, in.SyncMode), "", nil, syncOut, &syncStderr); exit != 0 {
 		return claudeStreamOutcome{errMsg: "Agent 服务器仓库同步失败（exit=" + fmtInt(exit) + "）：" + strings.TrimSpace(syncStderr.String())}, cleanup, nil
 	}
 	if sha := parseBaseSHAFromRemoteSyncOutput(syncStdout.String()); sha != "" {
@@ -1166,7 +1181,7 @@ func (t originTransport) PrepareRemote(ctx context.Context, client *gossh.Client
 	var syncStdout bytes.Buffer
 	var syncStderr bytes.Buffer
 	syncOut := io.MultiWriter(&syncStdout, &jobWriter{job: in.job})
-	syncExit, _ := client.Exec(ctx, buildRemoteSyncScript(baseRepo, baseBranch, syncTimeout), "", nil, syncOut, &syncStderr)
+	syncExit, _ := client.Exec(ctx, buildRemoteSyncScript(baseRepo, baseBranch, syncTimeout, in.SyncMode), "", nil, syncOut, &syncStderr)
 	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree prune", "", nil, &jobWriter{job: in.job}, nil)
 	// Persist the SSH-side sync outcome onto the local projects.sync_status so
 	// the UI ProjectDetail badge reflects what just happened on the agent
@@ -1882,18 +1897,30 @@ func shellQuoteSingle(s string) string {
 //     HEAD or stale checked-out branch is reset rather than rejected.
 //  2. Hard reset + clean so any half-finished state from the previous run
 //     can't poison this one (safe because the directory is scratch).
-//  3. Fetch origin/<base> under GIT_TERMINAL_PROMPT=0 with a timeout
-//     prefix when the host has coreutils `timeout` (Linux) or `gtimeout`
-//     (macOS via brew); on hosts lacking both, fall back to the SSH ctx's
-//     35-minute ceiling and surface a one-line hint in the log via stdout.
-//  4. Fast-forward onto origin/<base>, then emit the freshly-fetched tip
-//     SHA on its own NOVA_BASE_SHA= line for the Go-side caller to parse.
+//  3. (origin path only) Fetch origin/<base> under GIT_TERMINAL_PROMPT=0
+//     with a timeout prefix when the host has coreutils `timeout` (Linux)
+//     or `gtimeout` (macOS via brew); on hosts lacking both, fall back to
+//     the SSH ctx's 35-minute ceiling and surface a one-line hint in the
+//     log via stdout.
+//  4. (origin path only) Fast-forward onto origin/<base>, then emit the
+//     freshly-fetched tip SHA on its own NOVA_BASE_SHA= line for the Go
+//     caller to parse.
 //
-// The function deliberately returns ONE shell string (no envvars the
-// caller can manipulate from outside the file) so the remote has no choice
-// but to execute exactly the steps above in order. Any failure aborts via
-// `set -e` so the caller's exit-code check is unambiguous.
-func buildRemoteSyncScript(baseRepo, baseBranch string, timeout time.Duration) string {
+// syncMode selects the transport:
+//
+//	""          → origin path: clone / fetch / ff-merge as above.
+//	"local"     → bundle-over-SFTP path: the caller already pushed a
+//	              git-bundle into the agent's repo, so we just emit the
+//	              current HEAD as NOVA_BASE_SHA and let the bundle path
+//	              hard-reset the worktree later. Skipping the fetch
+//	              avoids hitting a non-reachable origin entirely.
+//
+// The function deliberately returns ONE shell string (envvars are inline
+// only — no env the caller can manipulate from outside the file) so the
+// remote has no choice but to execute exactly the steps above in order.
+// Any failure aborts via `set -e` so the caller's exit-code check is
+// unambiguous.
+func buildRemoteSyncScript(baseRepo, baseBranch string, timeout time.Duration, syncMode string) string {
 	seconds := int(timeout / time.Second)
 	if seconds < 10 {
 		seconds = 10
@@ -1904,8 +1931,28 @@ func buildRemoteSyncScript(baseRepo, baseBranch string, timeout time.Duration) s
 	qRepo := shellQuoteSingle(baseRepo)
 	qBranch := shellQuoteSingle(baseBranch)
 	qSeconds := shellQuoteSingle(strconv.Itoa(seconds))
+	qSync := shellQuoteSingle(syncMode)
+	// `local` path: skip origin fetch entirely; the bundle has already
+	// been pushed by the Go side and the worktree hard-reset happens in
+	// the bundle Transport.PrepareRemote path. We just emit NOVA_BASE_SHA
+	// from the current HEAD so the design-stage code_base_sha stamp still
+	// gets a real value.
+	if syncMode == "local" {
+		return strings.Join([]string{
+			"set -e",
+			"export NOVA_SYNC_MODE=" + qSync,
+			"cd " + qRepo,
+			"echo \"[nova-agent] sync_mode=local：跳过 origin fetch，由 bundle over SFTP 驱动 scratch\"",
+			// Ensure HEAD points at baseBranch (scratch dir assumption B) so
+			// the SHA we emit is meaningful.
+			"cur=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)",
+			"if [ \"$cur\" != " + qBranch + " ]; then git checkout " + qBranch + " >/dev/null 2>&1 || true; fi",
+			"echo \"NOVA_BASE_SHA=$(git rev-parse HEAD)\"",
+		}, "\n")
+	}
 	return strings.Join([]string{
 		"set -e",
+		"export NOVA_SYNC_MODE=" + qSync,
 		"cd " + qRepo,
 		// Auto-correct HEAD onto baseBranch (assume B: scratch dir, never user's).
 		"cur=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)",

@@ -497,6 +497,37 @@ export default function LaunchPlanSection({
               </small>
             )}
           </div>
+
+          {/* Sync-mode picker for the design stage. Mirrors the coding
+              block below — same shared `syncMode` state, same option set,
+              same disabled gate (rendered but greyed out when no Agent
+              server is picked so the layout doesn't shift). */}
+          <div className="launch-radio-card">
+            <div className="launch-radio-card-title">
+              {t('requirements.detail2.syncModeLabel')}
+            </div>
+            <div className="launch-radio-card-desc">
+              {t('requirements.detail2.syncModeRemoteHint')}
+            </div>
+            <div className="launch-radio-options">
+              {SYNC_MODE_OPTIONS.map(opt => (
+                <label
+                  key={opt.value || 'remote'}
+                  className={`launch-radio-option${syncMode === opt.value ? ' selected' : ''}`}
+                >
+                  <input
+                    type="radio"
+                    name="launchPlanSyncModeDesign"
+                    value={opt.value}
+                    checked={syncMode === opt.value}
+                    onChange={() => setSyncMode(opt.value)}
+                    disabled={fieldDisabled}
+                  />
+                  <span>{t(opt.labelKey)}</span>
+                </label>
+              ))}
+            </div>
+          </div>
         </div>
       )}
 
@@ -665,7 +696,7 @@ export default function LaunchPlanSection({
                 >
                   <input
                     type="radio"
-                    name="launchPlanSyncMode"
+                    name="launchPlanSyncModeCoding"
                     value={opt.value}
                     checked={syncMode === opt.value}
                     onChange={() => setSyncMode(opt.value)}

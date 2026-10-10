@@ -113,16 +113,16 @@ func (s *ScheduledTaskService) Create(t *model.ScheduledTask) (*model.ScheduledT
 		 agent_server_id, split_tasks, coding_model, coding_agent_server_id,
 		 status, job_id, error_message, created_by, created_at, updated_at, executed_at,
 		 recurrence, recur_time, recur_days, recur_tz, active,
-		 last_status, last_error, last_job_id, run_count)
+		 last_status, last_error, last_job_id, run_count, sync_mode)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		 ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.ID, t.TaskType, t.RequirementID, t.ProjectID, t.RequirementTitle,
 		t.RunAt, t.Model, t.ReadKnowledge, t.BranchName, t.BaseBranch,
 		t.AgentServerID, t.SplitTasks, t.CodingModel, t.CodingAgentServerID,
 		t.Status, t.JobID, t.ErrorMessage,
 		t.CreatedBy, t.CreatedAt, t.UpdatedAt, t.ExecutedAt,
 		t.Recurrence, t.RecurTime, t.RecurDays, t.RecurTZ, t.Active,
-		t.LastStatus, t.LastError, t.LastJobID, t.RunCount,
+		t.LastStatus, t.LastError, t.LastJobID, t.RunCount, t.SyncMode,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert scheduled_task: %w", err)
@@ -157,6 +157,7 @@ func (s *ScheduledTaskService) List(status, taskType, requirementID string) ([]m
 		st.created_by, st.created_at, st.updated_at, st.executed_at,
 		st.recurrence, st.recur_time, st.recur_days, st.recur_tz, st.active,
 		st.last_run_at, st.last_status, st.last_error, st.last_job_id, st.run_count,
+		st.sync_mode,
 		COALESCE(r.status, '') AS requirement_status
 		FROM scheduled_tasks st
 		LEFT JOIN requirements r ON r.id = st.requirement_id`
@@ -192,6 +193,7 @@ func (s *ScheduledTaskService) Get(id string) (*model.ScheduledTask, error) {
 		st.created_by, st.created_at, st.updated_at, st.executed_at,
 		st.recurrence, st.recur_time, st.recur_days, st.recur_tz, st.active,
 		st.last_run_at, st.last_status, st.last_error, st.last_job_id, st.run_count,
+		st.sync_mode,
 		COALESCE(r.status, '') AS requirement_status
 		FROM scheduled_tasks st
 		LEFT JOIN requirements r ON r.id = st.requirement_id
@@ -217,6 +219,7 @@ func (s *ScheduledTaskService) Due(now time.Time, limit int) ([]model.ScheduledT
 		st.created_by, st.created_at, st.updated_at, st.executed_at,
 		st.recurrence, st.recur_time, st.recur_days, st.recur_tz, st.active,
 		st.last_run_at, st.last_status, st.last_error, st.last_job_id, st.run_count,
+		st.sync_mode,
 		COALESCE(r.status, '') AS requirement_status
 		FROM scheduled_tasks st
 		LEFT JOIN requirements r ON r.id = st.requirement_id
@@ -643,6 +646,7 @@ func scanScheduledTask(rows *sql.Rows) (*model.ScheduledTask, error) {
 		&t.CreatedBy, &t.CreatedAt, &t.UpdatedAt, &executedAt,
 		&t.Recurrence, &t.RecurTime, &t.RecurDays, &t.RecurTZ, &t.Active,
 		&lastRunAtRaw, &t.LastStatus, &t.LastError, &t.LastJobID, &t.RunCount,
+		&t.SyncMode,
 		&t.RequirementStatus,
 	); err != nil {
 		return nil, err
