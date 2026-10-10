@@ -28,6 +28,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
@@ -49,7 +50,13 @@ const wikiStallTimeout = 10 * time.Minute
 // passing them explicitly is defense in depth: a misbehaving proxy that
 // ignores plan-mode cannot physically touch the project tree. Mirrors the
 // safety reasoning documented in runRemoteArchitectDesign / wizard_coding.
-var wikiDisallowedTools = []string{"Write", "Edit", "NotebookEdit"}
+//
+// "Task" is added so Claude cannot launch Explore / Plan sub-agents inside a
+// wiki run — those sub-agents can hang waiting for each other (their stream
+// never gets a final result) and the parent turn ends with a one-line
+// "等待回收中…" preamble instead of the actual plan. We want Claude to read
+// files directly and emit the doc in a single turn.
+var wikiDisallowedTools = []string{"Write", "Edit", "NotebookEdit", "Task"}
 
 // wikiRunParams is the prepared-shape output of prepareWikiDoc. Mirrors
 // designRunParams but skips the analyst → design session fork and the
@@ -239,20 +246,20 @@ func (h *WizardHandler) prepareWikiWorkspace(p *wikiRunParams, job *store.Job) b
 	// The wiki block (appended below) is the textual hard constraint;
 	// DisallowedTools is the structural one.
 	prompt := "## 需求标题\n" + p.Req.Title + "\n\n" +
-		"现在切换到「知识库」角色。请阅读项目相关源文件，" +
-		"基于需求描述与项目现状，沉淀一份可复用的知识库文档（Markdown 正文）。" +
+		"现在切换到「知识库」角色。请直接用 Read / Glob / Grep 阅读项目相关源文件（不要启动子代理），" +
+		"基于需求描述与项目现状，一次性沉淀出一份完整的、可复用的知识库文档（Markdown 正文）。" +
 		"文档应涵盖：背景与目标、关键概念、相关源文件清单、典型使用方式 / 调用路径、风险与注意事项。" +
-		"请先复述你对需求的理解，再输出文档正文。"
+		"请先复述你对需求的理解，再输出文档正文。不要发\"我已启动\"、\"等待回收中\"之类的进度消息——直接输出文档正文即可。"
 	if p.ResumeSID == "" && p.Req.AnalystContextSummary == "" {
 		// Fresh-session path: prepend project structure / docs pre-read so
 		// the model has the project shape without burning a turn on `ls`.
 		docBlock, _, treeSummary := collectProjectContext(workDir, p.Req.Title)
-		prompt = "现在切换到「知识库」角色。请阅读相关源文件，沉淀一份可复用的知识库文档。\n\n" +
+		prompt = "现在切换到「知识库」角色。请直接用 Read / Glob / Grep 阅读相关源文件（不要启动子代理），一次性沉淀出一份完整的、可复用的知识库文档。\n\n" +
 			"## 需求标题\n" + p.Req.Title + "\n\n" +
 			"## 需求描述\n" + p.Req.Description + "\n\n" +
 			"## 项目上下文\n" + docBlock + "\n" + treeSummary + "\n\n" +
 			"文档应涵盖：背景与目标、关键概念、相关源文件清单、典型使用方式 / 调用路径、风险与注意事项。\n" +
-			"请先复述你对需求的理解，再输出文档正文。"
+			"请先复述你对需求的理解，再输出文档正文。不要发\"我已启动\"、\"等待回收中\"之类的进度消息——直接输出文档正文即可。"
 	}
 	// Tail: append the wiki kind-specific block (read-only hard constraint).
 	if block := promptpkg.WikiBlock(p.Req.Kind, p.Req); block != "" {
@@ -424,6 +431,26 @@ func (h *WizardHandler) finalizeWikiRun(
 		return
 	}
 
+	// Preamble-rejection heuristic. Even with DisallowedTools=[...,Task] and
+	// the strengthened prompt forbidding sub-agents, a misbehaving model can
+	// still stream a one-line status message ("我已并行启动 2 个 Explore
+	// 子代理深入调研 ... 等待回收中…") and end its turn there without ever
+	// producing the actual document. The tier-3 streamText fallback would
+	// otherwise grab this preamble and persist it as the wiki doc — the user
+	// would see a useless 1-line message instead of the real content and
+	// "归档到知识库" would happily archive it.
+	//
+	// Reject when the cleaned content is suspiciously short AND lacks any
+	// markdown structure (no heading, no code block, no list, no table).
+	// A real knowledge doc almost always has at least one of these.
+	if looksLikeWikiPreamble(cleaned) {
+		log.Printf("[wiki-generate] rejected preamble for %s (len=%d): %q", id, len(cleaned), truncateForLog(cleaned, 80))
+		job.Append(store.LogLine{Type: "error", Content: "Claude 未输出可保存的知识库正文（疑似只发了进度消息），请重试"})
+		job.Finish(1, store.JobError)
+		// Leave status at 'designing' so the user can retry.
+		return
+	}
+
 	// Persist the wiki doc (sets status=designing) and clear the active
 	// job pointer so a refresh shows the finished doc instead of
 	// "executing".
@@ -446,4 +473,47 @@ func (h *WizardHandler) finalizeWikiRun(
 	job.Append(store.LogLine{Type: "done", Content: "✅ 知识库文档已生成！"})
 	job.Finish(0, store.JobDone)
 	log.Printf("[wiki-generate] job %s finished for %s", job.ID, id)
+}
+
+// looksLikeWikiPreamble reports whether the given cleaned content looks more
+// like a Claude status / progress message than an actual knowledge-base
+// document. The heuristic is intentionally conservative (prefers false
+// negatives to false positives — we only reject when BOTH signals fire):
+//
+//   1. Content is suspiciously short (< 200 chars after sanitize). A real
+//      knowledge doc covering 背景与目标 / 关键概念 / 相关源文件清单 / 调用
+//      路径 / 风险与注意事项 is virtually always longer.
+//   2. Content lacks ANY markdown structure — no heading (#/##/###),
+//      no code fence, no list item (- / 1. / *), no table row (|).
+//
+// The combined rule keeps the false-positive rate near zero: a 50-char
+// reply that happens to include a `# 标题` line still passes, and a long
+// prose reply without headings but with bullet points still passes.
+//
+// Origin: claude in plan mode can emit a one-line preamble ("我已并行启动
+// 2 个 Explore 子代理深入调研 ... 等待回收中…") and end its turn there
+// without producing the doc. The tier-3 streamText fallback in
+// finalizeWikiRun would otherwise grab this preamble and persist it as the
+// wiki doc — silently corrupting the requirement row. We catch it here.
+func looksLikeWikiPreamble(cleaned string) bool {
+	if len(cleaned) >= 200 {
+		return false
+	}
+	// Strip leading whitespace, then look for any structural marker.
+	trimmed := strings.TrimLeft(cleaned, " \t\n\r")
+	hasHeading := strings.HasPrefix(trimmed, "#") ||
+		strings.Contains(trimmed, "\n#") ||
+		strings.Contains(trimmed, "\n##")
+	hasCodeFence := strings.Contains(cleaned, "```")
+	hasList := false
+	for _, line := range strings.Split(cleaned, "\n") {
+		l := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(l, "- ") || strings.HasPrefix(l, "* ") ||
+			(len(l) > 2 && l[0] >= '0' && l[0] <= '9' && (l[1] == '.' || l[1] == ')') && l[2] == ' ') {
+			hasList = true
+			break
+		}
+	}
+	hasTable := strings.Contains(cleaned, "|") && strings.Contains(cleaned, "\n")
+	return !hasHeading && !hasCodeFence && !hasList && !hasTable
 }

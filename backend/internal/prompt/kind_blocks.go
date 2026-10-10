@@ -103,23 +103,25 @@ func AllBlocks(kind string, req *model.Requirement) string {
 // WikiBlock returns the kind-specific preface injected into the
 // "生成知识库文档" prompt (handler/wizard_wiki.go GenerateWikiDoc). Enforces
 // read-only behavior: Claude must NOT modify any source file, NOT create
-// docs in the project directory, and only output Markdown content via its
-// final assistant turn. Diagrams (flow / sequence / state) should be
-// expressed as fenced code blocks with the mermaid tag, e.g.
-// ` ```mermaid ... ``` `.
+// docs in the project directory, NOT launch sub-agents, and only output
+// Markdown content via its final assistant turn. Diagrams (flow / sequence
+// / state) should be expressed as fenced code blocks with the mermaid tag,
+// e.g. ` ```mermaid ... ``` `.
 //
-// The wizard handler additionally passes DisallowedTools=[Write,Edit,
-// NotebookEdit] to claude so plan-mode + tool restrictions backstop the
-// textual instruction: a misbehaving model cannot physically touch the
-// project tree even if it ignores this preface.
+// The wizard handler additionally passes
+// DisallowedTools=[Write,Edit,NotebookEdit,Task] to claude so plan-mode +
+// tool restrictions backstop the textual instruction: a misbehaving model
+// cannot physically touch the project tree or launch sub-agents even if
+// it ignores this preface.
 func WikiBlock(kind string, _ *model.Requirement) string {
 	switch kind {
 	case "wiki":
 		return "\n\n[知识库类型约束]\n" +
 			"1. 你正在为「知识库」类需求生成文档，仅用于沉淀为可复用的知识条目。\n" +
 			"2. 严禁修改任何源代码、严禁新建项目内文档、严禁执行破坏性命令。\n" +
-			"3. 仅通过最终消息输出完整 Markdown 文档正文。\n" +
-			"4. 流程图 / 时序图 / 状态图等用 Mermaid 代码块表达（如 ```mermaid ... ```）。\n"
+			"3. 严禁启动 Explore / Plan 等子代理（Task 工具已在结构层禁用）。自己直接用 Read / Glob / Grep 阅读相关源文件，一次性输出完整文档。\n" +
+			"4. 仅通过最终消息输出完整 Markdown 文档正文，不要发\"我已启动\"、\"等待回收中\"之类的进度消息。如果信息不足，直接在文档里写\"信息不足\"章节，不要拖延。\n" +
+			"5. 流程图 / 时序图 / 状态图等用 Mermaid 代码块表达（如 ```mermaid ... ```）。\n"
 	default:
 		return ""
 	}
