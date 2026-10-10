@@ -809,6 +809,10 @@ function SubTaskCard({
   // summaryExpanded (L1727) 一致——都是长内容默认折叠、点按钮展开。
   const [planExpanded, setPlanExpanded] = useState(false);
   const isPlanLong = (st.prompt?.length ?? 0) > 320;
+  // v0.5.x: brief 模式下「✅ 结果」块的长内容折叠。>600 字时默认折叠，避免
+  // 一句简短回执意外变成一整屏。复用了 isPlanLong 的视觉语言与按钮文案。
+  const [briefResultExpanded, setBriefResultExpanded] = useState(false);
+  const isBriefResultLong = (artifact?.length ?? 0) > 600;
   const [adjusting, setAdjusting] = useState(false);
   const [adjustInput, setAdjustInput] = useState('');
   const [adjustBusy, setAdjustBusy] = useState(false);
@@ -1220,6 +1224,20 @@ function SubTaskCard({
               {t('components.subTaskCard.sessionModeBare')}
             </span>
           )}
+          {/* Report-detail chip: surfaces the actually-effective report mode
+              on a manual sub-task. The backend resolves "auto" into brief/full
+              before writeback, so the chip only ever reads brief (the default
+              non-default — "full" matches the legacy three-section shape and
+              is intentionally hidden to keep noise low, mirroring the
+              session_mode='fork' policy). */}
+          {st.report_mode === 'brief' && (
+            <span
+              className="sub-card-mode-chip sub-card-mode-brief"
+              title={t('components.subTaskCard.reportModeBriefTitle')}
+            >
+              {t('components.subTaskCard.reportModeBrief')}
+            </span>
+          )}
           {/* Execution environment: 💻 本地 or 🛰️ Agent Server「name」. Shows
               "由哪个 Agent Server 开发" for every card; auto-orchestrated
               children inherit the main task's environment so they render the
@@ -1319,6 +1337,9 @@ function SubTaskCard({
               （activePhase 命中）显示内嵌 spinner 直到 phase_section 事件到达。 */}
           {st.phase_emitted && (
             <div className="sub-card-phases">
+              {/* v0.5.x 减负：full 模式下「理解」「实施」在终态默认折叠，只展开
+                  「小结」——给用户最相关的部分，让其他两段藏在 ▸ 里以备点开。
+                  流式（streaming）时三段仍然全开，方便实时跟进。 */}
               <PhaseSection
                 emoji="🧠"
                 title={t('components.subTaskCard.phaseUnderstandingTitle')}
@@ -1328,7 +1349,7 @@ function SubTaskCard({
                     : st.phase_understanding ?? ''
                 }
                 active={phaseOutputs.activePhase === 'understanding'}
-                defaultOpen
+                defaultOpen={streaming || phaseOutputs.activePhase === 'understanding'}
               />
               <PhaseSection
                 emoji="🔨"
@@ -1339,7 +1360,7 @@ function SubTaskCard({
                     : st.phase_implementation ?? ''
                 }
                 active={phaseOutputs.activePhase === 'implementation'}
-                defaultOpen
+                defaultOpen={streaming || phaseOutputs.activePhase === 'implementation'}
               />
               <PhaseSection
                 emoji="📋"
@@ -1355,10 +1376,12 @@ function SubTaskCard({
             </div>
           )}
 
-          {/* v0.5.x: 自拟方案渲染块。仅手动子任务且 prompt 非空、未 streaming
-              时显示。位置紧接 phase 面板之下、Live log 之上，让用户优先看到
-              自己写的方案、再看 Claude 输出/汇总。折叠逻辑镜像 .sub-report。 */}
-          {!streaming && isManualSource && (st.prompt?.trim() ?? '') !== '' && (
+          {/* v0.5.x: 自拟方案渲染块。仅手动子任务且 prompt 非空、未 streaming、
+              且 prompt 不太短时显示。位置紧接 phase 面板之下、Live log 之上。
+              一行小指令的 prompt 已经在卡片标题里展示了，再渲染一遍是纯
+              噪音——所以阈值 .sub-plan-short 把 ≤60 字的提示词直接收起来。
+              折叠逻辑镜像 .sub-report。 */}
+          {!streaming && isManualSource && (st.prompt?.trim().length ?? 0) > 60 && (
             <section className="sub-plan">
               <div className="sub-plan-eyebrow" aria-hidden="true">
                 <span className="sub-plan-eyebrow-icon">📝</span>
@@ -1396,13 +1419,72 @@ function SubTaskCard({
           {/* Live log (streaming) — full-width terminal scrollback. */}
           {streaming && <SubTaskLogView lines={lines} />}
 
+          {/* v0.5.x: brief-result block — 手动子任务在「简洁」模式下（report_mode='brief'）
+              渲染这块。源/状态/模型/耗时/花费 已经在卡头 .sub-card-meta +
+              .sub-card-quickstats 里展示完了，这里只放最终结果本身，不再重复
+              元数据 dl。3 行提示词以内直接展示；超长折叠 + 展开按钮，复用
+              .sub-plan 的 isPlanLong 模式。 */}
+          {!streaming && st.report_mode === 'brief' && (st.status === 'done' || st.status === 'stopped') && artifact && (
+            <section className="sub-result">
+              <div className="sub-result-eyebrow" aria-hidden="true">
+                <span className="sub-result-eyebrow-icon">✅</span>
+                <span className="sub-result-eyebrow-label">
+                  {t('components.subTaskCard.resultEyebrow')}
+                </span>
+              </div>
+              <div
+                className={
+                  'sub-result-body-wrap' +
+                  (isBriefResultLong && !briefResultExpanded ? ' is-collapsed' : '')
+                }
+              >
+                <div className="sub-result-body">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {stripArtifactCodeFence(stripArtifactHeader(artifact))}
+                  </ReactMarkdown>
+                </div>
+              </div>
+              {isBriefResultLong && (
+                <button
+                  type="button"
+                  className="sub-result-toggle-btn"
+                  onClick={() => setBriefResultExpanded((v) => !v)}
+                  aria-expanded={briefResultExpanded}
+                >
+                  {briefResultExpanded
+                    ? t('components.subTaskCard.resultExpandCollapse')
+                    : t('components.subTaskCard.resultExpandShow')}
+                </button>
+              )}
+            </section>
+          )}
+
+          {/* v0.5.x: brief-mode 的 error 也走这块——简洁失败提示，单行足够。
+              区分 done / stopped / error 共用一个 .sub-result 块。 */}
+          {!streaming && st.report_mode === 'brief' && st.status === 'error' && artifact && (
+            <section className="sub-result is-status-error">
+              <div className="sub-result-eyebrow" aria-hidden="true">
+                <span className="sub-result-eyebrow-icon">❌</span>
+                <span className="sub-result-eyebrow-label">
+                  {t('components.subTaskCard.resultErrorEyebrow')}
+                </span>
+              </div>
+              <div className="sub-result-body">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {stripArtifactCodeFence(stripArtifactHeader(artifact))}
+                </ReactMarkdown>
+              </div>
+            </section>
+          )}
+
           {/* Finished-report card — replaces the legacy .sub-card-artifact
               dark slab with a structured white card: report header → metadata
               strip → body. stopped rows also flow through this branch since
               they have an artifact (with the "⏹ 用户中止" banner prefix).
               手动子任务（phase_emitted=true）已通过上方三段卡片完整呈现内容，
-              此处隐藏 artifact body 以避免与三段卡片内容重复。 */}
-          {!streaming && !st.phase_emitted && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && artifact && (
+              此处隐藏 artifact body 以避免与三段卡片内容重复。brief 模式
+              （report_mode='brief'）也走上面的 sub-result 块，不进这里。 */}
+          {!streaming && !st.phase_emitted && st.report_mode !== 'brief' && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && artifact && (
             <div className={`sub-report is-status-${st.status}`}>
               <div className="sub-report-header">
                 <div className="sub-report-header-row">
@@ -1447,7 +1529,7 @@ function SubTaskCard({
               window is misleading: the row IS done, we just haven't
               fetched the artifact Markdown yet. The guard below matches
               the one above so the two branches stay symmetric. */}
-          {!streaming && !st.phase_emitted && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && !artifact && (
+          {!streaming && !st.phase_emitted && st.report_mode !== 'brief' && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && !artifact && (
             <div className="sub-report-empty">{t('components.subTaskCard.noArtifact')}</div>
           )}
 
@@ -2080,6 +2162,11 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
   // backend's 409 NO_SESSION check. The with_context / bare options stay
   // enabled — they explicitly opt out of the parent-session requirement.
   const [sessionMode, setSessionMode] = useState<SessionMode>('resume');
+  // v0.5.x: 报告详略分段控件的当前选项。'auto' 是默认——后端按提示词启发式
+  // 判定 brief / full；'brief' 强制简洁（不注入三段指令、不出三段报告）；
+  // 'full' 强制三段。无 touch 标志——后端的启发式已经对短提示词判得很准，
+  // 用户在大多数情况下不需要主动干预。
+  const [reportMode, setReportMode] = useState<'auto' | 'brief' | 'full'>('auto');
   // Track whether the user has touched the session-mode radio. The
   // stale-artifact auto-promote below MUST NOT stomp a deliberate user
   // pick: a fresh poll re-creates `latestArtifactStale` on every render
@@ -2132,15 +2219,22 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         // backend records an explicit choice — an omitted field would fall
         // back to the parent's env, which is wrong when the user picked 本地.
         agent_server_id: createAgentServerId,
+        // 报告详略：'auto' 也照实发送——后端再做规范化，0 成本、可观测。
+        report_mode: reportMode,
       });
       setPrompt('');
+      // Reset the report-mode radio so the next sub-task gets a fresh auto
+      // pick. The session-mode radio is left alone on purpose — a
+      // stale-session auto-promote may have been the user's last deliberate
+      // pick, and we don't want to nuke it.
+      setReportMode('auto');
       await loadList();
     } catch (e: any) {
       setError(e?.message || t('components.subTaskPanel.errCreate'));
     } finally {
       setSubmitting(false);
     }
-  }, [prompt, submitting, createModel, createConfigId, sessionMode, createAgentServerId, requirementId, loadList, t]);
+  }, [prompt, submitting, createModel, createConfigId, sessionMode, createAgentServerId, reportMode, requirementId, loadList, t]);
 
   // --- Manual re-split (🔄 Re-split) ------------------------------------
   // Escape hatch for when StartCoding's auto-orchestration produced no
@@ -2255,6 +2349,28 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     },
   ];
   const activeSessionMode = sessionModeOptions.find((o) => o.key === sessionMode) ?? sessionModeOptions[0];
+
+  // v0.5.x: 报告详略分段控件内容。auto 在最左做默认——后端启发式对「好像
+  // 没推送，请推送吧」这种一行小指令已经判得很准，绝大多数情况下用户
+  // 不需要切换；brief / full 留给那些明确想要简洁 / 三段的场景。
+  const reportModeOptions: Array<{ key: 'auto' | 'brief' | 'full'; label: string; desc: string }> = [
+    {
+      key: 'auto',
+      label: t('components.subTaskPanel.reportMode.auto'),
+      desc: t('components.subTaskPanel.reportMode.autoHint'),
+    },
+    {
+      key: 'brief',
+      label: t('components.subTaskPanel.reportMode.brief'),
+      desc: t('components.subTaskPanel.reportMode.briefHint'),
+    },
+    {
+      key: 'full',
+      label: t('components.subTaskPanel.reportMode.full'),
+      desc: t('components.subTaskPanel.reportMode.fullHint'),
+    },
+  ];
+  const activeReportMode = reportModeOptions.find((o) => o.key === reportMode) ?? reportModeOptions[0];
 
   return (
     <section className="sub-panel" aria-labelledby="sub-panel-title">
@@ -2543,6 +2659,37 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
               {t('components.subTaskPanel.sessionMode.freshHint')}
             </span>
           )}
+        </div>
+        {/* v0.5.x: 报告详略分段控件——视觉与文案镜像上面的 session-mode
+            控件（同一组 .sub-session-mode-* 类），只改 key。auto 是默认；
+            brief 跳过三段指令和 phase tracker；full 强制三段。 */}
+        <div className="sub-session-mode">
+          <span className="sub-session-mode-label" id="sub-report-mode-label">
+            {t('components.subTaskPanel.reportMode.label')}
+          </span>
+          <div className="sub-session-mode-segments" role="radiogroup" aria-labelledby="sub-report-mode-label">
+            {reportModeOptions.map((opt) => {
+              const active = reportMode === opt.key;
+              return (
+                <label
+                  key={opt.key}
+                  className={`sub-session-mode-option${active ? ' is-active' : ''}`}
+                  title={opt.desc}
+                >
+                  <input
+                    type="radio"
+                    name="reportMode"
+                    value={opt.key}
+                    checked={active}
+                    onChange={() => setReportMode(opt.key)}
+                    disabled={submitting || reSplitBusy}
+                  />
+                  <span className="sub-session-mode-option-text">{opt.label}</span>
+                </label>
+              );
+            })}
+          </div>
+          <span className="sub-session-mode-desc" role="note">{activeReportMode.desc}</span>
         </div>
         <div className="sub-composer-toolbar">
           <span className="sub-composer-hint">

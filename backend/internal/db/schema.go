@@ -875,6 +875,13 @@ var alterColumns = []string{
 	`ALTER TABLE sub_tasks ADD COLUMN phase_implementation TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE sub_tasks ADD COLUMN phase_summary         TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE sub_tasks ADD COLUMN phase_emitted         INTEGER NOT NULL DEFAULT 0`,
+	// 手动子任务的报告详略：'auto'（默认，由提示词启发式判定）/ 'brief'（简洁，
+	// 不注入三段指令、不启用 phase tracker）/ 'full'（强制三段）。'auto' 行
+	// 会在 SubTaskRunner.Run 入口被解析为 brief 或 full 并写回本列，所以读
+	// 到的永远是这个子任务实际生效的详略。auto / push_pr 行通过 phaseEnabled
+	// 门控本就不走三段，所以该列对它们没有意义；显式空串回落 auto 的语义与
+	// session_mode 一致。
+	`ALTER TABLE sub_tasks ADD COLUMN report_mode TEXT NOT NULL DEFAULT 'auto'`,
 	// 父子查询索引：未来「列出某个父任务的所有子任务」按此索引即可。
 	`CREATE INDEX IF NOT EXISTS idx_sub_tasks_parent ON sub_tasks(parent_subtask_id)`,
 	// Orchestration summary retry cap: the tick loop's case SummaryError branch

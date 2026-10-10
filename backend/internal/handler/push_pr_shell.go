@@ -89,7 +89,7 @@ func (h *WizardHandler) runPushPRShellJob(reqRow *model.Requirement, dev, base, 
 	}
 
 	shortDesc := "本地 shell 推送并创建 PR: " + dev
-	st, job, _, nerr := h.subTaskRunner.NewPendingSubTask(reqRow.ID, "推送并创建 PR", shortDesc, "", "", "", "", "")
+	st, job, _, nerr := h.subTaskRunner.NewPendingSubTask(reqRow.ID, "推送并创建 PR", shortDesc, "", "", "", "", "", "")
 	if nerr != nil {
 		return "", "", nerr
 	}

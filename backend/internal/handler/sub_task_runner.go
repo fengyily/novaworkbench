@@ -475,8 +475,14 @@ func (r *SubTaskRunner) SetRemoteCoding(fn func(*remoteCodingInput) claudeStream
 // row (see model.SubTaskSessionMode*). Pass "" to let SubTaskService.Create
 // default to "fork" (the legacy StartSubTask behavior, and the value auto-
 // orchestrated children always take).
-func (r *SubTaskRunner) NewPendingSubTask(reqID, title, prompt, modelDisplay, sourceSID, agentServerID, sessionMode, parentSubtaskID string) (*model.SubTask, *store.Job, string, error) {
-	st, err := r.subTaskSvc.Create(reqID, title, prompt, modelDisplay, sourceSID, "", 0, agentServerID, sessionMode, parentSubtaskID, "")
+//
+// reportMode persists the user-picked (or default) report-detail policy on
+// the row (see model.SubTaskReportMode*). "auto" is stored verbatim; Run
+// resolves it into brief|full at dispatch time and writes the resolved value
+// back so the card chip and the finished-render branch agree on what ran.
+// Pass "" to let SubTaskService.Create default to "auto".
+func (r *SubTaskRunner) NewPendingSubTask(reqID, title, prompt, modelDisplay, sourceSID, agentServerID, sessionMode, parentSubtaskID, reportMode string) (*model.SubTask, *store.Job, string, error) {
+	st, err := r.subTaskSvc.Create(reqID, title, prompt, modelDisplay, sourceSID, "", 0, agentServerID, sessionMode, parentSubtaskID, "", reportMode)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -680,6 +686,7 @@ func (r *SubTaskRunner) Run(
 	freshSession bool,
 	bare bool,
 	parentSourceSID string,
+	reportMode string,
 ) {
 	// Best-effort persistence: backend restart mid-run won't lose the log.
 	defer func() {
@@ -868,12 +875,30 @@ func (r *SubTaskRunner) Run(
 	// v0.5.x: 三阶段（理解 / 实施 / 小结）只在手动触发路径打开。auto / push_pr
 	// 子任务的 live log 渲染和自动批派逻辑保持不变——它们依然走单一的 artifact
 	// 路径，phase_* 列保持空、phase_emitted=0、前端不渲染三段区。
-	phaseEnabled := phaseEnabledForSource(st.Source)
+	//
+	// v0.5.x 报告详略：手动路径再叠加一道 reportMode 门。resolvedReportMode
+	// 是「auto 在这里已经被启发式判完的最终值」——brief 关掉 phase tracker
+	// 与三段指令，full 等同于旧行为。解析完后立刻写回行（UpdateReportMode），
+	// 卡片 chip 与终态渲染分支都读这个值。
+	resolvedReportMode := resolveReportMode(reportMode, body)
+	if perr := r.subTaskSvc.UpdateReportMode(st.ID, resolvedReportMode); perr != nil {
+		log.Printf("[sub-task] failed to persist report_mode for %s: %v", st.ID, perr)
+	}
+	st.ReportMode = resolvedReportMode
+
+	phaseEnabled := phaseEnabledForSource(st.Source) && resolvedReportMode != model.SubTaskReportModeBrief
 	var phaseTrack *phaseTracker
 	if phaseEnabled {
 		phaseTrack = &phaseTracker{}
 	}
-	log.Printf("[sub-task] phaseEnabled=%v source=%q id=%s", phaseEnabled, st.Source, st.ID)
+	log.Printf("[sub-task] phaseEnabled=%v source=%q reportMode=%q resolved=%q id=%s", phaseEnabled, st.Source, reportMode, resolvedReportMode, st.ID)
+
+	// Brief 模式给用户一个可见的提示：解释为什么这条子任务不会出三段报告。
+	// 仅手动路径且为 brief 时输出；auto / push_pr 行 phase 本来就不渲染，
+	// 不需要这条提示。
+	if phaseEnabledForSource(st.Source) && resolvedReportMode == model.SubTaskReportModeBrief {
+		job.Append(store.LogLine{Type: "message", Content: "🪶 简洁模式：本子任务直接执行，不生成三段式报告。"})
+	}
 
 	var prompt string
 	switch {
@@ -884,8 +909,12 @@ func (r *SubTaskRunner) Run(
 	default:
 		prompt = "## 子任务\n\n" + body + "\n"
 	}
-	if phaseEnabled {
+	switch {
+	case phaseEnabled:
 		prompt += phaseInstructionsBlock
+	case phaseEnabledForSource(st.Source):
+		// 手动路径 + brief：注入简洁指令，让 claude 知道这次只回 1~3 句。
+		prompt += briefInstructionsBlock
 	}
 	prompt += "\n> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
 	prompt += "\n" + promptpkg.GitCommitConvention + "\n"
