@@ -413,9 +413,59 @@
 .design-toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin-bottom: 12px;
   flex-wrap: wrap;
+}
+/* Sub-cluster inside .design-toolbar: groups Agent Server + SyncMode under a
+   single "执行环境" caption so the toolbar reads as two concerns
+   (model / execution-environment) + a right-anchored action group, instead
+   of three loose label-pills stacked next to each other.
+   The cluster is itself a flex row so each picker can size independently and
+   the SyncModeSelect still collapses to null when no Agent server is picked. */
+.design-env-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg);
+}
+.design-env-cluster-caption {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.design-env-cluster-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--color-border);
+  margin: 0 2px;
+}
+/* Sub-cluster that toggles ON only when an Agent server is picked.
+   Renders as a small bordered chip so the SyncMode picker visibly attaches
+   to the Agent Server picker instead of appearing as a free-floating <select>. */
+.design-sync-mode-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.design-toolbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+/* Compact inline hint shown when no ready Agent servers exist; was previously
+   a free-floating div with inline-style font/color, now a class so it sits
+   consistently on its own row inside the toolbar. */
+.design-toolbar-hint {
+  font-size: 12px;
+  color: var(--color-text-muted);
 }
 
 /* Claude session panel: lists per-stage claude session ids so the user can

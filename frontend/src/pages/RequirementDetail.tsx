@@ -2722,16 +2722,25 @@ export default function RequirementDetail() {
                       reachable remote); 'local' ships it as a git bundle over
                       SFTP and syncs back to the local worktree (self-hosted repo
                       with no reachable remote). Defaults to the project's remote
-                      config; the user can override before launch. */}
+                      config; the user can override before launch.
+                      Rendered as a preflight-field-card--exec to match the ENV
+                      card's violet rail + SYNC chip — keeps all three editable
+                      fields in the Execution section speaking one vocabulary
+                      (BASE / NEW / ENV / SYNC / MODEL) instead of letting the
+                      sync selector fall back to a bare browser-default select. */}
                   {agentServerId && (
                     <div className="modal-field">
                       <label>{t('requirements.detail2.syncModeLabel')}</label>
-                      <SyncModeSelect
-                        enabled={!!agentServerId}
-                        value={syncMode === 'local' ? 'local' : ''}
-                        onChange={(v) => setSyncMode(v === 'local' ? 'local' : 'remote')}
-                        disabled={coding}
-                      />
+                      <div className="preflight-field-card preflight-field-card--exec">
+                        <span className="preflight-field-chip" aria-hidden="true">SYNC</span>
+                        <SyncModeSelect
+                          enabled={!!agentServerId}
+                          value={syncMode === 'local' ? 'local' : ''}
+                          onChange={(v) => setSyncMode(v === 'local' ? 'local' : 'remote')}
+                          disabled={coding}
+                          className="form-input preflight-field-input"
+                        />
+                      </div>
                       <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
                         {syncMode === 'local'
                           ? t('requirements.detail2.syncModeLocalHint')
@@ -3887,10 +3896,16 @@ export default function RequirementDetail() {
       {/* ── Architect stage ── */}
       {(stage === 'architect' || req.status === 'designed' || stage === 'developer' || stage === 'done') && (
         <div className="detail-section design-section">
-          {/* Compact toolbar: the architect role is already shown in the
-              stepper, so this section leads with a content-oriented caption
-              and parks the stream toggle + regenerate action together. */}
-          <div className="design-toolbar model-row" style={{ gap: 8 }}>
+          {/* Toolbar splits into three readable blocks:
+              ─ Model       ── which Claude persona/model drives the design run
+              ─ 执行环境    ── where + how the code is shipped (Agent server + sync mode)
+              ─ Actions     ── process toggle / regenerate / export PDF / fullscreen, anchored right
+              The middle block sits inside a bordered cluster (.design-env-cluster)
+              so the two pickers read as ONE concern, not two loose label-pills.
+              The previous flat-row layout had three independent <label> blocks
+              stacked horizontally — at narrow widths they piled up with no
+              visual grouping, which was the "排版有点乱" feedback. */}
+          <div className="design-toolbar">
             {/* Per-stage architect model. Default = currently configured design
                 model; disabled while a design job runs (Claude is working —
                 model switch is locked). */}
@@ -3906,17 +3921,12 @@ export default function RequirementDetail() {
               configId={architectConfigId || undefined}
               onConfigChange={setArchitectConfigId}
             />
-            {/* Design-stage Agent server selector. Mirrors the dev-stage
-                picker in the coding modal: empty = local execution (default),
-                non-empty = route the architect run through that Agent server
-                (plan mode on the remote worker, see
-                backend/internal/handler/wizard_architect.go execArchitectDesign).
-                The same shared `agentServerId` state is reused — it covers
-                design + dev within a single requirement so a page refresh
-                doesn't drop the user's choice between stages. The seed
-                effect above prefers req.design_agent_server_id when it
-                differs from req.agent_server_id. Only `ready` servers are
-                populated (server-side guard mirrors this in the handler).
+            {/* ── Execution-environment cluster ──
+                Wraps Agent server + SyncMode under a single caption so the
+                pair reads as one logical unit. When no Agent server is picked,
+                the cluster still appears (so the caption is constant) but
+                SyncModeSelect returns null (its `enabled` prop is false) so
+                there's no orphaned half-card on the toolbar.
                 ── Project rule ──
                 Any entry point that can start work against a specific
                 execution environment MUST render the environment selector on
@@ -3925,10 +3935,8 @@ export default function RequirementDetail() {
                 design CTA) are the current set; the scheduled-run modal uses
                 the same shared ExecEnvSelect. Adding a new design/coding CTA?
                 Add its picker at the same time. */}
-            <label className="design-agent-server" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                {t('requirements.detail2.designAgentServerLabel')}
-              </span>
+            <div className="design-env-cluster">
+              <span className="design-env-cluster-caption">{t('requirements.detail2.execEnvCaption')}</span>
               <ExecEnvSelect
                 servers={agentServers}
                 value={agentServerId}
@@ -3940,24 +3948,19 @@ export default function RequirementDetail() {
                 localOptionLabel={t('requirements.detail2.preflightLocalExec')}
                 style={{ minWidth: 160 }}
               />
-            </label>
-            {/* Sync-mode picker for the architect stage. Only renders when an
-                Agent server is picked; the SyncModeSelect returns null
-                otherwise so we don't need an extra wrapping conditional here.
-                Label reuses the same `designAgentServerLabel` wording minus
-                the server suffix so the design toolbar stays compact. */}
-            <label className="design-sync-mode" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                {t('requirements.detail2.syncModeLabel')}
-              </span>
-              <SyncModeSelect
-                enabled={!!agentServerId}
-                value={designSyncMode}
-                onChange={setDesignSyncMode}
-                disabled={architectWorking}
-                style={{ minWidth: 140 }}
-              />
-            </label>
+              {agentServerId && (
+                <>
+                  <span className="design-env-cluster-divider" aria-hidden="true" />
+                  <SyncModeSelect
+                    enabled={!!agentServerId}
+                    value={designSyncMode}
+                    onChange={setDesignSyncMode}
+                    disabled={architectWorking}
+                    style={{ minWidth: 140 }}
+                  />
+                </>
+              )}
+            </div>
             {/* Persisted design environment: shows which Agent Server (or 本地)
                 the architect stage last ran on, read back from
                 requirements.design_agent_server_id. Only rendered once a design
@@ -3971,36 +3974,41 @@ export default function RequirementDetail() {
               />
             )}
             {agentServers.length === 0 && (
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+              <div className="design-toolbar-hint">
                 {t('requirements.detail2.designAgentServerNoHint')}
               </div>
             )}
-            {showDesignToggle && (
-              <button
-                className="btn btn-sm process-toggle"
-                onClick={() => setShowDesignProcess(v => !v)}
-                aria-expanded={designPanelOpen}
-              >
-                {designPanelOpen ? t('requirements.detail2.processToggleHide') : t('requirements.detail2.processToggleShow')}
-              </button>
-            )}
-            {req.status === 'designing' && hasDesign && (
-              <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={designing}><IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}</button>
-            )}
-            {hasDesign && (
-              <button
-                className="btn btn-sm"
-                onClick={handleExportPdf}
-                disabled={exporting}
-                style={{ marginLeft: 'auto' }}
-                title={t('requirements.detail2.exportPdfTitle')}
-              >
-                {exporting ? <><IconHourglass size={13} className="btn-icon" />{t('requirements.detail2.exportingPdf')}</> : <><IconFileText size={13} className="btn-icon" />{t('requirements.detail2.exportPdfBtn')}</>}
-              </button>
-            )}
-            {(designPanelOpen || hasDesign) && (
-              <FullscreenButton isFullscreen={designFs.isFullscreen} onClick={designFs.toggle} />
-            )}
+            {/* Action group — pinned to the right via .design-toolbar-actions
+                (margin-left: auto). Previously the export PDF button alone
+                carried `style={{ marginLeft: 'auto' }}`, which broke whenever
+                export wasn't shown — buttons drifted left mid-flow. */}
+            <div className="design-toolbar-actions">
+              {showDesignToggle && (
+                <button
+                  className="btn btn-sm process-toggle"
+                  onClick={() => setShowDesignProcess(v => !v)}
+                  aria-expanded={designPanelOpen}
+                >
+                  {designPanelOpen ? t('requirements.detail2.processToggleHide') : t('requirements.detail2.processToggleShow')}
+                </button>
+              )}
+              {req.status === 'designing' && hasDesign && (
+                <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={designing}><IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}</button>
+              )}
+              {hasDesign && (
+                <button
+                  className="btn btn-sm"
+                  onClick={handleExportPdf}
+                  disabled={exporting}
+                  title={t('requirements.detail2.exportPdfTitle')}
+                >
+                  {exporting ? <><IconHourglass size={13} className="btn-icon" />{t('requirements.detail2.exportingPdf')}</> : <><IconFileText size={13} className="btn-icon" />{t('requirements.detail2.exportPdfBtn')}</>}
+                </button>
+              )}
+              {(designPanelOpen || hasDesign) && (
+                <FullscreenButton isFullscreen={designFs.isFullscreen} onClick={designFs.toggle} />
+              )}
+            </div>
           </div>
 
           {/* Optional knowledge pre-read display (renders only when the user

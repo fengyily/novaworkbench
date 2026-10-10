@@ -190,6 +190,7 @@ export const requirements = {
     preflightAgentEmptyTitle: '设置 → Agent 服务器 添加一台并完成环境检查后可用',
     preflightLocalExec: '本地执行',
     preflightNoAgentHint: '未配置就绪的 Agent 服务器，请在「设置 → Agent 服务器」中添加并检查环境。',
+    execEnvCaption: '执行环境',
     syncModeLabel: '同步方式',
     syncModeRemote: '远程 Git 仓库同步',
     syncModeLocal: '本地仓库同步',

@@ -182,6 +182,7 @@ export const requirements = {
     preflightAgentEmptyTitle: 'Add an Agent server under Settings → Agent Servers and complete the env check to use it',
     preflightLocalExec: 'Local execution',
     preflightNoAgentHint: 'No ready Agent server. Add one and run the env check under Settings → Agent Servers.',
+    execEnvCaption: 'Execution env',
     syncModeLabel: 'Sync mode',
     syncModeRemote: 'Remote Git repo sync',
     syncModeLocal: 'Local repo sync',
