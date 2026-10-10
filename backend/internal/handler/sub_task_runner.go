@@ -1039,6 +1039,15 @@ func (r *SubTaskRunner) Run(
 	// Local execution: resolve resume / fork into the right CLI argv.
 	credEnv, credCleanup := gitCredentialEnv(r.projectSvc, r.platformSvc, req)
 	defer credCleanup()
+	// Pin the project's git committer identity into Claude's env so its
+	// `git commit` runs with the platform_token.git_user_* name/email
+	// instead of falling back to the host's ~/.gitconfig. Mirrors the
+	// pattern in merge.go Resolve (merge.go:889-897). Empty on any miss —
+	// callers must skip the env entries so un-bound legacy projects keep
+	// their ambient gitconfig behaviour.
+	if name, email := lookupGitIdentity(r.projectSvc, r.platformSvc, req); name != "" || email != "" {
+		credEnv = append(credEnv, buildIdentityEnv(name, email)...)
+	}
 	// Bare path drops the executor role system prompt — the user explicitly
 	// asked for a "裸 claude" session that uses CLI built-in defaults. Any
 	// other path inherits the executor persona, including the "你是一位资深
