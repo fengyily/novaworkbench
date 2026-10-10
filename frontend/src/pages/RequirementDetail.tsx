@@ -48,6 +48,7 @@ import {
   IconDatabase,
   IconSendOut,
   IconSleep,
+  IconServer,
   IconBotBadge,
   IconFolder,
   IconRefine,
@@ -667,48 +668,44 @@ export default function RequirementDetail() {
   // from requirements.architect_config_id so a refresh re-hydrates BOTH the
   // config dropdown and the model (fixes the "模型不在当前配置列表中" symptom).
   const [architectConfigId, setArchitectConfigId] = useState('');
-  // Agent-server selector for the developer stage. Empty string = local
-  // execution (the historical default); non-empty = run claude on the chosen
-  // remote target. Only `ready` servers are listed — the wizard refuses to
-  // start coding on a target whose dependencies haven't been verified.
+  // ── Execution-environment picker state ──
+  // Two independent selectors — one for the architect (design) stage and one
+  // for the developer (coding) stage. Previously this was a single
+  // `agentServerId` state shared by every picker on the page, which forced
+  // design and coding onto the same Agent server (the user complaint: "方案
+  // 在 Agent server 完成，实现在本地完成" was impossible). Now each stage owns
+  // its own state and seeds from its own persisted column. Both columns
+  // already exist on the requirements table — see
+  // backend/internal/db/schema.go (design_agent_server_id + agent_server_id)
+  // — and the wizard_architect / wizard_coding handlers stamp them
+  // independently, so the backend doesn't need any change.
   //
-  // agentServerId is seeded from the persisted requirements.agent_server_id so
-  // a page refresh / re-entry preselects the server the requirement last ran
-  // on (and so adjust-coding / continue-coding re-send the same target without
-  // the user re-picking it). useState's initial value only applies on first
-  // render — by then the requirement row may not have loaded yet, so we sync
-  // it in an effect below once req.agent_server_id arrives.
-  const [agentServerId, setAgentServerId] = useState('');
+  // Empty string = local execution (the historical default). Only `ready`
+  // servers are listed — the wizard refuses to start on a target whose
+  // dependencies haven't been verified. The state slot is `''` (NOT null)
+  // so every `<select>`/dropdown stays a plain string.
+  const [designAgentServerId, setDesignAgentServerId] = useState('');
+  const [codingAgentServerId, setCodingAgentServerId] = useState('');
   const [agentServers, setAgentServers] = useState<AgentServer[]>([]);
   useEffect(() => {
     agentServersApi.list()
       .then((rows) => setAgentServers((rows ?? []).filter((s) => s.status === 'ready')))
       .catch(() => {/* settings tab is the source of truth — silently ignore */});
   }, []);
-  // Preselect the dropdown from the persisted binding once the requirement
-  // loads. Only fills the dropdown when the user hasn't already picked
-  // something locally this session (agentServerId === ''), so switching
-  // selections mid-session is never clobbered by a re-fetch.
+  // Seed each picker from its OWN persisted column so the two stages come
+  // back independent after a page refresh. The `cur === ''` guard preserves
+  // any in-session user choice (matching the pre-split behaviour) — once the
+  // user picks a value in this session, the seed never overwrites it.
+  useEffect(() => {
+    if (req?.design_agent_server_id) {
+      setDesignAgentServerId((cur) => (cur === '' ? req.design_agent_server_id! : cur));
+    }
+  }, [req?.design_agent_server_id]);
   useEffect(() => {
     if (req?.agent_server_id) {
-      setAgentServerId((cur) => (cur === '' ? req.agent_server_id! : cur));
+      setCodingAgentServerId((cur) => (cur === '' ? req.agent_server_id! : cur));
     }
   }, [req?.agent_server_id]);
-  // Design-stage binding: the architect stage writes its own column
-  // (requirements.design_agent_server_id), independent of the dev-stage
-  // binding above. If the two bindings differ, prefer the design binding
-  // whenever the user hasn't already picked something this session — that
-  // way an "I've designed on A but haven't coded yet" requirement lands in
-  // the design section's selector pre-pointed at A without losing the dev
-  // binding when the developer stage later runs (the dev modal already
-  // reseeds itself from req.agent_server_id). The `cur === ''` guard
-  // preserves any in-session user choice, matching the dev-stage policy.
-  useEffect(() => {
-    const designID = req?.design_agent_server_id;
-    if (!designID) return;
-    if (designID === req?.agent_server_id) return; // dev seed already covers it
-    setAgentServerId((cur) => (cur === '' ? designID : cur));
-  }, [req?.design_agent_server_id, req?.agent_server_id]);
 
   // Poll /api/wizard/active-jobs every 5s so the status badge + claude-status
   // row can pulse while a coding/design/apply job is running on this
@@ -863,19 +860,20 @@ export default function RequirementDetail() {
     return () => { cancelled = true; clearInterval(id); };
   }, [req?.id]);
 
-  // Seed the selector from the requirement's persisted development source so
-  // a re-run (re-develop / start-development after a restart) defaults to the
-  // SAME Agent server the code already lives on, instead of silently
-  // dropping back to local execution. Runs once, and only when that server
-  // is still in the ready list (a deleted / unhealthy server falls back to
-  // local rather than failing).
+  // Seed the coding picker from the requirement's persisted development
+  // source so a re-run (re-develop / start-development after a restart)
+  // defaults to the SAME Agent server the code already lives on, instead of
+  // silently dropping back to local execution. Runs once, and only when that
+  // server is still in the ready list (a deleted / unhealthy server falls
+  // back to local rather than failing). Only the CODING picker is seeded
+  // here — design has its own design_agent_server_id column.
   const agentSeedRef = useRef(false);
   useEffect(() => {
     if (!req || agentSeedRef.current || agentServers.length === 0) return;
     agentSeedRef.current = true;
     if (req.dev_source === 'agent' && req.agent_server_id &&
         agentServers.some((s) => s.id === req.agent_server_id)) {
-      setAgentServerId(req.agent_server_id);
+      setCodingAgentServerId(req.agent_server_id);
     }
   }, [req, agentServers]);
 
@@ -1927,12 +1925,15 @@ export default function RequirementDetail() {
           // local execution (legacy default). The wizard remote branch
           // refuses servers that aren't in `ready` status, so an empty /
           // stale value here silently degrades to local without erroring.
-          ...(agentServerId ? { agent_server_id: agentServerId } : {}),
+          // Uses the DESIGN-stage picker so the user can pick a different
+          // Agent server for design vs coding (req_* the user explicitly
+          // called out: 设计 on Agent server + 实现 on 本地).
+          ...(designAgentServerId ? { agent_server_id: designAgentServerId } : {}),
           // Code-transport mode for the Agent-server run. Only sent when
           // the user actually picked a server AND a non-default value
           // (the wizard's "stamp if non-empty" prologue keeps an empty
           // sync_mode from silently overwriting a previous value).
-          ...(agentServerId && designSyncMode ? { sync_mode: designSyncMode } : {}),
+          ...(designAgentServerId && designSyncMode ? { sync_mode: designSyncMode } : {}),
         }),
       });
       const json = await res.json();
@@ -2299,14 +2300,17 @@ export default function RequirementDetail() {
           ...(developerConfigId ? { claude_config_id: developerConfigId } : {}),
           // Remote Agent-server execution. Empty string = local execution (the
           // wizardH.StartCoding default branch handles the legacy path).
-          ...(agentServerId ? { agent_server_id: agentServerId } : {}),
+          // Uses the CODING-stage picker — independent of the design picker,
+          // so the user can run 设计 on Agent server A and 实现 on Agent server
+          // B / 本地 (req_* the user explicitly called out).
+          ...(codingAgentServerId ? { agent_server_id: codingAgentServerId } : {}),
           // Agent-server code-transport mode. Only meaningful (and only sent)
           // when an Agent server is picked: 'remote' = origin clone/push,
           // 'local' = git-bundle over SFTP for a self-hosted repo with no
           // reachable remote. The backend persists it and every follow-up
           // action (adjust / continue / sub-task / merge / cleanup) reuses the
           // stored value, so adjust/continue below deliberately omit it.
-          ...(agentServerId ? { sync_mode: syncMode } : {}),
+          ...(codingAgentServerId ? { sync_mode: syncMode } : {}),
           // Development-mode: 'design' (default — fresh session, hand the
           // stored design doc to the agent via the -p prompt) or 'session'
           // (fork the design session, legacy behavior). Always sent — the
@@ -2804,8 +2808,8 @@ export default function RequirementDetail() {
         // render so the strip stays consistent with the form state.
         const stripBase = baseBranch || 'main';
         const stripNew = branchName || (req ? defaultBranchName(req.id, kindOf(req)) : '');
-        const stripEnv = agentServerId
-          ? (agentServers.find(s => s.id === agentServerId)?.name || 'remote')
+        const stripEnv = codingAgentServerId
+          ? (agentServers.find(s => s.id === codingAgentServerId)?.name || 'remote')
           : 'local';
         const stripModel = developerModel || developerDefaultModel || 'default';
         return (
@@ -2894,8 +2898,8 @@ export default function RequirementDetail() {
                       <ExecEnvSelect
                         className="form-input preflight-field-input"
                         servers={agentServers}
-                        value={agentServerId}
-                        onChange={setAgentServerId}
+                        value={codingAgentServerId}
+                        onChange={setCodingAgentServerId}
                         disabled={coding}
                         title={agentServers.length === 0 ? t('requirements.detail2.preflightAgentEmptyTitle') : ''}
                         localOptionLabel={t('requirements.detail2.preflightLocalExec')}
@@ -2912,16 +2916,25 @@ export default function RequirementDetail() {
                       reachable remote); 'local' ships it as a git bundle over
                       SFTP and syncs back to the local worktree (self-hosted repo
                       with no reachable remote). Defaults to the project's remote
-                      config; the user can override before launch. */}
-                  {agentServerId && (
+                      config; the user can override before launch.
+                      Rendered as a preflight-field-card--exec to match the ENV
+                      card's violet rail + SYNC chip — keeps all three editable
+                      fields in the Execution section speaking one vocabulary
+                      (BASE / NEW / ENV / SYNC / MODEL) instead of letting the
+                      sync selector fall back to a bare browser-default select. */}
+                  {codingAgentServerId && (
                     <div className="modal-field">
                       <label>{t('requirements.detail2.syncModeLabel')}</label>
-                      <SyncModeSelect
-                        enabled={!!agentServerId}
-                        value={syncMode === 'local' ? 'local' : ''}
-                        onChange={(v) => setSyncMode(v === 'local' ? 'local' : 'remote')}
-                        disabled={coding}
-                      />
+                      <div className="preflight-field-card preflight-field-card--exec">
+                        <span className="preflight-field-chip" aria-hidden="true">SYNC</span>
+                        <SyncModeSelect
+                          enabled={!!codingAgentServerId}
+                          value={syncMode === 'local' ? 'local' : ''}
+                          onChange={(v) => setSyncMode(v === 'local' ? 'local' : 'remote')}
+                          disabled={coding}
+                          className="form-input preflight-field-input"
+                        />
+                      </div>
                       <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
                         {syncMode === 'local'
                           ? t('requirements.detail2.syncModeLocalHint')
@@ -3825,8 +3838,8 @@ export default function RequirementDetail() {
           onGenerateDesign={() => requestDesignKnowledge(true)}
           onReset={() => setReq(prev => prev ? { ...prev, status: 'draft' } : prev)}
           agentServers={agentServers}
-          agentServerId={agentServerId}
-          onAgentServerChange={setAgentServerId}
+          agentServerId={designAgentServerId}
+          onAgentServerChange={setDesignAgentServerId}
         />
       )}
 
@@ -3853,191 +3866,316 @@ export default function RequirementDetail() {
                       ? t('requirements.detail2.draftIssueSkipHint')
                       : t('requirements.detail2.draftReqSkipHint')}
                 </p>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                  {/* Primary: go straight to architect-design. status stays draft;
-                      the backend ArchitectDesign handler tolerates the missing
-                      analyst session when skip_analysis is set, and UpdateDesign
-                      then moves status to designing. We transition locally first
-                      so the UI flips to the architect stage immediately.
-                      Hidden for kind=idea: ideas stay in the discussion stage
-                      and never reach architecture/code. */}
-                  {reqKind !== 'idea' && (
-                    <button className="btn btn-primary"
-                      onClick={() => requestDesignKnowledge(true)}
-                      disabled={!!busy}>
-                      {busy === '生成技术方案' /* i18n: protocol literal — state sentinel compared at render */
-                        ? <><IconHourglass size={13} className="btn-icon" />...</>
-                        : <><IconTriangle size={13} className="btn-icon" />{t('requirements.detail2.intentGenerateDesign')}</>}
-                    </button>
-                  )}
-                  {/* Scheduled design generation: opens ScheduleModal pre-loaded
-                      with the current architect model. Hidden for kind=idea
-                      (same gating as the primary button above). Disabled
-                      when a pending design row already exists (backend 409s
-                      in that case; the UI just gets there first). */}
-                  {reqKind !== 'idea' && !pendingByType.design && (
-                    <button
-                      className="btn btn-sm"
-                      onClick={() => setScheduleModal({ taskType: 'design' })}
-                      disabled={!!busy}
-                      title={t('requirements.detail2.scheduleDesignTitle')}
-                    >
-                      <IconClock size={13} className="btn-icon" />{t('requirements.detail2.scheduleDesignBtn')}
-                    </button>
-                  )}
-                  {/* Scheduled design+code (merged) generation: one scheduled
-                      task that runs architect-design and, on success, chains
-                      into start-coding. Hidden for kind=idea (merged task
-                      includes a coding stage, same gate as the "定时开发"
-                      button below) and disabled when ANY pending row already
-                      exists for this requirement — the backend's
-                      HasPendingConflict will surface a 409 otherwise. */}
-                  {reqKind !== 'idea' && !pendingByType.design && !pendingByType.coding && !pendingByType.design_and_coding && (
-                    <button
-                      className="btn btn-sm"
-                      onClick={() => setScheduleModal({ taskType: 'design_and_coding' })}
-                      disabled={!!busy}
-                      title={t('requirements.detail2.scheduleDesignCodingTitle')}
-                    >
-                      <IconClock size={13} className="btn-icon" />{t('requirements.detail2.scheduleDesignCodingBtn')}
-                    </button>
-                  )}
-                  {/* Immediate "design + coding" — runs architect-design and
-                      chains start-coding in one backend round-trip via
-                      /api/wizard/requirements/{id}/design-and-coding. No
-                      scheduled_tasks row is written. Disabled while a design
-                      job is already in flight (`designing`) so we don't open
-                      a modal the backend's preGate will 409; the modal's own
-                      pre-flight covers the live-job race for the second
-                      click anyway. */}
-                  {reqKind !== 'idea' && !pendingByType.design && !pendingByType.coding && !pendingByType.design_and_coding && !designing && !busy && (
-                    <button
-                      className="btn btn-sm"
-                      onClick={() => setImmediateModalOpen(true)}
-                      title={t('requirements.detail2.immediateDesignCodingTitle')}
-                    >
-                      <IconRocket size={13} className="btn-icon" />{t('requirements.detail2.immediateDesignCodingBtn')}
-                    </button>
-                  )}
-                  {/* Pending schedule hint — surfaces the planned time and
-                      offers an inline cancel link so the user doesn't have
-                      to navigate to the SchedulesPage. */}
-                  {pendingByType.design && (
-                    <PendingScheduleHint
-                      task={pendingByType.design}
-                      onCancel={async () => {
-                        await schedulesApi.cancel(pendingByType.design!.id);
-                        loadPendingSchedules();
-                      }}
-                    />
-                  )}
-                  {/* Merged (design+code) pending hint — same UX as the
-                      single-stage hint above, just labelled "方案+开发" so the
-                      user knows one row covers both stages. */}
-                  {pendingByType.design_and_coding && (
-                    <PendingScheduleHint
-                      task={pendingByType.design_and_coding}
-                      label={t('schedules.type.designCoding')}
-                      onCancel={async () => {
-                        await schedulesApi.cancel(pendingByType.design_and_coding!.id);
-                        loadPendingSchedules();
-                      }}
-                    />
-                  )}
-                  {/* Architect-model selectable BEFORE generating the plan.
-                      Irrelevant for kind=idea — the architect stage is hidden. */}
-                  {reqKind !== 'idea' && (
-                    <ModelSelect
-                      value={architectModel}
-                      onChange={setArchitectModel}
-                      stage="architect"
-                      label={t('requirements.detail2.architectModelLabel')}
-                      defaultModelName={architectDefaultModel}
-                      title={t('requirements.detail2.architectModelTitle')}
-                      configId={architectConfigId || undefined}
-                      onConfigChange={setArchitectConfigId}
-                    />
-                  )}
-                  {/* Design baseline SHA — the 40-char origin/<base> HEAD that the
-                      architect-design prologue locked. Empty / undefined = stage
-                      hasn't synced yet (or never ran / non-git project), so we
-                      skip rendering entirely instead of showing a stale or
-                      meaningless placeholder. Hidden for kind=idea — the
-                      architect stage doesn't run for ideas. */}
-                  {reqKind !== 'idea' && req?.design_base_sha && (
-                    <span
-                      className="dev-mode-badge"
-                      title={req.design_base_sha}
-                    >
-                      📌 {t('requirements.detail2.designBaseLabel', '基线')}: {req.design_base_sha.slice(0, 7)}
-                    </span>
-                  )}
-                  {/* Design-stage execution environment, selectable BEFORE the
-                      FIRST plan run. Shared-state note: `agentServerId` is the
-                      exact state runArchitectDesign reads at submit time, and
-                      the architect section renders the same picker bound to it,
-                      so the choice survives the draft → designing transition
-                      with no extra plumbing. Without this control the skip-
-                      analysis path had no way to leave 本地 on the first run —
-                      the architect section (the only other place the picker
-                      lives) isn't rendered until a design has already run.
-                      Hidden for kind=idea (no architect stage; same gating as
-                      the CTA above).
-                      ── Project rule ──
-                      Any entry point that can start work against a specific
-                      execution environment MUST render the environment
-                      selector on the same screen. Adding a new design/coding
-                      CTA? Add its picker here (or beside it) at the same time. */}
-                  {reqKind !== 'idea' && (
-                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                        {t('requirements.detail2.designAgentServerLabel')}
-                      </span>
-                      <ExecEnvSelect
-                        servers={agentServers}
-                        value={agentServerId}
-                        onChange={setAgentServerId}
-                        disabled={!!busy}
-                        title={agentServers.length === 0 ? t('requirements.detail2.designAgentServerEmptyTitle') : ''}
-                        localOptionLabel={t('requirements.detail2.preflightLocalExec')}
-                        style={{ minWidth: 160 }}
-                      />
-                    </label>
-                  )}
-                  {/* Empty-list hint, mirroring the architect toolbar: with no
-                      `ready` Agent Server the picker collapses to a single
-                      「本地执行」 option, so say why. */}
-                  {reqKind !== 'idea' && agentServers.length === 0 && (
-                    <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                      {t('requirements.detail2.designAgentServerNoHint')}
+                {/* Draft-stage (skip_analysis=true) action panel.
+                    The "decide & go" surface the user lands on when opening
+                    a fresh requirement with the analyst stage already
+                    skipped. Three decisions live here: pick a model, pick
+                    where it runs, pick how to start. The panel frames them
+                    as a single card with a quiet configuration zone on
+                    top and an action zone below, separated by a hairline.
+
+                    The previous flat-row layout dumped everything into one
+                    long flex-wrap strip; review noted the four design-start
+                    CTAs had a mix of btn-primary / btn-sm ("样式不同一"),
+                    the analyst-model picker was dead weight (analyst stage
+                    is skipped), and the model / sync-mode pickers sat AFTER
+                    the action buttons so the "model takes effect + sync
+                    mode is configurable here" intent was lost. The card
+                    framing + the route readout at the top fix all three. */}
+                {reqKind !== 'idea' && (
+                  <div className="draft-action-panel">
+                    {/* Header — eyebrow + monospaced route readout.
+                        The route readout is the SIGNATURE element: a single
+                        line that says where the work will go (本地 or named
+                        Agent Server + sync mode). It uses the same flight-
+                        leg / flight-ready vocabulary as the coding preflight
+                        modal so this panel and the modal read as one family
+                        of "where am I about to ship this?" surfaces. The
+                        READY dot signals the form is launchable (the user
+                        can still change values, but nothing is blocking). */}
+                    <div className="draft-action-header">
+                      <div className="preflight-eyebrow">
+                        {t('requirements.detail2.draftActionEyebrow')}
+                      </div>
+                      <div
+                        className="draft-action-route"
+                        aria-label={t('requirements.detail2.draftActionRouteAria')}
+                      >
+                        <span className="flight-leg">
+                          <span className="flight-leg-label">→ {t('requirements.detail2.draftActionRouteLabel')}</span>
+                        </span>
+                        <span className="flight-sep">·</span>
+                        <span className="flight-leg">
+                          <span className="flight-leg-value" title={
+                            designAgentServerId
+                              ? (agentServers.find(s => s.id === designAgentServerId)?.name || designAgentServerId)
+                              : t('requirements.detail2.preflightLocalExec')
+                          }>
+                            {designAgentServerId
+                              ? (agentServers.find(s => s.id === designAgentServerId)?.name || designAgentServerId)
+                              : t('requirements.detail2.preflightLocalExec')}
+                          </span>
+                          {designAgentServerId && (
+                            <>
+                              <span className="flight-arrow">·</span>
+                              <span className="flight-leg-value" title={
+                                designSyncMode === 'local'
+                                  ? t('requirements.detail2.syncModeLocal')
+                                  : t('requirements.detail2.syncModeRemote')
+                              }>
+                                {designSyncMode === 'local'
+                                  ? t('requirements.detail2.syncModeLocal')
+                                  : t('requirements.detail2.syncModeRemote')}
+                              </span>
+                            </>
+                          )}
+                        </span>
+                        <span className="flight-ready" aria-live="polite">
+                          <span className="flight-ready-dot" />
+                          {t('requirements.detail2.draftActionReady')}
+                        </span>
+                      </div>
                     </div>
-                  )}
-                  {/* For kind=idea this is the only CTA — promote it from a
-                      muted "run analysis first..." link to a primary button. */}
-                  {/* i18n: protocol literal — '开始分析' is the busy-state sentinel */}
+                    {/* Settings row — the configuration half of the card.
+                        Model picker (left) + execution-environment cluster
+                        (env picker + sync mode) + persisted env badge +
+                        baseline SHA badge. Wrapped in .design-toolbar so
+                        the inner layout still uses the same flex-wrap row
+                        the main architect toolbar uses; the parent card
+                        provides the framing that distinguishes the two
+                        surfaces. */}
+                    <div className="design-toolbar" style={{ marginBottom: 0 }}>
+                      {/* Architect model — sits at the head of the row so the
+                          user sees the active selection visually attached to
+                          the CTAs below. The picker state is shared with the
+                          main architect toolbar (setArchitectModel), so the
+                          value carries over once the requirement leaves the
+                          draft stage. */}
+                      <ModelSelect
+                        value={architectModel}
+                        onChange={setArchitectModel}
+                        stage="architect"
+                        label={t('requirements.detail2.architectModelLabel')}
+                        defaultModelName={architectDefaultModel}
+                        title={t('requirements.detail2.architectModelTitle')}
+                        configId={architectConfigId || undefined}
+                        onConfigChange={setArchitectConfigId}
+                      />
+                      {/* Execution environment cluster — same Agent-Server +
+                          SyncMode pair used by the main architect toolbar.
+                          SyncMode only renders when an Agent server is picked
+                          (gated by `enabled` on SyncModeSelect, mirroring the
+                          toolbar behavior), so 本地执行 rows stay free of the
+                          orphan half-card.
+                          ── Project rule ──
+                          Any entry point that can start work against a
+                          specific execution environment MUST render the
+                          environment selector on the same screen. This panel
+                          is the only place the picker lives for the FIRST
+                          run (skip_analysis path) — the architect section is
+                          not rendered until a design has already executed. */}
+                      <div className="design-env-cluster">
+                        <span className="design-env-cluster-caption">{t('requirements.detail2.execEnvCaption')}</span>
+                        <ExecEnvSelect
+                          servers={agentServers}
+                          value={designAgentServerId}
+                          onChange={setDesignAgentServerId}
+                          title={agentServers.length === 0 ? t('requirements.detail2.designAgentServerEmptyTitle') : ''}
+                          localOptionLabel={t('requirements.detail2.preflightLocalExec')}
+                          style={{ minWidth: 160 }}
+                        />
+                        {designAgentServerId && (
+                          <>
+                            <span className="design-env-cluster-divider" aria-hidden="true" />
+                            <SyncModeSelect
+                              enabled={!!designAgentServerId}
+                              value={designSyncMode}
+                              onChange={setDesignSyncMode}
+                              title={t('requirements.detail2.syncModeLabel')}
+                              style={{ minWidth: 140 }}
+                            />
+                          </>
+                        )}
+                      </div>
+                      {/* Persisted design env badge: surfaces the server
+                          previously used for this requirement so a refresh
+                          re-hydrates the user's mental model. */}
+                      {req.design_agent_server_id && (
+                        <ExecEnvBadge
+                          serverId={req.design_agent_server_id}
+                          serverName={req.design_agent_server_name}
+                          compact
+                        />
+                      )}
+                      {/* Design baseline SHA — the 40-char origin/<base> HEAD
+                          that the architect-design prologue locked. Empty =
+                          stage hasn't synced yet (or never ran / non-git
+                          project), so we skip rendering entirely. */}
+                      {req?.design_base_sha && (
+                        <span
+                          className="dev-mode-badge"
+                          title={req.design_base_sha}
+                        >
+                          📌 {t('requirements.detail2.designBaseLabel', '基线')}: {req.design_base_sha.slice(0, 7)}
+                        </span>
+                      )}
+                      {/* Empty-list hint: with no `ready` Agent Server the
+                          picker collapses to a single 「本地执行」 option, so
+                          say why. */}
+                      {agentServers.length === 0 && (
+                        <div className="design-toolbar-hint">{t('requirements.detail2.designAgentServerNoHint')}</div>
+                      )}
+                    </div>
+                    {/* Hairline divider between configuration and actions.
+                        Quiet 1px rule that signals "below this point, you
+                        commit" without adding another border weight. */}
+                    <div className="draft-action-divider" aria-hidden="true" />
+                    {/* Action zone — a slightly recessed surface
+                        (.draft-action-actions-surface) holding the four
+                        design-start CTAs. The surface tint visually
+                        separates the "decide" part above from the "do"
+                        part below; the actions row itself is right-aligned
+                        so the eye lands on the CTAs after scanning the
+                        route readout at the top. All four CTAs unified to
+                        `btn btn-sm` so the row reads as a consistent set
+                        of alternatives (immediate / scheduled / immediate-
+                        and-coded / scheduled-and-coded). Pending-hint
+                        strips slot in here too, next to the buttons they
+                        replace. */}
+                    <div className="draft-action-actions">
+                      <div className="draft-action-actions-surface">
+                        {/* Primary CTA — generates the technical design now.
+                            Kept as the FIRST child so it remains the visually
+                            leftmost action (i.e. the default focus when the
+                            panel is read top-to-bottom in zh-CN). The
+                            previous btn-primary styling was dropped: with
+                            four peer actions that all start the design run,
+                            a single highlighted CTA created the "样式不同一"
+                            fragmentation; equal weight reads cleaner. */}
+                        <button
+                          className="btn btn-sm"
+                          onClick={() => requestDesignKnowledge(true)}
+                          disabled={!!busy}
+                        >
+                          {busy === '生成技术方案' /* i18n: protocol literal — state sentinel compared at render */
+                            ? <><IconHourglass size={13} className="btn-icon" />...</>
+                            : <><IconTriangle size={13} className="btn-icon" />{t('requirements.detail2.intentGenerateDesign')}</>}
+                        </button>
+                        {/* Scheduled design generation — opens ScheduleModal
+                            pre-loaded with the current architect model. */}
+                        {!pendingByType.design && (
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => setScheduleModal({ taskType: 'design' })}
+                            disabled={!!busy}
+                            title={t('requirements.detail2.scheduleDesignTitle')}
+                          >
+                            <IconClock size={13} className="btn-icon" />{t('requirements.detail2.scheduleDesignBtn')}
+                          </button>
+                        )}
+                        {/* Scheduled design+code (merged) — chains
+                            architect-design into start-coding under one
+                            scheduled_tasks row. Hidden when ANY pending row
+                            already exists (backend's HasPendingConflict
+                            would 409). */}
+                        {!pendingByType.design && !pendingByType.coding && !pendingByType.design_and_coding && (
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => setScheduleModal({ taskType: 'design_and_coding' })}
+                            disabled={!!busy}
+                            title={t('requirements.detail2.scheduleDesignCodingTitle')}
+                          >
+                            <IconClock size={13} className="btn-icon" />{t('requirements.detail2.scheduleDesignCodingBtn')}
+                          </button>
+                        )}
+                        {/* Immediate "design + coding" — runs architect-design
+                            and chains start-coding in one backend round-trip
+                            via /api/wizard/requirements/{id}/design-and-coding.
+                            No scheduled_tasks row is written. */}
+                        {!pendingByType.design && !pendingByType.coding && !pendingByType.design_and_coding && !designing && !busy && (
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => setImmediateModalOpen(true)}
+                            title={t('requirements.detail2.immediateDesignCodingTitle')}
+                          >
+                            <IconRocket size={13} className="btn-icon" />{t('requirements.detail2.immediateDesignCodingBtn')}
+                          </button>
+                        )}
+                        {/* Pending schedule hint — surfaces the planned time
+                            and offers an inline cancel link. Sits next to
+                            the scheduling buttons it replaces. */}
+                        {pendingByType.design && (
+                          <PendingScheduleHint
+                            task={pendingByType.design}
+                            onCancel={async () => {
+                              await schedulesApi.cancel(pendingByType.design!.id);
+                              loadPendingSchedules();
+                            }}
+                          />
+                        )}
+                        {pendingByType.design_and_coding && (
+                          <PendingScheduleHint
+                            task={pendingByType.design_and_coding}
+                            label={t('schedules.type.designCoding')}
+                            onCancel={async () => {
+                              await schedulesApi.cancel(pendingByType.design_and_coding!.id);
+                              loadPendingSchedules();
+                            }}
+                          />
+                        )}
+                      </div>
+                    </div>
+                    {/* Fallback affordance — the rare analyst-stage escape
+                        hatch. Rendered as a real button (`btn btn-sm btn-ghost`)
+                        so it lives in the same component family as the four
+                        design-start CTAs above; the .btn-ghost variant keeps
+                        it visually quieter (transparent surface, primary
+                        text) so the user's eye still anchors on the action
+                        row, but the affordance is unambiguous (focus ring,
+                        keyboard activation, disabled state — none of which a
+                        text link offers). The trailing arrow nudges 2px right
+                        on hover for the terminal/console feel. */}
+                    <div className="draft-action-fallback-row">
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-ghost draft-action-fallback"
+                        onClick={() => transition('analyzing', '开始分析' /* i18n: protocol literal */)}
+                        disabled={!!busy}
+                        title={t('requirements.detail2.startAnalysisIssueTitle')}
+                      >
+                        {busy === '开始分析' /* i18n: protocol literal — state sentinel */
+                          ? <><IconHourglass size={12} className="btn-icon" />{t('requirements.detail2.draftActionFallback')}</>
+                          : <><IconArrowBack size={12} className="btn-icon" />{t('requirements.detail2.draftActionFallback')}<span className="draft-action-fallback-arrow" aria-hidden="true">→</span></>}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {/* "先排查根因" — the analyst-stage fallback (rare path).
+                    Demoted to a separate row beneath the design toolbar so
+                    it doesn't compete with the primary design-start CTAs;
+                    the analyst-model picker was REMOVED here: when the user
+                    picks this path the DeepRefineChat (rendered above the
+                    tab-empty block) carries its own analyst-model control,
+                    so duplicating it in the empty-state panel was just
+                    visual noise (the "分析:[MinMax]" line in the original
+                    layout). The button itself remains so users who change
+                    their mind mid-flow can still drop back into analysis. */}
+                {/* For kind=idea, the design panel above is hidden, so the
+                    analyst-stage CTA remains the primary affordance.
+                    Unified to btn btn-sm (same family as every other wizard
+                    stage CTA across the page). */}
+                {reqKind === 'idea' && (
                   <button
-                    className={reqKind === 'idea' ? 'btn btn-primary' : 'btn btn-sm'}
-                    onClick={() => transition('analyzing', '开始分析' /* i18n: protocol literal */)} disabled={!!busy}
-                    title={reqKind === 'idea' ? t('requirements.detail2.startAnalysisIdeaTitle') : t('requirements.detail2.startAnalysisIssueTitle')}
+                    className="btn btn-sm"
+                    onClick={() => transition('analyzing', '开始分析' /* i18n: protocol literal */)}
+                    disabled={!!busy}
+                    title={t('requirements.detail2.startAnalysisIdeaTitle')}
                   >
                     {busy === '开始分析' /* i18n: protocol literal — state sentinel */
                       ? <><IconHourglass size={13} className="btn-icon" />...</>
-                      : reqKind === 'idea'
-                        ? <><IconChat size={13} className="btn-icon" />{t('requirements.detail2.startAnalysisIdeaBtn')}</>
-                        : reqKind === 'issue'
-                          ? <><IconMagnifier size={13} className="btn-icon" />{t('requirements.detail2.startAnalysisIssueBtn')}</>
-                          : t('requirements.detail2.startAnalysisReqBtn')}
+                      : <><IconChat size={13} className="btn-icon" />{t('requirements.detail2.startAnalysisIdeaBtn')}</>}
                   </button>
-                  {/* Analyst-model selectable before opting into the analysis. */}
-                  <ModelSelect
-                    value={analystModel}
-                    onChange={setAnalystModel}
-                    stage="analyst"
-                    label={t('requirements.detail2.analystModelLabel')}
-                    defaultModelName={analystDefaultModel}
-                    title={t('requirements.detail2.analystModelTitle')}
-                  />
-                </div>
+                )}
               </>
             ) : (
               <>
@@ -4049,8 +4187,13 @@ export default function RequirementDetail() {
                       : t('requirements.detail2.draftReqNormalHint')}
                 </p>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                  {/* i18n: protocol literal — '开始分析' is the busy-state sentinel */}
-                  <button className="btn btn-primary" onClick={() => transition('analyzing', '开始分析' /* i18n: protocol literal */)} disabled={!!busy}>
+                  {/* i18n: protocol literal — '开始分析' is the busy-state sentinel.
+                      Wizard-stage CTA — uses the unified `btn btn-sm` so the
+                      primary action lives in the same component family as
+                      every other wizard CTAs across the page. Visual
+                      hierarchy is encoded by position (first / leftmost) +
+                      the surrounding route readout, not by btn-primary. */}
+                  <button className="btn btn-sm" onClick={() => transition('analyzing', '开始分析' /* i18n: protocol literal */)} disabled={!!busy}>
                     {busy === '开始分析' /* i18n: protocol literal — state sentinel */
                       ? <><IconHourglass size={13} className="btn-icon" />...</>
                       : reqKind === 'idea'
@@ -4085,10 +4228,16 @@ export default function RequirementDetail() {
           "方案完成" / DocRefineChat) for kind=wiki. */}
       {(stage === 'architect' || req.status === 'designed' || stage === 'developer' || stage === 'done') && reqKind !== 'wiki' && (
         <div className="detail-section design-section">
-          {/* Compact toolbar: the architect role is already shown in the
-              stepper, so this section leads with a content-oriented caption
-              and parks the stream toggle + regenerate action together. */}
-          <div className="design-toolbar model-row" style={{ gap: 8 }}>
+          {/* Toolbar splits into three readable blocks:
+              ─ Model       ── which Claude persona/model drives the design run
+              ─ 执行环境    ── where + how the code is shipped (Agent server + sync mode)
+              ─ Actions     ── process toggle / regenerate / export PDF / fullscreen, anchored right
+              The middle block sits inside a bordered cluster (.design-env-cluster)
+              so the two pickers read as ONE concern, not two loose label-pills.
+              The previous flat-row layout had three independent <label> blocks
+              stacked horizontally — at narrow widths they piled up with no
+              visual grouping, which was the "排版有点乱" feedback. */}
+          <div className="design-toolbar">
             {/* Per-stage architect model. Default = currently configured design
                 model; disabled while a design job runs (Claude is working —
                 model switch is locked). */}
@@ -4104,17 +4253,12 @@ export default function RequirementDetail() {
               configId={architectConfigId || undefined}
               onConfigChange={setArchitectConfigId}
             />
-            {/* Design-stage Agent server selector. Mirrors the dev-stage
-                picker in the coding modal: empty = local execution (default),
-                non-empty = route the architect run through that Agent server
-                (plan mode on the remote worker, see
-                backend/internal/handler/wizard_architect.go execArchitectDesign).
-                The same shared `agentServerId` state is reused — it covers
-                design + dev within a single requirement so a page refresh
-                doesn't drop the user's choice between stages. The seed
-                effect above prefers req.design_agent_server_id when it
-                differs from req.agent_server_id. Only `ready` servers are
-                populated (server-side guard mirrors this in the handler).
+            {/* ── Execution-environment cluster ──
+                Wraps Agent server + SyncMode under a single caption so the
+                pair reads as one logical unit. When no Agent server is picked,
+                the cluster still appears (so the caption is constant) but
+                SyncModeSelect returns null (its `enabled` prop is false) so
+                there's no orphaned half-card on the toolbar.
                 ── Project rule ──
                 Any entry point that can start work against a specific
                 execution environment MUST render the environment selector on
@@ -4123,14 +4267,12 @@ export default function RequirementDetail() {
                 design CTA) are the current set; the scheduled-run modal uses
                 the same shared ExecEnvSelect. Adding a new design/coding CTA?
                 Add its picker at the same time. */}
-            <label className="design-agent-server" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                {t('requirements.detail2.designAgentServerLabel')}
-              </span>
+            <div className="design-env-cluster">
+              <span className="design-env-cluster-caption">{t('requirements.detail2.execEnvCaption')}</span>
               <ExecEnvSelect
                 servers={agentServers}
-                value={agentServerId}
-                onChange={setAgentServerId}
+                value={designAgentServerId}
+                onChange={setDesignAgentServerId}
                 disabled={architectWorking}
                 title={architectWorking
                   ? t('requirements.detail2.designAgentServerBusyTitle')
@@ -4138,24 +4280,19 @@ export default function RequirementDetail() {
                 localOptionLabel={t('requirements.detail2.preflightLocalExec')}
                 style={{ minWidth: 160 }}
               />
-            </label>
-            {/* Sync-mode picker for the architect stage. Only renders when an
-                Agent server is picked; the SyncModeSelect returns null
-                otherwise so we don't need an extra wrapping conditional here.
-                Label reuses the same `designAgentServerLabel` wording minus
-                the server suffix so the design toolbar stays compact. */}
-            <label className="design-sync-mode" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                {t('requirements.detail2.syncModeLabel')}
-              </span>
-              <SyncModeSelect
-                enabled={!!agentServerId}
-                value={designSyncMode}
-                onChange={setDesignSyncMode}
-                disabled={architectWorking}
-                style={{ minWidth: 140 }}
-              />
-            </label>
+              {designAgentServerId && (
+                <>
+                  <span className="design-env-cluster-divider" aria-hidden="true" />
+                  <SyncModeSelect
+                    enabled={!!designAgentServerId}
+                    value={designSyncMode}
+                    onChange={setDesignSyncMode}
+                    disabled={architectWorking}
+                    style={{ minWidth: 140 }}
+                  />
+                </>
+              )}
+            </div>
             {/* Persisted design environment: shows which Agent Server (or 本地)
                 the architect stage last ran on, read back from
                 requirements.design_agent_server_id. Only rendered once a design
@@ -4169,36 +4306,41 @@ export default function RequirementDetail() {
               />
             )}
             {agentServers.length === 0 && (
-              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+              <div className="design-toolbar-hint">
                 {t('requirements.detail2.designAgentServerNoHint')}
               </div>
             )}
-            {showDesignToggle && (
-              <button
-                className="btn btn-sm process-toggle"
-                onClick={() => setShowDesignProcess(v => !v)}
-                aria-expanded={designPanelOpen}
-              >
-                {designPanelOpen ? t('requirements.detail2.processToggleHide') : t('requirements.detail2.processToggleShow')}
-              </button>
-            )}
-            {req.status === 'designing' && hasDesign && (
-              <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={designing}><IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}</button>
-            )}
-            {hasDesign && (
-              <button
-                className="btn btn-sm"
-                onClick={handleExportPdf}
-                disabled={exporting}
-                style={{ marginLeft: 'auto' }}
-                title={t('requirements.detail2.exportPdfTitle')}
-              >
-                {exporting ? <><IconHourglass size={13} className="btn-icon" />{t('requirements.detail2.exportingPdf')}</> : <><IconFileText size={13} className="btn-icon" />{t('requirements.detail2.exportPdfBtn')}</>}
-              </button>
-            )}
-            {(designPanelOpen || hasDesign) && (
-              <FullscreenButton isFullscreen={designFs.isFullscreen} onClick={designFs.toggle} />
-            )}
+            {/* Action group — pinned to the right via .design-toolbar-actions
+                (margin-left: auto). Previously the export PDF button alone
+                carried `style={{ marginLeft: 'auto' }}`, which broke whenever
+                export wasn't shown — buttons drifted left mid-flow. */}
+            <div className="design-toolbar-actions">
+              {showDesignToggle && (
+                <button
+                  className="btn btn-sm process-toggle"
+                  onClick={() => setShowDesignProcess(v => !v)}
+                  aria-expanded={designPanelOpen}
+                >
+                  {designPanelOpen ? t('requirements.detail2.processToggleHide') : t('requirements.detail2.processToggleShow')}
+                </button>
+              )}
+              {req.status === 'designing' && hasDesign && (
+                <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={designing}><IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}</button>
+              )}
+              {hasDesign && (
+                <button
+                  className="btn btn-sm"
+                  onClick={handleExportPdf}
+                  disabled={exporting}
+                  title={t('requirements.detail2.exportPdfTitle')}
+                >
+                  {exporting ? <><IconHourglass size={13} className="btn-icon" />{t('requirements.detail2.exportingPdf')}</> : <><IconFileText size={13} className="btn-icon" />{t('requirements.detail2.exportPdfBtn')}</>}
+                </button>
+              )}
+              {(designPanelOpen || hasDesign) && (
+                <FullscreenButton isFullscreen={designFs.isFullscreen} onClick={designFs.toggle} />
+              )}
+            </div>
           </div>
 
           {/* Optional knowledge pre-read display (renders only when the user
@@ -4235,7 +4377,11 @@ export default function RequirementDetail() {
             <div className="tab-empty">
               <p dangerouslySetInnerHTML={{ __html: t('requirements.detail2.architectIdleHint') }} />
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <button className="btn btn-primary" onClick={() => requestDesignKnowledge(false)} disabled={!!busy || designing}>
+                {/* Wizard-stage CTA — unified to `btn btn-sm` per the
+                    page-wide button unification (one visual family
+                    everywhere). Visual primacy comes from being the
+                    leftmost action, not from a btn-primary treatment. */}
+                <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={!!busy || designing}>
                   {busy === '生成技术方案' /* i18n: protocol literal — state sentinel */
                     ? <><IconHourglass size={13} className="btn-icon" />...</>
                     : <><IconTriangle size={13} className="btn-icon" />{t('requirements.detail2.startArchitectBtn')}</>}
@@ -4244,10 +4390,12 @@ export default function RequirementDetail() {
                     designing → analyzing; this is the recovery path when the
                     user advanced with a failed/incomplete analysis.
                     Hidden for skip-analysis requirements since there is no
-                    prior analysis session to return to. */}
+                    prior analysis session to return to. Uses btn-ghost so
+                    it reads as a recovery/secondary affordance, distinct
+                    from the primary CTA but in the same component family. */}
                 {!req.skip_analysis && (
                   <button
-                    className="btn btn-sm"
+                    className="btn btn-sm btn-ghost"
                     onClick={() => transition('analyzing', '返回重新分析' /* i18n: protocol literal — state sentinel */
                     )}
                     disabled={!!busy}
@@ -4508,105 +4656,187 @@ export default function RequirementDetail() {
               <p style={{ fontSize: 12, color: 'var(--color-text-muted)' }}
                 dangerouslySetInnerHTML={{ __html: t('requirements.detail2.devReadyWorktreeHint', { path: project?.local_path || '', id: req.id }) }}
               />
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                <button className="btn btn-primary" onClick={() => openBranchModal()}><IconRocket size={13} className="btn-icon" />{t('requirements.detail2.ctaStartCoding')}</button>
-                {/* Scheduled coding: opens ScheduleModal pre-loaded with the
-                    current developer model + branch defaults. Same gating
-                    as the primary button (kind=idea hidden; status in
-                    {designed, draft+skip_design} only). Disabled when a
-                    pending coding row already exists. */}
-                {!pendingByType.coding && (
-                  <button
-                    className="btn btn-sm"
-                    onClick={() => setScheduleModal({ taskType: 'coding' })}
-                    title={t('requirements.detail2.scheduleCodingTitle')}
+              {/* Developer-stage action panel — same HUD family as the
+                  draft panel. The card framing distinguishes "decide & go"
+                  (this surface) from the flat refinement toolbars used
+                  by the architect stage; the route readout in the
+                  header tells the user "where will this code actually
+                  run?" before they commit.
+
+                  Layout mirrors the draft panel:
+                    Header   — eyebrow + monospaced route readout
+                               (env · dev_mode · ● READY)
+                    Settings — model + env + dev_mode in one row
+                    Divider  — 1px hairline
+                    Actions  — 3 CTAs (开始开发 / 定时开发 / 立即生成方案并开发)
+                               in a recessed surface, right-aligned
+                    Fallback — "回退到方案" via the architect section's
+                               back-to-analysis button (rendered below
+                               only when applicable; not duplicated here). */}
+              <div className="draft-action-panel">
+                <div className="draft-action-header">
+                  <div className="preflight-eyebrow">
+                    {t('requirements.detail2.codingActionEyebrow')}
+                  </div>
+                  <div
+                    className="draft-action-route"
+                    aria-label={t('requirements.detail2.codingActionRouteAria')}
                   >
-                    <IconClock size={13} className="btn-icon" />{t('requirements.detail2.scheduleCodingBtn')}
-                  </button>
-                )}
-                {/* Immediate "design + coding" trigger in the developer
-                    section. Visible when no coding is in flight and no
-                    scheduled merged task exists; clicking opens
-                    DesignCodingImmediateModal which chains design → coding
-                    server-side. design_and_coding pending row is also
-                    excluded — if a merged schedule is already queued there's
-                    no value in launching a second chain immediately. */}
-                {!pendingByType.coding && !coding && !pendingByType.design_and_coding && !busy && (
-                  <button
-                    className="btn btn-sm"
-                    onClick={() => setImmediateModalOpen(true)}
-                    title={t('requirements.detail2.immediateDesignCodingTitle')}
-                  >
-                    <IconRocket size={13} className="btn-icon" />{t('requirements.detail2.immediateDesignCodingBtn')}
-                  </button>
-                )}
-                {pendingByType.coding && (
-                  <PendingScheduleHint
-                    task={pendingByType.coding}
-                    onCancel={async () => {
-                      await schedulesApi.cancel(pendingByType.coding!.id);
-                      loadPendingSchedules();
-                    }}
-                  />
-                )}
-                {/* Per-stage developer model. Default = currently configured dev
-                    model; disabled while a coding job runs (Claude is working —
-                    model switch is locked). */}
-                <ModelSelect
-                  value={developerModel}
-                  onChange={setDeveloperModel}
-                  disabled={coding}
-                  working={coding}
-                  stage="developer"
-                  label={t('requirements.detail2.devModelLabel')}
-                  defaultModelName={developerDefaultModel}
-                  title={coding ? t('requirements.detail2.devModelBusyTitle') : t('requirements.detail2.devModelIdleTitle')}
-                  configId={developerConfigId || undefined}
-                  onConfigChange={setDeveloperConfigId}
-                />
-                {/* Agent-server selector. Empty = local execution (the default
-                    and the only path before this feature); non-empty routes the
-                    claude CLI to that remote target. Only `ready` servers are
-                    listed — Check must succeed before coding can target them. */}
-                <label style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                  {t('requirements.detail2.devEnvLabel')}
-                  <ExecEnvSelect
-                    servers={agentServers}
-                    value={agentServerId}
-                    onChange={setAgentServerId}
+                    <span className="flight-leg">
+                      <span className="flight-leg-label">→ {t('requirements.detail2.draftActionRouteLabel')}</span>
+                    </span>
+                    <span className="flight-sep">·</span>
+                    <span className="flight-leg">
+                      <span className="flight-leg-value" title={
+                        codingAgentServerId
+                          ? (agentServers.find(s => s.id === codingAgentServerId)?.name || codingAgentServerId)
+                          : t('requirements.detail2.preflightLocalExec')
+                      }>
+                        {codingAgentServerId
+                          ? (agentServers.find(s => s.id === codingAgentServerId)?.name || codingAgentServerId)
+                          : t('requirements.detail2.preflightLocalExec')}
+                      </span>
+                      <span className="flight-arrow">·</span>
+                      <span className="flight-leg-value" title={
+                        devMode === 'session'
+                          ? t('requirements.detail2.devModeSessionOption')
+                          : t('requirements.detail2.devModeDesignOption')
+                      }>
+                        {devMode === 'session'
+                          ? t('requirements.detail2.devModeSessionOption')
+                          : t('requirements.detail2.devModeDesignOption')}
+                      </span>
+                    </span>
+                    <span className="flight-ready" aria-live="polite">
+                      <span className="flight-ready-dot" />
+                      {t('requirements.detail2.draftActionReady')}
+                    </span>
+                  </div>
+                </div>
+                <div className="design-toolbar design-toolbar--no-wrap" style={{ marginBottom: 0 }}>
+                  {/* Per-stage developer model. Default = currently
+                      configured dev model; disabled while a coding job
+                      runs (Claude is working — model switch is locked).
+                      The `.design-toolbar--no-wrap` modifier keeps model +
+                      执行环境 + 开发模式 on a single row — the shared
+                      `.design-toolbar` rule is `flex-wrap: wrap`, which
+                      previously let the pickers rearrange across lines and
+                      read as broken. Horizontal scroll kicks in on truly
+                      narrow viewports instead. */}
+                  <ModelSelect
+                    value={developerModel}
+                    onChange={setDeveloperModel}
                     disabled={coding}
-                    title={agentServerId
-                      ? t('requirements.detail2.devEnvOnTitle', { name: agentServers.find((s) => s.id === agentServerId)?.name ?? '' })
-                      : t('requirements.detail2.devEnvLocalTitle')}
-                    localOptionLabel={t('requirements.detail2.devEnvLocalOption')}
-                    style={{ minWidth: 140 }}
+                    working={coding}
+                    stage="developer"
+                    label={t('requirements.detail2.devModelLabel')}
+                    defaultModelName={developerDefaultModel}
+                    title={coding ? t('requirements.detail2.devModelBusyTitle') : t('requirements.detail2.devModelIdleTitle')}
+                    configId={developerConfigId || undefined}
+                    onConfigChange={setDeveloperConfigId}
                   />
-                </label>
-                {/* Development-mode selector. 'design' = design-based dev (default;
-                    create a new session and hand the design as the only input
-                    to the Agent). 'session' = session-based dev (continue in
-                    the original design session, legacy behavior). Seed
-                    matches dev_source: first entry reads req.dev_mode. */}
-                <label style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                  {t('requirements.detail2.devModeLabel')}
-                  <select
-                    className="form-input"
-                    style={{ minWidth: 150 }}
-                    value={devMode}
-                    onChange={(e) => setDevMode(e.target.value as 'session' | 'design')}
-                    disabled={coding}
-                    title={devMode === 'design'
-                      ? t('requirements.detail2.devModeNewSessionTitle')
-                      : t('requirements.detail2.devModeResumeSessionTitle')}
-                  >
-                    <option value="design">{t('requirements.detail2.devModeDesignOption')}</option>
-                    <option value="session">{t('requirements.detail2.devModeSessionOption')}</option>
-                  </select>
-                </label>
+                  {/* Agent-server selector. Empty = local execution
+                      (legacy default); non-empty routes the claude CLI to
+                      that remote target. Only `ready` servers are listed. */}
+                  <label style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
+                    {t('requirements.detail2.devEnvLabel')}
+                    <ExecEnvSelect
+                      servers={agentServers}
+                      value={codingAgentServerId}
+                      onChange={setCodingAgentServerId}
+                      disabled={coding}
+                      title={codingAgentServerId
+                        ? t('requirements.detail2.devEnvOnTitle', { name: agentServers.find((s) => s.id === codingAgentServerId)?.name ?? '' })
+                        : t('requirements.detail2.devEnvLocalTitle')}
+                      localOptionLabel={t('requirements.detail2.devEnvLocalOption')}
+                      style={{ minWidth: 130 }}
+                    />
+                  </label>
+                  {/* Development-mode selector. 'design' = design-based
+                      dev (default; new session, hand the design as the
+                      only input to the Agent). 'session' = session-based
+                      dev (continue in the original design session, legacy
+                      behavior). Seeded from requirements.dev_mode.
+                      minWidth trimmed from 150→120 so the row fits at
+                      common viewport widths without overflowing into a
+                      horizontal scroll. */}
+                  <label style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
+                    {t('requirements.detail2.devModeLabel')}
+                    <select
+                      className="form-input"
+                      style={{ minWidth: 120 }}
+                      value={devMode}
+                      onChange={(e) => setDevMode(e.target.value as 'session' | 'design')}
+                      disabled={coding}
+                      title={devMode === 'design'
+                        ? t('requirements.detail2.devModeNewSessionTitle')
+                        : t('requirements.detail2.devModeResumeSessionTitle')}
+                    >
+                      <option value="design">{t('requirements.detail2.devModeDesignOption')}</option>
+                      <option value="session">{t('requirements.detail2.devModeSessionOption')}</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="draft-action-divider" aria-hidden="true" />
+                <div className="draft-action-actions">
+                  <div className="draft-action-actions-surface">
+                    {/* All three CTAs are unified to `btn btn-sm` per
+                        the page-wide button unification — the primary
+                        action is identified by position (leftmost) +
+                        the route readout's READY indicator, not by a
+                        btn-primary treatment that would clash with the
+                        other wizard stage CTAs. */}
+                    <button className="btn btn-sm" onClick={() => openBranchModal()}>
+                      <IconRocket size={13} className="btn-icon" />{t('requirements.detail2.ctaStartCoding')}
+                    </button>
+                    {/* Scheduled coding: opens ScheduleModal pre-loaded
+                        with the current developer model + branch
+                        defaults. Same gating as the primary button
+                        (kind=idea hidden; status in {designed, draft
+                        +skip_design} only). */}
+                    {!pendingByType.coding && (
+                      <button
+                        className="btn btn-sm"
+                        onClick={() => setScheduleModal({ taskType: 'coding' })}
+                        title={t('requirements.detail2.scheduleCodingTitle')}
+                      >
+                        <IconClock size={13} className="btn-icon" />{t('requirements.detail2.scheduleCodingBtn')}
+                      </button>
+                    )}
+                    {/* Immediate "design + coding" trigger in the
+                        developer section. Opens
+                        DesignCodingImmediateModal which chains design →
+                        coding server-side. */}
+                    {!pendingByType.coding && !coding && !pendingByType.design_and_coding && !busy && (
+                      <button
+                        className="btn btn-sm"
+                        onClick={() => setImmediateModalOpen(true)}
+                        title={t('requirements.detail2.immediateDesignCodingTitle')}
+                      >
+                        <IconRocket size={13} className="btn-icon" />{t('requirements.detail2.immediateDesignCodingBtn')}
+                      </button>
+                    )}
+                    {pendingByType.coding && (
+                      <PendingScheduleHint
+                        task={pendingByType.coding}
+                        onCancel={async () => {
+                          await schedulesApi.cancel(pendingByType.coding!.id);
+                          loadPendingSchedules();
+                        }}
+                      />
+                    )}
+                  </div>
+                </div>
+                {/* Inline link to agent-server settings when the user
+                    has zero configured servers — kept OUTSIDE the action
+                    surface so the empty-state hint doesn't compete with
+                    the three CTAs above. */}
                 {agentServers.length === 0 && (
-                  <Link to="/settings/agent-servers" style={{ fontSize: 12 }}>
-                    {t('requirements.detail2.devModeAgentServerLink')}
-                  </Link>
+                  <div className="draft-action-fallback-row">
+                    <Link to="/settings/agent-servers" className="btn btn-sm btn-ghost draft-action-fallback">
+                      <IconServer size={12} className="btn-icon" />{t('requirements.detail2.devModeAgentServerLink')}
+                    </Link>
+                  </div>
                 )}
               </div>
             </div>

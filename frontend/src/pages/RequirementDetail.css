@@ -413,9 +413,218 @@
 .design-toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin-bottom: 12px;
   flex-wrap: wrap;
+}
+/* Coding-stage toolbar — the developer-section instance of .design-toolbar
+   holds model + 执行环境 + 开发模式. The previous shared rule let the row
+   wrap to a second line as soon as the page got slightly narrower than the
+   natural width, which made 执行环境 + 开发模式 appear on separate rows and
+   read as "broken" (the user complaint: "执行环境与开发模式存在换行的情况").
+   This variant keeps the row on one line and lets the user scroll
+   horizontally on truly narrow viewports instead of silently rearranging the
+   pickers across lines — same UX as a normal toolbar that fits its content. */
+.design-toolbar--no-wrap {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.design-toolbar--no-wrap > * {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+/* Sub-cluster inside .design-toolbar: groups Agent Server + SyncMode under a
+   single "执行环境" caption so the toolbar reads as two concerns
+   (model / execution-environment) + a right-anchored action group, instead
+   of three loose label-pills stacked next to each other.
+   The cluster is itself a flex row so each picker can size independently and
+   the SyncModeSelect still collapses to null when no Agent server is picked. */
+.design-env-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg);
+}
+.design-env-cluster-caption {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.design-env-cluster-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--color-border);
+  margin: 0 2px;
+}
+/* Sub-cluster that toggles ON only when an Agent server is picked.
+   Renders as a small bordered chip so the SyncMode picker visibly attaches
+   to the Agent Server picker instead of appearing as a free-floating <select>. */
+.design-sync-mode-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.design-toolbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+/* Compact inline hint shown when no ready Agent servers exist; was previously
+   a free-floating div with inline-style font/color, now a class so it sits
+   consistently on its own row inside the toolbar. */
+.design-toolbar-hint {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+/* Draft-stage action panel — the "decide & go" surface that the user lands on
+   when opening a fresh requirement with skip_analysis=true.
+
+   Visual concept: a single-card HUD that frames the three decisions the
+   user has to make in order — "pick a model", "pick where it runs",
+   "pick how to start" — with a monospaced route readout that tells them
+   where the work will go BEFORE they commit. The card wrapper (instead of
+   the flat flex-row used by the main architect toolbar) is deliberate: the
+   main toolbar is for refining a design that's already running; this panel
+   is for kicking one off, and the elevated container signals the different
+   intent.
+
+   Reuses the project's flight-strip vocabulary (.flight-leg / .flight-leg-
+   label / .flight-leg-value / .flight-ready / .flight-ready-dot) so the
+   preflight modal and this panel read as the same family — same monospace
+   font, same READY dot, same leg-label uppercase tracked micro-labels —
+   without re-stating those rules. The panel itself just composes them. */
+.draft-action-panel {
+  position: relative;
+  margin-top: 4px;
+  padding: 14px 16px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg);
+  /* Faint top accent: a 1px indigo hairline that says "this is the wizard
+     surface" without competing with the primary CTA. Uses the same
+     rgba primary tint as the .preflight-eyebrow::before dot so the
+     project feels visually coherent. */
+  box-shadow: inset 0 1px 0 rgba(79, 70, 229, 0.55),
+              0 1px 0 rgba(15, 23, 42, 0.02);
+}
+.draft-action-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+/* Override the preflight-eyebrow ::before dot only for the in-card context
+   (the dot already inherits from the shared .preflight-eyebrow class, so
+   no new rules are needed for the dot itself; we just give the eyebrow a
+   little breathing room from the route readout to its right). */
+.draft-action-header .preflight-eyebrow {
+  margin-bottom: 0;
+}
+/* Route readout — the signature element. Reuses the flight-strip leg
+   vocabulary so the panel reads as the same family as the coding
+   preflight modal. Sized tighter than the modal's full-width strip. */
+.draft-action-route {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.draft-action-route .flight-leg { gap: 4px; }
+.draft-action-route .flight-leg-label {
+  letter-spacing: 0.1em;
+  color: var(--color-text-muted);
+}
+.draft-action-route .flight-leg-value {
+  color: var(--color-text);
+  max-width: 180px;
+  font-weight: 600;
+}
+.draft-action-route .flight-arrow {
+  margin: 0 4px;
+  color: var(--color-border);
+}
+.draft-action-route .flight-ready {
+  margin-left: 0;
+  padding-left: 8px;
+  border-left: 1px solid var(--color-border);
+  font-size: 10px;
+}
+/* Hairline divider between the settings row and the action row inside
+   the card. 1px var(--color-border) keeps it quiet; the right margin
+   pulls it flush to the card edge so the divider visually anchors the
+   action cluster. */
+.draft-action-divider {
+  height: 1px;
+  background: var(--color-border);
+  margin: 10px 0;
+}
+/* Action cluster — same .design-toolbar-actions row, but here we lift it
+   onto a slightly recessed background (.draft-action-actions-surface) so
+   the four CTAs read as the actionable part of the card, distinct from
+   the quiet configuration above. The .draft-action-actions wrapper
+   simply arranges the inner row. */
+.draft-action-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.draft-action-actions-surface {
+  flex: 1;
+  display: flex;
+  justify-content: flex-end;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+}
+/* Bottom row: the rare analyst-fallback affordance. Rendered as a
+   real .btn.btn-sm.btn-ghost so it lives in the same component family
+   as the four design-start CTAs; the .btn-ghost variant (transparent
+   surface, primary text) keeps it visually quieter so the user's eye
+   still anchors on the action row. The .draft-action-fallback-row
+   wrapper provides left-alignment + spacing from the action surface
+   above. The arrow spans 2px right on hover for a terminal/console
+   micro-interaction. */
+.draft-action-fallback-row {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: 10px;
+}
+.draft-action-fallback {
+  /* The .btn / .btn-sm / .btn-ghost system handles padding, radius,
+     hover, focus and disabled states. We only add the
+     trailing-arrow micro-interaction. */
+  font-weight: 500;
+}
+.draft-action-fallback-arrow {
+  display: inline-block;
+  margin-left: 4px;
+  transition: transform 160ms ease;
+}
+.draft-action-fallback:hover:not(:disabled) .draft-action-fallback-arrow {
+  transform: translateX(2px);
 }
 
 /* Claude session panel: lists per-stage claude session ids so the user can

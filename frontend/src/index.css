@@ -163,6 +163,24 @@ body.no-scroll {
 .btn-danger { background: #EF4444; color: white; border-color: #EF4444; }
 .btn-danger:hover { background: #DC2626; border-color: #DC2626; }
 
+/* Ghost button — transparent surface, primary-coloured text. Used for
+   rare / digressive affordances that shouldn't compete with the panel's
+   primary action (e.g. the draft panel's "或先进行需求分析完善需求"
+   fallback, or the architect-idle "返回重新分析" recovery path). The
+   hover state paints a faint primary tint so the affordance is still
+   discoverable, but never so loud that it pulls focus from the main CTA.
+   Same sizing tokens as .btn-sm so a .btn.btn-sm.btn-ghost stack reads
+   as one row. */
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--color-primary);
+}
+.btn-ghost:hover:not(:disabled) {
+  background: rgba(79, 70, 229, 0.08);
+  border-color: rgba(79, 70, 229, 0.18);
+}
+
 /* ── Unified icon system ────────────────────────────────────────
    All inline glyphs share the same outline + rounded-cap language (see
    components/icons). Two helper utilities make them slot into the existing
