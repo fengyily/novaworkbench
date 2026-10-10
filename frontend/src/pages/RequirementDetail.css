@@ -385,6 +385,12 @@
   gap: 6px;
   white-space: nowrap;
 }
+/* The design section's header carries three children (title + persisted env
+   badge + action group) instead of the usual one or two, so let it wrap on
+   narrow viewports rather than squeezing the buttons. */
+.design-section .section-header {
+  flex-wrap: wrap;
+}
 
 /* Analysis-complete confirmation panel */
 .confirm-panel {
