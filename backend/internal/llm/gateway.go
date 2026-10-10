@@ -1002,6 +1002,65 @@ func (g *Gateway) ExtractReportKnowledge(reportKind, content, instruction string
 	res.Markdown = strings.TrimSpace(res.Markdown)
 	return res.Title, res.Markdown, u, nil
 }
+
+// GenerateDiagram asks the LLM to pick the BEST Mermaid diagram type for the
+// user's free-form text and emit strict Mermaid source. Companion of
+// ExtractReportKnowledge on the knowledge-creation side: the model returns the
+// same JSON envelope shape ({kind, title, mermaid, description}) so the
+// handler can route both through identical parsing. The HTTP LLM channel is
+// used (single-shot text, no tool use) — running on the user's "生成架构图"
+// click so a sync round-trip is fine. On channel misconfiguration / model
+// error the call returns an error so the handler can show an explicit
+// fallback rather than silently lose the user's request.
+//
+// kindHint optionally steers the diagram type (e.g. "flowchart" /
+// "sequenceDiagram"). When empty the prompt lets the model pick; when set the
+// prompt nudges but is not strict about it (a flowchart hint on a state-
+// shaped input may still emit stateDiagram-v2). Mirrors the instruction
+// parameter on ExtractReportKnowledge.
+//
+// Usage accounting: callers that want to write token_usage rows should use
+// the returned *Usage exactly like ExtractReportKnowledge's.
+func (g *Gateway) GenerateDiagram(input, kindHint string) (title, mermaid, kind, description string, usage *Usage, err error) {
+	if g.llmCfg == nil {
+		return "", "", "", "", nil, fmt.Errorf("llm not configured: no llm config provider")
+	}
+	baseURL, apiKey, model, err := g.llmCfg.LLMConfig()
+	if err != nil {
+		return "", "", "", "", nil, fmt.Errorf("llm config unavailable: %w", err)
+	}
+	if baseURL == "" || apiKey == "" {
+		return "", "", "", "", nil, fmt.Errorf("llm not configured: base_url and api_key required")
+	}
+	promptContent := input
+	if kindHint != "" {
+		promptContent = input + "\n\n用户希望的类型：" + kindHint + "（不强求，按内容判断更合适的类型）。"
+	}
+	out, u, err := chatCompletion(baseURL, apiKey, model, generateDiagramPrompt, promptContent, 4096)
+	if err != nil {
+		return "", "", "", "", nil, err
+	}
+	var res generateDiagramResult
+	if jerr := json.Unmarshal([]byte(stripJSONFences(out)), &res); jerr != nil {
+		return "", "", "", "", u, fmt.Errorf("llm http: decode generate diagram json: %w", jerr)
+	}
+	res.Title = strings.Trim(res.Title, "\"'` \n\r\t")
+	res.Mermaid = strings.TrimSpace(res.Mermaid)
+	res.Description = strings.TrimSpace(res.Description)
+	res.Kind = strings.TrimSpace(res.Kind)
+	// Drop a fenced ```mermaid``` wrapper if the model wrapped the source —
+	// extractReportKnowledgePrompt does the same idea for the markdown field
+	// via stripJSONFences, but Mermaid fences are 12 chars not the JSON
+	// braces stripJSONFences targets. Defensive in case a future prompt edit
+	// stops being strict.
+	if strings.HasPrefix(res.Mermaid, "```mermaid") && strings.HasSuffix(res.Mermaid, "```") {
+		res.Mermaid = strings.TrimPrefix(res.Mermaid, "```mermaid")
+		res.Mermaid = strings.TrimSuffix(res.Mermaid, "```")
+		res.Mermaid = strings.TrimSpace(res.Mermaid)
+	}
+	return res.Title, res.Mermaid, res.Kind, res.Description, u, nil
+}
+
 // ExtractStepsFromPlan converts the planner persona's plan-mode
 // implementation-steps Markdown into the {"subtasks":[{"title","prompt"}]}
 // envelope, over the direct HTTP LLM channel (OpenAI-compatible). This is the

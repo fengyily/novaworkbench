@@ -103,6 +103,46 @@ const extractReportKnowledgePrompt = `你是 NovaWorkbench 的知识库整理助
 - 输出纯 Markdown，建议章节：## 实现概述 / ## 涉及文件 / ## 关键决策 / ## 注意事项。
 只输出该 JSON 对象，不要任何前后缀说明。`
 
+// generateDiagramPrompt asks the LLM to pick the BEST Mermaid diagram type
+// for the user's input and emit strict Mermaid source. Mirrors
+// extractReportKnowledgePrompt's JSON-in-prompt shape (parser does
+// stripJSONFences + json.Unmarshal). The kind field is a suggestion from the
+// caller when known (e.g. the user picked "流程图" in the UI); when empty the
+// model is free to pick. The mermaid field is the raw Mermaid source WITHOUT
+// any ```mermaid fence — it's substituted into the knowledge row verbatim so
+// MarkdownRender can render it inline.
+//
+// The "no fabrication" rule from extractReportKnowledgePrompt applies: don't
+// invent components / endpoints / contracts the user didn't mention.
+const generateDiagramPrompt = `你是 NovaWorkbench 的架构可视化助手。
+用户会给你一段文字（需求描述、知识条目正文、项目结构片段、个人笔记…）。
+请判断最适合表达其内容的 Mermaid 图类型,并输出一张图。
+
+只输出一个 JSON 对象,不要任何前后缀文字、解释或 markdown 代码围栏。
+
+严格输出格式:
+{"kind":"flowchart|sequenceDiagram|stateDiagram-v2|classDiagram|erDiagram|gantt","title":"<不超过 30 字的中文标题>","mermaid":"<纯 Mermaid 源码,不要任何三反引号围栏>","description":"<一两句话说明这张图表达了什么>"}
+
+规则:
+- flowchart 用 TD 或 LR;节点 id 用字母数字,中文标签用 ["中文"] 包裹;避免空格与连字符在 id 内。
+- sequenceDiagram 必须先声明 participant,箭头方向 ->>(实线)/-->>(虚线);不要在同一图里混中英 id。
+- stateDiagram-v2 用 [*] 表示起止。
+- erDiagram 关系用 ||..|| / }o--o{ 等标准符号。
+- gantt / classDiagram 同理,优先采用最简洁能表达意图的语法。
+- 关键文件路径、API 端点等放在外侧 description 字段,不要塞进 mermaid 节点文字里。
+- 如果用户输入实在无法可视化(完全无结构,或纯寒暄),mermaid 字段返回空串,title 返回一个说明性短句,kind 留空。
+只输出该 JSON 对象,不要任何前后缀说明。`
+
+// generateDiagramResult is the JSON shape generateDiagramPrompt produces.
+// Fields match the prompt's four keys exactly so json.Unmarshal passes without
+// custom names. Title / Mermaid / Description are trimmed by the caller.
+type generateDiagramResult struct {
+	Kind        string `json:"kind"`
+	Title       string `json:"title"`
+	Mermaid     string `json:"mermaid"`
+	Description string `json:"description"`
+}
+
 // summarizeIdeaToRequirementResult is the JSON shape summarizeIdeaToRequirementPrompt
 // produces. The service treats an empty Markdown as "discussion didn't converge"
 // and refuses to create a new requirement.

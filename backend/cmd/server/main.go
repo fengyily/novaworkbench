@@ -228,7 +228,11 @@ func main() {
 	dashboardH := handler.NewDashboardHandler(projectSvc)
 	fsH := handler.NewFsHandler()
 	memoryH := handler.NewMemoryHandler(memorySvc)
-	knowledgeH := handler.NewKnowledgeHandler(knowledgeSvc)
+	// knowledgeH wraps KnowledgeService + the LLM gateway (for AI diagram
+	// generation) + the UsageService (for token-cost accounting on every
+	// generated diagram). Mirrors the constructor shape used by
+	// reportArchiveH below.
+	knowledgeH := handler.NewKnowledgeHandler(knowledgeSvc, llmGateway, usageSvc)
 	scannerH := handler.NewScannerHandler(scannerSvc)
 	sharedJobs := store.NewJobStore(50)
 	preflightH := handler.NewPreflightHandler(pfRegistry, sharedJobs)
@@ -725,6 +729,17 @@ func main() {
 	mux.HandleFunc("GET /api/knowledge/{id}", knowledgeH.Get)
 	mux.HandleFunc("PUT /api/knowledge/{id}", knowledgeH.Update)
 	mux.HandleFunc("DELETE /api/knowledge/{id}", knowledgeH.Delete)
+	// AI-generated architecture / sequence / state diagrams. Source:
+	// free-form text + optional kind hint. Upsert by (project_id,
+	// source_type='ai_diagram', source_ref=sha256(project+input)[:16]) so a
+	// duplicate request refreshes the same row instead of producing parallel
+	// copies. Sync (no JobStore) — same shape as report-archive.
+	mux.HandleFunc("POST /api/knowledge/generate-diagram", knowledgeH.GenerateDiagram)
+	// Plan → knowledge extraction. Frontend DOM-walks the rendered design-doc
+	// panel for ```mermaid``` blocks, posts each one here, backend writes a
+	// knowledge row per block (no LLM call — the model already emitted the
+	// blocks when generating the plan).
+	mux.HandleFunc("POST /api/knowledge/extract-diagrams", knowledgeH.ExtractDiagrams)
 	mux.HandleFunc("GET /api/knowledge/review/list", knowledgeH.ListForReview)
 	mux.HandleFunc("POST /api/knowledge/review/batch", knowledgeH.BatchReview)
 

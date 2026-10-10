@@ -250,11 +250,20 @@ func (h *WizardHandler) prepareWikiWorkspace(p *wikiRunParams, job *store.Job) b
 	// resumed session already carries the prior knowledge-doc context).
 	// The wiki block (appended below) is the textual hard constraint;
 	// DisallowedTools is the structural one.
+	//
+	// Anti-pattern note (req_b37e6f385d371b7e): a prior version of this
+	// prompt ended with "请先复述你对需求的理解，再输出文档正文" — Claude
+	// interpreted "复述" as "structure summary" and emitted a numbered
+	// TOC (1. 背景与目标：... 2. 关键概念：...) instead of the actual
+	// body. The backend's looksLikeWikiOutline heuristic now catches that
+	// shape, but the cleaner fix is to forbid the recap entirely here so
+	// the model doesn't burn a turn producing throwaway output.
 	prompt := "## 需求标题\n" + p.Req.Title + "\n\n" +
 		"现在切换到「知识库」角色。请直接用 Read / Glob / Grep 阅读项目相关源文件（不要启动子代理），" +
 		"基于需求描述与项目现状，一次性沉淀出一份完整的、可复用的知识库文档（Markdown 正文）。" +
-		"文档应涵盖：背景与目标、关键概念、相关源文件清单、典型使用方式 / 调用路径、风险与注意事项。" +
-		"请先复述你对需求的理解，再输出文档正文。不要发\"我已启动\"、\"等待回收中\"之类的进度消息——直接输出文档正文即可。"
+		"文档应涵盖：背景与目标、关键概念、相关源文件清单、典型使用方式 / 调用路径、风险与注意事项；" +
+		"每一节都必须填实（具体文件路径、关键函数签名、Mermaid 块或代码片段），禁止以一句话标签收尾。" +
+		"不要发\"我已启动\"、\"等待回收中\"之类的进度消息，也不要\"先复述需求 / 列大纲\"再写正文——直接给出最终 Markdown 全文。"
 	if p.ResumeSID == "" && p.Req.AnalystContextSummary == "" {
 		// Fresh-session path: prepend project structure / docs pre-read so
 		// the model has the project shape without burning a turn on `ls`.
@@ -263,8 +272,8 @@ func (h *WizardHandler) prepareWikiWorkspace(p *wikiRunParams, job *store.Job) b
 			"## 需求标题\n" + p.Req.Title + "\n\n" +
 			"## 需求描述\n" + p.Req.Description + "\n\n" +
 			"## 项目上下文\n" + docBlock + "\n" + treeSummary + "\n\n" +
-			"文档应涵盖：背景与目标、关键概念、相关源文件清单、典型使用方式 / 调用路径、风险与注意事项。\n" +
-			"请先复述你对需求的理解，再输出文档正文。不要发\"我已启动\"、\"等待回收中\"之类的进度消息——直接输出文档正文即可。"
+			"文档应涵盖：背景与目标、关键概念、相关源文件清单、典型使用方式 / 调用路径、风险与注意事项；每一节都必须填实（具体文件路径、关键函数签名、Mermaid 块或代码片段），禁止以一句话标签收尾。\n" +
+			"不要发\"我已启动\"、\"等待回收中\"之类的进度消息，也不要\"先复述需求 / 列大纲\"再写正文——直接给出最终 Markdown 全文。"
 	}
 	// Tail: append the wiki kind-specific block (read-only hard constraint).
 	if block := promptpkg.WikiBlock(p.Req.Kind, p.Req); block != "" {
@@ -449,6 +458,17 @@ func (h *WizardHandler) finalizeWikiRun(
 		return
 	}
 
+	// Mermaid 11.x syntax repair. Mermaid tightened its lexer in 10.x /
+// 11.x and several constructs the upstream model emits (semicolons
+// inside sequenceDiagram messages, parallelogram labels with a
+// missing closing '/', square labels with "(", ")", "{", "}" or
+// stray '"') cause the renderer to surface "Syntax error in text" at
+// the bottom of the doc. SanitizeMermaidBlocks applies three small,
+// empirically validated fixes — see the package comment in
+// service/mermaid.go for the full rationale and the failure modes
+// observed on req_b37e6f385d371b7e.
+	cleaned = service.SanitizeMermaidBlocks(cleaned)
+
 	// Preamble-rejection heuristic. Even with DisallowedTools=[...,Task] and
 	// the strengthened prompt forbidding sub-agents, a misbehaving model can
 	// still stream a one-line status message ("我已并行启动 2 个 Explore
@@ -464,6 +484,29 @@ func (h *WizardHandler) finalizeWikiRun(
 	if looksLikeWikiPreamble(cleaned) {
 		log.Printf("[wiki-generate] rejected preamble for %s (len=%d): %q", id, len(cleaned), truncateForLog(cleaned, 80))
 		job.Append(store.LogLine{Type: "error", Content: "Claude 未输出可保存的知识库正文（疑似只发了进度消息），请重试"})
+		job.Finish(1, store.JobError)
+		// Leave status at 'designing' so the user can retry.
+		return
+	}
+
+	// Outline-pattern detection. Catches a different failure mode than
+	// looksLikeWikiPreamble: a long, structurally-marked-up "table of
+	// contents" reply that lists what the doc *would* contain but never
+	// produces the body itself. Canonical example (req_b37e6f385d371b7e):
+	//
+	//   知识库正文已完整输出。文档覆盖：
+	//   1. **背景与目标**：MCP 在 Controller 内的定位...
+	//   2. **关键概念**：模块分层图、三道门...
+	//   ... (no Mermaid block, no file paths, no real content)
+	//
+	// The preamble heuristic missed this (1073 chars > 200, has list
+	// structure). The outline heuristic rejects when EITHER a "self-praise"
+	// tell is present OR the doc has 3+ label-only list items AND no
+	// concrete markers (backticks / fences). See looksLikeWikiOutline
+	// below for the exact rules.
+	if looksLikeWikiOutline(cleaned) {
+		log.Printf("[wiki-generate] rejected outline for %s (len=%d): %q", id, len(cleaned), truncateForLog(cleaned, 80))
+		job.Append(store.LogLine{Type: "error", Content: "Claude 仅输出了纲要 / 进度描述，未输出可保存的知识库正文，请重试"})
 		job.Finish(1, store.JobError)
 		// Leave status at 'designing' so the user can retry.
 		return
@@ -534,4 +577,128 @@ func looksLikeWikiPreamble(cleaned string) bool {
 	}
 	hasTable := strings.Contains(cleaned, "|") && strings.Contains(cleaned, "\n")
 	return !hasHeading && !hasCodeFence && !hasList && !hasTable
+}
+
+// looksLikeWikiOutline reports whether the cleaned content is a
+// "table-of-contents-only" emission — a structurally-marked-up reply that
+// *lists* what the document would cover but never actually delivers the
+// body. This is a different failure mode than looksLikeWikiPreamble
+// (which catches one-line progress messages); outline-shaped output is
+// long, has list/heading structure, and slips past the preamble guard.
+//
+// Reject when ANY of these fires:
+//
+//   (c) "Self-praise tell" — the model openly announces it has produced
+//       the doc, even though all it actually emitted is a TOC. Catches
+//       the canonical failure phrase "知识库正文已完整输出。文档覆盖：..."
+//       as well as siblings like "包含 N 张图" / "包含 N 个表" / "以下章节"
+//       used as a preamble to a list rather than as actual section
+//       headers. This branch alone is sufficient to reject.
+//
+//   (a) "Label-only outline" — three or more list items whose body is
+//       a one-clause label terminated by `：` (or `:`). The label regex
+//       matches `1. **Foo**：bar`, `- **Foo**：bar`, `* **Foo**: bar`,
+//       etc. ANDed with:
+//
+//   (b) "No concrete markers" — fewer than 4 backticks total in the
+//       entire doc (no inline code, no ``` fences, no file paths).
+//       A real knowledge doc virtually always has at least one of those.
+//
+// Branch (a)+(b) together reject the "long TOC with markdown structure"
+// case; branch (c) catches the variant where the model labels the
+// preamble with a self-praise sentence before the TOC.
+//
+// Origin: req_b37e6f385d371b7e (the wiki doc was a 1073-char TOC about
+// "MCP in Controller" — no Mermaid block, no file paths, no real
+// content). The preamble heuristic passed it (1073 > 200 + has list),
+// so this second heuristic was added.
+func looksLikeWikiOutline(cleaned string) bool {
+	if cleaned == "" {
+		return false
+	}
+	// Branch (c): self-praise tells. Each phrase is what the model emits
+	// right before (or instead of) the actual body. Trim whitespace
+	// defensively so a stray leading newline doesn't dodge the match.
+	trimmed := strings.TrimSpace(cleaned)
+	for _, tell := range wikiOutlineSelfPraiseTells {
+		if strings.Contains(trimmed, tell) {
+			return true
+		}
+	}
+	// Branch (a)+(b): label-only outline AND no concrete markers.
+	backtickCount := strings.Count(cleaned, "`")
+	if backtickCount >= 4 {
+		return false
+	}
+	labelItem := 0
+	for _, line := range strings.Split(cleaned, "\n") {
+		l := strings.TrimLeft(line, " \t")
+		if isWikiOutlineLabelItem(l) {
+			labelItem++
+		}
+	}
+	return labelItem >= 3
+}
+
+// wikiOutlineSelfPraiseTells are phrases that, when present, indicate
+// the model emitted a meta-description of the doc instead of the doc
+// itself. Substring match — any of these in the cleaned content is
+// sufficient (alone) to reject.
+var wikiOutlineSelfPraiseTells = []string{
+	"知识库正文已完整输出",
+	"文档覆盖：",
+	"文档覆盖:",
+	"包含一张图速记",
+	"包含一张速记图",
+	"包含一张图",
+	"包含两张",
+	"包含三张",
+	"包含 N 张",
+	"以下章节将",
+	"下面章节将",
+	"本文档涵盖",
+}
+
+// isWikiOutlineLabelItem reports whether a single trimmed line matches
+// the "label-only outline item" pattern: a list bullet (number, dash,
+// or asterisk) followed by an emphasized title and a Chinese-colon or
+// ASCII-colon separator. Examples that match:
+//
+//	1. **背景与目标**：MCP 在 Controller 内的定位...
+//	- **关键概念**：模块分层图...
+//	* **源文件清单**：按层...
+//
+// Examples that DO NOT match (a real section header without a label
+// pattern, or prose without a list marker): "# 背景与目标", "本节介绍
+// 模块分层图".
+func isWikiOutlineLabelItem(trimmed string) bool {
+	if trimmed == "" {
+		return false
+	}
+	// Strip the leading list marker. We accept "1.", "1)", "-", "*".
+	rest := trimmed
+	switch {
+	case len(rest) >= 3 && rest[0] >= '0' && rest[0] <= '9' && (rest[1] == '.' || rest[1] == ')') && rest[2] == ' ':
+		rest = rest[3:]
+	case len(rest) >= 2 && rest[0] == '-' && rest[1] == ' ':
+		rest = rest[2:]
+	case len(rest) >= 2 && rest[0] == '*' && rest[1] == ' ':
+		rest = rest[2:]
+	default:
+		return false
+	}
+	// Require an emphasized title: "**...**" or "**...**：" right after
+	// the marker. We deliberately don't try to match the whole title
+	// shape — `**` is enough signal.
+	if !strings.HasPrefix(rest, "**") {
+		return false
+	}
+	// Require a colon (Chinese full-width or ASCII) somewhere after the
+	// title's closing "**". We accept either, since models vary.
+	closer := strings.Index(rest[2:], "**")
+	if closer < 0 {
+		return false
+	}
+	tail := rest[2+closer+2:]
+	return strings.Contains(tail, "：") || strings.Contains(tail, ":")
 }
