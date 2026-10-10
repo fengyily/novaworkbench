@@ -116,6 +116,7 @@ export const wizard = {
     toolLogSummary: 'Tool calls · {{n}} phase(s) · total {{total}}',
     stepLabelDesign: 'Architect design',
     stepLabelCoding: 'Coding instructions',
+    stepLabelWiki: 'Knowledge doc',
   },
   // architect — SSE phase labels emitted by the backend wizard during the
   // pre-stage repo sync (clone / fetch). Rendered verbatim by the existing
