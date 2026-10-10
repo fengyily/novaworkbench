@@ -32,6 +32,15 @@
   gap: 6px;
 }
 
+/* Right-side action cluster — 把"导出 PDF"和"关闭"挤在一起，flex
+   space-between 让"返回"贴左、action cluster 贴右。导出按钮只在大屏
+   显示图标+文字；窄屏沿用 topbar-btn span 的隐藏规则收敛到只留图标。 */
+.kvp-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* Loading / error / 404 三态通用容器 */
 .kvp-state {
   flex: 1;
@@ -58,11 +67,14 @@
   padding-bottom: 64px;
 }
 
+/* Title area / meta / body 都不再设 max-width —— 详情页独占视口，让
+   正文撑满 .kvp-article 整宽，只保留左右 padding 作边界。
+   取消 v0.5 之前的 "窄/中/宽" 三档切换（曾用 [data-width="..."] 覆写），
+   旧 localStorage['knowledge.viewWidth'] 自然失效，无需清理。 */
 .kvp-title-area {
-  max-width: 760px;
   width: 100%;
-  margin: 0 auto;
-  padding: 48px 24px 0;
+  margin: 0;
+  padding: 48px 48px 0;
 }
 
 .kvp-badges {
@@ -82,10 +94,9 @@
 
 /* Meta strip — 12px muted 字段分隔 */
 .kvp-meta {
-  max-width: 760px;
   width: 100%;
-  margin: 0 auto;
-  padding: 12px 24px 0;
+  margin: 0;
+  padding: 12px 48px 0;
   display: flex;
   flex-wrap: wrap;
   gap: 6px 14px;
@@ -103,12 +114,11 @@
   font-weight: 500;
 }
 
-/* Body — max-width 760px 居中阅读舒适线 */
+/* Body — 撑满 article 整宽，左右各 48px 留边界。移动端在媒体查询里再压到 16px。 */
 .kvp-body {
-  max-width: 760px;
   width: 100%;
-  margin: 24px auto 0;
-  padding: 0 24px;
+  margin: 24px 0 0;
+  padding: 0 48px;
 }
 
 .kvp-empty-body {
@@ -117,6 +127,46 @@
   padding: 32px 0;
   color: var(--color-text-muted);
   font-style: italic;
+}
+
+/* ── Edit form ─────────────────────────────────────────
+   撑满 .kvp-article 整宽，与正文节奏一致，左右 padding 与 body 对齐；
+   textarea 给 360px 最小高度，长文档上下滚动而不撑高整页。 */
+.kvp-edit-form {
+  width: 100%;
+  margin: 24px 0 0;
+  padding: 0 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.kvp-edit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kvp-edit-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  letter-spacing: 0.02em;
+}
+
+.kvp-edit-textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  min-height: 360px;
+  resize: vertical;
+}
+
+.kvp-edit-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding-top: 4px;
 }
 
 /* ── Mobile ──────────────────────────────────────────────────────
@@ -143,6 +193,9 @@
     font-size: 11px;
   }
   .kvp-body {
+    padding: 0 16px;
+  }
+  .kvp-edit-form {
     padding: 0 16px;
   }
   .kvp-article {

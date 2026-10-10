@@ -1,0 +1,195 @@
+/* DiagramGenerator — 触发一次 AI 出图的 Dialog。视觉与项目内现有
+   modal-fullscreen 保持一致（MarkdownViewer / DocRefineChat 用的是同一
+   套全屏浮层基础类）。内部分两栏，左输入 / 右预览。*/
+
+.diagram-generator-overlay {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.55);
+  z-index: 1000;
+}
+
+.diagram-generator-box {
+  width: min(1200px, 95vw);
+  max-height: min(90vh, 920px);
+  background: var(--bg-primary, #ffffff);
+  border-radius: 10px;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.35);
+  display: flex;
+  flex-direction: column;
+}
+
+.diagram-generator-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+}
+
+.diagram-generator-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.diagram-generator-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  overflow: hidden;
+}
+
+.diagram-generator-left,
+.diagram-generator-right {
+  padding: 16px 20px;
+  overflow-y: auto;
+}
+
+.diagram-generator-left {
+  border-right: 1px solid var(--border-color, #e5e7eb);
+}
+
+.diagram-generator-right {
+  background: var(--bg-secondary, #f7f8fb);
+  display: flex;
+  flex-direction: column;
+}
+
+.dg-label {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.dg-label-text {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary, #64748b);
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.dg-textarea {
+  width: 100%;
+  min-height: 110px;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 6px;
+  background: var(--bg-primary, #ffffff);
+  color: var(--text-primary, #1e293b);
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.dg-mermaid-src {
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  min-height: 160px;
+}
+
+.dg-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  margin-bottom: 12px;
+}
+
+.dg-select {
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 6px;
+  background: var(--bg-primary, #ffffff);
+  color: var(--text-primary, #1e293b);
+  font-size: 13px;
+  min-width: 200px;
+}
+
+.dg-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+  align-items: center;
+}
+
+.dg-chip {
+  padding: 4px 10px;
+  border: 1px solid var(--border-color, #e5e7eb);
+  background: var(--bg-primary, #ffffff);
+  color: var(--text-secondary, #64748b);
+  border-radius: 12px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.dg-chip:hover {
+  background: var(--bg-hover, #f1f5f9);
+}
+
+.dg-meta {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: var(--bg-secondary, #f7f8fb);
+  border: 1px dashed var(--border-color, #e5e7eb);
+  border-radius: 6px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-secondary, #64748b);
+}
+
+.dg-error {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  color: #991b1b;
+  font-size: 12.5px;
+}
+
+.dg-preview-label {
+  font-size: 12px;
+  color: var(--text-secondary, #64748b);
+  font-weight: 600;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-color, #e5e7eb);
+}
+
+.diagram-generator-right .mermaid-svg {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow-y: auto;
+}
+
+.diagram-generator-right .mermaid-svg svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.dg-preview-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary, #64748b);
+  font-size: 13px;
+}
+
+.diagram-generator-footer {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border-color, #e5e7eb);
+}

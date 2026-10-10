@@ -37,6 +37,18 @@ export const components = {
     close: '✕ Close',
     closeTitle: 'Close (Esc)',
   },
+  // markdownImage — hover toolbar shown on every image figure inside
+  // MarkdownRender (plain <img> + mermaid SVG). Lives under `components`
+  // rather than `knowledge` because MarkdownRender is shared app-wide:
+  // knowledge base / design docs / weekly reports / sub-task replies all
+  // render through it.
+  markdownImage: {
+    zoomTitle: 'Zoom in',
+    downloadPngTitle: 'Download PNG (transparent background)',
+    downloadJpgTitle: 'Download JPG (white background)',
+    downloadSvgTitle: 'Download SVG (vector — Mermaid only)',
+    downloadFailPrefix: 'Download failed: ',
+  },
   folderPicker: {
     placeholder: 'Path: ~/workspace/my-project',
     loading: '⏳ Loading…',

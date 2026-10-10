@@ -2,8 +2,6 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import {
   projectsApi, runnerApi, reviewApi, platformApi, requirementsApi, knowledgeApi,
   usageApi, usageTotalInput, fmtCost, wizardApi,
@@ -487,11 +485,12 @@ export default function ProjectDetail() {
 
   // Knowledge base for this project. Loaded on demand when the knowledge tab
   // is opened; the tab groups entries by source_type (requirement / document /
-  // code / other).
+  // code / other). The full-content reading view lives at /knowledge/view/:id
+  // (KnowledgeViewPage) — we open it in a new tab from each card, mirroring
+  // KnowledgePage's behavior, so users never lose the project context behind a
+  // modal.
   const [knowledge, setKnowledge] = useState<KnowledgeItem[]>([]);
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
-  // Markdown detail modal for archived-requirement knowledge entries.
-  const [knowledgeModal, setKnowledgeModal] = useState<KnowledgeItem | null>(null);
   useEffect(() => {
     if (tab !== 'knowledge' || !id) return;
     let active = true;
@@ -1175,8 +1174,11 @@ export default function ProjectDetail() {
   // Render a group of knowledge entries under a labeled section. Reuses the
   // kb-card styles from KnowledgePage.css. The content preview is stripped of
   // markdown noise (stripMarkdownPreview) and clamped to a fixed number of
-  // lines via CSS so cards stay uniform regardless of entry length; a
-  // "View full" button on every card opens the full Markdown-rendered modal.
+  // lines via CSS so cards stay uniform regardless of entry length; the entire
+  // card is wrapped in an <a target="_blank"> that opens the dedicated reading
+  // view (/knowledge/view/:id) in a new tab — same pattern as KnowledgePage.
+  // The "View full" button uses preventDefault + window.open to avoid double
+  // navigation when the user clicks the button specifically.
   const renderKnowledgeGroup = (labelKey: string, items: KnowledgeItem[]) => {
     if (!items.length) return null;
     const label = t(labelKey);
@@ -1184,19 +1186,35 @@ export default function ProjectDetail() {
       <div className="detail-section" key={labelKey}>
         <h3 style={{ marginBottom: 12 }}>{label}{t('projects.detail.knowledgeCountSuffix', { n: items.length })}</h3>
         {items.map(k => (
-          <div key={k.id} className="kb-card">
-            <div className="kb-card-header">
-              <span className={`kb-type-badge cat-${k.category}`}>{k.category || 'general'}</span>
-              <span className="kb-card-title">{k.title}</span>
+          <a
+            key={k.id}
+            className="kb-card-link"
+            href={`/knowledge/view/${k.id}`}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <div className="kb-card">
+              <div className="kb-card-header">
+                <span className={`kb-type-badge cat-${k.category}`}>{k.category || 'general'}</span>
+                <span className="kb-card-title">{k.title}</span>
+              </div>
+              <div className="kb-card-content kb-clamp">{stripMarkdownPreview(k.content)}</div>
+              <span
+                className="kb-view-full"
+                role="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  window.open(`/knowledge/view/${k.id}`, '_blank', 'noopener,noreferrer');
+                }}
+              >{t('projects.detail.knowledgeViewFull')}</span>
+              <div className="kb-card-meta">
+                <span className="kb-source">{t('projects.detail.knowledgeSource', { type: k.source_type })}</span>
+                {k.source_ref && <span className="kb-ref">{k.source_ref}</span>}
+                <span className="kb-date">{new Date(k.created_at).toLocaleDateString()}</span>
+              </div>
             </div>
-            <div className="kb-card-content kb-clamp">{stripMarkdownPreview(k.content)}</div>
-            <button className="kb-view-full" onClick={() => setKnowledgeModal(k)}>{t('projects.detail.knowledgeViewFull')}</button>
-            <div className="kb-card-meta">
-              <span className="kb-source">{t('projects.detail.knowledgeSource', { type: k.source_type })}</span>
-              {k.source_ref && <span className="kb-ref">{k.source_ref}</span>}
-              <span className="kb-date">{new Date(k.created_at).toLocaleDateString()}</span>
-            </div>
-          </div>
+          </a>
         ))}
       </div>
     );
@@ -2425,23 +2443,6 @@ export default function ProjectDetail() {
               </small>
             </>
           )}
-        </div>
-      )}
-
-      {/* ── Knowledge detail modal (Markdown rendering) ── */}
-      {knowledgeModal && (
-        <div className="kb-modal-overlay modal-fullscreen-overlay" onClick={() => setKnowledgeModal(null)}>
-          <div className="kb-modal modal-fullscreen" onClick={e => e.stopPropagation()}>
-            <div className="kb-modal-header">
-              <h2>{knowledgeModal.title}</h2>
-              <button className="kb-modal-close" onClick={() => setKnowledgeModal(null)}>{t('projects.detail.modalClose')}</button>
-            </div>
-            <div className="kb-modal-body">
-              <div className="kb-markdown">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{knowledgeModal.content}</ReactMarkdown>
-              </div>
-            </div>
-          </div>
         </div>
       )}
 

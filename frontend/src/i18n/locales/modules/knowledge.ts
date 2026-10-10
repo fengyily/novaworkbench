@@ -7,6 +7,9 @@ export const knowledge = {
   allProjects: '全部项目',
   searchPlaceholder: '搜索...',
   scan: '🔄 扫描项目',
+  // AI 出图入口 (从知识库工具栏打开) —— 翻译键统一加 generateDiagram* 前缀。
+  generateDiagram: '生成架构图',
+  generateDiagramTitle: '通过 AI 生成一张 Mermaid 架构图并落库为知识条目',
   tabMemories: '记忆',
   tabKnowledge: '知识条目',
   tabReview: '待Review',
@@ -71,6 +74,31 @@ export const knowledge = {
     statusApproved: '已通过审核',
     statusPending: '待审核',
     statusRejected: '已驳回',
+    // PDF 导出（与 utils/exportDesignPdf.tsx 配合） —— pdfLabel 用作
+    // 下载文件名的中段（如 "<title>-知识条目.pdf"），fallback 同样如此；
+    // pdfExportFailPrefix 与 requirements.detail2.pdfExportFailPrefix 保持
+    // 同款前缀风格「导出失败：...」，便于统一排障。
+    pdfLabel: '知识条目',
+    exportPdfTitle: '将本知识条目导出为 PDF（包含 Mermaid 图）',
+    exportPdfBtn: '导出 PDF',
+    exportingPdf: '导出中…',
+    pdfExportFailPrefix: '导出失败：',
+    // 标题 / 内容 / 分类可编辑（覆盖扫描器 + AI 归档偶发的脏数据）。
+    editBtn: '编辑',
+    editBtnTitle: '修正标题 / 分类 / 内容（覆盖扫描器或 AI 归档的不规范结果）',
+    editTitleLabel: '标题',
+    editTitlePlaceholder: '可空，留空则用“无标题”',
+    editCategoryLabel: '分类',
+    editContentLabel: '内容（Markdown）',
+    editContentPlaceholder: '支持 GFM 语法 + ```mermaid``` 代码块',
+    editContentRequired: '内容不能为空',
+    editCancelBtn: '取消',
+    editSaveBtn: '保存',
+    editSavingBtn: '保存中…',
+    editSaveFailPrefix: '保存失败：',
+    // v0.5 之前曾有 "窄/中/宽" 三档切换，后取消（最大档在大屏两侧留白
+    // 仍过多）。图片工具栏（放大 / 下载 PNG-JPG-SVG）的文案在共享组件
+    // 命名空间 components.markdownImage 下，因为 MarkdownRender 被全应用复用。
   },
 } as const;
 

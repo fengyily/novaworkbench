@@ -3478,3 +3478,21 @@ allowed so the row collapses cleanly on every viewport. */
   .tags-chip-row { gap: 4px; }
   .req-tag-input { flex: 1 1 100%; min-width: 0; }
 }
+
+/* Design panel toolbar — v0.5.0 架构图提取 / 新建入口。display: flex 两枚
+   按钮左对齐，design-content 上方一条小工具栏。*/
+.design-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 0 10px;
+  margin-bottom: -4px;
+  border-bottom: 1px dashed var(--border-color, #e5e7eb);
+}
+
+/* KnowledgeViewPage — title 旁的小工具栏 (KVP L4.2) */
+.kvp-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}

@@ -6,6 +6,7 @@ import { fmtDate } from '../utils/intl';
 import { projectsApi } from '../api/client';
 import { stripMarkdownPreview } from '../utils/preview';
 import { IconExternalLink } from '../components/icons';
+import DiagramGenerator from '../components/DiagramGenerator';
 import './KnowledgePage.css';
 
 type Tab = 'memories' | 'knowledge' | 'review';
@@ -25,6 +26,7 @@ export default function KnowledgePage() {
 
   // Knowledge
   const [knowledge, setKnowledge] = useState<KnowledgeItem[]>([]);
+  const [showDiagramGenerator, setShowDiagramGenerator] = useState(false);
 
   // Review
   const [reviewItems, setReviewItems] = useState<KnowledgeItem[]>([]);
@@ -107,6 +109,15 @@ export default function KnowledgePage() {
         {selectedProject && (
           <button className="btn btn-sm" onClick={() => handleScan(selectedProject)}>
             {t('knowledge.scan')}
+          </button>
+        )}
+        {selectedProject && (
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={() => setShowDiagramGenerator(true)}
+            title={t('knowledge.generateDiagramTitle')}
+          >
+            🧠 {t('knowledge.generateDiagram')}
           </button>
         )}
       </div>
@@ -275,6 +286,15 @@ export default function KnowledgePage() {
           onSaved={() => { setShowMemDialog(false); loadTabData(); }}
         />
       )}
+
+      {/* AI 生成架构图 Dialog — 在选中的项目作用域里触发。
+          onSaved 负责把新行带回 /knowledge: 重新刷当前 tab + 切到 knowledge。 */}
+      <DiagramGenerator
+        open={showDiagramGenerator}
+        projectId={selectedProject}
+        onClose={() => setShowDiagramGenerator(false)}
+        onSaved={() => { setShowDiagramGenerator(false); loadTabData(); }}
+      />
     </div>
   );
 }

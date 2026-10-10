@@ -165,6 +165,10 @@ export const requirements = {
     actionBusyClean: '清理',
     // PDF + status transitions.
     pdfExportFailPrefix: '导出 PDF 失败: ',
+    // 架构图(从设计文档里挖 Mermaid 块) — 由 AI diagram 特性引入。
+    extractNoMermaid: '当前方案中没有 Mermaid 块',
+    extractDone: '已提取 {{count}} 张架构图为知识条目',
+    extractFailPrefix: '提取架构图失败: ',
     statusTransitionFailPrefix: '状态流转失败: ',
     archiveFailPrefix: '归档失败: ',
     archiveConfirmUndo: '取消归档将同时移除该需求在知识库中的条目，确认继续？',

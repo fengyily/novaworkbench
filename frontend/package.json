@@ -18,6 +18,8 @@
   "dependencies": {
     "html2pdf.js": "^0.14.0",
     "i18next": "^26.4.2",
+    "marked": "^16.4.2",
+    "mermaid": "^11.4.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-i18next": "^17.0.13",

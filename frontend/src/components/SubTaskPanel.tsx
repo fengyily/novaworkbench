@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
 import i18next from 'i18next';
+import MarkdownRender from './MarkdownRender';
 import {
   subTasksApi,
   subTaskCliCommand,
@@ -313,7 +312,7 @@ function SubTaskLogView({ lines }: { lines: LogLine[] }) {
     if (line.type === 'message' || line.type === 'result') {
       rendered.push(
         <div key={`m-${i}`} className={`sub-log-md sub-log-md-${line.type}`}>
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{line.content}</ReactMarkdown>
+          <MarkdownRender content={line.content} />
         </div>,
       );
     } else if (line.type === 'tool_result') {
@@ -327,7 +326,7 @@ function SubTaskLogView({ lines }: { lines: LogLine[] }) {
       // .sub-log-error-md carries the red left-border + red text visual.
       rendered.push(
         <div key={`e-${i}`} className="sub-log-md sub-log-error-md">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{line.content}</ReactMarkdown>
+          <MarkdownRender content={line.content} />
         </div>,
       );
     } else if (line.type === 'done') {
@@ -336,7 +335,7 @@ function SubTaskLogView({ lines }: { lines: LogLine[] }) {
       // .sub-log-done-md carries the green-text visual.
       rendered.push(
         <div key={`d-${i}`} className="sub-log-md sub-log-done-md">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{line.content}</ReactMarkdown>
+          <MarkdownRender content={line.content} />
         </div>,
       );
     } else {
@@ -396,7 +395,7 @@ function PhaseSection({
       </button>
       {open && (
         <div className="sub-phase-panel-body">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
+          <MarkdownRender content={markdown} />
         </div>
       )}
     </div>
@@ -434,7 +433,7 @@ function ToolResultRow({ content }: { content: string }) {
       </button>
       {open ? (
         <div className="sub-log-tool-result-body">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+          <MarkdownRender content={content} />
         </div>
       ) : (
         <pre className="sub-log-tool-result-preview">{preview}</pre>
@@ -1396,9 +1395,7 @@ function SubTaskCard({
                 }
               >
                 <div className="sub-plan-body">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {String(st.prompt).trim().replace(/\n{3,}/g, '\n\n')}
-                  </ReactMarkdown>
+                  <MarkdownRender content={String(st.prompt).trim().replace(/\n{3,}/g, '\n\n')} />
                 </div>
               </div>
               {isPlanLong && (
@@ -1439,9 +1436,7 @@ function SubTaskCard({
                 }
               >
                 <div className="sub-result-body">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {stripArtifactCodeFence(stripArtifactHeader(artifact))}
-                  </ReactMarkdown>
+                  <MarkdownRender content={stripArtifactCodeFence(stripArtifactHeader(artifact))} />
                 </div>
               </div>
               {isBriefResultLong && (
@@ -1470,9 +1465,7 @@ function SubTaskCard({
                 </span>
               </div>
               <div className="sub-result-body">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {stripArtifactCodeFence(stripArtifactHeader(artifact))}
-                </ReactMarkdown>
+                <MarkdownRender content={stripArtifactCodeFence(stripArtifactHeader(artifact))} />
               </div>
             </section>
           )}
@@ -1514,9 +1507,7 @@ function SubTaskCard({
                 <ReportHeader st={st} />
               </div>
               <div className="sub-report-body">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {stripArtifactCodeFence(stripArtifactHeader(artifact))}
-                </ReactMarkdown>
+                <MarkdownRender content={stripArtifactCodeFence(stripArtifactHeader(artifact))} />
               </div>
             </div>
           )}
@@ -2527,7 +2518,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
             }
           >
             <div className="sub-report-body">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{summaryReport!}</ReactMarkdown>
+              <MarkdownRender content={summaryReport!} />
             </div>
           </div>
           {isLongSummaryState && (

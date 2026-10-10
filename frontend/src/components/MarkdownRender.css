@@ -1,0 +1,185 @@
+/* MarkdownRender — mermaid 代码块 + 图片放大 / 下载工具栏的视觉样式。
+   与 MarkdownViewer.css / KnowledgeMarkdown.css 中的通用排版共存。
+   关键规则：
+   - mermaid-svg 块撑满容器、可滚动、SVG 自适应；
+   - .image-figure 包裹 <img> 或 mermaid <svg>，提供点击放大 + 工具栏下载
+     PNG/JPG（mermaid 额外提供 SVG 下载，因为 SVG 是矢量无失真）。 */
+
+.mermaid-svg {
+  margin: 0;
+  padding: 0.75em;
+  background: var(--bg-secondary, #f7f8fb);
+  border-radius: 6px;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.mermaid-svg svg {
+  max-width: 100%;
+  height: auto;
+  display: inline-block;
+}
+
+.mermaid-loading,
+.mermaid-error {
+  display: block;
+  margin: 0.75em 0;
+  padding: 0.6em 0.8em;
+  background: var(--bg-secondary, #f7f8fb);
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.85em;
+  line-height: 1.5;
+  color: var(--text-secondary, #64748b);
+}
+
+.mermaid-error {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #991b1b;
+}
+
+/* ImageFigure — 把普通 <img> 和 mermaid <svg> 都包成可放大 + 可下载的图块。
+   整个 figure 可点击触发全屏；工具栏 absolute 浮在右下角，自身阻止冒泡
+   以免点按钮时误触放大。 */
+.image-figure {
+  position: relative;
+  margin: 0.75em 0;
+  cursor: zoom-in;
+}
+
+/* 普通 markdown 图片 — 容器宽度、自适应高度 + 卡片化边框。 */
+.image-figure > .zoomable-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+  border-radius: 6px;
+  border: 1px solid var(--border-color, #e5e7eb);
+  background: var(--bg-secondary, #f7f8fb);
+  transition: box-shadow 0.15s ease;
+}
+.image-figure:hover > .zoomable-image {
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08);
+}
+
+/* Mermaid 图块：让外层 .mermaid-svg 在 figure 内不再有自己的外边距 / 边框
+   （统一由 .image-figure 接管），保持视觉一致。 */
+.image-figure > .mermaid-svg {
+  border: 1px solid var(--border-color, #e5e7eb);
+}
+
+/* 工具栏 — 默认隐藏，鼠标进入 figure 时浮出。点工具栏内按钮不会触发
+   figure 的 onClick（stopPropagation），所以不会同时打开放大浮层。 */
+.image-toolbar {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: rgba(15, 23, 42, 0.78);
+  color: #f8fafc;
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.18);
+  font-size: 11px;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  pointer-events: none;
+}
+.image-figure:hover .image-toolbar,
+.image-figure:focus-within .image-toolbar {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.image-toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 24px;
+  padding: 0 6px;
+  border: none;
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition: background 0.12s ease;
+}
+.image-toolbar-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+.image-toolbar-btn:active {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.image-toolbar-sep {
+  display: inline-block;
+  width: 1px;
+  height: 16px;
+  background: rgba(255, 255, 255, 0.2);
+  margin: 0 2px;
+}
+
+/* 全屏放大浮层 — 复用之前的 .img-zoom-overlay 视觉，按 ESC / 点击空白
+   关闭。img-zoom-target 同时支持 <img> 与 mermaid <svg>（后者通过
+   dangerouslySetInnerHTML 直接渲染）。 */
+.img-zoom-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(15, 23, 42, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  cursor: zoom-out;
+  animation: img-zoom-fade 0.12s ease-out;
+}
+
+.img-zoom-target {
+  max-width: 96vw;
+  max-height: 94vh;
+  object-fit: contain;
+  border-radius: 6px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.45);
+  background: #000;
+  cursor: default;
+}
+
+.img-zoom-svg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #ffffff;
+  padding: 16px;
+  overflow: auto;
+}
+
+/* !important 在这里是必需的，不是偷懒：
+   mermaid v11 在 <svg> 根标签上写内联 `style="max-width: {natural}px"`，把
+   图锁死在它的原始逻辑尺寸上。内联样式优先级高于任何选择器，没有 !important
+   的话下面的 max-width 全部失效，浮层里的图跟页面上一样小 —— 这正是"图放大
+   不了"的根因（对 mermaid 图而言）。
+   同时把 width/height 归 auto：mermaid 还写了 width="100%"，在 flex 容器里
+   会跟 max-height 打架。 */
+.img-zoom-svg svg {
+  max-width: 90vw !important;
+  max-height: 86vh !important;
+  width: auto !important;
+  height: auto !important;
+}
+
+@keyframes img-zoom-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

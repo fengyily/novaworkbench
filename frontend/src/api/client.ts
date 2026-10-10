@@ -327,7 +327,37 @@ export const knowledgeApi = {
     api.get<KnowledgeItem[]>(`/api/knowledge/review/list${project_id ? '?project_id=' + project_id : ''}`),
   batchReview: (ids: string[], action: string) =>
     api.post<{ status: string }>('/api/knowledge/review/batch', { ids, action }),
+
+  // AI-generated Mermaid diagram. Single endpoint with three modes:
+  //   1. generateDiagramPreview — preview-only (LLM call, no DB write).
+  //   2. generateDiagram({ ...mermaid_override }) — save with hand-edited
+  //      mermaid source (no second LLM call).
+  //   3. generateDiagram({ ...without override }) — LLM + persist in one
+  //      round-trip; the upsert identity is sha256(project + "|" + input
+  //      + "|" + override).
+  // All three return the same { id, title, kind, mermaid, description,
+  // created_at? } shape; preview sets id="" + skips created_at.
+  generateDiagramPreview: (data: { project_id: string; input: string; kind?: string }) =>
+    api.post<GenerateDiagramResult>('/api/knowledge/generate-diagram', { ...data, preview_only: true }),
+  generateDiagram: (data: { project_id: string; input: string; kind?: string; force_overwrite_mermaid?: string }) =>
+    api.post<GenerateDiagramResult>('/api/knowledge/generate-diagram', {
+      project_id: data.project_id,
+      input: data.input,
+      kind: data.kind,
+      mermaid_override: data.force_overwrite_mermaid || undefined,
+    }),
+  extractDiagrams: (data: { project_id: string; requirement_id: string; blocks: Array<{ mermaid: string; title?: string }> }) =>
+    api.post<{ ids: string[] }>('/api/knowledge/extract-diagrams', data),
 };
+
+export interface GenerateDiagramResult {
+  id: string;
+  title: string;
+  kind: string;
+  mermaid: string;
+  description: string;
+  created_at?: string;
+}
 
 // Scanner
 export interface ScanResult {

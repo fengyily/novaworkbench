@@ -1,25 +1,59 @@
 // One-click export of a technical design doc (Markdown) to PDF.
 //
-// The design is stored as plan-mode Markdown in requirements.design_docs.
-// We render it to static HTML via react-markdown (same renderer the page uses),
-// wrap it in a print-styled container with concrete colors (no CSS vars, so
-// html2canvas — which html2pdf uses under the hood — renders reliably), and
-// hand it to html2pdf.js to produce an A4 PDF download.
-import { renderToStaticMarkup } from 'react-dom/server';
+// The design is stored as plan-mode Markdown in requirements.design_docs (and
+// knowledge entries as Markdown in `knowledge.content`). We pre-bake any
+// ` ```mermaid ... ``` ` blocks into inline SVG via mermaid.render() and then
+// use `marked.parse()` — sync, no React, no rehype pipeline — to turn the
+// resulting markdown + inline SVG into an HTML string. That string is dropped
+// into a print-styled container with concrete (non-CSS-var) colors so
+// html2canvas can snapshot it without surprises, and html2pdf.js produces an
+// A4 PDF.
+//
+// Why marked (not react-markdown + renderToStaticMarkup)?
+//   - markdown content can contain raw mermaid SVG blocks (and design docs
+//     often embed other HTML like <kbd>/<details>) — react-markdown 9 escapes
+//     inline HTML by default and would render the SVG as escaped source.
+//   - renderToStaticMarkup + react-markdown in React 19 SSR mode had
+//     compatibility gaps (hooks-heavy components could return empty markup),
+//     which surfaced as blank PDFs until we switched to marked.
+//   - marked gives us sync output, inline HTML passes through unchanged, and
+//     the output feeds straight into a hidden container that html2pdf
+//     snapshots. No SSR, no React DOM tree for a single one-shot render.
+//
+// Mermaid is async + browser-only, so we still pre-render all mermaid blocks
+// to <svg> strings up front and substitute them back into the markdown before
+// handing it to marked. Failed renders fall back to a styled <pre> so the PDF
+// still includes the source for debugging.
 import i18next from 'i18next';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { marked } from 'marked';
+import mermaid from 'mermaid';
 
 export interface DesignExportInput {
   title: string;
   meta?: string; // e.g. "project-name · req_xxx"
   markdown: string;
   filename?: string;
+  // Optional filename component inserted between the (sanitized) filename and
+  // `.pdf` — the design-doc exporter defaults to "技术方案" via
+  // requirements.exportDesign.pdfSuffix; the knowledge-base exporter overrides
+  // with "知识条目" so the download looks like "<title>-知识条目.pdf".
+  // Same string is used as the empty-filename fallback.
+  pdfLabel?: string;
 }
+
+// Matches a fenced ```mermaid ... ``` block (non-greedy, dotall). The first
+// capture group is the mermaid source body. Used by prebakeMermaid below.
+const MERMAID_FENCE = /```mermaid\s*\n([\s\S]*?)```/g;
 
 // Inline, self-contained print styles. Concrete values (not var(--…)) because
 // html2canvas snapshots computed styles and some CSS-variable color spaces
 // (oklch etc.) can break it. Mirrors .analysis-summary on screen.
+//
+// Important for mermaid: the <svg> string returned by mermaid.render uses its
+// own internal class names (e.g. `.label`, `.nodeLabel`) and comes with a
+// <style> block embedded inside the svg. We force text color via inline
+// `style="color: #1e293b"` on the svg root so html2canvas doesn't drop the
+// text on light backgrounds.
 const STYLES = `
   .pdf-doc { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; color: #1e293b; line-height: 1.7; font-size: 14px; background: #fff; }
   .pdf-doc .pdf-header { border-bottom: 2px solid #4F46E5; padding-bottom: 12px; margin-bottom: 18px; }
@@ -44,6 +78,10 @@ const STYLES = `
   .pdf-doc th { background: #f1f5f9; font-weight: 600; }
   .pdf-doc a { color: #4F46E5; text-decoration: underline; }
   .pdf-doc hr { border: none; border-top: 1px solid #e2e8f0; margin: 16px 0; }
+  .pdf-doc img { max-width: 100%; height: auto; display: block; margin: 8px auto; }
+  .pdf-doc .pdf-mermaid { background: #f7f8fb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px; margin: 10px 0; text-align: center; overflow-x: auto; }
+  .pdf-doc .pdf-mermaid svg { max-width: 100%; height: auto; color: #1e293b; }
+  .pdf-doc .pdf-mermaid-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; text-align: left; }
   /* Keep block-level content from being split across a page boundary, so a
    * line of text never lands half on one page and half on the next. html2pdf
    * honors these (in 'css'/'avoid-all' pagebreak mode) by re-rendering each
@@ -56,25 +94,99 @@ const STYLES = `
   }
 `;
 
-function sanitizeFilename(name: string): string {
-  return name.replace(/[\\/:*?"<>|]/g, '_').slice(0, 80).trim() || i18next.t('requirements.exportDesign.designFallback');
+function sanitizeFilename(name: string, fallback: string): string {
+  return name.replace(/[\\/:*?"<>|]/g, '_').slice(0, 80).trim() || fallback;
+}
+
+// mermaidReady — single-init flag mirroring MarkdownRender.tsx. The PDF path
+// can be entered before any on-screen MarkdownRender has mounted, so this
+// helper makes sure mermaid.initialize runs at least once.
+let mermaidReady = false;
+function ensureMermaid() {
+  if (mermaidReady) return;
+  mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose', fontFamily: 'inherit' });
+  mermaidReady = true;
+}
+
+let mermaidSerial = 0;
+function nextMermaidId(): string {
+  mermaidSerial += 1;
+  return `pdf-mermaid-${Date.now().toString(36)}-${mermaidSerial}`;
+}
+
+// prebakeMermaid scans markdown for ```mermaid ... ``` blocks, renders each
+// one to inline SVG via mermaid.render(), and rewrites the markdown so the
+// marked pass sees a stream of inline HTML (no async fetches at export time).
+// A failed render is gracefully degraded to a styled <pre> code block — the
+// PDF still works, just without a diagram.
+async function prebakeMermaid(markdown: string): Promise<string> {
+  if (!/```mermaid/i.test(markdown)) return markdown;
+  ensureMermaid();
+  const matches: { match: string; svg: string }[] = [];
+  const re = new RegExp(MERMAID_FENCE.source, 'g');
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(markdown)) !== null) {
+    const src = m[1];
+    const id = nextMermaidId();
+    try {
+      const { svg } = await mermaid.render(id, src);
+      // mermaid.render's output ends with or without a trailing newline; trim
+      // so our wrapper div sits flush.
+      matches.push({ match: m[0], svg: svg.trim() });
+    } catch (e: unknown) {
+      const msg = String((e as Error)?.message || e);
+      const errHtml = `<div class="pdf-mermaid pdf-mermaid-error"><pre>${escapeHtml(src)}\n\n[render error: ${escapeHtml(msg)}]</pre></div>`;
+      matches.push({ match: m[0], svg: errHtml });
+    }
+  }
+  let out = markdown;
+  for (const { match, svg } of matches) {
+    out = out.replace(match, `<div class="pdf-mermaid">${svg}</div>`);
+  }
+  return out;
 }
 
 export async function exportDesignPdf(input: DesignExportInput): Promise<void> {
-  const { title, meta, markdown } = input;
-  const filename = `${sanitizeFilename(input.filename || title)}-${i18next.t('requirements.exportDesign.pdfSuffix')}.pdf`;
+  const { title, meta, markdown, pdfLabel } = input;
+  // Caller-provided label wins so different surfaces (design doc / knowledge
+  // entry / future report) get a recognizable filename suffix without forking
+  // the i18n key namespace.
+  const label = pdfLabel ?? i18next.t('requirements.exportDesign.pdfSuffix');
+  const fallback = pdfLabel ?? i18next.t('requirements.exportDesign.designFallback');
+  const filename = `${sanitizeFilename(input.filename || title, fallback)}-${label}.pdf`;
 
-  const body = renderToStaticMarkup(
-    <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>,
-  );
+  // Step 1: pre-bake any mermaid blocks into inline SVG so the markdown pass
+  // sees only static HTML for diagrams.
+  const prebaked = await prebakeMermaid(markdown);
+
+  // Step 2: marked.parse is sync and lets inline HTML (our pre-baked SVG
+  // containers) pass through verbatim. gfm: true enables tables / task lists /
+  // strikethrough / autolinks, matching what on-screen MarkdownRender shows
+  // via remark-gfm. breaks:true so long single lines don't overflow the page
+  // width (kept from the legacy SSR implementation).
+  const bodyHtml = marked.parse(prebaked, {
+    gfm: true,
+    breaks: false,
+    async: false,
+  }) as string;
 
   const stamp = new Date().toLocaleString(i18next.language || 'zh-CN', { hour12: false });
 
+  // The container MUST be inside the rendered viewport (top: 0 + left: 0) —
+  // html2canvas snapshots painted geometry, and a container parked at
+  // left: -99999px (the previous SSR-era approach) was correctly invisible to
+  // the canvas pass on some browsers, producing blank PDFs. Keeping it
+  // off-screen via opacity:0 + pointer-events:none still lets html2canvas read
+  // computed styles + layout.
   const container = document.createElement('div');
+  container.className = 'pdf-export-stage';
   container.style.position = 'fixed';
-  container.style.left = '-99999px';
+  container.style.left = '0';
   container.style.top = '0';
   container.style.width = '780px';
+  container.style.zIndex = '-1';
+  container.style.opacity = '0';
+  container.style.pointerEvents = 'none';
   container.style.background = '#ffffff';
   container.innerHTML = `
     <style>${STYLES}</style>
@@ -83,7 +195,7 @@ export async function exportDesignPdf(input: DesignExportInput): Promise<void> {
         <h1>${escapeHtml(title)}</h1>
         <div class="pdf-meta">${meta ? escapeHtml(meta) + ' · ' : ''}${escapeHtml(i18next.t('requirements.exportDesign.generatedAt'))} ${escapeHtml(stamp)}</div>
       </div>
-      <div class="pdf-body">${body}</div>
+      <div class="pdf-body">${bodyHtml}</div>
     </div>
   `;
   document.body.appendChild(container);

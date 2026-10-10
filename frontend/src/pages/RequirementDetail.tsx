@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode, type CSSProperties } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch, defaultBranchName } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, knowledgeApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch, defaultBranchName } from '../api/client';
 import { tLabel } from '../i18n/label';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
@@ -58,8 +58,8 @@ import {
   IconSparkles,
   IconClose,
 } from '../components/icons';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import MarkdownRender from '../components/MarkdownRender';
+import DiagramGenerator from '../components/DiagramGenerator';
 import { exportDesignPdf } from '../utils/exportDesignPdf';
 import { fmtDateTime, fmtNumber } from '../utils/intl';
 import { appendLogLine, coalesceLogLines, type LogLine, type UsageInfo, parseUsageSnapshots } from '../utils/logLines';
@@ -303,7 +303,7 @@ function CodingLines({ lines, working }: { lines: LogLine[]; working?: boolean }
       }
       nodes.push(
         <div key={key++} className="coding-line coding-line-message coding-message-md">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{group.join('')}</ReactMarkdown>
+          <MarkdownRender content={group.join('')} />
         </div>,
       );
       continue;
@@ -316,7 +316,7 @@ function CodingLines({ lines, working }: { lines: LogLine[]; working?: boolean }
       // plain text.
       nodes.push(
         <div key={key++} className="coding-line coding-line-message coding-message-md">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{line.content}</ReactMarkdown>
+          <MarkdownRender content={line.content} />
         </div>,
       );
       i++;
@@ -622,6 +622,7 @@ export default function RequirementDetail() {
   // via a toolbar button; CSS `.is-fullscreen` swaps the panel into a fixed
   // full-viewport surface without disturbing React state or the live SSE.
   const designFs = useFullscreen();
+  const [showDesignDiagramGenerator, setShowDesignDiagramGenerator] = useState(false);
   const codingFs = useFullscreen();
   const mergeFs = useFullscreen();
   const wikiFs = useFullscreen();
@@ -1315,6 +1316,44 @@ export default function RequirementDetail() {
       setExporting(false);
     }
   };
+
+  // extractMermaidBlocks — 把当前 design_docs 里的所有 ```mermaid``` 块一键
+  // 落到知识库。前端做正则切块 + 调 /api/knowledge/extract-diagrams,后端
+  // 负责 INSERT + source_ref 分配 + review 队列。零 LLM 成本。
+  //
+  // ParseDesign + regex-extract is intentionally re-done at click time rather
+  // than captured from the surrounding `design` const: that const is declared
+  // later in this component (line ~2776) and TS refuses to forward-reference.
+  // The parseDesign call is cheap (string split + JSON.parse fallback) so it's
+  // fine to repeat it on every click.
+  const extractMermaidBlocks = useCallback(async () => {
+    if (!req || !req.project_id) return;
+    const md = parseDesign(req.design_docs).plan_markdown || '';
+    const re = /```mermaid\s*\n([\s\S]*?)```/g;
+    const blocks: Array<{ mermaid: string; title?: string }> = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(md)) !== null) {
+      const src = (m[1] || '').trim();
+      if (src) blocks.push({ mermaid: src });
+    }
+    if (blocks.length === 0) {
+      alert(t('requirements.detail2.extractNoMermaid', { defaultValue: '当前方案中没有 Mermaid 块' }));
+      return;
+    }
+    try {
+      const res = await knowledgeApi.extractDiagrams({
+        project_id: req.project_id,
+        requirement_id: req.id,
+        blocks,
+      });
+      alert(t('requirements.detail2.extractDone', {
+        defaultValue: '已提取 {{count}} 张架构图为知识条目',
+        count: res.ids.length,
+      }));
+    } catch (err: unknown) {
+      alert(t('requirements.detail2.extractFailPrefix') + String((err as Error)?.message || err));
+    }
+  }, [req, t]);
 
   const handleDelete = async () => {
     if (!req) return;
@@ -3418,7 +3457,7 @@ export default function RequirementDetail() {
             }
           >
             <div className="analysis-summary">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{req.description}</ReactMarkdown>
+              <MarkdownRender content={req.description} />
             </div>
           </div>
           {isLongDesc && (
@@ -4487,6 +4526,27 @@ export default function RequirementDetail() {
 
           {hasDesign && (
             <>
+              {/* Design panel toolbar — "提取架构图" 把当前方案里的所有
+                  ```mermaid``` 块一键落到知识库；"新建架构图" 打开
+                  DiagramGenerator 用方案上下文作为 initialInput。 */}
+              <div className="design-toolbar">
+                {design.plan_markdown && /```mermaid/i.test(design.plan_markdown) && (
+                  <button
+                    className="btn btn-sm btn-primary"
+                    onClick={() => void extractMermaidBlocks()}
+                  >
+                    📐 提取架构图为知识条目
+                  </button>
+                )}
+                {req.project_id && (
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => setShowDesignDiagramGenerator(true)}
+                  >
+                    🧠 新建架构图（空白）
+                  </button>
+                )}
+              </div>
               <div
                 className={
                   'design-content' +
@@ -4498,7 +4558,7 @@ export default function RequirementDetail() {
                   <FullscreenButton isFullscreen onClick={designFs.exit} variant="floating" />
                 )}
                 {design.plan_markdown ? (
-                  <div className="analysis-summary"><ReactMarkdown remarkPlugins={[remarkGfm]}>{design.plan_markdown}</ReactMarkdown></div>
+                  <div className="analysis-summary"><MarkdownRender content={design.plan_markdown} /></div>
                 ) : (
                   <>
                     {design.overview && <div className="analysis-summary">{design.overview}</div>}
@@ -4604,9 +4664,7 @@ export default function RequirementDetail() {
                 takes over the section visually. */}
             {!wikiGenerating && (wiki.plan_markdown ? (
               <div className="analysis-summary">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {wiki.plan_markdown}
-                </ReactMarkdown>
+                <MarkdownRender content={wiki.plan_markdown} />
               </div>
             ) : (
               <p className="analysis-summary">{t('requirements.detail2.wikiEmptyHint')}</p>
@@ -5388,6 +5446,21 @@ export default function RequirementDetail() {
           }}
         />
       )}
+
+      {/* AI 生成架构图 Dialog — 由需求设计面板触发,initialInput 用需求
+          描述 + 设计文档摘要,让 LLM 有充分的关联上下文。Saved 后默认在
+          新窗口打开新行 (/knowledge/view/<id>),与 KnowledgePage 行为一
+          致 — 用户自然能跳过去看。 */}
+      <DiagramGenerator
+        open={showDesignDiagramGenerator}
+        projectId={req?.project_id || ''}
+        initialInput={req?.description || req?.title || ''}
+        onClose={() => setShowDesignDiagramGenerator(false)}
+        onSaved={(row) => {
+          setShowDesignDiagramGenerator(false);
+          window.open(`/knowledge/view/${row.id}`, '_blank');
+        }}
+      />
 
       {/* Immediate "design + coding" modal — sibling to <ScheduleModal>.
           The modal self-handles the wizardApi.startDesignAndCoding call and

@@ -42,6 +42,16 @@ export const components = {
     close: '✕ 关闭',
     closeTitle: '关闭 (Esc)',
   },
+  // markdownImage — MarkdownRender 里每个图块（普通 <img> + mermaid SVG）右下
+  // 角悬浮工具栏的文案。放在 components（不是 knowledge）是因为 MarkdownRender
+  // 被全应用复用：知识库 / 设计文档 / 周报 / 子任务回复都会渲染它。
+  markdownImage: {
+    zoomTitle: '放大查看',
+    downloadPngTitle: '下载 PNG（透明背景）',
+    downloadJpgTitle: '下载 JPG（白底）',
+    downloadSvgTitle: '下载 SVG（矢量，仅 Mermaid 图）',
+    downloadFailPrefix: '下载失败：',
+  },
   folderPicker: {
     placeholder: '路径: ~/workspace/my-project',
     loading: '⏳ 加载中...',

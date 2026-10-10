@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
+import MarkdownRender from './MarkdownRender';
 
 import { API_BASE, authedFetch, DefaultModelLabel, kindChatPlaceholderKeys, kindOf, requirementsApi, wizardApi, type Kind, type AgentServer } from '../api/client';
 import { tLabel } from '../i18n/label';
@@ -581,7 +580,7 @@ export default function DeepRefineChat({
                 : (<><span className="chat-role-dot" aria-hidden="true" /> {t('wizard.page.roleUser').replace('👤 ', '')}</>)}
             </span>
             {msg.role === 'ai' && !msg.isError
-              ? <div className="chat-content chat-content-md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown></div>
+              ? <div className="chat-content chat-content-md"><MarkdownRender content={msg.content} /></div>
               : <div className="chat-content" style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
             }
           </div>

@@ -158,6 +158,10 @@ export const requirements = {
     actionBusySave: 'Saving',
     actionBusyClean: 'Cleaning',
     pdfExportFailPrefix: 'PDF export failed: ',
+    // Architect-stage Mermaid extraction (added with the AI diagram feature).
+    extractNoMermaid: 'No Mermaid blocks found in the current design',
+    extractDone: 'Extracted {{count}} diagram(s) as knowledge entries',
+    extractFailPrefix: 'Failed to extract diagrams: ',
     statusTransitionFailPrefix: 'Status transition failed: ',
     archiveFailPrefix: 'Archive failed: ',
     archiveConfirmUndo: 'Unarchiving also removes this requirement\'s entry from the knowledge base. Continue?',

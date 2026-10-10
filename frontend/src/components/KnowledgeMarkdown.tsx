@@ -1,6 +1,5 @@
 import { Link } from 'react-router-dom';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import MarkdownRender from './MarkdownRender';
 import './KnowledgeMarkdown.css';
 
 interface Props {
@@ -9,17 +8,13 @@ interface Props {
 
 // KnowledgeMarkdown — 轻量 Markdown 渲染组件，独立于 MarkdownViewer（后者
 // 绑死全屏模态浮层，无法复用为独立页面）。 渲染 GFM（表格 / 任务列表 / 删除线 /
-// 自动链接），并把链接分两类：同源 SPA 路径走 react-router 的 Link（保持单页
-// 导航体验），外部 URL 走 target=_blank + rel=noopener noreferrer。
+// 自动链接）+ Mermaid 代码块（自动 SVG 渲染），并把链接分两类：同源 SPA 路径
+// 走 react-router 的 Link（保持单页导航体验），外部 URL 走 target=_blank +
+// rel=noopener noreferrer。
 export default function KnowledgeMarkdown({ content }: Props) {
   return (
     <div className="kmd">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{ a: SmartLink }}
-      >
-        {content}
-      </ReactMarkdown>
+      <MarkdownRender content={content} components={{ a: SmartLink }} />
     </div>
   );
 }

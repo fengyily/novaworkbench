@@ -1,7 +1,6 @@
 import { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import MarkdownRender from './MarkdownRender';
 import './MarkdownViewer.css';
 
 interface Props {
@@ -29,7 +28,7 @@ export default function MarkdownViewer({ title, content, onClose }: Props) {
           <button className="btn btn-sm" onClick={onClose} title={t('components.markdownViewer.closeTitle')}>{t('components.markdownViewer.close')}</button>
         </div>
         <div className="md-viewer-body">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+          <MarkdownRender content={content} />
         </div>
       </div>
     </div>

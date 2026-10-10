@@ -86,4 +86,6 @@
   margin: 1.2em 0;
 }
 
+/* 图片样式由 MarkdownRender 的 .image-figure / .zoomable-image 接管，
+   这条 fallback 只覆盖 KnowledgeMarkdown 之外的临时图（理论不应出现）。 */
 .kmd img { max-width: 100%; height: auto; }
