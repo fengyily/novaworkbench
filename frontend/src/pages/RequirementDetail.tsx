@@ -659,48 +659,44 @@ export default function RequirementDetail() {
   // from requirements.architect_config_id so a refresh re-hydrates BOTH the
   // config dropdown and the model (fixes the "模型不在当前配置列表中" symptom).
   const [architectConfigId, setArchitectConfigId] = useState('');
-  // Agent-server selector for the developer stage. Empty string = local
-  // execution (the historical default); non-empty = run claude on the chosen
-  // remote target. Only `ready` servers are listed — the wizard refuses to
-  // start coding on a target whose dependencies haven't been verified.
+  // ── Execution-environment picker state ──
+  // Two independent selectors — one for the architect (design) stage and one
+  // for the developer (coding) stage. Previously this was a single
+  // `agentServerId` state shared by every picker on the page, which forced
+  // design and coding onto the same Agent server (the user complaint: "方案
+  // 在 Agent server 完成，实现在本地完成" was impossible). Now each stage owns
+  // its own state and seeds from its own persisted column. Both columns
+  // already exist on the requirements table — see
+  // backend/internal/db/schema.go (design_agent_server_id + agent_server_id)
+  // — and the wizard_architect / wizard_coding handlers stamp them
+  // independently, so the backend doesn't need any change.
   //
-  // agentServerId is seeded from the persisted requirements.agent_server_id so
-  // a page refresh / re-entry preselects the server the requirement last ran
-  // on (and so adjust-coding / continue-coding re-send the same target without
-  // the user re-picking it). useState's initial value only applies on first
-  // render — by then the requirement row may not have loaded yet, so we sync
-  // it in an effect below once req.agent_server_id arrives.
-  const [agentServerId, setAgentServerId] = useState('');
+  // Empty string = local execution (the historical default). Only `ready`
+  // servers are listed — the wizard refuses to start on a target whose
+  // dependencies haven't been verified. The state slot is `''` (NOT null)
+  // so every `<select>`/dropdown stays a plain string.
+  const [designAgentServerId, setDesignAgentServerId] = useState('');
+  const [codingAgentServerId, setCodingAgentServerId] = useState('');
   const [agentServers, setAgentServers] = useState<AgentServer[]>([]);
   useEffect(() => {
     agentServersApi.list()
       .then((rows) => setAgentServers((rows ?? []).filter((s) => s.status === 'ready')))
       .catch(() => {/* settings tab is the source of truth — silently ignore */});
   }, []);
-  // Preselect the dropdown from the persisted binding once the requirement
-  // loads. Only fills the dropdown when the user hasn't already picked
-  // something locally this session (agentServerId === ''), so switching
-  // selections mid-session is never clobbered by a re-fetch.
+  // Seed each picker from its OWN persisted column so the two stages come
+  // back independent after a page refresh. The `cur === ''` guard preserves
+  // any in-session user choice (matching the pre-split behaviour) — once the
+  // user picks a value in this session, the seed never overwrites it.
+  useEffect(() => {
+    if (req?.design_agent_server_id) {
+      setDesignAgentServerId((cur) => (cur === '' ? req.design_agent_server_id! : cur));
+    }
+  }, [req?.design_agent_server_id]);
   useEffect(() => {
     if (req?.agent_server_id) {
-      setAgentServerId((cur) => (cur === '' ? req.agent_server_id! : cur));
+      setCodingAgentServerId((cur) => (cur === '' ? req.agent_server_id! : cur));
     }
   }, [req?.agent_server_id]);
-  // Design-stage binding: the architect stage writes its own column
-  // (requirements.design_agent_server_id), independent of the dev-stage
-  // binding above. If the two bindings differ, prefer the design binding
-  // whenever the user hasn't already picked something this session — that
-  // way an "I've designed on A but haven't coded yet" requirement lands in
-  // the design section's selector pre-pointed at A without losing the dev
-  // binding when the developer stage later runs (the dev modal already
-  // reseeds itself from req.agent_server_id). The `cur === ''` guard
-  // preserves any in-session user choice, matching the dev-stage policy.
-  useEffect(() => {
-    const designID = req?.design_agent_server_id;
-    if (!designID) return;
-    if (designID === req?.agent_server_id) return; // dev seed already covers it
-    setAgentServerId((cur) => (cur === '' ? designID : cur));
-  }, [req?.design_agent_server_id, req?.agent_server_id]);
 
   // Poll /api/wizard/active-jobs every 5s so the status badge + claude-status
   // row can pulse while a coding/design/apply job is running on this
@@ -855,19 +851,20 @@ export default function RequirementDetail() {
     return () => { cancelled = true; clearInterval(id); };
   }, [req?.id]);
 
-  // Seed the selector from the requirement's persisted development source so
-  // a re-run (re-develop / start-development after a restart) defaults to the
-  // SAME Agent server the code already lives on, instead of silently
-  // dropping back to local execution. Runs once, and only when that server
-  // is still in the ready list (a deleted / unhealthy server falls back to
-  // local rather than failing).
+  // Seed the coding picker from the requirement's persisted development
+  // source so a re-run (re-develop / start-development after a restart)
+  // defaults to the SAME Agent server the code already lives on, instead of
+  // silently dropping back to local execution. Runs once, and only when that
+  // server is still in the ready list (a deleted / unhealthy server falls
+  // back to local rather than failing). Only the CODING picker is seeded
+  // here — design has its own design_agent_server_id column.
   const agentSeedRef = useRef(false);
   useEffect(() => {
     if (!req || agentSeedRef.current || agentServers.length === 0) return;
     agentSeedRef.current = true;
     if (req.dev_source === 'agent' && req.agent_server_id &&
         agentServers.some((s) => s.id === req.agent_server_id)) {
-      setAgentServerId(req.agent_server_id);
+      setCodingAgentServerId(req.agent_server_id);
     }
   }, [req, agentServers]);
 
@@ -1742,12 +1739,15 @@ export default function RequirementDetail() {
           // local execution (legacy default). The wizard remote branch
           // refuses servers that aren't in `ready` status, so an empty /
           // stale value here silently degrades to local without erroring.
-          ...(agentServerId ? { agent_server_id: agentServerId } : {}),
+          // Uses the DESIGN-stage picker so the user can pick a different
+          // Agent server for design vs coding (req_* the user explicitly
+          // called out: 设计 on Agent server + 实现 on 本地).
+          ...(designAgentServerId ? { agent_server_id: designAgentServerId } : {}),
           // Code-transport mode for the Agent-server run. Only sent when
           // the user actually picked a server AND a non-default value
           // (the wizard's "stamp if non-empty" prologue keeps an empty
           // sync_mode from silently overwriting a previous value).
-          ...(agentServerId && designSyncMode ? { sync_mode: designSyncMode } : {}),
+          ...(designAgentServerId && designSyncMode ? { sync_mode: designSyncMode } : {}),
         }),
       });
       const json = await res.json();
@@ -2110,14 +2110,17 @@ export default function RequirementDetail() {
           ...(developerConfigId ? { claude_config_id: developerConfigId } : {}),
           // Remote Agent-server execution. Empty string = local execution (the
           // wizardH.StartCoding default branch handles the legacy path).
-          ...(agentServerId ? { agent_server_id: agentServerId } : {}),
+          // Uses the CODING-stage picker — independent of the design picker,
+          // so the user can run 设计 on Agent server A and 实现 on Agent server
+          // B / 本地 (req_* the user explicitly called out).
+          ...(codingAgentServerId ? { agent_server_id: codingAgentServerId } : {}),
           // Agent-server code-transport mode. Only meaningful (and only sent)
           // when an Agent server is picked: 'remote' = origin clone/push,
           // 'local' = git-bundle over SFTP for a self-hosted repo with no
           // reachable remote. The backend persists it and every follow-up
           // action (adjust / continue / sub-task / merge / cleanup) reuses the
           // stored value, so adjust/continue below deliberately omit it.
-          ...(agentServerId ? { sync_mode: syncMode } : {}),
+          ...(codingAgentServerId ? { sync_mode: syncMode } : {}),
           // Development-mode: 'design' (default — fresh session, hand the
           // stored design doc to the agent via the -p prompt) or 'session'
           // (fork the design session, legacy behavior). Always sent — the
@@ -2615,8 +2618,8 @@ export default function RequirementDetail() {
         // render so the strip stays consistent with the form state.
         const stripBase = baseBranch || 'main';
         const stripNew = branchName || (req ? defaultBranchName(req.id, kindOf(req)) : '');
-        const stripEnv = agentServerId
-          ? (agentServers.find(s => s.id === agentServerId)?.name || 'remote')
+        const stripEnv = codingAgentServerId
+          ? (agentServers.find(s => s.id === codingAgentServerId)?.name || 'remote')
           : 'local';
         const stripModel = developerModel || developerDefaultModel || 'default';
         return (
@@ -2705,8 +2708,8 @@ export default function RequirementDetail() {
                       <ExecEnvSelect
                         className="form-input preflight-field-input"
                         servers={agentServers}
-                        value={agentServerId}
-                        onChange={setAgentServerId}
+                        value={codingAgentServerId}
+                        onChange={setCodingAgentServerId}
                         disabled={coding}
                         title={agentServers.length === 0 ? t('requirements.detail2.preflightAgentEmptyTitle') : ''}
                         localOptionLabel={t('requirements.detail2.preflightLocalExec')}
@@ -2729,13 +2732,13 @@ export default function RequirementDetail() {
                       fields in the Execution section speaking one vocabulary
                       (BASE / NEW / ENV / SYNC / MODEL) instead of letting the
                       sync selector fall back to a bare browser-default select. */}
-                  {agentServerId && (
+                  {codingAgentServerId && (
                     <div className="modal-field">
                       <label>{t('requirements.detail2.syncModeLabel')}</label>
                       <div className="preflight-field-card preflight-field-card--exec">
                         <span className="preflight-field-chip" aria-hidden="true">SYNC</span>
                         <SyncModeSelect
-                          enabled={!!agentServerId}
+                          enabled={!!codingAgentServerId}
                           value={syncMode === 'local' ? 'local' : ''}
                           onChange={(v) => setSyncMode(v === 'local' ? 'local' : 'remote')}
                           disabled={coding}
@@ -3645,8 +3648,8 @@ export default function RequirementDetail() {
           onGenerateDesign={() => requestDesignKnowledge(true)}
           onReset={() => setReq(prev => prev ? { ...prev, status: 'draft' } : prev)}
           agentServers={agentServers}
-          agentServerId={agentServerId}
-          onAgentServerChange={setAgentServerId}
+          agentServerId={designAgentServerId}
+          onAgentServerChange={setDesignAgentServerId}
         />
       )}
 
@@ -3711,15 +3714,15 @@ export default function RequirementDetail() {
                         <span className="flight-sep">·</span>
                         <span className="flight-leg">
                           <span className="flight-leg-value" title={
-                            agentServerId
-                              ? (agentServers.find(s => s.id === agentServerId)?.name || agentServerId)
+                            designAgentServerId
+                              ? (agentServers.find(s => s.id === designAgentServerId)?.name || designAgentServerId)
                               : t('requirements.detail2.preflightLocalExec')
                           }>
-                            {agentServerId
-                              ? (agentServers.find(s => s.id === agentServerId)?.name || agentServerId)
+                            {designAgentServerId
+                              ? (agentServers.find(s => s.id === designAgentServerId)?.name || designAgentServerId)
                               : t('requirements.detail2.preflightLocalExec')}
                           </span>
-                          {agentServerId && (
+                          {designAgentServerId && (
                             <>
                               <span className="flight-arrow">·</span>
                               <span className="flight-leg-value" title={
@@ -3782,17 +3785,17 @@ export default function RequirementDetail() {
                         <span className="design-env-cluster-caption">{t('requirements.detail2.execEnvCaption')}</span>
                         <ExecEnvSelect
                           servers={agentServers}
-                          value={agentServerId}
-                          onChange={setAgentServerId}
+                          value={designAgentServerId}
+                          onChange={setDesignAgentServerId}
                           title={agentServers.length === 0 ? t('requirements.detail2.designAgentServerEmptyTitle') : ''}
                           localOptionLabel={t('requirements.detail2.preflightLocalExec')}
                           style={{ minWidth: 160 }}
                         />
-                        {agentServerId && (
+                        {designAgentServerId && (
                           <>
                             <span className="design-env-cluster-divider" aria-hidden="true" />
                             <SyncModeSelect
-                              enabled={!!agentServerId}
+                              enabled={!!designAgentServerId}
                               value={designSyncMode}
                               onChange={setDesignSyncMode}
                               title={t('requirements.detail2.syncModeLabel')}
@@ -4070,8 +4073,8 @@ export default function RequirementDetail() {
               <span className="design-env-cluster-caption">{t('requirements.detail2.execEnvCaption')}</span>
               <ExecEnvSelect
                 servers={agentServers}
-                value={agentServerId}
-                onChange={setAgentServerId}
+                value={designAgentServerId}
+                onChange={setDesignAgentServerId}
                 disabled={architectWorking}
                 title={architectWorking
                   ? t('requirements.detail2.designAgentServerBusyTitle')
@@ -4079,11 +4082,11 @@ export default function RequirementDetail() {
                 localOptionLabel={t('requirements.detail2.preflightLocalExec')}
                 style={{ minWidth: 160 }}
               />
-              {agentServerId && (
+              {designAgentServerId && (
                 <>
                   <span className="design-env-cluster-divider" aria-hidden="true" />
                   <SyncModeSelect
-                    enabled={!!agentServerId}
+                    enabled={!!designAgentServerId}
                     value={designSyncMode}
                     onChange={setDesignSyncMode}
                     disabled={architectWorking}
@@ -4343,12 +4346,12 @@ export default function RequirementDetail() {
                     <span className="flight-sep">·</span>
                     <span className="flight-leg">
                       <span className="flight-leg-value" title={
-                        agentServerId
-                          ? (agentServers.find(s => s.id === agentServerId)?.name || agentServerId)
+                        codingAgentServerId
+                          ? (agentServers.find(s => s.id === codingAgentServerId)?.name || codingAgentServerId)
                           : t('requirements.detail2.preflightLocalExec')
                       }>
-                        {agentServerId
-                          ? (agentServers.find(s => s.id === agentServerId)?.name || agentServerId)
+                        {codingAgentServerId
+                          ? (agentServers.find(s => s.id === codingAgentServerId)?.name || codingAgentServerId)
                           : t('requirements.detail2.preflightLocalExec')}
                       </span>
                       <span className="flight-arrow">·</span>
@@ -4368,10 +4371,16 @@ export default function RequirementDetail() {
                     </span>
                   </div>
                 </div>
-                <div className="design-toolbar" style={{ marginBottom: 0 }}>
+                <div className="design-toolbar design-toolbar--no-wrap" style={{ marginBottom: 0 }}>
                   {/* Per-stage developer model. Default = currently
                       configured dev model; disabled while a coding job
-                      runs (Claude is working — model switch is locked). */}
+                      runs (Claude is working — model switch is locked).
+                      The `.design-toolbar--no-wrap` modifier keeps model +
+                      执行环境 + 开发模式 on a single row — the shared
+                      `.design-toolbar` rule is `flex-wrap: wrap`, which
+                      previously let the pickers rearrange across lines and
+                      read as broken. Horizontal scroll kicks in on truly
+                      narrow viewports instead. */}
                   <ModelSelect
                     value={developerModel}
                     onChange={setDeveloperModel}
@@ -4387,30 +4396,33 @@ export default function RequirementDetail() {
                   {/* Agent-server selector. Empty = local execution
                       (legacy default); non-empty routes the claude CLI to
                       that remote target. Only `ready` servers are listed. */}
-                  <label style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  <label style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
                     {t('requirements.detail2.devEnvLabel')}
                     <ExecEnvSelect
                       servers={agentServers}
-                      value={agentServerId}
-                      onChange={setAgentServerId}
+                      value={codingAgentServerId}
+                      onChange={setCodingAgentServerId}
                       disabled={coding}
-                      title={agentServerId
-                        ? t('requirements.detail2.devEnvOnTitle', { name: agentServers.find((s) => s.id === agentServerId)?.name ?? '' })
+                      title={codingAgentServerId
+                        ? t('requirements.detail2.devEnvOnTitle', { name: agentServers.find((s) => s.id === codingAgentServerId)?.name ?? '' })
                         : t('requirements.detail2.devEnvLocalTitle')}
                       localOptionLabel={t('requirements.detail2.devEnvLocalOption')}
-                      style={{ minWidth: 140 }}
+                      style={{ minWidth: 130 }}
                     />
                   </label>
                   {/* Development-mode selector. 'design' = design-based
                       dev (default; new session, hand the design as the
                       only input to the Agent). 'session' = session-based
                       dev (continue in the original design session, legacy
-                      behavior). Seeded from requirements.dev_mode. */}
-                  <label style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      behavior). Seeded from requirements.dev_mode.
+                      minWidth trimmed from 150→120 so the row fits at
+                      common viewport widths without overflowing into a
+                      horizontal scroll. */}
+                  <label style={{ fontSize: 12, color: 'var(--color-text-muted)', display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
                     {t('requirements.detail2.devModeLabel')}
                     <select
                       className="form-input"
-                      style={{ minWidth: 150 }}
+                      style={{ minWidth: 120 }}
                       value={devMode}
                       onChange={(e) => setDevMode(e.target.value as 'session' | 'design')}
                       disabled={coding}

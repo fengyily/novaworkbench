@@ -417,6 +417,23 @@
   margin-bottom: 12px;
   flex-wrap: wrap;
 }
+/* Coding-stage toolbar — the developer-section instance of .design-toolbar
+   holds model + 执行环境 + 开发模式. The previous shared rule let the row
+   wrap to a second line as soon as the page got slightly narrower than the
+   natural width, which made 执行环境 + 开发模式 appear on separate rows and
+   read as "broken" (the user complaint: "执行环境与开发模式存在换行的情况").
+   This variant keeps the row on one line and lets the user scroll
+   horizontally on truly narrow viewports instead of silently rearranging the
+   pickers across lines — same UX as a normal toolbar that fits its content. */
+.design-toolbar--no-wrap {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.design-toolbar--no-wrap > * {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 /* Sub-cluster inside .design-toolbar: groups Agent Server + SyncMode under a
    single "执行环境" caption so the toolbar reads as two concerns
    (model / execution-environment) + a right-anchored action group, instead
