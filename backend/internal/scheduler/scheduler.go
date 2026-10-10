@@ -92,6 +92,22 @@ type DesignCodingParams struct {
 	SyncMode string
 }
 
+// WikiParams is the wizard-facing shape for a scheduled knowledge-base
+// document run (kind=wiki requirements only). Same field semantics as
+// DesignParams — Model == "" means "use the wiki role default",
+// AgentServerID == "" means local execution, SyncMode == "" means "keep
+// the requirement row's existing sync_mode". It is a separate type (and a
+// separate Executor method) rather than a flag on DesignParams because the
+// two stages write different columns: design → design_docs, wiki →
+// wiki_docs.
+type WikiParams struct {
+	RequirementID string
+	Model         string
+	ReadKnowledge bool
+	AgentServerID string
+	SyncMode      string
+}
+
 // Executor is the wizard's adapter surface. The handler package provides
 // the concrete implementation (handler/schedule_executor.go). Every method
 // returns the JobStore job id on success; non-nil err means the dispatch
@@ -100,6 +116,7 @@ type Executor interface {
 	RunScheduledDesign(ctx context.Context, p DesignParams) (jobID string, err error)
 	RunScheduledCoding(ctx context.Context, p CodingParams) (jobID string, err error)
 	RunScheduledDesignAndCoding(ctx context.Context, p DesignCodingParams) (jobID string, err error)
+	RunScheduledWiki(ctx context.Context, p WikiParams) (jobID string, err error)
 }
 
 // Scheduler polls scheduled_tasks for due rows and dispatches them through
@@ -324,6 +341,17 @@ func (s *Scheduler) dispatch(t model.ScheduledTask) {
 			BaseBranch:          t.BaseBranch,
 			SplitTasks:          t.SplitTasks,
 			SyncMode:            t.SyncMode,
+		})
+	case model.SchedTypeWiki:
+		// Knowledge-base document run. Reuses the design-stage columns
+		// (model / agent_server_id / sync_mode) because a wiki row has
+		// exactly one stage — see WikiParams for the mapping rationale.
+		jobID, err = s.exec.RunScheduledWiki(ctx, WikiParams{
+			RequirementID: t.RequirementID,
+			Model:         t.Model,
+			ReadKnowledge: t.ReadKnowledge,
+			AgentServerID: t.AgentServerID,
+			SyncMode:      t.SyncMode,
 		})
 	default:
 		// Defensive — DB guard at Create time already rejects bad types.

@@ -358,6 +358,8 @@ export const components = {
       designSectionHint: '先生成技术方案',
       codingSection: '开发',
       codingSectionHint: '再编写代码并提交',
+      wikiSection: '知识库',
+      wikiSectionHint: '阅读项目代码并沉淀知识库文档',
       submitImmediate: '创建并开始',
       submitScheduled: '创建并定时',
       launchFailed: '需求已创建，但自动启动失败：{{reason}}，请在详情页手动启动',

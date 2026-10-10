@@ -1181,7 +1181,9 @@ export const requirementsApi = {
   // a JobStore job. Returns { job_id } the caller streams via
   // /api/wizard/jobs/{id}/stream. Same shape as the wizard's
   // architect-design / start-coding entries.
-  generateWikiDoc: (id: string, opts: { model?: string; claude_config_id?: string; agent_server_id?: string; read_knowledge?: boolean } = {}) =>
+  // sync_mode is only honored when agent_server_id is set: '' = origin
+  // clone/push, 'local' = git bundle over SFTP.
+  generateWikiDoc: (id: string, opts: { model?: string; claude_config_id?: string; agent_server_id?: string; read_knowledge?: boolean; sync_mode?: '' | 'local' } = {}) =>
     api.post<{ job_id: string }>(`/api/wizard/wiki/generate`, { requirement_id: id, ...opts }),
   // PromoteFromIdea: summarize an idea's accumulated discussion (description +
   // chat history + acceptance_criteria) into a brand-new requirement row. The
@@ -2314,7 +2316,12 @@ export const agentServersApi = {
 // and internal/scheduler for the polling loop.
 // ────────────────────────────────────────────────────────────────────────
 
-export type ScheduledTaskType = 'design' | 'coding' | 'design_and_coding';
+// 'wiki' is the knowledge-base document run, valid only for kind=wiki
+// requirements (the backend rejects every other kind ↔ task_type pairing
+// with WIKI_ONLY / NOT_WIKI). It reuses the design-stage fields below
+// (model / agent_server_id / sync_mode) because a wiki row has exactly one
+// stage.
+export type ScheduledTaskType = 'design' | 'coding' | 'design_and_coding' | 'wiki';
 export type ScheduledTaskStatus =
   | 'pending'
   | 'running'

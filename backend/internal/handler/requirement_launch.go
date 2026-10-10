@@ -69,6 +69,14 @@ func resolveLaunchTaskType(req *model.Requirement, mode string) (string, *apiFai
 	if req.Kind == service.KindIdea {
 		return "", fail(400, launchErrNotAllowed, "idea 类型需求不支持启动计划")
 	}
+	// Wiki rows have exactly one stage (generate the knowledge doc) and no
+	// analyst stage, so both modes resolve to the same type and neither can
+	// hit LAUNCH_NEEDS_ANALYSIS. This check MUST precede the SkipDesign
+	// branch below: CreateRequirementForm forces skip_design=true for wiki,
+	// which would otherwise map it onto the coding path.
+	if req.Kind == service.KindWiki {
+		return model.SchedTypeWiki, nil
+	}
 	// Coding-only when SkipDesign is set — the "直接开发" flow.
 	if req.SkipDesign {
 		return model.SchedTypeCoding, nil
@@ -119,6 +127,15 @@ func dispatchLaunch(req *model.Requirement, spec *model.LaunchSpec, h *WizardHan
 		taskType, failure := resolveLaunchTaskType(req, "immediate")
 		if failure != nil {
 			return "", "", failure
+		}
+		// Wiki dispatches BEFORE immediatePreGate. That gate guards
+		// "立即生成方案并开发" and rejects kind=wiki outright
+		// (wizard_immediate.go) — a different semantic from "立即生成知识库
+		// 文档". Relaxing the gate would open the coding path for wiki rows;
+		// branching here keeps it shut while letting wiki through its own
+		// guard (prepareWikiDoc's kind + job checks).
+		if taskType == model.SchedTypeWiki {
+			return dispatchImmediateWiki(req, spec, h)
 		}
 		// pre-gate mirrors wizard_immediate.go's HTTP entry check: status
 		// must be one of the wizard-allowed set, no live design/coding job
@@ -218,6 +235,25 @@ func dispatchImmediateCoding(req *model.Requirement, spec *model.LaunchSpec, h *
 	return "immediate", "", nil
 }
 
+// dispatchImmediateWiki handles the immediate / wiki path: fire the
+// knowledge-doc generator right after the requirement row is inserted.
+// Delegates to WizardHandler.RunScheduledWiki — the same entry point the
+// scheduler uses — with a nil callback (Create's "launched at creation
+// time" semantics: there is no scheduled_tasks row to flip on finish).
+//
+// The design-stage fields of the LaunchSpec carry the wiki configuration
+// (design_model / design_agent_server_id / sync_mode), matching how
+// scheduled_tasks stores a wiki row — see scheduler.WikiParams.
+func dispatchImmediateWiki(req *model.Requirement, spec *model.LaunchSpec, h *WizardHandler) (string, string, *apiFailure) {
+	if _, err := h.RunScheduledWiki(req.ID, spec.DesignModel, spec.ReadKnowledge, spec.DesignAgentServerID, spec.SyncMode, nil); err != nil {
+		if af, ok := err.(*apiFailure); ok {
+			return "", "", af
+		}
+		return "", "", fail(500, "INTERNAL", "启动知识库文档生成失败: "+err.Error())
+	}
+	return "immediate", "", nil
+}
+
 // dispatchScheduled handles the scheduled path: assemble a
 // model.ScheduledTask, validate the recurrence block using the same
 // helpers schedule.go's Create uses (parseRunAt / validRecurTime /
@@ -285,6 +321,13 @@ func dispatchScheduled(req *model.Requirement, spec *model.LaunchSpec, schedSvc 
 		SplitTasks:          spec.SplitTasks,
 		CodingModel:         spec.CodingModel,
 		CodingAgentServerID: spec.CodingAgentServerID,
+		// SyncMode was previously dropped on this path (the direct
+		// POST /api/schedules route at schedule.go has always carried it),
+		// so a launch-spec schedule silently fell back to origin
+		// clone/push even when the user picked 「本地（git bundle）」. The
+		// wiki flow hits this immediately — knowledge-base requirements
+		// commonly live in repos with no reachable remote.
+		SyncMode:            model.NormalizeSyncMode(spec.SyncMode),
 		Recurrence:          recurrence,
 		RecurTime:           spec.Schedule.RecurTime,
 		RecurDays:           spec.Schedule.RecurDays,

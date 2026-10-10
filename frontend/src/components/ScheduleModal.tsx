@@ -144,12 +144,17 @@ export function ScheduleModal({
   const [errorMsg, setErrorMsg] = useState('');
 
   const isMerged = taskType === 'design_and_coding';
-  const isDesign = taskType === 'design' || taskType === 'design_and_coding';
+  // 'wiki' reuses the whole design-stage block (model + exec env + sync
+  // mode) — a wiki row carries exactly those three knobs, on exactly the
+  // same wire fields. isCoding stays false for wiki, which automatically
+  // hides the branch / base-branch / split-tasks inputs.
+  const isDesign = taskType === 'design' || taskType === 'design_and_coding' || taskType === 'wiki';
   const isCoding = taskType === 'coding' || taskType === 'design_and_coding';
 
   const titlePrefix = useMemo(() => {
     if (taskType === 'design') return t('schedules.modal.titleDesign');
     if (taskType === 'coding') return t('schedules.modal.titleCoding');
+    if (taskType === 'wiki') return t('schedules.modal.titleWiki');
     return t('schedules.modal.titleDesignCoding');
   }, [taskType, t]);
 
@@ -216,6 +221,10 @@ export function ScheduleModal({
         setErrorMsg(t('schedules.modal.errRunAtTooSoon'));
       } else if (code === 'IDEA_NOT_DEVELOPABLE') {
         setErrorMsg(t('schedules.modal.errIdeaNotDevelopable'));
+      } else if (code === 'WIKI_ONLY') {
+        setErrorMsg(t('schedules.modal.errWikiOnly'));
+      } else if (code === 'NOT_WIKI') {
+        setErrorMsg(t('schedules.modal.errNotWiki'));
       } else if (code === 'INVALID_RECUR_TIME') {
         setErrorMsg(t('schedules.modal.errRecurTime'));
       } else if (code === 'INVALID_RECUR_DAYS') {
@@ -254,7 +263,11 @@ export function ScheduleModal({
             {t('schedules.modal.introPrefix')}<strong>{requirementTitle || t('schedules.modal.sourceFallback')}</strong>{t('schedules.modal.introMiddle')}
             {isMerged
               ? t('schedules.modal.introDesignCoding')
-              : (taskType === 'design' ? t('schedules.modal.introDesign') : t('schedules.modal.introCoding'))}
+              : taskType === 'design'
+                ? t('schedules.modal.introDesign')
+                : taskType === 'wiki'
+                  ? t('schedules.modal.introWiki')
+                  : t('schedules.modal.introCoding')}
             {t('schedules.modal.introSuffix')}
           </p>
 
@@ -352,7 +365,9 @@ export function ScheduleModal({
                 <div className="modal-section-title">{t('schedules.modal.sectionDesignTitle')}</div>
               )}
               <div className="modal-field">
-                <label>{t('schedules.modal.designModelLabel')}</label>
+                <label>{taskType === 'wiki'
+                  ? t('schedules.modal.wikiModelLabel')
+                  : t('schedules.modal.designModelLabel')}</label>
                 <ModelSelect
                   value={model}
                   onChange={setModel}
@@ -392,7 +407,7 @@ export function ScheduleModal({
                     this matches the model field above, which also pairs a
                     for-less label with its control. */}
                 <label>
-                  {taskType === 'design'
+                  {taskType === 'design' || taskType === 'wiki'
                     ? t('schedules.modal.designAgentServerLabel')
                     : t('schedules.modal.designAgentServerLabelMerged')}
                 </label>
@@ -407,7 +422,7 @@ export function ScheduleModal({
                       : ''
                   }
                   localOptionLabel={
-                    taskType === 'design'
+                    taskType === 'design' || taskType === 'wiki'
                       ? t('schedules.modal.designAgentServerDefault')
                       : t('schedules.modal.designAgentServerDefaultMerged')
                   }
@@ -433,7 +448,7 @@ export function ScheduleModal({
                   disabled={submitting}
                 />
                 <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
-                  {t('schedule.modal.syncModeHelp')}
+                  {t('schedules.modal.syncModeHelp')}
                 </small>
               </div>
             </>
@@ -521,7 +536,7 @@ export function ScheduleModal({
                   disabled={submitting}
                 />
                 <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
-                  {t('schedule.modal.syncModeHelp')}
+                  {t('schedules.modal.syncModeHelp')}
                 </small>
               </div>
 

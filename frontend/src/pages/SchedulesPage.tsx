@@ -41,6 +41,7 @@ const TYPE_OPTIONS: { value: ScheduledTaskType; labelKey: string }[] = [
   { value: 'design', labelKey: 'schedules.type.design' },
   { value: 'coding', labelKey: 'schedules.type.coding' },
   { value: 'design_and_coding', labelKey: 'schedules.type.designCoding' },
+  { value: 'wiki', labelKey: 'schedules.type.wiki' },
 ];
 
 const statusLabelKeys: Record<ScheduledTaskStatus, string> = {
@@ -54,6 +55,7 @@ const typeLabelKeys: Record<ScheduledTaskType, string> = {
   design: 'schedules.type.design',
   coding: 'schedules.type.coding',
   design_and_coding: 'schedules.type.designCoding',
+  wiki: 'schedules.type.wiki',
 };
 
 // formatRecurChip renders a recurring row's cadence, e.g. "🔁 每天 09:00" or
@@ -407,7 +409,9 @@ function ScheduleRow({
     ? tr('schedules.typeDesignTitle')
     : isMerged
       ? tr('schedules.typeMergedTitle')
-      : tr('schedules.typeCodingTitle');
+      : t.task_type === 'wiki'
+        ? tr('schedules.typeWikiTitle')
+        : tr('schedules.typeCodingTitle');
   return (
     <div className={rowClass}>
       <div className="schedules-row-main">

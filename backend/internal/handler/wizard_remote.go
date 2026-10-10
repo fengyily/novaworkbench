@@ -146,6 +146,25 @@ type remoteRunInput struct {
 	// idle timer resets on every NDJSON line. Populated by the helper
 	// (caller leaves it nil).
 	heartbeats chan<- struct{}
+	// SystemPrompt is forwarded to the worker as `systemPrompt`. Empty for
+	// the architect / coding callers — those carry the role persona inside
+	// the -p payload itself (see workerRunRequest's docstring), so leaving
+	// it zero keeps their behaviour byte-identical. The wiki caller passes
+	// its role persona here so the remote run gets the same
+	// --append-system-prompt the local run gets (plan mode appends rather
+	// than replaces; see agent-worker/server.mjs buildClaudeArgs).
+	SystemPrompt string
+	// DisallowedTools is forwarded to the worker as `disallowedTools`
+	// (→ claude --disallowedTools "A B C"). Empty for architect / coding.
+	// The wiki caller passes wikiDisallowedTools; dropping it on the remote
+	// path would let Claude spawn Explore sub-agents and return nothing but
+	// a "等待回收中…" preamble, which finalizeWikiRun then rejects — i.e.
+	// remote wiki would fail 100% of the time.
+	DisallowedTools []string
+	// stageLabel is the log tag passed to parseStreamJSONFromReader.
+	// Empty falls back to "architect-design" so existing callers keep the
+	// exact log prefix they had before the field existed.
+	stageLabel string
 }
 
 // remoteArchitectInput is the architect-stage wrapper around remoteRunInput.
@@ -936,7 +955,7 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 	opts := llm.StreamOpts{
 		Prompt:                 remotePrompt,
 		WorkDir:                wtPath,
-		SystemPrompt:           "",
+		SystemPrompt:           in.SystemPrompt,
 		Model:                  cliModelArg(in.model),
 		ClaudeConfigID:         in.claudeConfigID,
 		SessionID:              in.sessionArg,
@@ -944,6 +963,7 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 		Fork:                   in.fork,
 		ForkSessionID:          in.forkSessionID,
 		PermissionMode:         in.PermissionMode,
+		DisallowedTools:        in.DisallowedTools,
 		OverrideSettingSources: &ignoreLocal,
 	}
 	envPairs := h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, in.claudeConfigID)
@@ -990,7 +1010,11 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 		return claudeStreamOutcome{errMsg: fmt.Sprintf("worker 返回 HTTP %d: %s", resp.StatusCode, truncateStr(string(errBody), 600))}, cleanup, nil
 	}
 
-	out := parseStreamJSONFromReader(ctx, resp.Body, jobSink{in.job}, "architect-design", in.usage, in.heartbeats)
+	stageLabel := in.stageLabel
+	if stageLabel == "" {
+		stageLabel = "architect-design"
+	}
+	out := parseStreamJSONFromReader(ctx, resp.Body, jobSink{in.job}, stageLabel, in.usage, in.heartbeats)
 	out.SessionFileMissingSide = sessionMissingSide
 	out.MissingSIDs = missingSIDs
 
@@ -1105,6 +1129,36 @@ func (h *WizardHandler) syncSessionDownWithTimeout(ctx context.Context, runFaile
 func (h *WizardHandler) runRemoteArchitectDesign(in *remoteArchitectInput) claudeStreamOutcome {
 	if in == nil || in.remoteRunInput == nil {
 		return claudeStreamOutcome{errMsg: "缺少 remoteArchitectInput"}
+	}
+	out, cleanup, err := h.prepareRemoteAgentRun(in.remoteRunInput)
+	defer cleanup()
+	if err != nil {
+		return claudeStreamOutcome{errMsg: err.Error()}
+	}
+	return out
+}
+
+// remoteWikiInput is the wiki-stage wrapper around remoteRunInput, the
+// sibling of remoteArchitectInput. Named rather than aliased so wiki-only
+// knobs (a wiki_docs write helper, a wiki-specific log tag, …) have a place
+// to land without growing the shared struct.
+type remoteWikiInput struct {
+	*remoteRunInput
+}
+
+// runRemoteWikiDoc is the wiki-stage counterpart of
+// runRemoteArchitectDesign: the plan-mode knowledge-doc run executes on the
+// chosen Agent server and comes back as the same claudeStreamOutcome the
+// local branch produces, so execWikiDoc's terminal handling
+// (finalizeWikiRun) is shared verbatim between the two surfaces.
+//
+// The caller MUST populate in.SystemPrompt (the wiki role persona) and
+// in.DisallowedTools (wikiDisallowedTools) — unlike the architect stage,
+// wiki depends on both reaching the remote claude. See the field comments
+// on remoteRunInput for why.
+func (h *WizardHandler) runRemoteWikiDoc(in *remoteWikiInput) claudeStreamOutcome {
+	if in == nil || in.remoteRunInput == nil {
+		return claudeStreamOutcome{errMsg: "缺少 remoteWikiInput"}
 	}
 	out, cleanup, err := h.prepareRemoteAgentRun(in.remoteRunInput)
 	defer cleanup()
@@ -1432,7 +1486,8 @@ func logRemoteLatestCommit(ctx context.Context, client *gossh.Client, job *store
 }
 
 // requirementSessionIDs returns the deduplicated, non-empty set of Claude
-// session ids relevant to this requirement — analysis / design / coding — plus
+// session ids relevant to this requirement — analysis / design / coding /
+// wiki — plus
 // sourceSID as a fallback so the file that will actually be `--resume`d is
 // always in the set. Returns nil (empty) when the requirement has no recorded
 // session ids and sourceSID is empty, which signals syncRequirementSessionsUp
@@ -1452,6 +1507,11 @@ func requirementSessionIDs(reqRow *model.Requirement, sourceSID string) []string
 		add(reqRow.AnalysisSessionID)
 		add(reqRow.DesignSessionID)
 		add(reqRow.CodingSessionID)
+		// kind=wiki rows carry their conversation on wiki_session_id (never
+		// on design_session_id). Without this the second and later remote
+		// wiki runs would find no jsonl to --resume and silently start over
+		// with no prior context.
+		add(reqRow.WikiSessionID)
 	}
 	add(sourceSID)
 	return ids
@@ -1811,11 +1871,18 @@ func workerCodeStale(h workerHealth) bool {
 // process env, so we don't need to strip the ANTHROPIC_* keys — the worker
 // passes the map straight to the child.
 //
-// systemPrompt is intentionally left empty for the wizard remote path: the
-// developer's persona is passed in the prompt itself (the -p payload
-// includes the role system prompt as a preamble), matching the previous
-// CLI invocation's behavior. If a future caller wants to pass it via
-// --system-prompt, set opts.SystemPrompt before this is called.
+// systemPrompt is forwarded verbatim from opts and is empty for the
+// architect / coding remote paths: their persona is passed in the prompt
+// itself (the -p payload includes the role system prompt as a preamble),
+// matching the previous CLI invocation's behavior. The wiki path DOES set
+// it (remoteRunInput.SystemPrompt) so the remote run gets the same role
+// persona the local run gets; in plan mode the worker appends it via
+// --append-system-prompt rather than replacing the CLI's plan-mode
+// instructions.
+//
+// disallowedTools is likewise forwarded verbatim; nil (architect / coding)
+// is omitempty-dropped, so only the wiki path actually puts a
+// --disallowedTools flag on the remote claude command line.
 //
 // The PermissionMode field is forwarded verbatim: "plan" → worker emits
 // --permission-mode plan (architect stage), "" → worker emits
@@ -1848,15 +1915,21 @@ func workerRunRequest(opts llm.StreamOpts, envPairs []string, srv *model.AgentSe
 		extraPaths = strings.Join(splitExtraPathLines(srv.ExtraPaths), ":")
 	}
 	return workerRunBody{
-		WorkDir:        opts.WorkDir,
-		Prompt:         opts.Prompt,
-		Model:          opts.Model,
-		SessionID:      opts.SessionID,
-		Resume:         opts.Resume,
-		Fork:           opts.Fork,
-		ForkSessionID:  opts.ForkSessionID,
-		PermissionMode: opts.PermissionMode,
-		Env:            envMap,
+		WorkDir:       opts.WorkDir,
+		Prompt:        opts.Prompt,
+		Model:         opts.Model,
+		SystemPrompt:  opts.SystemPrompt,
+		SessionID:     opts.SessionID,
+		Resume:        opts.Resume,
+		Fork:          opts.Fork,
+		ForkSessionID: opts.ForkSessionID,
+		// Tool denylist. omitempty keeps it off the wire for the architect /
+		// coding callers (which pass nil), so their request bodies are
+		// byte-identical to the pre-field shape. The wiki caller relies on
+		// this reaching the worker — see remoteRunInput.DisallowedTools.
+		DisallowedTools: opts.DisallowedTools,
+		PermissionMode:  opts.PermissionMode,
+		Env:             envMap,
 		// Pass the config id so the worker can mirror ANTHROPIC_MODEL into
 		// the inline --settings JSON (the worker's buildSettingsArg already
 		// does this for opts.model; claudeConfigId is informational today but

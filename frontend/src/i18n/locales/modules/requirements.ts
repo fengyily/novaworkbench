@@ -391,6 +391,11 @@ export const requirements = {
     architectModelLabel: '方案模型',
     architectModelTitle: '方案设计阶段使用的模型，开始前即可选择',
     architectModelBusyTitle: 'Claude 正在制定技术方案，暂不能切换模型',
+    // Wiki stage reuses the architect model/config state (a wiki row has no
+    // architect stage), but gets its own copy so the label reads right.
+    wikiModelLabel: '知识库模型',
+    wikiModelTitle: '生成知识库文档使用的模型，开始前即可选择',
+    wikiModelBusyTitle: 'Claude 正在生成知识库文档，暂不能切换模型',
     analystModelLabel: '分析模型',
     analystModelTitle: '需求分析阶段使用的模型，开始分析前即可选择',
     // Schedule (定时) entry points inside wizard sections.
@@ -400,6 +405,8 @@ export const requirements = {
     scheduleDesignCodingBtn: '定时生成方案并开发',
     scheduleCodingTitle: '设置未来时间自动开始开发，可预选模型与执行环境',
     scheduleCodingBtn: '定时开发',
+    scheduleWikiTitle: '设置未来时间自动生成知识库文档，可预选模型、执行环境与同步方式',
+    scheduleWikiBtn: '定时生成知识库',
     // Architect-stage CTAs.
     processToggleHide: '▼ 收起思考过程',
     processToggleShow: '▶ 思考过程',

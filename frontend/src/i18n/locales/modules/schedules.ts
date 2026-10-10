@@ -46,10 +46,12 @@ export const schedules = {
     design: '方案',
     coding: '开发',
     designCoding: '方案+开发',
+    wiki: '知识库',
   },
   typeDesignTitle: '定时方案生成',
   typeCodingTitle: '定时开发',
   typeMergedTitle: '定时方案设计 + 开发',
+  typeWikiTitle: '定时生成知识库文档',
   modelTitle: '模型',
   createdTitle: '创建时间',
   createdPrefix: '创建于',
@@ -76,6 +78,7 @@ export const schedules = {
     titleDesign: '⏰ 定时生成方案',
     titleCoding: '⏰ 定时开发',
     titleDesignCoding: '⏰ 定时生成方案并开发',
+    titleWiki: '⏰ 定时生成知识库文档',
     close: '关闭',
     // Recurrence controls in the create modal.
     recurrenceLabel: '执行频率',
@@ -95,6 +98,7 @@ export const schedules = {
     introDesign: '生成技术方案',
     introCoding: '开始开发',
     introDesignCoding: '先生成方案，完成后自动开始开发',
+    introWiki: '生成知识库文档',
     introSuffix: '。',
     sourceFallback: '该需求',
     runAtLabel: '计划执行时间',
@@ -127,6 +131,7 @@ export const schedules = {
     sectionDesignTitle: '方案设计',
     sectionCodingTitle: '开发',
     designModelLabel: '方案模型',
+    wikiModelLabel: '知识库模型',
     codingModelLabel: '开发模型',
     codingAgentServerLabel: '开发执行环境',
     codingAgentServerDefault: '本地执行',
@@ -138,6 +143,8 @@ export const schedules = {
     errAlreadyScheduled: '已存在一条 pending 定时任务，请先到「定时任务」页取消或删除。',
     errRunAtTooSoon: '计划时间距现在太近，请选一个至少 30 秒后的时间。',
     errIdeaNotDevelopable: '「想法」类需求不能直接安排开发，请先转为需求。',
+    errWikiOnly: '「知识库」类需求的定时任务只能是「生成知识库文档」。',
+    errNotWiki: '「生成知识库文档」定时任务仅适用于「知识库」类需求。',
     // Used by DesignCodingImmediateModal when backend surfaces a NO_SESSION
     // failure from prepareArchitectDesign. Falls back to errSubmit if you want
     // a single generic message.

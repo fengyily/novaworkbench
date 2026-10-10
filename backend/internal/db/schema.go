@@ -416,7 +416,7 @@ CREATE INDEX IF NOT EXISTS idx_orch_batches_active ON orchestration_batches(stat
 --   running → failed                  (boot recovery)
 CREATE TABLE IF NOT EXISTS scheduled_tasks (
 	id                    TEXT PRIMARY KEY,
-	task_type             TEXT NOT NULL DEFAULT 'design',   -- 'design' | 'coding' | 'design_and_coding'
+	task_type             TEXT NOT NULL DEFAULT 'design',   -- 'design' | 'coding' | 'design_and_coding' | 'wiki'（无 CHECK 约束，取值白名单在 service.ScheduledTaskService.Create）
 	requirement_id        TEXT NOT NULL,
 	project_id            TEXT NOT NULL DEFAULT '',
 	requirement_title     TEXT NOT NULL DEFAULT '',
