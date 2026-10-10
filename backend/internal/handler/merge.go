@@ -1643,6 +1643,31 @@ func lookupGitIdentity(projectSvc *service.ProjectService, platformSvc *service.
 	return tok.GitUserName, tok.GitUserEmail
 }
 
+// buildIdentityEnv returns the GIT_AUTHOR_* / GIT_COMMITTER_* env entries
+// for the given (name, email). Either side may be empty; the matching pair
+// is skipped. Returned slice is nil when both sides are empty, so callers
+// can append unconditionally. Shared by sub_task_runner.go and
+// wizard_orchestration.go so the env shape is locked in one place — the
+// existing inline form at merge.go Resolve (merge.go:889-897) is
+// intentionally kept inline to avoid an unrelated refactor.
+//
+// Empty-on-any-miss is the contract: projects whose platform token has
+// no git_user_name / git_user_email (or no platform token at all) must
+// keep falling back to the host's ~/.gitconfig rather than emit empty
+// GIT_AUTHOR_NAME= / GIT_AUTHOR_EMAIL= strings, which git would treat as
+// "set identity to the empty string" and reject with "Please tell me who
+// you are" — exactly the bug this helper exists to prevent.
+func buildIdentityEnv(name, email string) []string {
+	var env []string
+	if name != "" {
+		env = append(env, "GIT_AUTHOR_NAME="+name, "GIT_COMMITTER_NAME="+name)
+	}
+	if email != "" {
+		env = append(env, "GIT_AUTHOR_EMAIL="+email, "GIT_COMMITTER_EMAIL="+email)
+	}
+	return env
+}
+
 // Cleanup removes the requirement's isolated worktree (and prunes git's
 // worktree metadata) plus its dev branch, so finished/abandoned requirements
 // don't leave stray directories on disk. Refuses a dirty worktree unless

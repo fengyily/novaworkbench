@@ -1264,6 +1264,9 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	// 路径不动 —— 远端 push 认证已通过 origin URL 完成，Part B 不动远端）。
 	credEnv, credCleanup := gitCredentialEnv(h.projectSvc, h.platformSvc, req)
 	defer credCleanup()
+	if name, email := lookupGitIdentity(h.projectSvc, h.platformSvc, req); name != "" || email != "" {
+		credEnv = append(credEnv, buildIdentityEnv(name, email)...)
+	}
 	cmd, cancel, _ := h.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         executorPrompt,
 		WorkDir:        batch.WorkDir,
