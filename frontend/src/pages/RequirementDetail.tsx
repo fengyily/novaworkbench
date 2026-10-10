@@ -2769,6 +2769,23 @@ export default function RequirementDetail() {
     req.status === 'draft' || req.status === 'analyzing' ||
     req.status === 'done' || req.status === 'archived'
   );
+  // Visibility of the architect (方案设计) section. The previous condition
+  // covered the whole developer/done tail, so a skip_design requirement got an
+  // empty shell card wedged between 「需求分析」 and 「开发实现」: no design body,
+  // no live stream, every CTA filtered out — just a row of model/env pickers
+  // duplicating the ones the draft-action-panel already renders (they share the
+  // same state). Render only when the section actually has something to show:
+  // we're in the architect stage, a design body exists, or a stream is
+  // live/errored.
+  const showDesignSection =
+    reqKind !== 'wiki' && (stage === 'architect' || hasDesign || designPanelOpen);
+  // The toolbar pickers only matter while this section can still start or
+  // refine a design run: 「重新生成」 (status === 'designing') and DocRefineChat
+  // (designing | designed). In draft the draft-action-panel owns the same
+  // state, and in developing/done nothing here can launch a run — both degrade
+  // to the read-only ExecEnvBadge, with the model surfaced by the stepper's
+  // .stage-model-tag instead of a second dead dropdown.
+  const designConfigurable = req.status === 'designing' || req.status === 'designed';
 
   return (
     <div className="req-detail">
@@ -3976,8 +3993,9 @@ export default function RequirementDetail() {
                           specific execution environment MUST render the
                           environment selector on the same screen. This panel
                           is the only place the picker lives for the FIRST
-                          run (skip_analysis path) — the architect section is
-                          not rendered until a design has already executed. */}
+                          run (skip_analysis path) — `showDesignSection` keeps
+                          the architect section hidden until a design run has
+                          actually started or produced a body. */}
                       <div className="design-env-cluster">
                         <span className="design-env-cluster-caption">{t('requirements.detail2.execEnvCaption')}</span>
                         <ExecEnvSelect
@@ -4229,18 +4247,74 @@ export default function RequirementDetail() {
           design run lives on its own dedicated 「📚 知识库文档」section below
           and writes to wiki_docs / wiki_session_id, never design_docs. So
           hide the architect toolbar (model picker / agent server picker /
-          "方案完成" / DocRefineChat) for kind=wiki. */}
-      {(stage === 'architect' || req.status === 'designed' || stage === 'developer' || stage === 'done') && reqKind !== 'wiki' && (
+          "方案完成" / DocRefineChat) for kind=wiki — the `reqKind !== 'wiki'`
+          guard lives inside `showDesignSection`. */}
+      {showDesignSection && (
         <div className="detail-section design-section">
-          {/* Toolbar splits into three readable blocks:
-              ─ Model       ── which Claude persona/model drives the design run
-              ─ 执行环境    ── where + how the code is shipped (Agent server + sync mode)
-              ─ Actions     ── process toggle / regenerate / export PDF / fullscreen, anchored right
-              The middle block sits inside a bordered cluster (.design-env-cluster)
-              so the two pickers read as ONE concern, not two loose label-pills.
-              The previous flat-row layout had three independent <label> blocks
-              stacked horizontally — at narrow widths they piled up with no
-              visual grouping, which was the "排版有点乱" feedback. */}
+          {/* Section header — mirrors 需求分析 / 知识库文档 / 开发实现. Without it
+              this section opened straight onto a row of dropdowns, which read
+              as "loose selects dumped between two cards". The persisted env
+              badge and the action group live here too, so they stay available
+              in states where the configuration toolbar below is hidden. */}
+          <div className="section-header">
+            <h3>
+              <StageIcon stage="architect_design" size={16} className="icon-mr" />
+              {t('requirements.detail2.logSessionStageArchitect')}
+            </h3>
+            {/* Persisted design environment: shows which Agent Server (or 本地)
+                the architect stage last ran on, read back from
+                requirements.design_agent_server_id. Only rendered once a design
+                has actually run on a remote server so the header stays clean
+                for local-only requirements. */}
+            {req.design_agent_server_id && (
+              <ExecEnvBadge
+                serverId={req.design_agent_server_id}
+                serverName={req.design_agent_server_name}
+                compact
+              />
+            )}
+            {/* Action group — pinned to the right via .design-toolbar-actions
+                (margin-left: auto). Previously the export PDF button alone
+                carried `style={{ marginLeft: 'auto' }}`, which broke whenever
+                export wasn't shown — buttons drifted left mid-flow. */}
+            <div className="design-toolbar-actions">
+              {showDesignToggle && (
+                <button
+                  className="btn btn-sm process-toggle"
+                  onClick={() => setShowDesignProcess(v => !v)}
+                  aria-expanded={designPanelOpen}
+                >
+                  {designPanelOpen ? t('requirements.detail2.processToggleHide') : t('requirements.detail2.processToggleShow')}
+                </button>
+              )}
+              {req.status === 'designing' && hasDesign && (
+                <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={designing}><IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}</button>
+              )}
+              {hasDesign && (
+                <button
+                  className="btn btn-sm"
+                  onClick={handleExportPdf}
+                  disabled={exporting}
+                  title={t('requirements.detail2.exportPdfTitle')}
+                >
+                  {exporting ? <><IconHourglass size={13} className="btn-icon" />{t('requirements.detail2.exportingPdf')}</> : <><IconFileText size={13} className="btn-icon" />{t('requirements.detail2.exportPdfBtn')}</>}
+                </button>
+              )}
+              {(designPanelOpen || hasDesign) && (
+                <FullscreenButton isFullscreen={designFs.isFullscreen} onClick={designFs.toggle} />
+              )}
+            </div>
+          </div>
+          {/* Configuration toolbar — model + 执行环境 (Agent server + sync mode).
+              Gated on `designConfigurable` so it only appears while this
+              section can still drive a run; the actions moved up into the
+              header above. The 执行环境 block sits inside a bordered cluster
+              (.design-env-cluster) so the two pickers read as ONE concern, not
+              two loose label-pills. The previous flat-row layout had three
+              independent <label> blocks stacked horizontally — at narrow widths
+              they piled up with no visual grouping, which was the "排版有点乱"
+              feedback. */}
+          {designConfigurable && (
           <div className="design-toolbar">
             {/* Per-stage architect model. Default = currently configured design
                 model; disabled while a design job runs (Claude is working —
@@ -4297,55 +4371,13 @@ export default function RequirementDetail() {
                 </>
               )}
             </div>
-            {/* Persisted design environment: shows which Agent Server (or 本地)
-                the architect stage last ran on, read back from
-                requirements.design_agent_server_id. Only rendered once a design
-                has actually run on a remote server so the toolbar stays clean
-                for local-only requirements. */}
-            {req.design_agent_server_id && (
-              <ExecEnvBadge
-                serverId={req.design_agent_server_id}
-                serverName={req.design_agent_server_name}
-                compact
-              />
-            )}
             {agentServers.length === 0 && (
               <div className="design-toolbar-hint">
                 {t('requirements.detail2.designAgentServerNoHint')}
               </div>
             )}
-            {/* Action group — pinned to the right via .design-toolbar-actions
-                (margin-left: auto). Previously the export PDF button alone
-                carried `style={{ marginLeft: 'auto' }}`, which broke whenever
-                export wasn't shown — buttons drifted left mid-flow. */}
-            <div className="design-toolbar-actions">
-              {showDesignToggle && (
-                <button
-                  className="btn btn-sm process-toggle"
-                  onClick={() => setShowDesignProcess(v => !v)}
-                  aria-expanded={designPanelOpen}
-                >
-                  {designPanelOpen ? t('requirements.detail2.processToggleHide') : t('requirements.detail2.processToggleShow')}
-                </button>
-              )}
-              {req.status === 'designing' && hasDesign && (
-                <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={designing}><IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}</button>
-              )}
-              {hasDesign && (
-                <button
-                  className="btn btn-sm"
-                  onClick={handleExportPdf}
-                  disabled={exporting}
-                  title={t('requirements.detail2.exportPdfTitle')}
-                >
-                  {exporting ? <><IconHourglass size={13} className="btn-icon" />{t('requirements.detail2.exportingPdf')}</> : <><IconFileText size={13} className="btn-icon" />{t('requirements.detail2.exportPdfBtn')}</>}
-                </button>
-              )}
-              {(designPanelOpen || hasDesign) && (
-                <FullscreenButton isFullscreen={designFs.isFullscreen} onClick={designFs.toggle} />
-              )}
-            </div>
           </div>
+          )}
 
           {/* Optional knowledge pre-read display (renders only when the user
               opted in and the backend emitted a knowledge event). */}
