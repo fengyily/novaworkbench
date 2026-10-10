@@ -445,6 +445,12 @@ export interface SubTask {
   // phase_emitted 是前端唯一判定「是否走三段路径」的开关；老后端不返回时为
   // undefined（falsy），卡片沿用旧的 artifact 渲染，体验与改动前一致。
   phase_emitted?: boolean;
+  // v0.5.x: 报告详略。手动子任务在创建时由用户/启发式选定（auto/brief/full），
+  // SubTaskRunner 在 dispatch 时把 auto 解析为 brief 或 full 并写回行，所以
+  // 这里读到的总是「实际生效的」值。auto 永远不会被前端看到（后端写回时已
+  // 替换成 brief 或 full）。undefined = 老后端或非手动行，按 brief 不渲染
+  // 三段区即可——配合 !phase_emitted 已覆盖。
+  report_mode?: 'auto' | 'brief' | 'full';
 }
 
 export const subTasksApi = {
@@ -468,7 +474,7 @@ export const subTasksApi = {
   // 本地, or an agent_servers.id to run on that server.
   create: (
     requirementId: string,
-    data: { prompt: string; title?: string; model?: string; claude_config_id?: string; freshSession?: boolean; bare?: boolean; agent_server_id?: string },
+    data: { prompt: string; title?: string; model?: string; claude_config_id?: string; freshSession?: boolean; bare?: boolean; agent_server_id?: string; report_mode?: 'auto' | 'brief' | 'full' },
   ) => api.post<{ job_id: string; sub_task_id: string }>(`/api/requirements/${requirementId}/sub-tasks`, data),
   // List all sub-tasks for a requirement (oldest first).
   list: (requirementId: string) =>

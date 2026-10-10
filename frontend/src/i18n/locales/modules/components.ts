@@ -136,6 +136,18 @@ export const components = {
       bareHint: '什么都不带，也不带角色系统提示词，直接用 claude 默认',
       freshHint: '上次会话在 Agent 服务器上找不到，建议用「带上下文」模式（会自动带上需求 + 设计文档 + 上一会话最近 10 轮作为上下文）',
     },
+    // v0.5.x: 报告详略——「自动 / 简洁 / 详细」三档，默认自动，启发式
+    // 按提示词判 brief vs full；brief 跳过三段报告直接回一句话，full 强制
+    // 理解 / 实施 / 小结。镜像 sessionMode 的写法（label + 三段 + hint）。
+    reportMode: {
+      label: '报告详略',
+      auto: '自动',
+      autoHint: '短指令走简洁，长指令或多步任务自动出三段报告',
+      brief: '简洁',
+      briefHint: '直接动手，完成后只回 1~3 句话结果',
+      full: '详细',
+      fullHint: '强制输出「理解 / 实施 / 小结」三段式报告',
+    },
     // Report-archive (主 Agent 汇总报告 + 子任务报告 → knowledge). The
     // button sits in both the dev-summary card header and each done sub-task
     // card header; same icon / label pair keeps the affordance consistent.
@@ -241,6 +253,16 @@ export const components = {
     // badge and the picker read as the same option.
     sessionModeBare: '新会话',
     sessionModeBareTitle: '新建会话，不带上下文也不带角色系统提示词，使用 claude 默认',
+    // v0.5.x: 报告详略 chip——简洁模式卡头徽标。full 不显示 chip（与
+    // sessionMode='fork' 同理，避免噪音）。
+    reportModeBrief: '🪶 简洁',
+    reportModeBriefTitle: '本子任务未生成三段式报告，只回一句话结果',
+    // v0.5.x: 简洁模式结果块。resultEyebrow 是卡片里「✅ 结果」小标题；
+    // resultExpandShow / resultExpandCollapse 镜像自拟方案块的长内容折叠。
+    resultEyebrow: '结果',
+    resultErrorEyebrow: '错误',
+    resultExpandShow: '展开结果',
+    resultExpandCollapse: '收起结果',
     // Tree 折叠/徽标文案：父卡片展示子任务数量并允许展开/收起整棵子树。
     treeExpand: '展开后续操作',
     treeCollapse: '收起后续操作',

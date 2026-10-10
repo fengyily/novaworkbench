@@ -179,6 +179,20 @@ type SubTask struct {
 	// three sections when PhaseEmitted is true so old / auto rows stay
 	// visually identical to pre-feature renders.
 	PhaseEmitted bool `json:"phase_emitted"`
+	// ReportMode is the user-picked (or default) report-detail policy for
+	// manually-triggered sub-tasks. Three values:
+	//   - "auto" (default): the SubTaskRunner looks at the prompt and decides
+	//     brief vs full on the fly; the resolved value is written back to the
+	//     row before dispatch, so reads always see the actually-effective mode.
+	//   - "brief": no phase tracker, no three-section prompt, just a 1–3
+	//     sentence result. Falls back to the legacy single-artifact UI (the
+	//     same branch a pre-phase row renders).
+	//   - "full":  explicit three-section prompt even when the auto heuristic
+	//     would have chosen brief.
+	// Auto-orchestrated and push_pr rows keep this column at the schema default
+	// ('auto') because their phase_emitted gate is already false; the column
+	// only matters for source='manual' rows.
+	ReportMode string `json:"report_mode,omitempty"`
 }
 
 // Sub-task status values, kept as plain string constants so they line up with
@@ -233,6 +247,30 @@ const (
 	SubTaskSessionModeFork        = "fork"
 	SubTaskSessionModeWithContext = "with_context"
 	SubTaskSessionModeBare        = "bare"
+)
+
+// SubTaskReportMode values describe how verbose the per-card report should be
+// for a manually-triggered sub-task. Persisted on the row so the SubTaskCard
+// can render the right shape and the chip can show the actually-effective
+// value (auto is resolved at dispatch time and the resolved value is written
+// back, so the chip never reads "auto" for a row that actually ran as brief).
+//
+//   - SubTaskReportModeAuto:  default. SubTaskRunner.Run inspects the prompt
+//                             and picks brief vs full. The user can override
+//                             in the composer.
+//   - SubTaskReportModeBrief: no three-section prompt, no phase tracker —
+//                             invoke the child with a 1–3-sentence-result
+//                             instruction. Phase_emitted stays 0, so the
+//                             card falls back to the legacy single-artifact
+//                             render (now styled as a lightweight "✅ 结果"
+//                             block; see frontend SubTaskCard).
+//   - SubTaskReportModeFull:  force the three-section prompt even when the
+//                             auto heuristic would have picked brief. The
+//                             card renders the three phase cards as before.
+const (
+	SubTaskReportModeAuto  = "auto"
+	SubTaskReportModeBrief = "brief"
+	SubTaskReportModeFull  = "full"
 )
 
 // SubTaskTokens is the four-field token view the wizard handler hands the

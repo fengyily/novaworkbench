@@ -299,7 +299,7 @@ func (h *WizardHandler) commitOrchestrationBatch(
 		childAgentServerID = req.AgentServerID
 	}
 	for i, t := range payload.Subtasks {
-		if _, cerr := h.subTaskSvc.CreateWithBatchTx(tx, reqID, t.Title, t.Prompt, modelName, orchestratorSID, obID, i+1, childAgentServerID, "", "", ""); cerr != nil {
+		if _, cerr := h.subTaskSvc.CreateWithBatchTx(tx, reqID, t.Title, t.Prompt, modelName, orchestratorSID, obID, i+1, childAgentServerID, "", "", "", ""); cerr != nil {
 			log.Printf("[%s] %s: create child %d (%s): %v", logTag, reqID, i+1, t.Title, cerr)
 			return
 		}

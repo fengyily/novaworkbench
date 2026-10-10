@@ -1124,7 +1124,7 @@ func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev
 	}
 	// Pass sourceTag into the runner so the row's source column lands as
 	// SubTaskSourcePushPR and the lookup above stays self-consistent.
-	st, job, newSID, nerr := runner.NewPendingSubTask(reqRow.ID, title, prompt, modelName, sourceSID, pushServerID, "", "")
+	st, job, newSID, nerr := runner.NewPendingSubTask(reqRow.ID, title, prompt, modelName, sourceSID, pushServerID, "", "", "")
 	if nerr != nil {
 		return "", "", nerr
 	}
@@ -1137,7 +1137,7 @@ func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev
 		}
 	}
 	log.Printf("[push-pr] %s: dispatched new sub_task=%s job_id=%s model=%s", reqRow.ID, st.ID, job.ID, modelName)
-	go runner.Run(reqRow, st, job, newSID, sourceSID, prompt, modelName, roleConfigID, false, true, false, false, "")
+	go runner.Run(reqRow, st, job, newSID, sourceSID, prompt, modelName, roleConfigID, false, true, false, false, "", "")
 	return job.ID, st.ID, nil
 }
 

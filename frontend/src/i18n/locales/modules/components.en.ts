@@ -126,6 +126,19 @@ export const components = {
       bareHint: 'Nothing carried — no context, no role system prompt; claude CLI defaults only',
       freshHint: 'The previous session was not found on the Agent Server. We recommend the "With context" mode — it auto-injects the requirement title, design docs, and the last 10 turns of the previous session as context.',
     },
+    // v0.5.x: report-detail segmented control. Mirrors sessionMode's shape;
+    // 'auto' lets the backend heuristic decide brief vs full from the prompt
+    // length / structure, 'brief' skips the three-section report, 'full'
+    // forces it.
+    reportMode: {
+      label: 'Report detail',
+      auto: 'Auto',
+      autoHint: 'Short prompts take the brief path, long or multi-step prompts get the full three-section report',
+      brief: 'Brief',
+      briefHint: 'Just do the work; respond with a 1–3 sentence result',
+      full: 'Full',
+      fullHint: 'Force the "Understanding / Implementation / Summary" three-section report',
+    },
     // Report archive (主 Agent 汇总报告 + 子任务报告 → knowledge).
     archiveBtn: 'Archive to knowledge base',
     // Shorter visible label for the pill button when the entry has been
@@ -225,6 +238,15 @@ export const components = {
     // badge and the picker read as the same option.
     sessionModeBare: 'New session',
     sessionModeBareTitle: 'New session with no context and no role system prompt; claude CLI defaults',
+    // v0.5.x: brief-mode report chip + result block. resultEyebrow is the
+    // small "✅ Result" header on a brief-mode card; resultExpandShow /
+    // resultExpandCollapse mirror the long-content collapse pattern.
+    reportModeBrief: '🪶 Brief',
+    reportModeBriefTitle: 'This sub-task did not generate a three-section report; only a one-paragraph result is shown',
+    resultEyebrow: 'Result',
+    resultErrorEyebrow: 'Error',
+    resultExpandShow: 'Show result',
+    resultExpandCollapse: 'Hide result',
     // Tree expand/collapse + child count badge for the sub-task tree view.
     // No _one/_other plural keys: the zh-CN locale uses a single key for this
     // badge, so we mirror that to keep the two files in lockstep (the i18n

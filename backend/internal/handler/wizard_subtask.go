@@ -337,6 +337,7 @@ func (h *WizardHandler) runSubTask(
 	freshSession bool,
 	bare bool,
 	parentSourceSID string,
+	reportMode string,
 ) {
 	if h.subTaskRunner == nil {
 		log.Printf("[sub-task] runner not wired, cannot run %s", st.ID)
@@ -353,7 +354,16 @@ func (h *WizardHandler) runSubTask(
 	if st.Source == "" {
 		st.Source = model.SubTaskSourceManual
 	}
-	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, adjust, fork, freshSession, bare, parentSourceSID)
+	// Adjust/Redo/Continue 走的是 service.CreateAdjustment / RedoAsNew /
+	// ContinueAsNew，那几条路径已经写好了 st.ReportMode（继承自父）；空
+	// 串回落 auto 与 sessionMode 同理。
+	if reportMode == "" {
+		reportMode = st.ReportMode
+	}
+	if reportMode == "" {
+		reportMode = model.SubTaskReportModeAuto
+	}
+	h.subTaskRunner.Run(req, st, job, newSID, sourceSID, body, modelOverride, configIDOverride, adjust, fork, freshSession, bare, parentSourceSID, reportMode)
 	// (The agent-server routing branch previously inlined here moved to
 	// SubTaskRunner.Run so that every sub-task path — manual children,
 	// orchestrated children, and push/PR sub-tasks — shares the same
@@ -467,6 +477,13 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		// (inheritance), while an explicit "" means the user deliberately chose
 		// 本地 and must not fall back to a remote parent.
 		AgentServerID *string `json:"agent_server_id"`
+		// ReportMode picks the report-detail policy: "auto" (default — runner
+		// inspects the prompt and decides brief vs full), "brief" (skip the
+		// three-section prompt and the phase tracker, just 1–3 sentence result),
+		// or "full" (force the three-section prompt). Unknown values fall
+		// through to "auto" so a future client version can't accidentally
+		// break a row.
+		ReportMode string `json:"report_mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID", "Invalid JSON: "+err.Error())
@@ -475,6 +492,20 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(body.Prompt) == "" {
 		writeError(w, http.StatusBadRequest, "INVALID", "prompt 不能为空")
 		return
+	}
+	// Whitelist the user-supplied report_mode; an unknown value is treated as
+	// "auto" so a typo or a future client version's new mode never blocks a
+	// dispatch. The runner does the same normalization defensively.
+	reportMode := strings.TrimSpace(body.ReportMode)
+	switch reportMode {
+	case model.SubTaskReportModeBrief, model.SubTaskReportModeFull:
+		// explicit choice — pass through
+	case "":
+		// empty string → fall through; SubTaskService.Create defaults to auto
+	case model.SubTaskReportModeAuto:
+		// already the default
+	default:
+		reportMode = model.SubTaskReportModeAuto
 	}
 	id := r.PathValue("id")
 	req, err := h.reqSvc.Get(id)
@@ -523,7 +554,7 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 	// (inheritance) when the field is omitted, honor an explicit value
 	// (including "" for 本地) otherwise.
 	agentServerID := resolveSubTaskAgentServer(body.AgentServerID, req.AgentServerID)
-	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(id, strings.TrimSpace(body.Title), body.Prompt, body.Model, sourceSID, agentServerID, sessionMode, "")
+	st, job, newSID, err := h.subTaskRunner.NewPendingSubTask(id, strings.TrimSpace(body.Title), body.Prompt, body.Model, sourceSID, agentServerID, sessionMode, "", reportMode)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 		return
@@ -533,7 +564,7 @@ func (h *WizardHandler) StartSubTask(w http.ResponseWriter, r *http.Request) {
 		"sub_task_id": st.ID,
 	})
 
-	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, body.ClaudeConfigID, false, true, body.FreshSession, body.Bare, "")
+	go h.runSubTask(req, st, job, newSID, sourceSID, body.Prompt, body.Model, body.ClaudeConfigID, false, true, body.FreshSession, body.Bare, "", reportMode)
 }
 
 // AdjustSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/adjust.
@@ -629,7 +660,7 @@ func (h *WizardHandler) AdjustSubTask(w http.ResponseWriter, r *http.Request) {
 	// prompt prefix + system prompt as a fresh sub-task, but the
 	// source_session_id is the parent's session id (not the main agent),
 	// so the conversation inherits the parent's edits.
-	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, "", true, true, false, false, parent.SourceSessionID)
+	go h.runSubTask(req, st, job, newSID, parent.SessionID, body.Prompt, body.Model, "", true, true, false, false, parent.SourceSessionID, "")
 }
 
 // RedoSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/redo.
@@ -729,7 +760,7 @@ func (h *WizardHandler) RedoSubTask(w http.ResponseWriter, r *http.Request) {
 	// Re-use the shared spawn helper with adjust=false, fork=true and the
 	// ORIGINAL prompt (st.Prompt) so the child re-executes the same task
 	// from a clean fork off the requirement's main-agent session.
-	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false, true, false, false, parent.SourceSessionID)
+	go h.runSubTask(req, st, job, newSID, sourceSID, st.Prompt, body.Model, "", false, true, false, false, parent.SourceSessionID, "")
 }
 
 // continueSubTaskPrompt is the fixed Chinese prompt used by ContinueSubTask.
@@ -842,7 +873,7 @@ func (h *WizardHandler) ContinueSubTask(w http.ResponseWriter, r *http.Request) 
 	// Run() with fork=false picks "## 继续执行" as the prompt header so the
 	// child's contextualization stays consistent with the wizard's coding
 	// ContinueCoding path.
-	go h.runSubTask(req, st, job, newSID, sourceSID, continueSubTaskPrompt, body.Model, "", false, false, false, false, parent.SourceSessionID)
+	go h.runSubTask(req, st, job, newSID, sourceSID, continueSubTaskPrompt, body.Model, "", false, false, false, false, parent.SourceSessionID, "")
 }
 
 // StopSubTask handles POST /api/requirements/{id}/sub-tasks/{sid}/stop.

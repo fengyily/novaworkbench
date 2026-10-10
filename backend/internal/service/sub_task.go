@@ -91,7 +91,7 @@ func (s *SubTaskService) notifyChanged(reqID string) {
 // defaults to SubTaskSourceManual — pre-existing callers that omit the field
 // keep the original behaviour, while dispatchPushPRSubTask can pass
 // SubTaskSourcePushPR so the idempotency guard can find it later.
-func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID, sessionMode, parentSubtaskID, source string) (*model.SubTask, error) {
+func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID, sessionMode, parentSubtaskID, source, reportMode string) (*model.SubTask, error) {
 	if reqID == "" {
 		return nil, errors.New("requirement_id is required")
 	}
@@ -111,15 +111,18 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 	if source == "" {
 		source = model.SubTaskSourceManual
 	}
+	if reportMode == "" {
+		reportMode = model.SubTaskReportModeAuto
+	}
 	id := util.NewID("st")
 	now := time.Now()
 	_, err := s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, parent_subtask_id, title, prompt, status,
 		model, source_session_id, batch_id, batch_seq, source, agent_server_id,
-		session_mode, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session_mode, report_mode, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, parentSubtaskID, title, prompt, model.SubTaskStatusPending,
 		modelDisplay, sourceSID, batchID, batchSeq, source, agentServerID,
-		sessionMode, now, now)
+		sessionMode, reportMode, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert sub_task: %w", err)
 	}
@@ -138,6 +141,7 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 		AgentServerID:    agentServerID,
 		AgentServerIDSet: true,
 		SessionMode:      sessionMode,
+		ReportMode:       reportMode,
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}, nil
@@ -153,7 +157,13 @@ func (s *SubTaskService) Create(reqID, title, prompt, modelDisplay, sourceSID, b
 // source mirrors Create's parameter — empty falls back to SubTaskSourceAuto
 // (the historical default for batch children). Currently only "auto" rows
 // ever flow through this entry point.
-func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID, sessionMode, parentSubtaskID, source string) (*model.SubTask, error) {
+//
+// reportMode is wired through for symmetry with Create, but the auto-orchestrate
+// path always passes an empty string which normalizes to "auto" — and the
+// phase tracker is gated off for source='auto' anyway, so report_mode has no
+// runtime effect on these rows. Keeping the column populated keeps the column
+// NOT NULL constraint happy and the audit trail uniform.
+func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, modelDisplay, sourceSID, batchID string, batchSeq int, agentServerID, sessionMode, parentSubtaskID, source, reportMode string) (*model.SubTask, error) {
 	if tx == nil {
 		return nil, errors.New("tx is required")
 	}
@@ -174,15 +184,18 @@ func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, mode
 	if source == "" {
 		source = model.SubTaskSourceAuto
 	}
+	if reportMode == "" {
+		reportMode = model.SubTaskReportModeAuto
+	}
 	id := util.NewID("st")
 	now := time.Now()
 	_, err := tx.Exec(`INSERT INTO sub_tasks (id, requirement_id, parent_subtask_id, title, prompt, status,
 		model, source_session_id, batch_id, batch_seq, source, agent_server_id,
-		session_mode, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session_mode, report_mode, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, parentSubtaskID, title, prompt, model.SubTaskStatusPending,
 		modelDisplay, sourceSID, batchID, batchSeq, source, agentServerID,
-		sessionMode, now, now)
+		sessionMode, reportMode, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert sub_task: %w", err)
 	}
@@ -201,6 +214,7 @@ func (s *SubTaskService) CreateWithBatchTx(tx *db.Tx, reqID, title, prompt, mode
 		AgentServerID:    agentServerID,
 		AgentServerIDSet: true,
 		SessionMode:      sessionMode,
+		ReportMode:       reportMode,
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}, nil
@@ -235,6 +249,7 @@ func (s *SubTaskService) FindRecentPushForReq(reqID string, lookbackSec int) (*m
 		batch_id, batch_seq, batch_id_seq_run, source,
 		agent_server_id, '' AS agent_server_name,
 		session_mode, retry_count,
+		report_mode,
 		phase_understanding, phase_implementation, phase_summary, phase_emitted
 		FROM sub_tasks
 		WHERE requirement_id = ?
@@ -318,6 +333,7 @@ func (s *SubTaskService) List(reqID string) ([]model.SubTask, error) {
 		batch_id, batch_seq, batch_id_seq_run, source,
 		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
 		session_mode, retry_count,
+		report_mode,
 		phase_understanding, phase_implementation, phase_summary, phase_emitted
 		FROM sub_tasks WHERE requirement_id = ? ORDER BY created_at DESC, id DESC`, reqID)
 	if err != nil {
@@ -357,6 +373,7 @@ func (s *SubTaskService) Get(id string) (*model.SubTask, error) {
 		batch_id, batch_seq, batch_id_seq_run, source,
 		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
 		session_mode, retry_count,
+		report_mode,
 		phase_understanding, phase_implementation, phase_summary, phase_emitted
 		FROM sub_tasks WHERE id = ?`, id)
 	if err != nil {
@@ -415,6 +432,7 @@ func (s *SubTaskService) Subtree(rootID string) ([]model.SubTask, error) {
 			batch_id, batch_seq, batch_id_seq_run, source,
 			agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
 			session_mode, retry_count,
+			report_mode,
 			phase_understanding, phase_implementation, phase_summary, phase_emitted
 			FROM sub_tasks WHERE parent_subtask_id IN (` + strings.Join(placeholders, ",") + `)`
 		rows, err := s.db.Query(q, args...)
@@ -486,6 +504,7 @@ func (s *SubTaskService) ListByBatch(batchID string) ([]model.SubTask, error) {
 		batch_id, batch_seq, batch_id_seq_run, source,
 		agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
 		session_mode, retry_count,
+		report_mode,
 		phase_understanding, phase_implementation, phase_summary, phase_emitted
 		FROM sub_tasks WHERE batch_id = ?
 		ORDER BY batch_seq ASC, created_at ASC, id ASC`, batchID)
@@ -790,6 +809,7 @@ func (s *SubTaskService) ClaimNextPending(batchID string) (*model.SubTask, bool,
 			batch_id, batch_seq, batch_id_seq_run, source,
 			agent_server_id, COALESCE((SELECT name FROM agent_servers WHERE agent_servers.id = sub_tasks.agent_server_id), ''),
 			session_mode, retry_count,
+			report_mode,
 			phase_understanding, phase_implementation, phase_summary, phase_emitted
 			FROM sub_tasks WHERE id=?`, candidateID)
 		if err != nil {
@@ -938,6 +958,22 @@ func (s *SubTaskService) UpdateClaudeConfigID(id, configID string) error {
 	return err
 }
 
+// UpdateReportMode records the resolved report_mode on the row. Called by
+// SubTaskRunner.Run AFTER it has resolved the user's "auto" choice into the
+// actually-effective "brief" or "full" so the SubTaskCard chip and the
+// finished-render branch both read the value the run actually used (an "auto"
+// row that came in short becomes "brief" here). No-op when the resolved value
+// is empty so a downstream caller that hasn't decided yet doesn't stamp
+// "auto" again.
+func (s *SubTaskService) UpdateReportMode(id, mode string) error {
+	if id == "" || mode == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`UPDATE sub_tasks SET report_mode=?, updated_at=? WHERE id=?`,
+		mode, time.Now(), id)
+	return err
+}
+
 // MarkRunning transitions pending → running when the goroutine actually
 // spawns the claude CLI. Kept separate from Create so a Create that fails to
 // ever spawn (e.g. pre-flight error) doesn't leave the row visible as
@@ -1006,11 +1042,18 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 	if adjustMode == "" {
 		adjustMode = model.SubTaskSessionModeFork
 	}
+	// Inherit the parent's report_mode so a chain of adjustments stays on the
+	// same report shape (an adjustment of a "brief" sub-task remains "brief").
+	// Falls back to "auto" when the parent row predates the column.
+	adjustReportMode := parent.ReportMode
+	if adjustReportMode == "" {
+		adjustReportMode = model.SubTaskReportModeAuto
+	}
 	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, parent_subtask_id, title, prompt, status,
-		source_session_id, source, agent_server_id, session_mode, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		source_session_id, source, agent_server_id, session_mode, report_mode, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, reqID, parent.ID, adjustTitle, prompt, model.SubTaskStatusPending,
-		parent.SessionID, model.SubTaskSourceManual, parent.AgentServerID, adjustMode, now, now)
+		parent.SessionID, model.SubTaskSourceManual, parent.AgentServerID, adjustMode, adjustReportMode, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert adjustment sub_task: %w", err)
 	}
@@ -1026,6 +1069,7 @@ func (s *SubTaskService) CreateAdjustment(reqID, parentID, prompt string) (*mode
 		AgentServerID:    parent.AgentServerID,
 		AgentServerIDSet: true,
 		SessionMode:      adjustMode,
+		ReportMode:       adjustReportMode,
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}, nil
@@ -1060,15 +1104,19 @@ func (s *SubTaskService) RedoAsNew(parentID, modelOverride string) (*model.SubTa
 		modelName = parent.Model
 	}
 	title := capTitle("重做: "+parent.Title, 80)
+	redoReportMode := parent.ReportMode
+	if redoReportMode == "" {
+		redoReportMode = model.SubTaskReportModeAuto
+	}
 	id := util.NewID("st")
 	now := time.Now()
 	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, parent_subtask_id, title, prompt, status,
 		model, source_session_id, batch_id, batch_seq, source, agent_server_id,
-		session_mode, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session_mode, report_mode, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, parent.RequirementID, parent.ID, title, parent.Prompt, model.SubTaskStatusPending,
 		modelName, parent.SessionID, "", 0, model.SubTaskSourceManual, parent.AgentServerID,
-		parent.SessionMode, now, now)
+		parent.SessionMode, redoReportMode, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert redo sub_task: %w", err)
 	}
@@ -1087,6 +1135,7 @@ func (s *SubTaskService) RedoAsNew(parentID, modelOverride string) (*model.SubTa
 		AgentServerID:    parent.AgentServerID,
 		AgentServerIDSet: true,
 		SessionMode:      parent.SessionMode,
+		ReportMode:       redoReportMode,
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}, nil
@@ -1122,16 +1171,20 @@ func (s *SubTaskService) ContinueAsNew(parentID, modelOverride string) (*model.S
 	if continueMode == "" {
 		continueMode = model.SubTaskSessionModeFork
 	}
+	continueReportMode := parent.ReportMode
+	if continueReportMode == "" {
+		continueReportMode = model.SubTaskReportModeAuto
+	}
 	title := capTitle("继续: "+parent.Title, 80)
 	id := util.NewID("st")
 	now := time.Now()
 	_, err = s.db.Exec(`INSERT INTO sub_tasks (id, requirement_id, parent_subtask_id, title, prompt, status,
 		model, source_session_id, batch_id, batch_seq, source, agent_server_id,
-		session_mode, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session_mode, report_mode, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, parent.RequirementID, parent.ID, title, parent.Prompt, model.SubTaskStatusPending,
 		modelName, parent.SessionID, "", 0, model.SubTaskSourceManual, parent.AgentServerID,
-		continueMode, now, now)
+		continueMode, continueReportMode, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert continue sub_task: %w", err)
 	}
@@ -1150,6 +1203,7 @@ func (s *SubTaskService) ContinueAsNew(parentID, modelOverride string) (*model.S
 		AgentServerID:    parent.AgentServerID,
 		AgentServerIDSet: true,
 		SessionMode:      continueMode,
+		ReportMode:       continueReportMode,
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}, nil
@@ -1682,6 +1736,7 @@ func scanSubTask(rows *sql.Rows) (*model.SubTask, error) {
 		&st.Source,
 		&agentServerID, &st.AgentServerName,
 		&st.SessionMode, &st.RetryCount,
+		&st.ReportMode,
 		&st.PhaseUnderstanding, &st.PhaseImplementation, &st.PhaseSummary, &st.PhaseEmitted,
 	); err != nil {
 		return nil, err

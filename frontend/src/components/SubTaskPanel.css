@@ -512,6 +512,14 @@
   border: 1px solid rgba(100, 116, 139, 0.30);
   color: #475569;  /* Slate 600 */
 }
+/* v0.5.x: brief report-mode chip. Slate 100/600 调与 .sub-card-mode-bare
+   同色系但更柔和（更低饱和），表达"这里没出三段、不要期待"而不是"会话
+   模式不一样"。full 不显示 chip（与 session_mode='fork' 同理）。 */
+.sub-card-mode-brief {
+  background: rgba(16, 185, 129, 0.08);  /* Emerald 50 */
+  border: 1px solid rgba(16, 185, 129, 0.30);
+  color: #047857;  /* Emerald 700 */
+}
 
 .sub-card-counter {
   font-family: var(--font-mono);
@@ -1779,6 +1787,122 @@
   cursor: pointer;
 }
 .sub-plan-toggle-btn:hover {
+  background: var(--color-surface);
+  border-color: var(--color-primary);
+}
+
+/* v0.5.x: brief 模式的结果块。视觉镜像 .sub-plan（同样的 emerald 左边线 +
+   hover 底色 + 同样的 body 排版），但 eyebrow 文案换成「✅ 结果」并去掉
+   折叠按钮的左上角 padding——一行小指令的简短回执默认全展开即可。is-status-error
+   把左边线换成红，让错误态一眼可见。 */
+.sub-result {
+  margin: 0 16px 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-left: 2px solid var(--color-success);
+  border-radius: var(--radius-md);
+  background: var(--color-hover);
+}
+.sub-result.is-status-error {
+  border-left-color: var(--color-error, #DC2626);
+}
+.sub-result-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-success-deep, #047857);
+  background: var(--color-success-soft);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+}
+.sub-result.is-status-error .sub-result-eyebrow {
+  color: #B91C1C;
+  background: rgba(220, 38, 38, 0.08);
+}
+.sub-result-eyebrow-icon { font-size: 11px; line-height: 1; }
+
+/* Brief result body — 与 .sub-plan-body 同源（同样的 prose 排版），但镜像
+   选择器改成 .sub-result-body 避免与方案块样式互踩。 */
+.sub-result-body {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--color-text);
+}
+.sub-result-body > :first-child { margin-top: 0; }
+.sub-result-body > :last-child  { margin-bottom: 0; }
+.sub-result-body p { margin: 6px 0; }
+.sub-result-body h1,
+.sub-result-body h2,
+.sub-result-body h3 {
+  margin: 12px 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.sub-result-body ul,
+.sub-result-body ol { padding-left: 20px; margin: 6px 0; }
+.sub-result-body li { margin: 2px 0; }
+.sub-result-body strong { font-weight: 600; color: var(--color-text); }
+.sub-result-body code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+.sub-result-body pre {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  overflow-x: auto;
+}
+.sub-result-body pre code { background: transparent; padding: 0; }
+.sub-result-body blockquote {
+  margin: 6px 0;
+  padding: 4px 10px;
+  border-left: 2px solid var(--color-border);
+  color: var(--color-text-secondary);
+}
+
+/* Long-result 折叠——>600 字的 artifact 折叠到 160px，与 .sub-plan-body-wrap
+   同款 mask 渐隐，避免一行简短回执被意外的输出膨胀撑屏。 */
+.sub-result-body-wrap {
+  position: relative;
+  overflow: hidden;
+  max-height: none;
+  transition: max-height 0.25s ease;
+}
+.sub-result-body-wrap.is-collapsed { max-height: 160px; }
+.sub-result-body-wrap.is-collapsed::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 32px;
+  background: linear-gradient(180deg, transparent, var(--color-hover));
+  pointer-events: none;
+}
+.sub-result-body-wrap.is-collapsed .sub-result-body > :last-child { padding-bottom: 16px; }
+
+.sub-result-toggle-btn {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--color-primary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.sub-result-toggle-btn:hover {
   background: var(--color-surface);
   border-color: var(--color-primary);
 }
