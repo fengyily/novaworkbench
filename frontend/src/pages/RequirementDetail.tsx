@@ -77,6 +77,14 @@ interface DesignData {
   plan_markdown?: string; // plan-mode output (raw markdown, not the legacy JSON schema)
 }
 
+// WikiData holds the parsed shape of a wiki-kind requirement's Markdown
+// body. Unlike DesignData it only ever has one field — wiki docs are
+// always plan-markdown (no legacy JSON shape exists for the kind). The
+// type mirrors DesignData so the ReactMarkdown rendering path is shared.
+interface WikiData {
+  plan_markdown?: string;
+}
+
 // Decide whether the stored design document is long enough to warrant the
 // "default collapsed / click to expand" treatment. The current rule: more than
 // 12 newline-separated lines OR more than 1200 characters is "long". The
@@ -1390,6 +1398,34 @@ export default function RequirementDetail() {
     // 任何不携带 DesignData 字段的形态。返回 {} 而非把 raw 当 Markdown
     // 渲染,以防 hasDesign 误开启。
     return {};
+  };
+
+  // parseWikiDoc mirrors parseDesign for the wiki kind. Wiki docs are
+  // always plain (plan-mode) Markdown — no legacy JSON schema, no array
+  // form — so the implementation is simpler: try JSON, fall back to
+  // { plan_markdown: stripOuterFence(raw) }, drop empty content.
+  // Belt-and-braces: even though the backend sanitizes, the frontend
+  // re-strips the outer fence so a doc that survived a double-fence
+  // pass-through still renders correctly.
+  const parseWikiDoc = (raw: string | undefined): WikiData => {
+    if (!raw) return {};
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { plan_markdown: stripOuterFence(raw) };
+    }
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const obj = parsed as Partial<WikiData>;
+      if (typeof obj.plan_markdown === 'string') {
+        const trimmed = obj.plan_markdown.trim();
+        return trimmed === '' ? {} : { plan_markdown: stripOuterFence(trimmed) };
+      }
+    }
+    // Defensive: a JSON shape the wiki flow never produced — treat the
+    // raw input as Markdown so the user still sees something instead of
+    // a blank tab.
+    return { plan_markdown: stripOuterFence(raw) };
   };
 
   // 剥离外层 ```lang ... ``` 围栏(以及无 lang 标签的 ``` ... ``` 形式)。
@@ -3000,7 +3036,7 @@ export default function RequirementDetail() {
       <h1>{req.title}</h1>
 
       <div className="detail-meta">
-        <span className={`kind-badge kind-${reqKind}`} title={reqKind === 'idea' ? t('requirements.detail2.headerBadgeIdea') : reqKind === 'issue' ? t('requirements.detail2.headerBadgeIssue') : t('requirements.detail2.headerBadgeRequirement')}>{tLabel(t, kindLabelKeys as Record<string,string>, reqKind)}</span>
+        <span className={`kind-badge kind-${reqKind}`} title={reqKind === 'idea' ? t('requirements.detail2.headerBadgeIdea') : reqKind === 'issue' ? t('requirements.detail2.headerBadgeIssue') : reqKind === 'wiki' ? t('requirements.detail2.headerBadgeWiki') : t('requirements.detail2.headerBadgeRequirement')}>{tLabel(t, kindLabelKeys as Record<string,string>, reqKind)}</span>
         {/* claude-pulse overlay sits on top of status-badge + claude-status:
             amber ripple + micro-scale + brightness bump, 1.6s breathing cycle.
             Lets the detail-page head show at a glance whether a wizard job
@@ -4113,6 +4149,109 @@ export default function RequirementDetail() {
           )}
         </div>
       )}
+
+      {/* ── Wiki stage ── (kind=wiki only) ── */}
+      {reqKind === 'wiki' && (() => {
+        // Parse the wiki doc body. parseWikiDoc is defined above (mirrors
+        // parseDesign's JSON-or-Markdown fallback). Empty when the
+        // requirement hasn't been through GenerateWikiDoc yet, in which
+        // case the section still renders the "生成知识库文档" CTA.
+        const wiki = parseWikiDoc(req.wiki_docs);
+        return (
+          <div className="detail-section wiki-section">
+            <div className="section-header">
+              <h3><IconBook size={16} className="icon-mr" />{t('requirements.detail2.tabWikiDoc')}</h3>
+            </div>
+            {/* Doc body — only when wiki_docs is non-empty. Mermaid code
+                blocks render as text under the default react-markdown 8
+                (no rehype-mermaid plugin); the WikiBlock in the prompt
+                instructs the model to express diagrams as ```mermaid
+                ... ``` so future enhancement is a plugin swap. */}
+            {wiki.plan_markdown ? (
+              <div className="analysis-summary">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {wiki.plan_markdown}
+                </ReactMarkdown>
+              </div>
+            ) : (
+              <p className="analysis-summary">{t('requirements.detail2.wikiEmptyHint')}</p>
+            )}
+            {/* Action bar: status-gated. Mirrors the design / dev CTA
+                flow but with only wiki-specific actions (no coding / merge
+                buttons). */}
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+              {req.status === 'draft' || req.status === 'designing' ? (
+                <button
+                  className="btn btn-primary"
+                  onClick={async () => {
+                    setBusy(t('requirements.detail2.btnGenerateWiki'));
+                    try {
+                      await requirementsApi.generateWikiDoc(req.id, {});
+                      navigate(0);
+                    } catch (err: any) {
+                      alert(t('requirements.detail2.wikiGenerateFailPrefix') + (err?.message || String(err)));
+                    } finally {
+                      setBusy('');
+                    }
+                  }}
+                  disabled={!!busy}
+                >
+                  <IconSparkles size={13} className="btn-icon" />{t('requirements.detail2.btnGenerateWiki')}
+                </button>
+              ) : null}
+              {req.status === 'designed' && wiki.plan_markdown && (
+                <DocRefineChat
+                  reqId={req.id}
+                  projectPath={project?.local_path || ''}
+                  docType="wiki"
+                  currentDoc={wiki.plan_markdown}
+                  model={architectModel}
+                  defaultModel={architectDefaultModel}
+                  applyJobId={req.apply_job_id}
+                  onTurnDone={refresh}
+                  onWorkingChange={setRefineWorking}
+                  usage={designUsage}
+                  onUsage={setDesignUsage}
+                />
+              )}
+              {req.status === 'designed' && (
+                <button
+                  className="btn"
+                  onClick={async () => {
+                    if (!confirm(t('requirements.detail2.archiveToKbConfirm'))) return;
+                    try {
+                      await requirementsApi.wikiArchive(req.id);
+                      navigate(0);
+                    } catch (err: any) {
+                      alert(t('requirements.detail2.archiveFailPrefix') + (err?.message || String(err)));
+                    }
+                  }}
+                  disabled={!!busy}
+                >
+                  <IconArchive size={13} className="btn-icon" />{t('requirements.detail2.btnArchiveToWiki')}
+                </button>
+              )}
+              {req.status === 'archived' && (
+                <button
+                  className="btn"
+                  onClick={async () => {
+                    if (!confirm(t('requirements.detail2.unarchiveFromKbConfirm'))) return;
+                    try {
+                      await requirementsApi.wikiUnarchive(req.id);
+                      navigate(0);
+                    } catch (err: any) {
+                      alert(t('requirements.detail2.archiveFailPrefix') + (err?.message || String(err)));
+                    }
+                  }}
+                  disabled={!!busy}
+                >
+                  <IconArchive size={13} className="btn-icon" />{t('requirements.detail2.btnUnarchiveFromWiki')}
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── Developer stage ── */}
       {(stage === 'developer' || stage === 'done') && (hasDesign || req.skip_design) && (

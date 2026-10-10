@@ -38,6 +38,7 @@ export const status = {
     issue: '🐛 Issue',
     requirement: '📋 需求',
     idea: '💡 想法',
+    wiki: '📚 知识库',
   },
   // chip labels for the cross-project list filter (问题 differs from the
   // badge short label 'Issue')
@@ -45,31 +46,37 @@ export const status = {
     issue: '问题',
     requirement: '需求',
     idea: '想法',
+    wiki: '知识库',
   },
   kindShort: {
     issue: 'Issue',
     requirement: '需求',
     idea: '想法',
+    wiki: '知识库',
   },
   kindHint: {
     issue: '需要：复现路径 / 报错信息 / 期望行为',
     requirement: '需要：背景 / 目标 / 功能要点 / 验收标准',
     idea: '一句话或一段话都行，AI 会帮你评估可行性',
+    wiki: '需要：背景 / 关键概念 / 相关模块 / 注意事项',
   },
   kindPlaceholder: {
     issue: '请描述问题现象 / 复现步骤 / 报错信息……',
     requirement: '用自然语言描述你想要实现的功能……',
     idea: '写下你的想法或灵感，AI 会帮你评估可行性……',
+    wiki: '一句话或一段话描述这份知识库文档的主题……',
   },
   kindCreate: {
     issue: '🐛 创建 Issue',
     requirement: '📋 创建需求',
     idea: '💡 创建想法',
+    wiki: '📚 创建知识库',
   },
   kindChatPlaceholder: {
     issue: '贴 URL、描述页面元素、报错截图，或补充复现步骤... 输入 @ 引用 Skill',
     requirement: '贴URL、描述页面元素、或回复AI的问题... 输入 @ 引用 Skill',
     idea: '说说你的疑问、顾虑或备选思路... 输入 @ 引用 Skill',
+    wiki: '描述你希望补充或微调的知识库内容... 输入 @ 引用 Skill',
   },
   // wizard stages (stepper)
   stage: {

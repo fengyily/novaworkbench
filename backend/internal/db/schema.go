@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS requirements (
 	source_requirement_id TEXT NOT NULL DEFAULT '',
 	branch_name TEXT NOT NULL DEFAULT '',
 	worktree_path TEXT NOT NULL DEFAULT '',
+	wiki_docs TEXT NOT NULL DEFAULT '',
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 	completed_at DATETIME,
@@ -655,6 +656,15 @@ var alterColumns = []string{
 	// backfill. Validated in service.RequirementService; no CHECK constraint so
 	// the column behaves like the existing status/priority TEXT columns.
 	`ALTER TABLE requirements ADD COLUMN kind TEXT NOT NULL DEFAULT 'requirement'`,
+	// Wiki-type requirement: Markdown document body produced by the
+	// plan-mode "生成知识库文档" wizard stage. Stores plan-markdown content
+	// verbatim (same shape as design_docs). Empty string = no document
+	// yet. Validated in service.RequirementService; no CHECK constraint —
+	// keeps parity with status/priority/kind TEXT columns. The wizard
+	// session id (wiki_session_id) is added alongside in the same migration
+	// for the same rationale. Idempotent via isIgnorableDDLError.
+	`ALTER TABLE requirements ADD COLUMN wiki_docs        TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN wiki_session_id  TEXT NOT NULL DEFAULT ''`,
 	// Source traceability for promoted / split-off requirements. Set when an
 	// idea (or another kind) is summarized into a brand-new requirement via the
 	// "总结转需求" action. The original row keeps its own kind (so discussions

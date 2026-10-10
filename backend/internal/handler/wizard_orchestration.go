@@ -16,6 +16,7 @@ import (
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	promptpkg "github.com/novaworkbench/backend/internal/prompt"
+	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/internal/util"
 )
@@ -40,6 +41,15 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Kind == "idea" {
 		writeError(w, http.StatusConflict, "IDEA", "「想法」类需求不支持任务拆分，请先转为需求")
+		return
+	}
+	// Wiki rows have no sub-tasks: wiki never enters the developer stage
+	// (wizard_coding / wizard_immediate reject it), so there is nothing
+	// for an orchestration batch to dispatch. Reject loudly so an out-of-
+	// band call (curl, agent script) gets a clear 409 instead of a silent
+	// empty batch.
+	if req.Kind == service.KindWiki {
+		writeError(w, http.StatusConflict, "WIKI", "「知识库」类需求不支持任务拆分")
 		return
 	}
 	// Double-fire guard: refuse to re-split while an orchestration batch is

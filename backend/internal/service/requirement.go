@@ -35,6 +35,12 @@ const (
 	KindIssue       = "issue"
 	KindRequirement = "requirement"
 	KindIdea        = "idea"
+	// KindWiki marks a requirement as a knowledge-base entry: AI reads the
+	// project to produce a read-only Markdown document, archived into the
+	// knowledge table. Never enters the development pipeline — see the
+	// wiki guards in wizard_orchestration / wizard_coding / wizard_immediate
+	// / schedule. Validated alongside the legacy kinds in ValidKind below.
+	KindWiki = "wiki"
 )
 
 // ValidKind reports whether k is one of the accepted requirement kinds. Empty
@@ -42,7 +48,7 @@ const (
 // in (Create defaults to "requirement" when the caller omits the field).
 func ValidKind(k string) bool {
 	switch k {
-	case KindIssue, KindRequirement, KindIdea:
+	case KindIssue, KindRequirement, KindIdea, KindWiki:
 		return true
 	case "":
 		return true // caller may omit; the service defaults it
@@ -487,7 +493,7 @@ func (s *RequirementService) Create(req model.CreateRequirementReq) (*model.Requ
 	// frontend or a future API consumer doesn't silently misclassify a
 	// requirement. Empty is allowed here and normalized below.
 	if !ValidKind(req.Kind) {
-		return nil, fmt.Errorf("invalid kind: %q (allowed: issue, requirement, idea)", req.Kind)
+		return nil, fmt.Errorf("invalid kind: %q (allowed: issue, requirement, idea, wiki)", req.Kind)
 	}
 	kind := normalizeKind(req.Kind)
 	// Default to skip-analysis (true) when the caller omits the field, so the
@@ -1811,6 +1817,34 @@ func (s *RequirementService) UpdateDesign(id, designJSON string) (*model.Require
 	return s.Get(id)
 }
 
+// UpdateWikiDoc persists a wiki-kind requirement's Markdown document. Mirrors
+// UpdateDesign but writes to wiki_docs and only flips status to "designing".
+// The "wiki complete" gate is a separate transition driven by the user (the
+// detail page's 标记完成 button) — GenerateWikiDoc itself does NOT call
+// UpdateStatus so the user can apply-doc/微调-doc/overwrite before finalizing.
+// sanitizeDesignDoc is reused because it strips the same outer ```markdown```
+// fence Claude likes to wrap its plan in, without touching the Mermaid
+// / code-block content the wiki block instructs the model to emit.
+func (s *RequirementService) UpdateWikiDoc(id, md string) (*model.Requirement, error) {
+	now := time.Now()
+	cleaned := sanitizeDesignDoc(md)
+	_, err := s.db.Exec(
+		"UPDATE requirements SET wiki_docs=?, status='designing', updated_at=? WHERE id=?",
+		cleaned, now, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.Get(id)
+}
+
+// UpdateWikiSession persists the plan-mode claude session id for a wiki
+// requirement so the refine-doc / apply-doc stages can --resume the same
+// conversation. Mirrors UpdateDesignSession.
+func (s *RequirementService) UpdateWikiSession(id, sid string) error {
+	_, err := s.db.Exec("UPDATE requirements SET wiki_session_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", sid, id)
+	return err
+}
+
 // Archive turns a finished ("done") requirement into a knowledge-base entry so
 // its final requirement + design docs become reusable AI context. The
 // knowledge row is keyed by (source_ref=requirement id, source_type="requirement"),
@@ -1904,6 +1938,125 @@ func (s *RequirementService) Unarchive(id string) (*model.Requirement, error) {
 		return nil, err
 	}
 	if _, err := tx.Exec("DELETE FROM knowledge WHERE source_ref=? AND source_type='requirement'", id); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return s.Get(id)
+}
+
+// WikiArchive turns a wiki-kind requirement's Markdown body into a
+// knowledge-base entry. Mirrors Archive but the source is wiki_docs (NOT
+// design_docs) and the destination category is "wiki_doc" / source_type
+// "wiki_doc" so a knowledge-page filter can list wiki entries distinctly
+// from completed-requirement entries. The requirement status moves to
+// "archived"; the requirement row keeps its kind=wiki so an unarchive
+// round-trip restores exactly the same shape.
+//
+// Accepts status ∈ {designed, done} (wiki auto-promotes to designed on
+// successful generate, but a power user might have flipped the row to
+// "done" manually after applying-doc). Empty wiki_docs is rejected so a
+// 1-click archive of a "draft" row never persists a blank knowledge
+// entry.
+func (s *RequirementService) WikiArchive(id string) (*model.Knowledge, error) {
+	r, err := s.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if r.Kind != KindWiki {
+		return nil, fmt.Errorf("only wiki-kind requirements can be wiki-archived (current kind: %s)", r.Kind)
+	}
+	if r.Status != "designed" && r.Status != "done" {
+		return nil, fmt.Errorf("only wiki-kind requirements with status 'designed' or 'done' can be archived (current: %s)", r.Status)
+	}
+	if strings.TrimSpace(r.WikiDocs) == "" {
+		return nil, fmt.Errorf("wiki-kind requirement has no document yet — please generate the knowledge doc first")
+	}
+
+	content := "# " + r.Title + "\n\n" + r.WikiDocs
+	now := time.Now()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("UPDATE requirements SET status='archived', updated_at=? WHERE id=?", now, id); err != nil {
+		return nil, err
+	}
+
+	// source_ref uses a `wiki:<id>` prefix to keep wiki entries separate
+	// from the (project_id, source_ref=id, source_type='requirement') row
+	// the same requirement may have produced via the regular Archive path.
+	// This means the two flows are idempotent against each other.
+	sourceRef := "wiki:" + r.ID
+
+	var existingID string
+	_ = tx.QueryRow(
+		"SELECT id FROM knowledge WHERE project_id=? AND source_ref=? AND source_type='wiki_doc'",
+		r.ProjectID, sourceRef).Scan(&existingID)
+
+	if existingID != "" {
+		if _, err := tx.Exec(
+			"UPDATE knowledge SET title=?, content=?, updated_at=? WHERE id=?",
+			r.Title, content, now, existingID); err != nil {
+			return nil, err
+		}
+	} else {
+		existingID = util.NewID("kb")
+		if _, err := tx.Exec(
+			"INSERT INTO knowledge (id, project_id, title, content, category, source_type, source_ref, is_reviewed, is_approved, created_at, updated_at) VALUES (?,?,?,?, 'wiki_doc', 'wiki_doc', ?, 1, 1, ?, ?)",
+			existingID, r.ProjectID, r.Title, content, sourceRef, now, now); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	var k model.Knowledge
+	err = s.db.QueryRow(
+		"SELECT id, project_id, title, content, category, source_type, source_ref, is_reviewed, is_approved, created_at, updated_at FROM knowledge WHERE id=?",
+		existingID).
+		Scan(&k.ID, &k.ProjectID, &k.Title, &k.Content, &k.Category, &k.SourceType, &k.SourceRef, &k.IsReviewed, &k.IsApproved, &k.CreatedAt, &k.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &k, nil
+}
+
+// WikiUnarchive reverses WikiArchive: the requirement status returns to
+// "designed" and the wiki knowledge entry is removed. The original
+// wiki_docs body stays on the requirement row, so a re-archive produces
+// the same knowledge entry byte-for-byte.
+func (s *RequirementService) WikiUnarchive(id string) (*model.Requirement, error) {
+	r, err := s.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if r.Kind != KindWiki {
+		return nil, fmt.Errorf("only wiki-kind requirements can be wiki-unarchived (current kind: %s)", r.Kind)
+	}
+	if r.Status != "archived" {
+		return nil, fmt.Errorf("only archived wiki-kind requirements can be unarchived (current: %s)", r.Status)
+	}
+
+	now := time.Now()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("UPDATE requirements SET status='designed', updated_at=? WHERE id=?", now, id); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec("DELETE FROM knowledge WHERE source_ref=? AND source_type='wiki_doc'", "wiki:"+id); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

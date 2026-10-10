@@ -37,6 +37,7 @@ const KIND_FILTERS: { value: Kind; label: string }[] = [
   { value: 'issue', label: '🐛 问题' },
   { value: 'requirement', label: '📋 需求' },
   { value: 'idea', label: '💡 想法' },
+  { value: 'wiki', label: '📚 知识库' },
 ];
 
 export default function RequirementsCalendar() {
@@ -49,7 +50,7 @@ export default function RequirementsCalendar() {
   const [loading, setLoading] = useState(false);
   const [projectFilter, setProjectFilter] = useState('');
   const [activeKinds, setActiveKinds] = useState<Set<Kind>>(
-    new Set<Kind>(['issue', 'requirement', 'idea']),
+    new Set<Kind>(['issue', 'requirement', 'idea', 'wiki']),
   );
   const [search, setSearch] = useState('');
   const [modalFor, setModalFor] = useState<Requirement | null>(null);

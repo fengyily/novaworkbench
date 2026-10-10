@@ -105,12 +105,12 @@ function defaultRecurTime(): string {
 
 export interface LaunchPlanSectionProps {
   flow: Flow;
-  // The parent's `kind` value: requirement; issue; idea. The parent
-  // already hides this whole block for idea, but we re-check as a
+  // The parent's `kind` value: requirement; issue; idea; wiki. The parent
+  // already hides this whole block for idea AND wiki, but we re-check as a
   // defensive guard so a misconfigured caller can't dispatch a launch
-  // for an idea (the backend rejects anyway, but better UX to never
-  // show the form).
-  kind: 'requirement' | 'issue' | 'idea';
+  // for an idea / wiki (the backend rejects anyway, but better UX to
+  // never show the form).
+  kind: 'requirement' | 'issue' | 'idea' | 'wiki';
   // Caller pre-filters to status === 'ready'; the backend refuses any
   // other state. Re-project to the minimal ExecEnvServer shape so the
   // shared <ExecEnvSelect> renders without an extra cast.
@@ -276,6 +276,10 @@ export default function LaunchPlanSection({
   // re-check so onChange can never emit a launch spec for an idea. This
   // runs AFTER every hook above so the hook order is stable.
   if (kind === 'idea') return null;
+  // Wiki kind has no launch plan either — wiki only ever generates a
+  // read-only knowledge doc, never a developer run. The detail page's
+  // 「知识库文档」tab has its own 归档 button for the post-doc step.
+  if (kind === 'wiki') return null;
 
   return (
     <div className="launch-plan-section">

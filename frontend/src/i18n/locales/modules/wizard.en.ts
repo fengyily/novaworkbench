@@ -80,6 +80,7 @@ export const wizard = {
   docLabels: {
     design: 'Design',
     coding: 'Coding instructions',
+    wiki: 'Knowledge doc',
   },
   docRefine: {
     expandBtn: '💬 Refine {{label}}',

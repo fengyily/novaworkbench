@@ -81,6 +81,7 @@ export const wizard = {
   docLabels: {
     design: '技术方案',
     coding: '开发指令',
+    wiki: '知识库文档',
   },
   docRefine: {
     expandBtn: '💬 对话微调{{label}}',

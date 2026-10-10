@@ -142,6 +142,15 @@ func (h *ScheduleHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "IDEA_NOT_DEVELOPABLE", "「想法」类需求暂不支持进入开发阶段")
 		return
 	}
+	// Wiki rows never enter coding / design_and_coding — wiki only ever
+	// generates a read-only knowledge doc. Mirror the Idea guard so a
+	// user can't accidentally schedule a wiki row to "coding" (which
+	// would silently no-op downstream anyway, but the error here is
+	// clearer).
+	if (body.TaskType == model.SchedTypeCoding || body.TaskType == model.SchedTypeDesignCoding) && req.Kind == service.KindWiki {
+		writeError(w, 400, "WIKI_NOT_DEVELOPABLE", "「知识库」类需求不支持进入开发阶段")
+		return
+	}
 
 	t := &model.ScheduledTask{
 		TaskType:            body.TaskType,

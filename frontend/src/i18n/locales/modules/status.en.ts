@@ -24,36 +24,43 @@ export const status = {
     issue: '🐛 Issue',
     requirement: '📋 Requirement',
     idea: '💡 Idea',
+    wiki: '📚 Knowledge',
   },
   kindFilter: {
     issue: 'Issue',
     requirement: 'Requirement',
     idea: 'Idea',
+    wiki: 'Knowledge',
   },
   kindShort: {
     issue: 'Issue',
     requirement: 'Requirement',
     idea: 'Idea',
+    wiki: 'Knowledge',
   },
   kindHint: {
     issue: 'Needs: repro steps / error output / expected behaviour',
     requirement: 'Needs: background / goal / feature outline / acceptance criteria',
     idea: 'One sentence is enough — AI helps you assess feasibility',
+    wiki: 'Needs: background / key concepts / related modules / caveats',
   },
   kindPlaceholder: {
     issue: 'Describe the symptom / repro steps / error message…',
     requirement: 'Describe the feature you want in plain language…',
     idea: 'Write down your idea or inspiration; AI will assess feasibility…',
+    wiki: 'Describe the topic of this knowledge base document…',
   },
   kindCreate: {
     issue: '🐛 Create issue',
     requirement: '📋 Create requirement',
     idea: '💡 Create idea',
+    wiki: '📚 Create knowledge',
   },
   kindChatPlaceholder: {
     issue: 'Paste URLs, page elements, error screenshots, or extra repro steps... type @ to reference a Skill',
     requirement: 'Paste URLs, describe page elements, or reply to AI questions... type @ to reference a Skill',
     idea: 'Share your doubts, concerns or alternatives... type @ to reference a Skill',
+    wiki: 'Describe what you want to add or refine in this knowledge doc... type @ to reference a Skill',
   },
   stage: {
     analyst: 'Analysis',
