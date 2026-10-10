@@ -92,13 +92,30 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   // stage key that the backend's context-summary columns use:
   //   design  → architect_design  (design_docs is owned by this stage)
   //   coding  → coding            (coding instructions live here)
+  // compressible is hoisted before the JSX `<ContextUsageBar compressible=…>`
+  // (rendered later) and gates every wizardApi.compressContext /
+  // getContextSummary call so a wiki docType — which has no entry in the
+  // backend's contextSummaryColumns map — never reaches the API surface.
+  // Wiki is intentionally not compressible: it is a one-shot plan-mode
+  // artifact with no multi-turn context worth summarizing.
+  const compressible = docType === 'coding';
   // Computed once per render; the resulting string is what we send to
-  // wizardApi.compressContext / getContextSummary.
-  const compressStep = docType === 'design' ? 'architect_design' : 'coding';
+  // wizardApi.compressContext / getContextSummary. Empty string for wiki
+  // means the call sites (useEffect/useCallback deps) short-circuit because
+  // compress UI is hidden and no summary is loaded on mount.
+  const compressStep = compressible
+    ? 'coding'
+    : docType === 'design'
+    ? 'architect_design'
+    : '';
   // Step label shown in the usage bar header — resolved through tLabel so it
   // follows the active language.
   const stepLabel = t(
-    docType === 'design' ? 'wizard.docRefine.stepLabelDesign' : 'wizard.docRefine.stepLabelCoding',
+    docType === 'design'
+      ? 'wizard.docRefine.stepLabelDesign'
+      : docType === 'wiki'
+      ? 'wizard.docRefine.stepLabelWiki'
+      : 'wizard.docRefine.stepLabelCoding',
   );
   // label: chip / header / apply-button suffix.
   const label = t(docLabelKeys[docType]);
@@ -699,7 +716,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         // The design stage is excluded from compression: the design is a
         // one-shot plan-mode artifact, the refine chat has no compression
         // value — keep the usage bar but hide the compress button.
-        compressible={docType !== 'design'}
+        compressible={docType === 'coding'}
       />
       </div>
 
