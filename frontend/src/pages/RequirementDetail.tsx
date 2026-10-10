@@ -615,13 +615,14 @@ export default function RequirementDetail() {
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
-  // Independent fullscreen controllers for the three SSE panels that live
-  // here (design / coding / merge). Each panel toggles its own state via a
-  // toolbar button; CSS `.is-fullscreen` swaps the panel into a fixed
+  // Independent fullscreen controllers for the four SSE panels that live
+  // here (design / coding / merge / wiki). Each panel toggles its own state
+  // via a toolbar button; CSS `.is-fullscreen` swaps the panel into a fixed
   // full-viewport surface without disturbing React state or the live SSE.
   const designFs = useFullscreen();
   const codingFs = useFullscreen();
   const mergeFs = useFullscreen();
+  const wikiFs = useFullscreen();
   // Live re-render tickers for the timing section: while the plan-analysis span
   // or the development span is still open, tick so the displayed duration keeps
   // counting up. Called unconditionally (rules-of-hooks) with a boolean derived
@@ -1105,6 +1106,19 @@ export default function RequirementDetail() {
   // While the design job is actively running the panel stays open; once it
   // finishes the panel collapses and a toggle lets the user re-expand it.
   const [showDesignProcess, setShowDesignProcess] = useState(false);
+
+  // Streaming wiki-doc state (wiki phase). Mirrors the design state above:
+  // jobStore job → SSE stream → log lines → refresh on job_done. The wiki
+  // kind has no persisted wiki_job_id column (intentional — the schema stays
+  // minimal), so a refresh during an in-flight run loses the live SSE link;
+  // the wiki section's status gate (`draft|designing`) keeps the CTA
+  // available so the user can re-launch. Status moves to `designed`
+  // automatically once the backend's finalizeWikiRun persists wiki_docs.
+  const [wikiLines, setWikiLines] = useState<LogLine[]>([]);
+  const [wikiGenerating, setWikiGenerating] = useState(false);
+  const [wikiError, setWikiError] = useState(false);
+  const wikiRef = useRef<HTMLDivElement>(null);
+  const wikiEsRef = useRef<EventStream | null>(null);
 
   // Collapsible design-doc state. Long design documents default to collapsed
   // (truncated with a fade-mask + "Expand full text" button); short ones
@@ -1719,6 +1733,142 @@ export default function RequirementDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refresh]);
 
+  // ── Wiki phase: async knowledge-doc generation via JobStore ──────────────
+  // Mirrors the architect-design pattern (streamDesignJob + pollDesignJob)
+  // but the wiki stage has no persisted wiki_job_id column (intentional —
+  // see the wiki schema comment), so a page refresh during an in-flight run
+  // drops the live SSE link and the user simply re-launches from the CTA
+  // (status='designing' keeps the button visible). Final job_done status
+  // lands at `designed` once the backend's finalizeWikiRun persists
+  // wiki_docs; the refresh() on terminal pulls the new requirement in.
+  const streamWikiJob = useCallback((jobId: string) => {
+    if (wikiEsRef.current) wikiEsRef.current.close();
+    setWikiGenerating(true);
+    setWikiError(false);
+
+    wikiEsRef.current = createEventStream(
+      `/api/wizard/jobs/${jobId}/stream`,
+      (evt) => {
+        if (evt.type === 'knowledge' || evt.type === 'knowledge_result') {
+          // Optional knowledge pre-read: surface the read titles just like
+          // the design panel does, so the wiki and design UIs read the
+          // same way even though wiki lives in its own section.
+          try {
+            const kb = JSON.parse(evt.content ?? '{}') as { count?: number; items?: KnowledgeEntry[] };
+            if (Array.isArray(kb.items)) setKnowledgeItems(kb.items);
+            if (kb.count !== undefined) setKnowledgeEmpty(kb.count === 0);
+          } catch { /* malformed frame — ignore */ }
+          return;
+        }
+        if (evt.type === 'job_done') {
+          wikiEsRef.current?.close();
+          wikiEsRef.current = null;
+          setWikiGenerating(false);
+          // Mirror design: keep the stream panel open on failure so the red
+          // error line stays in view, and always refresh so the new
+          // wiki_docs / status='designed' surface without a manual reload.
+          const failed = evt.status === 'error' || (typeof evt.exit_code === 'number' && evt.exit_code !== 0);
+          setWikiError(failed);
+          refresh();
+          return;
+        }
+        // Plan-mode `usage` frames from the backend carry the live context
+        // usage snapshot. Wiki doesn't render a context-usage bar (it's a
+        // one-shot product, not a multi-turn chat), so we drop these frames
+        // here — appending them would pollute the log panel with raw JSON.
+        if (evt.type === 'usage') {
+          return;
+        }
+        const at = typeof evt.at === 'number' ? evt.at : Date.now();
+        setWikiLines(prev => appendLogLine(prev, { type: evt.type, content: evt.content ?? '', at }));
+      },
+      () => {
+        wikiEsRef.current = null;
+        // SSE link dropped before job_done landed — the backend job may
+        // still be running. Poll the snapshot; if the job has finished
+        // server-side, refresh; otherwise leave wikiGenerating=true and let
+        // the user re-launch or wait for the next status poll.
+        pollWikiJob(jobId, 0);
+      },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refresh]);
+
+  // Reconcile a dropped wiki SSE link by polling the job snapshot. Bounded
+  // retries (~2 min) so a genuinely long-running wiki run doesn't spin here
+  // forever — if still running after the retries, leave wikiGenerating=true
+  // and let the user re-launch from the CTA.
+  const pollWikiJob = useCallback((jobId: string, attempt: number) => {
+    if (attempt > 12) {
+      setWikiGenerating(false);
+      refresh();
+      return;
+    }
+    setTimeout(() => {
+      authedFetch(`${API_BASE}/api/wizard/jobs/${jobId}`)
+        .then(r => r.json())
+        .then(json => {
+          if (!json.success) { setWikiGenerating(false); refresh(); return; }
+          const { status, exit_code } = json.data as { status: string; exit_code: number };
+          if (status === 'running') {
+            pollWikiJob(jobId, attempt + 1);
+          } else {
+            setWikiGenerating(false);
+            setWikiError(status === 'error' || exit_code !== 0);
+            refresh();
+          }
+        })
+        .catch(() => {
+          setWikiGenerating(false);
+        });
+    }, 10000);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refresh]);
+
+  // runWikiGenerate kicks off the plan-mode knowledge-doc job and subscribes
+  // to its SSE stream. The backend's prepareWikiDoc promotes status
+  // draft → designing and pre-mints wiki_session_id, so the local state
+  // here just needs to swap the busy CTA for the streaming panel.
+  const runWikiGenerate = async () => {
+    if (!id) return;
+    setWikiLines([]);
+    setWikiError(false);
+    setWikiGenerating(true);
+    setKnowledgeItems([]);
+    setKnowledgeEmpty(false);
+    try {
+      const res = await authedFetch(`${API_BASE}/api/wizard/wiki/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requirement_id: id,
+          // Mirror the architect design wiring: per-request model override
+          // (empty = role's configured model) and the user-picked Claude
+          // config id. The wiki backend re-uses roleConfig("wiki") for the
+          // system prompt + default model.
+          ...(architectModel ? { model: architectModel } : {}),
+          ...(architectConfigId ? { claude_config_id: architectConfigId } : {}),
+          ...(agentServerId ? { agent_server_id: agentServerId } : {}),
+        }),
+      });
+      const json = await res.json();
+      const jobId = json.data?.job_id;
+      if (!jobId) throw new Error(json.error?.message || t('requirements.detail2.jobIdMissing'));
+      streamWikiJob(jobId);
+    } catch (err: any) {
+      setWikiLines([{ type: 'error', content: err?.message || String(err) }]);
+      setWikiGenerating(false);
+    }
+  };
+
+  // Close any open wiki SSE connection on unmount so navigating away
+  // mid-run doesn't leave a dangling subscriber that re-opens on the
+  // next mount.
+  useEffect(() => () => {
+    wikiEsRef.current?.close();
+    wikiEsRef.current = null;
+  }, []);
+
   const runArchitectDesign = async (useKnowledge: boolean) => {
     if (!id) return;
     setDesigning(true);
@@ -1886,6 +2036,10 @@ export default function RequirementDetail() {
   useEffect(() => {
     if (designRef.current) designRef.current.scrollTop = designRef.current.scrollHeight;
   }, [designLines]);
+
+  useEffect(() => {
+    if (wikiRef.current) wikiRef.current.scrollTop = wikiRef.current.scrollHeight;
+  }, [wikiLines]);
 
   // ── Edit requirement (title/description/priority) ─────────────────────────
   const openEdit = () => {
@@ -3659,7 +3813,10 @@ export default function RequirementDetail() {
         />
       )}
 
-      {req.status === 'draft' && (
+      {/* Wiki rows never enter the analyst stage (backend forces skip_analysis),
+          so we skip this whole section for kind=wiki and let the dedicated
+          「📚 知识库文档」section own the only CTA ("生成知识库文档"). */}
+      {req.status === 'draft' && reqKind !== 'wiki' && (
         <div
           className="detail-section analysis-section"
           ref={draftPlanRef}
@@ -3904,7 +4061,12 @@ export default function RequirementDetail() {
       )}
 
       {/* ── Architect stage ── */}
-      {(stage === 'architect' || req.status === 'designed' || stage === 'developer' || stage === 'done') && (
+      {/* Wiki rows never enter the architect stage either: the plan-mode
+          design run lives on its own dedicated 「📚 知识库文档」section below
+          and writes to wiki_docs / wiki_session_id, never design_docs. So
+          hide the architect toolbar (model picker / agent server picker /
+          "方案完成" / DocRefineChat) for kind=wiki. */}
+      {(stage === 'architect' || req.status === 'designed' || stage === 'developer' || stage === 'done') && reqKind !== 'wiki' && (
         <div className="detail-section design-section">
           {/* Compact toolbar: the architect role is already shown in the
               stepper, so this section leads with a content-oriented caption
@@ -4157,17 +4319,31 @@ export default function RequirementDetail() {
         // requirement hasn't been through GenerateWikiDoc yet, in which
         // case the section still renders the "生成知识库文档" CTA.
         const wiki = parseWikiDoc(req.wiki_docs);
+        // Wiki stage has its own streaming panel, mirroring the architect
+        // design panel: open while the job is actively running OR when the
+        // last run errored (so the red error line stays visible), closed
+        // on success.
+        const wikiPanelOpen = wikiGenerating || wikiError;
         return (
           <div className="detail-section wiki-section">
             <div className="section-header">
               <h3><IconBook size={16} className="icon-mr" />{t('requirements.detail2.tabWikiDoc')}</h3>
+              {/* Fullscreen toggle for the streaming panel — same pattern as
+                  the design panel's FullscreenButton. Only meaningful while
+                  the panel is rendered (job running / errored). */}
+              {wikiPanelOpen && (
+                <FullscreenButton isFullscreen={wikiFs.isFullscreen} onClick={wikiFs.toggle} />
+              )}
             </div>
             {/* Doc body — only when wiki_docs is non-empty. Mermaid code
                 blocks render as text under the default react-markdown 8
                 (no rehype-mermaid plugin); the WikiBlock in the prompt
                 instructs the model to express diagrams as ```mermaid
-                ... ``` so future enhancement is a plugin swap. */}
-            {wiki.plan_markdown ? (
+                ... ``` so future enhancement is a plugin swap. Hidden while
+                a generation is in flight so the user sees the live SSE
+                panel instead of a stale (or empty) body — the stream panel
+                takes over the section visually. */}
+            {!wikiGenerating && (wiki.plan_markdown ? (
               <div className="analysis-summary">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
                   {wiki.plan_markdown}
@@ -4175,28 +4351,51 @@ export default function RequirementDetail() {
               </div>
             ) : (
               <p className="analysis-summary">{t('requirements.detail2.wikiEmptyHint')}</p>
+            ))}
+            {/* Streaming panel — mirrors the architect design panel. Shows
+                the live phase / tool_call / message frames so the user
+                sees Claude exploring the project in real time. Persists
+                open on error so the red error line stays in view (matches
+                designPanelOpen behaviour). */}
+            {wikiPanelOpen && (
+              <div
+                className={`coding-panel ${wikiFs.isFullscreen ? 'is-fullscreen' : ''}`}
+                ref={wikiRef}
+                style={wikiFs.isFullscreen ? undefined : { marginBottom: 16 }}
+              >
+                {wikiFs.isFullscreen && (
+                  <FullscreenButton isFullscreen onClick={wikiFs.exit} variant="floating" />
+                )}
+                {/* Optional knowledge pre-read display (the wiki generator
+                    reuses the same `knowledge` SSE event the design stage
+                    emits). Renders above the log lines so the user can see
+                    which knowledge entries Claude consulted. */}
+                <KnowledgeReadPanel items={knowledgeItems} empty={knowledgeEmpty} projectId={project?.id} />
+                <CodingLines lines={wikiLines} working={wikiGenerating} />
+                {wikiGenerating && (
+                  <div className="coding-line coding-line-tool_call">
+                    <IconHourglass size={12} className="icon-mr" />
+                    {t('requirements.detail2.wikiPlanModeHint')}
+                  </div>
+                )}
+              </div>
             )}
             {/* Action bar: status-gated. Mirrors the design / dev CTA
                 flow but with only wiki-specific actions (no coding / merge
-                buttons). */}
+                buttons). The generate CTA wires into runWikiGenerate so the
+                user sees the live SSE panel above (instead of the old
+                navigate(0) full-reload that hid the stream entirely). */}
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
               {req.status === 'draft' || req.status === 'designing' ? (
                 <button
                   className="btn btn-primary"
-                  onClick={async () => {
-                    setBusy(t('requirements.detail2.btnGenerateWiki'));
-                    try {
-                      await requirementsApi.generateWikiDoc(req.id, {});
-                      navigate(0);
-                    } catch (err: any) {
-                      alert(t('requirements.detail2.wikiGenerateFailPrefix') + (err?.message || String(err)));
-                    } finally {
-                      setBusy('');
-                    }
-                  }}
-                  disabled={!!busy}
+                  onClick={runWikiGenerate}
+                  disabled={wikiGenerating || !!busy}
+                  title={wikiGenerating ? t('requirements.detail2.wikiGeneratingTitle') : t('requirements.detail2.btnGenerateWiki')}
                 >
-                  <IconSparkles size={13} className="btn-icon" />{t('requirements.detail2.btnGenerateWiki')}
+                  {wikiGenerating
+                    ? <><IconHourglass size={13} className="btn-icon" />{t('requirements.detail2.wikiGeneratingBtn')}</>
+                    : <><IconSparkles size={13} className="btn-icon" />{t('requirements.detail2.btnGenerateWiki')}</>}
                 </button>
               ) : null}
               {req.status === 'designed' && wiki.plan_markdown && (
@@ -4221,7 +4420,7 @@ export default function RequirementDetail() {
                     if (!confirm(t('requirements.detail2.archiveToKbConfirm'))) return;
                     try {
                       await requirementsApi.wikiArchive(req.id);
-                      navigate(0);
+                      await refresh();
                     } catch (err: any) {
                       alert(t('requirements.detail2.archiveFailPrefix') + (err?.message || String(err)));
                     }
@@ -4238,7 +4437,7 @@ export default function RequirementDetail() {
                     if (!confirm(t('requirements.detail2.unarchiveFromKbConfirm'))) return;
                     try {
                       await requirementsApi.wikiUnarchive(req.id);
-                      navigate(0);
+                      await refresh();
                     } catch (err: any) {
                       alert(t('requirements.detail2.archiveFailPrefix') + (err?.message || String(err)));
                     }
@@ -4254,7 +4453,11 @@ export default function RequirementDetail() {
       })()}
 
       {/* ── Developer stage ── */}
-      {(stage === 'developer' || stage === 'done') && (hasDesign || req.skip_design) && (
+      {/* Wiki rows never enter the developer stage either: there's no
+          coding / merge / PR / sub-task path for read-only knowledge docs.
+          Hide the whole section so we don't render "开始开发" / "开发完成" /
+          merge-PR / sub-task / commit-push-PR CTAs for kind=wiki. */}
+      {(stage === 'developer' || stage === 'done') && (hasDesign || req.skip_design) && reqKind !== 'wiki' && (
         <div className="detail-section">
           <div className="section-header"><h3><IconRocket size={16} className="icon-mr" />{t('requirements.detail2.logSessionStageDeveloper')}</h3></div>
 
