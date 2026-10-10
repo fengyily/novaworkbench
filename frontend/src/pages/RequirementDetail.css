@@ -468,6 +468,156 @@
   color: var(--color-text-muted);
 }
 
+/* Draft-stage action panel — the "decide & go" surface that the user lands on
+   when opening a fresh requirement with skip_analysis=true.
+
+   Visual concept: a single-card HUD that frames the three decisions the
+   user has to make in order — "pick a model", "pick where it runs",
+   "pick how to start" — with a monospaced route readout that tells them
+   where the work will go BEFORE they commit. The card wrapper (instead of
+   the flat flex-row used by the main architect toolbar) is deliberate: the
+   main toolbar is for refining a design that's already running; this panel
+   is for kicking one off, and the elevated container signals the different
+   intent.
+
+   Reuses the project's flight-strip vocabulary (.flight-leg / .flight-leg-
+   label / .flight-leg-value / .flight-ready / .flight-ready-dot) so the
+   preflight modal and this panel read as the same family — same monospace
+   font, same READY dot, same leg-label uppercase tracked micro-labels —
+   without re-stating those rules. The panel itself just composes them. */
+.draft-action-panel {
+  position: relative;
+  margin-top: 4px;
+  padding: 14px 16px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg);
+  /* Faint top accent: a 1px indigo hairline that says "this is the wizard
+     surface" without competing with the primary CTA. Uses the same
+     rgba primary tint as the .preflight-eyebrow::before dot so the
+     project feels visually coherent. */
+  box-shadow: inset 0 1px 0 rgba(79, 70, 229, 0.55),
+              0 1px 0 rgba(15, 23, 42, 0.02);
+}
+.draft-action-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+/* Override the preflight-eyebrow ::before dot only for the in-card context
+   (the dot already inherits from the shared .preflight-eyebrow class, so
+   no new rules are needed for the dot itself; we just give the eyebrow a
+   little breathing room from the route readout to its right). */
+.draft-action-header .preflight-eyebrow {
+  margin-bottom: 0;
+}
+/* Route readout — the signature element. Reuses the flight-strip leg
+   vocabulary so the panel reads as the same family as the coding
+   preflight modal. Sized tighter than the modal's full-width strip. */
+.draft-action-route {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.draft-action-route .flight-leg { gap: 4px; }
+.draft-action-route .flight-leg-label {
+  letter-spacing: 0.1em;
+  color: var(--color-text-muted);
+}
+.draft-action-route .flight-leg-value {
+  color: var(--color-text);
+  max-width: 180px;
+  font-weight: 600;
+}
+.draft-action-route .flight-arrow {
+  margin: 0 4px;
+  color: var(--color-border);
+}
+.draft-action-route .flight-ready {
+  margin-left: 0;
+  padding-left: 8px;
+  border-left: 1px solid var(--color-border);
+  font-size: 10px;
+}
+/* Hairline divider between the settings row and the action row inside
+   the card. 1px var(--color-border) keeps it quiet; the right margin
+   pulls it flush to the card edge so the divider visually anchors the
+   action cluster. */
+.draft-action-divider {
+  height: 1px;
+  background: var(--color-border);
+  margin: 10px 0;
+}
+/* Action cluster — same .design-toolbar-actions row, but here we lift it
+   onto a slightly recessed background (.draft-action-actions-surface) so
+   the four CTAs read as the actionable part of the card, distinct from
+   the quiet configuration above. The .draft-action-actions wrapper
+   simply arranges the inner row. */
+.draft-action-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.draft-action-actions-surface {
+  flex: 1;
+  display: flex;
+  justify-content: flex-end;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+}
+/* Bottom row: the rare analyst-fallback affordance. Rendered as a
+   subdued text link (not a button) because clicking it is a digression
+   from the primary intent — the design-start CTAs are the call to
+   action, this is the "actually, change my mind" escape hatch. The
+   arrow + underline-on-hover mimics a terminal/console feel that
+   fits the engineer's vernacular. */
+.draft-action-fallback {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+.draft-action-fallback:hover:not(:disabled) {
+  color: var(--color-primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.draft-action-fallback:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.draft-action-fallback-arrow {
+  display: inline-block;
+  transition: transform 160ms ease;
+}
+.draft-action-fallback:hover:not(:disabled) .draft-action-fallback-arrow {
+  transform: translateX(2px);
+}
+
 /* Claude session panel: lists per-stage claude session ids so the user can
    resume/inspect them locally (`claude --resume <id>` in the project dir). */
 .session-panel {

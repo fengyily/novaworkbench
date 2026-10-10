@@ -190,6 +190,14 @@ export const requirements = {
     syncModeLocalHint: 'Local self-hosted repo (no remote): ships code to the Agent server as a git bundle, syncs the result back to the local isolated worktree, and commits / merges locally.',
     syncModeLocalBadge: 'Local sync',
     syncModeLocalBadgeTitle: 'This requirement syncs code between the local repo and the Agent server via git bundles (no git remote).',
+    // Draft-stage action panel — see zh-CN module for the full rationale.
+    // The fallback phrasing uses "analysis" (the stage name) rather than
+    // "root-cause" since the english copy speaks to a broader audience.
+    draftActionEyebrow: 'Design stage',
+    draftActionRouteLabel: 'Target',
+    draftActionRouteAria: 'Design-generation target',
+    draftActionReady: 'READY',
+    draftActionFallback: 'Or run requirement analysis first',
     designAgentServerLabel: 'Design execution target',
     designAgentServerEmptyTitle: 'No ready Agent server. Add one under Settings → Agent Servers and complete the env check.',
     designAgentServerNoHint: 'No ready Agent server. Add one and run the env check under Settings → Agent Servers.',

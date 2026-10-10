@@ -198,6 +198,16 @@ export const requirements = {
     syncModeLocalHint: '本地自建仓库（无远程）：以 git bundle 文件同步代码到 Agent 服务器，开发完成后同步回本地隔离 worktree，提交 / 合并在本地完成。',
     syncModeLocalBadge: '本地同步',
     syncModeLocalBadgeTitle: '该需求通过 git bundle 在本地仓库与 Agent 服务器之间同步代码（无 git 远程仓库）。',
+    // Draft-stage action panel — the "decide & go" surface that wraps
+    // the model + env pickers and the four design-start CTAs in a single
+    // card. The eyebrow + route readout at the top reuse the preflight
+    // vocabulary (see .preflight-eyebrow / .flight-strip CSS) so this
+    // panel and the coding preflight modal read as the same family.
+    draftActionEyebrow: '方案设计',
+    draftActionRouteLabel: '执行目标',
+    draftActionRouteAria: '方案生成目标',
+    draftActionReady: 'READY',
+    draftActionFallback: '或先进行需求分析完善需求',
     designAgentServerLabel: '设计执行环境',
     designAgentServerEmptyTitle: '暂无可用的 Agent 服务器，请先在「设置 → Agent 服务器」中添加并完成环境检查。',
     designAgentServerNoHint: '未配置就绪的 Agent 服务器，请前往「设置 → Agent 服务器」添加并检查环境。',
