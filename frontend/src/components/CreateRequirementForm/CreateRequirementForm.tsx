@@ -173,6 +173,15 @@ export function CreateRequirementForm({
   };
 
   const showOptions = kind !== 'idea';
+  // The 开发流程 (direct / skip-analysis) switch is hidden for wiki as well as
+  // idea. Wiki is a single-stage kind: handleSubmit forces skip_design=true
+  // for it, so `flow` is never read — the control would toggle a value
+  // nothing consumes, and its note ("小改动，创建后立即进入开发") describes
+  // stages a wiki row never enters. LaunchPlanSection agrees: its
+  // resolveTaskType short-circuits on kind === 'wiki' before consulting
+  // `flow`, so nothing downstream is affected by hiding this.
+  // Priority stays visible — it is persisted and rendered for every kind.
+  const showFlow = kind !== 'idea' && kind !== 'wiki';
   const showProjectPicker = !fixedProjectId && !!projectOptions && projectOptions.length > 0;
   const canSubmit = !saving && !!description.trim() && !!projectId;
   const charCount = description.trim().length;
@@ -284,7 +293,7 @@ export function CreateRequirementForm({
         </div>
       )}
 
-      {showOptions && (
+      {showFlow && (
         <div className="form-group">
           <label>{t('components.createRequirement.flow')}</label>
           {/* Shared segmented-control style — same look as the kind switcher
