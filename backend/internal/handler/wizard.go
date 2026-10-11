@@ -82,6 +82,11 @@ type WizardHandler struct {
 	// in OrchestrationBatchService.Recover so a backend crash surfaces within
 	// one heartbeat cycle.
 	summaryKickIntervalSec int
+	// issueMonSvc is the persistence layer for issue_monitors. Wired from
+	// main.go via SetIssueMonSvc. nil in deployments without the issue-
+	// monitor feature; autoPushPR's comment-back hook is then a no-op (the
+	// wizard must never crash for a missing optional dep).
+	issueMonSvc *service.IssueMonitorService
 }
 
 func NewWizardHandler(database *db.DB, projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, agentSvrSvc *service.AgentServerService, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, batchSvc *service.OrchestrationBatchService, settingSvc *service.SettingService, worktreeH *WorktreeHandler, gitCredSvc *service.GitCredentialService) *WizardHandler {
@@ -116,4 +121,14 @@ func NewWizardHandler(database *db.DB, projectSvc *service.ProjectService, reqSv
 // scheduler tick still picks the batch up on its next interval.
 func (h *WizardHandler) SetOrchQueue(q interface{ Kick() }) {
 	h.orchQueue = q
+}
+
+// SetIssueMonSvc injects the issue_monitor service after construction.
+// Used by autoPushPR's comment-back hook (v0.5.x): the hook reads the
+// monitor row to learn whether to post a single "PR created" comment on
+// the originating GitHub Issue, and to flip monitor.comment_posted so a
+// re-push never comments twice. Passing nil disables the hook entirely
+// (the wizard must never crash for a missing optional dep).
+func (h *WizardHandler) SetIssueMonSvc(svc *service.IssueMonitorService) {
+	h.issueMonSvc = svc
 }

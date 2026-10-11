@@ -36,6 +36,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -159,6 +160,40 @@ func dispatchLaunch(req *model.Requirement, spec *model.LaunchSpec, h *WizardHan
 	default:
 		return "", "", fail(400, "INVALID", "launch.mode must be one of immediate/scheduled")
 	}
+}
+
+// RunLaunchForMonitor is the in-process dispatch surface the issue-monitor
+// poller uses (v0.5.x). It routes the monitor's LaunchSpec through the SAME
+// dispatchLaunch path requirement creation uses, so an imported Issue gets
+// identical treatment to a hand-created one — immediate vs scheduled,
+// design_and_coding vs coding-only, and the per-stage claude config ids all
+// behave the same.
+//
+// This replaced a bespoke immediate-only shim (formerly
+// RunImmediateDesignAndCodingForMonitor) which rebuilt a
+// designCodingImmediateReq by hand and silently dropped
+// DesignClaudeConfigID/CodingClaudeConfigID — the monitor's claude_config_id
+// was persisted but never reached the wizard. Going through dispatchLaunch
+// fixes that as a side effect, and adds the scheduled path for free.
+//
+// Returns the same (mode, scheduleID, errCode, errMsg) quad the service
+// layer wants for last_error / last_status bookkeeping; a non-empty errCode
+// signals a soft launch failure.
+func (h *WizardHandler) RunLaunchForMonitor(
+	ctx context.Context,
+	requirementID string,
+	spec model.LaunchSpec,
+	schedSvc *service.ScheduledTaskService,
+) (mode string, scheduleID string, errCode string, errMsg string) {
+	req, err := h.reqSvc.Get(requirementID)
+	if err != nil || req == nil {
+		return "", "", "NOT_FOUND", "requirement not found"
+	}
+	m, schedID, af := dispatchLaunch(req, &spec, h, schedSvc)
+	if af != nil {
+		return "", "", af.Code, af.Msg
+	}
+	return m, schedID, "", ""
 }
 
 // dispatchImmediateDesignAndCoding handles the immediate / design_and_coding

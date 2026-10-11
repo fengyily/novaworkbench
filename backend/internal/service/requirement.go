@@ -209,7 +209,14 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		// DevEndedAt pattern above). The NOT EXISTS(...) guard preserves the
 		// "only when ALL subtasks are completed" semantic; otherwise the
 		// subquery returns no row → NULL.
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,"+
+		//
+		// Issue-monitor source columns (source_platform, source_external_id,
+		// source_url, source_state, source_data) round-trip here so the list
+		// page can render "↗ Open on GitHub #42" affordances — all five are
+		// TEXT defaults so the dialect cost is zero and the column order
+		// tracks the INSERT in Create() above. The Calendar endpoint reads the
+		// slim subset only (see Calendar() below).
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,"+
 			"(SELECT st.completed_at FROM sub_tasks st WHERE st.requirement_id = r.id AND NOT EXISTS(SELECT 1 FROM sub_tasks o WHERE o.requirement_id = r.id AND o.completed_at IS NULL) ORDER BY st.completed_at DESC LIMIT 1) AS dev_ended_at"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" "+where+" "+orderBy,
@@ -232,7 +239,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.UsageSnapshots, &r.CodingPlan, &r.CodingStepPlan, &r.CodingPhase, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt,
-			&r.Tags, &r.Marks, &r.ClosedAt, &r.ClosedReason,
+			&r.Tags, &r.Marks, &r.ClosedAt, &r.ClosedReason, &r.SourcePlatform, &r.SourceExternalID, &r.SourceURL, &r.SourceState, &r.SourceData,
 			&r.DevEndedAt); err != nil {
 			return nil, err
 		}
@@ -418,7 +425,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	// created_at / updated_at — unqualified references would be ambiguous on
 	// MySQL/Postgres.
 	err := s.db.QueryRow(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.wiki_docs,r.wiki_session_id,r.wiki_job_id"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.wiki_docs,r.wiki_session_id,r.wiki_job_id,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
@@ -431,7 +438,8 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.UsageSnapshots, &r.CodingPlan, &r.CodingStepPlan, &r.CodingPhase, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt,
-			&r.Tags, &r.Marks, &r.ClosedAt, &r.ClosedReason, &r.WikiDocs, &r.WikiSessionID, &r.WikiJobID)
+			&r.Tags, &r.Marks, &r.ClosedAt, &r.ClosedReason, &r.WikiDocs, &r.WikiSessionID, &r.WikiJobID,
+			&r.SourcePlatform, &r.SourceExternalID, &r.SourceURL, &r.SourceState, &r.SourceData)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("requirement not found")
 	}
@@ -531,8 +539,9 @@ func (s *RequirementService) Create(req model.CreateRequirementReq) (*model.Requ
 	}
 
 	_, err := s.db.Exec(
-		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,skip_analysis,skip_design,created_at,updated_at) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,?,?,?)",
-		id, req.ProjectID, req.Title, req.Description, req.Priority, kind, sourceID, skipAnalysis, skipDesign, now, now)
+		"INSERT INTO requirements (id,project_id,title,description,status,priority,kind,acceptance_criteria,design_docs,conversation_ids,created_by,source_requirement_id,skip_analysis,skip_design,created_at,updated_at,source_platform,source_external_id,source_url,source_state,source_data) VALUES (?,?,?,?,'draft',?,?,'[]','[]','[]','user',?,?,?,?,?,?,?,?,?,?)",
+		id, req.ProjectID, req.Title, req.Description, req.Priority, kind, sourceID, skipAnalysis, skipDesign, now, now,
+		req.SourcePlatform, req.SourceExternalID, req.SourceURL, req.SourceState, req.SourceData)
 	if err != nil {
 		return nil, err
 	}

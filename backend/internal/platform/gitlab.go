@@ -3,7 +3,9 @@ package platform
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -156,4 +158,20 @@ func (c *gitlabClient) CreatePR(ctx context.Context, repoURL string, base, head,
 		return nil, err
 	}
 	return &PR{Number: raw.IID, HTMLURL: raw.WebURL}, nil
+}
+
+// ListIssues / PostIssueComment: v0.5.x ships GitHub-only. GitLab stubs
+// return a typed error and log a one-line warning so an operator
+// clicking "Issue Monitor" on a GitLab project sees a clear message in
+// both the backend log and the project error envelope. The endpoints
+// (`/api/v4/projects/{p}/issues` and `/api/v4/projects/{p}/issues/{n}/notes`)
+// are well-defined; implementing them is left for a follow-up release.
+func (c *gitlabClient) ListIssues(ctx context.Context, repoURL, label string) ([]Issue, error) {
+	log.Printf("[platform/gitlab] ListIssues not yet implemented (v0.5.x GitHub-only); repo=%s label=%q", repoURL, label)
+	return nil, errors.New("gitlab ListIssues is not implemented in v0.5.x (GitHub-only)")
+}
+
+func (c *gitlabClient) PostIssueComment(ctx context.Context, repoURL string, issueNumber int, body string) error {
+	log.Printf("[platform/gitlab] PostIssueComment not yet implemented (v0.5.x GitHub-only); repo=%s issue=%d", repoURL, issueNumber)
+	return errors.New("gitlab PostIssueComment is not implemented in v0.5.x (GitHub-only)")
 }

@@ -119,6 +119,14 @@ func (h *WizardHandler) RunImmediateDesignAndCoding(w http.ResponseWriter, r *ht
 	writeJSON(w, 200, map[string]string{"design_job_id": jobID})
 }
 
+// NOTE: the issue-monitor poller used to dispatch through a bespoke
+// RunImmediateDesignAndCodingForMonitor helper here. It was removed in
+// favour of the shared dispatchLaunch path — see
+// WizardHandler.RunLaunchForMonitor in requirement_launch.go. The old shim
+// silently dropped DesignClaudeConfigID/CodingClaudeConfigID, so a
+// monitor's claude_config_id never reached the wizard, and it had no
+// scheduled mode.
+
 // launchDesignAndCoding is the shared dispatch for an immediate
 // design+coding run, reused by both the HTTP handler
 // (RunImmediateDesignAndCoding above) and Create's launch spec

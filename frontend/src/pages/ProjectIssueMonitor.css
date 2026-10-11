@@ -1,0 +1,178 @@
+/* ProjectIssueMonitor — per-project Issue-monitor settings tab.
+   Every rule is scoped under .issue-monitor so nothing leaks into the other
+   settings pages. The mode cards / weekday pills mirror the visual
+   vocabulary of CreateRequirementForm's launch-plan block; they are
+   re-declared here rather than reused because that stylesheet scopes all of
+   its .launch-* rules under .create-req-form, which this page is not inside. */
+
+/* ── 执行方式: three selectable cards ─────────────────────────────── */
+.im-mode-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.im-mode-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+
+.im-mode-card:hover:not(:disabled) { border-color: #CBD5E1; }
+
+.im-mode-card.selected {
+  border-color: var(--color-primary);
+  background: var(--color-active);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+}
+
+.im-mode-card:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.im-mode-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.im-mode-card.selected .im-mode-card-head { color: var(--color-primary); }
+
+.im-mode-card-note {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+/* ── 定时 block ───────────────────────────────────────────────────── */
+.im-schedule {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+}
+
+.im-segment {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.im-segment-tab {
+  padding: 5px 14px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.im-segment-tab:hover:not(.selected) { background: var(--color-hover); }
+
+.im-segment-tab.selected {
+  background: var(--color-primary);
+  color: #fff;
+  font-weight: 600;
+}
+
+.im-weekdays {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.im-weekday {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: 50%;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.im-weekday:hover:not(.selected) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.im-weekday.selected {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+  color: #fff;
+  font-weight: 600;
+}
+
+/* ── Per-stage config cards ───────────────────────────────────────── */
+.im-stage {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.im-stage-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.im-stage-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.im-stage--design .im-stage-chip { background: #EDE9FE; color: #6D28D9; }
+.im-stage--coding .im-stage-chip { background: #CFFAFE; color: #0E7490; }
+
+.im-stage-hint { font-size: 12px; color: var(--color-text-muted); }
+
+.im-stage-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.im-stage-field:last-child { margin-bottom: 0; }
+
+.im-stage-field > label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.im-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.im-check > input { margin-top: 3px; }
