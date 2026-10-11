@@ -228,7 +228,16 @@ func main() {
 	projectH := handler.NewProjectHandler(projectSvc, scannerSvc)
 	healthH := handler.NewHealthHandler(pfRegistry)
 	dashboardH := handler.NewDashboardHandler(projectSvc)
-	fsH := handler.NewFsHandler()
+	// LocalPathProvider returns every active project's local_path so the FS
+	// handler can build its path whitelist. Closure over projectSvc avoids a
+	// direct handler -> service.ProjectService import cycle.
+	fsH := handler.NewFsHandler(func() []string {
+		paths, err := projectSvc.ListAllLocalPaths(context.Background())
+		if err != nil {
+			return nil
+		}
+		return paths
+	})
 	memoryH := handler.NewMemoryHandler(memorySvc)
 	// knowledgeH wraps KnowledgeService + the LLM gateway (for AI diagram
 	// generation) + the UsageService (for token-cost accounting on every
@@ -600,10 +609,12 @@ func main() {
 	mux.HandleFunc("PUT /api/settings/database", databaseH.Save)
 	mux.HandleFunc("POST /api/settings/database/migrate", databaseH.Migrate)
 
-	// File system browser
-	mux.HandleFunc("GET /api/fs/ls", fsH.ListDir)
-	mux.HandleFunc("GET /api/fs/validate", fsH.ValidatePath)
-	mux.HandleFunc("GET /api/fs/git-branches", fsH.GitBranches)
+	// File system browser — gated by fs.browse permission; path-level allow-list
+	// is enforced inside FsHandler.resolveAllowedPath (~/workspace + project roots).
+	fsB := middleware.RequirePermission(aclSvc, "fs.browse")
+	mux.HandleFunc("GET /api/fs/ls", fsB(http.HandlerFunc(fsH.ListDir)).ServeHTTP)
+	mux.HandleFunc("GET /api/fs/validate", fsB(http.HandlerFunc(fsH.ValidatePath)).ServeHTTP)
+	mux.HandleFunc("GET /api/fs/git-branches", fsB(http.HandlerFunc(fsH.GitBranches)).ServeHTTP)
 
 	// Requirements
 	mux.HandleFunc("GET /api/requirements", reqH.List)

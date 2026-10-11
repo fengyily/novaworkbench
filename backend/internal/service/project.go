@@ -125,6 +125,31 @@ func (s *ProjectService) CanAccess(userID string, isAdmin bool, projectID string
 	return count > 0, nil
 }
 
+// ListAllLocalPaths returns local_path values for every active (non
+// soft-deleted) project. Used by FsHandler to build the path allow-list for
+// /api/fs/*. Empty strings and NULLs are skipped. Returns nil + error on
+// query failure.
+func (s *ProjectService) ListAllLocalPaths(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT local_path FROM projects WHERE deleted_at IS NULL AND local_path <> ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			continue
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (s *ProjectService) Get(id string) (*model.Project, error) {
 	var p model.Project
 	err := s.db.QueryRow(`SELECT id, name, local_path, remote_url, status, default_branch,
