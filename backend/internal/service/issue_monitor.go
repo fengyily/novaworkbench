@@ -472,15 +472,16 @@ func (s *IssueMonitorService) RunOne(ctx context.Context, monitorID string) erro
 }
 
 // recordOutcome stamps the last_* columns on the monitor row. Used as
-// the unwind path for every error / success branch in RunOne. Uses
-// COALESCE on last_run_at so a failing monitor still records the
-// attempted run timestamp (helps the UI distinguish "never ran" from
-// "ran and failed").
+// the unwind path for every error / success branch in RunOne. last_run_at
+// is overwritten on every call so the interval gate sees the most
+// recent run (and the UI's "N 分钟前" stays accurate) instead of being
+// frozen at the first successful recordOutcome — which is what the old
+// COALESCE(last_run_at, ?) accidentally did.
 func (s *IssueMonitorService) recordOutcome(ctx context.Context, mon *model.IssueMonitor, status, errMsg string, created int) error {
 	now := time.Now()
 	_, err := s.db.Exec(
 		`UPDATE issue_monitors SET
-			last_run_at = COALESCE(last_run_at, ?),
+			last_run_at = ?,
 			last_status = ?,
 			last_error = ?,
 			run_count = run_count + 1,
@@ -715,6 +716,7 @@ func scanMonitor(row *sql.Row) (*model.IssueMonitor, error) {
 	); err != nil {
 		return nil, err
 	}
+	fixMonitorLastRunAt(&m)
 	return &m, nil
 }
 
@@ -732,7 +734,31 @@ func scanMonitorRows(rows *sql.Rows) (*model.IssueMonitor, error) {
 	); err != nil {
 		return nil, err
 	}
+	fixMonitorLastRunAt(&m)
 	return &m, nil
+}
+
+// fixMonitorLastRunAt reinterprets a monitor's LastRunAt so the
+// time.Time instant matches what was originally written. lib/pq
+// writes time.Time to TIMESTAMP WITHOUT TIME ZONE by calling
+// t.Format() in the time's Location (stripping the TZ without
+// converting), and reads naive timestamps as UTC by default — so a
+// local round-trip shifts the parsed instant by the local TZ offset.
+// Re-interpreting the parsed wall-clock components as local TZ restores
+// the original instant and lets the interval gate (which compares
+// against time.Now() in local TZ) compute the right "next" deadline.
+// Other timestamp columns on this row (created_at, updated_at) only
+// feed UI display, not gates, so we leave them on the default UTC parse.
+func fixMonitorLastRunAt(m *model.IssueMonitor) {
+	if m.LastRunAt == nil {
+		return
+	}
+	p := *m.LastRunAt
+	*m.LastRunAt = time.Date(
+		p.Year(), p.Month(), p.Day(),
+		p.Hour(), p.Minute(), p.Second(), p.Nanosecond(),
+		time.Local,
+	)
 }
 
 // ptrBool returns a *bool for the specified value so the Create path's
