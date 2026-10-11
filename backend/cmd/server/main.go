@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"github.com/novaworkbench/backend/internal/handler"
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/middleware"
+	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/preflight"
 	"github.com/novaworkbench/backend/internal/scheduler"
 	"github.com/novaworkbench/backend/internal/secret"
@@ -328,6 +330,53 @@ func main() {
 	go orchQueue.Start()
 	defer orchQueue.Stop()
 	wizardH.SetOrchQueue(orchQueue)
+
+	// Issue-monitor (v0.5.x): per-project "auto-import GitHub Issue" setting.
+	// The service owns the issue_monitors table; the handler exposes the
+	// project-level CRUD UI; the queue (declared below) ticks every
+	// NOVA_ISSUE_MONITOR_INTERVAL and dispatches the per-monitor
+	// service.RunOne — which (a) resolves the project's git remote + token,
+	// (b) lists matching open Issues via platform.Client.ListIssues, (c)
+	// dedups + creates a requirements row per Issue, and (d) optionally
+	// chains into wizard.start-design-and-coding per the monitor's flow.
+	issueMonSvc := service.NewIssueMonitorService(database).
+		SetLaunchFn(func(ctx context.Context, requirementID string, spec model.LaunchSpec) (string, string, string, string) {
+			return wizardH.RunLaunchForMonitor(ctx, requirementID, spec, schedSvc)
+		}).
+		SetProvider(func(ctx context.Context, projectID string) (string, string, string, string, error) {
+			proj, err := projectSvc.Get(projectID)
+			if err != nil || proj == nil {
+				return "", "", "", "", fmt.Errorf("project not found: %w", err)
+			}
+			var token, baseURL string
+			if proj.PlatformTokenID != "" {
+				if tok, terr := platformSvc.Get(proj.PlatformTokenID); terr == nil {
+					token = tok.Token
+					baseURL = tok.BaseURL
+				}
+			}
+			repoURL, repoErr := handler.EffectiveRemoteURL(proj.LocalPath, proj.RemoteURL)
+			if repoErr != nil {
+				return "", "", "", "", repoErr
+			}
+			return proj.PlatformType, baseURL, token, repoURL, nil
+		})
+	wizardH.SetIssueMonSvc(issueMonSvc)
+	issueMonH := handler.NewIssueMonitorHandler(issueMonSvc, projectSvc)
+	issueMonSemSize := 4
+	if env := os.Getenv("NOVA_ISSUE_MONITOR_CONCURRENCY"); env != "" {
+		if n, err := strconv.Atoi(env); err == nil && n > 0 {
+			issueMonSemSize = n
+		}
+	}
+	issueMonSem := make(chan struct{}, issueMonSemSize)
+	issueQueue := scheduler.NewIssueMonitorQueue(database, issueMonSvc, issueMonSem)
+	if err := issueQueue.Recover(); err != nil {
+		log.Printf("[main] issue-monitor queue recover: %v", err)
+	}
+	go issueQueue.Start()
+	defer issueQueue.Stop()
+
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
@@ -399,6 +448,18 @@ func main() {
 	mux.HandleFunc("POST /api/projects/{id}/restore", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.Restore)).ServeHTTP)
 	mux.HandleFunc("DELETE /api/projects/{id}/purge", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.Purge)).ServeHTTP)
 	mux.HandleFunc("POST /api/projects/{id}/scan", scannerH.Scan)
+
+	// Issue-monitor (v0.5.x GitHub-only). Five routes:
+	//   GET    /api/projects/{id}/issue-monitor       → fetch config (404)
+	//   PUT    /api/projects/{id}/issue-monitor       → upsert
+	//   DELETE /api/projects/{id}/issue-monitor       → remove
+	//   POST   /api/projects/{id}/issue-monitor/test  → preview matches
+	//   GET    /api/issue-monitors/active             → ops visibility
+	mux.HandleFunc("GET /api/projects/{id}/issue-monitor", issueMonH.Get)
+	mux.HandleFunc("PUT /api/projects/{id}/issue-monitor", issueMonH.Put)
+	mux.HandleFunc("DELETE /api/projects/{id}/issue-monitor", issueMonH.Delete)
+	mux.HandleFunc("POST /api/projects/{id}/issue-monitor/test", issueMonH.Test)
+	mux.HandleFunc("GET /api/issue-monitors/active", issueMonH.ListActive)
 
 	// Run sessions (docker compose)
 	mux.HandleFunc("POST /api/projects/{id}/run/start", runnerH.Start)

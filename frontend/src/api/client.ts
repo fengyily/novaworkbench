@@ -2480,3 +2480,97 @@ export function parseMarks(raw: string | undefined | null): string[] {
   } catch { /* fall through */ }
   return [];
 }
+
+// Issue monitor (v0.5.x): per-project GitHub-Issue auto-import setting.
+// One row per project at most — the backend enforces via app-level
+// upsert. Mirrors the model.IssueMonitor Go struct field-for-field so the
+// form below can edit it without a translation layer.
+// 执行方式. The immediate/scheduled literals match the backend's
+// model.LaunchMode* constants, which in turn match LaunchSpec.Mode — the
+// poller copies the value straight into a LaunchSpec.
+export type IssueMonitorLaunchMode = 'create_only' | 'immediate' | 'scheduled';
+// 时间窗周期. 'once' is deliberately absent: a poller imports Issues at
+// unpredictable times, so the backend resolves the window into a concrete
+// one-shot run_at instead of forwarding a recurrence.
+export type IssueMonitorRecurrence = 'daily' | 'weekly';
+
+export interface IssueMonitor {
+  id: string;
+  project_id: string;
+  label: string;
+  launch_mode: IssueMonitorLaunchMode;
+  skip_design: boolean;
+  design_model: string;
+  design_claude_config_id: string;
+  design_agent_server_id: string;
+  coding_model: string;
+  coding_claude_config_id: string;
+  coding_agent_server_id: string;
+  recurrence: IssueMonitorRecurrence;
+  recur_time: string;
+  recur_days: string;
+  recur_tz: string;
+  auto_push: boolean;
+  comment_on_pr: boolean;
+  comment_posted: boolean;
+  interval_minutes: number;
+  active: boolean;
+  last_run_at: string | null;
+  last_status: string;
+  last_error: string;
+  run_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+// Body for PUT /api/projects/{id}/issue-monitor. Subset of IssueMonitor
+// the user can edit; the rest (last_*, created_at, comment_posted, …)
+// is computed by the backend.
+export interface UpdateIssueMonitorReq {
+  label: string;
+  launch_mode: IssueMonitorLaunchMode;
+  skip_design: boolean;
+  design_model: string;
+  design_claude_config_id: string;
+  design_agent_server_id: string;
+  coding_model: string;
+  coding_claude_config_id: string;
+  coding_agent_server_id: string;
+  recurrence: IssueMonitorRecurrence;
+  recur_time: string;
+  recur_days: string;
+  recur_tz: string;
+  auto_push: boolean;
+  comment_on_pr: boolean;
+  interval_minutes: number;
+  active: boolean;
+}
+
+// Slim Issue the preview /test endpoint returns. Mirrors platform.Issue.
+// Body is intentionally omitted from the preview — the operator wants
+// match confirmation, not the full markdown description.
+export interface IssuePreview {
+  number: number;
+  title: string;
+  state: string;
+  html_url: string;
+  author: string;
+  labels: string[];
+}
+export interface IssuePreviewResponse {
+  issues: IssuePreview[];
+  count: number;
+}
+
+export const issueMonitorApi = {
+  get: (projectId: string) =>
+    api.get<IssueMonitor>(`/api/projects/${projectId}/issue-monitor`),
+  upsert: (projectId: string, data: UpdateIssueMonitorReq) =>
+    api.put<IssueMonitor>(`/api/projects/${projectId}/issue-monitor`, data),
+  delete: (projectId: string) =>
+    api.delete<void>(`/api/projects/${projectId}/issue-monitor`),
+  test: (projectId: string) =>
+    api.post<IssuePreviewResponse>(`/api/projects/${projectId}/issue-monitor/test`, {}),
+  listActive: () =>
+    api.get<{ items: IssueMonitor[] }>(`/api/issue-monitors/active`),
+};

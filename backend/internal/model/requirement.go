@@ -253,6 +253,22 @@ type Requirement struct {
 	// blank. Free-form text — the service does not enforce a vocabulary so
 	// the UI can show whatever the user typed (truncated in lists).
 	ClosedReason string `json:"closed_reason"`
+	// Issue-monitor source traceability (v0.5.x). All five columns are
+	// populated together by IssueMonitorService.RunOne when an external
+	// Issue is imported as a brand-new requirement row. Legacy rows (and
+	// every manually-created row) carry all-empty values; downstream code
+	// can use SourcePlatform != "" as the "imported" signal. SourceExternalID
+	// is the platform-specific identifier (GitHub Issue number for v0.5.x;
+	// GitLab & Gitea stub it for the future); SourceURL is the HTML link
+	// back to the ticket so the detail page can show a "↗ Open on GitHub"
+	// affordance; SourceState is the platform-reported open/closed snapshot
+	// the most recent poll observed; SourceData is a JSON dump of the raw
+	// API row, kept for future sync passes without re-fetching.
+	SourcePlatform   string `json:"source_platform,omitempty"`
+	SourceExternalID string `json:"source_external_id,omitempty"`
+	SourceURL        string `json:"source_url,omitempty"`
+	SourceState      string `json:"source_state,omitempty"`
+	SourceData       string `json:"source_data,omitempty"`
 }
 
 type CreateRequirementReq struct {
@@ -289,6 +305,19 @@ type CreateRequirementReq struct {
 	// exactly as before** — no dispatch, no scheduling, response shape
 	// unchanged.
 	Launch *LaunchSpec `json:"launch,omitempty"`
+
+	// Issue-monitor source fields (v0.5.x). Forwarded into the
+	// requirements.source_* columns on the INSERT so the auto-import path
+	// IssueMonitorService.RunOne (handler/issue_monitor.go) doesn't need a
+	// second write. Empty strings = manual creation; any non-empty value =
+	// an externally imported Issue. Callers that don't import from a
+	// remote platform can leave every field blank and the existing Create
+	// flow behaves exactly as before.
+	SourcePlatform   string `json:"source_platform,omitempty"`
+	SourceExternalID string `json:"source_external_id,omitempty"`
+	SourceURL        string `json:"source_url,omitempty"`
+	SourceState      string `json:"source_state,omitempty"`
+	SourceData       string `json:"source_data,omitempty"`
 }
 
 type UpdateStatusReq struct {

@@ -453,6 +453,102 @@ CREATE INDEX IF NOT EXISTS idx_sched_req     ON scheduled_tasks(requirement_id);
 CREATE INDEX IF NOT EXISTS idx_sched_run_at  ON scheduled_tasks(run_at);
 -- NOTE: idx_sched_task_type intentionally omitted — task_type 不在
 -- mysqlIndexedCol 白名单，MySQL 下索引 TEXT 会失败。List 端 Go 侧过滤即可。
+
+-- Issue monitors: one row per project that opts in to GitHub Issue auto-import.
+-- The ticker (scheduler/issue_monitor_queue.go) walks active rows on a fixed
+-- interval and, for each matching open Issue, INSERTs a brand-new
+-- requirements row (kind='issue') with the source_* columns populated.
+-- De-duplication of the (project, source) tuple is enforced at the application
+-- layer (per-monitor mutex + SELECT-then-INSERT in RunOne) — a plain lookup
+-- index below serves the dedup query and stays portable across SQLite / MySQL
+-- / Postgres without needing partial-unique-index gymnastics. The lifecycle
+-- columns mirror scheduled_tasks so an operator can quickly inspect recent
+-- activity via last_run_at / last_status / last_error.
+CREATE TABLE IF NOT EXISTS issue_monitors (
+	id                TEXT PRIMARY KEY,
+	project_id        TEXT NOT NULL,
+	-- label: the GitHub Label string the ticker polls with. Empty = disabled.
+	label             TEXT NOT NULL DEFAULT '',
+
+	-- ── 执行方式 / 开发流程 (v0.5.x) ─────────────────────────────────────
+	-- launch_mode: create_only | immediate | scheduled. The immediate/scheduled
+	-- literals are deliberately identical to LaunchSpec.Mode's wire values so
+	-- the poller copies the field straight into a LaunchSpec and hands it to
+	-- the same handler.dispatchLaunch path requirement creation uses.
+	launch_mode       TEXT NOT NULL DEFAULT 'create_only',
+	-- skip_design: 开发流程. 1 = 直接开发 (coding only), 0 = 方案开发
+	-- (design+coding). Copied onto the new requirement's skip_design so
+	-- resolveLaunchTaskType picks coding vs design_and_coding.
+	skip_design       INTEGER NOT NULL DEFAULT 0,
+	-- Per-stage dispatch config. Each *claude_config_id binds a claude_configs
+	-- row ('' = global default config) and each *agent_server_id names the
+	-- agent_servers row to run on ('' = local). Mirrors scheduled_tasks'
+	-- stage split so dispatchScheduled can store them verbatim.
+	design_model             TEXT NOT NULL DEFAULT '',
+	design_claude_config_id  TEXT NOT NULL DEFAULT '',
+	design_agent_server_id   TEXT NOT NULL DEFAULT '',
+	coding_model             TEXT NOT NULL DEFAULT '',
+	coding_claude_config_id  TEXT NOT NULL DEFAULT '',
+	coding_agent_server_id   TEXT NOT NULL DEFAULT '',
+	-- 时间窗 (only meaningful when launch_mode='scheduled'). These define WHEN
+	-- a newly imported Issue should be developed — NOT a recurrence handed to
+	-- scheduled_tasks. buildLaunchSpec resolves them via service.NextRunAt into
+	-- a concrete run_at on a recurrence='once' row, so each Issue is developed
+	-- exactly once. Passing 'daily' through as a recurrence would re-arm and
+	-- re-run design+coding on the same requirement every day (see
+	-- model/scheduled_task.go's re-arm contract).
+	recurrence        TEXT NOT NULL DEFAULT 'daily',
+	recur_time        TEXT NOT NULL DEFAULT '09:00',
+	recur_days        TEXT NOT NULL DEFAULT '',
+	recur_tz          TEXT NOT NULL DEFAULT '',
+
+	-- ── legacy, superseded by launch_mode / per-stage columns above ──────
+	-- Kept in place (never DROPped) because alterColumns is add-only: the
+	-- migration relies on isIgnorableDDLError swallowing "duplicate column",
+	-- and a DROP COLUMN is not idempotent. Go code no longer references these.
+	model             TEXT NOT NULL DEFAULT '',
+	claude_config_id  TEXT NOT NULL DEFAULT '',
+	exec_env          TEXT NOT NULL DEFAULT 'local',
+	agent_server_id   TEXT NOT NULL DEFAULT '',
+	flow              TEXT NOT NULL DEFAULT 'create_and_develop',
+
+	-- auto_push: 开发完成后自动 commit/push/PR (replaces the old
+	-- flow='create_and_push' variant). For issue-monitor rows we default 0 so
+	-- the branch lives in the worktree before someone clicks the manual
+	-- "推送 → PR" action. 0 does not mean "no PR ever", only "don't
+	-- auto-dispatch yet".
+	auto_push         INTEGER NOT NULL DEFAULT 0,
+	-- comment_on_pr: when 1 and this monitor's requirement reaches PR-create
+	-- success, the auto-push hook calls platform.PostIssueComment on the
+	-- originating Issue. Never closes or labels the Issue (decision locked
+	-- at design time) — only a single comment is dispatched.
+	comment_on_pr     INTEGER NOT NULL DEFAULT 0,
+	-- comment_posted: one-shot guard the comment-back hook flips to 1 after
+	-- the first successful PostIssueComment, so a re-push (manual or retry)
+	-- never posts the same comment twice.
+	comment_posted    INTEGER NOT NULL DEFAULT 0,
+	-- interval_minutes: per-monitor minimum delay between two RunOne calls.
+	-- Clamped to >=1 minute at write time (and ALSO checked against the env
+	-- floor NOVA_ISSUE_MONITOR_INTERVAL — a 30s env forces a 1-minute minimum
+	-- regardless of what the user typed in the UI).
+	interval_minutes  INTEGER NOT NULL DEFAULT 5,
+	-- active: master pause toggle. The ticker only walks active=1 rows and
+	-- the toggle flips to 0 instantly on PUT, taking effect on the next tick.
+	active            INTEGER NOT NULL DEFAULT 1,
+	last_run_at       DATETIME,
+	last_status       TEXT NOT NULL DEFAULT '',     -- 'ok' | 'partial' | 'failed'
+	last_error        TEXT NOT NULL DEFAULT '',
+	run_count         INTEGER NOT NULL DEFAULT 0,
+	created_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+-- Indexes: lookup-active-rows is the tick's hot path. Non-unique on purpose
+-- (the application-layer SELECT-then-INSERT in service.RunOne is the dedup
+-- gate). Per-monitor mutex prevents same-monitor races. The per-row UNIQUE
+-- constraint would have required dialect-specific partial-unique gymnastics.
+CREATE INDEX IF NOT EXISTS idx_issue_monitors_active  ON issue_monitors(active, last_run_at);
+CREATE INDEX IF NOT EXISTS idx_issue_monitors_project ON issue_monitors(project_id);
 `
 
 // alterColumns adds columns to older databases. ALTER TABLE fails when the
@@ -993,6 +1089,22 @@ var alterColumns = []string{
 	// MySQL 上的 TEXT DEFAULT '' 转成 TEXT DEFAULT (''),isIgnorableDDLError 吞
 	// 掉"duplicate column"以便历史 DB 平滑升级。
 	`ALTER TABLE requirements ADD COLUMN design_base_sha TEXT NOT NULL DEFAULT ''`,
+	// Issue-monitor source traceability (v0.5.x). Every requirement imported
+	// from a GitHub Issue carries the platform tag ("github" / "gitlab" /
+	// "gitea" — even though only GitHub ships in v0.5.x), the external id
+	// (Issue number for GitHub; nullable for older manual rows), the HTML URL
+	// back to the ticket, and a free-form state snapshot ("open" / "closed").
+	// source_data is a JSON dump of the raw API row, retained so a future
+	// sync pass can re-derive state without re-fetching. Empty on every
+	// legacy row; the poller writes all five columns in one INSERT so
+	// downstream code can rely on "all empty" as "manual" and "any set" as
+	// "imported". isIgnorableDDLError keeps the ALTERs safe on already-
+	// migrated databases.
+	`ALTER TABLE requirements ADD COLUMN source_platform    TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN source_external_id TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN source_url         TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN source_state       TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE requirements ADD COLUMN source_data        TEXT NOT NULL DEFAULT '{}'`,
 	// Sub-task execution start timestamp: written by MarkRunning (manual path)
 	// and ClaimNextPending (orchestration path) via COALESCE(started_at, ?) so
 	// it captures the FIRST pending → running transition. Drives the
@@ -1026,6 +1138,40 @@ var alterColumns = []string{
 	// error from isIgnorableDDLError swallows preexisting DBs.
 	`ALTER TABLE projects ADD COLUMN commit_mode TEXT NOT NULL DEFAULT 'llm_only'`,
 	`ALTER TABLE projects ADD COLUMN commit_script TEXT NOT NULL DEFAULT ''`,
+	// Issue-monitor dedup lookup index (v0.5.x). Composite on (project_id,
+	// source_platform, source_external_id) so the poller's RunOne SELECT
+	// "have I imported this Issue already?" is index-backed instead of
+	// full-scanning. Non-unique by design (the application layer enforces
+	// dedup via per-monitor mutex + a transactional SELECT-then-INSERT, and
+	// the unique variant would require dialect-specific partial-unique
+	// gymnastics on MySQL pre-8.0.13). Plain TEXT columns are fine to index
+	// in SQLite + Postgres; MySQL would fail because source_external_id
+	// isn't in mysqlIndexedCol. To keep things portable we SKIP this index
+	// on MySQL by emitting it only when the canonical-schema dialect step
+	// runs (the issue_monitors table above does the same trick).
+
+	// Issue-monitor 执行方式 / 开发流程 / 分阶段配置 (v0.5.x). These replace the
+	// original model / claude_config_id / exec_env / agent_server_id / flow
+	// columns, which are left in place (see the canonical block's "legacy"
+	// section — alterColumns is add-only and a DROP COLUMN is not idempotent,
+	// so the old columns stay behind unreferenced rather than being removed).
+	//
+	// All twelve are TEXT/INTEGER and none is an index target, so they are
+	// portable across SQLite / MySQL / Postgres without touching mysqlIndexedCol.
+	// TEXT NOT NULL DEFAULT '' is rewritten to DEFAULT ('') on MySQL by
+	// mysqlTextDefaultCol, same as the adjacent columns above.
+	`ALTER TABLE issue_monitors ADD COLUMN launch_mode             TEXT    NOT NULL DEFAULT 'create_only'`,
+	`ALTER TABLE issue_monitors ADD COLUMN skip_design             INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE issue_monitors ADD COLUMN design_model            TEXT    NOT NULL DEFAULT ''`,
+	`ALTER TABLE issue_monitors ADD COLUMN design_claude_config_id TEXT    NOT NULL DEFAULT ''`,
+	`ALTER TABLE issue_monitors ADD COLUMN design_agent_server_id  TEXT    NOT NULL DEFAULT ''`,
+	`ALTER TABLE issue_monitors ADD COLUMN coding_model            TEXT    NOT NULL DEFAULT ''`,
+	`ALTER TABLE issue_monitors ADD COLUMN coding_claude_config_id TEXT    NOT NULL DEFAULT ''`,
+	`ALTER TABLE issue_monitors ADD COLUMN coding_agent_server_id  TEXT    NOT NULL DEFAULT ''`,
+	`ALTER TABLE issue_monitors ADD COLUMN recurrence              TEXT    NOT NULL DEFAULT 'daily'`,
+	`ALTER TABLE issue_monitors ADD COLUMN recur_time              TEXT    NOT NULL DEFAULT '09:00'`,
+	`ALTER TABLE issue_monitors ADD COLUMN recur_days              TEXT    NOT NULL DEFAULT ''`,
+	`ALTER TABLE issue_monitors ADD COLUMN recur_tz                TEXT    NOT NULL DEFAULT ''`,
 }
 
 var (

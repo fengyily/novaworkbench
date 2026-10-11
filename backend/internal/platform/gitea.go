@@ -3,7 +3,9 @@ package platform
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -171,4 +173,17 @@ func (c *giteaClient) CreatePR(ctx context.Context, repoURL string, base, head, 
 		return nil, err
 	}
 	return &PR{Number: raw.Number, HTMLURL: raw.HTMLURL}, nil
+}
+
+// ListIssues / PostIssueComment: v0.5.x ships GitHub-only. Gitea stubs
+// follow the same pattern as the GitLab stubs above — typed error plus
+// log line so the failure is visible from both the UI and the backend.
+func (c *giteaClient) ListIssues(ctx context.Context, repoURL, label string) ([]Issue, error) {
+	log.Printf("[platform/gitea] ListIssues not yet implemented (v0.5.x GitHub-only); repo=%s label=%q", repoURL, label)
+	return nil, errors.New("gitea ListIssues is not implemented in v0.5.x (GitHub-only)")
+}
+
+func (c *giteaClient) PostIssueComment(ctx context.Context, repoURL string, issueNumber int, body string) error {
+	log.Printf("[platform/gitea] PostIssueComment not yet implemented (v0.5.x GitHub-only); repo=%s issue=%d", repoURL, issueNumber)
+	return errors.New("gitea PostIssueComment is not implemented in v0.5.x (GitHub-only)")
 }

@@ -21,11 +21,45 @@ type PR struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
-// Client abstracts platform-specific PR operations.
+// Issue represents an issue (or, on GitHub, an item that LOOKS like an
+// issue but is actually a PR — the consumer MUST filter by PullRequest
+// on the GitHub implementation because GitHub returns both via the
+// Issues endpoint). Body is the raw Markdown body returned by the API
+// (the HTML rendering is a UI thing; the API field is already Markdown).
+type Issue struct {
+	Number    int       `json:"number"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	Author    string    `json:"author"`
+	Labels    []string  `json:"labels"`
+	State     string    `json:"state"` // "open" | "closed"
+	HTMLURL   string    `json:"html_url"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Client abstracts platform-specific PR + Issue operations. ListIssues
+// and PostIssueComment are v0.5.x additions for the issue-monitor feature
+// (GitHub impl ships in this release; GitLab/Gitea return a stub "not yet
+// implemented" error so the interface compiles and the user sees a clear
+// signal instead of a silent failure).
 type Client interface {
 	ListOpenPRs(ctx context.Context, repoURL string) ([]PR, error)
 	SubmitComment(ctx context.Context, repoURL string, prNumber int, body string) error
 	CreatePR(ctx context.Context, repoURL string, base, head, title, body string) (*PR, error)
+
+	// ListIssues returns open Issues matching `label` (empty = no label
+	// filter) for the given repository. Implementations are expected to
+	// cap the page at a reasonable size; pagination is OUT OF SCOPE for
+	// v0.5.x — the monitor's poll cadence plus the dedup on
+	// (project_id, source_platform, source_external_id) handles churn.
+	ListIssues(ctx context.Context, repoURL, label string) ([]Issue, error)
+	// PostIssueComment posts a comment on the Issue (or PR — GitHub's
+	// `/issues/{n}/comments` endpoint serves both) identified by
+	// issueNumber. The issue-monitor's auto-push PR hook calls this with
+	// issueNumber = requirements.source_external_id (the GitHub Issue
+	// number the requirement was created from) when monitor.comment_on_pr
+	// is 1 and monitor.comment_posted is 0.
+	PostIssueComment(ctx context.Context, repoURL string, issueNumber int, body string) error
 }
 
 // readErrBody drains up to 2 KB of an error response body for a richer message

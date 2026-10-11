@@ -15,10 +15,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/model"
+	"github.com/novaworkbench/backend/internal/platform"
 	"github.com/novaworkbench/backend/internal/service"
 )
 
@@ -759,6 +761,89 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 	// returns immediately without running a job body here.)
 	if perr := h.reqSvc.Touch(reqRow.ID); perr != nil {
 		log.Printf("[wizard] touch requirement %s after auto-push: %v", reqRow.ID, perr)
+	}
+
+	// Issue-monitor comment-back hook (v0.5.x). When this requirement was
+	// auto-imported from a GitHub Issue AND the project's monitor has
+	// comment_on_pr=true AND no comment has been posted yet, post a
+	// single "✅ Auto-developed by NovaWorkbench." comment on the
+	// originating Issue with the PR link. We never close the Issue or
+	// change its labels — product decision locked at design time. Every
+	// failure path is a logged skip: this hook is convenience, not a
+	// critical correctness path, and a GitHub hiccup must NEVER turn a
+	// successful run into a visible error.
+	h.maybeCommentBackToSourceIssue(reqRow)
+}
+
+// maybeCommentBackToSourceIssue handles the issue-monitor ↔ auto-push
+// seam. Extracted into its own method so the manual MergeHandler.Push
+// path can call it for free (the user-initiated "Push & Create PR"
+// action ought to behave identically to the auto path).
+//
+// Steps:
+//  1. Source-platform guard — only GitHub in v0.5.x; other platforms
+//     exit silently.
+//  2. Look up the project monitor. When absent or comment_on_pr=0 or
+//     comment_posted=1, exit silently (idempotent).
+//  3. Build a GitHub client (uses the project's stored token + baseURL),
+//     call PostIssueComment, flip comment_posted=1 on success.
+//
+// Logging is permissive: one line on every skip / failure so an
+// operator skimming `log` can see whether the hook fired.
+func (h *WizardHandler) maybeCommentBackToSourceIssue(reqRow *model.Requirement) {
+	if h.issueMonSvc == nil || h.platformSvc == nil {
+		return
+	}
+	if reqRow == nil || reqRow.SourcePlatform == "" || reqRow.SourcePlatform != "github" {
+		return
+	}
+	mon, err := h.issueMonSvc.GetByProject(context.Background(), reqRow.ProjectID)
+	if err != nil {
+		log.Printf("[issue-monitor] comment-back: lookup failed for project=%s: %v", reqRow.ProjectID, err)
+		return
+	}
+	if mon == nil || !mon.CommentOnPR || mon.CommentPosted {
+		return
+	}
+	// Find the project's PR URL by re-reading the latest requirement
+	// state. source_external_id carries the GitHub Issue number;
+	// source_url carries the HTML URL back to the Issue.
+	issueNumber, err := strconv.Atoi(reqRow.SourceExternalID)
+	if err != nil || issueNumber <= 0 {
+		log.Printf("[issue-monitor] comment-back: invalid source_external_id %q for req=%s", reqRow.SourceExternalID, reqRow.ID)
+		return
+	}
+	// Pull the GitHub token from the project's platform token row.
+	proj, err := h.projectSvc.Get(reqRow.ProjectID)
+	if err != nil {
+		log.Printf("[issue-monitor] comment-back: project lookup failed for req=%s: %v", reqRow.ID, err)
+		return
+	}
+	var token, baseURL string
+	if proj.PlatformTokenID != "" {
+		tok, terr := h.platformSvc.Get(proj.PlatformTokenID)
+		if terr == nil {
+			token = tok.Token
+			baseURL = tok.BaseURL
+		}
+	}
+	client, err := platform.New("github", baseURL, token)
+	if err != nil {
+		log.Printf("[issue-monitor] comment-back: platform client failed for req=%s: %v", reqRow.ID, err)
+		return
+	}
+	repoURL, err := effectiveRemoteURL(proj.LocalPath, proj.RemoteURL)
+	if err != nil {
+		log.Printf("[issue-monitor] comment-back: repo URL resolution failed for req=%s: %v", reqRow.ID, err)
+		return
+	}
+	body := "✅ Auto-developed by NovaWorkbench.\n\nA branch for this Issue has been prepared. See the requirement detail page for the PR URL once it lands."
+	if err := client.PostIssueComment(context.Background(), repoURL, issueNumber, body); err != nil {
+		log.Printf("[issue-monitor] comment-back: PostIssueComment failed for req=%s issue=%d: %v", reqRow.ID, issueNumber, err)
+		return
+	}
+	if err := h.issueMonSvc.MarkCommentPosted(mon.ID); err != nil {
+		log.Printf("[issue-monitor] comment-back: mark posted failed for monitor=%s: %v", mon.ID, err)
 	}
 }
 

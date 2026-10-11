@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { useParams } from 'react-router-dom';
 import { AuthProvider, useAuth } from './utils/auth';
 import Layout from './components/Layout';
 import Login from './pages/Login';
@@ -28,11 +29,21 @@ import RequirementDetail from './pages/RequirementDetail';
 import RequirementsCalendar from './pages/RequirementsCalendar';
 import WizardPage from './pages/WizardPage';
 import ProjectDetail from './pages/ProjectDetail';
+import ProjectIssueMonitor from './pages/ProjectIssueMonitor';
 import SchedulesPage from './pages/SchedulesPage';
 
 // RequireAuth gates the authenticated app: while the session is being
 // restored it shows a minimal loader; once restored with no user it bounces
 // to /login. /login itself is mounted outside this guard.
+// ProjectIssueMonitorWithId bridges the route param into ProjectIssueMonitor
+// (which takes projectId as a prop, not a hook — consistent with the other
+// settings pages that take the id as a prop).
+function ProjectIssueMonitorWithId() {
+  const { id } = useParams();
+  if (!id) return null;
+  return <ProjectIssueMonitor projectId={id} />;
+}
+
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
   const { t } = useTranslation();
@@ -69,6 +80,9 @@ export default function App() {
             <Route path="projects/add" element={<AddProject />} />
             <Route path="projects" element={<ProjectsList />} />
             <Route path="projects/:id" element={<ProjectDetail />} />
+            <Route path="projects/:id/issue-monitor" element={<RequireAuth><Layout /></RequireAuth>}>
+              <Route index element={<ProjectIssueMonitorWithId />} />
+            </Route>
             <Route path="requirements" element={<RequirementsList />} />
             {/* 字面量段 "calendar" 必须早于 ":id" 通配注册，否则会被
                路由成 id="calendar" 的详情页。与后端 ServeMux 同款语义。 */}

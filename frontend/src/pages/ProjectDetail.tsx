@@ -15,6 +15,7 @@ import { fmtDate, fmtDateTime, fmtRelative, fmtRunAtRelative } from '../utils/in
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import { StatusChips } from '../components/StatusChips';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
+import ProjectIssueMonitor from './ProjectIssueMonitor';
 import { IconPlug, IconRobot, IconClock } from '../components/icons';
 import { stripMarkdownPreview } from '../utils/preview';
 import { createEventStream, type EventStream } from '../api/stream';
@@ -23,7 +24,7 @@ import './ProjectDetail.css';
 import './KnowledgePage.css';
 import { errorMessage as errMsg } from '../utils/errMsg';
 
-type Tab = 'overview' | 'knowledge' | 'run' | 'requirements' | 'review' | 'weekly' | 'usage';
+type Tab = 'overview' | 'knowledge' | 'run' | 'requirements' | 'review' | 'weekly' | 'usage' | 'issueMonitor';
 
 // Columns the requirements table allows the user to sort by clicking the
 // header. Each value maps to one logical comparator in `compareRequirements`
@@ -1274,6 +1275,9 @@ export default function ProjectDetail() {
         <button className={`tab-btn${tab === 'weekly' ? ' active' : ''}`} onClick={() => setTab('weekly')}>
           {t('projects.detail.tabs.weekly')}
         </button>
+        <button className={`tab-btn${tab === 'issueMonitor' ? ' active' : ''}`} onClick={() => setTab('issueMonitor')}>
+          {t('settings.issueMonitor.title')}
+        </button>
       </div>
 
       {/* ── Overview ── */}
@@ -2228,6 +2232,13 @@ export default function ProjectDetail() {
       {tab === 'weekly' && id && (
         <div className="tab-content">
           <ProjectWeeklyReport projectId={id} />
+        </div>
+      )}
+
+      {/* ── Issue monitor (v0.5.x GitHub auto-import) ── */}
+      {tab === 'issueMonitor' && id && (
+        <div className="tab-content">
+          <ProjectIssueMonitor projectId={id} />
         </div>
       )}
 

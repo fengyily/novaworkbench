@@ -140,11 +140,31 @@ func gitRemoteURL(localPath string) (string, error) {
 }
 
 // effectiveRemoteURL returns remoteURL if set, otherwise reads from git remote origin.
+//
+// Public alias EffectiveRemoteURL exposed below so out-of-package callers
+// (cmd/server/main.go's IssueMonitorProvider, internal/service/ when it
+// grows, etc.) can resolve the same remote without re-implementing the
+// `git remote get-url origin` fallback. The lowercase name is preserved
+// at the original call sites in handler/review.go and handler/merge.go
+// (those files import nothing that would rotate the symbol).
 func effectiveRemoteURL(localPath, remoteURL string) (string, error) {
 	if remoteURL != "" {
 		return remoteURL, nil
 	}
 	return gitRemoteURL(localPath)
+}
+
+// EffectiveRemoteURL is the exported twin of effectiveRemoteURL. Same
+// signature, same semantics; kept as a one-line wrapper to avoid
+// touching every call site in handler/.
+//
+// Note for callers: this function shells out to `git remote get-url
+// origin` when projects.remote_url is blank, which means the working
+// directory's origin must already be set (e.g. a fresh clone). For a
+// project registered before the user has run any commands, this returns
+// an error and the issue-monitor poller logs it.
+func EffectiveRemoteURL(localPath, remoteURL string) (string, error) {
+	return effectiveRemoteURL(localPath, remoteURL)
 }
 
 // ListPRs fetches open PRs from the configured platform.
