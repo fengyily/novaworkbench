@@ -1,7 +1,7 @@
 // Package handler — wizard pipeline (requirement → code).
 //
 // wizard_wiki.go is the wiki-kind generator. It mirrors the architect-design
-// shape (JobStore job → plan-mode claude stream → persist plan markdown) but
+// shape (JobStore job → claude stream → persist the emitted markdown) but
 // the result lives in requirements.wiki_docs (NOT design_docs) and the kind
 // guard rejects anything that is not service.KindWiki. The flow never reaches
 // the developer stage: 4-entry guards in wizard_orchestration / wizard_coding
@@ -10,9 +10,15 @@
 // only be archived into the knowledge table via the dedicated wiki-archive
 // endpoint (handler/requirement.go WikiArchive).
 //
+// One deliberate divergence from architect-design: wiki does NOT run in plan
+// mode (see wikiPermissionMode). Architect-design wants a plan file it can
+// capture; wiki wants a finished document, and plan mode actively produced
+// meta-plans that then got persisted as the doc (req_e2b2d40ecb638475).
+//
 // Reused infrastructure (no new tables / state machines / streams):
-//   - Gateway.StreamCmd plan-mode + --disallowedTools
-//   - runClaudeStream → captures out.planContent (the Write tool_use body)
+//   - Gateway.StreamCmd + --disallowedTools (no --permission-mode plan)
+//   - runClaudeStream → out.finalResult / out.streamText (out.planContent is
+//     a last-resort legacy fallback only)
 //   - JobStore (cap 50) + SSE replay/live via /api/wizard/jobs/{id}/stream
 //   - SanitizeDesignDoc (only strips outer ```markdown``` fence; Mermaid
 //     blocks survive untouched — the wiki block explicitly asks for them)
@@ -42,20 +48,57 @@ import (
 // wikiStallTimeout mirrors architectStallTimeout. Wiki never fans out Explore
 // sub-agents (the wiki block explicitly forbids destructive tools), so 10
 // minutes is generous; matches the architect stage so the watchdog behavior
-// is uniform across plan-mode stages.
+// is uniform across both long-running document stages.
 const wikiStallTimeout = 10 * time.Minute
 
+// wikiPermissionMode is the --permission-mode value for every wiki run
+// (local CLI and Agent Server alike). It is deliberately EMPTY — i.e. the
+// CLI gets --dangerously-skip-permissions — whereas architect-design passes
+// "plan".
+//
+// Why wiki must NOT run in plan mode (req_e2b2d40ecb638475):
+//
+// Plan mode makes the CLI inject its own system prompt telling the model to
+// explore read-only, write an *implementation plan* to ~/.claude/plans/*.md
+// and finish with ExitPlanMode. That instruction competes with — and for
+// some models outright beats — the wiki block's "仅通过最终消息输出完整
+// Markdown 文档正文". On req_e2b2d40ecb638475 the model did all the research
+// correctly, then wrote a "知识库沉淀计划：…" meta-plan (section 1 was
+// literally "架构图（放最前面）— 1 张 flowchart 覆盖：…" — it *described*
+// the diagram instead of drawing it, and the doc carried 0 Mermaid blocks).
+// runClaudeStream captured that plan file as out.planContent and
+// finalizeWikiRun persisted it verbatim as wiki_docs, then auto-promoted the
+// row to 'designed' with a "✅ 知识库文档已生成！" log line.
+//
+// The previous plan-mode wiki runs only produced real documents by luck:
+// wikiDisallowedTools denied Write, so the model gave up on the plan file
+// and (correctly) emitted the doc as its final message. When it routed
+// around the Write block with a Bash `cat > …/plans/x.md` heredoc it stayed
+// in plan mode and the plan got captured instead. Plan mode buys wiki
+// nothing — a wiki doc is a deliverable, not a proposal awaiting approval —
+// so the whole failure class disappears by not requesting it.
+//
+// DisallowedTools still applies in non-plan mode, so the read-only guarantee
+// is unchanged; only the CLI's plan-mode preamble goes away.
+const wikiPermissionMode = ""
+
 // wikiDisallowedTools is the closed list passed via StreamOpts.DisallowedTools
-// to the claude CLI. Plan-mode already denies Write/Edit/NotebookEdit, but
-// passing them explicitly is defense in depth: a misbehaving proxy that
-// ignores plan-mode cannot physically touch the project tree. Mirrors the
-// safety reasoning documented in runRemoteArchitectDesign / wizard_coding.
+// to the claude CLI. Passing Write/Edit/NotebookEdit explicitly is what keeps
+// a wiki run read-only now that wikiPermissionMode is no longer "plan" —
+// --dangerously-skip-permissions would otherwise grant full write access.
+// Mirrors the safety reasoning documented in runRemoteArchitectDesign /
+// wizard_coding.
+//
+// Denying "Write" has a second, load-bearing effect on top of read-only:
+// it is what stops the CLI from materialising a ~/.claude/plans/*.md file
+// that runClaudeStream would capture as out.planContent and finalizeWikiRun
+// would then persist as the doc (see wikiPermissionMode).
 //
 // "Task" is added so Claude cannot launch Explore / Plan sub-agents inside a
 // wiki run — those sub-agents can hang waiting for each other (their stream
 // never gets a final result) and the parent turn ends with a one-line
-// "等待回收中…" preamble instead of the actual plan. We want Claude to read
-// files directly and emit the doc in a single turn.
+// "等待回收中…" preamble instead of the actual document. We want Claude to
+// read files directly and emit the doc in a single turn.
 var wikiDisallowedTools = []string{"Write", "Edit", "NotebookEdit", "Task"}
 
 // wikiRunParams is the prepared-shape output of prepareWikiDoc. Mirrors
@@ -402,9 +445,15 @@ func (h *WizardHandler) execWikiDoc(p *wikiRunParams, job *store.Job, cb *runCal
 		sessionArg = p.NewWikiSID
 	}
 
+	// NOTE — wiki runs WITHOUT plan mode (wikiPermissionMode), unlike
+	// architect-design. See wikiPermissionMode's doc comment for the full
+	// rationale (req_e2b2d40ecb638475); in short, plan mode's CLI-injected
+	// "produce a plan for approval" instructions outrank our
+	// "output the final Markdown" prompt and the plan file then gets
+	// captured by runClaudeStream and persisted as the wiki doc.
 	var out claudeStreamOutcome
 	if p.AgentServerID != "" && h.agentSvrSvc != nil {
-		// Remote branch — plan-mode claude on the picked Agent server.
+		// Remote branch — claude on the picked Agent server.
 		// SystemPrompt + DisallowedTools MUST be threaded through:
 		// wikiDisallowedTools (notably the "Task" entry) is what stops the
 		// remote model from fanning out Explore sub-agents and ending its
@@ -413,7 +462,7 @@ func (h *WizardHandler) execWikiDoc(p *wikiRunParams, job *store.Job, cb *runCal
 		// run) — passing sessionArg instead would make
 		// prepareRemoteAgentRun set Resume=true against a session that was
 		// only just minted and never existed remotely.
-		job.Append(store.LogLine{Type: "phase", Content: "📚 Agent 服务器 plan 模式下阅读代码并生成知识库文档..."})
+		job.Append(store.LogLine{Type: "phase", Content: "📚 Agent 服务器正在阅读代码并生成知识库文档..."})
 		out = h.runRemoteWikiDoc(&remoteWikiInput{
 			remoteRunInput: &remoteRunInput{
 				job:             job,
@@ -428,7 +477,7 @@ func (h *WizardHandler) execWikiDoc(p *wikiRunParams, job *store.Job, cb *runCal
 				model:           model,
 				claudeConfigID:  claudeConfigID,
 				usage:           h.usageCtxForConfig("wiki_generate", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
-				PermissionMode:  "plan",
+				PermissionMode:  wikiPermissionMode,
 				SyncMode:        p.SyncMode,
 				SystemPrompt:    p.SystemPrompt,
 				DisallowedTools: wikiDisallowedTools,
@@ -439,7 +488,7 @@ func (h *WizardHandler) execWikiDoc(p *wikiRunParams, job *store.Job, cb *runCal
 		// Local branch — direct claude CLI invocation on the NovaWorkbench
 		// host. context.Background(): the HTTP request already returned, so
 		// the subprocess must not be tied to r.Context().
-		job.Append(store.LogLine{Type: "phase", Content: "📚 Claude 正在 plan 模式下阅读代码并生成知识库文档..."})
+		job.Append(store.LogLine{Type: "phase", Content: "📚 Claude 正在阅读代码并生成知识库文档..."})
 		cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
 			Prompt:          prompt,
 			WorkDir:         workDir,
@@ -450,7 +499,7 @@ func (h *WizardHandler) execWikiDoc(p *wikiRunParams, job *store.Job, cb *runCal
 			Resume:          p.ResumeSID != "",
 			Fork:            false,
 			ForkSessionID:   forkSessionID,
-			PermissionMode:  "plan",
+			PermissionMode:  wikiPermissionMode,
 			DisallowedTools: wikiDisallowedTools,
 		})
 		out = runClaudeStream(jobSink{job}, cmd, "wiki-generate",
@@ -463,6 +512,26 @@ func (h *WizardHandler) execWikiDoc(p *wikiRunParams, job *store.Job, cb *runCal
 	}
 
 	h.finalizeWikiRun(out, p, job, id, model)
+}
+
+// resetWikiSessionOnReject drops the stored wiki_session_id after a doc
+// rejection so the next 重新生成 starts a clean conversation.
+//
+// Rationale: a wiki doc is single-shot — there is no multi-turn value to
+// preserve (unlike architect-design, which forks a session the user keeps
+// refining through refine-doc / apply-doc). And a rejected run leaves a
+// poisoned history behind: on req_e2b2d40ecb638475 the session held the
+// plan-mode meta-plan plus an ExitPlanMode call, so resuming it pushes the
+// model straight back into the "write a plan" trajectory that caused the
+// rejection. Retrying from a fresh session converges; retrying on the same
+// session loops.
+//
+// Mirrors the staleSession branch's cleanup, which already clears the id
+// for the same "this session is not worth resuming" reason.
+func (h *WizardHandler) resetWikiSessionOnReject(id string) {
+	if err := h.reqSvc.UpdateWikiSession(id, ""); err != nil {
+		log.Printf("[wiki-generate] failed to clear rejected wiki session for %s: %v", id, err)
+	}
 }
 
 // finalizeWikiRun is the terminal-state handler for the wiki-doc stage.
@@ -512,18 +581,30 @@ func (h *WizardHandler) finalizeWikiRun(
 		}
 	}
 
-	// In plan mode, the full plan markdown is captured from the Write
-	// tool_use event that lands in ~/.claude/plans/*.md. Fall back to
-	// the result text if capture missed it, then to the cumulative
-	// streamed text as a last resort (see claudeStreamOutcome.streamText
-	// in wizard_stream.go — non-Anthropic proxies and ExitPlan exits in
-	// plan mode often leave planContent + finalResult both empty).
-	planMarkdown := out.planContent
-	if planMarkdown == "" {
-		planMarkdown = out.finalResult
-	}
+	// Capture priority is finalResult → streamText → planContent.
+	//
+	// The wiki block asks for the document in the FINAL MESSAGE, and wiki
+	// runs outside plan mode (wikiPermissionMode), so the authoritative
+	// source is the CLI's "result" event. streamText is the cumulative
+	// fallback for non-Anthropic proxies that stream deltas but never emit a
+	// well-formed result event (see claudeStreamOutcome.streamText in
+	// wizard_stream.go).
+	//
+	// planContent is kept LAST as a legacy safety net only. It holds the
+	// body of a Write to ~/.claude/plans/*.md, i.e. a plan-mode artifact —
+	// preferring it (as this code used to) is exactly how
+	// req_e2b2d40ecb638475 ended up with a "知识库沉淀计划" meta-plan and 0
+	// Mermaid blocks persisted as its wiki doc while the job reported
+	// success. Write is denied via wikiDisallowedTools, so in the current
+	// configuration planContent should always be empty; if a future change
+	// re-enables it, branch (d) of looksLikeWikiOutline (wikiPlanShapeTells)
+	// is the backstop.
+	planMarkdown := out.finalResult
 	if planMarkdown == "" {
 		planMarkdown = out.streamText
+	}
+	if planMarkdown == "" {
+		planMarkdown = out.planContent
 	}
 	// Mid-stream failure with partial plan: persist the partial as a
 	// fallback so the exploration work isn't lost, but mark the job
@@ -562,7 +643,9 @@ func (h *WizardHandler) finalizeWikiRun(
 		job.Append(store.LogLine{Type: "error", Content: "Claude 未返回可保存的知识库正文，请重试"})
 		job.Finish(1, store.JobError)
 		// Leave status at 'designing' so the user can retry from the CTA
-		// instead of staring at a permanently broken "归档" button.
+		// instead of staring at a permanently broken "归档" button, and
+		// drop the session so the retry is a clean run.
+		h.resetWikiSessionOnReject(id)
 		return
 	}
 
@@ -593,7 +676,9 @@ func (h *WizardHandler) finalizeWikiRun(
 		log.Printf("[wiki-generate] rejected preamble for %s (len=%d): %q", id, len(cleaned), truncateForLog(cleaned, 80))
 		job.Append(store.LogLine{Type: "error", Content: "Claude 未输出可保存的知识库正文（疑似只发了进度消息），请重试"})
 		job.Finish(1, store.JobError)
-		// Leave status at 'designing' so the user can retry.
+		// Leave status at 'designing' so the user can retry, from a clean
+		// session.
+		h.resetWikiSessionOnReject(id)
 		return
 	}
 
@@ -608,16 +693,30 @@ func (h *WizardHandler) finalizeWikiRun(
 	//   ... (no Mermaid block, no file paths, no real content)
 	//
 	// The preamble heuristic missed this (1073 chars > 200, has list
-	// structure). The outline heuristic rejects when EITHER a "self-praise"
-	// tell is present OR the doc has 3+ label-only list items AND no
-	// concrete markers (backticks / fences). See looksLikeWikiOutline
+	// structure). The outline heuristic rejects on a "self-praise" tell, on
+	// a "plan-shape" tell (req_e2b2d40ecb638475), or when the doc has 3+
+	// label-only list items AND no fenced block. See looksLikeWikiOutline
 	// below for the exact rules.
 	if looksLikeWikiOutline(cleaned) {
 		log.Printf("[wiki-generate] rejected outline for %s (len=%d): %q", id, len(cleaned), truncateForLog(cleaned, 80))
-		job.Append(store.LogLine{Type: "error", Content: "Claude 仅输出了纲要 / 进度描述，未输出可保存的知识库正文，请重试"})
+		job.Append(store.LogLine{Type: "error", Content: "Claude 仅输出了纲要 / 计划 / 进度描述，未输出可保存的知识库正文，请重试"})
 		job.Finish(1, store.JobError)
-		// Leave status at 'designing' so the user can retry.
+		// Leave status at 'designing' so the user can retry, from a clean
+		// session — this is the branch that fires for a plan-mode-era
+		// session, and resuming it would reproduce the plan.
+		h.resetWikiSessionOnReject(id)
 		return
+	}
+
+	// Diagnostic only (never rejects): a wiki doc with zero Mermaid blocks
+	// is almost always missing the architecture / flow / sequence diagrams
+	// the user asked for. The guards above can't reject on this alone — a
+	// legitimately diagram-free topic exists — but logging it makes the
+	// "why is this doc thin?" question answerable from the server log
+	// without re-deriving it from the DB. See req_e2b2d40ecb638475, whose
+	// doc had 0 Mermaid blocks and 0 fences of any kind.
+	if n := strings.Count(cleaned, "```mermaid"); n == 0 {
+		log.Printf("[wiki-generate] NOTE %s saved with no Mermaid block (len=%d, fences=%d)", id, len(cleaned), strings.Count(cleaned, "```")/2)
 	}
 
 	// Persist the wiki doc (sets status=designing) and clear the active
@@ -716,41 +815,66 @@ func looksLikeWikiPreamble(cleaned string) bool {
 //       used as a preamble to a list rather than as actual section
 //       headers. This branch alone is sufficient to reject.
 //
+//   (d) "Plan-shape tell" — the model emitted a meta-plan *about* the
+//       document instead of the document. Catches the plan-mode artifact
+//       from req_e2b2d40ecb638475 ("知识库沉淀计划：…", whose section 1 was
+//       "架构图（放最前面）— 1 张 flowchart 覆盖：…" — describing the
+//       diagram instead of drawing it). See wikiPlanShapeTells.
+//
 //   (a) "Label-only outline" — three or more list items whose body is
 //       a one-clause label terminated by `：` (or `:`). The label regex
 //       matches `1. **Foo**：bar`, `- **Foo**：bar`, `* **Foo**: bar`,
 //       etc. ANDed with:
 //
-//   (b) "No concrete markers" — fewer than 4 backticks total in the
-//       entire doc (no inline code, no ``` fences, no file paths).
-//       A real knowledge doc virtually always has at least one of those.
+//   (b) "No fenced block" — the doc contains no ``` fence at all, i.e.
+//       no Mermaid diagram and no code snippet. The wiki block requires
+//       every section to carry a file path / signature / Mermaid block /
+//       code snippet, and diagrams are precisely what the user asks for,
+//       so a doc that is all bullets and no fenced block is an outline.
 //
 // Branch (a)+(b) together reject the "long TOC with markdown structure"
 // case; branch (c) catches the variant where the model labels the
-// preamble with a self-praise sentence before the TOC.
+// preamble with a self-praise sentence before the TOC; branch (d) catches
+// the plan-mode variant.
 //
 // Origin: req_b37e6f385d371b7e (the wiki doc was a 1073-char TOC about
 // "MCP in Controller" — no Mermaid block, no file paths, no real
 // content). The preamble heuristic passed it (1073 > 200 + has list),
 // so this second heuristic was added.
+//
+// Branch (b) USED TO COUNT INLINE BACKTICKS (">= 4 backticks → keep").
+// That escape hatch is defeated by exactly the failure it was meant to
+// catch: req_e2b2d40ecb638475's meta-plan carried 344 inline backticks
+// (file paths and function names in prose), 0 fenced blocks, and 6
+// label-only items — so it sailed past (a)+(b) and was persisted, then
+// auto-promoted to 'designed' with a "✅ 知识库文档已生成！" log line even
+// though it contained no architecture, flow or sequence diagram at all.
+// Counting fences instead of backticks closes that hole.
 func looksLikeWikiOutline(cleaned string) bool {
 	if cleaned == "" {
 		return false
 	}
-	// Branch (c): self-praise tells. Each phrase is what the model emits
-	// right before (or instead of) the actual body. Trim whitespace
-	// defensively so a stray leading newline doesn't dodge the match.
+	// Trim whitespace defensively so a stray leading newline doesn't dodge
+	// the substring matches.
 	trimmed := strings.TrimSpace(cleaned)
+	// Branch (c): self-praise tells.
 	for _, tell := range wikiOutlineSelfPraiseTells {
 		if strings.Contains(trimmed, tell) {
 			return true
 		}
 	}
-	// Branch (a)+(b): label-only outline AND no concrete markers.
-	backtickCount := strings.Count(cleaned, "`")
-	if backtickCount >= 4 {
+	// Branch (d): plan-shape tells.
+	for _, tell := range wikiPlanShapeTells {
+		if strings.Contains(trimmed, tell) {
+			return true
+		}
+	}
+	// Branch (b): a fenced code block (Mermaid diagram or code snippet) is
+	// the "concrete marker". An opening + closing fence is two occurrences.
+	if strings.Count(cleaned, "```") >= 2 {
 		return false
 	}
+	// Branch (a): count label-only outline items.
 	labelItem := 0
 	for _, line := range strings.Split(cleaned, "\n") {
 		l := strings.TrimLeft(line, " \t")
@@ -778,6 +902,38 @@ var wikiOutlineSelfPraiseTells = []string{
 	"以下章节将",
 	"下面章节将",
 	"本文档涵盖",
+}
+
+// wikiPlanShapeTells are phrases that only appear when the model is
+// *describing* the document it intends to write later instead of writing
+// it — the plan-mode failure recorded on req_e2b2d40ecb638475, where
+// requirements.wiki_docs ended up holding the body of
+// ~/.claude/plans/sorted-conjuring-raccoon.md:
+//
+//	# 知识库沉淀计划：vCloud Controller 中的 Task 应用
+//	## 需要写出的最终 Markdown 文档结构
+//	### 1. 架构图（放最前面）— 1 张 `flowchart` 覆盖：...
+//	## 我需要修改 / 创建的文件
+//	...本计划最终将知识库文档正文仅通过最终消息以 Markdown 全文输出...
+//
+// Unlike wikiOutlineSelfPraiseTells (which are self-congratulatory and can
+// appear in a real doc's preamble), these are *structural* tells with no
+// legitimate place in a knowledge artefact: a wiki doc has no "files I need
+// to modify", and it never announces that it will be delivered later. Each
+// is a substring match; any hit alone rejects.
+//
+// Deliberately narrow — "预期产出：" and "计划" as plain words are avoided
+// because a real wiki doc about e.g. a scheduling module can legitimately
+// contain them. Four of the five entries below matched
+// req_e2b2d40ecb638475 independently (the last is the no-spaces variant of
+// entry 2), so the regression is caught with margin even if the model
+// rewords one of them.
+var wikiPlanShapeTells = []string{
+	"需要写出的最终 Markdown",
+	"我需要修改 / 创建的文件",
+	"我需要修改/创建的文件",
+	"本计划最终将",
+	"仅通过最终消息",
 }
 
 // isWikiOutlineLabelItem reports whether a single trimmed line matches

@@ -1147,15 +1147,22 @@ type remoteWikiInput struct {
 }
 
 // runRemoteWikiDoc is the wiki-stage counterpart of
-// runRemoteArchitectDesign: the plan-mode knowledge-doc run executes on the
-// chosen Agent server and comes back as the same claudeStreamOutcome the
-// local branch produces, so execWikiDoc's terminal handling
-// (finalizeWikiRun) is shared verbatim between the two surfaces.
+// runRemoteArchitectDesign: the knowledge-doc run executes on the chosen
+// Agent server and comes back as the same claudeStreamOutcome the local
+// branch produces, so execWikiDoc's terminal handling (finalizeWikiRun) is
+// shared verbatim between the two surfaces.
+//
+// Unlike the architect stage this is NOT a plan-mode run — the caller passes
+// PermissionMode: wikiPermissionMode (empty → --dangerously-skip-permissions)
+// because plan mode made the model emit a meta-plan that then got persisted
+// as the wiki doc. See wikiPermissionMode in wizard_wiki.go.
 //
 // The caller MUST populate in.SystemPrompt (the wiki role persona) and
 // in.DisallowedTools (wikiDisallowedTools) — unlike the architect stage,
-// wiki depends on both reaching the remote claude. See the field comments
-// on remoteRunInput for why.
+// wiki depends on both reaching the remote claude. DisallowedTools carries
+// the read-only guarantee that plan mode used to provide; SystemPrompt is a
+// full --system-prompt replacement once plan mode is off. See the field
+// comments on remoteRunInput for why.
 func (h *WizardHandler) runRemoteWikiDoc(in *remoteWikiInput) claudeStreamOutcome {
 	if in == nil || in.remoteRunInput == nil {
 		return claudeStreamOutcome{errMsg: "缺少 remoteWikiInput"}
