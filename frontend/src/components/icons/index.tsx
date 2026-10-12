@@ -441,6 +441,13 @@ export const IconClock = makeIcon(
   'M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z',
 );
 
+/** Git branch fork — a 3-dot branch line (commit, branch, commit).
+ *  Used by the inline base-branch pickers on the design / development
+ *  action panels to convey "this is the source we're forking from". */
+export const IconBranch = makeIcon(
+  'M6 3v18M6 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4ZM6 17a2 2 0 1 0 0 4 2 2 0 0 0 0-4ZM18 9a3 3 0 1 0-3-3M18 9a3 3 0 0 0-3 3v0a3 3 0 0 1-3 3h-3',
+);
+
 /** External link / open in new tab — replaces ↗ */
 export const IconExternalLink = makeRichIcon(() => [
   <path key="a" d="M13 5h6v6" />,

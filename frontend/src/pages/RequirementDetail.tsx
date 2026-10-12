@@ -45,6 +45,7 @@ import {
   IconPin,
   IconPlay,
   IconTriangle,
+  IconBranch,
   IconDatabase,
   IconSendOut,
   IconSleep,
@@ -608,6 +609,93 @@ function WorktreePathHint({ path, onClean, cleaning, disabled }: {
   );
 }
 
+/** Inline base-branch picker used by the design / development action
+ *  panels. Reuses the preflight modal's chip+rail vocabulary (cyan
+ *  GIT rail, BASE chip, monospace input) so the inline picker and
+ *  the modal preflight checklist read as one continuous design system.
+ *
+ *  The picker is the SOURCE OF TRUTH for the active base branch;
+ *  the preflight modal (when it opens) seeds its BASE field from
+ *  this component's value. That way the user can change the base
+ *  before committing to one of the CTAs, without having to discover
+ *  the option inside a popup.
+ *
+ *  Props:
+ *  - id          input + datalist id pair (must be unique per instance)
+ *  - value       controlled value
+ *  - onChange    controlled value setter
+ *  - placeholder placeholder shown when value is empty (= project default)
+ *  - disabled    locked while a job is running
+ *  - datalistId  id of the <datalist> with branch suggestions
+ *  - options     list of branch names to suggest
+ *  - chipLabel   uppercase chip text — "BASE 设计" / "BASE 开发"
+ *  - defaultHint i18n key for the trailing hint rail
+ *  - defaultName the project default branch name (rendered in the hint)
+ *  - emptyWarn   i18n key shown when `options` is empty
+ *  - showIcon    whether to render the branch icon inside the chip */
+function InlineBaseBranchPicker({
+  inputId,
+  datalistId,
+  value,
+  onChange,
+  placeholder,
+  disabled,
+  options,
+  chipLabel,
+  defaultName,
+  emptyWarnText,
+  showIcon = true,
+}: {
+  inputId: string;
+  datalistId: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  disabled?: boolean;
+  options: string[];
+  chipLabel: string;
+  defaultName: string;
+  emptyWarnText: string;
+  showIcon?: boolean;
+}) {
+  return (
+    <div className="branch-selector">
+      <div className="preflight-field-card preflight-field-card--git">
+        <span className="preflight-field-chip" aria-hidden="true">
+          {showIcon && <IconBranch />}
+          {chipLabel}
+        </span>
+        <input
+          id={inputId}
+          list={datalistId}
+          className="preflight-field-input"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          disabled={disabled}
+          placeholder={placeholder || defaultName || 'main'}
+        />
+      </div>
+      <datalist id={datalistId}>
+        {(options || []).map(b => (
+          <option key={b} value={b} />
+        ))}
+      </datalist>
+      {options.length === 0 ? (
+        <span className="branch-selector-warn" role="status">
+          {emptyWarnText}
+        </span>
+      ) : (
+        <span className="branch-selector-hint">
+          {/* i18n: protocol literal — the word "默认" anchors the
+              project default branch as the silent baseline. */}
+          <span aria-hidden="true">默认</span>
+          <code>{defaultName || 'main'}</code>
+        </span>
+      )}
+    </div>
+  );
+}
+
 export default function RequirementDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -1070,6 +1158,29 @@ export default function RequirementDetail() {
   // setting still produces a usable input. Reset whenever the active
   // project changes (see the useEffect further down).
   const [designBaseBranch, setDesignBaseBranch] = useState<string>(project?.default_branch || 'main');
+
+  // Development-stage inline base branch picker — mirrors
+  // `designBaseBranch` for the developer stage. Separate state so
+  // the two stages can target different bases independently
+  // (e.g. design against `main`, code against `release/1.2`). The
+  // preflight modal still opens as a final checklist before
+  // start-coding fires, but it now seeds from this state so the
+  // user no longer has to discover the base branch by opening
+  // a modal. Default mirrors `designBaseBranch` for symmetry.
+  const [codingBaseBranch, setCodingBaseBranch] = useState<string>(project?.default_branch || 'main');
+
+  // Reset both inline base-branch pickers when the active project
+  // changes. Without this, switching from project A (default_branch
+  // = `main`) to project B (default_branch = `release/1.2`) keeps
+  // the previous project's value in the picker, which would send
+  // the new run to the wrong base. The pickers are also reset
+  // whenever the project metadata refreshes (default_branch
+  // edited from the project settings page mid-session).
+  useEffect(() => {
+    const fallback = project?.default_branch || 'main';
+    setDesignBaseBranch(prev => prev || fallback);
+    setCodingBaseBranch(prev => prev || fallback);
+  }, [project?.id, project?.default_branch]);
 
   // Optional "Read project knowledge base" step (default off). The dev
   // checkbox lives in the branch modal; the design one has its own confirm
@@ -2446,7 +2557,11 @@ export default function RequirementDetail() {
     if (!req || !project) return;
     extraDescRef.current = extraDesc;
     const defaultBranch = defaultBranchName(req.id, kindOf(req));
-    const defaultBase = project.default_branch || 'main';
+    // Seed the modal's BASE field from the inline `codingBaseBranch`
+    // picker (the source of truth) rather than re-defaulting to the
+    // project main. The inline picker is right there on the action
+    // panel — the user expects the modal to mirror it, not reset it.
+    const defaultBase = codingBaseBranch.trim() || project.default_branch || 'main';
     setBranchName(defaultBranch);
     setBaseBranch(defaultBase);
     setReadKnowledgeDev(false); // default unchecked each time
@@ -2465,6 +2580,12 @@ export default function RequirementDetail() {
 
   const confirmBranchAndStart = () => {
     setShowBranchModal(false);
+    // Mirror the modal's BASE into the inline `codingBaseBranch`
+    // picker so a confirm-without-edit still leaves the inline
+    // picker reflecting the value that just fired. Covers the case
+    // where the modal was seeded with the previous-run value (e.g.
+    // page loaded with stale state) and the user accepted it.
+    setCodingBaseBranch(baseBranch);
     doStartCoding(branchName, baseBranch, readKnowledgeDev, splitTasksDev, autoPushPRDev);
   };
 
@@ -2987,7 +3108,17 @@ export default function RequirementDetail() {
                       <select
                         className="form-input preflight-field-input"
                         value={baseBranch}
-                        onChange={e => setBaseBranch(e.target.value)}
+                        onChange={e => {
+                          // Keep the inline `codingBaseBranch` picker on
+                          // the action panel in sync with the modal —
+                          // the inline picker is the source of truth,
+                          // the modal is the final checklist that
+                          // mirrors it. Two-way sync means a confirm
+                          // without further edits just propagates the
+                          // value the user already saw on the panel.
+                          setBaseBranch(e.target.value);
+                          setCodingBaseBranch(e.target.value);
+                        }}
                       >
                         {availableBranches.length === 0 && <option value={baseBranch}>{baseBranch}</option>}
                         {availableBranches.map(b => <option key={b} value={b}>{b}</option>)}
@@ -4175,41 +4306,24 @@ export default function RequirementDetail() {
                       {/* Design-stage base branch picker — placed at the
                           TOP of the action zone so the user sees the
                           design-time base before committing to one of the
-                          four CTAs below. The coding stage has its own
-                          picker in the branch modal; we keep the two
-                          pickers separate so design vs coding can target
-                          different bases (mirrors the agent-server picker
-                          pattern). Uses the existing availableBranches
-                          list, populated by GET /api/fs/git-branches —
-                          empty list falls back to a plain text input. */}
-                      <div className="design-branch-row">
-                        <label htmlFor="design-base-branch-input">
-                          {t('requirements.detail2.designBaseBranchLabel')}
-                        </label>
-                        <input
-                          id="design-base-branch-input"
-                          list="design-branch-suggestions"
-                          value={designBaseBranch}
-                          onChange={e => setDesignBaseBranch(e.target.value)}
-                          disabled={!!busy}
-                          placeholder={project?.default_branch || 'main'}
-                        />
-                        <datalist id="design-branch-suggestions">
-                          {(availableBranches || []).map(b => (
-                            <option key={b} value={b} />
-                          ))}
-                        </datalist>
-                        <span className="design-branch-hint">
-                          {t('requirements.detail2.designBaseBranchHelp', {
-                            default: project?.default_branch || 'main',
-                          })}
-                        </span>
-                        {availableBranches.length === 0 && (
-                          <span className="design-branch-warn">
-                            {t('requirements.detail2.designBranchPickerEmpty')}
-                          </span>
-                        )}
-                      </div>
+                          four CTAs below. Renders the shared
+                          InlineBaseBranchPicker (chip+rail vocabulary
+                          reused from the preflight modal) so the inline
+                          picker and the popup modal read as one design
+                          system. The development stage has its own
+                          picker just below the model/env row. */}
+                      <InlineBaseBranchPicker
+                        inputId="design-base-branch-input"
+                        datalistId="design-branch-suggestions"
+                        value={designBaseBranch}
+                        onChange={setDesignBaseBranch}
+                        disabled={!!busy}
+                        placeholder={project?.default_branch || 'main'}
+                        options={availableBranches}
+                        chipLabel="BASE 设计"
+                        defaultName={project?.default_branch || 'main'}
+                        emptyWarnText={t('requirements.detail2.designBranchPickerEmpty')}
+                      />
                       <div className="draft-action-actions-surface">
                         {/* Primary CTA — generates the technical design now.
                             Kept as the FIRST child so it remains the visually
@@ -4561,34 +4675,18 @@ export default function RequirementDetail() {
                   no matter which entry point they used to land here.
                   Single state (designBaseBranch) shared with the draft
                   panel. */}
-              <div className="design-branch-row">
-                <label htmlFor="design-base-branch-input-idle">
-                  {t('requirements.detail2.designBaseBranchLabel')}
-                </label>
-                <input
-                  id="design-base-branch-input-idle"
-                  list="design-branch-suggestions-idle"
-                  value={designBaseBranch}
-                  onChange={e => setDesignBaseBranch(e.target.value)}
-                  disabled={!!busy || designing}
-                  placeholder={project?.default_branch || 'main'}
-                />
-                <datalist id="design-branch-suggestions-idle">
-                  {(availableBranches || []).map(b => (
-                    <option key={b} value={b} />
-                  ))}
-                </datalist>
-                <span className="design-branch-hint">
-                  {t('requirements.detail2.designBaseBranchHelp', {
-                    default: project?.default_branch || 'main',
-                  })}
-                </span>
-                {availableBranches.length === 0 && (
-                  <span className="design-branch-warn">
-                    {t('requirements.detail2.designBranchPickerEmpty')}
-                  </span>
-                )}
-              </div>
+              <InlineBaseBranchPicker
+                inputId="design-base-branch-input-idle"
+                datalistId="design-branch-suggestions-idle"
+                value={designBaseBranch}
+                onChange={setDesignBaseBranch}
+                disabled={!!busy || designing}
+                placeholder={project?.default_branch || 'main'}
+                options={availableBranches}
+                chipLabel="BASE 设计"
+                defaultName={project?.default_branch || 'main'}
+                emptyWarnText={t('requirements.detail2.designBranchPickerEmpty')}
+              />
               <p dangerouslySetInnerHTML={{ __html: t('requirements.detail2.architectIdleHint') }} />
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 {/* Wizard-stage CTA — unified to `btn btn-sm` per the
@@ -5158,6 +5256,34 @@ export default function RequirementDetail() {
                     </select>
                   </label>
                 </div>
+                {/* Development-stage base branch picker — its own row
+                    below the model/env/dev_mode row and above the
+                    divider so the user picks the "where do we start
+                    from" source before committing to a CTA. Renders
+                    the same chip+rail picker as the design stage so
+                    the two stage panels speak one visual vocabulary;
+                    the chip carries "BASE 开发" so the user always
+                    knows which stage's base they're editing.
+
+                    The preflight modal (still opened by the primary
+                    CTA) seeds its BASE field from this state — the
+                    inline picker is the source of truth, the modal is
+                    the final checklist that mirrors it. Mirrors the
+                    design-stage picker's position so the two panels
+                    have a parallel reading order (settings → base →
+                    actions). */}
+                <InlineBaseBranchPicker
+                  inputId="coding-base-branch-input"
+                  datalistId="coding-branch-suggestions"
+                  value={codingBaseBranch}
+                  onChange={setCodingBaseBranch}
+                  disabled={coding}
+                  placeholder={project?.default_branch || 'main'}
+                  options={availableBranches}
+                  chipLabel="BASE 开发"
+                  defaultName={project?.default_branch || 'main'}
+                  emptyWarnText={t('requirements.detail2.designBranchPickerEmpty')}
+                />
                 <div className="draft-action-divider" aria-hidden="true" />
                 <div className="draft-action-actions">
                   <div className="draft-action-actions-surface">
