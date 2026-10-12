@@ -53,7 +53,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import ModelSelect from '../ModelSelect';
 import { ExecEnvSelect, type ExecEnvServer } from '../ExecEnvSelect';
-import { IconClock, IconHand, IconPlay, IconRocket } from '../icons';
+import { IconBranch, IconClock, IconHand, IconPlay, IconRocket } from '../icons';
+import { API_BASE, authedFetch } from '../../api/client';
 import { toRFC3339Local, WEEK_LABELS } from '../../utils/time';
 import type { AgentServer, LaunchSpec, ScheduleSpec } from '../../api/client';
 
@@ -124,6 +125,18 @@ export interface LaunchPlanSectionProps {
   // other state. Re-project to the minimal ExecEnvServer shape so the
   // shared <ExecEnvSelect> renders without an extra cast.
   agentServers: AgentServer[];
+  // Project-level base-branch default (project.default_branch) — used as
+  // the initial value + placeholder for the BASE input AND rendered into
+  // the helper text. Falls back to "main" when the project setting is
+  // missing or empty. The backend fallback chain honours the same order
+  // (HTTP body > project.default_branch > "main").
+  defaultBaseBranch?: string;
+  // Project repo local path — when supplied, we fetch the branch list
+  // via GET /api/fs/git-branches on mount so the BASE input gets an
+  // HTML5 <datalist> autocomplete. Fetch fails silently: an empty list
+  // degrades to a plain <input> with placeholder, matching the
+  // openBranchModal fallback path in RequirementDetail.tsx.
+  projectLocalPath?: string;
   disabled?: boolean;
   onChange: (spec: LaunchSpec | null) => void;
 }
@@ -154,6 +167,8 @@ export default function LaunchPlanSection({
   flow,
   kind,
   agentServers,
+  defaultBaseBranch,
+  projectLocalPath,
   disabled,
   onChange,
 }: LaunchPlanSectionProps) {
@@ -196,7 +211,25 @@ export default function LaunchPlanSection({
   const [codingClaudeConfigId, setCodingClaudeConfigId] = useState('');
   const [codingAgentServerId, setCodingAgentServerId] = useState('');
   const [branchName, setBranchName] = useState('');
+  // Shared base branch — single source of truth for BOTH the design and
+  // coding stages. Mirrors how the backend treats it: spec.BaseBranch is
+  // one field, picked up by both prepareArchitectDesign (via
+  // resolveImmediateDesignBase) and the coding stage (via
+  // resolveImmediateBase). Same UX as DesignCodingImmediateModal which
+  // also keeps a single shared state for both stages.
   const [baseBranch, setBaseBranch] = useState('');
+  // Fetched branch list for the BASE input's <datalist> autocomplete.
+  // Empty list = no remote / fetch failed / no project path supplied;
+  // the input degrades to a plain text field (matches the
+  // openBranchModal fallback path in RequirementDetail.tsx).
+  const [availableBranches, setAvailableBranches] = useState<string[]>([]);
+  // computed once so the helper text + placeholder use the same source
+  // as the initial value. Single source of truth: change any one of the
+  // three and you change all three.
+  const baseBranchDefault = useMemo(
+    () => defaultBaseBranch || 'main',
+    [defaultBaseBranch],
+  );
   // Default OFF to match the developer-stage preflight default: split
   // tasks runs an extra dispatch round and is the slower path.
   const [splitTasks, setSplitTasks] = useState(false);
@@ -210,6 +243,27 @@ export default function LaunchPlanSection({
   const [devMode, setDevMode] = useState<'session' | 'design'>('design');
 
   const taskType = resolveTaskType(flow, kind, mode);
+
+  // Fetch git branch list once on mount (mirrors RequirementDetail's
+  // openBranchModal pattern). Empty path or fetch failure: leave
+  // availableBranches empty and the input renders as plain text. Cost
+  // is a single small JSON call — same path-keyed dedup the preflight
+  // modal does.
+  useEffect(() => {
+    if (!projectLocalPath) return;
+    let alive = true;
+    authedFetch(`${API_BASE}/api/fs/git-branches?path=${encodeURIComponent(projectLocalPath)}`)
+      .then(r => r.json())
+      .then(json => {
+        if (!alive) return;
+        if (json.success && Array.isArray(json.data?.branches)) {
+          setAvailableBranches(json.data.branches);
+        }
+      })
+      .catch(() => { /* silent — see comment above */ });
+    return () => { alive = false; };
+  }, [projectLocalPath]);
+
   const isWiki = taskType === 'wiki';
   // Wiki reuses the "design stage" half of this panel — model + exec env +
   // sync mode are exactly the three knobs a knowledge-doc run takes, and
@@ -560,6 +614,52 @@ export default function LaunchPlanSection({
               ))}
             </div>
           </div>
+
+          {/* Design-stage base branch picker — sits at the BOTTOM of the
+              design section (after sync-mode) so the user discovers it
+              alongside the other "where the work happens" controls. The
+              input is the same shared `baseBranch` state the coding stage
+              reads from below — one value drives BOTH the design and
+              coding base, mirroring how the backend treats spec.BaseBranch
+              (single field) and how DesignCodingImmediateModal works.
+              The chip+rail vocabulary matches dev pre-flight so the user
+              sees one design system across launch / pre-flight / detail. */}
+          <div className="modal-field">
+            <div className="preflight-field-card preflight-field-card--git launch-base-card">
+              <span className="preflight-field-chip" aria-hidden="true">
+                <IconBranch />
+                {'BASE 方案'}
+              </span>
+              <input
+                id="launch-plan-design-base-branch"
+                list="launch-plan-design-branches"
+                className="form-input preflight-field-input"
+                value={baseBranch}
+                onChange={e => setBaseBranch(e.target.value)}
+                placeholder={baseBranchDefault}
+                disabled={fieldDisabled}
+              />
+            </div>
+            <datalist id="launch-plan-design-branches">
+              {availableBranches.map(b => (
+                <option key={b} value={b} />
+              ))}
+            </datalist>
+            <small className="launch-plan-section__note">
+              {availableBranches.length === 0
+                ? t('requirements.detail2.designBranchPickerEmpty')
+                : t('requirements.detail2.designBaseBranchHelp', { default: baseBranchDefault })}
+            </small>
+            {/* design_and_coding only: clarifier that the SINGLE shared
+                BASE input below drives both stages. For design-only or
+                wiki tasks the coding stage doesn't run, so suppress the
+                note — would be confusing. */}
+            {taskType === 'design_and_coding' && (
+              <small className="launch-plan-section__note launch-plan-section__note--accent">
+                {t('requirements.detail2.immediateGitSharedNote')}
+              </small>
+            )}
+          </div>
         </div>
       )}
 
@@ -623,15 +723,34 @@ export default function LaunchPlanSection({
 
           <div className="modal-field">
             <div className="preflight-field-card preflight-field-card--git">
-              <span className="preflight-field-chip" aria-hidden="true">BASE</span>
+              <span className="preflight-field-chip" aria-hidden="true">
+                <IconBranch />
+                {'BASE 开发'}
+              </span>
               <input
+                list="launch-plan-coding-branches"
                 className="form-input preflight-field-input"
                 value={baseBranch}
                 onChange={e => setBaseBranch(e.target.value)}
-                placeholder="main"
+                placeholder={baseBranchDefault}
                 disabled={fieldDisabled}
               />
             </div>
+            <datalist id="launch-plan-coding-branches">
+              {availableBranches.map(b => (
+                <option key={b} value={b} />
+              ))}
+            </datalist>
+            {/* design_and_coding: mirror the design-section BASE input
+                (same shared `baseBranch` state) — explicit note so the
+                user doesn't think changing one and not the other is
+                intentional. For coding-only tasks the design section
+                is hidden so this note would be confusing; drop it. */}
+            {taskType === 'design_and_coding' && (
+              <small className="launch-plan-section__note launch-plan-section__note--accent">
+                {t('requirements.detail2.immediateGitSharedNote')}
+              </small>
+            )}
           </div>
 
           <div className="modal-field">

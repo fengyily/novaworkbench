@@ -24,7 +24,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import AtMentionTextarea from '../AtMentionTextarea';
 import LaunchPlanSection from './LaunchPlanSection';
-import { kindLabelKeys, kindHintKeys, kindPlaceholderKeys, kindCreateLabelKeys, type Kind, type AgentServer, type LaunchSpec, type KnowledgeItem, agentServersApi, requirementsApi, type Requirement } from '../../api/client';
+import { kindLabelKeys, kindHintKeys, kindPlaceholderKeys, kindCreateLabelKeys, type Kind, type AgentServer, type LaunchSpec, type KnowledgeItem, type Project, agentServersApi, projectsApi, requirementsApi, type Requirement } from '../../api/client';
 import { tLabel } from '../../i18n/label';
 import { errorMessage } from '../../utils/errMsg';
 import PdfUploadDialog from '../PdfUploadDialog';
@@ -95,6 +95,12 @@ export function CreateRequirementForm({
   // Filter to ready servers here so LaunchPlanSection receives a stable
   // contract; mirrors RequirementDetail.tsx:674-677 exactly.
   const [agentServers, setAgentServers] = useState<AgentServer[]>([]);
+  // Active project's metadata — used to seed the launch plan's BASE
+  // input (default_branch) + branch-list auto-complete (local_path).
+  // Fetched on projectId change; project-picker switches trigger a
+  // re-fetch so the BASE default always reflects the user's current
+  // selection.
+  const [activeProject, setActiveProject] = useState<Project | null>(null);
 
   // Cross-project mode: pick the first project as a sensible default so the
   // submit button isn't disabled on first paint.
@@ -126,6 +132,24 @@ export function CreateRequirementForm({
       });
     return () => { alive = false; };
   }, []);
+
+  // Refetch project metadata whenever the user switches projects in the
+  // picker (or on first paint). The launch plan's BASE input + branch
+  // list both depend on this so an outdated project never leaks a stale
+  // default_branch into a new requirement. 404 (rare: project removed
+  // mid-session) is treated as "no defaults" — the input falls back to
+  // "main" inside LaunchPlanSection.
+  useEffect(() => {
+    if (!projectId) {
+      setActiveProject(null);
+      return;
+    }
+    let alive = true;
+    projectsApi.get(projectId)
+      .then(p => { if (alive) setActiveProject(p); })
+      .catch(() => { if (alive) setActiveProject(null); });
+    return () => { alive = false; };
+  }, [projectId]);
 
   const handleSubmit = async () => {
     if (saving) return;
@@ -364,6 +388,8 @@ export function CreateRequirementForm({
             flow={flow}
             kind={kind}
             agentServers={agentServers}
+            defaultBaseBranch={activeProject?.default_branch}
+            projectLocalPath={activeProject?.local_path}
             disabled={saving}
             onChange={setLaunchSpec}
           />
