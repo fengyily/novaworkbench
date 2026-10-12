@@ -109,7 +109,7 @@ function MermaidBlock({ source }: { source: string }) {
     mermaid
       .render(id, source)
       .then(({ svg: out }) => {
-        if (!cancelled) setSvg(out);
+        if (!cancelled) setSvg(postProcessMermaidSvg(out));
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(String((e as Error)?.message || e));
