@@ -37,6 +37,42 @@ function nextMermaidId(): string {
   return `mermaid-${Date.now().toString(36)}-${mermaidSerial}`;
 }
 
+// postProcessMermaidSvg — mermaid v11 注入的 <svg> 同时带:
+//   • viewBox="0 0 W H"  (真实逻辑尺寸)
+//   • style="max-width: Wpx; max-height: Hpx; ..." (把图锁死在自然尺寸,干扰 CSS 自适应)
+//   • width="100%"  (让 SVG 在块流里撑满容器)
+// 这套组合在普通页面上会让图"按自然尺寸 100% 撑开",CSS max-width:100% 因内联 style 失效;
+// 在全屏浮层里 width: auto !important 又把 width="100%" 抹掉,SVG 回落到 300×150 默认尺寸。
+// 这里做三件事:1) 解析 viewBox 拿 W/H; 2) 写回 width="W" height="H" 让 SVG 有明确像素尺寸;
+// 3) 剥掉 style 里的 max-width / max-height,让 .mermaid-svg / .img-zoom-svg 的 CSS 接管。
+function postProcessMermaidSvg(raw: string): string {
+  const m = raw.match(/<svg\b[^>]*\bviewBox=["']([-\d.\s]+)["']/i);
+  if (!m) return raw;
+  const parts = m[1].trim().split(/\s+/).map(Number);
+  if (parts.length !== 4 || !parts[2] || !parts[3]) return raw;
+  const w = parts[2];
+  const h = parts[3];
+  // 重写整个 <svg ...> 起始标签,一次性做完三件事:
+  //   1) 剥掉残留的 width="..." / height="..."(避免与下面新注入的重复);
+  //   2) 清掉 style 里的 max-width / max-height(若 style 体为空则整段 style 也移除);
+  //   3) 注入 width="W" height="H",让 SVG 拥有明确的像素尺寸,CSS 就能接管 max-width。
+  // 这里一次性匹配整个 <svg ...> 而不是分两次 replace,是因为 <svg\b 单独匹配时
+  // 回调只能拿到 "<svg" 这 4 个字符,无法对属性做剥除。
+  return raw.replace(/<svg\b([^>]*)>/i, (_full, attrs: string) => {
+    let cleaned = attrs
+      .replace(/\swidth=["'][^"']*["']/i, '')
+      .replace(/\sheight=["'][^"']*["']/i, '')
+      .replace(/\sstyle=["']([^"']*)["']/i, (_sf, body: string) => {
+        const cleanedBody = body
+          .replace(/max-width\s*:\s*[^;]+;?/gi, '')
+          .replace(/max-height\s*:\s*[^;]+;?/gi, '')
+          .replace(/;\s*$/, '');
+        return cleanedBody.trim() === '' ? '' : ` style="${cleanedBody}"`;
+      });
+    return `<svg${cleaned} width="${w}" height="${h}">`;
+  });
+}
+
 // MermaidCode — react-markdown 的 code 组件 override。识别 ```mermaid 块，渲
 // 染为内联 SVG；其他语言走默认 <code>；`inline`（行内 `code`）始终走默认 <code>。
 function MermaidCode(props: {
@@ -57,6 +93,8 @@ function MermaidCode(props: {
 }
 
 // MermaidBlock — 客户端异步 mermaid.render() 出 SVG，挂到 DOM。
+// mermaid v11 输出的 SVG 在挂到 DOM 前会经过 postProcessMermaidSvg 后处理：
+// 解析 viewBox 写回 width/height 属性、剥离内联 max-*，让外部 CSS 能正常接管。
 // 错误的代码块不会让整页崩 — 走 <pre className="mermaid-error">。
 // 整个 mermaid-svg 容器是可点击 + 可下载的：点击区域走全屏浮层，
 // 工具栏提供 PNG / JPG / SVG 三种格式下载。
@@ -71,7 +109,7 @@ function MermaidBlock({ source }: { source: string }) {
     mermaid
       .render(id, source)
       .then(({ svg: out }) => {
-        if (!cancelled) setSvg(out);
+        if (!cancelled) setSvg(postProcessMermaidSvg(out));
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(String((e as Error)?.message || e));
