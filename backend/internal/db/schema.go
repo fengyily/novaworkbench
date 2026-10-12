@@ -59,6 +59,10 @@ CREATE TABLE IF NOT EXISTS requirements (
 	source_requirement_id TEXT NOT NULL DEFAULT '',
 	branch_name TEXT NOT NULL DEFAULT '',
 	worktree_path TEXT NOT NULL DEFAULT '',
+	-- 设计阶段使用的基线分支（方案设计 worktree 的 base ref）。持久化原因：worktree
+	-- 创建时机靠前，coding 阶段 --resume 设计 session 时会沿用设计阶段创建的
+	-- worktree 路径，必须把当时的基线记下，保证后续阶段与方案设计看到一致的代码快照。
+	design_base_branch TEXT NOT NULL DEFAULT '',
 	wiki_docs TEXT NOT NULL DEFAULT '',
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -700,6 +704,13 @@ var alterColumns = []string{
 	// isolated working tree instead of the shared project checkout.
 	`ALTER TABLE requirements ADD COLUMN branch_name TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN worktree_path TEXT NOT NULL DEFAULT ''`,
+	// design_base_branch: the base branch the architect-design stage picked
+	// when creating the isolated worktree. Persisted so re-runs / scheduled
+	// dispatches and the coding stage (which --resumes the design session)
+	// all see the same baseline snapshot, even if the original Pre-flight
+	// Modal choice is no longer available. Empty = no preference; backend
+	// falls back to project.default_branch.
+	`ALTER TABLE requirements ADD COLUMN design_base_branch TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE weekly_reports ADD COLUMN git_branch TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE weekly_reports ADD COLUMN git_author TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE projects ADD COLUMN deleted_at TEXT`,

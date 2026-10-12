@@ -64,6 +64,15 @@ type designRunParams struct {
 	Req            *model.Requirement
 	ProjectPath    string
 	DefaultBranch  string
+	// BaseBranch is the EFFECTIVE base ref the design stage will use when
+	// creating the isolated worktree, AFTER the three-tier resolver in
+	// prepareArchitectDesign has collapsed request body / persisted /
+	// project.default_branch into one value. Always non-empty by the time
+	// the exec body runs (the resolver substitutes "main" if all three
+	// sources are empty). Carried separately from DefaultBranch so the
+	// exec body and any future diagnostics can distinguish the
+	// "project's configured default" from the "user's actual pick".
+	BaseBranch     string
 	SourceSID      string
 	Fork           bool
 	SkipAnalysis   bool
@@ -109,9 +118,18 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		// is selected). Only honored when AgentServerID is non-empty; local
 		// execution ignores it.
 		SyncMode string `json:"sync_mode"`
+		// BaseBranch — optional override for the worktree base ref. Empty
+		// means "use the persisted requirements.design_base_branch (re-runs
+		// / scheduled dispatches reuse the same baseline), or fall back to
+		// project.default_branch". Mirrors the start-coding stage's
+		// branch_name / base_branch pair so the design Pre-flight Modal
+		// can pick a non-default base (PR feedback round, parallel branch,
+		// etc.). Always written back to design_base_branch by the
+		// three-tier resolver in prepareArchitectDesign.
+		BaseBranch string `json:"base_branch"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	p, job, af := h.prepareArchitectDesign(r.Context(), body.RequirementID, body.Model, body.ClaudeConfigID, body.AgentServerID, body.ReadKnowledge, body.SyncMode)
+	p, job, af := h.prepareArchitectDesign(r.Context(), body.RequirementID, body.Model, body.ClaudeConfigID, body.AgentServerID, body.ReadKnowledge, body.SyncMode, body.BaseBranch)
 	if writeIfAPIError(w, af) {
 		return
 	}
@@ -134,7 +152,23 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 // forward; empty = keep the requirement's persisted value (Stamp-If-Non-Empty
 // semantics — same convention as the HTTP body).
 func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnowledge bool, agentServerID string, syncMode string, cb *runCallbacks) (string, error) {
-	p, job, af := h.prepareArchitectDesign(context.Background(), requirementID, model, "", agentServerID, readKnowledge, syncMode)
+	// baseBranch is intentionally "" here — the scheduler doesn't carry an
+	// explicit base branch for design tasks; prepareArchitectDesign's
+	// three-tier resolver falls through to the persisted
+	// requirements.design_base_branch (so a scheduled re-dispatch reuses
+	// the same baseline as the original Pre-flight Modal pick) and only
+	// then to project.default_branch. Keeping the wire field out of
+	// scheduled_tasks avoids schema churn for a value that's only set on
+	// the initial user-driven dispatch.
+	return h.RunScheduledDesignWithBase(requirementID, model, readKnowledge, agentServerID, syncMode, "", cb)
+}
+
+// RunScheduledDesignWithBase is the explicit-base variant of
+// RunScheduledDesign, kept as a separate function so the simple
+// scheduler-facing path stays one-line and the explicit-base contract
+// (used by tests and any future direct dispatch) is self-documenting.
+func (h *WizardHandler) RunScheduledDesignWithBase(requirementID, model string, readKnowledge bool, agentServerID string, syncMode string, baseBranch string, cb *runCallbacks) (string, error) {
+	p, job, af := h.prepareArchitectDesign(context.Background(), requirementID, model, "", agentServerID, readKnowledge, syncMode, baseBranch)
 	if af != nil {
 		return "", af
 	}
@@ -155,7 +189,7 @@ func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnow
 // line-for-line the same as the original synchronous section; only the
 // writeError calls have been replaced with returning *apiFailure so the
 // scheduler can reuse the same validation outcomes.
-func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementID, modelOverride, claudeConfigIDOverride string, agentServerID string, readKnowledge bool, syncMode string) (*designRunParams, *store.Job, *apiFailure) {
+func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementID, modelOverride, claudeConfigIDOverride string, agentServerID string, readKnowledge bool, syncMode string, baseBranch string) (*designRunParams, *store.Job, *apiFailure) {
 	id := requirementID
 	if id == "" {
 		return nil, nil, fail(400, "INVALID", "missing requirement id")
@@ -171,6 +205,35 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	if project != nil {
 		projectPath = project.LocalPath
 		defaultBranch = project.DefaultBranch
+	}
+
+	// Three-tier base-branch resolver. Precedence:
+	//   1. Request body base_branch (fresh user choice, e.g. Pre-flight Modal pick)
+	//   2. Persisted requirements.design_base_branch (re-runs / scheduled
+	//      dispatches / page refreshes reuse the same baseline so the
+	//      isolated worktree and any --resume'd design session stay
+	//      consistent)
+	//   3. project.default_branch (the project's configured default)
+	// The final selected value is always written back to
+	// requirements.design_base_branch so subsequent reads can
+	// short-circuit and so a future scheduled dispatch (which sends ""
+	// for base_branch) still finds the right baseline. Persist failures
+	// are logged, not surfaced — same log-only behavior as
+	// UpdateDesignSession / UpdateDesignJob / UpdateWorktree, because
+	// the worktree itself is the source of truth at runtime and a
+	// stale persisted value just means the next pick will overwrite it.
+	selected := baseBranch
+	if selected == "" {
+		selected = req.DesignBaseBranch
+	}
+	if selected == "" {
+		selected = defaultBranch
+	}
+	if selected == "" {
+		selected = "main"
+	}
+	if perr := h.reqSvc.UpdateDesignBaseBranch(id, selected); perr != nil {
+		log.Printf("[architect-design] failed to persist design_base_branch for %s: %v", id, perr)
 	}
 
 	// Prologue: persist the design-stage agent-server binding BEFORE any
@@ -299,6 +362,7 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 		Req:           req,
 		ProjectPath:   projectPath,
 		DefaultBranch: defaultBranch,
+		BaseBranch:    selected,
 		SourceSID:     sourceSID,
 		Fork:          fork,
 		SkipAnalysis:  skipAnalysis,
@@ -361,14 +425,18 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 	// Surface the hard-sync phase up-front so the user sees something is
 	// happening even on a slow network. The actual fetch line is emitted by
 	// SyncToOriginBase through logf (which we wire to a job.Append below).
-	job.Append(store.LogLine{Type: "phase", Content: "🔄 同步仓库基线到 origin/" + p.DefaultBranch + "…"})
+	// Use p.BaseBranch (the user-selected effective base after the
+	// three-tier resolver) rather than p.DefaultBranch (the project's
+	// configured default) so the sync / worktree base line up with what
+	// the user picked in the Pre-flight Modal.
+	job.Append(store.LogLine{Type: "phase", Content: "🔄 同步仓库基线到 origin/" + p.BaseBranch + "…"})
 
 	// Read the timeout fresh on every design entry so a settings change takes
 	// effect without restarting the backend (same hot-reload story as the
 	// subtask concurrency / auto-retry settings). Missing/garbage → 60s.
 	timeout, _ := h.settingSvc.GitSyncTimeout()
 
-	workDir, baseSHA, err := h.resolveWorkDirSynced(context.Background(), p.Req, p.ProjectPath, p.DefaultBranch, timeout, func(s string) {
+	workDir, baseSHA, err := h.resolveWorkDirSynced(context.Background(), p.Req, p.ProjectPath, p.BaseBranch, timeout, func(s string) {
 		job.Append(store.LogLine{Type: "message", Content: s})
 	})
 	if err != nil {

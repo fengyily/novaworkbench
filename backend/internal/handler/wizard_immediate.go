@@ -66,6 +66,14 @@ type designCodingImmediateReq struct {
 	DesignModel         string `json:"design_model"`
 	DesignConfigID      string `json:"design_claude_config_id"`
 	DesignAgentServerID string `json:"design_agent_server_id"`
+	// DesignBaseBranch is the optional user-picked base for the design
+	// stage's worktree. Empty → falls through to persisted
+	// requirements.design_base_branch, then to project.default_branch.
+	// Wired into prepareArchitectDesign's three-tier resolver; the
+	// prepareArchitectDesign body writes the resolved value back to the
+	// row so the coding stage's --resume of the design session inherits
+	// the same baseline.
+	DesignBaseBranch    string `json:"design_base_branch"`
 	CodingModel         string `json:"coding_model"`
 	CodingConfigID      string `json:"coding_claude_config_id"`
 	CodingAgentServerID string `json:"coding_agent_server_id"`
@@ -161,7 +169,7 @@ func (h *WizardHandler) launchDesignAndCoding(reqID string, body *designCodingIm
 	// is identical. prepareArchitectDesign mints the JobStore job and
 	// persists design_job_id on the requirement row before we return, so
 	// a second concurrent POST hits DESIGN_JOB_ACTIVE on the next call.
-	p, job, af := h.prepareArchitectDesign(context.Background(), reqID, body.DesignModel, body.DesignConfigID, body.DesignAgentServerID, body.ReadKnowledge, body.SyncMode)
+	p, job, af := h.prepareArchitectDesign(context.Background(), reqID, body.DesignModel, body.DesignConfigID, body.DesignAgentServerID, body.ReadKnowledge, body.SyncMode, body.DesignBaseBranch)
 	if af != nil {
 		return "", af
 	}
@@ -200,6 +208,7 @@ func (h *WizardHandler) launchDesignOnly(reqID string, body *designCodingImmedia
 		body.DesignAgentServerID,
 		body.ReadKnowledge,
 		body.SyncMode,
+		body.DesignBaseBranch,
 	)
 	if af != nil {
 		return "", af

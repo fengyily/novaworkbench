@@ -783,6 +783,16 @@ export interface Requirement {
   skip_design: boolean;
   branch_name?: string;
   worktree_path?: string;
+  // design_base_branch: the base ref the architect-design stage picked when
+  // creating the isolated worktree. Persisted on the requirement by the
+  // three-tier resolver in wizard_architect.go (request body → persisted →
+  // project.default_branch) so re-runs / page refreshes / scheduled
+  // dispatches all reuse the same baseline. Empty = no preference; the
+  // backend falls back to project.default_branch. Surfaced read-only in
+  // the Pre-flight Modal as the default value of the BASE dropdown and
+  // the "沿用上次基线" hint. Distinct from design_base_sha (a commit hash
+  // stamped for merge-stage use) — this is a branch name.
+  design_base_branch?: string;
   // Effective model actually dispatched to the claude CLI for each stage
   // (the model pinned in the --settings env block, or the DefaultModelLabel
   // literal when none was specified). Empty = the stage hasn't run yet (or

@@ -186,6 +186,19 @@ export const requirements = {
     preflightEyebrow: 'Pre-flight',
     preflightTitle: '启动开发会话',
     preflightSubtitle: 'Claude 将按下列配置进入编码执行阶段。',
+    // Design-stage Pre-flight Modal: opens before runArchitectDesign. Mirrors
+    // the dev preflight vocabulary (Pre-flight eyebrow + Flight strip +
+    // BASE card) so the two modals read as the same family, but only the
+    // BASE picker is editable (NEW is fixed to feat/<req_id> by the
+    // wizard_architect.go contract, and the design stage has no EXEC
+    // section — model / config / server pickers live in the toolbar).
+    designPreflightTitle: '生成技术方案（设计预检）',
+    designPreflightSubtitle: 'Claude 将按下列配置进入方案设计阶段。',
+    designPreflightBaseBranchLabel: '基础分支 BASE（方案设计 worktree 的起点）',
+    designPreflightReuseHint: '沿用上次基线：{{branch}}',
+    designPreflightReady: 'READY',
+    designPreflightConfirm: '确认',
+    designPreflightCancel: '取消',
     preflightAria: '配置摘要',
     preflightGitSection: 'Git · 工作分支',
     preflightBaseBranchLabel: '基础分支（从哪里签出）',

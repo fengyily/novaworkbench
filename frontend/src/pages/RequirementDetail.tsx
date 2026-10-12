@@ -1080,6 +1080,18 @@ export default function RequirementDetail() {
   const [autoPushPRDev, setAutoPushPRDev] = useState(true);
   const [showDesignKnowledgeModal, setShowDesignKnowledgeModal] = useState(false);
   const [readKnowledgeDesign, setReadKnowledgeDesign] = useState(false);
+  // designBaseBranch is the user-picked base ref for the design stage's
+  // worktree, surfaced in the Design Pre-flight Modal. Defaulted from
+  // req.design_base_branch (persisted on prior runs) when present, else
+  // from project.default_branch, else 'main'. Kept in its own state
+  // (rather than reusing the dev stage's `baseBranch`) so a design
+  // pick doesn't leak into a future coding pick and vice versa.
+  const [designBaseBranch, setDesignBaseBranch] = useState<string>('');
+  // designAvailableBranches is the /api/fs/git-branches fetch result for
+  // the design modal. Loaded once on Modal open. Distinct from
+  // availableBranches (the dev modal's list) so opening one modal never
+  // races the other's load.
+  const [designAvailableBranches, setDesignAvailableBranches] = useState<string[]>([]);
   const designNeedsTransitionRef = useRef(false);
   // Titles read by the backend, surfaced via the SSE "knowledge" event.
   const [knowledgeItems, setKnowledgeItems] = useState<KnowledgeEntry[]>([]);
@@ -1972,7 +1984,7 @@ export default function RequirementDetail() {
     wikiEsRef.current = null;
   }, []);
 
-  const runArchitectDesign = async (useKnowledge: boolean) => {
+  const runArchitectDesign = async (useKnowledge: boolean, baseBranch: string = '') => {
     if (!id) return;
     setDesigning(true);
     setDesignLines([]);
@@ -2024,6 +2036,14 @@ export default function RequirementDetail() {
           // (the wizard's "stamp if non-empty" prologue keeps an empty
           // sync_mode from silently overwriting a previous value).
           ...(designAgentServerId && designSyncMode ? { sync_mode: designSyncMode } : {}),
+          // base_branch: the user-picked ref for the design stage's
+          // worktree (mirrors the dev preflight's base_branch). Empty =
+          // the backend's three-tier resolver falls through to
+          // requirements.design_base_branch (re-runs reuse the same
+          // baseline) and then to project.default_branch. Always sent
+          // (even when empty) so the wire format mirrors model / config /
+          // server above — no "key missing" ambiguity in logs.
+          base_branch: baseBranch,
         }),
       });
       const json = await res.json();
@@ -2036,24 +2056,63 @@ export default function RequirementDetail() {
     }
   };
 
-  // Design-entry gates first show a "read project knowledge?" checkbox modal
-  // (default unchecked) — per feedback "make it optional, default unchecked". needsTransition
-  // covers the draft/analyzing entries that must move status to designing
-  // before launching the job; status==='designing' entries run directly.
+  // Design-entry gates first show a Pre-flight Modal (knowledge checkbox +
+  // base-branch picker). Default ordering for the BASE dropdown:
+  //   1. req.design_base_branch (the last pick the user made / the backend
+  //      persisted for re-runs)
+  //   2. project.default_branch (the project's configured default)
+  //   3. 'main' (ultimate fallback)
+  // needsTransition covers the draft/analyzing entries that must move
+  // status to designing before launching the job; status==='designing'
+  // entries run directly.
   const requestDesignKnowledge = (needsTransition: boolean) => {
     designNeedsTransitionRef.current = needsTransition;
     setReadKnowledgeDesign(false); // reset to default (unchecked) each time
+    const defaultBase = req?.design_base_branch
+      || project?.default_branch
+      || 'main';
+    setDesignBaseBranch(defaultBase);
     setShowDesignKnowledgeModal(true);
+    if (project?.local_path) {
+      // Same /api/fs/git-branches endpoint the dev preflight uses; loaded
+      // here so the BASE dropdown has the same options the dev modal
+      // already showed the user. Cached in designAvailableBranches
+      // (separate from availableBranches) so opening the dev modal later
+      // doesn't blow away the design modal's snapshot mid-edit.
+      authedFetch(`${API_BASE}/api/fs/git-branches?path=${encodeURIComponent(project.local_path)}`)
+        .then(r => r.json())
+        .then(json => {
+          if (json.success && Array.isArray(json.data?.branches)) {
+            setDesignAvailableBranches(json.data.branches);
+          }
+        })
+        .catch(() => { /* best-effort — dropdown falls back to the typed default */ });
+    }
   };
+
+  // Re-sync designBaseBranch from the latest req whenever the persisted
+  // value changes. The useEffect catches both the initial GET and any
+  // later refresh where the requirement is reloaded (e.g. a follow-up
+  // design run that just persisted a new base_branch via the three-tier
+  // resolver). Without this, a page refresh after a non-default pick
+  // would silently drop back to project.default_branch until the user
+  // re-opened the modal.
+  useEffect(() => {
+    const persisted = req?.design_base_branch;
+    if (persisted) {
+      setDesignBaseBranch(persisted);
+    }
+  }, [req?.design_base_branch]);
 
   const confirmDesignKnowledge = async () => {
     setShowDesignKnowledgeModal(false);
     const useKnowledge = readKnowledgeDesign;
+    const baseBranch = designBaseBranch || req?.design_base_branch || project?.default_branch || 'main';
     if (designNeedsTransitionRef.current) {
       await transition('designing', t('requirements.detail2.intentGenerateDesign'));
-      await runArchitectDesign(useKnowledge);
+      await runArchitectDesign(useKnowledge, baseBranch);
     } else {
-      await runArchitectDesign(useKnowledge);
+      await runArchitectDesign(useKnowledge, baseBranch);
     }
   };
 
@@ -2889,25 +2948,100 @@ export default function RequirementDetail() {
       {designLaunchErrorToast && (
         <span className="merge-hint-toast" role="status">{designLaunchErrorToast}</span>
       )}
-      {/* Optional "read project knowledge" confirm modal for the design stage */}
-      {showDesignKnowledgeModal && (
-        <div className="modal-overlay" onClick={() => setShowDesignKnowledgeModal(false)}>
-          <div className="modal-box" onClick={e => e.stopPropagation()}>
-            <h3><IconTriangle size={16} className="icon-mr" />{t('requirements.detail2.intentGenerateDesign')}</h3>
-            <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
-              {t('requirements.detail2.designKnowledgeHint')}
-            </p>
-            <label className="merge-check" style={{ margin: '8px 0 12px' }}>
-              <input type="checkbox" checked={readKnowledgeDesign} onChange={e => setReadKnowledgeDesign(e.target.checked)} />
-              <IconBook size={13} className="icon-mr" />{t('requirements.detail2.preflightReadKnowledgeDefault')}
-            </label>
-            <div className="modal-actions btn-row-2col">
-              <button className="btn btn-primary" onClick={confirmDesignKnowledge}>{t('requirements.detail2.btnConfirm')}</button>
-              <button className="btn" onClick={() => setShowDesignKnowledgeModal(false)}>{t('requirements.detail2.btnCancel')}</button>
+      {/* Design-stage Pre-flight Modal — opens before runArchitectDesign. The
+          original lightweight "read knowledge?" confirm was promoted to a
+          full Pre-flight (mirroring the dev modal's vocabulary) so the
+          user can pick a non-default base branch — without that, every
+          design run anchored to project.default_branch, blocking PR
+          feedback round-trips and parallel-branch baselines. Reuses
+          preflight-* CSS classes; introduces no new CSS variables. */}
+      {showDesignKnowledgeModal && req && (() => {
+        const stripNew = `feat/${req.id}`;
+        const stripBase = designBaseBranch || 'main';
+        // "Reuse last base" hint — only shown when the persisted value is
+        // non-empty AND matches the current dropdown value, so the
+        // affordance doesn't blink on/off mid-edit.
+        const persistPrev = req.design_base_branch;
+        return (
+          <div className="modal-overlay" onClick={() => setShowDesignKnowledgeModal(false)}>
+            <div className="modal-box preflight-box" onClick={e => e.stopPropagation()}>
+              <div className="preflight-header">
+                <div className="preflight-eyebrow">{t('requirements.detail2.preflightEyebrow')}</div>
+                <h3 className="preflight-title">{t('requirements.detail2.designPreflightTitle')}</h3>
+                <p className="preflight-subtitle">
+                  {t('requirements.detail2.designPreflightSubtitle')}
+                </p>
+              </div>
+
+              {/* Flight strip — design stage only renders the GIT leg (no
+                  EXEC leg: model / config / server pickers live in the
+                  toolbar and are not part of this modal's contract). */}
+              <div className="flight-strip" aria-label={t('requirements.detail2.preflightAria')}>
+                <span className="flight-leg">
+                  <span className="flight-leg-label">GIT</span>
+                  <span className="flight-leg-value" title={stripBase}>{stripBase}</span>
+                  <IconArrowRight size={11} className="flight-arrow" aria-hidden />
+                  <span className="flight-leg-value" title={stripNew}>{stripNew}</span>
+                </span>
+                <span className="flight-ready" aria-live="polite">
+                  <span className="flight-ready-dot" />
+                  {t('requirements.detail2.designPreflightReady')}
+                </span>
+              </div>
+
+              <div className="preflight-body">
+                <div className="preflight-section">
+                  <div className="preflight-section-label">{t('requirements.detail2.preflightGitSection')}</div>
+                  <div className="modal-field">
+                    <label>{t('requirements.detail2.designPreflightBaseBranchLabel')}</label>
+                    <div className="preflight-field-card preflight-field-card--git">
+                      <span className="preflight-field-chip" aria-hidden="true">BASE</span>
+                      <select
+                        className="form-input preflight-field-input"
+                        value={designBaseBranch}
+                        onChange={e => setDesignBaseBranch(e.target.value)}
+                      >
+                        {designAvailableBranches.length === 0 && (
+                          <option value={designBaseBranch}>{designBaseBranch}</option>
+                        )}
+                        {designAvailableBranches.map(b => (
+                          <option key={b} value={b}>{b}</option>
+                        ))}
+                      </select>
+                    </div>
+                    {persistPrev && persistPrev === designBaseBranch && (
+                      <small className="preflight-hint">
+                        {t('requirements.detail2.designPreflightReuseHint', { branch: persistPrev })}
+                      </small>
+                    )}
+                  </div>
+                </div>
+
+                <div className="preflight-section">
+                  <div className="preflight-section-label">{t('requirements.detail2.preflightExecSection')}</div>
+                  <label className="merge-check" style={{ margin: '8px 0 12px' }}>
+                    <input
+                      type="checkbox"
+                      checked={readKnowledgeDesign}
+                      onChange={e => setReadKnowledgeDesign(e.target.checked)}
+                    />
+                    <IconBook size={13} className="icon-mr" />{t('requirements.detail2.preflightReadKnowledgeDefault')}
+                  </label>
+                </div>
+              </div>
+
+              <div className="modal-actions btn-row-2col">
+                <button className="btn btn-primary" onClick={confirmDesignKnowledge}>
+                  {t('requirements.detail2.designPreflightConfirm')}
+                </button>
+                <button className="btn" onClick={() => setShowDesignKnowledgeModal(false)}>
+                  {t('requirements.detail2.designPreflightCancel')}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Branch modal — pre-flight checklist */}
       {showBranchModal && (() => {

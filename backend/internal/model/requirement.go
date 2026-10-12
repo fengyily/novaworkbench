@@ -46,6 +46,15 @@ type Requirement struct {
 	SkipDesign          bool   `json:"skip_design"`   // when true, skip analyst+architect stages and go straight to coding ("直接开发")
 	BranchName          string `json:"branch_name"`   // dev branch checked out in the worktree; empty = legacy in-place checkout
 	WorktreePath        string `json:"worktree_path"` // absolute path of the isolated git worktree; empty = no worktree (legacy)
+	// DesignBaseBranch is the base ref the architect-design stage picked when
+	// creating the isolated worktree. Persisted on the requirement so re-runs
+	// / scheduled dispatches and the coding stage (which --resumes the
+	// design session) all see the same baseline snapshot, even if the
+	// original Pre-flight Modal choice is no longer available. Empty = no
+	// preference; backend falls back to project.default_branch. Distinct
+	// from DesignBaseSHA (a commit hash recorded for context) — this is a
+	// branch name passed to `git worktree add <branch> <base>`.
+	DesignBaseBranch    string `json:"design_base_branch"`
 	// Effective model actually dispatched to the claude CLI for each stage
 	// (the --model value, or the display literal "默认模型" when neither the
 	// role nor the active claude config specified one). Written only on the
