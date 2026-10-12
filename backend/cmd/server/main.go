@@ -822,6 +822,9 @@ func main() {
 	mux.HandleFunc("GET /api/knowledge", knowledgeH.List)
 	mux.HandleFunc("GET /api/knowledge/search", knowledgeH.Search)
 	mux.HandleFunc("POST /api/knowledge", knowledgeH.Create)
+	// PDF upload → parse → LLM-polish → knowledge row. multipart/form-data
+	// body (field "file" + "project_id"); see KnowledgeHandler.UploadPdf.
+	mux.HandleFunc("POST /api/knowledge/upload-pdf", knowledgeH.UploadPdf)
 	mux.HandleFunc("GET /api/knowledge/{id}", knowledgeH.Get)
 	mux.HandleFunc("PUT /api/knowledge/{id}", knowledgeH.Update)
 	mux.HandleFunc("DELETE /api/knowledge/{id}", knowledgeH.Delete)

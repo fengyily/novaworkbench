@@ -4,8 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -13,16 +17,40 @@ import (
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/service"
+	"github.com/novaworkbench/backend/internal/util"
 )
+
+// pdfUploadMaxMemory is the in-memory threshold for r.ParseMultipartForm —
+// uploads larger than this are spilled to a temp file on disk so we don't
+// hold a 20 MB PDF in heap.
+const pdfUploadMaxMemory = 20 << 20 // 20 MB
+
+// pdfUploadMaxBody is the hard cap on the total request body. Set on
+// http.MaxBytesReader so a 1 GB upload is rejected at the body-read layer
+// before we ever start spilling through ParseMultipartForm.
+const pdfUploadMaxBody = 50 << 20 // 50 MB
 
 type KnowledgeHandler struct {
 	svc   *service.KnowledgeService
 	llm   *llm.Gateway
 	usage *service.UsageService
+
+	// pdfExtract / pdfPolish are the side-effecting steps that the upload
+	// pipeline delegates to. They default to util.GetText (pure-Go PDF text
+	// extraction) and the LLM Gateway's ConvertPdfTextToMarkdown, but tests
+	// override them to avoid standing up a real extractor or LLM channel.
+	pdfExtract func(path string) (string, error)
+	pdfPolish  func(rawText, file string) (string, *llm.Usage, error)
 }
 
 func NewKnowledgeHandler(svc *service.KnowledgeService, llmGateway *llm.Gateway, usageSvc *service.UsageService) *KnowledgeHandler {
-	return &KnowledgeHandler{svc: svc, llm: llmGateway, usage: usageSvc}
+	return &KnowledgeHandler{
+		svc:        svc,
+		llm:        llmGateway,
+		usage:      usageSvc,
+		pdfExtract: util.GetText,
+		pdfPolish:  llmGateway.ConvertPdfTextToMarkdown,
+	}
 }
 
 func (h *KnowledgeHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -362,4 +390,165 @@ func (h *KnowledgeHandler) recordUsage(projectID, step string, usage *llm.Usage)
 	if rerr := h.usage.Record(u); rerr != nil {
 		fmt.Printf("[knowledge.generate-diagram] record usage failed: %v (ignored)\n", rerr)
 	}
+}
+
+// UploadPdf — POST /api/knowledge/upload-pdf (multipart/form-data).
+//
+// Companion of GenerateDiagram (LLM-driven, no file) and Create (JSON
+// metadata only) on the knowledge-write surface: where Create takes a
+// {title, content} body and GenerateDiagram asks the LLM to mint a Mermaid
+// diagram, UploadPdf takes a binary PDF and walks the full PDF → Markdown
+// pipeline. Body shape:
+//
+//	field name "file"    — required, the PDF blob
+//	field name "project_id" — optional in form, falls back to ?project_id=
+//	                            query string; required (the knowledge row
+//	                            must be project-scoped to satisfy the FK).
+//
+// Validation is layered: http.MaxBytesReader caps the request body up front
+// (returns 413 TOO_LARGE on overflow), ParseMultipartForm then spills the
+// in-memory threshold to a temp file, and the file type is double-checked
+// (Content-Type prefix + .pdf extension) before extraction. On success
+// returns 201 with the same KnowledgeItem shape as Create; on failure
+// returns 400 / 413 / 500 with the project's standard writeError envelope.
+//
+// Token usage from the polish step is recorded via recordUsage so a PDF
+// upload shows up in the project's token_usage dashboard alongside
+// diagram/report-archive calls.
+func (h *KnowledgeHandler) UploadPdf(w http.ResponseWriter, r *http.Request) {
+	// http.MaxBytesReader must wrap the body BEFORE ParseMultipartForm so
+	// oversize requests are rejected at the body-read layer (it surfaces as
+	// a *http.MaxBytesError on the next read). Without this cap, a 1 GB
+	// upload would happily spill through ParseMultipartForm before we
+	// realized anything was wrong.
+	r.Body = http.MaxBytesReader(w, r.Body, pdfUploadMaxBody)
+
+	if err := r.ParseMultipartForm(pdfUploadMaxMemory); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "TOO_LARGE",
+				fmt.Sprintf("PDF 上传超过 %d MB 限制", pdfUploadMaxBody>>20))
+			return
+		}
+		writeError(w, http.StatusBadRequest, "INVALID_FORM",
+			"Failed to parse multipart form: "+err.Error())
+		return
+	}
+
+	// project_id is required; accept either form field or ?project_id= query
+	// for clients that find query-string simpler to thread.
+	projectID := strings.TrimSpace(r.FormValue("project_id"))
+	if projectID == "" {
+		projectID = strings.TrimSpace(r.URL.Query().Get("project_id"))
+	}
+	if projectID == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_PROJECT_ID", "project_id is required")
+		return
+	}
+
+	f, fileHeader, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_FILE", "Form field \"file\" is required: "+err.Error())
+		return
+	}
+	defer f.Close()
+	if fileHeader.Size > pdfUploadMaxBody {
+		writeError(w, http.StatusRequestEntityTooLarge, "TOO_LARGE",
+			fmt.Sprintf("PDF 上传超过 %d MB 限制", pdfUploadMaxBody>>20))
+		return
+	}
+
+	// Type check: Content-Type prefix + filename extension. Browsers always
+	// send application/pdf for picker-selected PDFs, but we still require
+	// the .pdf extension as belt-and-suspenders since the Content-Type can
+	// be spoofed.
+	ct := fileHeader.Header.Get("Content-Type")
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(ct)), "application/pdf") {
+		writeError(w, http.StatusBadRequest, "INVALID_FILE_TYPE",
+			fmt.Sprintf("Only PDF files are accepted, got Content-Type=%q", ct))
+		return
+	}
+	if strings.ToLower(filepath.Ext(fileHeader.Filename)) != ".pdf" {
+		writeError(w, http.StatusBadRequest, "INVALID_FILE_TYPE",
+			fmt.Sprintf("Only .pdf files are accepted, got filename=%q", fileHeader.Filename))
+		return
+	}
+
+	// Spill the upload to a temp file so the extractor can read it via
+	// os.Open (rather than a multipart.File) — util.GetText expects a real
+	// filesystem path. MkdirTemp root defaults to os.TempDir() which is
+	// already per-user on every supported platform. Cleanup is unconditional
+	// via defer so a panic in the pipeline still leaves no orphans.
+	tmpFile, err := os.CreateTemp("", "pdf-upload-*.pdf")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "Failed to create temp file: "+err.Error())
+		return
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := io.Copy(tmpFile, f); err != nil {
+		f.Close()
+		tmpFile.Close()
+		// io.Copy against a MaxBytesReader-wrapped body surfaces an
+		// *http.MaxBytesError when the temp spill itself exceeded the cap
+		// (e.g. multipart overhead pushed it over). Map that to TOO_LARGE
+		// instead of a generic 500.
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "TOO_LARGE",
+				fmt.Sprintf("PDF 上传超过 %d MB 限制", pdfUploadMaxBody>>20))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INVALID_FILE", "Failed to read uploaded file: "+err.Error())
+		return
+	}
+	if err := tmpFile.Close(); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "Failed to close temp file: "+err.Error())
+		return
+	}
+
+	// Pull the two pipeline steps off the handler so the same call site
+	// works in production (util.GetText + LLM gateway) and in tests (mocked
+	// stubs). The defaults are wired in NewKnowledgeHandler.
+	extract := h.pdfExtract
+	polish := h.pdfPolish
+	if extract == nil {
+		extract = util.GetText
+	}
+	if polish == nil {
+		polish = h.llm.ConvertPdfTextToMarkdown
+	}
+
+	k, usage, err := h.svc.CreateFromPdf(
+		service.CreateKnowledgeFromPdfReq{
+			ProjectID:  projectID,
+			SourceFile: fileHeader.Filename,
+			FilePath:   tmpPath,
+		},
+		extract,
+		polish,
+	)
+	if err != nil {
+		// Empty-PDF (zero bytes / blank extraction) is a client problem,
+		// not a server error — surface as 400 so the frontend can show a
+		// actionable toast instead of a generic failure.
+		if errors.Is(err, util.ErrEmptyPdfInput) || errors.Is(err, llm.ErrEmptyInput) {
+			writeError(w, http.StatusBadRequest, "INVALID_FILE",
+				"PDF 内容为空或无法提取文本")
+			return
+		}
+		// Extract-failure often manifests as "the file is not a valid PDF"
+		// (e.g. someone renamed a .exe to .pdf) — keep the legacy 500
+		// since this is rarely recoverable in production and the frontend
+		// just needs a human message.
+		writeError(w, http.StatusInternalServerError, "EXTRACT_FAILED",
+			"PDF 解析失败: "+err.Error())
+		return
+	}
+
+	if usage != nil {
+		h.recordUsage(projectID, "knowledge.upload_pdf", usage)
+	}
+	writeJSON(w, http.StatusCreated, k)
 }
