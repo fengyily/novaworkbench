@@ -1,0 +1,42 @@
+/* Floating "↓ N new messages" pill, anchored bottom-center of an SSE panel.
+   Expects the parent scroll container to be `position: relative`. */
+
+.scroll-to-bottom-button {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 10;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12);
+  color: var(--color-primary);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.scroll-to-bottom-button:hover {
+  transform: translateX(-50%) translateY(-1px);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.16);
+}
+
+.scroll-to-bottom-button:active {
+  transform: translateX(-50%) translateY(0);
+}
+
+.scroll-to-bottom-button .stb-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.scroll-to-bottom-button .stb-label {
+  white-space: nowrap;
+}
