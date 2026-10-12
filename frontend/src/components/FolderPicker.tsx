@@ -25,8 +25,10 @@ export default function FolderPicker({ value, onChange }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Try home dir first
-    listDir('~');
+    // Default to ~/workspace: server enforces a path allow-list of
+    // ~/workspace + every registered projects.local_path, so start in the
+    // workspace root the user can actually browse.
+    listDir('~/workspace');
   }, []);
 
   const listDir = useCallback(async (path: string) => {
