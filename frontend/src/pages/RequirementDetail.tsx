@@ -1063,6 +1063,14 @@ export default function RequirementDetail() {
   const [baseBranch, setBaseBranch] = useState('');
   const [availableBranches, setAvailableBranches] = useState<string[]>([]);
 
+  // Design-stage base branch picker (separate from the coding-stage
+  // `baseBranch` above so the two stages can pick different bases
+  // without overwriting each other). Defaults to the project's
+  // default_branch with a "main" hard fallback so an empty project
+  // setting still produces a usable input. Reset whenever the active
+  // project changes (see the useEffect further down).
+  const [designBaseBranch, setDesignBaseBranch] = useState<string>(project?.default_branch || 'main');
+
   // Optional "Read project knowledge base" step (default off). The dev
   // checkbox lives in the branch modal; the design one has its own confirm
   // modal so the user can opt in right before generating the technical plan.
@@ -2006,6 +2014,10 @@ export default function RequirementDetail() {
           read_knowledge: useKnowledge,
           // Per-request model override — empty means the role's configured model.
           ...(architectModel ? { model: architectModel } : {}),
+          // Per-run design-stage base branch (release/integration/etc.).
+          // Backend fallback chain: body > project.default_branch > "main",
+          // so an empty / whitespace string here still resolves correctly.
+          base_branch: designBaseBranch.trim() || project?.default_branch || 'main',
           // User-picked Claude config for the architect stage. Empty = the
           // backend resolves it (model→config lookup / role / active). Sent so
           // the picked config is persisted (architect_config_id) and re-hydrates
@@ -2896,6 +2908,15 @@ export default function RequirementDetail() {
             <h3><IconTriangle size={16} className="icon-mr" />{t('requirements.detail2.intentGenerateDesign')}</h3>
             <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginBottom: 8 }}>
               {t('requirements.detail2.designKnowledgeHint')}
+            </p>
+            {/* Show the current design base one more time so the user can
+                spot a stale value before clicking confirm (the input on the
+                page above is the source of truth — this is a read-only
+                mirror). Helps catch the case where the user opened the
+                modal after editing the base in another tab / ref. */}
+            <p className="design-knowledge-base-readout">
+              {t('requirements.detail2.designBaseBranchLabel')}:{' '}
+              <code>{designBaseBranch || project?.default_branch || 'main'}</code>
             </p>
             <label className="merge-check" style={{ margin: '8px 0 12px' }}>
               <input type="checkbox" checked={readKnowledgeDesign} onChange={e => setReadKnowledgeDesign(e.target.checked)} />
@@ -4151,6 +4172,44 @@ export default function RequirementDetail() {
                         strips slot in here too, next to the buttons they
                         replace. */}
                     <div className="draft-action-actions">
+                      {/* Design-stage base branch picker — placed at the
+                          TOP of the action zone so the user sees the
+                          design-time base before committing to one of the
+                          four CTAs below. The coding stage has its own
+                          picker in the branch modal; we keep the two
+                          pickers separate so design vs coding can target
+                          different bases (mirrors the agent-server picker
+                          pattern). Uses the existing availableBranches
+                          list, populated by GET /api/fs/git-branches —
+                          empty list falls back to a plain text input. */}
+                      <div className="design-branch-row">
+                        <label htmlFor="design-base-branch-input">
+                          {t('requirements.detail2.designBaseBranchLabel')}
+                        </label>
+                        <input
+                          id="design-base-branch-input"
+                          list="design-branch-suggestions"
+                          value={designBaseBranch}
+                          onChange={e => setDesignBaseBranch(e.target.value)}
+                          disabled={!!busy}
+                          placeholder={project?.default_branch || 'main'}
+                        />
+                        <datalist id="design-branch-suggestions">
+                          {(availableBranches || []).map(b => (
+                            <option key={b} value={b} />
+                          ))}
+                        </datalist>
+                        <span className="design-branch-hint">
+                          {t('requirements.detail2.designBaseBranchHelp', {
+                            default: project?.default_branch || 'main',
+                          })}
+                        </span>
+                        {availableBranches.length === 0 && (
+                          <span className="design-branch-warn">
+                            {t('requirements.detail2.designBranchPickerEmpty')}
+                          </span>
+                        )}
+                      </div>
                       <div className="draft-action-actions-surface">
                         {/* Primary CTA — generates the technical design now.
                             Kept as the FIRST child so it remains the visually
@@ -4497,6 +4556,39 @@ export default function RequirementDetail() {
 
           {req.status === 'designing' && !hasDesign && !designing && !req.design_job_id && reqKind !== 'idea' && (
             <div className="tab-empty">
+              {/* Design-stage base branch picker — same component as the
+                  draft-stage action panel so the user sees the same input
+                  no matter which entry point they used to land here.
+                  Single state (designBaseBranch) shared with the draft
+                  panel. */}
+              <div className="design-branch-row">
+                <label htmlFor="design-base-branch-input-idle">
+                  {t('requirements.detail2.designBaseBranchLabel')}
+                </label>
+                <input
+                  id="design-base-branch-input-idle"
+                  list="design-branch-suggestions-idle"
+                  value={designBaseBranch}
+                  onChange={e => setDesignBaseBranch(e.target.value)}
+                  disabled={!!busy || designing}
+                  placeholder={project?.default_branch || 'main'}
+                />
+                <datalist id="design-branch-suggestions-idle">
+                  {(availableBranches || []).map(b => (
+                    <option key={b} value={b} />
+                  ))}
+                </datalist>
+                <span className="design-branch-hint">
+                  {t('requirements.detail2.designBaseBranchHelp', {
+                    default: project?.default_branch || 'main',
+                  })}
+                </span>
+                {availableBranches.length === 0 && (
+                  <span className="design-branch-warn">
+                    {t('requirements.detail2.designBranchPickerEmpty')}
+                  </span>
+                )}
+              </div>
               <p dangerouslySetInnerHTML={{ __html: t('requirements.detail2.architectIdleHint') }} />
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 {/* Wizard-stage CTA — unified to `btn btn-sm` per the

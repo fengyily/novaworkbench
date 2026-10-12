@@ -46,6 +46,11 @@ type DesignParams struct {
 	ReadKnowledge bool
 	AgentServerID string
 	SyncMode      string
+	// BaseBranch — scheduled_tasks.base_branch value forwarded to
+	// RunScheduledDesign so a cron user can override the per-design base
+	// without touching project.default_branch. Empty falls back to
+	// project.DefaultBranch inside prepareArchitectDesign.
+	BaseBranch string
 }
 
 // CodingParams is the wizard-facing shape for a scheduled start-coding.
@@ -313,6 +318,7 @@ func (s *Scheduler) dispatch(t model.ScheduledTask) {
 			ReadKnowledge: t.ReadKnowledge,
 			AgentServerID: t.AgentServerID,
 			SyncMode:      t.SyncMode,
+			BaseBranch:    t.BaseBranch,
 		})
 	case model.SchedTypeCoding:
 		jobID, err = s.exec.RunScheduledCoding(ctx, CodingParams{

@@ -201,9 +201,16 @@ export function ScheduleModal({
       if (syncMode && (agentServerId || codingAgentServerId)) {
         body.sync_mode = syncMode;
       }
+      // base_branch is now written for BOTH coding and design-only
+      // schedules; the backend (Scheduler.SchedTypeDesign /
+      // SchedTypeDesignCoding) reads it from t.BaseBranch and forwards
+      // it through the executor. Empty / whitespace falls back to
+      // project.default_branch on the server so we don't pre-resolve it
+      // here (keeping the placeholder logic out of the client).
+      const resolvedBaseBranch = (baseBranch || '').trim() || defaultBaseBranch || 'main';
+      body.base_branch = resolvedBaseBranch;
       if (isCoding) {
         body.branch_name = branchName;
-        body.base_branch = baseBranch;
         body.split_tasks = splitTasks;
       }
       if (isMerged) {
@@ -551,17 +558,6 @@ export function ScheduleModal({
                   disabled={submitting}
                 />
               </div>
-              <div className="modal-field">
-                <label htmlFor="sched-base">{t('schedules.modal.baseBranchLabel')}</label>
-                <input
-                  id="sched-base"
-                  className="form-input"
-                  value={baseBranch}
-                  onChange={e => setBaseBranch(e.target.value)}
-                  placeholder="main"
-                  disabled={submitting}
-                />
-              </div>
               <div className="modal-field modal-check-row">
                 <label>
                   <input
@@ -574,6 +570,36 @@ export function ScheduleModal({
                 </label>
               </div>
             </>
+          )}
+
+          {/* Base-branch picker — shown for BOTH the coding stage
+              (isCoding) and the design-only stage (taskType === 'design').
+              For merged design_and_coding schedules the same input drives
+              both halves: design uses it for the design-stage base, and
+              coding uses it for the coding-stage base (the backend
+              fallback chain keeps them in sync). Placed OUTSIDE the
+              isCoding block above so a design-only schedule can render
+              it without the coding-only sibling fields (branch / split
+              tasks). wiki schedules stay on the design-stage block per
+              the existing isDesign grouping and do not show this input
+              — the requirement scope is design / design_and_coding only. */}
+          {(isCoding || taskType === 'design') && (
+            <div className="modal-field">
+              <label htmlFor="sched-base">{t('schedules.modal.baseBranchLabel')}</label>
+              <input
+                id="sched-base"
+                className="form-input"
+                value={baseBranch}
+                onChange={e => setBaseBranch(e.target.value)}
+                placeholder={defaultBaseBranch || 'main'}
+                disabled={submitting}
+              />
+              <small style={{ color: '#64748B', marginTop: 4, display: 'block' }}>
+                {t('requirements.detail2.designBaseBranchHelp', {
+                  default: defaultBaseBranch || 'main',
+                })}
+              </small>
+            </div>
           )}
 
           {errorMsg && (

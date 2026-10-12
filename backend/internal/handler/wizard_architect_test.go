@@ -178,7 +178,7 @@ func TestPrepareDesignWorkspace_GateFailure(t *testing.T) {
 	p := &designRunParams{
 		Req:           req,
 		ProjectPath:   work,
-		DefaultBranch: "main",
+		BaseBranch:    "main",
 		// SourceSID + SkipAnalysis both false → resume path; the prompt
 		// branch matters here only in that it must NOT run on failure.
 		SourceSID:    "somesid",
@@ -311,7 +311,7 @@ func TestPrepareDesignWorkspace_SuccessStampsBaseline(t *testing.T) {
 	p := &designRunParams{
 		Req:           req,
 		ProjectPath:   work,
-		DefaultBranch: baseBranch,
+		BaseBranch:    baseBranch,
 		// resume path (analyst session present) — picks the simpler prompt
 		// branch so the test doesn't need to fabricate a docBlock.
 		SourceSID:    "analyst-sid",

@@ -59,7 +59,7 @@ func (e *ScheduledExecutor) RunScheduledDesign(ctx context.Context, p scheduler.
 	if err != nil {
 		return "", err
 	}
-	_, err = e.h.RunScheduledDesign(p.RequirementID, p.Model, p.ReadKnowledge, p.AgentServerID, p.SyncMode, e.callbackFor(schedID))
+	_, err = e.h.RunScheduledDesign(p.RequirementID, p.Model, p.ReadKnowledge, p.AgentServerID, p.SyncMode, p.BaseBranch, e.callbackFor(schedID))
 	if err != nil {
 		return "", err
 	}
@@ -322,7 +322,7 @@ func (e *ScheduledExecutor) RunScheduledDesignAndCoding(ctx context.Context, p s
 	//    pre-gate and now). Pass the user-picked model + agent server
 	//    through the design-stage fields of the merged task; ReadKnowledge
 	//    is shared between the two stages per the merge-modal UI.
-	stage1JobID, err := e.h.RunScheduledDesign(p.RequirementID, p.DesignModel, p.ReadKnowledge, p.DesignAgentServerID, p.SyncMode, e.chainedDesignCallback(p.RequirementID, schedID, p))
+	stage1JobID, err := e.h.RunScheduledDesign(p.RequirementID, p.DesignModel, p.ReadKnowledge, p.DesignAgentServerID, p.SyncMode, p.BaseBranch, e.chainedDesignCallback(p.RequirementID, schedID, p))
 	if err != nil {
 		// Synchronous failure (the prepare step rejected, no goroutine was
 		// spawned). Mark the row failed immediately.

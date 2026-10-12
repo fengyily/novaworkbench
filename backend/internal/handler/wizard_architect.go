@@ -63,7 +63,14 @@ const architectStallTimeout = 10 * time.Minute
 type designRunParams struct {
 	Req            *model.Requirement
 	ProjectPath    string
-	DefaultBranch  string
+	// BaseBranch is the user-picked (or defaulted) base branch for the
+	// design stage. Resolution order: HTTP body / scheduler payload >
+	// project.DefaultBranch > "main". Forwarded into
+	// prepareDesignWorkspace → resolveWorkDirSynced, which threads it
+	// both into SyncDesignBase (so the hard sync gate runs against the
+	// user-chosen base) and into anchorWorktree (so the resulting
+	// worktree is rooted at origin/<base>).
+	BaseBranch     string
 	SourceSID      string
 	Fork           bool
 	SkipAnalysis   bool
@@ -109,9 +116,15 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 		// is selected). Only honored when AgentServerID is non-empty; local
 		// execution ignores it.
 		SyncMode string `json:"sync_mode"`
+		// BaseBranch — user-picked base branch for the design stage
+		// (e.g. release/1.2, integration). Empty falls back to
+		// project.DefaultBranch inside prepareArchitectDesign, then to
+		// "main" if even that is empty. Mirrors the dev-stage
+		// BaseBranch behaviour in wizard_coding.go:458-481.
+		BaseBranch string `json:"base_branch"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	p, job, af := h.prepareArchitectDesign(r.Context(), body.RequirementID, body.Model, body.ClaudeConfigID, body.AgentServerID, body.ReadKnowledge, body.SyncMode)
+	p, job, af := h.prepareArchitectDesign(r.Context(), body.RequirementID, body.Model, body.ClaudeConfigID, body.AgentServerID, body.ReadKnowledge, body.SyncMode, body.BaseBranch)
 	if writeIfAPIError(w, af) {
 		return
 	}
@@ -133,8 +146,13 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 // syncMode is the scheduled_tasks.sync_mode value the scheduler carries
 // forward; empty = keep the requirement's persisted value (Stamp-If-Non-Empty
 // semantics — same convention as the HTTP body).
-func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnowledge bool, agentServerID string, syncMode string, cb *runCallbacks) (string, error) {
-	p, job, af := h.prepareArchitectDesign(context.Background(), requirementID, model, "", agentServerID, readKnowledge, syncMode)
+//
+// baseBranch is the scheduled_tasks.base_branch value the scheduler carries
+// forward; empty falls back to project.DefaultBranch inside
+// prepareArchitectDesign. Same fallback chain as the HTTP path so a cron
+// user can override the base per-schedule without touching project settings.
+func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnowledge bool, agentServerID string, syncMode string, baseBranch string, cb *runCallbacks) (string, error) {
+	p, job, af := h.prepareArchitectDesign(context.Background(), requirementID, model, "", agentServerID, readKnowledge, syncMode, baseBranch)
 	if af != nil {
 		return "", af
 	}
@@ -155,7 +173,11 @@ func (h *WizardHandler) RunScheduledDesign(requirementID, model string, readKnow
 // line-for-line the same as the original synchronous section; only the
 // writeError calls have been replaced with returning *apiFailure so the
 // scheduler can reuse the same validation outcomes.
-func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementID, modelOverride, claudeConfigIDOverride string, agentServerID string, readKnowledge bool, syncMode string) (*designRunParams, *store.Job, *apiFailure) {
+// baseBranch is the explicit override passed from the HTTP body or the
+// scheduler; empty falls back to project.DefaultBranch, then to "main".
+// Resolution happens inside the function body so every caller (HTTP /
+// scheduler / immediate chained) shares the same fallback chain.
+func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementID, modelOverride, claudeConfigIDOverride string, agentServerID string, readKnowledge bool, syncMode string, baseBranch string) (*designRunParams, *store.Job, *apiFailure) {
 	id := requirementID
 	if id == "" {
 		return nil, nil, fail(400, "INVALID", "missing requirement id")
@@ -167,10 +189,20 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	}
 	project, _ := h.projectSvc.Get(req.ProjectID)
 	projectPath := ""
-	defaultBranch := ""
+	// Resolve the design-stage base branch: explicit override (HTTP body
+	// or scheduler payload) wins, otherwise project.DefaultBranch, otherwise
+	// the hard-coded "main" sentinel. The resolved value is later stamped
+	// into designRunParams.BaseBranch and forwarded into both
+	// SyncDesignBase (hard sync gate) and anchorWorktree (worktree root).
+	effectiveBase := baseBranch
+	if effectiveBase == "" && project != nil {
+		effectiveBase = project.DefaultBranch
+	}
+	if effectiveBase == "" {
+		effectiveBase = "main"
+	}
 	if project != nil {
 		projectPath = project.LocalPath
-		defaultBranch = project.DefaultBranch
 	}
 
 	// Prologue: persist the design-stage agent-server binding BEFORE any
@@ -298,7 +330,7 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	return &designRunParams{
 		Req:           req,
 		ProjectPath:   projectPath,
-		DefaultBranch: defaultBranch,
+		BaseBranch:    effectiveBase,
 		SourceSID:     sourceSID,
 		Fork:          fork,
 		SkipAnalysis:  skipAnalysis,
@@ -361,14 +393,14 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 	// Surface the hard-sync phase up-front so the user sees something is
 	// happening even on a slow network. The actual fetch line is emitted by
 	// SyncToOriginBase through logf (which we wire to a job.Append below).
-	job.Append(store.LogLine{Type: "phase", Content: "🔄 同步仓库基线到 origin/" + p.DefaultBranch + "…"})
+	job.Append(store.LogLine{Type: "phase", Content: "🔄 同步仓库基线到 origin/" + p.BaseBranch + "…"})
 
 	// Read the timeout fresh on every design entry so a settings change takes
 	// effect without restarting the backend (same hot-reload story as the
 	// subtask concurrency / auto-retry settings). Missing/garbage → 60s.
 	timeout, _ := h.settingSvc.GitSyncTimeout()
 
-	workDir, baseSHA, err := h.resolveWorkDirSynced(context.Background(), p.Req, p.ProjectPath, p.DefaultBranch, timeout, func(s string) {
+	workDir, baseSHA, err := h.resolveWorkDirSynced(context.Background(), p.Req, p.ProjectPath, p.BaseBranch, timeout, func(s string) {
 		job.Append(store.LogLine{Type: "message", Content: s})
 	})
 	if err != nil {
@@ -566,6 +598,11 @@ func (h *WizardHandler) execArchitectDesign(p *designRunParams, job *store.Job, 
 				usage:          h.usageCtxForConfig("architect_design", id, req.ProjectID, job.ID, model, "", "", claudeConfigID),
 				PermissionMode: "plan",
 				SyncMode:       p.SyncMode,
+				// Forward the user-picked base branch so the remote worker
+				// anchors its worktree at origin/<base> and the hard sync
+				// gate (inside prepareRemoteAgentRun's fallback chain) runs
+				// against the same base the local path would.
+				baseBranch: p.BaseBranch,
 			},
 		})
 	} else {

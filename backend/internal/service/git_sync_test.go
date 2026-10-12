@@ -351,7 +351,7 @@ func TestSyncDesignBase_StampsSyncStatus(t *testing.T) {
 
 	var logged []string
 	logf := func(s string) { logged = append(logged, s) }
-	res, err := svc.SyncDesignBase(ctx, projID, 10*time.Second, logf)
+	res, err := svc.SyncDesignBase(ctx, projID, "", 10*time.Second, logf)
 	if err != nil {
 		t.Fatalf("SyncDesignBase: %v", err)
 	}
@@ -411,7 +411,7 @@ func TestSyncDesignBase_FetchFailureStampsErrorStatus(t *testing.T) {
 	// Tight fetch timeout so the test stays under CI's per-test budget.
 	fctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	_, err := svc.SyncDesignBase(fctx, projID, 5*time.Second, nil)
+	_, err := svc.SyncDesignBase(fctx, projID, "", 5*time.Second, nil)
 	if err == nil {
 		t.Fatalf("SyncDesignBase must return non-nil on fetch failure (hard-block contract)")
 	}
@@ -463,7 +463,7 @@ func TestSyncDesignBase_NoOriginSkips(t *testing.T) {
 		t.Fatalf("insert project: %v", err)
 	}
 
-	res, err := svc.SyncDesignBase(context.Background(), projID, 5*time.Second, nil)
+	res, err := svc.SyncDesignBase(context.Background(), projID, "", 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("expected nil error on skip, got: %v", err)
 	}

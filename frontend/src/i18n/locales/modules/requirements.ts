@@ -120,6 +120,22 @@ export const requirements = {
     // 方案区的 7 位徽章，title 给全 SHA。无值时徽章不渲染。
     designBaseLabel: '基线',
     designBaseTooltip: 'architect-design 阶段锁定的事实基线 (origin/<base> SHA)',
+    // Design-stage base branch picker (mirrors the dev-stage picker in
+    // LaunchPlanSection / ScheduleModal / preflight). The default is
+    // project.default_branch with a hard "main" fallback. The help
+    // text uses the {{default}} placeholder so the label can be
+    // rendered without a separate translation key for the value.
+    designBaseBranchLabel: '基线分支',
+    designBaseBranchHelp: '默认使用项目主分支 {{default}}，可改为 release/integration 等任意远程分支',
+    // Empty-list fallback shown when GET /api/fs/git-branches fails
+    // (project local_path missing, no git, or pre-clone). The user
+    // must type the base manually in that case.
+    designBranchPickerEmpty: '无法读取分支列表，请手动输入',
+    // DesignCodingImmediateModal flight strip caption — clarifies that
+    // the single base-branch input below drives BOTH the design and
+    // the coding stage in the chained run, so the user is not surprised
+    // when the same value is sent twice.
+    immediateGitSharedNote: 'GIT 基线将同时应用于设计与开发',
     // Knowledge-read panel (architect / developer stage heads).
     knowledgeReadTitle: '已读取项目知识库',
     knowledgeReadLink: '查看知识库全文 →',

@@ -120,6 +120,22 @@ export const requirements = {
     // in the design section; the full SHA is in the title. Hidden when empty.
     designBaseLabel: 'Base',
     designBaseTooltip: 'Locked design baseline (origin/<base> SHA)',
+    // Design-stage base branch picker (mirrors the dev-stage picker in
+    // LaunchPlanSection / ScheduleModal / preflight). The default is
+    // project.default_branch with a hard "main" fallback. The help
+    // text uses the {{default}} placeholder so the label can be
+    // rendered without a separate translation key for the value.
+    designBaseBranchLabel: 'Base branch',
+    designBaseBranchHelp: 'Defaults to project main branch {{default}}; you can use any remote branch like release/integration',
+    // Empty-list fallback shown when GET /api/fs/git-branches fails
+    // (project local_path missing, no git, or pre-clone). The user
+    // must type the base manually in that case.
+    designBranchPickerEmpty: 'Branch list unavailable; type manually',
+    // DesignCodingImmediateModal flight strip caption — clarifies that
+    // the single base-branch input below drives BOTH the design and
+    // the coding stage in the chained run, so the user is not surprised
+    // when the same value is sent twice.
+    immediateGitSharedNote: 'GIT base applies to design and coding',
     knowledgeReadTitle: 'Read project knowledge base',
     knowledgeReadLink: 'View full knowledge base →',
     knowledgeReadEmpty: 'No relevant knowledge — went straight to code analysis.',
