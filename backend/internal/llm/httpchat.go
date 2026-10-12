@@ -241,6 +241,130 @@ type Usage struct {
 	Model            string `json:"model"`
 }
 
+// salvageMarkdownFromReasoning pulls a polished markdown answer out of a
+// reasoning model's `reasoning_content` when `content` came back empty.
+//
+// Why this exists: reasoning models (DeepSeek-R1, DeepSeek-V3 with thinking
+// enabled, o1, etc.) sometimes return an empty `content` field while their
+// `reasoning_content` actually carries the final answer. Three patterns
+// show up in the wild:
+//
+//   1. Gateway serialization: the response puts the entire assistant turn
+//      in `reasoning_content` and leaves `content` empty. Common with
+//      self-hosted gateways that don't know how to split.
+//   2. max_tokens exhausted during reasoning: the budget runs out before
+//      the model can start its final-answer section in `content`, so the
+//      markdown ends up appended to `reasoning_content` instead.
+//   3. Model style: a few reasoning models write the answer inline with
+//      the reasoning trace (often after a "Final Answer:" or similar
+//      transition marker) and never emit a separate `content` field.
+//
+// All three leave the user staring at a 500 ("empty response") on a PDF
+// upload that LITERALLY worked — the markdown is there, just in the
+// wrong field. This helper rescues the markdown when the structure is
+// clearly an actual document (heading + body) rather than pure scratchpad
+// prose.
+//
+// Heuristics, in order:
+//
+//   - Look for explicit transition markers ("Final Answer:", "Markdown
+//     Output:", etc.). Take the LAST occurrence so the model mentioning
+//     the word "Answer" mid-thinking doesn't trip a false salvage.
+//   - Fallback: find the LAST markdown heading at start of line. Pure
+//     reasoning traces rarely contain "# Title"-style structure; the
+//     model's actual answer almost always does.
+//   - In both branches, validate the candidate has at least one extra
+//     structural element (list, table, code fence, or another heading)
+//     so we don't accidentally surface scratchpad prose as the user's
+//     knowledge row.
+//
+// Returns "" when nothing matches; the caller then surfaces the original
+// "empty response" diagnostic so the operator can decide whether to
+// switch models or check the gateway config.
+func salvageMarkdownFromReasoning(reasoning string) string {
+	reasoning = strings.TrimSpace(reasoning)
+	if reasoning == "" {
+		return ""
+	}
+	// Explicit transition markers. We always pick the LAST occurrence in
+	// the text so a model that mentions "Answer" mid-thinking doesn't
+	// trip a false salvage.
+	transitions := []string{
+		"\n**Final Answer:**",
+		"\n**Final Answer**:",
+		"\nFinal Answer:",
+		"\nfinal answer:",
+		"\nMarkdown Output:",
+		"\nMarkdown document:",
+		"\nHere is the markdown:",
+		"\nHere's the markdown:",
+		"\nAnswer:",
+	}
+	bestStart := -1
+	bestMarker := ""
+	for _, marker := range transitions {
+		if idx := strings.LastIndex(reasoning, marker); idx > bestStart {
+			bestStart = idx
+			bestMarker = marker
+		}
+	}
+	if bestStart >= 0 {
+		// Skip past the marker itself (e.g. "\nFinal Answer:") and any
+		// leading whitespace/blank lines before the actual answer body
+		// starts. The reasoning trace often has a blank line between the
+		// marker and the answer for readability — that's normal.
+		after := reasoning[bestStart+len(bestMarker):]
+		candidate := strings.TrimLeft(after, " \t\r\n")
+		candidate = strings.TrimSpace(candidate)
+		if hasMarkdownStructure(candidate) {
+			return candidate
+		}
+	}
+	// Fallback: the LAST markdown heading at start of line. We try the
+	// deeper levels first (`###`, `##`, `#`) so a sub-heading inside the
+	// answer wins over a thinking-trace "## Step 1" marker higher up.
+	for _, prefix := range []string{"\n# ", "\n## ", "\n### "} {
+		if idx := strings.LastIndex(reasoning, prefix); idx >= 0 {
+			candidate := strings.TrimSpace(reasoning[idx+1:])
+			if hasMarkdownStructure(candidate) {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+// hasMarkdownStructure is a cheap heuristic: returns true if s looks like
+// an actual markdown document (heading + at least one other structural
+// element — another heading, a list, a table, or a code fence) rather
+// than a single line of prose. Reasoning traces are mostly prose, so
+// this filter is what prevents us from salvaging scratchpad chatter.
+func hasMarkdownStructure(s string) bool {
+	if s == "" {
+		return false
+	}
+	// Must contain at least one newline — a single line is just prose.
+	if !strings.Contains(s, "\n") {
+		return false
+	}
+	// Must contain at least one structural element beyond the leading
+	// heading. Any of these count.
+	structural := []string{
+		"\n# ", "\n## ", "\n### ", "\n#### ",
+		"\n- ", "\n* ", "\n+ ",
+		"\n1. ", "\n2. ", "\n3. ",
+		"\n| ",
+		"\n```",
+		"\n> ",
+	}
+	for _, marker := range structural {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // chatCompletion sends a single-turn chat completion to an OpenAI-compatible
 // /chat/completions endpoint and returns the assistant's raw text. Shared by
 // the lightweight LLM tasks that bypass the claude CLI for speed — none need
@@ -316,28 +440,42 @@ func chatCompletion(baseURL, apiKey, model, systemPrompt, userContent string, ma
 		return "", nil, fmt.Errorf("llm http: empty response (no choices, body=%s)", strings.TrimSpace(snippet))
 	}
 	content := cr.Choices[0].Message.Content
+	reasoning := cr.Choices[0].Message.ReasoningContent
 	if content == "" {
-		// The LLM emitted an empty final answer. Two known causes:
-		//   1. Reasoning models (DeepSeek-R1 / o1) that finished thinking but
-		//      surfaced nothing in `content` — their reasoning trace lives in
-		//      `reasoning_content`. We DON'T return the reasoning text (would
-		//      be raw model scratchpad noise to the user), but we log it
-		//      alongside the prompt and model so the operator can confirm
-		//      reasoning-mode is the cause and switch the model to a
-		//      non-reasoning one for this single-shot text task.
-		//   2. Safety refusal / output filter that swallows the response.
+		// The LLM emitted an empty final answer. Three known causes, handled
+		// in order of how actionable they are:
+		//
+		//   1. Reasoning models (DeepSeek-R1 / V3, o1, etc.) that finished
+		//      their chain-of-thought AND emitted the final answer — but the
+		//      gateway put the answer into `reasoning_content` instead of
+		//      `content` (or max_tokens exhausted during reasoning so the
+		//      `content` buffer is empty while `reasoning_content` carries
+		//      the markdown). Try to salvage the polished markdown so the
+		//      upload doesn't hard-fail.
+		//   2. Reasoning model that thought but never produced a final
+		//      answer — `reasoning_content` is pure scratchpad prose with
+		//      no markdown structure. Salvage returns empty; we surface
+		//      the diagnostic so the operator can switch to a non-reasoning
+		//      model.
+		//   3. Safety refusal / output filter that swallowed the response.
 		//      Same diagnostic: log the raw body so the operator can spot
 		//      refusal markers.
-		reasoning := cr.Choices[0].Message.ReasoningContent
-		snippet := string(raw)
-		if len(snippet) > 256 {
-			snippet = snippet[:256]
+		if salvaged := salvageMarkdownFromReasoning(reasoning); salvaged != "" {
+			log.Printf("[llm http] /chat/completions returned empty content but reasoning_content "+
+				"had a markdown answer — salvaging: model=%q reasoning_len=%d salvaged_len=%d",
+				model, len(reasoning), len(salvaged))
+			content = salvaged
+		} else {
+			snippet := string(raw)
+			if len(snippet) > 256 {
+				snippet = snippet[:256]
+			}
+			log.Printf("[llm http] /chat/completions returned empty content: model=%q reasoning_len=%d body=%s",
+				model, len(reasoning), snippet)
+			return "", nil, fmt.Errorf("llm http: empty response (model returned empty content; "+
+				"if using a reasoning model like DeepSeek-R1, switch to a non-reasoning model — "+
+				"raw body=%s)", strings.TrimSpace(snippet))
 		}
-		log.Printf("[llm http] /chat/completions returned empty content: model=%q reasoning_len=%d body=%s",
-			model, len(reasoning), snippet)
-		return "", nil, fmt.Errorf("llm http: empty response (model returned empty content; "+
-			"if using a reasoning model like DeepSeek-R1, switch to a non-reasoning model — "+
-			"raw body=%s)", strings.TrimSpace(snippet))
 	}
 	var usage *Usage
 	if cr.Usage != nil {
