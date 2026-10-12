@@ -6,9 +6,8 @@ import Layout from './components/Layout';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import AddProject from './pages/AddProject';
-import {
-  ProjectsList, Chat, Reports,
-} from './pages/PlaceholderPages';
+import { Chat, Reports } from './pages/PlaceholderPages';
+import ProjectsList from './pages/ProjectsList';
 import RequirementsList from './pages/RequirementsList';
 import Settings from './pages/Settings';
 import SettingsTokens from './pages/SettingsTokens';
