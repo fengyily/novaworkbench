@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -205,10 +206,19 @@ type chatMessage struct {
 
 // chatResponse is the minimal slice of the OpenAI-compatible response needed
 // to extract the assistant text and token usage.
+//
+// ReasoningContent is the DeepSeek-R1 / o1-style field that some gateways
+// return INSTEAD of (or alongside) Content when the model is in reasoning
+// mode. We don't render it to the user, but on an empty Content we treat it
+// as a fallback so a reasoning-enabled model that finished thinking but
+// emitted an empty final answer is surfaced with a useful diagnostic instead
+// of a bare "empty response" — the model's reasoning trace is logged for
+// postmortem but NOT returned to the caller (would be noise to the user).
 type chatResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content,omitempty"`
 		} `json:"message"`
 	} `json:"choices"`
 	Usage *chatUsage `json:"usage,omitempty"`
@@ -294,8 +304,40 @@ func chatCompletion(baseURL, apiKey, model, systemPrompt, userContent string, ma
 	if err := json.Unmarshal(raw, &cr); err != nil {
 		return "", nil, fmt.Errorf("llm http: decode response: %w", err)
 	}
-	if len(cr.Choices) == 0 || cr.Choices[0].Message.Content == "" {
-		return "", nil, fmt.Errorf("llm http: empty response")
+	if len(cr.Choices) == 0 {
+		// No choices at all — most often a model that doesn't support
+		// /chat/completions (e.g. embeddings-only) or a gateway bug. Log the
+		// raw body (truncated) so the operator can tell which.
+		snippet := string(raw)
+		if len(snippet) > 256 {
+			snippet = snippet[:256]
+		}
+		log.Printf("[llm http] /chat/completions returned no choices: model=%q body=%s", model, snippet)
+		return "", nil, fmt.Errorf("llm http: empty response (no choices, body=%s)", strings.TrimSpace(snippet))
+	}
+	content := cr.Choices[0].Message.Content
+	if content == "" {
+		// The LLM emitted an empty final answer. Two known causes:
+		//   1. Reasoning models (DeepSeek-R1 / o1) that finished thinking but
+		//      surfaced nothing in `content` — their reasoning trace lives in
+		//      `reasoning_content`. We DON'T return the reasoning text (would
+		//      be raw model scratchpad noise to the user), but we log it
+		//      alongside the prompt and model so the operator can confirm
+		//      reasoning-mode is the cause and switch the model to a
+		//      non-reasoning one for this single-shot text task.
+		//   2. Safety refusal / output filter that swallows the response.
+		//      Same diagnostic: log the raw body so the operator can spot
+		//      refusal markers.
+		reasoning := cr.Choices[0].Message.ReasoningContent
+		snippet := string(raw)
+		if len(snippet) > 256 {
+			snippet = snippet[:256]
+		}
+		log.Printf("[llm http] /chat/completions returned empty content: model=%q reasoning_len=%d body=%s",
+			model, len(reasoning), snippet)
+		return "", nil, fmt.Errorf("llm http: empty response (model returned empty content; "+
+			"if using a reasoning model like DeepSeek-R1, switch to a non-reasoning model — "+
+			"raw body=%s)", strings.TrimSpace(snippet))
 	}
 	var usage *Usage
 	if cr.Usage != nil {
@@ -305,7 +347,7 @@ func chatCompletion(baseURL, apiKey, model, systemPrompt, userContent string, ma
 			Model:            model,
 		}
 	}
-	return cr.Choices[0].Message.Content, usage, nil
+	return content, usage, nil
 }
 
 // formatAndTitleViaHTTP reorganizes the user's raw requirement content into
