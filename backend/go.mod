@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/ledongthuc/pdf v0.0.0-20260907135840-6c8c28e0e8a0
 	github.com/pkg/sftp v1.13.11
 	golang.org/x/crypto v0.55.0
 	modernc.org/sqlite v1.53.0
