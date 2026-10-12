@@ -25,6 +25,25 @@ package util
 // This file does NOT render Markdown. It only returns the raw text
 // extracted from the PDF. Polishing raw text into structured Markdown
 // happens in a later stage via the LLM gateway.
+//
+// Multi-page robustness:
+//   * Reader.GetPlainText() in ledongthuc/pdf does call Page.GetPlainText()
+//     per page in a loop, but if the very first page's decoder panics
+//     (recoverTo resets the result and propagates the error), the whole
+//     extraction aborts and the row is persisted with zero text — or if a
+//     later page's decoder panics, every page after that point is silently
+//     dropped. The user-visible symptom (kb_68170a49c45714b1) was "row
+//     contains only page 1 of a multi-page PDF". The version below iterates
+//     pages explicitly with per-page panic/error isolation, so one bad page
+//     can no longer truncate a multi-page upload.
+//   * A null page entry (Page{} returned by Reader.Page when the page tree
+//     can't resolve `num`, e.g. /Count is wrong or /Kids is malformed) is
+//     skipped instead of silently written as "" and causing the page count
+//     to drift.
+//   * Pages are joined with "\n\f\n" — a form-feed flanked by newlines.
+//     The downstream LLM polish step sees this as a page boundary; "\f"
+//     is the canonical PDF-page-break convention so the markdown emerges
+//     with one block per page even when the LLM refuses to add headings.
 
 import (
 	"bytes"
@@ -42,6 +61,13 @@ import (
 // "missing startxref" or similar; we surface a stable error so the handler
 // can map it to a 400 INVALID_FILE.
 var ErrEmptyPdfInput = errors.New("pdf_extract: empty input")
+
+// pdfPageSeparator is the boundary written between two successfully
+// extracted pages. "\f" (form-feed) is the canonical PDF page-break
+// character; flanking newlines make sure the LLM prompt path sees a
+// visible blank line on either side and parses the boundary as its own
+// paragraph instead of mashing two pages together.
+const pdfPageSeparator = "\n\f\n"
 
 // extractFunc is the swappable implementation behind GetText / GetTextFromReader.
 // Reassigning it (e.g. from a future pdftotext-backed variant) is a one-line
@@ -61,25 +87,59 @@ func initExtractFunc() {
 		if err != nil {
 			return "", fmt.Errorf("open pdf: %w", err)
 		}
-		stream, err := reader.GetPlainText()
-		if err != nil {
-			return "", fmt.Errorf("read pdf text: %w", err)
+
+		// Iterate pages explicitly (rather than calling
+		// reader.GetPlainText() once) so a single bad page can no
+		// longer abort the whole extraction. The library's GetPlainText
+		// does iterate pages but propagates per-page errors and lets
+		// panics from Page.GetPlainText's recoverTo bubble up; here we
+		// log-and-continue on each page failure instead.
+		totalPages := reader.NumPage()
+		var out bytes.Buffer
+		extractedPages := 0
+		for i := 1; i <= totalPages; i++ {
+			p := reader.Page(i)
+			if p.V.IsNull() {
+				// Page tree couldn't resolve this index (rare; happens
+				// when /Count is wrong or /Kids is malformed). Skip
+				// rather than abort.
+				continue
+			}
+			// Page.GetPlainText accepts nil for fonts and falls back to
+			// the library's per-page font cache internally — we can't
+			// pass the shared cache across pages because fontCache() is
+			// unexported, and re-parsing the per-page fonts is cheap
+			// enough not to bother shimming.
+			text, err := p.GetPlainText(nil)
+			if err != nil {
+				// Per-page failure (panic recovered to error, malformed
+				// CMap, broken XObject ref). Continue with the
+				// remaining pages so the row still gets the working
+				// ones — the previous behaviour aborted here and lost
+				// every page after the first failure.
+				fmt.Printf("[pdf_extract] page %d/%d: %v (continuing with remaining pages)\n", i, totalPages, err)
+				continue
+			}
+			if extractedPages > 0 {
+				out.WriteString(pdfPageSeparator)
+			}
+			out.WriteString(text)
+			extractedPages++
 		}
-		if stream == nil {
-			return "", nil
+		if extractedPages == 0 && totalPages > 0 {
+			// Every page failed. Surface a single error rather than a
+			// blank string so the handler can map it to 400 INVALID_FILE
+			// (the "all-pages-failed" case is genuinely a bad PDF).
+			return "", fmt.Errorf("pdf_extract: all %d pages failed extraction", totalPages)
 		}
-		var buf bytes.Buffer
-		if _, err := io.Copy(&buf, stream); err != nil {
-			return "", fmt.Errorf("buffer pdf text: %w", err)
-		}
-		return buf.String(), nil
+		return out.String(), nil
 	}
 }
 
 // GetText opens the PDF at the given filesystem path and returns the
-// concatenated plain-text content of every page. Pages are joined with no
-// separator — the caller is expected to feed the result to an LLM that
-// will re-segment into Markdown.
+// concatenated plain-text content of every page. Pages are joined with
+// "\n\f\n" so downstream consumers can split pages losslessly and the
+// LLM polish step can treat each page as its own block.
 //
 // Returns ErrEmptyPdfInput for a zero-byte file, and a wrapped error
 // (with %w) for any other failure so the handler can log it.
@@ -105,7 +165,7 @@ func GetText(path string) (string, error) {
 // over the file.
 //
 // When called from a multipart upload handler, sizeBytes is the
-// Content-Length reported in the multipart.FileHeader.
+// Content.Length reported in the multipart.FileHeader.
 //
 // An empty reader (sizeBytes == 0) returns ErrEmptyPdfInput.
 func GetTextFromReader(r io.ReaderAt, sizeBytes int64) (string, error) {

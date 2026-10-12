@@ -3,6 +3,7 @@ package util
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -104,6 +105,39 @@ func TestPdfExtract_MissingFile(t *testing.T) {
 	_, err := GetText("/nonexistent/path/that/should/never/exist.pdf")
 	if err == nil {
 		t.Fatalf("GetText on missing file: expected error, got nil")
+	}
+}
+
+// TestPdfExtract_GetText_MultiPage_AllPagesExtracted — regression for the
+// "only page 1 was extracted" bug (kb_68170a49c45714b1 symptom). The
+// multi-page fixture has 10 pages, each containing a unique marker phrase
+// "PAGE-CONTENT-N". Every page's marker MUST appear in the concatenated
+// output; missing a single marker means we silently truncated. Also
+// asserts the page separator ("\f") shows up between pages so the
+// downstream LLM polish step can segment per page.
+func TestPdfExtract_GetText_MultiPage_AllPagesExtracted(t *testing.T) {
+	path := filepath.Join("testdata", "multi-page.pdf")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("fixture missing at %s: %v", path, err)
+	}
+	got, err := GetText(path)
+	if err != nil {
+		t.Fatalf("GetText(%s): %v", path, err)
+	}
+	if got == "" {
+		t.Fatalf("GetText returned empty string for %s", path)
+	}
+	for i := 1; i <= 10; i++ {
+		marker := fmt.Sprintf("PAGE-CONTENT-%d", i)
+		if !strings.Contains(got, marker) {
+			t.Fatalf("multi-page extraction truncated at page %d — missing marker %q in output:\n%s", i, marker, got)
+		}
+	}
+	// 10 pages => 9 separators. Guard against the library suddenly
+	// collapsing all pages into one block again.
+	separatorCount := strings.Count(got, "\f")
+	if separatorCount < 9 {
+		t.Fatalf("expected at least 9 page separators (\\f), got %d — pages may have been merged back into one block", separatorCount)
 	}
 }
 
