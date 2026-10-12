@@ -80,9 +80,9 @@ handler/  ->  service/  ->  *db.DB (model/ holds structs, no behavior)
 
 Services hold `*db.DB` (not `*sql.DB`) — a thin wrapper that rebinds `?`→`$N` on PostgreSQL (`Exec`/`Query`/`QueryRow`/`Begin`), quotes reserved identifiers via `Ident` (the `key` column is reserved in MySQL), and builds upsert suffixes via `OnConflict` (`ON CONFLICT … DO UPDATE` vs `ON DUPLICATE KEY UPDATE`). **Conventions for new SQL**: write `?` placeholders, go through the wrapper, use `Ident`/`OnConflict` where relevant. New columns still follow the ad-hoc pattern: append an `ALTER TABLE` to `alterColumns` in `schema.go` — no separate migration files.
 
-`db.Migrate(src, dst)` copies all **27 tables** parent-first, preserving IDs and skipping duplicate PKs; it backs both the `-migrate` CLI flag and `POST /api/settings/database/migrate` (settings UI).
+`db.Migrate(src, dst)` copies the **24 tables listed in `copyOrder`** parent-first, preserving IDs and skipping duplicate PKs; it backs both the `-migrate` CLI flag and `POST /api/settings/database/migrate` (settings UI). (`copyOrder` is a hand-maintained subset of the schema — the issue-monitor tables are not in it.)
 
-**27 tables** (`schema.go:14,31,46,74,89,109,116,123,137,147,160,166,178,191,202,225,243,255,265,273,281,291,300,317,350,389,415`):
+**30 tables** (`schema.go:14,31,46,75,90,110,117,124,138,148,161,167,179,192,203,226,244,256,266,274,282,300,309,318,335,368,407,434,484,606`):
 
 | 表 | ID 前缀 | 一句话 |
 |---|---|---|
@@ -91,7 +91,9 @@ Services hold `*db.DB` (not `*sql.DB`) — a thin wrapper that rebinds `?`→`$N
 | `project_run_configs` / `platform_tokens` / `roles` / `acl_roles` / `permissions` | (PK=proj_id) / `tok_` / 固定 / `arole_` / 固定 | docker-compose run 配置 / GitHub/GitLab/Gitea Token / **AI persona**(注 system prompt) / **RBAC 角色**(`RequirePermission` 用) / 权限枚举 |
 | `settings` / `claude_configs` / `weekly_reports` / `job_logs` / `token_usage` | (PK=key) / `ccfg_` / - / (PK=job_id) / `tu_` | KV 设置 / 多 Claude 配置 / 项目周报 / Job 持久化日志 / LLM token 用量 |
 | `users` / `acl_role_permissions` / `acl_user_roles` / `user_projects` / `sessions` | `usr_` / 复合 PK / 复合 PK / 复合 PK / 32-byte hex | ACL 用户(含 `locale`) / 角色-权限 / 用户-角色 / 用户-项目授权 / **session token**(非 JWT) |
+| `project_stars` | 复合 PK(`user_id`+`project_id`) | **按用户**的项目星标(`/projects` 置顶 + Dashboard 排序);`user_id` 刻意不加外键(`NOVA_AUTH_DISABLED` 注入的合成 `admin` 在 `users` 中无行),`Purge` 显式清理 |
 | `skills` / `agent_servers` / `sub_tasks` / `orchestration_batches` / `scheduled_tasks` | `skill_` / `agent_` / `st_` / `ob_` / `sched_` | AI Skills(`.claude/agents/`) / 远端 Agent 主机(凭据 AES-256-GCM 加密) / 需求子任务 / 子任务批派发 / 定时任务(design/coding/design_and_coding) |
+| `issue_monitors` / `issue_monitor_pending_launches` | `im_` / `imp_` | GitHub Issue 监控配置 / 待启动开发的 Issue 队列 |
 
 > **`roles` vs `acl_roles`**: 两个"角色"语义独立。`roles` = AI persona(由 wizard/review 注入 system prompt);`acl_roles` = RBAC 角色(由 `middleware/auth.go` `RequirePermission` 消费)。
 

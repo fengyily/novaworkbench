@@ -273,6 +273,52 @@ func (h *ProjectHandler) SyncNow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, p)
 }
 
+// SetStar sets (or clears) the calling user's star on a project. The star is
+// a personal view preference — it pins the project into the "⭐ 星标项目"
+// block above the paginated /projects list and sorts it first on the
+// dashboard — so the route is deliberately not gated on project.manage;
+// read-only members may star too. Access control is the CanAccess check
+// below, which keeps a non-admin from probing project IDs they can't see.
+//
+// PUT /api/projects/{id}/star   body: {"starred": true}
+func (h *ProjectHandler) SetStar(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	u := middleware.CurrentUser(r)
+	if u == nil || u.UserID == "" {
+		// middleware.Auth normally rejects first; this is the backstop for the
+		// auth-disabled bypass, where there is no principal to hang a star on.
+		writeError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "请先登录")
+		return
+	}
+	var req struct {
+		Starred bool `json:"starred"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "请求格式错误")
+		return
+	}
+	if !u.IsAdmin {
+		ok, err := h.svc.CanAccess(u.UserID, false, id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", "project not found")
+			return
+		}
+	}
+	if err := h.svc.SetStar(u.UserID, id, req.Starred); err != nil {
+		if strings.HasPrefix(err.Error(), "PROJECT_NOT_FOUND") {
+			writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", "project not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "STAR_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "starred": req.Starred})
+}
+
 // UpdatePlatform binds a platform token to a project.
 // PATCH /api/projects/{id}/platform  body: {platform_type, platform_token_id}
 func (h *ProjectHandler) UpdatePlatform(w http.ResponseWriter, r *http.Request) {

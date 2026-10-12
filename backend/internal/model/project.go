@@ -73,6 +73,11 @@ type Project struct {
 	RequirementCount int `json:"requirement_count"`
 	IssueCount       int `json:"issue_count"`
 	IdeaCount        int `json:"idea_count"`
+	// Starred is a per-user flag, not a column on projects — it is derived by
+	// ListForUser's LEFT JOIN against project_stars for the calling user.
+	// Always false on the internal List() / unauthenticated paths and on
+	// single-row reads (Get / getAny), which don't know the caller.
+	Starred bool `json:"starred"`
 }
 
 // AddProjectRequest is the body of POST /api/projects.
