@@ -457,9 +457,10 @@ export interface SubTask {
   // source column. batch_seq is the 1-based dispatch order within the batch.
   batch_id?: string;
   batch_seq?: number;
-  // Provenance marker: 'auto' = tryAutoOrchestrate 派发；'manual' = 手动创建。
+  // Provenance marker: 'auto' = tryAutoOrchestrate 派发；'manual' = 手动创建；
+  // 'push_pr' = 「推送并发起 PR」子任务(MergeHandler.Push 或自动 shell 路径)。
   // 只读字段，后端写入后前端仅展示，不修改。向后兼容：旧后端不返回此字段时为 undefined。
-  source?: 'manual' | 'auto';
+  source?: 'manual' | 'auto' | 'push_pr';
   // Execution environment for this sub-task: '' (or undefined on legacy
   // backends) = 本地; a non-empty agent_servers.id = runs on that Agent
   // Server. agent_server_name is the resolved display name (join, read-only).

@@ -311,6 +311,10 @@ export const components = {
     planEyebrow: '自拟方案',
     planExpandShow: '展开方案',
     planExpandCollapse: '收起方案',
+    // push_pr 子任务报告卡顶部独立 PR 链接 chip。仅在 source === 'push_pr'
+    // 且 status === 'done' 时显示,与后端 emit 的 pr_link SSE 事件以及
+    // artifact body 末尾追加的 "**PR**: <url>" 行一一对应。
+    viewPrLink: '查看 PR',
   },
   createRequirement: {
     title: '新需求',

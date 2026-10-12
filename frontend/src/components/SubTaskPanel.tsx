@@ -26,7 +26,7 @@ import { modelContextWindow } from '../utils/modelWindow';
 import AtMentionTextarea from './AtMentionTextarea';
 import ModelSelect from './ModelSelect';
 import ContextUsageBar from './ContextUsageBar';
-import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck, IconArchive, IconHourglass } from './icons';
+import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck, IconArchive, IconHourglass, IconGlobe } from './icons';
 import { fmtDateTime } from '../utils/intl';
 import './SubTaskPanel.css';
 
@@ -145,6 +145,21 @@ const statusChipClass: Record<SubTaskStatus, string> = {
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   return s.slice(0, max) + '…';
+}
+
+// extractFirstURL pulls the first http(s) URL out of a string, ignoring
+// trailing punctuation/closing brackets that are common after a Markdown
+// link reference. Returns null when no URL is present.
+//
+// Mirrors backend extractPRURL's intent (NOT extractURL — there's no
+// full-text fallback; Claude's assistant text would surface arbitrary
+// prose as a "PR link"). The caller must gate this on the sub-task's
+// source ('push_pr') so other sub-task types (manual/auto) don't show
+// a PR chip.
+function extractFirstURL(s: string): string | null {
+  if (!s) return null;
+  const m = s.match(/https?:\/\/[^\s<>"')\]]+/);
+  return m ? m[0].replace(/[)\]]+$/, '') : null;
 }
 
 // stripArtifactHeader removes the 4-line Markdown header that
@@ -1135,6 +1150,14 @@ function SubTaskCard({
   // badge matches the inline pattern at L916-925.
   const reportStatusKey = statusLabelKeys[st.status] ?? statusLabelKeys.pending;
   const reportChipClass = statusChipClass[st.status] ?? statusChipClass.pending;
+  // PR-link chip: only for push_pr sub-tasks in the terminal "done" state.
+  // extractFirstURL is intentionally only run on the *raw* artifact (not
+  // the stripped+MarkdownRendered version) so the URL survives even when
+  // Claude wrapped it in a triple-backtick fence that stripArtifactCodeFence
+  // will eat. The backend's appendPRLineToBody guarantees a trailing
+  // "**PR**: <url>" line, which makes this extraction robust.
+  const isPushPRSource = st.source === 'push_pr';
+  const prLink = isPushPRSource && st.status === 'done' ? extractFirstURL(artifact ?? '') : null;
   const isAutoSource = st.source === 'auto' || (!st.source && !!st.batch_id);
   const sourceKey = isAutoSource ? 'sourceAuto' : 'sourceManual';
   const sourceTitleKey = isAutoSource ? 'sourceAutoTitle' : 'sourceManualTitle';
@@ -1506,6 +1529,17 @@ function SubTaskCard({
                 </div>
                 <ReportHeader st={st} />
               </div>
+              {st.status === 'done' && prLink && (
+                <a
+                  className="sub-report-pr-link"
+                  href={prLink}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <IconGlobe size={13} className="btn-icon" />
+                  {t('components.subTaskCard.viewPrLink')}
+                </a>
+              )}
               <div className="sub-report-body">
                 <MarkdownRender content={stripArtifactCodeFence(stripArtifactHeader(artifact))} />
               </div>

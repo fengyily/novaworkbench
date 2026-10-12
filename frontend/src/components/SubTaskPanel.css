@@ -1474,6 +1474,26 @@
   line-height: 1.7;
   color: var(--color-text);
 }
+
+/* push_pr 子任务报告卡顶部的独立 PR 链接 chip。视觉与 .pr-link-btn
+   (RequirementDetail.css) 保持一致:成功色背景 + 白字,鼠标 hover 时轻微
+   变暗。仅在 st.source === 'push_pr' 且 status === 'done' 时出现,所以
+   manual / auto 子任务的报告卡不会误显示。 */
+.sub-report-pr-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 20px 12px;
+  padding: 6px 12px;
+  background: var(--color-success, #10b981);
+  color: #fff;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  width: fit-content;
+}
+.sub-report-pr-link:hover { filter: brightness(0.95); color: #fff; }
 /* 与 .sub-summary-body 同步的 prose 规则 — 镜像 MarkdownViewer.css 的字号层级 */
 .sub-report-body > :first-child { margin-top: 0; }
 .sub-report-body > :last-child { margin-bottom: 0; }

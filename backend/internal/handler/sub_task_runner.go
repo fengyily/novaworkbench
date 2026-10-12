@@ -95,6 +95,46 @@ func phaseEnabledForSource(source string) bool {
 	return source == model.SubTaskSourceManual || source == ""
 }
 
+// extractPRURL scans Claude's free-text finalResult line-by-line and returns
+// the first trimmed line beginning with `http://` or `https://`. Returns ""
+// when no such line exists.
+//
+// IMPORTANT: this is intentionally stricter than push_pr_shell.go's
+// extractURL — that helper falls back to the full trimmed stdout when no
+// URL line is found (because gh/glab/tea always print *something* usable),
+// whereas Claude's assistant text frequently contains prose with no URL at
+// all, and a full-text fallback would surface arbitrary prose as a "PR link".
+// Caller MUST gate this on SubTaskSourcePushPR (push_pr sub-tasks are
+// prompt-scoped to git push + gh/glab/tea pr create, so any URL in the
+// assistant text is overwhelmingly the PR/MR URL).
+func extractPRURL(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
+			return line
+		}
+	}
+	return ""
+}
+
+// appendPRLineToBody returns body with a trailing "**PR**: <url>" line
+// appended (separated by a blank line) — but only when:
+//   - url is non-empty
+//   - body does NOT already contain url (Claude may already have written
+//     the URL inline; skipping avoids duplication)
+//
+// Exposed as a free function so the contract is unit-testable without
+// standing up the full SubTaskRunner / DB stack.
+func appendPRLineToBody(body, url string) string {
+	if url == "" {
+		return body
+	}
+	if strings.Contains(body, url) {
+		return body
+	}
+	return body + "\n\n**PR**: " + url
+}
+
 // feed a single text delta into the tracker. The callback hooks let the
 // caller react to phase transitions synchronously — flushing the just-
 // closed buffer to DB and pushing the matching SSE event to the job — without
@@ -1380,6 +1420,17 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 	default:
 		job.Append(store.LogLine{Type: "result", Content: strings.TrimSpace(out.finalResult)})
 		artifactBody = out.finalResult
+		// push_pr 子任务的 prompt 只覆盖 git push + gh/glab/tea pr create,
+		// Claude 的 finalResult 里基本只有 PR/MR 链接是 http(s) URL。emit 一个
+		// 独立的 pr_link 事件让前端的 applyMergeSignals 能识别,同时把 URL
+		// 追加到 artifact body 末尾(appendPRLineToBody 在 URL 已被 Claude 粘贴
+		// 时跳过,避免重复),让 SubTaskPanel 的 MarkdownRender 正文里始终可见。
+		if st.Source == model.SubTaskSourcePushPR {
+			if u := extractPRURL(out.finalResult); u != "" {
+				job.Append(store.LogLine{Type: "pr_link", Content: u})
+				artifactBody = appendPRLineToBody(artifactBody, u)
+			}
+		}
 	}
 	job.Append(store.LogLine{Type: "done", Content: "✅ 子任务完成！"})
 

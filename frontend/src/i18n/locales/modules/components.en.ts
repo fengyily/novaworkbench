@@ -302,6 +302,10 @@ export const components = {
     planEyebrow: 'Your plan',
     planExpandShow: 'Show plan',
     planExpandCollapse: 'Hide plan',
+    // push_pr sub-task report card top-of-card PR link chip. Only shown when
+    // source === 'push_pr' AND status === 'done', mirroring the backend's
+    // pr_link SSE event and the "**PR**: <url>" line appended to artifact body.
+    viewPrLink: 'View PR',
   },
   createRequirement: {
     title: 'New requirement',
