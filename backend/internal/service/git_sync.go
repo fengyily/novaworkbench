@@ -73,11 +73,20 @@ type GitSyncResult struct {
 //	0b  remote get-url origin            → no origin configured → Skipped=true
 //	0c  rev-parse --verify HEAD          → unborn HEAD (empty)   → Skipped=true
 //	A   status --porcelain               → non-empty             → DIRTY_WORKTREE
-//	B   rev-parse --abbrev-ref HEAD      → != baseBranch         → HEAD_NOT_ON_BASE
+//	B   rev-parse --abbrev-ref HEAD      → record cur branch     (no rejection)
 //	C   fetch origin <base>              → non-zero exit         → FETCH_FAILED
-//	D   rev-list --count origin/<b>..HEAD → > 0                  → UNPUSHED_COMMITS
-//	E   merge --ff-only origin/<b>       → non-zero exit         → FF_FAILED
+//	D   rev-list --count origin/<b>..HEAD → > 0  (only when HEAD on base) → UNPUSHED_COMMITS
+//	E   merge --ff-only origin/<b>       → non-zero exit (only when HEAD on base) → FF_FAILED
 //	F   rev-parse origin/<b>             → BaseSHA
+//
+// Steps D and E only run when HEAD is sitting on baseBranch — they're the
+// "fast-forward the local base ref" path, which requires HEAD to be on the
+// base branch to mean anything. When HEAD is on a different branch (the
+// launch-plan case: user is on main, picked fix/<x> as the design baseline)
+// we skip D/E entirely and just record origin/<base> SHA from the fetch —
+// the design stage stamps that SHA verbatim and resolveStartRef / the worktree
+// already prefer origin/<base> over the local ref, so a stale local <base>
+// ref doesn't poison anything.
 //
 // logf may be nil (silent). The function never mutates the working tree on
 // the failure path — every gate runs read-only first, so a DIRTY_WORKTREE
@@ -152,31 +161,23 @@ func (s *ProjectService) SyncToOriginBase(ctx context.Context, projectID, repoPa
 		}
 	}
 
-	// Step B: HEAD must be sitting on baseBranch. Detached HEADs report as
-	// literal "HEAD" from --abbrev-ref, which we count as "not on base" — a
-	// detached HEAD can't be safely fast-forwarded without a working branch.
+	// Step B: capture HEAD's branch so steps D / E (the "fast-forward the
+	// local base ref" path, which only makes sense when HEAD is on the base
+	// branch) can be skipped when HEAD is on something else. Detached HEADs
+	// report as literal "HEAD" from --abbrev-ref; we treat that the same as
+	// any non-base branch — cur stays non-empty so D/E get skipped. A
+	// genuine rev-parse failure (corrupted HEAD) is recorded as cur=""
+	// (same skip), which is safer than rejecting on a transient read error.
+	//
+	// We no longer reject when HEAD is on a different branch from baseBranch:
+	// launch-plan lets users pick a non-default baseline while sitting on
+	// main, and forcing them to `git checkout <base>` first broke the flow.
+	// The design SHA we stamp comes from origin/<base> directly, and
+	// resolveStartRef / the worktree prefer origin/<base> over the local
+	// ref — so a stale local <base> ref doesn't poison the design.
+	var curBranch string
 	if head, herr := gitRunPlain(repoPath, "rev-parse", "--abbrev-ref", "HEAD"); herr == nil {
-		cur := strings.TrimSpace(head)
-		if cur != baseBranch {
-			return res, &SyncGateError{
-				Code: SyncGateHeadNotOnBase,
-				Msg: fmt.Sprintf(
-					"当前 HEAD 在 `%s` 分支（design 基线要求 `%s`），无法安全 fast-forward。"+
-						" 请执行 `git checkout %s` 后重试",
-					cur, baseBranch, baseBranch),
-				Stderr: "",
-			}
-		}
-	} else {
-		// Couldn't read HEAD's branch — treat as HEAD_NOT_ON_BASE (safer than
-		// continuing with stale ref info).
-		return res, &SyncGateError{
-			Code: SyncGateHeadNotOnBase,
-			Msg: fmt.Sprintf(
-				"无法确定当前 HEAD 分支（design 基线要求 `%s`），请确认仓库状态后重试",
-				baseBranch),
-			Stderr: capStderr(herr.Error()),
-		}
+		curBranch = strings.TrimSpace(head)
 	}
 
 	// Step C: fetch origin <base> under GIT_TERMINAL_PROMPT=0 so a stalled
@@ -210,44 +211,63 @@ func (s *ProjectService) SyncToOriginBase(ctx context.Context, projectID, repoPa
 		}
 	}
 
-	// Step D: must run AFTER step C's fetch — using a stale origin/<base>
-	// would compute an ahead count against the wrong tip. rev-list --count
-	// prints the integer directly so we Atoi it; anything non-zero means
-	// HEAD has unpushed commits, which would block --ff-only.
-	countOut, cerr := gitRunPlain(repoPath, "rev-list", "--count", "origin/"+baseBranch+"..HEAD")
-	if cerr == nil {
-		if n, nerr := atoiTrimmed(countOut); nerr == nil && n > 0 {
-			// Capture the actual ahead commits so the user sees exactly
-			// what they'd need to push (or reset) — much more useful than
-			// the bare count.
-			detail, _ := gitRunPlain(repoPath, "log", "--oneline", "origin/"+baseBranch+"..HEAD")
-			return res, &SyncGateError{
-				Code: SyncGateUnpushedCommits,
-				Msg: fmt.Sprintf(
-					"本地有 %d 个未推送的提交，design 阶段拒绝同步。请先 `git push origin %s`" +
-						" 或 `git reset --hard origin/%s` 后重试",
-					n, baseBranch, baseBranch),
-				Stderr: capStderr(detail),
+	// Steps D + E: only meaningful when HEAD is on baseBranch. When the user
+	// is sitting on a different branch (e.g. main with design baseline =
+	// fix/<x>) HEAD's "ahead-of-origin/<base>" count is irrelevant to the
+	// design stage — the design prompt will branch off origin/<base>, not
+	// off HEAD. Skipping these steps lets launch-plan users run design
+	// against a non-default baseline without manually switching branches.
+	if curBranch == baseBranch {
+		// Step D: must run AFTER step C's fetch — using a stale origin/<base>
+		// would compute an ahead count against the wrong tip. rev-list --count
+		// prints the integer directly so we Atoi it; anything non-zero means
+		// HEAD has unpushed commits, which would block --ff-only.
+		countOut, cerr := gitRunPlain(repoPath, "rev-list", "--count", "origin/"+baseBranch+"..HEAD")
+		if cerr == nil {
+			if n, nerr := atoiTrimmed(countOut); nerr == nil && n > 0 {
+				// Capture the actual ahead commits so the user sees exactly
+				// what they'd need to push (or reset) — much more useful than
+				// the bare count.
+				detail, _ := gitRunPlain(repoPath, "log", "--oneline", "origin/"+baseBranch+"..HEAD")
+				return res, &SyncGateError{
+					Code: SyncGateUnpushedCommits,
+					Msg: fmt.Sprintf(
+						"本地有 %d 个未推送的提交，design 阶段拒绝同步。请先 `git push origin %s`" +
+							" 或 `git reset --hard origin/%s` 后重试",
+						n, baseBranch, baseBranch),
+					Stderr: capStderr(detail),
+				}
 			}
 		}
-	}
-	// rev-list failure (other than counting) is non-fatal: it just means we
-	// can't confidently assert "0 ahead" → skip ahead to ff which will fail
-	// loudly if our assumption was wrong.
+		// rev-list failure (other than counting) is non-fatal: it just means we
+		// can't confidently assert "0 ahead" → skip ahead to ff which will fail
+		// loudly if our assumption was wrong.
 
-	// Step E: merge --ff-only. By construction (A clean + B on-base + D
-	// zero-ahead) this should always succeed; if it doesn't, surface it
-	// as FF_FAILED so the user knows something changed underfoot (e.g.
-	// concurrent push to origin/<base> between C and E).
-	mffOut, mffErr := gitRunPlain(repoPath, "merge", "--ff-only", "origin/"+baseBranch)
-	if mffErr != nil {
-		return res, &SyncGateError{
-			Code: SyncGateFFFailed,
-			Msg: fmt.Sprintf(
-				"无法 fast-forward 到 origin/%s，请检查仓库状态后重试",
-				baseBranch),
-			Stderr: capStderr(mffOut + "\n" + mffErr.Error()),
+		// Step E: merge --ff-only. By construction (A clean + B on-base + D
+		// zero-ahead) this should always succeed; if it doesn't, surface it
+		// as FF_FAILED so the user knows something changed underfoot (e.g.
+		// concurrent push to origin/<base> between C and E).
+		mffOut, mffErr := gitRunPlain(repoPath, "merge", "--ff-only", "origin/"+baseBranch)
+		if mffErr != nil {
+			return res, &SyncGateError{
+				Code: SyncGateFFFailed,
+				Msg: fmt.Sprintf(
+					"无法 fast-forward 到 origin/%s，请检查仓库状态后重试",
+					baseBranch),
+				Stderr: capStderr(mffOut + "\n" + mffErr.Error()),
+			}
 		}
+	} else {
+		// HEAD on a different branch — the launch-plan / non-default-baseline
+		// case. Emit a short note so the SSE panel doesn't go silent during
+		// the fetch (and so a confused user can see HEAD is intentionally on
+		// a non-base branch). The SHA we stamp comes from origin/<base> so
+		// resolveStartRef / the worktree pick the fresh upstream tip.
+		branchLabel := curBranch
+		if branchLabel == "" {
+			branchLabel = "<unreadable>"
+		}
+		syncLog("ℹ️ 当前 HEAD 在 `" + branchLabel + "` 分支，跳过本地 `merge --ff-only`（design 基线 = `origin/" + baseBranch + "`）")
 	}
 
 	// Step F: capture the final SHA + emit the human-readable success lines

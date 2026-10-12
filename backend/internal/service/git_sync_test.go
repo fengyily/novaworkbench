@@ -15,12 +15,13 @@ import (
 
 // TestSyncToOriginBase_GatesAndSkips exercises the hard-sync gate end-to-end
 // against real on-disk git repositories. The "hard" half of the design-stage
-// sync lives here (gates A/B/C/D/E), with the assertion matrix mirroring the
+// sync lives here (gates A/C/D/E), with the assertion matrix mirroring the
 // nine-cases acceptance list from the requirement:
 //
-//	Gates:  DIRTY_WORKTREE / HEAD_NOT_ON_BASE / UNPUSHED_COMMITS /
-//	        FETCH_FAILED / FF_FAILED
+//	Gates:  DIRTY_WORKTREE / UNPUSHED_COMMITS / FETCH_FAILED / FF_FAILED
 //	Skip:   non-git dir / no origin / empty repo (unborn HEAD)
+//	HEAD on non-base branch: ALLOWED (no rejection) — fetches origin/<base>
+//	                            + records SHA + skips local merge --ff-only
 //	Happy:  fast-forward to origin/<base>, BaseSHA is 40 hex
 //
 // All tests run against a real on-disk git tree (t.TempDir() + bare origin +
@@ -93,24 +94,36 @@ func TestSyncToOriginBase_GatesAndSkips(t *testing.T) {
 		}
 	})
 
-	// (b) HEAD_NOT_ON_BASE: HEAD is on a non-base branch; the gate refuses
-	// before touching the network.
-	t.Run("HeadNotOnBase_Rejected", func(t *testing.T) {
+	// (b) HEAD_ON_NON_BASE_BRANCH: HEAD is on a non-base branch; the gate
+	// no longer rejects (that broke launch-plan users picking a non-default
+	// baseline while sitting on main). Instead we just fetch origin/<base>,
+	// record the SHA from origin/<base>, and emit a short note via logf
+	// saying we skipped the local merge --ff-only because HEAD isn't on
+	// base. The SHA comes from the upstream ref directly, so a stale local
+	// <base> ref doesn't poison the design.
+	t.Run("HeadOnNonBaseBranch_Allowed", func(t *testing.T) {
 		work := freshWorkdir(t)
 		mustGit(t, work, "git", "checkout", "-b", "feature/tmp")
-		res, err := svc.SyncToOriginBase(context.Background(), "", work, baseBranch, 10*time.Second, nil)
-		if err == nil {
-			t.Fatalf("expected HEAD_NOT_ON_BASE error, got nil (res=%+v)", res)
+		var logged []string
+		logf := func(s string) { logged = append(logged, s) }
+		res, err := svc.SyncToOriginBase(context.Background(), "", work, baseBranch, 10*time.Second, logf)
+		if err != nil {
+			t.Fatalf("expected nil error on HEAD-not-on-base, got %v (res=%+v)", err, res)
 		}
-		gate, ok := err.(*SyncGateError)
-		if !ok {
-			t.Fatalf("expected *SyncGateError, got %T: %v", err, err)
+		if res.Skipped {
+			t.Fatalf("expected Skipped=false, got %+v", res)
 		}
-		if gate.Code != SyncGateHeadNotOnBase {
-			t.Fatalf("Code = %q, want %q", gate.Code, SyncGateHeadNotOnBase)
+		if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(res.BaseSHA) {
+			t.Fatalf("BaseSHA must be 40-char hex, got %q", res.BaseSHA)
 		}
-		if !strings.Contains(gate.Msg, baseBranch) {
-			t.Fatalf("Msg must mention the base branch, got: %q", gate.Msg)
+		// The "ℹ️ 当前 HEAD 在 `feature/tmp` 分支..." note must be emitted
+		// so the SSE panel doesn't go silent during the fetch.
+		combined := strings.Join(logged, "\n")
+		if !strings.Contains(combined, "feature/tmp") {
+			t.Fatalf("logf must mention the current HEAD branch, got: %s", combined)
+		}
+		if !strings.Contains(combined, "merge --ff-only") {
+			t.Fatalf("logf must explain we skipped merge --ff-only, got: %s", combined)
 		}
 	})
 
