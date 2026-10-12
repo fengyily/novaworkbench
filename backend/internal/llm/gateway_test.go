@@ -62,11 +62,13 @@ func TestConvertPdfTextToMarkdown(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(chatResponse{
 			Choices: []struct {
 				Message struct {
-					Content string `json:"content"`
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content,omitempty"`
 				} `json:"message"`
 			}{
 				{Message: struct {
-					Content string `json:"content"`
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content,omitempty"`
 				}{Content: "```markdown\n" + wantMarkdown + "\n```"}},
 			},
 			Usage: &chatUsage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150},
@@ -151,11 +153,13 @@ func TestConvertPdfTextToMarkdown_TruncatesLargeInput(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(chatResponse{
 			Choices: []struct {
 				Message struct {
-					Content string `json:"content"`
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content,omitempty"`
 				} `json:"message"`
 			}{
 				{Message: struct {
-					Content string `json:"content"`
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content,omitempty"`
 				}{Content: "# truncated"}},
 			},
 		})
@@ -177,5 +181,48 @@ func TestConvertPdfTextToMarkdown_TruncatesLargeInput(t *testing.T) {
 	}
 	if !strings.Contains(gotUserContent, "（后文已截断）") {
 		t.Errorf("truncation marker missing in user content")
+	}
+}
+
+// TestConvertPdfTextToMarkdown_EmptyContentFromReasoningModel covers the
+// DeepSeek-R1 / o1-style failure mode: the model finished reasoning and
+// emitted its full answer into `reasoning_content` but left `content` empty.
+// The gateway must surface a clear, actionable error (mentioning reasoning
+// models so the operator can switch the model) and NOT silently substitute
+// the reasoning trace as user-facing markdown. The reasoning trace is for
+// diagnostics, not for the knowledge row.
+//
+// The error message is also asserted to contain the model name and a body
+// snippet so the upload-handler 500 response is self-explanatory in the
+// backend log without the operator needing to attach a debugger.
+func TestConvertPdfTextToMarkdown_EmptyContentFromReasoningModel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Reasoning model answer: full text in reasoning_content, empty
+		// content. The reasoning text is intentionally chatty so we can
+		// assert it was NOT surfaced to the caller.
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"","reasoning_content":"the model thought really hard but emitted nothing final"}}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`))
+	}))
+	defer srv.Close()
+
+	g := New(nil, fakeLLMConfig{baseURL: srv.URL, apiKey: "k", model: "deepseek-reasoner"})
+	md, _, err := g.ConvertPdfTextToMarkdown("some raw pdf text", "doc.pdf")
+	if err == nil {
+		t.Fatalf("expected error on empty content, got nil (md=%q)", md)
+	}
+	if md != "" {
+		t.Errorf("expected empty markdown on error, got %q (must not surface reasoning trace)", md)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "empty content") {
+		t.Errorf("error message should mention empty content, got: %q", msg)
+	}
+	if !strings.Contains(msg, "reasoning") {
+		t.Errorf("error message should mention reasoning model mitigation, got: %q", msg)
+	}
+	// Body snippet should be present so the operator can spot the empty
+	// content + non-empty reasoning_content in the response.
+	if !strings.Contains(msg, "reasoning_content") {
+		t.Errorf("error message should include the raw body snippet (got: %q) so the operator can confirm the reasoning-model cause", msg)
 	}
 }
