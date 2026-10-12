@@ -76,7 +76,22 @@ export function createEventStream(
           }
         }
       }
-      // Stream ended without the terminal (job_done) frame.
+      // Stream ended. If a trailing partial frame remains (the terminating
+      // "\n\n" may have been swallowed by an intermediate proxy or a TCP FIN),
+      // treat the residual data as a final frame so consumers still see
+      // terminal events like job_done. WHATWG EventSource handles this
+      // implicitly; this is the standard SSE-client EOF-flush requirement.
+      if (!closed && buf.trim().length > 0) {
+        for (const line of buf.split('\n')) {
+          const data = line.startsWith('data:') ? line.slice(5).trim() : line.trim();
+          if (!data) continue;
+          try {
+            onMessage(JSON.parse(data));
+          } catch {
+            // malformed frame — skip
+          }
+        }
+      }
       if (!closed) fail();
     } catch {
       // AbortError from close() is expected; anything else is a dropped link.
