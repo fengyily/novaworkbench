@@ -292,6 +292,11 @@ func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.Sub
 	} else {
 		job.Append(store.LogLine{Type: "result", Content: "⚠️ 推送完成，但未能自动创建 PR（无平台 CLI / 无 remote）。请手动创建 PR。"})
 	}
+	// 让前端的 applyMergeSignals 能识别 PR URL 并点亮「创建 PR / 查看 PR」CTA。
+	// prURL 可能是真实的 PR,也可能是 compare 链接(用户手动补 PR),两条都暴露。
+	if prURL != "" {
+		job.Append(store.LogLine{Type: "pr_link", Content: prURL})
+	}
 	job.Append(store.LogLine{Type: "done", Content: "✅ 推送流程完成"})
 	job.Finish(0, store.JobDone)
 	log.Printf("[push-pr-shell] job %s finished for %s", job.ID, reqRow.ID)
