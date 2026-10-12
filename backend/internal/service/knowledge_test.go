@@ -1,9 +1,13 @@
 package service
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"strings"
 	"testing"
 
 	"github.com/novaworkbench/backend/internal/db"
+	"github.com/novaworkbench/backend/internal/llm"
 )
 
 // knowledgeTestDB opens a fresh SQLite db in a temp dir (migrations applied by
@@ -123,3 +127,109 @@ func TestListForRequirement(t *testing.T) {
 		}
 	})
 }
+
+// TestCreateFromPdf covers the end-to-end PDF → knowledge-row pipeline with
+// mock extract + polish closures. The DB is real (knowledgeTestDB) so the
+// INSERT and the post-insert Get go through the same code path the handler
+// hits. Asserts: (1) source_type='pdf_upload', (2) category='document',
+// (3) source_ref starts with "pdf:", (4) title contains the original
+// filename, (5) content equals the polished markdown verbatim.
+func TestCreateFromPdf(t *testing.T) {
+	d := knowledgeTestDB(t)
+	ks := NewKnowledgeService(d)
+
+	// Mock raw extractor — ignores the path, returns a fixed string. Lets us
+	// verify extract is called and the result is forwarded to polish.
+	extract := func(path string) (string, error) {
+		if path == "" {
+			return "", errExtractEmpty
+		}
+		return "raw invoice text line 1\nraw invoice text line 2", nil
+	}
+	// Mock LLM polish — returns a markdown body with a heading. The
+	// pdfKnowledgeTitle helper is expected to lift the first heading into
+	// the knowledge.title field.
+	polish := func(rawText, file string) (string, *llm.Usage, error) {
+		if rawText == "" {
+			return "", nil, errPolishEmpty
+		}
+		return "# Invoice 2026-01\n\n- item A\n- item B\n", &llm.Usage{
+			PromptTokens:     10,
+			CompletionTokens: 5,
+			Model:            "test-model",
+		}, nil
+	}
+
+	const filename = "invoice-2026-01.pdf"
+	k, usage, err := ks.CreateFromPdf(CreateKnowledgeFromPdfReq{
+		ProjectID:  "proj_1",
+		SourceFile: filename,
+		FilePath:   "/tmp/fake.pdf",
+	}, extract, polish)
+	if err != nil {
+		t.Fatalf("CreateFromPdf: %v", err)
+	}
+	if k == nil {
+		t.Fatal("expected non-nil knowledge row")
+	}
+	if usage == nil || usage.PromptTokens != 10 || usage.CompletionTokens != 5 {
+		t.Fatalf("expected usage {10, 5, test-model}, got %+v", usage)
+	}
+
+	// (1) source_type
+	if k.SourceType != SourceTypePdfUpload {
+		t.Errorf("SourceType = %q, want %q", k.SourceType, SourceTypePdfUpload)
+	}
+	// (2) category
+	if k.Category != CategoryDocument {
+		t.Errorf("Category = %q, want %q", k.Category, CategoryDocument)
+	}
+	// (3) source_ref starts with "pdf:" and is sha256(filename)[:16]
+	if !strings.HasPrefix(k.SourceRef, "pdf:") {
+		t.Errorf("SourceRef %q missing 'pdf:' prefix", k.SourceRef)
+	}
+	wantRefSum := sha256.Sum256([]byte(filename))
+	wantRef := "pdf:" + hex.EncodeToString(wantRefSum[:])[:16]
+	if k.SourceRef != wantRef {
+		t.Errorf("SourceRef = %q, want %q", k.SourceRef, wantRef)
+	}
+	// (4) title contains the original filename
+	if !strings.Contains(k.Title, "Invoice") {
+		t.Errorf("Title %q does not contain polish-extracted header", k.Title)
+	}
+	// (5) content equals polish output verbatim
+	if k.Content != "# Invoice 2026-01\n\n- item A\n- item B\n" {
+		t.Errorf("Content = %q, want polished markdown verbatim", k.Content)
+	}
+	if k.ProjectID != "proj_1" {
+		t.Errorf("ProjectID = %q, want proj_1", k.ProjectID)
+	}
+
+	// error path: extract failure short-circuits before any DB write
+	extErr := func(path string) (string, error) { return "", errExtractBoom }
+	if _, _, err := ks.CreateFromPdf(CreateKnowledgeFromPdfReq{
+		ProjectID: "proj_1", SourceFile: filename, FilePath: "/tmp/x.pdf",
+	}, extErr, polish); err == nil {
+		t.Error("expected error when extract returns an error")
+	}
+	// error path: polish failure also short-circuits
+	badPolish := func(rawText, file string) (string, *llm.Usage, error) {
+		return "", nil, errPolishBoom
+	}
+	if _, _, err := ks.CreateFromPdf(CreateKnowledgeFromPdfReq{
+		ProjectID: "proj_1", SourceFile: filename, FilePath: "/tmp/x.pdf",
+	}, extract, badPolish); err == nil {
+		t.Error("expected error when polish returns an error")
+	}
+}
+
+var (
+	errExtractEmpty = stringErr("extract: empty path")
+	errPolishEmpty  = stringErr("polish: empty raw text")
+	errExtractBoom  = stringErr("extract: simulated failure")
+	errPolishBoom   = stringErr("polish: simulated failure")
+)
+
+type stringErr string
+
+func (e stringErr) Error() string { return string(e) }

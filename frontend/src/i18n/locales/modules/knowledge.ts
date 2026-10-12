@@ -30,6 +30,19 @@ export const knowledge = {
   reviewSkip: '⏭️ 跳过',
   reviewReject: '❌ 拒绝',
   reviewEmpty: '🎉 没有待审核的知识条目',
+  // PDF 上传(知识 tab 顶部按钮 + 弹窗)。中文表述保持与既有「📄 / 解析」
+  // 风格一致(参见 memoriesEmpty 里的「点击...来自动生成」)。
+  uploadPdf: '上传 PDF',
+  uploadPdfTitle: '上传 PDF 到知识库',
+  uploadPdfSelectHint: '请选择 PDF 文件(最大 20 MB)',
+  uploadPdfSelectFile: '选择文件',
+  uploadPdfSelected: '已选择: {{name}} ({{size}})',
+  uploadPdfUploading: '解析中，请稍候...',
+  uploadPdfSuccess: '上传成功，已添加为知识条目',
+  uploadPdfFailed: '上传失败: {{msg}}',
+  uploadPdfInvalidType: '仅支持 PDF 文件',
+  uploadPdfTooLarge: '文件超出 20 MB 限制',
+  uploadPdfEmpty: '请先选择文件',
   memType: {
     business_context: '业务背景',
     technical_debt: '技术债务',

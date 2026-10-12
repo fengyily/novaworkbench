@@ -1,13 +1,16 @@
 package service
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 
 	"fmt"
 	"github.com/novaworkbench/backend/internal/db"
 	"strings"
 	"time"
 
+	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/util"
 )
@@ -23,6 +26,8 @@ func NewKnowledgeService(db *db.DB) *KnowledgeService { return &KnowledgeService
 const (
 	SourceTypeAIDiagram = "ai_diagram"
 	CategoryTechDesign  = "tech_design"
+	SourceTypePdfUpload = "pdf_upload"
+	CategoryDocument    = "document"
 )
 
 // UpsertAIDiagram writes (or refreshes) a single knowledge row carrying a
@@ -312,6 +317,110 @@ func (s *KnowledgeService) Create(req model.CreateKnowledgeReq) (*model.Knowledg
 		return nil, err
 	}
 	return s.Get(id)
+}
+
+// CreateKnowledgeFromPdfReq is the service-layer payload for the PDF upload
+// path. SourceFile is the original filename as the user picked it (used in
+// both source_ref and the human title); FilePath is the on-disk path of a
+// temp file the handler has already written (this method does NOT delete the
+// temp file — the handler owns its lifecycle via defer os.Remove).
+type CreateKnowledgeFromPdfReq struct {
+	ProjectID  string
+	SourceFile string
+	FilePath   string
+}
+
+// pdfSourceRefPrefix is the namespace tag prepended to source_ref for rows
+// created via the PDF upload path. Lets the /knowledge page filter by
+// "pdf:*" source_ref when the user wants to list only PDF-derived entries.
+const pdfSourceRefPrefix = "pdf:"
+
+// pdfSourceRef builds the (project_id, source_ref, source_type='pdf_upload')
+// identity for the PDF path. sha256 of the original filename is taken in
+// order to be stable across re-uploads of the same file (the re-upload then
+// produces a new row, since there is no UNIQUE constraint; the hash is a
+// debug-friendly tag, not an upsert key).
+func pdfSourceRef(filename string) string {
+	sum := sha256.Sum256([]byte(filename))
+	return pdfSourceRefPrefix + hex.EncodeToString(sum[:])[:16]
+}
+
+// pdfKnowledgeTitle picks the title shown on the /knowledge card. The first
+// non-empty line of the polished Markdown is preferred so the card reflects
+// the document's own header; fall back to "PDF: <filename>" when the polish
+// step returns no header. Trimmed to 200 chars to keep the list view sane.
+func pdfKnowledgeTitle(markdown, filename string) string {
+	for _, line := range strings.Split(markdown, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Drop leading markdown heading marks and any surrounding whitespace.
+		line = strings.TrimLeft(line, "#")
+		line = strings.TrimSpace(line)
+		if line != "" {
+			if len(line) > 200 {
+				line = line[:200]
+			}
+			return line
+		}
+	}
+	return "PDF: " + filename
+}
+
+// CreateFromPdf is the PDF → knowledge-row pipeline. The two side-effecting
+// steps (PDF text extraction, LLM polish) are injected as function values so
+// unit tests can stub them without standing up a real extractor or LLM
+// gateway — the service only owns the DB write and the field-level
+// reshaping between them.
+//
+// Flow:
+//  1. extract(req.FilePath) → rawText
+//  2. polish(rawText, req.SourceFile) → markdown + usage
+//  3. INSERT a knowledge row with category=document, source_type=pdf_upload,
+//     source_ref="pdf:<sha256(filename)[:16]>", and a title derived from
+//     the polished markdown's first header (or "PDF: <filename>" fallback).
+//
+// Returns the inserted row plus the LLM usage record so the handler can
+// bill it via token_usage. Temp-file cleanup is the handler's
+// responsibility.
+func (s *KnowledgeService) CreateFromPdf(
+	req CreateKnowledgeFromPdfReq,
+	extract func(path string) (string, error),
+	polish func(rawText, file string) (string, *llm.Usage, error),
+) (*model.Knowledge, *llm.Usage, error) {
+	if req.ProjectID == "" {
+		return nil, nil, fmt.Errorf("project_id required")
+	}
+	if req.FilePath == "" {
+		return nil, nil, fmt.Errorf("file_path required")
+	}
+	if extract == nil || polish == nil {
+		return nil, nil, fmt.Errorf("extract and polish functions must not be nil")
+	}
+
+	rawText, err := extract(req.FilePath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("extract pdf: %w", err)
+	}
+
+	markdown, usage, err := polish(rawText, req.SourceFile)
+	if err != nil {
+		return nil, nil, fmt.Errorf("polish pdf text: %w", err)
+	}
+
+	k, err := s.Create(model.CreateKnowledgeReq{
+		ProjectID:  req.ProjectID,
+		Title:      pdfKnowledgeTitle(markdown, req.SourceFile),
+		Content:    markdown,
+		Category:   CategoryDocument,
+		SourceType: SourceTypePdfUpload,
+		SourceRef:  pdfSourceRef(req.SourceFile),
+	})
+	if err != nil {
+		return nil, usage, err
+	}
+	return k, usage, nil
 }
 
 func (s *KnowledgeService) Update(id string, req model.CreateKnowledgeReq) (*model.Knowledge, error) {

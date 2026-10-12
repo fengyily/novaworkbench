@@ -29,6 +29,20 @@ export const knowledge = {
   reviewSkip: '⏭️ Skip',
   reviewReject: '❌ Reject',
   reviewEmpty: '🎉 Nothing left to review',
+  // PDF upload (knowledge tab header button + dialog). Mirrors the rest of
+  // the module's tone — emojis reserved for terminal status (success/fail),
+  // plain sentences for in-flight messages.
+  uploadPdf: 'Upload PDF',
+  uploadPdfTitle: 'Upload a PDF to the knowledge base',
+  uploadPdfSelectHint: 'Select a PDF file (max 20 MB)',
+  uploadPdfSelectFile: 'Choose file',
+  uploadPdfSelected: 'Selected: {{name}} ({{size}})',
+  uploadPdfUploading: 'Parsing, please wait…',
+  uploadPdfSuccess: 'Upload succeeded — added as a knowledge entry',
+  uploadPdfFailed: 'Upload failed: {{msg}}',
+  uploadPdfInvalidType: 'Only PDF files are supported',
+  uploadPdfTooLarge: 'File exceeds the 20 MB limit',
+  uploadPdfEmpty: 'Please choose a file first',
   memType: {
     business_context: 'Business context',
     technical_debt: 'Technical debt',

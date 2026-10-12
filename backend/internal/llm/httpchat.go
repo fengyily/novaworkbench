@@ -103,6 +103,35 @@ const extractReportKnowledgePrompt = `你是 NovaWorkbench 的知识库整理助
 - 输出纯 Markdown，建议章节：## 实现概述 / ## 涉及文件 / ## 关键决策 / ## 注意事项。
 只输出该 JSON 对象，不要任何前后缀说明。`
 
+// pdfToMarkdownPrompt asks the LLM to clean up raw text extracted from a PDF
+// (often noisy — page numbers, repeated headers/footers, hyphenated line
+// breaks, glued tables) into structured Markdown suitable for the project
+// knowledge base. The source filename is passed in the user message as a
+// hint; the model returns a single Markdown document (no JSON envelope, no
+// surrounding ```markdown fence) so the caller can persist the string
+// verbatim into knowledge.content.
+//
+// Hard bans:
+//   - mermaid / flowchart / diagram code blocks (knowledge rows are read as
+//     documents, not architecture diagrams; the diagram flow owns its own
+//     knowledge rows).
+//   - any wrapping code fence around the whole response (MarkdownRender
+//     would render the fence literally).
+//   - fabrication: the model must only reorganize what was in the source —
+//     no invented sections, no inferred technical detail. If the source is
+//     empty / meaningless, return an empty string so the caller can
+//     surface a clean parse failure instead of writing hallucinated content.
+const pdfToMarkdownPrompt = `你是 NovaWorkbench 的 PDF 文档整理助手。
+用户会给出一份从 PDF 抽取出的原始文本（可能含断行噪声、页码、重复页眉、表格粘连），以及原始文件名。请整理为结构清晰、便于检索的 Markdown 文档。
+
+输出要求：
+- 直接输出 Markdown 正文，不要用任何代码围栏（三个反引号加语言名、或裸的三个反引号）包裹整体输出；不要输出 mermaid 等图表代码块；不要任何前后缀说明。
+- 以一个 # 一级标题开头；标题尽量反映文档主题（必要时参考原始文件名）。
+- 合理使用 ## 二级标题、列表、必要时用 Markdown 表格语法还原原始文本中的表格。
+- 清理：删除页码（如「第 1 页」「Page 2/10」）、重复的页眉页脚、与正文无关的导航/版权噪声；合并被错误断行的句子。
+- 保留：原始章节结构、关键技术术语、API 端点、文件路径、引用与数据。
+- 如果原始文本几乎为空或没有可整理的内容，直接输出空字符串（不要凑字）。`
+
 // generateDiagramPrompt asks the LLM to pick the BEST Mermaid diagram type
 // for the user's input and emit strict Mermaid source. Mirrors
 // extractReportKnowledgePrompt's JSON-in-prompt shape (parser does
