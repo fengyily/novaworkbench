@@ -7,7 +7,6 @@ import { projectsApi } from '../api/client';
 import { stripMarkdownPreview } from '../utils/preview';
 import { IconExternalLink } from '../components/icons';
 import DiagramGenerator from '../components/DiagramGenerator';
-import PdfUploadDialog from '../components/PdfUploadDialog';
 import './KnowledgePage.css';
 
 type Tab = 'memories' | 'knowledge' | 'review';
@@ -28,9 +27,6 @@ export default function KnowledgePage() {
   // Knowledge
   const [knowledge, setKnowledge] = useState<KnowledgeItem[]>([]);
   const [showDiagramGenerator, setShowDiagramGenerator] = useState(false);
-  // PDF 上传弹窗 — 沿用 showDiagramGenerator 同样的状态机:show=true 时
-  // 挂载组件;onSaved 关弹窗 + 调 loadTabData() 刷新知识 tab 列表。
-  const [showPdfUpload, setShowPdfUpload] = useState(false);
 
   // Review
   const [reviewItems, setReviewItems] = useState<KnowledgeItem[]>([]);
@@ -183,16 +179,6 @@ export default function KnowledgePage() {
         <div className="kb-list">
           <div className="kb-list-header">
             <span>{t('knowledge.knowledgeCount', { n: knowledge.length })}</span>
-            {selectedProject && (
-              <button
-                className="btn btn-primary btn-sm"
-                onClick={() => setShowPdfUpload(true)}
-                disabled={!selectedProject}
-                title={t('knowledge.uploadPdfTitle')}
-              >
-                📄 {t('knowledge.uploadPdf')}
-              </button>
-            )}
           </div>
           {knowledge.length === 0 ? (
             <div className="kb-empty">{t('knowledge.knowledgeEmpty')}</div>
@@ -309,19 +295,6 @@ export default function KnowledgePage() {
         onClose={() => setShowDiagramGenerator(false)}
         onSaved={() => { setShowDiagramGenerator(false); loadTabData(); }}
       />
-
-      {/* PDF 上传 Dialog — 上传成功后只需刷新知识 tab 列表,不切换 tab;
-          用户大概率就停留在 knowledge tab 看新行。 */}
-      {showPdfUpload && selectedProject && (
-        <PdfUploadDialog
-          projectId={selectedProject}
-          onClose={() => setShowPdfUpload(false)}
-          onSuccess={() => {
-            setShowPdfUpload(false);
-            loadTabData();
-          }}
-        />
-      )}
     </div>
   );
 }

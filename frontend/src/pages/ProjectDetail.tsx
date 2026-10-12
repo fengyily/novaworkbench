@@ -14,6 +14,7 @@ import { tLabel } from '../i18n/label';
 import { fmtDate, fmtDateTime, fmtRelative, fmtRunAtRelative } from '../utils/intl';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import { StatusChips } from '../components/StatusChips';
+import PdfUploadDialog from '../components/PdfUploadDialog';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
 import ProjectIssueMonitor from './ProjectIssueMonitor';
 import { IconPlug, IconRobot, IconClock } from '../components/icons';
@@ -476,6 +477,15 @@ export default function ProjectDetail() {
   // modal.
   const [knowledge, setKnowledge] = useState<KnowledgeItem[]>([]);
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
+  // PDF 上传弹窗状态:挂在项目级知识库里,上传后直接刷新当前列表,
+  // 不必跳走也不必切 tab。
+  const [showPdfUpload, setShowPdfUpload] = useState(false);
+  const refreshKnowledge = useCallback(() => {
+    if (!id) return;
+    knowledgeApi.list({ project_id: id, limit: 200 })
+      .then(res => setKnowledge(res.items ?? []))
+      .catch(() => {});
+  }, [id]);
   useEffect(() => {
     if (tab !== 'knowledge' || !id) return;
     let active = true;
@@ -1748,6 +1758,18 @@ export default function ProjectDetail() {
       {/* ── Knowledge base ── */}
       {tab === 'knowledge' && (
         <div className="tab-content">
+          <div className="run-control-bar">
+            <span className="compose-detect">
+              {t('projects.detail.knowledgeCount', { n: knowledge.length })}
+            </span>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() => setShowPdfUpload(true)}
+              title={t('knowledge.uploadPdfTitle')}
+            >
+              📄 {t('knowledge.uploadPdf')}
+            </button>
+          </div>
           {knowledgeLoading ? (
             <div className="tab-empty"><p>{t('projects.detail.knowledgeLoading')}</p></div>
           ) : knowledge.length === 0 ? (
@@ -1759,6 +1781,16 @@ export default function ProjectDetail() {
               {renderKnowledgeGroup('projects.detail.knowledgeGroupCode', knowledge.filter(k => k.source_type === 'code'))}
               {renderKnowledgeGroup('projects.detail.knowledgeGroupOther', knowledge.filter(k => !['requirement', 'document', 'code'].includes(k.source_type)))}
             </>
+          )}
+          {showPdfUpload && id && (
+            <PdfUploadDialog
+              projectId={id}
+              onClose={() => setShowPdfUpload(false)}
+              onSuccess={() => {
+                setShowPdfUpload(false);
+                refreshKnowledge();
+              }}
+            />
           )}
         </div>
       )}
