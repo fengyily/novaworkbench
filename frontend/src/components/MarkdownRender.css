@@ -15,9 +15,10 @@
 }
 
 .mermaid-svg svg {
+  display: block;
   max-width: 100%;
   height: auto;
-  display: inline-block;
+  margin: 0 auto;
 }
 
 .mermaid-loading,
