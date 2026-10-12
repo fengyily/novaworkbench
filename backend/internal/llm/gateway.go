@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -49,6 +50,13 @@ type Gateway struct {
 	claudeEnv ClaudeEnvProvider
 	llmCfg    LLMConfigProvider
 }
+
+// ErrEmptyInput is returned by HTTP-channel methods when the caller hands them
+// a blank source. Surfaced instead of an opaque "the model returned nothing
+// useful" error so the handler can map it to a 400 INVALID_INPUT (the user's
+// upload was blank, not the LLM misbehaving). Used by ConvertPdfTextToMarkdown
+// and reserved for future single-shot text transforms on this channel.
+var ErrEmptyInput = errors.New("llm: empty input")
 
 // New wires the gateway with separate providers for the Claude CLI env (auth
 // token / base URL, from the active claude_configs row) and the direct HTTP
@@ -1001,6 +1009,80 @@ func (g *Gateway) ExtractReportKnowledge(reportKind, content, instruction string
 	res.Title = strings.Trim(res.Title, "\"'` \n\r\t")
 	res.Markdown = strings.TrimSpace(res.Markdown)
 	return res.Title, res.Markdown, u, nil
+}
+
+// ConvertPdfTextToMarkdown takes the raw text extracted from a PDF (often
+// noisy — page numbers, repeated headers/footers, hyphenated line breaks,
+// glued tables) and asks the LLM to clean it up into structured Markdown
+// suitable for the project knowledge base. The HTTP LLM channel is used
+// (single-shot text, no tool use) because the task runs on the user's PDF
+// upload click and must be sync + fast — the claude CLI's process + tool
+// startup would be a noticeable hitch for a one-shot text transform.
+//
+// `sourceFile` is the original PDF file name (e.g. "invoice.pdf"); passed
+// into the user message as a hint so the LLM can pick a sensible # heading
+// when the extracted text has no obvious title. Empty sourceFile is allowed
+// — the prompt falls back to a generic heading.
+//
+// Returns ErrEmptyInput immediately when rawText is blank so the upload
+// handler can surface a 400 (the PDF was empty / a scan with no OCR) instead
+// of paying for an LLM round trip that will produce nothing useful. On
+// channel misconfiguration or model error the call returns an error so the
+// upload handler can fall back to persisting the raw text verbatim — the
+// knowledge row still exists, just unpolished.
+//
+// Truncation: rawText is capped at 60 KiB before the LLM call (matching
+// the maxBlock budget in wizard_knowledge.buildKnowledgeBlock) so a 500-page
+// PDF doesn't blow the prompt budget. The returned markdown is the model's
+// full response, NOT the truncated input — the LLM is told to summarize
+// rather than verbatim copy when the source is huge.
+//
+// `usage` is non-nil only when the LLM provider reported token counts; the
+// caller can pipe it into recordUsage for token_usage billing parity with
+// the rest of the HTTP-channel methods.
+func (g *Gateway) ConvertPdfTextToMarkdown(rawText, sourceFile string) (markdown string, usage *Usage, err error) {
+	if strings.TrimSpace(rawText) == "" {
+		return "", nil, ErrEmptyInput
+	}
+	if g.llmCfg == nil {
+		return "", nil, fmt.Errorf("llm not configured: no llm config provider")
+	}
+	baseURL, apiKey, model, err := g.llmCfg.LLMConfig()
+	if err != nil {
+		return "", nil, fmt.Errorf("llm config unavailable: %w", err)
+	}
+	if baseURL == "" || apiKey == "" {
+		return "", nil, fmt.Errorf("llm not configured: base_url and api_key required")
+	}
+
+	// Cap the source text. 60 KiB matches wizard_knowledge.buildKnowledgeBlock's
+	// maxBlock (per project across multiple entries) and leaves headroom for
+	// the system prompt + response inside the model's context window.
+	const maxInputBytes = 60 * 1024
+	if len(rawText) > maxInputBytes {
+		rawText = rawText[:maxInputBytes] + "\n…（后文已截断）"
+	}
+
+	userContent := "原始文件名：" + sourceFile + "\n\n---\n\n" + rawText
+	out, u, callErr := chatCompletion(baseURL, apiKey, model, pdfToMarkdownPrompt, userContent, 4096)
+	if callErr != nil {
+		return "", nil, callErr
+	}
+	// The prompt forbids a wrapping code fence, but a self-hosted gateway
+	// may still prepend/append ``` or ```markdown. stripJSONFences strips
+	// the JSON-style fences we use elsewhere; defensively trim common
+	// variants here too so the knowledge row's MarkdownRender doesn't see a
+	// literal fence at the top of the body.
+	cleaned := strings.TrimSpace(out)
+	cleaned = strings.TrimPrefix(cleaned, "```markdown")
+	cleaned = strings.TrimPrefix(cleaned, "```md")
+	cleaned = strings.TrimPrefix(cleaned, "```")
+	cleaned = strings.TrimSuffix(cleaned, "```")
+	cleaned = strings.TrimSpace(cleaned)
+	if cleaned == "" {
+		return "", u, fmt.Errorf("llm http: empty markdown from pdf polish")
+	}
+	return cleaned, u, nil
 }
 
 // GenerateDiagram asks the LLM to pick the BEST Mermaid diagram type for the

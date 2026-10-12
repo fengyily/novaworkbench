@@ -101,10 +101,18 @@ export async function authedFetch(url: string, init?: RequestInit): Promise<Resp
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const url = `${API_BASE}${path}`;
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(options?.headers as Record<string, string> | undefined),
-  };
+  // For FormData bodies the browser sets `multipart/form-data; boundary=...`
+  // itself — pre-stamping `Content-Type: application/json` would either be
+  // overwritten (losing the boundary) or, on some runtimes, override the
+  // generated boundary and break the upload entirely. Skip the default
+  // Content-Type when the caller hands us a FormData instance.
+  const isFormData = typeof FormData !== 'undefined' && options?.body instanceof FormData;
+  const headers: Record<string, string> = isFormData
+    ? { ...(options?.headers as Record<string, string> | undefined) }
+    : {
+        'Content-Type': 'application/json',
+        ...(options?.headers as Record<string, string> | undefined),
+      };
 
   // authedFetch injects the bearer token and throws (after clearing the token
   // + redirecting) on 401.
@@ -129,6 +137,11 @@ export const api = {
   patch: <T>(path: string, body: unknown) =>
     request<T>(path, { method: 'PATCH', body: JSON.stringify(body) }),
   delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
+  // Multipart upload helper. Body MUST be a FormData instance — do NOT
+  // JSON.stringify it; the browser will set the proper Content-Type with the
+  // boundary (see request() above).
+  upload: <T>(path: string, formData: FormData) =>
+    request<T>(path, { method: 'POST', body: formData }),
 };
 
 // API endpoints
@@ -358,6 +371,16 @@ export const knowledgeApi = {
     }),
   extractDiagrams: (data: { project_id: string; requirement_id: string; blocks: Array<{ mermaid: string; title?: string }> }) =>
     api.post<{ ids: string[] }>('/api/knowledge/extract-diagrams', data),
+  // Upload a PDF to the knowledge base. Backend route is
+  // POST /api/knowledge/upload-pdf (multipart/form-data; fields: `file` =
+  // the PDF, `project_id` = the target project). On success the backend
+  // returns 201 with the new KnowledgeItem JSON.
+  uploadPdf: (projectId: string, file: File) => {
+    const fd = new FormData();
+    fd.append('project_id', projectId);
+    fd.append('file', file);
+    return api.upload<KnowledgeItem>('/api/knowledge/upload-pdf', fd);
+  },
 };
 
 export interface GenerateDiagramResult {
