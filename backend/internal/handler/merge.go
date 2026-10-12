@@ -130,6 +130,13 @@ func (h *MergeHandler) roleConfig(key string) (systemPrompt, model, configID str
 // loadReqProject resolves the requirement + its project (LocalPath /
 // DefaultBranch / PlatformType). Shared by every endpoint. Returns the
 // requirement row too — its BranchName/WorktreePath drive worktree isolation.
+//
+// defaultBranch follows the precedence chain the user sees in the UI:
+// the design-stage base stamp on the requirement row (reqRow.BaseBranch)
+// wins when present, otherwise the project's stored DefaultBranch,
+// otherwise the literal "main" sentinel. The merge stage uses this value
+// as both the git merge target AND the PR base — so picking a non-default
+// base at design time now flows through to the PR without any extra wiring.
 func (h *MergeHandler) loadReqProject(w http.ResponseWriter, r *http.Request) (reqRow *model.Requirement, projectPath, defaultBranch, platformType string, ok bool) {
 	reqID := r.PathValue("id")
 	reqRow, err := h.reqSvc.Get(reqID)
@@ -142,7 +149,10 @@ func (h *MergeHandler) loadReqProject(w http.ResponseWriter, r *http.Request) (r
 		writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", "项目路径不存在")
 		return nil, "", "", "", false
 	}
-	db := project.DefaultBranch
+	db := reqRow.BaseBranch
+	if db == "" {
+		db = project.DefaultBranch
+	}
 	if db == "" {
 		db = "main"
 	}
@@ -1001,10 +1011,18 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// base = the main branch to merge into dev + the PR base target.
+	// Precedence mirrors loadReqProject: reqRow.BaseBranch (design-stage
+	// stamp) > project.DefaultBranch > "main". The same value flows into
+	// both the git merge target and the platform.CreatePR call so the
+	// auto-opened PR targets the user-picked base instead of the project
+	// default.
 	project, _ := h.loadProjectNoWrite(reqRow.ID)
-	base := "main"
-	if project != nil && project.DefaultBranch != "" {
+	base := reqRow.BaseBranch
+	if base == "" && project != nil && project.DefaultBranch != "" {
 		base = project.DefaultBranch
+	}
+	if base == "" {
+		base = "main"
 	}
 
 	// 项目历史语言风格：用于让 Claude 子代理写 commit / PR title / PR body 时

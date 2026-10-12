@@ -162,6 +162,14 @@ type Requirement struct {
 	// snapshot. Empty for legacy rows and requirements whose design stage was
 	// skipped (no remote / non-git / unborn HEAD — Skipped branch).
 	DesignBaseSHA string `json:"design_base_sha"`
+	// BaseBranch is the baseline branch chosen at the design stage and reused
+	// by the development + merge stages. Stamped by the design prologue with
+	// the user-picked base (or project.DefaultBranch if none) so the dev
+	// stage can stay in sync when the user re-uses the design stage but
+	// forgets to re-pick a base on the coding form, AND so the merge stage
+	// can target the PR at the chosen base. Empty for legacy rows; the merge
+	// stage then falls back to project.DefaultBranch.
+	BaseBranch string `json:"base_branch"`
 	// DevMode records HOW the coding stage was launched: "session" forks the
 	// design session (legacy default — Claude inherits the full analysis+design
 	// conversation), "design" starts a fresh session and hands the stored
