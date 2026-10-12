@@ -163,20 +163,14 @@
   background: #ffffff;
   padding: 16px;
   overflow: auto;
+  max-width: 96vw;
+  max-height: 94vh;
 }
 
-/* !important 在这里是必需的，不是偷懒：
-   mermaid v11 在 <svg> 根标签上写内联 `style="max-width: {natural}px"`，把
-   图锁死在它的原始逻辑尺寸上。内联样式优先级高于任何选择器，没有 !important
-   的话下面的 max-width 全部失效，浮层里的图跟页面上一样小 —— 这正是"图放大
-   不了"的根因（对 mermaid 图而言）。
-   同时把 width/height 归 auto：mermaid 还写了 width="100%"，在 flex 容器里
-   会跟 max-height 打架。 */
 .img-zoom-svg svg {
-  max-width: 90vw !important;
-  max-height: 86vh !important;
-  width: auto !important;
-  height: auto !important;
+  display: block;
+  max-width: 90vw;
+  max-height: 86vh;
 }
 
 @keyframes img-zoom-fade {
