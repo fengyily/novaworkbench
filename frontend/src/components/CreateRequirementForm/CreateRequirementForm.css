@@ -373,6 +373,15 @@
   color: var(--color-text-muted, #94A3B8);
 }
 
+/* Accent variant — used by the design/coding shared-BASE clarifier
+   so the "this value drives BOTH stages" hint reads as part of the
+   GIT rail rather than a wall of grey helper text. Cyan tint matches
+   the existing preflight-field-card--git accent so the user ties the
+   note to the input it qualifies. */
+.create-req-form .launch-plan-section__note--accent {
+  color: var(--color-accent-cyan, #06b6d4);
+}
+
 .create-req-form .launch-section__row {
   display: inline-flex;
   gap: 2px;
