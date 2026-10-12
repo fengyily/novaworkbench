@@ -585,6 +585,126 @@
   background: var(--color-border);
   margin: 10px 0;
 }
+
+/* ── Inline branch selector ────────────────────────────────────────────
+   Sits inside the design / development action panels as the
+   user-facing "where do we start from?" affordance. Reuses the
+   preflight modal's chip+rail vocabulary (cyan GIT rail, BASE chip,
+   monospace input) so the inline picker and the preflight modal
+   read as one continuous design system — the inline picker is the
+   SOURCE OF TRUTH, the modal mirrors it.
+
+   Why not reuse `.preflight-field-card` directly? The modal card is
+   designed to be the only element on its row; inline it needs to
+   share a row with the model/env/dev_mode selectors (development
+   stage) or stand alone but small (design stage). We trim its
+   padding, allow it to flex, and add a hint rail so the default
+   branch is visible without having to look at the input. */
+.branch-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 320px;
+  max-width: 100%;
+}
+/* Compact card variant — same rail+chip as the modal, but the
+   padding is tightened so the picker doesn't dominate the action
+   panel. The card still wears the cyan rail so the visual link to
+   the modal's GIT section is unmistakable. */
+.branch-selector .preflight-field-card {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px 10px 4px 11px;
+}
+.branch-selector .preflight-field-card::before {
+  margin: -4px 0 -4px -11px;
+}
+/* The chip is the only piece of uppercase copy the user sees; widen
+   it from 30px→46px so it can carry the stage label (BASE 设计 / BASE
+   开发) and still align with the model/env chips on the dev panel. */
+.branch-selector .preflight-field-chip {
+  min-width: 46px;
+  padding: 0 8px;
+  font-size: 10.5px;
+  letter-spacing: 0.6px;
+  gap: 4px;
+  display: inline-flex;
+  align-items: center;
+}
+.branch-selector .preflight-field-chip svg {
+  width: 11px;
+  height: 11px;
+  stroke-width: 2.4;
+}
+/* Smaller monospace input — the inline context is tighter than the
+   modal, so we shave 1px off font size and tighten padding. The
+   datalist is invisible but the input still receives native
+   autocomplete suggestions. */
+.branch-selector .preflight-field-input {
+  padding: 3px 6px;
+  font-size: 12.5px;
+}
+/* Focus state — the same cyan halo as the modal, but softened so it
+   doesn't compete with the CTAs below. The subtle box-shadow doubles
+   as the "this is the source we're forking from" affordance: the
+   picker visually *attaches* to the rest of the card on focus. */
+.branch-selector .preflight-field-card:focus-within {
+  border-color: rgba(6, 182, 212, 0.55);
+  box-shadow:
+    0 0 0 1px rgba(6, 182, 212, 0.22),
+    0 1px 0 rgba(6, 182, 212, 0.08);
+}
+/* Hint rail — shows the project's default branch as a quiet anchor
+   ("默认 main"), positioned to the right of the card. Wraps to a
+   new line on narrow viewports rather than squeezing the input. */
+.branch-selector-hint {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  letter-spacing: 0.01em;
+}
+.branch-selector-hint code {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+}
+/* Warning rail — replaces the hint when /api/fs/git-branches returned
+   an empty list (project not cloned, or local_path missing). The
+   amber color matches the existing `.design-branch-warn` family so
+   empty-state feedback is consistent. */
+.branch-selector-warn {
+  font-size: 11px;
+  color: #b45309;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.branch-selector-warn::before {
+  content: '⚠';
+  font-size: 11px;
+  line-height: 1;
+}
+/* Disabled state — the card dims, the rail fades, the chip goes
+   transparent. Used while a coding job is running (the picker is
+   locked until the job finishes, same as model/env). */
+.branch-selector .preflight-field-card:has(.preflight-field-input:disabled) {
+  opacity: 0.55;
+}
+.branch-selector .preflight-field-input:disabled {
+  cursor: not-allowed;
+}
 /* Action cluster — same .design-toolbar-actions row, but here we lift it
    onto a slightly recessed background (.draft-action-actions-surface) so
    the four CTAs read as the actionable part of the card, distinct from

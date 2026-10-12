@@ -161,7 +161,12 @@ func (h *WizardHandler) launchDesignAndCoding(reqID string, body *designCodingIm
 	// is identical. prepareArchitectDesign mints the JobStore job and
 	// persists design_job_id on the requirement row before we return, so
 	// a second concurrent POST hits DESIGN_JOB_ACTIVE on the next call.
-	p, job, af := h.prepareArchitectDesign(context.Background(), reqID, body.DesignModel, body.DesignConfigID, body.DesignAgentServerID, body.ReadKnowledge, body.SyncMode)
+	// Resolve the design-stage base branch from the same body.BaseBranch
+	// the coding half will use (resolveImmediateBase is called separately
+	// inside the chained callback) so the two halves always share a base
+	// when the user picks one in DesignCodingImmediateModal.
+	designBase := resolveImmediateDesignBase(h, body.BaseBranch, reqRow.ProjectID)
+	p, job, af := h.prepareArchitectDesign(context.Background(), reqID, body.DesignModel, body.DesignConfigID, body.DesignAgentServerID, body.ReadKnowledge, body.SyncMode, designBase)
 	if af != nil {
 		return "", af
 	}
@@ -192,6 +197,7 @@ func (h *WizardHandler) launchDesignOnly(reqID string, body *designCodingImmedia
 	// string (NOT the requirement row), and returns 3 values including
 	// *store.Job. Reuses the same gating as the HTTP /api/wizard/architect-design
 	// and scheduler paths.
+	designBase := resolveImmediateDesignBase(h, body.BaseBranch, reqRow.ProjectID)
 	p, job, af := h.prepareArchitectDesign(
 		context.Background(),
 		reqID,
@@ -200,6 +206,7 @@ func (h *WizardHandler) launchDesignOnly(reqID string, body *designCodingImmedia
 		body.DesignAgentServerID,
 		body.ReadKnowledge,
 		body.SyncMode,
+		designBase,
 	)
 	if af != nil {
 		return "", af
@@ -387,6 +394,24 @@ func resolveImmediateBranch(explicit, reqID, kind string) string {
 // falls back to the project's stored DefaultBranch, else "main" — same
 // precedence chain execStartCoding uses inline (wizard_coding.go:200-216).
 func resolveImmediateBase(h *WizardHandler, explicit, projectID string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if projectID != "" {
+		if proj, err := h.projectSvc.Get(projectID); err == nil && proj != nil && proj.DefaultBranch != "" {
+			return proj.DefaultBranch
+		}
+	}
+	return "main"
+}
+
+// resolveImmediateDesignBase mirrors resolveImmediateBase for the design-stage
+// half of the chained run. It returns the explicit body.BaseBranch when
+// provided, otherwise project.DefaultBranch, otherwise "main". Does NOT touch
+// codingRunParams.BranchName — that is resolveImmediateBase's job. The two
+// helpers stay separate so future asymmetry (e.g. a design-only override that
+// diverges from coding) does not require refactoring the coding path.
+func resolveImmediateDesignBase(h *WizardHandler, explicit, projectID string) string {
 	if explicit != "" {
 		return explicit
 	}

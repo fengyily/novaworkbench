@@ -533,17 +533,23 @@ func (h *WizardHandler) anchorWorktree(req *model.Requirement, projectPath, defa
 //
 // timeout bounds the underlying fetch; pass the setting-driven value from
 // settingSvc.GitSyncTimeout so changes take effect without a restart.
-func (h *WizardHandler) resolveWorkDirSynced(ctx context.Context, req *model.Requirement, projectPath, defaultBranch string, timeout time.Duration, logf func(string)) (workDir, baseSHA string, err error) {
+//
+// baseBranch is forwarded both to SyncDesignBase (so the hard sync gate
+// runs against the user-chosen base instead of always project.DefaultBranch)
+// and to anchorWorktree (so the resulting worktree is rooted at origin/<base>).
+// Pass an empty string to fall back to project.DefaultBranch — the historical
+// behaviour preserved for any caller that has not yet been migrated.
+func (h *WizardHandler) resolveWorkDirSynced(ctx context.Context, req *model.Requirement, projectPath, baseBranch string, timeout time.Duration, logf func(string)) (workDir, baseSHA string, err error) {
 	if req == nil || projectPath == "" {
 		return projectPath, "", nil
 	}
-	res, serr := h.projectSvc.SyncDesignBase(ctx, req.ProjectID, timeout, logf)
+	res, serr := h.projectSvc.SyncDesignBase(ctx, req.ProjectID, baseBranch, timeout, logf)
 	if serr != nil {
 		// Hard block: the design stage must not proceed against a stale local
 		// checkout. Caller renders the SyncGateError in the SSE panel.
 		return "", "", serr
 	}
-	wt, werr := h.anchorWorktree(req, projectPath, defaultBranch, true, logf)
+	wt, werr := h.anchorWorktree(req, projectPath, baseBranch, true, logf)
 	return wt, res.BaseSHA, werr
 }
 

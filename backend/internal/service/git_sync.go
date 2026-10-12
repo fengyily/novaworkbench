@@ -312,7 +312,13 @@ func atoiTrimmed(s string) (int, error) {
 // Skipped=true results (non-git / no origin / empty repo) carry a nil
 // error and BaseSHA=""; the design stage treats these as "no baseline to
 // record" and skips UpdateDesignBaseSHA entirely.
-func (s *ProjectService) SyncDesignBase(ctx context.Context, projectID string, timeout time.Duration, logf func(string)) (GitSyncResult, error) {
+//
+// baseBranch is an explicit override: when non-empty it takes precedence over
+// project.DefaultBranch so the design stage can sync against a non-default
+// base (release-/* / incoming-*). When empty, the function falls back to
+// project.DefaultBranch, preserving the historical behaviour for any caller
+// that has not yet been migrated to pass the override.
+func (s *ProjectService) SyncDesignBase(ctx context.Context, projectID, baseBranch string, timeout time.Duration, logf func(string)) (GitSyncResult, error) {
 	var res GitSyncResult
 	if projectID == "" {
 		return res, fmt.Errorf("projectID is empty")
@@ -323,6 +329,14 @@ func (s *ProjectService) SyncDesignBase(ctx context.Context, projectID string, t
 	}
 	if p.LocalPath == "" {
 		return res, fmt.Errorf("project has no local_path")
+	}
+
+	// baseBranch override: explicit > project.DefaultBranch. Empty here
+	// means "no override requested" so we fall back to project.DefaultBranch,
+	// preserving existing callers.
+	effectiveBase := baseBranch
+	if effectiveBase == "" {
+		effectiveBase = p.DefaultBranch
 	}
 
 	// Auto-clone when the directory is missing — matches EnsureClonedAndSynced's
@@ -340,7 +354,7 @@ func (s *ProjectService) SyncDesignBase(ctx context.Context, projectID string, t
 		}
 	}
 
-	res, err = s.SyncToOriginBase(ctx, p.ID, p.LocalPath, p.DefaultBranch, timeout, logf)
+	res, err = s.SyncToOriginBase(ctx, p.ID, p.LocalPath, effectiveBase, timeout, logf)
 	if err != nil {
 		// *SyncGateError is the design-stage rejection signal we EXPECT to
 		// see; everything else is an unexpected DB / git plumbing error.

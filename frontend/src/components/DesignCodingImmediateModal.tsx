@@ -238,6 +238,17 @@ export function DesignCodingImmediateModal({
             {t('requirements.detail2.preflightLaunchBtn').toUpperCase()}
           </span>
         </div>
+        {/* Shared-base note — surfaces that the single base-branch
+            input below drives BOTH the design and the coding stage
+            (resolveImmediateDesignBase + resolveImmediateBase resolve
+            from the same body.BaseBranch on the server). The note is
+            rendered OUTSIDE the flight strip so the strip itself stays
+            a tight, scannable status row; the note sits as a small
+            caption directly below. Without this, users editing the
+            input might believe the value applies to only one stage. */}
+        <p className="immediate-git-shared-note">
+          {t('requirements.detail2.immediateGitSharedNote')}
+        </p>
 
         <div className="preflight-body">
           {/* Design-stage section — violet accent rail mirrors the
