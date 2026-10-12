@@ -411,6 +411,11 @@ export const components = {
     compressedTitle: '{{stage}}阶段已压缩',
     usageTitle: '{{stage}}: {{used}} / {{window}} tokens（原始 {{pct}}%）',
   },
+  scrollToBottom: {
+    ariaLabel: '滚动到最新消息',
+    button: '滚到底部',
+    newMessages: '↓ {{count}} 条新消息',
+  },
 } as const;
 
 export default components;
