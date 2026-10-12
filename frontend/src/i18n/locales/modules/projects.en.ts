@@ -300,6 +300,7 @@ export const projects = {
     knowledgeGroupCode: 'Project structure',
     knowledgeGroupOther: 'Other',
     knowledgeCountSuffix: '({{n}})',
+    knowledgeCount: 'Project knowledge base ({{n}})',
     knowledgeViewFull: 'View full →',
     knowledgeSource: 'Source: {{type}}',
     reviewUnconfiguredTitle: 'No platform token configured — cannot fetch PRs.',

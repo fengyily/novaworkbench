@@ -307,6 +307,7 @@ export const projects = {
     knowledgeGroupCode: '项目结构',
     knowledgeGroupOther: '其他',
     knowledgeCountSuffix: '（{{n}}）',
+    knowledgeCount: '本项目知识库（{{n}}）',
     knowledgeViewFull: '查看全文 →',
     knowledgeSource: '来源: {{type}}',
     // Review tab.

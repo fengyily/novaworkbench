@@ -24,9 +24,10 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import AtMentionTextarea from '../AtMentionTextarea';
 import LaunchPlanSection from './LaunchPlanSection';
-import { kindLabelKeys, kindHintKeys, kindPlaceholderKeys, kindCreateLabelKeys, type Kind, type AgentServer, type LaunchSpec, agentServersApi, requirementsApi, type Requirement } from '../../api/client';
+import { kindLabelKeys, kindHintKeys, kindPlaceholderKeys, kindCreateLabelKeys, type Kind, type AgentServer, type LaunchSpec, type KnowledgeItem, agentServersApi, requirementsApi, type Requirement } from '../../api/client';
 import { tLabel } from '../../i18n/label';
 import { errorMessage } from '../../utils/errMsg';
+import PdfUploadDialog from '../PdfUploadDialog';
 import './CreateRequirementForm.css';
 
 type Flow = 'skip-analysis' | 'direct';
@@ -79,6 +80,12 @@ export function CreateRequirementForm({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+
+  // PDF 上传(仅 wiki kind 可见) — 上传成功后:
+  //   1) 后端已经在 knowledge 表写入条目;
+  //   2) 把解析出的 Markdown 预填到 description,让用户基于已解析内容
+  //      进一步编辑或直接提交需求(同时关联到项目知识库)。
+  const [showPdfUpload, setShowPdfUpload] = useState(false);
 
   // Launch-plan state. The section is collapsed by default — opening it is
   // an explicit "I'm opting into a long-running task" gesture, matching the
@@ -215,6 +222,22 @@ export function CreateRequirementForm({
 
       {/* Step 2 — Description (the panel's main job) */}
       <div className="form-group create-req-desc">
+        {/* wiki kind 提供 PDF 上传入口:上传后把 Markdown 回填到 description,
+            同时后端已经在 knowledge 表留下条目,无需再走 LLM organize。 */}
+        {kind === 'wiki' && (
+          <div className="create-req-pdf-row">
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => setShowPdfUpload(true)}
+              disabled={saving || !projectId}
+              title={t('knowledge.uploadPdfTitle')}
+            >
+              📄 {t('knowledge.uploadPdf')}
+            </button>
+            <small className="form-hint">{t('components.createRequirement.uploadPdfHint')}</small>
+          </div>
+        )}
         <AtMentionTextarea
           value={description}
           onChange={setDescription}
@@ -374,6 +397,25 @@ export function CreateRequirementForm({
           })()}
         </button>
       </div>
+
+      {/* PDF 上传弹窗 — 仅 wiki kind 触发;上传后:
+          - 立即写入 knowledge 表(后端副作用)
+          - 用 KnowledgeItem.content 作为 description 预填,用户可继续编辑
+          - skipOrganize 强制开启,避免对已结构化的 Markdown 再跑一次 LLM。 */}
+      {showPdfUpload && projectId && (
+        <PdfUploadDialog
+          projectId={projectId}
+          onClose={() => setShowPdfUpload(false)}
+          onSuccess={(item: KnowledgeItem) => {
+            setShowPdfUpload(false);
+            if (item.content) {
+              setDescription(item.content);
+            }
+            setSkipOrganize(true);
+            setError(null);
+          }}
+        />
+      )}
     </div>
   );
 }

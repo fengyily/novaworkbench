@@ -331,6 +331,7 @@ export const components = {
     submitHintIssue: '提交后 AI 整理为 Bug 报告：现象 / 复现步骤 / 期望行为 / 实际行为。',
     submitHintIdea: '提交后 AI 整理为灵感记录：灵感来源 / 初步设想 / 待回答的关键问题。',
     submitHintRequirement: '提交后 AI 整理为结构化文档：背景 / 目标 / 功能要点 / 验收标准。',
+    uploadPdfHint: '把 PDF 上传后会解析为 Markdown 并填到下方描述框',
     shortcut: '⌘/Ctrl + Enter 提交',
     saving: '创建中…',
     savingOrganize: '创建中…AI 正在整理',

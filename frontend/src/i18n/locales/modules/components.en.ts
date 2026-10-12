@@ -322,6 +322,7 @@ export const components = {
     submitHintIssue: 'AI turns it into a bug report: symptom / repro / expected / actual.',
     submitHintIdea: 'AI turns it into an idea note: source / rough plan / open questions.',
     submitHintRequirement: 'AI turns it into a structured doc: background / goal / features / acceptance criteria.',
+    uploadPdfHint: 'Upload a PDF and it will be parsed into Markdown, then filled into the description below',
     shortcut: '⌘/Ctrl + Enter to submit',
     saving: 'Creating…',
     savingOrganize: 'Creating… AI is organizing',
