@@ -289,6 +289,23 @@ CREATE TABLE IF NOT EXISTS user_projects (
 );
 CREATE INDEX IF NOT EXISTS idx_user_projects_user ON user_projects(user_id);
 
+-- Per-user project stars driving the "⭐ 星标项目" pinned block on /projects.
+-- Shape mirrors user_projects on purpose so the MySQL "indexed TEXT -> VARCHAR"
+-- fixup needs no special case.
+--
+-- user_id intentionally carries NO foreign key: the NOVA_AUTH_DISABLED bypass
+-- (middleware/auth.go) injects a synthetic principal with user_id="admin" that
+-- has no row in users. SQLite never enables PRAGMA foreign_keys so it wouldn't
+-- notice, but MySQL / PostgreSQL would reject the insert outright.
+CREATE TABLE IF NOT EXISTS project_stars (
+	user_id    TEXT NOT NULL,
+	project_id TEXT NOT NULL,
+	starred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (user_id, project_id),
+	FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_project_stars_user ON project_stars(user_id);
+
 CREATE TABLE IF NOT EXISTS sessions (
 	token       TEXT PRIMARY KEY,
 	user_id     TEXT NOT NULL,

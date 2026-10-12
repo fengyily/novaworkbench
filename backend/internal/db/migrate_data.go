@@ -37,6 +37,7 @@ var copyOrder = []string{
 	"acl_role_permissions",
 	"acl_user_roles",
 	"user_projects",
+	"project_stars",
 	"sessions",
 	"sub_tasks",
 	"scheduled_tasks",

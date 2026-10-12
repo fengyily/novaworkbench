@@ -179,6 +179,10 @@ export interface Project {
   requirement_count?: number;
   issue_count?: number;
   idea_count?: number;
+  // Per-user star, derived server-side from project_stars for the logged-in
+  // user — NOT a column on projects. Only populated by the list endpoints
+  // (GET /api/projects, GET /api/dashboard); single-project reads omit it.
+  starred?: boolean;
 }
 
 export interface DashboardData {
@@ -255,6 +259,12 @@ export const projectsApi = {
   // is still stamped so the badge reflects reality. Pair with the manual
   // "立即同步" button in ProjectDetail overview.
   syncNow: (id: string) => api.post<Project>(`/api/projects/${id}/sync`, {}),
+  // Toggle the per-user star. Starred projects are pinned into the
+  // "⭐ 星标项目" block above the paginated project list (and sort first on
+  // the dashboard). Returns {id, starred} so the caller can reconcile the
+  // optimistic local state.
+  setStar: (id: string, starred: boolean) =>
+    api.put<{ id: string; starred: boolean }>(`/api/projects/${id}/star`, { starred }),
   // Pick the project's commit-push sourcing strategy used by the
   // "完成开发 → 提交推送" pipeline. mode ∈ script_only | llm_only |
   // script_first | llm_first; script is the shell snippet whose stdout

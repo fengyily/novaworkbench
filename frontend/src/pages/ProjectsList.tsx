@@ -4,6 +4,12 @@ import { useTranslation } from 'react-i18next';
 import { projectsApi, type Project } from '../api/client';
 import { errorMessage } from '../utils/errMsg';
 import { fmtDateTime } from '../utils/intl';
+import { pageWindow } from '../utils/pageWindow';
+
+// Rows per page in the "全部项目" / trash tables. Matches the requirements
+// tab's REQ_PAGE_SIZE so both paginated tables feel the same. Starred
+// projects live in their own un-paginated block and don't count toward this.
+const PROJECT_PAGE_SIZE = 15;
 
 export default function ProjectsList() {
   const { t } = useTranslation();
@@ -33,6 +39,10 @@ export default function ProjectsList() {
   // One-shot backfill of missing AI descriptions
   const [backfilling, setBackfilling] = useState(false);
 
+  // Pagination of the non-starred list + per-project star toggle busy id.
+  const [page, setPage] = useState(1);
+  const [starBusy, setStarBusy] = useState<string | null>(null);
+
   const loadActive = useCallback(() => {
     setLoading(true);
     projectsApi.list()
@@ -53,6 +63,11 @@ export default function ProjectsList() {
     if (view === 'active') loadActive();
     else loadTrash();
   }, [view, loadActive, loadTrash]);
+
+  // Switching between the active list and the trash swaps the whole dataset —
+  // a page number carried over from the other view is meaningless. (The
+  // curPage clamp below is the second guard, for rows disappearing in place.)
+  useEffect(() => { setPage(1); }, [view]);
 
   // Auto-dismiss toast after 4s
   useEffect(() => {
@@ -117,6 +132,26 @@ export default function ProjectsList() {
       setError(errorMessage(e));
     } finally {
       setRestoringId(null);
+    }
+  };
+
+  // Star / unstar, applied optimistically: the row jumps between the pinned
+  // block and the paginated table immediately. A full reload would flash the
+  // whole table and reset the page position, so on failure we restore the
+  // previous flag instead of re-fetching.
+  const toggleStar = async (p: Project) => {
+    if (starBusy) return;
+    const next = !p.starred;
+    setStarBusy(p.id);
+    setError(null);
+    setProjects(prev => prev.map(x => (x.id === p.id ? { ...x, starred: next } : x)));
+    try {
+      await projectsApi.setStar(p.id, next);
+    } catch (e) {
+      setProjects(prev => prev.map(x => (x.id === p.id ? { ...x, starred: !next } : x)));
+      setError(`${t('projects.list.starFailed')}: ${errorMessage(e)}`);
+    } finally {
+      setStarBusy(null);
     }
   };
 
@@ -284,7 +319,114 @@ export default function ProjectsList() {
   };
 
   // ---- Render ----
-  const list = view === 'active' ? projects : trashProjects;
+  //
+  // On the active view the list splits in two: starred projects go into the
+  // un-paginated "⭐ 星标项目" block on top, everything else into the
+  // paginated table below. A project therefore appears in exactly one place.
+  // The trash view has no stars — it paginates the whole list.
+  const pinned = view === 'active' ? projects.filter(p => p.starred) : [];
+  const rest = view === 'active' ? projects.filter(p => !p.starred) : trashProjects;
+  const totalPages = Math.max(1, Math.ceil(rest.length / PROJECT_PAGE_SIZE));
+  // Clamp rather than trust `page`: starring or deleting a row can shrink the
+  // list under a page number that was valid a moment ago.
+  const curPage = Math.min(page, totalPages);
+  const paged = rest.slice((curPage - 1) * PROJECT_PAGE_SIZE, curPage * PROJECT_PAGE_SIZE);
+
+  // Shared row renderer for both tables. `showStar` is off in the trash,
+  // where starring a deleted project makes no sense.
+  const renderTable = (rows: Project[], showStar: boolean) => (
+    <table className="project-table" style={{ width: '100%' }}>
+      <thead>
+        <tr>
+          {showStar && <th className="col-star" aria-label={t('projects.list.colStar')} />}
+          <th>{t('projects.list.colName')}</th>
+          <th>{t('projects.list.colDesc')}</th>
+          <th>{t('projects.list.colType')}</th>
+          <th>{t('projects.list.colPath')}</th>
+          <th>{t('projects.list.colStatus')}</th>
+          <th>{t('projects.list.colRequirementCount')}</th>
+          <th>{t('projects.list.colIssueCount')}</th>
+          <th>{t('projects.list.colIdeaCount')}</th>
+          <th>{view === 'active' ? t('projects.list.colUpdated') : t('projects.list.colDeleted')}</th>
+          <th>{t('projects.list.colActions')}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(p => {
+          const noRemote = view === 'trash' && !p.remote_url;
+          return (
+            <tr
+              key={p.id}
+              className={view === 'active' ? 'clickable-row' : undefined}
+              onClick={view === 'active' ? () => navigate(`/projects/${p.id}`) : undefined}
+            >
+              {showStar && (
+                // stopPropagation: the whole row navigates to the detail
+                // page, and clicking the star must not leave the list.
+                <td className="col-star" onClick={e => e.stopPropagation()}>
+                  <button
+                    className={`star-btn${p.starred ? ' on' : ''}`}
+                    disabled={starBusy === p.id}
+                    aria-pressed={!!p.starred}
+                    title={t(p.starred ? 'projects.list.unstar' : 'projects.list.star')}
+                    onClick={() => toggleStar(p)}
+                  >
+                    {p.starred ? '★' : '☆'}
+                  </button>
+                </td>
+              )}
+              <td className="project-name">{p.name}</td>
+              <td className="project-desc-cell">
+                <div className="project-desc-clamp">
+                  {p.description || <span style={{ color: 'var(--color-text-muted)' }}>{t('projects.list.noDesc')}</span>}
+                </div>
+              </td>
+              <td><span className="type-tag">{p.project_type || 'Unknown'}</span></td>
+              <td className="path-cell" style={{ wordBreak: 'break-all' }}>
+                {p.local_path}
+                {view === 'trash' && p.deleted_dir ? (
+                  <span style={{ color: 'var(--color-warning)', fontSize: 11, marginLeft: 6 }}>{t('projects.list.dirDeleted')}</span>
+                ) : null}
+              </td>
+              <td><span className={`status-badge status-${p.status}`}>{statusBadge(p.status)}</span></td>
+              <td className="count-cell">{p.requirement_count ?? 0}</td>
+              <td className="count-cell">{p.issue_count ?? 0}</td>
+              <td className="count-cell">{p.idea_count ?? 0}</td>
+              <td>{fmtDateTime(view === 'active' ? p.updated_at : (p.deleted_at || p.updated_at))}</td>
+              <td onClick={e => e.stopPropagation()}>
+                {view === 'active' ? (
+                  <button
+                    className="btn btn-sm btn-danger"
+                    onClick={() => openDeleteModal(p)}
+                  >
+                    {t('projects.list.delete')}
+                  </button>
+                ) : (
+                  <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                    <button
+                      className="btn btn-sm btn-primary"
+                      onClick={() => handleRestore(p)}
+                      disabled={!!restoringId || noRemote}
+                      title={noRemote ? t('projects.list.noRemoteTitle') : undefined}
+                    >
+                      {restoringId === p.id ? t('projects.list.cloning') : t('projects.list.restore')}
+                    </button>
+                    <button
+                      className="btn btn-sm btn-danger"
+                      onClick={() => openPurgeModal(p)}
+                      disabled={!!restoringId}
+                    >
+                      {t('projects.list.purge')}
+                    </button>
+                  </div>
+                )}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
 
   return (
     <div style={{ width: '100%', position: 'relative' }}>
@@ -331,7 +473,7 @@ export default function ProjectsList() {
 
       {loading ? (
         <div className="loading">{t('projects.list.loading')}</div>
-      ) : list.length === 0 ? (
+      ) : pinned.length === 0 && rest.length === 0 ? (
         view === 'active' ? (
           <div className="mobile-empty">
             <span className="mobile-empty-mark">📁</span>
@@ -349,81 +491,53 @@ export default function ProjectsList() {
           </div>
         )
       ) : (
-        <table className="project-table" style={{ width: '100%' }}>
-          <thead>
-            <tr>
-              <th>{t('projects.list.colName')}</th>
-              <th>{t('projects.list.colDesc')}</th>
-              <th>{t('projects.list.colType')}</th>
-              <th>{t('projects.list.colPath')}</th>
-              <th>{t('projects.list.colStatus')}</th>
-              <th>{t('projects.list.colRequirementCount')}</th>
-              <th>{t('projects.list.colIssueCount')}</th>
-              <th>{t('projects.list.colIdeaCount')}</th>
-              <th>{view === 'active' ? t('projects.list.colUpdated') : t('projects.list.colDeleted')}</th>
-              <th>{t('projects.list.colActions')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {list.map(p => {
-              const noRemote = view === 'trash' && !p.remote_url;
-              return (
-                <tr
-                  key={p.id}
-                  className={view === 'active' ? 'clickable-row' : undefined}
-                  onClick={view === 'active' ? () => navigate(`/projects/${p.id}`) : undefined}
-                >
-                  <td className="project-name">{p.name}</td>
-                  <td className="project-desc-cell">
-                    <div className="project-desc-clamp">
-                      {p.description || <span style={{ color: 'var(--color-text-muted)' }}>{t('projects.list.noDesc')}</span>}
-                    </div>
-                  </td>
-                  <td><span className="type-tag">{p.project_type || 'Unknown'}</span></td>
-                  <td className="path-cell" style={{ wordBreak: 'break-all' }}>
-                    {p.local_path}
-                    {view === 'trash' && p.deleted_dir ? (
-                      <span style={{ color: 'var(--color-warning)', fontSize: 11, marginLeft: 6 }}>{t('projects.list.dirDeleted')}</span>
-                    ) : null}
-                  </td>
-                  <td><span className={`status-badge status-${p.status}`}>{statusBadge(p.status)}</span></td>
-                  <td className="count-cell">{p.requirement_count ?? 0}</td>
-                  <td className="count-cell">{p.issue_count ?? 0}</td>
-                  <td className="count-cell">{p.idea_count ?? 0}</td>
-                  <td>{fmtDateTime(view === 'active' ? p.updated_at : (p.deleted_at || p.updated_at))}</td>
-                  <td onClick={e => e.stopPropagation()}>
-                    {view === 'active' ? (
-                      <button
-                        className="btn btn-sm btn-danger"
-                        onClick={() => openDeleteModal(p)}
-                      >
-                        {t('projects.list.delete')}
-                      </button>
-                    ) : (
-                      <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-                        <button
-                          className="btn btn-sm btn-primary"
-                          onClick={() => handleRestore(p)}
-                          disabled={!!restoringId || noRemote}
-                          title={noRemote ? t('projects.list.noRemoteTitle') : undefined}
-                        >
-                          {restoringId === p.id ? t('projects.list.cloning') : t('projects.list.restore')}
-                        </button>
-                        <button
-                          className="btn btn-sm btn-danger"
-                          onClick={() => openPurgeModal(p)}
-                          disabled={!!restoringId}
-                        >
-                          {t('projects.list.purge')}
-                        </button>
-                      </div>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <>
+          {/* Starred projects: pinned above the list, never paginated, and
+              hidden entirely when nothing is starred. */}
+          {view === 'active' && pinned.length > 0 && (
+            <section className="pinned-section">
+              <h2 className="pinned-section-title">
+                {t('projects.list.pinnedTitle', { count: pinned.length })}
+              </h2>
+              {renderTable(pinned, true)}
+            </section>
+          )}
+
+          {view === 'active' && pinned.length > 0 && rest.length > 0 && (
+            <h2 className="project-list-section-title">{t('projects.list.allTitle')}</h2>
+          )}
+
+          {rest.length > 0 && renderTable(paged, view === 'active')}
+
+          {/* Pagination over the non-starred rows only; the info line shows
+              the true total for that group, not just the current page. */}
+          {totalPages > 1 && (
+            <div className="pagination">
+              <span className="pagination-info">
+                {t('projects.list.paginationInfo', { total: rest.length, cur: curPage, totalPages })}
+              </span>
+              <button className="btn btn-sm" disabled={curPage <= 1} onClick={() => setPage(curPage - 1)}>
+                {t('projects.list.paginationPrev')}
+              </button>
+              {pageWindow(totalPages, curPage).map((p, i) =>
+                p === '…' ? (
+                  <span key={`e${i}`} className="pagination-ellipsis">…</span>
+                ) : (
+                  <button
+                    key={p}
+                    className={`btn btn-sm${p === curPage ? ' active' : ''}`}
+                    onClick={() => setPage(p)}
+                  >
+                    {p}
+                  </button>
+                ),
+              )}
+              <button className="btn btn-sm" disabled={curPage >= totalPages} onClick={() => setPage(curPage + 1)}>
+                {t('projects.list.paginationNext')}
+              </button>
+            </div>
+          )}
+        </>
       )}
 
       {renderDeleteModal()}

@@ -18,6 +18,7 @@ import ProjectWeeklyReport from './ProjectWeeklyReport';
 import ProjectIssueMonitor from './ProjectIssueMonitor';
 import { IconPlug, IconRobot, IconClock } from '../components/icons';
 import { stripMarkdownPreview } from '../utils/preview';
+import { pageWindow } from '../utils/pageWindow';
 import { createEventStream, type EventStream } from '../api/stream';
 import './RequirementDetail.css';
 import './ProjectDetail.css';
@@ -73,23 +74,6 @@ const platformLabels: Record<string, string> = {
 
 // Requirements tab pagination: 15 rows per page, first page shown by default.
 const REQ_PAGE_SIZE = 15;
-
-// Page-number window for the pagination control — always include the first and
-// last page, keep a small neighborhood around the current one, and collapse the
-// gap in between into an ellipsis. Yields numbers interleaved with '…'.
-function reqPageWindow(total: number, current: number): (number | '…')[] {
-  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
-  const candidates = new Set([1, total, current - 1, current, current + 1]);
-  const pages = [...candidates].filter(p => p >= 1 && p <= total).sort((a, b) => a - b);
-  const out: (number | '…')[] = [];
-  let prev = 0;
-  for (const p of pages) {
-    if (prev && p - prev > 1) out.push('…');
-    out.push(p);
-    prev = p;
-  }
-  return out;
-}
 
 // SortHeader — clickable <th> that drives the requirements-tab sort state.
 // Renders the column label plus an arrow indicator (▲ / ▼) when active, and
@@ -2066,7 +2050,7 @@ export default function ProjectDetail() {
               <button className="btn btn-sm" disabled={curReqPage <= 1} onClick={() => setReqPage(curReqPage - 1)}>
                 {t('projects.detail.paginationPrev')}
               </button>
-              {reqPageWindow(totalReqPages, curReqPage).map((p, i) =>
+              {pageWindow(totalReqPages, curReqPage).map((p, i) =>
                 p === '…' ? (
                   <span key={`e${i}`} className="pagination-ellipsis">…</span>
                 ) : (

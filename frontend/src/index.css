@@ -1634,3 +1634,99 @@ select.form-input { cursor: pointer; }
 /* The scheduled-task log modal now lives in SchedulesPage.css under
    .schedules-log-* — the legacy .schedule-log-* rules have been
    removed to avoid duplicate styles for the same surface. */
+
+/* ── Shared pagination control ────────────────────────────────────────
+   Moved here from ProjectDetail.css once a second page (the project list)
+   started using it — relying on ProjectDetail.css happening to be in the
+   bundle was an implicit coupling. Used by the requirements tab and by
+   the paginated "全部项目" table. */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 0 4px;
+}
+
+.pagination-info {
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--color-text-muted, #64748b);
+}
+
+.pagination .btn {
+  min-width: 32px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  background: var(--color-surface, #fff);
+  color: var(--color-text);
+}
+
+.pagination .btn:hover:not(:disabled):not(.active) {
+  border-color: var(--color-primary, #4f46e5);
+  color: var(--color-primary, #4f46e5);
+}
+
+.pagination .btn.active {
+  background: var(--color-primary, #4f46e5);
+  border-color: var(--color-primary, #4f46e5);
+  color: #fff;
+  cursor: default;
+}
+
+.pagination .btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.pagination-ellipsis {
+  padding: 0 2px;
+  color: var(--color-text-muted, #64748b);
+  font-size: 12px;
+}
+
+@media (max-width: 768px) {
+  /* Pagination buttons get equal width so the user can tap them on touch. */
+  .pagination { justify-content: center; }
+  .pagination .btn { min-width: 44px; }
+}
+
+/* ── Project star / pinned block ──────────────────────────────────────
+   The ☆/★ toggle in the project table and the "⭐ 星标项目" section that
+   holds the starred rows above the paginated list. Amber is used only
+   here, so it doesn't collide with the Indigo/Slate/Emerald system. */
+.star-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  width: 24px;
+  height: 24px;
+  line-height: 24px;
+  font-size: 16px;
+  color: var(--color-text-muted, #64748b);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.star-btn:hover:not(:disabled) { color: #f59e0b; }
+.star-btn.on { color: #f59e0b; }
+.star-btn:disabled { opacity: 0.5; cursor: progress; }
+
+.pinned-section { margin-bottom: 24px; }
+.pinned-section-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text, #334155);
+  margin: 0 0 8px;
+}
+.project-list-section-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text, #334155);
+  margin: 0 0 8px;
+}
+
+.project-table th.col-star,
+.project-table td.col-star {
+  width: 36px;
+  text-align: center;
+}

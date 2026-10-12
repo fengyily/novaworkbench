@@ -65,26 +65,40 @@ func (s *ProjectService) List() ([]model.Project, error) {
 // see every non-deleted project; non-admins see only projects assigned via the
 // user_projects table. An empty userID with isAdmin=true (the historical
 // call site / NOVA_AUTH_DISABLED bypass) returns all projects.
+//
+// Rows carry a per-user `starred` flag from the project_stars LEFT JOIN and
+// starred projects sort first, so both /projects and the dashboard (which
+// reuses this through DashboardForUser) pin them to the top. With an empty
+// userID the JOIN matches nothing, every row is starred=false and the order
+// degrades to the historical updated_at DESC.
 func (s *ProjectService) ListForUser(userID string, isAdmin bool) ([]model.Project, error) {
-	q := `SELECT id, name, local_path, remote_url, status, default_branch,
-		project_type, claude_files, platform_type, platform_token_id, added_at, updated_at, last_scanned_at,
-		deleted_at, deleted_dir, description, description_manual, description_hash, claude_project_slug,
-		commit_lang, commit_lang_override, commit_lang_source, commit_lang_updated_at,
-		last_synced_at, last_synced_commit, sync_status,
-		requirement_count, issue_count, idea_count
-		FROM projects`
-	args := []any{}
+	// userID feeds the JOIN predicate, which precedes WHERE in the statement —
+	// it must therefore be the FIRST arg, because *db.DB rebinds `?` to $N on
+	// PostgreSQL strictly by position.
+	args := []any{userID}
+	// CASE WHEN ... THEN 0 ELSE 1 END (INTEGER) rather than a bare IS NOT NULL
+	// so the scanned type matches the existing description_manual INTEGER→bool
+	// path on all three dialects.
+	q := `SELECT p.id, p.name, p.local_path, p.remote_url, p.status, p.default_branch,
+		p.project_type, p.claude_files, p.platform_type, p.platform_token_id, p.added_at, p.updated_at, p.last_scanned_at,
+		p.deleted_at, p.deleted_dir, p.description, p.description_manual, p.description_hash, p.claude_project_slug,
+		p.commit_lang, p.commit_lang_override, p.commit_lang_source, p.commit_lang_updated_at,
+		p.last_synced_at, p.last_synced_commit, p.sync_status,
+		p.requirement_count, p.issue_count, p.idea_count,
+		CASE WHEN ps.user_id IS NULL THEN 0 ELSE 1 END AS starred
+		FROM projects p
+		LEFT JOIN project_stars ps ON ps.project_id = p.id AND ps.user_id = ?`
 	if !isAdmin || userID == "" {
 		if userID == "" {
 			// No user and not admin → nothing visible.
 			return []model.Project{}, nil
 		}
-		q += ` WHERE deleted_at IS NULL AND id IN (SELECT project_id FROM user_projects WHERE user_id = ?)`
+		q += ` WHERE p.deleted_at IS NULL AND p.id IN (SELECT project_id FROM user_projects WHERE user_id = ?)`
 		args = append(args, userID)
 	} else {
-		q += ` WHERE deleted_at IS NULL`
+		q += ` WHERE p.deleted_at IS NULL`
 	}
-	q += ` ORDER BY updated_at DESC`
+	q += ` ORDER BY starred DESC, p.updated_at DESC`
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -100,13 +114,49 @@ func (s *ProjectService) ListForUser(userID string, isAdmin bool) ([]model.Proje
 			&p.ClaudeProjectSlug,
 			&p.CommitLang, &p.CommitLangOverride, &p.CommitLangSource, &p.CommitLangUpdatedAt,
 			&p.LastSyncedAt, &p.LastSyncedCommit, &p.SyncStatus,
-		&p.RequirementCount, &p.IssueCount, &p.IdeaCount)
+		&p.RequirementCount, &p.IssueCount, &p.IdeaCount, &p.Starred)
 		if err != nil {
 			return nil, err
 		}
 		projects = append(projects, p)
 	}
 	return projects, nil
+}
+
+// SetStar toggles userID's star on projectID. Stars are a per-user view
+// preference: they only affect that user's list ordering, never anyone else's,
+// so no project.manage permission is required — the caller's access to the
+// project is checked by the handler.
+//
+// starred=false removes the row; re-starring an already-starred project only
+// refreshes starred_at, so the call is idempotent in both directions.
+func (s *ProjectService) SetStar(userID, projectID string, starred bool) error {
+	if userID == "" {
+		return fmt.Errorf("STAR_FAILED: missing user")
+	}
+	var exists int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM projects WHERE id = ? AND deleted_at IS NULL`, projectID,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("STAR_FAILED: lookup: %w", err)
+	}
+	if exists == 0 {
+		return fmt.Errorf("PROJECT_NOT_FOUND: %s", projectID)
+	}
+	if !starred {
+		if _, err := s.db.Exec(
+			`DELETE FROM project_stars WHERE user_id = ? AND project_id = ?`, userID, projectID,
+		); err != nil {
+			return fmt.Errorf("STAR_FAILED: delete: %w", err)
+		}
+		return nil
+	}
+	q := `INSERT INTO project_stars (user_id, project_id, starred_at) VALUES (?, ?, ?)` +
+		s.db.OnConflict("user_id, project_id", "starred_at = excluded.starred_at")
+	if _, err := s.db.Exec(q, userID, projectID, time.Now()); err != nil {
+		return fmt.Errorf("STAR_FAILED: insert: %w", err)
+	}
+	return nil
 }
 
 // CanAccess reports whether userID may access projectID. Admins see all; an
@@ -1510,7 +1560,7 @@ func (s *ProjectService) Purge(id string) error {
 	}
 
 	// Direct children keyed off project_id.
-	projScoped := []string{"token_usage", "memories", "knowledge", "conversations", "project_run_configs", "weekly_reports", "user_projects", "requirements"}
+	projScoped := []string{"token_usage", "memories", "knowledge", "conversations", "project_run_configs", "weekly_reports", "user_projects", "project_stars", "requirements"}
 	for _, tbl := range projScoped {
 		if _, err := tx.Exec(`DELETE FROM `+tbl+` WHERE project_id = ?`, id); err != nil {
 			return fmt.Errorf("PURGE_FAILED: %s: %w", tbl, err)

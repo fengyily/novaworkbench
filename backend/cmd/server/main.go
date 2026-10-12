@@ -504,6 +504,11 @@ func main() {
 	mux.HandleFunc("PATCH /api/projects/{id}", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.UpdateBasicInfo)).ServeHTTP)
 	mux.HandleFunc("PATCH /api/projects/{id}/platform", projectH.UpdatePlatform)
 
+	// Per-user project star (pins the project to the top of /projects and the
+	// dashboard). Deliberately NOT behind project.manage — starring is a
+	// personal view preference, and the handler already enforces CanAccess.
+	mux.HandleFunc("PUT /api/projects/{id}/star", projectH.SetStar)
+
 	// Manual repo sync — pulls origin/<default_branch> and refreshes sync badge.
 	mux.HandleFunc("POST /api/projects/{id}/sync", projectH.SyncNow)
 
