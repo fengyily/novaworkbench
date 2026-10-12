@@ -226,3 +226,175 @@ func TestConvertPdfTextToMarkdown_EmptyContentFromReasoningModel(t *testing.T) {
 		t.Errorf("error message should include the raw body snippet (got: %q) so the operator can confirm the reasoning-model cause", msg)
 	}
 }
+
+// TestConvertPdfTextToMarkdown_SalvagesAnswerFromReasoningContent covers
+// the salvage path: a reasoning model returns an empty `content` but its
+// `reasoning_content` actually contains a polished markdown document
+// (heading + list). The gateway must extract that markdown and surface it
+// to the caller — otherwise the user gets a 500 on a PDF upload whose
+// answer was sitting in the response the whole time.
+//
+// Mirrors the real-world DeepSeek-V3-flash / R1 behavior: the gateway
+// returns everything in reasoning_content, leaves content empty. The
+// caller must still produce a knowledge row.
+func TestConvertPdfTextToMarkdown_SalvagesAnswerFromReasoningContent(t *testing.T) {
+	const reasoningTrace = "We need to produce a Markdown document from the raw extracted PDF text. " +
+		"The user uploaded a manual page so the structure should follow the document's chapter order.\n\n" +
+		"Final Answer:\n" +
+		"# 设备维护手册\n\n" +
+		"- 第 1 章：开机自检\n" +
+		"- 第 2 章：日常维护\n" +
+		"- 第 3 章：故障排查"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Reasoning model: empty content, full answer in reasoning_content
+		// after a "Final Answer:" transition.
+		resp := `{"choices":[{"message":{"content":"","reasoning_content":` +
+			jsonEscape(reasoningTrace) +
+			`}}],"usage":{"prompt_tokens":42,"completion_tokens":99,"total_tokens":141}}`
+		_, _ = w.Write([]byte(resp))
+	}))
+	defer srv.Close()
+
+	g := New(nil, fakeLLMConfig{baseURL: srv.URL, apiKey: "k", model: "deepseek-flash"})
+	md, usage, err := g.ConvertPdfTextToMarkdown("some raw pdf text", "manual.pdf")
+	if err != nil {
+		t.Fatalf("expected salvage to succeed, got error: %v", err)
+	}
+	if !strings.HasPrefix(md, "# 设备维护手册") {
+		t.Errorf("expected salvaged heading, got: %q", md)
+	}
+	if !strings.Contains(md, "- 第 1 章") {
+		t.Errorf("expected salvaged list item, got: %q", md)
+	}
+	// Defensive: scratchpad chatter that came BEFORE the "Final Answer:"
+	// marker must NOT leak into the user-facing markdown.
+	if strings.Contains(md, "We need to produce") {
+		t.Errorf("scratchpad prose leaked into salvaged markdown: %q", md)
+	}
+	if usage == nil {
+		t.Fatalf("expected non-nil usage")
+	}
+	if usage.CompletionTokens != 99 {
+		t.Errorf("usage completion tokens wrong: got %d want 99", usage.CompletionTokens)
+	}
+}
+
+// TestConvertPdfTextToMarkdown_SalvagesViaLastHeading covers the fallback
+// salvage path: reasoning_content has no explicit transition marker but
+// the actual markdown answer starts at a heading later in the trace.
+// Common when DeepSeek-style models just think-then-write with no
+// "Final Answer:" prefix.
+func TestConvertPdfTextToMarkdown_SalvagesViaLastHeading(t *testing.T) {
+	const reasoningTrace = "Step 1: parse the document.\n" +
+		"Step 2: identify chapter boundaries.\n" +
+		"Step 3: write the polished markdown.\n\n" +
+		"# 产品规格表\n\n" +
+		"| 型号 | 尺寸 |\n" +
+		"| --- | --- |\n" +
+		"| A1 | 10cm |"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := `{"choices":[{"message":{"content":"","reasoning_content":` +
+			jsonEscape(reasoningTrace) +
+			`}}]}`
+		_, _ = w.Write([]byte(resp))
+	}))
+	defer srv.Close()
+
+	g := New(nil, fakeLLMConfig{baseURL: srv.URL, apiKey: "k", model: "deepseek-flash"})
+	md, _, err := g.ConvertPdfTextToMarkdown("raw", "spec.pdf")
+	if err != nil {
+		t.Fatalf("expected salvage to succeed via heading fallback, got error: %v", err)
+	}
+	if !strings.HasPrefix(md, "# 产品规格表") {
+		t.Errorf("expected heading from last-occurrence fallback, got: %q", md)
+	}
+	if !strings.Contains(md, "| A1 |") {
+		t.Errorf("expected table row from salvaged markdown, got: %q", md)
+	}
+	if strings.Contains(md, "Step 1") {
+		t.Errorf("scratchpad prose leaked into salvaged markdown: %q", md)
+	}
+}
+
+// TestSalvageMarkdownFromReasoning is the unit test for the helper itself.
+// Each case documents a real-world response shape and what the helper
+// should do with it.
+func TestSalvageMarkdownFromReasoning(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string // expected returned markdown; "" means helper returns empty
+	}{
+		{
+			name: "empty input",
+			in:   "",
+			want: "",
+		},
+		{
+			name: "whitespace-only input",
+			in:   "  \n\t  ",
+			want: "",
+		},
+		{
+			name: "pure scratchpad prose, no markdown structure",
+			in:   "I need to think about this carefully. The user wants a markdown document but I haven't produced one yet.",
+			want: "",
+		},
+		{
+			name: "single heading line, no body — looks like scratchpad",
+			in:   "Some thinking\n# Step 1\nMore thinking",
+			want: "",
+		},
+		{
+			name: "explicit Final Answer marker with full document",
+			in: "We need to produce a markdown document.\n\nFinal Answer:\n" +
+				"# Title\n\n- item 1\n- item 2",
+			want: "# Title\n\n- item 1\n- item 2",
+		},
+		{
+			name: "explicit Markdown Output marker",
+			in: "Thinking trace here.\n\nMarkdown Output:\n# Doc\n\n| a | b |\n| - | - |",
+			want: "# Doc\n\n| a | b |\n| - | - |",
+		},
+		{
+			name: "last heading fallback when no transition marker",
+			in: "Step 1: parse\nStep 2: structure\n# 报告\n\n- 第一条\n- 第二条",
+			want: "# 报告\n\n- 第一条\n- 第二条",
+		},
+		{
+			name: "transition marker but only prose after it — no salvage",
+			in:   "Reasoning.\n\nFinal Answer:\nLet me explain the conclusion in prose with no markdown at all.",
+			want: "",
+		},
+		{
+			name: "multiple Final Answer markers — take the LAST",
+			in: "First guess (wrong):\n\nFinal Answer:\nnot the real answer\n\nBetter analysis:\n\nFinal Answer:\n# Real Answer\n\n- final point",
+			want: "# Real Answer\n\n- final point",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := salvageMarkdownFromReasoning(tc.in)
+			if got != tc.want {
+				t.Errorf("salvage mismatch:\n got: %q\nwant: %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// jsonEscape returns a JSON-encoded string value (including the surrounding
+// double quotes), so fixture strings can contain any printable or control
+// character and still embed cleanly inside a hand-written JSON object.
+// Delegates to json.Marshal so all escaping rules (quotes, backslashes,
+// control chars, surrogate pairs, etc.) are handled correctly.
+func jsonEscape(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic("jsonEscape: " + err.Error())
+	}
+	return string(b)
+}
