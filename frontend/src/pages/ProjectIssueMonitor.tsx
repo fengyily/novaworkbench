@@ -189,6 +189,19 @@ export default function ProjectIssueMonitor({ projectId }: { projectId: string }
         <span className="form-hint">{t('settings.issueMonitor.intervalHint')}</span>
       </div>
 
+      <div className="form-group">
+        <label>{t('settings.issueMonitor.maxConcurrent')}</label>
+        <input
+          className="form-input"
+          type="number"
+          min={1}
+          max={20}
+          value={form.max_concurrent_launches}
+          onChange={e => setForm({ ...form, max_concurrent_launches: Math.max(1, Number(e.target.value) || 1) })}
+        />
+        <span className="form-hint">{t('settings.issueMonitor.maxConcurrentHint')}</span>
+      </div>
+
       {/* ── 执行方式 ────────────────────────────────────────────── */}
       <div className="form-group">
         <label>{t('settings.issueMonitor.launchMode')}</label>
@@ -516,6 +529,7 @@ function emptyForm(): UpdateIssueMonitorReq {
     auto_push: false,
     comment_on_pr: false,
     interval_minutes: 5,
+    max_concurrent_launches: 1,
     active: false,
   };
 }
@@ -541,6 +555,9 @@ function toForm(mon: IssueMonitor): UpdateIssueMonitorReq {
     auto_push: mon.auto_push,
     comment_on_pr: mon.comment_on_pr,
     interval_minutes: mon.interval_minutes || 5,
+    // Default to 1 for older rows that predate this column — the
+    // backend also normalizes <1 → 1, so both layers agree.
+    max_concurrent_launches: mon.max_concurrent_launches || 1,
     active: mon.active,
   };
 }

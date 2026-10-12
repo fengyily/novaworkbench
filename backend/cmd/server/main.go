@@ -386,6 +386,25 @@ func main() {
 	go issueQueue.Start()
 	defer issueQueue.Stop()
 
+	// Pending-launch drain queue (v0.5.x+). IssueMonitorQueue above does
+	// the polling + requirement creation; this queue drains the rows
+	// that polling enqueued, under each monitor's max_concurrent_launches
+	// cap. The two are independent on purpose — polling cadence is gated
+	// by the platform's API rate, dispatch cadence is gated by the
+	// user's token budget. NOVA_IMPL_TICK overrides the 30s default.
+	implQueue := scheduler.NewIssueMonitorLaunchQueue(
+		database, issueMonSvc, schedSvc,
+		func(ctx context.Context, requirementID string, spec model.LaunchSpec) (string, string, string, string) {
+			return wizardH.RunLaunchForMonitor(ctx, requirementID, spec, schedSvc)
+		},
+		0, // 0 → default cadence resolved inside the constructor
+	)
+	if err := implQueue.Recover(); err != nil {
+		log.Printf("[main] impl-queue recover: %v", err)
+	}
+	go implQueue.Start()
+	defer implQueue.Stop()
+
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)

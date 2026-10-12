@@ -65,7 +65,13 @@ type IssueMonitor struct {
 	CommentPosted bool `json:"comment_posted"` // one-shot guard against double-commenting
 
 	IntervalMinutes int        `json:"interval_minutes"` // 1..60*24*7; clamped at write time to >=1 and to ceil(NOVA_ISSUE_MONITOR_INTERVAL / 60)
-	Active          bool       `json:"active"`
+	// MaxConcurrentLaunches caps how many imported-by-this-monitor requirements
+	// may be in the wizard pipeline (analyzing/designing/designed/developing)
+	// at the same time. Excess imports queue in issue_monitor_pending_launches
+	// until a slot frees. Default 1: "import one, develop one" — raise to
+	// 2-3 only when the user actually wants concurrency. Clamped to >=1.
+	MaxConcurrentLaunches int        `json:"max_concurrent_launches"`
+	Active                bool       `json:"active"`
 	LastRunAt       *time.Time `json:"last_run_at,omitempty"`
 	LastStatus      string     `json:"last_status"` // "ok" | "partial" | "failed"
 	LastError       string     `json:"last_error"`

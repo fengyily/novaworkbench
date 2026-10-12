@@ -149,6 +149,7 @@ func (s *IssueMonitorService) GetByProject(ctx context.Context, projectID string
 				coding_model, coding_claude_config_id, coding_agent_server_id,
 				recurrence, recur_time, recur_days, recur_tz,
 				auto_push, comment_on_pr, comment_posted, interval_minutes,
+				max_concurrent_launches,
 				active, last_run_at, last_status, last_error, run_count,
 				created_at, updated_at
 		 FROM issue_monitors WHERE project_id = ?`, projectID)
@@ -173,6 +174,7 @@ func (s *IssueMonitorService) GetByID(ctx context.Context, id string) (*model.Is
 				coding_model, coding_claude_config_id, coding_agent_server_id,
 				recurrence, recur_time, recur_days, recur_tz,
 				auto_push, comment_on_pr, comment_posted, interval_minutes,
+				max_concurrent_launches,
 				active, last_run_at, last_status, last_error, run_count,
 				created_at, updated_at
 		 FROM issue_monitors WHERE id = ?`, id)
@@ -197,6 +199,7 @@ func (s *IssueMonitorService) ListActive(ctx context.Context) ([]model.IssueMoni
 				coding_model, coding_claude_config_id, coding_agent_server_id,
 				recurrence, recur_time, recur_days, recur_tz,
 				auto_push, comment_on_pr, comment_posted, interval_minutes,
+				max_concurrent_launches,
 				active, last_run_at, last_status, last_error, run_count,
 				created_at, updated_at
 		 FROM issue_monitors WHERE active = 1 ORDER BY last_run_at`)
@@ -250,14 +253,16 @@ func (s *IssueMonitorService) Upsert(ctx context.Context, mon *model.IssueMonito
 				 coding_model, coding_claude_config_id, coding_agent_server_id,
 				 recurrence, recur_time, recur_days, recur_tz,
 				 auto_push, comment_on_pr, comment_posted, interval_minutes,
+				 max_concurrent_launches,
 				 active, run_count, created_at, updated_at)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			mon.ID, mon.ProjectID, mon.Label,
 			mon.LaunchMode, boolInt(mon.SkipDesign),
 			mon.DesignModel, mon.DesignClaudeConfigID, mon.DesignAgentServerID,
 			mon.CodingModel, mon.CodingClaudeConfigID, mon.CodingAgentServerID,
 			mon.Recurrence, mon.RecurTime, mon.RecurDays, mon.RecurTZ,
 			boolInt(mon.AutoPush), boolInt(mon.CommentOnPR), boolInt(mon.CommentPosted), mon.IntervalMinutes,
+			mon.MaxConcurrentLaunches,
 			boolInt(mon.Active), mon.RunCount, now, now)
 		if err != nil {
 			return err
@@ -280,6 +285,7 @@ func (s *IssueMonitorService) Upsert(ctx context.Context, mon *model.IssueMonito
 			coding_model = ?, coding_claude_config_id = ?, coding_agent_server_id = ?,
 			recurrence = ?, recur_time = ?, recur_days = ?, recur_tz = ?,
 			auto_push = ?, comment_on_pr = ?, interval_minutes = ?,
+			max_concurrent_launches = ?,
 			active = ?, updated_at = ?
 		 WHERE id = ?`,
 		mon.Label, mon.LaunchMode, boolInt(mon.SkipDesign),
@@ -287,6 +293,7 @@ func (s *IssueMonitorService) Upsert(ctx context.Context, mon *model.IssueMonito
 		mon.CodingModel, mon.CodingClaudeConfigID, mon.CodingAgentServerID,
 		mon.Recurrence, mon.RecurTime, mon.RecurDays, mon.RecurTZ,
 		boolInt(mon.AutoPush), boolInt(mon.CommentOnPR), mon.IntervalMinutes,
+		mon.MaxConcurrentLaunches,
 		boolInt(mon.Active), now, mon.ID)
 	if err != nil {
 		return err
@@ -438,22 +445,44 @@ func (s *IssueMonitorService) RunOne(ctx context.Context, monitorID string) erro
 			continue
 		}
 		created++
-		// Dispatch the development run. buildLaunchSpec returns nil for
-		// launch_mode=create_only, in which case the requirement is left for
-		// a human to drive manually. A nil LaunchFn (early-boot race)
-		// degrades the same way instead of failing the whole tick.
+		// Enqueue (don't dispatch). Decoupling "import" from "start wizard"
+		// is what stops a 10-issue tick from spawning 10 claude processes
+		// back-to-back: each row lands in issue_monitor_pending_launches
+		// and the per-monitor max_concurrent_launches cap is enforced on
+		// the dispatch side (scheduler.IssueMonitorLaunchQueue). See the
+		// package doc on this table for the lifecycle.
+		//
+		// buildLaunchSpec returns nil for launch_mode=create_only — those
+		// requirements stay on the list for a human to drive manually.
+		// A buildLaunchSpec failure here is a row-level error (e.g. an
+		// invalid recur_time the UI shouldn't have produced); we log + keep
+		// going rather than poisoning the whole tick.
 		spec, specErr := s.buildLaunchSpec(mon)
 		if specErr != nil {
 			log.Printf("[issue-monitor] monitor=%s req=%s build launch spec failed: %v", monitorID, id, specErr)
 			lastCreateErr = specErr
-		} else if spec != nil && s.LaunchFn != nil {
-			mode, schedID, errCode, errMsg := s.LaunchFn(ctx, id, *spec)
-			if errCode != "" {
-				log.Printf("[issue-monitor] monitor=%s req=%s launch(%s) failed: %s: %s", monitorID, id, spec.Mode, errCode, errMsg)
-				lastCreateErr = fmt.Errorf("wizard launch %s: %s", errCode, errMsg)
-			} else if mode == model.LaunchModeScheduled {
-				log.Printf("[issue-monitor] monitor=%s req=%s scheduled task=%s run_at=%s", monitorID, id, schedID, spec.Schedule.RunAt)
+			continue
+		}
+		if spec == nil {
+			continue
+		}
+		runAt := time.Now()
+		if spec.Mode == model.LaunchModeScheduled && spec.Schedule != nil {
+			// Reuse the same NextRunAt resolution the wizard would have
+			// used; the resulting run_at is the user's "first window" for
+			// this Issue, identical to the old dispatchScheduled output.
+			rt, err := time.Parse(time.RFC3339, spec.Schedule.RunAt)
+			if err != nil {
+				log.Printf("[issue-monitor] monitor=%s req=%s parse run_at failed: %v", monitorID, id, err)
+				lastCreateErr = err
+				continue
 			}
+			runAt = rt
+		}
+		if err := s.enqueueLaunch(ctx, monitorID, id, spec.Mode, runAt); err != nil {
+			log.Printf("[issue-monitor] monitor=%s req=%s enqueue launch failed: %v", monitorID, id, err)
+			lastCreateErr = err
+			continue
 		}
 	}
 	status := "ok"
@@ -609,6 +638,13 @@ func (s *IssueMonitorService) normalize(mon *model.IssueMonitor) error {
 	if mon.IntervalMinutes > 60*24*7 {
 		mon.IntervalMinutes = 60 * 24 * 7 // one week cap
 	}
+	// MaxConcurrentLaunches clamp: >=1 (zero would wedge every dispatch
+	// forever — same reasoning as the project limiter's normalization).
+	// No upper bound — the cap is whatever the user is comfortable with
+	// relative to their token budget; the form's UI is the gate.
+	if mon.MaxConcurrentLaunches < 1 {
+		mon.MaxConcurrentLaunches = 1
+	}
 	return nil
 }
 
@@ -711,6 +747,7 @@ func scanMonitor(row *sql.Row) (*model.IssueMonitor, error) {
 		&m.CodingModel, &m.CodingClaudeConfigID, &m.CodingAgentServerID,
 		&m.Recurrence, &m.RecurTime, &m.RecurDays, &m.RecurTZ,
 		&m.AutoPush, &m.CommentOnPR, &m.CommentPosted, &m.IntervalMinutes,
+		&m.MaxConcurrentLaunches,
 		&m.Active, &m.LastRunAt, &m.LastStatus, &m.LastError, &m.RunCount,
 		&m.CreatedAt, &m.UpdatedAt,
 	); err != nil {
@@ -729,6 +766,7 @@ func scanMonitorRows(rows *sql.Rows) (*model.IssueMonitor, error) {
 		&m.CodingModel, &m.CodingClaudeConfigID, &m.CodingAgentServerID,
 		&m.Recurrence, &m.RecurTime, &m.RecurDays, &m.RecurTZ,
 		&m.AutoPush, &m.CommentOnPR, &m.CommentPosted, &m.IntervalMinutes,
+		&m.MaxConcurrentLaunches,
 		&m.Active, &m.LastRunAt, &m.LastStatus, &m.LastError, &m.RunCount,
 		&m.CreatedAt, &m.UpdatedAt,
 	); err != nil {
@@ -803,4 +841,179 @@ func decodeURL(raw string) (*url.URL, error) {
 		return nil, errors.New("remote_url empty")
 	}
 	return url.Parse(raw)
+}
+
+// enqueueLaunch INSERTs a row into issue_monitor_pending_launches for the
+// (monitor, requirement) pair. Caller is responsible for choosing runAt
+// (now() for immediate, NextRunAt(...) for scheduled). The unique
+// constraint on requirement_id makes a second INSERT a no-op failure
+// rather than a duplicate dispatch — useful as a defense-in-depth
+// (RunOne's per-monitor mutex already prevents the same-monitor race).
+func (s *IssueMonitorService) enqueueLaunch(ctx context.Context, monitorID, requirementID, mode string, runAt time.Time) error {
+	if monitorID == "" || requirementID == "" {
+		return errors.New("monitor_id and requirement_id required")
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO issue_monitor_pending_launches
+			(id, monitor_id, requirement_id, mode, run_at, attempts, last_error, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, 0, '', ?, ?)`,
+		util.NewID("iml"), monitorID, requirementID, mode, runAt, runAt, runAt)
+	return err
+}
+
+// CountInFlightLaunches returns the number of requirements imported by
+// `monitorID` that are currently in the wizard pipeline (analyzing /
+// designing / designed / developing). Used by the launch queue to compute
+// `free = max_concurrent_launches - in_flight` BEFORE selecting pending
+// rows, so we never start more than the cap.
+//
+// Imported-by-this-monitor is the only condition: an end-user requirement
+// for the same project that happens to also be "developing" does NOT count
+// against this monitor's cap (otherwise unrelated work would wedge the
+// monitor's queue). The join through pending_launches → requirement_id is
+// the cheapest way to express "this requirement was put in the pipeline by
+// me".
+func (s *IssueMonitorService) CountInFlightLaunches(ctx context.Context, monitorID string) (int, error) {
+	if monitorID == "" {
+		return 0, errors.New("monitor_id required")
+	}
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM issue_monitor_pending_launches pl
+		 JOIN requirements r ON r.id = pl.requirement_id
+		 WHERE pl.monitor_id = ?
+		   AND r.status IN ('analyzing','designing','designed','developing')`,
+		monitorID,
+	).Scan(&n)
+	return n, err
+}
+
+// PendingLaunch is a row from issue_monitor_pending_launches — the dispatch
+// shape the launch queue needs. Kept here (not in model/) because it's a
+// pure service-layer projection with no JSON wire shape; exposing it
+// through the model package would invite drift if the column list grows.
+type PendingLaunch struct {
+	ID            string
+	MonitorID     string
+	RequirementID string
+	Mode          string // "immediate" | "scheduled"
+	RunAt         time.Time
+	Attempts      int
+	LastError     string
+}
+
+// ClaimDueLaunches atomically claims up to `limit` due rows for `monitorID`,
+// returning the rows in run_at order. "Claim" = DELETE them under a
+// transaction and return the values; the dispatch either succeeds (the
+// wizard now owns the requirement) or fails (RecordLaunchFailure re-INSERTs
+// with bumped attempts + deferred run_at).
+//
+// Why DELETE-then-return instead of SELECT FOR UPDATE: SQLite/MySQL/PG all
+// have slightly different "lock returned rows" semantics, and we want
+// portable code without per-dialect branches. The atomicity we actually
+// need is "no other tick sees this row" — DELETE delivers that across
+// all three drivers with identical semantics.
+//
+// On dispatch failure the queue re-inserts the row with attempts+1 (see
+// RecordLaunchFailure). If the backend crashes between the DELETE and the
+// re-insert, the row is gone — acceptable for v0.5.x since the orphaned
+// requirement is just "stuck in the wizard state it was in", exactly the
+// failure mode RecoverInterrupted already handles for sub_tasks.
+func (s *IssueMonitorService) ClaimDueLaunches(ctx context.Context, monitorID string, limit int) ([]PendingLaunch, error) {
+	if monitorID == "" || limit <= 0 {
+		return nil, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	// Tx has no Query method (the wrapper only exposes Exec/QueryRow), so
+	// we go through the embedded *sql.Tx with an explicit Rebind to keep
+	// the ?/$N rewriting portable across SQLite/MySQL/Postgres.
+	rows, err := tx.Tx.Query(
+		s.db.Rebind(
+			`SELECT id, monitor_id, requirement_id, mode, run_at, attempts, last_error
+			 FROM issue_monitor_pending_launches
+			 WHERE monitor_id = ? AND run_at <= ?
+			 ORDER BY run_at
+			 LIMIT ?`),
+		monitorID, time.Now(), limit)
+	if err != nil {
+		return nil, err
+	}
+	var out []PendingLaunch
+	for rows.Next() {
+		var p PendingLaunch
+		if err := rows.Scan(&p.ID, &p.MonitorID, &p.RequirementID, &p.Mode, &p.RunAt, &p.Attempts, &p.LastError); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(out) == 0 {
+		return nil, tx.Commit()
+	}
+	// DELETE the claimed rows. Per-dialect placeholder: `s.db.Exec` already
+	// rewrites ? → $N on Postgres, so the helper handles the bind list
+	// correctly across drivers.
+	ids := make([]any, 0, len(out))
+	placeholders := make([]string, 0, len(out))
+	for _, p := range out {
+		ids = append(ids, p.ID)
+		placeholders = append(placeholders, "?")
+	}
+	stmt := "DELETE FROM issue_monitor_pending_launches WHERE id IN (" + strings.Join(placeholders, ",") + ")"
+	if _, err := tx.Exec(stmt, ids...); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RecordLaunchFailure re-inserts a claimed-but-failed launch row with
+// attempts+1 and a deferred run_at. The first failure retries after 1
+// minute; subsequent failures double the delay, capped at 30 minutes.
+// After maxAttempts the row is re-inserted but with run_at pinned far in
+// the future so the tick stops picking it up — the operator's signal is
+// "the queue stopped retrying" + the row's last_error column.
+//
+// Returns the row's new run_at so the caller can log "next retry at ...".
+func (s *IssueMonitorService) RecordLaunchFailure(ctx context.Context, p PendingLaunch, errMsg string, maxAttempts int) (time.Time, error) {
+	if p.ID == "" || p.MonitorID == "" || p.RequirementID == "" {
+		return time.Time{}, errors.New("pending launch row missing required fields")
+	}
+	if maxAttempts <= 0 {
+		maxAttempts = 5
+	}
+	attempts := p.Attempts + 1
+	var delay time.Duration
+	if attempts > maxAttempts {
+		// Pin run_at one week out so the queue stops retrying. The row is
+		// still in the table so an operator can inspect / manually bump it.
+		delay = 7 * 24 * time.Hour
+	} else {
+		// 1, 2, 4, 8, 16 minutes; capped at 30.
+		delay = time.Duration(1<<uint(attempts-1)) * time.Minute
+		if delay > 30*time.Minute {
+			delay = 30 * time.Minute
+		}
+	}
+	nextRun := time.Now().Add(delay)
+	_, err := s.db.Exec(
+		`INSERT INTO issue_monitor_pending_launches
+			(id, monitor_id, requirement_id, mode, run_at, attempts, last_error, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, p.MonitorID, p.RequirementID, p.Mode, nextRun, attempts, errMsg, nextRun, nextRun)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return nextRun, nil
 }

@@ -532,6 +532,14 @@ CREATE TABLE IF NOT EXISTS issue_monitors (
 	-- floor NOVA_ISSUE_MONITOR_INTERVAL — a 30s env forces a 1-minute minimum
 	-- regardless of what the user typed in the UI).
 	interval_minutes  INTEGER NOT NULL DEFAULT 5,
+	-- max_concurrent_launches: per-monitor parallel-launch cap. Mirrors
+	-- subtask.concurrency in spirit: at most N requirements imported by this
+	-- monitor may be in the wizard pipeline (analyzing/designing/designed/
+	-- developing) at once. The rest sit in issue_monitor_pending_launches
+	-- until a slot frees up. Default 1 keeps the "import one, develop one"
+	-- mental model. The user-visible knob in the form unlocks 2/3 when
+	-- they actually want concurrency.
+	max_concurrent_launches INTEGER NOT NULL DEFAULT 1,
 	-- active: master pause toggle. The ticker only walks active=1 rows and
 	-- the toggle flips to 0 instantly on PUT, taking effect on the next tick.
 	active            INTEGER NOT NULL DEFAULT 1,
@@ -549,6 +557,51 @@ CREATE TABLE IF NOT EXISTS issue_monitors (
 -- constraint would have required dialect-specific partial-unique gymnastics.
 CREATE INDEX IF NOT EXISTS idx_issue_monitors_active  ON issue_monitors(active, last_run_at);
 CREATE INDEX IF NOT EXISTS idx_issue_monitors_project ON issue_monitors(project_id);
+
+-- Pending-launch queue. Decouples "import Issue + write requirement" from
+-- "start design/coding": RunOne just inserts rows here when it imports K
+-- issues at once, and the new scheduler.IssueMonitorLaunchQueue drains them
+-- under the per-monitor max_concurrent_launches cap. Without this table,
+-- importing 10 issues at once would spawn 10 claude subprocesses back-to-back
+-- and exhaust the project limiter / token budget.
+--
+-- Lifecycle:
+--   RunOne INSERTs a row when spec != nil (mode != create_only).
+--   LaunchQueue tick SELECTs due rows ORDER BY run_at, dispatches each via
+--     the wizard dispatch path, and DELETEs the row on dispatch attempt
+--     (success AND failure — failures bump attempts + push run_at forward).
+--   The cap is enforced on the dispatch side, not here, so a stuck monitor
+--     doesn't deadlock the table.
+--
+-- run_at semantics:
+--   - immediate: now() at RunOne time (so the next tick picks it up
+--     immediately, subject to the per-monitor cap).
+--   - scheduled: NextRunAt(monitor.recur_*) computed by RunOne. Identical
+--     to the value that would have been handed to dispatchScheduled.
+--   - on dispatch failure: bumped by min(2^attempts, 30) minutes, capped at
+--     5 attempts. After that last_error holds the failure description and
+--     the queue stops retrying.
+--
+-- Unique on requirement_id: a single imported requirement must not appear
+-- twice. The pair (monitor_id, requirement_id) is logically redundant but
+-- the per-row UNIQUE is cheaper than a composite and the FK already pins
+-- project_id through the monitor row.
+CREATE TABLE IF NOT EXISTS issue_monitor_pending_launches (
+	id              TEXT PRIMARY KEY,
+	monitor_id      TEXT NOT NULL,
+	requirement_id  TEXT NOT NULL UNIQUE,
+	mode            TEXT NOT NULL,             -- "immediate" | "scheduled"
+	run_at          DATETIME NOT NULL,
+	attempts        INTEGER NOT NULL DEFAULT 0,
+	last_error      TEXT NOT NULL DEFAULT '',
+	created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (monitor_id) REFERENCES issue_monitors(id) ON DELETE CASCADE
+);
+-- Hot path: tick scans WHERE monitor_id = ? AND run_at <= now() ORDER BY run_at
+-- LIMIT free. (monitor_id, run_at) is the natural covering index.
+CREATE INDEX IF NOT EXISTS idx_impl_monitor_due
+	ON issue_monitor_pending_launches(monitor_id, run_at);
 `
 
 // alterColumns adds columns to older databases. ALTER TABLE fails when the
@@ -1172,13 +1225,19 @@ var alterColumns = []string{
 	`ALTER TABLE issue_monitors ADD COLUMN recur_time              TEXT    NOT NULL DEFAULT '09:00'`,
 	`ALTER TABLE issue_monitors ADD COLUMN recur_days              TEXT    NOT NULL DEFAULT ''`,
 	`ALTER TABLE issue_monitors ADD COLUMN recur_tz                TEXT    NOT NULL DEFAULT ''`,
+	// max_concurrent_launches: per-monitor parallel-launch cap for the
+	// pending_launches queue (v0.5.x+). Default 1 — the conservative
+	// "import one, develop one" baseline; the form unlocks 2/3 when the user
+	// actually wants concurrency. INTEGER NOT NULL DEFAULT 1 keeps the column
+	// portable across all three dialects (no TEXT-default rewriting).
+	`ALTER TABLE issue_monitors ADD COLUMN max_concurrent_launches   INTEGER NOT NULL DEFAULT 1`,
 }
 
 var (
 	// MySQL cannot index TEXT columns (needs a key length), so every column
 	// that is a PK/UNIQUE/index target becomes a VARCHAR. Column definitions
 	// all start at the beginning of a line in the canonical schema.
-	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|session_id|type|status|username|role_id|permission_id|user_id|token)(\s+)TEXT\b`)
+	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id)(\s+)TEXT\b`)
 	mysqlLocalPathCol = regexp.MustCompile(`(?m)^(\s*)local_path(\s+)TEXT\b`)
 	// `key` is a reserved word in MySQL — quote it in DDL. (Queries go
 	// through DB.Ident.)

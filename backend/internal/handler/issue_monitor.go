@@ -80,7 +80,12 @@ type PutRequest struct {
 	AutoPush        bool `json:"auto_push"`
 	CommentOnPR     bool `json:"comment_on_pr"`
 	IntervalMinutes int  `json:"interval_minutes"`
-	Active          bool `json:"active"`
+	// MaxConcurrentLaunches caps how many imported-by-this-monitor
+	// requirements may be in the wizard pipeline at once. Default 1
+	// (conservative — set in Put when the field is 0). Excess imports
+	// queue in issue_monitor_pending_launches until a slot frees.
+	MaxConcurrentLaunches int  `json:"max_concurrent_launches"`
+	Active                bool `json:"active"`
 }
 
 // Put upserts the monitor row for a project.
@@ -113,25 +118,29 @@ func (h *IssueMonitorHandler) Put(w http.ResponseWriter, r *http.Request) {
 	if body.IntervalMinutes == 0 {
 		body.IntervalMinutes = 5
 	}
+	if body.MaxConcurrentLaunches == 0 {
+		body.MaxConcurrentLaunches = 1
+	}
 	mon := &model.IssueMonitor{
-		ProjectID:            id,
-		Label:                body.Label,
-		LaunchMode:           body.LaunchMode,
-		SkipDesign:           body.SkipDesign,
-		DesignModel:          body.DesignModel,
-		DesignClaudeConfigID: body.DesignClaudeConfigID,
-		DesignAgentServerID:  body.DesignAgentServerID,
-		CodingModel:          body.CodingModel,
-		CodingClaudeConfigID: body.CodingClaudeConfigID,
-		CodingAgentServerID:  body.CodingAgentServerID,
-		Recurrence:           body.Recurrence,
-		RecurTime:            body.RecurTime,
-		RecurDays:            body.RecurDays,
-		RecurTZ:              body.RecurTZ,
-		AutoPush:             body.AutoPush,
-		CommentOnPR:          body.CommentOnPR,
-		IntervalMinutes:      body.IntervalMinutes,
-		Active:               body.Active,
+		ProjectID:             id,
+		Label:                 body.Label,
+		LaunchMode:            body.LaunchMode,
+		SkipDesign:            body.SkipDesign,
+		DesignModel:           body.DesignModel,
+		DesignClaudeConfigID:  body.DesignClaudeConfigID,
+		DesignAgentServerID:   body.DesignAgentServerID,
+		CodingModel:           body.CodingModel,
+		CodingClaudeConfigID:  body.CodingClaudeConfigID,
+		CodingAgentServerID:   body.CodingAgentServerID,
+		Recurrence:            body.Recurrence,
+		RecurTime:             body.RecurTime,
+		RecurDays:             body.RecurDays,
+		RecurTZ:               body.RecurTZ,
+		AutoPush:              body.AutoPush,
+		CommentOnPR:           body.CommentOnPR,
+		IntervalMinutes:       body.IntervalMinutes,
+		MaxConcurrentLaunches: body.MaxConcurrentLaunches,
+		Active:                body.Active,
 	}
 	if err := h.svc.Upsert(r.Context(), mon); err != nil {
 		// Normalize errors so the UI can map them to fields; the service

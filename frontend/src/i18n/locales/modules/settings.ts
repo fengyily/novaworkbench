@@ -285,6 +285,8 @@ export const settings = {
     autoPush: '开发完成后自动提交 / 推送 / 创建 PR',
     autoPushHint: 'issue-monitor 创建的需求默认不自动推 PR；勾选后会在 design+coding 完成后立即触发推送。',
     scheduleHint: '这是「每个新导入 Issue 的执行时间窗」，不是扫描频率——扫描频率由上面的轮询间隔控制。每个 Issue 只会按该时间窗执行一次，不会重复触发。',
+    maxConcurrent: '并行启动上限',
+    maxConcurrentHint: '同时进入开发流程的「该监控导入的需求」上限。命中 N 个新 Issue 时，第 1~M 个立即开发，剩下的排队等空位。默认 1（导入一个开发一个）。',
     commentOnPR: 'PR 创建后在原 Issue 评论',
     commentOnPRHint: '开启后，自动（或手动）创建 PR 时会在原 GitHub Issue 上发一条链接评论。不会关闭 Issue，也不会修改任何标签。',
     commentPosted: '已对原 Issue 发送过 PR 链接评论（再次触发不会重复发送）',

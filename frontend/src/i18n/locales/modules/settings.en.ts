@@ -279,6 +279,8 @@ export const settings = {
     autoPush: 'Auto commit / push / create PR when development finishes',
     autoPushHint: 'Requirements created by the issue monitor do NOT auto-push by default; ticking this dispatches the push as soon as design+coding completes.',
     scheduleHint: 'This is the execution window for each newly imported Issue — NOT the polling cadence, which the interval above controls. Each Issue runs once inside this window and is never re-triggered.',
+    maxConcurrent: 'Parallel launch cap',
+    maxConcurrentHint: 'Maximum number of this-monitor\'s imported requirements that may be in the wizard pipeline at once. When N issues match in one tick, the first M start immediately; the rest queue and start as slots free up. Default 1 ("import one, develop one").',
     commentOnPR: 'Comment on the originating Issue after PR creation',
     commentOnPRHint: 'When on, the auto-push hook posts a single comment on the GitHub Issue once a PR exists. The Issue is never closed and no labels are changed.',
     commentPosted: 'The PR link has already been commented on the originating Issue (it will not be posted twice)',

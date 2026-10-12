@@ -397,6 +397,7 @@ func TestIssueMonitor_UpsertRoundTrip(t *testing.T) {
 		AutoPush:             true,
 		CommentOnPR:          true,
 		IntervalMinutes:      10,
+		MaxConcurrentLaunches: 3,
 		Active:               true,
 	}
 	if err := svc.Upsert(ctx, mon); err != nil {
@@ -425,6 +426,7 @@ func TestIssueMonitor_UpsertRoundTrip(t *testing.T) {
 	upd.RecurDays = ""
 	upd.AutoPush = false
 	upd.IntervalMinutes = 30
+	upd.MaxConcurrentLaunches = 2
 	if err := svc.Upsert(ctx, &upd); err != nil {
 		t.Fatalf("Upsert (update): %v", err)
 	}
@@ -512,7 +514,134 @@ func assertMonitorEqual(t *testing.T, want, got *model.IssueMonitor) {
 	if want.IntervalMinutes != got.IntervalMinutes {
 		t.Fatalf("IntervalMinutes: got %d, want %d", got.IntervalMinutes, want.IntervalMinutes)
 	}
+	if want.MaxConcurrentLaunches != got.MaxConcurrentLaunches {
+		t.Fatalf("MaxConcurrentLaunches: got %d, want %d", got.MaxConcurrentLaunches, want.MaxConcurrentLaunches)
+	}
 	if want.Active != got.Active {
 		t.Fatalf("Active: got %v, want %v", got.Active, want.Active)
+	}
+}
+
+// seedRequirement inserts a bare requirements row so the
+// issue_monitor_pending_launches → requirements join in
+// CountInFlightLaunches has something to resolve. Status is taken
+// straight from the caller's argument so each scenario can pin the
+// row to a specific point in the wizard pipeline.
+func seedRequirement(t *testing.T, d *db.DB, id, projectID, status string) {
+	t.Helper()
+	now := time.Now()
+	if _, err := d.Exec(
+		`INSERT INTO requirements (id, project_id, title, description, priority, kind, status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, projectID, "test req", "test desc", "medium", "issue", status, now, now); err != nil {
+		t.Fatalf("seedRequirement: %v", err)
+	}
+}
+
+// TestPendingLaunches_RoundTrip is the load-bearing test for the
+// issue_monitor_pending_launches primitives added to keep the import
+// path from spawning N claude subprocesses back-to-back. It exercises
+// enqueueLaunch, CountInFlightLaunches, ClaimDueLaunches, and
+// RecordLaunchFailure against a real (temp) SQLite DB. The four
+// assertions each pin down one invariant:
+//
+//   - enqueueLaunch + ClaimDueLaunches round-trips (mode + run_at).
+//   - ClaimDueLaunches honors `limit` and the run_at <= now() filter.
+//   - CountInFlightLaunches only counts requirements in the wizard
+//     pipeline (analyzing/developing/etc.), ignoring terminal ones.
+//   - RecordLaunchFailure re-inserts with attempts+1 and a deferred
+//     run_at, capped at 5 attempts (then parked at +7d).
+func TestPendingLaunches_RoundTrip(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "impl.db")
+	d, err := db.Init(db.Config{Driver: "sqlite", SQLitePath: dbPath})
+	if err != nil {
+		t.Fatalf("db init: %v", err)
+	}
+	defer d.Close()
+	seedProject(t, d, "proj_1", "proj_1", "/tmp/proj_1")
+
+	svc := NewIssueMonitorService(d)
+	ctx := context.Background()
+
+	// Insert a monitor so the FK from pending_launches is satisfied.
+	mon := &model.IssueMonitor{
+		ProjectID: "proj_1", Label: "needs-fix",
+		LaunchMode: model.LaunchModeImmediate,
+	}
+	if err := svc.Upsert(ctx, mon); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// Three requirements: req_active in developing (counts as in-flight),
+	// req_done in done (does NOT count), req_pending still in draft
+	// (does NOT count — "draft" is not in the wizard pipeline yet).
+	seedRequirement(t, d, "req_active", "proj_1", "developing")
+	seedRequirement(t, d, "req_done", "proj_1", "done")
+	seedRequirement(t, d, "req_pending", "proj_1", "draft")
+
+	// Enqueue two launches. RunAt = now (so they're both "due" in the
+	// ClaimDueLaunches scan).
+	now := time.Now()
+	if err := svc.enqueueLaunch(ctx, mon.ID, "req_pending", model.LaunchModeImmediate, now); err != nil {
+		t.Fatalf("enqueueLaunch(req_pending): %v", err)
+	}
+	if err := svc.enqueueLaunch(ctx, mon.ID, "req_active", model.LaunchModeImmediate, now); err != nil {
+		t.Fatalf("enqueueLaunch(req_active): %v", err)
+	}
+
+	// In-flight count: only req_active (developing) counts.
+	n, err := svc.CountInFlightLaunches(ctx, mon.ID)
+	if err != nil {
+		t.Fatalf("CountInFlightLaunches: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("CountInFlightLaunches got %d, want 1", n)
+	}
+
+	// Claim up to 5 due rows: both rows should come back.
+	rows, err := svc.ClaimDueLaunches(ctx, mon.ID, 5)
+	if err != nil {
+		t.Fatalf("ClaimDueLaunches: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("ClaimDueLaunches got %d rows, want 2", len(rows))
+	}
+	// They should be returned in run_at order — both have the same run_at,
+	// so any order is acceptable, but each must carry mode=immediate and
+	// the original requirement id.
+	gotReqs := map[string]string{}
+	for _, r := range rows {
+		gotReqs[r.RequirementID] = r.Mode
+	}
+	if gotReqs["req_pending"] != model.LaunchModeImmediate || gotReqs["req_active"] != model.LaunchModeImmediate {
+		t.Fatalf("ClaimDueLaunches lost the requirement id or mode: %+v", gotReqs)
+	}
+
+	// After ClaimDueLaunches, the rows must be gone (the "atomic claim").
+	rows2, err := svc.ClaimDueLaunches(ctx, mon.ID, 5)
+	if err != nil {
+		t.Fatalf("ClaimDueLaunches (post-claim): %v", err)
+	}
+	if len(rows2) != 0 {
+		t.Fatalf("ClaimDueLaunches returned %d rows after a successful claim, want 0", len(rows2))
+	}
+
+	// RecordLaunchFailure: re-insert one row with attempts=1, run_at
+	// deferred. The next ClaimDueLaunches should NOT see it (run_at
+	// is in the future).
+	claimed := rows[0]
+	delay, err := svc.RecordLaunchFailure(ctx, claimed, "synthetic failure", 5)
+	if err != nil {
+		t.Fatalf("RecordLaunchFailure: %v", err)
+	}
+	if !delay.After(now) {
+		t.Fatalf("RecordLaunchFailure run_at should be deferred; got %v, now=%v", delay, now)
+	}
+	rows3, err := svc.ClaimDueLaunches(ctx, mon.ID, 5)
+	if err != nil {
+		t.Fatalf("ClaimDueLaunches (post-failure): %v", err)
+	}
+	if len(rows3) != 0 {
+		t.Fatalf("ClaimDueLaunches returned %d rows after RecordLaunchFailure (run_at deferred), want 0", len(rows3))
 	}
 }

@@ -2514,6 +2514,11 @@ export interface IssueMonitor {
   comment_on_pr: boolean;
   comment_posted: boolean;
   interval_minutes: number;
+  // Per-monitor parallel-launch cap: at most N imported-by-this-monitor
+  // requirements may be in the wizard pipeline at once. Excess imports
+  // queue in issue_monitor_pending_launches until a slot frees up.
+  // Default 1 (conservative); raise to 2-3 to actually parallelize.
+  max_concurrent_launches: number;
   active: boolean;
   last_run_at: string | null;
   last_status: string;
@@ -2543,6 +2548,7 @@ export interface UpdateIssueMonitorReq {
   auto_push: boolean;
   comment_on_pr: boolean;
   interval_minutes: number;
+  max_concurrent_launches: number;
   active: boolean;
 }
 
