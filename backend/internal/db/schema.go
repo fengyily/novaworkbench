@@ -1159,6 +1159,16 @@ var alterColumns = []string{
 	// MySQL 上的 TEXT DEFAULT '' 转成 TEXT DEFAULT (''),isIgnorableDDLError 吞
 	// 掉"duplicate column"以便历史 DB 平滑升级。
 	`ALTER TABLE requirements ADD COLUMN design_base_sha TEXT NOT NULL DEFAULT ''`,
+	// base_branch: the baseline branch chosen at the architect-design stage
+	// (mirrors LaunchSpec / scheduled_tasks.base_branch). Persisted so the
+	// development stage can pick up the same base when the user picks one in
+	// design but not in coding, AND so the merge stage can target the PR at
+	// the chosen base instead of project.DefaultBranch. STAMP-IF-NON-EMPTY
+	// semantics: the design stage prologue writes whatever the user picked
+	// (or the project fallback) right before SyncDesignBase runs; later
+	// re-runs overwrite cleanly. Empty = legacy row or no design yet — the
+	// merge stage then falls back to project.DefaultBranch.
+	`ALTER TABLE requirements ADD COLUMN base_branch TEXT NOT NULL DEFAULT ''`,
 	// Issue-monitor source traceability (v0.5.x). Every requirement imported
 	// from a GitHub Issue carries the platform tag ("github" / "gitlab" /
 	// "gitea" — even though only GitHub ships in v0.5.x), the external id

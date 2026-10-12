@@ -456,13 +456,19 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	}
 
 	// Resolve baseBranch early (used by both the worktree and legacy in-place
-	// paths below). Precedence: UI-provided p.BaseBranch > project's stored
-	// default_branch > literal "main". Loading the project here costs one extra
-	// Get that's almost always served by the page-load cache, and it lets us
-	// surface a one-line "本次使用的主分支: <name>" hint in the Job panel so
-	// the user knows exactly which base the worktree was branched off when an
-	// issue shows up later.
+	// paths below). Precedence: UI-provided p.BaseBranch > the design-stage
+	// stamp on the requirement row (reqRow.BaseBranch — keeps coding in
+	// sync with design when the user re-uses the design stage but forgets
+	// to re-pick a base on the coding form) > project's stored
+	// default_branch > literal "main". Loading the project here costs one
+	// extra Get that's almost always served by the page-load cache, and it
+	// lets us surface a one-line "本次使用的主分支: <name>" hint in the Job
+	// panel so the user knows exactly which base the worktree was branched
+	// off when an issue shows up later.
 	baseBranch := p.BaseBranch
+	if baseBranch == "" && reqRow != nil && reqRow.BaseBranch != "" {
+		baseBranch = reqRow.BaseBranch
+	}
 	if baseBranch == "" {
 		var projID string
 		if reqRow != nil {

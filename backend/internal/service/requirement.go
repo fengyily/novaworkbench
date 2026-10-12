@@ -216,7 +216,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 		// TEXT defaults so the dialect cost is zero and the column order
 		// tracks the INSERT in Create() above. The Calendar endpoint reads the
 		// slim subset only (see Calendar() below).
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data,"+
 			"(SELECT st.completed_at FROM sub_tasks st WHERE st.requirement_id = r.id AND NOT EXISTS(SELECT 1 FROM sub_tasks o WHERE o.requirement_id = r.id AND o.completed_at IS NULL) ORDER BY st.completed_at DESC LIMIT 1) AS dev_ended_at"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" "+where+" "+orderBy,
@@ -235,7 +235,7 @@ func (s *RequirementService) List(projectID string, status string, priority stri
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.ArchitectConfigID, &r.DeveloperConfigID,
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
-			&r.DesignBaseSHA,
+			&r.DesignBaseSHA, &r.BaseBranch,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.UsageSnapshots, &r.CodingPlan, &r.CodingStepPlan, &r.CodingPhase, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt,
@@ -425,7 +425,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 	// created_at / updated_at — unqualified references would be ambiguous on
 	// MySQL/Postgres.
 	err := s.db.QueryRow(
-		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.wiki_docs,r.wiki_session_id,r.wiki_job_id,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data"+
+		"SELECT r.id,r.project_id,r.title,r.description,r.status,r.priority,r.kind,r.acceptance_criteria,r.design_docs,r.conversation_ids,r.assigned_to,r.created_by,r.source_requirement_id,r.analysis_session_id,r.design_session_id,r.design_job_id,r.analysis_job_id,r.apply_job_id,r.coding_job_id,r.last_coding_job_id,r.coding_session_id,r.skip_analysis,r.skip_design,r.branch_name,r.worktree_path,r.analyst_model,r.architect_model,r.developer_model,r.reviewer_model,r.architect_config_id,r.developer_config_id,r.agent_server_id,COALESCE(ags.name,''),r.design_agent_server_id,COALESCE(dags.name,''),r.design_base_sha,r.base_branch,r.analyst_context_summary,r.analyst_compressed_at,r.design_context_summary,r.design_compressed_at,r.coding_context_summary,r.coding_compressed_at,r.usage_snapshots,r.coding_plan,r.coding_step_plan,r.coding_phase,r.dev_source,r.dev_mode,r.sync_mode,r.auto_push,r.created_at,r.updated_at,r.completed_at,r.analysis_started_at,r.analysis_ended_at,r.tags,r.marks,r.closed_at,r.closed_reason,r.wiki_docs,r.wiki_session_id,r.wiki_job_id,r.source_platform,r.source_external_id,r.source_url,r.source_state,r.source_data"+
 			" FROM requirements r LEFT JOIN agent_servers ags ON ags.id = r.agent_server_id LEFT JOIN agent_servers dags ON dags.id = r.design_agent_server_id"+
 			" WHERE r.id = ?", id).
 		Scan(&r.ID, &r.ProjectID, &r.Title, &r.Description, &r.Status, &r.Priority, &r.Kind,
@@ -434,7 +434,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 			&r.AnalystModel, &r.ArchitectModel, &r.DeveloperModel, &r.ReviewerModel,
 			&r.ArchitectConfigID, &r.DeveloperConfigID,
 			&r.AgentServerID, &r.AgentServerName, &r.DesignAgentServerID, &r.DesignAgentServerName,
-			&r.DesignBaseSHA,
+			&r.DesignBaseSHA, &r.BaseBranch,
 			&r.AnalystContextSummary, &r.AnalystCompressedAt, &r.DesignContextSummary, &r.DesignCompressedAt, &r.CodingContextSummary, &r.CodingCompressedAt,
 			&r.UsageSnapshots, &r.CodingPlan, &r.CodingStepPlan, &r.CodingPhase, &r.DevSource, &r.DevMode, &r.SyncMode, &r.AutoPush,
 			&r.CreatedAt, &r.UpdatedAt, &r.CompletedAt, &r.AnalysisStartedAt, &r.AnalysisEndedAt,
@@ -1176,6 +1176,22 @@ func (s *RequirementService) UpdateDesignBaseSHA(id, sha string) error {
 	_, err := s.db.Exec(
 		"UPDATE requirements SET design_base_sha = ?, updated_at = ? WHERE id = ?",
 		sha, time.Now(), id)
+	return err
+}
+
+// UpdateBaseBranch stamps the resolved baseline branch onto the requirement.
+// Called from the design stage prologue (right after the explicit-vs-default
+// fallback chain resolves the value) so a later coding-stage run can pick
+// up the same base even when the user forgot to re-pick it on the coding
+// form, AND so the merge stage targets the PR at the user-chosen base
+// instead of project.DefaultBranch. STAMP-IF-NON-EMPTY: empty input clears
+// the column (used when the user explicitly blanks the field), and a
+// non-empty input always overwrites — re-runs deliberately update the row
+// so a deliberate base switch flips the PR target on the next merge.
+func (s *RequirementService) UpdateBaseBranch(id, branch string) error {
+	_, err := s.db.Exec(
+		"UPDATE requirements SET base_branch = ?, updated_at = ? WHERE id = ?",
+		branch, time.Now(), id)
 	return err
 }
 

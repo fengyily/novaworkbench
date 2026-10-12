@@ -204,6 +204,15 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	if project != nil {
 		projectPath = project.LocalPath
 	}
+	// Persist the resolved base branch onto the requirement so the
+	// development + merge stages can pick up the same base when the user
+	// (a) picked one in design but forgot to re-pick it on the coding form
+	// or (b) is targeting the PR at a non-default base. Stamp-if-non-empty
+	// semantics: any value the user explicitly chose (or the project
+	// fallback) wins, including re-runs that switch the base.
+	if uerr := h.reqSvc.UpdateBaseBranch(id, effectiveBase); uerr != nil {
+		log.Printf("[architect-design] failed to persist base_branch for %s: %v", id, uerr)
+	}
 
 	// Prologue: persist the design-stage agent-server binding BEFORE any
 	// SSH / worktree work so a later failure still leaves a record of what
