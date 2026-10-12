@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useBusyFlag } from '../utils/useBusyFlag';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { platformApi, projectsApi, type PlatformToken } from '../api/client';
@@ -27,7 +28,7 @@ export default function AddProject() {
   const [branch, setBranch] = useState('');
   const [tokens, setTokens] = useState<PlatformToken[]>([]);
   const [platformTokenId, setPlatformTokenId] = useState('');
-  const [loading, setLoading] = useState(false);
+  const { busy: loading, withBusy } = useBusyFlag();
   const [error, setError] = useState<string | null>(null);
 
   // Pull the platform-token list once. The list endpoint omits the raw
@@ -46,24 +47,24 @@ export default function AddProject() {
     ? tokens.filter(t => t.platform === inferredPlatform)
     : tokens;
 
-  const handleSubmit = async () => {
-    setError(null);
-    setLoading(true);
-    try {
-      const chosen = tokens.find(t => t.id === platformTokenId);
-      const platformType = chosen?.platform ?? inferredPlatform;
-      await projectsApi.add({
-        remote_url: remoteUrl,
-        branch: branch || undefined,
-        platform_type: platformType || undefined,
-        platform_token_id: platformTokenId || undefined,
-      });
-      navigate('/');
-    } catch (err: unknown) {
-      setError(errorMessage(err));
-    } finally {
-      setLoading(false);
-    }
+  const handleSubmit = () => {
+    if (!remoteUrl) return;
+    return withBusy(async () => {
+      setError(null);
+      try {
+        const chosen = tokens.find(t => t.id === platformTokenId);
+        const platformType = chosen?.platform ?? inferredPlatform;
+        await projectsApi.add({
+          remote_url: remoteUrl,
+          branch: branch || undefined,
+          platform_type: platformType || undefined,
+          platform_token_id: platformTokenId || undefined,
+        });
+        navigate('/');
+      } catch (err: unknown) {
+        setError(errorMessage(err));
+      }
+    });
   };
 
   return (

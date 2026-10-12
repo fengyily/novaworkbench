@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useBusyFlag } from '../utils/useBusyFlag';
 import { useTranslation } from 'react-i18next';
 import { platformApi, type PlatformToken, type GeneratedGPGKey } from '../api/client';
 import { errorMessage } from '../utils/errMsg';
@@ -60,7 +61,7 @@ export default function SettingsTokens() {
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [editingId, setEditingId] = useState('');
-  const [saving, setSaving] = useState(false);
+  const { busy: saving, withBusy: withSaving } = useBusyFlag();
   const [error, setError] = useState('');
   const [deleteId, setDeleteId] = useState('');
 
@@ -91,7 +92,7 @@ export default function SettingsTokens() {
   const [gpgSource, setGpgSource] = useState<'paste' | 'generate'>('paste');
   const [genName, setGenName] = useState('');
   const [genEmail, setGenEmail] = useState('');
-  const [generating, setGenerating] = useState(false);
+  const { busy: generating, withBusy: withGenerating, release: releaseGenerating } = useBusyFlag();
   // The generated pair, held in React state only for as long as the
   // disclosure modal is open — never written to any storage API.
   const [generatedKey, setGeneratedKey] = useState<GeneratedGPGKey | null>(null);
@@ -127,7 +128,7 @@ export default function SettingsTokens() {
     setGpgSource('paste');
     setGenName(name);
     setGenEmail(email);
-    setGenerating(false);
+    releaseGenerating();
   };
 
   const openEditModal = (tok: PlatformToken) => {
@@ -180,7 +181,7 @@ export default function SettingsTokens() {
     return '';
   };
 
-  const handleSave = async () => {
+  const handleSave = () => {
     const invalid = validateCommonFields();
     if (invalid) {
       setError(invalid);
@@ -200,45 +201,44 @@ export default function SettingsTokens() {
       return;
     }
 
-    setSaving(true);
     setError('');
-    try {
-      if (editingId) {
-        const updated = await platformApi.update(editingId, {
-          name: form.name,
-          base_url: form.base_url,
-          git_user_name: form.git_user_name,
-          git_user_email: form.git_user_email,
-          new_token: form.token || undefined,
-          gpg_enabled: form.gpg_enabled,
-          gpg_private_key: form.gpg_private_key || undefined,
-          gpg_passphrase: form.gpg_passphrase || undefined,
-          // Wipe stored ciphertext + key id + flag when the user turns the
-          // toggle off on an already-enabled row. Disabling on a row that
-          // never had GPG on is a no-op — clear_gpg=false (the default).
-          clear_gpg: disablingGpg || undefined,
-        });
-        setTokens(prev => prev.map(t => (t.id === updated.id ? updated : t)));
-      } else {
-        const tok = await platformApi.create({
-          name: form.name,
-          platform: form.platform,
-          base_url: form.base_url,
-          token: form.token,
-          git_user_name: form.git_user_name,
-          git_user_email: form.git_user_email,
-          gpg_enabled: form.gpg_enabled,
-          gpg_private_key: form.gpg_private_key || undefined,
-          gpg_passphrase: form.gpg_passphrase || undefined,
-        });
-        setTokens(prev => [tok, ...prev]);
+    return withSaving(async () => {
+      try {
+        if (editingId) {
+          const updated = await platformApi.update(editingId, {
+            name: form.name,
+            base_url: form.base_url,
+            git_user_name: form.git_user_name,
+            git_user_email: form.git_user_email,
+            new_token: form.token || undefined,
+            gpg_enabled: form.gpg_enabled,
+            gpg_private_key: form.gpg_private_key || undefined,
+            gpg_passphrase: form.gpg_passphrase || undefined,
+            // Wipe stored ciphertext + key id + flag when the user turns the
+            // toggle off on an already-enabled row. Disabling on a row that
+            // never had GPG on is a no-op — clear_gpg=false (the default).
+            clear_gpg: disablingGpg || undefined,
+          });
+          setTokens(prev => prev.map(t => (t.id === updated.id ? updated : t)));
+        } else {
+          const tok = await platformApi.create({
+            name: form.name,
+            platform: form.platform,
+            base_url: form.base_url,
+            token: form.token,
+            git_user_name: form.git_user_name,
+            git_user_email: form.git_user_email,
+            gpg_enabled: form.gpg_enabled,
+            gpg_private_key: form.gpg_private_key || undefined,
+            gpg_passphrase: form.gpg_passphrase || undefined,
+          });
+          setTokens(prev => [tok, ...prev]);
+        }
+        closeModal();
+      } catch (err: unknown) {
+        setError(errorMessage(err));
       }
-      closeModal();
-    } catch (err: unknown) {
-      setError(errorMessage(err));
-    } finally {
-      setSaving(false);
-    }
+    });
   };
 
   // handleGenerate asks the server to create a key pair for this token and
@@ -249,7 +249,7 @@ export default function SettingsTokens() {
   // token first — with GPG off, because there is no key yet — and then
   // generate against the new id. The modal stays open in edit mode so the
   // user can finish the rest of the form afterwards.
-  const handleGenerate = async () => {
+  const handleGenerate = () => {
     const invalid = validateCommonFields();
     if (invalid) {
       setError(invalid);
@@ -260,45 +260,44 @@ export default function SettingsTokens() {
       return;
     }
 
-    setGenerating(true);
     setError('');
-    try {
-      let tokenId = editingId;
-      if (!tokenId) {
-        const created = await platformApi.create({
-          name: form.name,
-          platform: form.platform,
-          base_url: form.base_url,
-          token: form.token,
-          git_user_name: form.git_user_name,
-          git_user_email: form.git_user_email,
-          gpg_enabled: false,
-        });
-        setTokens(prev => [created, ...prev]);
-        tokenId = created.id;
-        setEditingId(created.id);
-        // The PAT is now stored; blank the field so a later save doesn't
-        // re-send it as a rotation.
-        setForm(f => ({ ...f, token: '' }));
-      }
+    return withGenerating(async () => {
+      try {
+        let tokenId = editingId;
+        if (!tokenId) {
+          const created = await platformApi.create({
+            name: form.name,
+            platform: form.platform,
+            base_url: form.base_url,
+            token: form.token,
+            git_user_name: form.git_user_name,
+            git_user_email: form.git_user_email,
+            gpg_enabled: false,
+          });
+          setTokens(prev => [created, ...prev]);
+          tokenId = created.id;
+          setEditingId(created.id);
+          // The PAT is now stored; blank the field so a later save doesn't
+          // re-send it as a rotation.
+          setForm(f => ({ ...f, token: '' }));
+        }
 
-      const payload = await platformApi.generateGpgKey(tokenId, {
-        name: genName.trim(),
-        email: genEmail.trim(),
-      });
-      setGeneratedKey(payload);
-      setShowGenModal(true);
-      // The server turned gpg_enabled on as part of the generate; mirror
-      // that locally (both as "current" and as "original") so a subsequent
-      // 保存 can't read as "the user just switched GPG off".
-      setForm(f => ({ ...f, gpg_enabled: true, gpg_private_key: '', gpg_passphrase: '' }));
-      setOriginalGpgEnabled(true);
-      await reload();
-    } catch (err: unknown) {
-      setError(`${t('settings.tokens.errGpgGenerateFailed')}${errorMessage(err)}`);
-    } finally {
-      setGenerating(false);
-    }
+        const payload = await platformApi.generateGpgKey(tokenId, {
+          name: genName.trim(),
+          email: genEmail.trim(),
+        });
+        setGeneratedKey(payload);
+        setShowGenModal(true);
+        // The server turned gpg_enabled on as part of the generate; mirror
+        // that locally (both as "current" and as "original") so a subsequent
+        // 保存 can't read as "the user just switched GPG off".
+        setForm(f => ({ ...f, gpg_enabled: true, gpg_private_key: '', gpg_passphrase: '' }));
+        setOriginalGpgEnabled(true);
+        await reload();
+      } catch (err: unknown) {
+        setError(`${t('settings.tokens.errGpgGenerateFailed')}${errorMessage(err)}`);
+      }
+    });
   };
 
   // Closing the disclosure modal is the moment the plaintext key pair

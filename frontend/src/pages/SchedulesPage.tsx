@@ -12,6 +12,7 @@
 // horizontal pill rows matching the kind-chip vocabulary.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useBusyFlag } from '../utils/useBusyFlag';
 import { Link } from 'react-router-dom';
 import {
   schedulesApi,
@@ -96,7 +97,7 @@ export default function SchedulesPage() {
   // fetches the wizard job snapshot once on open.
   const [logJobId, setLogJobId] = useState<string | null>(null);
   const [logJob, setLogJob] = useState<RunJob | null>(null);
-  const [logLoading, setLogLoading] = useState(false);
+  const { busy: logLoading, withBusy: withLogBusy } = useBusyFlag();
   // Tick used to recompute relative time labels every 30s so the "next
   // fire" countdown stays accurate without a full list refresh.
   const [, setTick] = useState(0);
@@ -214,18 +215,17 @@ export default function SchedulesPage() {
     }
     load();
   };
-  const handleOpenLog = async (jobId: string) => {
+  const handleOpenLog = (jobId: string) => {
     setLogJobId(jobId);
     setLogJob(null);
-    setLogLoading(true);
-    try {
-      const j = await wizardApi.getJob(jobId);
-      setLogJob(j);
-    } catch {
-      setLogJob(null);
-    } finally {
-      setLogLoading(false);
-    }
+    return withLogBusy(async () => {
+      try {
+        const j = await wizardApi.getJob(jobId);
+        setLogJob(j);
+      } catch {
+        setLogJob(null);
+      }
+    });
   };
 
   return (
@@ -347,6 +347,7 @@ export default function SchedulesPage() {
               key={t.id}
               t={t}
               now={now}
+              logLoading={logLoading}
               onCancel={() => handleCancel(t.id)}
               onDelete={() => handleDelete(t.id)}
               onOpenLog={() => handleOpenLog(t.job_id)}
@@ -374,6 +375,7 @@ export default function SchedulesPage() {
 function ScheduleRow({
   t,
   now,
+  logLoading,
   onCancel,
   onDelete,
   onOpenLog,
@@ -381,6 +383,7 @@ function ScheduleRow({
 }: {
   t: ScheduledTask;
   now: number;
+  logLoading: boolean;
   onCancel: () => void;
   onDelete: () => void;
   onOpenLog: (jobId: string) => void;
@@ -507,7 +510,7 @@ function ScheduleRow({
             )
           )}
           {canLog && (
-            <button className="btn btn-sm" onClick={() => onOpenLog(logJobId)}>{tr('schedules.viewLog')}</button>
+            <button className="btn btn-sm" onClick={() => onOpenLog(logJobId)} disabled={logLoading}>{tr('schedules.viewLog')}</button>
           )}
           <button
             className="btn btn-sm schedules-btn-danger"

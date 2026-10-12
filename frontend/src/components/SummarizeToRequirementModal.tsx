@@ -14,6 +14,7 @@
 
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useBusyFlag } from '../utils/useBusyFlag';
 import {
   requirementsApi,
   agentServersApi,
@@ -39,6 +40,7 @@ export function SummarizeToRequirementModal({ sourceId, sourceTitle, onClose, on
   const { t } = useTranslation();
   const [phase, setPhase] = useState<Phase>('idle');
   const [errorMsg, setErrorMsg] = useState('');
+  const { withBusy } = useBusyFlag();
   // Optional "同时生成技术方案" stage. Default off — the legacy behavior
   // (just create the requirement row) stays the default. When enabled, the
   // promote POST forwards the picked design-stage overrides and the backend
@@ -73,43 +75,45 @@ export function SummarizeToRequirementModal({ sourceId, sourceTitle, onClose, on
     };
   }, []);
 
-  const handleConfirm = async () => {
-    setPhase('running');
-    setErrorMsg('');
-    try {
-      // api.post<Requirement> wraps the response envelope; on non-success it
-      // throws ApiError whose `code` is the backend's error.code. We forward
-      // the optional design-stage config only when autoDesign is checked so
-      // un-ticked submissions stay byte-for-byte equivalent to the legacy
-      // empty-body POST (the backend's "no design" branch is preserved).
-      const item = await requirementsApi.promoteFromIdea(
-        sourceId,
-        autoDesign ? { design: designConfig } : undefined,
-      );
-      // design_job_id is `string` on the Requirement row (empty when no job
-      // was dispatched) — collapse the empty-string sentinel to undefined so
-      // downstream consumers can use a single truthy check. launch_error is
-      // already optional and only set when the wizard dispatch failed.
-      onCreated(item.id, {
-        designJobId: item.design_job_id || undefined,
-        launchError: item.launch_error,
-      });
-    } catch (err: any) {
-      // 422 NOT_CONVERGED — the discussion has not converged. Render the
-      // friendly message (the prompt already encodes that semantic) and let
-      // the user keep chatting before retrying. ApiError exposes `code` as
-      // a top-level field, populated from the backend's error.code.
-      const code = err?.code;
-      if (code === 'NOT_CONVERGED') {
+  const handleConfirm = () => {
+    return withBusy(async () => {
+      setPhase('running');
+      setErrorMsg('');
+      try {
+        // api.post<Requirement> wraps the response envelope; on non-success it
+        // throws ApiError whose `code` is the backend's error.code. We forward
+        // the optional design-stage config only when autoDesign is checked so
+        // un-ticked submissions stay byte-for-byte equivalent to the legacy
+        // empty-body POST (the backend's "no design" branch is preserved).
+        const item = await requirementsApi.promoteFromIdea(
+          sourceId,
+          autoDesign ? { design: designConfig } : undefined,
+        );
+        // design_job_id is `string` on the Requirement row (empty when no job
+        // was dispatched) — collapse the empty-string sentinel to undefined so
+        // downstream consumers can use a single truthy check. launch_error is
+        // already optional and only set when the wizard dispatch failed.
+        onCreated(item.id, {
+          designJobId: item.design_job_id || undefined,
+          launchError: item.launch_error,
+        });
+      } catch (err: any) {
+        // 422 NOT_CONVERGED — the discussion has not converged. Render the
+        // friendly message (the prompt already encodes that semantic) and let
+        // the user keep chatting before retrying. ApiError exposes `code` as
+        // a top-level field, populated from the backend's error.code.
+        const code = err?.code;
+        if (code === 'NOT_CONVERGED') {
+          setPhase('error');
+          setErrorMsg(t('requirements.promote.notConverged'));
+          return;
+        }
         setPhase('error');
-        setErrorMsg(t('requirements.promote.notConverged'));
-        return;
+        setErrorMsg(
+          err?.message || t('requirements.promote.requestFailed', { status: err?.status ?? '?' }),
+        );
       }
-      setPhase('error');
-      setErrorMsg(
-        err?.message || t('requirements.promote.requestFailed', { status: err?.status ?? '?' }),
-      );
-    }
+    });
   };
 
   // Click-outside-to-dismiss — but ONLY when the LLM call isn't running.
