@@ -51,6 +51,7 @@
   border-radius: 8px;
   padding: 12px;
   background: var(--color-bg);
+  position: relative;
 }
 .chat-msg { margin-bottom: 12px; }
 .chat-msg:last-child { margin-bottom: 0; }

@@ -402,6 +402,11 @@ export const components = {
     compressedTitle: '{{stage}} stage was compressed',
     usageTitle: '{{stage}}: {{used}} / {{window}} tokens (raw {{pct}}%)',
   },
+  scrollToBottom: {
+    ariaLabel: 'Scroll to latest',
+    button: 'Scroll to bottom',
+    newMessages: '↓ {{count}} new messages',
+  },
 } as const;
 
 export default components;

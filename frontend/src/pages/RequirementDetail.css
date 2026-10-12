@@ -996,6 +996,7 @@
   padding: 12px;
   background: var(--color-bg);
   margin-bottom: 12px;
+  position: relative;
 }
 .deep-refine-panel .chat-msg { margin-bottom: 10px; }
 .deep-refine-panel .chat-role {
