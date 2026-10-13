@@ -3105,8 +3105,9 @@ export default function RequirementDetail() {
                     <label>{t('requirements.detail2.preflightBaseBranchLabel')}</label>
                     <div className="preflight-field-card preflight-field-card--git">
                       <span className="preflight-field-chip" aria-hidden="true">BASE</span>
-                      <select
+                      <input
                         className="form-input preflight-field-input"
+                        list="base-branch-suggestions"
                         value={baseBranch}
                         onChange={e => {
                           // Keep the inline `codingBaseBranch` picker on
@@ -3116,14 +3117,20 @@ export default function RequirementDetail() {
                           // mirrors it. Two-way sync means a confirm
                           // without further edits just propagates the
                           // value the user already saw on the panel.
+                          // Free-text input (not <select>) so the user
+                          // can type a branch that isn't in the local
+                          // suggestion list — e.g. a remote-only or
+                          // about-to-be-pushed branch the dev already
+                          // knows about.
                           setBaseBranch(e.target.value);
                           setCodingBaseBranch(e.target.value);
                         }}
-                      >
-                        {availableBranches.length === 0 && <option value={baseBranch}>{baseBranch}</option>}
-                        {availableBranches.map(b => <option key={b} value={b}>{b}</option>)}
-                      </select>
+                        placeholder={project?.default_branch || 'main'}
+                      />
                     </div>
+                    <datalist id="base-branch-suggestions">
+                      {availableBranches.map(b => <option key={b} value={b} />)}
+                    </datalist>
                   </div>
                   <div className="modal-field">
                     <label>{t('requirements.detail2.preflightNewBranchLabel')}</label>
