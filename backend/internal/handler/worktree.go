@@ -14,8 +14,15 @@ import (
 )
 
 // ErrNotAGitRepo is returned by EnsureWorktree when the project path is not a
-// git repository. Callers fall back to the legacy in-place coding path so the
-// wizard quick-start (no requirement row) and non-git projects keep working.
+// git repository. As of 2026-10-13 callers MUST treat this as a hard error —
+// the previous silent "fall back to in-place coding" behaviour was the root
+// cause of req_dcffe98eb4187a03 losing its entire diff (5 sub-tasks reported
+// "done" writing into a directory with no .git/, push_pr then failed with no
+// visible signal). The wizard prologue (service.ProjectService.
+// EnsureClonedAndSynced) auto-bootstraps .git/ from the project's stored
+// remote_url before EnsureWorktree is called, so reaching this branch means
+// the project is genuinely unrecoverable from this host and the wizard must
+// surface an actionable error instead of burning compute on doomed sub-tasks.
 var ErrNotAGitRepo = errors.New("not a git repository")
 
 // WorktreeHandler bundles the per-requirement worktree helpers with the

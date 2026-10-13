@@ -699,8 +699,22 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			useWorktree = true
 			job.Append(store.LogLine{Type: "message", Content: "🌿 已创建/复用隔离 worktree: " + wtPath})
 		case errors.Is(wtErr, ErrNotAGitRepo):
-			// Fall through to the legacy in-place checkout below.
-			job.Append(store.LogLine{Type: "message", Content: "ℹ️ 非 git 仓库，在项目目录直接开发: " + p.ProjectPath})
+			// Hard fail instead of the previous silent "in-place coding"
+			// fallback. The prologue above (EnsureClonedAndSynced +
+			// EnsureCloned) already tried to auto-bootstrap a missing .git/
+			// from the project's stored remote_url — reaching this branch
+			// means either the project has no remote_url at all, the
+			// bootstrap fetch failed, or .git/ is unrecoverable from this
+			// host. Continuing past this point would burn 30+ minutes of
+			// sub-task runs whose diffs can never be committed (no .git/
+			// → push_pr always fails) — the exact regression that hit
+			// req_dcffe98eb4187a03 on 2026-10-13. Surface the actionable
+			// error and abort the job so the user fixes the project first.
+			hint := "请在项目设置页确认 local_path 与 remote_url 配置正确，并在项目根目录确认 .git/ 目录存在（必要时执行 `git init && git remote add origin <url> && git fetch origin <baseBranch>` 后重试）。"
+			job.Append(store.LogLine{Type: "error", Content: "❌ 项目目录不是 git 仓库，无法创建开发 worktree: " + p.ProjectPath})
+			job.Append(store.LogLine{Type: "error", Content: "❌ " + hint})
+			job.Finish(1, store.JobError)
+			return
 		default:
 			job.Append(store.LogLine{Type: "error", Content: "❌ 创建 worktree 失败: " + wtErr.Error()})
 			job.Finish(1, store.JobError)

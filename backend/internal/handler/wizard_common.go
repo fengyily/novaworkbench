@@ -509,7 +509,20 @@ func (h *WizardHandler) anchorWorktree(req *model.Requirement, projectPath, defa
 	wtPath, err := h.worktreeH.ensureWorktreeFrom(context.Background(), req.ProjectID, projectPath, req.ID, branch, defaultBranch, skipSync, logf)
 	if err != nil {
 		if errors.Is(err, ErrNotAGitRepo) {
-			return projectPath, nil // non-git repo → legacy in-place
+			// Hard fail instead of silently falling through to in-place
+			// coding. The wizard prologue (EnsureClonedAndSynced above)
+			// already tried to auto-bootstrap a missing .git/ from the
+			// project's stored remote_url — reaching this branch means
+			// the project path is unrecoverable from this host (no
+			// remote_url, fetch failed, or .git/ is otherwise missing).
+			// Returning projectPath here used to be a documented "legacy
+			// in-place behaviour", but in practice it produced exactly the
+			// silent-failure chain that hit req_dcffe98eb4187a03 on
+			// 2026-10-13: coding proceeds, sub-tasks all report "done",
+			// push_pr finally errors out, and the user has no signal that
+			// nothing was ever tracked by git. Surface a clear error so
+			// the caller fails loudly.
+			return "", fmt.Errorf("项目目录不是 git 仓库，无法创建 worktree: %s — 请确认项目设置中的 local_path / remote_url / DefaultBranch 正确，并在项目根目录确认 .git/ 存在", projectPath)
 		}
 		return "", err // git repo but worktree add failed → hard error
 	}

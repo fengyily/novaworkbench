@@ -1252,6 +1252,91 @@ func (s *ProjectService) EnsureCloned(id string) error {
 	return nil
 }
 
+// bootstrapMissingGitDir repairs a project directory whose .git/ was lost
+// (manual rm -rf, half-finished clone, Docker volume reset) by re-creating
+// it from the project's stored remote_url. It runs only when:
+//
+//   - the directory exists on disk
+//   - .git/ does NOT exist
+//   - the project has a non-empty remote_url
+//
+// It deliberately does NOT checkout any branch — existing source files stay
+// untouched on disk and the wizard's worktree-creation stage is what
+// creates the dev branch from origin/<base>. The bootstrap is best-effort:
+// failures bubble up as a wrapped error so the caller can surface a clear
+// "your project path is not a git repo, run X to fix" message instead of
+// letting the wizard silently fall through to in-place coding (which was
+// the behaviour that caused req_dcffe98eb4187a03 to lose its entire diff
+// on 2026-10-13).
+//
+// When the project has no token configured the bootstrap still runs
+// (public repos) — credentials only matter for the fetch step, and an
+// unauthenticated fetch against a private repo fails the same way
+// EnsureCloned would fail it, surfacing the auth error to the user.
+func (s *ProjectService) bootstrapMissingGitDir(p *model.Project, logf func(string)) error {
+	if p.LocalPath == "" {
+		return fmt.Errorf("project has no local_path")
+	}
+	if p.RemoteURL == "" {
+		return fmt.Errorf("project %s has no remote_url configured — cannot bootstrap .git/", p.Name)
+	}
+	// Quick re-check: if some other process re-created .git/ between the
+	// caller's stat and our git init, skip silently.
+	if _, err := os.Stat(filepath.Join(p.LocalPath, ".git")); err == nil {
+		return nil
+	}
+	// Step 1: git init. Safe to run in a directory with existing source
+	// files — git will simply start tracking them without touching the
+	// files themselves.
+	if _, err := gitRunPlain(p.LocalPath, "init"); err != nil {
+		return fmt.Errorf("git init: %w", err)
+	}
+	if logf != nil {
+		logf("🔧 git init 已执行")
+	}
+	// Step 2: register the project remote as `origin`. Allow the existing
+	// remote (if any) to be replaced — bootstrap is a one-time repair.
+	if _, err := gitRunPlain(p.LocalPath, "remote", "remove", "origin"); err != nil {
+		// `remote remove origin` fails when no remote named origin exists;
+		// that's fine, ignore.
+	}
+	if _, err := gitRunPlain(p.LocalPath, "remote", "add", "origin", p.RemoteURL); err != nil {
+		return fmt.Errorf("git remote add origin: %w", err)
+	}
+	if logf != nil {
+		logf("🔧 已注册 remote origin → " + redactUserinfo(p.RemoteURL))
+	}
+	// Step 3: fetch the project's default branch so the wizard's worktree
+	// creation can branch off origin/<base>. Use GIT_TERMINAL_PROMPT=0 to
+	// never block on stdin, and inject the project's platform token when
+	// one is bound (the same path syncBaseBranchService uses).
+	baseBranch := p.DefaultBranch
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	fctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(fctx, "git", "-C", p.LocalPath, "fetch", "origin", baseBranch)
+	baseEnv := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if p.ID != "" && s.gitCredSvc != nil {
+		credEnv, credCleanup, _ := s.gitCredSvc.BuildEnv(fctx, p.ID)
+		if credCleanup != nil {
+			defer credCleanup()
+		}
+		baseEnv = append(baseEnv, credEnv...)
+	}
+	cmd.Env = baseEnv
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if runErr := cmd.Run(); runErr != nil {
+		return fmt.Errorf("git fetch origin %s: %s: %w", baseBranch, strings.TrimSpace(stderr.String()), runErr)
+	}
+	if logf != nil {
+		logf("🔧 已 fetch origin/" + baseBranch)
+	}
+	return nil
+}
+
 // ProjectSyncResult reports the outcome of EnsureClonedAndSynced so the
 // caller (handler wizard stages) can tailor user-facing phase events
 // ("cloned" vs "fetched" vs "skipped") without re-inspecting the project.
@@ -1260,12 +1345,13 @@ func (s *ProjectService) EnsureCloned(id string) error {
 // error for git failures; it stamps sync_status=error and lets the wizard
 // continue with the local snapshot.
 type ProjectSyncResult struct {
-	Cloned  bool   // true when this call performed a `git clone`
-	Fetched bool   // true when this call performed a `git fetch origin <base>`
-	OldSHA  string // HEAD before fetch (empty when Cloned=true or Skipped=true)
-	NewSHA  string // origin/<defaultBranch> SHA after fetch (or HEAD after clone)
-	Skipped bool   // true when the project has no remote_url → sync_status stays idle
-	Err     error  // non-nil when the last git step failed (network, auth, timeout)
+	Cloned       bool   // true when this call performed a `git clone`
+	Fetched      bool   // true when this call performed a `git fetch origin <base>`
+	Bootstrapped bool   // true when this call re-created a missing .git/ from remote_url
+	OldSHA       string // HEAD before fetch (empty when Cloned=true or Skipped=true)
+	NewSHA       string // origin/<defaultBranch> SHA after fetch (or HEAD after clone)
+	Skipped      bool   // true when the project has no remote_url → sync_status stays idle
+	Err          error  // non-nil when the last git step failed (network, auth, timeout)
 }
 
 // fetchTimeout caps the inner `git fetch origin <base>` so a stalled network
@@ -1434,6 +1520,32 @@ func (s *ProjectService) EnsureClonedAndSynced(ctx context.Context, id string, l
 		}
 		_ = s.updateSyncStatus(id, SyncStatusOK, res.NewSHA, now)
 		return res, nil
+	}
+
+	// Case 3a: directory present but .git/ missing → the project's local
+	// repo was lost (rm -rf, half-clone, Docker volume reset) but the
+	// source files are still on disk. Bootstrap a fresh .git/ from the
+	// stored remote_url so the wizard's worktree-creation stage can run.
+	// Without this, EnsureWorktreeLogged below returns ErrNotAGitRepo and
+	// the wizard would silently fall through to in-place coding — see
+	// req_dcffe98eb4187a03 (2026-10-13) where the bug surfaced as 5
+	// "done" sub_tasks followed by a push_pr error.
+	if _, gerr := os.Stat(filepath.Join(p.LocalPath, ".git")); gerr != nil && os.IsNotExist(gerr) {
+		if logf != nil {
+			logf("🔧 检测到项目目录缺少 .git/，尝试从 remote_url 自动恢复…")
+		}
+		if bootErr := s.bootstrapMissingGitDir(p, logf); bootErr != nil {
+			res.Err = bootErr
+			if logf != nil {
+				logf("⚠️ " + bootErr.Error())
+			}
+			_ = s.updateSyncStatus(id, SyncStatusError, "", now)
+			return res, nil // not fatal — wizard surfaces the actionable error
+		}
+		res.Bootstrapped = true
+		if logf != nil {
+			logf("✅ 已为项目恢复 .git/（remote 已配置为 origin）")
+		}
 	}
 
 	// Case 3: directory present → fetch origin/<base>. Best-effort.
