@@ -1148,39 +1148,34 @@ export default function RequirementDetail() {
   // Branch modal state
   const [showBranchModal, setShowBranchModal] = useState(false);
   const [branchName, setBranchName] = useState('');
-  const [baseBranch, setBaseBranch] = useState('');
+  // Modal-local BASE snapshot — taken from the unified `baseBranch` on
+  // open, committed back on confirm. Cancelling the modal leaves the
+  // inline picker (and the design/coding unified state) untouched.
+  const [modalBaseBranch, setModalBaseBranch] = useState('');
   const [availableBranches, setAvailableBranches] = useState<string[]>([]);
 
-  // Design-stage base branch picker (separate from the coding-stage
-  // `baseBranch` above so the two stages can pick different bases
-  // without overwriting each other). Defaults to the project's
-  // default_branch with a "main" hard fallback so an empty project
-  // setting still produces a usable input. Reset whenever the active
-  // project changes (see the useEffect further down).
-  const [designBaseBranch, setDesignBaseBranch] = useState<string>(project?.default_branch || 'main');
-
-  // Development-stage inline base branch picker — mirrors
-  // `designBaseBranch` for the developer stage. Separate state so
-  // the two stages can target different bases independently
-  // (e.g. design against `main`, code against `release/1.2`). The
-  // preflight modal still opens as a final checklist before
-  // start-coding fires, but it now seeds from this state so the
-  // user no longer has to discover the base branch by opening
-  // a modal. Default mirrors `designBaseBranch` for symmetry.
-  const [codingBaseBranch, setCodingBaseBranch] = useState<string>(project?.default_branch || 'main');
-
-  // Reset both inline base-branch pickers when the active project
-  // changes. Without this, switching from project A (default_branch
-  // = `main`) to project B (default_branch = `release/1.2`) keeps
-  // the previous project's value in the picker, which would send
-  // the new run to the wrong base. The pickers are also reset
-  // whenever the project metadata refreshes (default_branch
-  // edited from the project settings page mid-session).
+  // Single source of truth for BOTH the design-stage and coding-stage
+  // BASE branch. Seeded once from req.base_branch (when design has
+  // already run on this requirement) → project.default_branch → 'main'
+  // so the picker shows the project's real default instead of being
+  // stuck at 'main' (the previous useState initializer evaluated
+  // project?.default_branch while project was still null on the
+  // async fetch, and the reset effect's `prev || fallback` logic
+  // then refused to overwrite the resulting 'main'). After first
+  // seed, user customisation wins — the effect short-circuits so
+  // mid-session project-metadata edits can't clobber an in-flight
+  // design/coding choice.
+  const [baseBranch, setBaseBranch] = useState<string>('');
+  const baseBranchSeededRef = useRef(false);
   useEffect(() => {
-    const fallback = project?.default_branch || 'main';
-    setDesignBaseBranch(prev => prev || fallback);
-    setCodingBaseBranch(prev => prev || fallback);
-  }, [project?.id, project?.default_branch]);
+    if (baseBranchSeededRef.current) return;
+    const seed = req?.base_branch?.trim()
+      || project?.default_branch?.trim()
+      || '';
+    if (!seed) return; // project/req not loaded yet — retry on next render
+    baseBranchSeededRef.current = true;
+    setBaseBranch(seed);
+  }, [project?.default_branch, req?.base_branch]);
 
   // Optional "Read project knowledge base" step (default off). The dev
   // checkbox lives in the branch modal; the design one has its own confirm
@@ -2128,7 +2123,7 @@ export default function RequirementDetail() {
           // Per-run design-stage base branch (release/integration/etc.).
           // Backend fallback chain: body > project.default_branch > "main",
           // so an empty / whitespace string here still resolves correctly.
-          base_branch: designBaseBranch.trim() || project?.default_branch || 'main',
+          base_branch: baseBranch.trim() || project?.default_branch || 'main',
           // User-picked Claude config for the architect stage. Empty = the
           // backend resolves it (model→config lookup / role / active). Sent so
           // the picked config is persisted (architect_config_id) and re-hydrates
@@ -2557,13 +2552,14 @@ export default function RequirementDetail() {
     if (!req || !project) return;
     extraDescRef.current = extraDesc;
     const defaultBranch = defaultBranchName(req.id, kindOf(req));
-    // Seed the modal's BASE field from the inline `codingBaseBranch`
-    // picker (the source of truth) rather than re-defaulting to the
-    // project main. The inline picker is right there on the action
-    // panel — the user expects the modal to mirror it, not reset it.
-    const defaultBase = codingBaseBranch.trim() || project.default_branch || 'main';
+    // Snapshot the unified `baseBranch` state into the modal's local
+    // copy so the modal can be cancelled without losing the inline
+    // picker's value. The inline picker is the source of truth for
+    // both design and coding stages — the modal is the final
+    // checklist that mirrors it, not a separate edit surface that
+    // leaks back on every keystroke.
     setBranchName(defaultBranch);
-    setBaseBranch(defaultBase);
+    setModalBaseBranch(baseBranch || project.default_branch || 'main');
     setReadKnowledgeDev(false); // default unchecked each time
     setSplitTasksDev(false); // default unchecked each time
     setAutoPushPRDev(true); // default checked each time (都自动推送)
@@ -2580,13 +2576,11 @@ export default function RequirementDetail() {
 
   const confirmBranchAndStart = () => {
     setShowBranchModal(false);
-    // Mirror the modal's BASE into the inline `codingBaseBranch`
-    // picker so a confirm-without-edit still leaves the inline
-    // picker reflecting the value that just fired. Covers the case
-    // where the modal was seeded with the previous-run value (e.g.
-    // page loaded with stale state) and the user accepted it.
-    setCodingBaseBranch(baseBranch);
-    doStartCoding(branchName, baseBranch, readKnowledgeDev, splitTasksDev, autoPushPRDev);
+    // Commit the modal's BASE back to the unified inline picker so a
+    // confirm without further edits still leaves the inline picker
+    // reflecting the value that just fired.
+    setBaseBranch(modalBaseBranch);
+    doStartCoding(branchName, modalBaseBranch, readKnowledgeDev, splitTasksDev, autoPushPRDev);
   };
 
   // ── Further adjust: resume the prior coding session, output appends to codingLines
@@ -3037,7 +3031,7 @@ export default function RequirementDetail() {
                 modal after editing the base in another tab / ref. */}
             <p className="design-knowledge-base-readout">
               {t('requirements.detail2.designBaseBranchLabel')}:{' '}
-              <code>{designBaseBranch || project?.default_branch || 'main'}</code>
+              <code>{baseBranch || project?.default_branch || 'main'}</code>
             </p>
             <label className="merge-check" style={{ margin: '8px 0 12px' }}>
               <input type="checkbox" checked={readKnowledgeDesign} onChange={e => setReadKnowledgeDesign(e.target.checked)} />
@@ -3108,22 +3102,19 @@ export default function RequirementDetail() {
                       <input
                         className="form-input preflight-field-input"
                         list="base-branch-suggestions"
-                        value={baseBranch}
+                        value={modalBaseBranch}
                         onChange={e => {
-                          // Keep the inline `codingBaseBranch` picker on
-                          // the action panel in sync with the modal —
-                          // the inline picker is the source of truth,
-                          // the modal is the final checklist that
-                          // mirrors it. Two-way sync means a confirm
-                          // without further edits just propagates the
-                          // value the user already saw on the panel.
+                          // Modal-local edit only — the inline picker
+                          // (the unified design+coding state) is
+                          // committed via setBaseBranch() on confirm.
+                          // Cancelling the modal must NOT leak edits
+                          // back into the inline picker.
                           // Free-text input (not <select>) so the user
                           // can type a branch that isn't in the local
                           // suggestion list — e.g. a remote-only or
                           // about-to-be-pushed branch the dev already
                           // knows about.
-                          setBaseBranch(e.target.value);
-                          setCodingBaseBranch(e.target.value);
+                          setModalBaseBranch(e.target.value);
                         }}
                         placeholder={project?.default_branch || 'main'}
                       />
@@ -4322,8 +4313,8 @@ export default function RequirementDetail() {
                       <InlineBaseBranchPicker
                         inputId="design-base-branch-input"
                         datalistId="design-branch-suggestions"
-                        value={designBaseBranch}
-                        onChange={setDesignBaseBranch}
+                        value={baseBranch}
+                        onChange={setBaseBranch}
                         disabled={!!busy}
                         placeholder={project?.default_branch || 'main'}
                         options={availableBranches}
@@ -4680,13 +4671,13 @@ export default function RequirementDetail() {
               {/* Design-stage base branch picker — same component as the
                   draft-stage action panel so the user sees the same input
                   no matter which entry point they used to land here.
-                  Single state (designBaseBranch) shared with the draft
-                  panel. */}
+                  Single state (baseBranch) shared with the draft panel
+                  AND the dev picker below. */}
               <InlineBaseBranchPicker
                 inputId="design-base-branch-input-idle"
                 datalistId="design-branch-suggestions-idle"
-                value={designBaseBranch}
-                onChange={setDesignBaseBranch}
+                value={baseBranch}
+                onChange={setBaseBranch}
                 disabled={!!busy || designing}
                 placeholder={project?.default_branch || 'main'}
                 options={availableBranches}
@@ -5282,8 +5273,8 @@ export default function RequirementDetail() {
                 <InlineBaseBranchPicker
                   inputId="coding-base-branch-input"
                   datalistId="coding-branch-suggestions"
-                  value={codingBaseBranch}
-                  onChange={setCodingBaseBranch}
+                  value={baseBranch}
+                  onChange={setBaseBranch}
                   disabled={coding}
                   placeholder={project?.default_branch || 'main'}
                   options={availableBranches}

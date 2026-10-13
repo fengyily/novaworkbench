@@ -867,6 +867,10 @@ export interface Requirement {
   // architect-design 阶段锁定的事实基线（同步完成后 origin/<base> 的 HEAD SHA）。
   // 空字符串 = 未跑过 / 未配置 / 非 git 项目。merge 阶段把非空值塞进 PR body。
   design_base_sha?: string;
+  // 设计阶段选定的基线分支。design 阶段跑过后由后端写入；coding 阶段
+  // 当用户没在 dev 表单重新指定时，回退到这个值（与 wizard_coding.go
+  // 里 `reqRow.BaseBranch` 优先链一致）。空 = 未跑过 design。
+  base_branch?: string;
   // Development-mode provenance for the coding stage, stamped when StartCoding
   // runs. 'session' = fork the design/analysis session (legacy default —
   // Claude inherits the full conversation). 'design' = fresh session, hand
