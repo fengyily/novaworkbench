@@ -552,18 +552,45 @@ func (h *WizardHandler) anchorWorktree(req *model.Requirement, projectPath, defa
 // and to anchorWorktree (so the resulting worktree is rooted at origin/<base>).
 // Pass an empty string to fall back to project.DefaultBranch — the historical
 // behaviour preserved for any caller that has not yet been migrated.
-func (h *WizardHandler) resolveWorkDirSynced(ctx context.Context, req *model.Requirement, projectPath, baseBranch string, timeout time.Duration, logf func(string)) (workDir, baseSHA string, err error) {
+//
+// skipOriginSync=true opts out of the local SyncDesignBase gate. This is the
+// Agent Server path: when the design/coding stage will execute on a remote
+// agent host (originTransport.PrepareRemote, wizard_remote.go:1217), the local
+// hard-sync is wasted work (the remote side fetches its own tip) and a local
+// FETCH_FAILED would wrongly abort the run on a working remote. In that mode
+// this function only anchors the local worktree (anchorWorktree's own
+// skipSync=true) and returns baseSHA="" — the SSH-side PrepareRemote becomes
+// the authoritative writer of requirements.design_base_sha. Local dirty /
+// unpushed gates still run inside the worktree layer (DIRTY_WORKTREE there
+// protects later sub-task env-fallback scenarios), so flipping this flag
+// only suppresses the network-bound fetch, not all safety checks.
+func (h *WizardHandler) resolveWorkDirSynced(ctx context.Context, req *model.Requirement, projectPath, baseBranch string, timeout time.Duration, logf func(string), skipOriginSync bool) (workDir, baseSHA string, err error) {
 	if req == nil || projectPath == "" {
 		return projectPath, "", nil
 	}
-	res, serr := h.projectSvc.SyncDesignBase(ctx, req.ProjectID, baseBranch, timeout, logf)
-	if serr != nil {
-		// Hard block: the design stage must not proceed against a stale local
-		// checkout. Caller renders the SyncGateError in the SSE panel.
-		return "", "", serr
+	if skipOriginSync {
+		// Agent Server path — do NOT call SyncDesignBase. The remote
+		// originTransport.PrepareRemote owns the sync + base_sha stamp;
+		// locally we only need a usable worktree so subsequent pre-read
+		// (collectProjectContext), skill materialization, and SFTP upload
+		// have a filesystem to operate on. resolveStartRef inside
+		// ensureWorktreeCore falls back to local baseBranch / HEAD when
+		// origin/<base> isn't reachable from this host, which is exactly
+		// the "本地拉不下,只让远程拉" case this flag exists for.
+		if logf != nil {
+			logf("⏭️ 跳过本地 origin/" + baseBranch + " 同步（Agent Server 模式，由远端 SSH 侧接管）")
+		}
+	} else {
+		res, serr := h.projectSvc.SyncDesignBase(ctx, req.ProjectID, baseBranch, timeout, logf)
+		if serr != nil {
+			// Hard block: the design stage must not proceed against a stale local
+			// checkout. Caller renders the SyncGateError in the SSE panel.
+			return "", "", serr
+		}
+		baseSHA = res.BaseSHA
 	}
 	wt, werr := h.anchorWorktree(req, projectPath, baseBranch, true, logf)
-	return wt, res.BaseSHA, werr
+	return wt, baseSHA, werr
 }
 
 // resolveWorkDir returns the directory the current claude stage should run in:

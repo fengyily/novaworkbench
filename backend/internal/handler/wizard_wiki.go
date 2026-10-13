@@ -335,7 +335,7 @@ func (h *WizardHandler) prepareWikiWorkspace(p *wikiRunParams, job *store.Job) b
 	timeout, _ := h.settingSvc.GitSyncTimeout()
 	workDir, _, err := h.resolveWorkDirSynced(context.Background(), p.Req, p.ProjectPath, p.DefaultBranch, timeout, func(s string) {
 		job.Append(store.LogLine{Type: "message", Content: s})
-	})
+	}, false /* skipOriginSync — wiki stage not on Agent Server path */)
 	if err != nil {
 		// Mirror architect-design's gate-error formatting.
 		var gateErr *service.SyncGateError

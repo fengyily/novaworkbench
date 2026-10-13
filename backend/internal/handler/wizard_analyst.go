@@ -89,6 +89,14 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	resumePrompt := req.UserMessage
 
 	systemPrompt, model, claudeConfigID := h.roleConfig("analyst")
+	// Append the per-requirement attachment manifest so Claude knows what
+	// files the user uploaded alongside the requirement and how to find them
+	// on disk. attachManifestFor returns "" when nothing is wired / no
+	// attachments exist, so callers don't need to nil-check. Analyst runs
+	// are local-only in v0.5.x so no serverID is passed here.
+	if m := h.attachManifestFor(req.RequirementID, ""); m != "" {
+		systemPrompt = systemPrompt + "\n\n" + m
+	}
 	// Per-request model override (highest precedence); empty means role default.
 	if req.Model != "" {
 		model = req.Model
@@ -143,7 +151,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 			syncLogf := func(s string) {
 				job.Append(store.LogLine{Type: "message", Content: s})
 			}
-			wd, baseSHA, err := h.resolveWorkDirSynced(context.Background(), requirement, projectPath, defaultBranch, timeout, syncLogf)
+			wd, baseSHA, err := h.resolveWorkDirSynced(context.Background(), requirement, projectPath, defaultBranch, timeout, syncLogf, false /* skipOriginSync — analyst-chat not on Agent Server path */)
 			if err != nil {
 				job.Append(store.LogLine{Type: "error", Content: "❌ " + err.Error()})
 				job.Finish(1, store.JobError)
@@ -358,6 +366,15 @@ func (h *WizardHandler) DeveloperChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	systemPrompt, model, claudeConfigID := h.roleConfig("developer")
+	// Append the per-requirement attachment manifest so the developer role
+	// (start-coding / sub-task children) reads the same files the analyst
+	// and architect already saw. attachManifestFor is a no-op when there's
+	// nothing attached. developer-chat is local-only in v0.5.x — remote
+	// attachment sync lives at start-coding entry (wizard_coding.go) which
+	// has the p.AgentServerID plumbing.
+	if m := h.attachManifestFor(req.RequirementID, ""); m != "" {
+		systemPrompt = systemPrompt + "\n\n" + m
+	}
 	// Per-request model override (highest precedence); empty means role default.
 	if req.Model != "" {
 		model = req.Model

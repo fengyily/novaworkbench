@@ -328,6 +328,16 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	// via the early-return on wdErr.
 
 	systemPrompt, model, claudeConfigID := h.roleConfig("architect")
+	// Append the per-requirement attachment manifest so the architect sees
+	// the same files the analyst did and can ground the design on real
+	// evidence (logs / specs / repro screenshots). When the user picked an
+	// Agent Server for the design stage, syncAttachmentsToRemote copies
+	// every file over to ~/.nova/attachments/<req_id>/ first; on sync
+	// failure the prompt silently falls back to local paths.
+	attachDir := h.resolveAttachDir(context.Background(), requirementID, agentServerID)
+	if m := h.attachManifestFor(requirementID, attachDir); m != "" {
+		systemPrompt = systemPrompt + "\n\n" + m
+	}
 	// Per-request model override (highest precedence); empty means role default.
 	if modelOverride != "" {
 		model = modelOverride
@@ -409,9 +419,17 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 	// subtask concurrency / auto-retry settings). Missing/garbage → 60s.
 	timeout, _ := h.settingSvc.GitSyncTimeout()
 
+	// skipOriginSync=true when an Agent Server is selected: the local
+	// fetch+gate is redundant (the SSH-side originTransport.PrepareRemote
+	// will run its own sync against origin/<base>) and a local FETCH_FAILED
+	// would wrongly hard-abort a run whose remote path is perfectly healthy.
+	// The remote side still gets baseSHA via parseBaseSHAFromRemoteSyncOutput
+	// (wizard_remote.go:1262-1268) and overwrites design_base_sha — so
+	// returning baseSHA="" here is intentional.
+	skipOriginSync := p.AgentServerID != ""
 	workDir, baseSHA, err := h.resolveWorkDirSynced(context.Background(), p.Req, p.ProjectPath, p.BaseBranch, timeout, func(s string) {
 		job.Append(store.LogLine{Type: "message", Content: s})
-	})
+	}, skipOriginSync)
 	if err != nil {
 		// Render the gate failure in the same SSE panel the user is watching.
 		// *service.SyncGateError carries a human-readable Msg plus the raw
