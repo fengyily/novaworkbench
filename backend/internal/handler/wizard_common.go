@@ -688,7 +688,13 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 	// (开发在主 checkout 上直接做了),直推会把未隔离的改动推到 main,
 	// 且 gh pr create 必然失败 (head == base)。拒绝推送并说明原因
 	// (req_82e061807ef0372f: dev=main, base=main → 直推 main + commit "main")。
-	if dev == base {
+	//
+	// No-branch 模式例外 (v0.6.x):用户显式选择「直接在 base 分支上开发」,
+	// dev == base 是预期行为 — 此时应走 runPushBaseShellJob 直接 commit +
+	// push base、跳过 PR 创建。autoPushPR 入口处不再拒绝,但 dev != base
+	// 仍走 push_pr_shell.go 的硬闸门(req_82e061807ef0372f 防御),所以这条
+	// 闸门只在 NoBranch=true 且 dev == base 时旁路。
+	if dev == base && !reqRow.NoBranch {
 		log.Printf("[auto-push] %s: dev branch %q == base %q — refusing to push directly to base branch", reqRow.ID, dev, base)
 		return
 	}
@@ -756,6 +762,9 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 
 	var jobID, subTaskID string
 	if codeLivesOnAgent(reqRow) {
+		// StartCoding prologue refuses no_branch + agent_server up-front, so
+		// reaching here for NoBranch=true means a stray race; defer to the
+		// standard remote dispatch (which will trip dev==base and be skipped).
 		var derr error
 		jobID, subTaskID, derr = dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, autoCommitMsg, pushModel, pushCfgID, commitLang, "auto")
 		if derr != nil {
@@ -763,6 +772,15 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 			return
 		}
 		log.Printf("[auto-push] %s: remote → LLM sub-task %s job %s branch=%s model=%q", reqRow.ID, subTaskID, jobID, dev, pushModel)
+	} else if reqRow.NoBranch {
+		// No-branch 本地:走专属 push-base shell job — commit + push base,跳过 PR。
+		var serr error
+		jobID, subTaskID, serr = h.subTaskRunner.RunPushBaseShellJob(reqRow, base, remote, platformType, autoCommitMsg, pushModel, pushCfgID, commitLang, autoPRTitle)
+		if serr != nil {
+			log.Printf("[auto-push] %s: no-branch shell dispatch failed: %v", reqRow.ID, serr)
+			return
+		}
+		log.Printf("[auto-push] %s: no-branch → base-shell job %s sub_task=%s base=%s", reqRow.ID, jobID, subTaskID, base)
 	} else {
 		var serr error
 		jobID, subTaskID, serr = h.runPushPRShellJob(reqRow, dev, base, remote, platformType, autoCommitMsg, pushModel, pushCfgID, commitLang, autoPRTitle)

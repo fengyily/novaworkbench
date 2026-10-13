@@ -26,6 +26,9 @@ export default function WizardPage() {
   // Step 3: Coding
   const [codeOutput, setCodeOutput] = useState<string[]>([]);
   const [coding, setCoding] = useState(false);
+  // v0.6.x 不创建分支开关:WizardPage quick-start 路径也暴露该选项,
+  // 让用户在 step 3「开始编码」之前就能选 no-branch。
+  const [noBranch, setNoBranch] = useState(false);
   const outputRef = useRef<HTMLDivElement>(null);
 
   // Step 1: Create Project
@@ -124,6 +127,11 @@ export default function WizardPage() {
           project_path: projectPath,
           requirement_title: messages[0]?.role === 'user' ? messages[0].content : t('wizard.page.defaultRequirementTitle'),
           requirement_desc: finalReq || chatHistory,
+          // v0.6.x no-branch 模式:WizardPage quick-start 路径没传
+          // requirement_id,所以 p.RequirementID=="" 时 wizard_coding.go
+          // 不走 worktree 路径,no_branch 主要控制「base vs 不创建」语义。
+          // 后端在没有 requirement_id 时会保留 fallback 行为。
+          no_branch: noBranch,
         }),
       });
 
@@ -263,6 +271,15 @@ export default function WizardPage() {
             <div className="start-section">
               <p>{t('wizard.page.projectLine')}<code>{projectPath}</code></p>
               <p>{t('wizard.page.ctaHint')}</p>
+              {/* v0.6.x 不创建分支开关:复用与详情页 preflight 同样的 toggle 文案,
+                  行为一致 — 勾选后跳过 worktree 创建,直接在 base 分支开发。 */}
+              <label className={`preflight-toggle ${noBranch ? 'is-checked' : ''}`} style={{ marginTop: 16, marginBottom: 16 }}>
+                <input type="checkbox" checked={noBranch} onChange={e => setNoBranch(e.target.checked)} />
+                <div className="preflight-toggle-body">
+                  <div className="preflight-toggle-title">{t('requirements.detail2.preflightBranchStrategyBase')}</div>
+                  <div className="preflight-toggle-desc">{t('requirements.detail2.preflightBranchStrategyBaseDesc')}</div>
+                </div>
+              </label>
               <button className="btn btn-primary btn-lg" onClick={handleStartCoding}>
                 {t('wizard.page.startCoding')}
               </button>

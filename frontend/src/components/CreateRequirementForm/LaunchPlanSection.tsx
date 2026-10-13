@@ -241,6 +241,12 @@ export default function LaunchPlanSection({
   // 'design' = hand the stored design doc via -p; matches the
   // RequirementDetail dev-mode picker default.
   const [devMode, setDevMode] = useState<'session' | 'design'>('design');
+  // v0.6.x 不创建分支开关:与后端 wizard_coding.go prologue 互校 — 勾选时
+  // 把 branch_name 设为 ""、coding_agent_server_id 强制清空(后端前置拒绝),
+  // 同时令开发 stage 的 NEW 分支输入置灰。manual / scheduled 模式下仍然
+  // 收集(后端忽略未触发 start-coding 的字段),让用户在 select-time 一次性
+  // 表达意图,manual 后续手动启动开发时继承该选择。
+  const [noBranch, setNoBranch] = useState(false);
 
   const taskType = resolveTaskType(flow, kind, mode);
 
@@ -320,8 +326,13 @@ export default function LaunchPlanSection({
       coding_model: codingModel || undefined,
       coding_claude_config_id: codingClaudeConfigId || undefined,
       coding_agent_server_id: codingAgentServerId || undefined,
-      branch_name: branchName || undefined,
+      // no-branch 模式下 branch_name 必须为空(后端 wizard_coding.go 把空
+      // 字符串 + no_branch=true 视为「在 base 分支直接开发」)。
+      branch_name: noBranch ? '' : (branchName || undefined),
       base_branch: baseBranch || undefined,
+      // v0.6.x:不创建分支。仅 immediate / scheduled 下发到后端生效;
+      // manual 模式下用户后续手动 StartCoding 时,该字段也会被读出来。
+      no_branch: noBranch || undefined,
       split_tasks: splitTasks || undefined,
       auto_push_pr: autoPushPR,
       read_knowledge: readKnowledge || undefined,
@@ -337,7 +348,7 @@ export default function LaunchPlanSection({
     designModel, designClaudeConfigId, designAgentServerId,
     codingModel, codingClaudeConfigId, codingAgentServerId,
     branchName, baseBranch, splitTasks, autoPushPR, readKnowledge,
-    syncMode, devMode,
+    syncMode, devMode, noBranch,
   ]);
 
   const fieldDisabled = !!disabled;
@@ -760,11 +771,47 @@ export default function LaunchPlanSection({
                 className="form-input preflight-field-input"
                 value={branchName}
                 onChange={e => setBranchName(e.target.value)}
-                placeholder="feat/req-xxx"
-                disabled={fieldDisabled}
+                placeholder={noBranch ? (baseBranch || baseBranchDefault) : "feat/req-xxx"}
+                disabled={fieldDisabled || noBranch}
               />
             </div>
           </div>
+
+          {/* v0.6.x 不创建分支开关(preflight-toggle 卡片形式,与同 stage
+              的 splitTasks / autoPushPR 同一视觉语言)。勾选时:
+              - 后端跳过 worktree 创建与 PR 创建,直接 commit/push base
+              - NEW 分支名输入置灰(见上)
+              - coding_agent_server_id 强制清空(后端前置拒绝 no_branch+agent)
+              - auto_push 行为不变 — 但 push 走 push_pr_base.go 而非 push_pr_shell.go */}
+          <label
+            className={`preflight-toggle ${noBranch ? 'is-checked' : ''}`}
+            onClick={(e) => {
+              e.preventDefault();
+              if (fieldDisabled) return;
+              const next = !noBranch;
+              setNoBranch(next);
+              if (next) {
+                // 互斥清空:agent server 与 no-branch 不兼容(后端拒绝)。
+                setCodingAgentServerId('');
+                setSyncMode('');
+              }
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={noBranch}
+              onChange={() => {}}
+              disabled={fieldDisabled}
+            />
+            <div className="preflight-toggle-body">
+              <div className="preflight-toggle-title">
+                {t('requirements.detail2.preflightBranchStrategyBase')}
+              </div>
+              <div className="preflight-toggle-desc">
+                {t('requirements.detail2.preflightBranchStrategyBaseDesc')}
+              </div>
+            </div>
+          </label>
 
           <label className={`preflight-toggle ${splitTasks ? 'is-checked' : ''}`}>
             <input

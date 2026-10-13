@@ -134,6 +134,17 @@ type Requirement struct {
 	// three development completion points (local non-split, Agent-server, and
 	// the split orchestrator summary).
 	AutoPush bool `json:"auto_push"`
+	// NoBranch records the "develop on base branch" choice made at the coding
+	// stage prologue. When true, the requirement skipped worktree creation
+	// and branch creation; coding, commit, and push all happen directly on the
+	// base branch, with PR creation skipped (gh/glab/tea reject head==base).
+	// Read by ContinueCoding/AdjustCoding (to pick the same checkout) and by
+	// autoPushPR / push_pr_shell / LocalMerge / Cleanup to keep behavior
+	// consistent with how the code was first developed. false = legacy
+	// "feat/<reqID> worktree + auto-PR" flow. Stamped once when the coding
+	// stage prologue runs; nil pointer fields in codingRunParams preserve the
+	// previous value so re-runs that omit the field stay consistent.
+	NoBranch bool `json:"no_branch"`
 	// DesignAgentServerID records WHERE this requirement's architect-design
 	// stage was run. Stamped by the design stage prologue (mirror of
 	// AgentServerID for the dev stage). Empty = 本地 (no remote agent). On a
@@ -371,6 +382,14 @@ type LaunchSpec struct {
 	BranchName    string `json:"branch_name,omitempty"`
 	BaseBranch    string `json:"base_branch,omitempty"`
 	SplitTasks    bool   `json:"split_tasks"`
+	// NoBranch toggles the "develop on base branch" mode (v0.6.x). true 时
+	// coding 阶段跳过 worktree 创建与 PR 创建,直接在 base 分支 commit/push。
+	// 之前三个 dispatch 入口(dispatchImmediateCoding /
+	// dispatchImmediateDesignAndCoding / dispatchScheduled)都把这个字段 silent
+	// drop 了,导致前端 toggle 没生效。bool (非 *bool) 是有意为之:launch
+	// spec 总是显式表达意图,默认值 false = 沿用现有 feat/req_xxx 流程。
+	// 与 agent_server_id 互斥 — 后端 prologue 在 StartCoding 入口处会前置拒绝。
+	NoBranch bool `json:"no_branch"`
 	// AutoPushPR is *bool so an omitted key means "use the row's persisted
 	// value" (mirrors codingRunParams.AutoPushPR semantics). Defaults in
 	// dispatch: false for *bool — callers that want the project default

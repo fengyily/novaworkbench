@@ -221,10 +221,16 @@ const (
 // MergeHandler.Push button and the autoPushPR end-of-development trigger).
 // It's the discriminator the idempotency guard keys on — see
 // SubTaskService.FindRecentPushForReq.
+//
+// "push_base" marks rows dispatched by the no-branch mode shell job
+// (runPushBaseShellJob) which commits + pushes the base branch directly
+// without PR creation. Used by SubTaskPanel badge rendering and the
+// idempotency guard for no-branch re-runs.
 const (
-	SubTaskSourceManual = "manual"
-	SubTaskSourceAuto   = "auto"
-	SubTaskSourcePushPR = "push_pr"
+	SubTaskSourceManual   = "manual"
+	SubTaskSourceAuto     = "auto"
+	SubTaskSourcePushPR   = "push_pr"
+	SubTaskSourcePushBase = "push_base"
 )
 
 // SubTaskSessionMode values describe which conversation-threading policy

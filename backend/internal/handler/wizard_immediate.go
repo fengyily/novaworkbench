@@ -72,6 +72,12 @@ type designCodingImmediateReq struct {
 	BranchName          string `json:"branch_name"`
 	BaseBranch          string `json:"base_branch"`
 	SplitTasks          bool   `json:"split_tasks"`
+	// v0.6.x 不创建分支开关。true 时 coding 阶段跳过 worktree 创建与 PR,
+	// 直接在 base 分支 commit/push。LaunchSpec 入口(dispatchImmediateDesignAndCoding)
+	// 与 HTTP /api/wizard/design-coding-immediate 入口都需要透传。
+	// 与 AutoPushPR 用 *bool 同:nil = 保留行值(让 CreateLaunchSpec 路径
+	// 之前的请求行为不变),non-nil = stamp 显式值。
+	NoBranch            *bool  `json:"no_branch"`
 	AutoPushPR          *bool  `json:"auto_push_pr"`
 	DevMode             string `json:"dev_mode"`
 	SyncMode            string `json:"sync_mode"`
@@ -318,6 +324,11 @@ func (h *WizardHandler) immediateDesignCallback(reqID string, body designCodingI
 				ReadKnowledge:    body.ReadKnowledge,
 				AgentServerID:    body.CodingAgentServerID,
 				SplitTasks:       body.SplitTasks,
+				// v0.6.x no-branch: LaunchSpec 与 HTTP design-coding-immediate
+				// 双入口都要求显式透传 body.NoBranch 到 codingRunParams。
+				// body.NoBranch 是 *bool(prologue nil-vs-non-nil 语义),
+				// 直接赋值即可。
+				NoBranch:         body.NoBranch,
 				AutoPushPR:       body.AutoPushPR,
 				DevMode:          body.DevMode,
 				SyncMode:         body.SyncMode,

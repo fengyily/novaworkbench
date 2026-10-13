@@ -67,6 +67,14 @@ type ScheduledTask struct {
 	// non-empty. Forwarded to the wizard at dispatch time so the run uses
 	// the same transport the user picked at schedule creation.
 	SyncMode            string     `json:"sync_mode,omitempty"`
+	// NoBranch mirrors requirements.no_branch: when true the coding stage
+	// skips worktree + branch creation and commits/pushes directly on
+	// BaseBranch (no PR). Set by the launch-spec immediate / scheduled
+	// dispatch path (requirement_launch.go) and read by
+	// scheduler.RunScheduledCoding / chainedDesignCallback when populating
+	// wizard_coding.go codingRunParams. "" / false = legacy
+	// "feat/<reqID> worktree + auto-PR" flow (backward compatible).
+	NoBranch            bool       `json:"no_branch"`
 	// RequirementStatus is the LIVE status of the linked requirement at the
 	// moment of query — populated by LEFT JOIN `requirements` so the
 	// /schedules list can render a status chip next to the requirement

@@ -144,6 +144,14 @@ func (e *ScheduledExecutor) RunScheduledCoding(ctx context.Context, p scheduler.
 
 	// 构造 codingRunParams（按 wizard 既有字段）。Title / Desc 从最新需求
 	// 行读取——用户在调度后修改了标题/描述也以最新值为准。
+	//
+	// NoBranch:scheduled_tasks.no_branch 透传到 codingRunParams(wizard prologue
+	// 的 UpdateNoBranch 会持久化到 requirements.no_branch,后续的
+	// ContinueCoding / AdjustCoding / autoPushPR / LocalMerge / Cleanup 都从
+	// 那里读)。用 pointer 复用 prologue 的 nil-vs-non-nil 语义:scheduler
+	// 总是 stamp 显式值,所以这里也是 *bool{&p.NoBranch},保证 prologue
+	// 一定执行 UpdateNoBranch 而不是「保留行值」(后者会让 DB 永远是 0)。
+	noBranch := p.NoBranch
 	cp := &codingRunParams{
 		RequirementID:    p.RequirementID,
 		RequirementTitle: req.Title,
@@ -155,6 +163,7 @@ func (e *ScheduledExecutor) RunScheduledCoding(ctx context.Context, p scheduler.
 		AgentServerID:    p.AgentServerID,
 		SplitTasks:       p.SplitTasks,
 		SyncMode:         p.SyncMode,
+		NoBranch:         &noBranch,
 		// ProjectPath 由 wizard exec body 自身从 reqRow.ProjectID + projectSvc 解析
 		// （保留 HTTP 路径完全相同的逻辑），此处不传。
 	}
@@ -378,6 +387,11 @@ func (e *ScheduledExecutor) chainedDesignCallback(reqID, schedID string, p sched
 				}
 				return
 			}
+			// NoBranch: 与单阶段 RunScheduledCoding 同 — 用 &localNonNil
+			// 保证 prologue 走 UpdateNoBranch,把 schedule.no_branch 写回
+			// requirements.no_branch。schedule 上的 no_branch 是 launch spec
+			// 入口的 durable 记录,合并 schedule 设计/开发两阶段都保留。
+			noBranchLocal := p.NoBranch
 			cp := &codingRunParams{
 				RequirementID:    reqID,
 				RequirementTitle: req.Title,
@@ -388,6 +402,7 @@ func (e *ScheduledExecutor) chainedDesignCallback(reqID, schedID string, p sched
 				ReadKnowledge:    p.ReadKnowledge,
 				AgentServerID:    p.CodingAgentServerID,
 				SplitTasks:       p.SplitTasks,
+				NoBranch:         &noBranchLocal,
 				// ProjectPath / ClaudeConfigID / AutoPushPR / DevMode stay
 				// empty so the wizard exec body resolves them via the
 				// existing per-stage priority chain (same behavior as the

@@ -59,6 +59,14 @@ type DesignParams struct {
 // persona (end-to-end implementation rather than decomposition). SyncMode
 // is the user-picked code-transport mode carried on the scheduled_tasks
 // row; "" / "local" — same semantics as DesignParams.SyncMode.
+//
+// NoBranch mirrors wizard_coding.go codingRunParams.NoBranch: when true the
+// scheduler skips the worktree + branch creation step and forces the
+// working dir to projectPath + BaseBranch. Sourced from scheduled_tasks.
+// no_branch (stamped by the launch-spec immediate / scheduled dispatch
+// path). Same pointer-vs-value caveat as the HTTP path: the schedule
+// row's no_branch is the durable record; a re-run with the column unchanged
+// re-applies the original intent.
 type CodingParams struct {
 	RequirementID string
 	BranchName    string
@@ -68,6 +76,7 @@ type CodingParams struct {
 	SplitTasks    bool
 	ReadKnowledge bool
 	SyncMode      string
+	NoBranch      bool
 }
 
 // DesignCodingParams is the wizard-facing shape for a merged
@@ -95,6 +104,10 @@ type DesignCodingParams struct {
 	// schedule (the user's choice at schedule creation applies to both
 	// halves of the chained run).
 	SyncMode string
+	// NoBranch mirrors CodingParams.NoBranch and is forwarded to the coding
+	// stage inside chainedDesignCallback. Carried verbatim from the launch
+	// spec at schedule creation time.
+	NoBranch bool
 }
 
 // WikiParams is the wizard-facing shape for a scheduled knowledge-base
@@ -330,6 +343,7 @@ func (s *Scheduler) dispatch(t model.ScheduledTask) {
 			SplitTasks:    t.SplitTasks,
 			ReadKnowledge: t.ReadKnowledge,
 			SyncMode:      t.SyncMode,
+			NoBranch:      t.NoBranch,
 		})
 	case model.SchedTypeDesignCoding:
 		// Merged two-stage task: design runs first; on success the executor
@@ -347,6 +361,7 @@ func (s *Scheduler) dispatch(t model.ScheduledTask) {
 			BaseBranch:          t.BaseBranch,
 			SplitTasks:          t.SplitTasks,
 			SyncMode:            t.SyncMode,
+			NoBranch:            t.NoBranch,
 		})
 	case model.SchedTypeWiki:
 		// Knowledge-base document run. Reuses the design-stage columns

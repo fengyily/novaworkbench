@@ -90,6 +90,11 @@ export function DesignCodingImmediateModal({
   // inference (project.remote_url) is the tie-breaker when nothing is
   // picked.
   const [syncMode, setSyncMode] = useState<'' | 'local'>('');
+  // v0.6.x 不创建分支开关。立即开发(design+coding 一键启动)只影响
+  // coding 阶段 — design 阶段有自己的 worktree 流,与 coding 的 no_branch
+  // 互不影响。Agent server 互斥:勾选 no_branch 时清掉 codingAgentServerId
+  // (后端前置拒绝)。
+  const [noBranch, setNoBranch] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
@@ -106,8 +111,12 @@ export function DesignCodingImmediateModal({
         design_agent_server_id: designAgentServerId || undefined,
         coding_model: codingModel || undefined,
         coding_agent_server_id: codingAgentServerId || undefined,
-        branch_name: branchName,
+        branch_name: noBranch ? '' : branchName,
         base_branch: baseBranch,
+        // v0.6.x no-branch:仅作用于 coding 阶段(后端 wizard_coding.go prologue
+        // 对 design 阶段忽略此字段)。勾选时与 agent_server_id 互斥 — 后端
+        // 会前置拒绝,前端勾选时已强制 setCodingAgentServerId('')。
+        no_branch: noBranch,
         split_tasks: splitTasks,
         // Mirrors the devMode picker on RequirementDetail. The backend
         // (wizard_coding.go UpdateDevMode) uses the requirement row's
@@ -416,6 +425,37 @@ export function DesignCodingImmediateModal({
                 />
               </div>
             </div>
+            {/* v0.6.x 不创建分支开关(toggle card 形式,与同 modal 的
+                readKnowledge / splitTasks 同一视觉语言)。勾选时:
+                - branch_name 输入置灰,后端跳过 worktree
+                - coding 阶段直接在 base 分支 commit/push,无 PR
+                - 与 Agent server 互斥(后端前置拒绝)— setCodingAgentServerId('') */}
+            <label
+              className={`preflight-toggle ${noBranch ? 'is-checked' : ''}`}
+              onClick={(e) => {
+                e.preventDefault();
+                if (submitting) return;
+                const next = !noBranch;
+                setNoBranch(next);
+                if (next) {
+                  setCodingAgentServerId('');
+                  setSyncMode('');
+                }
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={noBranch}
+                onChange={() => {}}
+                disabled={submitting}
+              />
+              <div className="preflight-toggle-body">
+                <div className="preflight-toggle-title">{t('requirements.detail2.preflightBranchStrategyBase')}</div>
+                <div className="preflight-toggle-desc">
+                  {t('requirements.detail2.preflightBranchStrategyBaseDesc')}
+                </div>
+              </div>
+            </label>
             <div className="modal-field">
               <label>{t('requirements.detail2.preflightNewBranchLabel')}</label>
               <div className="preflight-field-card preflight-field-card--git">
@@ -424,8 +464,8 @@ export function DesignCodingImmediateModal({
                   className="form-input preflight-field-input"
                   value={branchName}
                   onChange={e => setBranchName(e.target.value)}
-                  placeholder={`feat/${requirementId.replace(/^req_/, '')}`}
-                  disabled={submitting}
+                  placeholder={noBranch ? (baseBranch || 'main') : `feat/${requirementId.replace(/^req_/, '')}`}
+                  disabled={submitting || noBranch}
                 />
               </div>
             </div>

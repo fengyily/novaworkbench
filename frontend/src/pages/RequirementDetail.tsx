@@ -796,6 +796,29 @@ export default function RequirementDetail() {
     }
   }, [req?.agent_server_id]);
 
+  // v0.6.x 不创建分支 + Agent Server 互斥:后端 StartCoding prologue 直接
+  // 拒绝,前端在这里先一步把 agent server 清掉并给出警告,避免用户点了
+  // 「确认开发」才看到 400 错误。两条规则都要生效:
+  //   1. 用户勾选「直接在 base」→ 清 codingAgentServerId,展示一次性提示
+  //   2. 用户切到 Agent server → 反向关闭 no-branch
+  // developOnBase 的声明在 L1159+ — 这里通过 useEffect 闭包捕获运行时的
+  // 最新值(setter 函数不会触发依赖关系),所以提前声明两个 effect 不影响
+  // 执行顺序,只在编译期报「使用前声明」错误。把 useState 提到此处即可。
+  const [agentServerLockedNotice, setAgentServerLockedNotice] = useState(false);
+  const [developOnBase, setDevelopOnBase] = useState(false);
+  useEffect(() => {
+    if (developOnBase && codingAgentServerId) {
+      setCodingAgentServerId('');
+      setAgentServerLockedNotice(true);
+    }
+  }, [developOnBase, codingAgentServerId]);
+  useEffect(() => {
+    if (!developOnBase) return;
+    if (codingAgentServerId) {
+      setDevelopOnBase(false);
+    }
+  }, [codingAgentServerId]);
+
   // Poll /api/wizard/active-jobs every 5s so the status badge + claude-status
   // row can pulse while a coding/design/apply job is running on this
   // requirement — even if the persisted *_job_id column hasn't refreshed
@@ -2445,7 +2468,7 @@ export default function RequirementDetail() {
     streamJob(activeSchedJobId, { keepDone: false });
   }, [activeSchedJobId, streamJob]);
 
-  const doStartCoding = async (bName: string, bBase: string, useKnowledge: boolean, splitTasks: boolean, autoPushPR: boolean) => {
+  const doStartCoding = async (bName: string, bBase: string, useKnowledge: boolean, splitTasks: boolean, autoPushPR: boolean, noBranch: boolean) => {
     if (!req || !project || !id) return;
     setCoding(true);
     setCodingLines([]);
@@ -2483,8 +2506,12 @@ export default function RequirementDetail() {
           requirement_title: req.title,
           requirement_desc: desc,
           requirement_id: req.id,
-          branch_name: bName,
+          // v0.6.x:勾选「直接在 base 分支」时把 branch_name 留空,让后端走
+          // no-branch 路径;同时显式带上 no_branch=true 触发后端的 base 分支
+          // checkout + commit/push base 流程。worktree 与 PR 创建均被跳过。
+          branch_name: noBranch ? '' : bName,
           base_branch: bBase,
+          no_branch: noBranch,
           read_knowledge: useKnowledge,
           // Whether to split the requirement into sub-tasks (developer persona
           // decomposition + auto-dispatch). Default false = do not split; the
@@ -2558,7 +2585,10 @@ export default function RequirementDetail() {
     // both design and coding stages — the modal is the final
     // checklist that mirrors it, not a separate edit surface that
     // leaks back on every keystroke.
-    setBranchName(defaultBranch);
+    // v0.6.x 不创建分支:从需求行的 no_branch 字段回填(默认 false = 创建分支)。
+    // 若该需求上一次是 no-branch run,这里会自然还原成 disable,体验连贯。
+    setDevelopOnBase(!!req.no_branch);
+    setBranchName(req.no_branch ? '' : defaultBranch);
     setModalBaseBranch(baseBranch || project.default_branch || 'main');
     setReadKnowledgeDev(false); // default unchecked each time
     setSplitTasksDev(false); // default unchecked each time
@@ -2580,7 +2610,7 @@ export default function RequirementDetail() {
     // confirm without further edits still leaves the inline picker
     // reflecting the value that just fired.
     setBaseBranch(modalBaseBranch);
-    doStartCoding(branchName, modalBaseBranch, readKnowledgeDev, splitTasksDev, autoPushPRDev);
+    doStartCoding(branchName, modalBaseBranch, readKnowledgeDev, splitTasksDev, autoPushPRDev, developOnBase);
   };
 
   // ── Further adjust: resume the prior coding session, output appends to codingLines
@@ -3073,8 +3103,12 @@ export default function RequirementDetail() {
                 <span className="flight-leg">
                   <span className="flight-leg-label">GIT</span>
                   <span className="flight-leg-value" title={stripBase}>{stripBase}</span>
-                  <IconArrowRight size={11} className="flight-arrow" aria-hidden />
-                  <span className="flight-leg-value" title={stripNew}>{stripNew}</span>
+                  {!developOnBase && (
+                    <>
+                      <IconArrowRight size={11} className="flight-arrow" aria-hidden />
+                      <span className="flight-leg-value" title={stripNew}>{stripNew}</span>
+                    </>
+                  )}
                 </span>
                 <span className="flight-sep">·</span>
                 <span className="flight-leg">
@@ -3123,6 +3157,58 @@ export default function RequirementDetail() {
                       {availableBranches.map(b => <option key={b} value={b} />)}
                     </datalist>
                   </div>
+                  {/* v0.6.x 不创建分支开关(radio 单选,worktree 是默认)。
+                      勾选「直接在 base」时:branch_name 输入置灰且 placeholder
+                      改为 base;下方出现并发冲突警告 + Agent server 自动切本地的
+                      提示。user 改 radio 时清空 branchName 字段 — 让后端走
+                      no-branch 路径(branch_name=="" + no_branch==true)。 */}
+                  <div className="modal-field">
+                    <label>{t('requirements.detail2.preflightBranchStrategyLabel')}</label>
+                    {/* v0.6.x 不创建分支开关:复用 preflight-toggle 卡片(同
+                        modal 内 readKnowledgeDev / splitTasksDev / autoPushPRDev
+                        同一视觉语言)— 两个 stacked 卡片,只有一个 `is-checked`,
+                        行为即「1-of-2 选择」。点 worktree 卡片回填 branchName,
+                        点 base 卡片清空 branchName(让后端走 no-branch 路径)。 */}
+                    <label
+                      className={`preflight-toggle ${!developOnBase ? 'is-checked' : ''}`}
+                      onClick={(e) => { e.preventDefault(); setDevelopOnBase(false); setBranchName(defaultBranchName(req.id, kindOf(req))); }}
+                    >
+                      <input type="radio" name="branch-strategy" checked={!developOnBase} onChange={() => {}} />
+                      <div className="preflight-toggle-body">
+                        <div className="preflight-toggle-title">
+                          <IconBranch size={14} className="icon-mr" />
+                          {t('requirements.detail2.preflightBranchStrategyWorktree')}
+                        </div>
+                        <div className="preflight-toggle-desc">
+                          {t('requirements.detail2.preflightBranchStrategyWorktreeDesc')}
+                        </div>
+                      </div>
+                    </label>
+                    <label
+                      className={`preflight-toggle ${developOnBase ? 'is-checked' : ''}`}
+                      onClick={(e) => { e.preventDefault(); setDevelopOnBase(true); setBranchName(''); }}
+                    >
+                      <input type="radio" name="branch-strategy" checked={developOnBase} onChange={() => {}} />
+                      <div className="preflight-toggle-body">
+                        <div className="preflight-toggle-title">
+                          <IconArrowRight size={14} className="icon-mr" />
+                          {t('requirements.detail2.preflightBranchStrategyBase')}
+                        </div>
+                        <div className="preflight-toggle-desc">
+                          {t('requirements.detail2.preflightBranchStrategyBaseDesc')}
+                        </div>
+                      </div>
+                    </label>
+                    {/* 当用户勾选 no-branch 时若已选 Agent Server,会触发
+                        上面的 useEffect 自动清掉。这里给一个一次性提示。 */}
+                    {agentServerLockedNotice && (
+                      <div
+                        style={{ fontSize: 12, color: 'var(--color-warning, #f59e0b)', marginTop: 4, lineHeight: 1.5 }}
+                      >
+                        {t('requirements.detail2.preflightBranchStrategyBaseWarn')}
+                      </div>
+                    )}
+                  </div>
                   <div className="modal-field">
                     <label>{t('requirements.detail2.preflightNewBranchLabel')}</label>
                     <div className="preflight-field-card preflight-field-card--git">
@@ -3132,7 +3218,8 @@ export default function RequirementDetail() {
                         list="branch-suggestions"
                         value={branchName}
                         onChange={e => setBranchName(e.target.value)}
-                        placeholder={defaultBranchName(req.id, kindOf(req))}
+                        placeholder={developOnBase ? modalBaseBranch || 'base' : defaultBranchName(req.id, kindOf(req))}
+                        disabled={developOnBase}
                       />
                     </div>
                     <datalist id="branch-suggestions">
@@ -5549,10 +5636,22 @@ export default function RequirementDetail() {
 
               {/* ── Merge / PR step ── */}
               <div className="merge-section">
-                <div className="merge-actions stack-mobile">
-                  <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}><IconMerge size={13} className="btn-icon" />{t('requirements.detail2.mergeLocalTitle')}</button>
-                  <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}><IconGlobe size={13} className="btn-icon" />{t('requirements.detail2.mergePrTitle')}</button>
-                </div>
+                {/* v0.6.x no-branch 模式:本地合并 / 推送 PR 都无意义 —
+                    - LocalMerge 在后端短路(200 + no_branch:true)
+                    - 推送 PR 后端会按 base 走,但用户在 UI 上应该看到「无需操作」
+                    把两个按钮替换成一个 status chip,告诉用户「已在 base 完成」。 */}
+                {req?.no_branch ? (
+                  <div className="merge-actions stack-mobile" data-no-branch="true">
+                    <span className="badge badge-success" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <IconCheck size={13} /> 已直接提交到 base 分支 {mergeState?.target_branch || 'main'}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="merge-actions stack-mobile">
+                    <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}><IconMerge size={13} className="btn-icon" />{t('requirements.detail2.mergeLocalTitle')}</button>
+                    <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}><IconGlobe size={13} className="btn-icon" />{t('requirements.detail2.mergePrTitle')}</button>
+                  </div>
+                )}
 
                 {mergeState?.worktree_path && (
                   <WorktreePathHint
@@ -5606,8 +5705,16 @@ export default function RequirementDetail() {
                 <div className="tab-empty"><p><IconCheck size={14} className="icon-mr" />{t('requirements.detail2.devCompleteHint')}</p></div>
               )}
               <div className="merge-actions stack-mobile">
-                <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}><IconMerge size={13} className="btn-icon" />{t('requirements.detail2.mergeLocalTitle')}</button>
-                <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}><IconGlobe size={13} className="btn-icon" />{t('requirements.detail2.mergePrTitle')}</button>
+                {req?.no_branch ? (
+                  <span className="badge badge-success" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    <IconCheck size={13} /> 已直接提交到 base 分支 {mergeState?.target_branch || 'main'}
+                  </span>
+                ) : (
+                  <>
+                    <button className="btn" onClick={() => openMergeModal('local')} disabled={merging}><IconMerge size={13} className="btn-icon" />{t('requirements.detail2.mergeLocalTitle')}</button>
+                    <button className="btn" onClick={() => openMergeModal('push')} disabled={merging}><IconGlobe size={13} className="btn-icon" />{t('requirements.detail2.mergePrTitle')}</button>
+                  </>
+                )}
               </div>
               {mergeState?.worktree_path && (
                 <WorktreePathHint

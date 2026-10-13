@@ -570,7 +570,14 @@ func (h *MergeHandler) State(w http.ResponseWriter, r *http.Request) {
 		// (dir) works regardless of which worktree has dev checked out.
 		ahead, behind = aheadBehind(dir, target, dev)
 	}
-	prURL := buildPRURL(pf, webBase, owner, repo, target, dev)
+	prURL := ""
+	// No-branch 模式:v0.6.x 的 dev==base 场景下 buildPRURL 会生成退化的
+	// `.../compare/main...main` 链接,前端拿到这个 URL 后会尝试「打开 PR」,
+	// 但平台(head=head)==base 必然拒绝。直接省略,前端根据 no_branch=true 隐藏
+	// PR CTA、改成「已直接在 base 完成」展示。
+	if !reqRow.NoBranch {
+		prURL = buildPRURL(pf, webBase, owner, repo, target, dev)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"is_git":            true,
@@ -588,6 +595,7 @@ func (h *MergeHandler) State(w http.ResponseWriter, r *http.Request) {
 		"mid_merge":         midMerge(dir),
 		"conflict_files":    conflictedFiles(dir),
 		"worktree_path":     reqRow.WorktreePath,
+		"no_branch":         reqRow.NoBranch,
 	})
 }
 
@@ -617,6 +625,19 @@ func (h *MergeHandler) LocalMerge(w http.ResponseWriter, r *http.Request) {
 	if h.usesAgentServer(reqRow) {
 		writeError(w, http.StatusConflict, "AGENT_SERVER_REQUIRED",
 			"该需求由 Agent 服务器开发，代码位于远端工作区，无法在本地直接合入。请使用「推送并发起 PR」（将在同一台 Agent 服务器上执行）。")
+		return
+	}
+	// No-branch 模式(v0.6.x):开发直接落在 base 分支上,「合并 base 到 base」
+	// 是 no-op 而 `git checkout <target>` 会以「Already on 'main'」失败。短路
+	// LocalMerge,告诉前端无需任何合并操作;真正的推送/收尾走 autoPushPR /
+	// 手动 Push,都已经路由到 runPushBaseShellJob。
+	if reqRow.NoBranch {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok":            true,
+			"message":       "不创建分支模式:代码已直接在 base 分支,无需合并",
+			"no_branch":     true,
+			"target_branch": defaultBranch,
+		})
 		return
 	}
 	if dev == "" || dev == "HEAD" {
@@ -1069,12 +1090,28 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	// The child starts a fresh session (the main-agent session may already be
 	// gone or unsuitable to continue) and runs in the requirement's own
 	// worktree / agent server (resolved inside dispatchPushPRSubTask).
-	jobID, subTaskID, err := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, pushCommitMsg, effectiveModel, roleConfigID, commitLang, "manual")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
-		return
+	//
+	// No-branch 模式 (v0.6.x) 例外:dev == base 且 gh/glab/tea 必然拒绝 head==base,
+	// 路由到 runPushBaseShellJob — commit + push base + 无 PR,逻辑与 auto 入口
+	// 共享同一 shell job。
+	var jobID, subTaskID string
+	if reqRow.NoBranch {
+		var berr error
+		jobID, subTaskID, berr = h.subTaskRunner.RunPushBaseShellJob(reqRow, base, remote, platformType, pushCommitMsg, effectiveModel, roleConfigID, commitLang, "")
+		if berr != nil {
+			writeError(w, http.StatusInternalServerError, "DB_ERROR", berr.Error())
+			return
+		}
+		log.Printf("[merge/push] %s: no-branch → base-shell job=%s base=%s", reqRow.ID, jobID, base)
+	} else {
+		var err error
+		jobID, subTaskID, err = dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, pushCommitMsg, effectiveModel, roleConfigID, commitLang, "manual")
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+			return
+		}
+		log.Printf("[merge/push] sub-task %s job %s req %s: branch=%s", subTaskID, jobID, reqRow.ID, dev)
 	}
-	log.Printf("[merge/push] sub-task %s job %s req %s: branch=%s", subTaskID, jobID, reqRow.ID, dev)
 	// Push/PR sub-task dispatched — bump parent requirement last-active time.
 	if perr := h.reqSvc.Touch(reqRow.ID); perr != nil {
 		log.Printf("[merge] touch requirement %s after push dispatch: %v", reqRow.ID, perr)
@@ -1735,6 +1772,23 @@ func (h *MergeHandler) Cleanup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// else: keep going and clean the local leftovers too.
+	}
+
+	// No-branch 模式 (v0.6.x):从未创建 worktree / 分支,但前一个 run 留下的
+	// BranchName / WorktreePath 残留字段会让后续 run 误以为存在 worktree。
+	// 主动清零再 short-circuit,语义上「清理」= 无操作 + 持久化字段归位。
+	if reqRow.NoBranch {
+		if reqRow.BranchName != "" || reqRow.WorktreePath != "" {
+			if cerr := h.reqSvc.UpdateWorktree(reqRow.ID, "", ""); cerr != nil {
+				log.Printf("[worktree-cleanup] %s: no-branch clear stale fields: %v", reqRow.ID, cerr)
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok":        true,
+			"message":   "不创建工作分支模式:无 worktree / 分支需要清理",
+			"no_branch": true,
+		})
+		return
 	}
 
 	if reqRow.WorktreePath == "" {

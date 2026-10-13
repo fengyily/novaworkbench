@@ -209,6 +209,11 @@ func (h *WizardHandler) RunLaunchForMonitor(
 // from wizard_immediate.go, so the frontend's existing translation keys
 // keep working when the same error is surfaced from the create flow.
 func dispatchImmediateDesignAndCoding(req *model.Requirement, spec *model.LaunchSpec, h *WizardHandler) (string, string, *apiFailure) {
+	// v0.6.x:LaunchSpec.NoBranch 是 bool,designCodingImmediateReq.NoBranch
+	// 是 *bool(prologue nil-vs-non-nil 语义),用 local var + &local 包一层,
+	// 保证 prologue 走 UpdateNoBranch 把 no_branch 持久化。补上前端 toggle
+	// 一直 silent drop,wizard 走默认 feat/req_xxx + 自动 PR 路径。
+	noBranchLocal := spec.NoBranch
 	body := designCodingImmediateReq{
 		ReadKnowledge:       spec.ReadKnowledge,
 		DesignModel:         spec.DesignModel,
@@ -220,6 +225,7 @@ func dispatchImmediateDesignAndCoding(req *model.Requirement, spec *model.Launch
 		BranchName:          spec.BranchName,
 		BaseBranch:          spec.BaseBranch,
 		SplitTasks:          spec.SplitTasks,
+		NoBranch:            &noBranchLocal,
 		AutoPushPR:          spec.AutoPushPR,
 		DevMode:             spec.DevMode,
 		SyncMode:            spec.SyncMode,
@@ -251,6 +257,11 @@ func dispatchImmediateCoding(req *model.Requirement, spec *model.LaunchSpec, h *
 		return "", "", af
 	}
 	_ = updated // gateCodingEntry already promoted status + reloaded; execStartCoding reads the latest row again
+	// v0.6.x:LaunchSpec.NoBranch 是 bool,codingRunParams.NoBranch 是 *bool
+	// (沿用 prologue nil-vs-non-nil 语义:nil = 保留行值,non-nil = stamp
+	// 显式值)。local var + &local 永远 non-nil,prologue 走 UpdateNoBranch
+	// 把 schedule 即时启动的 no_branch 写回 requirements.no_branch。
+	noBranchLocal := spec.NoBranch
 	cp := &codingRunParams{
 		RequirementID:  req.ID,
 		Model:          spec.CodingModel,
@@ -258,6 +269,7 @@ func dispatchImmediateCoding(req *model.Requirement, spec *model.LaunchSpec, h *
 		ReadKnowledge:  spec.ReadKnowledge,
 		AgentServerID:  spec.CodingAgentServerID,
 		SplitTasks:     spec.SplitTasks,
+		NoBranch:       &noBranchLocal,
 		AutoPushPR:     spec.AutoPushPR,
 		DevMode:        spec.DevMode,
 		SyncMode:       spec.SyncMode,
@@ -363,6 +375,14 @@ func dispatchScheduled(req *model.Requirement, spec *model.LaunchSpec, schedSvc 
 		// wiki flow hits this immediately — knowledge-base requirements
 		// commonly live in repos with no reachable remote.
 		SyncMode:            model.NormalizeSyncMode(spec.SyncMode),
+		// v0.6.x:把 LaunchSpec.NoBranch 持久化到 scheduled_tasks.no_branch。
+		// 不写就违约:scheduler 派发时 CodingParams.NoBranch 永远是 false,
+		// coding 阶段走默认 feat/req_xxx + 自动 PR 路径,与前端 toggle
+		// 语义不一致。schedule_executor 会把这个字段透传给
+		// codingRunParams.NoBranch,prologue 走 UpdateNoBranch 写回
+		// requirements.no_branch。design_and_coding 场景下 NoBranch 仅作用于
+		// 第二阶段(开发),与 wizard_coding.go 行为一致。
+		NoBranch:            spec.NoBranch,
 		Recurrence:          recurrence,
 		RecurTime:           spec.Schedule.RecurTime,
 		RecurDays:           spec.Schedule.RecurDays,

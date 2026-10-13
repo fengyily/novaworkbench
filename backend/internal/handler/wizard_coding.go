@@ -125,6 +125,16 @@ type codingRunParams struct {
 	// completion points — one of which may run asynchronously after a restart —
 	// all read the same intent.
 	AutoPushPR *bool `json:"auto_push_pr"`
+	// NoBranch toggles the "develop on base branch" mode (v0.6.x). When true,
+	// StartCoding skips worktree creation and forces the working dir to
+	// projectPath + baseBranch; commit + push go directly to base and PR
+	// creation is skipped (gh/glab/tea reject head==base). Pointer semantics
+	// mirror AutoPushPR: nil (omitted by scheduler / legacy clients) preserves
+	// the persisted value (DB default = false / legacy "feat/<reqID> worktree"
+	// flow); non-nil is stamped on the row so the three completion points +
+	// ContinueCoding / AdjustCoding / LocalMerge / Cleanup reads stay
+	// consistent with how the code was first developed.
+	NoBranch *bool `json:"no_branch"`
 	// DevMode picks the coding session threading strategy: "" / "session" =
 	// fork the design (or analysis) session (legacy default, Claude
 	// inherits the full conversation); "design" = fresh session, hand the
@@ -582,6 +592,26 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 				reqRow.AutoPush = *p.AutoPushPR
 			}
 		}
+		// Stamp the "develop on base branch" intent. Same pointer semantics
+		// as AutoPushPR: nil preserves the persisted value, non-nil is
+		// written through so the three completion points + every follow-up
+		// (ContinueCoding / AdjustCoding / LocalMerge / Cleanup / autoPushPR)
+		// read the same choice. Agent-server combination is refused up-front:
+		// the remote agent-worker's remoteBranchFor helper falls back to
+		// "requirement-<id>" which contradicts the "develop on base" intent,
+		// and we don't have a clean way to keep the two consistent in v1.
+		if p.NoBranch != nil {
+			if perr := h.reqSvc.UpdateNoBranch(p.RequirementID, *p.NoBranch); perr != nil {
+				log.Printf("[start-coding] failed to persist no_branch for %s: %v", p.RequirementID, perr)
+			} else if reqRow != nil {
+				reqRow.NoBranch = *p.NoBranch
+			}
+			if *p.NoBranch && p.AgentServerID != "" {
+				job.Append(store.LogLine{Type: "error", Content: "❌ 不创建分支模式仅支持本地执行,请将执行环境切到「本地」后再发起开发。"})
+				job.Finish(1, store.JobError)
+				return
+			}
+		}
 	}
 	// Recover the project directory if a Docker rebuild / fresh workspace
 	// mount left it absent. Without this, EnsureWorktreeLogged below returns
@@ -679,7 +709,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// (feat/req_xxx 或 fix/req_xxx)。没有分支名 → worktree 守卫跳过 →
 	// 在主 checkout 上直接开发 → autoPushPR 把 dev 解析成 main →
 	// 直推 main + commit message 退化为 "main"（req_82e061807ef0372f）。
-	if p.BranchName == "" && p.RequirementID != "" {
+	//
+	// no-branch 模式例外：当本次运行显式选择「直接在 base 分支上开发」时,
+	// 不派生分支名,p.BranchName 保持 "" 并在下面走 no-branch 执行路径。
+	// 没有分支名也意味着 worktree 不创建 — 这正是用户想要的(直接在 base 上改)。
+	noBranchMode := reqRow != nil && reqRow.NoBranch
+	if p.BranchName == "" && p.RequirementID != "" && !noBranchMode {
 		kind := ""
 		if reqRow != nil {
 			kind = reqRow.Kind
@@ -720,6 +755,42 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			job.Finish(1, store.JobError)
 			return
 		}
+	} else if noBranchMode && p.RequirementID != "" {
+		// No-branch 模式:验证项目是 git 仓库、清理上一个 run 的 worktree 残留字段、
+		// 把 base 分支切到 worktree-safe 状态(拉最新 + checkout base)。
+		//
+		// 不创建 worktree — git 不允许多个 worktree 共享同一分支,
+		// 用户已明确接受「不创建分支 = 不隔离」这一前提;并发 no-branch 需求
+		// 会冲突,UI 会给出警告(ReqDetail preflightBaseHint)。
+		//
+		// 清理旧 BranchName/WorktreePath:上一个分支模式 run 留下的字段会让
+		// 续接路径误以为有 worktree 工作,先把它们清零再开始。
+		if _, gerr := gitRun(p.ProjectPath, "rev-parse", "--is-inside-work-tree"); gerr != nil {
+			job.Append(store.LogLine{Type: "error", Content: "❌ 项目目录不是 git 仓库,无法在不创建分支模式下开发: " + p.ProjectPath})
+			job.Finish(6, store.JobError) // exitCode=6 区别于 ErrNotAGitRepo 的 1
+			return
+		}
+		if reqRow != nil && (reqRow.BranchName != "" || reqRow.WorktreePath != "") {
+			if perr := h.reqSvc.UpdateWorktree(p.RequirementID, "", ""); perr != nil {
+				log.Printf("[start-coding] failed to clear stale worktree fields for %s: %v", p.RequirementID, perr)
+			} else {
+				reqRow.BranchName, reqRow.WorktreePath = "", ""
+				job.Append(store.LogLine{Type: "message", Content: "🧹 已清理上一个分支模式 run 残留的 branch_name / worktree_path"})
+			}
+		}
+		h.worktreeH.syncBaseBranch(context.Background(), projectIDForCreds(reqRow), p.ProjectPath, baseBranch, func(s string) {
+			job.Append(store.LogLine{Type: "message", Content: s})
+		})
+		// 强制切到 base(detached HEAD / 其他 ref 状态兜底)。失败只警告不终止 —
+		// 工作区脏时切不过去,后续的 `git pull --rebase` 会再次尝试。
+		if out, cerr := gitRun(p.ProjectPath, "checkout", baseBranch); cerr != nil {
+			job.Append(store.LogLine{Type: "warning", Content: "⚠️ git checkout " + baseBranch + " 失败(可能工作区脏): " + strings.TrimSpace(out) + " — 继续尝试"})
+		} else {
+			job.Append(store.LogLine{Type: "message", Content: "🌿 已切到 base 分支: " + baseBranch})
+		}
+		workDir = p.ProjectPath
+		branchDir = p.ProjectPath
+		job.Append(store.LogLine{Type: "message", Content: "📍 不创建分支模式:在项目目录直接开发,base=" + baseBranch})
 	}
 
 	// Checkout the development branch before coding. Skipped for worktrees
@@ -784,7 +855,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// job — the repo may have no remote at all, or the branch may have no
 	// upstream tracking info, in which case there is simply nothing to
 	// pull and we proceed on the already-checked-out branch.
-	if p.BranchName != "" {
+	if p.BranchName != "" || noBranchMode {
 		// Inject the project's platform token into both `git pull` invocations
 		// (defect point 2). BuildEnv returns (nil, noop, nil) when the project
 		// has no token / SSH remote / missing fields, so a misconfigured
@@ -816,7 +887,9 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 
 	// Persist the worktree location + branch so adjust-coding and the merge
 	// step can find the isolated working tree (jobs are in-memory; the path
-	// must live in the DB to survive a restart).
+	// must live in the DB to survive a restart). No-branch mode keeps both
+	// columns empty (branch name + path are both ""), which is the explicit
+	// signal to AdjustCoding/ContinueCoding/Cleanup that no worktree exists.
 	if useWorktree && p.RequirementID != "" {
 		if perr := h.reqSvc.UpdateWorktree(p.RequirementID, p.BranchName, workDir); perr != nil {
 			log.Printf("[start-coding] failed to persist worktree for %s: %v", p.RequirementID, perr)
@@ -1665,6 +1738,15 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 				workDir = req.WorktreePath
 			}
 		}
+		// No-branch 模式:续接开发时主动切回 base 分支(避免 detached HEAD /
+		// 其他 ref 残留)。工作区脏时只警告不终止,后续 git 操作会再处理。
+		if req.NoBranch && req.BaseBranch != "" {
+			if out, cerr := gitRun(workDir, "checkout", req.BaseBranch); cerr != nil {
+				job.Append(store.LogLine{Type: "warning", Content: "⚠️ 追加调整切回 base 分支失败(可能工作区脏): " + strings.TrimSpace(out)})
+			} else {
+				job.Append(store.LogLine{Type: "message", Content: "🌿 已切回 base 分支: " + req.BaseBranch})
+			}
+		}
 		adjustPrompt := body.Message
 		adjustSkills := h.mentionedSkills(req.Title + " " + req.Description + " " + body.Message)
 		if err := llm.MaterializeSkillFiles(workDir, adjustSkills); err != nil {
@@ -1922,6 +2004,15 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 					req.ID, req.WorktreePath, filepath.Join(worktreeRoot(proj.LocalPath), req.ID))
 			} else if _, statErr := os.Stat(req.WorktreePath); statErr == nil {
 				workDir = req.WorktreePath
+			}
+		}
+		// No-branch 模式:续接开发时主动切回 base 分支(避免 detached HEAD /
+		// 其他 ref 残留)。工作区脏时只警告不终止,后续 git 操作会再处理。
+		if req.NoBranch && req.BaseBranch != "" {
+			if out, cerr := gitRun(workDir, "checkout", req.BaseBranch); cerr != nil {
+				job.Append(store.LogLine{Type: "warning", Content: "⚠️ 续接开发切回 base 分支失败(可能工作区脏): " + strings.TrimSpace(out)})
+			} else {
+				job.Append(store.LogLine{Type: "message", Content: "🌿 已切回 base 分支: " + req.BaseBranch})
 			}
 		}
 		prompt := "继续完成之前中断的开发任务。请先检查当前代码与工作区状态，" +

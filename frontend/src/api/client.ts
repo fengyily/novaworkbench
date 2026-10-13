@@ -925,6 +925,10 @@ export interface Requirement {
   // 完成）与「中途关闭」（强制关闭）。archived 行不允许 Close。
   closed_at?: string;
   closed_reason?: string;
+  // 不创建分支开关(v0.6.x)。true 时该需求跳过 worktree 创建与 PR,直接
+  // 在 base 分支上 commit/push。后端 StartCoding prologue 写入,前端在
+  // 详情页 preflight modal 提供 toggle,并在 Merge 卡片根据它隐藏 PR CTA。
+  no_branch?: boolean;
   // Launch-spec dispatch result (display-only, NOT a requirements column).
   // Populated ONLY by POST /api/requirements when the request carried a
   // launch spec. launch_mode tells the caller which downstream path the
@@ -981,6 +985,9 @@ export interface LaunchSpec {
   base_branch?: string;
   split_tasks?: boolean;
   auto_push_pr?: boolean;
+  // v0.6.x 不创建分支开关。true 时后端跳过 worktree 创建 + PR 创建,
+  // commit / push 直接到 base。空 = 后端默认(沿用新分支模式)。
+  no_branch?: boolean;
   read_knowledge?: boolean;
   // '' = remote-Git sync (legacy default), 'local' = local-repo sync (used
   // for self-hosted repos with no reachable remote). Mirrors sync_mode on the
@@ -1318,6 +1325,14 @@ export interface StartCodingReq {
    */
   auto_push_pr?: boolean;
   /**
+   * v0.6.x 不创建分支开关。true 时后端跳过 worktree 创建与 PR 创建,
+   * commit / push 直接到 base 分支。配合 base_branch 一同传;
+   * branch_name 此时留空(后端也不再派生 feat/req_xxx)。
+   * Undefined = 沿用需求行的持久化值(DB default = false)。
+   * 与 agent_server_id 互斥 — 后端前置拒绝 no_branch + agent_server。
+   */
+  no_branch?: boolean;
+  /**
    * Coding session threading strategy. 'session' = fork the design/analysis
    * session (legacy default, Claude inherits the conversation). 'design' =
    * fresh session, hand the stored design doc to the agent via the -p
@@ -1363,6 +1378,8 @@ export interface DesignCodingImmediateReq {
   split_tasks?: boolean;
   /** nil = keep the requirement row's persisted value; true/false = override. */
   auto_push_pr?: boolean;
+  /** v0.6.x 不创建分支开关。配合 base_branch 一同传;空值=保留行值。 */
+  no_branch?: boolean;
   dev_mode?: '' | 'session' | 'design';
   sync_mode?: '' | 'local' | 'remote';
 }
@@ -1539,6 +1556,9 @@ export interface MergeState {
   mid_merge: boolean;
   conflict_files: string[];
   worktree_path?: string;
+  // v0.6.x 不创建分支标记。true 时前端隐藏 PR CTA,改显示
+  // 「已直接在 base 分支完成」(后端 dev_branch==target_branch)。
+  no_branch?: boolean;
 }
 export const mergeApi = {
   state: (reqId: string) => api.get<MergeState>(`/api/requirements/${reqId}/merge/state`),

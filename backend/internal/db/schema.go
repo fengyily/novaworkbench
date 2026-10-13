@@ -782,6 +782,13 @@ var alterColumns = []string{
 	// choice so the scheduler can forward it to the wizard handler at
 	// dispatch time, instead of forcing the UI to re-pick on every fire.
 	`ALTER TABLE scheduled_tasks ADD COLUMN sync_mode TEXT NOT NULL DEFAULT ''`,
+	// v0.6.x "不创建分支" 开关镜像 requirements.no_branch。当 1 时,scheduler
+	// 把 schedule.no_branch 透传到 codingRunParams.NoBranch,wizard 跳过
+	// worktree 创建、直接在 base 分支开发并跳过 PR。INTEGER + DEFAULT 0
+	// 与 requirements.no_branch 同一约定,0 = 沿用现有"feat/req_xxx 分支
+	// + 自动 PR"行为(向后兼容)。launch spec 入口
+	// (requirement_launch.go dispatchScheduled) 是唯一写入路径。
+	`ALTER TABLE scheduled_tasks ADD COLUMN no_branch INTEGER NOT NULL DEFAULT 0`,
 	// Per-role Claude-config binding: lets a role carry its own ANTHROPIC_BASE_URL
 	// + ANTHROPIC_AUTH_TOKEN pair (via claude_configs.id) so the role's chosen
 	// model runs against the role's chosen gateway, not just the global active
@@ -959,6 +966,15 @@ var alterColumns = []string{
 	// bool field scans consistently across SQLite / MySQL / Postgres. The user
 	// can clear it per-requirement from the start-coding preflight dialog.
 	`ALTER TABLE requirements ADD COLUMN auto_push INTEGER NOT NULL DEFAULT 1`,
+	// "不创建分支" 模式开关(v0.6.x)。当 1 时,StartCoding 跳过 worktree 创建
+	// 与分支 checkout,直接在项目目录的 base 分支上开发;commit / push 都到
+	// base 分支,跳过 PR 创建(gh/glab/tea 在 head==base 时必然失败)。持久化
+	// 到 coding run 起点(CodingSessionID 不变),由 ContinueCoding / AdjustCoding
+	// / autoPushPR / LocalMerge / Cleanup 读取以保持生命周期一致。INTEGER +
+	// DEFAULT 0 与 skip_analysis/skip_design/auto_push 同一约定,保证
+	// SQLite/MySQL/PG 一致扫描。0 = 沿用现有"feat/req_xxx 分支 + 自动 PR"
+	// 行为(向后兼容)。
+	`ALTER TABLE requirements ADD COLUMN no_branch INTEGER NOT NULL DEFAULT 0`,
 	// Plan-analysis timing. analysis_started_at is stamped when the requirement
 	// enters the "analyzing" stage (and reset — started re-stamped, ended
 	// cleared — on every re-entry so "重新计算" holds); analysis_ended_at is
