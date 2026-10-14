@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import MarkdownRender from './MarkdownRender';
+import '../styles/markdown-prose.css';
 import './MarkdownViewer.css';
 
 interface Props {
@@ -27,7 +28,7 @@ export default function MarkdownViewer({ title, content, onClose }: Props) {
           <h3>{title || t('components.markdownViewer.preview')}</h3>
           <button className="btn btn-sm" onClick={onClose} title={t('components.markdownViewer.closeTitle')}>{t('components.markdownViewer.close')}</button>
         </div>
-        <div className="md-viewer-body">
+        <div className="md-viewer-body md-prose">
           <MarkdownRender content={content} />
         </div>
       </div>
