@@ -193,3 +193,30 @@
   .cr-field-row { flex-direction: column; }
   .cr-mode-hint { min-width: 0; }
 }
+
+/* ── Run bindings toolbar (model + execution environment) ──────────────────
+   Sits directly under the mode tabs and applies to both PR and branch
+   reviews. Wraps as a whole on narrow viewports; the ModelSelect card brings
+   its own internal layout so this only owns the labelled column shells. */
+.project-code-review .cr-run-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-end;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-subtle, transparent);
+}
+
+.project-code-review .cr-run-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 220px;
+}
+
+.project-code-review .cr-run-field .cr-hint {
+  margin: 0;
+}

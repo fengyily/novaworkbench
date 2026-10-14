@@ -30,13 +30,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  reviewApi, codeReviewsApi, parseReviewFindings,
+  reviewApi, codeReviewsApi, agentServersApi, parseReviewFindings,
   type PR, type PRListResponse, type Project,
-  type CodeReview, type ReviewFinding, type ReviewSeverity, type GoalMet,
+  type CodeReview, type CodeReviewRunBinding, type ReviewFinding, type ReviewSeverity, type GoalMet,
   API_BASE, authedFetch,
 } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import AttachmentPanel from '../components/AttachmentPanel';
+import ModelSelect from '../components/ModelSelect';
+import { ExecEnvSelect, type ExecEnvServer } from '../components/ExecEnvSelect';
 import MarkdownRender from '../components/MarkdownRender';
 import { IconPlug, IconRobot } from '../components/icons';
 import { errorMessage } from '../utils/errMsg';
@@ -77,6 +79,15 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   const [running, setRunning] = useState(false);
   const reviewEsRef = useRef<EventStream | null>(null);
   const reviewPanelRef = useRef<HTMLDivElement>(null);
+
+  // ── Run bindings (shared by both modes) ──────────────────────────────────
+  // Which model to review with and where to run it. Both are per-session and
+  // persisted on the code_reviews row, so re-running one from history
+  // reproduces the same setup. '' means "reviewer role default" / 本地.
+  const [runModel, setRunModel] = useState('');
+  const [runConfigId, setRunConfigId] = useState('');
+  const [agentServerId, setAgentServerId] = useState('');
+  const [agentServers, setAgentServers] = useState<ExecEnvServer[]>([]);
 
   // ── Branch mode ──────────────────────────────────────────────────────────
   const [branches, setBranches] = useState<string[]>([]);
@@ -123,6 +134,15 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
   useEffect(() => { loadPRs(); }, [loadPRs]);
   useEffect(() => { loadHistory(); }, [loadHistory]);
+
+  // Only ready servers are offered — the backend refuses the rest, so listing
+  // them would only mislead. A failure leaves the list empty, which still
+  // renders the 本地 option.
+  useEffect(() => {
+    agentServersApi.list()
+      .then(rows => setAgentServers((rows ?? []).filter(srv => srv.status === 'ready')))
+      .catch(() => {/* 设置 → Agent 服务器 is the source of truth */});
+  }, []);
 
   // Branch candidates for the two selectors. Best-effort, mirroring
   // ProjectDetail's existing fetch: on failure the list stays empty and the
@@ -180,6 +200,13 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     );
   }, [projectId, t]);
 
+  // The three toolbar picks, in the wire shape both entry points accept.
+  const runBinding = useCallback((): CodeReviewRunBinding => ({
+    model: runModel,
+    claude_config_id: runConfigId,
+    agent_server_id: agentServerId,
+  }), [runModel, runConfigId, agentServerId]);
+
   const resetPanel = () => {
     setReviewLines([]);
     setReviewDone(false);
@@ -204,14 +231,14 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
     try {
       const { job_id } = await reviewApi.startReview(
-        projectId, pr.head_branch, pr.base_branch, pr.number, pr.title, extraRequirements);
+        projectId, pr.head_branch, pr.base_branch, pr.number, pr.title, extraRequirements, runBinding());
       subscribeJob(job_id, (text) => { setCommentBody(text); loadHistory(); });
     } catch (err: unknown) {
       setReviewLines([{ type: 'error', content: errorMessage(err) }]);
       setReviewingPR(null);
       setRunning(false);
     }
-  }, [projectId, running, extraRequirements, subscribeJob, loadHistory]);
+  }, [projectId, running, extraRequirements, subscribeJob, loadHistory, runBinding]);
 
   const handleSubmitComment = async () => {
     if (!commentBody || lastReviewedPRRef.current === 0) return;
@@ -242,6 +269,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
         base_branch: baseBranch.trim(),
         title: draftTitle.trim(),
         description,
+        ...runBinding(),
       });
       setSession(rv);
       setBaseBranch(rv.base_branch);
@@ -253,7 +281,12 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
   // Description / title / branches are saved on blur rather than per
   // keystroke — the row is only read when the run starts.
-  const saveDraftField = async () => {
+  //
+  // `override` exists for the toolbar pickers: they fire from an onChange, so
+  // the state they just set isn't readable here yet. Passing the new value
+  // explicitly lets a model / exec-env change persist immediately instead of
+  // waiting for the next blur.
+  const saveDraftField = async (override?: CodeReviewRunBinding) => {
     if (!session || session.status === 'running') return;
     try {
       const rv = await codeReviewsApi.update(session.id, {
@@ -261,6 +294,8 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
         base_branch: baseBranch.trim(),
         title: draftTitle.trim(),
         description,
+        ...runBinding(),
+        ...(override ?? {}),
       });
       setSession(rv);
       setDescSavedAt(Date.now());
@@ -299,6 +334,9 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     setDescription('');
     setDraftTitle('');
     setDescSavedAt(0);
+    setRunModel('');
+    setRunConfigId('');
+    setAgentServerId('');
     resetPanel();
   };
 
@@ -320,6 +358,13 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     try {
       const full = await codeReviewsApi.get(rv.id);
       setSelected(full);
+      // Seed the toolbar from the stored row so 重跑 reproduces the same
+      // model + execution environment. The backend stamps `model` with the
+      // EFFECTIVE model after a run; ModelSelect maps its DefaultModelLabel
+      // literal back to "use the role default".
+      setRunModel(full.model);
+      setRunConfigId(full.claude_config_id);
+      setAgentServerId(full.agent_server_id);
       if (full.review_type === 'branch') {
         setMode('branch');
         setSession(full);
@@ -388,6 +433,36 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
         <span className="cr-mode-hint">
           {mode === 'pr' ? t('projects.detail.reviewModeHintPR') : t('projects.detail.reviewModeHintBranch')}
         </span>
+      </div>
+
+      {/* Run bindings — shared by both modes. The picks live on the review
+          session row, so a 重跑 from history reuses the same model and the
+          same execution environment. */}
+      <div className="cr-run-bar">
+        <div className="cr-run-field">
+          <label className="cr-label">{t('projects.detail.reviewModelLabel')}</label>
+          <ModelSelect
+            value={runModel}
+            onChange={(m) => { setRunModel(m); if (session) void saveDraftField({ model: m }); }}
+            configId={runConfigId}
+            onConfigChange={(c) => { setRunConfigId(c); if (session) void saveDraftField({ claude_config_id: c }); }}
+            disabled={running}
+            title={t('projects.detail.reviewModelHint')}
+          />
+        </div>
+        <div className="cr-run-field">
+          <label className="cr-label">{t('projects.detail.reviewExecEnvLabel')}</label>
+          <ExecEnvSelect
+            servers={agentServers}
+            value={agentServerId}
+            onChange={(v) => { setAgentServerId(v); if (session) void saveDraftField({ agent_server_id: v }); }}
+            disabled={running}
+            title={t('projects.detail.reviewExecEnvHint')}
+          />
+          <span className="cr-hint">
+            {agentServerId ? t('projects.detail.reviewExecEnvRemoteHint') : t('projects.detail.reviewExecEnvLocalHint')}
+          </span>
+        </div>
       </div>
 
       {/* ── PR mode ── */}

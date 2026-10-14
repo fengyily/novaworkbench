@@ -37,17 +37,28 @@ type CodeReview struct {
 	// stripped; FindingsJSON is that block's `findings` array verbatim (empty
 	// when the model didn't honour the contract — the UI then renders
 	// ResultMD alone).
-	ResultMD     string     `json:"result_md"`
-	FindingsJSON string     `json:"findings_json"`
-	P0Count      int        `json:"p0_count"`
-	P1Count      int        `json:"p1_count"`
-	P3Count      int        `json:"p3_count"`
-	GoalMet      string     `json:"goal_met"`
-	Model        string     `json:"model"`
-	CreatedBy    string     `json:"created_by"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-	FinishedAt   *time.Time `json:"finished_at,omitempty"`
+	ResultMD     string `json:"result_md"`
+	FindingsJSON string `json:"findings_json"`
+	P0Count      int    `json:"p0_count"`
+	P1Count      int    `json:"p1_count"`
+	P3Count      int    `json:"p3_count"`
+	GoalMet      string `json:"goal_met"`
+	// Model is the review's model binding: the user's pick from the Review
+	// toolbar when one was made, overwritten with the EFFECTIVE model (role
+	// override → config default → "默认模型" literal) once a run starts, so
+	// the picker always shows what the last run actually used.
+	Model string `json:"model"`
+	// ClaudeConfigID is the claude_configs row the gateway sources auth +
+	// base URL from. Empty = fall back to the reviewer role's binding, then
+	// the global active config.
+	ClaudeConfigID string `json:"claude_config_id"`
+	// AgentServerID is the execution environment: empty = 本地, otherwise an
+	// agent_servers.id the run is dispatched to over SSH.
+	AgentServerID string     `json:"agent_server_id"`
+	CreatedBy     string     `json:"created_by"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty"`
 }
 
 // ReviewFinding is one graded issue from the report's trailing JSON block.

@@ -94,7 +94,7 @@ Services hold `*db.DB` (not `*sql.DB`) — a thin wrapper that rebinds `?`→`$N
 | `project_stars` | 复合 PK(`user_id`+`project_id`) | **按用户**的项目星标(`/projects` 置顶 + Dashboard 排序);`user_id` 刻意不加外键(`NOVA_AUTH_DISABLED` 注入的合成 `admin` 在 `users` 中无行),`Purge` 显式清理 |
 | `skills` / `agent_servers` / `sub_tasks` / `orchestration_batches` / `scheduled_tasks` | `skill_` / `agent_` / `st_` / `ob_` / `sched_` | AI Skills(`.claude/agents/`) / 远端 Agent 主机(凭据 AES-256-GCM 加密) / 需求子任务 / 子任务批派发 / 定时任务(design/coding/design_and_coding) |
 | `issue_monitors` / `issue_monitor_pending_launches` | `im_` / `imp_` | GitHub Issue 监控配置 / 待启动开发的 Issue 队列 |
-| `code_reviews` / `code_review_attachments` | `crv_` / `att_` | **Review 会话**(分支 Review + PR Review 共用,持有描述/状态/`result_md`/`findings_json`/P0·P1·P3 计数/`goal_met`) / Review 会话的附件(逐列照抄 `requirement_attachments`,owner 列为 `review_id`) |
+| `code_reviews` / `code_review_attachments` | `crv_` / `att_` | **Review 会话**(分支 Review + PR Review 共用,持有描述/状态/`result_md`/`findings_json`/P0·P1·P3 计数/`goal_met`,以及 `model`/`claude_config_id`/`agent_server_id` 执行绑定) / Review 会话的附件(逐列照抄 `requirement_attachments`,owner 列为 `review_id`) |
 
 > **`roles` vs `acl_roles`**: 两个"角色"语义独立。`roles` = AI persona(由 wizard/review 注入 system prompt);`acl_roles` = RBAC 角色(由 `middleware/auth.go` `RequirePermission` 消费)。
 
@@ -132,7 +132,8 @@ Review 有**两个入口、一套管线**,统一落到 `code_reviews` 表(`handl
 - **尾部 JSON 抽取**(`extractTrailingJSON`)—— **不能复用 `wizard_stream.go` 的 `extractJSON`**:那个从**第一个** `{` 开始扫,Review 报告正文里随便一个代码片段花括号就会取错段。这里优先找最后一个 ` ```json ` 围栏,回退为「从**最后**一个顶层 `{` 起的 brace-match(跳过字符串字面量)」。解析失败时 `findings_json=''`、计数 0,前端**自动退化**为纯 Markdown 渲染(报告正文本身已含 `## P0/P1/P3` 小节,信息不丢)。
 - **附件复用**(`service/attachment.go`)—— `AttachmentService` 的表名 / owner 列是**构造期常量**:`NewAttachmentService`(`requirement_attachments` / `requirement_id`)与 `NewCodeReviewAttachmentService`(`code_review_attachments` / `review_id`)。`handler/attachment.go` **一行未改**,`main.go` 构造第二个实例挂到 `/api/code-reviews/{id}/attachments` 即可。两边 owner id 前缀不同(`req_` / `crv_`),共用 `~/.novaworkbench/attachments/<owner_id>/` 不冲突。`handler/attachments_prompt.go` 的包级 `attachManifestFor(svc, ownerID, attachDir)` 被 wizard 与 review 共用。
 - **删除**(`CodeReviewService.Delete`)—— 先遍历附件逐个 `Delete`(行 + 落盘文件)再删会话行;FK CASCADE 只兜底数据库侧,不然会留下孤儿字节。
-- **范围外**:分支 Review 目前**仅本地执行**,不接 Agent Server(`SyncToAgentServer` 已是 owner-id 泛化的,后续只需加 `ExecEnvSelect`)。
+- **模型 + 执行环境**(两种入口共用)—— Review 工具条有 `ModelSelect` + `ExecEnvSelect`,选择落到 `code_reviews.model` / `claude_config_id` / `agent_server_id`,所以从历史「重跑」会复现同一套模型与执行环境。`model` 列双用:用户选择写入,run 开始时被 `MarkRunning` 覆盖为**生效模型**(`DefaultModelLabel` 哨兵由前端 `ModelSelect` 映回「角色默认」)。
+- **Agent Server 执行**(`handler/review_remote.go`)—— Review 是只读运行,**刻意不复用** `prepareRemoteAgentRun`(那条路要 `*model.Requirement` + worktree/分支/GPG/session 同步/commit-push,Review 一样都不需要)。共用的是 SSH 客户端、`/tmp/nova-agent/<project_id>/base` 这个 scratch clone 布局、`ensureRemoteOrigin` / `ensureRemoteWorkerReady` / `workerRunRequest` / `parseStreamJSONFromReader`。附件先经 `SyncToAgentServer` 上行,manifest 用远端路径重算。**限制**:agent 主机只看得到 origin,所以未推送的本地分支在远端 review 不了 —— `resolveRemoteDiffRefs` 直接报错提示改用「本地执行」,而不是去 diff 别的东西。
 
 UI 在 `pages/ProjectCodeReview.tsx`(+ `.css`),由 `ProjectDetail` 的 Review tab 以 `<ProjectCodeReview projectId={id} project={project} />` 挂载 —— 对齐 `ProjectWeeklyReport` / `ProjectIssueMonitor` 的同类范式。`AttachmentPanel` 加了 `resource` prop(`'requirements' | 'code-reviews'`)复用整个面板。
 
@@ -225,4 +226,4 @@ The gates map to status transitions: `draft → analyzing` (enter analyst chat) 
 - **Design system** (CSS variables in `index.css`): Indigo primary `#4F46E5`, Slate text `#64748B`, Emerald success `#10B981`.
 - **Requirement status lifecycle**: `draft → analyzing → designing → designed → developing → done` (plus `archived`). Three role-gated stages (analyst / architect / developer); each completion gate is a manual user action.
 - **i18n key 规范**: 增删 i18n key 必须同步更新 `frontend/src/i18n/locales/{zh-CN,en-US}.ts`;CI 跑 `scripts/check-i18n-keys.mjs`(zh/en 同步校验)与 `scripts/check-i18n-cjk.sh`(扫 zh 漏译)。
-- **ExecEnv 约定**: `local / agent-server` 必须在 design / coding / sub-task 三阶段都通过 `ExecEnvSelect.tsx` 暴露选择;后端经 `BuildRemoteEnvPairs*` 决定本地 spawn 或 SSH 远端执行。
+- **ExecEnv 约定**: `local / agent-server` 必须在 design / coding / sub-task 三阶段以及 Code Review 都通过 `ExecEnvSelect.tsx` 暴露选择;后端经 `BuildRemoteEnvPairs*` 决定本地 spawn 或 SSH 远端执行。

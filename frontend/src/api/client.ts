@@ -1666,13 +1666,16 @@ export interface PRListResponse {
 export const reviewApi = {
   listPRs: (projectId: string) =>
     api.get<PRListResponse>(`/api/projects/${projectId}/prs`),
-  startReview: (projectId: string, branch: string, baseBranch: string, prNumber: number, prTitle: string, extraRequirements?: string) =>
+  // `binding` carries the Review toolbar's model / claude-config / agent-server
+  // picks. Omitting it keeps the legacy behaviour (reviewer role model, 本地).
+  startReview: (projectId: string, branch: string, baseBranch: string, prNumber: number, prTitle: string, extraRequirements?: string, binding?: CodeReviewRunBinding) =>
     api.post<{ job_id: string }>(`/api/projects/${projectId}/prs/review`, {
       branch,
       base_branch: baseBranch,
       pr_number: prNumber,
       pr_title: prTitle,
       extra_requirements: extraRequirements ?? '',
+      ...(binding ?? {}),
     }),
   streamJobUrl: (projectId: string, jobId: string) =>
     `${API_BASE}/api/projects/${projectId}/prs/jobs/${jobId}/stream`,
@@ -1726,7 +1729,16 @@ export interface CodeReview {
   p1_count: number;
   p3_count: number;
   goal_met: GoalMet;
+  /**
+   * Model binding: the user's pick from the Review toolbar, overwritten with
+   * the effective model once a run starts (may therefore come back as the
+   * DefaultModelLabel literal, which ModelSelect maps to '').
+   */
   model: string;
+  /** claude_configs row the gateway sources auth + base URL from ('' = role / active). */
+  claude_config_id: string;
+  /** Execution environment: '' = 本地, otherwise an agent_servers.id. */
+  agent_server_id: string;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -1748,14 +1760,25 @@ export function parseReviewFindings(review: Pick<CodeReview, 'findings_json'> | 
   }
 }
 
+/**
+ * Execution bindings sent alongside the composer fields. All three are
+ * optional and all three mean "fall back to the reviewer role / 本地" when
+ * empty, so an older UI that omits them keeps the previous behaviour.
+ */
+export interface CodeReviewRunBinding {
+  model?: string;
+  claude_config_id?: string;
+  agent_server_id?: string;
+}
+
 export const codeReviewsApi = {
-  create: (projectId: string, body: { branch: string; base_branch?: string; title?: string; description?: string }) =>
+  create: (projectId: string, body: { branch: string; base_branch?: string; title?: string; description?: string } & CodeReviewRunBinding) =>
     api.post<CodeReview>(`/api/projects/${projectId}/reviews`, body),
   list: (projectId: string, limit?: number) =>
     api.get<CodeReview[]>(`/api/projects/${projectId}/reviews${limit ? `?limit=${limit}` : ''}`),
   get: (reviewId: string) =>
     api.get<CodeReview>(`/api/reviews/${reviewId}`),
-  update: (reviewId: string, body: { branch?: string; base_branch?: string; title?: string; description?: string }) =>
+  update: (reviewId: string, body: { branch?: string; base_branch?: string; title?: string; description?: string } & CodeReviewRunBinding) =>
     api.put<CodeReview>(`/api/reviews/${reviewId}`, body),
   remove: (reviewId: string) =>
     api.delete<{ status: string }>(`/api/reviews/${reviewId}`),

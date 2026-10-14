@@ -684,6 +684,15 @@ CREATE TABLE IF NOT EXISTS code_reviews (
 	p3_count        INTEGER NOT NULL DEFAULT 0,
 	goal_met        TEXT NOT NULL DEFAULT '',         -- yes|partial|no|''
 	model           TEXT NOT NULL DEFAULT '',
+	-- claude_config_id / agent_server_id are the Review session's "where and
+	-- with what" bindings, chosen in the Review tab's toolbar and persisted so
+	-- a re-run from history reproduces the same setup. claude_config_id is the
+	-- claude_configs row the gateway sources auth + base URL from (empty =
+	-- fall back to the role binding, then the global active config).
+	-- agent_server_id is the Agent Server the run executes on (empty = 本地),
+	-- a plain TEXT pointer with no FK so the column never blocks migration.
+	claude_config_id TEXT NOT NULL DEFAULT '',
+	agent_server_id  TEXT NOT NULL DEFAULT '',
 	created_by      TEXT NOT NULL DEFAULT '',
 	created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -851,6 +860,12 @@ var alterColumns = []string{
 	// time); coding_agent_server_id mirrors agent_server_id / design_agent_server_id
 	// (empty = 本地). Both default '' so legacy rows from before the merge feature
 	// continue to scan cleanly without a backfill.
+	// Review-session execution bindings (see the code_reviews DDL above):
+	// which claude config to source auth/base-URL from, and which Agent
+	// Server to run on ('' = 本地). Added here so databases created before the
+	// model / exec-env pickers existed pick the columns up on the next boot.
+	`ALTER TABLE code_reviews ADD COLUMN claude_config_id TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE code_reviews ADD COLUMN agent_server_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE scheduled_tasks ADD COLUMN coding_model TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE scheduled_tasks ADD COLUMN coding_agent_server_id TEXT NOT NULL DEFAULT ''`,
 	// Recurring scheduled tasks: an "alarm-style" repeating plan lives on the

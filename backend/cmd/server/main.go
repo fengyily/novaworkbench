@@ -434,6 +434,7 @@ func main() {
 	reviewH.SetCodeReviewSvc(codeReviewSvc)
 	reviewH.SetAttachmentSvc(reviewAttachmentSvc)
 	reviewH.SetGitCredentialSvc(gitCredSvc)
+	reviewH.SetAgentServerSvc(agentSvrSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
 	mergeH := handler.NewMergeHandler(database, projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc, gitCredSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)

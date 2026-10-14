@@ -37,8 +37,8 @@ func NewCodeReviewService(database *db.DB, attachSvc *AttachmentService) *CodeRe
 
 const codeReviewCols = `id, project_id, review_type, branch, base_branch, pr_number,
 	title, description, status, job_id, result_md, findings_json,
-	p0_count, p1_count, p3_count, goal_met, model, created_by,
-	created_at, updated_at, finished_at`
+	p0_count, p1_count, p3_count, goal_met, model, claude_config_id,
+	agent_server_id, created_by, created_at, updated_at, finished_at`
 
 // Create inserts a draft session. branch is required for branch reviews;
 // PR reviews carry pr_number instead and may leave branch blank only when
@@ -62,11 +62,12 @@ func (s *CodeReviewService) Create(rv *model.CodeReview) (*model.CodeReview, err
 	_, err := s.db.Exec(`INSERT INTO code_reviews (
 		id, project_id, review_type, branch, base_branch, pr_number,
 		title, description, status, job_id, result_md, findings_json,
-		p0_count, p1_count, p3_count, goal_met, model, created_by,
-		created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', 0, 0, 0, '', '', ?, ?, ?)`,
+		p0_count, p1_count, p3_count, goal_met, model, claude_config_id,
+		agent_server_id, created_by, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', 0, 0, 0, '', ?, ?, ?, ?, ?, ?)`,
 		id, rv.ProjectID, rv.ReviewType, rv.Branch, rv.BaseBranch, rv.PRNumber,
-		rv.Title, rv.Description, model.ReviewStatusDraft, rv.CreatedBy, now, now)
+		rv.Title, rv.Description, model.ReviewStatusDraft,
+		rv.Model, rv.ClaudeConfigID, rv.AgentServerID, rv.CreatedBy, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert code_review: %w", err)
 	}
@@ -104,7 +105,8 @@ func (s *CodeReviewService) ListByProject(projectID string, limit int) ([]model.
 	return out, rows.Err()
 }
 
-// Update patches the user-editable fields (description / branches / title).
+// Update patches the user-editable fields (description / branches / title,
+// plus the model / claude-config / agent-server bindings from the toolbar).
 // Refused while the session is running — the prompt has already been built
 // at that point, so accepting an edit would silently lie about what was
 // reviewed. draft and the two terminal states are both editable (editing a
@@ -121,9 +123,11 @@ func (s *CodeReviewService) Update(id string, rv *model.CodeReview) (*model.Code
 		rv.Branch = cur.Branch
 	}
 	_, err = s.db.Exec(`UPDATE code_reviews
-		SET branch = ?, base_branch = ?, title = ?, description = ?, updated_at = ?
+		SET branch = ?, base_branch = ?, title = ?, description = ?,
+		    model = ?, claude_config_id = ?, agent_server_id = ?, updated_at = ?
 		WHERE id = ?`,
-		rv.Branch, rv.BaseBranch, rv.Title, rv.Description, time.Now().UTC(), id)
+		rv.Branch, rv.BaseBranch, rv.Title, rv.Description,
+		rv.Model, rv.ClaudeConfigID, rv.AgentServerID, time.Now().UTC(), id)
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +202,8 @@ func scanCodeReview(row rowScanner) (*model.CodeReview, error) {
 	if err := row.Scan(&rv.ID, &rv.ProjectID, &rv.ReviewType, &rv.Branch,
 		&rv.BaseBranch, &rv.PRNumber, &rv.Title, &rv.Description, &rv.Status,
 		&rv.JobID, &rv.ResultMD, &rv.FindingsJSON, &rv.P0Count, &rv.P1Count,
-		&rv.P3Count, &rv.GoalMet, &rv.Model, &rv.CreatedBy,
+		&rv.P3Count, &rv.GoalMet, &rv.Model, &rv.ClaudeConfigID,
+		&rv.AgentServerID, &rv.CreatedBy,
 		&createdAt, &updatedAt, &finishedAt); err != nil {
 		return nil, err
 	}

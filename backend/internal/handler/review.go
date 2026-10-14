@@ -42,6 +42,10 @@ type ReviewHandler struct {
 	reviewSvc  *service.CodeReviewService
 	attachSvc  *service.AttachmentService
 	gitCredSvc *service.GitCredentialService
+	// agentSvrSvc resolves the Agent Server a review was pinned to (the
+	// "执行环境" picker). nil → the exec-env choice degrades to 本地 with an
+	// explicit error line rather than silently running somewhere else.
+	agentSvrSvc *service.AgentServerService
 }
 
 // SetCodeReviewSvc wires the persisted-session store. Without it the
@@ -58,6 +62,12 @@ func (h *ReviewHandler) SetAttachmentSvc(svc *service.AttachmentService) { h.att
 // SetGitCredentialSvc wires the askpass env builder so `git fetch origin`
 // works against private HTTPS remotes during ref resolution.
 func (h *ReviewHandler) SetGitCredentialSvc(svc *service.GitCredentialService) { h.gitCredSvc = svc }
+
+// SetAgentServerSvc wires remote execution. Without it a review pinned to an
+// Agent Server fails with a clear message instead of quietly falling back to
+// the local machine (which would review a different checkout than the user
+// asked for).
+func (h *ReviewHandler) SetAgentServerSvc(svc *service.AgentServerService) { h.agentSvrSvc = svc }
 
 func NewReviewHandler(projectSvc *service.ProjectService, platformSvc *service.PlatformTokenService, roleSvc *service.RoleService, llmGateway *llm.Gateway, jobs *store.JobStore, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder) *ReviewHandler {
 	return &ReviewHandler{
@@ -257,6 +267,14 @@ type StartReviewReq struct {
 	PRNumber          int    `json:"pr_number"`
 	PRTitle           string `json:"pr_title"`
 	ExtraRequirements string `json:"extra_requirements"`
+	// Model / ClaudeConfigID / AgentServerID mirror the branch-review
+	// composer's toolbar (ModelSelect + ExecEnvSelect). All three are
+	// optional: empty Model falls back to the reviewer role's model, empty
+	// ClaudeConfigID to the role / active-config binding, empty
+	// AgentServerID to 本地 execution.
+	Model          string `json:"model"`
+	ClaudeConfigID string `json:"claude_config_id"`
+	AgentServerID  string `json:"agent_server_id"`
 }
 
 // StartReview is the legacy PR-review entry point, kept verbatim in shape
@@ -293,8 +311,11 @@ func (h *ReviewHandler) StartReview(w http.ResponseWriter, r *http.Request) {
 		// The PR entry point's single-line "额外审查要求" shares the
 		// description column — see runReviewSession for the prompt-slot
 		// mapping. Storing it means a re-run from history keeps it.
-		Description: req.ExtraRequirements,
-		CreatedBy:   currentUserID(r),
+		Description:    req.ExtraRequirements,
+		Model:          strings.TrimSpace(req.Model),
+		ClaudeConfigID: strings.TrimSpace(req.ClaudeConfigID),
+		AgentServerID:  strings.TrimSpace(req.AgentServerID),
+		CreatedBy:      currentUserID(r),
 	}
 	if h.reviewSvc != nil {
 		created, cerr := h.reviewSvc.Create(rv)
@@ -319,6 +340,12 @@ type CreateReviewReq struct {
 	BaseBranch  string `json:"base_branch"`
 	Title       string `json:"title"`
 	Description string `json:"description"`
+	// Toolbar bindings — see StartReviewReq for the fallback chain. Sent on
+	// both create and update so a draft composed now reproduces the same
+	// setup when it is re-run from history later.
+	Model          string `json:"model"`
+	ClaudeConfigID string `json:"claude_config_id"`
+	AgentServerID  string `json:"agent_server_id"`
 }
 
 // CreateReview opens a draft session. The draft exists so attachments have a
@@ -348,13 +375,16 @@ func (h *ReviewHandler) CreateReview(w http.ResponseWriter, r *http.Request) {
 		req.BaseBranch = detectBaseBranch(project.LocalPath)
 	}
 	rv, err := h.reviewSvc.Create(&model.CodeReview{
-		ProjectID:   project.ID,
-		ReviewType:  model.ReviewTypeBranch,
-		Branch:      strings.TrimSpace(req.Branch),
-		BaseBranch:  strings.TrimSpace(req.BaseBranch),
-		Title:       strings.TrimSpace(req.Title),
-		Description: req.Description,
-		CreatedBy:   currentUserID(r),
+		ProjectID:      project.ID,
+		ReviewType:     model.ReviewTypeBranch,
+		Branch:         strings.TrimSpace(req.Branch),
+		BaseBranch:     strings.TrimSpace(req.BaseBranch),
+		Title:          strings.TrimSpace(req.Title),
+		Description:    req.Description,
+		Model:          strings.TrimSpace(req.Model),
+		ClaudeConfigID: strings.TrimSpace(req.ClaudeConfigID),
+		AgentServerID:  strings.TrimSpace(req.AgentServerID),
+		CreatedBy:      currentUserID(r),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", err.Error())
@@ -403,11 +433,14 @@ func (h *ReviewHandler) UpdateReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	patch := &model.CodeReview{
-		ReviewType:  cur.ReviewType,
-		Branch:      strings.TrimSpace(req.Branch),
-		BaseBranch:  strings.TrimSpace(req.BaseBranch),
-		Title:       strings.TrimSpace(req.Title),
-		Description: req.Description,
+		ReviewType:     cur.ReviewType,
+		Branch:         strings.TrimSpace(req.Branch),
+		BaseBranch:     strings.TrimSpace(req.BaseBranch),
+		Title:          strings.TrimSpace(req.Title),
+		Description:    req.Description,
+		Model:          strings.TrimSpace(req.Model),
+		ClaudeConfigID: strings.TrimSpace(req.ClaudeConfigID),
+		AgentServerID:  strings.TrimSpace(req.AgentServerID),
 	}
 	rv, err := h.reviewSvc.Update(cur.ID, patch)
 	if err != nil {
@@ -584,22 +617,37 @@ func (h *ReviewHandler) runReviewSession(job *store.Job, rv *model.CodeReview, p
 	// grading contract + checklist live in the task prompt (prompt.Build-
 	// ReviewPrompt) so they apply even to installs whose persona was
 	// customised before this feature existed.
-	systemPrompt, modelName, claudeConfigID := h.roleConfig("reviewer")
-	job.SetModel(modelName)
-
-	// Attachment manifest → system prompt. Claude reads the files on demand
-	// via the absolute paths listed in the block (BuildManifest never inlines
-	// the bytes, so a 2 GB upload can't blow the context).
-	manifest := attachManifestFor(h.attachSvc, rv.ID, "")
-	if manifest != "" {
-		systemPrompt = strings.TrimRight(systemPrompt, "\n") + "\n\n" + manifest
+	rolePrompt, modelName, claudeConfigID := h.roleConfig("reviewer")
+	// Per-session overrides from the Review toolbar (ModelSelect +
+	// ExecEnvSelect). An empty model keeps the role default; the sentinel
+	// "默认模型" is the UI's way of saying the same thing, so it must never
+	// be treated as a model id.
+	if picked := strings.TrimSpace(rv.Model); picked != "" && picked != DefaultModelLabel {
+		modelName = picked
 	}
+	claudeConfigID = h.resolveReviewConfigID(strings.TrimSpace(rv.ClaudeConfigID), modelName, claudeConfigID)
+	job.SetModel(modelName)
 
 	if h.reviewSvc != nil {
 		if err := h.reviewSvc.MarkRunning(rv.ID, job.ID, modelName); err != nil {
 			log.Printf("[Review] mark running %s: %v", rv.ID, err)
 		}
 	}
+
+	// Execution environment: empty agent_server_id = 本地; anything else
+	// dispatches the whole run (repo sync, attachment upload, claude) to the
+	// Agent Server over SSH. We never silently fall back to local — that
+	// would review a different checkout than the user picked.
+	if strings.TrimSpace(rv.AgentServerID) != "" {
+		h.runRemoteReviewSession(ctx, job, rv, project, rolePrompt, modelName, claudeConfigID)
+		return
+	}
+
+	// Attachment manifest → system prompt. Claude reads the files on demand
+	// via the absolute paths listed in the block (BuildManifest never inlines
+	// the bytes, so a 2 GB upload can't blow the context).
+	manifest := attachManifestFor(h.attachSvc, rv.ID, "")
+	systemPrompt := appendManifest(rolePrompt, manifest)
 
 	// Private HTTPS remotes need the askpass wiring for `git fetch origin`.
 	var gitEnv []string
@@ -621,28 +669,7 @@ func (h *ReviewHandler) runReviewSession(job *store.Job, rv *model.CodeReview, p
 
 	reviewUsage := h.newReviewUsage(job.ID, rv, modelName)
 
-	// rv.Description holds whatever free-text context the user supplied, but
-	// the two entry points mean different things by it: a branch review's is
-	// the 改动目标 the reviewer grades 目标达成 against, while the PR entry
-	// point's single-line field is 额外审查要求. One column, two prompt slots —
-	// so a re-run from history keeps the text either way, correctly labelled.
-	description, extra := rv.Description, ""
-	if rv.ReviewType == model.ReviewTypePR {
-		description, extra = "", rv.Description
-	}
-
-	taskPrompt := prompt.BuildReviewPrompt(prompt.ReviewPromptInput{
-		ReviewType:        rv.ReviewType,
-		Branch:            rv.Branch,
-		BaseBranch:        rv.BaseBranch,
-		HeadRef:           headRef,
-		BaseRef:           baseRef,
-		PRNumber:          rv.PRNumber,
-		PRTitle:           rv.Title,
-		Description:       description,
-		ExtraRequirements: extra,
-		HasAttachments:    manifest != "",
-	})
+	taskPrompt := buildReviewTaskPrompt(rv, headRef, baseRef, manifest != "")
 
 	cmd := h.llm.StreamCmd(ctx, llm.StreamOpts{
 		Prompt:         taskPrompt,
@@ -794,6 +821,64 @@ func (h *ReviewHandler) finishReview(job *store.Job, rv *model.CodeReview, model
 		return
 	}
 	job.Finish(0, store.JobDone)
+}
+
+// resolveReviewConfigID mirrors WizardHandler.resolveConfigIDForRun for the
+// review path: an explicit pick from the toolbar wins; otherwise the config
+// that actually lists the effective model wins (so picking a model from a
+// non-active config still gets that config's base URL + token); otherwise the
+// reviewer role's binding; otherwise the globally active config.
+func (h *ReviewHandler) resolveReviewConfigID(picked, modelName, roleCfgID string) string {
+	if picked != "" {
+		return picked
+	}
+	if modelName != "" && modelName != DefaultModelLabel && h.claudeCfg != nil {
+		if cid, err := h.claudeCfg.ResolveConfigForModel(modelName); err == nil && cid != "" {
+			return cid
+		}
+	}
+	if roleCfgID != "" {
+		return roleCfgID
+	}
+	return h.activeConfigID()
+}
+
+// appendManifest glues an attachment manifest block onto a system prompt.
+// Empty manifest returns the prompt untouched, so callers can append
+// unconditionally.
+func appendManifest(systemPrompt, manifest string) string {
+	if manifest == "" {
+		return systemPrompt
+	}
+	return strings.TrimRight(systemPrompt, "\n") + "\n\n" + manifest
+}
+
+// buildReviewTaskPrompt renders the task prompt for a session. Shared by the
+// local and Agent-server paths so the grading contract, the checklist and the
+// description/extra-requirements split can never drift between them.
+//
+// rv.Description holds whatever free-text context the user supplied, but the
+// two entry points mean different things by it: a branch review's is the
+// 改动目标 the reviewer grades 目标达成 against, while the PR entry point's
+// single-line field is 额外审查要求. One column, two prompt slots — so a re-run
+// from history keeps the text either way, correctly labelled.
+func buildReviewTaskPrompt(rv *model.CodeReview, headRef, baseRef string, hasAttachments bool) string {
+	description, extra := rv.Description, ""
+	if rv.ReviewType == model.ReviewTypePR {
+		description, extra = "", rv.Description
+	}
+	return prompt.BuildReviewPrompt(prompt.ReviewPromptInput{
+		ReviewType:        rv.ReviewType,
+		Branch:            rv.Branch,
+		BaseBranch:        rv.BaseBranch,
+		HeadRef:           headRef,
+		BaseRef:           baseRef,
+		PRNumber:          rv.PRNumber,
+		PRTitle:           rv.Title,
+		Description:       description,
+		ExtraRequirements: extra,
+		HasAttachments:    hasAttachments,
+	})
 }
 
 // buildReviewOutcome maps a finished report onto the row we persist.
