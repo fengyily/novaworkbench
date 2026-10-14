@@ -244,6 +244,12 @@ func main() {
 	// generated diagram). Mirrors the constructor shape used by
 	// reportArchiveH below.
 	knowledgeH := handler.NewKnowledgeHandler(knowledgeSvc, llmGateway, usageSvc)
+	// Attachments: per-requirement file store. Metadata in
+	// requirement_attachments; files under
+	// ~/.novaworkbench/attachments/<req_id>/. Used by the wizard's three
+	// role-gated stages — see service.AttachmentService.BuildManifest.
+	attachmentSvc := service.NewAttachmentService(database)
+	attachmentH := handler.NewAttachmentHandler(attachmentSvc)
 	scannerH := handler.NewScannerHandler(scannerSvc)
 	sharedJobs := store.NewJobStore(50)
 	preflightH := handler.NewPreflightHandler(pfRegistry, sharedJobs)
@@ -371,6 +377,12 @@ func main() {
 			return proj.PlatformType, baseURL, token, repoURL, nil
 		})
 	wizardH.SetIssueMonSvc(issueMonSvc)
+	// Attachment service: per-requirement files. The wizard injects the
+	// manifest block into every stage's system prompt so Claude knows what
+	// the user uploaded alongside the requirement. Built by the
+	// attachment handler below — wiring order: handler builds first,
+	// wizard then SetAttachmentSvc.
+	wizardH.SetAttachmentSvc(attachmentSvc)
 	issueMonH := handler.NewIssueMonitorHandler(issueMonSvc, projectSvc)
 	issueMonSemSize := 4
 	if env := os.Getenv("NOVA_ISSUE_MONITOR_CONCURRENCY"); env != "" {
@@ -674,6 +686,15 @@ func main() {
 	mux.HandleFunc("DELETE /api/requirements/{id}/analysis-session", reqH.ClearAnalysisSession)
 	mux.HandleFunc("POST /api/requirements/{id}/archive", reqH.Archive)
 	mux.HandleFunc("POST /api/requirements/{id}/unarchive", reqH.Unarchive)
+	// Requirement attachments — multipart upload + list + download + edit
+	// description + delete. Same auth middleware as the rest of /api; no
+	// RequirePermission gate (auth alone is enough — the requirement
+	// itself is the scope).
+	mux.HandleFunc("POST /api/requirements/{id}/attachments", attachmentH.Upload)
+	mux.HandleFunc("GET /api/requirements/{id}/attachments", attachmentH.List)
+	mux.HandleFunc("GET /api/requirements/{id}/attachments/{att_id}/content", attachmentH.Content)
+	mux.HandleFunc("PUT /api/requirements/{id}/attachments/{att_id}", attachmentH.UpdateDescription)
+	mux.HandleFunc("DELETE /api/requirements/{id}/attachments/{att_id}", attachmentH.Delete)
 	// Wiki archive / unarchive — distinct from the regular archive above
 	// (which is bound to status='done' + design_docs). WikiArchive
 	// accepts status ∈ {designed, done} and writes source_type='wiki_doc'

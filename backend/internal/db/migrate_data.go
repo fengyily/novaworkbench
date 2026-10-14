@@ -19,6 +19,7 @@ var copyOrder = []string{
 	"projects",
 	"memories",
 	"requirements",
+	"requirement_attachments",
 	"knowledge",
 	"conversations",
 	"refinement_chats",

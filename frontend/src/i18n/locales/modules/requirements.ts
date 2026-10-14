@@ -725,6 +725,30 @@ export const requirements = {
     immediateCodingSection: 'Coding · 开发',
     immediateFlightAria: '两阶段任务摘要',
   },
+  // Requirement-scoped file attachments. Shown as a collapsible panel
+  // on the requirement detail page; each row has its own description,
+  // download link, and delete button.
+  attachment: {
+    sectionTitle: '📎 附件',
+    sectionHint: '上传日志 / 截图 / 复现包等文件,三个阶段(分析 / 方案 / 开发)都会看到它们',
+    uploadBtn: '上传附件',
+    dragDropHint: '拖拽文件到此处,或点击选择',
+    empty: '暂无附件',
+    descriptionLabel: '描述 (告诉 AI 这份文件是做什么的)',
+    descriptionPlaceholder: '例如:2026-10-13 那批复现的错误日志',
+    addDescription: '+ 添加描述',
+    editDescription: '编辑描述',
+    download: '下载',
+    delete: '删除',
+    deleteConfirm: '删除附件「{{name}}」?',
+    uploadFailed: '上传失败:{{msg}}',
+    updateFailed: '更新描述失败:{{msg}}',
+    deleteFailed: '删除失败:{{msg}}',
+    loadFailed: '加载附件失败:{{msg}}',
+    sizeLimit: '单文件最大 2 GB',
+    archiveEntries: '共 {{count}} 个条目,{{size}} 解压后',
+    archiveBadge: '📦 压缩包',
+  },
 } as const;
 
 export default requirements;

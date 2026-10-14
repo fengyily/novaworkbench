@@ -9,6 +9,13 @@
 package handler
 
 import (
+	"context"
+	"log"
+	"path/filepath"
+	"strings"
+
+	gossh "github.com/novaworkbench/backend/internal/ssh"
+
 	"github.com/novaworkbench/backend/internal/db"
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/service"
@@ -87,6 +94,12 @@ type WizardHandler struct {
 	// monitor feature; autoPushPR's comment-back hook is then a no-op (the
 	// wizard must never crash for a missing optional dep).
 	issueMonSvc *service.IssueMonitorService
+	// attachSvc handles per-requirement file attachments (manifest_text +
+	// description block injected into every wizard prompt). Wired from
+	// main.go via SetAttachmentSvc. nil before the wire up — wizard
+	// stages simply skip the manifest block when nil (no behavior change
+	// vs pre-feature).
+	attachSvc *service.AttachmentService
 }
 
 func NewWizardHandler(database *db.DB, projectSvc *service.ProjectService, reqSvc *service.RequirementService, knowledgeSvc *service.KnowledgeService, llmGateway *llm.Gateway, jobs *store.JobStore, roleSvc *service.RoleService, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder, skillSvc *service.SkillService, platformSvc *service.PlatformTokenService, agentSvrSvc *service.AgentServerService, subTaskSvc *service.SubTaskService, subTaskRunner *SubTaskRunner, batchSvc *service.OrchestrationBatchService, settingSvc *service.SettingService, worktreeH *WorktreeHandler, gitCredSvc *service.GitCredentialService) *WizardHandler {
@@ -131,4 +144,95 @@ func (h *WizardHandler) SetOrchQueue(q interface{ Kick() }) {
 // (the wizard must never crash for a missing optional dep).
 func (h *WizardHandler) SetIssueMonSvc(svc *service.IssueMonitorService) {
 	h.issueMonSvc = svc
+}
+
+// SetAttachmentSvc injects the per-requirement attachment service. The
+// wizard's three role-gated stages (analyst / architect / developer) all
+// share one attachment set; attachManifestFor renders it into the system
+// prompt via attachManifestFor so Claude knows what files are available.
+// Passing nil disables the injection (legacy / no-feature deployments).
+//
+// The directory Claude should treat as the attachment root depends on the
+// exec env (local → ~/.novaworkbench/attachments/<req_id>; remote agent
+// server → its synced mirror). For now only the local path is wired —
+// Agent-server attachment sync is a follow-up; remote callers will still
+// see the manifest with the local path baked into the location lines, which
+// the LLM treats as opaque identifiers (it has Bash to figure out the real
+// path if/when sync lands).
+func (h *WizardHandler) SetAttachmentSvc(svc *service.AttachmentService) {
+	h.attachSvc = svc
+}
+
+// attachManifestFor returns the attachment manifest markdown for a
+// requirement, ready to be appended to a stage's system prompt. Empty
+// string when the service isn't wired or no attachments exist — callers
+// can append unconditionally without nil-checking the result.
+//
+// attachDir is the directory Claude should treat as the attachment root.
+// Local execution passes the local root; remote Agent-server execution
+// passes the synced mirror on the agent host (see syncAttachmentsToRemote).
+// Passing "" falls back to the local root as a safe default.
+func (h *WizardHandler) attachManifestFor(reqID, attachDir string) string {
+	if h.attachSvc == nil || strings.TrimSpace(reqID) == "" {
+		return ""
+	}
+	if strings.TrimSpace(attachDir) == "" {
+		attachDir = filepath.Join(service.AttachmentRoot(), reqID)
+	}
+	return h.attachSvc.BuildManifest(reqID, attachDir)
+}
+
+// syncAttachmentsToRemote copies the requirement's attachments to the
+// named Agent Server (when remote execution is being used) and returns
+// the canonical remote directory Claude should treat as the attachment
+// root. Returns "" when there's nothing to sync, the service isn't
+// wired, or anything failed — callers fall back to the local path.
+//
+// The dial is intentionally short-lived (sync-then-close). The actual
+// claude subprocess later opens its own persistent SSH session via
+// runRemoteCoding / runRemoteArchitectDesign; sharing the connection
+// would couple those lifecycles in ways that have not been worth the
+// refactor yet. The sync cost is bounded: a single SFTP upload per file
+// whose sha256 has changed since the last successful sync (state lives
+// on agent_servers.attachment_sync_state).
+func (h *WizardHandler) syncAttachmentsToRemote(ctx context.Context, reqID, serverID string) string {
+	if h.attachSvc == nil || h.agentSvrSvc == nil {
+		return ""
+	}
+	if strings.TrimSpace(reqID) == "" || strings.TrimSpace(serverID) == "" {
+		return ""
+	}
+	srv, plain, err := h.agentSvrSvc.GetWithCredential(serverID)
+	if err != nil {
+		log.Printf("[wizard] attachment sync: agent_servers lookup %s failed: %v (using local paths)", serverID, err)
+		return ""
+	}
+	sshClient, err := gossh.Dial(ctx, srv.Host, srv.Port, srv.Username, srv.AuthType, plain)
+	if err != nil {
+		log.Printf("[wizard] attachment sync: SSH dial %s failed: %v (using local paths)", srv.Name, err)
+		return ""
+	}
+	defer sshClient.Close()
+	rd, err := h.attachSvc.SyncToAgentServer(ctx, serverID, sshClient, reqID)
+	if err != nil {
+		log.Printf("[wizard] attachment sync to %s failed: %v (using local paths)", srv.Name, err)
+		return ""
+	}
+	return rd
+}
+
+// resolveAttachDir returns the directory the wizard should pass into
+// attachManifestFor. Local runs get the local root; remote runs first
+// attempt a sync to the agent server and on success use the canonical
+// remote path, otherwise silently fall back to local paths so a
+// intermittent SSH error doesn't break the run.
+func (h *WizardHandler) resolveAttachDir(ctx context.Context, reqID, serverID string) string {
+	local := filepath.Join(service.AttachmentRoot(), reqID)
+	if strings.TrimSpace(serverID) == "" {
+		return local
+	}
+	if rd := h.syncAttachmentsToRemote(ctx, reqID, serverID); rd != "" {
+		return rd
+	}
+	return local
 }

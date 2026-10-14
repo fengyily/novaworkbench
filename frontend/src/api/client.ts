@@ -401,6 +401,60 @@ export const scannerApi = {
   scan: (projectId: string) => api.post<ScanResult>(`/api/projects/${projectId}/scan`, {}),
 };
 
+// Requirement attachments — files the user uploads alongside a requirement so
+// the wizard's three role-gated stages (analyst / architect / developer) can
+// ground their work on real evidence (logs, screenshots, repro packages).
+// Files are kept in ~/.novaworkbench/attachments/<req_id>/ on the backend;
+// metadata lives in requirement_attachments. The (requirement_id, sha256)
+// unique pair on the server means re-uploading the same bytes reuses the same
+// row — Upload calls in the UI should treat identical content as idempotent.
+export interface Attachment {
+  id: string;
+  requirement_id: string;
+  filename: string;
+  stored_path: string;
+  mime_type: string;
+  size_bytes: number;
+  sha256: string;
+  description: string;
+  manifest_text?: string;        // populated for archives (zip via stdlib, tar as hint)
+  uploaded_by: string;
+  uploaded_at: string;           // ISO 8601
+}
+
+export const attachmentsApi = {
+  // Returns [] when the requirement has no attachments (never null).
+  list: (requirementId: string) =>
+    api.get<Attachment[]>(`/api/requirements/${requirementId}/attachments`),
+
+  // Multipart upload: field "file" = the blob; field "description" = optional
+  // user annotation (≤ 500 chars; trimmed). The server caps each file at
+  // service.MaxAttachmentSize (currently 2 GB) — large enough for log dumps
+  // and zip bundles, small enough to keep the DoS surface bounded.
+  upload: (requirementId: string, file: File, description?: string) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (description) fd.append('description', description);
+    return api.upload<Attachment>(`/api/requirements/${requirementId}/attachments`, fd);
+  },
+
+  // Returns a same-origin URL the browser can fetch directly. Avoids
+  // round-tripping the bytes through React state for the simple "download"
+  // case. The Content-Disposition header carries the original filename.
+  downloadUrl: (requirementId: string, attId: string) =>
+    `${API_BASE}/api/requirements/${requirementId}/attachments/${attId}/content`,
+
+  // Edit the user-written annotation only. Returns the post-update row.
+  updateDescription: (requirementId: string, attId: string, description: string) =>
+    api.put<Attachment>(`/api/requirements/${requirementId}/attachments/${attId}`,
+      { description }),
+
+  // Row + on-disk file deletion. 204 on success, 404 if the row doesn't
+  // belong to this requirement.
+  delete: (requirementId: string, attId: string) =>
+    api.delete<{ status: string }>(`/api/requirements/${requirementId}/attachments/${attId}`),
+};
+
 // Sub-tasks: manually-triggered child agents that fork a requirement's main
 // session (coding_session_id). Shown in the developer stage's SubTaskPanel.
 // The status field mirrors JobStore job status (pending/running/done/error);

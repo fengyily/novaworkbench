@@ -60,8 +60,17 @@ type AgentServer struct {
 	// SystemInfoAt is the timestamp of the last system_info collection, or
 	// nil when never collected. UI uses it to render "last inventory N min ago".
 	SystemInfoAt *string `json:"system_info_collected_at"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
+	// AttachmentSyncState is a JSON-encoded mirror of what the wizard has
+	// uploaded to ~/<AttachmentRootRemote>/ — schema:
+	//   {"<req_id>": {"<att_id>": "<sha256>", ...}, ...}
+	// Used by AttachmentService.SyncToAgentServer to diff on every wizard
+	// stage entry and skip SFTP uploads for files whose sha hasn't
+	// changed since the last successful sync. Writes are best-effort and
+	// non-blocking — a JSON parse failure falls back to a full re-upload,
+	// never to dropping a file silently. Persists across backend restarts.
+	AttachmentSyncState string `json:"attachment_sync_state"`
+	CreatedAt           string `json:"created_at"`
+	UpdatedAt           string `json:"updated_at"`
 }
 
 // CreateAgentServerReq is the create payload. AuthValue is the plaintext

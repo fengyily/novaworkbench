@@ -44,6 +44,7 @@ func scanRow(row interface {
 		&a.InstallJobID, &a.WorkerVersion,
 		&a.ClaudeBin, &a.NodeBin, &a.ExtraPaths,
 		&a.SystemInfo, &systemInfoAt,
+		&a.AttachmentSyncState,
 		&a.CreatedAt, &a.UpdatedAt,
 	)
 	if err != nil {
@@ -64,7 +65,7 @@ func scanRow(row interface {
 	return &a, nil
 }
 
-const selectColumns = `id, name, host, port, username, auth_type, auth_value, auth_value_algo, status, last_check_at, check_result, install_job_id, worker_version, claude_bin, node_bin, extra_paths, system_info, system_info_collected_at, created_at, updated_at`
+const selectColumns = `id, name, host, port, username, auth_type, auth_value, auth_value_algo, status, last_check_at, check_result, install_job_id, worker_version, claude_bin, node_bin, extra_paths, system_info, system_info_collected_at, attachment_sync_state, created_at, updated_at`
 
 // List returns all servers ordered by creation time. Credentials are NOT
 // decrypted — callers must use GetWithCredential for the plaintext.

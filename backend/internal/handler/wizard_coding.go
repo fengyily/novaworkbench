@@ -1029,6 +1029,17 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		roleKey = "planner"
 	}
 	systemPrompt, model, claudeConfigID := h.roleConfig(roleKey)
+	// Append the per-requirement attachment manifest so the coding agent
+	// sees every uploaded file alongside the existing role persona. For
+	// archives (.zip with precomputed manifest_text) Claude can grep or
+	// unzip -p individual entries; for opaque files it uses Read directly.
+	// When p.AgentServerID is set we sync first so Claude's Read tool can
+	// actually reach the files on the remote host; otherwise we use the
+	// local path directly.
+	attachDir := h.resolveAttachDir(context.Background(), p.RequirementID, p.AgentServerID)
+	if m := h.attachManifestFor(p.RequirementID, attachDir); m != "" {
+		systemPrompt = systemPrompt + "\n\n" + m
+	}
 	// Per-request model override (highest precedence); empty means role default.
 	if p.Model != "" {
 		model = p.Model

@@ -660,6 +660,27 @@ export const requirements = {
     immediateCodingSection: 'Coding · Development',
     immediateFlightAria: 'Two-stage mission summary',
   },
+  attachment: {
+    sectionTitle: '📎 Attachments',
+    sectionHint: 'Upload logs / screenshots / repro packages. All three stages (analyst / architect / developer) will see them.',
+    uploadBtn: 'Upload',
+    dragDropHint: 'Drag & drop files here, or click to choose',
+    empty: 'No attachments yet',
+    descriptionLabel: 'Description (tell AI what this file is for)',
+    descriptionPlaceholder: 'e.g. error log from the 2026-10-13 incident',
+    addDescription: '+ Add description',
+    editDescription: 'Edit description',
+    download: 'Download',
+    delete: 'Delete',
+    deleteConfirm: 'Delete attachment "{{name}}"?',
+    uploadFailed: 'Upload failed: {{msg}}',
+    updateFailed: 'Update description failed: {{msg}}',
+    deleteFailed: 'Delete failed: {{msg}}',
+    loadFailed: 'Load attachments failed: {{msg}}',
+    sizeLimit: 'Max 2 GB per file',
+    archiveEntries: '{{count}} entries, {{size}} uncompressed',
+    archiveBadge: '📦 Archive',
+  },
 } as const;
 
 export default requirements;

@@ -1,0 +1,282 @@
+/* AttachmentPanel — per-requirement file attachment panel.
+   Compact visual hierarchy: header → dropzone → queue → list.
+   Description rows are click-to-edit; archive manifests auto-expand.
+   Colors stay within the design-system variables (existing Indigo / Slate /
+   Emerald) so the panel matches SubTaskPanel / KnowledgeMarkdown. */
+
+.attachment-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 0;
+}
+
+.attachment-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.attachment-panel__title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-strong, #1e293b);
+}
+
+.attachment-panel__hint {
+  font-size: 12px;
+  color: var(--text-muted, #64748b);
+  margin-top: 2px;
+}
+
+.attachment-panel__error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* dropzone */
+
+.attachment-panel__dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 24px 12px;
+  border: 2px dashed var(--border-soft, #cbd5e1);
+  border-radius: 8px;
+  background: var(--bg-subtle, #f8fafc);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.attachment-panel__dropzone:hover,
+.attachment-panel__dropzone.is-dragging {
+  border-color: var(--color-primary, #4f46e5);
+  background: rgba(79, 70, 229, 0.04);
+}
+
+.attachment-panel__dropzone-icon {
+  font-size: 28px;
+  line-height: 1;
+}
+
+.attachment-panel__dropzone-hint {
+  font-size: 13px;
+  color: var(--text-strong, #334155);
+}
+
+.attachment-panel__dropzone-limit {
+  font-size: 11px;
+  color: var(--text-muted, #94a3b8);
+}
+
+/* queue */
+
+.attachment-panel__queue {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+}
+
+.attachment-panel__queue-row {
+  display: grid;
+  grid-template-columns: 1fr 2fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.attachment-panel__queue-name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.attachment-panel__queue-desc {
+  font: inherit;
+  padding: 4px 8px;
+  border: 1px solid var(--border-soft, #cbd5e1);
+  border-radius: 4px;
+  background: white;
+  font-size: 13px;
+}
+
+.attachment-panel__queue-desc:focus {
+  outline: none;
+  border-color: var(--color-primary, #4f46e5);
+}
+
+.attachment-panel__queue-remove {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 18px;
+  color: var(--text-muted, #64748b);
+  padding: 0 6px;
+  line-height: 1;
+}
+
+.attachment-panel__queue-remove:hover {
+  color: #dc2626;
+}
+
+.attachment-panel__upload-btn {
+  align-self: flex-end;
+  background: var(--color-primary, #4f46e5);
+  color: white;
+  border: 0;
+  border-radius: 4px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.attachment-panel__upload-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* list */
+
+.attachment-panel__list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.attachment-panel__empty {
+  color: var(--text-muted, #94a3b8);
+  font-size: 13px;
+  text-align: center;
+  padding: 16px 0;
+}
+
+.attachment-panel__row {
+  border: 1px solid var(--border-soft, #e2e8f0);
+  border-radius: 6px;
+  padding: 8px 12px;
+  background: white;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.attachment-panel__row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.attachment-panel__filename {
+  flex: 1;
+  font-size: 13px;
+  color: var(--color-primary, #4f46e5);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.attachment-panel__filename:hover {
+  text-decoration: underline;
+}
+
+.attachment-panel__archive-badge {
+  margin-left: 6px;
+  font-size: 11px;
+  color: #b45309;
+  background: #fef3c7;
+  border-radius: 3px;
+  padding: 1px 6px;
+}
+
+.attachment-panel__size {
+  font-size: 11px;
+  color: var(--text-muted, #64748b);
+  flex-shrink: 0;
+}
+
+.attachment-panel__row-actions button {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.attachment-panel__row-actions button:hover {
+  background: #fee2e2;
+}
+
+.attachment-panel__desc {
+  font-size: 12px;
+  color: var(--text-strong, #334155);
+  padding: 4px 6px;
+  border-radius: 3px;
+  cursor: text;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.attachment-panel__desc:hover {
+  background: var(--bg-subtle, #f1f5f9);
+}
+
+.attachment-panel__desc-empty {
+  color: var(--text-muted, #94a3b8);
+  font-style: italic;
+}
+
+.attachment-panel__desc-edit textarea {
+  width: 100%;
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--color-primary, #4f46e5);
+  border-radius: 3px;
+  resize: vertical;
+  min-height: 36px;
+}
+
+.attachment-panel__desc-edit textarea:focus {
+  outline: none;
+}
+
+/* archive manifest preview */
+
+.attachment-panel__manifest {
+  background: #f8fafc;
+  border-top: 1px solid var(--border-soft, #e2e8f0);
+  margin: 4px -12px -8px;
+  padding: 8px 12px;
+  border-radius: 0 0 6px 6px;
+}
+
+.attachment-panel__manifest-header {
+  font-size: 11px;
+  color: var(--text-muted, #64748b);
+  margin-bottom: 4px;
+}
+
+.attachment-panel__manifest-body {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+  color: var(--text-strong, #334155);
+  margin: 0;
+  white-space: pre;
+  overflow-x: auto;
+  max-height: 200px;
+  overflow-y: auto;
+}

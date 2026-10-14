@@ -819,3 +819,64 @@ func downloadFile(sftpCli *sftp.Client, remotePath, localPath string) error {
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+// Remove deletes remotePath on the SFTP server. Tilde is expanded against
+// the remote user's $HOME before removal. A missing file is NOT an error
+// — the attachment-sync diff already nulled out the orphan row on disk so
+// a stale remote file just gets a silent no-op, matching the contract of
+// the sync service's "delete locally → delete remotely on next sync" loop.
+//
+// Naming kept short (Remove not RemoveFile) to mirror the stdlib os.Remove
+// caller conventions the rest of the codebase already uses.
+func (c *Client) Remove(remotePath string) error {
+	if c == nil || c.conn == nil {
+		return errors.New("ssh: client not connected")
+	}
+	if remotePath == "" {
+		return errors.New("ssh: empty remote path")
+	}
+	expanded, xerr := c.expandHome(remotePath)
+	if xerr != nil {
+		return xerr
+	}
+	sftpCli, err := c.sftp()
+	if err != nil {
+		return err
+	}
+	defer sftpCli.Close()
+	if err := sftpCli.Remove(expanded); err != nil {
+		if isRemoteNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("ssh: sftp remove %s: %w", remotePath, err)
+	}
+	return nil
+}
+
+// RemoveAll removes remotePath and any descendants (recursive). Used by
+// per-requirement attachment pruning when the wizard retires a row. Like
+// Remove, a missing target is treated as success.
+func (c *Client) RemoveAll(remotePath string) error {
+	if c == nil || c.conn == nil {
+		return errors.New("ssh: client not connected")
+	}
+	if remotePath == "" {
+		return errors.New("ssh: empty remote path")
+	}
+	expanded, xerr := c.expandHome(remotePath)
+	if xerr != nil {
+		return xerr
+	}
+	sftpCli, err := c.sftp()
+	if err != nil {
+		return err
+	}
+	defer sftpCli.Close()
+	if err := sftpCli.RemoveAll(expanded); err != nil {
+		if isRemoteNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("ssh: sftp remove-all %s: %w", remotePath, err)
+	}
+	return nil
+}
