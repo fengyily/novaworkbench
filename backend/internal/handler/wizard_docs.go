@@ -319,6 +319,11 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	if req.Model != "" {
 		model = req.Model
 	}
+	// Align the gateway config with the picked model: keep ANTHROPIC_BASE_URL
+	// and ANTHROPIC_MODEL on the same claude_configs row (resolveConfigIDForRun's
+	// ResolveConfigForModel arm). DocRefineChat only sends `model`, so requestCl
+	// is always empty here — the role binding remains the devCfgID fallback.
+	claudeConfigID = h.resolveConfigIDForRun("", model, claudeConfigID)
 
 	// Anchor the refine to the same worktree as the stage it resumes, so the
 	// conversation never carries original-dir absolute paths.
@@ -499,6 +504,8 @@ func (h *WizardHandler) refineDocViaAgent(w http.ResponseWriter, r *http.Request
 	if req.Model != "" {
 		model = req.Model
 	}
+	// Align the gateway config with the picked model. See resolveConfigIDForRun.
+	claudeConfigID = h.resolveConfigIDForRun("", model, claudeConfigID)
 	_ = systemPrompt // Agent worker prepends the role persona into the prompt itself; not passed via --system-prompt.
 
 	projectPath := req.ProjectPath
@@ -735,6 +742,8 @@ func (h *WizardHandler) ApplyDoc(w http.ResponseWriter, r *http.Request) {
 	if req.Model != "" {
 		model = req.Model
 	}
+	// Align the gateway config with the picked model. See resolveConfigIDForRun.
+	claudeConfigID = h.resolveConfigIDForRun("", model, claudeConfigID)
 
 	// Create the job, persist its id so a refresh can reconnect, and return the
 	// job id immediately. Claude runs in a goroutine writing progress into the
