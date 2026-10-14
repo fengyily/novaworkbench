@@ -250,6 +250,16 @@ func main() {
 	// role-gated stages — see service.AttachmentService.BuildManifest.
 	attachmentSvc := service.NewAttachmentService(database)
 	attachmentH := handler.NewAttachmentHandler(attachmentSvc)
+	// Review-scoped attachments: identical HTTP surface, different owner
+	// table (code_review_attachments). The handler reads r.PathValue("id")
+	// either way, so a second AttachmentHandler instance mounted under
+	// /api/code-reviews/{id}/attachments is all that's needed.
+	reviewAttachmentSvc := service.NewCodeReviewAttachmentService(database)
+	reviewAttachmentH := handler.NewAttachmentHandler(reviewAttachmentSvc)
+	// Persisted Review sessions — owner of the attachments above, carrier of
+	// the user-written 改动目标 description, landing spot for the graded
+	// (P0/P1/P3) report.
+	codeReviewSvc := service.NewCodeReviewService(database, reviewAttachmentSvc)
 	scannerH := handler.NewScannerHandler(scannerSvc)
 	sharedJobs := store.NewJobStore(50)
 	preflightH := handler.NewPreflightHandler(pfRegistry, sharedJobs)
@@ -419,6 +429,11 @@ func main() {
 
 	runnerH := handler.NewRunnerHandler(projectSvc, sharedJobs, database)
 	reviewH := handler.NewReviewHandler(projectSvc, platformSvc, roleSvc, llmGateway, sharedJobs, jobLogSvc, claudeCfgSvc, usageSvc)
+	// Branch-Review extras, injected post-construction so the legacy
+	// constructor signature (and its tests) stay put.
+	reviewH.SetCodeReviewSvc(codeReviewSvc)
+	reviewH.SetAttachmentSvc(reviewAttachmentSvc)
+	reviewH.SetGitCredentialSvc(gitCredSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
 	mergeH := handler.NewMergeHandler(database, projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc, gitCredSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)
@@ -511,6 +526,24 @@ func main() {
 	mux.HandleFunc("POST /api/projects/{id}/prs/review", reviewH.StartReview)
 	mux.HandleFunc("GET /api/projects/{id}/prs/jobs/{job_id}/stream", reviewH.StreamReviewJob)
 	mux.HandleFunc("POST /api/projects/{id}/prs/{pr_number}/comment", reviewH.SubmitComment)
+
+	// Branch Review sessions — a persisted review entity the user composes
+	// (branch + base + description + attachments) before starting the run.
+	// The run itself streams over the PR job-stream route above; no second
+	// SSE channel. No RequirePermission gate, matching the /prs routes.
+	mux.HandleFunc("POST /api/projects/{id}/reviews", reviewH.CreateReview)
+	mux.HandleFunc("GET /api/projects/{id}/reviews", reviewH.ListReviews)
+	mux.HandleFunc("GET /api/reviews/{rid}", reviewH.GetReview)
+	mux.HandleFunc("PUT /api/reviews/{rid}", reviewH.UpdateReview)
+	mux.HandleFunc("DELETE /api/reviews/{rid}", reviewH.DeleteReview)
+	mux.HandleFunc("POST /api/reviews/{rid}/start", reviewH.StartReviewSession)
+	// Review-session attachments — same handler as the requirement ones,
+	// bound to the review-scoped service instance.
+	mux.HandleFunc("POST /api/code-reviews/{id}/attachments", reviewAttachmentH.Upload)
+	mux.HandleFunc("GET /api/code-reviews/{id}/attachments", reviewAttachmentH.List)
+	mux.HandleFunc("GET /api/code-reviews/{id}/attachments/{att_id}/content", reviewAttachmentH.Content)
+	mux.HandleFunc("PUT /api/code-reviews/{id}/attachments/{att_id}", reviewAttachmentH.UpdateDescription)
+	mux.HandleFunc("DELETE /api/code-reviews/{id}/attachments/{att_id}", reviewAttachmentH.Delete)
 
 	// Project platform config
 	mux.HandleFunc("PATCH /api/projects/{id}", middleware.RequirePermission(aclSvc, "project.manage")(http.HandlerFunc(projectH.UpdateBasicInfo)).ServeHTTP)

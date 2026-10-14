@@ -3,7 +3,9 @@ package handler
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,8 +15,10 @@ import (
 	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
+	"github.com/novaworkbench/backend/internal/middleware"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/platform"
+	"github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 )
@@ -28,7 +32,32 @@ type ReviewHandler struct {
 	jobLogSvc   *service.JobLogService
 	claudeCfg   *service.ClaudeConfigService
 	usageSvc    usageRecorder
+
+	// Branch-Review dependencies, injected via setters rather than the
+	// constructor so the existing NewReviewHandler call shape (and its
+	// tests) keep working. Each one degrades gracefully when nil:
+	// reviewSvc nil → session endpoints 503 but the legacy PR flow still
+	// runs; attachSvc nil → no 📎 block in the system prompt; gitCredSvc
+	// nil → `git fetch` runs with ambient credentials only.
+	reviewSvc  *service.CodeReviewService
+	attachSvc  *service.AttachmentService
+	gitCredSvc *service.GitCredentialService
 }
+
+// SetCodeReviewSvc wires the persisted-session store. Without it the
+// /api/projects/{id}/reviews family returns 503 and StartReview falls back
+// to an ephemeral (unpersisted) run.
+func (h *ReviewHandler) SetCodeReviewSvc(svc *service.CodeReviewService) { h.reviewSvc = svc }
+
+// SetAttachmentSvc wires the REVIEW-scoped attachment store
+// (service.NewCodeReviewAttachmentService) — not the requirement one. Its
+// manifest is appended to the reviewer's system prompt so Claude can Read
+// the uploaded context files.
+func (h *ReviewHandler) SetAttachmentSvc(svc *service.AttachmentService) { h.attachSvc = svc }
+
+// SetGitCredentialSvc wires the askpass env builder so `git fetch origin`
+// works against private HTTPS remotes during ref resolution.
+func (h *ReviewHandler) SetGitCredentialSvc(svc *service.GitCredentialService) { h.gitCredSvc = svc }
 
 func NewReviewHandler(projectSvc *service.ProjectService, platformSvc *service.PlatformTokenService, roleSvc *service.RoleService, llmGateway *llm.Gateway, jobs *store.JobStore, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder) *ReviewHandler {
 	return &ReviewHandler{
@@ -230,7 +259,12 @@ type StartReviewReq struct {
 	ExtraRequirements string `json:"extra_requirements"`
 }
 
-// StartReview creates a review job and starts Claude CLI asynchronously.
+// StartReview is the legacy PR-review entry point, kept verbatim in shape
+// (same route, same {"job_id": ...} response) so the existing PR tab and its
+// comment-submit flow are untouched. Internally it is now a thin shell: it
+// materialises a review_type='pr' session row and starts it, so PR reviews
+// land in the same history + structured-findings pipeline as branch reviews.
+// When the session store isn't wired the run still happens, just unpersisted.
 // POST /api/projects/{id}/prs/review
 func (h *ReviewHandler) StartReview(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -249,10 +283,214 @@ func (h *ReviewHandler) StartReview(w http.ResponseWriter, r *http.Request) {
 		req.BaseBranch = detectBaseBranch(project.LocalPath)
 	}
 
+	rv := &model.CodeReview{
+		ProjectID:  project.ID,
+		ReviewType: model.ReviewTypePR,
+		Branch:     req.Branch,
+		BaseBranch: req.BaseBranch,
+		PRNumber:   req.PRNumber,
+		Title:      req.PRTitle,
+		// The PR entry point's single-line "额外审查要求" shares the
+		// description column — see runReviewSession for the prompt-slot
+		// mapping. Storing it means a re-run from history keeps it.
+		Description: req.ExtraRequirements,
+		CreatedBy:   currentUserID(r),
+	}
+	if h.reviewSvc != nil {
+		created, cerr := h.reviewSvc.Create(rv)
+		if cerr != nil {
+			log.Printf("[Review] persist PR review session failed: %v (running unpersisted)", cerr)
+		} else {
+			rv = created
+		}
+	}
+
 	job := h.jobs.Create(id)
 	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID})
 
-	go h.runReview(job, project.ID, project.LocalPath, req)
+	go h.runReviewSession(job, rv, project)
+}
+
+// ── Review sessions (branch Review) ─────────────────────────────────────────
+
+// CreateReviewReq is the body for creating a draft branch-review session.
+type CreateReviewReq struct {
+	Branch      string `json:"branch"`
+	BaseBranch  string `json:"base_branch"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+}
+
+// CreateReview opens a draft session. The draft exists so attachments have a
+// stable owner id to upload against before anything runs.
+// POST /api/projects/{id}/reviews
+func (h *ReviewHandler) CreateReview(w http.ResponseWriter, r *http.Request) {
+	if h.reviewSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "NOT_AVAILABLE", "Review 会话服务未启用")
+		return
+	}
+	id := r.PathValue("id")
+	project, err := h.projectSvc.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", "项目不存在")
+		return
+	}
+	var req CreateReviewReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "请求体解析失败")
+		return
+	}
+	if strings.TrimSpace(req.Branch) == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "branch 字段不能为空")
+		return
+	}
+	if strings.TrimSpace(req.BaseBranch) == "" {
+		req.BaseBranch = detectBaseBranch(project.LocalPath)
+	}
+	rv, err := h.reviewSvc.Create(&model.CodeReview{
+		ProjectID:   project.ID,
+		ReviewType:  model.ReviewTypeBranch,
+		Branch:      strings.TrimSpace(req.Branch),
+		BaseBranch:  strings.TrimSpace(req.BaseBranch),
+		Title:       strings.TrimSpace(req.Title),
+		Description: req.Description,
+		CreatedBy:   currentUserID(r),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, rv)
+}
+
+// ListReviews returns the project's review history, newest first.
+// GET /api/projects/{id}/reviews
+func (h *ReviewHandler) ListReviews(w http.ResponseWriter, r *http.Request) {
+	if h.reviewSvc == nil {
+		writeJSON(w, http.StatusOK, []model.CodeReview{})
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	rows, err := h.reviewSvc.ListByProject(r.PathValue("id"), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+// GetReview returns one session (including the persisted report + findings).
+// GET /api/reviews/{rid}
+func (h *ReviewHandler) GetReview(w http.ResponseWriter, r *http.Request) {
+	rv, ok := h.lookupReview(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, rv)
+}
+
+// UpdateReview patches description / branches / title on a draft or finished
+// session. Running sessions are refused by the service layer.
+// PUT /api/reviews/{rid}
+func (h *ReviewHandler) UpdateReview(w http.ResponseWriter, r *http.Request) {
+	cur, ok := h.lookupReview(w, r)
+	if !ok {
+		return
+	}
+	var req CreateReviewReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "请求体解析失败")
+		return
+	}
+	patch := &model.CodeReview{
+		ReviewType:  cur.ReviewType,
+		Branch:      strings.TrimSpace(req.Branch),
+		BaseBranch:  strings.TrimSpace(req.BaseBranch),
+		Title:       strings.TrimSpace(req.Title),
+		Description: req.Description,
+	}
+	rv, err := h.reviewSvc.Update(cur.ID, patch)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "UPDATE_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rv)
+}
+
+// DeleteReview removes the session plus its attachments (rows + files).
+// DELETE /api/reviews/{rid}
+func (h *ReviewHandler) DeleteReview(w http.ResponseWriter, r *http.Request) {
+	rv, ok := h.lookupReview(w, r)
+	if !ok {
+		return
+	}
+	if rv.Status == model.ReviewStatusRunning {
+		writeError(w, http.StatusConflict, "REVIEW_RUNNING", "Review 正在运行，无法删除")
+		return
+	}
+	if err := h.reviewSvc.Delete(rv.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "DELETE_FAILED", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// StartReviewSession runs (or re-runs) a persisted session and returns the
+// JobStore id. The SSE stream is the existing
+// GET /api/projects/{id}/prs/jobs/{job_id}/stream — branch reviews
+// deliberately do NOT open a second streaming channel.
+// POST /api/reviews/{rid}/start
+func (h *ReviewHandler) StartReviewSession(w http.ResponseWriter, r *http.Request) {
+	rv, ok := h.lookupReview(w, r)
+	if !ok {
+		return
+	}
+	if rv.Status == model.ReviewStatusRunning {
+		writeError(w, http.StatusConflict, "REVIEW_RUNNING", "该 Review 正在运行中")
+		return
+	}
+	project, err := h.projectSvc.Get(rv.ProjectID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "PROJECT_NOT_FOUND", "项目不存在")
+		return
+	}
+	if strings.TrimSpace(rv.BaseBranch) == "" {
+		rv.BaseBranch = detectBaseBranch(project.LocalPath)
+	}
+
+	job := h.jobs.Create(rv.ProjectID)
+	writeJSON(w, http.StatusOK, map[string]string{"job_id": job.ID, "review_id": rv.ID})
+
+	go h.runReviewSession(job, rv, project)
+}
+
+// lookupReview resolves {rid} and writes the error response itself when the
+// store is missing or the row doesn't exist. ok=false means "already
+// responded, return now".
+func (h *ReviewHandler) lookupReview(w http.ResponseWriter, r *http.Request) (*model.CodeReview, bool) {
+	if h.reviewSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "NOT_AVAILABLE", "Review 会话服务未启用")
+		return nil, false
+	}
+	rv, err := h.reviewSvc.Get(r.PathValue("rid"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "REVIEW_NOT_FOUND", "Review 不存在")
+			return nil, false
+		}
+		writeError(w, http.StatusInternalServerError, "GET_FAILED", err.Error())
+		return nil, false
+	}
+	return rv, true
+}
+
+// currentUserID returns the authenticated principal's id, or "" when auth is
+// disabled (the synthetic admin has no users row).
+func currentUserID(r *http.Request) string {
+	if u := middleware.CurrentUser(r); u != nil {
+		return u.UserID
+	}
+	return ""
 }
 
 // StreamReviewJob streams a review job via SSE.
@@ -335,76 +573,107 @@ func (h *ReviewHandler) SubmitComment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "submitted"})
 }
 
-// runReview runs Claude CLI against the branch diff and streams output into the job.
-func (h *ReviewHandler) runReview(job *store.Job, projectID, projectPath string, req StartReviewReq) {
-	prContext := ""
-	if req.PRTitle != "" {
-		prContext = fmt.Sprintf("PR 标题：%s\n", req.PRTitle)
-	}
-	if req.PRNumber > 0 {
-		prContext += fmt.Sprintf("PR 编号：#%d\n", req.PRNumber)
-	}
-	if req.ExtraRequirements != "" {
-		prContext += fmt.Sprintf("额外审查要求：%s\n", req.ExtraRequirements)
-	}
+// runReviewSession drives one review run end to end: resolve the diff refs,
+// build the prompt (with the user's description + attachment manifest),
+// stream claude's output into the job, then persist the report + the parsed
+// P0/P1/P3 findings back onto the session row.
+func (h *ReviewHandler) runReviewSession(job *store.Job, rv *model.CodeReview, project *model.Project) {
+	ctx := context.Background()
 
-	// The reviewer persona + review checklist + report format live in the
-	// configurable "reviewer" role (system prompt); the -p prompt carries only
-	// the dynamic task content (PR context, branches, operation steps).
-	systemPrompt, model, claudeConfigID := h.roleConfig("reviewer")
-	// Stamp the effective model on the in-memory job so StreamReviewJob's
-	// job_done frame + GetJob can surface it before the durable log is written.
-	job.SetModel(model)
+	// The reviewer persona lives in the configurable "reviewer" role; the
+	// grading contract + checklist live in the task prompt (prompt.Build-
+	// ReviewPrompt) so they apply even to installs whose persona was
+	// customised before this feature existed.
+	systemPrompt, modelName, claudeConfigID := h.roleConfig("reviewer")
+	job.SetModel(modelName)
 
-	// Token-usage recorder for this review run. requirement_id is empty
-	// (reviews are project-level, not tied to a requirement), so review rows
-	// are never counted in requirement/project totals — only in the project's
-	// review breakdown. Best-effort: recordFrom swallows all errors.
-	reviewMeta := fmt.Sprintf("{\"pr_number\":%d,\"pr_title\":%q,\"branch\":%q}", req.PRNumber, req.PRTitle, req.Branch)
-	configID, currency := h.activeConfigMeta()
-	reviewUsage := &usageCtx{
-		Rec:            h.usageSvc,
-		ProjectID:      projectID,
-		JobID:          job.ID,
-		Step:           "review",
-		Model:          model,
-		ClaudeConfigID: configID,
-		Currency:       currency,
-		Meta:           reviewMeta,
+	// Attachment manifest → system prompt. Claude reads the files on demand
+	// via the absolute paths listed in the block (BuildManifest never inlines
+	// the bytes, so a 2 GB upload can't blow the context).
+	manifest := attachManifestFor(h.attachSvc, rv.ID, "")
+	if manifest != "" {
+		systemPrompt = strings.TrimRight(systemPrompt, "\n") + "\n\n" + manifest
 	}
 
-	prompt := fmt.Sprintf(
-		"请对以下 PR 的改动进行代码 Review。\n\n"+
-			"%s"+
-			"目标分支：`%s`\n基础分支：`%s`\n\n"+
-			"操作步骤：\n"+
-			"1. 先运行 `git fetch origin` 拉取最新远端分支\n"+
-			"2. 运行 `git diff origin/%s...origin/%s` 查看所有改动\n"+
-			"3. 阅读改动涉及的关键源文件\n"+
-			"4. 给出结构化的 Review 报告\n",
-		prContext, req.Branch, req.BaseBranch, req.BaseBranch, req.Branch)
+	if h.reviewSvc != nil {
+		if err := h.reviewSvc.MarkRunning(rv.ID, job.ID, modelName); err != nil {
+			log.Printf("[Review] mark running %s: %v", rv.ID, err)
+		}
+	}
 
-	cmd := h.llm.StreamCmd(context.Background(), llm.StreamOpts{
-		Prompt:         prompt,
-		WorkDir:        projectPath,
+	// Private HTTPS remotes need the askpass wiring for `git fetch origin`.
+	var gitEnv []string
+	cleanup := func() {}
+	if h.gitCredSvc != nil {
+		if env, c, err := h.gitCredSvc.BuildEnv(ctx, rv.ProjectID); err == nil {
+			gitEnv, cleanup = env, c
+		}
+	}
+
+	headRef, baseRef, err := resolveDiffRefs(ctx, project.LocalPath, rv.Branch, rv.BaseBranch, gitEnv)
+	cleanup()
+	if err != nil {
+		msg := "无法解析对比分支: " + err.Error()
+		job.Append(store.LogLine{Type: "error", Content: msg})
+		h.finishReview(job, rv, modelName, model.ReviewStatusError, msg)
+		return
+	}
+
+	reviewUsage := h.newReviewUsage(job.ID, rv, modelName)
+
+	// rv.Description holds whatever free-text context the user supplied, but
+	// the two entry points mean different things by it: a branch review's is
+	// the 改动目标 the reviewer grades 目标达成 against, while the PR entry
+	// point's single-line field is 额外审查要求. One column, two prompt slots —
+	// so a re-run from history keeps the text either way, correctly labelled.
+	description, extra := rv.Description, ""
+	if rv.ReviewType == model.ReviewTypePR {
+		description, extra = "", rv.Description
+	}
+
+	taskPrompt := prompt.BuildReviewPrompt(prompt.ReviewPromptInput{
+		ReviewType:        rv.ReviewType,
+		Branch:            rv.Branch,
+		BaseBranch:        rv.BaseBranch,
+		HeadRef:           headRef,
+		BaseRef:           baseRef,
+		PRNumber:          rv.PRNumber,
+		PRTitle:           rv.Title,
+		Description:       description,
+		ExtraRequirements: extra,
+		HasAttachments:    manifest != "",
+	})
+
+	cmd := h.llm.StreamCmd(ctx, llm.StreamOpts{
+		Prompt:         taskPrompt,
+		WorkDir:        project.LocalPath,
 		SystemPrompt:   systemPrompt,
-		Model:          cliModelArg(model),
+		Model:          cliModelArg(modelName),
 		ClaudeConfigID: claudeConfigID,
 	})
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		job.Append(store.LogLine{Type: "error", Content: "启动 Claude 失败: " + err.Error()})
-		job.Finish(1, store.JobError)
+		msg := "启动 Claude 失败: " + err.Error()
+		job.Append(store.LogLine{Type: "error", Content: msg})
+		h.finishReview(job, rv, modelName, model.ReviewStatusError, msg)
 		return
 	}
 
 	if err := cmd.Start(); err != nil {
 		logClaudeExecDiag("review", cmd)
-		job.Append(store.LogLine{Type: "error", Content: explainExecError(err)})
-		job.Finish(1, store.JobError)
+		msg := explainExecError(err)
+		job.Append(store.LogLine{Type: "error", Content: msg})
+		h.finishReview(job, rv, modelName, model.ReviewStatusError, msg)
 		return
 	}
+
+	// finalReport accumulates the assistant text that makes up the report.
+	// The `result` event's payload is the authoritative final answer when
+	// present; the streamed text blocks are the fallback for runs that end
+	// without one.
+	var streamed strings.Builder
+	finalReport := ""
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -433,6 +702,8 @@ func (h *ReviewHandler) runReview(job *store.Job, projectID, projectPath string,
 						case "text":
 							if text, ok := bmap["text"].(string); ok && strings.TrimSpace(text) != "" {
 								job.Append(store.LogLine{Type: "message", Content: text})
+								streamed.WriteString(text)
+								streamed.WriteString("\n\n")
 							}
 						case "tool_use":
 							inp, _ := bmap["input"].(map[string]interface{})
@@ -448,6 +719,7 @@ func (h *ReviewHandler) runReview(job *store.Job, projectID, projectPath string,
 			if sub, _ := evt["subtype"].(string); sub == "success" {
 				if result, ok := evt["result"].(string); ok && strings.TrimSpace(result) != "" {
 					job.Append(store.LogLine{Type: "message", Content: result})
+					finalReport = result
 				}
 			} else if sub == "error" {
 				if errMsg, ok := evt["error"].(string); ok {
@@ -467,15 +739,90 @@ func (h *ReviewHandler) runReview(job *store.Job, projectID, projectPath string,
 		}
 	}
 
+	if strings.TrimSpace(finalReport) == "" {
+		finalReport = streamed.String()
+	}
+	h.finishReview(job, rv, modelName, model.ReviewStatusDone, finalReport)
+}
+
+// newReviewUsage builds the token-usage recorder for a review run.
+// requirement_id stays empty (reviews are project-level), so review rows
+// never inflate requirement/project totals — they show up only in the
+// project's review breakdown. review_id is carried in meta so the breakdown
+// can link back to the session.
+func (h *ReviewHandler) newReviewUsage(jobID string, rv *model.CodeReview, modelName string) *usageCtx {
+	meta := fmt.Sprintf(`{"pr_number":%d,"pr_title":%q,"branch":%q,"review_id":%q,"review_type":%q}`,
+		rv.PRNumber, rv.Title, rv.Branch, rv.ID, rv.ReviewType)
+	configID, currency := h.activeConfigMeta()
+	return &usageCtx{
+		Rec:            h.usageSvc,
+		ProjectID:      rv.ProjectID,
+		JobID:          jobID,
+		Step:           "review",
+		Model:          modelName,
+		ClaudeConfigID: configID,
+		Currency:       currency,
+		Meta:           meta,
+	}
+}
+
+// finishReview is the single terminal path for a review run: parse the
+// report's trailing JSON contract, persist the session row, snapshot the job
+// log, and close the job.
+//
+// A contract miss is explicitly NOT an error — result_md keeps the whole
+// report, findings_json stays empty, counts stay 0, and the frontend falls
+// back to rendering the Markdown as-is (the report's own ## P0/P1/P3
+// sections mean no information is lost).
+func (h *ReviewHandler) finishReview(job *store.Job, rv *model.CodeReview, modelName, status, report string) {
+	if h.reviewSvc != nil {
+		if err := h.reviewSvc.MarkFinished(rv.ID, buildReviewOutcome(status, report)); err != nil {
+			log.Printf("[Review] persist review %s: %v", rv.ID, err)
+		}
+	}
+
 	// Persist the finished review job (incl. the effective reviewer model) so a
 	// backend restart doesn't wipe the record and the UI can surface "本次 review
 	// 使用模型". Review jobs aren't bound to a requirement, so requirement_id is
 	// empty and the model lives on job_logs.model.
-	lines, status, exitCode := job.Snapshot()
-	if perr := h.jobLogSvc.Save(job.ID, "", string(status), exitCode, job.StartedAt, job.FinishedAt, lines, model); perr != nil {
+	lines, jobStatus, exitCode := job.Snapshot()
+	if perr := h.jobLogSvc.Save(job.ID, "", string(jobStatus), exitCode, job.StartedAt, job.FinishedAt, lines, modelName); perr != nil {
 		log.Printf("[Review] failed to persist job log %s: %v", job.ID, perr)
 	}
+	if status == model.ReviewStatusError {
+		job.Finish(1, store.JobError)
+		return
+	}
 	job.Finish(0, store.JobDone)
+}
+
+// buildReviewOutcome maps a finished report onto the row we persist.
+//
+// Happy path: the trailing JSON contract parses, so result_md is the report
+// WITHOUT the contract block and the findings land structured + counted.
+// Degraded path (contract missing or malformed): result_md keeps the whole
+// report, findings_json stays empty and all counts stay 0, which is the
+// signal the frontend uses to fall back to plain-Markdown rendering. The
+// report's own ## P0/P1/P3 sections mean the user loses nothing.
+func buildReviewOutcome(status, report string) service.ReviewOutcome {
+	out := service.ReviewOutcome{Status: status, ResultMD: report}
+	jsonPart, markdownPart := extractTrailingJSON(report)
+	if jsonPart == "" {
+		return out
+	}
+	findings, goalMet, ok := parseFindings(jsonPart)
+	if !ok {
+		return out
+	}
+	raw, err := json.Marshal(findings)
+	if err != nil {
+		return out
+	}
+	out.ResultMD = markdownPart
+	out.FindingsJSON = string(raw)
+	out.GoalMet = goalMet
+	out.P0, out.P1, out.P3 = countBySeverity(findings)
+	return out
 }
 
 // detectBaseBranch reads origin/HEAD or falls back to main/master.

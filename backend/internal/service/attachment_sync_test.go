@@ -411,7 +411,7 @@ func basenameForStoredPath(t *testing.T, _ *AttachmentService, storedPath string
 
 func mustUpload(t *testing.T, svc *AttachmentService, reqID, filename string, content []byte, description string) model.Attachment {
 	t.Helper()
-	dir, err := svc.requirementDir(reqID)
+	dir, err := svc.ownerDir(reqID)
 	if err != nil {
 		t.Fatalf("req dir: %v", err)
 	}

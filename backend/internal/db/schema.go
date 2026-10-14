@@ -651,6 +651,69 @@ CREATE TABLE IF NOT EXISTS issue_monitor_pending_launches (
 -- LIMIT free. (monitor_id, run_at) is the natural covering index.
 CREATE INDEX IF NOT EXISTS idx_impl_monitor_due
 	ON issue_monitor_pending_launches(monitor_id, run_at);
+
+-- Persisted code-review sessions. One row per Review run (both the branch
+-- Review the user composes by hand AND the legacy "review this open PR"
+-- entry point, discriminated by review_type). The row exists BEFORE the run
+-- starts because attachments need a stable owner id to upload against —
+-- the draft status is exactly that pre-run window.
+--
+-- description is the user-written context ("本次改动的目标是…") that the
+-- reviewer prompt checks the diff against, reporting 目标达成情况 in goal_met.
+-- result_md holds the Markdown report with the trailing JSON contract block
+-- stripped. findings_json holds that block's findings array verbatim, and
+-- p0/p1/p3_count are denormalised from it so the history table renders
+-- without parsing JSON per row. All three counts stay 0 (and findings_json
+-- empty) when the model didn't honour the contract — the UI degrades to
+-- plain-Markdown rendering.
+CREATE TABLE IF NOT EXISTS code_reviews (
+	id              TEXT PRIMARY KEY,
+	project_id      TEXT NOT NULL,
+	review_type     TEXT NOT NULL DEFAULT 'branch',   -- 'branch' | 'pr'
+	branch          TEXT NOT NULL DEFAULT '',
+	base_branch     TEXT NOT NULL DEFAULT '',
+	pr_number       INTEGER NOT NULL DEFAULT 0,
+	title           TEXT NOT NULL DEFAULT '',
+	description     TEXT NOT NULL DEFAULT '',
+	status          TEXT NOT NULL DEFAULT 'draft',    -- draft|running|done|error
+	job_id          TEXT NOT NULL DEFAULT '',
+	result_md       TEXT NOT NULL DEFAULT '',
+	findings_json   TEXT NOT NULL DEFAULT '',
+	p0_count        INTEGER NOT NULL DEFAULT 0,
+	p1_count        INTEGER NOT NULL DEFAULT 0,
+	p3_count        INTEGER NOT NULL DEFAULT 0,
+	goal_met        TEXT NOT NULL DEFAULT '',         -- yes|partial|no|''
+	model           TEXT NOT NULL DEFAULT '',
+	created_by      TEXT NOT NULL DEFAULT '',
+	created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+	finished_at     DATETIME,
+	FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_cr_project ON code_reviews(project_id, created_at);
+
+-- Attachments owned by a Review session. Column-for-column identical to
+-- requirement_attachments (only requirement_id -> review_id) on purpose:
+-- fixupSchema's MySQL "indexed TEXT -> VARCHAR" translation keys off the
+-- column shape, and AttachmentService drives both tables through the same
+-- SQL with the table/owner-column swapped at construction time.
+CREATE TABLE IF NOT EXISTS code_review_attachments (
+	id              TEXT PRIMARY KEY,
+	review_id       TEXT NOT NULL,
+	filename        TEXT NOT NULL,
+	stored_path     TEXT NOT NULL,
+	mime_type       TEXT NOT NULL DEFAULT 'application/octet-stream',
+	size_bytes      INTEGER NOT NULL DEFAULT 0,
+	sha256          TEXT NOT NULL,
+	description     TEXT NOT NULL DEFAULT '',
+	manifest_text   TEXT NOT NULL DEFAULT '',
+	uploaded_by     TEXT NOT NULL DEFAULT '',
+	uploaded_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (review_id) REFERENCES code_reviews(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_uniq_attach_crv_sha
+	ON code_review_attachments(review_id, sha256);
+CREATE INDEX IF NOT EXISTS idx_cra_review ON code_review_attachments(review_id);
 `
 
 // alterColumns adds columns to older databases. ALTER TABLE fails when the
@@ -1320,7 +1383,7 @@ var (
 	// MySQL cannot index TEXT columns (needs a key length), so every column
 	// that is a PK/UNIQUE/index target becomes a VARCHAR. Column definitions
 	// all start at the beginning of a line in the canonical schema.
-	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id)(\s+)TEXT\b`)
+	mysqlIndexedCol   = regexp.MustCompile(`(?m)^(\s*)(id|job_id|project_id|requirement_id|review_id|session_id|type|status|username|role_id|permission_id|user_id|token|monitor_id)(\s+)TEXT\b`)
 	mysqlLocalPathCol = regexp.MustCompile(`(?m)^(\s*)local_path(\s+)TEXT\b`)
 	// `key` is a reserved word in MySQL — quote it in DDL. (Queries go
 	// through DB.Ident.)

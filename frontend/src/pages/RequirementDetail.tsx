@@ -4161,7 +4161,7 @@ export default function RequirementDetail() {
           is in its lifecycle. Self-contained: AttachmentPanel owns its
           data fetch / upload / edit-description / delete state and only
           needs the requirement id. */}
-      <AttachmentPanel requirementId={req.id} />
+      <AttachmentPanel ownerId={req.id} />
 
       {/* ── Analyst stage ── */}
       {/* While analyzing, DeepRefineChat is itself the section (own card + header),

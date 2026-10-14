@@ -173,13 +173,7 @@ func (h *WizardHandler) SetAttachmentSvc(svc *service.AttachmentService) {
 // passes the synced mirror on the agent host (see syncAttachmentsToRemote).
 // Passing "" falls back to the local root as a safe default.
 func (h *WizardHandler) attachManifestFor(reqID, attachDir string) string {
-	if h.attachSvc == nil || strings.TrimSpace(reqID) == "" {
-		return ""
-	}
-	if strings.TrimSpace(attachDir) == "" {
-		attachDir = filepath.Join(service.AttachmentRoot(), reqID)
-	}
-	return h.attachSvc.BuildManifest(reqID, attachDir)
+	return attachManifestFor(h.attachSvc, reqID, attachDir)
 }
 
 // syncAttachmentsToRemote copies the requirement's attachments to the
