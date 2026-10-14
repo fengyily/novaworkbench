@@ -821,6 +821,53 @@
   padding: 3px 8px;
 }
 
+/* ── Token ledger (collapsible summary row) ─────────────────────────
+   Wraps the usage table + adjust history in a session-panel style
+   <details>. The summary line carries the at-a-glance totals (cost ·
+   tokens · call count) so the section is one row tall by default and
+   only grows when the user explicitly expands it. The trailing
+   .usage-summary-toggle sits on the far right as a hint, mirroring the
+   summary / chevron rhythm used elsewhere on the page. */
+.usage-collapsible {
+  margin: 8px 0 12px;
+}
+.usage-collapsible > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--color-text);
+  padding: 10px 14px;
+}
+.usage-collapsible > summary::-webkit-details-marker { display: none; }
+.usage-collapsible > summary .session-caret { font-size: 10px; color: var(--color-text-muted); margin-right: 2px; }
+.usage-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+}
+.usage-summary-total {
+  font-weight: 600;
+  color: var(--color-primary);
+  font-size: 13.5px;
+  letter-spacing: 0.01em;
+}
+.usage-summary-dot { color: var(--color-text-muted); opacity: 0.7; }
+.usage-summary-cache { color: var(--color-text-muted); font-size: 12px; }
+.usage-summary-toggle {
+  margin-left: auto;
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+}
+.usage-collapsible[open] > summary .usage-summary-toggle { display: none; }
+
 /* Coding panel */
 .coding-panel {
   background: #0f172a;
@@ -1719,43 +1766,6 @@ select.preflight-field-input {
   white-space: nowrap;
 }
 .stage-time-tag svg { margin-top: -1px; }
-
-/* ── Timing summary section ──────────────────────────────────────── */
-.timing-section { margin-top: 16px; }
-.timing-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.timing-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--color-border, #e2e8f0);
-  border-radius: 10px;
-  background: var(--color-surface, #fff);
-}
-.timing-row-label {
-  display: inline-flex;
-  align-items: center;
-  font-weight: 600;
-  color: var(--color-text, #1e293b);
-  min-width: 120px;
-}
-.timing-row-count { font-weight: 400; color: var(--color-text-muted, #64748b); }
-.timing-row-value {
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  color: var(--color-primary, #4f46e5);
-}
-.timing-row-range {
-  margin-left: auto;
-  font-size: 12px;
-  color: var(--color-text-muted, #64748b);
-}
-.timing-row-note { color: var(--color-text-muted, #94a3b8); }
 
 /* ── Merge / PR step ─────────────────────────────────────────────── */
 .merge-section {
@@ -3433,7 +3443,21 @@ allowed so the row collapses cleanly on every viewport. */
 .tags-compact-empty {
   font-size: 12px;
   color: var(--color-text-muted);
-  margin-bottom: 2px;
+  margin-bottom: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  letter-spacing: 0.02em;
+}
+.tags-compact-empty::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-border-strong, #94a3b8);
+  opacity: 0.55;
+  flex-shrink: 0;
 }
 
 /* Mark chips (preset selector) — 头部 meta 行 inline 多选。颜色由

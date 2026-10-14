@@ -9,6 +9,7 @@ import DocRefineChat from '../components/DocRefineChat';
 import ModelSelect from '../components/ModelSelect';
 import AtMentionTextarea from '../components/AtMentionTextarea';
 import SubTaskPanel from '../components/SubTaskPanel';
+import AttachmentPanel from '../components/AttachmentPanel';
 import { DevSourceBadge } from '../components/DevSourceBadge';
 import { ExecEnvBadge } from '../components/ExecEnvBadge';
 import { ExecEnvSelect } from '../components/ExecEnvSelect';
@@ -3767,61 +3768,13 @@ export default function RequirementDetail() {
         )}
       </div>
 
-      {/* Time spent — plan-analysis span + development span. Rendered only when
-          there is at least one metric to show (a fresh draft has neither). */}
-      {(req.analysis_started_at || req.dev_started_at) && (
-        <div className="detail-section timing-section">
-          <div className="section-header" style={{ marginBottom: 10 }}>
-            <span className="ledger-title">
-              <span className="ledger-title-mark" aria-hidden />
-              {t('requirements.detail2.timingTitle')}
-            </span>
-          </div>
-          <div className="timing-grid">
-            <div className="timing-row">
-              <span className="timing-row-label">
-                <IconClock size={14} className="icon-mr" />{t('requirements.detail2.timingAnalysisLabel')}
-              </span>
-              <span className="timing-row-value">
-                {analysisMs != null
-                  ? formatSpan(analysisMs) + (analysisRunning ? ` (${t('requirements.detail2.timingRunning')})` : '')
-                  : t('requirements.detail2.timingNoData')}
-              </span>
-              <span className="timing-row-range">
-                {req.analysis_started_at ? fmtDateTime(req.analysis_started_at) : t('requirements.detail2.timingNoData')}
-                {t('requirements.detail2.timingRangeSep')}
-                {req.analysis_ended_at ? fmtDateTime(req.analysis_ended_at) : t('requirements.detail2.timingRunning')}
-              </span>
-            </div>
-            <div className="timing-row">
-              <span className="timing-row-label">
-                <IconClock size={14} className="icon-mr" />{t('requirements.detail2.timingDevLabel')}
-                {(req.sub_task_count ?? 0) > 0 && (
-                  <span className="timing-row-count">
-                    {' · '}{t('requirements.detail2.timingTaskCount', { n: req.sub_task_count ?? 0 })}
-                  </span>
-                )}
-              </span>
-              <span className="timing-row-value">
-                {devMs != null
-                  ? formatSpan(devMs) + (devRunning ? ` (${t('requirements.detail2.timingRunning')})` : '')
-                  : t('requirements.detail2.timingNoData')}
-              </span>
-              <span className="timing-row-range">
-                {req.dev_started_at ? fmtDateTime(req.dev_started_at) : t('requirements.detail2.timingNoData')}
-                {t('requirements.detail2.timingRangeSep')}
-                {req.dev_ended_at ? fmtDateTime(req.dev_ended_at) : (req.dev_started_at ? t('requirements.detail2.timingRunning') : t('requirements.detail2.timingNoData'))}
-                {req.dev_ended_at && (
-                  <span className="timing-row-note">{' · '}{t('requirements.detail2.timingDevNote')}</span>
-                )}
-              </span>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Token usage — per-step breakdown + total for this requirement.
-          input = input_tokens + cache_creation + cache_read (billed input). */}
+          Default-collapsed into a session-panel style <details> so the section
+          stays a one-line summary (total cost · total tokens · call count) at
+          rest. Expanding reveals the per-step ledger table + adjust history.
+          (v0.5.x takes priority over raw vertical real estate — the breakdown
+          is still reachable in one click; it just doesn't push the page around
+          on requirements with no rich usage data yet.) */}
       <div className="detail-section usage-section ledger">
         <div className="section-header ledger-header" style={{ marginBottom: 10 }}>
           <span className="ledger-title">
@@ -3830,13 +3783,52 @@ export default function RequirementDetail() {
           </span>
           {usageLoading && <span className="ledger-loading">{t('requirements.detail2.usageRefreshing')}</span>}
         </div>
+        {/* Collapsible ledger body. Default-closed so a fresh requirement page
+            doesn't get pushed by the table — the summary line below already
+            carries the cost / token / call totals, and the user expands the
+            <details> only when they want the per-step breakdown. Auto-opens
+            on first render when there is data, so returning users still see
+            their usage in context without an extra click. */}
         {usage && usage.by_step.length > 0 ? (
-          <>
-            {/* Mobile-only receipt layout — replaced by CSS at ≤768px to give
-                the section a "bill" feel: hero total + segmented proportion
-                bar, then one card per stage with a thin left stripe in the
-                stage's accent color. The desktop table below stays untouched
-                for ≥769px viewports. */}
+          <details className="session-panel usage-collapsible">
+            <summary>
+              <span className="session-caret"><IconPlay size={11} /></span>
+              <IconClock size={13} className="icon-mr" />
+              {(() => {
+                const totalCount = usage.by_step.reduce((acc, s) => acc + s.count, 0);
+                const totalTokens = usage.total.input_tokens + usage.total.output_tokens
+                  + usage.total.cache_creation_tokens + usage.total.cache_read_tokens;
+                const cachedTokens = usage.total.cache_read_tokens;
+                const cacheHitRate = (usage.total.input_tokens + usage.total.cache_creation_tokens + usage.total.cache_read_tokens) > 0
+                  ? cachedTokens / (usage.total.input_tokens + usage.total.cache_creation_tokens + usage.total.cache_read_tokens)
+                  : 0;
+                const compactCount = (n: number) => n >= 1000
+                  ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`
+                  : fmtNumber(n);
+                return (
+                  <span className="usage-summary">
+                    <span className="usage-summary-total">{fmtCost(usage.total.costs)}</span>
+                    <span className="usage-summary-dot">·</span>
+                    <span>{compactCount(totalTokens)} {t('requirements.detail2.usageTokensUnit')}</span>
+                    <span className="usage-summary-dot">·</span>
+                    <span>{t('requirements.detail2.usageCallCount', { n: fmtNumber(totalCount) })}</span>
+                    {cacheHitRate > 0 && (
+                      <>
+                        <span className="usage-summary-dot">·</span>
+                        <span className="usage-summary-cache">{t('requirements.detail2.usageCacheHitRate', { pct: Math.round(cacheHitRate * 100) })}</span>
+                      </>
+                    )}
+                  </span>
+                );
+              })()}
+              <span className="usage-summary-toggle">{t('requirements.detail2.usageSummaryBreakdown')}</span>
+            </summary>
+            <div className="session-body">
+              {/* Mobile-only receipt layout — replaced by CSS at ≤768px to give
+                  the section a "bill" feel: hero total + segmented proportion
+                  bar, then one card per stage with a thin left stripe in the
+                  stage's accent color. The desktop table below stays untouched
+                  for ≥769px viewports. */}
             {(() => {
               const primaryCost = (c?: CostItem[]): number => (c && c.length ? c[0].amount : 0);
               const fmtCount = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : fmtNumber(n);
@@ -4066,7 +4058,8 @@ export default function RequirementDetail() {
                 </div>
               </div>
             )}
-          </>
+            </div>
+          </details>
         ) : (
           <div className="ledger-empty">
             <span className="ledger-empty-icon" aria-hidden><IconMailbox size={28} /></span>
@@ -4160,6 +4153,15 @@ export default function RequirementDetail() {
           </details>
         );
       })()}
+
+      {/* File attachments — visible on every stage (analyst / architect /
+          coding) because all three read the same set. Sits between the
+          metadata block and the stage panels so it's the first thing the
+          user sees when scrolling in, regardless of where the requirement
+          is in its lifecycle. Self-contained: AttachmentPanel owns its
+          data fetch / upload / edit-description / delete state and only
+          needs the requirement id. */}
+      <AttachmentPanel requirementId={req.id} />
 
       {/* ── Analyst stage ── */}
       {/* While analyzing, DeepRefineChat is itself the section (own card + header),
