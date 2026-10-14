@@ -42,6 +42,12 @@
 // findings_json is empty, the verdict is 'plain', and the Markdown
 // disclosure opens by itself (the report's own ## P0/P1/P3 sections mean
 // nothing is lost).
+//
+// 追问 (follow-ups) hang off the selected report: each question is its own
+// job on the same SSE channel, answered by resuming the review's claude
+// session, and the whole thread is persisted server-side so it survives a
+// reload. A follow-up never re-grades the review — the P0/P1/P3 counts you
+// see always belong to the report above it.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -49,6 +55,7 @@ import {
   reviewApi, codeReviewsApi, agentServersApi, parseReviewFindings,
   type PR, type PRListResponse, type Project,
   type CodeReview, type CodeReviewRunBinding, type ReviewFinding, type ReviewSeverity, type GoalMet,
+  type CodeReviewFollowup,
   API_BASE, authedFetch,
 } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
@@ -135,15 +142,31 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   const [detailLoading, setDetailLoading] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
 
+  // ── 追问 ─────────────────────────────────────────────────────────────────
+  // The thread belongs to the report currently in the result view, and runs
+  // on its own stream so asking a question never clobbers the review log
+  // still on screen above it.
+  const [followups, setFollowups] = useState<CodeReviewFollowup[]>([]);
+  const [question, setQuestion] = useState('');
+  const [askRunning, setAskRunning] = useState(false);
+  const [askLines, setAskLines] = useState<{ type: string; content: string }[]>([]);
+  const [askError, setAskError] = useState('');
+  const askEsRef = useRef<EventStream | null>(null);
+  const askPanelRef = useRef<HTMLDivElement>(null);
+
   // Close the SSE stream when the tab unmounts so a navigated-away review
   // doesn't keep a dangling reader around.
-  useEffect(() => () => { reviewEsRef.current?.close(); }, []);
+  useEffect(() => () => { reviewEsRef.current?.close(); askEsRef.current?.close(); }, []);
 
   // Keep the live stream pinned to the newest line (behaviour carried over
   // from ProjectDetail's review panel).
   useEffect(() => {
     if (reviewPanelRef.current) reviewPanelRef.current.scrollTop = reviewPanelRef.current.scrollHeight;
   }, [reviewLines]);
+
+  useEffect(() => {
+    if (askPanelRef.current) askPanelRef.current.scrollTop = askPanelRef.current.scrollHeight;
+  }, [askLines]);
 
   // ── Loaders ──────────────────────────────────────────────────────────────
 
@@ -164,6 +187,22 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
   useEffect(() => { loadPRs(); }, [loadPRs]);
   useEffect(() => { loadHistory(); }, [loadHistory]);
+
+  // The 追问 thread follows whichever report is in the result view. Keyed on
+  // the id (not the object) so re-reading the same session after a run
+  // doesn't refetch the thread it just updated.
+  const selectedId = selected?.id ?? '';
+  useEffect(() => {
+    setAskLines([]);
+    setAskError('');
+    setQuestion('');
+    if (!selectedId) { setFollowups([]); return; }
+    let cancelled = false;
+    codeReviewsApi.listFollowups(selectedId)
+      .then(rows => { if (!cancelled) setFollowups(Array.isArray(rows) ? rows : []); })
+      .catch(() => { if (!cancelled) setFollowups([]); });
+    return () => { cancelled = true; };
+  }, [selectedId]);
 
   // Only ready servers are offered — the backend refuses the rest, so listing
   // them would only mislead. A failure leaves the list empty, which still
@@ -420,6 +459,64 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     } catch (err: unknown) {
       setReviewLines([{ type: 'error', content: errorMessage(err) }]);
       setRunning(false);
+    }
+  };
+
+  // ── 追问 handlers ────────────────────────────────────────────────────────
+
+  const reloadFollowups = useCallback((reviewId: string) => {
+    codeReviewsApi.listFollowups(reviewId)
+      .then(rows => setFollowups(Array.isArray(rows) ? rows : []))
+      .catch(() => {/* the turn is persisted either way; the next open re-reads it */});
+  }, []);
+
+  // One question = one job on the shared review SSE channel. The answer is
+  // persisted by the backend, so when the job ends we just re-read the thread
+  // instead of trying to reconstruct it from the stream.
+  const handleAsk = async () => {
+    if (!selected || askRunning || !question.trim()) return;
+    const reviewId = selected.id;
+    setAskRunning(true);
+    setAskError('');
+    setAskLines([]);
+    try {
+      const { job_id } = await codeReviewsApi.ask(reviewId, question.trim());
+      setQuestion('');
+      askEsRef.current?.close();
+      askEsRef.current = createEventStream(
+        reviewApi.streamJobUrl(projectId, job_id),
+        (data) => {
+          if (data.type === 'job_done') {
+            setAskRunning(false);
+            askEsRef.current?.close();
+            askEsRef.current = null;
+            reloadFollowups(reviewId);
+          } else if (data.content) {
+            setAskLines(prev => [...prev, { type: data.type, content: data.content }]);
+          }
+        },
+        () => {
+          setAskRunning(false);
+          setAskError(t('projects.detail.reviewSseDrop'));
+          askEsRef.current = null;
+          // The run itself may well have finished — re-read before concluding
+          // anything from the dropped stream.
+          reloadFollowups(reviewId);
+        },
+      );
+    } catch (err: unknown) {
+      setAskError(errorMessage(err));
+      setAskRunning(false);
+    }
+  };
+
+  const handleDeleteFollowup = async (fu: CodeReviewFollowup) => {
+    if (!window.confirm(t('projects.detail.reviewFollowupDeleteConfirm'))) return;
+    try {
+      await codeReviewsApi.removeFollowup(fu.review_id, fu.id);
+      reloadFollowups(fu.review_id);
+    } catch (err: unknown) {
+      setAskError(errorMessage(err));
     }
   };
 
@@ -846,6 +943,86 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
               </div>
             </details>
           )}
+
+          {/* ── 追问 ── Asks run against THIS report; they never change its
+              findings or counts. */}
+          <div className="cr-followups">
+            <div className="cr-followups-head">
+              <span className="cr-label">{t('projects.detail.reviewFollowupTitle')}</span>
+              <span className="cr-hint">{t('projects.detail.reviewFollowupHint')}</span>
+            </div>
+
+            {followups.length === 0 && !askRunning && (
+              <p className="cr-sev-empty">{t('projects.detail.reviewFollowupEmpty')}</p>
+            )}
+
+            {followups.map(fu => (
+              <article key={fu.id} className={`cr-followup cr-followup-${fu.status}`}>
+                <div className="cr-followup-q">
+                  <span className="cr-followup-tag">{t('projects.detail.reviewFollowupQ')}</span>
+                  <span className="cr-followup-qtext">{fu.question}</span>
+                  <button
+                    className="btn btn-sm cr-followup-del"
+                    onClick={() => handleDeleteFollowup(fu)}
+                    disabled={fu.status === 'running'}
+                  >{t('projects.detail.reviewDeleteBtn')}</button>
+                </div>
+                {fu.status === 'running' ? (
+                  <p className="cr-followup-pending">{t('projects.detail.reviewFollowupRunning')}</p>
+                ) : fu.status === 'error' ? (
+                  <p className="cr-followup-errtext">{t('projects.detail.reviewFollowupFailed')}：{fu.answer}</p>
+                ) : (
+                  <div className="cr-followup-a">
+                    <span className="cr-followup-tag">{t('projects.detail.reviewFollowupA')}</span>
+                    <MarkdownRender content={fu.answer} />
+                  </div>
+                )}
+                <div className="cr-followup-meta">
+                  <span>{fmtDateTime(fu.created_at)}</span>
+                  {fu.model && <span><IconRobot size={12} /> {fu.model}</span>}
+                  {/* Only worth flagging the degraded case: a resumed answer
+                      is the expectation, a fresh one explains why an answer
+                      may be shallower than the report it talks about. */}
+                  {fu.status === 'done' && !fu.resumed && (
+                    <span className="cr-followup-fresh">{t('projects.detail.reviewFollowupFresh')}</span>
+                  )}
+                </div>
+              </article>
+            ))}
+
+            {askRunning && (
+              <div className="coding-panel cr-followup-stream" ref={askPanelRef} style={{ maxHeight: 220 }}>
+                {askLines.map((line, i) => (
+                  <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
+                ))}
+                <div className="coding-line coding-line-tool_call">{t('projects.detail.reviewFollowupRunning')}</div>
+              </div>
+            )}
+
+            {askError && <div className="cr-error">{askError}</div>}
+
+            {selected.result_md ? (
+              <div className="cr-followup-composer">
+                <textarea
+                  className="form-input cr-desc"
+                  rows={3}
+                  placeholder={t('projects.detail.reviewFollowupPlaceholder')}
+                  value={question}
+                  onChange={e => setQuestion(e.target.value)}
+                  disabled={askRunning || selected.status === 'running'}
+                />
+                <button
+                  className="btn btn-primary"
+                  onClick={handleAsk}
+                  disabled={askRunning || !question.trim() || selected.status === 'running'}
+                >
+                  {askRunning ? t('projects.detail.reviewFollowupAsking') : t('projects.detail.reviewFollowupAsk')}
+                </button>
+              </div>
+            ) : (
+              <p className="cr-hint">{t('projects.detail.reviewFollowupNoReport')}</p>
+            )}
+          </div>
         </article>
       )}
 

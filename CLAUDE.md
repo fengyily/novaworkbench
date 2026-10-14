@@ -59,7 +59,7 @@ Env vars the backend reads: `NOVA_PORT` (default `9527`), `CLAUDE_BIN` (default 
 
 ## Architecture
 
-`cmd/server/main.go` wires everything; ~176 routes registered on a single `http.ServeMux` (Go 1.22 method+path pattern). Dependency flow:
+`cmd/server/main.go` wires everything; ~179 routes registered on a single `http.ServeMux` (Go 1.22 method+path pattern). Dependency flow:
 
 ```
 handler/  ->  service/  ->  *db.DB (model/ holds structs, no behavior)
@@ -82,7 +82,7 @@ Services hold `*db.DB` (not `*sql.DB`) — a thin wrapper that rebinds `?`→`$N
 
 `db.Migrate(src, dst)` copies the **24 tables listed in `copyOrder`** parent-first, preserving IDs and skipping duplicate PKs; it backs both the `-migrate` CLI flag and `POST /api/settings/database/migrate` (settings UI). (`copyOrder` is a hand-maintained subset of the schema — the issue-monitor tables are not in it.)
 
-**33 tables** (`schema.go:14,31,46,86,107,122,142,149,156,170,180,193,199,211,224,235,258,276,288,298,306,314,332,341,350,367,400,439,466,516,638,669,700`):
+**34 tables** (`schema.go:14,31,46,86,107,122,142,149,156,170,180,193,199,211,224,235,258,276,288,298,306,314,332,341,350,367,400,439,466,516,638,669,716,743`):
 
 | 表 | ID 前缀 | 一句话 |
 |---|---|---|
@@ -94,7 +94,8 @@ Services hold `*db.DB` (not `*sql.DB`) — a thin wrapper that rebinds `?`→`$N
 | `project_stars` | 复合 PK(`user_id`+`project_id`) | **按用户**的项目星标(`/projects` 置顶 + Dashboard 排序);`user_id` 刻意不加外键(`NOVA_AUTH_DISABLED` 注入的合成 `admin` 在 `users` 中无行),`Purge` 显式清理 |
 | `skills` / `agent_servers` / `sub_tasks` / `orchestration_batches` / `scheduled_tasks` | `skill_` / `agent_` / `st_` / `ob_` / `sched_` | AI Skills(`.claude/agents/`) / 远端 Agent 主机(凭据 AES-256-GCM 加密) / 需求子任务 / 子任务批派发 / 定时任务(design/coding/design_and_coding) |
 | `issue_monitors` / `issue_monitor_pending_launches` | `im_` / `imp_` | GitHub Issue 监控配置 / 待启动开发的 Issue 队列 |
-| `code_reviews` / `code_review_attachments` | `crv_` / `att_` | **Review 会话**(分支 Review + PR Review 共用,持有描述/状态/`result_md`/`findings_json`/P0·P1·P3 计数/`goal_met`,以及 `model`/`claude_config_id`/`agent_server_id` 执行绑定) / Review 会话的附件(逐列照抄 `requirement_attachments`,owner 列为 `review_id`) |
+| `code_reviews` / `code_review_attachments` | `crv_` / `att_` | **Review 会话**(分支 Review + PR Review 共用,持有描述/状态/`result_md`/`findings_json`/P0·P1·P3 计数/`goal_met`,以及 `model`/`claude_config_id`/`agent_server_id` 执行绑定 + `claude_session_id` 供追问 `--resume`) / Review 会话的附件(逐列照抄 `requirement_attachments`,owner 列为 `review_id`) |
+| `code_review_followups` | `crf_` | **Review 追问**(一行一问一答,`resumed` 记录是否续接了原 Review 会话;`CodeReviewService.Delete` 显式清理,不依赖 SQLite 不生效的 FK CASCADE) |
 
 > **`roles` vs `acl_roles`**: 两个"角色"语义独立。`roles` = AI persona(由 wizard/review 注入 system prompt);`acl_roles` = RBAC 角色(由 `middleware/auth.go` `RequirePermission` 消费)。
 
@@ -131,9 +132,10 @@ Review 有**两个入口、一套管线**,统一落到 `code_reviews` 表(`handl
 - **分级契约**(`prompt/review.go`)—— 三维检查清单(代码问题 / **修改目标是否达成** / 安全性)+ **P0 / P1 / P3 三档**(刻意跳过 P2,prompt 里显式声明不使用,否则模型会自行补档)+ 报告末尾一个 ` ```json ` 围栏块。**契约写在任务 prompt 而不是 reviewer persona**:`RoleService.SeedDefaults()` 是 per-key 回填,存量库的 `reviewer` 行不会被覆盖,用户也可能已自定义 persona —— 放 role 里对存量安装会失效。
 - **尾部 JSON 抽取**(`extractTrailingJSON`)—— **不能复用 `wizard_stream.go` 的 `extractJSON`**:那个从**第一个** `{` 开始扫,Review 报告正文里随便一个代码片段花括号就会取错段。这里优先找最后一个 ` ```json ` 围栏,回退为「从**最后**一个顶层 `{` 起的 brace-match(跳过字符串字面量)」。解析失败时 `findings_json=''`、计数 0,前端**自动退化**为纯 Markdown 渲染(报告正文本身已含 `## P0/P1/P3` 小节,信息不丢)。
 - **附件复用**(`service/attachment.go`)—— `AttachmentService` 的表名 / owner 列是**构造期常量**:`NewAttachmentService`(`requirement_attachments` / `requirement_id`)与 `NewCodeReviewAttachmentService`(`code_review_attachments` / `review_id`)。`handler/attachment.go` **一行未改**,`main.go` 构造第二个实例挂到 `/api/code-reviews/{id}/attachments` 即可。两边 owner id 前缀不同(`req_` / `crv_`),共用 `~/.novaworkbench/attachments/<owner_id>/` 不冲突。`handler/attachments_prompt.go` 的包级 `attachManifestFor(svc, ownerID, attachDir)` 被 wizard 与 review 共用。
-- **删除**(`CodeReviewService.Delete`)—— 先遍历附件逐个 `Delete`(行 + 落盘文件)再删会话行;FK CASCADE 只兜底数据库侧,不然会留下孤儿字节。
+- **删除**(`CodeReviewService.Delete`)—— 先遍历附件逐个 `Delete`(行 + 落盘文件),再删 `code_review_followups` 行(SQLite 从不开 `PRAGMA foreign_keys`,CASCADE 不会触发),最后删会话行。
+- **追问**(`handler/review_followup.go` + `service/code_review_followup.go` + `prompt.BuildFollowupPrompt`)—— 报告出来后可对同一份报告连续提问:`POST /api/reviews/{rid}/followups` 建 `crf_` 行 + JobStore job,**复用 review 那条 SSE 通道**(`/api/projects/{id}/prs/jobs/{job_id}/stream`),答完由后端落库,前端重新拉 `GET .../followups` 渲染整串线程。关键约束:①**追问从不重评**——`result_md`/`findings_json`/P0·P1·P3 计数一律不动,prompt 里显式禁止再输出 ` ```json ` 块(否则会被 `extractTrailingJSON` 当成新契约);②优先 `--resume code_reviews.claude_session_id`(session id 在 review 流的 `session_id` 字段里捕获,本地与远端两条路径都写),会话失效(`isStaleSessionError`)时**自动退化**成全新会话,prompt 里带上报告原文 + 本串已有问答,`code_review_followups.resumed=0` 记录这件事并在 UI 标注;③远端 review 的追问回到**同一台 Agent Server 的同一个 scratch clone**(`/tmp/nova-agent/<project_id>/base`),否则 `--resume` 找不到 session。
 - **模型 + 执行环境**(两种入口共用)—— Review 工具条有 `ModelSelect` + `ExecEnvSelect`,选择落到 `code_reviews.model` / `claude_config_id` / `agent_server_id`,所以从历史「重跑」会复现同一套模型与执行环境。`model` 列双用:用户选择写入,run 开始时被 `MarkRunning` 覆盖为**生效模型**(`DefaultModelLabel` 哨兵由前端 `ModelSelect` 映回「角色默认」)。
-- **Agent Server 执行**(`handler/review_remote.go`)—— Review 是只读运行,**刻意不复用** `prepareRemoteAgentRun`(那条路要 `*model.Requirement` + worktree/分支/GPG/session 同步/commit-push,Review 一样都不需要)。共用的是 SSH 客户端、`/tmp/nova-agent/<project_id>/base` 这个 scratch clone 布局、`ensureRemoteOrigin` / `ensureRemoteWorkerReady` / `workerRunRequest` / `parseStreamJSONFromReader`。附件先经 `SyncToAgentServer` 上行,manifest 用远端路径重算。**限制**:agent 主机只看得到 origin,所以未推送的本地分支在远端 review 不了 —— `resolveRemoteDiffRefs` 直接报错提示改用「本地执行」,而不是去 diff 别的东西。
+- **Agent Server 执行**(`handler/review_remote.go`)—— Review 是只读运行,**刻意不复用** `prepareRemoteAgentRun`(那条路要 `*model.Requirement` + worktree/分支/GPG/session 同步/commit-push,Review 一样都不需要)。共用的是 SSH 客户端、`/tmp/nova-agent/<project_id>/base` 这个 scratch clone 布局、`ensureRemoteOrigin` / `ensureRemoteWorkerReady` / `workerRunRequest` / `parseStreamJSONFromReader`(后三者经 `ReviewHandler.runRemoteWorkerStream` 统一收口,Review 与追问共用)。附件先经 `SyncToAgentServer` 上行,manifest 用远端路径重算。**限制**:agent 主机只看得到 origin,所以未推送的本地分支在远端 review 不了 —— `resolveRemoteDiffRefs` 直接报错提示改用「本地执行」,而不是去 diff 别的东西。
 
 - **报告视图**(`pages/ProjectCodeReview.tsx` + `.css`)—— 自上而下是 **verdict 结论横幅 → 分级计数 ledger → 问题清单 → 完整报告(折叠)**。verdict 由 `status` + 持久化的 P0/P1 计数推出(`block`/`warn`/`clean`/`error`/`pending`/`plain`),整张卡片的强调色由 `--cr-accent` / `--cr-accent-soft` / `--cr-accent-deep` 三个变量驱动,加一种状态只需加一个变量块。计数为 0 的档位**刻意不上色**(ledger tile 与历史表 chip 同此规则),否则「只有一个 P0」的报告在三色并列里反而看不出来。实心色块一律用 `-deep` 色号:白字压 `--color-warning`(#F59E0B)只有 2.15:1 对比度,`-deep` 变体才过 4.5:1。完整报告挂 `.md-prose`(见上条),且在 `findings_json` 为空(模型未遵守分级契约)时**默认展开**,保证降级路径下信息不被折叠藏起来。
 
@@ -209,7 +211,7 @@ The gates map to status transitions: `draft → analyzing` (enter analyst chat) 
 
 ## Frontend
 
-- **API 客户端 (`frontend/src/api/`)** — **单文件 `client.ts`** 集中 28 个 `*Api` 对象 + `api.get/post/put/patch/delete` 包装;`stream.ts` (93 行) 是 `createEventStream()` SSE 替代品。27 个 `*Api`:`projectsApi` / `dashboardApi` / `fsApi` / `memoriesApi` / `knowledgeApi` / `scannerApi` / `subTasksApi` / `subTaskConfigApi`(v0.5.0 新增) / `requirementsApi` / `wizardApi` / `runnerApi` / `mergeApi` / `reviewApi` / `platformApi` / `claudeApi` / `llmApi` / `databaseApi` / **`rolesApi`(AI persona)** / `skillsApi` / `reportsApi` / `usageApi` / `authApi` / **`aclApi`(RBAC, 含义与 `rolesApi` 不同)** / `preflightApi` / `agentServersApi` / `schedulesApi` / `gitSyncConfigApi`(v0.5.0 新增) / **`codeReviewsApi`(分支 Review 会话,与 `reviewApi` 的 PR 面并存)**.
+- **API 客户端 (`frontend/src/api/`)** — **单文件 `client.ts`** 集中 28 个 `*Api` 对象 + `api.get/post/put/patch/delete` 包装;`stream.ts` (93 行) 是 `createEventStream()` SSE 替代品。27 个 `*Api`:`projectsApi` / `dashboardApi` / `fsApi` / `memoriesApi` / `knowledgeApi` / `scannerApi` / `subTasksApi` / `subTaskConfigApi`(v0.5.0 新增) / `requirementsApi` / `wizardApi` / `runnerApi` / `mergeApi` / `reviewApi` / `platformApi` / `claudeApi` / `llmApi` / `databaseApi` / **`rolesApi`(AI persona)** / `skillsApi` / `reportsApi` / `usageApi` / `authApi` / **`aclApi`(RBAC, 含义与 `rolesApi` 不同)** / `preflightApi` / `agentServersApi` / `schedulesApi` / `gitSyncConfigApi`(v0.5.0 新增) / **`codeReviewsApi`(分支 Review 会话 + 追问 `listFollowups`/`ask`/`removeFollowup`,与 `reviewApi` 的 PR 面并存)**.
 - **路由表 (`App.tsx:55-83`, `RequireAuth` + `<Layout>` 包裹)**: `/login` `Login`; `/` `Dashboard`; `/wizard` `WizardPage`; `/projects/add` `AddProject`; `/projects` `ProjectsList`; `/projects/:id` `ProjectDetail`(内嵌 `/projects/:id/reports` 由 `ProjectWeeklyReport` 渲染); `/requirements` `RequirementsList`; `/requirements/calendar` `RequirementsCalendar`; `/requirements/:id` `RequirementDetail`; `/schedules` `SchedulesPage`; `/knowledge` `KnowledgePage`; `/chat` `Chat`(占位); `/reports` `Reports`(占位); `/settings` `Settings`(嵌套 `index=SettingsTokens` / `users=SettingsUsers` / `acl=SettingsACLRoles` / `roles=SettingsRoles` / `agent-servers=SettingsAgentServers` / `skills=SettingsSkills` / `claude=SettingsClaude` / `llm=SettingsLLM` / `subtask=SettingsSubTask` / `git-sync=SettingsGitSync` / `database=SettingsDatabase` / `preflight=SettingsPreflight`)。
 
 - **i18n (`frontend/src/i18n/`)** — `i18next ^26` + `react-i18next ^17`,顶层 init 在 `i18n/index.ts`(模块顶层自调用 `initI18n()`,先于 App 挂载)。支持 `zh-CN` / `en-US`(`i18n/constants.ts`),18 对模块(`chat`/`common`/`components`/`dashboard`/`errors`/`knowledge`/`login`/`nav`/`projects`/`reports`/`requirements`/`schedules`/`settings`/`status`/`time`/`wizard` 等)。`LanguageSwitcher` 嵌在 `Layout` 与 `Login`。`utils/lang.ts` 持久化到 localStorage + `users.locale`。`utils/intl.ts` 提供 `fmtDate`/`fmtDateTime`。

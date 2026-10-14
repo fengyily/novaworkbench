@@ -545,3 +545,88 @@
 .project-code-review .cr-run-field .cr-hint {
   margin: 0;
 }
+
+/* ── 追问 thread ───────────────────────────────────────────────────────────
+   Hangs off the report in the result view. Deliberately quieter than the
+   findings blocks above it: a follow-up explains the report, it never
+   competes with the P0/P1/P3 grading for attention. */
+.cr-followups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--color-border);
+}
+.cr-followups-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.cr-followups-head .cr-hint { flex: 1; min-width: 220px; }
+
+.cr-followup {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface);
+}
+/* The status modifier on the article (cr-followup-running|done|error) only
+   tints the frame; the failure TEXT has its own class so the two can't
+   cascade into each other. */
+.cr-followup.cr-followup-error { border-color: var(--color-error); }
+
+.cr-followup-q {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.cr-followup-qtext {
+  flex: 1;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--color-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.cr-followup-tag {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  background: var(--color-hover);
+  color: var(--color-text-secondary);
+}
+.cr-followup-del { flex: none; }
+
+.cr-followup-a { display: flex; gap: 8px; align-items: flex-start; }
+.cr-followup-a > :not(.cr-followup-tag) { flex: 1; min-width: 0; }
+.cr-followup-pending { margin: 0; font-size: 13px; color: var(--color-text-muted); }
+.cr-followup-errtext { margin: 0; font-size: 13px; color: var(--color-error); word-break: break-word; }
+
+.cr-followup-meta {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+.cr-followup-meta span { display: inline-flex; align-items: center; gap: 4px; }
+.cr-followup-fresh { color: var(--color-warning-deep, var(--color-text-muted)); }
+
+.cr-followup-stream { border-radius: 8px; }
+
+.cr-followup-composer {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+.cr-followup-composer .cr-desc { flex: 1; }
+
+@media (max-width: 768px) {
+  .cr-followup-composer { flex-direction: column; align-items: stretch; }
+}

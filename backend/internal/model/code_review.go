@@ -54,11 +54,17 @@ type CodeReview struct {
 	ClaudeConfigID string `json:"claude_config_id"`
 	// AgentServerID is the execution environment: empty = 本地, otherwise an
 	// agent_servers.id the run is dispatched to over SSH.
-	AgentServerID string     `json:"agent_server_id"`
-	CreatedBy     string     `json:"created_by"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
-	FinishedAt    *time.Time `json:"finished_at,omitempty"`
+	AgentServerID string `json:"agent_server_id"`
+	// ClaudeSessionID is the stream session_id of the review's LAST run.
+	// Follow-up questions resume it so the answer is grounded in the diff and
+	// the report the model already produced. Empty = no session to resume
+	// (old rows, or a run that never emitted an init event); the follow-up
+	// then starts fresh with the report embedded in its prompt.
+	ClaudeSessionID string     `json:"claude_session_id"`
+	CreatedBy       string     `json:"created_by"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
 }
 
 // ReviewFinding is one graded issue from the report's trailing JSON block.
@@ -71,4 +77,38 @@ type ReviewFinding struct {
 	Title      string `json:"title"`
 	Detail     string `json:"detail"`
 	Suggestion string `json:"suggestion"`
+}
+
+// Follow-up (追问) lifecycle. A follow-up is created already `running` — it
+// has no draft window, since the question is submitted and dispatched in one
+// request.
+const (
+	FollowupStatusRunning = "running"
+	FollowupStatusDone    = "done"
+	FollowupStatusError   = "error"
+)
+
+// CodeReviewFollowup is one question-and-answer turn asked against a finished
+// Review. The thread is persisted (rather than living in the memory-only
+// JobStore) so reopening the review from history shows the whole discussion.
+//
+// A follow-up is strictly read-only with respect to the review: it never
+// rewrites result_md, findings_json or the severity counts.
+type CodeReviewFollowup struct {
+	ID       string `json:"id"`
+	ReviewID string `json:"review_id"`
+	Question string `json:"question"`
+	Answer   string `json:"answer"`
+	Status   string `json:"status"`
+	JobID    string `json:"job_id"`
+	Model    string `json:"model"`
+	// Resumed is true when the turn continued the review's claude session.
+	// False means the session was gone and the answer came from a fresh run
+	// seeded with the stored report — still useful, but without the tool
+	// history of the original review.
+	Resumed    bool       `json:"resumed"`
+	CreatedBy  string     `json:"created_by"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }

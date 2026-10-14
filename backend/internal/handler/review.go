@@ -46,6 +46,16 @@ type ReviewHandler struct {
 	// "执行环境" picker). nil → the exec-env choice degrades to 本地 with an
 	// explicit error line rather than silently running somewhere else.
 	agentSvrSvc *service.AgentServerService
+	// followupSvc persists the 追问 thread hanging off a finished review.
+	// nil → the follow-up endpoints answer 503 and everything else in Review
+	// behaves exactly as before.
+	followupSvc *service.CodeReviewFollowupService
+}
+
+// SetCodeReviewFollowupSvc wires the 追问 thread store (see
+// handler/review_followup.go).
+func (h *ReviewHandler) SetCodeReviewFollowupSvc(svc *service.CodeReviewFollowupService) {
+	h.followupSvc = svc
 }
 
 // SetCodeReviewSvc wires the persisted-session store. Without it the
@@ -701,6 +711,9 @@ func (h *ReviewHandler) runReviewSession(job *store.Job, rv *model.CodeReview, p
 	// without one.
 	var streamed strings.Builder
 	finalReport := ""
+	// sessionID is the claude session this run is writing into; captured once
+	// from the stream so follow-up questions can resume it.
+	sessionID := ""
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -714,6 +727,17 @@ func (h *ReviewHandler) runReviewSession(job *store.Job, rv *model.CodeReview, p
 		var evt map[string]interface{}
 		if err := json.Unmarshal([]byte(line), &evt); err != nil {
 			continue
+		}
+
+		// Every stream-json event carries the run's session_id; the first one
+		// (the system/init event) is enough. Persisting it is what lets a
+		// later 追问 `--resume` this exact conversation instead of paying to
+		// rebuild the diff context from scratch.
+		if sessionID == "" {
+			if sid, _ := evt["session_id"].(string); sid != "" {
+				sessionID = sid
+				h.rememberReviewSession(rv, sid)
+			}
 		}
 
 		switch evt["type"] {
@@ -821,6 +845,20 @@ func (h *ReviewHandler) finishReview(job *store.Job, rv *model.CodeReview, model
 		return
 	}
 	job.Finish(0, store.JobDone)
+}
+
+// rememberReviewSession persists the claude session id of the run in flight so
+// 追问 can resume it. Best-effort by design: losing the id only costs the
+// follow-up its resumed context (it then runs fresh with the report embedded
+// in the prompt), so a write failure must never disturb the review.
+func (h *ReviewHandler) rememberReviewSession(rv *model.CodeReview, sessionID string) {
+	if h.reviewSvc == nil || rv == nil || sessionID == "" {
+		return
+	}
+	rv.ClaudeSessionID = sessionID
+	if err := h.reviewSvc.SetClaudeSessionID(rv.ID, sessionID); err != nil {
+		log.Printf("[Review] persist session id for %s: %v", rv.ID, err)
+	}
 }
 
 // resolveReviewConfigID mirrors WizardHandler.resolveConfigIDForRun for the

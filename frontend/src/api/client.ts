@@ -1739,6 +1739,38 @@ export interface CodeReview {
   claude_config_id: string;
   /** Execution environment: '' = 本地, otherwise an agent_servers.id. */
   agent_server_id: string;
+  /**
+   * claude session id of the review's last run. Follow-up questions resume
+   * it; '' means a 追问 will run fresh with the report pasted into its prompt
+   * (older rows, or a run that never reported a session).
+   */
+  claude_session_id: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  finished_at?: string;
+}
+
+export type FollowupStatus = 'running' | 'done' | 'error';
+
+/**
+ * One 追问 turn on a finished review: the user's question and the model's
+ * answer. Persisted server-side, so reopening a review from history brings
+ * the whole thread back (the live stream itself is memory-only).
+ *
+ * `answer` doubles as the failure message when status is 'error' — the thread
+ * shows what went wrong instead of an empty bubble.
+ */
+export interface CodeReviewFollowup {
+  id: string;
+  review_id: string;
+  question: string;
+  answer: string;
+  status: FollowupStatus;
+  job_id: string;
+  model: string;
+  /** true when the turn continued the review's claude session. */
+  resumed: boolean;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -1785,6 +1817,16 @@ export const codeReviewsApi = {
   // Returns the JobStore id to subscribe to via reviewApi.streamJobUrl.
   start: (reviewId: string) =>
     api.post<{ job_id: string; review_id: string }>(`/api/reviews/${reviewId}/start`, {}),
+
+  // ── 追问 ────────────────────────────────────────────────────────────────
+  // Asking returns a JobStore id streamed through the SAME channel as the
+  // review (reviewApi.streamJobUrl) — follow-ups never open a second stream.
+  listFollowups: (reviewId: string) =>
+    api.get<CodeReviewFollowup[]>(`/api/reviews/${reviewId}/followups`),
+  ask: (reviewId: string, question: string) =>
+    api.post<{ job_id: string; followup_id: string }>(`/api/reviews/${reviewId}/followups`, { question }),
+  removeFollowup: (reviewId: string, followupId: string) =>
+    api.delete<{ status: string }>(`/api/reviews/${reviewId}/followups/${followupId}`),
 };
 
 // Platform tokens

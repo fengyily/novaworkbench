@@ -693,6 +693,13 @@ CREATE TABLE IF NOT EXISTS code_reviews (
 	-- a plain TEXT pointer with no FK so the column never blocks migration.
 	claude_config_id TEXT NOT NULL DEFAULT '',
 	agent_server_id  TEXT NOT NULL DEFAULT '',
+	-- claude_session_id is the stream's session_id for the LAST run of this
+	-- review. 追问 (follow-up questions) resume that conversation with the
+	-- CLI's --resume flag, so the model answers with the whole diff + report
+	-- context it already built instead of re-reading everything. Empty (or a session
+	-- the CLI no longer has on disk) is not an error: the follow-up falls
+	-- back to a fresh run whose prompt embeds the stored report.
+	claude_session_id TEXT NOT NULL DEFAULT '',
 	created_by      TEXT NOT NULL DEFAULT '',
 	created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -723,6 +730,37 @@ CREATE TABLE IF NOT EXISTS code_review_attachments (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_uniq_attach_crv_sha
 	ON code_review_attachments(review_id, sha256);
 CREATE INDEX IF NOT EXISTS idx_cra_review ON code_review_attachments(review_id);
+
+-- Follow-up questions asked against a finished Review ("追问"). One row per
+-- question, holding both the question and the model's answer so the thread
+-- survives a page reload and a backend restart (the JobStore is memory-only).
+--
+-- A follow-up never re-grades the review: it does not touch result_md /
+-- findings_json / the P0·P1·P3 counts. It is a read-only Q&A turn on top of
+-- the report, resumed from code_reviews.claude_session_id when that session
+-- is still available and run fresh (with the report embedded in the prompt)
+-- when it isn't.
+CREATE TABLE IF NOT EXISTS code_review_followups (
+	id              TEXT PRIMARY KEY,
+	review_id       TEXT NOT NULL,
+	question        TEXT NOT NULL DEFAULT '',
+	answer          TEXT NOT NULL DEFAULT '',
+	status          TEXT NOT NULL DEFAULT 'running',  -- running|done|error
+	job_id          TEXT NOT NULL DEFAULT '',
+	model           TEXT NOT NULL DEFAULT '',
+	-- resumed records whether this turn actually continued the review's
+	-- claude session (1) or had to start a fresh one with the report pasted
+	-- into the prompt (0). Surfaced in the UI so a user who sees a shallower
+	-- answer knows why.
+	resumed         INTEGER NOT NULL DEFAULT 0,
+	created_by      TEXT NOT NULL DEFAULT '',
+	created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+	updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+	finished_at     DATETIME,
+	FOREIGN KEY (review_id) REFERENCES code_reviews(id) ON DELETE CASCADE
+);
+-- The thread view is always "every follow-up of one review, oldest first".
+CREATE INDEX IF NOT EXISTS idx_crf_review ON code_review_followups(review_id, created_at);
 `
 
 // alterColumns adds columns to older databases. ALTER TABLE fails when the
@@ -866,6 +904,9 @@ var alterColumns = []string{
 	// model / exec-env pickers existed pick the columns up on the next boot.
 	`ALTER TABLE code_reviews ADD COLUMN claude_config_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE code_reviews ADD COLUMN agent_server_id TEXT NOT NULL DEFAULT ''`,
+	// Claude session id of the review's last run, so 追问 can `--resume` the
+	// conversation that already holds the diff and the report.
+	`ALTER TABLE code_reviews ADD COLUMN claude_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE scheduled_tasks ADD COLUMN coding_model TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE scheduled_tasks ADD COLUMN coding_agent_server_id TEXT NOT NULL DEFAULT ''`,
 	// Recurring scheduled tasks: an "alarm-style" repeating plan lives on the

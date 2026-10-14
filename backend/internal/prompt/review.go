@@ -162,3 +162,104 @@ JSON 块的约束：
 
 	return b.String()
 }
+
+// ── 追问 (follow-up questions on a finished review) ──────────────────────────
+
+// FollowupPromptInput is everything a follow-up turn needs. Two shapes come
+// out of it, selected by Resumed:
+//
+//	Resumed = true  — the claude session that produced the report is still
+//	                  available and the run uses `--resume`, so the model
+//	                  already holds the diff, the files it read and its own
+//	                  report. The prompt is then just the question plus the
+//	                  answering rules; re-pasting the report would only burn
+//	                  context.
+//	Resumed = false — a fresh session (old review, session expired, or a
+//	                  remote run whose host no longer has the jsonl). The
+//	                  prompt has to carry the review context itself: branch,
+//	                  diff range, the user's 改动目标, the report, and the
+//	                  earlier Q&A of this same thread.
+//
+// Either way a follow-up is read-only: it explains, it does not re-grade, and
+// it must NOT emit the trailing JSON contract (that block is parsed into
+// findings_json and a second one would corrupt the stored report).
+type FollowupPromptInput struct {
+	Resumed     bool
+	Branch      string
+	BaseBranch  string
+	HeadRef     string
+	BaseRef     string
+	PRNumber    int
+	PRTitle     string
+	Description string // the user's 改动目标, as given to the original review
+	ReportMD    string // the stored result_md (already trimmed by the caller)
+	History     []FollowupTurn
+	Question    string
+}
+
+// FollowupTurn is one earlier question/answer pair of the same thread,
+// replayed into a fresh session so the follow-ups read as a conversation even
+// when the original claude session is gone.
+type FollowupTurn struct {
+	Question string
+	Answer   string
+}
+
+// BuildFollowupPrompt assembles the follow-up task prompt (Chinese, per the
+// repo convention that UI text and AI prompts are Chinese).
+func BuildFollowupPrompt(in FollowupPromptInput) string {
+	var b strings.Builder
+
+	if in.Resumed {
+		b.WriteString("我针对你刚才输出的 Review 报告有一个追问，请基于本次会话已有的 diff、源码与报告内容回答。\n\n")
+	} else {
+		b.WriteString("你是代码 Review 的作者。用户针对一份已完成的 Review 报告提出追问，请结合下面的报告原文与仓库代码回答。\n\n")
+		b.WriteString("## Review 上下文\n\n")
+		if in.PRTitle != "" {
+			fmt.Fprintf(&b, "- PR 标题：%s\n", in.PRTitle)
+		}
+		if in.PRNumber > 0 {
+			fmt.Fprintf(&b, "- PR 编号：#%d\n", in.PRNumber)
+		}
+		if in.Branch != "" {
+			fmt.Fprintf(&b, "- 目标分支：`%s`\n", in.Branch)
+		}
+		if in.BaseBranch != "" {
+			fmt.Fprintf(&b, "- 基础分支：`%s`\n", in.BaseBranch)
+		}
+		if in.BaseRef != "" && in.HeadRef != "" {
+			fmt.Fprintf(&b, "- 对比区间：`git diff %s...%s`（需要时可自行运行查看改动）\n", in.BaseRef, in.HeadRef)
+		}
+		b.WriteString("\n")
+		if strings.TrimSpace(in.Description) != "" {
+			fmt.Fprintf(&b, "### 用户描述的改动目标\n\n%s\n\n", strings.TrimSpace(in.Description))
+		}
+		if strings.TrimSpace(in.ReportMD) != "" {
+			fmt.Fprintf(&b, "### 已输出的 Review 报告原文\n\n%s\n\n", strings.TrimSpace(in.ReportMD))
+		}
+	}
+
+	if len(in.History) > 0 {
+		b.WriteString("## 本轮追问之前的问答\n\n")
+		for i, turn := range in.History {
+			fmt.Fprintf(&b, "**追问 %d**：%s\n\n", i+1, strings.TrimSpace(turn.Question))
+			if strings.TrimSpace(turn.Answer) != "" {
+				fmt.Fprintf(&b, "**回答 %d**：%s\n\n", i+1, strings.TrimSpace(turn.Answer))
+			}
+		}
+	}
+
+	fmt.Fprintf(&b, "## 本次追问\n\n%s\n\n", strings.TrimSpace(in.Question))
+
+	b.WriteString(`## 回答要求
+
+1. 直接回答问题本身，不要重复输出整份 Review 报告，也不要重新给所有问题分级。
+2. 需要引用代码时，用 ` + "`文件路径:行号`" + ` 指明位置；不确定的地方要先用 Read / Grep 工具确认，不要凭印象作答。
+3. 如果追问涉及某条具体问题，请说明：它为什么是问题、会在什么场景下出错、应该怎么改（必要时给出修改后的代码片段）。
+4. 如果经核对发现原报告中的结论有误或不准确，直接说明并更正，不要为了自洽而辩护。
+5. 用 Markdown 作答，控制在必要篇幅内。
+6. **不要输出 json 代码围栏块**（分级统计只由 Review 报告本身产出，追问不参与）。
+`)
+
+	return b.String()
+}

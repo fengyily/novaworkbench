@@ -23,6 +23,7 @@ var copyOrder = []string{
 	// Review sessions own their attachments — parent before child.
 	"code_reviews",
 	"code_review_attachments",
+	"code_review_followups",
 	"knowledge",
 	"conversations",
 	"refinement_chats",

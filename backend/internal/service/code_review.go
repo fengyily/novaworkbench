@@ -38,7 +38,7 @@ func NewCodeReviewService(database *db.DB, attachSvc *AttachmentService) *CodeRe
 const codeReviewCols = `id, project_id, review_type, branch, base_branch, pr_number,
 	title, description, status, job_id, result_md, findings_json,
 	p0_count, p1_count, p3_count, goal_met, model, claude_config_id,
-	agent_server_id, created_by, created_at, updated_at, finished_at`
+	agent_server_id, claude_session_id, created_by, created_at, updated_at, finished_at`
 
 // Create inserts a draft session. branch is required for branch reviews;
 // PR reviews carry pr_number instead and may leave branch blank only when
@@ -63,8 +63,8 @@ func (s *CodeReviewService) Create(rv *model.CodeReview) (*model.CodeReview, err
 		id, project_id, review_type, branch, base_branch, pr_number,
 		title, description, status, job_id, result_md, findings_json,
 		p0_count, p1_count, p3_count, goal_met, model, claude_config_id,
-		agent_server_id, created_by, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', 0, 0, 0, '', ?, ?, ?, ?, ?, ?)`,
+		agent_server_id, claude_session_id, created_by, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', 0, 0, 0, '', ?, ?, ?, '', ?, ?, ?)`,
 		id, rv.ProjectID, rv.ReviewType, rv.Branch, rv.BaseBranch, rv.PRNumber,
 		rv.Title, rv.Description, model.ReviewStatusDraft,
 		rv.Model, rv.ClaudeConfigID, rv.AgentServerID, rv.CreatedBy, now, now)
@@ -141,9 +141,22 @@ func (s *CodeReviewService) MarkRunning(id, jobID, modelName string) error {
 	_, err := s.db.Exec(`UPDATE code_reviews
 		SET status = ?, job_id = ?, model = ?, result_md = '', findings_json = '',
 		    p0_count = 0, p1_count = 0, p3_count = 0, goal_met = '',
-		    finished_at = NULL, updated_at = ?
+		    claude_session_id = '', finished_at = NULL, updated_at = ?
 		WHERE id = ?`,
 		model.ReviewStatusRunning, jobID, modelName, time.Now().UTC(), id)
+	return err
+}
+
+// SetClaudeSessionID stamps the session id of the run currently streaming, so
+// follow-up questions can `--resume` that conversation. Best-effort by
+// contract: callers log and continue on error, because losing the id only
+// costs the follow-up its resumed context, never the review itself.
+func (s *CodeReviewService) SetClaudeSessionID(id, sessionID string) error {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`UPDATE code_reviews SET claude_session_id = ?, updated_at = ? WHERE id = ?`,
+		sessionID, time.Now().UTC(), id)
 	return err
 }
 
@@ -188,6 +201,13 @@ func (s *CodeReviewService) Delete(id string) error {
 			}
 		}
 	}
+	// Follow-up rows are dropped explicitly rather than left to the FK
+	// CASCADE: SQLite never enables PRAGMA foreign_keys, so on the default
+	// driver the cascade would silently not fire and the thread would
+	// outlive its review.
+	if _, err := s.db.Exec(`DELETE FROM code_review_followups WHERE review_id = ?`, id); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(`DELETE FROM code_reviews WHERE id = ?`, id)
 	return err
 }
@@ -203,7 +223,7 @@ func scanCodeReview(row rowScanner) (*model.CodeReview, error) {
 		&rv.BaseBranch, &rv.PRNumber, &rv.Title, &rv.Description, &rv.Status,
 		&rv.JobID, &rv.ResultMD, &rv.FindingsJSON, &rv.P0Count, &rv.P1Count,
 		&rv.P3Count, &rv.GoalMet, &rv.Model, &rv.ClaudeConfigID,
-		&rv.AgentServerID, &rv.CreatedBy,
+		&rv.AgentServerID, &rv.ClaudeSessionID, &rv.CreatedBy,
 		&createdAt, &updatedAt, &finishedAt); err != nil {
 		return nil, err
 	}

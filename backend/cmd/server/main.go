@@ -260,6 +260,9 @@ func main() {
 	// the user-written 改动目标 description, landing spot for the graded
 	// (P0/P1/P3) report.
 	codeReviewSvc := service.NewCodeReviewService(database, reviewAttachmentSvc)
+	// 追问 thread of a finished review — persisted because the JobStore that
+	// carries the live stream is memory-only.
+	codeReviewFollowupSvc := service.NewCodeReviewFollowupService(database)
 	scannerH := handler.NewScannerHandler(scannerSvc)
 	sharedJobs := store.NewJobStore(50)
 	preflightH := handler.NewPreflightHandler(pfRegistry, sharedJobs)
@@ -435,6 +438,7 @@ func main() {
 	reviewH.SetAttachmentSvc(reviewAttachmentSvc)
 	reviewH.SetGitCredentialSvc(gitCredSvc)
 	reviewH.SetAgentServerSvc(agentSvrSvc)
+	reviewH.SetCodeReviewFollowupSvc(codeReviewFollowupSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
 	mergeH := handler.NewMergeHandler(database, projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc, gitCredSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)
@@ -538,6 +542,11 @@ func main() {
 	mux.HandleFunc("PUT /api/reviews/{rid}", reviewH.UpdateReview)
 	mux.HandleFunc("DELETE /api/reviews/{rid}", reviewH.DeleteReview)
 	mux.HandleFunc("POST /api/reviews/{rid}/start", reviewH.StartReviewSession)
+	// 追问: ask a finished review for more detail. Streams on the same job
+	// channel as the review itself; never re-grades the report.
+	mux.HandleFunc("GET /api/reviews/{rid}/followups", reviewH.ListFollowups)
+	mux.HandleFunc("POST /api/reviews/{rid}/followups", reviewH.AskFollowup)
+	mux.HandleFunc("DELETE /api/reviews/{rid}/followups/{fid}", reviewH.DeleteFollowup)
 	// Review-session attachments — same handler as the requirement ones,
 	// bound to the review-scoped service instance.
 	mux.HandleFunc("POST /api/code-reviews/{id}/attachments", reviewAttachmentH.Upload)
