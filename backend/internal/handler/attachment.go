@@ -157,7 +157,7 @@ func (h *AttachmentHandler) Content(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "GET_FAILED", err.Error())
 		return
 	}
-	if a.RequirementID != reqID {
+	if a.OwnerID != reqID {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "attachment not found")
 		return
 	}
@@ -205,7 +205,7 @@ func (h *AttachmentHandler) UpdateDescription(w http.ResponseWriter, r *http.Req
 		}
 		writeError(w, http.StatusInternalServerError, "GET_FAILED", err.Error())
 		return
-	} else if existing.RequirementID != reqID {
+	} else if existing.OwnerID != reqID {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "attachment not found")
 		return
 	}
@@ -232,7 +232,7 @@ func (h *AttachmentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, "GET_FAILED", err.Error())
 		return
-	} else if existing.RequirementID != reqID {
+	} else if existing.OwnerID != reqID {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "attachment not found")
 		return
 	}

@@ -3,24 +3,24 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
 import {
-  projectsApi, runnerApi, reviewApi, platformApi, requirementsApi, knowledgeApi,
+  projectsApi, runnerApi, platformApi, requirementsApi, knowledgeApi,
   usageApi, usageTotalInput, fmtCost, wizardApi,
-  type Project, type RunStatus, type PR, type PRListResponse, type PlatformToken,
+  type Project, type RunStatus, type PlatformToken,
   type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage,
   kindLabelKeys, kindOf, API_BASE, authedFetch,
   MARK_PRESETS, parseMarks,
 } from '../api/client';
 import { tLabel } from '../i18n/label';
-import { fmtDate, fmtDateTime, fmtRelative, fmtRunAtRelative } from '../utils/intl';
+import { fmtDateTime, fmtRelative, fmtRunAtRelative } from '../utils/intl';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import { StatusChips } from '../components/StatusChips';
 import PdfUploadDialog from '../components/PdfUploadDialog';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
 import ProjectIssueMonitor from './ProjectIssueMonitor';
-import { IconPlug, IconRobot, IconClock } from '../components/icons';
+import ProjectCodeReview from './ProjectCodeReview';
+import { IconClock } from '../components/icons';
 import { stripMarkdownPreview } from '../utils/preview';
 import { pageWindow } from '../utils/pageWindow';
-import { createEventStream, type EventStream } from '../api/stream';
 import './RequirementDetail.css';
 import './ProjectDetail.css';
 import './KnowledgePage.css';
@@ -381,22 +381,8 @@ export default function ProjectDetail() {
   const [visibleCount, setVisibleCount] = useState(6);
   const recentSectionRef = useRef<HTMLDivElement>(null);
 
-  // Review tab
-  const [prData, setPrData] = useState<PRListResponse | null>(null);
-  const [prsLoading, setPrsLoading] = useState(false);
-  const [prsError, setPrsError] = useState('');
-  const [reviewingPR, setReviewingPR] = useState<PR | null>(null);
-  const [reviewLines, setReviewLines] = useState<{ type: string; content: string }[]>([]);
-  const [reviewDone, setReviewDone] = useState(false);
-  // Effective model the reviewer role ran with for the most recent review
-  // (from the job_done SSE frame). Empty until a review completes.
-  const [reviewModel, setReviewModel] = useState('');
-  const [commentBody, setCommentBody] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [submitMsg, setSubmitMsg] = useState('');
-  const [extraRequirements, setExtraRequirements] = useState('');
-  const reviewEsRef = useRef<EventStream | null>(null);
-  const reviewPanelRef = useRef<HTMLDivElement>(null);
+  // Review tab — the whole surface (PR mode + branch mode + history) lives in
+  // <ProjectCodeReview>, which owns its own state and SSE lifecycle.
 
   // Token usage tab — project total (excl review), per-requirement totals,
   // and the review breakdown (recorded but not counted in the total).
@@ -435,15 +421,11 @@ export default function ProjectDetail() {
   useEffect(() => {
     if (logPanelRef.current) logPanelRef.current.scrollTop = logPanelRef.current.scrollHeight;
   }, [logLines]);
-  useEffect(() => {
-    if (reviewPanelRef.current) reviewPanelRef.current.scrollTop = reviewPanelRef.current.scrollHeight;
-  }, [reviewLines]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
-      reviewEsRef.current?.close();
     };
   }, []);
 
@@ -456,17 +438,6 @@ export default function ProjectDetail() {
       if (s.status === 'running' && s.job_id) pollJob(s.job_id, true);
     }).catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, id]);
-
-  // Load PR list on tab switch
-  useEffect(() => {
-    if (tab !== 'review' || !id) return;
-    setPrsLoading(true);
-    setPrsError('');
-    reviewApi.listPRs(id)
-      .then(setPrData)
-      .catch(err => setPrsError(err instanceof Error ? err.message : String(err)))
-      .finally(() => setPrsLoading(false));
   }, [tab, id]);
 
   // Knowledge base for this project. Loaded on demand when the knowledge tab
@@ -791,72 +762,6 @@ export default function ProjectDetail() {
       setCommitPushSaving(false);
     }
   };
-
-  // ── Review tab handlers ────────────────────────────────────────────────────
-
-  const handleReview = useCallback(async (pr: PR) => {
-    if (!id || reviewingPR) return;
-    setReviewingPR(pr);
-    setReviewLines([]);
-    setReviewDone(false);
-    setReviewModel('');
-    setCommentBody('');
-    setSubmitMsg('');
-    reviewEsRef.current?.close();
-
-    try {
-      const { job_id } = await reviewApi.startReview(id, pr.head_branch, pr.base_branch, pr.number, pr.title, extraRequirements);
-
-      const messageLines: string[] = [];
-
-      reviewEsRef.current = createEventStream(
-        reviewApi.streamJobUrl(id, job_id),
-        (data) => {
-          if (data.type === 'job_done') {
-            setCommentBody(messageLines.join('\n\n'));
-            setReviewDone(true);
-            setReviewModel(data.model || '');
-            setReviewingPR(null);
-            reviewEsRef.current?.close();
-            reviewEsRef.current = null;
-          } else if (data.content) {
-            setReviewLines(prev => [...prev, { type: data.type, content: data.content }]);
-            if (data.type === 'message') messageLines.push(data.content);
-          }
-        },
-        () => {
-          setReviewLines(prev => [...prev, { type: 'error', content: t('projects.detail.reviewSseDrop') }]);
-          setCommentBody(messageLines.join('\n\n'));
-          setReviewDone(true);
-          setReviewingPR(null);
-          reviewEsRef.current = null;
-        },
-      );
-    } catch (err: unknown) {
-      setReviewLines([{ type: 'error', content: err instanceof Error ? err.message : String(err) }]);
-      setReviewingPR(null);
-    }
-  }, [id, reviewingPR, extraRequirements, t]);
-
-  const handleSubmitComment = async () => {
-    if (!id || !commentBody || lastReviewedPRRef.current === 0) return;
-    setSubmitting(true);
-    setSubmitMsg('');
-    try {
-      await reviewApi.submitComment(id, lastReviewedPRRef.current, commentBody);
-      setSubmitMsg(t('projects.detail.reviewSubmitOk'));
-    } catch (err: unknown) {
-      setSubmitMsg(t('projects.detail.reviewErrPrefix') + (err instanceof Error ? err.message : String(err)));
-    } finally { setSubmitting(false); }
-  };
-
-  const lastReviewedPRRef = useRef<number>(0);
-
-  // Patch handleReview to track PR number
-  const handleReviewWithTracking = useCallback(async (pr: PR) => {
-    lastReviewedPRRef.current = pr.number;
-    await handleReview(pr);
-  }, [handleReview]);
 
   const isRunning = runStatus?.status === 'running';
 
@@ -1261,7 +1166,7 @@ export default function ProjectDetail() {
           {t('projects.detail.tabs.requirements')}
         </button>
         <button className={`tab-btn${tab === 'review' ? ' active' : ''}`} onClick={() => setTab('review')}>
-          {t('projects.detail.tabs.review')}{reviewingPR ? t('projects.detail.activeSuffix') : ''}
+          {t('projects.detail.tabs.review')}
         </button>
         <button className={`tab-btn${tab === 'usage' ? ' active' : ''}`} onClick={() => setTab('usage')}>
           {t('projects.detail.tabs.usage')}
@@ -2105,143 +2010,8 @@ export default function ProjectDetail() {
       )}
 
       {/* ── Review ── */}
-      {tab === 'review' && (
-        <div className="tab-content">
-          {/* Not configured */}
-          {!prsLoading && prData && !prData.configured && (
-            <div className="review-unconfigured">
-              <div className="review-unconfigured-icon"><IconPlug size={28} /></div>
-              <p>{t('projects.detail.reviewUnconfiguredTitle')}</p>
-              <p>
-                {t('projects.detail.reviewUnconfiguredHint')}
-                <a href="/settings" style={{ color: 'var(--color-primary)', margin: '0 4px' }}>{t('projects.detail.platformSettingsLink')}</a>
-                {t('projects.detail.reviewUnconfiguredHint2')}
-              </p>
-            </div>
-          )}
-
-          {prsLoading && <div className="tab-empty">{t('projects.detail.reviewLoading')}</div>}
-          {prsError && <div className="tab-empty" style={{ color: 'var(--color-error)' }}>{prsError}</div>}
-
-          {!prsLoading && prData && (prData.configured || prData.prs.length > 0) && (
-            <>
-              {prData.prs.length === 0 && (
-                <div className="tab-empty"><p>{t('projects.detail.reviewNoPRs')}</p></div>
-              )}
-              {prData.prs.length > 0 && (
-                <>
-                  <div className="review-requirements-bar">
-                    <label className="review-requirements-label">{t('projects.detail.reviewExtraLabel')}</label>
-                    <input
-                      className="form-input review-requirements-input"
-                      placeholder={t('projects.detail.reviewExtraPlaceholder')}
-                      value={extraRequirements}
-                      onChange={e => setExtraRequirements(e.target.value)}
-                      disabled={!!reviewingPR}
-                    />
-                  </div>
-                  <div className="pr-list">
-                  <table className="pr-table table-cards">
-                    <thead>
-                      <tr>
-                        <th style={{ width: 52 }}>{t('projects.detail.reviewColNumber')}</th>
-                        <th>{t('projects.detail.reviewColTitle')}</th>
-                        <th style={{ width: 260 }}>{t('projects.detail.reviewColBranch')}</th>
-                        <th style={{ width: 100 }}>{t('projects.detail.reviewColAuthor')}</th>
-                        <th style={{ width: 90 }}>{t('projects.detail.reviewColUpdatedAt')}</th>
-                        <th style={{ width: 120 }}>{t('projects.detail.reviewColActions')}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {prData.prs.map(pr => (
-                        <tr key={pr.number} className={reviewingPR?.number === pr.number ? 'pr-row-active' : ''}>
-                          <td data-label="#" style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>#{pr.number}</td>
-                          <td data-label={t('projects.detail.reviewColTitle')} className="pr-title">
-                            <a href={pr.html_url} target="_blank" rel="noreferrer" style={{ color: 'var(--color-primary)' }}>
-                              {pr.title}
-                            </a>
-                          </td>
-                          <td data-label={t('projects.detail.reviewColBranch')}><code className="pr-branch">{pr.head_branch}</code> ← <code className="pr-branch">{pr.base_branch}</code></td>
-                          <td data-label={t('projects.detail.reviewColAuthor')}>{pr.author}</td>
-                          <td data-label={t('projects.detail.reviewColUpdatedAt')}>{pr.updated_at ? fmtDate(pr.updated_at) : '—'}</td>
-                          <td data-label={t('projects.detail.reviewColActions')}>
-                            <button
-                              className="btn btn-primary btn-sm"
-                              onClick={() => handleReviewWithTracking(pr)}
-                              disabled={!!reviewingPR}
-                            >
-                              {reviewingPR?.number === pr.number ? t('projects.detail.reviewBtnActive') : t('projects.detail.reviewBtn')}
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                </>
-              )}
-            </>
-          )}
-
-          {/* Stream output */}
-          {(reviewLines.length > 0 || reviewingPR) && (
-            <div className="review-panel-wrap">
-              <div className="review-panel-header">
-                <span>
-                  {t('projects.detail.reviewHeader')}
-                  {reviewingPR ? `：#${reviewingPR.number} ${reviewingPR.title}` : ''}
-                  {reviewDone ? t('projects.detail.reviewHeaderDone') : ''}
-                </span>
-                {reviewDone && (
-                  <button className="btn btn-secondary btn-sm" onClick={() => {
-                    setReviewLines([]); setReviewDone(false); setCommentBody(''); setSubmitMsg('');
-                  }}>
-                    {t('projects.detail.reviewDoneBtn')}
-                  </button>
-                )}
-              </div>
-              <div className="coding-panel" ref={reviewPanelRef} style={{ maxHeight: 360 }}>
-                {reviewLines.map((line, i) => (
-                  <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
-                ))}
-                {reviewingPR && !reviewDone && (
-                  <div className="coding-line coding-line-tool_call">{t('projects.detail.reviewProgress')}</div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Comment editor — shown after review completes */}
-          {reviewDone && lastReviewedPRRef.current > 0 && (
-            <div className="review-comment-wrap">
-              <div className="review-panel-header">
-                <span>{t('projects.detail.reviewCommentHeader', { n: lastReviewedPRRef.current })}</span>
-              </div>
-              <div className="review-model-line">
-                <IconRobot size={13} /> {t('projects.detail.reviewModelLine', { model: reviewModel || t('projects.detail.reviewDefaultModel') })}
-              </div>
-              <textarea
-                className="review-comment-editor"
-                value={commentBody}
-                onChange={e => setCommentBody(e.target.value)}
-                rows={12}
-                placeholder={t('projects.detail.reviewEditorPlaceholder')}
-              />
-              <div className="review-comment-actions">
-                {submitMsg && (
-                  <span className={submitMsg.startsWith('✅') ? 'submit-ok' : 'submit-err'}>{submitMsg}</span>
-                )}
-                <button
-                  className="btn btn-primary"
-                  onClick={handleSubmitComment}
-                  disabled={submitting || !commentBody}
-                >
-                  {submitting ? t('projects.detail.reviewSubmitBusy') : t('projects.detail.reviewSubmit')}
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
+      {tab === 'review' && id && (
+        <ProjectCodeReview projectId={id} project={project} />
       )}
 
       {/* ── Weekly report ── */}

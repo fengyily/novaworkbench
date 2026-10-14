@@ -1,6 +1,8 @@
-// AttachmentPanel — per-requirement file attachments on the requirement
-// detail page. The backend keeps a row per (requirement_id, sha256); the UI
-// is a thin client that calls attachmentsApi.
+// AttachmentPanel — file attachments for one owner. Used on the requirement
+// detail page (owner = a requirement) and in the branch-Review composer
+// (owner = a code_reviews session); the `resource` prop picks which backend
+// collection the same five calls hit. The backend keeps a row per
+// (owner, sha256); the UI is a thin client that calls attachmentsApi.
 //
 // Three concerns this component owns:
 //   1. list+refresh — re-fetch after every mutation so a re-upload reuses
@@ -16,12 +18,15 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { attachmentsApi, type Attachment } from '../api/client';
+import { attachmentsApi, type Attachment, type AttachmentResource } from '../api/client';
 import { errorMessage } from '../utils/errMsg';
 import './AttachmentPanel.css';
 
 interface Props {
-  requirementId: string;
+  /** Owner id — a requirement id (req_*) or a review session id (crv_*). */
+  ownerId: string;
+  /** Which backend collection owns the files. Defaults to requirements. */
+  resource?: AttachmentResource;
 }
 
 interface PendingUpload {
@@ -50,7 +55,7 @@ function archiveUncompressedSize(a: Attachment): string | null {
   return m ? m[1] : null;
 }
 
-export default function AttachmentPanel({ requirementId }: Props) {
+export default function AttachmentPanel({ ownerId, resource = 'requirements' }: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<Attachment[]>([]);
   const [loading, setLoading] = useState(false);
@@ -66,14 +71,14 @@ export default function AttachmentPanel({ requirementId }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const rows = await attachmentsApi.list(requirementId);
+      const rows = await attachmentsApi.list(resource, ownerId);
       setItems(Array.isArray(rows) ? rows : []);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
-  }, [requirementId]);
+  }, [resource, ownerId]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -109,7 +114,7 @@ export default function AttachmentPanel({ requirementId }: Props) {
   // ---- upload commit ----
   const sendOne = async (p: PendingUpload): Promise<void> => {
     try {
-      await attachmentsApi.upload(requirementId, p.file, p.description);
+      await attachmentsApi.upload(resource, ownerId, p.file, p.description);
       await refresh();
     } catch (err) {
       setError(t('requirements.attachment.uploadFailed', { msg: errorMessage(err) }));
@@ -135,7 +140,7 @@ export default function AttachmentPanel({ requirementId }: Props) {
   const onDelete = async (a: Attachment) => {
     if (!confirm(t('requirements.attachment.deleteConfirm', { name: a.filename }))) return;
     try {
-      await attachmentsApi.delete(requirementId, a.id);
+      await attachmentsApi.delete(resource, ownerId, a.id);
       setItems((cur) => cur.filter((x) => x.id !== a.id));
     } catch (err) {
       setError(t('requirements.attachment.deleteFailed', { msg: errorMessage(err) }));
@@ -152,7 +157,7 @@ export default function AttachmentPanel({ requirementId }: Props) {
     setEditingDescId(null);
     if (next === a.description) return;
     try {
-      const updated = await attachmentsApi.updateDescription(requirementId, a.id, next);
+      const updated = await attachmentsApi.updateDescription(resource, ownerId, a.id, next);
       setItems((cur) => cur.map((x) => (x.id === a.id ? updated : x)));
     } catch (err) {
       setError(t('requirements.attachment.updateFailed', { msg: errorMessage(err) }));
@@ -160,7 +165,7 @@ export default function AttachmentPanel({ requirementId }: Props) {
   };
 
   const downloadHref = (a: Attachment) =>
-    attachmentsApi.downloadUrl(requirementId, a.id);
+    attachmentsApi.downloadUrl(resource, ownerId, a.id);
 
   return (
     <div className="attachment-panel">

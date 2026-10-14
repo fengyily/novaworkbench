@@ -401,16 +401,22 @@ export const scannerApi = {
   scan: (projectId: string) => api.post<ScanResult>(`/api/projects/${projectId}/scan`, {}),
 };
 
-// Requirement attachments — files the user uploads alongside a requirement so
-// the wizard's three role-gated stages (analyst / architect / developer) can
-// ground their work on real evidence (logs, screenshots, repro packages).
-// Files are kept in ~/.novaworkbench/attachments/<req_id>/ on the backend;
-// metadata lives in requirement_attachments. The (requirement_id, sha256)
-// unique pair on the server means re-uploading the same bytes reuses the same
-// row — Upload calls in the UI should treat identical content as idempotent.
+// Attachments — files the user uploads alongside an *owner* so the AI can
+// ground its work on real evidence (logs, screenshots, repro packages,
+// design docs). Two owner kinds exist today:
+//   'requirements'  — the wizard's three role-gated stages read them
+//   'code-reviews'  — a branch Review session reads them as the evidence for
+//                     "修改目标是否达成"
+// Files are kept in ~/.novaworkbench/attachments/<owner_id>/ on the backend
+// (the req_ / crv_ id prefixes keep the two spaces apart); metadata lives in
+// requirement_attachments / code_review_attachments respectively. The
+// (owner, sha256) unique pair on the server means re-uploading the same bytes
+// reuses the same row — treat identical content as idempotent.
+export type AttachmentResource = 'requirements' | 'code-reviews';
+
 export interface Attachment {
   id: string;
-  requirement_id: string;
+  owner_id: string;              // req_* or crv_*
   filename: string;
   stored_path: string;
   mime_type: string;
@@ -422,37 +428,41 @@ export interface Attachment {
   uploaded_at: string;           // ISO 8601
 }
 
+// Every method takes (resource, ownerId): the backend mounts one and the
+// same handler under both /api/requirements/{id}/attachments and
+// /api/code-reviews/{id}/attachments, so the only difference is the path
+// segment.
 export const attachmentsApi = {
-  // Returns [] when the requirement has no attachments (never null).
-  list: (requirementId: string) =>
-    api.get<Attachment[]>(`/api/requirements/${requirementId}/attachments`),
+  // Returns [] when the owner has no attachments (never null).
+  list: (resource: AttachmentResource, ownerId: string) =>
+    api.get<Attachment[]>(`/api/${resource}/${ownerId}/attachments`),
 
   // Multipart upload: field "file" = the blob; field "description" = optional
   // user annotation (≤ 500 chars; trimmed). The server caps each file at
   // service.MaxAttachmentSize (currently 2 GB) — large enough for log dumps
   // and zip bundles, small enough to keep the DoS surface bounded.
-  upload: (requirementId: string, file: File, description?: string) => {
+  upload: (resource: AttachmentResource, ownerId: string, file: File, description?: string) => {
     const fd = new FormData();
     fd.append('file', file);
     if (description) fd.append('description', description);
-    return api.upload<Attachment>(`/api/requirements/${requirementId}/attachments`, fd);
+    return api.upload<Attachment>(`/api/${resource}/${ownerId}/attachments`, fd);
   },
 
   // Returns a same-origin URL the browser can fetch directly. Avoids
   // round-tripping the bytes through React state for the simple "download"
   // case. The Content-Disposition header carries the original filename.
-  downloadUrl: (requirementId: string, attId: string) =>
-    `${API_BASE}/api/requirements/${requirementId}/attachments/${attId}/content`,
+  downloadUrl: (resource: AttachmentResource, ownerId: string, attId: string) =>
+    `${API_BASE}/api/${resource}/${ownerId}/attachments/${attId}/content`,
 
   // Edit the user-written annotation only. Returns the post-update row.
-  updateDescription: (requirementId: string, attId: string, description: string) =>
-    api.put<Attachment>(`/api/requirements/${requirementId}/attachments/${attId}`,
+  updateDescription: (resource: AttachmentResource, ownerId: string, attId: string, description: string) =>
+    api.put<Attachment>(`/api/${resource}/${ownerId}/attachments/${attId}`,
       { description }),
 
   // Row + on-disk file deletion. 204 on success, 404 if the row doesn't
-  // belong to this requirement.
-  delete: (requirementId: string, attId: string) =>
-    api.delete<{ status: string }>(`/api/requirements/${requirementId}/attachments/${attId}`),
+  // belong to this owner.
+  delete: (resource: AttachmentResource, ownerId: string, attId: string) =>
+    api.delete<{ status: string }>(`/api/${resource}/${ownerId}/attachments/${attId}`),
 };
 
 // Sub-tasks: manually-triggered child agents that fork a requirement's main
@@ -1656,18 +1666,125 @@ export interface PRListResponse {
 export const reviewApi = {
   listPRs: (projectId: string) =>
     api.get<PRListResponse>(`/api/projects/${projectId}/prs`),
-  startReview: (projectId: string, branch: string, baseBranch: string, prNumber: number, prTitle: string, extraRequirements?: string) =>
+  // `binding` carries the Review toolbar's model / claude-config / agent-server
+  // picks. Omitting it keeps the legacy behaviour (reviewer role model, 本地).
+  startReview: (projectId: string, branch: string, baseBranch: string, prNumber: number, prTitle: string, extraRequirements?: string, binding?: CodeReviewRunBinding) =>
     api.post<{ job_id: string }>(`/api/projects/${projectId}/prs/review`, {
       branch,
       base_branch: baseBranch,
       pr_number: prNumber,
       pr_title: prTitle,
       extra_requirements: extraRequirements ?? '',
+      ...(binding ?? {}),
     }),
   streamJobUrl: (projectId: string, jobId: string) =>
     `${API_BASE}/api/projects/${projectId}/prs/jobs/${jobId}/stream`,
   submitComment: (projectId: string, prNumber: number, body: string) =>
     api.post<{ status: string }>(`/api/projects/${projectId}/prs/${prNumber}/comment`, { body }),
+};
+
+// ── Branch Review sessions ──────────────────────────────────────────────────
+//
+// A CodeReview is a persisted Review session: the owner of its attachments,
+// the carrier of the user-written description ("本次改动的目标是…"), and the
+// landing spot for the graded report. Branch reviews are composed in the UI
+// (create draft → describe → attach → start); PR reviews are created
+// server-side by the legacy reviewApi.startReview and show up in the same
+// history list.
+//
+// The run itself streams over reviewApi.streamJobUrl — there is no separate
+// SSE channel for branch reviews.
+export type CodeReviewStatus = 'draft' | 'running' | 'done' | 'error';
+export type CodeReviewType = 'branch' | 'pr';
+/** Grading ladder. P2 is intentionally unused — see prompt/review.go. */
+export type ReviewSeverity = 'P0' | 'P1' | 'P3';
+/** '' means the model didn't answer the 目标达成 question. */
+export type GoalMet = 'yes' | 'partial' | 'no' | '';
+
+export interface ReviewFinding {
+  severity: ReviewSeverity;
+  file: string;
+  line: string;        // "42" or "12-20" or ""
+  title: string;
+  detail: string;
+  suggestion: string;
+}
+
+export interface CodeReview {
+  id: string;
+  project_id: string;
+  review_type: CodeReviewType;
+  branch: string;
+  base_branch: string;
+  pr_number: number;
+  title: string;
+  description: string;
+  status: CodeReviewStatus;
+  job_id: string;
+  /** Markdown report with the trailing JSON contract block stripped. */
+  result_md: string;
+  /** JSON-encoded ReviewFinding[]; '' when the model broke the contract. */
+  findings_json: string;
+  p0_count: number;
+  p1_count: number;
+  p3_count: number;
+  goal_met: GoalMet;
+  /**
+   * Model binding: the user's pick from the Review toolbar, overwritten with
+   * the effective model once a run starts (may therefore come back as the
+   * DefaultModelLabel literal, which ModelSelect maps to '').
+   */
+  model: string;
+  /** claude_configs row the gateway sources auth + base URL from ('' = role / active). */
+  claude_config_id: string;
+  /** Execution environment: '' = 本地, otherwise an agent_servers.id. */
+  agent_server_id: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  finished_at?: string;
+}
+
+/**
+ * Decodes CodeReview.findings_json. Returns [] for the degraded case (empty
+ * or malformed), which is exactly when the UI should fall back to rendering
+ * result_md as plain Markdown.
+ */
+export function parseReviewFindings(review: Pick<CodeReview, 'findings_json'> | null | undefined): ReviewFinding[] {
+  if (!review?.findings_json) return [];
+  try {
+    const parsed = JSON.parse(review.findings_json);
+    return Array.isArray(parsed) ? (parsed as ReviewFinding[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Execution bindings sent alongside the composer fields. All three are
+ * optional and all three mean "fall back to the reviewer role / 本地" when
+ * empty, so an older UI that omits them keeps the previous behaviour.
+ */
+export interface CodeReviewRunBinding {
+  model?: string;
+  claude_config_id?: string;
+  agent_server_id?: string;
+}
+
+export const codeReviewsApi = {
+  create: (projectId: string, body: { branch: string; base_branch?: string; title?: string; description?: string } & CodeReviewRunBinding) =>
+    api.post<CodeReview>(`/api/projects/${projectId}/reviews`, body),
+  list: (projectId: string, limit?: number) =>
+    api.get<CodeReview[]>(`/api/projects/${projectId}/reviews${limit ? `?limit=${limit}` : ''}`),
+  get: (reviewId: string) =>
+    api.get<CodeReview>(`/api/reviews/${reviewId}`),
+  update: (reviewId: string, body: { branch?: string; base_branch?: string; title?: string; description?: string } & CodeReviewRunBinding) =>
+    api.put<CodeReview>(`/api/reviews/${reviewId}`, body),
+  remove: (reviewId: string) =>
+    api.delete<{ status: string }>(`/api/reviews/${reviewId}`),
+  // Returns the JobStore id to subscribe to via reviewApi.streamJobUrl.
+  start: (reviewId: string) =>
+    api.post<{ job_id: string; review_id: string }>(`/api/reviews/${reviewId}/start`, {}),
 };
 
 // Platform tokens

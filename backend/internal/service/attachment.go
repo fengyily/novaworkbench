@@ -49,31 +49,60 @@ func AttachmentRoot() string     { return attachmentRoot }
 // be generous, but an unbounded cap lets a single bad client exhaust disk.
 const MaxAttachmentSize = 2 << 30
 
-// AttachmentService is the per-requirement attachment store.
-type AttachmentService struct{ db *db.DB }
+// AttachmentService is the attachment store for one owner kind. The table
+// and the owner column are fixed at construction time so the exact same
+// method bodies back both requirement attachments and code-review
+// attachments — the two owner id spaces (`req_*` / `crv_*`) never collide,
+// so they also share one on-disk root (attachmentRoot/<owner_id>/).
+//
+// table / ownerCol are package-level constants chosen by the constructors
+// below, never caller input: the fmt.Sprintf'd SQL has no injection surface.
+type AttachmentService struct {
+	db       *db.DB
+	table    string
+	ownerCol string
+}
 
-func NewAttachmentService(d *db.DB) *AttachmentService { return &AttachmentService{db: d} }
+// NewAttachmentService builds the requirement-scoped store (the original,
+// and still the only one the wizard stages use).
+func NewAttachmentService(d *db.DB) *AttachmentService {
+	return &AttachmentService{db: d, table: "requirement_attachments", ownerCol: "requirement_id"}
+}
 
-// requirementDir returns the per-requirement directory (creating it on first
-// use). Returns absolute path.
-func (s *AttachmentService) requirementDir(reqID string) (string, error) {
-	dir := filepath.Join(attachmentRoot, reqID)
+// NewCodeReviewAttachmentService builds the review-scoped twin. Same
+// behaviour, different table — the owner is a code_reviews row, so the
+// files live under attachmentRoot/<crv_id>/ and are injected into the
+// reviewer's system prompt by handler.attachManifestFor.
+func NewCodeReviewAttachmentService(d *db.DB) *AttachmentService {
+	return &AttachmentService{db: d, table: "code_review_attachments", ownerCol: "review_id"}
+}
+
+// ownerDir returns the per-owner directory (creating it on first use).
+// Returns absolute path.
+func (s *AttachmentService) ownerDir(ownerID string) (string, error) {
+	dir := filepath.Join(attachmentRoot, ownerID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
 	return dir, nil
 }
 
+// selectCols is the shared projection; every scan below reads these in
+// order into model.Attachment.
+func (s *AttachmentService) selectCols() string {
+	return fmt.Sprintf(`id, %s, filename, stored_path, mime_type,
+		       size_bytes, sha256, description, manifest_text, uploaded_by, uploaded_at`, s.ownerCol)
+}
+
 // List returns every attachment row for a requirement, ordered by
 // upload time. The wizard's BuildManifest iterates this directly.
-func (s *AttachmentService) List(reqID string) ([]model.Attachment, error) {
-	rows, err := s.db.Query(`
-		SELECT id, requirement_id, filename, stored_path, mime_type,
-		       size_bytes, sha256, description, manifest_text, uploaded_by, uploaded_at
-		FROM requirement_attachments
-		WHERE requirement_id = ?
+func (s *AttachmentService) List(ownerID string) ([]model.Attachment, error) {
+	rows, err := s.db.Query(fmt.Sprintf(`
+		SELECT %s
+		FROM %s
+		WHERE %s = ?
 		ORDER BY uploaded_at ASC, id ASC
-	`, reqID)
+	`, s.selectCols(), s.table, s.ownerCol), ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +111,7 @@ func (s *AttachmentService) List(reqID string) ([]model.Attachment, error) {
 	for rows.Next() {
 		var a model.Attachment
 		var uploadedAt time.Time
-		if err := rows.Scan(&a.ID, &a.RequirementID, &a.Filename, &a.StoredPath,
+		if err := rows.Scan(&a.ID, &a.OwnerID, &a.Filename, &a.StoredPath,
 			&a.MimeType, &a.SizeBytes, &a.SHA256, &a.Description,
 			&a.ManifestText, &a.UploadedBy, &uploadedAt); err != nil {
 			return nil, err
@@ -98,11 +127,9 @@ func (s *AttachmentService) List(reqID string) ([]model.Attachment, error) {
 func (s *AttachmentService) Get(attID string) (*model.Attachment, error) {
 	var a model.Attachment
 	var uploadedAt time.Time
-	err := s.db.QueryRow(`
-		SELECT id, requirement_id, filename, stored_path, mime_type,
-		       size_bytes, sha256, description, manifest_text, uploaded_by, uploaded_at
-		FROM requirement_attachments WHERE id = ?
-	`, attID).Scan(&a.ID, &a.RequirementID, &a.Filename, &a.StoredPath,
+	err := s.db.QueryRow(fmt.Sprintf(`
+		SELECT %s FROM %s WHERE id = ?
+	`, s.selectCols(), s.table), attID).Scan(&a.ID, &a.OwnerID, &a.Filename, &a.StoredPath,
 		&a.MimeType, &a.SizeBytes, &a.SHA256, &a.Description,
 		&a.ManifestText, &a.UploadedBy, &uploadedAt)
 	if err != nil {
@@ -121,9 +148,9 @@ func (s *AttachmentService) Get(attID string) (*model.Attachment, error) {
 // fall back to "external tool needed (tar) — call `tar -tf <path>` first".
 //
 // Errors wrap os.PathError / sqlite errors; handler maps to writeError.
-func (s *AttachmentService) Upload(reqID string, in model.AttachmentUpload) (*model.Attachment, error) {
-	if strings.TrimSpace(reqID) == "" {
-		return nil, errors.New("requirement_id required")
+func (s *AttachmentService) Upload(ownerID string, in model.AttachmentUpload) (*model.Attachment, error) {
+	if strings.TrimSpace(ownerID) == "" {
+		return nil, errors.New("owner id required")
 	}
 	if strings.TrimSpace(in.Filename) == "" {
 		return nil, errors.New("filename required")
@@ -131,7 +158,7 @@ func (s *AttachmentService) Upload(reqID string, in model.AttachmentUpload) (*mo
 	if in.Reader == nil {
 		return nil, errors.New("file content required")
 	}
-	dir, err := s.requirementDir(reqID)
+	dir, err := s.ownerDir(ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -180,12 +207,10 @@ func (s *AttachmentService) Upload(reqID string, in model.AttachmentUpload) (*mo
 	// an "update the annotation only" intent still goes through Upload.
 	var existing model.Attachment
 	var upAt time.Time
-	err = s.db.QueryRow(`
-		SELECT id, requirement_id, filename, stored_path, mime_type,
-		       size_bytes, sha256, description, manifest_text, uploaded_by, uploaded_at
-		FROM requirement_attachments WHERE requirement_id = ? AND sha256 = ?
-	`, reqID, sum).Scan(
-		&existing.ID, &existing.RequirementID, &existing.Filename,
+	err = s.db.QueryRow(fmt.Sprintf(`
+		SELECT %s FROM %s WHERE %s = ? AND sha256 = ?
+	`, s.selectCols(), s.table, s.ownerCol), ownerID, sum).Scan(
+		&existing.ID, &existing.OwnerID, &existing.Filename,
 		&existing.StoredPath, &existing.MimeType, &existing.SizeBytes,
 		&existing.SHA256, &existing.Description, &existing.ManifestText,
 		&existing.UploadedBy, &upAt,
@@ -194,7 +219,7 @@ func (s *AttachmentService) Upload(reqID string, in model.AttachmentUpload) (*mo
 		// Hash hit — update description (no-op if same) and return existing.
 		if existing.Description != in.Description {
 			if _, uerr := s.db.Exec(
-				`UPDATE requirement_attachments SET description = ? WHERE id = ?`,
+				fmt.Sprintf(`UPDATE %s SET description = ? WHERE id = ?`, s.table),
 				in.Description, existing.ID); uerr != nil {
 				return nil, uerr
 			}
@@ -207,7 +232,7 @@ func (s *AttachmentService) Upload(reqID string, in model.AttachmentUpload) (*mo
 	}
 
 	// New row — move temp file to its permanent name.
-	storedRel = filepath.ToSlash(filepath.Join(reqID,
+	storedRel = filepath.ToSlash(filepath.Join(ownerID,
 		fmt.Sprintf("%s__%s__%s", attID, short, safeName)))
 	finalAbs := filepath.Join(attachmentRoot, filepath.FromSlash(storedRel))
 	if err := os.Rename(tmpPath, finalAbs); err != nil {
@@ -218,12 +243,12 @@ func (s *AttachmentService) Upload(reqID string, in model.AttachmentUpload) (*mo
 	manifest := buildArchiveManifest(finalAbs, in.Filename)
 
 	now := time.Now().UTC()
-	if _, err := s.db.Exec(`
-		INSERT INTO requirement_attachments
-		  (id, requirement_id, filename, stored_path, mime_type,
+	if _, err := s.db.Exec(fmt.Sprintf(`
+		INSERT INTO %s
+		  (id, %s, filename, stored_path, mime_type,
 		   size_bytes, sha256, description, manifest_text, uploaded_by, uploaded_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, attID, reqID, in.Filename, storedRel, mime,
+	`, s.table, s.ownerCol), attID, ownerID, in.Filename, storedRel, mime,
 		written, sum, in.Description, manifest, in.UploadedBy, now); err != nil {
 		// Roll back the renamed file if the DB write fails so we don't
 		// leave orphan bytes on disk for a row that doesn't exist.
@@ -231,7 +256,7 @@ func (s *AttachmentService) Upload(reqID string, in model.AttachmentUpload) (*mo
 		return nil, err
 	}
 	return &model.Attachment{
-		ID: attID, RequirementID: reqID, Filename: in.Filename,
+		ID: attID, OwnerID: ownerID, Filename: in.Filename,
 		StoredPath: storedRel, MimeType: mime, SizeBytes: written,
 		SHA256: sum, Description: in.Description, ManifestText: manifest,
 		UploadedBy: in.UploadedBy, UploadedAt: now,
@@ -241,7 +266,7 @@ func (s *AttachmentService) Upload(reqID string, in model.AttachmentUpload) (*mo
 // UpdateDescription patches a single column. Returns the post-update row.
 func (s *AttachmentService) UpdateDescription(attID, description string) (*model.Attachment, error) {
 	if _, err := s.db.Exec(
-		`UPDATE requirement_attachments SET description = ? WHERE id = ?`,
+		fmt.Sprintf(`UPDATE %s SET description = ? WHERE id = ?`, s.table),
 		description, attID); err != nil {
 		return nil, err
 	}
@@ -252,10 +277,10 @@ func (s *AttachmentService) UpdateDescription(attID, description string) (*model
 // missing disk file is not an error. Returns the deleted row (mostly for
 // logging; the handler can pick what to surface to the caller).
 func (s *AttachmentService) Delete(attID string) error {
-	var reqID, storedPath string
+	var ownerID, storedPath string
 	err := s.db.QueryRow(
-		`SELECT requirement_id, stored_path FROM requirement_attachments WHERE id = ?`,
-		attID).Scan(&reqID, &storedPath)
+		fmt.Sprintf(`SELECT %s, stored_path FROM %s WHERE id = ?`, s.ownerCol, s.table),
+		attID).Scan(&ownerID, &storedPath)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -263,7 +288,7 @@ func (s *AttachmentService) Delete(attID string) error {
 		return err
 	}
 	if _, err := s.db.Exec(
-		`DELETE FROM requirement_attachments WHERE id = ?`, attID); err != nil {
+		fmt.Sprintf(`DELETE FROM %s WHERE id = ?`, s.table), attID); err != nil {
 		return err
 	}
 	abs := filepath.Join(attachmentRoot, filepath.FromSlash(storedPath))
@@ -281,11 +306,11 @@ func (s *AttachmentService) AbsolutePath(a *model.Attachment) string {
 
 // TotalSize returns the aggregate on-disk size of a requirement's
 // attachments. Used by the upload handler as a per-requirement budget guard.
-func (s *AttachmentService) TotalSize(reqID string) (int64, error) {
+func (s *AttachmentService) TotalSize(ownerID string) (int64, error) {
 	var total sql.NullInt64
 	if err := s.db.QueryRow(
-		`SELECT COALESCE(SUM(size_bytes), 0) FROM requirement_attachments WHERE requirement_id = ?`,
-		reqID).Scan(&total); err != nil {
+		fmt.Sprintf(`SELECT COALESCE(SUM(size_bytes), 0) FROM %s WHERE %s = ?`, s.table, s.ownerCol),
+		ownerID).Scan(&total); err != nil {
 		return 0, err
 	}
 	return total.Int64, nil
@@ -309,8 +334,8 @@ func (s *AttachmentService) TotalSize(reqID string) (int64, error) {
 // exec → ~/.novaworkbench/attachments/<req_id>; remote → synced mirror on
 // the agent server). The wizard injects both the manifest body AND a brief
 // stage-specific intro line — see handler/wizard_common.go:InjectAttachments.
-func (s *AttachmentService) BuildManifest(reqID, attachDir string) string {
-	atts, err := s.List(reqID)
+func (s *AttachmentService) BuildManifest(ownerID, attachDir string) string {
+	atts, err := s.List(ownerID)
 	if err != nil || len(atts) == 0 {
 		return ""
 	}
