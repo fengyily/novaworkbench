@@ -148,3 +148,29 @@ func TestBuildReviewPrompt_AsksForGoalCheckEvidence(t *testing.T) {
 		}
 	}
 }
+
+// One stored column, two meanings: a branch review's description is the
+// 改动目标 the report grades 目标达成 against, a PR review's is 额外审查要求.
+// Labelling the latter as the former would have the reviewer grade the
+// change against the wrong text.
+func TestBuildRegeneratePrompt_SeparatesGoalFromExtraRequirements(t *testing.T) {
+	branch := BuildRegeneratePrompt(sampleRegenerateInput(false))
+	if !strings.Contains(branch, "用户描述的改动目标（判断「目标是否达成」的唯一依据）") {
+		t.Error("a branch review's description must be presented as the 改动目标")
+	}
+	if strings.Contains(branch, "额外审查要求") {
+		t.Error("a branch review has no 额外审查要求 slot")
+	}
+
+	in := sampleRegenerateInput(false)
+	in.ReviewType = "pr"
+	in.Description = ""
+	in.ExtraRequirements = "重点看并发安全"
+	pr := BuildRegeneratePrompt(in)
+	if !strings.Contains(pr, "### 额外审查要求\n\n重点看并发安全") {
+		t.Error("a PR review's text must be presented as 额外审查要求")
+	}
+	if strings.Contains(pr, "用户描述的改动目标（判断「目标是否达成」的唯一依据）") {
+		t.Error("a PR review has no 改动目标 to grade against")
+	}
+}

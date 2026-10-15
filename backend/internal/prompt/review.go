@@ -380,9 +380,14 @@ type RegeneratePromptInput struct {
 	BaseRef     string
 	PRNumber    int
 	PRTitle     string
-	Description string // the user's 改动目标
-	ReportMD    string // the current result_md (already trimmed by the caller)
-	History     []FollowupTurn
+	Description string // the user's 改动目标 (branch reviews)
+	// ExtraRequirements is the PR entry point's single-line 额外审查要求.
+	// One stored column, two meanings — see handler.buildReviewTaskPrompt;
+	// labelling a PR's extra requirements as the 改动目标 would make the
+	// reviewer grade 目标达成 against the wrong text.
+	ExtraRequirements string
+	ReportMD          string // the current result_md (already trimmed by the caller)
+	History           []FollowupTurn
 	// HasAttachments keeps the attachment directive in play: a regeneration
 	// that silently stopped consulting the uploaded log would quietly
 	// downgrade every goal_check that cited it.
@@ -429,6 +434,9 @@ func BuildRegeneratePrompt(in RegeneratePromptInput) string {
 		b.WriteString("\n")
 		if strings.TrimSpace(in.Description) != "" {
 			fmt.Fprintf(&b, "### 用户描述的改动目标（判断「目标是否达成」的唯一依据）\n\n%s\n\n", strings.TrimSpace(in.Description))
+		}
+		if strings.TrimSpace(in.ExtraRequirements) != "" {
+			fmt.Fprintf(&b, "### 额外审查要求\n\n%s\n\n", strings.TrimSpace(in.ExtraRequirements))
 		}
 		if strings.TrimSpace(in.ReportMD) != "" {
 			fmt.Fprintf(&b, "### 上一版 Review 报告原文\n\n%s\n\n", strings.TrimSpace(in.ReportMD))

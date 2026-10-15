@@ -371,7 +371,14 @@ func regeneratePrompt(rv *model.CodeReview, history []prompt.FollowupTurn, resum
 		in.BaseBranch = rv.BaseBranch
 		in.PRNumber = rv.PRNumber
 		in.PRTitle = rv.Title
-		in.Description = rv.Description
+		// Same one-column-two-meanings split as buildReviewTaskPrompt: a
+		// branch review's description is the 改动目标 the report grades
+		// against, a PR review's is 额外审查要求.
+		if rv.ReviewType == model.ReviewTypePR {
+			in.ExtraRequirements = rv.Description
+		} else {
+			in.Description = rv.Description
+		}
 		in.ReportMD = truncateStr(rv.ResultMD, maxRegenerateReportChars)
 		// The resolved refs aren't persisted, so the prompt names the branch
 		// pair and lets the model resolve it if it wants the diff again.
