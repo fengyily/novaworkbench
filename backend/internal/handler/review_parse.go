@@ -114,6 +114,12 @@ func matchObject(s string, start int) (int, bool) {
 }
 
 // reviewContract is the shape of the trailing JSON block.
+//
+// `goal_checks` is deliberately NOT a member here. It is the contract's one
+// optional part, and leaving it out of this struct means encoding/json skips
+// it wholesale: a model that emits `"goal_checks": "见上文"` instead of an
+// array can then still have its findings graded. parseGoalChecks decodes it
+// separately, exactly because it is allowed to fail on its own.
 type reviewContract struct {
 	GoalMet  string                `json:"goal_met"`
 	Findings []model.ReviewFinding `json:"findings"`
@@ -171,4 +177,65 @@ func countBySeverity(findings []model.ReviewFinding) (p0, p1, p3 int) {
 		}
 	}
 	return p0, p1, p3
+}
+
+// parseGoalChecks pulls the optional `goal_checks` array out of the contract
+// block and re-marshals the rows worth keeping, ready for
+// code_reviews.goal_checks_json.
+//
+// It is separate from parseFindings (and fails separately) because the two
+// have different stakes. Findings are the report: losing them means losing
+// the grading. goal_checks is supporting evidence for a verdict the report
+// states anyway, so every failure mode here degrades to "" — no evidence
+// table, verdict and findings untouched.
+//
+// Rows are dropped when they carry no criterion (an entry with only a status
+// says nothing) and statuses outside the four known verdicts are normalised
+// to "unknown" rather than discarded: the criterion is still worth showing,
+// and silently dropping it would misrepresent how many points were checked.
+func parseGoalChecks(jsonPart string) string {
+	jsonPart = strings.TrimSpace(jsonPart)
+	if jsonPart == "" {
+		return ""
+	}
+	var envelope struct {
+		GoalChecks []model.GoalCheck `json:"goal_checks"`
+	}
+	if err := json.Unmarshal([]byte(jsonPart), &envelope); err != nil {
+		return ""
+	}
+	checks := make([]model.GoalCheck, 0, len(envelope.GoalChecks))
+	for _, c := range envelope.GoalChecks {
+		c.Criterion = strings.TrimSpace(c.Criterion)
+		if c.Criterion == "" {
+			continue
+		}
+		c.Status = normalizeGoalCheckStatus(c.Status)
+		c.Evidence = strings.TrimSpace(c.Evidence)
+		checks = append(checks, c)
+	}
+	if len(checks) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(checks)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+// normalizeGoalCheckStatus maps a per-criterion verdict onto the four values
+// the UI colours. Anything unrecognised (including empty) becomes "unknown",
+// which is a real verdict here: "this criterion could not be checked".
+func normalizeGoalCheckStatus(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case prompt.GoalMetYes:
+		return prompt.GoalMetYes
+	case prompt.GoalMetPartial:
+		return prompt.GoalMetPartial
+	case prompt.GoalMetNo:
+		return prompt.GoalMetNo
+	default:
+		return model.GoalCheckUnknown
+	}
 }

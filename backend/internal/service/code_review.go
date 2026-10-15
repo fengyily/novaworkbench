@@ -37,7 +37,8 @@ func NewCodeReviewService(database *db.DB, attachSvc *AttachmentService) *CodeRe
 
 const codeReviewCols = `id, project_id, review_type, branch, base_branch, pr_number,
 	title, description, status, job_id, result_md, findings_json,
-	p0_count, p1_count, p3_count, goal_met, model, claude_config_id,
+	p0_count, p1_count, p3_count, goal_met, goal_checks_json, revision_no,
+	model, claude_config_id,
 	agent_server_id, claude_session_id, created_by, created_at, updated_at, finished_at`
 
 // Create inserts a draft session. branch is required for branch reviews;
@@ -62,9 +63,10 @@ func (s *CodeReviewService) Create(rv *model.CodeReview) (*model.CodeReview, err
 	_, err := s.db.Exec(`INSERT INTO code_reviews (
 		id, project_id, review_type, branch, base_branch, pr_number,
 		title, description, status, job_id, result_md, findings_json,
-		p0_count, p1_count, p3_count, goal_met, model, claude_config_id,
+		p0_count, p1_count, p3_count, goal_met, goal_checks_json, revision_no,
+		model, claude_config_id,
 		agent_server_id, claude_session_id, created_by, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', 0, 0, 0, '', ?, ?, ?, '', ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', 0, 0, 0, '', '', 0, ?, ?, ?, '', ?, ?, ?)`,
 		id, rv.ProjectID, rv.ReviewType, rv.Branch, rv.BaseBranch, rv.PRNumber,
 		rv.Title, rv.Description, model.ReviewStatusDraft,
 		rv.Model, rv.ClaudeConfigID, rv.AgentServerID, rv.CreatedBy, now, now)
@@ -137,13 +139,55 @@ func (s *CodeReviewService) Update(id string, rv *model.CodeReview) (*model.Code
 // MarkRunning stamps the job binding + effective model and clears the
 // previous run's result so a re-run doesn't show stale findings while the
 // new stream is still going.
+//
+// Clearing is safe even though it looks destructive: a finished report was
+// already frozen into code_review_revisions by the run that produced it, so
+// the previous version stays readable (and restorable) through the version
+// switcher. revision_no is deliberately NOT reset — it keeps pointing at the
+// newest frozen version until this run produces its own.
 func (s *CodeReviewService) MarkRunning(id, jobID, modelName string) error {
 	_, err := s.db.Exec(`UPDATE code_reviews
 		SET status = ?, job_id = ?, model = ?, result_md = '', findings_json = '',
-		    p0_count = 0, p1_count = 0, p3_count = 0, goal_met = '',
+		    p0_count = 0, p1_count = 0, p3_count = 0, goal_met = '', goal_checks_json = '',
 		    claude_session_id = '', finished_at = NULL, updated_at = ?
 		WHERE id = ?`,
 		model.ReviewStatusRunning, jobID, modelName, time.Now().UTC(), id)
+	return err
+}
+
+// MarkRegenerating is MarkRunning's non-destructive twin, used by
+// 「基于追问对话重新生成」. It moves the row to `running` and binds the new job
+// — and touches nothing else.
+//
+// Keeping result_md / findings_json / the counts / claude_session_id in place
+// is the whole point:
+//
+//   - The regeneration prompt is built FROM the stored report, so wiping it
+//     first would leave the model nothing to revise.
+//   - claude_session_id is what `--resume` continues; clearing it would
+//     downgrade every regeneration to a cold session.
+//   - If the run fails, MarkRegenerateFailed flips the status back and the
+//     user still has the report they started with. A regeneration must never
+//     be able to cost someone a good report.
+//
+// model is left alone too: the regeneration runs with the review's existing
+// binding, and the effective-model stamp of the original run stays truthful
+// until a new report actually lands.
+func (s *CodeReviewService) MarkRegenerating(id, jobID string) error {
+	_, err := s.db.Exec(`UPDATE code_reviews
+		SET status = ?, job_id = ?, updated_at = ?
+		WHERE id = ?`,
+		model.ReviewStatusRunning, jobID, time.Now().UTC(), id)
+	return err
+}
+
+// MarkRegenerateFailed rolls a failed regeneration back to `done`, leaving
+// the previous report in place. The failure is reported through the job
+// stream (and the job log); the review row must not record it, because the
+// report it holds is still a perfectly good finished report.
+func (s *CodeReviewService) MarkRegenerateFailed(id string) error {
+	_, err := s.db.Exec(`UPDATE code_reviews SET status = ?, updated_at = ? WHERE id = ?`,
+		model.ReviewStatusDone, time.Now().UTC(), id)
 	return err
 }
 
@@ -167,6 +211,9 @@ type ReviewOutcome struct {
 	FindingsJSON string
 	P0, P1, P3   int
 	GoalMet      string
+	// GoalChecksJSON is the optional per-criterion evidence array. Empty
+	// when the model answered only the one-word verdict.
+	GoalChecksJSON string
 }
 
 // MarkFinished writes the terminal row. A parse miss is not a failure: the
@@ -180,10 +227,10 @@ func (s *CodeReviewService) MarkFinished(id string, out ReviewOutcome) error {
 	_, err := s.db.Exec(`UPDATE code_reviews
 		SET status = ?, result_md = ?, findings_json = ?,
 		    p0_count = ?, p1_count = ?, p3_count = ?, goal_met = ?,
-		    finished_at = ?, updated_at = ?
+		    goal_checks_json = ?, finished_at = ?, updated_at = ?
 		WHERE id = ?`,
 		out.Status, out.ResultMD, out.FindingsJSON,
-		out.P0, out.P1, out.P3, out.GoalMet, now, now, id)
+		out.P0, out.P1, out.P3, out.GoalMet, out.GoalChecksJSON, now, now, id)
 	return err
 }
 
@@ -208,6 +255,12 @@ func (s *CodeReviewService) Delete(id string) error {
 	if _, err := s.db.Exec(`DELETE FROM code_review_followups WHERE review_id = ?`, id); err != nil {
 		return err
 	}
+	// Same story for the version history: no CASCADE fires on SQLite, and an
+	// orphan revision row would keep the whole (often large) report text
+	// alive after its review is gone.
+	if _, err := s.db.Exec(`DELETE FROM code_review_revisions WHERE review_id = ?`, id); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(`DELETE FROM code_reviews WHERE id = ?`, id)
 	return err
 }
@@ -222,7 +275,8 @@ func scanCodeReview(row rowScanner) (*model.CodeReview, error) {
 	if err := row.Scan(&rv.ID, &rv.ProjectID, &rv.ReviewType, &rv.Branch,
 		&rv.BaseBranch, &rv.PRNumber, &rv.Title, &rv.Description, &rv.Status,
 		&rv.JobID, &rv.ResultMD, &rv.FindingsJSON, &rv.P0Count, &rv.P1Count,
-		&rv.P3Count, &rv.GoalMet, &rv.Model, &rv.ClaudeConfigID,
+		&rv.P3Count, &rv.GoalMet, &rv.GoalChecksJSON, &rv.RevisionNo,
+		&rv.Model, &rv.ClaudeConfigID,
 		&rv.AgentServerID, &rv.ClaudeSessionID, &rv.CreatedBy,
 		&createdAt, &updatedAt, &finishedAt); err != nil {
 		return nil, err

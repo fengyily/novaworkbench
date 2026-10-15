@@ -1,8 +1,11 @@
 package handler
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/novaworkbench/backend/internal/model"
 )
 
 // The trailing-JSON extractor is the one piece of the review pipeline that
@@ -213,5 +216,69 @@ func TestBuildReviewOutcome_ErrorStatus(t *testing.T) {
 	}
 	if !strings.Contains(out.ResultMD, "都不存在") {
 		t.Fatalf("result_md = %q", out.ResultMD)
+	}
+}
+
+// goal_checks is the structured evidence behind the 目标达成 verdict: which
+// acceptance point was checked, what the verdict for it was, and what the
+// reviewer based that on.
+func TestParseGoalChecks_NormalisesRows(t *testing.T) {
+	raw := `{"goal_met":"partial",
+	  "goal_checks":[
+	    {"criterion":" 分页参数生效 ","status":"YES","evidence":" api.go:42 "},
+	    {"criterion":"旧参数兼容","status":"maybe","evidence":""},
+	    {"criterion":"","status":"no","evidence":"没有 criterion 的行没有意义"}
+	  ],
+	  "findings":[]}`
+
+	var checks []model.GoalCheck
+	if err := json.Unmarshal([]byte(parseGoalChecks(raw)), &checks); err != nil {
+		t.Fatalf("re-marshalled goal_checks does not parse: %v", err)
+	}
+	if len(checks) != 2 {
+		t.Fatalf("got %d checks, want the 2 with a criterion", len(checks))
+	}
+	if checks[0].Criterion != "分页参数生效" || checks[0].Status != "yes" || checks[0].Evidence != "api.go:42" {
+		t.Errorf("first check not normalised: %+v", checks[0])
+	}
+	// An unrecognised status keeps the row (the criterion was still checked)
+	// but is reported honestly as "could not determine".
+	if checks[1].Status != model.GoalCheckUnknown {
+		t.Errorf("second check status = %q, want unknown", checks[1].Status)
+	}
+}
+
+// goal_checks is optional, and every way it can be absent or broken has to
+// degrade to "no evidence table" — never to a failed parse of the report.
+func TestParseGoalChecks_DegradesToEmpty(t *testing.T) {
+	cases := map[string]string{
+		"absent":        `{"goal_met":"yes","findings":[]}`,
+		"empty array":   `{"goal_met":"yes","goal_checks":[],"findings":[]}`,
+		"wrong type":    `{"goal_met":"yes","goal_checks":"见上文","findings":[]}`,
+		"malformed":     `{"goal_met":`,
+		"blank input":   ``,
+		"no criterions": `{"goal_checks":[{"status":"yes","evidence":"x"}]}`,
+	}
+	for name, raw := range cases {
+		if got := parseGoalChecks(raw); got != "" {
+			t.Errorf("%s: parseGoalChecks = %q, want \"\"", name, got)
+		}
+	}
+}
+
+// The two parsers must fail independently: a goal_checks the model got wrong
+// cannot be allowed to cost the user their graded findings.
+func TestParseFindings_SurvivesBrokenGoalChecks(t *testing.T) {
+	raw := `{"goal_met":"no","goal_checks":"忘了写成数组","findings":[{"severity":"P0","title":"空指针"}]}`
+
+	findings, goalMet, ok := parseFindings(raw)
+	if !ok {
+		t.Fatal("parseFindings should still succeed when goal_checks is malformed")
+	}
+	if len(findings) != 1 || goalMet != "no" {
+		t.Fatalf("findings=%+v goalMet=%q, want the P0 and a 'no' verdict", findings, goalMet)
+	}
+	if got := parseGoalChecks(raw); got != "" {
+		t.Errorf("parseGoalChecks = %q, want \"\" for a non-array", got)
 	}
 }

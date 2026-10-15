@@ -15,7 +15,6 @@ import (
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/service"
-	gossh "github.com/novaworkbench/backend/internal/ssh"
 	"github.com/novaworkbench/backend/internal/store"
 )
 
@@ -161,125 +160,38 @@ func (h *ReviewHandler) runFollowup(job *store.Job, rv *model.CodeReview, fu *mo
 
 	job.Append(store.LogLine{Type: "phase", Content: "💬 追问：" + fu.Question})
 
-	if strings.TrimSpace(rv.AgentServerID) != "" {
-		h.runRemoteFollowup(ctx, job, rv, fu, project, rolePrompt, modelName, claudeConfigID, history)
-		return
+	spec := reviewTurnSpec{
+		scope:             "review-followup",
+		prompt:            func(resumed bool) string { return h.followupPrompt(rv, fu, history, resumed) },
+		usage:             func() *usageCtx { return h.newFollowupUsage(job.ID, rv, fu, modelName) },
+		resumePhase:       "🔗 续接本次 Review 的会话上下文...",
+		staleNotice:       "⚠️ 原 Review 会话已失效，改用「报告原文 + 仓库代码」重新作答",
+		remoteMissingRepo: "Agent 服务器上的仓库副本已不存在，请重新运行一次 Review 后再追问",
+		remoteNoService:   "Agent 服务器服务未初始化，无法在远端执行追问",
 	}
 
-	manifest := attachManifestFor(h.attachSvc, rv.ID, "")
-	systemPrompt := appendManifest(rolePrompt, manifest)
-	sessionID := strings.TrimSpace(rv.ClaudeSessionID)
-
-	// First attempt resumes the review's conversation when there is one.
-	if sessionID != "" {
-		job.Append(store.LogLine{Type: "phase", Content: "🔗 续接本次 Review 的会话上下文..."})
-		answer, stale, errMsg := h.streamFollowup(ctx, job, project.LocalPath, systemPrompt,
-			h.followupPrompt(rv, fu, history, true), modelName, claudeConfigID, sessionID, true,
-			h.newFollowupUsage(job.ID, rv, fu, modelName))
-		if !stale {
-			h.finishFollowup(job, fu, modelName, true, answer, errMsg)
-			return
-		}
-		// The jsonl is gone (CLI pruned it, or the review ran elsewhere).
-		// Fall through to a fresh run rather than failing the question.
-		job.Append(store.LogLine{Type: "message", Content: "⚠️ 原 Review 会话已失效，改用「报告原文 + 仓库代码」重新作答"})
-	}
-
-	answer, _, errMsg := h.streamFollowup(ctx, job, project.LocalPath, systemPrompt,
-		h.followupPrompt(rv, fu, history, false), modelName, claudeConfigID, "", false,
-		h.newFollowupUsage(job.ID, rv, fu, modelName))
-	h.finishFollowup(job, fu, modelName, false, answer, errMsg)
-}
-
-// runRemoteFollowup answers on the Agent Server the review ran on. It reuses
-// the scratch clone (/tmp/nova-agent/<project_id>/base) that review created,
-// which is also where the resumable claude session lives — resuming from the
-// local host would find nothing.
-func (h *ReviewHandler) runRemoteFollowup(ctx context.Context, job *store.Job, rv *model.CodeReview, fu *model.CodeReviewFollowup, project *model.Project, rolePrompt, modelName, claudeConfigID string, history []prompt.FollowupTurn) {
-	answer, resumed, errMsg := h.execRemoteFollowup(ctx, job, rv, fu, project, rolePrompt, modelName, claudeConfigID, history)
+	answer, resumed, errMsg := h.runReviewTurn(ctx, job, rv, project, rolePrompt, modelName, claudeConfigID, spec)
 	h.finishFollowup(job, fu, modelName, resumed, answer, errMsg)
 }
 
-func (h *ReviewHandler) execRemoteFollowup(ctx context.Context, job *store.Job, rv *model.CodeReview, fu *model.CodeReviewFollowup, project *model.Project, rolePrompt, modelName, claudeConfigID string, history []prompt.FollowupTurn) (answer string, resumed bool, errMsg string) {
-	if h.agentSvrSvc == nil {
-		return "", false, "Agent 服务器服务未初始化，无法在远端执行追问"
+// runReviewTurn dispatches a resumable turn to the review's execution
+// environment: 本地 when agent_server_id is empty, the Agent Server
+// otherwise. Never a silent local fallback — a remote review's session only
+// exists over there.
+func (h *ReviewHandler) runReviewTurn(ctx context.Context, job *store.Job, rv *model.CodeReview, project *model.Project, rolePrompt, modelName, claudeConfigID string, spec reviewTurnSpec) (text string, resumed bool, errMsg string) {
+	if strings.TrimSpace(rv.AgentServerID) != "" {
+		return h.runRemoteReviewTurn(ctx, job, rv, project, rolePrompt, modelName, claudeConfigID, spec)
 	}
-	runCtx, cancel, hb := newRollingCtx("remote-review-followup", agentIdleTimeout())
-	defer cancel()
-	runCtx, absCancel := context.WithTimeout(runCtx, agentMaxTotalTimeout())
-	defer absCancel()
-
-	srv, plain, err := h.agentSvrSvc.GetWithCredential(rv.AgentServerID)
-	if err != nil {
-		return "", false, "无法读取 Agent 服务器凭据: " + err.Error()
-	}
-	client, err := gossh.Dial(runCtx, srv.Host, srv.Port, srv.Username, srv.AuthType, plain)
-	if err != nil {
-		return "", false, "SSH 连接失败: " + err.Error()
-	}
-	defer client.Close()
-
-	baseRepo := "/tmp/nova-agent/" + project.ID + "/base"
-	if !client.Exists(baseRepo) {
-		// The clone is what both the review's session file and its working
-		// directory hang off. Without it there is nothing to resume and no
-		// code to read, so re-running the Review is the honest answer.
-		return "", false, "Agent 服务器上的仓库副本已不存在，请重新运行一次 Review 后再追问"
-	}
-
-	// Attachments are only re-uploaded for a fresh session; a resumed one
-	// already read whatever it needed during the review.
-	sessionID := strings.TrimSpace(rv.ClaudeSessionID)
-	attachDir := ""
-	if sessionID == "" && h.attachSvc != nil {
-		if rd, serr := h.attachSvc.SyncToAgentServer(runCtx, rv.AgentServerID, client, rv.ID); serr == nil {
-			attachDir = rd
-		}
-	}
-	systemPrompt := appendManifest(rolePrompt, attachManifestFor(h.attachSvc, rv.ID, attachDir))
-
-	ignoreLocal := true
-	build := func(resume bool) llm.StreamOpts {
-		opts := llm.StreamOpts{
-			Prompt:                 h.followupPrompt(rv, fu, history, resume),
-			WorkDir:                baseRepo,
-			SystemPrompt:           systemPrompt,
-			Model:                  cliModelArg(modelName),
-			ClaudeConfigID:         claudeConfigID,
-			OverrideSettingSources: &ignoreLocal,
-		}
-		if resume {
-			opts.Resume = true
-			opts.SessionID = sessionID
-		}
-		return opts
-	}
-
-	if sessionID != "" {
-		job.Append(store.LogLine{Type: "phase", Content: "🔗 在 Agent 服务器上续接本次 Review 的会话..."})
-		out, msg := h.runRemoteWorkerStream(runCtx, client, srv, job, build(true), claudeConfigID, "review-followup",
-			h.newFollowupUsage(job.ID, rv, fu, modelName), hb)
-		if msg == "" {
-			return firstNonEmpty(out.finalResult, out.streamText), true, ""
-		}
-		if !out.staleSession {
-			return "", true, msg
-		}
-		job.Append(store.LogLine{Type: "message", Content: "⚠️ 远端的 Review 会话已失效，改用「报告原文 + 仓库代码」重新作答"})
-	}
-
-	out, msg := h.runRemoteWorkerStream(runCtx, client, srv, job, build(false), claudeConfigID, "review-followup",
-		h.newFollowupUsage(job.ID, rv, fu, modelName), hb)
-	if msg != "" {
-		return "", false, msg
-	}
-	return firstNonEmpty(out.finalResult, out.streamText), false, ""
+	return h.runLocalReviewTurn(ctx, job, rv, project, rolePrompt, modelName, claudeConfigID, spec)
 }
 
-// streamFollowup runs one local claude turn and streams it into the job.
+// streamReviewTurn runs one local claude turn against a finished review and
+// streams it into the job. Shared by 追问 and 「重新生成」 — it only knows how
+// to run a prompt, not what the prompt is for.
+//
 // stale=true means the run failed specifically because `--resume` pointed at
 // a conversation the CLI no longer has, which the caller retries fresh.
-func (h *ReviewHandler) streamFollowup(ctx context.Context, job *store.Job, workDir, systemPrompt, taskPrompt, modelName, claudeConfigID, sessionID string, resume bool, uctx *usageCtx) (answer string, stale bool, errMsg string) {
+func (h *ReviewHandler) streamReviewTurn(ctx context.Context, job *store.Job, workDir, systemPrompt, taskPrompt, modelName, claudeConfigID, sessionID string, resume bool, uctx *usageCtx) (answer string, stale bool, errMsg string) {
 	opts := llm.StreamOpts{
 		Prompt:         taskPrompt,
 		WorkDir:        workDir,

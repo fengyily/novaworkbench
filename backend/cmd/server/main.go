@@ -263,6 +263,10 @@ func main() {
 	// 追问 thread of a finished review — persisted because the JobStore that
 	// carries the live stream is memory-only.
 	codeReviewFollowupSvc := service.NewCodeReviewFollowupService(database)
+	// Frozen versions of a review's report. code_reviews keeps the current
+	// one; this is the history that makes 「基于追问对话重新生成」 safe to
+	// click — the version it replaces stays readable and restorable.
+	codeReviewRevisionSvc := service.NewCodeReviewRevisionService(database)
 	scannerH := handler.NewScannerHandler(scannerSvc)
 	sharedJobs := store.NewJobStore(50)
 	preflightH := handler.NewPreflightHandler(pfRegistry, sharedJobs)
@@ -439,6 +443,7 @@ func main() {
 	reviewH.SetGitCredentialSvc(gitCredSvc)
 	reviewH.SetAgentServerSvc(agentSvrSvc)
 	reviewH.SetCodeReviewFollowupSvc(codeReviewFollowupSvc)
+	reviewH.SetCodeReviewRevisionSvc(codeReviewRevisionSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
 	mergeH := handler.NewMergeHandler(database, projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc, gitCredSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)
@@ -547,6 +552,13 @@ func main() {
 	mux.HandleFunc("GET /api/reviews/{rid}/followups", reviewH.ListFollowups)
 	mux.HandleFunc("POST /api/reviews/{rid}/followups", reviewH.AskFollowup)
 	mux.HandleFunc("DELETE /api/reviews/{rid}/followups/{fid}", reviewH.DeleteFollowup)
+	// 重新生成: rewrite the report in light of the 追问 thread. Streams on the
+	// same job channel; the version it replaces is frozen first, so the
+	// revision routes below can always get it back.
+	mux.HandleFunc("POST /api/reviews/{rid}/regenerate", reviewH.RegenerateReview)
+	mux.HandleFunc("GET /api/reviews/{rid}/revisions", reviewH.ListRevisions)
+	mux.HandleFunc("GET /api/reviews/{rid}/revisions/{n}", reviewH.GetRevision)
+	mux.HandleFunc("POST /api/reviews/{rid}/revisions/{n}/restore", reviewH.RestoreRevision)
 	// Review-session attachments — same handler as the requirement ones,
 	// bound to the review-scoped service instance.
 	mux.HandleFunc("POST /api/code-reviews/{id}/attachments", reviewAttachmentH.Upload)

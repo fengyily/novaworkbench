@@ -24,6 +24,7 @@ var copyOrder = []string{
 	"code_reviews",
 	"code_review_attachments",
 	"code_review_followups",
+	"code_review_revisions",
 	"knowledge",
 	"conversations",
 	"refinement_chats",
