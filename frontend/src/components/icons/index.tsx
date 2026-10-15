@@ -530,6 +530,20 @@ export const STAGE_ICONS: Record<string, typeof IconAnalyst> = {
   review: IconReview,
 };
 
+/** Document with folded corner + M — marks the .md download in the export menu. */
+export const IconFileMarkdown = makeRichIcon(() => [
+  <path key="a" d="M6 3.5h8.5L18 7v12.5A1.5 1.5 0 0 1 16.5 21h-10A1.5 1.5 0 0 1 5 19.5v-14.5A1.5 1.5 0 0 1 6.5 3.5Z" />,
+  <path key="b" d="M14.5 3.5V7H18" />,
+  <path key="c" d="M7 14l1.5 2.2L10 14v3.5" />,
+  <path key="d" d="M11.5 14v3.5h2.2" />,
+]);
+
+/** Caret pointing down — the split-button dropdown affordance. */
+export const IconChevronDown = makeIcon(
+  'M6 9l6 6 6-6',
+);
+
+
 /**
  * Convenience wrapper — given a stage key, render its icon at the requested
  * size. Falls back to a generic cog so the page never renders a missing-icon
