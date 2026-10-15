@@ -66,6 +66,9 @@ import MarkdownRender from '../components/MarkdownRender';
 import { IconArchitect, IconBranch, IconClock, IconFileText, IconPlug, IconRobot } from '../components/icons';
 import { errorMessage } from '../utils/errMsg';
 import { fmtDate, fmtDateTime } from '../utils/intl';
+import { useStickToBottom } from '../utils/useStickToBottom';
+import { useAutoScrollPref } from '../utils/autoScrollPref';
+import { ScrollToBottomButton } from '../components/ScrollToBottomButton';
 import '../styles/markdown-prose.css';
 import './ProjectCodeReview.css';
 
@@ -152,7 +155,6 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   const [reviewModel, setReviewModel] = useState('');
   const [running, setRunning] = useState(false);
   const reviewEsRef = useRef<EventStream | null>(null);
-  const reviewPanelRef = useRef<HTMLDivElement>(null);
 
   // ── Run bindings (shared by both modes) ──────────────────────────────────
   // Which model to review with and where to run it. Both are per-session and
@@ -190,21 +192,24 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   const [askLines, setAskLines] = useState<{ type: string; content: string }[]>([]);
   const [askError, setAskError] = useState('');
   const askEsRef = useRef<EventStream | null>(null);
-  const askPanelRef = useRef<HTMLDivElement>(null);
 
   // Close the SSE stream when the tab unmounts so a navigated-away review
   // doesn't keep a dangling reader around.
   useEffect(() => () => { reviewEsRef.current?.close(); askEsRef.current?.close(); }, []);
 
-  // Keep the live stream pinned to the newest line (behaviour carried over
-  // from ProjectDetail's review panel).
-  useEffect(() => {
-    if (reviewPanelRef.current) reviewPanelRef.current.scrollTop = reviewPanelRef.current.scrollHeight;
-  }, [reviewLines]);
-
-  useEffect(() => {
-    if (askPanelRef.current) askPanelRef.current.scrollTop = askPanelRef.current.scrollHeight;
-  }, [askLines]);
+  // Conditional stick-to-bottom for the review + followup-ask streams. The
+  // global auto-scroll preference is shared via utils/autoScrollPref.
+  const { autoScroll } = useAutoScrollPref();
+  const reviewStick = useStickToBottom<HTMLDivElement>({
+    deps: [reviewLines],
+    itemCount: reviewLines.length,
+    disabled: !autoScroll,
+  });
+  const askStick = useStickToBottom<HTMLDivElement>({
+    deps: [askLines],
+    itemCount: askLines.length,
+    disabled: !autoScroll,
+  });
 
   // ── Loaders ──────────────────────────────────────────────────────────────
 
@@ -869,13 +874,14 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
               </button>
             )}
           </div>
-          <div className="coding-panel" ref={reviewPanelRef} style={{ maxHeight: 360 }}>
+          <div className="coding-panel" ref={reviewStick.ref} style={{ maxHeight: 360 }}>
             {reviewLines.map((line, i) => (
               <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
             ))}
             {running && !reviewDone && (
               <div className="coding-line coding-line-tool_call">{t('projects.detail.reviewProgress')}</div>
             )}
+            <ScrollToBottomButton count={reviewStick.pendingCount} onClick={reviewStick.scrollToBottom} />
           </div>
         </div>
       )}
@@ -1058,11 +1064,12 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
             ))}
 
             {askRunning && (
-              <div className="coding-panel cr-followup-stream" ref={askPanelRef} style={{ maxHeight: 220 }}>
+              <div className="coding-panel cr-followup-stream" ref={askStick.ref} style={{ maxHeight: 220 }}>
                 {askLines.map((line, i) => (
                   <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
                 ))}
                 <div className="coding-line coding-line-tool_call">{t('projects.detail.reviewFollowupRunning')}</div>
+                <ScrollToBottomButton count={askStick.pendingCount} onClick={askStick.scrollToBottom} />
               </div>
             )}
 

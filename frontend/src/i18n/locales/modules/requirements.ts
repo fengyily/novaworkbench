@@ -520,6 +520,7 @@ export const requirements = {
     mergeConflictResolveManualBtn: '已手动解决，继续',
     mergeConflictAbortBtn: '中止合并',
     mergeRunningHint: '执行中...',
+    mergeProcessTitle: '合并 / 推送 PR 进度',
     mergeCreatePrBtn: '创建 PR',
     mergeViewOrCreatePrBtn: '查看 / 创建 PR',
     devCompleteHint: '开发已完成。',

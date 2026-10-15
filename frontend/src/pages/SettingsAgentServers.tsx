@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useStickToBottom } from '../utils/useStickToBottom';
+import { useAutoScrollPref } from '../utils/autoScrollPref';
+import { ScrollToBottomButton } from '../components/ScrollToBottomButton';
 import {
   agentServersApi,
   type AgentServer,
@@ -686,17 +689,17 @@ function ServerCard({
 }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(true); // expanded by default — install logs are the main signal
-  const logRef = useRef<HTMLPreElement>(null);
   const showLogs = busy !== '' || logs.length > 0;
 
-  // Auto-scroll the terminal panel to the bottom whenever new lines arrive.
-  // Without this a streaming install fills the panel above the fold and the
-  // user has to manually drag the scrollbar to keep up.
-  useEffect(() => {
-    if (logRef.current && (busy !== '' || logs.length > 0)) {
-      logRef.current.scrollTop = logRef.current.scrollHeight;
-    }
-  }, [logs, busy]);
+  // Conditional stick-to-bottom: only follow when the user is at-bottom,
+  // show a jump pill when scrolled up. The toggle is global (shared via
+  // module-level state in utils/autoScrollPref).
+  const { autoScroll } = useAutoScrollPref();
+  const logStick = useStickToBottom<HTMLPreElement>({
+    deps: [logs, busy],
+    itemCount: logs.length,
+    disabled: !autoScroll || !showLogs,
+  });
 
   return (
     <div className="server-card">
@@ -765,8 +768,9 @@ function ServerCard({
             )}
           </div>
           {expanded && (
-            <pre className="server-card-log" ref={logRef}>
+            <pre className="server-card-log" ref={logStick.ref}>
               {logs.length === 0 ? t('settings.agentServersPage.logEmpty') : logs.join('\n')}
+              <ScrollToBottomButton count={logStick.pendingCount} onClick={logStick.scrollToBottom} />
             </pre>
           )}
         </div>

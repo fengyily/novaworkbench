@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useStickToBottom } from '../utils/useStickToBottom';
+import { useAutoScrollPref } from '../utils/autoScrollPref';
+import { ScrollToBottomButton } from '../components/ScrollToBottomButton';
 import {
   preflightApi,
   authedFetch,
@@ -225,19 +228,42 @@ function DepCard({ dep, state, onInstall }: { dep: PreflightDep; state?: Install
       )}
 
       {state && state.log.length > 0 && (
-        <div style={{ marginTop: 10, background: '#0f172a', color: '#f1f5f9', padding: 10, borderRadius: 6, fontFamily: 'monospace', fontSize: 12, maxHeight: 240, overflowY: 'auto' }}>
-          {state.log.map((line, idx) => (
-            <div key={idx} style={{ color: line.type === 'error' ? '#fca5a5' : '#f1f5f9' }}>
-              {line.content}
-            </div>
-          ))}
-          {state.done && (
-            <div style={{ marginTop: 8, color: state.status === 'done' ? '#86efac' : '#fca5a5' }}>
-              {state.status === 'done' ? t('settings.preflight.doneOk', { code: state.exit_code }) : t('settings.preflight.doneFail', { code: state.exit_code })}
-            </div>
-          )}
+        <PreflightInstallLog state={state} doneLabel={state.done ? (state.status === 'done' ? t('settings.preflight.doneOk', { code: state.exit_code }) : t('settings.preflight.doneFail', { code: state.exit_code })) : ''} doneOkColor={state.done ? (state.status === 'done' ? '#86efac' : '#fca5a5') : ''} />
+      )}
+    </div>
+  );
+}
+
+// Install-log panel for one dependency. Pulled out so the inline scroll
+// container can own its own useStickToBottom hook (rules-of-hooks forbids
+// nesting it inside the parent's conditional block). Uses the global
+// auto-scroll preference so the user can pin the log in place from any
+// other SSE panel.
+function PreflightInstallLog({ state, doneLabel, doneOkColor }: { state: InstallState; doneLabel: string; doneOkColor: string }) {
+  const { autoScroll } = useAutoScrollPref();
+  const stick = useStickToBottom<HTMLDivElement>({
+    deps: [state.log],
+    itemCount: state.log.length,
+    disabled: !autoScroll,
+  });
+  return (
+    <div
+      ref={stick.ref}
+      className="preflight-install-log"
+      style={{ marginTop: 10, background: '#0f172a', color: '#f1f5f9', padding: 10, borderRadius: 6, fontFamily: 'monospace', fontSize: 12, maxHeight: 240, overflowY: 'auto', position: 'relative' }}
+    >
+      {state.log.map((line, idx) => (
+        <div key={idx} style={{ color: line.type === 'error' ? '#fca5a5' : '#f1f5f9' }}>
+          {line.content}
+        </div>
+      ))}
+      {state.done && doneLabel && (
+        <div style={{ marginTop: 8, color: doneOkColor }}>
+          {doneLabel}
         </div>
       )}
+      <ScrollToBottomButton count={stick.pendingCount} onClick={stick.scrollToBottom} />
+    </div>
     </div>
   );
 }

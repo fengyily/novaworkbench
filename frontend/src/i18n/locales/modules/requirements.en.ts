@@ -495,6 +495,7 @@ export const requirements = {
     mergeConflictResolveManualBtn: 'Already resolved — continue',
     mergeConflictAbortBtn: 'Abort merge',
     mergeRunningHint: 'Running…',
+    mergeProcessTitle: 'Merge / push PR progress',
     mergeCreatePrBtn: 'Create PR',
     mergeViewOrCreatePrBtn: 'View / create PR',
     devCompleteHint: 'Development complete.',

@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import i18next from 'i18next';
 import MarkdownRender from './MarkdownRender';
+import { useStickToBottom } from '../utils/useStickToBottom';
+import { useAutoScrollPref } from '../utils/autoScrollPref';
+import { ScrollToBottomButton } from './ScrollToBottomButton';
+import { useFullscreen } from '../utils/useFullscreen';
+import { FullscreenButton } from './FullscreenButton';
 import {
   subTasksApi,
   subTaskCliCommand,
@@ -295,10 +300,19 @@ async function writeClipboard(text: string): Promise<boolean> {
 // {type, content} event shape the SSE pipeline emits.
 function SubTaskLogView({ lines }: { lines: LogLine[] }) {
   const { t } = useTranslation();
-  const logRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [lines]);
+  const subLogFs = useFullscreen();
+  // Global auto-scroll preference (shared with RequirementDetail's panels
+  // via module-level state in utils/autoScrollPref). Toggling the switch
+  // on any panel pauses / resumes every sub-task log at once.
+  const { autoScroll } = useAutoScrollPref();
+  // Conditional stick-to-bottom: log lines are appended (not replaced) so
+  // itemCount is the canonical signal. The hook also re-fires on fullscreen
+  // toggle so the height transition doesn't strand us with a stale isAtBottom.
+  const stick = useStickToBottom<HTMLDivElement>({
+    deps: [lines, subLogFs.isFullscreen],
+    itemCount: lines.length,
+    disabled: !autoScroll,
+  });
   if (lines.length === 0) {
     return <div className="sub-log-empty">{t('components.subTaskCard.logEmpty')}</div>;
   }
@@ -372,7 +386,28 @@ function SubTaskLogView({ lines }: { lines: LogLine[] }) {
     }
   });
   flush(lines.length);
-  return <div className="sub-log" ref={logRef}>{rendered}</div>;
+  return (
+    <div className={`sub-log ${subLogFs.isFullscreen ? 'is-fullscreen' : ''}`} ref={stick.ref}>
+      {subLogFs.isFullscreen ? (
+        <FullscreenButton isFullscreen onClick={subLogFs.exit} variant="floating" />
+      ) : (
+        // Inline fullscreen entry — sits inside the dark surface so it
+        // doesn't clash with the surrounding card chrome. The
+        // sub-log-fullscreen-btn class keeps the dark-bg styling localized.
+        <button
+          type="button"
+          className="sub-log-fullscreen-btn"
+          onClick={subLogFs.enter}
+          title={t('components.fullscreen.enterTitle')}
+          aria-label={t('components.fullscreen.enterTitle')}
+        >
+          {t('components.fullscreen.enter')}
+        </button>
+      )}
+      {rendered}
+      <ScrollToBottomButton count={stick.pendingCount} onClick={stick.scrollToBottom} />
+    </div>
+  );
 }
 
 // v0.5.x: 三段折叠区组件——理解 / 实施 / 小结每段都是一个本地小组件。

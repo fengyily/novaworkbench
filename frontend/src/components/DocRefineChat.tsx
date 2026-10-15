@@ -3,6 +3,10 @@ import { useTranslation } from 'react-i18next';
 import { API_BASE, authedFetch, DefaultModelLabel, wizardApi } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import { appendLogLine, coalesceLogLines, type LogLine, type UsageInfo, computeUsage } from '../utils/logLines';
+import { useStickToBottom } from '../utils/useStickToBottom';
+import { useAutoScrollPref } from '../utils/autoScrollPref';
+import { ScrollToBottomButton } from './ScrollToBottomButton';
+import { AutoScrollToggle } from './AutoScrollToggle';
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import ModelSelect from './ModelSelect';
 import AtMentionTextarea from './AtMentionTextarea';
@@ -64,6 +68,8 @@ const docLabelKeys: Record<'design' | 'coding' | 'wiki', string> = {
 export default function DocRefineChat({ reqId, projectPath, docType, currentDoc, model, defaultModel, applyJobId, onTurnDone, onWorkingChange, usage, onUsage }: Props) {
   const [expanded, setExpanded] = useState(false);
   const { isFullscreen, toggle: toggleFullscreen, exit: exitFullscreen } = useFullscreen();
+  // Global auto-scroll preference; shared via module-level state.
+  const { autoScroll, toggle: toggleAutoScroll } = useAutoScrollPref();
   const { t } = useTranslation();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -72,7 +78,14 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
   const [refineComplete, setRefineComplete] = useState(false);
   const [applying, setApplying] = useState(false);
   const [applyLines, setApplyLines] = useState<LogLine[]>([]);
-  const chatRef = useRef<HTMLDivElement>(null);
+  // Conditional stick-to-bottom for the chat panel. appendLogLine replaces
+  // the trailing line in place on each thinking heartbeat, so itemCount
+  // (messages + refine-line growth) is the canonical signal.
+  const chatStick = useStickToBottom<HTMLDivElement>({
+    deps: [messages.length, refineLines.length, isFullscreen],
+    itemCount: messages.length + refineLines.length,
+    disabled: !autoScroll,
+  });
   const esRef = useRef<EventStream | null>(null);
   // streamDocJobRef holds the latest streamDocJob useCallback so
   // streamRefine can hand off to the Agent-bound JobStore flow without a
@@ -132,9 +145,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
     }
   }, [model]);
 
-  useEffect(() => {
-    if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
-  }, [messages, applyLines]);
+  // Chat panel auto-scroll is now handled by useStickToBottom (see above).
 
   // Surface turn progress upward so the parent's claudeWorking aggregation
   // (RequirementDetail's status badge + claude-status row) can pulse
@@ -626,6 +637,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
             <button className="btn btn-sm" onClick={handleClear} title={t('wizard.docRefine.clearTitle')}>🗑</button>
           )}
           <button className="btn btn-sm" onClick={() => setExpanded(false)}>{t('wizard.docRefine.collapse')}</button>
+          <AutoScrollToggle enabled={autoScroll} onToggle={toggleAutoScroll} />
           <FullscreenButton isFullscreen={isFullscreen} onClick={toggleFullscreen} />
         </div>
       </div>
@@ -641,7 +653,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           The confirm-panel and action-row below stay outside the stack so
           they don't accidentally fire from inside the fullscreen view. */}
       <div className={`chat-panel-stack ${isFullscreen ? 'is-fullscreen' : ''}`}>
-      <div className="chat-panel" ref={chatRef}>
+      <div className="chat-panel" ref={chatStick.ref}>
         {isFullscreen && (
           <FullscreenButton isFullscreen={true} onClick={exitFullscreen} variant="floating" />
         )}
@@ -666,6 +678,7 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
         {refineLines.length > 0 && (
           <CodingPhasesPanel lines={refineLines} working={working} />
         )}
+        <ScrollToBottomButton count={chatStick.pendingCount} onClick={chatStick.scrollToBottom} />
       </div>
 
       {/* Apply progress. Rendered as soon as `applying` flips true — the panel
@@ -791,6 +804,14 @@ function CodingPhasesPanel({
 }) {
   const { t } = useTranslation();
   useTick(working);
+  const { autoScroll } = useAutoScrollPref();
+  // Conditional stick-to-bottom — phases grow on each thinking heartbeat
+  // (toolCall timestamps mutate the source array but its length grows).
+  const phasesStick = useStickToBottom<HTMLDivElement>({
+    deps: [logLines.length],
+    itemCount: logLines.length,
+    disabled: !autoScroll,
+  });
   const phases = buildPhaseGroups(logLines);
   const firstAt = phases[0]?.startedAt;
   const lastPhase = phases[phases.length - 1];
@@ -799,7 +820,7 @@ function CodingPhasesPanel({
       ? Math.max(0, (lastPhase.isActive ? Date.now() : lastPhase.finishedAt) - firstAt)
       : 0;
   return (
-    <div className="coding-panel" style={style ?? { margin: '8px 0', maxHeight: 160 }}>
+    <div className="coding-panel" style={style ?? { margin: '8px 0', maxHeight: 160 }} ref={phasesStick.ref}>
       <div className="coding-line-summary">
         {t('wizard.docRefine.toolLogSummary', { n: phases.length, total: formatDuration(totalMs) })}
       </div>
@@ -833,6 +854,7 @@ function CodingPhasesPanel({
       {trailingHint && (
         <div className="coding-line coding-line-tool_call">{trailingHint}</div>
       )}
+      <ScrollToBottomButton count={phasesStick.pendingCount} onClick={phasesStick.scrollToBottom} />
     </div>
   );
 }

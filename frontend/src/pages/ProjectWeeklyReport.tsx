@@ -3,6 +3,9 @@ import { useTranslation } from 'react-i18next';
 import { reportsApi, type WeeklyReport, type ReportGitInfo, type GenerateReportBody } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import MarkdownViewer from '../components/MarkdownViewer';
+import { useStickToBottom } from '../utils/useStickToBottom';
+import { useAutoScrollPref } from '../utils/autoScrollPref';
+import { ScrollToBottomButton } from '../components/ScrollToBottomButton';
 import { errorMessage } from '../utils/errMsg';
 import './ProjectWeeklyReport.css';
 
@@ -48,7 +51,6 @@ export default function ProjectWeeklyReport({ projectId }: { projectId: string }
   const [genLines, setGenLines] = useState<{ type: string; content: string }[]>([]);
   const [genError, setGenError] = useState('');
   const esRef = useRef<EventStream | null>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
 
   // History
   const [reports, setReports] = useState<WeeklyReport[]>([]);
@@ -82,10 +84,15 @@ export default function ProjectWeeklyReport({ projectId }: { projectId: string }
     loadReports();
   }, [projectId, loadReports]);
 
-  // Auto-scroll the stream panel
-  useEffect(() => {
-    if (panelRef.current) panelRef.current.scrollTop = panelRef.current.scrollHeight;
-  }, [genLines]);
+  // Conditional stick-to-bottom for the weekly-report generator's SSE
+  // stream panel. Toggle is bound to the global preference (pausing on
+  // any panel pauses this one too).
+  const { autoScroll } = useAutoScrollPref();
+  const panelStick = useStickToBottom<HTMLDivElement>({
+    deps: [genLines],
+    itemCount: genLines.length,
+    disabled: !autoScroll,
+  });
 
   // Close the stream on unmount / project switch
   useEffect(() => {
@@ -310,11 +317,12 @@ export default function ProjectWeeklyReport({ projectId }: { projectId: string }
               <button className="btn btn-secondary btn-sm" onClick={() => setGenLines([])}>{t('reports.clear')}</button>
             )}
           </div>
-          <div className="coding-panel" ref={panelRef} style={{ maxHeight: 320 }}>
+          <div className="coding-panel" ref={panelStick.ref} style={{ maxHeight: 320 }}>
             {genLines.map((line, i) => (
               <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
             ))}
             {generating && <div className="coding-line coding-line-tool_call">{t('reports.writing')}</div>}
+            <ScrollToBottomButton count={panelStick.pendingCount} onClick={panelStick.scrollToBottom} />
           </div>
         </div>
       )}

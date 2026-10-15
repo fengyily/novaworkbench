@@ -2,6 +2,10 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
+import { useStickToBottom } from '../utils/useStickToBottom';
+import { useAutoScrollPref } from '../utils/autoScrollPref';
+import { ScrollToBottomButton } from '../components/ScrollToBottomButton';
+
 import {
   projectsApi, runnerApi, platformApi, requirementsApi, knowledgeApi,
   usageApi, usageTotalInput, fmtCost, wizardApi,
@@ -245,7 +249,6 @@ export default function ProjectDetail() {
   const [stopping, setStopping] = useState(false);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollCountRef = useRef(0);
-  const logPanelRef = useRef<HTMLDivElement>(null);
   // Anchor for the inline "new requirement" composer — used by the
   // "+ New requirement" button to scroll the form into view when the list is
   // long enough that the form would otherwise open below the fold.
@@ -417,10 +420,16 @@ export default function ProjectDetail() {
     platformApi.list().then(data => setTokens(data ?? [])).catch(() => {});
   }, []);
 
-  // Auto-scroll panels
-  useEffect(() => {
-    if (logPanelRef.current) logPanelRef.current.scrollTop = logPanelRef.current.scrollHeight;
-  }, [logLines]);
+  // Auto-scroll the docker-run streaming panel. Same pattern as the
+  // wizard SSE panels: only follow when at-bottom, render a jump pill
+  // when the user scrolls up. Toggle is bound to the global preference so
+  // flipping it on any other panel pauses this one too.
+  const { autoScroll } = useAutoScrollPref();
+  const runStick = useStickToBottom<HTMLDivElement>({
+    deps: [logLines],
+    itemCount: logLines.length,
+    disabled: !autoScroll,
+  });
 
   // Cleanup on unmount
   useEffect(() => {
@@ -1715,11 +1724,12 @@ export default function ProjectDetail() {
               : <button className="btn btn-danger" onClick={handleStop} disabled={stopping}>{stopping ? t('projects.detail.runStopping') : t('projects.detail.runStop')}</button>}
           </div>
           {(logLines.length > 0 || isRunning) && (
-            <div className="coding-panel" ref={logPanelRef}>
+            <div className="coding-panel" ref={runStick.ref}>
               {logLines.map((line, i) => (
                 <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
               ))}
               {isRunning && <div className="coding-line coding-line-tool_call">{t('projects.detail.runRunningLine')}</div>}
+              <ScrollToBottomButton count={runStick.pendingCount} onClick={runStick.scrollToBottom} />
             </div>
           )}
           {!isRunning && logLines.length === 0 && (

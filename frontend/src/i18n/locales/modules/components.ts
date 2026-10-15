@@ -420,6 +420,12 @@ export const components = {
     button: '滚到底部',
     newMessages: '↓ {{count}} 条新消息',
   },
+  autoScroll: {
+    on: '⇩ 自动滚动',
+    off: '⇲ 已暂停',
+    onTitle: '正在跟随最新输出，点击暂停',
+    offTitle: '已暂停自动滚动，点击恢复跟随',
+  },
 } as const;
 
 export default components;

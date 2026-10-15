@@ -1,0 +1,18 @@
+/* Auto-scroll toggle button. Default state is "on" (auto-follow active);
+   the `is-on` modifier paints the active accent so the button visibly
+   reads as a state indicator, not a transient action. */
+
+.auto-scroll-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.auto-scroll-toggle.is-on {
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.auto-scroll-toggle:not(.is-on) {
+  color: var(--color-text-muted);
+}

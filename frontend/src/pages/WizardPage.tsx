@@ -3,6 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { API_BASE, authedFetch, projectsApi } from '../api/client';
 import FolderPicker from '../components/FolderPicker';
+import { useStickToBottom } from '../utils/useStickToBottom';
+import { useAutoScrollPref } from '../utils/autoScrollPref';
+import { ScrollToBottomButton } from '../components/ScrollToBottomButton';
 import './WizardPage.css';
 
 type Step = 1 | 2 | 3;
@@ -29,7 +32,6 @@ export default function WizardPage() {
   // v0.6.x 不创建分支开关:WizardPage quick-start 路径也暴露该选项,
   // 让用户在 step 3「开始编码」之前就能选 no-branch。
   const [noBranch, setNoBranch] = useState(false);
-  const outputRef = useRef<HTMLDivElement>(null);
 
   // Step 1: Create Project
   const handleCreateProject = async () => {
@@ -160,12 +162,15 @@ export default function WizardPage() {
     }
   };
 
-  // Scroll output
-  useEffect(() => {
-    if (outputRef.current) {
-      outputRef.current.scrollTop = outputRef.current.scrollHeight;
-    }
-  }, [codeOutput]);
+  // Conditional stick-to-bottom for the wizard's code-output stream.
+  // Toggle is bound to the global preference (pausing on any panel
+  // pauses this one too).
+  const { autoScroll } = useAutoScrollPref();
+  const outputStick = useStickToBottom<HTMLDivElement>({
+    deps: [codeOutput],
+    itemCount: codeOutput.length,
+    disabled: !autoScroll,
+  });
 
   return (
     <div className="wizard-page">
@@ -293,12 +298,13 @@ export default function WizardPage() {
           )}
 
           {codeOutput.length > 0 && (
-            <div className="code-output" ref={outputRef}>
+            <div className="code-output" ref={outputStick.ref}>
               {codeOutput.map((line, i) => (
                 <div key={i} className={`output-line ${line.startsWith('⚠️') ? 'stderr' : ''}`}>
                   {line}
                 </div>
               ))}
+              <ScrollToBottomButton count={outputStick.pendingCount} onClick={outputStick.scrollToBottom} />
             </div>
           )}
 

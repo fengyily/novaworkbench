@@ -411,6 +411,12 @@ export const components = {
     button: 'Scroll to bottom',
     newMessages: '↓ {{count}} new messages',
   },
+  autoScroll: {
+    on: '⇩ Auto-scroll',
+    off: '⇲ Paused',
+    onTitle: 'Following latest output — click to pause',
+    offTitle: 'Auto-scroll paused — click to resume',
+  },
 } as const;
 
 export default components;

@@ -71,6 +71,10 @@ import { SessionContextStrip } from '../components/SessionContextStrip';
 import './RequirementDetail.css';
 import { FullscreenButton } from '../components/FullscreenButton';
 import { useFullscreen } from '../utils/useFullscreen';
+import { useStickToBottom } from '../utils/useStickToBottom';
+import { useAutoScrollPref } from '../utils/autoScrollPref';
+import { AutoScrollToggle } from '../components/AutoScrollToggle';
+import { ScrollToBottomButton } from '../components/ScrollToBottomButton';
 
 interface DesignData {
   overview?: string;
@@ -715,6 +719,34 @@ export default function RequirementDetail() {
   const codingFs = useFullscreen();
   const mergeFs = useFullscreen();
   const wikiFs = useFullscreen();
+  // Global "follow the stream" preference — shared across all SSE panels on
+  // this page (design / wiki / coding / merge). Toggle is rendered once per
+  // panel header; the state lives in localStorage so it survives reloads.
+  const { autoScroll, toggle: toggleAutoScroll } = useAutoScrollPref();
+  // Conditional-stick hooks. Each is keyed on the line source + the matching
+  // fullscreen flag so toggling fullscreen re-runs the compute (the container
+  // height changes from 480px to 100vh, which would otherwise make
+  // `isAtBottom` look stale). `itemCount` is used for the log-line panels
+  // because appendLogLine replaces the trailing line in place on each
+  // thinking heartbeat — deps wouldn't fire on those tail-line updates.
+  const designStick = useStickToBottom<HTMLDivElement>({
+    deps: [designLines, designFs.isFullscreen],
+    disabled: !autoScroll,
+  });
+  const wikiStick = useStickToBottom<HTMLDivElement>({
+    deps: [wikiLines, wikiFs.isFullscreen],
+    disabled: !autoScroll,
+  });
+  const codingStick = useStickToBottom<HTMLDivElement>({
+    deps: [codingLines, codingFs.isFullscreen],
+    itemCount: codingLines.length,
+    disabled: !autoScroll,
+  });
+  const mergeStick = useStickToBottom<HTMLDivElement>({
+    deps: [mergeLines, mergeFs.isFullscreen],
+    itemCount: mergeLines.length,
+    disabled: !autoScroll,
+  });
   // Live re-render tickers for the timing section: while the plan-analysis span
   // or the development span is still open, tick so the displayed duration keeps
   // counting up. Called unconditionally (rules-of-hooks) with a boolean derived
@@ -1065,7 +1097,6 @@ export default function RequirementDetail() {
   const [codingCompressing, setCodingCompressing] = useState(false);
   const [codingCompressedAt, setCodingCompressedAt] = useState<string | null>(null);
   const [codingSummaryModal, setCodingSummaryModal] = useState<string | null>(null);
-  const codingRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventStream | null>(null);
   const extraDescRef = useRef('');
   // One-shot guard for the creation-intent flows (autoStartDesign /
@@ -1253,7 +1284,6 @@ export default function RequirementDetail() {
   // hides behind the "Thinking process" toggle and the user has no idea the
   // run failed.
   const [designError, setDesignError] = useState(false);
-  const designRef = useRef<HTMLDivElement>(null);
   const designEsRef = useRef<EventStream | null>(null);
 
   // Collapsible "Thinking process" toggle for the architect design stream.
@@ -1271,7 +1301,6 @@ export default function RequirementDetail() {
   const [wikiLines, setWikiLines] = useState<LogLine[]>([]);
   const [wikiGenerating, setWikiGenerating] = useState(false);
   const [wikiError, setWikiError] = useState(false);
-  const wikiRef = useRef<HTMLDivElement>(null);
   const wikiEsRef = useRef<EventStream | null>(null);
 
   // Collapsible design-doc state. Long design documents default to collapsed
@@ -2286,13 +2315,11 @@ export default function RequirementDetail() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, req?.design_job_id]);
 
-  useEffect(() => {
-    if (designRef.current) designRef.current.scrollTop = designRef.current.scrollHeight;
-  }, [designLines]);
-
-  useEffect(() => {
-    if (wikiRef.current) wikiRef.current.scrollTop = wikiRef.current.scrollHeight;
-  }, [wikiLines]);
+  // Auto-scroll for design/wiki/coding panels is now handled by
+  // useStickToBottom (declared above). The hook fires only when the user is
+  // already at-bottom; if they scroll up, a "↓ N new messages" pill appears
+  // and they can re-engage on demand. The toggle button in each header
+  // controls the global preference.
 
   // ── Edit requirement (title/description/priority) ─────────────────────────
   const openEdit = () => {
@@ -2922,9 +2949,7 @@ export default function RequirementDetail() {
     };
   }, []);
 
-  useEffect(() => {
-    if (codingRef.current) codingRef.current.scrollTop = codingRef.current.scrollHeight;
-  }, [codingLines]);
+  // Coding panel auto-scroll: see useStickToBottom above.
 
   // Load merge state when entering the developer/done stage (the merge step
   // only makes sense once coding has produced a dev branch to merge from).
@@ -4646,6 +4671,9 @@ export default function RequirementDetail() {
                   {exporting ? <><IconHourglass size={13} className="btn-icon" />{t('requirements.detail2.exportingPdf')}</> : <><IconFileText size={13} className="btn-icon" />{t('requirements.detail2.exportPdfBtn')}</>}
                 </button>
               )}
+              {designPanelOpen && (
+                <AutoScrollToggle enabled={autoScroll} onToggle={toggleAutoScroll} />
+              )}
               {(designPanelOpen || hasDesign) && (
                 <FullscreenButton isFullscreen={designFs.isFullscreen} onClick={designFs.toggle} />
               )}
@@ -4732,7 +4760,7 @@ export default function RequirementDetail() {
           {designPanelOpen && (
             <div
               className={`coding-panel ${designFs.isFullscreen ? 'is-fullscreen' : ''}`}
-              ref={designRef}
+              ref={designStick.ref}
               style={designFs.isFullscreen ? undefined : { marginBottom: 16 }}
             >
               {designFs.isFullscreen && (
@@ -4752,6 +4780,7 @@ export default function RequirementDetail() {
               />
               <CodingLines lines={designLines} working={designing} />
               {designProcessActive && <div className="coding-line coding-line-tool_call"><IconHourglass size={12} className="icon-mr" />{t('requirements.detail2.architectPlanModeHint')}</div>}
+              <ScrollToBottomButton count={designStick.pendingCount} onClick={designStick.scrollToBottom} />
             </div>
           )}
 
@@ -4949,9 +4978,14 @@ export default function RequirementDetail() {
                   compact
                 />
               )}
-              {/* Fullscreen toggle for the streaming panel — same pattern as
-                  the design panel's FullscreenButton. Only meaningful while
-                  the panel is rendered (job running / errored). */}
+              {/* Auto-scroll + fullscreen toggles for the streaming panel.
+                  Same pattern as the design panel: the toggle button is only
+                  meaningful while the panel is rendered (job running / errored),
+                  and the global preference is shared across all panels on this
+                  page. */}
+              {wikiPanelOpen && (
+                <AutoScrollToggle enabled={autoScroll} onToggle={toggleAutoScroll} />
+              )}
               {wikiPanelOpen && (
                 <FullscreenButton isFullscreen={wikiFs.isFullscreen} onClick={wikiFs.toggle} />
               )}
@@ -5047,7 +5081,7 @@ export default function RequirementDetail() {
             {wikiPanelOpen && (
               <div
                 className={`coding-panel ${wikiFs.isFullscreen ? 'is-fullscreen' : ''}`}
-                ref={wikiRef}
+                ref={wikiStick.ref}
                 style={wikiFs.isFullscreen ? undefined : { marginBottom: 16 }}
               >
                 {wikiFs.isFullscreen && (
@@ -5065,6 +5099,7 @@ export default function RequirementDetail() {
                     {t('requirements.detail2.wikiPlanModeHint')}
                   </div>
                 )}
+                <ScrollToBottomButton count={wikiStick.pendingCount} onClick={wikiStick.scrollToBottom} />
               </div>
             )}
             {/* Action bar: status-gated. Mirrors the design / dev CTA
@@ -5207,7 +5242,20 @@ export default function RequirementDetail() {
           merge-PR / sub-task / commit-push-PR CTAs for kind=wiki. */}
       {(stage === 'developer' || stage === 'done') && (hasDesign || req.skip_design) && reqKind !== 'wiki' && (
         <div className="detail-section">
-          <div className="section-header"><h3><IconRocket size={16} className="icon-mr" />{t('requirements.detail2.logSessionStageDeveloper')}</h3></div>
+          {/* Section header — mirrors 方案设计 / 知识库文档: title + a right-aligned
+              action group with auto-scroll + fullscreen toggles. The toggles
+              only show while the streaming panel itself is visible (same guard
+              the design / wiki sections use), so a requirement that hasn't
+              started coding yet doesn't render dead buttons. */}
+          <div className="section-header">
+            <h3><IconRocket size={16} className="icon-mr" />{t('requirements.detail2.logSessionStageDeveloper')}</h3>
+            {(codingLines.length > 0 || coding || !!req.coding_phase) && (
+              <div className="design-toolbar-actions">
+                <AutoScrollToggle enabled={autoScroll} onToggle={toggleAutoScroll} />
+                <FullscreenButton isFullscreen={codingFs.isFullscreen} onClick={codingFs.toggle} />
+              </div>
+            )}
+          </div>
 
           {/* Optional knowledge pre-read display (renders only when the user
               opted in and the backend emitted a knowledge event). */}
@@ -5442,7 +5490,7 @@ export default function RequirementDetail() {
               `coding` and `codingLines` are still empty — which used to render
               a blank page under a requirement that was very much busy. */}
           {(codingLines.length > 0 || coding || !!req.coding_phase) && (
-            <div className={`coding-panel ${codingFs.isFullscreen ? 'is-fullscreen' : ''}`} ref={codingRef}>
+            <div className={`coding-panel ${codingFs.isFullscreen ? 'is-fullscreen' : ''}`} ref={codingStick.ref}>
               {codingFs.isFullscreen && (
                 <FullscreenButton isFullscreen onClick={codingFs.exit} variant="floating" />
               )}
@@ -5502,6 +5550,7 @@ export default function RequirementDetail() {
                   </button>
                 </div>
               )}
+              <ScrollToBottomButton count={codingStick.pendingCount} onClick={codingStick.scrollToBottom} />
             </div>
           )}
 
@@ -5681,13 +5730,29 @@ export default function RequirementDetail() {
                 )}
 
                 {mergeLines.length > 0 && (
-                  <div className={`coding-panel merge-panel ${mergeFs.isFullscreen ? 'is-fullscreen' : ''}`}>
-                    {mergeFs.isFullscreen && (
-                      <FullscreenButton isFullscreen onClick={mergeFs.exit} variant="floating" />
-                    )}
-                    <CodingLines lines={mergeLines} working={merging} />
-                    {merging && <div className="coding-line coding-line-tool_call"><IconHourglass size={12} className="icon-mr" />{t('requirements.detail2.mergeRunningHint')}</div>}
-                  </div>
+                  <>
+                    {/* Inline toolbar for the merge streaming panel — mirror
+                        of the design / coding section headers so the merge
+                        panel also gets an explicit auto-scroll toggle and a
+                        fullscreen entry point. Without this, mergeFs.toggle
+                        was declared but never wired to a button, leaving the
+                        floating exit fullscreen button permanently dead. */}
+                    <div className="section-header" style={{ marginTop: 12 }}>
+                      <span style={{ fontWeight: 600, fontSize: 14 }}>{t('requirements.detail2.mergeProcessTitle')}</span>
+                      <div className="design-toolbar-actions">
+                        <AutoScrollToggle enabled={autoScroll} onToggle={toggleAutoScroll} />
+                        <FullscreenButton isFullscreen={mergeFs.isFullscreen} onClick={mergeFs.toggle} />
+                      </div>
+                    </div>
+                    <div className={`coding-panel merge-panel ${mergeFs.isFullscreen ? 'is-fullscreen' : ''}`} ref={mergeStick.ref}>
+                      {mergeFs.isFullscreen && (
+                        <FullscreenButton isFullscreen onClick={mergeFs.exit} variant="floating" />
+                      )}
+                      <CodingLines lines={mergeLines} working={merging} />
+                      {merging && <div className="coding-line coding-line-tool_call"><IconHourglass size={12} className="icon-mr" />{t('requirements.detail2.mergeRunningHint')}</div>}
+                      <ScrollToBottomButton count={mergeStick.pendingCount} onClick={mergeStick.scrollToBottom} />
+                    </div>
+                  </>
                 )}
 
                 {prLink && !merging && (

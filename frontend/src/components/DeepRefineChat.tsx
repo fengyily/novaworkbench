@@ -3,6 +3,10 @@ import { useTranslation } from 'react-i18next';
 import MarkdownRender from './MarkdownRender';
 
 import { API_BASE, authedFetch, DefaultModelLabel, kindChatPlaceholderKeys, kindOf, requirementsApi, wizardApi, type Kind, type AgentServer } from '../api/client';
+import { useStickToBottom } from '../utils/useStickToBottom';
+import { useAutoScrollPref } from '../utils/autoScrollPref';
+import { ScrollToBottomButton } from './ScrollToBottomButton';
+import { AutoScrollToggle } from './AutoScrollToggle';
 import { tLabel } from '../i18n/label';
 import { createEventStream, type EventStream } from '../api/stream';
 import AtMentionTextarea from './AtMentionTextarea';
@@ -71,14 +75,23 @@ export default function DeepRefineChat({
 }: Props) {
   const [expanded, setExpanded] = useState(true);
   const { isFullscreen, toggle: toggleFullscreen, exit: exitFullscreen } = useFullscreen();
+  // Global auto-scroll preference; shared via module-level state.
+  const { autoScroll, toggle: toggleAutoScroll } = useAutoScrollPref();
   const { t } = useTranslation();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [chatting, setChatting] = useState(false);
+  // Conditional stick-to-bottom for the chat panel. Uses messages + toolLog
+  // length growth (itemCount) because toolLog is replaced in place by
+  // thinking heartbeats — deps alone would miss the tail-line updates.
+  const chatStick = useStickToBottom<HTMLDivElement>({
+    deps: [messages.length, toolLog.length, isFullscreen],
+    itemCount: messages.length + toolLog.length,
+    disabled: !autoScroll,
+  });
   // toolLog: live activity feed (phase + tool-call labels)
   const [toolLog, setToolLog] = useState<LogLine[]>([]);
   const [retryMsg, setRetryMsg] = useState('');
-  const chatRef = useRef<HTMLDivElement>(null);
   // Context-usage snapshot is now CONTROLLED — the parent owns the live state
   // so it can also feed the always-on top strip and seed from the persisted
   // requirements.usage_snapshots blob. We report each `usage` SSE event upward
@@ -443,9 +456,7 @@ export default function DeepRefineChat({
     }
   }, [reqId, t]);
 
-  useEffect(() => {
-    if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
-  }, [messages, toolLog]);
+  // Chat panel auto-scroll is now handled by useStickToBottom (see above).
 
   // Boot: load saved chat; reconnect to an in-flight job if one is active
   // (page refresh), otherwise auto-start the first turn when there's no
@@ -549,6 +560,7 @@ export default function DeepRefineChat({
             <button className="btn btn-sm" onClick={handleClear} title={t('wizard.analyst.clearTitle')}>🗑</button>
           )}
           <button className="btn btn-sm" onClick={() => setExpanded(false)}>{t('wizard.analyst.collapseBtn')}</button>
+          <AutoScrollToggle enabled={autoScroll} onToggle={toggleAutoScroll} />
           <FullscreenButton isFullscreen={isFullscreen} onClick={toggleFullscreen} />
         </div>
       </div>
@@ -563,7 +575,7 @@ export default function DeepRefineChat({
           per-section CSS (mobile 100dvh chat-panel height, composer sticky,
           etc.) keeps working unchanged. */}
       <div className={`chat-panel-stack ${isFullscreen ? 'is-fullscreen' : ''}`}>
-      <div className="chat-panel" ref={chatRef}>
+      <div className="chat-panel" ref={chatStick.ref}>
         {isFullscreen && (
           <FullscreenButton isFullscreen={true} onClick={exitFullscreen} variant="floating" />
         )}
@@ -608,6 +620,7 @@ export default function DeepRefineChat({
             </button>
           </div>
         )}
+        <ScrollToBottomButton count={chatStick.pendingCount} onClick={chatStick.scrollToBottom} />
       </div>
 
       <div className="chat-input-row composer-sticky">
