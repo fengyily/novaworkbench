@@ -161,3 +161,17 @@ func TestErrRemoteDirMissingIsExported(t *testing.T) {
 		t.Fatal("ErrRemoteDirMissing must not be nil")
 	}
 }
+
+// TestRemoveAllNilClient pins the nil-client early-return for RemoveAll,
+// mirroring the same contract Remove has. The GPG provision retry path
+// (see req_499ee84d2a3853f3) calls Client.RemoveAll before it has opened
+// an SFTP session in some test scenarios, and a panic in that branch
+// would be a regression. We assert an error (not a panic, not a nil
+// return) so callers can rely on the "Client not connected" path.
+func TestRemoveAllNilClient(t *testing.T) {
+	var c *Client
+	err := c.RemoveAll("/tmp/whatever")
+	if err == nil {
+		t.Fatal("RemoveAll on nil client must return an error, got nil")
+	}
+}
