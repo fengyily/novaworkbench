@@ -283,6 +283,33 @@
   box-shadow: inset 0 0 0 1px var(--color-border);
 }
 
+/* ── 改动概览图 ──────────────────────────────────────────────────────────── */
+/* The Mermaid blocks hoisted out of result_md. Styled as a quiet band
+   between the ledger and the findings: it is context for the list below,
+   not a finding of its own, so it carries no severity colour. */
+.cr-diagrams {
+  padding: 14px 18px 16px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg);
+}
+.cr-diagrams-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--color-text);
+}
+.cr-diagrams-head svg { color: var(--color-text-secondary); flex: none; }
+.cr-diagrams-title { flex: none; }
+.cr-diagrams-head .cr-hint { flex: 1; min-width: 200px; font-weight: 400; }
+/* Each diagram is its own MarkdownRender, so the gap has to come from the
+   container rather than from prose margins (there is no prose here). */
+.cr-diagrams-body { display: flex; flex-direction: column; gap: 14px; }
+.cr-diagrams-body > * { margin: 0; }
+
 /* ── Findings ────────────────────────────────────────────────────────────── */
 .cr-findings { padding: 16px 18px; display: flex; flex-direction: column; gap: 18px; }
 

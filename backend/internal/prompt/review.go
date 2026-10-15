@@ -35,6 +35,49 @@ const (
 	GoalMetNo      = "no"
 )
 
+// reviewMermaidDirective is the diagram half of the review output contract:
+// a review report should show the shape of a change (call chain, flow,
+// module layout, state transitions), not just describe it in prose — the
+// same bar the architect-stage design doc is held to (see
+// kind_blocks.go's mermaidDirective / wikiMermaidDirective, whose wording
+// and Mermaid-11 compat rules this deliberately mirrors so a reader moving
+// between 方案设计 and Review sees the same kind of picture).
+//
+// Two things are tuned differently from the design-doc twin:
+//
+//  1. Scope is the diff, not the system. A review that redraws the whole
+//     architecture buries the three nodes that actually changed, so the
+//     directive caps the count, asks for 【新增】/【改】 markers, and gives
+//     an explicit out ("写「无」") for one-line changes — without that out
+//     the model dutifully draws a two-node flowchart for a typo fix.
+//  2. Ordering is load-bearing. handler.extractTrailingJSON finds the LAST
+//     ```json fence and, failing that, brace-matches backwards from the end
+//     of the text; a Mermaid block emitted AFTER the contract block would
+//     leave prose trailing the JSON and defeat both paths. Hence the final
+//     bullet pinning diagrams to the body.
+//
+// Blocks that still come back malformed are repaired by
+// service.SanitizeMermaidBlocks before the report is persisted.
+const reviewMermaidDirective = "## 输出图示（Mermaid）\n\n" +
+	"凡是能用图说清楚的改动，都要在「## 改动概览图」里用 ```mermaid ... ``` 代码块画出来，**不要只写文字描述**。" +
+	"按改动的实际形态挑图，不要为了凑数把每种图都画一遍：\n" +
+	"- 跨模块 / 跨层的调用链、请求在前后端之间的往返 → ` ```mermaid ...sequenceDiagram... ``` `（先声明 participant）。\n" +
+	"- 新增或改动的处理流程、分支判断、数据流转 → ` ```mermaid ...flowchart TD/LR... ``` `。\n" +
+	"- 新增模块 / 组件依赖、分层结构的变化 → ` ```mermaid ...flowchart LR... ``` ` 画架构图（用 subgraph 分层）。\n" +
+	"- 状态机 / 生命周期 / 状态字段取值流转 → ` ```mermaid ...stateDiagram-v2... ``` `（[*] 表示起止）。\n" +
+	"- 表结构 / 实体关系的变化 → ` ```mermaid ...erDiagram... ``` `。\n\n" +
+	"画图的尺度：\n" +
+	"- 一般 1-2 张，最多 3 张；每张图前用一句话说明这张图在讲什么。\n" +
+	"- **只画本次 diff 涉及的部分**，不要把整个系统重画一遍；可以保留少量未改动的节点作为上下文。\n" +
+	"- 新增 / 改动的节点用 `【新增】` / `【改】` 前缀标出，让人一眼看出增量在哪。\n" +
+	"- 改动确实只是单文件小修小补（改文案、改常量、补注释）时，「## 改动概览图」直接写「无」，不要硬凑。\n\n" +
+	"**Mermaid 11.x 兼容约束**（违反会被前端标红 \"Syntax error in text\"）：\n" +
+	"- 节点 label 含 `(`、`)`、`{`、`}` 或半角 `;` 时，整段 label 用双引号包起来：`[\"foo(n)<br/>bar\"]`。\n" +
+	"- 平行四边形 `[/text/]` 必须 `[/` 开头、`/]` 结尾，两段斜杠都不能少。\n" +
+	"- sequenceDiagram 的消息文本、stateDiagram-v2 的转移说明里都不要用半角 `;` —— mermaid 11 会把它当成新语句开始并报错。\n" +
+	"- Mermaid 块里**只放图本身**（节点 + 连线），文件路径 / 函数签名等细节写到正文里，不要塞进节点文字。\n" +
+	"- 所有 Mermaid 块都必须出现在报告正文中，位置在文末 json 块**之前**。\n"
+
 // ReviewPromptInput is everything the review task prompt needs. HeadRef /
 // BaseRef are the already-resolved git refs (handler.resolveDiffRefs picks
 // origin/<x> when it exists and falls back to the local branch), so the
@@ -135,17 +178,26 @@ func BuildReviewPrompt(in ReviewPromptInput) string {
 ## 总体评价
 （一到三句话，包含「是否建议合入」的明确结论）
 
+## 改动概览图
+（用 Mermaid 画出本次改动，规则见下面的「输出图示（Mermaid）」。改动确实简单到不值得画图时，只写「无」）
+
 ## 目标达成情况
 （逐条对照用户描述的目标说明达成情况）
 
 ## P0 — 必须修复
 ## P1 — 建议修复
 ## P3 — 优化项建议
-（每项格式：**标题** — ` + "`文件路径:行号`" + `，问题描述，然后给出具体修改建议）
+（每项格式：**标题** — ` + "`文件路径:行号`" + `，问题描述，然后给出具体修改建议；
+问题本身涉及多步调用 / 并发时序 / 状态流转时，在该条目下补一个 Mermaid 图说明出错路径）
 
 ## 优点
 （值得保留的好设计）
 
+`)
+
+	b.WriteString(reviewMermaidDirective)
+
+	b.WriteString(`
 **报告正文结束后，必须在最末尾追加一个 json 代码围栏块**，供系统解析分级统计（这是硬性要求，不可省略、不可放在正文中间）：
 
 ` + "```json" + `
@@ -258,7 +310,9 @@ func BuildFollowupPrompt(in FollowupPromptInput) string {
 3. 如果追问涉及某条具体问题，请说明：它为什么是问题、会在什么场景下出错、应该怎么改（必要时给出修改后的代码片段）。
 4. 如果经核对发现原报告中的结论有误或不准确，直接说明并更正，不要为了自洽而辩护。
 5. 用 Markdown 作答，控制在必要篇幅内。
-6. **不要输出 json 代码围栏块**（分级统计只由 Review 报告本身产出，追问不参与）。
+6. 问题涉及调用链 / 并发时序 / 状态流转 / 模块依赖时，用 ` + "```mermaid" + ` 代码块作图说明（` + "`sequenceDiagram`" + ` / ` + "`flowchart TD`" + ` / ` + "`stateDiagram-v2`" + `），一张讲清楚即可，不要只写文字。
+   Mermaid 11.x 兼容：节点 label 含 ` + "`(`" + `、` + "`)`" + `、` + "`{`" + `、` + "`}`" + ` 或半角 ` + "`;`" + ` 时整段用双引号包起来；sequenceDiagram 的消息文本里不要用半角 ` + "`;`" + `。
+7. **不要输出 json 代码围栏块**（分级统计只由 Review 报告本身产出，追问不参与）。
 `)
 
 	return b.String()

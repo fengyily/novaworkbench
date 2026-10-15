@@ -14,6 +14,7 @@ import (
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/prompt"
+	"github.com/novaworkbench/backend/internal/service"
 	gossh "github.com/novaworkbench/backend/internal/ssh"
 	"github.com/novaworkbench/backend/internal/store"
 )
@@ -387,9 +388,15 @@ func (h *ReviewHandler) streamFollowup(ctx context.Context, job *store.Job, work
 // finishFollowup is the single terminal path: persist the turn, snapshot the
 // job log and close the job. An error is stored as the answer text so the
 // thread shows what happened instead of an empty bubble.
+//
+// The answer goes through service.SanitizeMermaidBlocks for the same reason
+// the review report does (buildReviewOutcome): BuildFollowupPrompt invites a
+// Mermaid diagram when the question is about a call chain or a timing
+// problem, and a block the Mermaid 11 lexer rejects would render as a red
+// error card inside the thread. No-op when the answer has no diagram.
 func (h *ReviewHandler) finishFollowup(job *store.Job, fu *model.CodeReviewFollowup, modelName string, resumed bool, answer, errMsg string) {
 	status := model.FollowupStatusDone
-	body := answer
+	body := service.SanitizeMermaidBlocks(answer)
 	if errMsg != "" {
 		status = model.FollowupStatusError
 		body = errMsg

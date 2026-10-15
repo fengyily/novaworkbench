@@ -927,7 +927,15 @@ func buildReviewTaskPrompt(rv *model.CodeReview, headRef, baseRef string, hasAtt
 // report, findings_json stays empty and all counts stay 0, which is the
 // signal the frontend uses to fall back to plain-Markdown rendering. The
 // report's own ## P0/P1/P3 sections mean the user loses nothing.
+//
+// Both paths run the report through service.SanitizeMermaidBlocks first:
+// prompt.BuildReviewPrompt asks for Mermaid diagrams (改动概览图 + per-finding
+// call/timing diagrams) and the model occasionally emits blocks the Mermaid
+// 11 lexer rejects, which would render as a red "Syntax error in text" card
+// in the report view. The sanitizer only touches ```mermaid fences, so it is
+// a no-op for a diagram-free report.
 func buildReviewOutcome(status, report string) service.ReviewOutcome {
+	report = service.SanitizeMermaidBlocks(report)
 	out := service.ReviewOutcome{Status: status, ResultMD: report}
 	jsonPart, markdownPart := extractTrailingJSON(report)
 	if jsonPart == "" {

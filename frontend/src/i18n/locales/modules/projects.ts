@@ -393,6 +393,9 @@ export const projects = {
     reviewVerdictPlain: '未分级',
     reviewVerdictHintPlain: '模型未按分级契约输出，下方为完整报告原文。',
     reviewFullReport: '完整报告',
+    // 「改动概览图」：把报告里的 Mermaid 图提到折叠的完整报告之上单独展示。
+    reviewDiagrams: '改动概览图',
+    reviewDiagramsHint: '由本次 Review 报告中的 Mermaid 图提取，点击图可放大 / 下载。',
     reviewGoalLabel: '目标达成情况',
     reviewGoalYes: '已达成',
     reviewGoalPartial: '部分达成',

@@ -385,6 +385,10 @@ export const projects = {
     reviewVerdictPlain: 'Ungraded',
     reviewVerdictHintPlain: 'The model did not follow the grading contract; the full report is below.',
     reviewFullReport: 'Full report',
+    // "Change diagrams": the report's Mermaid blocks, surfaced above the
+    // collapsed full report so they are not hidden behind a disclosure.
+    reviewDiagrams: 'Change diagrams',
+    reviewDiagramsHint: 'Extracted from the Mermaid blocks in this report — click a diagram to zoom or download it.',
     reviewGoalLabel: 'Goal attainment',
     reviewGoalYes: 'Met',
     reviewGoalPartial: 'Partially met',

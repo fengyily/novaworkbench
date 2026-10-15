@@ -63,7 +63,7 @@ import AttachmentPanel from '../components/AttachmentPanel';
 import ModelSelect from '../components/ModelSelect';
 import { ExecEnvSelect, type ExecEnvServer } from '../components/ExecEnvSelect';
 import MarkdownRender from '../components/MarkdownRender';
-import { IconBranch, IconClock, IconFileText, IconPlug, IconRobot } from '../components/icons';
+import { IconArchitect, IconBranch, IconClock, IconFileText, IconPlug, IconRobot } from '../components/icons';
 import { errorMessage } from '../utils/errMsg';
 import { fmtDate, fmtDateTime } from '../utils/intl';
 import '../styles/markdown-prose.css';
@@ -85,6 +85,44 @@ const SEVERITIES: ReviewSeverity[] = ['P0', 'P1', 'P3'];
  *   plain   — the model broke the trailing-JSON contract, nothing to grade
  */
 type ReviewVerdict = 'error' | 'block' | 'warn' | 'clean' | 'pending' | 'plain';
+
+/**
+ * Collect the bodies of every ```mermaid fence in a report, in order.
+ *
+ * Line-based rather than regex-based because a review report is full of
+ * fenced code: a regex for ```mermaid[\s\S]*?``` happily matches across a
+ * Go snippet that itself contains the word, and a non-greedy match stops at
+ * the first ``` inside a nested fence. Tracking fence state line by line
+ * also means a ```go block mentioning mermaid is skipped outright.
+ *
+ * An unterminated final fence still yields its body — models truncate the
+ * closing marker often enough that dropping the diagram would lose a real
+ * picture (same reasoning as the backend's lastJSONFence).
+ */
+function extractMermaidBlocks(md: string): string[] {
+  const blocks: string[] = [];
+  let current: string[] | null = null;
+  let inOtherFence = false;
+  for (const line of md.split('\n')) {
+    const t = line.trim();
+    if (current) {
+      if (/^`{3,}\s*$/.test(t)) {
+        if (current.join('\n').trim()) blocks.push(current.join('\n'));
+        current = null;
+      } else {
+        current.push(line);
+      }
+    } else if (inOtherFence) {
+      if (/^`{3,}\s*$/.test(t)) inOtherFence = false;
+    } else if (/^`{3,}\s*mermaid\b/i.test(t)) {
+      current = [];
+    } else if (/^`{3,}/.test(t)) {
+      inOtherFence = true;
+    }
+  }
+  if (current && current.join('\n').trim()) blocks.push(current.join('\n'));
+  return blocks;
+}
 
 interface Props {
   projectId: string;
@@ -523,6 +561,15 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   // ── Derived ──────────────────────────────────────────────────────────────
 
   const findings = useMemo(() => parseReviewFindings(selected), [selected]);
+
+  // Diagrams are pulled out of the report and shown in their own section.
+  // They live inside result_md (the reviewer is asked for a 「改动概览图」 and
+  // for per-finding call/timing diagrams), and result_md sits behind a
+  // disclosure that is closed whenever the review graded cleanly — i.e.
+  // exactly the reports whose diagrams are worth a glance would hide them.
+  // The blocks stay in the prose too; duplicating a picture that is one
+  // click away costs less than burying it.
+  const diagrams = useMemo(() => extractMermaidBlocks(selected?.result_md || ''), [selected?.result_md]);
   const grouped = useMemo(() => {
     const m = new Map<ReviewSeverity, ReviewFinding[]>(SEVERITIES.map(s => [s, []]));
     for (const f of findings) m.get(f.severity)?.push(f);
@@ -880,6 +927,26 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
               ))}
             </div>
           ) : null}
+
+          {/* 改动概览图 — the report's Mermaid blocks, hoisted above the
+              findings so the shape of the change is visible before the list
+              of what is wrong with it. Rendered through MarkdownRender so a
+              diagram keeps the same zoom / download affordances it has in
+              the design doc and the knowledge base. */}
+          {diagrams.length > 0 && (
+            <section className="cr-diagrams">
+              <h4 className="cr-diagrams-head">
+                <IconArchitect size={13} />
+                <span className="cr-diagrams-title">{t('projects.detail.reviewDiagrams')}</span>
+                <span className="cr-hint">{t('projects.detail.reviewDiagramsHint')}</span>
+              </h4>
+              <div className="cr-diagrams-body md-prose">
+                {diagrams.map((src, i) => (
+                  <MarkdownRender key={i} content={'```mermaid\n' + src + '\n```'} />
+                ))}
+              </div>
+            </section>
+          )}
 
           {findings.length > 0 && (
             <div className="cr-findings">
