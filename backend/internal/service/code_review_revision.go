@@ -52,6 +52,12 @@ const revisionCols = `id, review_id, rev_no, trigger_kind, result_md, findings_j
 // empty version would show up as a selectable "v2" that renders nothing.
 // Callers can therefore call this unconditionally; it returns (nil, nil) when
 // there is nothing worth keeping.
+//
+// followupCount means "how many 追问 turns this version TOOK INTO ACCOUNT",
+// not how many existed at the time: an `initial` version passes 0 even on a
+// re-run with a long thread, because a review run reads the diff and not the
+// conversation. Only a regeneration records a non-zero count, and the UI
+// reads the difference against the live thread as "N 条追问尚未纳入报告".
 func (s *CodeReviewRevisionService) Snapshot(rv *model.CodeReview, trigger string, followupCount int) (*model.CodeReviewRevision, error) {
 	if rv == nil {
 		return nil, errors.New("review is required")

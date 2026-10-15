@@ -866,7 +866,13 @@ func (h *ReviewHandler) snapshotFinishedReview(reviewID, status string) {
 		log.Printf("[Review] reload finished review %s for snapshot: %v", reviewID, err)
 		return
 	}
-	if _, err := h.revisionSvc.Snapshot(rv, model.RevisionTriggerInitial, h.answeredFollowupCount(reviewID)); err != nil {
+	// followup_count is 0 for every `initial` version, including a re-run of
+	// a review that already has a 追问 thread. The field means "how many
+	// follow-ups this version took into account", and a review run derives
+	// its report from the diff alone — it never reads the thread. Recording
+	// the live thread length here would tell the UI those turns had been
+	// folded in and hide the 「重新生成」 prompt that would actually fold them.
+	if _, err := h.revisionSvc.Snapshot(rv, model.RevisionTriggerInitial, 0); err != nil {
 		log.Printf("[Review] snapshot review %s: %v", reviewID, err)
 	}
 }

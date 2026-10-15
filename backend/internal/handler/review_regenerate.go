@@ -183,7 +183,10 @@ func (h *ReviewHandler) RegenerateReview(w http.ResponseWriter, r *http.Request)
 	// (finishReview → snapshotFinishedReview); EnsureSnapshot covers the
 	// review that finished before this table existed. A failure here aborts
 	// the whole request: running on would make the regeneration destructive.
-	if err := h.revisionSvc.EnsureSnapshot(rv, h.answeredFollowupCount(rv.ID)); err != nil {
+	// followup_count 0, for the same reason snapshotFinishedReview uses 0:
+	// the version being frozen here is the output of a review RUN, which
+	// never read the thread.
+	if err := h.revisionSvc.EnsureSnapshot(rv, 0); err != nil {
 		writeError(w, http.StatusInternalServerError, "SNAPSHOT_FAILED", "保存当前报告版本失败，已取消重新生成: "+err.Error())
 		return
 	}

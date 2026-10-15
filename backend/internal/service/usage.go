@@ -58,6 +58,14 @@ func nullableString(s string) any {
 	return s
 }
 
+// Review-family steps all start with "review": the review run itself
+// ("review"), a 追问 turn ("review-followup") and a regeneration
+// ("review-regenerate"). The project queries below separate review cost from
+// feature-development cost with `step [NOT] LIKE 'review%'` rather than an
+// equality test on "review" alone — otherwise the two follow-on steps would
+// be counted as development work in the project totals AND be missing from
+// the review breakdown, i.e. wrong in both places at once.
+
 // StepLabels maps a step code to its Chinese display label. Shared with the
 // frontend's stepLabels; the API joins it onto StepUsage rows so the client
 // doesn't have to maintain a parallel map.
@@ -75,6 +83,8 @@ var StepLabels = map[string]string{
 	"sub_task_adjust":     "子任务调整",
 	"merge":               "合入解决",
 	"review":              "代码审查",
+	"review-followup":     "Review 追问",
+	"review-regenerate":   "Review 重新生成",
 }
 
 func stepLabel(step string) string {
@@ -207,7 +217,7 @@ func (s *UsageService) RequirementsByProject(projID string) ([]model.ReqUsage, e
 	tables := s.priceTablesBestEffort()
 
 	rows, err := s.db.Query(
-		"SELECT requirement_id, claude_config_id, currency, model, SUM(input_tokens), SUM(output_tokens), SUM(cache_creation_tokens), SUM(cache_read_tokens) FROM token_usage WHERE project_id=? AND step!='review' AND requirement_id IS NOT NULL GROUP BY requirement_id, claude_config_id, currency, model ORDER BY SUM(input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens) DESC",
+		"SELECT requirement_id, claude_config_id, currency, model, SUM(input_tokens), SUM(output_tokens), SUM(cache_creation_tokens), SUM(cache_read_tokens) FROM token_usage WHERE project_id=? AND step NOT LIKE 'review%' AND requirement_id IS NOT NULL GROUP BY requirement_id, claude_config_id, currency, model ORDER BY SUM(input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens) DESC",
 		projID)
 	if err != nil {
 		return nil, err
@@ -257,7 +267,7 @@ func (s *UsageService) ModelsByProject(projID string) ([]model.ModelUsage, error
 	tables := s.priceTablesBestEffort()
 
 	rows, err := s.db.Query(
-		"SELECT model, claude_config_id, currency, SUM(input_tokens), SUM(output_tokens), SUM(cache_creation_tokens), SUM(cache_read_tokens) FROM token_usage WHERE project_id=? AND step!='review' GROUP BY model, claude_config_id, currency ORDER BY SUM(input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens) DESC",
+		"SELECT model, claude_config_id, currency, SUM(input_tokens), SUM(output_tokens), SUM(cache_creation_tokens), SUM(cache_read_tokens) FROM token_usage WHERE project_id=? AND step NOT LIKE 'review%' GROUP BY model, claude_config_id, currency ORDER BY SUM(input_tokens+output_tokens+cache_creation_tokens+cache_read_tokens) DESC",
 		projID)
 	if err != nil {
 		return nil, err
@@ -324,7 +334,7 @@ func (s *UsageService) DailyByProject(projID string) ([]model.DailyUsage, error)
 	dayExpr := s.dateExpr()
 
 	rows, err := s.db.Query(
-		"SELECT "+dayExpr+", claude_config_id, currency, model, SUM(input_tokens), SUM(output_tokens), SUM(cache_creation_tokens), SUM(cache_read_tokens) FROM token_usage WHERE project_id=? AND step!='review' GROUP BY "+dayExpr+", claude_config_id, currency, model ORDER BY "+dayExpr+" DESC",
+		"SELECT "+dayExpr+", claude_config_id, currency, model, SUM(input_tokens), SUM(output_tokens), SUM(cache_creation_tokens), SUM(cache_read_tokens) FROM token_usage WHERE project_id=? AND step NOT LIKE 'review%' GROUP BY "+dayExpr+", claude_config_id, currency, model ORDER BY "+dayExpr+" DESC",
 		projID)
 	if err != nil {
 		return nil, err
@@ -371,7 +381,7 @@ func (s *UsageService) DailyByProject(projID string) ([]model.DailyUsage, error)
 // (requirement_id is NULL). Meta is parsed into PR fields for display.
 func (s *UsageService) ReviewRowsByProject(projID string) ([]model.ReviewUsage, error) {
 	rows, err := s.db.Query(
-		"SELECT id, job_id, meta, input_tokens, output_tokens, created_at FROM token_usage WHERE project_id=? AND step='review' ORDER BY created_at DESC",
+		"SELECT id, job_id, meta, input_tokens, output_tokens, created_at FROM token_usage WHERE project_id=? AND step LIKE 'review%' ORDER BY created_at DESC",
 		projID)
 	if err != nil {
 		return nil, err
@@ -618,7 +628,7 @@ type ProjectSummary struct {
 // ProjectSummary returns the project total (excl review), per-requirement and
 // per-model and per-day totals, and the review breakdown.
 func (s *UsageService) ProjectSummary(projID string) (ProjectSummary, error) {
-	total, err := s.totals("project_id=? AND step!='review'", projID)
+	total, err := s.totals("project_id=? AND step NOT LIKE 'review%'", projID)
 	if err != nil {
 		return ProjectSummary{}, err
 	}
