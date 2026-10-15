@@ -43,6 +43,16 @@ type CodeReview struct {
 	P1Count      int    `json:"p1_count"`
 	P3Count      int    `json:"p3_count"`
 	GoalMet      string `json:"goal_met"`
+	// GoalChecksJSON is the contract's optional `goal_checks` array verbatim
+	// (a []GoalCheck): the per-criterion evidence behind GoalMet's single
+	// yes/partial/no verdict. Empty when the model skipped it — the verdict
+	// alone still renders, so this never gates anything.
+	GoalChecksJSON string `json:"goal_checks_json"`
+	// RevisionNo is which version of the report code_reviews currently holds.
+	// It starts at 1 and climbs by one per finished run (a re-review or a
+	// 「基于对话重新生成」), matching the rev_no of the newest
+	// code_review_revisions row. Older versions stay readable there.
+	RevisionNo int `json:"revision_no"`
 	// Model is the review's model binding: the user's pick from the Review
 	// toolbar when one was made, overwritten with the EFFECTIVE model (role
 	// override → config default → "默认模型" literal) once a run starts, so
@@ -77,6 +87,67 @@ type ReviewFinding struct {
 	Title      string `json:"title"`
 	Detail     string `json:"detail"`
 	Suggestion string `json:"suggestion"`
+}
+
+// GoalCheck is one row of the "修改目标是否达成" evidence table: a criterion
+// taken from the user's 改动目标 description, the verdict for it, and the
+// concrete evidence the reviewer based that verdict on (a diff hunk, a log
+// line from an uploaded run log, a section of an attached design doc).
+//
+// It is the structured half of what GoalMet summarises in one word. The
+// contract marks it optional, so a model that answers only `goal_met` still
+// produces a usable report — the UI simply has no evidence table to show.
+type GoalCheck struct {
+	Criterion string `json:"criterion"`
+	// Status is yes | partial | no | unknown. "unknown" is its own verdict
+	// here (unlike GoalMet's empty string): a criterion the reviewer could
+	// not check — e.g. it needs a runtime log nobody attached — is a real
+	// outcome the user should see, not a missing answer.
+	Status   string `json:"status"`
+	Evidence string `json:"evidence"`
+}
+
+// Goal-check statuses. The first three mirror prompt.GoalMet*; "unknown" is
+// the extra verdict only a per-criterion row can carry.
+const (
+	GoalCheckUnknown = "unknown"
+)
+
+// Revision triggers: what produced this version of the report.
+const (
+	RevisionTriggerInitial    = "initial"    // a Review run (first or re-run)
+	RevisionTriggerRegenerate = "regenerate" // 基于追问对话重新生成
+)
+
+// CodeReviewRevision is one frozen version of a review's report.
+//
+// code_reviews always holds the CURRENT version — every existing read path
+// (history list, PR comment, 追问 prompt) keeps working untouched. This table
+// is the history behind it, so 「基于对话重新生成」 can produce a v2 without
+// destroying the v1 the user already read, and so a disappointing v2 can be
+// switched back.
+type CodeReviewRevision struct {
+	ID       string `json:"id"`
+	ReviewID string `json:"review_id"`
+	// RevNo is 1-based and unique per review; the newest row's RevNo equals
+	// CodeReview.RevisionNo.
+	RevNo        int    `json:"rev_no"`
+	Trigger      string `json:"trigger"`
+	ResultMD     string `json:"result_md"`
+	FindingsJSON string `json:"findings_json"`
+	P0Count      int    `json:"p0_count"`
+	P1Count      int    `json:"p1_count"`
+	P3Count      int    `json:"p3_count"`
+	GoalMet      string `json:"goal_met"`
+	// GoalChecksJSON mirrors CodeReview.GoalChecksJSON for this version.
+	GoalChecksJSON string `json:"goal_checks_json"`
+	// FollowupCount is how many 追问 turns existed when this version was
+	// produced. The UI reads it as "v2 已纳入 N 条追问", and the difference
+	// against the live thread length is what makes 「重新生成」 worth
+	// offering again.
+	FollowupCount int       `json:"followup_count"`
+	Model         string    `json:"model"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // Follow-up (追问) lifecycle. A follow-up is created already `running` — it

@@ -50,6 +50,10 @@ type ReviewHandler struct {
 	// nil → the follow-up endpoints answer 503 and everything else in Review
 	// behaves exactly as before.
 	followupSvc *service.CodeReviewFollowupService
+	// revisionSvc freezes each finished report as a version, which is what
+	// makes 「基于对话重新生成」 non-destructive. nil → no version history is
+	// kept and regeneration is refused outright (see RegenerateReview).
+	revisionSvc *service.CodeReviewRevisionService
 }
 
 // SetCodeReviewFollowupSvc wires the 追问 thread store (see
@@ -830,21 +834,42 @@ func (h *ReviewHandler) finishReview(job *store.Job, rv *model.CodeReview, model
 		if err := h.reviewSvc.MarkFinished(rv.ID, buildReviewOutcome(status, report)); err != nil {
 			log.Printf("[Review] persist review %s: %v", rv.ID, err)
 		}
+		h.snapshotFinishedReview(rv.ID, status)
 	}
 
-	// Persist the finished review job (incl. the effective reviewer model) so a
-	// backend restart doesn't wipe the record and the UI can surface "本次 review
-	// 使用模型". Review jobs aren't bound to a requirement, so requirement_id is
-	// empty and the model lives on job_logs.model.
-	lines, jobStatus, exitCode := job.Snapshot()
-	if perr := h.jobLogSvc.Save(job.ID, "", string(jobStatus), exitCode, job.StartedAt, job.FinishedAt, lines, modelName); perr != nil {
-		log.Printf("[Review] failed to persist job log %s: %v", job.ID, perr)
-	}
-	if status == model.ReviewStatusError {
-		job.Finish(1, store.JobError)
+	// Close + persist the job (incl. the effective reviewer model) so a
+	// backend restart doesn't wipe the record and the UI can surface "本次
+	// review 使用模型".
+	h.closeReviewJob(job, modelName, status == model.ReviewStatusError)
+}
+
+// snapshotFinishedReview freezes a successful run's report as the next
+// version, so 「基于对话重新生成」 later has something to fall back to and the
+// version switcher has something to switch between.
+//
+// Only successful runs are frozen. A failed run stores its error message in
+// result_md (that is how the UI shows what went wrong), and freezing that
+// would put a selectable "v2" on the list that renders an error instead of a
+// report. Best-effort throughout: the report itself is already persisted and
+// visible, so a snapshot failure costs only the history entry.
+func (h *ReviewHandler) snapshotFinishedReview(reviewID, status string) {
+	if h.revisionSvc == nil || status != model.ReviewStatusDone {
 		return
 	}
-	job.Finish(0, store.JobDone)
+	rv, err := h.reviewSvc.Get(reviewID)
+	if err != nil {
+		log.Printf("[Review] reload finished review %s for snapshot: %v", reviewID, err)
+		return
+	}
+	// followup_count is 0 for every `initial` version, including a re-run of
+	// a review that already has a 追问 thread. The field means "how many
+	// follow-ups this version took into account", and a review run derives
+	// its report from the diff alone — it never reads the thread. Recording
+	// the live thread length here would tell the UI those turns had been
+	// folded in and hide the 「重新生成」 prompt that would actually fold them.
+	if _, err := h.revisionSvc.Snapshot(rv, model.RevisionTriggerInitial, 0); err != nil {
+		log.Printf("[Review] snapshot review %s: %v", reviewID, err)
+	}
 }
 
 // rememberReviewSession persists the claude session id of the run in flight so
@@ -952,6 +977,9 @@ func buildReviewOutcome(status, report string) service.ReviewOutcome {
 	out.ResultMD = markdownPart
 	out.FindingsJSON = string(raw)
 	out.GoalMet = goalMet
+	// Evidence for the 目标达成 verdict. Optional by contract and parsed on
+	// its own, so a malformed goal_checks costs only the evidence table.
+	out.GoalChecksJSON = parseGoalChecks(jsonPart)
 	out.P0, out.P1, out.P3 = countBySeverity(findings)
 	return out
 }

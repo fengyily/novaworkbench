@@ -13,47 +13,11 @@
 
 .project-code-review { display: flex; flex-direction: column; gap: 16px; }
 
-/* ── Mode switch ─────────────────────────────────────────────────────────── */
-.cr-mode-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.cr-mode-tabs {
-  display: inline-flex;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  overflow: hidden;
-  background: var(--color-surface);
-}
-.cr-mode-tab {
-  padding: 6px 16px;
-  font-size: 13px;
-  border: none;
-  background: transparent;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-}
-.cr-mode-tab:hover:not(:disabled) { background: var(--color-hover); }
-.cr-mode-tab.active {
-  background: var(--color-active);
-  color: var(--color-primary);
-  font-weight: 600;
-}
-.cr-mode-tab:disabled { opacity: .55; cursor: not-allowed; }
-.cr-mode-hint { font-size: 12px; color: var(--color-text-muted); flex: 1; min-width: 220px; }
-
-/* ── Branch composer ─────────────────────────────────────────────────────── */
-.cr-composer {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 16px;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  background: var(--color-surface);
-}
+/* ── Composer fields ─────────────────────────────────────────────────────
+   The mode switch is a segmented control and the composer is a stack of
+   numbered step cards — both live further down, with the rest of the
+   layout added when the tab was split into panels. What is left here are
+   the field primitives those cards fill themselves with. */
 .cr-field-row { display: flex; gap: 12px; flex-wrap: wrap; }
 .cr-field-row .cr-field { flex: 1; min-width: 220px; }
 .cr-field { display: flex; flex-direction: column; gap: 6px; }
@@ -112,7 +76,10 @@
   border-radius: var(--radius-xl);
   background: var(--color-surface);
   box-shadow: var(--shadow-card);
-  overflow: hidden;
+  /* `clip`, not `hidden`: both clip children to the rounded corners, but
+     `hidden` makes this a scroll container, which silently kills the
+     `position: sticky` on the toolbar inside it. */
+  overflow: clip;
 }
 .cr-report-block {
   --cr-accent: var(--color-error);
@@ -520,7 +487,6 @@
 
 @media (max-width: 768px) {
   .cr-field-row { flex-direction: column; }
-  .cr-mode-hint { min-width: 0; }
 
   /* The verdict meta chips stop competing with the headline for the one
      available column — they stack underneath, left-aligned. */
@@ -656,4 +622,362 @@
 
 @media (max-width: 768px) {
   .cr-followup-composer { flex-direction: column; align-items: stretch; }
+}
+
+/* ── Three-step composer ──────────────────────────────────────────────────
+   The composer asks three different kinds of question (what to review /
+   what "done" means / how to run it), so each gets its own numbered card
+   rather than all of them sharing one flat stack of inputs. */
+.cr-composer-shell { display: flex; flex-direction: column; gap: 12px; }
+
+.cr-step {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface);
+}
+.cr-step-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.cr-step-no {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--color-primary);
+  align-self: center;
+}
+.cr-step-title {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--color-text);
+  flex: none;
+}
+.cr-step-head .cr-hint { flex: 1; min-width: 200px; }
+
+/* The advanced step is a <details>; its summary carries the same head
+   layout, so only the marker chrome differs. */
+.cr-advanced > .cr-advanced-summary {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.cr-advanced > .cr-advanced-summary::-webkit-details-marker { display: none; }
+.cr-advanced > .cr-advanced-summary::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  align-self: center;
+  border-right: 1.5px solid var(--color-text-muted);
+  border-bottom: 1.5px solid var(--color-text-muted);
+  transform: rotate(45deg) translate(-2px, -2px);
+  transition: transform 0.15s ease;
+}
+.cr-advanced[open] > .cr-advanced-summary::after {
+  transform: rotate(-135deg) translate(-2px, -2px);
+}
+.cr-advanced[open] > .cr-advanced-summary { margin-bottom: 12px; }
+/* The run bar is nested inside the step card now, so it drops the frame it
+   used to draw for itself. */
+.project-code-review .cr-advanced .cr-run-bar {
+  border: none;
+  padding: 0;
+  margin: 0;
+  background: none;
+}
+
+/* Segmented control for PR / 分支 — one control, two states, instead of
+   tabs that looked like page navigation. */
+.cr-segmented {
+  display: inline-flex;
+  padding: 3px;
+  gap: 3px;
+  border-radius: 8px;
+  background: var(--color-hover);
+  align-self: flex-start;
+}
+.cr-segment {
+  border: none;
+  background: none;
+  padding: 5px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.cr-segment:hover:not(:disabled):not(.active) { color: var(--color-text); }
+.cr-segment.active {
+  background: var(--color-surface);
+  color: var(--color-primary);
+  box-shadow: var(--shadow-sm, 0 1px 2px rgba(15, 23, 42, 0.08));
+}
+.cr-segment:disabled { opacity: .55; cursor: not-allowed; }
+
+.cr-attach-wait {
+  padding: 10px 12px;
+  border: 1px dashed var(--color-border);
+  border-radius: 8px;
+}
+
+/* ── Result layout ────────────────────────────────────────────────────────
+   Report and conversation side by side once there is room for both: the
+   questions worth asking come from the report you are looking at. Below
+   1280px they stack, report first. */
+.cr-result-grid { display: flex; flex-direction: column; gap: 16px; }
+.cr-result-grid > .cr-report { min-width: 0; }
+.cr-result-aside { min-width: 0; }
+
+@media (min-width: 1280px) {
+  .cr-result-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.6fr) minmax(320px, 1fr);
+    align-items: start;
+  }
+  .cr-result-aside {
+    position: sticky;
+    top: 12px;
+    max-height: calc(100vh - 32px);
+    overflow-y: auto;
+  }
+}
+
+/* ── Report action bar ───────────────────────────────────────────────────
+   Sticky, because a long report scrolls past the point where you decide to
+   export it or ask for a rewrite. */
+.cr-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+  border-radius: 10px 10px 0 0;
+}
+.cr-toolbar-spacer { flex: 1; min-width: 0; }
+
+.cr-versions { display: inline-flex; gap: 4px; }
+.cr-version {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.cr-version:hover:not(:disabled) { background: var(--color-hover); }
+/* The current version is the disabled one — it reads as "you are here"
+   rather than as an unavailable action, which is why it keeps full
+   contrast instead of the usual disabled dimming. */
+.cr-version.active {
+  background: var(--color-active);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  opacity: 1;
+  cursor: default;
+}
+
+.cr-export { position: relative; display: inline-flex; }
+/* Click-away layer: a menu that only closes on a second click of its own
+   trigger is a menu users leave open by accident. */
+.cr-export-backdrop { position: fixed; inset: 0; z-index: 4; }
+.cr-export-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 5;
+  min-width: 160px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-md, 0 6px 18px rgba(15, 23, 42, 0.12));
+}
+.cr-export-menu button {
+  border: none;
+  background: none;
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--color-text);
+  cursor: pointer;
+}
+.cr-export-menu button:hover { background: var(--color-hover); }
+
+/* ── 目标达成清单 ─────────────────────────────────────────────────────────
+   The evidence behind the verdict chip in the band above. Deliberately a
+   list of rows rather than a table: the evidence column is free text and
+   routinely longer than the other two put together. */
+.cr-goals {
+  padding: 14px 18px;
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.cr-goals-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--color-text);
+}
+.cr-goals-head .cr-hint { flex: 1; min-width: 200px; font-weight: 400; }
+.cr-goal-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.cr-goal-item {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 9px 12px;
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-border);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--color-bg);
+}
+.cr-goal-item-yes { border-left-color: var(--color-success); }
+.cr-goal-item-partial { border-left-color: var(--color-warning); }
+.cr-goal-item-no { border-left-color: var(--color-error); }
+.cr-goal-item-unknown { border-left-color: var(--color-border); }
+.cr-goal-flag {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--color-hover);
+  color: var(--color-text-secondary);
+}
+.cr-goal-body { flex: 1; min-width: 0; }
+.cr-goal-criterion {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.6;
+  color: var(--color-text);
+}
+.cr-goal-evidence {
+  margin: 5px 0 0;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+  word-break: break-word;
+}
+.cr-goal-evidence-tag {
+  display: inline-block;
+  margin-right: 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+/* Per-finding 追问 entry point. Quiet until hovered — it sits on every
+   finding, and three loud buttons per row would compete with the titles. */
+.cr-finding-ask {
+  flex: none;
+  opacity: 0.55;
+  font-size: 11.5px;
+  padding: 1px 8px;
+}
+.cr-finding:hover .cr-finding-ask,
+.cr-finding-ask:focus-visible { opacity: 1; }
+
+/* ── Conversation column ─────────────────────────────────────────────────- */
+.cr-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface);
+}
+/* In the two-column layout the thread owns its own card, so it no longer
+   needs the separator it used when it hung off the bottom of the report. */
+.cr-chat .cr-followups { margin-top: 0; padding-top: 0; border-top: none; }
+
+.cr-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.cr-chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  text-align: left;
+}
+.cr-chip:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  background: var(--color-active);
+}
+.cr-chip:disabled { opacity: .5; cursor: not-allowed; }
+
+.cr-regen {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 10px;
+  border-top: 1px dashed var(--color-border);
+}
+.cr-regen .cr-hint { flex: 1; min-width: 180px; }
+
+/* ── History extras ───────────────────────────────────────────────────── */
+.cr-history-blanks {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+.cr-history-rev {
+  display: inline-block;
+  margin-top: 3px;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  background: var(--color-active);
+  color: var(--color-primary);
+}
+
+@media (max-width: 768px) {
+  .cr-step { padding: 12px 14px; }
+  .cr-toolbar { padding: 8px; }
+  .cr-goals { padding: 12px 14px; }
+  .cr-chat { padding: 12px 14px; }
+  .cr-segmented { align-self: stretch; }
+  .cr-segment { flex: 1; }
 }

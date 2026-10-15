@@ -761,6 +761,42 @@ CREATE TABLE IF NOT EXISTS code_review_followups (
 );
 -- The thread view is always "every follow-up of one review, oldest first".
 CREATE INDEX IF NOT EXISTS idx_crf_review ON code_review_followups(review_id, created_at);
+
+-- Frozen versions of a review's report ("v1 / v2 / …").
+--
+-- code_reviews keeps the CURRENT version, so every existing read path (the
+-- history list, the PR comment回贴, the 追问 prompt) is untouched. This table
+-- is the history behind it: 「基于追问对话重新生成」 snapshots the version it
+-- is about to replace, which is what makes the operation non-destructive —
+-- a v2 that reads worse than v1 can be switched back, and a failed
+-- regeneration leaves the review exactly as it was.
+--
+-- rev_no is 1-based per review (not globally), hence the composite unique
+-- index rather than a bare column constraint.
+CREATE TABLE IF NOT EXISTS code_review_revisions (
+	id              TEXT PRIMARY KEY,
+	review_id       TEXT NOT NULL,
+	rev_no          INTEGER NOT NULL DEFAULT 1,
+	-- trigger_kind: 'initial' (a Review run) | 'regenerate' (基于追问重新生成).
+	-- Named *_kind because a bare "trigger" column is a reserved word in MySQL.
+	trigger_kind    TEXT NOT NULL DEFAULT 'initial',
+	result_md       TEXT NOT NULL DEFAULT '',
+	findings_json   TEXT NOT NULL DEFAULT '',
+	p0_count        INTEGER NOT NULL DEFAULT 0,
+	p1_count        INTEGER NOT NULL DEFAULT 0,
+	p3_count        INTEGER NOT NULL DEFAULT 0,
+	goal_met        TEXT NOT NULL DEFAULT '',
+	goal_checks_json TEXT NOT NULL DEFAULT '',
+	-- How many 追问 turns had been answered when this version was produced.
+	-- The UI compares it against the live thread length to show "有 N 条新
+	-- 追问尚未纳入报告".
+	followup_count  INTEGER NOT NULL DEFAULT 0,
+	model           TEXT NOT NULL DEFAULT '',
+	created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (review_id) REFERENCES code_reviews(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_uniq_crr_rev ON code_review_revisions(review_id, rev_no);
+CREATE INDEX IF NOT EXISTS idx_crr_review ON code_review_revisions(review_id, rev_no);
 `
 
 // alterColumns adds columns to older databases. ALTER TABLE fails when the
@@ -907,6 +943,14 @@ var alterColumns = []string{
 	// Claude session id of the review's last run, so 追问 can `--resume` the
 	// conversation that already holds the diff and the report.
 	`ALTER TABLE code_reviews ADD COLUMN claude_session_id TEXT NOT NULL DEFAULT ''`,
+	// Per-criterion evidence behind the one-word goal_met verdict (the
+	// contract's optional `goal_checks` array, stored verbatim). Empty on
+	// every pre-existing row and on any run where the model skipped it.
+	`ALTER TABLE code_reviews ADD COLUMN goal_checks_json TEXT NOT NULL DEFAULT ''`,
+	// Which version of the report the row currently holds. Defaults to 1 so
+	// a database written before code_review_revisions existed reads as "v1",
+	// which is exactly what its single stored report is.
+	`ALTER TABLE code_reviews ADD COLUMN revision_no INTEGER NOT NULL DEFAULT 1`,
 	`ALTER TABLE scheduled_tasks ADD COLUMN coding_model TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE scheduled_tasks ADD COLUMN coding_agent_server_id TEXT NOT NULL DEFAULT ''`,
 	// Recurring scheduled tasks: an "alarm-style" repeating plan lives on the

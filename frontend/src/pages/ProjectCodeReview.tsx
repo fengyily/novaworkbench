@@ -1,128 +1,66 @@
-// ProjectCodeReview — the project detail page's "代码 Review" tab, lifted out
-// of ProjectDetail.tsx (which was well past 2000 lines) into its own file,
-// mirroring ProjectWeeklyReport / ProjectIssueMonitor.
+// ProjectCodeReview — the project detail page's "代码 Review" tab.
+//
+// This file is the container: it owns the state, the SSE plumbing and the
+// handlers, and composes four panels that own no server state of their own
+// (pages/codeReview/): ReviewComposer / ReviewReport / ReviewChat /
+// ReviewHistory. It used to be one 1200-line component; splitting it is what
+// made the result view's two-column layout and the sticky action bar
+// tractable.
 //
 // Two modes share one output panel and one history list:
 //
-//   PR 模式     — the original flow: list open PRs from the platform, review
-//                 one, then post the report back as a comment. Behaviour is
-//                 unchanged; the state / handlers / markup were moved here
-//                 verbatim.
-//   分支 模式   — the new flow: pick any branch (including one that was never
-//                 pushed), write what the change was meant to achieve, attach
-//                 supporting files, then run the review. The description and
-//                 attachments are what let the reviewer answer "目标是否达成".
+//   PR 模式     — list open PRs from the platform, review one, then post the
+//                 report back as a comment.
+//   分支 模式   — review any branch (including one that was never pushed),
+//                 with a 改动目标 description and attachments as the context
+//                 that lets the reviewer answer 目标是否达成.
 //
-// Both modes run on the backend's single JobStore+SSE channel
-// (reviewApi.streamJobUrl) — branch review deliberately does not open a
-// second stream.
+// Both run on the backend's single JobStore+SSE channel
+// (reviewApi.streamJobUrl) — branch review, 追问 and regeneration all share
+// it rather than opening streams of their own.
 //
-// A branch review is a persisted session (`crv_*`): the draft row has to
-// exist before attachments can be uploaded, because the row IS the
-// attachment owner. That's why the composer is two-phase (create → describe
-// + attach → start) rather than one big form.
+// The draft row: a branch review is a persisted session (`crv_*`) and the
+// row IS the attachment owner, so it has to exist before anything can be
+// uploaded. That used to be a manual 「创建草稿」 button — an implementation
+// detail the user had to perform. It is now created automatically (debounced)
+// once a branch is picked; abandoned ones are hidden from the history list
+// and can be purged in one click (see shared.isBlankDraft).
 //
-// The report reads top-down as verdict → ledger → findings → full prose:
+// The report → conversation → report loop:
 //
-//   verdict  — one coloured band answering "can this merge?" before any
-//              reading is required (ReviewVerdict below derives it from
-//              status + the persisted P0/P1 counts).
-//   ledger   — three count tiles, coloured only when non-zero so a single
-//              P0 is findable at a glance.
-//   findings — the graded items, grouped by severity; an empty bucket
-//              collapses to one quiet line instead of a full section.
-//   prose    — result_md behind a disclosure, rendered with the shared
-//              `.md-prose` typography (styles/markdown-prose.css) so the
-//              report looks the same here as in the knowledge base and the
-//              design-doc viewer. Before that class existed this surface had
-//              no typography at all and fell back to browser defaults.
+//   report v1 → 追问 … → 基于对话重新生成 → report v2 (v1 still readable)
 //
-// Findings rendering degrades on purpose: when the model honoured the
-// trailing-JSON contract we group by P0/P1/P3 with counts; when it didn't,
-// findings_json is empty, the verdict is 'plain', and the Markdown
-// disclosure opens by itself (the report's own ## P0/P1/P3 sections mean
-// nothing is lost).
-//
-// 追问 (follow-ups) hang off the selected report: each question is its own
-// job on the same SSE channel, answered by resuming the review's claude
-// session, and the whole thread is persisted server-side so it survives a
-// reload. A follow-up never re-grades the review — the P0/P1/P3 counts you
-// see always belong to the report above it.
+// Regeneration goes through the same job channel and the same grading
+// contract, and the backend freezes the version it replaces first, so the
+// version switcher in the report toolbar can always go back.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  reviewApi, codeReviewsApi, agentServersApi, parseReviewFindings,
+  reviewApi, codeReviewsApi, agentServersApi,
   type PR, type PRListResponse, type Project,
-  type CodeReview, type CodeReviewRunBinding, type ReviewFinding, type ReviewSeverity, type GoalMet,
+  type CodeReview, type CodeReviewRunBinding, type CodeReviewRevision, type ReviewFinding,
   type CodeReviewFollowup,
   API_BASE, authedFetch,
 } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
-import AttachmentPanel from '../components/AttachmentPanel';
-import ModelSelect from '../components/ModelSelect';
-import { ExecEnvSelect, type ExecEnvServer } from '../components/ExecEnvSelect';
-import MarkdownRender from '../components/MarkdownRender';
-import { IconArchitect, IconBranch, IconClock, IconFileText, IconPlug, IconRobot } from '../components/icons';
+import type { ExecEnvServer } from '../components/ExecEnvSelect';
+import { IconRobot } from '../components/icons';
+import ReviewComposer, { type Mode } from './codeReview/ReviewComposer';
+import ReviewReport from './codeReview/ReviewReport';
+import ReviewChat from './codeReview/ReviewChat';
+import ReviewHistory from './codeReview/ReviewHistory';
+import type { StreamLine } from './codeReview/shared';
 import { errorMessage } from '../utils/errMsg';
-import { fmtDate, fmtDateTime } from '../utils/intl';
+import { exportDesignPdf } from '../utils/exportDesignPdf';
+import {
+  buildReviewMarkdown, downloadReviewMarkdown, reviewExportTitle, reviewTargetLabel,
+} from '../utils/reviewExport';
 import '../styles/markdown-prose.css';
 import './ProjectCodeReview.css';
 
-type Mode = 'pr' | 'branch';
-
-/** Display order of the severity buckets. P2 is intentionally absent. */
-const SEVERITIES: ReviewSeverity[] = ['P0', 'P1', 'P3'];
-
-/**
- * Headline state of a finished review, derived from status + counts.
- *
- *   block   — at least one P0: must not merge
- *   warn    — no P0 but some P1: merge after fixing
- *   clean   — graded, nothing blocking
- *   error   — the run itself failed
- *   pending — draft or still running, so there is no result yet
- *   plain   — the model broke the trailing-JSON contract, nothing to grade
- */
-type ReviewVerdict = 'error' | 'block' | 'warn' | 'clean' | 'pending' | 'plain';
-
-/**
- * Collect the bodies of every ```mermaid fence in a report, in order.
- *
- * Line-based rather than regex-based because a review report is full of
- * fenced code: a regex for ```mermaid[\s\S]*?``` happily matches across a
- * Go snippet that itself contains the word, and a non-greedy match stops at
- * the first ``` inside a nested fence. Tracking fence state line by line
- * also means a ```go block mentioning mermaid is skipped outright.
- *
- * An unterminated final fence still yields its body — models truncate the
- * closing marker often enough that dropping the diagram would lose a real
- * picture (same reasoning as the backend's lastJSONFence).
- */
-function extractMermaidBlocks(md: string): string[] {
-  const blocks: string[] = [];
-  let current: string[] | null = null;
-  let inOtherFence = false;
-  for (const line of md.split('\n')) {
-    const t = line.trim();
-    if (current) {
-      if (/^`{3,}\s*$/.test(t)) {
-        if (current.join('\n').trim()) blocks.push(current.join('\n'));
-        current = null;
-      } else {
-        current.push(line);
-      }
-    } else if (inOtherFence) {
-      if (/^`{3,}\s*$/.test(t)) inOtherFence = false;
-    } else if (/^`{3,}\s*mermaid\b/i.test(t)) {
-      current = [];
-    } else if (/^`{3,}/.test(t)) {
-      inOtherFence = true;
-    }
-  }
-  if (current && current.join('\n').trim()) blocks.push(current.join('\n'));
-  return blocks;
-}
+/** How long to wait after the last branch keystroke before creating a draft. */
+const DRAFT_DEBOUNCE_MS = 700;
 
 interface Props {
   projectId: string;
@@ -133,7 +71,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   const { t } = useTranslation();
   const [mode, setMode] = useState<Mode>('pr');
 
-  // ── PR mode (moved verbatim from ProjectDetail) ──────────────────────────
+  // ── PR mode ──────────────────────────────────────────────────────────────
   const [prData, setPrData] = useState<PRListResponse | null>(null);
   const [prsLoading, setPrsLoading] = useState(false);
   const [prsError, setPrsError] = useState('');
@@ -145,12 +83,13 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   const lastReviewedPRRef = useRef<number>(0);
 
   // ── Shared stream panel ──────────────────────────────────────────────────
-  const [reviewLines, setReviewLines] = useState<{ type: string; content: string }[]>([]);
+  const [reviewLines, setReviewLines] = useState<StreamLine[]>([]);
   const [reviewDone, setReviewDone] = useState(false);
   // Effective model the reviewer role ran with for the most recent review
   // (from the job_done SSE frame). Empty until a review completes.
   const [reviewModel, setReviewModel] = useState('');
   const [running, setRunning] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
   const reviewEsRef = useRef<EventStream | null>(null);
   const reviewPanelRef = useRef<HTMLDivElement>(null);
 
@@ -177,8 +116,9 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   // ── History + result ─────────────────────────────────────────────────────
   const [history, setHistory] = useState<CodeReview[]>([]);
   const [selected, setSelected] = useState<CodeReview | null>(null);
+  const [revisions, setRevisions] = useState<CodeReviewRevision[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [reportOpen, setReportOpen] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
 
   // ── 追问 ─────────────────────────────────────────────────────────────────
   // The thread belongs to the report currently in the result view, and runs
@@ -187,24 +127,18 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   const [followups, setFollowups] = useState<CodeReviewFollowup[]>([]);
   const [question, setQuestion] = useState('');
   const [askRunning, setAskRunning] = useState(false);
-  const [askLines, setAskLines] = useState<{ type: string; content: string }[]>([]);
+  const [askLines, setAskLines] = useState<StreamLine[]>([]);
   const [askError, setAskError] = useState('');
   const askEsRef = useRef<EventStream | null>(null);
-  const askPanelRef = useRef<HTMLDivElement>(null);
 
-  // Close the SSE stream when the tab unmounts so a navigated-away review
+  // Close the SSE streams when the tab unmounts so a navigated-away review
   // doesn't keep a dangling reader around.
   useEffect(() => () => { reviewEsRef.current?.close(); askEsRef.current?.close(); }, []);
 
-  // Keep the live stream pinned to the newest line (behaviour carried over
-  // from ProjectDetail's review panel).
+  // Keep the live stream pinned to the newest line.
   useEffect(() => {
     if (reviewPanelRef.current) reviewPanelRef.current.scrollTop = reviewPanelRef.current.scrollHeight;
   }, [reviewLines]);
-
-  useEffect(() => {
-    if (askPanelRef.current) askPanelRef.current.scrollTop = askPanelRef.current.scrollHeight;
-  }, [askLines]);
 
   // ── Loaders ──────────────────────────────────────────────────────────────
 
@@ -226,21 +160,30 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   useEffect(() => { loadPRs(); }, [loadPRs]);
   useEffect(() => { loadHistory(); }, [loadHistory]);
 
-  // The 追问 thread follows whichever report is in the result view. Keyed on
-  // the id (not the object) so re-reading the same session after a run
-  // doesn't refetch the thread it just updated.
+  // The 追问 thread and the version list both follow whichever report is in
+  // the result view. Keyed on the id (not the object) so re-reading the same
+  // session after a run doesn't refetch what it just updated.
   const selectedId = selected?.id ?? '';
   useEffect(() => {
     setAskLines([]);
     setAskError('');
     setQuestion('');
-    if (!selectedId) { setFollowups([]); return; }
+    if (!selectedId) { setFollowups([]); setRevisions([]); return; }
     let cancelled = false;
     codeReviewsApi.listFollowups(selectedId)
       .then(rows => { if (!cancelled) setFollowups(Array.isArray(rows) ? rows : []); })
       .catch(() => { if (!cancelled) setFollowups([]); });
+    codeReviewsApi.listRevisions(selectedId)
+      .then(rows => { if (!cancelled) setRevisions(Array.isArray(rows) ? rows : []); })
+      .catch(() => { if (!cancelled) setRevisions([]); });
     return () => { cancelled = true; };
   }, [selectedId]);
+
+  const reloadRevisions = useCallback((reviewId: string) => {
+    codeReviewsApi.listRevisions(reviewId)
+      .then(rows => setRevisions(Array.isArray(rows) ? rows : []))
+      .catch(() => {/* the switcher just stays on the current version */});
+  }, []);
 
   // Only ready servers are offered — the backend refuses the rest, so listing
   // them would only mislead. A failure leaves the list empty, which still
@@ -251,9 +194,8 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
       .catch(() => {/* 设置 → Agent 服务器 is the source of truth */});
   }, []);
 
-  // Branch candidates for the two selectors. Best-effort, mirroring
-  // ProjectDetail's existing fetch: on failure the list stays empty and the
-  // user types the branch name by hand.
+  // Branch candidates for the two selectors. Best-effort: on failure the
+  // list stays empty and the user types the branch name by hand.
   useEffect(() => {
     const localPath = project?.local_path;
     if (mode !== 'branch' || !localPath) return;
@@ -287,6 +229,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
           setReviewDone(true);
           setReviewModel(data.model || '');
           setRunning(false);
+          setRegenerating(false);
           setReviewingPR(null);
           onDone(messageLines.join('\n\n'));
           reviewEsRef.current?.close();
@@ -300,6 +243,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
         setReviewLines(prev => [...prev, { type: 'error', content: t('projects.detail.reviewSseDrop') }]);
         setReviewDone(true);
         setRunning(false);
+        setRegenerating(false);
         setReviewingPR(null);
         onDone(messageLines.join('\n\n'));
         reviewEsRef.current = null;
@@ -324,7 +268,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
   // ── PR mode handlers ─────────────────────────────────────────────────────
 
-  const handleReview = useCallback(async (pr: PR) => {
+  const handleReviewPR = useCallback(async (pr: PR) => {
     if (running) return;
     lastReviewedPRRef.current = pr.number;
     setReviewingPR(pr);
@@ -361,31 +305,6 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
   // ── Branch mode handlers ─────────────────────────────────────────────────
 
-  // Creating the draft is what gives attachments an owner id, so the panel
-  // only appears after this resolves.
-  const handleCreateDraft = async () => {
-    if (!branch.trim()) {
-      setBranchError(t('projects.detail.reviewNeedBranch'));
-      return;
-    }
-    setCreating(true);
-    setBranchError('');
-    try {
-      const rv = await codeReviewsApi.create(projectId, {
-        branch: branch.trim(),
-        base_branch: baseBranch.trim(),
-        title: draftTitle.trim(),
-        description,
-        ...runBinding(),
-      });
-      setSession(rv);
-      setBaseBranch(rv.base_branch);
-      loadHistory();
-    } catch (err: unknown) {
-      setBranchError(errorMessage(err));
-    } finally { setCreating(false); }
-  };
-
   // Description / title / branches are saved on blur rather than per
   // keystroke — the row is only read when the run starts.
   //
@@ -393,7 +312,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   // the state they just set isn't readable here yet. Passing the new value
   // explicitly lets a model / exec-env change persist immediately instead of
   // waiting for the next blur.
-  const saveDraftField = async (override?: CodeReviewRunBinding) => {
+  const saveDraftField = useCallback(async (override?: CodeReviewRunBinding) => {
     if (!session || session.status === 'running') return;
     try {
       const rv = await codeReviewsApi.update(session.id, {
@@ -406,11 +325,76 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
       });
       setSession(rv);
       setDescSavedAt(Date.now());
-    } catch { /* non-fatal: the start call re-sends nothing, so surface on start instead */ }
-  };
+    } catch { /* non-fatal: surfaced on start instead */ }
+  }, [session, branch, baseBranch, draftTitle, description, runBinding]);
+
+  // ensureDraft returns the review row for the current composer, creating it
+  // on first need and never creating a second one.
+  //
+  // The row exists only so attachments have an owner id, which is not the
+  // user's problem — making them press 「创建草稿」 first was exposing our
+  // schema as a workflow step. Two callers race for it (the debounce timer
+  // below and the 开始 button), so an in-flight create is cached in a ref and
+  // handed to whoever asks next; without that, clicking 开始 inside the
+  // debounce window would leave a stray blank draft behind.
+  //
+  // Form values are read through formRef rather than captured, which keeps
+  // this callback stable — a callback that changed on every keystroke in the
+  // description box would restart the debounce timer forever.
+  const sessionRef = useRef<CodeReview | null>(null);
+  const draftPromiseRef = useRef<Promise<CodeReview> | null>(null);
+  const formRef = useRef({ branch, baseBranch, draftTitle, description, binding: runBinding() });
+  formRef.current = { branch, baseBranch, draftTitle, description, binding: runBinding() };
+  useEffect(() => { sessionRef.current = session; }, [session]);
+
+  const ensureDraft = useCallback(async (): Promise<CodeReview | null> => {
+    if (sessionRef.current) return sessionRef.current;
+    if (draftPromiseRef.current) return draftPromiseRef.current;
+    const form = formRef.current;
+    if (!form.branch.trim()) return null;
+    setCreating(true);
+    const pending = codeReviewsApi.create(projectId, {
+      branch: form.branch.trim(),
+      base_branch: form.baseBranch.trim(),
+      title: form.draftTitle.trim(),
+      description: form.description,
+      ...form.binding,
+    })
+      .then(rv => {
+        // Written straight to the ref as well as to state: a caller awaiting
+        // this promise must not be able to observe "no session" because the
+        // re-render hasn't happened yet.
+        sessionRef.current = rv;
+        setSession(rv);
+        setBaseBranch(prev => prev || rv.base_branch);
+        setBranchError('');
+        loadHistory();
+        return rv;
+      })
+      .finally(() => {
+        draftPromiseRef.current = null;
+        setCreating(false);
+      });
+    draftPromiseRef.current = pending;
+    return pending;
+  }, [projectId, loadHistory]);
+
+  // Debounced because `branch` is a free-text input with a datalist: typing
+  // "feat/pagination" by hand would otherwise create a row per keystroke.
+  useEffect(() => {
+    if (mode !== 'branch' || session || running || !branch.trim()) return;
+    const timer = window.setTimeout(() => {
+      void ensureDraft().catch((err: unknown) => setBranchError(errorMessage(err)));
+    }, DRAFT_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [mode, branch, session, running, ensureDraft]);
 
   const handleStartBranchReview = async () => {
-    if (!session || running) return;
+    if (running) return;
+    if (!branch.trim()) {
+      setBranchError(t('projects.detail.reviewNeedBranch'));
+      return;
+    }
     setRunning(true);
     setReviewLines([]);
     setReviewDone(false);
@@ -418,16 +402,28 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     setSelected(null);
     setBranchError('');
     try {
-      // Flush any un-blurred edits so the run sees the latest description.
-      await saveDraftField();
-      const { job_id } = await codeReviewsApi.start(session.id);
+      const existing = session;
+      // Joins the debounced create when one is already in flight, so hitting
+      // 开始 immediately after typing a branch starts THAT row.
+      const rv = existing ?? await ensureDraft();
+      if (!rv) {
+        setBranchError(t('projects.detail.reviewNeedBranch'));
+        setRunning(false);
+        return;
+      }
+      // A row ensureDraft just created already carries the current form
+      // values; an existing one may be holding un-blurred edits.
+      if (existing) await saveDraftField();
+      const reviewId = rv.id;
+      const { job_id } = await codeReviewsApi.start(reviewId);
       subscribeJob(job_id, () => {
         loadHistory();
         // Re-read the session so the graded findings (written by the stream
         // tail) land in the result view.
-        codeReviewsApi.get(session.id).then(rv => {
-          setSession(rv);
-          setSelected(rv);
+        codeReviewsApi.get(reviewId).then(full => {
+          setSession(full);
+          setSelected(full);
+          reloadRevisions(reviewId);
         }).catch(() => {});
       });
     } catch (err: unknown) {
@@ -438,12 +434,14 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
   const handleNewSession = () => {
     setSession(null);
+    setBranch('');
     setDescription('');
     setDraftTitle('');
     setDescSavedAt(0);
     setRunModel('');
     setRunConfigId('');
     setAgentServerId('');
+    setBranchError('');
     resetPanel();
   };
 
@@ -457,6 +455,18 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     } catch (err: unknown) {
       setBranchError(errorMessage(err));
     }
+  };
+
+  // Abandoned auto-drafts. Deleted without a per-row confirm because by
+  // definition they hold nothing: no description, no report, no attachments
+  // the user ever got to upload.
+  const handlePurgeBlankDrafts = async (drafts: CodeReview[]) => {
+    if (!window.confirm(t('projects.detail.reviewBlankDraftsConfirm', { n: drafts.length }))) return;
+    const keepId = session?.id;
+    await Promise.allSettled(
+      drafts.filter(d => d.id !== keepId).map(d => codeReviewsApi.remove(d.id)),
+    );
+    loadHistory();
   };
 
   // Clicking a history row loads its persisted report into the result view.
@@ -480,7 +490,11 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
         setDraftTitle(full.title);
         setDescription(full.description);
       }
-    } catch { setSelected(rv); } finally { setDetailLoading(false); }
+      return full;
+    } catch {
+      setSelected(rv);
+      return rv;
+    } finally { setDetailLoading(false); }
   };
 
   const handleRerun = async (rv: CodeReview) => {
@@ -493,6 +507,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
       subscribeJob(job_id, () => {
         loadHistory();
         codeReviewsApi.get(rv.id).then(setSelected).catch(() => {});
+        reloadRevisions(rv.id);
       });
     } catch (err: unknown) {
       setReviewLines([{ type: 'error', content: errorMessage(err) }]);
@@ -558,65 +573,92 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     }
   };
 
-  // ── Derived ──────────────────────────────────────────────────────────────
+  // Pre-fill the question box with a reference the model can resolve
+  // unambiguously ("P0-2 …"), plus the finding's own title so the question
+  // still reads as a sentence in the thread.
+  const handleAskAbout = (finding: ReviewFinding, ref: string) => {
+    const loc = finding.file ? `（${finding.file}${finding.line ? `:${finding.line}` : ''}）` : '';
+    setQuestion(t('projects.detail.reviewAskAboutTemplate', {
+      ref, title: finding.title, loc,
+    }));
+    document.querySelector('.cr-chat .cr-desc')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
 
-  const findings = useMemo(() => parseReviewFindings(selected), [selected]);
+  // ── Regeneration + versions ──────────────────────────────────────────────
 
-  // Diagrams are pulled out of the report and shown in their own section.
-  // They live inside result_md (the reviewer is asked for a 「改动概览图」 and
-  // for per-finding call/timing diagrams), and result_md sits behind a
-  // disclosure that is closed whenever the review graded cleanly — i.e.
-  // exactly the reports whose diagrams are worth a glance would hide them.
-  // The blocks stay in the prose too; duplicating a picture that is one
-  // click away costs less than burying it.
-  const diagrams = useMemo(() => extractMermaidBlocks(selected?.result_md || ''), [selected?.result_md]);
-  const grouped = useMemo(() => {
-    const m = new Map<ReviewSeverity, ReviewFinding[]>(SEVERITIES.map(s => [s, []]));
-    for (const f of findings) m.get(f.severity)?.push(f);
-    return m;
-  }, [findings]);
+  // Answered turns the current report hasn't taken in yet. The newest
+  // revision records how many were folded in when it was produced, so the
+  // difference is exactly "what would change if you regenerated now".
+  const answeredFollowups = useMemo(
+    () => followups.filter(fu => fu.status === 'done').length, [followups]);
+  const foldedFollowups = useMemo(() => {
+    const current = revisions.find(r => r.rev_no === selected?.revision_no);
+    return current?.followup_count ?? 0;
+  }, [revisions, selected?.revision_no]);
+  const pendingFollowups = Math.max(0, answeredFollowups - foldedFollowups);
 
-  // Counts come from the persisted columns rather than the decoded array —
-  // the backend derived both from the same JSON, and the columns stay
-  // meaningful (all zero) on the degraded path where findings_json is empty.
-  const counts = useMemo<Record<ReviewSeverity, number>>(() => ({
-    P0: selected?.p0_count ?? 0,
-    P1: selected?.p1_count ?? 0,
-    P3: selected?.p3_count ?? 0,
-  }), [selected]);
+  const handleRegenerate = async () => {
+    if (!selected || running || regenerating) return;
+    const reviewId = selected.id;
+    setRegenerating(true);
+    setRunning(true);
+    setReviewLines([]);
+    setReviewDone(false);
+    setBranchError('');
+    try {
+      const { job_id } = await codeReviewsApi.regenerate(reviewId);
+      subscribeJob(job_id, () => {
+        loadHistory();
+        codeReviewsApi.get(reviewId).then(full => {
+          setSelected(full);
+          if (session?.id === reviewId) setSession(full);
+        }).catch(() => {});
+        reloadRevisions(reviewId);
+      });
+    } catch (err: unknown) {
+      setReviewLines([{ type: 'error', content: errorMessage(err) }]);
+      setRegenerating(false);
+      setRunning(false);
+    }
+  };
 
-  // The verdict is the one thing a reader wants before anything else: can
-  // this be merged? It drives the report's accent colour and headline.
-  // 'plain' is the degraded path — the model broke the trailing-JSON
-  // contract, so there is nothing to grade and the Markdown report leads.
-  const verdict = useMemo<ReviewVerdict>(() => {
-    if (!selected) return 'plain';
-    if (selected.status === 'error') return 'error';
-    // A draft picked from history has never produced a report — saying
-    // "ungraded" there would read as a model failure rather than "not run".
-    if (selected.status === 'draft' || selected.status === 'running') return 'pending';
-    if (!selected.findings_json) return 'plain';
-    if (counts.P0 > 0) return 'block';
-    if (counts.P1 > 0) return 'warn';
-    return 'clean';
-  }, [selected, counts]);
-  // Same TitleCase-the-discriminant convention as `statusLabel` below.
-  const verdictKey = verdict.charAt(0).toUpperCase() + verdict.slice(1);
+  // Switching versions rewrites the review row, so the whole result view
+  // follows — including the 追问 thread's "pending" count, which is relative
+  // to the version on screen.
+  const handleSelectRevision = async (revNo: number) => {
+    if (!selected) return;
+    try {
+      const updated = await codeReviewsApi.restoreRevision(selected.id, revNo);
+      setSelected(updated);
+      if (session?.id === updated.id) setSession(updated);
+      loadHistory();
+    } catch (err: unknown) {
+      setAskError(errorMessage(err));
+    }
+  };
 
-  // The full Markdown report is a disclosure: when the findings are graded
-  // they lead and the prose is backup, but on the degraded path the prose is
-  // all there is, so it opens by itself.
-  useEffect(() => {
-    setReportOpen(!selected?.findings_json);
-  }, [selected?.id, selected?.findings_json]);
+  // ── Export ───────────────────────────────────────────────────────────────
 
-  const statusLabel = (s: CodeReview['status']) => t(`projects.detail.reviewStatus${s.charAt(0).toUpperCase()}${s.slice(1)}`);
-  const goalLabel = (g: GoalMet) => {
-    switch (g) {
-      case 'yes': return t('projects.detail.reviewGoalYes');
-      case 'partial': return t('projects.detail.reviewGoalPartial');
-      case 'no': return t('projects.detail.reviewGoalNo');
-      default: return t('projects.detail.reviewGoalUnknown');
+  const handleExportMarkdown = () => {
+    if (!selected) return;
+    downloadReviewMarkdown({ review: selected, followups, projectName: project?.name });
+  };
+
+  const handleExportPdf = async () => {
+    if (!selected) return;
+    setExportingPdf(true);
+    try {
+      await exportDesignPdf({
+        title: reviewExportTitle(selected),
+        meta: `${project?.name ?? ''}${project?.name ? ' · ' : ''}${reviewTargetLabel(selected)}`,
+        markdown: buildReviewMarkdown({ review: selected, followups, projectName: project?.name }),
+        filename: reviewExportTitle(selected),
+        pdfLabel: t('projects.detail.reviewExportPdfLabel'),
+      });
+    } catch (err: unknown) {
+      setAskError(t('projects.detail.reviewExportFailed') + errorMessage(err));
+    } finally {
+      setExportingPdf(false);
     }
   };
 
@@ -624,242 +666,54 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
   return (
     <div className="tab-content project-code-review">
-      {/* Mode switch */}
-      <div className="cr-mode-bar">
-        <div className="cr-mode-tabs">
-          <button
-            className={`cr-mode-tab${mode === 'pr' ? ' active' : ''}`}
-            onClick={() => setMode('pr')}
-            disabled={running}
-          >{t('projects.detail.reviewModePR')}</button>
-          <button
-            className={`cr-mode-tab${mode === 'branch' ? ' active' : ''}`}
-            onClick={() => setMode('branch')}
-            disabled={running}
-          >{t('projects.detail.reviewModeBranch')}</button>
-        </div>
-        <span className="cr-mode-hint">
-          {mode === 'pr' ? t('projects.detail.reviewModeHintPR') : t('projects.detail.reviewModeHintBranch')}
-        </span>
-      </div>
+      <ReviewComposer
+        mode={mode}
+        onModeChange={setMode}
+        running={running}
+        bindings={{
+          model: runModel,
+          configId: runConfigId,
+          agentServerId,
+          servers: agentServers,
+          onModelChange: (m) => { setRunModel(m); if (session) void saveDraftField({ model: m }); },
+          onConfigChange: (c) => { setRunConfigId(c); if (session) void saveDraftField({ claude_config_id: c }); },
+          onAgentServerChange: (v) => { setAgentServerId(v); if (session) void saveDraftField({ agent_server_id: v }); },
+        }}
+        prData={prData}
+        prsLoading={prsLoading}
+        prsError={prsError}
+        reviewingPR={reviewingPR}
+        extraRequirements={extraRequirements}
+        onExtraRequirementsChange={setExtraRequirements}
+        onReviewPR={handleReviewPR}
+        branchForm={{
+          branches,
+          branch,
+          baseBranch,
+          title: draftTitle,
+          description,
+          onBranchChange: setBranch,
+          onBaseBranchChange: setBaseBranch,
+          onTitleChange: setDraftTitle,
+          onDescriptionChange: setDescription,
+          onFieldBlur: () => { if (session) void saveDraftField(); },
+          session,
+          creating,
+          savedAt: descSavedAt,
+          error: branchError,
+          onStart: handleStartBranchReview,
+          onReset: handleNewSession,
+          onDelete: () => { if (session) void handleDelete(session); },
+        }}
+      />
 
-      {/* Run bindings — shared by both modes. The picks live on the review
-          session row, so a 重跑 from history reuses the same model and the
-          same execution environment. */}
-      <div className="cr-run-bar">
-        <div className="cr-run-field">
-          <label className="cr-label">{t('projects.detail.reviewModelLabel')}</label>
-          <ModelSelect
-            value={runModel}
-            onChange={(m) => { setRunModel(m); if (session) void saveDraftField({ model: m }); }}
-            configId={runConfigId}
-            onConfigChange={(c) => { setRunConfigId(c); if (session) void saveDraftField({ claude_config_id: c }); }}
-            disabled={running}
-            title={t('projects.detail.reviewModelHint')}
-          />
-        </div>
-        <div className="cr-run-field">
-          <label className="cr-label">{t('projects.detail.reviewExecEnvLabel')}</label>
-          <ExecEnvSelect
-            servers={agentServers}
-            value={agentServerId}
-            onChange={(v) => { setAgentServerId(v); if (session) void saveDraftField({ agent_server_id: v }); }}
-            disabled={running}
-            title={t('projects.detail.reviewExecEnvHint')}
-          />
-          <span className="cr-hint">
-            {agentServerId ? t('projects.detail.reviewExecEnvRemoteHint') : t('projects.detail.reviewExecEnvLocalHint')}
-          </span>
-        </div>
-      </div>
-
-      {/* ── PR mode ── */}
-      {mode === 'pr' && (
-        <>
-          {!prsLoading && prData && !prData.configured && (
-            <div className="review-unconfigured">
-              <div className="review-unconfigured-icon"><IconPlug size={28} /></div>
-              <p>{t('projects.detail.reviewUnconfiguredTitle')}</p>
-              <p>
-                {t('projects.detail.reviewUnconfiguredHint')}
-                <a href="/settings" style={{ color: 'var(--color-primary)', margin: '0 4px' }}>{t('projects.detail.platformSettingsLink')}</a>
-                {t('projects.detail.reviewUnconfiguredHint2')}
-              </p>
-            </div>
-          )}
-
-          {prsLoading && <div className="tab-empty">{t('projects.detail.reviewLoading')}</div>}
-          {prsError && <div className="tab-empty" style={{ color: 'var(--color-error)' }}>{prsError}</div>}
-
-          {!prsLoading && prData && (prData.configured || prData.prs.length > 0) && (
-            <>
-              {prData.prs.length === 0 && (
-                <div className="tab-empty"><p>{t('projects.detail.reviewNoPRs')}</p></div>
-              )}
-              {prData.prs.length > 0 && (
-                <>
-                  <div className="review-requirements-bar">
-                    <label className="review-requirements-label">{t('projects.detail.reviewExtraLabel')}</label>
-                    <input
-                      className="form-input review-requirements-input"
-                      placeholder={t('projects.detail.reviewExtraPlaceholder')}
-                      value={extraRequirements}
-                      onChange={e => setExtraRequirements(e.target.value)}
-                      disabled={running}
-                    />
-                  </div>
-                  <div className="pr-list">
-                    <table className="pr-table table-cards">
-                      <thead>
-                        <tr>
-                          <th style={{ width: 52 }}>{t('projects.detail.reviewColNumber')}</th>
-                          <th>{t('projects.detail.reviewColTitle')}</th>
-                          <th style={{ width: 260 }}>{t('projects.detail.reviewColBranch')}</th>
-                          <th style={{ width: 100 }}>{t('projects.detail.reviewColAuthor')}</th>
-                          <th style={{ width: 90 }}>{t('projects.detail.reviewColUpdatedAt')}</th>
-                          <th style={{ width: 120 }}>{t('projects.detail.reviewColActions')}</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {prData.prs.map(pr => (
-                          <tr key={pr.number} className={reviewingPR?.number === pr.number ? 'pr-row-active' : ''}>
-                            <td data-label="#" style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>#{pr.number}</td>
-                            <td data-label={t('projects.detail.reviewColTitle')} className="pr-title">
-                              <a href={pr.html_url} target="_blank" rel="noreferrer" style={{ color: 'var(--color-primary)' }}>
-                                {pr.title}
-                              </a>
-                            </td>
-                            <td data-label={t('projects.detail.reviewColBranch')}><code className="pr-branch">{pr.head_branch}</code> ← <code className="pr-branch">{pr.base_branch}</code></td>
-                            <td data-label={t('projects.detail.reviewColAuthor')}>{pr.author}</td>
-                            <td data-label={t('projects.detail.reviewColUpdatedAt')}>{pr.updated_at ? fmtDate(pr.updated_at) : '—'}</td>
-                            <td data-label={t('projects.detail.reviewColActions')}>
-                              <button
-                                className="btn btn-primary btn-sm"
-                                onClick={() => handleReview(pr)}
-                                disabled={running}
-                              >
-                                {reviewingPR?.number === pr.number ? t('projects.detail.reviewBtnActive') : t('projects.detail.reviewBtn')}
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
-              )}
-            </>
-          )}
-        </>
-      )}
-
-      {/* ── Branch mode composer ── */}
-      {mode === 'branch' && (
-        <div className="cr-composer">
-          <div className="cr-field-row">
-            <div className="cr-field">
-              <label className="cr-label">{t('projects.detail.reviewBranchLabel')}</label>
-              <input
-                className="form-input"
-                list="cr-branch-options"
-                placeholder={t('projects.detail.reviewBranchPlaceholder')}
-                value={branch}
-                onChange={e => setBranch(e.target.value)}
-                onBlur={() => { if (session) void saveDraftField(); }}
-                disabled={running}
-              />
-            </div>
-            <div className="cr-field">
-              <label className="cr-label">{t('projects.detail.reviewBaseLabel')}</label>
-              <input
-                className="form-input"
-                list="cr-branch-options"
-                placeholder={t('projects.detail.reviewBasePlaceholder')}
-                value={baseBranch}
-                onChange={e => setBaseBranch(e.target.value)}
-                onBlur={() => { if (session) void saveDraftField(); }}
-                disabled={running}
-              />
-            </div>
-            <datalist id="cr-branch-options">
-              {branches.map(b => <option key={b} value={b} />)}
-            </datalist>
-          </div>
-          <p className="cr-hint">{t('projects.detail.reviewBranchesHint')}</p>
-
-          <div className="cr-field">
-            <label className="cr-label">{t('projects.detail.reviewTitleLabel')}</label>
-            <input
-              className="form-input"
-              placeholder={t('projects.detail.reviewTitlePlaceholder')}
-              value={draftTitle}
-              onChange={e => setDraftTitle(e.target.value)}
-              onBlur={() => { if (session) void saveDraftField(); }}
-              disabled={running}
-            />
-          </div>
-
-          <div className="cr-field">
-            <label className="cr-label">
-              {t('projects.detail.reviewDescLabel')}
-              {descSavedAt > 0 && <span className="cr-saved">{t('projects.detail.reviewDescSaved')}</span>}
-            </label>
-            <textarea
-              className="form-input cr-desc"
-              rows={5}
-              placeholder={t('projects.detail.reviewDescPlaceholder')}
-              value={description}
-              onChange={e => setDescription(e.target.value)}
-              onBlur={() => { if (session) void saveDraftField(); }}
-              disabled={running}
-            />
-          </div>
-
-          {/* Attachments need the draft row as their owner, so they only
-              appear once the session exists. */}
-          {session ? (
-            <div className="cr-attach">
-              <div className="cr-attach-head">
-                <span className="cr-label">{t('projects.detail.reviewAttachTitle')}</span>
-                <span className="cr-hint">{t('projects.detail.reviewAttachHint')}</span>
-              </div>
-              <AttachmentPanel ownerId={session.id} resource="code-reviews" />
-            </div>
-          ) : (
-            <p className="cr-hint">{t('projects.detail.reviewCreateDraftHint')}</p>
-          )}
-
-          {branchError && <div className="cr-error">{branchError}</div>}
-
-          <div className="cr-actions">
-            {!session ? (
-              <button className="btn btn-primary" onClick={handleCreateDraft} disabled={creating}>
-                {creating ? t('projects.detail.reviewCreating') : t('projects.detail.reviewCreateDraft')}
-              </button>
-            ) : (
-              <>
-                <button className="btn btn-primary" onClick={handleStartBranchReview} disabled={running}>
-                  {running ? t('projects.detail.reviewStartBusy') : t('projects.detail.reviewStartBtn')}
-                </button>
-                <button className="btn btn-secondary" onClick={handleNewSession} disabled={running}>
-                  {t('projects.detail.reviewResetBtn')}
-                </button>
-                <button className="btn btn-secondary" onClick={() => handleDelete(session)} disabled={running}>
-                  {t('projects.detail.reviewDeleteBtn')}
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ── Live stream (shared) ── */}
+      {/* ── Live stream (shared by review / 追问 / regeneration) ── */}
       {(reviewLines.length > 0 || running) && (
         <div className="review-panel-wrap cr-stream">
           <div className="review-panel-header">
             <span className="cr-stream-title">
               {running && !reviewDone && <span className="cr-pulse" aria-hidden="true" />}
-              {t('projects.detail.reviewHeader')}
+              {regenerating ? t('projects.detail.reviewRegenerateHeader') : t('projects.detail.reviewHeader')}
               {reviewingPR ? `：#${reviewingPR.number} ${reviewingPR.title}` : ''}
               {reviewDone ? t('projects.detail.reviewHeaderDone') : ''}
             </span>
@@ -880,217 +734,45 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
         </div>
       )}
 
-      {/* ── Graded result ── */}
+      {/* ── Result ── Report and conversation side by side on a wide screen:
+          the questions worth asking come from the report you are looking at,
+          and scrolling between the two was the main friction in the old
+          single-column stack. Narrow screens fall back to one column. */}
       {detailLoading && <div className="tab-empty">{t('projects.detail.reviewLoadingDetail')}</div>}
       {selected && !detailLoading && (
-        <article className={`cr-report cr-report-${verdict}`}>
-          {/* Verdict band — the "can this merge?" answer, stated once, in
-              colour, above everything else. */}
-          <header className="cr-verdict">
-            <span className="cr-verdict-mark" aria-hidden="true" />
-            <div className="cr-verdict-text">
-              <h3 className="cr-verdict-title">{t(`projects.detail.reviewVerdict${verdictKey}`)}</h3>
-              <p className="cr-verdict-sub">{t(`projects.detail.reviewVerdictHint${verdictKey}`)}</p>
-            </div>
-            <div className="cr-verdict-meta">
-              <span className={`cr-goal cr-goal-${selected.goal_met || 'unknown'}`}>
-                {t('projects.detail.reviewGoalLabel')}：{goalLabel(selected.goal_met)}
-              </span>
-              <span className="cr-meta-chip">
-                <IconBranch size={12} />
-                <code>{selected.review_type === 'pr' && selected.pr_number > 0 ? `#${selected.pr_number}` : selected.branch}</code>
-                {selected.base_branch ? <> ← <code>{selected.base_branch}</code></> : null}
-              </span>
-              {selected.model && (
-                <span className="cr-meta-chip" title={t('projects.detail.reviewModelLine', { model: selected.model })}>
-                  <IconRobot size={12} />{selected.model}
-                </span>
-              )}
-              <span className="cr-meta-chip">
-                <IconClock size={12} />{fmtDateTime(selected.finished_at || selected.created_at)}
-              </span>
-            </div>
-          </header>
-
-          {/* Severity ledger — three tiles, one glance. Zero stays grey so
-              the eye lands only on what actually needs attention. */}
-          {selected.findings_json ? (
-            <div className="cr-ledger">
-              {SEVERITIES.map(sev => (
-                <div key={sev} className={`cr-ledger-cell cr-ledger-${sev}${counts[sev] === 0 ? ' is-zero' : ''}`}>
-                  <span className="cr-ledger-num">{counts[sev]}</span>
-                  <span className="cr-ledger-label">
-                    <span className="cr-ledger-tag">{sev}</span>
-                    {t(`projects.detail.reviewSevShort${sev}`)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : null}
-
-          {/* 改动概览图 — the report's Mermaid blocks, hoisted above the
-              findings so the shape of the change is visible before the list
-              of what is wrong with it. Rendered through MarkdownRender so a
-              diagram keeps the same zoom / download affordances it has in
-              the design doc and the knowledge base. */}
-          {diagrams.length > 0 && (
-            <section className="cr-diagrams">
-              <h4 className="cr-diagrams-head">
-                <IconArchitect size={13} />
-                <span className="cr-diagrams-title">{t('projects.detail.reviewDiagrams')}</span>
-                <span className="cr-hint">{t('projects.detail.reviewDiagramsHint')}</span>
-              </h4>
-              <div className="cr-diagrams-body md-prose">
-                {diagrams.map((src, i) => (
-                  <MarkdownRender key={i} content={'```mermaid\n' + src + '\n```'} />
-                ))}
-              </div>
-            </section>
-          )}
-
-          {findings.length > 0 && (
-            <div className="cr-findings">
-              {SEVERITIES.map(sev => {
-                const items = grouped.get(sev) ?? [];
-                // An empty bucket collapses to one quiet line — rendering a
-                // full empty section for each would triple the noise on a
-                // report that only found P3s.
-                if (items.length === 0) {
-                  return (
-                    <p key={sev} className="cr-sev-empty">
-                      <span className={`cr-sev-badge cr-sev-badge-${sev}`}>{sev}</span>
-                      {t('projects.detail.reviewSevEmpty')}
-                    </p>
-                  );
-                }
-                return (
-                  <section key={sev} className={`cr-sev cr-sev-${sev}`}>
-                    <h4 className="cr-sev-head">
-                      <span className={`cr-sev-badge cr-sev-badge-${sev}`}>{sev}</span>
-                      <span className="cr-sev-name">{t(`projects.detail.reviewSev${sev}`)}</span>
-                      <span className="cr-sev-count">{items.length}</span>
-                    </h4>
-                    <ol className="cr-finding-list">
-                      {items.map((f, i) => (
-                        <li key={i} className="cr-finding">
-                          <div className="cr-finding-head">
-                            <span className="cr-finding-idx">{sev}-{i + 1}</span>
-                            <span className="cr-finding-title">{f.title}</span>
-                            {(f.file || f.line) && (
-                              <code className="cr-finding-loc">{f.file}{f.line ? `:${f.line}` : ''}</code>
-                            )}
-                          </div>
-                          {f.detail && <p className="cr-finding-detail">{f.detail}</p>}
-                          {f.suggestion && (
-                            <p className="cr-finding-suggestion">
-                              <span className="cr-finding-suggestion-tag">{t('projects.detail.reviewFindingSuggestion')}</span>
-                              {f.suggestion}
-                            </p>
-                          )}
-                        </li>
-                      ))}
-                    </ol>
-                  </section>
-                );
-              })}
-            </div>
-          )}
-
-          {/* Full Markdown report. Collapsed behind a disclosure when the
-              findings above already carry the verdict; open by default when
-              they don't (degraded path), so nothing is ever hidden. */}
-          {selected.result_md && (
-            <details className="cr-report-md" open={reportOpen} onToggle={e => setReportOpen(e.currentTarget.open)}>
-              <summary className="cr-report-md-summary">
-                <IconFileText size={13} />
-                {t('projects.detail.reviewFullReport')}
-              </summary>
-              <div className="cr-report-md-body md-prose">
-                <MarkdownRender content={selected.result_md} />
-              </div>
-            </details>
-          )}
-
-          {/* ── 追问 ── Asks run against THIS report; they never change its
-              findings or counts. */}
-          <div className="cr-followups">
-            <div className="cr-followups-head">
-              <span className="cr-label">{t('projects.detail.reviewFollowupTitle')}</span>
-              <span className="cr-hint">{t('projects.detail.reviewFollowupHint')}</span>
-            </div>
-
-            {followups.length === 0 && !askRunning && (
-              <p className="cr-sev-empty">{t('projects.detail.reviewFollowupEmpty')}</p>
-            )}
-
-            {followups.map(fu => (
-              <article key={fu.id} className={`cr-followup cr-followup-${fu.status}`}>
-                <div className="cr-followup-q">
-                  <span className="cr-followup-tag">{t('projects.detail.reviewFollowupQ')}</span>
-                  <span className="cr-followup-qtext">{fu.question}</span>
-                  <button
-                    className="btn btn-sm cr-followup-del"
-                    onClick={() => handleDeleteFollowup(fu)}
-                    disabled={fu.status === 'running'}
-                  >{t('projects.detail.reviewDeleteBtn')}</button>
-                </div>
-                {fu.status === 'running' ? (
-                  <p className="cr-followup-pending">{t('projects.detail.reviewFollowupRunning')}</p>
-                ) : fu.status === 'error' ? (
-                  <p className="cr-followup-errtext">{t('projects.detail.reviewFollowupFailed')}：{fu.answer}</p>
-                ) : (
-                  <div className="cr-followup-a">
-                    <span className="cr-followup-tag">{t('projects.detail.reviewFollowupA')}</span>
-                    <MarkdownRender content={fu.answer} />
-                  </div>
-                )}
-                <div className="cr-followup-meta">
-                  <span>{fmtDateTime(fu.created_at)}</span>
-                  {fu.model && <span><IconRobot size={12} /> {fu.model}</span>}
-                  {/* Only worth flagging the degraded case: a resumed answer
-                      is the expectation, a fresh one explains why an answer
-                      may be shallower than the report it talks about. */}
-                  {fu.status === 'done' && !fu.resumed && (
-                    <span className="cr-followup-fresh">{t('projects.detail.reviewFollowupFresh')}</span>
-                  )}
-                </div>
-              </article>
-            ))}
-
-            {askRunning && (
-              <div className="coding-panel cr-followup-stream" ref={askPanelRef} style={{ maxHeight: 220 }}>
-                {askLines.map((line, i) => (
-                  <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
-                ))}
-                <div className="coding-line coding-line-tool_call">{t('projects.detail.reviewFollowupRunning')}</div>
-              </div>
-            )}
-
-            {askError && <div className="cr-error">{askError}</div>}
-
-            {selected.result_md ? (
-              <div className="cr-followup-composer">
-                <textarea
-                  className="form-input cr-desc"
-                  rows={3}
-                  placeholder={t('projects.detail.reviewFollowupPlaceholder')}
-                  value={question}
-                  onChange={e => setQuestion(e.target.value)}
-                  disabled={askRunning || selected.status === 'running'}
-                />
-                <button
-                  className="btn btn-primary"
-                  onClick={handleAsk}
-                  disabled={askRunning || !question.trim() || selected.status === 'running'}
-                >
-                  {askRunning ? t('projects.detail.reviewFollowupAsking') : t('projects.detail.reviewFollowupAsk')}
-                </button>
-              </div>
-            ) : (
-              <p className="cr-hint">{t('projects.detail.reviewFollowupNoReport')}</p>
-            )}
-          </div>
-        </article>
+        <div className="cr-result-grid">
+          <ReviewReport
+            review={selected}
+            revisions={revisions}
+            busy={running || regenerating}
+            pendingFollowups={pendingFollowups}
+            canRegenerate={!!selected.result_md && selected.status !== 'running'}
+            onExportMarkdown={handleExportMarkdown}
+            onExportPdf={handleExportPdf}
+            exportingPdf={exportingPdf}
+            onRegenerate={handleRegenerate}
+            onRerun={() => void handleRerun(selected)}
+            onSelectRevision={(n) => void handleSelectRevision(n)}
+            onAskAbout={handleAskAbout}
+          />
+          <aside className="cr-result-aside">
+            <ReviewChat
+              review={selected}
+              followups={followups}
+              question={question}
+              onQuestionChange={setQuestion}
+              asking={askRunning}
+              askLines={askLines}
+              askError={askError}
+              onAsk={handleAsk}
+              onDeleteFollowup={handleDeleteFollowup}
+              pendingFollowups={pendingFollowups}
+              canRegenerate={!!selected.result_md && selected.status !== 'running'}
+              regenerating={regenerating}
+              onRegenerate={handleRegenerate}
+            />
+          </aside>
+        </div>
       )}
 
       {/* ── PR comment editor — PR mode only, unchanged behaviour ── */}
@@ -1124,70 +806,15 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
         </div>
       )}
 
-      {/* ── History ── */}
-      <div className="cr-history">
-        <div className="review-panel-header">
-          <span>{t('projects.detail.reviewHistoryTitle')}</span>
-        </div>
-        {history.length === 0 ? (
-          <div className="tab-empty"><p>{t('projects.detail.reviewHistoryEmpty')}</p></div>
-        ) : (
-          <table className="pr-table table-cards">
-            <thead>
-              <tr>
-                <th style={{ width: 90 }}>{t('projects.detail.reviewHistoryColType')}</th>
-                <th>{t('projects.detail.reviewHistoryColTarget')}</th>
-                <th style={{ width: 90 }}>{t('projects.detail.reviewHistoryColStatus')}</th>
-                <th style={{ width: 150 }}>{t('projects.detail.reviewHistoryColFindings')}</th>
-                <th style={{ width: 150 }}>{t('projects.detail.reviewHistoryColTime')}</th>
-                <th style={{ width: 160 }}>{t('projects.detail.reviewHistoryColActions')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {history.map(rv => (
-                <tr key={rv.id} className={selected?.id === rv.id ? 'pr-row-active' : ''}>
-                  <td data-label={t('projects.detail.reviewHistoryColType')}>
-                    {rv.review_type === 'pr' ? t('projects.detail.reviewModePR') : t('projects.detail.reviewModeBranch')}
-                  </td>
-                  <td data-label={t('projects.detail.reviewHistoryColTarget')}>
-                    {rv.review_type === 'pr' && rv.pr_number > 0 && <code className="pr-branch">#{rv.pr_number}</code>}{' '}
-                    <code className="pr-branch">{rv.branch}</code>
-                    {rv.base_branch ? <> ← <code className="pr-branch">{rv.base_branch}</code></> : null}
-                    {rv.title ? <div className="cr-history-title">{rv.title}</div> : null}
-                  </td>
-                  <td data-label={t('projects.detail.reviewHistoryColStatus')}>
-                    <span className={`cr-status cr-status-${rv.status}`}>{statusLabel(rv.status)}</span>
-                  </td>
-                  <td data-label={t('projects.detail.reviewHistoryColFindings')}>
-                    {/* Zero counts stay grey so a row with a single P0 reads
-                        at a glance instead of blending into three chips. */}
-                    {SEVERITIES.map(sev => {
-                      const n = sev === 'P0' ? rv.p0_count : sev === 'P1' ? rv.p1_count : rv.p3_count;
-                      return (
-                        <span key={sev} className={`cr-count cr-count-${sev}${n === 0 ? ' is-zero' : ''}`}>
-                          {sev} {n}
-                        </span>
-                      );
-                    })}
-                  </td>
-                  <td data-label={t('projects.detail.reviewHistoryColTime')}>{fmtDateTime(rv.created_at)}</td>
-                  <td data-label={t('projects.detail.reviewHistoryColActions')}>
-                    <button className="btn btn-sm" onClick={() => handleOpenHistory(rv)}>
-                      {t('projects.detail.reviewReportTitle')}
-                    </button>
-                    <button className="btn btn-sm" onClick={() => handleRerun(rv)} disabled={running || rv.status === 'running'}>
-                      {t('projects.detail.reviewRerunBtn')}
-                    </button>
-                    <button className="btn btn-sm" onClick={() => handleDelete(rv)} disabled={rv.status === 'running'}>
-                      {t('projects.detail.reviewDeleteBtn')}
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      <ReviewHistory
+        history={history}
+        selectedId={selectedId}
+        running={running}
+        onOpen={(rv) => void handleOpenHistory(rv)}
+        onRerun={(rv) => void handleRerun(rv)}
+        onDelete={(rv) => void handleDelete(rv)}
+        onPurgeBlankDrafts={(drafts) => void handlePurgeBlankDrafts(drafts)}
+      />
     </div>
   );
 }

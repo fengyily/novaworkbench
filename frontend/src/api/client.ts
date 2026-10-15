@@ -1710,6 +1710,21 @@ export interface ReviewFinding {
   suggestion: string;
 }
 
+/** Per-criterion verdict. 'unknown' = the reviewer could not check it. */
+export type GoalCheckStatus = 'yes' | 'partial' | 'no' | 'unknown';
+
+/**
+ * One row of the 目标达成 evidence table: an acceptance point taken from the
+ * user's 改动目标, the verdict for it, and what that verdict rests on (a
+ * `file:line`, a log line from an uploaded run log, a section of an attached
+ * doc). Optional by contract — see CodeReview.goal_checks_json.
+ */
+export interface GoalCheck {
+  criterion: string;
+  status: GoalCheckStatus;
+  evidence: string;
+}
+
 export interface CodeReview {
   id: string;
   project_id: string;
@@ -1729,6 +1744,18 @@ export interface CodeReview {
   p1_count: number;
   p3_count: number;
   goal_met: GoalMet;
+  /**
+   * JSON-encoded GoalCheck[] — the per-criterion evidence behind goal_met.
+   * '' when the model answered only the one-word verdict, which is allowed
+   * by the contract; the verdict chip still renders.
+   */
+  goal_checks_json: string;
+  /**
+   * Which version of the report this row currently holds (1-based). 0 on a
+   * draft that has never produced one. Older versions stay readable through
+   * codeReviewsApi.listRevisions / getRevision.
+   */
+  revision_no: number;
   /**
    * Model binding: the user's pick from the Review toolbar, overwritten with
    * the effective model once a run starts (may therefore come back as the
@@ -1793,6 +1820,49 @@ export function parseReviewFindings(review: Pick<CodeReview, 'findings_json'> | 
 }
 
 /**
+ * Decodes CodeReview.goal_checks_json. Empty is the normal case for reports
+ * written before the evidence table was part of the contract, and for models
+ * that answered only `goal_met` — callers render the verdict chip alone.
+ */
+export function parseGoalChecks(review: Pick<CodeReview, 'goal_checks_json'> | null | undefined): GoalCheck[] {
+  if (!review?.goal_checks_json) return [];
+  try {
+    const parsed = JSON.parse(review.goal_checks_json);
+    return Array.isArray(parsed) ? (parsed as GoalCheck[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** What produced a report version. */
+export type RevisionTrigger = 'initial' | 'regenerate';
+
+/**
+ * One frozen version of a review's report.
+ *
+ * The review row always serves the current version; this is the history
+ * behind it, which is what makes 「基于对话重新生成」 safe to click — the
+ * version it replaces stays readable and can be restored.
+ */
+export interface CodeReviewRevision {
+  id: string;
+  review_id: string;
+  rev_no: number;
+  trigger: RevisionTrigger;
+  result_md: string;
+  findings_json: string;
+  p0_count: number;
+  p1_count: number;
+  p3_count: number;
+  goal_met: GoalMet;
+  goal_checks_json: string;
+  /** How many 追问 turns were already folded in when this version was made. */
+  followup_count: number;
+  model: string;
+  created_at: string;
+}
+
+/**
  * Execution bindings sent alongside the composer fields. All three are
  * optional and all three mean "fall back to the reviewer role / 本地" when
  * empty, so an older UI that omits them keeps the previous behaviour.
@@ -1827,6 +1897,23 @@ export const codeReviewsApi = {
     api.post<{ job_id: string; followup_id: string }>(`/api/reviews/${reviewId}/followups`, { question }),
   removeFollowup: (reviewId: string, followupId: string) =>
     api.delete<{ status: string }>(`/api/reviews/${reviewId}/followups/${followupId}`),
+
+  // ── 重新生成 + 版本历史 ──────────────────────────────────────────────────
+  // Regeneration rewrites the report in light of the 追问 thread. It returns
+  // a JobStore id streamed through the SAME channel as the review
+  // (reviewApi.streamJobUrl). The version it replaces is frozen first, so a
+  // v2 that reads worse than v1 is never a one-way door — and a failed run
+  // leaves the review exactly as it was.
+  regenerate: (reviewId: string) =>
+    api.post<{ job_id: string; review_id: string }>(`/api/reviews/${reviewId}/regenerate`, {}),
+  listRevisions: (reviewId: string) =>
+    api.get<CodeReviewRevision[]>(`/api/reviews/${reviewId}/revisions`),
+  getRevision: (reviewId: string, revNo: number) =>
+    api.get<CodeReviewRevision>(`/api/reviews/${reviewId}/revisions/${revNo}`),
+  // Makes an older version current again. Nothing is deleted: the list
+  // records what was produced, not which one is selected.
+  restoreRevision: (reviewId: string, revNo: number) =>
+    api.post<CodeReview>(`/api/reviews/${reviewId}/revisions/${revNo}/restore`, {}),
 };
 
 // Platform tokens
