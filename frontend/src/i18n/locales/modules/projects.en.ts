@@ -341,7 +341,7 @@ export const projects = {
     reviewExecEnvLabel: 'Execution environment',
     reviewExecEnvHint: 'Pick the machine the review runs on; empty means local execution.',
     reviewExecEnvLocalHint: 'Runs against the local repository, so unpushed local branches can be reviewed.',
-    reviewExecEnvRemoteHint: 'Runs against the Agent Server\'s clone — only branches pushed to origin can be reviewed.',
+    reviewExecEnvRemoteHint: 'Runs against the Agent Server\'s clone; a branch that was never pushed is shipped over as a git bundle.',
     reviewBranchLabel: 'Target branch',
     reviewBranchPlaceholder: 'Branch to review, e.g. feat/pagination',
     reviewBaseLabel: 'Base branch',

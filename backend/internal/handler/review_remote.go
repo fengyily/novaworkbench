@@ -28,10 +28,11 @@ import (
 // scratch-clone layout (/tmp/nova-agent/<project_id>/base), ensureRemoteOrigin,
 // ensureRemoteWorkerReady, workerRunRequest and parseStreamJSONFromReader.
 //
-// Scope note: because the agent host only ever sees the project's origin, a
-// branch that was never pushed cannot be reviewed remotely. That is reported
-// as a clear error rather than silently diffing something else — local
-// execution remains the answer for unpushed work.
+// Scope note: the agent host only ever sees the project's origin, so a branch
+// that was never pushed is not resolvable there on its own. Rather than
+// refusing the run (that used to be the behaviour), the missing commits are
+// carried over as a git bundle into a refs/nova-review/* namespace — origin is
+// never written to. See review_bundle.go.
 
 // runRemoteReviewSession runs one review on an Agent Server and persists the
 // outcome. It owns the terminal state exactly like the local branch of
@@ -106,7 +107,10 @@ func (h *ReviewHandler) execRemoteReview(ctx context.Context, job *store.Job, rv
 		job.Append(store.LogLine{Type: "message", Content: "⚠️ git fetch origin 失败，继续使用远端已有的引用"})
 	}
 
-	headRef, baseRef, err := resolveRemoteDiffRefs(runCtx, client, baseRepo, rv.Branch, rv.BaseBranch)
+	// Origin-first resolution, with a repair step for refs the agent host
+	// can't see: a branch that was never pushed is shipped over as a git
+	// bundle instead of failing the run (see review_bundle.go).
+	headRef, baseRef, err := resolveRemoteReviewRefs(runCtx, client, job, baseRepo, project.LocalPath, rv)
 	if err != nil {
 		return "", "无法在 Agent 服务器上解析对比分支: " + err.Error()
 	}
@@ -208,31 +212,10 @@ func (h *ReviewHandler) runRemoteWorkerStream(ctx context.Context, client *gossh
 	return out, ""
 }
 
-// resolveRemoteDiffRefs is resolveDiffRefs' remote twin: same origin-first /
-// local-fallback preference, evaluated on the agent host's scratch clone.
-//
-// In practice only `origin/<x>` exists over there (the clone is made fresh and
-// nothing ever checks a branch out), so a branch that was never pushed fails
-// here with a message that names the fix instead of producing an empty diff.
-func resolveRemoteDiffRefs(ctx context.Context, client *gossh.Client, repoDir, branch, base string) (headRef, baseRef string, err error) {
-	branch = strings.TrimSpace(branch)
-	base = strings.TrimSpace(base)
-	if branch == "" {
-		return "", "", fmt.Errorf("目标分支不能为空")
-	}
-	if base == "" {
-		return "", "", fmt.Errorf("基础分支不能为空")
-	}
-	headRef, ok := pickRemoteRef(ctx, client, repoDir, branch)
-	if !ok {
-		return "", "", fmt.Errorf("分支 %q 在 Agent 服务器的仓库副本中不存在（未推送到 origin 的本地分支请改用「本地执行」）", branch)
-	}
-	baseRef, ok = pickRemoteRef(ctx, client, repoDir, base)
-	if !ok {
-		return "", "", fmt.Errorf("基础分支 %q 在 Agent 服务器的仓库副本中不存在", base)
-	}
-	return headRef, baseRef, nil
-}
+// Ref resolution for a remote review lives in review_bundle.go
+// (resolveRemoteReviewRefs): origin-first, with any ref the agent host is
+// missing shipped over as a git bundle. pickRemoteRef below is its lookup
+// half — the remote twin of review_refs.go's pickRef.
 
 // pickRemoteRef mirrors pickRef: prefer origin/<name>, fall back to the bare
 // name, and honour a name the user already qualified.

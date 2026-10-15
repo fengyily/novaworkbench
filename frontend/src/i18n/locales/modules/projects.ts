@@ -349,7 +349,7 @@ export const projects = {
     reviewExecEnvLabel: '执行环境',
     reviewExecEnvHint: '选择 Review 在哪台机器上执行；留空为本地执行。',
     reviewExecEnvLocalHint: '在本机仓库执行，可 Review 尚未推送的本地分支。',
-    reviewExecEnvRemoteHint: '在 Agent 服务器的仓库副本执行，仅支持已推送到 origin 的分支。',
+    reviewExecEnvRemoteHint: '在 Agent 服务器的仓库副本执行；未推送到 origin 的本地分支会自动以 git bundle 同步过去。',
     reviewBranchLabel: '目标分支',
     reviewBranchPlaceholder: '要被 Review 的分支，如 feat/pagination',
     reviewBaseLabel: '基础分支',
