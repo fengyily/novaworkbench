@@ -231,13 +231,20 @@ func (c *Client) Exec(ctx context.Context, cmd, label string, env []string, out 
 	}
 
 	// Pump both pipes to the same writer in goroutines, then start the
-	// command. Both goroutines drain before we Wait().
-	done := make(chan struct{})
+	// command. We MUST wait on BOTH pumps before returning — if we only
+	// wait on stdout, the stderr pump keeps writing into the shared
+	// `out` (e.g. an io.MultiWriter of bytes.Buffer + jobWriter) after
+	// Exec returns, so callers that read the buffer immediately can see
+	// a half-converged stream and miss the script's last stdout line
+	// (the GPG NOVA_GPG_KEYID marker is the canonical victim).
+	doneStdout := make(chan struct{})
+	doneStderr := make(chan struct{})
 	go func() {
-		defer close(done)
+		defer close(doneStdout)
 		pump(stdoutPipe, label, out, nil)
 	}()
 	go func() {
+		defer close(doneStderr)
 		pump(stderrPipe, label, out, stderrTail)
 	}()
 
@@ -256,10 +263,12 @@ func (c *Client) Exec(ctx context.Context, cmd, label string, env []string, out 
 	case waitErr = <-waitCh:
 	case <-ctx.Done():
 		_ = sess.Close()
-		<-done
+		<-doneStdout
+		<-doneStderr
 		return -1, ctx.Err()
 	}
-	<-done
+	<-doneStdout
+	<-doneStderr
 	if waitErr != nil {
 		// An ExitError carries the exit code; treat any other error as
 		// a transport failure.
