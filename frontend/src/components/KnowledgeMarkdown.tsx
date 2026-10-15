@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import MarkdownRender from './MarkdownRender';
+import '../styles/markdown-prose.css';
 import './KnowledgeMarkdown.css';
 
 interface Props {
@@ -13,7 +14,7 @@ interface Props {
 // rel=noopener noreferrer。
 export default function KnowledgeMarkdown({ content }: Props) {
   return (
-    <div className="kmd">
+    <div className="kmd md-prose">
       <MarkdownRender content={content} components={{ a: SmartLink }} />
     </div>
   );

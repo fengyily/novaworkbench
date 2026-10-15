@@ -137,44 +137,16 @@ func (h *ReviewHandler) execRemoteReview(ctx context.Context, job *store.Job, rv
 		ClaudeConfigID:         claudeConfigID,
 		OverrideSettingSources: &ignoreLocal,
 	}
-	runBody := workerRunRequest(opts, h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, claudeConfigID), srv)
 
 	job.Append(store.LogLine{Type: "phase", Content: "🤖 Agent 服务器开始执行 Review（nova-agent-worker）..."})
-	if err := ensureRemoteWorkerReady(runCtx, client, srv, job); err != nil {
-		return "", err.Error()
+	out, errMsg := h.runRemoteWorkerStream(runCtx, client, srv, job, opts, claudeConfigID, "review",
+		h.newReviewUsage(job.ID, rv, modelName), hb)
+	if errMsg != "" {
+		return "", errMsg
 	}
-
-	const workerAddr = "127.0.0.1:7000"
-	bodyBytes, mErr := json.Marshal(runBody)
-	if mErr != nil {
-		return "", "序列化 worker 请求失败: " + mErr.Error()
-	}
-	req, reqErr := http.NewRequestWithContext(runCtx, http.MethodPost, "http://"+workerAddr+"/v1/run", bytes.NewReader(bodyBytes))
-	if reqErr != nil {
-		return "", "构造 worker 请求失败: " + reqErr.Error()
-	}
-	req.Header.Set("Content-Type", "application/json")
-	// parseStreamJSONFromReader returns on the `result` event, leaving the
-	// rest of the body unread; Close() would then DRAIN it and block until
-	// the remote claude actually exits. Connection: close takes the
-	// tear-down path instead. Same reasoning as wizard_remote.go.
-	req.Close = true
-
-	httpClient := &http.Client{Transport: client.HTTPTransport(workerAddr)}
-	resp, doErr := httpClient.Do(req)
-	if doErr != nil {
-		return "", "POST /v1/run 失败: " + doErr.Error()
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Sprintf("worker 返回 HTTP %d: %s", resp.StatusCode, truncateStr(string(errBody), 600))
-	}
-
-	out := parseStreamJSONFromReader(runCtx, resp.Body, jobSink{job}, "review", h.newReviewUsage(job.ID, rv, modelName), hb)
-	if out.errMsg != "" {
-		return "", out.errMsg
-	}
+	// The remote run's session_id is what a later 追问 resumes (on the same
+	// agent host, in the same scratch clone).
+	h.rememberReviewSession(rv, out.sessionID)
 	// finalResult is the authoritative report; streamText is the fallback for
 	// runs that ended without a `result` event (seen with some OpenAI-
 	// compatible proxies).
@@ -186,6 +158,54 @@ func (h *ReviewHandler) execRemoteReview(ctx context.Context, job *store.Job, rv
 		return "", "Agent 服务器未返回任何 Review 内容"
 	}
 	return report, ""
+}
+
+// runRemoteWorkerStream POSTs one run to the agent host's nova-agent-worker
+// and parses the NDJSON stream back. Shared by the remote review and the
+// remote 追问 so the worker-readiness check, the Connection: close handling
+// and the error wording can never drift between them.
+//
+// Returns either a parsed outcome or a user-facing error message, never both.
+func (h *ReviewHandler) runRemoteWorkerStream(ctx context.Context, client *gossh.Client, srv *model.AgentServer, job *store.Job, opts llm.StreamOpts, claudeConfigID, scope string, uctx *usageCtx, hb chan<- struct{}) (claudeStreamOutcome, string) {
+	var zero claudeStreamOutcome
+	if err := ensureRemoteWorkerReady(ctx, client, srv, job); err != nil {
+		return zero, err.Error()
+	}
+
+	runBody := workerRunRequest(opts, h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, claudeConfigID), srv)
+
+	const workerAddr = "127.0.0.1:7000"
+	bodyBytes, mErr := json.Marshal(runBody)
+	if mErr != nil {
+		return zero, "序列化 worker 请求失败: " + mErr.Error()
+	}
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+workerAddr+"/v1/run", bytes.NewReader(bodyBytes))
+	if reqErr != nil {
+		return zero, "构造 worker 请求失败: " + reqErr.Error()
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// parseStreamJSONFromReader returns on the `result` event, leaving the
+	// rest of the body unread; Close() would then DRAIN it and block until
+	// the remote claude actually exits. Connection: close takes the
+	// tear-down path instead. Same reasoning as wizard_remote.go.
+	req.Close = true
+
+	httpClient := &http.Client{Transport: client.HTTPTransport(workerAddr)}
+	resp, doErr := httpClient.Do(req)
+	if doErr != nil {
+		return zero, "POST /v1/run 失败: " + doErr.Error()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(resp.Body)
+		return zero, fmt.Sprintf("worker 返回 HTTP %d: %s", resp.StatusCode, truncateStr(string(errBody), 600))
+	}
+
+	out := parseStreamJSONFromReader(ctx, resp.Body, jobSink{job}, scope, uctx, hb)
+	if out.errMsg != "" {
+		return out, out.errMsg
+	}
+	return out, ""
 }
 
 // resolveRemoteDiffRefs is resolveDiffRefs' remote twin: same origin-first /

@@ -1,0 +1,189 @@
+/* markdown-prose — the single canonical typography surface for rendered
+ * Markdown across NovaWorkbench.
+ *
+ * Why this file exists: `MarkdownRender` emits bare `<h2>` / `<table>` /
+ * `<pre>` with no wrapper class, so every host had to bring its own
+ * typography. Three near-identical copies had already accumulated
+ * (`.md-viewer-body` in MarkdownViewer.css, `.kmd` in KnowledgeMarkdown.css,
+ * assorted rules in RequirementDetail.css) and a fourth surface — the code
+ * Review report — had none at all, which is why the same report rendered as
+ * styled prose in one place and as raw browser defaults in another.
+ *
+ * Usage: put `md-prose` on the element wrapping <MarkdownRender />.
+ *
+ * Tuning knobs (set on the host, inherited here):
+ *   --md-prose-size    base font size   (default 14px)
+ *   --md-prose-lh      base line-height (default 1.75)
+ *   --md-prose-measure max line length  (default none — host owns width)
+ *
+ * Images / mermaid diagrams are deliberately NOT styled here: MarkdownRender
+ * owns those via .image-figure / .mermaid-svg so the zoom + download toolbar
+ * stays consistent too.
+ */
+
+.md-prose {
+  font-size: var(--md-prose-size, 14px);
+  line-height: var(--md-prose-lh, 1.75);
+  color: var(--color-text);
+  /* Let long URLs and CJK/latin mixes break instead of forcing h-scroll. */
+  overflow-wrap: anywhere;
+}
+
+/* Embedded in cards far more often than not, so the first and last blocks
+   must not fight the container's own padding. */
+.md-prose > :first-child { margin-top: 0; }
+.md-prose > :last-child { margin-bottom: 0; }
+
+/* ── Headings ───────────────────────────────────────────────────────────── */
+.md-prose h1,
+.md-prose h2,
+.md-prose h3,
+.md-prose h4,
+.md-prose h5,
+.md-prose h6 {
+  margin: 1.6em 0 0.6em;
+  font-weight: 650;
+  line-height: 1.35;
+  color: var(--color-text);
+  /* Keeps a heading from stranding at the bottom of a scroll/print break. */
+  break-after: avoid;
+}
+
+.md-prose h1 {
+  font-size: calc(var(--md-prose-size, 14px) + 7px);
+  letter-spacing: -0.015em;
+  padding-bottom: 8px;
+  border-bottom: 2px solid var(--color-border);
+}
+.md-prose h2 {
+  font-size: calc(var(--md-prose-size, 14px) + 4px);
+  letter-spacing: -0.01em;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-border);
+}
+.md-prose h3 { font-size: calc(var(--md-prose-size, 14px) + 2px); }
+.md-prose h4 { font-size: var(--md-prose-size, 14px); }
+.md-prose h5,
+.md-prose h6 {
+  font-size: calc(var(--md-prose-size, 14px) - 1px);
+  color: var(--color-text-secondary);
+}
+
+/* ── Flow ───────────────────────────────────────────────────────────────── */
+.md-prose p { margin: 0.7em 0; max-width: var(--md-prose-measure, none); }
+.md-prose strong { font-weight: 650; color: var(--color-text); }
+.md-prose em { font-style: italic; }
+.md-prose del { color: var(--color-text-muted); }
+
+.md-prose ul,
+.md-prose ol { margin: 0.7em 0; padding-left: 1.5em; }
+.md-prose li { margin: 0.3em 0; }
+.md-prose li > ul,
+.md-prose li > ol { margin: 0.3em 0; }
+/* Tinted markers keep dense bullet lists from reading as a wall of dots. */
+.md-prose li::marker { color: var(--color-text-muted); }
+
+/* GFM task lists — strip the bullet and align the box with the text. */
+.md-prose li:has(> input[type='checkbox']) { list-style: none; margin-left: -1.2em; }
+.md-prose li > input[type='checkbox'] {
+  margin-right: 8px;
+  vertical-align: baseline;
+  accent-color: var(--color-primary);
+}
+
+.md-prose hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 1.8em 0;
+}
+
+/* Safety net only: MarkdownRender wraps every image in .image-figure, which
+   owns the real sizing. This catches a raw <img> that slipped through. */
+.md-prose img { max-width: 100%; height: auto; }
+
+.md-prose a {
+  color: var(--color-primary);
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+.md-prose a:hover { text-decoration: underline; }
+
+/* ── Code ───────────────────────────────────────────────────────────────── */
+/* Inline code reads as a token: soft indigo wash, no border — the border is
+   reserved for the `.pr-branch`-style standalone ref chips. */
+.md-prose code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  background: var(--color-active);
+  color: var(--color-text);
+  padding: 0.12em 0.4em;
+  border-radius: 4px;
+}
+
+.md-prose pre {
+  margin: 1em 0;
+  padding: 14px 16px;
+  background: #0F172A;
+  color: #E2E8F0;
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  line-height: 1.6;
+  /* A hairline of inner light keeps the slab from looking like a hole
+     punched in the card on light backgrounds. */
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.18);
+}
+.md-prose pre code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  font-size: 0.8125em;
+}
+
+.md-prose blockquote {
+  margin: 1em 0;
+  padding: 2px 16px;
+  border-left: 3px solid var(--color-primary);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--color-active);
+  color: var(--color-text-secondary);
+}
+.md-prose blockquote > :first-child { margin-top: 0.5em; }
+.md-prose blockquote > :last-child { margin-bottom: 0.5em; }
+
+/* ── Tables ─────────────────────────────────────────────────────────────── */
+/* MarkdownRender emits a bare <table> with no wrapper to hang a scroll
+   container on, so the table becomes its own: `display:block` + `overflow-x`
+   makes a wide table scroll instead of stretching the card, while
+   `width:max-content` + `min-width:100%` keeps a narrow one filling the
+   column (a plain `display:block` table would shrink-wrap). */
+.md-prose table {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 1em 0;
+  font-size: 0.9375em;
+}
+.md-prose th,
+.md-prose td {
+  border: 1px solid var(--color-border);
+  padding: 7px 11px;
+  text-align: left;
+  vertical-align: top;
+}
+.md-prose th {
+  background: var(--color-hover);
+  font-weight: 650;
+  color: var(--color-text);
+  white-space: nowrap;
+}
+/* Zebra striping — at this density it does more for scanability than extra
+   row padding would. */
+.md-prose tbody tr:nth-child(even) { background: rgba(241, 245, 249, 0.55); }
+
+@media (max-width: 768px) {
+  .md-prose { --md-prose-size: 13px; }
+  .md-prose pre { padding: 12px; }
+}

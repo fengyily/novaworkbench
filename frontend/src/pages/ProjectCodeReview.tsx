@@ -22,10 +22,32 @@
 // attachment owner. That's why the composer is two-phase (create → describe
 // + attach → start) rather than one big form.
 //
+// The report reads top-down as verdict → ledger → findings → full prose:
+//
+//   verdict  — one coloured band answering "can this merge?" before any
+//              reading is required (ReviewVerdict below derives it from
+//              status + the persisted P0/P1 counts).
+//   ledger   — three count tiles, coloured only when non-zero so a single
+//              P0 is findable at a glance.
+//   findings — the graded items, grouped by severity; an empty bucket
+//              collapses to one quiet line instead of a full section.
+//   prose    — result_md behind a disclosure, rendered with the shared
+//              `.md-prose` typography (styles/markdown-prose.css) so the
+//              report looks the same here as in the knowledge base and the
+//              design-doc viewer. Before that class existed this surface had
+//              no typography at all and fell back to browser defaults.
+//
 // Findings rendering degrades on purpose: when the model honoured the
 // trailing-JSON contract we group by P0/P1/P3 with counts; when it didn't,
-// findings_json is empty and we render result_md as plain Markdown (the
-// report's own ## P0/P1/P3 sections mean nothing is lost).
+// findings_json is empty, the verdict is 'plain', and the Markdown
+// disclosure opens by itself (the report's own ## P0/P1/P3 sections mean
+// nothing is lost).
+//
+// 追问 (follow-ups) hang off the selected report: each question is its own
+// job on the same SSE channel, answered by resuming the review's claude
+// session, and the whole thread is persisted server-side so it survives a
+// reload. A follow-up never re-grades the review — the P0/P1/P3 counts you
+// see always belong to the report above it.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -33,6 +55,7 @@ import {
   reviewApi, codeReviewsApi, agentServersApi, parseReviewFindings,
   type PR, type PRListResponse, type Project,
   type CodeReview, type CodeReviewRunBinding, type ReviewFinding, type ReviewSeverity, type GoalMet,
+  type CodeReviewFollowup,
   API_BASE, authedFetch,
 } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
@@ -40,15 +63,66 @@ import AttachmentPanel from '../components/AttachmentPanel';
 import ModelSelect from '../components/ModelSelect';
 import { ExecEnvSelect, type ExecEnvServer } from '../components/ExecEnvSelect';
 import MarkdownRender from '../components/MarkdownRender';
-import { IconPlug, IconRobot } from '../components/icons';
+import { IconArchitect, IconBranch, IconClock, IconFileText, IconPlug, IconRobot } from '../components/icons';
 import { errorMessage } from '../utils/errMsg';
 import { fmtDate, fmtDateTime } from '../utils/intl';
+import '../styles/markdown-prose.css';
 import './ProjectCodeReview.css';
 
 type Mode = 'pr' | 'branch';
 
 /** Display order of the severity buckets. P2 is intentionally absent. */
 const SEVERITIES: ReviewSeverity[] = ['P0', 'P1', 'P3'];
+
+/**
+ * Headline state of a finished review, derived from status + counts.
+ *
+ *   block   — at least one P0: must not merge
+ *   warn    — no P0 but some P1: merge after fixing
+ *   clean   — graded, nothing blocking
+ *   error   — the run itself failed
+ *   pending — draft or still running, so there is no result yet
+ *   plain   — the model broke the trailing-JSON contract, nothing to grade
+ */
+type ReviewVerdict = 'error' | 'block' | 'warn' | 'clean' | 'pending' | 'plain';
+
+/**
+ * Collect the bodies of every ```mermaid fence in a report, in order.
+ *
+ * Line-based rather than regex-based because a review report is full of
+ * fenced code: a regex for ```mermaid[\s\S]*?``` happily matches across a
+ * Go snippet that itself contains the word, and a non-greedy match stops at
+ * the first ``` inside a nested fence. Tracking fence state line by line
+ * also means a ```go block mentioning mermaid is skipped outright.
+ *
+ * An unterminated final fence still yields its body — models truncate the
+ * closing marker often enough that dropping the diagram would lose a real
+ * picture (same reasoning as the backend's lastJSONFence).
+ */
+function extractMermaidBlocks(md: string): string[] {
+  const blocks: string[] = [];
+  let current: string[] | null = null;
+  let inOtherFence = false;
+  for (const line of md.split('\n')) {
+    const t = line.trim();
+    if (current) {
+      if (/^`{3,}\s*$/.test(t)) {
+        if (current.join('\n').trim()) blocks.push(current.join('\n'));
+        current = null;
+      } else {
+        current.push(line);
+      }
+    } else if (inOtherFence) {
+      if (/^`{3,}\s*$/.test(t)) inOtherFence = false;
+    } else if (/^`{3,}\s*mermaid\b/i.test(t)) {
+      current = [];
+    } else if (/^`{3,}/.test(t)) {
+      inOtherFence = true;
+    }
+  }
+  if (current && current.join('\n').trim()) blocks.push(current.join('\n'));
+  return blocks;
+}
 
 interface Props {
   projectId: string;
@@ -104,16 +178,33 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   const [history, setHistory] = useState<CodeReview[]>([]);
   const [selected, setSelected] = useState<CodeReview | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
+
+  // ── 追问 ─────────────────────────────────────────────────────────────────
+  // The thread belongs to the report currently in the result view, and runs
+  // on its own stream so asking a question never clobbers the review log
+  // still on screen above it.
+  const [followups, setFollowups] = useState<CodeReviewFollowup[]>([]);
+  const [question, setQuestion] = useState('');
+  const [askRunning, setAskRunning] = useState(false);
+  const [askLines, setAskLines] = useState<{ type: string; content: string }[]>([]);
+  const [askError, setAskError] = useState('');
+  const askEsRef = useRef<EventStream | null>(null);
+  const askPanelRef = useRef<HTMLDivElement>(null);
 
   // Close the SSE stream when the tab unmounts so a navigated-away review
   // doesn't keep a dangling reader around.
-  useEffect(() => () => { reviewEsRef.current?.close(); }, []);
+  useEffect(() => () => { reviewEsRef.current?.close(); askEsRef.current?.close(); }, []);
 
   // Keep the live stream pinned to the newest line (behaviour carried over
   // from ProjectDetail's review panel).
   useEffect(() => {
     if (reviewPanelRef.current) reviewPanelRef.current.scrollTop = reviewPanelRef.current.scrollHeight;
   }, [reviewLines]);
+
+  useEffect(() => {
+    if (askPanelRef.current) askPanelRef.current.scrollTop = askPanelRef.current.scrollHeight;
+  }, [askLines]);
 
   // ── Loaders ──────────────────────────────────────────────────────────────
 
@@ -134,6 +225,22 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
   useEffect(() => { loadPRs(); }, [loadPRs]);
   useEffect(() => { loadHistory(); }, [loadHistory]);
+
+  // The 追问 thread follows whichever report is in the result view. Keyed on
+  // the id (not the object) so re-reading the same session after a run
+  // doesn't refetch the thread it just updated.
+  const selectedId = selected?.id ?? '';
+  useEffect(() => {
+    setAskLines([]);
+    setAskError('');
+    setQuestion('');
+    if (!selectedId) { setFollowups([]); return; }
+    let cancelled = false;
+    codeReviewsApi.listFollowups(selectedId)
+      .then(rows => { if (!cancelled) setFollowups(Array.isArray(rows) ? rows : []); })
+      .catch(() => { if (!cancelled) setFollowups([]); });
+    return () => { cancelled = true; };
+  }, [selectedId]);
 
   // Only ready servers are offered — the backend refuses the rest, so listing
   // them would only mislead. A failure leaves the list empty, which still
@@ -393,14 +500,115 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     }
   };
 
+  // ── 追问 handlers ────────────────────────────────────────────────────────
+
+  const reloadFollowups = useCallback((reviewId: string) => {
+    codeReviewsApi.listFollowups(reviewId)
+      .then(rows => setFollowups(Array.isArray(rows) ? rows : []))
+      .catch(() => {/* the turn is persisted either way; the next open re-reads it */});
+  }, []);
+
+  // One question = one job on the shared review SSE channel. The answer is
+  // persisted by the backend, so when the job ends we just re-read the thread
+  // instead of trying to reconstruct it from the stream.
+  const handleAsk = async () => {
+    if (!selected || askRunning || !question.trim()) return;
+    const reviewId = selected.id;
+    setAskRunning(true);
+    setAskError('');
+    setAskLines([]);
+    try {
+      const { job_id } = await codeReviewsApi.ask(reviewId, question.trim());
+      setQuestion('');
+      askEsRef.current?.close();
+      askEsRef.current = createEventStream(
+        reviewApi.streamJobUrl(projectId, job_id),
+        (data) => {
+          if (data.type === 'job_done') {
+            setAskRunning(false);
+            askEsRef.current?.close();
+            askEsRef.current = null;
+            reloadFollowups(reviewId);
+          } else if (data.content) {
+            setAskLines(prev => [...prev, { type: data.type, content: data.content }]);
+          }
+        },
+        () => {
+          setAskRunning(false);
+          setAskError(t('projects.detail.reviewSseDrop'));
+          askEsRef.current = null;
+          // The run itself may well have finished — re-read before concluding
+          // anything from the dropped stream.
+          reloadFollowups(reviewId);
+        },
+      );
+    } catch (err: unknown) {
+      setAskError(errorMessage(err));
+      setAskRunning(false);
+    }
+  };
+
+  const handleDeleteFollowup = async (fu: CodeReviewFollowup) => {
+    if (!window.confirm(t('projects.detail.reviewFollowupDeleteConfirm'))) return;
+    try {
+      await codeReviewsApi.removeFollowup(fu.review_id, fu.id);
+      reloadFollowups(fu.review_id);
+    } catch (err: unknown) {
+      setAskError(errorMessage(err));
+    }
+  };
+
   // ── Derived ──────────────────────────────────────────────────────────────
 
   const findings = useMemo(() => parseReviewFindings(selected), [selected]);
+
+  // Diagrams are pulled out of the report and shown in their own section.
+  // They live inside result_md (the reviewer is asked for a 「改动概览图」 and
+  // for per-finding call/timing diagrams), and result_md sits behind a
+  // disclosure that is closed whenever the review graded cleanly — i.e.
+  // exactly the reports whose diagrams are worth a glance would hide them.
+  // The blocks stay in the prose too; duplicating a picture that is one
+  // click away costs less than burying it.
+  const diagrams = useMemo(() => extractMermaidBlocks(selected?.result_md || ''), [selected?.result_md]);
   const grouped = useMemo(() => {
     const m = new Map<ReviewSeverity, ReviewFinding[]>(SEVERITIES.map(s => [s, []]));
     for (const f of findings) m.get(f.severity)?.push(f);
     return m;
   }, [findings]);
+
+  // Counts come from the persisted columns rather than the decoded array —
+  // the backend derived both from the same JSON, and the columns stay
+  // meaningful (all zero) on the degraded path where findings_json is empty.
+  const counts = useMemo<Record<ReviewSeverity, number>>(() => ({
+    P0: selected?.p0_count ?? 0,
+    P1: selected?.p1_count ?? 0,
+    P3: selected?.p3_count ?? 0,
+  }), [selected]);
+
+  // The verdict is the one thing a reader wants before anything else: can
+  // this be merged? It drives the report's accent colour and headline.
+  // 'plain' is the degraded path — the model broke the trailing-JSON
+  // contract, so there is nothing to grade and the Markdown report leads.
+  const verdict = useMemo<ReviewVerdict>(() => {
+    if (!selected) return 'plain';
+    if (selected.status === 'error') return 'error';
+    // A draft picked from history has never produced a report — saying
+    // "ungraded" there would read as a model failure rather than "not run".
+    if (selected.status === 'draft' || selected.status === 'running') return 'pending';
+    if (!selected.findings_json) return 'plain';
+    if (counts.P0 > 0) return 'block';
+    if (counts.P1 > 0) return 'warn';
+    return 'clean';
+  }, [selected, counts]);
+  // Same TitleCase-the-discriminant convention as `statusLabel` below.
+  const verdictKey = verdict.charAt(0).toUpperCase() + verdict.slice(1);
+
+  // The full Markdown report is a disclosure: when the findings are graded
+  // they lead and the prose is backup, but on the degraded path the prose is
+  // all there is, so it opens by itself.
+  useEffect(() => {
+    setReportOpen(!selected?.findings_json);
+  }, [selected?.id, selected?.findings_json]);
 
   const statusLabel = (s: CodeReview['status']) => t(`projects.detail.reviewStatus${s.charAt(0).toUpperCase()}${s.slice(1)}`);
   const goalLabel = (g: GoalMet) => {
@@ -647,9 +855,10 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
       {/* ── Live stream (shared) ── */}
       {(reviewLines.length > 0 || running) && (
-        <div className="review-panel-wrap">
+        <div className="review-panel-wrap cr-stream">
           <div className="review-panel-header">
-            <span>
+            <span className="cr-stream-title">
+              {running && !reviewDone && <span className="cr-pulse" aria-hidden="true" />}
               {t('projects.detail.reviewHeader')}
               {reviewingPR ? `：#${reviewingPR.number} ${reviewingPR.title}` : ''}
               {reviewDone ? t('projects.detail.reviewHeaderDone') : ''}
@@ -674,59 +883,214 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
       {/* ── Graded result ── */}
       {detailLoading && <div className="tab-empty">{t('projects.detail.reviewLoadingDetail')}</div>}
       {selected && !detailLoading && (
-        <div className="cr-result">
-          <div className="review-panel-header">
-            <span>{t('projects.detail.reviewReportTitle')}</span>
-            <span className={`cr-goal cr-goal-${selected.goal_met || 'unknown'}`}>
-              {t('projects.detail.reviewGoalLabel')}：{goalLabel(selected.goal_met)}
-            </span>
-          </div>
-          {selected.model && (
-            <div className="review-model-line">
-              <IconRobot size={13} /> {t('projects.detail.reviewModelLine', { model: selected.model })}
+        <article className={`cr-report cr-report-${verdict}`}>
+          {/* Verdict band — the "can this merge?" answer, stated once, in
+              colour, above everything else. */}
+          <header className="cr-verdict">
+            <span className="cr-verdict-mark" aria-hidden="true" />
+            <div className="cr-verdict-text">
+              <h3 className="cr-verdict-title">{t(`projects.detail.reviewVerdict${verdictKey}`)}</h3>
+              <p className="cr-verdict-sub">{t(`projects.detail.reviewVerdictHint${verdictKey}`)}</p>
             </div>
+            <div className="cr-verdict-meta">
+              <span className={`cr-goal cr-goal-${selected.goal_met || 'unknown'}`}>
+                {t('projects.detail.reviewGoalLabel')}：{goalLabel(selected.goal_met)}
+              </span>
+              <span className="cr-meta-chip">
+                <IconBranch size={12} />
+                <code>{selected.review_type === 'pr' && selected.pr_number > 0 ? `#${selected.pr_number}` : selected.branch}</code>
+                {selected.base_branch ? <> ← <code>{selected.base_branch}</code></> : null}
+              </span>
+              {selected.model && (
+                <span className="cr-meta-chip" title={t('projects.detail.reviewModelLine', { model: selected.model })}>
+                  <IconRobot size={12} />{selected.model}
+                </span>
+              )}
+              <span className="cr-meta-chip">
+                <IconClock size={12} />{fmtDateTime(selected.finished_at || selected.created_at)}
+              </span>
+            </div>
+          </header>
+
+          {/* Severity ledger — three tiles, one glance. Zero stays grey so
+              the eye lands only on what actually needs attention. */}
+          {selected.findings_json ? (
+            <div className="cr-ledger">
+              {SEVERITIES.map(sev => (
+                <div key={sev} className={`cr-ledger-cell cr-ledger-${sev}${counts[sev] === 0 ? ' is-zero' : ''}`}>
+                  <span className="cr-ledger-num">{counts[sev]}</span>
+                  <span className="cr-ledger-label">
+                    <span className="cr-ledger-tag">{sev}</span>
+                    {t(`projects.detail.reviewSevShort${sev}`)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          {/* 改动概览图 — the report's Mermaid blocks, hoisted above the
+              findings so the shape of the change is visible before the list
+              of what is wrong with it. Rendered through MarkdownRender so a
+              diagram keeps the same zoom / download affordances it has in
+              the design doc and the knowledge base. */}
+          {diagrams.length > 0 && (
+            <section className="cr-diagrams">
+              <h4 className="cr-diagrams-head">
+                <IconArchitect size={13} />
+                <span className="cr-diagrams-title">{t('projects.detail.reviewDiagrams')}</span>
+                <span className="cr-hint">{t('projects.detail.reviewDiagramsHint')}</span>
+              </h4>
+              <div className="cr-diagrams-body md-prose">
+                {diagrams.map((src, i) => (
+                  <MarkdownRender key={i} content={'```mermaid\n' + src + '\n```'} />
+                ))}
+              </div>
+            </section>
           )}
 
           {findings.length > 0 && (
             <div className="cr-findings">
-              <div className="cr-findings-head">{t('projects.detail.reviewFindingsTitle')}</div>
               {SEVERITIES.map(sev => {
                 const items = grouped.get(sev) ?? [];
+                // An empty bucket collapses to one quiet line — rendering a
+                // full empty section for each would triple the noise on a
+                // report that only found P3s.
+                if (items.length === 0) {
+                  return (
+                    <p key={sev} className="cr-sev-empty">
+                      <span className={`cr-sev-badge cr-sev-badge-${sev}`}>{sev}</span>
+                      {t('projects.detail.reviewSevEmpty')}
+                    </p>
+                  );
+                }
                 return (
                   <section key={sev} className={`cr-sev cr-sev-${sev}`}>
                     <h4 className="cr-sev-head">
                       <span className={`cr-sev-badge cr-sev-badge-${sev}`}>{sev}</span>
-                      {t(`projects.detail.reviewSev${sev}`)}
+                      <span className="cr-sev-name">{t(`projects.detail.reviewSev${sev}`)}</span>
                       <span className="cr-sev-count">{items.length}</span>
                     </h4>
-                    {items.length === 0 ? (
-                      <p className="cr-sev-empty">{t('projects.detail.reviewSevEmpty')}</p>
-                    ) : items.map((f, i) => (
-                      <article key={i} className="cr-finding">
-                        <div className="cr-finding-title">{f.title}</div>
-                        {(f.file || f.line) && (
-                          <code className="cr-finding-loc">{f.file}{f.line ? `:${f.line}` : ''}</code>
-                        )}
-                        {f.detail && <p className="cr-finding-detail">{f.detail}</p>}
-                        {f.suggestion && (
-                          <p className="cr-finding-suggestion">
-                            <strong>{t('projects.detail.reviewFindingSuggestion')}：</strong>{f.suggestion}
-                          </p>
-                        )}
-                      </article>
-                    ))}
+                    <ol className="cr-finding-list">
+                      {items.map((f, i) => (
+                        <li key={i} className="cr-finding">
+                          <div className="cr-finding-head">
+                            <span className="cr-finding-idx">{sev}-{i + 1}</span>
+                            <span className="cr-finding-title">{f.title}</span>
+                            {(f.file || f.line) && (
+                              <code className="cr-finding-loc">{f.file}{f.line ? `:${f.line}` : ''}</code>
+                            )}
+                          </div>
+                          {f.detail && <p className="cr-finding-detail">{f.detail}</p>}
+                          {f.suggestion && (
+                            <p className="cr-finding-suggestion">
+                              <span className="cr-finding-suggestion-tag">{t('projects.detail.reviewFindingSuggestion')}</span>
+                              {f.suggestion}
+                            </p>
+                          )}
+                        </li>
+                      ))}
+                    </ol>
                   </section>
                 );
               })}
             </div>
           )}
 
+          {/* Full Markdown report. Collapsed behind a disclosure when the
+              findings above already carry the verdict; open by default when
+              they don't (degraded path), so nothing is ever hidden. */}
           {selected.result_md && (
-            <div className="cr-report-md">
-              <MarkdownRender content={selected.result_md} />
-            </div>
+            <details className="cr-report-md" open={reportOpen} onToggle={e => setReportOpen(e.currentTarget.open)}>
+              <summary className="cr-report-md-summary">
+                <IconFileText size={13} />
+                {t('projects.detail.reviewFullReport')}
+              </summary>
+              <div className="cr-report-md-body md-prose">
+                <MarkdownRender content={selected.result_md} />
+              </div>
+            </details>
           )}
-        </div>
+
+          {/* ── 追问 ── Asks run against THIS report; they never change its
+              findings or counts. */}
+          <div className="cr-followups">
+            <div className="cr-followups-head">
+              <span className="cr-label">{t('projects.detail.reviewFollowupTitle')}</span>
+              <span className="cr-hint">{t('projects.detail.reviewFollowupHint')}</span>
+            </div>
+
+            {followups.length === 0 && !askRunning && (
+              <p className="cr-sev-empty">{t('projects.detail.reviewFollowupEmpty')}</p>
+            )}
+
+            {followups.map(fu => (
+              <article key={fu.id} className={`cr-followup cr-followup-${fu.status}`}>
+                <div className="cr-followup-q">
+                  <span className="cr-followup-tag">{t('projects.detail.reviewFollowupQ')}</span>
+                  <span className="cr-followup-qtext">{fu.question}</span>
+                  <button
+                    className="btn btn-sm cr-followup-del"
+                    onClick={() => handleDeleteFollowup(fu)}
+                    disabled={fu.status === 'running'}
+                  >{t('projects.detail.reviewDeleteBtn')}</button>
+                </div>
+                {fu.status === 'running' ? (
+                  <p className="cr-followup-pending">{t('projects.detail.reviewFollowupRunning')}</p>
+                ) : fu.status === 'error' ? (
+                  <p className="cr-followup-errtext">{t('projects.detail.reviewFollowupFailed')}：{fu.answer}</p>
+                ) : (
+                  <div className="cr-followup-a">
+                    <span className="cr-followup-tag">{t('projects.detail.reviewFollowupA')}</span>
+                    <MarkdownRender content={fu.answer} />
+                  </div>
+                )}
+                <div className="cr-followup-meta">
+                  <span>{fmtDateTime(fu.created_at)}</span>
+                  {fu.model && <span><IconRobot size={12} /> {fu.model}</span>}
+                  {/* Only worth flagging the degraded case: a resumed answer
+                      is the expectation, a fresh one explains why an answer
+                      may be shallower than the report it talks about. */}
+                  {fu.status === 'done' && !fu.resumed && (
+                    <span className="cr-followup-fresh">{t('projects.detail.reviewFollowupFresh')}</span>
+                  )}
+                </div>
+              </article>
+            ))}
+
+            {askRunning && (
+              <div className="coding-panel cr-followup-stream" ref={askPanelRef} style={{ maxHeight: 220 }}>
+                {askLines.map((line, i) => (
+                  <div key={i} className={`coding-line coding-line-${line.type}`}>{line.content}</div>
+                ))}
+                <div className="coding-line coding-line-tool_call">{t('projects.detail.reviewFollowupRunning')}</div>
+              </div>
+            )}
+
+            {askError && <div className="cr-error">{askError}</div>}
+
+            {selected.result_md ? (
+              <div className="cr-followup-composer">
+                <textarea
+                  className="form-input cr-desc"
+                  rows={3}
+                  placeholder={t('projects.detail.reviewFollowupPlaceholder')}
+                  value={question}
+                  onChange={e => setQuestion(e.target.value)}
+                  disabled={askRunning || selected.status === 'running'}
+                />
+                <button
+                  className="btn btn-primary"
+                  onClick={handleAsk}
+                  disabled={askRunning || !question.trim() || selected.status === 'running'}
+                >
+                  {askRunning ? t('projects.detail.reviewFollowupAsking') : t('projects.detail.reviewFollowupAsk')}
+                </button>
+              </div>
+            ) : (
+              <p className="cr-hint">{t('projects.detail.reviewFollowupNoReport')}</p>
+            )}
+          </div>
+        </article>
       )}
 
       {/* ── PR comment editor — PR mode only, unchanged behaviour ── */}
@@ -795,9 +1159,16 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
                     <span className={`cr-status cr-status-${rv.status}`}>{statusLabel(rv.status)}</span>
                   </td>
                   <td data-label={t('projects.detail.reviewHistoryColFindings')}>
-                    <span className="cr-count cr-count-P0">P0 {rv.p0_count}</span>
-                    <span className="cr-count cr-count-P1">P1 {rv.p1_count}</span>
-                    <span className="cr-count cr-count-P3">P3 {rv.p3_count}</span>
+                    {/* Zero counts stay grey so a row with a single P0 reads
+                        at a glance instead of blending into three chips. */}
+                    {SEVERITIES.map(sev => {
+                      const n = sev === 'P0' ? rv.p0_count : sev === 'P1' ? rv.p1_count : rv.p3_count;
+                      return (
+                        <span key={sev} className={`cr-count cr-count-${sev}${n === 0 ? ' is-zero' : ''}`}>
+                          {sev} {n}
+                        </span>
+                      );
+                    })}
                   </td>
                   <td data-label={t('projects.detail.reviewHistoryColTime')}>{fmtDateTime(rv.created_at)}</td>
                   <td data-label={t('projects.detail.reviewHistoryColActions')}>
