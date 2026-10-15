@@ -282,3 +282,46 @@ func TestParseFindings_SurvivesBrokenGoalChecks(t *testing.T) {
 		t.Errorf("parseGoalChecks = %q, want \"\" for a non-array", got)
 	}
 }
+
+// A regeneration replaces a report the user already read, so its output has
+// to look like a report before it is allowed to land. The CLI exits 0 with
+// non-report text often enough that this is a real failure mode, not a
+// hypothetical one.
+func TestLooksLikeReport(t *testing.T) {
+	accept := []string{
+		"## 总体评价\n建议修复后合入\n\n## P0 — 必须修复\n无",
+		"前言一句话\n\n## 目标达成情况\n已达成",
+		"  ## 总体评价\n正文", // indented heading still counts
+	}
+	for _, s := range accept {
+		if !looksLikeReport(s) {
+			t.Errorf("looksLikeReport(%q) = false, want true", truncateStr(s, 40))
+		}
+	}
+
+	reject := []string{
+		"",
+		"   \n\n",
+		"Not logged in · Please run /login", // seen in the wild
+		"Error: 401 Unauthorized",           // proxy error as plain text
+		"#不是标题",                             // no space, and only h1-ish
+		"报告生成中断，请重试",                        // prose with no structure
+	}
+	for _, s := range reject {
+		if looksLikeReport(s) {
+			t.Errorf("looksLikeReport(%q) = true, want false", s)
+		}
+	}
+}
+
+// The failure message has to name what actually came back — "regeneration
+// failed" alone leaves the user guessing at a problem (not logged in) that
+// the CLI already stated plainly.
+func TestReportSnippet(t *testing.T) {
+	if got := reportSnippet("Not logged in · Please run /login"); !strings.Contains(got, "Please run /login") {
+		t.Errorf("snippet = %q, want it to quote the CLI output", got)
+	}
+	if got := reportSnippet("   "); !strings.Contains(got, "没有任何输出") {
+		t.Errorf("snippet for blank output = %q", got)
+	}
+}

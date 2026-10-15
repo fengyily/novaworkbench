@@ -319,15 +319,7 @@ func (h *ReviewHandler) finishFollowup(job *store.Job, fu *model.CodeReviewFollo
 			log.Printf("[Review] persist follow-up %s: %v", fu.ID, err)
 		}
 	}
-	lines, jobStatus, exitCode := job.Snapshot()
-	if perr := h.jobLogSvc.Save(job.ID, "", string(jobStatus), exitCode, job.StartedAt, job.FinishedAt, lines, modelName); perr != nil {
-		log.Printf("[Review] failed to persist follow-up job log %s: %v", job.ID, perr)
-	}
-	if status == model.FollowupStatusError {
-		job.Finish(1, store.JobError)
-		return
-	}
-	job.Finish(0, store.JobDone)
+	h.closeReviewJob(job, modelName, status == model.FollowupStatusError)
 }
 
 // followupPrompt renders the task prompt for one turn. resumed selects the

@@ -252,16 +252,15 @@ func (h *ReviewHandler) runRegenerate(job *store.Job, rv *model.CodeReview, proj
 // restores `done` and keeps the previous report. The user ends the attempt
 // exactly where they started, which is the contract this feature promises.
 func (h *ReviewHandler) finishRegenerate(job *store.Job, rv *model.CodeReview, modelName, report, errMsg string) {
-	if errMsg == "" && strings.TrimSpace(report) == "" {
-		errMsg = "模型未返回任何报告内容，已保留上一版报告"
+	if errMsg == "" && !looksLikeReport(report) {
+		errMsg = "模型未返回完整的 Review 报告，已保留上一版报告" + reportSnippet(report)
 	}
 	if errMsg != "" {
 		job.Append(store.LogLine{Type: "error", Content: errMsg})
 		if err := h.reviewSvc.MarkRegenerateFailed(rv.ID); err != nil {
 			log.Printf("[Review] roll back regeneration %s: %v", rv.ID, err)
 		}
-		h.saveReviewJobLog(job, modelName)
-		job.Finish(1, store.JobError)
+		h.closeReviewJob(job, modelName, true)
 		return
 	}
 
@@ -282,15 +281,63 @@ func (h *ReviewHandler) finishRegenerate(job *store.Job, rv *model.CodeReview, m
 		log.Printf("[Review] reload regenerated review %s: %v", rv.ID, err)
 	}
 
-	h.saveReviewJobLog(job, modelName)
-	job.Finish(0, store.JobDone)
+	h.closeReviewJob(job, modelName, false)
 }
 
-// saveReviewJobLog persists a finished review-family job so a backend restart
-// doesn't wipe the record (the JobStore is a memory-only ring buffer). Review
-// jobs aren't bound to a requirement, so requirement_id stays empty and the
-// effective model lives on job_logs.model.
-func (h *ReviewHandler) saveReviewJobLog(job *store.Job, modelName string) {
+// looksLikeReport is the acceptance gate a regeneration's output has to pass
+// before it is allowed to replace the report the user already has.
+//
+// It exists because the claude CLI can exit 0 having produced something that
+// is not a report at all — "Not logged in · Please run /login" is the one
+// seen in practice, and a proxy returning a plain-text error does the same.
+// A first review can hand that text straight through: it ends up in
+// result_md where it tells the user exactly what went wrong, and nothing was
+// lost. A REGENERATION cannot, because accepting it would push a good report
+// down into the version history and show a one-line CLI message in its place.
+//
+// The test is the contract's own shape rather than a length threshold: every
+// report BuildRegeneratePrompt asks for opens its sections with a Markdown
+// `##` heading (总体评价 / 改动概览图 / 目标达成情况 / P0 / P1 / P3 / 优点).
+// A false positive here is the safe direction anyway — the previous report
+// is kept and the job reports an error the user can read.
+func looksLikeReport(report string) bool {
+	for _, line := range strings.Split(report, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "## ") {
+			return true
+		}
+	}
+	return false
+}
+
+// reportSnippet renders whatever came back instead of a report, so the job
+// log says "Not logged in · Please run /login" rather than only that
+// something went wrong. Empty output adds nothing.
+func reportSnippet(report string) string {
+	s := strings.TrimSpace(report)
+	if s == "" {
+		return "（模型没有任何输出）"
+	}
+	return "。模型实际返回：" + truncateStr(s, 300)
+}
+
+// closeReviewJob is the common ending of every review-family run (review,
+// 追问, regeneration): close the job, then persist it so a backend restart
+// doesn't wipe the record (the JobStore is a memory-only ring buffer).
+//
+// The order matters and used to be the other way around. Job.Snapshot reads
+// the job's CURRENT status, so taking it before Finish persisted every
+// review job as `running` with exit 0 and a zero finished_at, no matter how
+// it actually ended. Snapshot only takes a read lock, so running it after
+// Finish is safe.
+//
+// Review jobs aren't bound to a requirement, so requirement_id stays empty
+// and the effective model lives on job_logs.model.
+func (h *ReviewHandler) closeReviewJob(job *store.Job, modelName string, failed bool) {
+	if failed {
+		job.Finish(1, store.JobError)
+	} else {
+		job.Finish(0, store.JobDone)
+	}
 	lines, jobStatus, exitCode := job.Snapshot()
 	if err := h.jobLogSvc.Save(job.ID, "", string(jobStatus), exitCode, job.StartedAt, job.FinishedAt, lines, modelName); err != nil {
 		log.Printf("[Review] failed to persist job log %s: %v", job.ID, err)

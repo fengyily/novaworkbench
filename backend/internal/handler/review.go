@@ -837,15 +837,10 @@ func (h *ReviewHandler) finishReview(job *store.Job, rv *model.CodeReview, model
 		h.snapshotFinishedReview(rv.ID, status)
 	}
 
-	// Persist the finished review job (incl. the effective reviewer model) so a
-	// backend restart doesn't wipe the record and the UI can surface "本次 review
-	// 使用模型".
-	h.saveReviewJobLog(job, modelName)
-	if status == model.ReviewStatusError {
-		job.Finish(1, store.JobError)
-		return
-	}
-	job.Finish(0, store.JobDone)
+	// Close + persist the job (incl. the effective reviewer model) so a
+	// backend restart doesn't wipe the record and the UI can surface "本次
+	// review 使用模型".
+	h.closeReviewJob(job, modelName, status == model.ReviewStatusError)
 }
 
 // snapshotFinishedReview freezes a successful run's report as the next
