@@ -126,14 +126,30 @@ type Requirement struct {
 	// consistent. Empty for local (non-agent) execution and legacy rows.
 	SyncMode string `json:"sync_mode"`
 	// AutoPush controls whether the coding stage, once development finishes,
-	// automatically dispatches the "提交 → 推送 → 创建 PR" sub-task (the same
-	// child agent MergeHandler.Push triggers manually). Defaults to true so
-	// every start-coding run ships its result by default; the user can turn it
-	// off per-requirement from the start-coding preflight dialog for
-	// exploratory runs. Stamped by the start-coding prologue and read at the
-	// three development completion points (local non-split, Agent-server, and
-	// the split orchestrator summary).
+	// automatically dispatches ANY of the post-development finishers (commit /
+	// push / PR). It is the legacy single-toggle that the three new stage
+	// flags below now refine; reading code (wizard_orchestration summary,
+	// wizard_coding plan-mode tail, schedule_executor) keeps using it as the
+	// aggregate "should we run post-development at all?" gate (= auto_commit
+	// OR auto_push_remote OR auto_create_pr). Stamped at the start-coding
+	// prologue via UpdateAutoPushFlags: writing one of the three new flags
+	// writes this column too so the legacy read paths stay authoritative.
 	AutoPush bool `json:"auto_push"`
+	// AutoCommit / AutoPushRemote / AutoCreatePR are the three orthogonal
+	// stage toggles that replace the old single "auto_push_pr" preflight
+	// checkbox (frontend split into three cards). Defaults all true (DB
+	// DEFAULT 1) so legacy rows + new UI runs both keep "做完全套" behavior:
+	// commit → push → create PR. The dispatch (WizardHandler.autoPushPR
+	// → push_pr_shell / push_pr_base / dispatchPushPRSubTask) reads these
+	// flags to decide which stages to actually run:
+	//   autoCommit     off → bail (nothing to push / nothing to PR)
+	//   autoPushRemote off → commit only
+	//   autoCreatePR   off → skip gh/glab/tea pr create
+	// The split lets a user "commit locally without pushing", "push to the
+	// remote branch but don't open a PR", or "do everything as before".
+	AutoCommit     bool `json:"auto_commit"`
+	AutoPushRemote bool `json:"auto_push_remote"`
+	AutoCreatePR   bool `json:"auto_create_pr"`
 	// NoBranch records the "develop on base branch" choice made at the coding
 	// stage prologue. When true, the requirement skipped worktree creation
 	// and branch creation; coding, commit, and push all happen directly on the

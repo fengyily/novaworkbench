@@ -233,9 +233,18 @@ export default function LaunchPlanSection({
   // Default OFF to match the developer-stage preflight default: split
   // tasks runs an extra dispatch round and is the slower path.
   const [splitTasks, setSplitTasks] = useState(false);
-  // Auto-push default ON so the common "create + ship" path stays
-  // zero-config.
-  const [autoPushPR, setAutoPushPR] = useState(true);
+  // Auto-push defaults — three independent stage toggles split of the legacy
+  // single auto_push_pr checkbox. All ON so the common "create + ship" path
+  // stays zero-config; the user can opt out of any single stage.
+  //   autoCommit     — git add + commit on the dev branch
+  //   autoPush       — git push -u origin dev (implies commit)
+  //   autoCreatePR   — gh / glab / tea PR create (implies push)
+  // Dependency cascade enforced in the onChange handlers below — turning off
+  // an earlier stage auto-disables its descendants; the backend re-enforces
+  // the same invariant on the wire.
+  const [autoCommit, setAutoCommit] = useState(true);
+  const [autoPush, setAutoPush] = useState(true);
+  const [autoCreatePR, setAutoCreatePR] = useState(true);
   // '' = remote-Git sync (default); 'local' = no-remote fallback.
   const [syncMode, setSyncMode] = useState<'' | 'local'>('');
   // 'design' = hand the stored design doc via -p; matches the
@@ -334,7 +343,12 @@ export default function LaunchPlanSection({
       // manual 模式下用户后续手动 StartCoding 时,该字段也会被读出来。
       no_branch: noBranch || undefined,
       split_tasks: splitTasks || undefined,
-      auto_push_pr: autoPushPR,
+      // Three independent stage flags. Backend treats a non-nil composite
+      // auto_push_pr as "all on" so the issue-monitor / older clients keep
+      // working via that field name; new code prefers the three flags.
+      auto_commit: autoCommit || undefined,
+      auto_push: autoPush || undefined,
+      auto_create_pr: autoCreatePR || undefined,
       read_knowledge: readKnowledge || undefined,
       sync_mode: syncMode || undefined,
       dev_mode: devMode || undefined,
@@ -347,7 +361,7 @@ export default function LaunchPlanSection({
     mode, recurrence, runAt, recurTime, recurDays,
     designModel, designClaudeConfigId, designAgentServerId,
     codingModel, codingClaudeConfigId, codingAgentServerId,
-    branchName, baseBranch, splitTasks, autoPushPR, readKnowledge,
+    branchName, baseBranch, splitTasks, autoCommit, autoPush, autoCreatePR, readKnowledge,
     syncMode, devMode, noBranch,
   ]);
 
@@ -778,7 +792,7 @@ export default function LaunchPlanSection({
           </div>
 
           {/* v0.6.x 不创建分支开关(preflight-toggle 卡片形式,与同 stage
-              的 splitTasks / autoPushPR 同一视觉语言)。勾选时:
+              的 splitTasks / autoCommit 同一视觉语言)。勾选时:
               - 后端跳过 worktree 创建与 PR 创建,直接 commit/push base
               - NEW 分支名输入置灰(见上)
               - coding_agent_server_id 强制清空(后端前置拒绝 no_branch+agent)
@@ -830,19 +844,81 @@ export default function LaunchPlanSection({
             </div>
           </label>
 
-          <label className={`preflight-toggle ${autoPushPR ? 'is-checked' : ''}`}>
+          {/* Three independent stage toggles split of the legacy auto_push_pr
+             checkbox (mirrors RequirementDetail's preflight modal —
+             identical cascade: commit → push → PR, each "later" toggle
+             auto-enables its predecessors; each "earlier" toggle's
+             off-state collapses the descendants). Backend re-enforces
+             the same invariant on the wire (wizard_coding.go stamping). */}
+          <label className={`preflight-toggle ${autoCommit ? 'is-checked' : ''}`}>
             <input
               type="checkbox"
-              checked={autoPushPR}
-              onChange={e => setAutoPushPR(e.target.checked)}
+              checked={autoCommit}
+              onChange={e => {
+                const next = e.target.checked;
+                setAutoCommit(next);
+                if (!next) {
+                  setAutoPush(false);
+                  setAutoCreatePR(false);
+                }
+              }}
               disabled={fieldDisabled}
             />
             <div className="preflight-toggle-body">
               <div className="preflight-toggle-title">
-                {t('requirements.detail2.preflightAutoPushPR')}
+                {t('requirements.detail2.preflightAutoCommit')}
               </div>
               <div className="preflight-toggle-desc">
-                {t('requirements.detail2.preflightAutoPushPRHint')}
+                {t('requirements.detail2.preflightAutoCommitHint')}
+              </div>
+            </div>
+          </label>
+
+          <label className={`preflight-toggle ${autoPush ? 'is-checked' : ''}`}>
+            <input
+              type="checkbox"
+              checked={autoPush}
+              onChange={e => {
+                const next = e.target.checked;
+                setAutoPush(next);
+                if (next) {
+                  setAutoCommit(true);
+                } else {
+                  setAutoCreatePR(false);
+                }
+              }}
+              disabled={fieldDisabled}
+            />
+            <div className="preflight-toggle-body">
+              <div className="preflight-toggle-title">
+                {t('requirements.detail2.preflightAutoPush')}
+              </div>
+              <div className="preflight-toggle-desc">
+                {t('requirements.detail2.preflightAutoPushHint')}
+              </div>
+            </div>
+          </label>
+
+          <label className={`preflight-toggle ${autoCreatePR ? 'is-checked' : ''}`}>
+            <input
+              type="checkbox"
+              checked={autoCreatePR}
+              onChange={e => {
+                const next = e.target.checked;
+                setAutoCreatePR(next);
+                if (next) {
+                  setAutoCommit(true);
+                  setAutoPush(true);
+                }
+              }}
+              disabled={fieldDisabled}
+            />
+            <div className="preflight-toggle-body">
+              <div className="preflight-toggle-title">
+                {t('requirements.detail2.preflightAutoCreatePR')}
+              </div>
+              <div className="preflight-toggle-desc">
+                {t('requirements.detail2.preflightAutoCreatePRHint')}
               </div>
             </div>
           </label>

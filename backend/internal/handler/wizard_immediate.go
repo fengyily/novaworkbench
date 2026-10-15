@@ -78,7 +78,13 @@ type designCodingImmediateReq struct {
 	// 与 AutoPushPR 用 *bool 同:nil = 保留行值(让 CreateLaunchSpec 路径
 	// 之前的请求行为不变),non-nil = stamp 显式值。
 	NoBranch            *bool  `json:"no_branch"`
+	// AutoPushPR is the LEGACY single-toggle kept for backward compatibility
+	// (issue-monitor / older scheduler paths). New frontend sends the three
+	// independent stage flags below, which take precedence when present.
 	AutoPushPR          *bool  `json:"auto_push_pr"`
+	AutoCommit          *bool  `json:"auto_commit"`
+	AutoPush            *bool  `json:"auto_push"` // marshals as auto_push; model field is AutoPushRemote (avoid DB-column collision in JSON)
+	AutoCreatePR        *bool  `json:"auto_create_pr"`
 	DevMode             string `json:"dev_mode"`
 	SyncMode            string `json:"sync_mode"`
 }
@@ -329,7 +335,14 @@ func (h *WizardHandler) immediateDesignCallback(reqID string, body designCodingI
 				// body.NoBranch 是 *bool(prologue nil-vs-non-nil 语义),
 				// 直接赋值即可。
 				NoBranch:         body.NoBranch,
+				// Legacy single-toggle + three independent stage flags both
+				// pass through; the prologue in wizard_coding.go takes the
+				// three stage flags when any are set, falling back to the
+				// legacy boolean otherwise.
 				AutoPushPR:       body.AutoPushPR,
+				AutoCommit:       body.AutoCommit,
+				AutoPush:         body.AutoPush,
+				AutoCreatePR:     body.AutoCreatePR,
 				DevMode:          body.DevMode,
 				SyncMode:         body.SyncMode,
 			}

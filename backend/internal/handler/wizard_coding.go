@@ -124,7 +124,15 @@ type codingRunParams struct {
 	// from the preflight-dialog toggle is stamped onto the row so the three
 	// completion points — one of which may run asynchronously after a restart —
 	// all read the same intent.
-	AutoPushPR *bool `json:"auto_push_pr"`
+	AutoPushPR *bool `json:"auto_push_pr"` // LEGACY single-toggle kept for backward compatibility with
+	// older clients / schedule_executor / issue-monitor paths that still post
+	// the single boolean. New frontend sends three independent stage flags
+	// below (auto_commit / auto_push / auto_create_pr). When both are present
+	// the new three flags win; when AutoPushPR alone is present it is treated
+	// as "all three stages enabled" (mirrors today's behavior).
+	AutoCommit   *bool `json:"auto_commit"`
+	AutoPush     *bool `json:"auto_push"`      // model field is AutoPushRemote (avoid DB-column name collision in JSON)
+	AutoCreatePR *bool `json:"auto_create_pr"`
 	// NoBranch toggles the "develop on base branch" mode (v0.6.x). When true,
 	// StartCoding skips worktree creation and forces the working dir to
 	// projectPath + baseBranch; commit + push go directly to base and PR
@@ -580,16 +588,66 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		}
 		// Stamp the auto-push intent from the preflight-dialog toggle. Pointer
 		// semantics: nil (omitted by the scheduler / legacy clients) preserves
-		// the row's persisted value — reqRow.AutoPush already carries the DB
-		// default (true) or the last stamped choice — so the "都自动推送"
-		// default is never silently cleared. A non-nil value is persisted so
-		// the split orchestrator summary (which may run after a restart) reads
-		// the same intent the completion points below do.
-		if p.AutoPushPR != nil {
+		// the row's persisted value — reqRow.AutoCommit / AutoPushRemote /
+		// AutoCreatePR already carry the DB defaults (all true) or the last
+		// stamped choice — so the "都自动推送" default is never silently cleared.
+		// Three independent stage flags (auto_commit / auto_push / auto_create_pr)
+		// take priority over the legacy AutoPushPR (which now writes all three
+		// at once to mirror its old "do everything" semantics). When ALL three
+		// new flags are nil we fall through to the legacy single-flag path so
+		// older clients (issue-monitor / schedule_executor legacy) keep working.
+		stageFlagSet := p.AutoCommit != nil || p.AutoPush != nil || p.AutoCreatePR != nil
+		if stageFlagSet {
+			// Read the current persisted values so a partial POST (only one of
+			// the three flags set) still preserves the user's previous choice
+			// for the unsent flags — same write-through semantics the legacy
+			// pointer-nil guard gave AutoPushPR.
+			commit := true
+			push := true
+			pr := true
+			if reqRow != nil {
+				commit = reqRow.AutoCommit
+				push = reqRow.AutoPushRemote
+				pr = reqRow.AutoCreatePR
+			}
+			if p.AutoCommit != nil {
+				commit = *p.AutoCommit
+			}
+			if p.AutoPush != nil {
+				push = *p.AutoPush
+			}
+			if p.AutoCreatePR != nil {
+				pr = *p.AutoCreatePR
+			}
+			// Enforce the dependency invariant: PR requires push, push
+			// requires commit. Without this the user could turn off commit
+			// and leave PR on — which would commit/push nothing and silently
+			// produce no PR. Snap the dependents back to true.
+			if !commit {
+				push = false
+				pr = false
+			} else if !push {
+				pr = false
+			}
+			if perr := h.reqSvc.UpdateAutoPushFlags(p.RequirementID, commit, push, pr); perr != nil {
+				log.Printf("[start-coding] failed to persist auto_commit/push/pr for %s: %v", p.RequirementID, perr)
+			} else if reqRow != nil {
+				reqRow.AutoCommit = commit
+				reqRow.AutoPushRemote = push
+				reqRow.AutoCreatePR = pr
+				reqRow.AutoPush = commit || push || pr
+			}
+		} else if p.AutoPushPR != nil {
+			// Legacy single-toggle path (issue-monitor / older clients). The
+			// helper turns a single boolean into the three stage flags, all
+			// equal — matches today's "do everything" behavior.
 			if perr := h.reqSvc.UpdateAutoPush(p.RequirementID, *p.AutoPushPR); perr != nil {
 				log.Printf("[start-coding] failed to persist auto_push for %s: %v", p.RequirementID, perr)
 			} else if reqRow != nil {
 				reqRow.AutoPush = *p.AutoPushPR
+				reqRow.AutoCommit = *p.AutoPushPR
+				reqRow.AutoPushRemote = *p.AutoPushPR
+				reqRow.AutoCreatePR = *p.AutoPushPR
 			}
 		}
 		// Stamp the "develop on base branch" intent. Same pointer semantics

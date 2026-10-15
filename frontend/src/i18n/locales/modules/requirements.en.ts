@@ -238,6 +238,15 @@ export const requirements = {
     preflightReadKnowledgeHint: 'Before coding, scan the project for entries relevant to this requirement and inject them as extra context. Takes a few seconds — very useful for complex requirements.',
     preflightSplitTasks: 'Split tasks and auto-dispatch',
     preflightSplitTasksHint: 'Have the main agent decompose the requirement into sub-tasks and dispatch them in series. Off by default — the developer persona runs directly, which is faster.',
+    preflightAutoCommit: 'Auto-commit when development finishes',
+    preflightAutoCommitHint: 'Run `git add -A && git commit` on the dev branch when development finishes. Off leaves changes in your worktree to commit manually.',
+    preflightAutoPush: 'Auto-push to remote after commit',
+    preflightAutoPushHint: 'Run `git push -u origin <dev>` to upload the committed branch. Off leaves commits local; you push by hand.',
+    preflightAutoCreatePR: 'Auto-create PR after push',
+    preflightAutoCreatePRHint: 'Open the PR via `gh` / `glab` / `tea` (or fall back to a compare link). Off means you open the PR yourself in the browser.',
+    // Legacy composite key kept around for any out-of-tree consumer; the
+    // preflight dialog and LaunchPlanSection already use the three split
+    // keys above.
     preflightAutoPushPR: 'Auto commit / push / create PR when done',
     preflightAutoPushPRHint: 'After development finishes, automatically dispatch a sub-task that runs the full "commit → merge main → push → create PR" flow. On by default; works for split and non-split runs and Agent-server execution. If the project has no remote or platform token configured, it is skipped or only pushes.',
     preflightDevModeTitle: 'Development mode',
@@ -417,11 +426,9 @@ export const requirements = {
     designSectionSteps: 'Implementation steps',
     designSectionModelChanges: 'Data model changes',
     designSectionRisks: 'Implementation risks',
-    designExpandCollapse: '▲ Collapse design',
-    designExpandShow: '▼ Show full design',
-    // BRIEF (requirement.description) collapse toggle — mirrors the design
-    // toggle above; uses "Collapse" without "design" since the BRIEF is the
-    // requirement's own description, not the technical design.
+    // BRIEF (requirement.description) collapse toggle. The design body is
+    // rendered 固定显示 (always in full, no collapse) as of v0.5.x — only the
+    // BRIEF card still uses this gate.
     descExpandCollapse: '▲ Collapse',
     descExpandShow: '▼ Show full description',
     designCompleteBtn: 'Design complete',

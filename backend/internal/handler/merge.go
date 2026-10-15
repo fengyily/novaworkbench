@@ -1095,9 +1095,15 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 	// 路由到 runPushBaseShellJob — commit + push base + 无 PR,逻辑与 auto 入口
 	// 共享同一 shell job。
 	var jobID, subTaskID string
+	// Manual "推送并创建 PR" button always runs the full chain
+	// (commit + push + PR) regardless of the requirement's stored stage
+	// flags — the user explicitly clicked the manual button, so the
+	// preflight auto-stage toggles (which govern auto-dispatch only) don't
+	// apply here. PR-creation is forced on; PR title/body are passed empty
+	// (the LLM child prompts its own).
 	if reqRow.NoBranch {
 		var berr error
-		jobID, subTaskID, berr = h.subTaskRunner.RunPushBaseShellJob(reqRow, base, remote, platformType, pushCommitMsg, effectiveModel, roleConfigID, commitLang, "")
+		jobID, subTaskID, berr = h.subTaskRunner.RunPushBaseShellJob(reqRow, base, remote, platformType, pushCommitMsg, effectiveModel, roleConfigID, commitLang, "", true, true)
 		if berr != nil {
 			writeError(w, http.StatusInternalServerError, "DB_ERROR", berr.Error())
 			return
@@ -1105,7 +1111,7 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[merge/push] %s: no-branch → base-shell job=%s base=%s", reqRow.ID, jobID, base)
 	} else {
 		var err error
-		jobID, subTaskID, err = dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, pushCommitMsg, effectiveModel, roleConfigID, commitLang, "manual")
+		jobID, subTaskID, err = dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, pushCommitMsg, effectiveModel, roleConfigID, commitLang, "manual", true, true, true)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
 			return
@@ -1144,9 +1150,9 @@ func (h *MergeHandler) Push(w http.ResponseWriter, r *http.Request) {
 //
 // Returns the JobStore job id + sub_tasks row id so an HTTP caller can hand
 // them to the frontend for SSE subscription; the automatic caller ignores them.
-func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, modelName, roleConfigID, commitLang, sourceTag string) (jobID, subTaskID string, err error) {
-	log.Printf("[push-pr] %s: dispatch attempt source=%s model=%s cfg=%s commit_msg_set=%v",
-		reqRow.ID, sourceTag, modelName, roleConfigID, commitMessage != "")
+func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, modelName, roleConfigID, commitLang, sourceTag string, autoCommit, autoPushRemote, autoCreatePR bool) (jobID, subTaskID string, err error) {
+	log.Printf("[push-pr] %s: dispatch attempt source=%s model=%s cfg=%s commit_msg_set=%v (commit=%v push=%v pr=%v)",
+		reqRow.ID, sourceTag, modelName, roleConfigID, commitMessage != "", autoCommit, autoPushRemote, autoCreatePR)
 
 	// Idempotency guard: collapse manual+auto races that fire within a few
 	// seconds of each other. A row already tagged push_pr AND still
@@ -1163,10 +1169,22 @@ func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev
 		return existing.JobID, existing.ID, nil
 	}
 
-	prompt := buildPushSubTaskPrompt(reqRow, dev, base, remote, platformType, commitMessage, commitLang)
-	title := "推送并创建 PR"
+	prompt := buildPushSubTaskPrompt(reqRow, dev, base, remote, platformType, commitMessage, commitLang, autoPushRemote, autoCreatePR)
+	// Sub-task card title reflects which stages are actually being run on
+	// the agent host — same convention as runPushPRShellJob's stage-aware
+	// "本地 shell 推送" variant. The auto path's wording differs because
+	// the remote LLM is the runner, not a local shell.
+	var title string
+	switch {
+	case autoCreatePR:
+		title = "推送并创建 PR"
+	case autoPushRemote:
+		title = "推送 (跳过 PR)"
+	default:
+		title = "提交 (跳过推送)"
+	}
 	if commitMessage != "" {
-		title = "推送并创建 PR: " + truncateMergePrompt(commitMessage, 40)
+		title = title + ": " + truncateMergePrompt(commitMessage, 40)
 	}
 	sourceSID := ""
 	// Route the push/PR child to where the code physically lives: on the agent
@@ -1206,9 +1224,28 @@ func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev
 // platformType is the project's configured platform ("github" / "gitlab" /
 // "gitea") — empty tells the child to surface a compare URL via git
 // (no token / no automated PR).
-func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, commitLang string) string {
+//
+// autoCommit / autoPushRemote / autoCreatePR (the post-development stage
+// flags from the start-coding preflight) gate which steps the prompt
+// actually requires: any stage that's false gets its step dropped from the
+// prompt so the LLM doesn't run it. autoCommit is enforced upstream by
+// autoPushPR (we never get here with false), so the prompt can assume it
+// is true; autoPushRemote=false and autoCreatePR=false are the only
+// meaningful variants this helper needs to express.
+func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, commitLang string, autoPushRemote, autoCreatePR bool) string {
 	var b strings.Builder
-	b.WriteString("请完成「提交 → 合并主分支 → 推送 → 创建 PR」全流程。当前任务所有 git 操作都在当前工作目录（worktree / 项目目录）中执行；请避免在工作目录以外执行任何写操作。\n")
+	switch {
+	case autoPushRemote && autoCreatePR:
+		b.WriteString("请完成「提交 → 合并主分支 → 推送 → 创建 PR」全流程。")
+	case autoPushRemote && !autoCreatePR:
+		b.WriteString("请完成「提交 → 合并主分支 → 推送」流程（**不要创建 PR** — 用户在 start-coding 弹窗里关掉了 auto_create_pr）。")
+	default:
+		// autoCommit only (no push, no PR) — extremely rare on the LLM path
+		// (commit-only usually hits the shell job instead) but cover it so
+		// the prompt never lies about what to do.
+		b.WriteString("请完成「提交」流程（**不要 push，也不要创建 PR** — 用户只勾选了 auto_commit）。")
+	}
+	b.WriteString("当前任务所有 git 操作都在当前工作目录（worktree / 项目目录）中执行；请避免在工作目录以外执行任何写操作。\n")
 	// Agent-server dispatch: the child runs inside the requirement's remote
 	// worktree on the agent host (same /tmp/nova-agent/<proj>/<req> layout the
 	// coding pass used), so the "当前工作目录" wording above stays true — the
@@ -1261,40 +1298,52 @@ func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platfo
 	b.WriteString("   - 整合双方改动、消除冲突标记后写回文件。\n")
 	b.WriteString("   - 运行 `git add -A` 暂存已解决的文件，再运行 `git commit --no-edit` 完成合并提交。\n")
 	b.WriteString("   - 不要留下任何冲突标记。\n")
-	b.WriteString("4. **推送分支**：运行 `git push -u origin ")
-	b.WriteString(dev)
-	b.WriteString("` 推送开发分支到 origin。如果推送失败（例如需要先 pull），请尝试 `git pull --rebase origin ")
-	b.WriteString(dev)
-	b.WriteString("` 后再推送，仍失败则报告错误并停止。\n")
-	b.WriteString("5. **创建 PR**（如平台支持）：\n")
-	switch platformType {
-	case "github":
-		b.WriteString("   - 使用 `gh pr create --base ")
-		b.WriteString(base)
-		b.WriteString(" --head ")
+	// Step 4 (push) — only required when autoPushRemote is on. The opening
+	//    sentence already told the LLM which stages to run; the body just has
+	//    to match. Mirrors the user's start-coding preflight intent so a
+	//    "push only, no PR" run doesn't accidentally run git push.
+	if autoPushRemote {
+		b.WriteString("4. **推送分支**：运行 `git push -u origin ")
 		b.WriteString(dev)
-		b.WriteString(" --title \"<PR 标题>\" --body \"<PR 正文>\"` 创建 PR（gh CLI 已自动认证）。\n")
-		b.WriteString("   - 如果 `gh` 不可用，改用项目配置的 PlatformToken（通过环境变量或 backend API 调用），或告知用户手动访问 ")
-		b.WriteString(remote)
-		b.WriteString(" 上的 compare 链接创建。\n")
-	case "gitlab":
-		b.WriteString("   - 使用 `glab mr create --target-branch ")
-		b.WriteString(base)
-		b.WriteString(" --source-branch ")
+		b.WriteString("` 推送开发分支到 origin。如果推送失败（例如需要先 pull），请尝试 `git pull --rebase origin ")
 		b.WriteString(dev)
-		b.WriteString(" --title \"<PR 标题>\" --description \"<PR 正文>\"` 创建 Merge Request。\n")
-		b.WriteString("   - 如 `glab` 不可用，告知用户手动通过 GitLab Web UI 创建。\n")
-	case "gitea":
-		b.WriteString("   - 使用 `tea pr create --base ")
-		b.WriteString(base)
-		b.WriteString(" --head ")
-		b.WriteString(dev)
-		b.WriteString(" --title \"<PR 标题>\" --description \"<PR 正文>\"` 创建 PR。\n")
-		b.WriteString("   - 如 `tea` 不可用，告知用户手动通过 Gitea Web UI 创建。\n")
-	default:
-		b.WriteString("   - 项目未配置平台 Token / 平台类型。请推送到 origin 后，告知用户手动访问 ")
-		b.WriteString(remote)
-		b.WriteString(" 上的 compare 链接创建 PR。\n")
+		b.WriteString("` 后再推送，仍失败则报告错误并停止。\n")
+	}
+	// Step 5 (PR creation) — skipped entirely when autoCreatePR is off. When
+	//    skipped, the LLM is told (in the opening sentence) not to run any PR
+	//    CLI; not emitting the step at all keeps the prompt's steps list and
+	//    the opening sentence consistent.
+	if autoCreatePR {
+		b.WriteString("5. **创建 PR**（如平台支持）：\n")
+		switch platformType {
+		case "github":
+			b.WriteString("   - 使用 `gh pr create --base ")
+			b.WriteString(base)
+			b.WriteString(" --head ")
+			b.WriteString(dev)
+			b.WriteString(" --title \"<PR 标题>\" --body \"<PR 正文>\"` 创建 PR（gh CLI 已自动认证）。\n")
+			b.WriteString("   - 如果 `gh` 不可用，改用项目配置的 PlatformToken（通过环境变量或 backend API 调用），或告知用户手动访问 ")
+			b.WriteString(remote)
+			b.WriteString(" 上的 compare 链接创建。\n")
+		case "gitlab":
+			b.WriteString("   - 使用 `glab mr create --target-branch ")
+			b.WriteString(base)
+			b.WriteString(" --source-branch ")
+			b.WriteString(dev)
+			b.WriteString(" --title \"<PR 标题>\" --description \"<PR 正文>\"` 创建 Merge Request。\n")
+			b.WriteString("   - 如 `glab` 不可用，告知用户手动通过 GitLab Web UI 创建。\n")
+		case "gitea":
+			b.WriteString("   - 使用 `tea pr create --base ")
+			b.WriteString(base)
+			b.WriteString(" --head ")
+			b.WriteString(dev)
+			b.WriteString(" --title \"<PR 标题>\" --description \"<PR 正文>\"` 创建 PR。\n")
+			b.WriteString("   - 如 `tea` 不可用，告知用户手动通过 Gitea Web UI 创建。\n")
+		default:
+			b.WriteString("   - 项目未配置平台 Token / 平台类型。请推送到 origin 后，告知用户手动访问 ")
+			b.WriteString(remote)
+			b.WriteString(" 上的 compare 链接创建 PR。\n")
+		}
 	}
 	b.WriteString("\n")
 	b.WriteString(service.PRLangRules(commitLang))

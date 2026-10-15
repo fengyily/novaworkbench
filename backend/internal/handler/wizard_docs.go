@@ -217,6 +217,18 @@ func looksBinary(data []byte) bool {
 
 // RefineDoc streams a multi-turn conversation to refine a design doc or a coding instruction.
 // doc_type: "design" | "coding" | "wiki"
+//
+// As of v0.5.x the refine turn runs WITHOUT a role persona system prompt:
+// the resumed claude session already carries the doc + prior turns as
+// conversation context, and the per-turn prompt below self-encodes the
+// task shape (completeness discipline + [REFINE_COMPLETE] sentinel + "用
+// 中文"). The role row is still loaded for its bound model + Claude
+// config, but its `SystemPrompt` field is intentionally discarded. The
+// CLI's built-in default system prompt survives untouched (gateway.go:662
+// skips --system-prompt / --append-system-prompt when StreamOpts.SystemPrompt
+// is empty). SSE frames are emitted in real-time by runClaudeStream
+// (stream_event.content_block_delta → message events) — no batching.
+
 func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RequirementID       string `json:"requirement_id"`
@@ -314,7 +326,15 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	systemPrompt, model, claudeConfigID := h.roleConfig(roleKey)
+	// Per-refine-doc design decision: skip the role persona as a system prompt.
+	// The resumed claude session already carries the doc + prior turns as
+	// conversation context, and the local prompt below self-encodes the
+	// task shape (completeness discipline + [REFINE_COMPLETE] sentinel + a
+	// "用中文" line). Letting the architect persona replace the CLI's
+	// built-in system prompt was adding tone / section-shape noise without
+	// measurable benefit on the refine turn; users want a plain chat. We
+	// still load the role row to pick up its bound model + Claude config.
+	_, model, claudeConfigID := h.roleConfig(roleKey)
 	// Per-request model override (highest precedence); empty means role default.
 	if req.Model != "" {
 		model = req.Model
@@ -389,9 +409,13 @@ func (h *WizardHandler) RefineDoc(w http.ResponseWriter, r *http.Request) {
 	prompt = h.applyMentionedSkills(prompt, workDir, skillText)
 
 	cmd := h.llm.StreamCmd(r.Context(), llm.StreamOpts{
-		Prompt:         prompt,
-		WorkDir:        workDir,
-		SystemPrompt:   systemPrompt,
+		Prompt:  prompt,
+		WorkDir: workDir,
+		// SystemPrompt intentionally omitted: the design refine is a plain
+		// chat, no role persona is prepended. gateway.streamArgs skips
+		// --system-prompt / --append-system-prompt when StreamOpts.SystemPrompt
+		// is empty (gateway.go:662), so the CLI's built-in default system
+		// prompt survives untouched.
 		Model:          cliModelArg(model),
 		ClaudeConfigID: claudeConfigID,
 		SessionID:      sourceSID,

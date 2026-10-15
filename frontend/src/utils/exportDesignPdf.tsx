@@ -47,7 +47,8 @@ const MERMAID_FENCE = /```mermaid\s*\n([\s\S]*?)```/g;
 
 // Inline, self-contained print styles. Concrete values (not var(--…)) because
 // html2canvas snapshots computed styles and some CSS-variable color spaces
-// (oklch etc.) can break it. Mirrors .analysis-summary on screen.
+// (oklch etc.) can break it. Mirrors .md-prose on screen (which is the
+// single canonical Markdown typography surface — see styles/markdown-prose.css).
 //
 // Important for mermaid: the <svg> string returned by mermaid.render uses its
 // own internal class names (e.g. `.label`, `.nodeLabel`) and comes with a

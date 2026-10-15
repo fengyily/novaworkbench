@@ -497,6 +497,13 @@ func workerCategoryHint(cat, msg string) string {
 		return "Claude 达到单轮最大工具调用次数。请把需求拆小，或在提示词里限制工具调用总数。"
 	case "preflight_timeout":
 		return "preflight 5 秒内未完成（`claude --print ping` 卡住）。通常是 Agent 服务器无法访问 API，请检查网络。"
+	case "stdin_prompt_failed":
+		// worker 在 resume 路径下用 stdin 投递 prompt 时（workaround
+		// claude CLI 忽略 `-p` 的 bug，anthropics/claude-code#4521/#5187）写入失败。
+		// 通常意味着父 claude 进程在我们 write 之前已退出，或 Agent 服务器上
+		// 残留的 worker 是改 fix 之前的版本（不会走 stdin 路径）。请在「设置
+		// → Agent 服务器」点「检查」触发热升级，再重试。
+		return "Agent 服务器侧 prompt 经 stdin 投递失败。通常是 worker 还没拉到修这个 bug 的新版 server.mjs，请在「设置 → Agent 服务器」点「检查」（会热升级 worker）后重试；若仍失败，请 SSH 到 Agent 服务器 `systemctl --user restart nova-agent-worker.service` 并查看 ~/nova-agent-worker/worker.log 中 `stdin` 相关错误。"
 	case "running_as_root":
 		// Claude CLI refuses --dangerously-skip-permissions when the current
 		// uid is root (or sudo is in effect) for security reasons. The CLI

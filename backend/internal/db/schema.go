@@ -1170,6 +1170,22 @@ var alterColumns = []string{
 	// SQLite/MySQL/PG 一致扫描。0 = 沿用现有"feat/req_xxx 分支 + 自动 PR"
 	// 行为(向后兼容)。
 	`ALTER TABLE requirements ADD COLUMN no_branch INTEGER NOT NULL DEFAULT 0`,
+	// Three independent post-development flags (split of the legacy single
+	// auto_push toggle). All default 1 so existing rows keep "做完全套"的旧
+	// 行为;新列与 requirements.auto_push 同时维护,旧 AutoPush 读取点继续
+	// 当「应该跑自动收尾吗」的总开关 (= auto_commit OR auto_push_remote OR
+	// auto_create_pr)。命名约定沿用 skip_analysis / skip_design / auto_push
+	// / no_branch 的 INTEGER(0/1) + DEFAULT 约定,保证 SQLite/MySQL/PG 一致。
+	//   - auto_commit       : commit 工作区改动 (默认 ON,= 自动 commit)
+	//   - auto_push_remote  : commit 后推送到 origin (默认 ON,= 自动 push)
+	//   - auto_create_pr    : push 后开 PR (默认 ON,= 自动 PR)
+	// 三者独立,通过后端 dispatch 阶段化执行:都开 = 旧行为;只 commit = 不
+	// 推送、不开 PR;commit+push = 不开 PR。push_pr_shell / push_pr_base /
+	// dispatchPushPRSubTask 入口按 flag 跳过对应阶段;issue-monitor 的
+	// auto_push 列保持单开关不动(单独语义)。
+	`ALTER TABLE requirements ADD COLUMN auto_commit INTEGER NOT NULL DEFAULT 1`,
+	`ALTER TABLE requirements ADD COLUMN auto_push_remote INTEGER NOT NULL DEFAULT 1`,
+	`ALTER TABLE requirements ADD COLUMN auto_create_pr INTEGER NOT NULL DEFAULT 1`,
 	// Plan-analysis timing. analysis_started_at is stamped when the requirement
 	// enters the "analyzing" stage (and reset — started re-stamped, ended
 	// cleared — on every re-entry so "重新计算" holds); analysis_ended_at is

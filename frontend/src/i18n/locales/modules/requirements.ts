@@ -253,6 +253,14 @@ export const requirements = {
     preflightReadKnowledgeHint: '编码前先扫描项目内与本需求相关的知识条目，作为额外上下文注入。耗时约几秒，对复杂需求特别有用。',
     preflightSplitTasks: '拆分任务并自动派发',
     preflightSplitTasksHint: '由主 Agent 把需求拆成子任务，再串行调度子 Agent 执行。默认关闭—— developer persona 会直接实现，更快。',
+    preflightAutoCommit: '开发完成后自动提交',
+    preflightAutoCommitHint: '把当前 worktree 的改动 git add + commit。关掉后改动留在工作区，由你手动处理提交。',
+    preflightAutoPush: 'commit 后自动推送到远程',
+    preflightAutoPushHint: '执行 git push -u origin <dev>。关掉后 commit 留在本地，不会上送到 origin。',
+    preflightAutoCreatePR: 'push 后自动创建 PR',
+    preflightAutoCreatePRHint: '通过 gh / glab / tea 创建 PR（或在平台不支持时给出 compare 链接）。关掉后仅 commit + push，PR 由你手动在浏览器里创建。',
+    // 旧的复合 key 保留以避免破坏可能仍在引用它的外部脚本;
+    // 前端分支弹窗与 LaunchPlanSection 已切到上面三个独立 key。
     preflightAutoPushPR: '开发完成后自动提交 / 推送 / 创建 PR',
     preflightAutoPushPRHint: '开发完成后自动派发一个子任务，执行「提交 → 合并主分支 → 推送 → 创建 PR」全流程。默认开启；拆分与非拆分、Agent 服务器开发都适用。若项目未配置远程或平台 Token，会自动跳过或仅推送。',
     preflightDevModeTitle: '开发模式',
@@ -440,11 +448,9 @@ export const requirements = {
     designSectionSteps: '实现步骤',
     designSectionModelChanges: '数据模型变更',
     designSectionRisks: '实现风险',
-    designExpandCollapse: '▲ 收起方案',
-    designExpandShow: '▼ 展开全文',
-    // BRIEF (requirement.description) collapse toggle — mirrors the design
-    // toggle above but uses a plain "collapse" label since the BRIEF is short
-    // enough that "收起方案" reads as overkill.
+    // BRIEF (requirement.description) collapse toggle. The design body is
+    // rendered 固定显示 (always in full, no collapse) as of v0.5.x — only the
+    // BRIEF card still uses this gate.
     descExpandCollapse: '▲ 收起',
     descExpandShow: '▼ 展开完整需求描述',
     designCompleteBtn: '方案完成',

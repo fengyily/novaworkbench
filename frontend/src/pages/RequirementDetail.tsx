@@ -68,6 +68,12 @@ import { appendLogLine, coalesceLogLines, type LogLine, type UsageInfo, parseUsa
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
 import { ContextUsageBar } from '../components/ContextUsageBar';
 import { SessionContextStrip } from '../components/SessionContextStrip';
+// Shared Markdown typography surface. The detail page used to roll its own
+// `.analysis-summary` typography copy, which had drifted from the canonical
+// rules and (because it set white-space:pre-wrap on .design-section p) caused
+// the model-written 需求复述 prose to render with line breaks mid-sentence.
+// See styles/markdown-prose.css for the single source of truth.
+import '../styles/markdown-prose.css';
 import './RequirementDetail.css';
 import { FullscreenButton } from '../components/FullscreenButton';
 import { useFullscreen } from '../utils/useFullscreen';
@@ -115,37 +121,12 @@ function isSyncStale(p?: Project | null): boolean {
   return Date.now() - t > 24 * 3600 * 1000;
 }
 
-function isLongDesignDoc(raw: string): boolean {
-  if (!raw || !raw.trim()) return false;
-  let body = raw;
-  if (raw.trimStart().startsWith('{')) {
-    try {
-      const obj = JSON.parse(raw) as Partial<DesignData>;
-      if (obj.plan_markdown) {
-        body = obj.plan_markdown;
-      } else {
-        body = [
-          obj.overview ?? '',
-          ...(obj.files ?? []),
-          ...(obj.steps ?? []),
-          obj.model_changes ?? '',
-          ...(obj.risks ?? []),
-        ].join('\n');
-      }
-    } catch {
-      // Fall through and treat raw as markdown.
-    }
-  }
-  const lines = body.split('\n').length;
-  const chars = body.length;
-  return lines > 12 || chars > 1200;
-}
-
 // Decide whether the BRIEF card (requirement.description) is long enough to
 // warrant the "default collapsed / click to expand" treatment. The threshold
-// here is TIGHTER than isLongDesignDoc (8 lines / 500 chars vs 12 / 1200)
-// because the BRIEF card sits at the very top of the requirement detail page,
-// above every other section. The user's first action on this page is usually
+// here is 8 lines / 500 chars (the BRIEF sits at the very top of the page,
+// above every other section, so we collapse aggressively). The design body
+// is NOT collapsed by default anymore (v0.5.x 方案固定显示) — only the BRIEF
+// card uses this gate. The user's first action on this page is usually
 // to scroll past the description to reach the design / coding panel —
 // collapsing a long BRIEF removes 200+ px of forced scrolling. Short
 // descriptions are still rendered in full, unchanged. The check tolerates
@@ -1212,10 +1193,21 @@ export default function RequirementDetail() {
   // no auto-orchestration). Reset to false each time the branch modal opens so
   // the default is preserved across coding runs.
   const [splitTasksDev, setSplitTasksDev] = useState(false);
-  // Whether to auto "提交 → 推送 → 创建 PR" once development finishes. Default
-  // true so every run ships its result; reset to true each time the branch
-  // modal opens. The user can turn it off for exploratory runs.
-  const [autoPushPRDev, setAutoPushPRDev] = useState(true);
+  // Three independent post-development stage toggles (split of the legacy
+  // single "auto_push_pr" checkbox). Default all true so every run ships its
+  // result by default; reset to (true, true, true) each time the branch
+  // modal opens. The user can turn any of them off for exploratory runs.
+  //   autoCommitDev     — git add + commit on the dev branch
+  //   autoPushDev       — git push -u origin dev (implies commit)
+  //   autoCreatePRDev   — gh / glab / tea PR create (implies push)
+  // Dependency cascade enforced by autoTogglePushDev / autoToggleCreatePRDev:
+  // turning on a later stage auto-enables its predecessors, turning off an
+  // earlier stage auto-disables the descendants. Backend also enforces the
+  // same invariant (wizard_coding.go stamping) so a partial POST that flips
+  // just autoCommit=false lands as commit=false/push=false/PR=false.
+  const [autoCommitDev, setAutoCommitDev] = useState(true);
+  const [autoPushDev, setAutoPushDev] = useState(true);
+  const [autoCreatePRDev, setAutoCreatePRDev] = useState(true);
   const [showDesignKnowledgeModal, setShowDesignKnowledgeModal] = useState(false);
   const [readKnowledgeDesign, setReadKnowledgeDesign] = useState(false);
   const designNeedsTransitionRef = useRef(false);
@@ -1279,12 +1271,13 @@ export default function RequirementDetail() {
   // render in full as before. Re-evaluated whenever the requirement or its
   // stored design_docs change, and any switch collapses the view back to its
   // default so the user isn't left with a stale "expanded" state.
-  const [designExpanded, setDesignExpanded] = useState(false);
-  const [isLongDesign, setIsLongDesign] = useState(false);
-  useEffect(() => {
-    setIsLongDesign(!!req?.design_docs && isLongDesignDoc(req.design_docs));
-    setDesignExpanded(false);
-  }, [req?.id, req?.design_docs]);
+  //
+  // v0.5.x: the design body is now rendered "固定显示" (always in full, never
+  // collapsed) so the post-design refine chat can sit directly underneath
+  // and reference the same viewport. The isLongDesign gate + design-toggle
+  // button + design-content-collapsed CSS are all gone — long designs scroll
+  // inside their own container, the user no longer has to click "展开全文".
+  // DocRefineChat picks up the default-expanded state at the same time.
 
   // Collapsible BRIEF (requirement.description) state. Mirrors the design-doc
   // collapse above: long descriptions default to collapsed (truncated with a
@@ -2469,7 +2462,16 @@ export default function RequirementDetail() {
     streamJob(activeSchedJobId, { keepDone: false });
   }, [activeSchedJobId, streamJob]);
 
-  const doStartCoding = async (bName: string, bBase: string, useKnowledge: boolean, splitTasks: boolean, autoPushPR: boolean, noBranch: boolean) => {
+  const doStartCoding = async (
+    bName: string,
+    bBase: string,
+    useKnowledge: boolean,
+    splitTasks: boolean,
+    autoCommit: boolean,
+    autoPush: boolean,
+    autoCreatePR: boolean,
+    noBranch: boolean,
+  ) => {
     if (!req || !project || !id) return;
     setCoding(true);
     setCodingLines([]);
@@ -2520,11 +2522,17 @@ export default function RequirementDetail() {
           // branch (mirrors the agent role's behavior). Sent explicitly even
           // when false so the backend never sees a missing field.
           split_tasks: splitTasks,
-          // Whether to auto-dispatch the "提交 → 推送 → 创建 PR" sub-task once
-          // development finishes. Sent explicitly (even when false) so the
-          // backend stamps the requirement's auto_push column with the user's
-          // choice; omitting it would let the backend default (true) stand.
-          auto_push_pr: autoPushPR,
+          // Three independent stage flags. Sent explicitly (even when false) so the
+          // backend stamps the requirement's auto_commit / auto_push_remote /
+          // auto_create_pr columns with the user's choice; omitting them
+          // would let the backend default (true) stand and silently re-enable
+          // a stage the user just turned off. The composite auto_push_pr is
+          // left out — the three flags alone let backend compute the
+          // aggregate; issue-monitor / older clients keep working via the
+          // same field name.
+          auto_commit: autoCommit,
+          auto_push: autoPush,
+          auto_create_pr: autoCreatePR,
           // Per-request model override — empty means the role's configured model.
           ...(developerModel ? { model: developerModel } : {}),
           // Per-request claude_config id (the user-picked "config" from
@@ -2593,7 +2601,13 @@ export default function RequirementDetail() {
     setModalBaseBranch(baseBranch || project.default_branch || 'main');
     setReadKnowledgeDev(false); // default unchecked each time
     setSplitTasksDev(false); // default unchecked each time
-    setAutoPushPRDev(true); // default checked each time (都自动推送)
+    // Three stage defaults — all checked (都自动推送 创建 PR),mirrors the
+    // legacy single-toggle default. The dependency cascade lives in the
+    // checkbox onChange handlers below, so flipping one stage off
+    // automatically snaps its descendants off when the user clicks.
+    setAutoCommitDev(true);
+    setAutoPushDev(true);
+    setAutoCreatePRDev(true);
     setShowBranchModal(true);
     authedFetch(`${API_BASE}/api/fs/git-branches?path=${encodeURIComponent(project.local_path)}`)
       .then(r => r.json())
@@ -2611,7 +2625,7 @@ export default function RequirementDetail() {
     // confirm without further edits still leaves the inline picker
     // reflecting the value that just fired.
     setBaseBranch(modalBaseBranch);
-    doStartCoding(branchName, modalBaseBranch, readKnowledgeDev, splitTasksDev, autoPushPRDev, developOnBase);
+    doStartCoding(branchName, modalBaseBranch, readKnowledgeDev, splitTasksDev, autoCommitDev, autoPushDev, autoCreatePRDev, developOnBase);
   };
 
   // ── Further adjust: resume the prior coding session, output appends to codingLines
@@ -3330,17 +3344,89 @@ export default function RequirementDetail() {
                       </div>
                     </div>
                   </label>
-                  {/* Auto push+PR switch: default checked (= ship the result once
-                      development finishes by dispatching the "提交 → 推送 → 创建 PR"
-                      sub-task). Works for both split and non-split runs and for
-                      Agent-server execution. Reset to true in openBranchModal;
-                      the value is always sent so the backend stamps auto_push. */}
-                  <label className={`preflight-toggle ${autoPushPRDev ? 'is-checked' : ''}`}>
-                    <input type="checkbox" checked={autoPushPRDev} onChange={e => setAutoPushPRDev(e.target.checked)} />
+                  {/* Three independent stage toggles split of the legacy single
+                      "提交 → 推送 → 创建 PR" checkbox. Dependency cascade:
+                      turning off commit forces push + PR off; turning off
+                      push forces PR off. The backend (wizard_coding.go
+                      stamping) re-enforces the same invariant on the wire so
+                      a partial POST can't sneak through. Same UX pattern as
+                      readKnowledgeDev / splitTasksDev: cards stay aligned,
+                      new toggles reuse the IconRocket family. */}
+                  <label className={`preflight-toggle ${autoCommitDev ? 'is-checked' : ''}`}>
+                    <input
+                      type="checkbox"
+                      checked={autoCommitDev}
+                      onChange={e => {
+                        const next = e.target.checked;
+                        setAutoCommitDev(next);
+                        // Commit is the root of the chain — turning it off
+                        // collapses everything underneath.
+                        if (!next) {
+                          setAutoPushDev(false);
+                          setAutoCreatePRDev(false);
+                        }
+                      }}
+                    />
                     <div className="preflight-toggle-body">
-                      <div className="preflight-toggle-title"><IconRocket size={14} className="icon-mr" />{t('requirements.detail2.preflightAutoPushPR')}</div>
+                      <div className="preflight-toggle-title">
+                        <IconSave size={14} className="icon-mr" />
+                        {t('requirements.detail2.preflightAutoCommit')}
+                      </div>
                       <div className="preflight-toggle-desc">
-                        {t('requirements.detail2.preflightAutoPushPRHint')}
+                        {t('requirements.detail2.preflightAutoCommitHint')}
+                      </div>
+                    </div>
+                  </label>
+                  <label className={`preflight-toggle ${autoPushDev ? 'is-checked' : ''}`}>
+                    <input
+                      type="checkbox"
+                      checked={autoPushDev}
+                      onChange={e => {
+                        const next = e.target.checked;
+                        setAutoPushDev(next);
+                        // Push needs commit; turning it on re-enables
+                        // commit (in case it was the only one off). PR cascades
+                        // off when push turns off — opening a PR for a branch
+                        // we didn't push is meaningless and the platform CLIs
+                        // would reject it anyway.
+                        if (next) {
+                          setAutoCommitDev(true);
+                        } else {
+                          setAutoCreatePRDev(false);
+                        }
+                      }}
+                    />
+                    <div className="preflight-toggle-body">
+                      <div className="preflight-toggle-title">
+                        <IconArrowRight size={14} className="icon-mr" />
+                        {t('requirements.detail2.preflightAutoPush')}
+                      </div>
+                      <div className="preflight-toggle-desc">
+                        {t('requirements.detail2.preflightAutoPushHint')}
+                      </div>
+                    </div>
+                  </label>
+                  <label className={`preflight-toggle ${autoCreatePRDev ? 'is-checked' : ''}`}>
+                    <input
+                      type="checkbox"
+                      checked={autoCreatePRDev}
+                      onChange={e => {
+                        const next = e.target.checked;
+                        setAutoCreatePRDev(next);
+                        // PR implies push + commit.
+                        if (next) {
+                          setAutoCommitDev(true);
+                          setAutoPushDev(true);
+                        }
+                      }}
+                    />
+                    <div className="preflight-toggle-body">
+                      <div className="preflight-toggle-title">
+                        <IconRocket size={14} className="icon-mr" />
+                        {t('requirements.detail2.preflightAutoCreatePR')}
+                      </div>
+                      <div className="preflight-toggle-desc">
+                        {t('requirements.detail2.preflightAutoCreatePRHint')}
                       </div>
                     </div>
                   </label>
@@ -3700,7 +3786,7 @@ export default function RequirementDetail() {
               (isLongDesc && !descExpanded ? ' detail-desc-collapsed' : '')
             }
           >
-            <div className="analysis-summary">
+            <div className="md-prose">
               <MarkdownRender content={req.description} />
             </div>
           </div>
@@ -4833,7 +4919,6 @@ export default function RequirementDetail() {
               <div
                 className={
                   'design-content' +
-                  (isLongDesign && !designExpanded && !designContentFullscreen ? ' design-content-collapsed' : '') +
                   (designContentFullscreen ? ' is-fullscreen' : '')
                 }
               >
@@ -4841,10 +4926,10 @@ export default function RequirementDetail() {
                   <FullscreenButton isFullscreen onClick={designFs.exit} variant="floating" />
                 )}
                 {design.plan_markdown ? (
-                  <div className="analysis-summary"><MarkdownRender content={design.plan_markdown} /></div>
+                  <div className="md-prose"><MarkdownRender content={design.plan_markdown} /></div>
                 ) : (
                   <>
-                    {design.overview && <div className="analysis-summary">{design.overview}</div>}
+                    {design.overview && <div className="md-prose"><p>{design.overview}</p></div>}
                     {design.files && design.files.length > 0 && (
                       <div className="analysis-block">
                         <h4><IconFileText size={13} className="icon-mr" />{t('requirements.detail2.designSectionFiles')}</h4>
@@ -4869,16 +4954,6 @@ export default function RequirementDetail() {
                   </>
                 )}
               </div>
-              {isLongDesign && !designContentFullscreen && (
-                <button
-                  type="button"
-                  className="btn btn-sm design-toggle-btn"
-                  onClick={() => setDesignExpanded(v => !v)}
-                  aria-expanded={designExpanded}
-                >
-                  {designExpanded ? t('requirements.detail2.designExpandCollapse') : t('requirements.detail2.designExpandShow')}
-                </button>
-              )}
             </>
           )}
 
@@ -5033,11 +5108,11 @@ export default function RequirementDetail() {
                 panel instead of a stale (or empty) body — the stream panel
                 takes over the section visually. */}
             {!wikiGenerating && (wiki.plan_markdown ? (
-              <div className="analysis-summary">
+              <div className="md-prose">
                 <MarkdownRender content={wiki.plan_markdown} />
               </div>
             ) : (
-              <p className="analysis-summary">{t('requirements.detail2.wikiEmptyHint')}</p>
+              <p className="md-prose">{t('requirements.detail2.wikiEmptyHint')}</p>
             ))}
             {/* Streaming panel — mirrors the architect design panel. Shows
                 the live phase / tool_call / message frames so the user

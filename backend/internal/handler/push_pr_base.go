@@ -48,7 +48,13 @@ import (
 //
 // Returns (jobID, subTaskID, error) like runPushPRShellJob so autoPushPR /
 // MergeHandler.Push can log symmetrically.
-func (r *SubTaskRunner) RunPushBaseShellJob(reqRow *model.Requirement, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle string) (jobID, subTaskID string, err error) {
+// autoCommit / autoPushRemote gate the post-development stages (the same
+// split as the feature-branch push_pr_shell path): when autoCommit=false
+// we bail (nothing to push); when autoPushRemote=false we still commit but
+// skip the push step. PR creation is always skipped on the no-branch path
+// (gh/glab/tea reject head==base by design — auto_create_pr is documented
+// as a no-op here).
+func (r *SubTaskRunner) RunPushBaseShellJob(reqRow *model.Requirement, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle string, autoCommit, autoPushRemote bool) (jobID, subTaskID string, err error) {
 	if r == nil || r.subTaskSvc == nil {
 		log.Printf("[push-base-shell] %s: sub-task runner not wired, skip", reqRow.ID)
 		return "", "", nil
@@ -59,6 +65,10 @@ func (r *SubTaskRunner) RunPushBaseShellJob(reqRow *model.Requirement, base, rem
 		// in a feature branch. The PR path would have rejected dev==base
 		// anyway; here we surface a clear log line so the operator sees why.
 		log.Printf("[push-base-shell] %s: requirement is not in no-branch mode (reqRow.NoBranch=false), skip", reqRow.ID)
+		return "", "", nil
+	}
+	if !autoCommit {
+		log.Printf("[push-base-shell] %s: auto_commit disabled, skip (push=%v)", reqRow.ID, autoPushRemote)
 		return "", "", nil
 	}
 
@@ -92,16 +102,24 @@ func (r *SubTaskRunner) RunPushBaseShellJob(reqRow *model.Requirement, base, rem
 	}
 
 	shortDesc := "本地 shell 推送 base 分支: " + base
-	st, job, _, nerr := r.NewPendingSubTask(reqRow.ID, "推送 base 分支", shortDesc, "", "", "", "", "", "")
+	var title string
+	switch {
+	case autoPushRemote:
+		title = "推送 base 分支"
+	default:
+		title = "本地提交 base 分支"
+		shortDesc = "本地 shell 提交 base 分支（不推送）: " + base
+	}
+	st, job, _, nerr := r.NewPendingSubTask(reqRow.ID, title, shortDesc, "", "", "", "", "", "")
 	if nerr != nil {
 		return "", "", nerr
 	}
 	if uerr := r.subTaskSvc.UpdateSource(st.ID, model.SubTaskSourcePushBase); uerr != nil {
 		log.Printf("[push-base-shell] %s: failed to stamp source=push_base on %s: %v", reqRow.ID, st.ID, uerr)
 	}
-	log.Printf("[push-base-shell] %s: dispatched shell sub_task=%s job_id=%s dir=%s base=%s", reqRow.ID, st.ID, job.ID, dir, base)
+	log.Printf("[push-base-shell] %s: dispatched shell sub_task=%s job_id=%s dir=%s base=%s commit=%v push=%v", reqRow.ID, st.ID, job.ID, dir, base, autoCommit, autoPushRemote)
 
-	go r.execPushBaseShell(reqRow, st, job, dir, proj.LocalPath, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle)
+	go r.execPushBaseShell(reqRow, st, job, dir, proj.LocalPath, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle, autoPushRemote)
 	return job.ID, st.ID, nil
 }
 
@@ -118,7 +136,7 @@ func (r *SubTaskRunner) RunPushBaseShellJob(reqRow *model.Requirement, base, rem
 // so we resolve the cred env at call time via the runner's credential
 // helper — currently a thin pass-through to assembleGitCredEnv's logic
 // shared via the gitRefSignature helper (see sub_task_runner.go).
-func (r *SubTaskRunner) execPushBaseShell(reqRow *model.Requirement, st *model.SubTask, job *store.Job, dir, projectPath, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle string) {
+func (r *SubTaskRunner) execPushBaseShell(reqRow *model.Requirement, st *model.SubTask, job *store.Job, dir, projectPath, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle string, autoPushRemote bool) {
 	var runStartTime time.Time
 	defer func() {
 		lines, status, exitCode := job.Snapshot()
@@ -223,10 +241,17 @@ func (r *SubTaskRunner) execPushBaseShell(reqRow *model.Requirement, st *model.S
 		job.Append(store.LogLine{Type: "message", Content: "ℹ️ git fetch origin " + base + " 跳过: " + ferr.Error()})
 	}
 
-	// ── Step 3: push base to origin. No "merge base into dev" step
-	// (dev == base here). On push failure, retry with pull --rebase so a
-	// remote ahead of local (e.g. another no-branch push on the same project)
-	// doesn't permanently fail.
+	// ── Step 3 (conditional): push base to origin. No PR step (no-branch
+	// path always skips PR creation; gh/glab/tea reject head==base). When
+	// autoPushRemote=false the user opted out of pushing — bail here so the
+	// commit sits locally until they push manually.
+	if !autoPushRemote {
+		job.Append(store.LogLine{Type: "result", Content: "✅ 已本地提交至 base 分支 " + base + "（未推送 — 在 start-coding 弹窗里关掉了 auto_push_remote）"})
+		job.Append(store.LogLine{Type: "done", Content: "✅ commit-only 流程完成"})
+		job.Finish(0, store.JobDone)
+		log.Printf("[push-base-shell] job %s finished for %s (autoPushRemote=false, commit-only)", job.ID, reqRow.ID)
+		return
+	}
 	if _, perr := git("push", "-u", "origin", base); perr != nil {
 		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 首次 push base 失败，尝试 pull --rebase 后重推: " + perr.Error()})
 		if _, rerr := git("pull", "--rebase", "origin", base); rerr != nil {

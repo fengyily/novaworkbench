@@ -793,29 +793,56 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 		// reaching here for NoBranch=true means a stray race; defer to the
 		// standard remote dispatch (which will trip dev==base and be skipped).
 		var derr error
-		jobID, subTaskID, derr = dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, autoCommitMsg, pushModel, pushCfgID, commitLang, "auto")
+		// The remote LLM sub-task handles commit + push + PR as one prompt;
+		// we tell the sub-task which stages are enabled so it can skip the
+		// gh/glab/tea PR-creation step (or skip the push entirely) without
+		// editing the existing prompt template too aggressively.
+		jobID, subTaskID, derr = dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, autoCommitMsg, pushModel, pushCfgID, commitLang, "auto", reqRow.AutoCommit, reqRow.AutoPushRemote, reqRow.AutoCreatePR)
 		if derr != nil {
 			log.Printf("[auto-push] %s: remote LLM dispatch failed: %v", reqRow.ID, derr)
 			return
 		}
-		log.Printf("[auto-push] %s: remote → LLM sub-task %s job %s branch=%s model=%q", reqRow.ID, subTaskID, jobID, dev, pushModel)
+		log.Printf("[auto-push] %s: remote → LLM sub-task %s job %s branch=%s model=%q (commit=%v push=%v pr=%v)", reqRow.ID, subTaskID, jobID, dev, pushModel, reqRow.AutoCommit, reqRow.AutoPushRemote, reqRow.AutoCreatePR)
 	} else if reqRow.NoBranch {
 		// No-branch 本地:走专属 push-base shell job — commit + push base,跳过 PR。
 		var serr error
-		jobID, subTaskID, serr = h.subTaskRunner.RunPushBaseShellJob(reqRow, base, remote, platformType, autoCommitMsg, pushModel, pushCfgID, commitLang, autoPRTitle)
+		// No-branch commits go directly to base; PR creation is always
+		// skipped on this path regardless of AutoCreatePR (gh/glab/tea
+		// reject head==base), so we only gate push/commit here.
+		jobID, subTaskID, serr = h.subTaskRunner.RunPushBaseShellJob(reqRow, base, remote, platformType, autoCommitMsg, pushModel, pushCfgID, commitLang, autoPRTitle, reqRow.AutoCommit, reqRow.AutoPushRemote)
 		if serr != nil {
 			log.Printf("[auto-push] %s: no-branch shell dispatch failed: %v", reqRow.ID, serr)
 			return
 		}
-		log.Printf("[auto-push] %s: no-branch → base-shell job %s sub_task=%s base=%s", reqRow.ID, jobID, subTaskID, base)
+		log.Printf("[auto-push] %s: no-branch → base-shell job %s sub_task=%s base=%s (commit=%v push=%v)", reqRow.ID, jobID, subTaskID, base, reqRow.AutoCommit, reqRow.AutoPushRemote)
 	} else {
 		var serr error
-		jobID, subTaskID, serr = h.runPushPRShellJob(reqRow, dev, base, remote, platformType, autoCommitMsg, pushModel, pushCfgID, commitLang, autoPRTitle)
+		// Local shell path: pick the variant by stage flag combination.
+		switch {
+		case reqRow.AutoCommit && reqRow.AutoPushRemote && reqRow.AutoCreatePR:
+			jobID, subTaskID, serr = h.runPushPRShellJob(reqRow, dev, base, remote, platformType, autoCommitMsg, pushModel, pushCfgID, commitLang, autoPRTitle, true)
+		case reqRow.AutoCommit && reqRow.AutoPushRemote && !reqRow.AutoCreatePR:
+			// Push to remote but skip PR creation — what most users want for
+			// "internal branches / draft work I haven't finished yet".
+			jobID, subTaskID, serr = h.runPushPRShellJob(reqRow, dev, base, remote, platformType, autoCommitMsg, pushModel, pushCfgID, commitLang, autoPRTitle, false)
+		case reqRow.AutoCommit && !reqRow.AutoPushRemote:
+			// Commit-only: just record the work, leave it on the local worktree.
+			// Reuses the shell job plumbing so the SubTaskPanel card stays
+			// uniform (same job_logs durability, same idempotency guard),
+			// just with push + PR stages skipped via the second arg.
+			jobID, subTaskID, serr = h.runCommitOnlyShellJob(reqRow, dev, base, autoCommitMsg, pushModel, pushCfgID)
+		default:
+			// AutoCommit off → bail (the prologue keeps AutoPushRemote /
+			// AutoCreatePR consistent with it, so this is the only "do
+			// nothing" branch left).
+			log.Printf("[auto-push] %s: auto_commit disabled, skip (push=%v pr=%v)", reqRow.ID, reqRow.AutoPushRemote, reqRow.AutoCreatePR)
+			return
+		}
 		if serr != nil {
 			log.Printf("[auto-push] %s: local shell dispatch failed: %v", reqRow.ID, serr)
 			return
 		}
-		log.Printf("[auto-push] %s: local → shell job %s sub_task=%s branch=%s", reqRow.ID, jobID, subTaskID, dev)
+		log.Printf("[auto-push] %s: local → shell job %s sub_task=%s branch=%s (commit=%v push=%v pr=%v)", reqRow.ID, jobID, subTaskID, dev, reqRow.AutoCommit, reqRow.AutoPushRemote, reqRow.AutoCreatePR)
 	}
 
 	// Bump parent requirement last-active time so the auto-push dispatch shows
@@ -836,7 +863,14 @@ func (h *WizardHandler) autoPushPR(reqRow *model.Requirement) {
 	// failure path is a logged skip: this hook is convenience, not a
 	// critical correctness path, and a GitHub hiccup must NEVER turn a
 	// successful run into a visible error.
-	h.maybeCommentBackToSourceIssue(reqRow)
+	//
+	// Stage-gated: only meaningful when AutoCreatePR=true (otherwise there's
+	// no PR link to comment). Commit-only / push-only runs skip the hook.
+	if reqRow.AutoCreatePR {
+		h.maybeCommentBackToSourceIssue(reqRow)
+	} else {
+		log.Printf("[auto-push] %s: skip issue-monitor comment-back (auto_create_pr=false)", reqRow.ID)
+	}
 }
 
 // maybeCommentBackToSourceIssue handles the issue-monitor ↔ auto-push

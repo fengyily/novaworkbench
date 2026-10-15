@@ -1048,6 +1048,15 @@ export interface LaunchSpec {
   branch_name?: string;
   base_branch?: string;
   split_tasks?: boolean;
+  // 三个独立 stage 开关 — commit / push / PR 各自分离(preflight 弹窗
+  // 把它们的 UI 拆成了三张卡片)。auto_push_pr 是遗留聚合字段,新发送
+  // 逻辑优先使用三 stage 字段;老客户端/issue-monitor 路径仍可单发。
+  auto_commit?: boolean;
+  auto_push?: boolean;
+  auto_create_pr?: boolean;
+  // LEGACY: kept for backward compatibility with older clients / the
+  // issue-monitor auto-push field. Mirrors auto_commit && auto_push &&
+  // auto_create_pr (all on or all off).
   auto_push_pr?: boolean;
   // v0.6.x 不创建分支开关。true 时后端跳过 worktree 创建 + PR 创建,
   // commit / push 直接到 base。空 = 后端默认(沿用新分支模式)。
@@ -1381,11 +1390,17 @@ export interface StartCodingReq {
   agent_server_id?: string;
   /** false = developer persona direct implementation; true = sub-task split. */
   split_tasks?: boolean;
+  // 三个独立 stage 开关 — commit / push / PR 各自分离。前端分支弹窗
+  // (RequirementDetail) 与 LaunchPlanSection 已切到这三个字段;后端在
+  // 三个字段全部未传时回退到遗留的 auto_push_pr 兼容老客户端。
+  auto_commit?: boolean;
+  auto_push?: boolean;
+  auto_create_pr?: boolean;
   /**
-   * Whether to auto-dispatch the "提交 → 推送 → 创建 PR" sub-task once
-   * development finishes. Undefined = backend keeps the requirement row's
-   * persisted value (DB default = true); a boolean is stamped onto the row so
-   * the split / non-split / Agent-server completion points all agree.
+   * LEGACY: composite "do everything" toggle kept for older clients and the
+   * issue-monitor path. New code sends the three stage flags above instead;
+   * backend treats a non-nil auto_push_pr as "all three stages ON".
+   * Undefined = backend keeps the requirement row's persisted value.
    */
   auto_push_pr?: boolean;
   /**
@@ -1440,7 +1455,11 @@ export interface DesignCodingImmediateReq {
   branch_name?: string;
   base_branch?: string;
   split_tasks?: boolean;
-  /** nil = keep the requirement row's persisted value; true/false = override. */
+  // 三 stage 独立开关,语义与 StartCoding request 一致。
+  auto_commit?: boolean;
+  auto_push?: boolean;
+  auto_create_pr?: boolean;
+  /** LEGACY composite toggle — same semantics as StartCoding request. */
   auto_push_pr?: boolean;
   /** v0.6.x 不创建分支开关。配合 base_branch 一同传;空值=保留行值。 */
   no_branch?: boolean;

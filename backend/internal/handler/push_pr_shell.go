@@ -54,9 +54,14 @@ const pushShellStepTimeout = 10 * time.Minute
 // shell steps themselves (git doesn't talk to an LLM). commitLang feeds the
 // (LLM-only) fallback path.
 //
+// createPR gates the GH/GLab/Tea PR-creation step (step 5) — when false,
+// the job still commits + merges + pushes but skips creating the PR, which
+// is the user's "push to remote but don't open a PR" intent (post-coding
+// stage flag split).
+//
 // Returns (jobID, subTaskID, error) like dispatchPushPRSubTask so autoPushPR
 // can log symmetrically.
-func (h *WizardHandler) runPushPRShellJob(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle string) (jobID, subTaskID string, err error) {
+func (h *WizardHandler) runPushPRShellJob(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle string, createPR bool) (jobID, subTaskID string, err error) {
 	if h.subTaskRunner == nil || h.subTaskSvc == nil {
 		log.Printf("[push-pr-shell] %s: sub-task runner not wired, skip", reqRow.ID)
 		return "", "", nil
@@ -88,17 +93,74 @@ func (h *WizardHandler) runPushPRShellJob(reqRow *model.Requirement, dev, base, 
 		return "", "", nil
 	}
 
-	shortDesc := "本地 shell 推送并创建 PR: " + dev
-	st, job, _, nerr := h.subTaskRunner.NewPendingSubTask(reqRow.ID, "推送并创建 PR", shortDesc, "", "", "", "", "", "")
+	// Stage-aware card title + shortDesc — distinguish "commit only" / "push
+	// only" / "full chain" runs on SubTaskPanel so the user can tell at a
+	// glance what was actually dispatched.
+	var title, shortDesc string
+	switch {
+	case !createPR:
+		title = "本地 shell 推送"
+		shortDesc = "本地 shell 推送 (跳过 PR 创建): " + dev
+	default:
+		title = "推送并创建 PR"
+		shortDesc = "本地 shell 推送并创建 PR: " + dev
+	}
+	st, job, _, nerr := h.subTaskRunner.NewPendingSubTask(reqRow.ID, title, shortDesc, "", "", "", "", "", "")
 	if nerr != nil {
 		return "", "", nerr
 	}
 	if uerr := h.subTaskSvc.UpdateSource(st.ID, model.SubTaskSourcePushPR); uerr != nil {
 		log.Printf("[push-pr-shell] %s: failed to stamp source=push_pr on %s: %v", reqRow.ID, st.ID, uerr)
 	}
-	log.Printf("[push-pr-shell] %s: dispatched shell sub_task=%s job_id=%s dir=%s dev=%s base=%s", reqRow.ID, st.ID, job.ID, dir, dev, base)
+	log.Printf("[push-pr-shell] %s: dispatched shell sub_task=%s job_id=%s dir=%s dev=%s base=%s createPR=%v", reqRow.ID, st.ID, job.ID, dir, dev, base, createPR)
 
-	go h.execPushPRShell(reqRow, st, job, dir, proj.LocalPath, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle)
+	go h.execPushPRShell(reqRow, st, job, dir, proj.LocalPath, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle, createPR)
+	return job.ID, st.ID, nil
+}
+
+// runCommitOnlyShellJob dispatches a shell-driven commit-only job for a
+// LOCAL requirement (auto_commit=true with auto_push_remote=false). Reuses
+// the same plumbing (idempotency guard → NewPendingSubTask → goroutine →
+// job_logs persistence) as runPushPRShellJob but bails after the commit +
+// merge step, leaving the worktree-clean state on disk for the user to push
+// manually later.
+//
+// We deliberately keep the dev==base safety gate off here — commit-only is
+// safe on base too (it's only the push/PR steps that need isolation). The
+// merge step (no-op when dev is just-ahead of base) still happens so the
+// commit is coherent with whatever base picked up while the agent ran.
+func (h *WizardHandler) runCommitOnlyShellJob(reqRow *model.Requirement, dev, base, commitMessage, pushModel, pushCfgID string) (jobID, subTaskID string, err error) {
+	if h.subTaskRunner == nil || h.subTaskSvc == nil {
+		log.Printf("[commit-shell] %s: sub-task runner not wired, skip", reqRow.ID)
+		return "", "", nil
+	}
+	const lookbackSec = 90
+	if existing, ferr := h.subTaskSvc.FindRecentPushForReq(reqRow.ID, lookbackSec); ferr != nil {
+		log.Printf("[commit-shell] %s: idempotency lookup failed: %v (continuing)", reqRow.ID, ferr)
+	} else if existing != nil {
+		log.Printf("[commit-shell] %s: idempotent hit existing sub_task=%s job_id=%s", reqRow.ID, existing.ID, existing.JobID)
+		return existing.JobID, existing.ID, nil
+	}
+	proj, perr := h.projectSvc.Get(reqRow.ProjectID)
+	if perr != nil || proj == nil {
+		log.Printf("[commit-shell] %s: project load failed (%v), skip", reqRow.ID, perr)
+		return "", "", nil
+	}
+	dir := proj.LocalPath
+	_, dir = devBranchAndDir(reqRow, dir)
+	if dir == "" {
+		log.Printf("[commit-shell] %s: no local workdir, skip", reqRow.ID)
+		return "", "", nil
+	}
+	st, job, _, nerr := h.subTaskRunner.NewPendingSubTask(reqRow.ID, "本地 shell 提交", "本地 shell 提交 (仅 commit, 不推送): "+dev, "", "", "", "", "", "")
+	if nerr != nil {
+		return "", "", nerr
+	}
+	if uerr := h.subTaskSvc.UpdateSource(st.ID, model.SubTaskSourcePushPR); uerr != nil {
+		log.Printf("[commit-shell] %s: failed to stamp source=push_pr on %s: %v", reqRow.ID, st.ID, uerr)
+	}
+	log.Printf("[commit-shell] %s: dispatched commit-only sub_task=%s job_id=%s dir=%s dev=%s", reqRow.ID, st.ID, job.ID, dir, dev)
+	go h.execCommitOnlyShell(reqRow, st, job, dir, proj.LocalPath, dev, base, commitMessage, pushModel, pushCfgID)
 	return job.ID, st.ID, nil
 }
 
@@ -114,7 +176,7 @@ func (h *WizardHandler) runPushPRShellJob(reqRow *model.Requirement, dev, base, 
 // Run → MarkRunning → finishSubTask → subTaskSvc.Finish). The artifact body
 // is the full JobStore log rendered as Markdown so the user can reopen it
 // from the SubTaskPanel card even after the in-memory ring buffer evicts.
-func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.SubTask, job *store.Job, dir, projectPath, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle string) {
+func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.SubTask, job *store.Job, dir, projectPath, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, prTitle string, createPR bool) {
 	var runStartTime time.Time
 	defer func() {
 		lines, status, exitCode := job.Snapshot()
@@ -255,7 +317,7 @@ func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.Sub
 		job.Finish(0, store.JobDone) // shell job's job is "delegate", not error
 		// The shell job is now terminal, so the idempotency guard in
 		// dispatchPushPRSubTask won't block this new dispatch.
-		_, _, derr := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, "auto")
+		_, _, derr := dispatchPushPRSubTask(h.subTaskRunner, reqRow, dev, base, remote, platformType, commitMessage, pushModel, pushCfgID, commitLang, "auto", true, true, createPR)
 		if derr != nil {
 			log.Printf("[push-pr-shell] %s: conflict-fallback dispatch failed: %v", reqRow.ID, derr)
 		}
@@ -283,23 +345,160 @@ func (h *WizardHandler) execPushPRShell(reqRow *model.Requirement, st *model.Sub
 		job.Append(store.LogLine{Type: "message", Content: "⬆️ 已推送 " + dev + " → origin"})
 	}
 
-	// ── Step 5: create PR (gh / glab / tea) or surface a compare link.
-	prURL, prCreated := h.createPRShell(job, git, dir, dev, base, platformType, remote, commitLang, prTitle, reqRow)
-	if prCreated {
-		job.Append(store.LogLine{Type: "result", Content: "✅ 推送并创建 PR 完成\n\nPR: " + prURL})
-	} else if prURL != "" {
-		job.Append(store.LogLine{Type: "result", Content: "⚠️ 推送完成，但 PR 创建失败。请通过 compare 链接手动创建: " + prURL})
+	// ── Step 5: create PR (gh / glab / tea) or surface a compare link. Skipped
+	// when createPR=false (auto_create_pr post-coding toggle off) — the user
+	// asked for commit+push only, so we report "推送完成 (未创建 PR)" and exit
+	// cleanly. The SubTaskPanel card title ("本地 shell 推送") already told
+	// the user this would happen.
+	if createPR {
+		prURL, prCreated := h.createPRShell(job, git, dir, dev, base, platformType, remote, commitLang, prTitle, reqRow)
+		if prCreated {
+			job.Append(store.LogLine{Type: "result", Content: "✅ 推送并创建 PR 完成\n\nPR: " + prURL})
+		} else if prURL != "" {
+			job.Append(store.LogLine{Type: "result", Content: "⚠️ 推送完成，但 PR 创建失败。请通过 compare 链接手动创建: " + prURL})
+		} else {
+			job.Append(store.LogLine{Type: "result", Content: "⚠️ 推送完成，但未能自动创建 PR（无平台 CLI / 无 remote）。请手动创建 PR。"})
+		}
+		// 让前端的 applyMergeSignals 能识别 PR URL 并点亮「创建 PR / 查看 PR」CTA。
+		// prURL 可能是真实的 PR,也可能是 compare 链接(用户手动补 PR),两条都暴露。
+		if prURL != "" {
+			job.Append(store.LogLine{Type: "pr_link", Content: prURL})
+		}
+		job.Append(store.LogLine{Type: "done", Content: "✅ 推送并 PR 流程完成"})
 	} else {
-		job.Append(store.LogLine{Type: "result", Content: "⚠️ 推送完成，但未能自动创建 PR（无平台 CLI / 无 remote）。请手动创建 PR。"})
+		// createPR=false: commit + merge + push done, no PR — leave the
+		// SubTaskPanel card explicit about what was skipped so the user can
+		// tell why there's no PR CTA lit up.
+		job.Append(store.LogLine{Type: "result", Content: "✅ 推送完成（未创建 PR — 在 start-coding 弹窗里关掉了 auto_create_pr）"})
+		job.Append(store.LogLine{Type: "done", Content: "✅ 仅推送流程完成"})
 	}
-	// 让前端的 applyMergeSignals 能识别 PR URL 并点亮「创建 PR / 查看 PR」CTA。
-	// prURL 可能是真实的 PR,也可能是 compare 链接(用户手动补 PR),两条都暴露。
-	if prURL != "" {
-		job.Append(store.LogLine{Type: "pr_link", Content: prURL})
-	}
-	job.Append(store.LogLine{Type: "done", Content: "✅ 推送流程完成"})
 	job.Finish(0, store.JobDone)
-	log.Printf("[push-pr-shell] job %s finished for %s", job.ID, reqRow.ID)
+	log.Printf("[push-pr-shell] job %s finished for %s (createPR=%v)", job.ID, reqRow.ID, createPR)
+}
+
+// execCommitOnlyShell is the goroutine body for runCommitOnlyShellJob.
+// It does the commit + optional merge step (same scaffolding as the push
+// shell job), then bails BEFORE running `git push` or any PR step. The
+// worktree stays exactly as the coding agent left it (clean, committed,
+// ahead of base by however many commits) ready for the user to push
+// manually when they're ready.
+//
+// We keep the defer-Finish/Save scaffolding identical to execPushPRShell so
+// the SubTaskPanel card + job_logs durability behave the same way for both
+// variants — the user can't tell from the panel chrome which dispatch ran.
+func (h *WizardHandler) execCommitOnlyShell(reqRow *model.Requirement, st *model.SubTask, job *store.Job, dir, projectPath, dev, base, commitMessage, pushModel, pushCfgID string) {
+	var runStartTime time.Time
+	defer func() {
+		lines, status, exitCode := job.Snapshot()
+		log.Printf("[commit-shell] defer-Save job_id=%s req_id=%s sub_task_id=%s status=%s exit=%d lines=%d", job.ID, st.RequirementID, st.ID, status, exitCode, len(lines))
+		if perr := h.jobLogSvc.Save(job.ID, st.RequirementID, string(status), exitCode, job.StartedAt, job.FinishedAt, lines, ""); perr != nil {
+			log.Printf("[commit-shell] failed to persist job log %s: %v", job.ID, perr)
+		}
+		if h.subTaskSvc != nil {
+			finalStatus := model.SubTaskStatusDone
+			if status == store.JobError {
+				finalStatus = model.SubTaskStatusError
+			}
+			artifactBody := renderShellJobLog(lines)
+			artifact := buildSubTaskArtifact(st, "", artifactBody, time.Now())
+			if ferr := h.subTaskSvc.Finish(st.ID, finalStatus, artifact, "", model.SubTaskTokens{}, 0, runStartTime); ferr != nil {
+				log.Printf("[commit-shell] failed to finish sub_task %s: %v", st.ID, ferr)
+			}
+		}
+		if terr := h.reqSvc.Touch(st.RequirementID); terr != nil {
+			log.Printf("[commit-shell] touch requirement %s: %v", st.RequirementID, terr)
+		}
+	}()
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[commit-shell] panic recovered in job %s (sub_task %s): %v", job.ID, st.ID, rec)
+			job.Append(store.LogLine{Type: "error", Content: "❌ 内部异常，任务已中止: " + fmt.Sprint(rec)})
+		}
+		if _, status, _ := job.Snapshot(); status == store.JobRunning {
+			job.Finish(1, store.JobError)
+		}
+	}()
+
+	// Same admission gates as the push variant — keep parallel requirements
+	// from racing git index locks on the same checkout.
+	release := h.subTaskRunner.AcquireGates(reqRow.ProjectID, job)
+	defer release()
+
+	if cur, gerr := h.subTaskSvc.Get(st.ID); gerr == nil && cur != nil && cur.Status == model.SubTaskStatusStopped {
+		job.Append(store.LogLine{Type: "message", Content: "⏹ 排队期间已被停止，未启动执行"})
+		job.Finish(0, store.JobDone)
+		return
+	}
+	runStartTime, mErr := h.subTaskSvc.MarkRunning(st.ID)
+	if mErr != nil {
+		log.Printf("[commit-shell] failed to mark running for %s: %v", st.ID, mErr)
+	}
+	job.Append(store.LogLine{Type: "phase", Content: "📝 本地 shell commit-only 流程启动（dev=" + dev + ", base=" + base + "）"})
+
+	credEnv, credCleanup := h.assembleGitCredEnv(reqRow, dir, projectPath, job)
+	if credCleanup != nil {
+		defer credCleanup()
+	}
+	git := func(args ...string) (string, error) {
+		return gitRunWithTimeout(dir, pushShellStepTimeout, credEnv, args...)
+	}
+
+	// ── Step 1: commit uncommitted changes (idempotent — no-op if the
+	// coding agent already committed, which is the common case).
+	if dirty, _ := git("status", "--porcelain"); strings.TrimSpace(dirty) != "" {
+		job.Append(store.LogLine{Type: "message", Content: "📝 工作区有未提交改动，执行 git add -A && git commit"})
+		if _, gerr := git("add", "-A"); gerr != nil {
+			job.Append(store.LogLine{Type: "error", Content: "❌ git add 失败: " + gerr.Error()})
+			job.Finish(1, store.JobError)
+			return
+		}
+		msg := strings.TrimSpace(commitMessage)
+		if msg == "" {
+			if title := strings.TrimSpace(reqRow.Title); title != "" {
+				msg = title
+			} else {
+				msg = reqRow.ID
+			}
+		}
+		if _, cerr := git("commit", "-m", msg, "--no-verify"); cerr != nil {
+			job.Append(store.LogLine{Type: "message", Content: "ℹ️ git commit 未产生新提交（可能已无改动）: " + cerr.Error()})
+		}
+	} else {
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 工作区干净，跳过提交"})
+	}
+
+	// ── Step 2: fetch base (best-effort — no remote / offline just proceeds
+	// with the local base).
+	if _, ferr := git("fetch", "origin", base); ferr != nil {
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ git fetch origin " + base + " 跳过: " + ferr.Error()})
+	}
+
+	// ── Step 3: merge base into dev (best-effort). Conflict here is
+	// unrecoverable for commit-only: there is no LLM fallback on this path,
+	// so we record the conflict as a job error and let the user resolve it
+	// before re-running. (Mirror of the push shell job's behavior on the
+	// push steps; commit-only trades "auto-resolve via LLM" for "stay local
+	// / don't push anything".)
+	if _, behind := aheadBehindInfo(dir, "origin/"+base, dev); behind == 0 {
+		job.Append(store.LogLine{Type: "message", Content: "✅ dev 已是 base 的最新，无需合并"})
+	} else if out, merr := git("merge", "origin/"+base, "--no-edit"); merr != nil {
+		// Conflict. Abort + surface, but DO NOT hand off to the LLM (this
+		// path was chosen because the user wanted to push / PR manually).
+		job.Append(store.LogLine{Type: "message", Content: "⚠️ 合并 " + base + " 失败/冲突: " + out + " — commit-only 不处理冲突，请手动解决后再运行"})
+		if _, aerr := git("merge", "--abort"); aerr != nil {
+			job.Append(store.LogLine{Type: "message", Content: "ℹ️ git merge --abort: " + aerr.Error()})
+		}
+		job.Append(store.LogLine{Type: "error", Content: "❌ commit-only 路径遇到合并冲突，无法继续；请手动 merge 或 rebase 后重新触发。"})
+		job.Finish(1, store.JobError)
+		return
+	} else {
+		job.Append(store.LogLine{Type: "message", Content: "🔀 已合并 origin/" + base + " 到 " + dev})
+	}
+
+	job.Append(store.LogLine{Type: "result", Content: "✅ 仅本地 commit 完成（未推送 — 在 start-coding 弹窗里关掉了 auto_push_remote）"})
+	job.Append(store.LogLine{Type: "done", Content: "✅ commit-only 流程完成"})
+	job.Finish(0, store.JobDone)
+	log.Printf("[commit-shell] job %s finished for %s", job.ID, reqRow.ID)
 }
 
 // buildPRShellBody is the pure helper that assembles the 2-section PR body
