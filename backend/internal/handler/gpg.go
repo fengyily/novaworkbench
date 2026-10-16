@@ -60,10 +60,16 @@ import (
 //     worktree's user.name / user.email. Either or both may be empty;
 //     empty fields are not written at all so git falls back to its own
 //     config lookup, preserving dev-machine behavior.
+//   - stateDir: where the script records each key's PRIOR value so the
+//     caller can undo the writes later (see the capture note inside).
+//     Empty disables capture entirely and leaves the emitted script
+//     byte-identical to the pre-teardown version — the remote path
+//     passes "" because its whole GNUPGHOME lives in a disposable
+//     scratch clone that gets rm -rf'd anyway.
 //
 // The script never embeds the private key or the passphrase — only
 // file paths under GNUPGHOME.
-func buildGPGProvisionScript(gnupgHome, wtPath, baseRepo, gitName, gitEmail string) string {
+func buildGPGProvisionScript(gnupgHome, wtPath, baseRepo, gitName, gitEmail, stateDir string) string {
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
 	b.WriteString("set -eu\n")
@@ -89,7 +95,44 @@ func buildGPGProvisionScript(gnupgHome, wtPath, baseRepo, gitName, gitEmail stri
 	// Enable per-worktree config on the base repo. Required for
 	// `git config --worktree` to actually land in
 	// .git/worktrees/<id>/config.worktree instead of being rejected.
+	//
+	// Deliberately NOT reverted by the teardown, even though it is
+	// written by this script: it is the shared gate every concurrent
+	// session on this base repo depends on, it carries no session
+	// path, and unsetting it would break any other run mid-flight
+	// (invariant 1 at the top of this file). Leaving it true is inert
+	// and the next run re-sets it anyway.
 	b.WriteString("git -C " + shellQuoteSingle(baseRepo) + " config extensions.worktreeConfig true || true\n")
+
+	// State capture (local path only — stateDir == "" emits nothing).
+	// For every key we are about to overwrite, record what was already
+	// there so the caller's cleanup can put it back. Two files per key,
+	// both under stateDir:
+	//
+	//   <key>.value — the prior value, byte for byte. ABSENT means the
+	//                 key had no value at that scope, so undo = unset.
+	//   <key>.scope — "worktree" or "local": the scope the write
+	//                 actually landed in. ABSENT means we never got far
+	//                 enough to write this key, so undo must skip it.
+	//                 This is what guarantees we never unset a key we
+	//                 did not set.
+	//
+	// Values are stored as FILE BYTES and never interpolated into shell
+	// syntax. A repo's user.name is arbitrary text — it may contain
+	// quotes, backticks or $(...) — and re-quoting a captured value at
+	// teardown time would be a command-injection surface. The Go side
+	// reads the file back and passes it as one argv element instead.
+	//
+	// .scope is written AFTER the write succeeds, never before: writing
+	// it first would let a crash mid-write make the teardown unset a key
+	// we never set, destroying the user's own config. Written after, the
+	// worst case is leaking a single key we did set.
+	if stateDir != "" {
+		b.WriteString("mkdir -p " + shellQuoteSingle(stateDir) + "\n")
+	}
+	stateFile := func(key, suffix string) string {
+		return shellQuoteSingle(stateDir + "/" + key + suffix)
+	}
 
 	// writeWt emits `git -C <wt> config --worktree <key> <val>` with a
 	// fallback to `--local` if --worktree is unsupported. The caller
@@ -111,10 +154,51 @@ func buildGPGProvisionScript(gnupgHome, wtPath, baseRepo, gitName, gitEmail stri
 			valRendered = shellQuoteSingle(val)
 		}
 		wtQ := shellQuoteSingle(wtPath)
+
+		// capture records the prior value at `scope` into <key>.value,
+		// or removes that file when there was nothing to record. `if
+		// cmd` is exempt from `set -e`, so a miss (exit 1) reads as
+		// "absent" instead of aborting the script. No-op when capture
+		// is disabled.
+		capture := func(scope, indent string) string {
+			if stateDir == "" {
+				return ""
+			}
+			valFile := stateFile(key, ".value")
+			return indent + "if _prev=$(git -C " + wtQ + " config " + scope + " --get " + keyQ + " 2>/dev/null); then\n" +
+				indent + "  printf '%s' \"$_prev\" > " + valFile + "\n" +
+				indent + "else\n" +
+				indent + "  rm -f " + valFile + "\n" +
+				indent + "fi\n"
+		}
+		recordScope := func(scope, indent string) string {
+			if stateDir == "" {
+				return ""
+			}
+			return indent + "echo " + scope + " > " + stateFile(key, ".scope") + "\n"
+		}
+
+		b.WriteString(capture("--worktree", ""))
 		b.WriteString("if ! git -C " + wtQ + " config --worktree " + keyQ + " " + valRendered + " 2>/dev/null; then\n")
 		b.WriteString("  echo \"[nova-gpg] --worktree config 失败，回落到 --local（key=" + key + "）\" >&2\n")
 		b.WriteString("  echo \"NOVA_GPG_WORKTREE_FALLBACK=1\"\n")
+		// The --local fallback overwrites the value in the SHARED
+		// .git/config, so the prior value has to be captured at that
+		// scope — and it replaces the --worktree capture written above
+		// (the --worktree write just failed, so it changed nothing).
+		b.WriteString(capture("--local", "  "))
 		b.WriteString("  git -C " + wtQ + " config --local " + keyQ + " " + valRendered + "\n")
+		b.WriteString(recordScope("local", "  "))
+		// The else branch exists only to record the successful
+		// --worktree landing. With capture disabled it would be an
+		// EMPTY else clause, which /bin/sh rejects outright — so emit
+		// the else only when there is something to put in it. This is
+		// what keeps the stateDir=="" script identical to the version
+		// that predates the teardown.
+		if wtScope := recordScope("worktree", "  "); wtScope != "" {
+			b.WriteString("else\n")
+			b.WriteString(wtScope)
+		}
 		b.WriteString("fi\n")
 	}
 

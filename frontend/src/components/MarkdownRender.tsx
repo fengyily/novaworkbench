@@ -17,6 +17,7 @@ import { useTranslation } from 'react-i18next';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import mermaid from 'mermaid';
+import { removeMermaidLeftovers } from '../utils/mermaidCleanup';
 import './MarkdownRender.css';
 
 let mermaidReady = false;
@@ -27,6 +28,7 @@ function ensureMermaid() {
     theme: 'neutral',
     securityLevel: 'loose',
     fontFamily: 'inherit',
+    suppressErrorRendering: true,
   });
   mermaidReady = true;
 }
@@ -112,6 +114,7 @@ function MermaidBlock({ source }: { source: string }) {
         if (!cancelled) setSvg(postProcessMermaidSvg(out));
       })
       .catch((e: unknown) => {
+        removeMermaidLeftovers(id);
         if (!cancelled) setError(String((e as Error)?.message || e));
       });
     return () => {
