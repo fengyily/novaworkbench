@@ -126,9 +126,9 @@ export default function ReviewChat({
             ) : fu.status === 'error' ? (
               <p className="cr-followup-errtext">{t('projects.detail.reviewFollowupFailed')}：{fu.answer}</p>
             ) : (
-              <div className="cr-followup-a md-prose">
+              <div className="cr-followup-a">
                 <span className="cr-followup-tag">{t('projects.detail.reviewFollowupA')}</span>
-                <MarkdownRender content={fu.answer} />
+                <div className="cr-followup-abody md-prose"><MarkdownRender content={fu.answer} /></div>
               </div>
             )}
             <div className="cr-followup-meta">
