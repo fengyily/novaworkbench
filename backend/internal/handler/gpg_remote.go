@@ -154,7 +154,12 @@ func attemptRemoteGPGProvisionOnce(
 	//    We never tee the key.asc / passphrase file contents — only the
 	//    script's stdout, which is just `gpg` status output and our own
 	//    NOVA_GPG_* marker.
-	script := buildGPGProvisionScript(gnupgHome, wtPath, baseRepo, gitName, gitEmail)
+	// stateDir is empty on purpose: the remote path's whole GNUPGHOME
+	// lives in a disposable scratch clone that makeRemoteGPGCleanup
+	// rm -rf's over SSH, so there is nothing left to leak and nothing to
+	// restore. Empty also keeps the emitted script byte-identical to the
+	// version that predates the local teardown.
+	script := buildGPGProvisionScript(gnupgHome, wtPath, baseRepo, gitName, gitEmail, "")
 	// Debug breadcrumb #1: log a hash + length of the script body so
 	// we can confirm the binary actually shipped the new marker / set
 	// -eu rules. A different hash than the one in `make build`'s

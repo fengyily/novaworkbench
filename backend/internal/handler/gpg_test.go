@@ -15,12 +15,16 @@ import (
 // trip through shellQuoteSingle without losing the leading slash or
 // the path.
 func TestBuildGPGProvisionScript_HappyWorktree(t *testing.T) {
+	// stateDir="" is the remote/Agent-Server shape: no state capture, so
+	// the emitted body is identical to what shipped before the local
+	// teardown existed.
 	script := buildGPGProvisionScript(
 		"/tmp/nova-agent/proj_abc/req_xyz.gnupg",
 		"/tmp/nova-agent/proj_abc/req_xyz",
 		"/tmp/nova-agent/proj_abc/base",
 		"Zhang San",
 		"zhangsan@example.com",
+		"",
 	)
 
 	for _, want := range []string{
@@ -66,7 +70,7 @@ func TestBuildGPGProvisionScript_HappyWorktree(t *testing.T) {
 // (i.e. sits at top level) is a bug.
 func TestBuildGPGProvisionScript_NoLocalInHappyPath(t *testing.T) {
 	script := buildGPGProvisionScript(
-		"/tmp/g", "/tmp/wt", "/tmp/base", "Name", "n@e.com",
+		"/tmp/g", "/tmp/wt", "/tmp/base", "Name", "n@e.com", "",
 	)
 
 	lines := strings.Split(script, "\n")
@@ -114,7 +118,7 @@ func TestBuildGPGProvisionScript_NoLocalInHappyPath(t *testing.T) {
 // gpg.program, base extensions.worktreeConfig) must still be there.
 func TestBuildGPGProvisionScript_EmptyIdentity(t *testing.T) {
 	script := buildGPGProvisionScript(
-		"/tmp/g", "/tmp/wt", "/tmp/base", "", "",
+		"/tmp/g", "/tmp/wt", "/tmp/base", "", "", "",
 	)
 	if strings.Contains(script, "'user.name'") {
 		t.Errorf("empty gitName must not write user.name; got:\n%s", script)
@@ -135,6 +139,112 @@ func TestBuildGPGProvisionScript_EmptyIdentity(t *testing.T) {
 	}
 }
 
+// TestBuildGPGProvisionScript_StateCapture asserts the local
+// (teardown-enabled) shape: before each write the script records the key's
+// PRIOR value, and after a successful write it records the scope the write
+// landed in. Those two files are exactly what restoreLocalGPGConfig replays.
+func TestBuildGPGProvisionScript_StateCapture(t *testing.T) {
+	script := buildGPGProvisionScript(
+		"/tmp/g", "/tmp/wt", "/tmp/base", "Name", "n@e.com", "/tmp/g/teardown-state",
+	)
+
+	for _, want := range []string{
+		"mkdir -p '/tmp/g/teardown-state'",
+		// Prior value, read at the worktree scope and stored as file
+		// bytes (never re-quoted into shell syntax):
+		"if _prev=$(git -C '/tmp/wt' config --worktree --get 'commit.gpgsign' 2>/dev/null); then",
+		`printf '%s' "$_prev" > '/tmp/g/teardown-state/commit.gpgsign.value'`,
+		"rm -f '/tmp/g/teardown-state/commit.gpgsign.value'",
+		// Landing scope, recorded AFTER the write succeeded:
+		"echo worktree > '/tmp/g/teardown-state/commit.gpgsign.scope'",
+		// The --local fallback is a DIFFERENT key space (the shared
+		// .git/config), so its prior value has to be captured there.
+		"if _prev=$(git -C '/tmp/wt' config --local --get 'commit.gpgsign' 2>/dev/null); then",
+		"echo local > '/tmp/g/teardown-state/commit.gpgsign.scope'",
+		// Every key gets the treatment, identity pair included.
+		"'/tmp/g/teardown-state/user.name.scope'",
+		"'/tmp/g/teardown-state/user.email.scope'",
+		"'/tmp/g/teardown-state/user.signingkey.scope'",
+		"'/tmp/g/teardown-state/tag.gpgsign.scope'",
+		"'/tmp/g/teardown-state/gpg.program.scope'",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("capture-enabled script missing fragment:\n  %q\nfull script:\n%s", want, script)
+		}
+	}
+
+	// Per key, the capture must precede the write it protects — otherwise
+	// we would record the value we just overwrote and "restore" to our own
+	// value.
+	capture := strings.Index(script, "config --worktree --get 'user.signingkey'")
+	write := strings.Index(script, "config --worktree 'user.signingkey' \"$keyid\"")
+	if capture < 0 || write < 0 {
+		t.Fatalf("expected both a capture and a write for user.signingkey\n%s", script)
+	}
+	if capture > write {
+		t.Errorf("user.signingkey capture (offset %d) must come before its write (offset %d)", capture, write)
+	}
+}
+
+// TestBuildGPGProvisionScript_NoCaptureWhenStateDirEmpty pins the remote
+// (Agent Server) shape. That path's GNUPGHOME lives in a scratch clone that
+// gets rm -rf'd, so it asks for no capture — and must therefore emit none of
+// the machinery, keeping its script byte-identical to the pre-teardown one.
+func TestBuildGPGProvisionScript_NoCaptureWhenStateDirEmpty(t *testing.T) {
+	script := buildGPGProvisionScript(
+		"/tmp/g", "/tmp/wt", "/tmp/base", "Name", "n@e.com", "",
+	)
+	for _, banned := range []string{
+		"teardown-state",
+		"--get",
+		"_prev",
+		"echo worktree",
+		"echo local",
+	} {
+		if strings.Contains(script, banned) {
+			t.Errorf("stateDir=\"\" must not emit capture machinery; found %q in:\n%s", banned, script)
+		}
+	}
+}
+
+// TestGPGProvisionScript_ShellSyntax parses the generated script with
+// /bin/sh -n (syntax check only, nothing is executed) for both shapes.
+//
+// This is not a theoretical guard. Capture mode wraps the --worktree write
+// in an if/else so it can record the landing scope, and with capture
+// DISABLED that else body would be empty — `if ...; then ...; else fi` is a
+// syntax error in POSIX sh, so the naive emission would ship a script the
+// remote path cannot even parse. The failure mode is "every remote GPG run
+// dies with a shell syntax error", which is worth a test.
+func TestGPGProvisionScript_ShellSyntax(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("/bin/sh is not available on Windows")
+	}
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skip("/bin/sh not found on PATH")
+	}
+
+	for _, tc := range []struct {
+		name     string
+		stateDir string
+	}{
+		{"capture-disabled", ""},
+		{"capture-enabled", "/tmp/g/teardown-state"},
+		{"state-dir-with-quote", "/tmp/o'connor/state"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := buildGPGProvisionScript(
+				"/tmp/g", "/tmp/wt", "/tmp/base", "Name", "n@e.com", tc.stateDir,
+			)
+			cmd := exec.Command("/bin/sh", "-n")
+			cmd.Stdin = strings.NewReader(script)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("/bin/sh -n rejected the generated script: %v\n%s\n--- script ---\n%s", err, out, script)
+			}
+		})
+	}
+}
+
 // TestBuildGPGProvisionScript_ShellQuoteSafe verifies that a
 // GNUPGHOME path containing a single quote (a pathological but legal
 // value) still survives shellQuoteSingle escaping. Single quotes
@@ -144,7 +254,7 @@ func TestBuildGPGProvisionScript_ShellQuoteSafe(t *testing.T) {
 	// Path with embedded single quote: /tmp/o'connor/.gnupg
 	script := buildGPGProvisionScript(
 		"/tmp/o'connor/.gnupg",
-		"/tmp/wt", "/tmp/base", "n", "e@x",
+		"/tmp/wt", "/tmp/base", "n", "e@x", "",
 	)
 	wantExport := `export GNUPGHOME='/tmp/o'\''connor/.gnupg'`
 	if !strings.Contains(script, wantExport) {
@@ -160,7 +270,7 @@ func TestBuildGPGProvisionScript_ShellQuoteSafe(t *testing.T) {
 // form here as a tripwire.
 func TestBuildGPGProvisionScript_NoSecretMaterial(t *testing.T) {
 	script := buildGPGProvisionScript(
-		"/tmp/g", "/tmp/wt", "/tmp/base", "n", "e@x",
+		"/tmp/g", "/tmp/wt", "/tmp/base", "n", "e@x", "",
 	)
 	for _, banned := range []string{
 		"-----BEGIN PGP PRIVATE KEY BLOCK-----",

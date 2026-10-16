@@ -97,7 +97,12 @@ func provisionLocalGPG(
 	//    marker; it never references the key.asc / passphrase file
 	//    contents, so even if we DID tee to the job log nothing secret
 	//    would leak.
-	script := buildGPGProvisionScript(home, wtPath, baseRepo, gitName, gitEmail)
+	// stateDir is where the script records each key's prior git-config
+	// value; restoreLocalGPGConfig replays it on the way out. It sits
+	// inside home on purpose — home is 0700, and the captured identity
+	// strings inherit that.
+	stateDir := home + "/" + localGPGStateDirName
+	script := buildGPGProvisionScript(home, wtPath, baseRepo, gitName, gitEmail, stateDir)
 	cmd := exec.Command("/bin/sh", "-c", script)
 	cmd.Env = append(os.Environ(), "GNUPGHOME="+home)
 	var stdoutBuf bytes.Buffer
@@ -116,6 +121,13 @@ func provisionLocalGPG(
 		if msg == "" {
 			msg = "❌ GPG 配置失败（exit=" + exitCodeString(cmd) + "）"
 		}
+		// The script may have written some of the git config keys before
+		// it died. Undo them — and do it BEFORE the home goes away,
+		// since the state describing the writes lives inside it.
+		// Skipping this is the same bug as the missing cleanup: the keys
+		// survive pointing at a wrapper that is about to stop existing,
+		// and every later `git commit` in this worktree fails.
+		restoreLocalGPGConfig(wtPath, stateDir)
 		_ = os.RemoveAll(home)
 		return "", "", noopCleanup, &gpgProvisionError{msg: msg, cause: runErr}
 	}
@@ -123,12 +135,13 @@ func provisionLocalGPG(
 	// 4. Parse the marker line out of the script output.
 	parsedKeyID, worktreeFallback := parseKeyIDFromScriptOutput(stdoutBuf.String())
 	if parsedKeyID == "" {
+		restoreLocalGPGConfig(wtPath, stateDir)
 		_ = os.RemoveAll(home)
 		return "", "", noopCleanup, &gpgProvisionError{msg: "GPG provision 脚本未输出 keyid，请检查本机 gpg 是否能正常运行"}
 	}
 	_ = worktreeFallback // surfaced by caller via job log when needed
 
-	cleanup = makeLocalGPGCleanup(home)
+	cleanup = makeLocalGPGCleanup(home, wtPath)
 	return home, parsedKeyID, cleanup, nil
 }
 
@@ -279,18 +292,98 @@ func verifyImportedGPGKey(armoredKey, passphrase string) (keyID, fingerprint, ui
 	return keyID, fingerprint, uid, nil
 }
 
-// makeLocalGPGCleanup returns an idempotent rm-rf closure for the local
-// GNUPGHOME. Safe to call multiple times (sync.Once) so a defer + a
-// panic-recovery defer in the caller both work without doubling the work.
-func makeLocalGPGCleanup(home string) func() {
+// localGPGStateDirName is the subdirectory of the per-run GNUPGHOME in
+// which buildGPGProvisionScript records, per git-config key, the value that
+// was there before it overwrote it and the scope the write landed in. The
+// teardown reads it back to restore the worktree's config.
+const localGPGStateDirName = "teardown-state"
+
+// gpgTeardownTimeout caps the whole restore pass. Each `git config` call is
+// sub-millisecond and never prompts, but this runs from a defer — sometimes
+// on the shutdown path — and a locked or unreachable config file must not
+// be able to wedge it.
+const gpgTeardownTimeout = 15 * time.Second
+
+// makeLocalGPGCleanup returns an idempotent closure that undoes the run's
+// git-config writes and then rm -rf's the local GNUPGHOME. Safe to call
+// multiple times (sync.Once) so a defer + a panic-recovery defer in the
+// caller both work without doubling the work.
+//
+// The restore has to happen before the rm -rf: the state files that say
+// which keys we wrote and what was there before live inside home.
+func makeLocalGPGCleanup(home, wtPath string) func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
+			restoreLocalGPGConfig(wtPath, home+"/"+localGPGStateDirName)
 			// Swallow the error — a leftover /tmp dir is recoverable
 			// (the OS cleans it eventually) and we never want a cleanup
 			// failure to mask a more important upstream error.
 			_ = os.RemoveAll(home)
 		})
+	}
+}
+
+// restoreLocalGPGConfig undoes the git-config writes that
+// buildGPGProvisionScript made in wtPath, using the per-key state files the
+// script left in stateDir.
+//
+// The work list comes from the state DIRECTORY rather than from a second
+// copy of the key list in Go, so whatever the script actually managed to
+// write is exactly what gets undone and the two sides cannot drift as keys
+// are added. A key with no <key>.scope file was never written — the script
+// died first, or the write never happened — and is left strictly alone.
+// That guarantee is the point: a wrong `--unset` discards the user's own
+// configuration, which is worse than the litter we are cleaning up.
+//
+// Every command is exec'd directly, never through a shell, and the prior
+// value is read from a file and passed as a single argv element — so a
+// value containing quotes, backticks or $(...) is data and can never be
+// interpreted as code or as extra arguments. Errors are swallowed: a failed
+// restore is recoverable litter, and this runs from defers where masking
+// the real error would be worse.
+func restoreLocalGPGConfig(wtPath, stateDir string) {
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		// Capture never ran, or already restored — nothing to undo.
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), gpgTeardownTimeout)
+	defer cancel()
+	for _, e := range entries {
+		key, ok := strings.CutSuffix(e.Name(), ".scope")
+		if !ok {
+			continue
+		}
+		// The keys are hard-coded literals in the script, so anything
+		// that isn't shaped like a config key means the state dir was
+		// tampered with. Refuse it rather than pass it to git: a key
+		// starting with "-" would be parsed as a FLAG (--global would
+		// redirect the write into the user's global config), and a
+		// separator would escape the state dir.
+		if key == "" || strings.HasPrefix(key, "-") || strings.ContainsAny(key, "/\\ \t\n") {
+			continue
+		}
+		scopeBytes, rerr := os.ReadFile(stateDir + "/" + key + ".scope")
+		if rerr != nil {
+			continue
+		}
+		// The script writes exactly "worktree" or "local". Anything
+		// else is a truncated file, and guessing a scope could unset
+		// the value at the wrong one.
+		scope := "--" + strings.TrimSpace(string(scopeBytes))
+		if scope != "--worktree" && scope != "--local" {
+			continue
+		}
+		args := []string{"-C", wtPath, "config", scope}
+		if prior, verr := os.ReadFile(stateDir + "/" + key + ".value"); verr == nil {
+			args = append(args, key, string(prior))
+		} else {
+			// No .value file means the key did not exist at that scope
+			// before we wrote it, so undo means removing it.
+			args = append(args, "--unset", key)
+		}
+		_ = exec.CommandContext(ctx, "git", args...).Run()
 	}
 }
 
