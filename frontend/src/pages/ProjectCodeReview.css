@@ -42,7 +42,38 @@
   padding: 8px 12px;
 }
 .cr-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-.cr-branch-toolbar { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+
+/* Branch pickers — same row, each picker's `.branch-selector` already owns
+   its hint rail. We only tighten the row gap and keep the cards from
+   squeezing each other on narrow viewports. */
+.cr-branch-pickers {
+  align-items: flex-start;
+  gap: 14px;
+}
+.cr-branch-pickers .branch-selector { flex: 1 1 280px; max-width: 100%; }
+
+/* Toolbar under the pickers — left shows branch-count totals so the user
+   knows what's in the dropdown, right has the manual fetch button. */
+.cr-branch-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+.cr-branch-counts {
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+.cr-branch-counts > span + span[aria-hidden] {
+  opacity: 0.5;
+}
+.cr-branch-toolbar > .btn { margin-left: auto; }
 
 /* ── Live stream panel ───────────────────────────────────────────────────── */
 .cr-stream-title { display: inline-flex; align-items: center; gap: 8px; }
