@@ -444,6 +444,11 @@ func main() {
 	reviewH.SetAgentServerSvc(agentSvrSvc)
 	reviewH.SetCodeReviewFollowupSvc(codeReviewFollowupSvc)
 	reviewH.SetCodeReviewRevisionSvc(codeReviewRevisionSvc)
+	// Wires the "turn a Review finding into a tracked issue" action. Done as a
+	// setter rather than a constructor arg so the existing NewReviewHandler
+	// tests keep working — and so a build that disables the requirement
+	// service simply exposes no /issues endpoint.
+	reviewH.SetRequirementSvc(reqSvc)
 	reportH := handler.NewReportHandler(projectSvc, reportSvc, llmGateway, sharedJobs, claudeCfgSvc)
 	mergeH := handler.NewMergeHandler(database, projectSvc, reqSvc, llmGateway, sharedJobs, roleSvc, platformSvc, jobLogSvc, claudeCfgSvc, usageSvc, subTaskSvc, subTaskRunner, agentSvrSvc, gitCredSvc)
 	platformH := handler.NewPlatformHandler(platformSvc)
@@ -564,6 +569,10 @@ func main() {
 	mux.HandleFunc("POST /api/code-reviews/{id}/attachments", reviewAttachmentH.Upload)
 	mux.HandleFunc("GET /api/code-reviews/{id}/attachments", reviewAttachmentH.List)
 	mux.HandleFunc("GET /api/code-reviews/{id}/attachments/{att_id}/content", reviewAttachmentH.Content)
+	// "Turn this finding into a tracked issue": single finding_ref or batch by
+	// severity. See handler/review_issue.go for the body shape and the
+	// per-mode dispatch.
+	mux.HandleFunc("POST /api/code-reviews/{rid}/issues", reviewH.CreateIssuesFromReview)
 	mux.HandleFunc("PUT /api/code-reviews/{id}/attachments/{att_id}", reviewAttachmentH.UpdateDescription)
 	mux.HandleFunc("DELETE /api/code-reviews/{id}/attachments/{att_id}", reviewAttachmentH.Delete)
 

@@ -304,6 +304,12 @@ type Requirement struct {
 	SourceURL        string `json:"source_url,omitempty"`
 	SourceState      string `json:"source_state,omitempty"`
 	SourceData       string `json:"source_data,omitempty"`
+	// SourceReviewID points at the code_reviews row that seeded this
+	// requirement via the Review "create issue" action. Distinct from the
+	// Issue-monitor source_* columns (those are platform-issued tickets,
+	// this is an internal cross-table pointer) so it gets its own field.
+	// Empty on every legacy row and on every Issue-monitor import.
+	SourceReviewID string `json:"source_review_id,omitempty"`
 }
 
 type CreateRequirementReq struct {
@@ -353,6 +359,15 @@ type CreateRequirementReq struct {
 	SourceURL        string `json:"source_url,omitempty"`
 	SourceState      string `json:"source_state,omitempty"`
 	SourceData       string `json:"source_data,omitempty"`
+	// SourceReviewID: pointer back to the code_reviews row that seeded this
+	// requirement via the Review "create issue" action. Distinct from the
+	// Issue-monitor source_* fields: those are platform-issued tickets
+	// (github/gitlab/gitea), this is an internal cross-table pointer used by
+	// the requirement detail page to render a navigation chip back to the
+	// review verdict. Empty on every legacy row and on every Issue-monitor
+	// import. Validated in service.RequirementService (must point to an
+	// existing row in the same project, same rule as SourceRequirementID).
+	SourceReviewID string `json:"source_review_id,omitempty"`
 }
 
 type UpdateStatusReq struct {

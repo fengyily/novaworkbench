@@ -455,6 +455,17 @@ export const projects = {
     reviewAskAbout: '追问此条',
     reviewAskAboutHint: '就这条问题继续提问，会自动带上它的编号与位置。',
     reviewAskAboutTemplate: '关于 {{ref}}「{{title}}」{{loc}}：这个问题会在什么场景下真的出错？应该怎么改？',
+    // 把这条问题一键建成可追踪的 issue 需求（kind=issue），标题/描述/位置
+    // 会自动从 finding 里抽取，并写回 Review 的链接作为来源。
+    reviewCreateIssue: '创建 issue',
+    reviewCreateIssueBusy: '创建中...',
+    reviewCreateIssueHint: '把这条问题建成可追踪的 issue 需求，并保留与 Review 的关联。',
+    reviewCreatedIssue: '已建 issue',
+    reviewCreatedIssueTitle: '已创建需求 {{id}}，点击跳转到详情页。',
+    // 报告级的批量建 issue：把当前所有 P0 + P1 一并建成 issue 需求。
+    reviewBulkCreate: '一键建 issue（{{n}}）',
+    reviewBulkCreateBusy: '批量创建中...',
+    reviewBulkCreateHint: '把当前报告中所有 P0 + P1 一键建成可追踪的 issue 需求。',
     reviewChipRisk: '这些问题里哪一条风险最高？为什么？',
     reviewChipGoal: '改动目标有没有真正达成？依据是什么？',
     reviewChipFix: '给出修复这些 P0 的最小改动方案。',

@@ -826,6 +826,13 @@ export interface Requirement {
   // column. Rendered as a "← source: <title>" link in the detail header so the
   // user can jump back to the originating idea.
   source_requirement_id?: string;
+  // SourceReviewID points at the code_reviews row that seeded this
+  // requirement via the Review "create issue" action. Distinct from
+  // source_requirement_id (which is for idea→requirement promotion) and
+  // from the Issue-monitor source_* fields (those are platform-issued
+  // tickets). Rendered as a "← Review <short-id>" chip in the detail
+  // header so a tracked issue stays navigable back to the verdict context.
+  source_review_id?: string;
   design_session_id: string; design_job_id: string; analysis_job_id: string; apply_job_id: string; coding_session_id: string;
   // Wiki-kind requirement: Markdown body produced by the plan-mode
   // "生成知识库文档" wizard stage, plus the persisted claude session id so
@@ -1943,6 +1950,19 @@ export const codeReviewsApi = {
   // records what was produced, not which one is selected.
   restoreRevision: (reviewId: string, revNo: number) =>
     api.post<CodeReview>(`/api/reviews/${reviewId}/revisions/${revNo}/restore`, {}),
+
+  // ── 创建 issue 需求 ────────────────────────────────────────────────────
+  // Turn a graded finding into a tracked issue-kind requirement. Single
+  // finding_ref ("P0-1") for the per-card button; batch with severities
+  // for the report-level "convert all blocking items" affordance. Returns
+  // the freshly-created requirements so the UI can navigate straight to
+  // /requirements/:new_id without a second round-trip.
+  createIssues: (reviewId: string, body: {
+    finding_ref?: string;
+    batch?: boolean;
+    severities?: ('P0' | 'P1' | 'P3')[];
+    priority?: string;
+  }) => api.post<Requirement[]>(`/api/code-reviews/${reviewId}/issues`, body),
 };
 
 // Platform tokens

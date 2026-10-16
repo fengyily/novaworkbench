@@ -1412,6 +1412,15 @@ var alterColumns = []string{
 	`ALTER TABLE requirements ADD COLUMN source_url         TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN source_state       TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN source_data        TEXT NOT NULL DEFAULT '{}'`,
+	// source_review_id: pointer back to the code_reviews row that seeded this
+	// requirement via the Review "create issue" action (POST .../issues).
+	// Mirrors the existing source_platform/source_external_id pattern but is a
+	// first-class FK because the requirement detail page renders a navigation
+	// chip back to the review and the verdict context. Empty on every legacy
+	// row and on every Issue-monitor import (those carry their own external
+	// pointer in source_platform). isIgnorableDDLError keeps the ALTER safe on
+	// already-migrated databases.
+	`ALTER TABLE requirements ADD COLUMN source_review_id  TEXT NOT NULL DEFAULT ''`,
 	// Sub-task execution start timestamp: written by MarkRunning (manual path)
 	// and ClaimNextPending (orchestration path) via COALESCE(started_at, ?) so
 	// it captures the FIRST pending → running transition. Drives the

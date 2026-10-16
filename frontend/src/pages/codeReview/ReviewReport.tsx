@@ -53,11 +53,33 @@ interface Props {
   onSelectRevision: (revNo: number) => void;
   /** Pre-fill the 追问 box with a question about one finding. */
   onAskAbout: (finding: ReviewFinding, ref: string) => void;
+  /** Turn this finding into a tracked issue-kind requirement. The handler is
+      expected to surface the new requirement id (e.g. via a toast or inline
+      chip) so the user can jump straight to /requirements/:new_id. */
+  onCreateIssue: (finding: ReviewFinding, ref: string) => void;
+  /** Per-finding ref strings currently being turned into issues (keyed by
+      ref, value true). The container owns this state so a clicked button
+      stays in its busy state through the round-trip and re-renders after
+      success don't reset it. */
+  creatingIssues: Record<string, boolean>;
+  /** Inline success state: ref → newly-created requirement id. Rendered as a
+      "✓ 已创建 →" chip with a link to /requirements/:new_id. Cleared on the
+      next report reload so it doesn't leak across runs. */
+  createdIssues: Record<string, string>;
+  /** Convert every graded finding in one shot. Mirrors the per-card button
+      but at the report level — the typical "I've read the report, action
+      it all" gesture after a verdict comes back. */
+  onBulkCreateIssues: () => void;
+  /** True while a batch creation round-trip is in flight. The button is
+      disabled during this window so a second click can't mint duplicates. */
+  bulkCreating: boolean;
 }
 
 export default function ReviewReport({
   review, revisions, busy, pendingFollowups, canRegenerate,
   onExportMarkdown, onExportPdf, exportingPdf, onRegenerate, onRerun, onSelectRevision, onAskAbout,
+  onCreateIssue, creatingIssues, createdIssues,
+  onBulkCreateIssues, bulkCreating,
 }: Props) {
   const { t } = useTranslation();
   const [exportOpen, setExportOpen] = useState(false);
@@ -71,6 +93,17 @@ export default function ReviewReport({
     for (const f of findings) m.get(f.severity)?.push(f);
     return m;
   }, [findings]);
+
+  // Bulk-conversion candidate count: P0 + P1 findings only (P3 are nits
+  // nobody plans to file). When the model didn't honour the trailing-JSON
+  // contract there are no findings to convert at all and the bulk button
+  // is disabled by the `hasBulkFindings` flag below.
+  const bulkCount = useMemo(() => {
+    let n = 0;
+    for (const f of findings) if (f.severity === 'P0' || f.severity === 'P1') n++;
+    return n;
+  }, [findings]);
+  const hasBulkFindings = bulkCount > 0;
 
   const verdict = deriveVerdict(review);
   const verdictKey = titleCase(verdict);
@@ -155,6 +188,22 @@ export default function ReviewReport({
         </button>
         <button className="btn btn-sm" onClick={onRerun} disabled={busy}>
           {t('projects.detail.reviewRerunBtn')}
+        </button>
+        {/* Convert every graded finding into a tracked issue in one shot.
+            Lives at the report level because the user has just read the
+            whole report and decided to action it; the per-card button
+            above handles the "I just want this one" case. Disabled while
+            a batch is in flight or any per-card creation is mid-RTT, so
+            a double-click can't mint duplicate rows. */}
+        <button
+          className="btn btn-sm cr-bulk-issue"
+          onClick={onBulkCreateIssues}
+          disabled={busy || bulkCreating || !hasBulkFindings || Object.values(creatingIssues).some(Boolean)}
+          title={t('projects.detail.reviewBulkCreateHint')}
+        >
+          {bulkCreating
+            ? t('projects.detail.reviewBulkCreateBusy')
+            : t('projects.detail.reviewBulkCreate', { n: bulkCount })}
         </button>
       </div>
 
@@ -292,6 +341,29 @@ export default function ReviewReport({
                             onClick={() => onAskAbout(f, ref)}
                             title={t('projects.detail.reviewAskAboutHint')}
                           >{t('projects.detail.reviewAskAbout')}</button>
+                          {/* Turn this finding into a tracked issue. Lives
+                              next to Ask About because both are per-card
+                              actions on the same finding. After success the
+                              container renders the new requirement id as a
+                              link, so the button itself can stay quiet. */}
+                          {createdIssues[ref] ? (
+                            <a
+                              className="btn btn-sm cr-finding-issue-link"
+                              href={`/requirements/${createdIssues[ref]}`}
+                              title={t('projects.detail.reviewCreatedIssueTitle', { id: createdIssues[ref] })}
+                            >✓ {t('projects.detail.reviewCreatedIssue')}</a>
+                          ) : (
+                            <button
+                              className="btn btn-sm cr-finding-issue"
+                              onClick={() => onCreateIssue(f, ref)}
+                              disabled={busy || !!creatingIssues[ref]}
+                              title={t('projects.detail.reviewCreateIssueHint')}
+                            >
+                              {creatingIssues[ref]
+                                ? t('projects.detail.reviewCreateIssueBusy')
+                                : t('projects.detail.reviewCreateIssue')}
+                            </button>
+                          )}
                         </div>
                         {f.detail && <p className="cr-finding-detail">{f.detail}</p>}
                         {f.suggestion && (

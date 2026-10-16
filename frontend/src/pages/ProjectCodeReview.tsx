@@ -121,6 +121,18 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   const [detailLoading, setDetailLoading] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
 
+  // ── 创建 issue ───────────────────────────────────────────────────────────
+  // Per-finding "Create Issue" — keyed by the same ref string the report
+  // renders ("P0-1", "P1-2"…) so the in-flight and success state can be
+  // looked up from the button without a parent re-render. The map is
+  // cleared when the user opens a different review so a stale success chip
+  // doesn't leak across runs (createdIssues is intentionally NOT cleared
+  // when switching to another review, because the "✓ 已创建 →" link IS the
+  // record of what happened).
+  const [creatingIssues, setCreatingIssues] = useState<Record<string, boolean>>({});
+  const [createdIssues, setCreatedIssues] = useState<Record<string, string>>({});
+  const [bulkCreating, setBulkCreating] = useState(false);
+
   // ── 追问 ─────────────────────────────────────────────────────────────────
   // The thread belongs to the report currently in the result view, and runs
   // on its own stream so asking a question never clobbers the review log
@@ -596,6 +608,73 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     document.querySelector('.cr-chat .cr-desc')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
 
+  // ── 创建 issue handlers ──────────────────────────────────────────────────
+
+  // Per-finding creation: one round-trip per click, the busy state is held
+  // by `creatingIssues[ref]` so a second click on the same card is a no-op
+  // (button stays disabled). On success the response carries the new
+  // requirement id, which is dropped into `createdIssues` — the per-card
+  // button swaps itself for a "✓ 已创建 →" link so the user can jump
+  // straight to /requirements/:new_id.
+  const handleCreateIssue = useCallback(async (finding: ReviewFinding, ref: string) => {
+    if (!selected || creatingIssues[ref]) return;
+    setCreatingIssues(prev => ({ ...prev, [ref]: true }));
+    try {
+      const created = await codeReviewsApi.createIssues(selected.id, { finding_ref: ref });
+      const first = Array.isArray(created) && created.length > 0 ? created[0] : null;
+      if (first) setCreatedIssues(prev => ({ ...prev, [ref]: first.id }));
+    } catch (err: unknown) {
+      // The user-visible error already lands in setBranchesError elsewhere;
+      // we don't have a review-specific error slot, so the most local
+      // honest place is to reuse it. (askError would be confusing here —
+      // it's for the 追问 stream.)
+      setBranchesError(errorMessage(err));
+    } finally {
+      setCreatingIssues(prev => {
+        const { [ref]: _drop, ...rest } = prev;
+        return rest;
+      });
+    }
+  }, [selected, creatingIssues]);
+
+  // Batch creation: one round-trip turns every P0 + P1 finding into an
+  // issue-kind requirement. The success response is a list — every ref in
+  // that list gets its own success chip, so the user sees a per-finding
+  // "✓ 已创建 →" link rather than a single bulk confirmation that doesn't
+  // tell them which finding got which id. The button stays disabled while
+  // ANY per-card creation is in flight so the two paths can't race.
+  const handleBulkCreateIssues = useCallback(async () => {
+    if (!selected || bulkCreating) return;
+    if (Object.values(creatingIssues).some(Boolean)) return;
+    setBulkCreating(true);
+    try {
+      const created = await codeReviewsApi.createIssues(selected.id, {
+        batch: true,
+        severities: ['P0', 'P1'],
+      });
+      if (Array.isArray(created)) {
+        setCreatedIssues(prev => {
+          const next = { ...prev };
+          for (const req of created) {
+            // source_external_id is "<reviewId>#<ref>"; we built it that way
+            // in review_issue.go specifically so the round-trip stays
+            // ref-keyed without a server-side join.
+            const ext = (req as { source_external_id?: string }).source_external_id ?? '';
+            const hash = ext.indexOf('#');
+            if (hash < 0) continue;
+            const ref = ext.slice(hash + 1);
+            if (ref) next[ref] = req.id;
+          }
+          return next;
+        });
+      }
+    } catch (err: unknown) {
+      setBranchesError(errorMessage(err));
+    } finally {
+      setBulkCreating(false);
+    }
+  }, [selected, bulkCreating, creatingIssues]);
+
   // ── Regeneration + versions ──────────────────────────────────────────────
 
   // Answered turns the current report hasn't taken in yet. The newest
@@ -770,6 +849,11 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
             onRerun={() => void handleRerun(selected)}
             onSelectRevision={(n) => void handleSelectRevision(n)}
             onAskAbout={handleAskAbout}
+            onCreateIssue={handleCreateIssue}
+            creatingIssues={creatingIssues}
+            createdIssues={createdIssues}
+            onBulkCreateIssues={() => void handleBulkCreateIssues()}
+            bulkCreating={bulkCreating}
           />
           <aside className="cr-result-aside">
             <ReviewChat

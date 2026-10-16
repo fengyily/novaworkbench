@@ -54,6 +54,13 @@ type ReviewHandler struct {
 	// makes 「基于对话重新生成」 non-destructive. nil → no version history is
 	// kept and regeneration is refused outright (see RegenerateReview).
 	revisionSvc *service.CodeReviewRevisionService
+	// reqSvc lets the Review handler turn a graded finding into a tracked
+	// issue-kind requirement via POST /api/code-reviews/{rid}/issues (see
+	// handler/review_issue.go). nil → that endpoint answers 503 so the
+	// frontend can hide the "create issue" affordance in builds where
+	// requirements are disabled, while every other review endpoint keeps
+	// working.
+	reqSvc *service.RequirementService
 }
 
 // SetCodeReviewFollowupSvc wires the 追问 thread store (see
@@ -82,6 +89,11 @@ func (h *ReviewHandler) SetGitCredentialSvc(svc *service.GitCredentialService) {
 // the local machine (which would review a different checkout than the user
 // asked for).
 func (h *ReviewHandler) SetAgentServerSvc(svc *service.AgentServerService) { h.agentSvrSvc = svc }
+
+// SetRequirementSvc wires the "turn a finding into an issue" action so
+// POST /api/code-reviews/{rid}/issues can mint a new requirements row from
+// the persisted findings. Without it the endpoint answers 503.
+func (h *ReviewHandler) SetRequirementSvc(svc *service.RequirementService) { h.reqSvc = svc }
 
 func NewReviewHandler(projectSvc *service.ProjectService, platformSvc *service.PlatformTokenService, roleSvc *service.RoleService, llmGateway *llm.Gateway, jobs *store.JobStore, jobLogSvc *service.JobLogService, claudeCfg *service.ClaudeConfigService, usageSvc usageRecorder) *ReviewHandler {
 	return &ReviewHandler{

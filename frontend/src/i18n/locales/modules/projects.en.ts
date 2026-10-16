@@ -451,6 +451,18 @@ export const projects = {
     reviewAskAbout: 'Ask about this',
     reviewAskAboutHint: 'Ask a follow-up about this finding; its number and location are filled in for you.',
     reviewAskAboutTemplate: 'About {{ref}} "{{title}}"{{loc}}: when would this actually go wrong, and how should it be fixed?',
+    // Turn this finding into a tracked issue-kind requirement. Title /
+    // description / location are pulled from the finding and the Review
+    // pointer is recorded as the source.
+    reviewCreateIssue: 'Create issue',
+    reviewCreateIssueBusy: 'Creating…',
+    reviewCreateIssueHint: 'Convert this finding into a tracked issue-kind requirement and keep its link to the Review.',
+    reviewCreatedIssue: 'Issue created',
+    reviewCreatedIssueTitle: 'Created requirement {{id}}. Click to open the detail page.',
+    // Report-level bulk: convert every graded P0 + P1 finding in one shot.
+    reviewBulkCreate: 'Create issues ({{n}})',
+    reviewBulkCreateBusy: 'Creating…',
+    reviewBulkCreateHint: 'Convert every P0 + P1 finding in this report into a tracked issue-kind requirement.',
     reviewChipRisk: 'Which of these findings carries the highest risk, and why?',
     reviewChipGoal: 'Was the stated goal actually achieved? What is the evidence?',
     reviewChipFix: 'Give me the smallest change that fixes the P0 findings.',

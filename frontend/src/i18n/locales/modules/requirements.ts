@@ -598,6 +598,10 @@ export const requirements = {
     // Knowledge context (Step 5 → 一键汇总 → 来源 idea).
     sourceIdeaTitle: '点击查看来源想法的讨论',
     sourceIdeaBackLink: '← 来源想法',
+    // 来自 Review 的「创建 issue」动作 — 与 source_requirement_id 同侧的
+    // provenance 标记；点回项目页（Review tab 未做 URL 同步）。
+    sourceReviewTitle: '本需求由 Review {{id}} 中的一条 finding 一键创建',
+    sourceReviewBackLink: '← 来源 Review {{id}}',
     // Resume hint when a previous run was interrupted.
     resumeHint: '检测到上一次开发未完成，可点击"继续调整"恢复会话',
     // Merge/PR URL placeholder.

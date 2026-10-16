@@ -3580,6 +3580,25 @@ export default function RequirementDetail() {
             {t('requirements.detail2.sourceIdeaBackLink')}
           </Link>
         )}
+        {/* Source Review pointer — set when the requirement was minted from
+            the Review tab's "Create Issue" action. Sits next to the existing
+            source_requirement_id link because both are provenance
+            affordances (one for idea→requirement promotion, one for
+            review-finding→issue conversion). Lands on the project page; the
+            review tab itself isn't URL-synced in ProjectDetail (it's just
+            useState), so we can't deep-link to a specific review row from
+            here without changing ProjectDetail. The user reaches the review
+            by clicking the tab — the chip's value is "this came from a
+            review", not "click to jump exactly there". */}
+        {req.source_review_id && (
+          <Link
+            to={`/projects/${req.project_id}`}
+            className="source-link"
+            title={t('requirements.detail2.sourceReviewTitle', { id: req.source_review_id })}
+          >
+            {t('requirements.detail2.sourceReviewBackLink', { id: req.source_review_id })}
+          </Link>
+        )}
         {/* Per-stage "compressed" badges. Each one is a passive indicator of
             whether that wizard stage's session has been summarized into the
             {step}_context_summary column — the chat components own the

@@ -566,6 +566,11 @@ export const requirements = {
     claudeStatusAria: 'Claude working status',
     sourceIdeaTitle: 'Click to view the source idea\'s discussion',
     sourceIdeaBackLink: '← Source idea',
+    // From the Review tab's "Create issue" action. Sits next to
+    // source_requirement_id as a provenance affordance; lands on the
+    // project page because the Review tab isn't URL-synced.
+    sourceReviewTitle: 'This requirement was created from a finding in Review {{id}}',
+    sourceReviewBackLink: '← Source Review {{id}}',
     resumeHint: 'Detected an unfinished previous run — click "Continue adjusting" to resume',
     mergePrUrlEmpty: '(remote URL not configured)',
     resumeBannerTitle: 'Detected an unfinished previous session',

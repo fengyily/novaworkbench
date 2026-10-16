@@ -942,6 +942,35 @@
 .cr-finding:hover .cr-finding-ask,
 .cr-finding-ask:focus-visible { opacity: 1; }
 
+/* Per-finding "Create Issue" button — sibling of the Ask button, same
+   quiet-until-hovered treatment so the row stays readable when many findings
+   are open. The success state swaps to a green link with the same footprint
+   so the row doesn't reflow when an issue is created. */
+.cr-finding-issue,
+.cr-finding-issue-link {
+  flex: none;
+  opacity: 0.55;
+  font-size: 11.5px;
+  padding: 1px 8px;
+  margin-left: 4px;
+}
+.cr-finding:hover .cr-finding-issue,
+.cr-finding-issue:focus-visible,
+.cr-finding:hover .cr-finding-issue-link,
+.cr-finding-issue-link:focus-visible { opacity: 1; }
+.cr-finding-issue-link {
+  /* Success chip uses a positive colour so it reads as "done, click me" —
+     muted would be read as a still-disabled button. */
+  color: var(--color-success, #10B981);
+  text-decoration: none;
+}
+.cr-finding-issue-link:hover { text-decoration: underline; }
+
+/* Report-level bulk "Create Issues for P0+P1" button. Pinned to the
+   toolbar like the other report-level actions; the count badge inside
+   gives the user a chance to confirm before they commit to N new issues. */
+.cr-bulk-issue { flex: none; }
+
 /* ── Conversation column ─────────────────────────────────────────────────- */
 .cr-chat {
   display: flex;
