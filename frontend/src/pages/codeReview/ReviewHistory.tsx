@@ -54,7 +54,7 @@ export default function ReviewHistory({
 
   return (
     <div className="cr-history">
-      <div className="req-table-wrap">
+      <div className="cr-history-head">
         <span>{t('projects.detail.reviewHistoryTitle')}</span>
         {blanks.length > 0 && (
           <span className="cr-history-blanks">
@@ -65,6 +65,7 @@ export default function ReviewHistory({
           </span>
         )}
       </div>
+      <div className="req-table-wrap">
       {rows.length === 0 ? (
         <div className="tab-empty"><p>{t('projects.detail.reviewHistoryEmpty')}</p></div>
       ) : (
@@ -152,6 +153,7 @@ export default function ReviewHistory({
           </tbody>
         </table>
       )}
+      </div>
     </div>
   );
 }

@@ -39,7 +39,7 @@ import { useTranslation } from 'react-i18next';
 import {
   reviewApi, codeReviewsApi, agentServersApi, fsApi,
   type PR, type PRListResponse, type Project,
-  type CodeReview, type CodeReviewRunBinding, type CodeReviewRevision, type ReviewFinding,
+  type CodeReview, type CodeReviewRunBinding, type ReviewFinding,
   type CodeReviewFollowup,
   type FsBranchesResponse,
 } from '../api/client';
@@ -117,14 +117,12 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
   // ── History + result ─────────────────────────────────────────────────────
   const [history, setHistory] = useState<CodeReview[]>([]);
-  const [selected, setSelected] = useState<CodeReview | null>(null);
+  const [resultReviewId, setResultReviewId] = useState<string | null>(null);
   // Composer is on-demand: the page opens to a history list, and the user
   // presses the header button to summon the form. Toggled by the page-header
   // primary button (and the mobile FAB); the composer's own "collapse" button
   // and the success path of 开始 also flip it back off.
   const [showCreate, setShowCreate] = useState(false);
-  const [revisions, setRevisions] = useState<CodeReviewRevision[]>([]);
-  const [detailLoading, setDetailLoading] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
 
   // ── 创建 issue ───────────────────────────────────────────────────────────
@@ -145,7 +143,6 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   // live stream, the current job id, the followup list and the version
   // list all live in the `reviewSession` hook. The page only holds the
   // one-shot pre-fill slot.
-  const [followups, setFollowups] = useState<CodeReviewFollowup[]>([]);
   const [askTemplate, setAskTemplate] = useState<string>('');
 
   // Hook owns: detail row, followup thread, version list, active
@@ -154,7 +151,6 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   // page just plumbs its UI bits to those handlers. `resultReviewId` is
   // the only thing the page needs to drive the result view; the hook
   // reloads detail / followups / revisions whenever it changes.
-  const resultReviewId = selected?.id ?? null;
   const reviewSession = useReviewSession(resultReviewId, projectId);
 
   // Read-through aliases for the rest of the file. The hook owns the
@@ -162,12 +158,10 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   // downstream JSX reads `selected` / `revisions` / `detailLoading` by
   // those names. Keeping the names lets the rest of the file stay close
   // to its old shape so the diff stays localised.
-  // eslint-disable-next-line @typescript-eslint/no-redeclare
   const selected = reviewSession.review;
-  // eslint-disable-next-line @typescript-eslint/no-redeclare
   const revisions = reviewSession.revisions;
-  // eslint-disable-next-line @typescript-eslint/no-redeclare
   const detailLoading = reviewSession.detailLoading;
+  const followups = reviewSession.followups;
 
   // Close the PR-mode SSE when the tab unmounts so a navigated-away
   // review doesn't keep a dangling reader around. The branch-mode SSE
@@ -206,8 +200,6 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   // report's 「针对 P0-2 提问」 button pushes into the chat).
   // The local `selected` reference is still used to derive
   // `resultReviewId` above and to gate UI on having a review loaded.
-  void followups;
-  void revisions;
 
   // Only ready servers are offered — the backend refuses the rest, so listing
   // them would only mislead. A failure leaves the list empty, which still
@@ -298,7 +290,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     setReviewDone(false);
     setReviewModel('');
     setSubmitMsg('');
-    setSelected(null);
+    setResultReviewId(null);
   };
 
   // ── PR mode handlers ─────────────────────────────────────────────────────
@@ -313,7 +305,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     setReviewModel('');
     setCommentBody('');
     setSubmitMsg('');
-    setSelected(null);
+    setResultReviewId(null);
 
     try {
       const { job_id } = await reviewApi.startReview(
@@ -465,7 +457,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
       // `await reviewSession.rerun()` below, so the browser still
       // treats it as user-initiated and does not block the popup.
       setShowCreate(false);
-      window.open(`/reviews/${reviewId}`, '_blank', 'noopener,noreferrer');
+      window.open(`/reviews/${reviewId}?run=1`, '_blank', 'noopener,noreferrer');
       await reviewSession.rerun();
       loadHistory();
     } catch (err: unknown) {
@@ -494,7 +486,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     try {
       await codeReviewsApi.remove(rv.id);
       if (session?.id === rv.id) handleNewSession();
-      if (selected?.id === rv.id) setSelected(null);
+      if (resultReviewId === rv.id) setResultReviewId(null);
       loadHistory();
     } catch (err: unknown) {
       setBranchesError(errorMessage(err));
@@ -518,10 +510,9 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   // history-row click handler both depend on it; without useCallback here
   // those consumers would re-fire every render.
   const handleOpenHistory = useCallback(async (rv: CodeReview) => {
-    setDetailLoading(true);
     try {
       const full = await codeReviewsApi.get(rv.id);
-      setSelected(full);
+      setResultReviewId(full.id);
       // Seed the toolbar from the stored row so 重跑 reproduces the same
       // model + execution environment. The backend stamps `model` with the
       // EFFECTIVE model after a run; ModelSelect maps its DefaultModelLabel
@@ -539,9 +530,9 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
       }
       return full;
     } catch {
-      setSelected(rv);
+      setResultReviewId(rv.id);
       return rv;
-    } finally { setDetailLoading(false); }
+    }
   }, []);
 
   const handleRerun = async (rv: CodeReview) => {

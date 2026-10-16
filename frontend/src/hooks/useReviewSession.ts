@@ -10,10 +10,16 @@
 // endpoint. Starting a new action closes whatever was streaming before
 // so the user never sees interleaved log lines from two jobs.
 //
-// `projectId` is required alongside `reviewId` because the SSE URL is
-// `/api/projects/{projectId}/prs/jobs/{jobId}/stream` and we need it
-// before the CodeReview row is loaded (e.g. when rerun is clicked on the
-// just-loaded detail). The window page and the tab both have it.
+// The SSE URL is `/api/projects/{projectId}/prs/jobs/{jobId}/stream`. The
+// project id comes from the loaded review row (`review.project_id`); the
+// optional `projectIdHint` only covers the window before the row arrives.
+//
+// A review that is already `running` (opened in a new window, or selected
+// from history mid-run) is joined automatically via `review.job_id` —
+// JobStore replays history to every new subscriber, so no backend change
+// is needed. `opts.waitForStart` covers the race where the window opens
+// before the POST /start has persisted: while the row is still `draft` it
+// is polled until it flips to running.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -30,6 +36,11 @@ export type RerunOpts = Record<string, never>;
 export interface UseReviewSessionResult {
   review: CodeReview | null;
   detailLoading: boolean;
+  /** Last failure from load / action / restore; cleared by clearError. */
+  error: string;
+  clearError: () => void;
+  /** The review id does not exist (HTTP 404 on detail load). */
+  notFound: boolean;
   followups: CodeReviewFollowup[];
   revisions: CodeReviewRevision[];
   activeRevisionNo: number | null;
@@ -45,10 +56,20 @@ export interface UseReviewSessionResult {
   reload: () => Promise<void>;
 }
 
+export interface UseReviewSessionOpts {
+  /** Poll a `draft` row until a concurrent start makes it `running`. */
+  waitForStart?: boolean;
+}
+
+const START_POLL_MS = 1500;
+const START_POLL_MAX = 20;
+
 export function useReviewSession(
   reviewId: string | null,
-  projectId: string,
+  projectIdHint?: string,
+  opts: UseReviewSessionOpts = {},
 ): UseReviewSessionResult {
+  const waitForStart = !!opts.waitForStart;
   const [review, setReview] = useState<CodeReview | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [followups, setFollowups] = useState<CodeReviewFollowup[]>([]);
@@ -57,6 +78,8 @@ export function useReviewSession(
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [liveLines, setLiveLines] = useState<StreamLine[]>([]);
   const [running, setRunning] = useState(false);
+  const [error, setError] = useState('');
+  const [notFound, setNotFound] = useState(false);
 
   // Single shared SSE — start/ask/regenerate/rerun all funnel through
   // it so only one JobStore stream is open at a time. Held in a ref so
@@ -65,6 +88,10 @@ export function useReviewSession(
   const esRef = useRef<EventStream | null>(null);
   const reviewIdRef = useRef<string | null>(reviewId);
   reviewIdRef.current = reviewId;
+  const projectIdRef = useRef('');
+  projectIdRef.current = review?.project_id || projectIdHint || '';
+  const clearError = useCallback(() => setError(''), []);
+  const fail = useCallback((err: unknown) => setError(errorMessage(err)), []);
 
   // ── SSE plumbing ────────────────────────────────────────────────────────
   //
@@ -110,7 +137,7 @@ export function useReviewSession(
     setLiveLines([]);
     setRunning(true);
     esRef.current = createEventStream(
-      reviewApi.streamJobUrl(projectId, jobId),
+      reviewApi.streamJobUrl(projectIdRef.current, jobId),
       (data) => {
         if (data.type === 'job_done') {
           setRunning(false);
@@ -132,7 +159,7 @@ export function useReviewSession(
         if (rid) onSettled(rid);
       },
     );
-  }, [projectId, closeStream]);
+  }, [closeStream]);
 
   // ── Effect: re-load detail when reviewId changes ────────────────────────
   useEffect(() => {
@@ -144,6 +171,8 @@ export function useReviewSession(
     setLiveLines([]);
     setRunning(false);
     setCurrentJobId(null);
+    setError('');
+    setNotFound(false);
 
     if (!reviewId) {
       setReview(null);
@@ -157,7 +186,12 @@ export function useReviewSession(
     setDetailLoading(true);
     Promise.all([
       codeReviewsApi.get(reviewId)
-        .then(rv => { if (!cancelled) setReview(rv); }),
+        .then(rv => { if (!cancelled) setReview(rv); })
+        .catch((err: unknown) => {
+          if (cancelled) return;
+          if ((err as { status?: number }).status === 404) setNotFound(true);
+          else fail(err);
+        }),
       codeReviewsApi.listFollowups(reviewId)
         .then(rows => { if (!cancelled) setFollowups(Array.isArray(rows) ? rows : []); }),
       codeReviewsApi.listRevisions(reviewId)
@@ -165,7 +199,37 @@ export function useReviewSession(
     ]).catch(() => { /* detailLoading resets in finally regardless */ })
       .finally(() => { if (!cancelled) setDetailLoading(false); });
     return () => { cancelled = true; };
-  }, [reviewId, closeStream]);
+  }, [reviewId, closeStream, fail]);
+
+  // Join a run that is already in flight (started elsewhere). Guarded by
+  // esRef so a tab-initiated rerun/regenerate, which subscribes itself,
+  // is never double-subscribed.
+  const reviewRowId = review?.id;
+  const reviewStatus = review?.status;
+  const reviewJobId = review?.job_id;
+  useEffect(() => {
+    if (!reviewId || reviewRowId !== reviewId) return;
+    if (reviewStatus !== 'running' || !reviewJobId) return;
+    if (esRef.current) return;
+    subscribe(reviewJobId, refreshAfterRun);
+  }, [reviewId, reviewRowId, reviewStatus, reviewJobId, subscribe, refreshAfterRun]);
+
+  // Wait for a concurrent start to land: poll while the row is a draft.
+  useEffect(() => {
+    if (!waitForStart || !reviewId || reviewRowId !== reviewId || reviewStatus !== 'draft') return;
+    let cancelled = false;
+    let tries = 0;
+    const timer = window.setInterval(() => {
+      if (++tries > START_POLL_MAX) { window.clearInterval(timer); return; }
+      codeReviewsApi.get(reviewId)
+        .then(rv => {
+          if (cancelled) return;
+          if (rv.status !== 'draft') { window.clearInterval(timer); setReview(rv); }
+        })
+        .catch(() => { /* transient; the next tick retries */ });
+    }, START_POLL_MS);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [waitForStart, reviewId, reviewRowId, reviewStatus]);
 
   // Close the SSE when the hook unmounts so a navigated-away review
   // doesn't keep a dangling reader around.
@@ -185,11 +249,12 @@ export function useReviewSession(
       const { job_id } = await codeReviewsApi.ask(rid, question);
       subscribe(job_id, (r) => refreshFollowups(r));
     } catch (err: unknown) {
+      fail(err);
       setLiveLines(prev => [...prev, { type: 'error', content: errorMessage(err) }]);
       setRunning(false);
       setCurrentJobId(null);
     }
-  }, [running, subscribe, refreshFollowups]);
+  }, [running, subscribe, refreshFollowups, fail]);
 
   const regenerate = useCallback(async () => {
     const rid = reviewIdRef.current;
@@ -198,11 +263,12 @@ export function useReviewSession(
       const { job_id } = await codeReviewsApi.regenerate(rid);
       subscribe(job_id, refreshAfterRun);
     } catch (err: unknown) {
+      fail(err);
       setLiveLines(prev => [...prev, { type: 'error', content: errorMessage(err) }]);
       setRunning(false);
       setCurrentJobId(null);
     }
-  }, [running, subscribe, refreshAfterRun]);
+  }, [running, subscribe, refreshAfterRun, fail]);
 
   const rerun = useCallback(async (_opts: RerunOpts = {}) => {
     const rid = reviewIdRef.current;
@@ -211,11 +277,12 @@ export function useReviewSession(
       const { job_id } = await codeReviewsApi.start(rid);
       subscribe(job_id, refreshAfterRun);
     } catch (err: unknown) {
+      fail(err);
       setLiveLines(prev => [...prev, { type: 'error', content: errorMessage(err) }]);
       setRunning(false);
       setCurrentJobId(null);
     }
-  }, [running, subscribe, refreshAfterRun]);
+  }, [running, subscribe, refreshAfterRun, fail]);
 
   const restoreRevision = useCallback(async (n: number) => {
     const rid = reviewIdRef.current;
@@ -224,9 +291,9 @@ export function useReviewSession(
       const updated = await codeReviewsApi.restoreRevision(rid, n);
       setReview(updated);
     } catch (err: unknown) {
-      setLiveLines(prev => [...prev, { type: 'error', content: errorMessage(err) }]);
+      fail(err);
     }
-  }, []);
+  }, [fail]);
 
   const reload = useCallback(async () => {
     const rid = reviewIdRef.current;
@@ -241,13 +308,16 @@ export function useReviewSession(
       setFollowups(Array.isArray(fu) ? fu : []);
       setRevisions(Array.isArray(rv) ? rv : []);
     } catch (err: unknown) {
-      setLiveLines(prev => [...prev, { type: 'error', content: errorMessage(err) }]);
+      fail(err);
     }
-  }, []);
+  }, [fail]);
 
   return {
     review,
     detailLoading,
+    error,
+    clearError,
+    notFound,
     followups,
     revisions,
     activeRevisionNo,

@@ -7,13 +7,10 @@
 // ProjectCodeReview 容器在 tab 里也是同一个 hook 的客户端，两处行为自然
 // 对齐（追问 SSE 追加、版本回切、export 等等）。
 //
-// Loading 顺序：URL 上的 id 立即拿到 → hook 用一个空 projectId 启动
-//（hook 拿不到真实 projectId 就只能拿到空字符串，让 SSE 暂不订阅；不影响
-// detail / followups / revisions 拉取）→ review 行一旦到位，projectId
-// 重新喂入 hook，真正的 SSE 通道才挂上。这一段用一个 effect 触发
-// `setKnownProjectId(review.project_id)`，与 hook 自身的"reviewId 变化时
-// 重拉 detail" 行为叠加，确保切换 review 不会拖着一份陈旧的 liveLines
-// 串到下一份。
+// Loading 顺序：URL 上的 id 立即交给 hook，hook 自己拉 review / followups /
+// revisions，并用 review.project_id 拼 SSE 地址；review 若仍在 running 会
+// 自动接入同一条 job 流。`?run=1` 表示本窗口由「开始 Review」打开，start 可能
+// 尚未落库，hook 会在 draft 状态下轮询等待。
 //
 // 关闭按钮沿用 KnowledgeViewPage 的智能回退（line 76-84）：新窗口里点
 // 关闭能 window.close()，直接粘贴 URL 进入时退到 /projects，而不是 /knowledge
@@ -21,10 +18,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   codeReviewsApi, projectsApi,
-  type CodeReview, type CodeReviewFollowup, type ReviewFinding,
+  type CodeReviewFollowup, type ReviewFinding,
 } from '../api/client';
 import { errorMessage } from '../utils/errMsg';
 import {
@@ -36,95 +33,35 @@ import ReviewReport from './codeReview/ReviewReport';
 import ReviewChat from './codeReview/ReviewChat';
 import './CodeReviewViewPage.css';
 
-// The hook signature wants projectId at construction time. We don't know it
-// until the CodeReview row arrives, so we boot it with '' (which the hook
-// treats as "no projectId yet, but still load detail" — see
-// useReviewSession's reviewId effect, which only depends on reviewId) and
-// upgrade the real id into a remount via a `key` on the inner session.
-//
-// Falling back to a remount (rather than the hook reacting to a changing
-// projectId) is the simpler choice: the projectId is only consumed by the
-// SSE URL builder, and remounting when the row arrives also clears any
-// streaming log that may have leaked from a previous id, which we want
-// anyway.
-const PLACEHOLDER_PROJECT_ID = '';
-
 export default function CodeReviewViewPage() {
   const { id } = useParams<{ id: string }>();
+  const [searchParams] = useSearchParams();
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const [knownProjectId, setKnownProjectId] = useState<string>(PLACEHOLDER_PROJECT_ID);
   const [projectName, setProjectName] = useState<string>('');
   const [projectNameError, setProjectNameError] = useState<string>('');
 
-  // Track the review locally so the hook can boot with PLACEHOLDER_PROJECT_ID
-  // and we can re-mount the hook with the real one once the row arrives.
-  // The hook itself returns the same `review` we mirror here, but a mirror
-  // lets us read project_id without subscribing to the session shape.
-  const [review, setReview] = useState<CodeReview | null>(null);
-  const [loadingReview, setLoadingReview] = useState<boolean>(true);
-  const [loadError, setLoadError] = useState<string>('');
-  const [notFound, setNotFound] = useState<boolean>(false);
+  const session = useReviewSession(id ?? null, undefined, {
+    waitForStart: searchParams.get('run') === '1',
+  });
+  const review = session.review;
+  const projectId = review?.project_id ?? '';
+  const loadingReview = !!id && session.detailLoading && !review;
+  const notFound = !id || session.notFound;
+  const loadError = !review && !session.detailLoading ? session.error : '';
 
-  // Initial load: pull just the review row. The hook does this in parallel
-  // with followups/revisions, but doing it separately here gives us a
-  // dedicated error/not-found path before any SSE is wired.
+  // Project display name for the topbar and exported PDF/MD header. Failure
+  // is non-fatal — the topbar falls back to the project id.
   useEffect(() => {
-    if (!id) { setNotFound(true); setLoadingReview(false); return; }
-    let cancelled = false;
-    setLoadingReview(true);
-    setNotFound(false);
-    setLoadError('');
-    setReview(null);
-    setKnownProjectId(PLACEHOLDER_PROJECT_ID);
     setProjectName('');
     setProjectNameError('');
-    codeReviewsApi.get(id)
-      .then((rv) => {
-        if (cancelled) return;
-        setReview(rv);
-        setKnownProjectId(rv.project_id);
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        const status = (err as { status?: number }).status;
-        if (status === 404) setNotFound(true);
-        else setLoadError(errorMessage(err));
-      })
-      .finally(() => { if (!cancelled) setLoadingReview(false); });
-    return () => { cancelled = true; };
-  }, [id]);
-
-  // Once we know the project, look up its display name for the topbar and
-  // the exported PDF/MD header. 404 here is non-fatal — we just fall back
-  // to the project id (matches the tab's behaviour where `project` may
-  // be null while detail is loading).
-  useEffect(() => {
-    if (!knownProjectId || knownProjectId === PLACEHOLDER_PROJECT_ID) return;
+    if (!projectId) return;
     let cancelled = false;
-    projectsApi.get(knownProjectId)
+    projectsApi.get(projectId)
       .then((p) => { if (!cancelled) setProjectName(p?.name || ''); })
       .catch((err: unknown) => { if (!cancelled) setProjectNameError(errorMessage(err)); });
     return () => { cancelled = true; };
-  }, [knownProjectId]);
-
-  // The hook is keyed on the known projectId so the SSE re-binds as soon as
-  // the row arrives. The placeholder + remount path above is what lets
-  // `useReviewSession` get a stable `projectId` string in its argument.
-  const session = useReviewSession(
-    id ?? null,
-    knownProjectId || PLACEHOLDER_PROJECT_ID,
-  );
-
-  // The hook also re-fetches the review when reviewId changes, so once
-  // knownProjectId triggers a remount and the hook re-runs its detail
-  // effect, this setReview can become redundant. We only need to keep it
-  // in sync if the hook's `review` advances (e.g. after rerun/regenerate).
-  useEffect(() => {
-    if (session.review && (!review || session.review.id === review.id)) {
-      setReview(session.review);
-    }
-  }, [session.review, review]);
+  }, [projectId]);
 
   // ── Closing — same smart fallback as KnowledgeViewPage.tsx:76-84 ──────────
   const handleClose = useCallback(() => {
@@ -201,18 +138,11 @@ export default function CodeReviewViewPage() {
   }, [review, bulkCreating, creatingIssues]);
 
   // ── 追问 handlers ────────────────────────────────────────────────────────
-  // The hook owns the SSE stream + the followup thread; we just hand it
-  // the question text. ReviewChat owns its own textarea, so the only
-  // local state is the inline error string surfaced when the POST fails.
-  const [askError, setAskError] = useState<string>('');
+  // The hook owns the SSE stream, the followup thread and failures
+  // (`session.error`); we just hand it the question text.
   const handleAsk = useCallback(async (q: string) => {
     if (!review || session.running) return;
-    setAskError('');
-    try {
-      await session.askFollowup(q);
-    } catch (err: unknown) {
-      setAskError(errorMessage(err));
-    }
+    await session.askFollowup(q);
   }, [review, session]);
 
   const handleDeleteFollowup = useCallback(async (fu: CodeReviewFollowup) => {
@@ -221,14 +151,13 @@ export default function CodeReviewViewPage() {
       await codeReviewsApi.removeFollowup(fu.review_id, fu.id);
       await session.reload();
     } catch (err: unknown) {
-      setAskError(errorMessage(err));
+      setPageError(errorMessage(err));
     }
   }, [t, session]);
 
-  // Single error surface — askError plus pageError fold into one banner
-  // rendered just above the chat (so a single slot catches every error
-  // path on the page, not two stacked ones).
-  const displayError = askError || pageError;
+  // Single error surface: hook failures (load / ask / regenerate / rerun /
+  // restore) plus page-level ones, shown above the report.
+  const displayError = session.error || pageError;
 
   // ── Export ───────────────────────────────────────────────────────────────
   const [exportingPdf, setExportingPdf] = useState<boolean>(false);
@@ -253,7 +182,7 @@ export default function CodeReviewViewPage() {
         pdfLabel: t('projects.detail.reviewExportPdfLabel'),
       });
     } catch (err: unknown) {
-      setAskError(t('projects.detail.reviewExportFailed') + errorMessage(err));
+      setPageError(t('projects.detail.reviewExportFailed') + errorMessage(err));
     } finally {
       setExportingPdf(false);
     }
@@ -346,6 +275,11 @@ export default function CodeReviewViewPage() {
         </button>
       </header>
       <main className="crv-main">
+        {displayError && (
+          <div className="cr-error">
+            {t('projects.detail.reviewErrPrefix')}{displayError}
+          </div>
+        )}
         <ReviewReport
           review={session.review}
           revisions={session.revisions}
@@ -369,7 +303,6 @@ export default function CodeReviewViewPage() {
         />
         {review ? (
           <aside className="crv-chat-wrap">
-            {displayError && <div className="cr-error">{displayError}</div>}
             <ReviewChat
               followups={session.followups}
               liveLines={session.liveLines}
