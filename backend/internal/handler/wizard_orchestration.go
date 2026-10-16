@@ -15,7 +15,6 @@ import (
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
-	promptpkg "github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/internal/util"
@@ -156,17 +155,21 @@ func (h *WizardHandler) ReOrchestrate(w http.ResponseWriter, r *http.Request) {
 		// fresh session carrying the requirement title + description.
 		sessionID := req.CodingSessionID
 		resume := sessionID != ""
+		// Per-project git context (style + commit-mode + token-injection env
+		// reminder) — same shape StartCoding carries, so a ReOrchestrate that
+		// ends up spawning child agents exposes them to the same expectations.
+		gitBlock := gitProjectBlock(h.projectSvc, h.platformSvc, req, false)
 		var prompt string
 		if resume {
 			prompt = developerDecomposePrompt(req.Title,
-				"上次未能成功完成任务拆分。请基于已有的需求与上下文，重新立即完成**任务拆分**：\n", workDir)
+				"上次未能成功完成任务拆分。请基于已有的需求与上下文，重新立即完成**任务拆分**：\n", workDir, gitBlock)
 		} else {
 			sessionID = util.NewUUID()
 			if perr := h.reqSvc.UpdateCodingSession(id, sessionID); perr != nil {
 				log.Printf("[re-orchestrate] failed to persist coding session for %s: %v", id, perr)
 			}
 			prompt = developerDecomposePrompt(req.Title,
-				"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后立即完成**任务拆分**：\n", workDir)
+				"请先读取项目中的相关文件理解现有代码结构与需求上下文，然后立即完成**任务拆分**：\n", workDir, gitBlock)
 			if d := strings.TrimSpace(req.Description); d != "" {
 				prompt += "\n\n需求描述：\n" + d
 			}
@@ -524,6 +527,11 @@ const SUBTASKS_READY = "[SUBTASKS_READY]"
 // channel that can't be broken by embedded code fences or prose, unlike the
 // legacy "```json block + [SUBTASKS_READY] sentinel" text convention, which
 // stays as the fallback.
+//
+// gitBlock is the pre-rendered project-level git context block (or "" when
+// not available). The caller passes the result of gitProjectBlock(...) so
+// this function stays a pure builder and remains unit-testable without a
+// ProjectService in scope.
 const subTasksFileRelPath = ".novaworkbench/subtasks.json"
 
 // subTasksFilePath returns the absolute path the decompose prompt tells the
@@ -532,7 +540,7 @@ func subTasksFilePath(workDir string) string {
 	return filepath.Join(workDir, subTasksFileRelPath)
 }
 
-func developerDecomposePrompt(title, leadIn, workDir string) string {
+func developerDecomposePrompt(title, leadIn, workDir, gitBlock string) string {
 	return fmt.Sprintf(
 		"现在切换到「开发者」角色。用户已点击「开始开发」，正式进入执行实现阶段（需求：%s）。\n"+
 			leadIn+
@@ -542,9 +550,8 @@ func developerDecomposePrompt(title, leadIn, workDir string) string {
 			"3. 最后在回复中单独一行输出 [SUBTASKS_READY] 哨兵。\n"+
 			"注意：第 2 步的 Write 文件是后端调度子Agent 的主要依据，务必调用 Write 工具完成，不要只在回复里贴 JSON。\n"+
 			"要求：不要直接编写项目代码（由子Agent完成）；不要输出『等待确认』——直接给出拆分结果，后端检测到拆分文件后会自动串行调度子Agent执行并在全部完成后交回主Agent汇总。\n"+
-			promptpkg.GitCommitConvention+
-			"\n",
-		title, subTasksFilePath(workDir))
+			"%s\n",
+		title, subTasksFilePath(workDir), gitBlock)
 }
 
 // agentDirectPrompt builds the -p prompt for the "agent" role (local
@@ -561,21 +568,22 @@ func developerDecomposePrompt(title, leadIn, workDir string) string {
 // implement). The 工作目录：<path>） tail is what rewritePersonaWorkDir
 // keys off to swap the local path for the remote cwd on Agent-Server runs.
 //
+// gitBlock mirrors developerDecomposePrompt's gitBlock parameter.
+//
 // NB: the literal sentinel string is intentionally NOT mentioned anywhere in
 // this prompt — past experience shows models occasionally honor an explicit
 // "do not emit X" instruction by emitting X anyway (req_9d24ef181a5ad5c4).
 // Routing this prompt through the wizard is what guarantees no sentinel: the
 // orchestrator is short-circuited (see StartCoding) and the -p message
 // contains no trigger phrase.
-func agentDirectPrompt(reqID, title, leadIn, workDir string) string {
+func agentDirectPrompt(reqID, title, leadIn, workDir, gitBlock string) string {
 	return fmt.Sprintf(
 		"现在切换到「Agent 开发者」角色，正在执行需求（需求 ID：%s，标题：%s，工作目录：%s）。\n"+
 			leadIn+
 			"直接使用 Read / Edit / Write / Bash 工具完成代码实现、构建与基础验证，并在结束时进行 git commit。\n"+
 			"完成后在最终回复里简要说明：做了什么、关键文件、验证方式。\n"+
-			promptpkg.GitCommitConvention+
-			"\n",
-		reqID, title, workDir)
+			"%s\n",
+		reqID, title, workDir, gitBlock)
 }
 
 // effectiveDesignDocs returns the stored design doc only when it carries real
@@ -1190,11 +1198,10 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 		log.Printf("[orchestrate] failed to persist claude_config_id for %s: %v", st.ID, perr)
 	}
 
-	executorPrompt := "## 子任务\n\n" + st.Prompt + "\n\n" +
-		"> 本任务通过 --fork-session 继承了主 Agent 的项目上下文与代码库访问权限。\n" +
-		"> 如需补充信息，可正常读取项目文件或调用工具。\n" +
-		"> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n" +
-		promptpkg.GitCommitConvention + "\n"
+	// executorPrompt is composed below — it depends on `req`, which is loaded
+	// further down by the requirement-row lookup. Keeping the prompt build
+	// co-located with the rest of the local-branch setup makes the
+	// ordering self-explanatory.
 
 	// Heartbeat ticker: keeps batch_id_seq_run fresh for boot recovery. Capped
 	// at the configured interval so a stuck Finish() can't leak past one
@@ -1251,6 +1258,18 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 		log.Printf("[orchestrate] requirement %s missing for child %s: %v", reqID, st.ID, rerr)
 		return
 	}
+	// Per-project git context — symmetric with sub_task_runner.Run + push-pr
+	// children: orchestrated auto-orchestration children also need the
+	// project's commit style / commit mode / token-injection reminders so a
+	// child that ends up doing a "提交 / 推送 / 建 PR" line of work inherits
+	// the same expectations. Sits after the req-row load because the
+	// project_row read goes through req.ProjectID.
+	childGitBlock := gitProjectBlock(h.projectSvc, h.platformSvc, req, false)
+	executorPrompt := "## 子任务\n\n" + st.Prompt + "\n\n" +
+		"> 本任务通过 --fork-session 继承了主 Agent 的项目上下文与代码库访问权限。\n" +
+		"> 如需补充信息，可正常读取项目文件或调用工具。\n" +
+		"> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n" +
+		childGitBlock + "\n"
 	// The child runs where ITS OWN row says, not where the requirement currently
 	// says: a manual override (or a requirement whose environment was changed
 	// after this row was created) must be honored, and the SubTaskPanel card
@@ -1266,6 +1285,20 @@ func (h *WizardHandler) ExecuteOrchestratedChild(batch *model.OrchestrationBatch
 	defer credCleanup()
 	if name, email := lookupGitIdentity(h.projectSvc, h.platformSvc, req); name != "" || email != "" {
 		credEnv = append(credEnv, buildIdentityEnv(name, email)...)
+	}
+	// Platform-token env so the orchestrated child can call gh/glab/tea and
+	// hit the project's REST API. Same helper SubTaskRunner.Run + push-pr
+	// dispatch use — keeps the local dispatch surfaces (auto-orchestrate,
+	// manual sub-task, push-pr child) consistent.
+	projLocal := ""
+	if proj, perr := h.projectSvc.Get(req.ProjectID); perr == nil && proj != nil {
+		projLocal = proj.LocalPath
+	}
+	if platEnv := platformRunEnv(h.projectSvc, h.platformSvc, req, batch.WorkDir, projLocal); len(platEnv) > 0 {
+		credEnv = append(credEnv, platEnv...)
+	}
+	if secretVals := secretsForAdjustRedaction(h.projectSvc, h.platformSvc, req); secretVals != nil {
+		job.SetSecrets(secretVals)
 	}
 	cmd, cancel, _ := h.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         executorPrompt,

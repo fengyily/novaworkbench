@@ -221,6 +221,12 @@ export const projects = {
       scriptPlaceholder: '# Runs in the worktree root; stdout is the commit message\n# Env vars: NOVA_COMMIT_REQUIREMENT_ID / NOVA_COMMIT_PROJECT_DIR / NOVA_COMMIT_WORKTREE\necho "fix: $(date +%Y%m%d)"',
       scriptMissingWarn: 'This mode requires a script, but the field is empty. Cannot save until provided.',
     },
+    // v0.5.x: hint placed below each of the three git-related cards
+    // (commit-push mode, commit language, platform token) so the user
+    // knows the configuration is injected into the AI's git operating
+    // context — including manually-typed commit / push / create-PR
+    // instructions inside a development session.
+    aiContextHint: 'This setting is injected into the AI\'s git working context — including manually-typed commit / push / create-PR instructions.',
     platformTitle: 'Platform config',
     platformCurrent: 'Current: {{platform}}',
     platformUnbound: '(no token bound)',

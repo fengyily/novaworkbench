@@ -1160,6 +1160,15 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 		return
 	}
 
+	// Per-project git context (style + commit mode + token-injection env
+	// reminder). Resolved once here so both the fresh-session and fork/resume
+	// branches below can pass it as the gitBlock parameter — keeping the
+	// per-project expectations identical regardless of which session-threading
+	// path the requirement took. Fallback to GitCommitConvention when reqRow
+	// is nil (legacy quick-start) so the prompt still carries the no-AI-
+	// trailer rule.
+	gitBlock := gitProjectBlock(h.projectSvc, h.platformSvc, reqRow, false)
+
 	var prompt string
 	if sourceSID == "" {
 		// Fresh-session path: no design/analysis session to fork (skip-design
@@ -1203,6 +1212,9 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 				}
 				return p.DevMode
 			}())
+		// Per-project git context (style + commit mode + token-injection env
+		// reminder) is computed at the top of this block (gitBlock) and passed
+		// to the helper below.
 		if roleKey == "agent" {
 			// agent persona (Agent-Server remote OR local split_tasks=false):
 			// implement the requirement directly end-to-end. No decomposition
@@ -1220,7 +1232,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 				leadIn = "用户选择「基于方案开发」：不会接续原方案会话，而是把下面的方案作为唯一依据创建新会话直接实现。\n" +
 					"请先读取项目中的相关文件理解现有代码结构，再依据方案直接实现：\n"
 			}
-			prompt = agentDirectPrompt(p.RequirementID, p.RequirementTitle, leadIn, workDir)
+			prompt = agentDirectPrompt(p.RequirementID, p.RequirementTitle, leadIn, workDir, gitBlock)
 		} else {
 			// developer persona + fresh-session path + split_tasks=true.
 			// Keep the original decomposition trigger so the developer role
@@ -1233,7 +1245,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 				leadIn = "用户选择「基于方案开发」：不会接续原方案会话，而是把下面的方案作为唯一依据创建新会话。\n" +
 					"请先读取与方案直接相关的项目文件，然后依据方案立即完成**任务拆分**：\n"
 			}
-			prompt = developerDecomposePrompt(p.RequirementTitle, leadIn, workDir)
+			prompt = developerDecomposePrompt(p.RequirementTitle, leadIn, workDir, gitBlock)
 		}
 		// Requirement description goes FIRST (it is the actual requirement
 		// text on the fresh-session path — immediate/scheduler callers set
@@ -1285,7 +1297,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			// requirement + analysis + design, so the leadIn references that
 			// history instead of asking the agent to re-read files.
 			prompt = agentDirectPrompt(p.RequirementID, p.RequirementTitle,
-				"基于已完成的需求分析与技术方案，请直接实现需求：\n", workDir)
+				"基于已完成的需求分析与技术方案，请直接实现需求：\n", workDir, gitBlock)
 		} else {
 			// developer persona + fork/resume path + split_tasks=true.
 			// Decompose the work into sub-tasks so tryAutoOrchestrate (called
@@ -1293,7 +1305,7 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 			// split_tasks=false fork/resume case is handled by roleKey=="agent"
 			// above — we route those requests through the agent role entirely.
 			prompt = developerDecomposePrompt(p.RequirementTitle,
-				"基于已完成的需求分析与技术方案，请立即完成**任务拆分**：\n", workDir)
+				"基于已完成的需求分析与技术方案，请立即完成**任务拆分**：\n", workDir, gitBlock)
 		}
 		if desc := strings.TrimSpace(p.RequirementDesc); desc != "" {
 			if roleKey == "agent" {
@@ -1368,7 +1380,11 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	// (agentDirectPrompt / developerDecomposePrompt, patched separately
 	// in wizard_orchestration.go) also embed this string — duplication is
 	// harmless: Claude just sees the same rule twice.
-	prompt += "\n" + promptpkg.GitCommitConvention + "\n"
+	//
+	// Replaced by the per-project block (which embeds GitCommitConvention
+	// at its head) so the assistant gets one unified "本项目 Git 约定" section
+	// instead of two barely-overlapping rule blocks.
+	prompt += "\n" + gitProjectBlock(h.projectSvc, h.platformSvc, reqRow, false) + "\n"
 	// Local credential + GPG provisioning shared with the shell push/PR job
 	// (handler/push_pr_shell.go). Extracted so both the coding subprocess and
 	// the shell `git commit`/`git push` carry the same identity / askpass /
@@ -1377,6 +1393,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 	codingExtraEnv, credCleanup := h.assembleGitCredEnv(reqRow, workDir, p.ProjectPath, job)
 	if credCleanup != nil {
 		defer credCleanup()
+	}
+	// Register the raw platform token for log redaction so a model that
+	// echoes $NOVA_PLATFORM_TOKEN / $GH_TOKEN in debug output never reaches
+	// the SSE stream or job_logs row. Empty / unbound projects are no-ops.
+	if secretVals := secretsForAdjustRedaction(h.projectSvc, h.platformSvc, reqRow); secretVals != nil {
+		job.SetSecrets(secretVals)
 	}
 	cmd, cancel, _ := h.llm.GenerateCode(llm.StreamOpts{
 		Prompt:         prompt,
@@ -1576,13 +1598,14 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 // assembleGitCredEnv builds the per-run git credential + signing environment
 // for a LOCAL coding or push/PR job, so both the Claude subprocess (coding)
 // and the shell `git commit`/`git push` (push_pr_shell.go) carry the SAME
-// identity, askpass, and GPG setup — a divergence would mean the coding
-// agent's commits and the push job's merge commit sign under different
-// identities.
+// identity, askpass, GPG, AND platform-token setup — a divergence would mean
+// the coding agent's commits and the push job's merge commit run under
+// different identities / credentials.
 //
 // Returns:
-//   - env: GIT_AUTHOR_*/GIT_COMMITTER_* + GIT_ASKPASS env spliced into the
-//     subprocess env. Empty when no identity/askpass applies.
+//   - env: GIT_AUTHOR_*/GIT_COMMITTER_* + GIT_ASKPASS + NOVA_PLATFORM_*
+//     (where applicable) env spliced into the subprocess env. Empty when no
+//     identity/askpass applies.
 //   - cleanup: tears down the askpass script + GPG GNUPGHOME + per-worktree
 //     git config writes. Always non-nil (no-op when nothing was provisioned);
 //     caller defers it.
@@ -1591,6 +1614,12 @@ func (h *WizardHandler) execStartCoding(p *codingRunParams, job *store.Job, cb *
 // worktree's per-worktree git config (a side effect, not env) so plain `git`
 // commands run in workDir pick up signing automatically — that's why the shell
 // push job gets signing for free by calling this.
+//
+// Platform-token injection (NOVA_PLATFORM_TOKEN / GH_TOKEN / GITLAB_TOKEN /
+// GITEA_TOKEN) is appended last so the resulting env shape is:
+// identity → askpass → platform-token. SSH / unbound-token projects are
+// unaffected (platformRunEnv skips the platform block when the remote is
+// SSH or no platform_token_id is set).
 //
 // Failure policy mirrors the historical local path: GPG decrypt/provision
 // failures WARN (via job.Append) but do NOT abort — a working run is more
@@ -1618,7 +1647,16 @@ func (h *WizardHandler) assembleGitCredEnv(reqRow *model.Requirement, workDir, p
 		env = append(env, credEnv...)
 		cleanups = append(cleanups, credCleanup)
 	}
-	// 3. GPG signing — writes per-worktree git config (side effect) so plain
+	// 3. Platform-token env (NOVA_PLATFORM_TOKEN + native aliases) so the
+	//    coding agent's manual `gh` / `glab` / `tea` / REST-API calls
+	//    authenticate against the project's configured platform. Mirrors the
+	//    inject points in handler/merge.go and sub_task_runner.Run, so all
+	//    four paths end up with the same env regardless of which one drove
+	//    the spawn.
+	if platEnv := platformRunEnv(h.projectSvc, h.platformSvc, reqRow, workDir, projectPath); len(platEnv) > 0 {
+		env = append(env, platEnv...)
+	}
+	// 4. GPG signing — writes per-worktree git config (side effect) so plain
 	//    `git commit`/`git merge` in workDir sign automatically.
 	if project, pErr := h.projectSvc.Get(reqRow.ProjectID); pErr == nil && project != nil && project.PlatformTokenID != "" {
 		enabled, _, armored, passphrase, gpgErr := h.platformSvc.GPGSigningMaterial(project.PlatformTokenID)
@@ -1817,20 +1855,28 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		adjustPrompt := body.Message
-		adjustSkills := h.mentionedSkills(req.Title + " " + req.Description + " " + body.Message)
-		if err := llm.MaterializeSkillFiles(workDir, adjustSkills); err != nil {
-			log.Printf("[adjust-coding] %s: best-effort skill materialize failed: %v", req.ID, err)
-		}
-		if rb := llm.SkillRefBlock(adjustSkills); rb != "" {
-			adjustPrompt = rb + body.Message
-		}
-		adjustPrompt = llm.TranslateAtToSlash(adjustPrompt, llm.SlugsOf(adjustSkills))
+		// Append the per-project "本项目 Git 约定" block so a manual adjust-coding
+		// turn whose body contains "提交 / 推送 / 建 PR" inherits the project's
+		// commit style + commit mode + token-injection environment hints — the
+		// original AdjustCoding path injected no GitCommitConvention at all, which
+		// is exactly the regression this fix repairs.
+		adjustPrompt += "\n" + gitProjectBlock(h.projectSvc, h.platformSvc, req, false) + "\n"
 		// Tail the kind-specific developer block so a resumed Issue session
 		// stays anchored to "最小改动、修复根因" framing on every follow-up
 		// turn. For requirement rows it's a no-op.
 		if block := promptpkg.DeveloperBlock(req.Kind, req); block != "" {
 			adjustPrompt += "\n\n" + block
 		}
+		adjustSkills := h.mentionedSkills(req.Title + " " + req.Description + " " + body.Message)
+		if err := llm.MaterializeSkillFiles(workDir, adjustSkills); err != nil {
+			log.Printf("[adjust-coding] %s: best-effort skill materialize failed: %v", req.ID, err)
+		}
+		if rb := llm.SkillRefBlock(adjustSkills); rb != "" {
+			// rb (skill ref block) goes on top, then the user's body, then the
+			// Git context block + kind-specific tail appended above.
+			adjustPrompt = rb + adjustPrompt
+		}
+		adjustPrompt = llm.TranslateAtToSlash(adjustPrompt, llm.SlugsOf(adjustSkills))
 		// Execution-consistency: a requirement that was coded on an Agent
 		// server has its working tree on THAT host, not here — the local
 		// worktree either doesn't exist or lags behind origin. Route the
@@ -1859,6 +1905,23 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			h.finishRemoteCodingJob(job, out, body.RequirementID, model, claudeConfigID, "adjust-coding", "✅ 追加调整完成！")
 			return
 		}
+		// Local credential + platform-token env (was missing entirely from the
+		// pre-fix AdjustCoding path — manual follow-up turns previously ran without
+		// ANY git creds or platform-token injection, so a "请帮我提交并推送" body
+		// could not actually push). Built once here so all three of AdjustCoding's
+		// local exit paths (this one + the bare-prompt variant below) share it.
+		adjustCredEnv, adjustCredCleanup := h.assembleGitCredEnv(req, workDir, proj.LocalPath, job)
+		if adjustCredCleanup != nil {
+			defer adjustCredCleanup()
+		}
+		// Register the raw platform-token value as a redactable secret on the
+		// job — without this, a model that echoes `$GH_TOKEN` in its debug
+		// output would push the PAT into the SSE stream and the persisted
+		// job_logs row. Look up via the same path platformRunEnv used so the
+		// redaction covers exactly the value we just injected.
+		if secretsForAdjustRedaction(h.projectSvc, h.platformSvc, req) != nil {
+			job.SetSecrets(secretsForAdjustRedaction(h.projectSvc, h.platformSvc, req))
+		}
 		cmd, cancel, _ := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:         adjustPrompt,
 			WorkDir:        workDir,
@@ -1868,6 +1931,7 @@ func (h *WizardHandler) AdjustCoding(w http.ResponseWriter, r *http.Request) {
 			SessionID:      req.CodingSessionID,
 			Resume:         true,
 			Fork:           false,
+			ExtraEnv:       adjustCredEnv,
 		})
 		defer cancel()
 		adjustUsage := h.usageCtxForConfig("adjust_coding", body.RequirementID, req.ProjectID, job.ID, model, "", body.Message, claudeConfigID)
@@ -2087,6 +2151,11 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 		prompt := "继续完成之前中断的开发任务。请先检查当前代码与工作区状态，" +
 			"判断哪些部分已完成、哪些未完成或需要修复；然后基于技术方案继续完成剩余工作、补齐缺失内容。" +
 			"最后用中文总结本次完成的内容。"
+		// Append the per-project "本项目 Git 约定" block — symmetric with the
+		// AdjustCoding fix: ContinueCoding previously had no GitCommitConvention
+		// either, so a "请接着帮我提交推送" follow-up was never going to inherit
+		// the project's commit mode / token-injection env.
+		prompt += "\n" + gitProjectBlock(h.projectSvc, h.platformSvc, req, false) + "\n"
 		// Kind-specific developer tail — keeps an Issue session's framing
 		// ("最小改动、修复根因") present on every continue round.
 		if block := promptpkg.DeveloperBlock(req.Kind, req); block != "" {
@@ -2114,6 +2183,17 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 			h.finishRemoteCodingJob(job, out, body.RequirementID, model, claudeConfigID, "continue-coding", "✅ 续接开发完成！")
 			return
 		}
+		// Local credential + platform-token env (symmetric with AdjustCoding).
+		// ContinueCoding previously passed ExtraEnv=nil, leaving a manual
+		// "继续帮我 push" turn with no platform token and no askpass — now it
+		// matches execStartCoding's wiring.
+		continueCredEnv, continueCredCleanup := h.assembleGitCredEnv(req, workDir, proj.LocalPath, job)
+		if continueCredCleanup != nil {
+			defer continueCredCleanup()
+		}
+		if secretsForAdjustRedaction(h.projectSvc, h.platformSvc, req) != nil {
+			job.SetSecrets(secretsForAdjustRedaction(h.projectSvc, h.platformSvc, req))
+		}
 		cmd, cancel, _ := h.llm.GenerateCode(llm.StreamOpts{
 			Prompt:         prompt,
 			WorkDir:        workDir,
@@ -2123,6 +2203,7 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 			SessionID:      req.CodingSessionID,
 			Resume:         true,
 			Fork:           false,
+			ExtraEnv:       continueCredEnv,
 		})
 		defer cancel()
 		continueUsage := h.usageCtxForConfig("continue_coding", body.RequirementID, req.ProjectID, job.ID, model, "", "", claudeConfigID)
@@ -2180,4 +2261,44 @@ func (h *WizardHandler) ContinueCoding(w http.ResponseWriter, r *http.Request) {
 // ScheduledExecutor.
 type runCallbacks struct {
 	OnFinish func(jobID string, ok bool)
+}
+
+// secretsForAdjustRedaction resolves the raw token value(s) for a
+// requirement's project so the caller can register them via
+// store.Job.SetSecrets. Returns nil when the project is unbound / has no
+// platform token / is on an SSH remote — matching the "platformRunEnv
+// misses = no-op" contract.
+//
+// Used by AdjustCoding / ContinueCoding / sub_task_runner.Run /
+// wizard_orchestration.ExecuteOrchestratedChild / merge.go buildPushPR
+// dispatch. The PlatformToken is read via the existing service helper
+// (the raw PAT lives only on disk in platform_tokens.token, AES-decrypted
+// in service.Get — see service/platform.go:267).
+func secretsForAdjustRedaction(
+	projectSvc *service.ProjectService,
+	platformSvc *service.PlatformTokenService,
+	reqRow *model.Requirement,
+) []string {
+	if projectSvc == nil || platformSvc == nil || reqRow == nil {
+		return nil
+	}
+	proj, err := projectSvc.Get(reqRow.ProjectID)
+	if err != nil || proj == nil {
+		return nil
+	}
+	if proj.PlatformTokenID == "" {
+		return nil
+	}
+	if looksLikeSSH(proj.RemoteURL) {
+		// SSH remotes don't use the NOVA_PLATFORM_TOKEN env at all — git
+		// push goes through the agent host's ssh-agent. Registering the
+		// token for redaction would still be safe (just unnecessary), so
+		// nil is a perf optimization, not a correctness requirement.
+		return nil
+	}
+	tok, err := platformSvc.Get(proj.PlatformTokenID)
+	if err != nil || tok == nil || tok.Token == "" {
+		return nil
+	}
+	return []string{tok.Token}
 }

@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -259,4 +260,74 @@ func TestAppendAfterFinishDoesNotPanic(t *testing.T) {
 	if _, status, _ := job.Snapshot(); status != JobDone {
 		t.Fatalf("job status = %q, want %q", status, JobDone)
 	}
+}
+
+// TestSetSecrets_RedactsLines covers the platform-token redaction the
+// handler code now relies on (every place that injects a token into the
+// child env must call SetSecrets before the job's lines are broadcast).
+//
+// The test asserts all three exit paths from Append — the in-memory log,
+// the Snapshot (used by job_logs persistence), and the live Subscribe
+// channel — scrub the secret. Calling SetSecrets with nil / empty must
+// be a strict no-op (legacy job callers should not see any change), and
+// the early-return terminal guard must NOT process lines at all (sanity
+// check — already covered by an earlier test, repeated here so a future
+// change doesn't silently break the redaction path on already-finished
+// jobs).
+func TestSetSecrets_RedactsLines(t *testing.T) {
+	const secret = "ghp_FAKE_PAT_DO_NOT_USE_1234567890"
+
+	t.Run("SetSecrets replaces every secret occurrence", func(t *testing.T) {
+		j := NewJobStore(4).Create("req_redact_1")
+		j.SetSecrets([]string{secret})
+
+		j.Append(LogLine{Type: "message", Content: "before:" + secret + ":after"})
+		j.Append(LogLine{Type: "message", Content: "no secret here"})
+		j.Append(LogLine{Type: "message", Content: secret + secret})
+
+		lines, _, _ := j.Snapshot()
+		for i, line := range lines {
+			if strings.Contains(line.Content, secret) {
+				t.Errorf("line #%d still contains secret: %q", i, line.Content)
+			}
+		}
+		if !strings.Contains(lines[0].Content, "before:***:after") {
+			t.Errorf("line #0 should redact middle of string; got %q", lines[0].Content)
+		}
+	})
+
+	t.Run("SetSecrets live subscriber sees redacted frames", func(t *testing.T) {
+		j := NewJobStore(4).Create("req_redact_2")
+		ch, existing, ok := subscribeAsync(j)
+		if !ok {
+			t.Fatal("Subscribe blocked on freshly created job")
+		}
+		if existing != 0 {
+			t.Fatalf("existing = %d, want 0", existing)
+		}
+		j.SetSecrets([]string{secret})
+		j.Append(LogLine{Type: "message", Content: "leak: " + secret})
+		line, open := nextLine(t, ch, time.Second, "first appended line")
+		if !open {
+			t.Fatal("live subscriber channel closed before the test could read it")
+		}
+		if strings.Contains(line.Content, secret) {
+			t.Errorf("live subscriber saw the unredacted secret: %q", line.Content)
+		}
+		if !strings.Contains(line.Content, "***") {
+			t.Errorf("live subscriber must see the *** placeholder; got %q", line.Content)
+		}
+	})
+
+	t.Run("SetSecrets nil is a no-op", func(t *testing.T) {
+		j := NewJobStore(4).Create("req_redact_3")
+		j.SetSecrets(nil)
+		j.SetSecrets([]string{""}) // empty strings also no-op
+		const echo = "echo $GITHUB_TOKEN"
+		j.Append(LogLine{Type: "message", Content: echo})
+		lines, _, _ := j.Snapshot()
+		if lines[0].Content != echo {
+			t.Errorf("nil SetSecrets must leave lines untouched; got %q want %q", lines[0].Content, echo)
+		}
+	})
 }

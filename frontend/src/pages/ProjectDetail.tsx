@@ -1502,6 +1502,7 @@ export default function ProjectDetail() {
             </div>
             <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
               {t('projects.detail.commitLang.hint')}
+              <div style={{ marginTop: 6 }}>{t('projects.detail.aiContextHint')}</div>
               {project.commit_lang && project.commit_lang !== 'auto' && project.commit_lang_source !== 'override' && (
                 <span style={{ marginLeft: 6 }}>
                   {t('projects.detail.commitLang.detectedLabel')}
@@ -1535,6 +1536,9 @@ export default function ProjectDetail() {
                 {t('projects.detail.commitPush.hint')}
               </span>
             </div>
+            <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
+              {t('projects.detail.aiContextHint')}
+            </div>
             <CommitPushConfigSection
               mode={project.commit_mode ?? 'llm_only'}
               script={project.commit_script ?? ''}
@@ -1558,6 +1562,9 @@ export default function ProjectDetail() {
                   {project.platform_token_id ? '' : t('projects.detail.platformUnbound')}
                 </span>
               )}
+            </div>
+            <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
+              {t('projects.detail.aiContextHint')}
             </div>
 
             <div className="platform-form-row">

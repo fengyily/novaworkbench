@@ -61,6 +61,19 @@ type Job struct {
 	// Future kinds (rate_limited, context_overflow, ...) can land here without
 	// breaking older clients (omitempty keeps the wire shape additive).
 	ErrorKind string `json:"error_kind,omitempty"`
+	// secrets is the list of substrings (e.g. raw API tokens) that must be
+	// redacted out of every line before it lands in the in-memory log,
+	// reaches the SSE channel, or ends up in the persisted job_logs row.
+	// The slice is append-only (set once via SetSecrets, mutated only inside
+	// the locked Append path) — a runtime append would race the broadcast
+	// loop and could leave one subscriber seeing an unredacted line.
+	//
+	// SetSecrets is called by handler code immediately after a Job has been
+	// created and right before the claude child spawns, so the secret never
+	// reaches a LogLine in the first place. The empty-string / empty-slice
+	// guards in Append make this opt-in (older job callers stay on the
+	// pre-redaction path) so the change is a strict addition.
+	secrets []string
 	mu    sync.RWMutex
 	subs  []chan LogLine
 	// cmd / cancel wire the running subprocess into the job so a handler-side
@@ -160,6 +173,23 @@ func (j *Job) Append(line LogLine) {
 	if j.Status != JobRunning {
 		return
 	}
+	// Secret redaction. Walks the configured secrets list and replaces each
+	// occurrence with "***" in the line content. Runs INSIDE the lock (same
+	// critical section that appends / broadcasts the line) so a SetSecrets
+	// call from another goroutine can't race the broadcast and leak a still-
+	// unredacted frame to subscribers.
+	//
+	// Skip the empty-string guard via a length check so the per-line copy /
+	// ReplaceAll cost is paid only when secrets are actually configured
+	// (legacy job callers that never call SetSecrets stay on the no-op path).
+	if len(j.secrets) > 0 && line.Content != "" {
+		for _, s := range j.secrets {
+			if s == "" {
+				continue
+			}
+			line.Content = strings.ReplaceAll(line.Content, s, "***")
+		}
+	}
 	j.Log = append(j.Log, line)
 	for _, ch := range j.subs {
 		select {
@@ -167,6 +197,42 @@ func (j *Job) Append(line LogLine) {
 		default:
 		}
 	}
+}
+
+// SetSecrets configures the substring list that Job.Append redacts out of
+// every log line. Called once per job — typically immediately after Create,
+// before the claude subprocess spawns, by the handler that knows which
+// platform token values are about to be injected into the child env.
+//
+// Passing a nil / empty slice DISABLES redaction (matching the legacy
+// behavior). Replaces whatever list was previously set; the swap is safe to
+// call again from any goroutine because Append holds j.mu while reading.
+//
+// Any non-empty token in the slice is treated as a literal substring; the
+// intent is to redact the raw PAT/Bearer value of the platform_tokens row.
+// Secret rotation (SetSecrets on a finished job) is a no-op because no
+// lines are written after Finish — but the helper stays idempotent.
+func (j *Job) SetSecrets(secrets []string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if len(secrets) == 0 {
+		j.secrets = nil
+		return
+	}
+	// Defensive copy: caller may mutate its slice after the call returns
+	// (e.g. rotate the platform_tokens row) without affecting redaction.
+	out := make([]string, 0, len(secrets))
+	for _, s := range secrets {
+		if s == "" {
+			continue
+		}
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		j.secrets = nil
+		return
+	}
+	j.secrets = out
 }
 
 // Write splits p into lines (keeping a small carry-over buffer for partial

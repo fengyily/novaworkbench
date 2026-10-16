@@ -3,6 +3,8 @@ package handler
 import (
 	"strings"
 	"testing"
+
+	promptpkg "github.com/novaworkbench/backend/internal/prompt"
 )
 
 // TestExtractSubtasksPayload_Fenced covers the happy path — agent emits a
@@ -335,7 +337,7 @@ func TestDeveloperDecomposePrompt_AlwaysTriggers(t *testing.T) {
 	}
 	for name, leadIn := range cases {
 		t.Run(name, func(t *testing.T) {
-			p := developerDecomposePrompt("优化需求列表类型列宽度", leadIn, "/tmp/workdir")
+			p := developerDecomposePrompt("优化需求列表类型列宽度", leadIn, "/tmp/workdir", promptpkg.GitCommitConvention)
 			// The trigger phrase the developer system prompt keys its
 			// decomposition + sentinel emission on.
 			if !strings.Contains(p, "开始开发") {

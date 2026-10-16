@@ -570,7 +570,25 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// `claude --print ping` hang and fail the preflight (preflight_timeout).
 	// The pairs come from the SAME settingsEnvOverrides map the local path
 	// serializes into its --settings JSON, so the two surfaces cannot drift.
-	envPairs := h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, in.claudeConfigID)
+	//
+	// platformRunEnv injects the project-level git platform token
+	// (NOVA_PLATFORM_TOKEN / GH_TOKEN / GITLAB_TOKEN / GITEA_TOKEN) into
+	// the remote worker so a remote coding session can `gh pr create` etc.
+	// against the same platform the local path sees. The remote worker
+	// folds the env pairs into its own --settings JSON, matching the
+	// SHELL env-vars the Bash tool inherits — so a model running on the
+	// remote host actually sees the same auth vars the local path injects.
+	var envPairs []string
+	if platEnv := platformRunEnv(h.projectSvc, h.platformSvc, in.reqRow, wtPath, in.workDir); len(platEnv) > 0 {
+		envPairs = append(envPairs, h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, in.claudeConfigID, platEnv...)...)
+	} else {
+		envPairs = h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, in.claudeConfigID)
+	}
+	// Register the raw token for log redaction on the job (mirrors the
+	// local-path SetSecrets wiring in sub_task_runner.Run / execStartCoding).
+	if secretVals := secretsForAdjustRedaction(h.projectSvc, h.platformSvc, in.reqRow); secretVals != nil && in.job != nil {
+		in.job.SetSecrets(secretVals)
+	}
 	runBody := workerRunRequest(opts, envPairs, srv)
 
 	// Step 5: POST to nova-agent-worker via SSH direct-tcpip channel. The
@@ -966,7 +984,20 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 		DisallowedTools:        in.DisallowedTools,
 		OverrideSettingSources: &ignoreLocal,
 	}
-	envPairs := h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, in.claudeConfigID)
+	// Per-project git platform env — same wiring as the runRemoteCoding step-4
+	// path above, so both stages of the Agent-server dispatch expose the
+	// project's NOVA_PLATFORM_TOKEN + native aliases to the remote Bash
+	// tool. SSH / unbound projects gracefully return only NOVA_COMMIT_*.
+	localRepoPath := ""
+	if proj, perr := h.projectSvc.Get(in.reqRow.ProjectID); perr == nil && proj != nil {
+		localRepoPath = proj.LocalPath
+	}
+	var envPairs []string
+	if platEnv := platformRunEnv(h.projectSvc, h.platformSvc, in.reqRow, wtPath, localRepoPath); len(platEnv) > 0 {
+		envPairs = append(envPairs, h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, in.claudeConfigID, platEnv...)...)
+	} else {
+		envPairs = h.llm.BuildRemoteEnvPairsWithConfig(opts.Model, in.claudeConfigID)
+	}
 	runBody := workerRunRequest(opts, envPairs, srv)
 
 	// Step 5: POST to nova-agent-worker via SSH direct-tcpip channel.

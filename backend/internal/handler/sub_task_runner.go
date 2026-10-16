@@ -10,7 +10,6 @@ import (
 
 	"github.com/novaworkbench/backend/internal/llm"
 	"github.com/novaworkbench/backend/internal/model"
-	promptpkg "github.com/novaworkbench/backend/internal/prompt"
 	"github.com/novaworkbench/backend/internal/service"
 	"github.com/novaworkbench/backend/internal/store"
 	"github.com/novaworkbench/backend/internal/util"
@@ -957,7 +956,11 @@ func (r *SubTaskRunner) Run(
 		prompt += briefInstructionsBlock
 	}
 	prompt += "\n> 你是执行者：请直接动手实现本子任务并落盘代码改动，不要再做任务拆分。\n"
-	prompt += "\n" + promptpkg.GitCommitConvention + "\n"
+	// Replace the legacy GitCommitConvention tail with the full project
+	// context block (GitCommitConvention lives at the head of the rendered
+	// block, so the assistant still sees the no-AI-trailer / no-typed-creds
+	// rule). Push-pr children get forPR=true so they also see PRLangRules.
+	prompt += "\n" + gitProjectBlock(r.projectSvc, r.platformSvc, req, st.Source == model.SubTaskSourcePushPR) + "\n"
 	// Bare ("新会话（裸 claude）") path: skip --resume, skip parent context
 	// injection, skip the executor role system prompt — invoke claude with
 	// only the user's free-text body. Takes priority over freshSession so
@@ -1116,6 +1119,26 @@ func (r *SubTaskRunner) Run(
 	// their ambient gitconfig behaviour.
 	if name, email := lookupGitIdentity(r.projectSvc, r.platformSvc, req); name != "" || email != "" {
 		credEnv = append(credEnv, buildIdentityEnv(name, email)...)
+	}
+	// Platform-token env so the child can call `gh` / `glab` / `tea` /
+	// REST API against the project's configured platform. SSH / unbound
+	// projects skip this block (platformRunEnv returns only NOVA_COMMIT_*
+	// or nothing). The project local path travels as worktree-or-project —
+	// assembleGitCredEnv's caller already knows the workdir but we re-pass
+	// proj.LocalPath here so script-mode (commit_script=…) and the worktree
+	// see the same NOVA_COMMIT_* triple.
+	projPath := ""
+	if proj != nil {
+		projPath = proj.LocalPath
+	}
+	if platEnv := platformRunEnv(r.projectSvc, r.platformSvc, req, workDir, projPath); len(platEnv) > 0 {
+		credEnv = append(credEnv, platEnv...)
+	}
+	// Register the raw token for log redaction — symmetric with the
+	// execStartCoding / AdjustCoding / ContinueCoding wiring. Same
+	// helper, same "miss = no-op" semantics.
+	if secretVals := secretsForAdjustRedaction(r.projectSvc, r.platformSvc, req); secretVals != nil {
+		job.SetSecrets(secretVals)
 	}
 	// Bare path drops the executor role system prompt — the user explicitly
 	// asked for a "裸 claude" session that uses CLI built-in defaults. Any

@@ -1169,7 +1169,16 @@ func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev
 		return existing.JobID, existing.ID, nil
 	}
 
-	prompt := buildPushSubTaskPrompt(reqRow, dev, base, remote, platformType, commitMessage, commitLang, autoPushRemote, autoCreatePR)
+	// Per-project git context block — styles, commit mode, and the
+	// platform-token env reminders all live here. forPR=true so the block
+	// also carries the PR title/body language rules (formerly emitted as a
+	// separate service.PRLangRules(commitLang) call below the prompt body,
+//	now consolidated into the single block to avoid duplication). Falls
+	// back to "" when the project row / token row is missing; buildPushSubTaskPrompt
+	// then degrades to "just GitCommitConvention" so callers never see an
+	// empty tail.
+	gitBlock := gitProjectBlock(runner.projectSvc, runner.platformSvc, reqRow, true)
+	prompt := buildPushSubTaskPrompt(reqRow, dev, base, remote, platformType, commitMessage, commitLang, autoPushRemote, autoCreatePR, gitBlock)
 	// Sub-task card title reflects which stages are actually being run on
 	// the agent host — same convention as runPushPRShellJob's stage-aware
 	// "本地 shell 推送" variant. The auto path's wording differs because
@@ -1232,7 +1241,14 @@ func dispatchPushPRSubTask(runner *SubTaskRunner, reqRow *model.Requirement, dev
 // autoPushPR (we never get here with false), so the prompt can assume it
 // is true; autoPushRemote=false and autoCreatePR=false are the only
 // meaningful variants this helper needs to express.
-func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, commitLang string, autoPushRemote, autoCreatePR bool) string {
+//
+// gitContextBlock is the pre-rendered per-project "本项目 Git 约定" block
+// (caller invokes prompt.BuildGitProjectBlock with forPR=true so the PR
+// title/body language rules are included). Pass "" to omit — historical
+// pre-render callers and tests both rely on the empty-string semantics, but
+// dispatchPushPRSubTask (the only production caller) always renders the
+// block up-front.
+func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platformType, commitMessage, commitLang string, autoPushRemote, autoCreatePR bool, gitContextBlock string) string {
 	var b strings.Builder
 	switch {
 	case autoPushRemote && autoCreatePR:
@@ -1317,12 +1333,17 @@ func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platfo
 		b.WriteString("5. **创建 PR**（如平台支持）：\n")
 		switch platformType {
 		case "github":
-			b.WriteString("   - 使用 `gh pr create --base ")
+			// Token-aware instruction: the project's NOVA_PLATFORM_TOKEN /
+			// GH_TOKEN env is now seeded by the dispatch path; we no longer
+			// claim "gh CLI 已自动认证" because most hosts don't have gh
+			// pre-logged-in — the prompt explicitly references the env so the
+			// agent knows which one to read.
+			b.WriteString("   - 推荐使用 `gh pr create --base ")
 			b.WriteString(base)
 			b.WriteString(" --head ")
 			b.WriteString(dev)
-			b.WriteString(" --title \"<PR 标题>\" --body \"<PR 正文>\"` 创建 PR（gh CLI 已自动认证）。\n")
-			b.WriteString("   - 如果 `gh` 不可用，改用项目配置的 PlatformToken（通过环境变量或 backend API 调用），或告知用户手动访问 ")
+			b.WriteString(" --title \"<PR 标题>\" --body \"<PR 正文>\"` 创建 PR（凭据已在环境变量 `$GH_TOKEN` / `$NOVA_PLATFORM_TOKEN` 中）。\n")
+			b.WriteString("   - 如 `gh` 不可用，改用项目配置的 PlatformToken（通过环境变量或 backend API 调用），或告知用户手动访问 ")
 			b.WriteString(remote)
 			b.WriteString(" 上的 compare 链接创建。\n")
 		case "gitlab":
@@ -1330,14 +1351,14 @@ func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platfo
 			b.WriteString(base)
 			b.WriteString(" --source-branch ")
 			b.WriteString(dev)
-			b.WriteString(" --title \"<PR 标题>\" --description \"<PR 正文>\"` 创建 Merge Request。\n")
+			b.WriteString(" --title \"<PR 标题>\" --description \"<PR 正文>\"` 创建 Merge Request（凭据在 `$GITLAB_TOKEN` / `$NOVA_PLATFORM_TOKEN`）。\n")
 			b.WriteString("   - 如 `glab` 不可用，告知用户手动通过 GitLab Web UI 创建。\n")
 		case "gitea":
 			b.WriteString("   - 使用 `tea pr create --base ")
 			b.WriteString(base)
 			b.WriteString(" --head ")
 			b.WriteString(dev)
-			b.WriteString(" --title \"<PR 标题>\" --description \"<PR 正文>\"` 创建 PR。\n")
+			b.WriteString(" --title \"<PR 标题>\" --description \"<PR 正文>\"` 创建 PR（凭据在 `$GITEA_TOKEN` / `$NOVA_PLATFORM_TOKEN`）。\n")
 			b.WriteString("   - 如 `tea` 不可用，告知用户手动通过 Gitea Web UI 创建。\n")
 		default:
 			b.WriteString("   - 项目未配置平台 Token / 平台类型。请推送到 origin 后，告知用户手动访问 ")
@@ -1346,7 +1367,6 @@ func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platfo
 		}
 	}
 	b.WriteString("\n")
-	b.WriteString(service.PRLangRules(commitLang))
 	b.WriteString("- 可执行 `git log origin/")
 	b.WriteString(base)
 	b.WriteString("..")
@@ -1362,23 +1382,19 @@ func buildPushSubTaskPrompt(reqRow *model.Requirement, dev, base, remote, platfo
 	b.WriteString("- 如遇网络 / 凭据 / 远端权限错误，请明确报告并停止后续步骤。\n")
 	b.WriteString("- 完成后请简要输出：执行了哪些步骤、最终状态（成功 / 失败）、PR 链接（如有），方便作为子任务产物落盘。\n")
 
-	// 强制 git 提交/推送规范：禁止 AI 署名 + 凭据由 askpass 脚本注入，
-	// 此 prompt 走 SubTaskRunner.Run 已注入凭据 env，这里只补规范段。
-	b.WriteString("\n\n")
-	b.WriteString(promptpkg.GitCommitConvention)
+	// 末尾追加「本项目 Git 约定」块：包含 GitCommitConvention（禁 AI 署名）、
+	// 提交风格、提交推送模式、平台凭据注入提示、PR 摘要模板（forPR=true）。
+	// 删掉了原来单独的 StyleHint 追加 —— 风格已经在新块里，且重复叠加会让
+	// 模型对"硬性指令"产生冗余免疫。新块的 PR 摘要模板也覆盖了原来的
+	// PRLangRules(commitLang) 内联一行。
 	b.WriteString("\n")
-
-	// 项目历史风格注入：当 commitLang 非空时，在 prompt 末尾追加一行提示，
-	// 让 Claude 在写 commit 信息与 PR 标题/正文时遵循项目历史语言（zh / en /
-	// mixed）。空值表示无风格偏好，按子任务默认行为处理。StyleHint 内部已做
-	// override 解析，这里直接传 commitLang 与空 override 等价于传入最终值。
-	if commitLang != "" {
-		if hint := service.StyleHint(commitLang, ""); hint != "" {
-			b.WriteString("\n")
-			b.WriteString(hint)
-			b.WriteString("\n")
-		}
+	if strings.TrimSpace(gitContextBlock) == "" {
+		// 退化兜底：调用方没有注入（测试 / 旧调用），仍然保留禁 AI 署名规范。
+		b.WriteString(promptpkg.GitCommitConvention)
+	} else {
+		b.WriteString(gitContextBlock)
 	}
+	b.WriteString("\n")
 
 	return b.String()
 }

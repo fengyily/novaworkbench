@@ -222,6 +222,9 @@ export const projects = {
       scriptPlaceholder: '# 在工作区根目录执行；stdout 即 commit 信息\n# 可用环境变量：NOVA_COMMIT_REQUIREMENT_ID / NOVA_COMMIT_PROJECT_DIR / NOVA_COMMIT_WORKTREE\necho "fix: $(date +%Y%m%d)"',
       scriptMissingWarn: '当前模式需要脚本，但内容为空，无法保存。',
     },
+    // v0.5.x: 与 git context 注入有关的提现,挂在「提交推送模式」「提交风格」「平台 Token」卡片下方的统一提示。
+    // 提示用户该配置会注入到 AI 的 Git 操作上下文(手动提交 / 推送 / 创建 PR 同样生效)。
+    aiContextHint: '该配置会注入到 AI 的 Git 操作上下文，包括手动下达的提交 / 推送 / 创建 PR 指令。',
     // Overview — platform config.
     platformTitle: '平台配置',
     platformCurrent: '当前：{{platform}}',
