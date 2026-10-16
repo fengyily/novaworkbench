@@ -27,6 +27,7 @@
 import i18next from 'i18next';
 import { marked } from 'marked';
 import mermaid from 'mermaid';
+import { removeMermaidLeftovers } from './mermaidCleanup';
 
 export interface DesignExportInput {
   title: string;
@@ -105,7 +106,7 @@ function sanitizeFilename(name: string, fallback: string): string {
 let mermaidReady = false;
 function ensureMermaid() {
   if (mermaidReady) return;
-  mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose', fontFamily: 'inherit' });
+  mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose', fontFamily: 'inherit', suppressErrorRendering: true });
   mermaidReady = true;
 }
 
@@ -135,6 +136,7 @@ async function prebakeMermaid(markdown: string): Promise<string> {
       // so our wrapper div sits flush.
       matches.push({ match: m[0], svg: svg.trim() });
     } catch (e: unknown) {
+      removeMermaidLeftovers(id);
       const msg = String((e as Error)?.message || e);
       const errHtml = `<div class="pdf-mermaid pdf-mermaid-error"><pre>${escapeHtml(src)}\n\n[render error: ${escapeHtml(msg)}]</pre></div>`;
       matches.push({ match: m[0], svg: errHtml });
