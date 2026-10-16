@@ -55,8 +55,11 @@ interface Props {
   onAskAbout: (finding: ReviewFinding, ref: string) => void;
   /** Turn this finding into a tracked issue-kind requirement. The handler is
       expected to surface the new requirement id (e.g. via a toast or inline
-      chip) so the user can jump straight to /requirements/:new_id. */
-  onCreateIssue: (finding: ReviewFinding, ref: string) => void;
+      chip) so the user can jump straight to /requirements/:new_id. Only the
+      ref is needed: the backend reuses parseFindings to look the finding up
+      in the persisted findings_json, so the caller doesn't have to send the
+      finding object itself. */
+  onCreateIssue: (ref: string) => void;
   /** Per-finding ref strings currently being turned into issues (keyed by
       ref, value true). The container owns this state so a clicked button
       stays in its busy state through the round-trip and re-renders after
@@ -355,7 +358,7 @@ export default function ReviewReport({
                           ) : (
                             <button
                               className="btn btn-sm cr-finding-issue"
-                              onClick={() => onCreateIssue(f, ref)}
+                              onClick={() => onCreateIssue(ref)}
                               disabled={busy || !!creatingIssues[ref]}
                               title={t('projects.detail.reviewCreateIssueHint')}
                             >

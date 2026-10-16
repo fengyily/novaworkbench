@@ -616,7 +616,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   // requirement id, which is dropped into `createdIssues` — the per-card
   // button swaps itself for a "✓ 已创建 →" link so the user can jump
   // straight to /requirements/:new_id.
-  const handleCreateIssue = useCallback(async (finding: ReviewFinding, ref: string) => {
+  const handleCreateIssue = useCallback(async (ref: string) => {
     if (!selected || creatingIssues[ref]) return;
     setCreatingIssues(prev => ({ ...prev, [ref]: true }));
     try {
