@@ -59,10 +59,18 @@ import {
   IconTrash,
   IconSparkles,
   IconClose,
+  IconFileMarkdown,
+  IconChevronDown,
 } from '../components/icons';
 import MarkdownRender from '../components/MarkdownRender';
 import DiagramGenerator from '../components/DiagramGenerator';
 import { exportDesignPdf } from '../utils/exportDesignPdf';
+import {
+  parseDesign,
+  stripOuterFence,
+  buildLegacyDesignMarkdown,
+  downloadDesignMarkdown,
+} from '../utils/designExport';
 import { fmtDateTime, fmtNumber } from '../utils/intl';
 import { appendLogLine, coalesceLogLines, type LogLine, type UsageInfo, parseUsageSnapshots } from '../utils/logLines';
 import { buildPhaseGroups, formatDuration, useTick } from '../utils/phaseGroups';
@@ -77,15 +85,6 @@ import '../styles/markdown-prose.css';
 import './RequirementDetail.css';
 import { FullscreenButton } from '../components/FullscreenButton';
 import { useFullscreen } from '../utils/useFullscreen';
-
-interface DesignData {
-  overview?: string;
-  files?: string[];
-  steps?: string[];
-  model_changes?: string;
-  risks?: string[];
-  plan_markdown?: string; // plan-mode output (raw markdown, not the legacy JSON schema)
-}
 
 // WikiData holds the parsed shape of a wiki-kind requirement's Markdown
 // body. Unlike DesignData it only ever has one field — wiki docs are
@@ -1310,6 +1309,8 @@ export default function RequirementDetail() {
 
   // PDF export state for the technical design doc.
   const [exporting, setExporting] = useState(false);
+  // SplitButton dropdown state for the .md export option.
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
 
   // Token usage for this requirement (per-step + total). Refreshed on mount
   // and after each stage completes (refresh()), so the breakdown reflects the
@@ -1419,20 +1420,6 @@ export default function RequirementDetail() {
     }
   };
 
-  // Compose the design as a Markdown string for PDF export. plan_markdown is
-  // already raw Markdown; legacy JSON designs are reassembled into Markdown
-  // sections mirroring how doStartCoding builds the dev-instruction payload.
-  const designToMarkdown = (d: DesignData): string => {
-    if (d.plan_markdown) return d.plan_markdown;
-    const parts: string[] = [];
-    if (d.overview) parts.push(`## ${t('requirements.detail2.designMdOverview')}\n${d.overview}`);
-    if (d.steps?.length) parts.push(`## ${t('requirements.detail2.designMdSteps')}\n${d.steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}`);
-    if (d.files?.length) parts.push(`## ${t('requirements.detail2.designMdFiles')}\n${d.files.map(f => `- ${f}`).join('\n')}`);
-    if (d.model_changes && d.model_changes !== t('requirements.detail2.designModelChangesNone')) parts.push(`## ${t('requirements.detail2.designModelChangesHeader')}\n${d.model_changes}`);
-    if (d.risks?.length) parts.push(`## ${t('requirements.detail2.designMdRisks')}\n${d.risks.map(r => `- ${r}`).join('\n')}`);
-    return parts.join('\n\n') || req?.description || '';
-  };
-
   const handleExportPdf = async () => {
     if (!req || !project) return;
     setExporting(true);
@@ -1440,13 +1427,28 @@ export default function RequirementDetail() {
       await exportDesignPdf({
         title: req.title,
         meta: `${project.name} · ${req.id}`,
-        markdown: designToMarkdown(parseDesign(req.design_docs)),
+        markdown: buildLegacyDesignMarkdown(parseDesign(req.design_docs)),
         filename: req.title,
       });
     } catch (err: any) {
       alert(t('requirements.detail2.pdfExportFailPrefix') + err.message);
     } finally {
       setExporting(false);
+    }
+  };
+
+  const handleExportMarkdown = () => {
+    if (!req) return;
+    try {
+      downloadDesignMarkdown({
+        title: req.title,
+        meta: project ? `${project.name} · ${req.id}` : undefined,
+        markdown: buildLegacyDesignMarkdown(parseDesign(req.design_docs)),
+        filename: req.title,
+        markdownSuffix: t('requirements.exportDesign.markdownSuffix'),
+      });
+    } catch (err: any) {
+      alert(t('requirements.detail2.markdownExportFailPrefix') + err.message);
     }
   };
 
@@ -1543,62 +1545,6 @@ export default function RequirementDetail() {
     lastSummaryStatusRef.current = current;
   }, [orchBatch?.summary_status, refresh]);
 
-  // 设计文档存在多种存储形态:
-  //   - 计划模式 (新): 原始 Markdown 字符串
-  //   - legacy JSON 对象: {overview, files, steps, model_changes, risks}
-  //   - legacy JSON 数组: ["# 方案..."]
-  //   - 边缘情形 1: finalResult fallback 可能产出以 { 开头的非设计 JSON
-  //   - 边缘情形 2: Claude 在 apply-doc 输出被 ```markdown ... ``` 围栏包裹,
-  //     ReactMarkdown 会把整段当代码块渲染,需要 strip 外层围栏
-  //   - 边缘情形 3: schema 默认值 '[]' (backend/internal/db/schema.go:55)
-  //     在 designing 阶段仍携带字面量 '[]';任何解析结果若不含有效设计
-  //     内容,一律视为无设计,返回 {} —— 避免 hasDesign 误为 true 后
-  //     ReactMarkdown 把字面量渲染出来,也避免 doStartCoding 注入
-  //     `## 技术方案\n[]` 到开发 prompt。
-  //
-  // 仅当 JSON 解析结果显式携带 plan_markdown 或任意 legacy 字段,
-  // 才视为 DesignData;若为合法 JSON 但不带设计内容,统一返回 {}。
-  // 当作 Markdown 之前先剥掉外层代码围栏(只发生在 JSON parse 失败分支)。
-  const parseDesign = (raw: string): DesignData => {
-    if (!raw) return {};
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      // 不是合法 JSON:整段视为 Markdown(去除可能的代码围栏)。
-      return { plan_markdown: stripOuterFence(raw) };
-    }
-    // legacy JSON 数组形态:["# 方案\n## 详情", ...]
-    // 空数组 / 全空白元素 / 全非字符串元素 → 一律视为无设计。
-    if (Array.isArray(parsed)) {
-      const first = parsed.find((v) => typeof v === 'string' && v.trim() !== '');
-      if (typeof first !== 'string') return {};
-      return { plan_markdown: stripOuterFence(first) };
-    }
-    if (parsed !== null && typeof parsed === 'object') {
-      const obj = parsed as Partial<DesignData>;
-      const objHasShape = typeof obj.plan_markdown === 'string'
-          || obj.overview !== undefined
-          || obj.files !== undefined
-          || obj.steps !== undefined
-          || obj.model_changes !== undefined
-          || obj.risks !== undefined;
-      if (objHasShape) {
-        if (typeof obj.plan_markdown === 'string') {
-          // 空 / 全空白 plan_markdown → undefined,避免下游三元
-          // 同时被误判 truthy,与 hasDesign 语义保持一致。
-          const trimmed = obj.plan_markdown.trim();
-          obj.plan_markdown = trimmed === '' ? undefined : stripOuterFence(trimmed);
-        }
-        return obj;
-      }
-    }
-    // JSON 解析成功但不带设计内容:'{}' / '42' / 'null' / 'true' 等
-    // 任何不携带 DesignData 字段的形态。返回 {} 而非把 raw 当 Markdown
-    // 渲染,以防 hasDesign 误开启。
-    return {};
-  };
-
   // parseWikiDoc mirrors parseDesign for the wiki kind. Wiki docs are
   // always plain (plan-mode) Markdown — no legacy JSON schema, no array
   // form — so the implementation is simpler: try JSON, fall back to
@@ -1625,16 +1571,6 @@ export default function RequirementDetail() {
     // raw input as Markdown so the user still sees something instead of
     // a blank tab.
     return { plan_markdown: stripOuterFence(raw) };
-  };
-
-  // 剥离外层 ```lang ... ``` 围栏(以及无 lang 标签的 ``` ... ``` 形式)。
-  // 仅当整段内容首尾恰好是一对完整代码围栏时才剥离,避免误删正文中
-  // 偶然配对的三个反引号对(例如示例代码块)。
-  const FENCE_RE = /^```[^\n]*\n([\s\S]*?)\n```\s*$/;
-  const stripOuterFence = (s: string): string => {
-    if (!s) return s;
-    const m = FENCE_RE.exec(s.trim());
-    return m ? m[1] : s;
   };
 
   // ── Status gate transitions ────────────────────────────────────────────────
@@ -4723,14 +4659,43 @@ export default function RequirementDetail() {
                 <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={designing}><IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}</button>
               )}
               {hasDesign && (
-                <button
-                  className="btn btn-sm"
-                  onClick={handleExportPdf}
-                  disabled={exporting}
-                  title={t('requirements.detail2.exportPdfTitle')}
-                >
-                  {exporting ? <><IconHourglass size={13} className="btn-icon" />{t('requirements.detail2.exportingPdf')}</> : <><IconFileText size={13} className="btn-icon" />{t('requirements.detail2.exportPdfBtn')}</>}
-                </button>
+                <div className="btn-group-split" role="group">
+                  <button
+                    className="btn btn-sm btn-split-main"
+                    onClick={handleExportPdf}
+                    disabled={exporting}
+                    title={t('requirements.detail2.exportPdfTitle')}
+                  >
+                    {exporting ? <><IconHourglass size={13} className="btn-icon" />{t('requirements.detail2.exportingPdf')}</> : <><IconFileText size={13} className="btn-icon" />{t('requirements.detail2.exportPdfBtn')}</>}
+                  </button>
+                  <div className="btn-split-menu-wrap">
+                    <button
+                      className="btn btn-sm btn-split-caret"
+                      aria-label={t('requirements.detail2.exportMenuLabel')}
+                      title={t('requirements.detail2.exportMenuLabel')}
+                      onClick={(e) => { e.stopPropagation(); setExportMenuOpen(v => !v); }}
+                    >
+                      <IconChevronDown size={13} />
+                    </button>
+                    {exportMenuOpen && (
+                      <>
+                        <div className="btn-split-backdrop" onClick={() => setExportMenuOpen(false)} />
+                        <div className="btn-split-dropdown" role="menu">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="btn-split-item"
+                            onClick={() => { setExportMenuOpen(false); handleExportMarkdown(); }}
+                            title={t('requirements.detail2.exportMarkdownTitle')}
+                          >
+                            <IconFileMarkdown size={13} />
+                            {t('requirements.detail2.exportMarkdownBtn')}
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
               )}
               {(designPanelOpen || hasDesign) && (
                 <FullscreenButton isFullscreen={designFs.isFullscreen} onClick={designFs.toggle} />

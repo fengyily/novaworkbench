@@ -86,6 +86,8 @@ export const requirements = {
     pdfSuffix: '技术方案',
     designFallback: '技术方案',
     generatedAt: '生成于',
+    markdownSuffix: '技术方案',
+    projectLabel: '所属项目',
   },
   promote: {
     sourceFallback: '该想法',
@@ -181,6 +183,7 @@ export const requirements = {
     actionBusyClean: '清理',
     // PDF + status transitions.
     pdfExportFailPrefix: '导出 PDF 失败: ',
+    markdownExportFailPrefix: '导出 Markdown 失败: ',
     // 架构图(从设计文档里挖 Mermaid 块) — 由 AI diagram 特性引入。
     extractNoMermaid: '当前方案中没有 Mermaid 块',
     extractDone: '已提取 {{count}} 张架构图为知识条目',
@@ -438,6 +441,9 @@ export const requirements = {
     exportPdfTitle: '将技术方案导出为 PDF',
     exportPdfBtn: '导出 PDF',
     exportingPdf: '导出中...',
+    exportMenuLabel: '更多导出选项',
+    exportMarkdownBtn: '导出为 Markdown',
+    exportMarkdownTitle: '将技术方案导出为 Markdown(.md),可在 Markdown 编辑器或 Git diff 中直接查看',
     architectPlanModeHint: 'Claude 正在 plan 模式下制定技术方案...',
     architectIdleHint: '需求分析已完成。方案设计阶段将在 <strong>plan 模式</strong>下探索项目代码，制定具体可执行的技术实现方案（Markdown）。',
     startArchitectBtn: '开始制定技术方案',

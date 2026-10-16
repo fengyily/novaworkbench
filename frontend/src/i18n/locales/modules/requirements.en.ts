@@ -86,6 +86,8 @@ export const requirements = {
     pdfSuffix: 'design',
     designFallback: 'design',
     generatedAt: 'Generated at',
+    markdownSuffix: 'design',
+    projectLabel: 'Project',
   },
   promote: {
     sourceFallback: 'this idea',
@@ -174,6 +176,7 @@ export const requirements = {
     actionBusySave: 'Saving',
     actionBusyClean: 'Cleaning',
     pdfExportFailPrefix: 'PDF export failed: ',
+    markdownExportFailPrefix: 'Markdown export failed: ',
     // Architect-stage Mermaid extraction (added with the AI diagram feature).
     extractNoMermaid: 'No Mermaid blocks found in the current design',
     extractDone: 'Extracted {{count}} diagram(s) as knowledge entries',
@@ -416,6 +419,9 @@ export const requirements = {
     exportPdfTitle: 'Export the design to PDF',
     exportPdfBtn: 'Export PDF',
     exportingPdf: 'Exporting…',
+    exportMenuLabel: 'More export options',
+    exportMarkdownBtn: 'Export as Markdown',
+    exportMarkdownTitle: 'Export the design to Markdown (.md) for diffs and editors',
     architectPlanModeHint: 'Claude is producing the design in plan mode…',
     architectIdleHint: 'Analysis is done. The design stage will explore the project code in <strong>plan mode</strong> and produce an actionable Markdown design.',
     startArchitectBtn: 'Start producing the design',
