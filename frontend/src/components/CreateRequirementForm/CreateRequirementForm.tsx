@@ -229,21 +229,33 @@ export function CreateRequirementForm({
   // Cleanup: if the user closed the form without typing anything, drop the
   // pre-created draft row so requirements.list doesn't fill with empty
   // stubs. Best-effort (fire-and-forget); we don't block unmount.
+  //
+  // The verdict is recomputed on every render into a ref; only a MOUNT-ONLY
+  // effect reads it. The obvious version of this — listing description /
+  // pendingReqId / draftTouched in the dep array — is wrong in a way that
+  // breaks creation outright: React runs the *previous* render's cleanup
+  // before re-running an effect whose deps changed, so the cleanup triggered
+  // by the very first keystroke still closed over description="" and deleted
+  // the draft the user was typing into. Submit then PUT
+  // /api/requirements/<id> against a row that no longer existed, and the
+  // server answered "requirement not found" (Update → Get → sql.ErrNoRows).
+  //
+  // draftTouched is set only on a successful submit, so it can't carry the
+  // "has the user typed?" signal on its own — description.trim() is the real
+  // guard, and reading it at unmount time is what makes it correct.
+  const dropDraftIdRef = useRef<string | null>(null);
+  dropDraftIdRef.current =
+    !existingRequirementId && pendingReqId && !draftTouched && !description.trim()
+      ? pendingReqId
+      : null;
   useEffect(() => {
     return () => {
-      if (
-        !existingRequirementId &&
-        pendingReqId &&
-        !draftTouched &&
-        !description.trim()
-      ) {
-        requirementsApi.remove(pendingReqId).catch(() => {});
-      }
+      const id = dropDraftIdRef.current;
+      if (id) requirementsApi.remove(id).catch(() => {});
     };
-    // description / draftTouched / pendingReqId / existingRequirementId are
-    // captured in the closure; the effect re-binds when any of them change
-    // so the cleanup uses the latest values.
-  }, [existingRequirementId, pendingReqId, draftTouched, description]);
+    // Mount-only on purpose — a dep array here re-runs the cleanup mid-life
+    // (every keystroke) instead of only at unmount. See the comment above.
+  }, []);
 
   const handleSubmit = async () => {
     if (saving) return;
