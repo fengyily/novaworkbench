@@ -69,7 +69,7 @@ func TestResolveDiffRefs_LocalOnlyBranch(t *testing.T) {
 	work := newRefsFixture(t)
 	commitOnBranch(t, work, "feat/local", "a.txt")
 
-	head, base, err := resolveDiffRefs(context.Background(), work, "feat/local", "main", nil)
+	head, base, _, err := resolveDiffRefs(context.Background(), work, "feat/local", "main", nil)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestResolveDiffRefs_PrefersOriginWhenPushed(t *testing.T) {
 	commitOnBranch(t, work, "feat/pushed", "b.txt")
 	gitIn(t, work, "push", "origin", "feat/pushed")
 
-	head, base, err := resolveDiffRefs(context.Background(), work, "feat/pushed", "main", nil)
+	head, base, _, err := resolveDiffRefs(context.Background(), work, "feat/pushed", "main", nil)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestResolveDiffRefs_RemoteOnlyBranch(t *testing.T) {
 	gitIn(t, work, "push", "origin", "feat/remote")
 	gitIn(t, work, "branch", "-D", "feat/remote")
 
-	head, _, err := resolveDiffRefs(context.Background(), work, "feat/remote", "main", nil)
+	head, _, _, err := resolveDiffRefs(context.Background(), work, "feat/remote", "main", nil)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -121,13 +121,13 @@ func TestResolveDiffRefs_RemoteOnlyBranch(t *testing.T) {
 func TestResolveDiffRefs_MissingBranchErrors(t *testing.T) {
 	work := newRefsFixture(t)
 
-	if _, _, err := resolveDiffRefs(context.Background(), work, "feat/ghost", "main", nil); err == nil {
+	if _, _, _, err := resolveDiffRefs(context.Background(), work, "feat/ghost", "main", nil); err == nil {
 		t.Fatal("expected an error for a branch that exists nowhere")
 	} else if !strings.Contains(err.Error(), "feat/ghost") {
 		t.Fatalf("error should name the branch, got %v", err)
 	}
 
-	if _, _, err := resolveDiffRefs(context.Background(), work, "main", "nope", nil); err == nil {
+	if _, _, _, err := resolveDiffRefs(context.Background(), work, "main", "nope", nil); err == nil {
 		t.Fatal("expected an error for a missing base branch")
 	}
 }
@@ -139,7 +139,7 @@ func TestResolveDiffRefs_AcceptsQualifiedRef(t *testing.T) {
 	commitOnBranch(t, work, "feat/q", "d.txt")
 	gitIn(t, work, "push", "origin", "feat/q")
 
-	head, _, err := resolveDiffRefs(context.Background(), work, "origin/feat/q", "main", nil)
+	head, _, _, err := resolveDiffRefs(context.Background(), work, "origin/feat/q", "main", nil)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -150,10 +150,86 @@ func TestResolveDiffRefs_AcceptsQualifiedRef(t *testing.T) {
 
 func TestResolveDiffRefs_BlankInputs(t *testing.T) {
 	work := newRefsFixture(t)
-	if _, _, err := resolveDiffRefs(context.Background(), work, "", "main", nil); err == nil {
+	if _, _, _, err := resolveDiffRefs(context.Background(), work, "", "main", nil); err == nil {
 		t.Fatal("blank branch should error")
 	}
-	if _, _, err := resolveDiffRefs(context.Background(), work, "main", "  ", nil); err == nil {
+	if _, _, _, err := resolveDiffRefs(context.Background(), work, "main", "  ", nil); err == nil {
 		t.Fatal("blank base should error")
+	}
+}
+
+// TestResolveDiffRefs_FetchFailsBranchMissing：当仓库无 origin 远端（fetch
+// 必失败 exit=128），且分支本地与 origin 都不存在时，错误消息含
+// "git fetch origin 失败 (exit=128)" + fetchWarning 非空。
+func TestResolveDiffRefs_FetchFailsBranchMissing(t *testing.T) {
+	root := t.TempDir()
+	work := filepath.Join(root, "work")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, work, "init", "--initial-branch=main")
+	gitIn(t, work, "config", "user.email", "t@e")
+	gitIn(t, work, "config", "user.name", "t")
+	// 注意：故意不 git remote add origin，所以 fetch 会失败
+	head, base, fetchWarn, err := resolveDiffRefs(context.Background(), work, "feat/ghost", "main", nil)
+	if head != "" || base != "" || err == nil {
+		t.Fatalf("expected empty refs + error, got head=%q base=%q err=%v fetchWarn=%q", head, base, err, fetchWarn)
+	}
+	if fetchWarn == "" {
+		t.Fatalf("expected non-empty fetchWarning when fetch fails, got %q", fetchWarn)
+	}
+	if !strings.Contains(err.Error(), "git fetch origin 失败") || !strings.Contains(err.Error(), "exit=128") {
+		t.Fatalf("error should describe fetch failure, got: %v", err)
+	}
+}
+
+// TestResolveDiffRefs_FetchFailsBranchLocalOnly：当 fetch 失败但分支仅本地
+// 存在时，仍能正常解析，且返回 fetchWarning 非空让上游日志可见。
+func TestResolveDiffRefs_FetchFailsBranchLocalOnly(t *testing.T) {
+	root := t.TempDir()
+	work := filepath.Join(root, "work")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, work, "init", "--initial-branch=main")
+	gitIn(t, work, "config", "user.email", "t@e")
+	gitIn(t, work, "config", "user.name", "t")
+	gitIn(t, work, "commit", "--allow-empty", "-m", "init")
+	gitIn(t, work, "checkout", "-b", "feat/local-only")
+	// 不设 origin，fetch 会失败，但分支本地存在
+	head, _, warn, err := resolveDiffRefs(context.Background(), work, "feat/local-only", "main", nil)
+	if err != nil {
+		t.Fatalf("expected success for local-only branch, got %v", err)
+	}
+	if !strings.Contains(head, "feat/local-only") {
+		t.Fatalf("head ref should contain branch name, got %q", head)
+	}
+	if warn == "" || !strings.Contains(warn, "git fetch origin 失败") {
+		t.Fatalf("expected fetchWarning to mention fetch failure, got %q", warn)
+	}
+}
+
+// TestResolveDiffRefs_FetchOKBranchMissing：fetch 成功但分支真的不存在
+// （用 bare origin + 不存在的分支名），fetchWarning 为空，消息保持旧文案。
+func TestResolveDiffRefs_FetchOKBranchMissing(t *testing.T) {
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	work := filepath.Join(root, "work")
+	gitIn(t, root, "init", "--bare", "--initial-branch=main", origin)
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// clone 必须在 root 跑（cwd），否则目标目录里再克隆一份
+	gitIn(t, root, "clone", origin, work)
+	// 现在有 origin 但没有 feat/ghost 分支
+	_, _, warn, err := resolveDiffRefs(context.Background(), work, "feat/ghost", "main", nil)
+	if err == nil {
+		t.Fatal("expected error for genuinely missing branch")
+	}
+	if warn != "" {
+		t.Fatalf("expected empty fetchWarning when fetch succeeds, got %q", warn)
+	}
+	if !strings.Contains(err.Error(), "在本地与 origin 上都不存在") {
+		t.Fatalf("legacy message should be preserved on fetch-success path, got: %v", err)
 	}
 }

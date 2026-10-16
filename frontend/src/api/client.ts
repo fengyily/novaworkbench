@@ -300,9 +300,19 @@ export interface FsItems {
   breadcrumb: { name: string; path: string; is_dir: boolean }[];
 }
 
+export interface FsBranchesResponse {
+  branches: string[];
+  fetch_warning?: string;
+}
+
 export const fsApi = {
   listDir: (path: string) => api.get<FsItems>(`/api/fs/ls?path=${encodeURIComponent(path)}`),
   validate: (path: string) => api.get<any>(`/api/fs/validate?path=${encodeURIComponent(path)}`),
+  gitBranches: (opts: { path: string; refresh?: boolean }) => {
+    const qs = new URLSearchParams({ path: opts.path });
+    if (opts.refresh) qs.set('refresh', '1');
+    return api.get<FsBranchesResponse>(`/api/fs/git-branches?${qs.toString()}`);
+  },
 };
 
 // Memories
