@@ -74,6 +74,7 @@ func (s *GitCredentialService) BuildEnv(ctx context.Context, projectID string) (
 		return nil, noop, nil
 	}
 	if project == nil || tok == nil {
+		log.Printf("[git-credentials] %s: no credential injected: no-token-bound", projectID)
 		return nil, noop, nil
 	}
 	if strings.TrimSpace(project.RemoteURL) == "" {
@@ -81,6 +82,7 @@ func (s *GitCredentialService) BuildEnv(ctx context.Context, projectID string) (
 	}
 	if isSSHRemoteURL(project.RemoteURL) {
 		// SSH auth is key-based; tokens are irrelevant here.
+		log.Printf("[git-credentials] %s: no credential injected: ssh-remote", projectID)
 		return nil, noop, nil
 	}
 
@@ -89,6 +91,7 @@ func (s *GitCredentialService) BuildEnv(ctx context.Context, projectID string) (
 	// remote URL would have put into the origin basic-auth userinfo.
 	username, password := askpassCredentials(tok)
 	if username == "" || password == "" {
+		log.Printf("[git-credentials] %s: no credential injected: empty-cred", projectID)
 		return nil, noop, nil
 	}
 

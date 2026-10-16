@@ -1316,20 +1316,22 @@ func (s *ProjectService) bootstrapMissingGitDir(p *model.Project, logf func(stri
 	}
 	fctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(fctx, "git", "-C", p.LocalPath, "fetch", "origin", baseBranch)
 	baseEnv := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	var credEnv []string
 	if p.ID != "" && s.gitCredSvc != nil {
-		credEnv, credCleanup, _ := s.gitCredSvc.BuildEnv(fctx, p.ID)
+		var credCleanup func()
+		credEnv, credCleanup, _ = s.gitCredSvc.BuildEnv(fctx, p.ID)
 		if credCleanup != nil {
 			defer credCleanup()
 		}
 		baseEnv = append(baseEnv, credEnv...)
 	}
+	cmd := exec.CommandContext(fctx, "git", fetchArgs(p.LocalPath, baseBranch, len(credEnv) > 0)...)
 	cmd.Env = baseEnv
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if runErr := cmd.Run(); runErr != nil {
-		return fmt.Errorf("git fetch origin %s: %s: %w", baseBranch, strings.TrimSpace(stderr.String()), runErr)
+		return fmt.Errorf("git fetch origin %s: %s%s: %w", baseBranch, strings.TrimSpace(stderr.String()), fetchAuthHint(stderr.String()), runErr)
 	}
 	if logf != nil {
 		logf("🔧 已 fetch origin/" + baseBranch)
@@ -1403,20 +1405,29 @@ func (s *ProjectService) syncBaseBranchService(ctx context.Context, projectID, p
 	// missing token all fall through to the historical prompt-disabled path.
 	fctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(fctx, "git", "-C", projectPath, "fetch", "origin", baseBranch)
 	baseEnv := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	var credEnv []string
 	if projectID != "" && s.gitCredSvc != nil {
-		credEnv, credCleanup, _ := s.gitCredSvc.BuildEnv(ctx, projectID)
+		var credCleanup func()
+		credEnv, credCleanup, _ = s.gitCredSvc.BuildEnv(ctx, projectID)
 		if credCleanup != nil {
 			defer credCleanup()
 		}
 		baseEnv = append(baseEnv, credEnv...)
 	}
+	if logf != nil {
+		if len(credEnv) > 0 {
+			logf("🔑 使用项目绑定 Token 认证")
+		} else {
+			logf("ℹ️ 项目未绑定平台 Token，将以匿名方式 fetch")
+		}
+	}
+	cmd := exec.CommandContext(fctx, "git", fetchArgs(projectPath, baseBranch, len(credEnv) > 0)...)
 	cmd.Env = baseEnv
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if runErr := cmd.Run(); runErr != nil {
-		return oldSHA, "", fmt.Errorf("git fetch origin %s: %s: %w", baseBranch, strings.TrimSpace(stderr.String()), runErr)
+		return oldSHA, "", fmt.Errorf("git fetch origin %s: %s%s: %w", baseBranch, strings.TrimSpace(stderr.String()), fetchAuthHint(stderr.String()), runErr)
 	}
 	if tip, terr := gitRunPlain(projectPath, "rev-parse", "--verify", "--quiet", "origin/"+baseBranch); terr == nil {
 		newSHA = strings.TrimSpace(tip)
@@ -1433,6 +1444,29 @@ func (s *ProjectService) syncBaseBranchService(ctx context.Context, projectID, p
 		}
 	}
 	return oldSHA, newSHA, nil
+}
+
+// fetchArgs builds the `git fetch origin <base>` argv. When a platform token
+// was injected via GIT_ASKPASS (withToken), ambient credential helpers are
+// disabled so askpass is the only credential source — mirroring the remote
+// path (handler/git_credentials_remote.go). Without a token the historical
+// behaviour is kept.
+func fetchArgs(path, baseBranch string, withToken bool) []string {
+	args := []string{}
+	if withToken {
+		args = append(args, "-c", "credential.helper=")
+	}
+	return append(args, "-C", path, "fetch", "origin", baseBranch)
+}
+
+// fetchAuthHint returns a suffix pointing at the platform token when a fetch
+// failure looks like an authentication / authorization problem.
+func fetchAuthHint(stderr string) string {
+	low := strings.ToLower(stderr)
+	if strings.Contains(low, "not found") || strings.Contains(low, "authentication failed") {
+		return "（请检查项目绑定的平台 Token 及其对该仓库/组织的访问权限，例如 SSO 授权）"
+	}
+	return ""
 }
 
 // gitRunPlain is a thin wrapper over exec.Command("git", ...) for read-only
