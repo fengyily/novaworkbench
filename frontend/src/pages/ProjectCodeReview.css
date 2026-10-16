@@ -680,7 +680,9 @@
 .cr-followup-del { flex: none; }
 
 .cr-followup-a { display: flex; gap: 8px; align-items: flex-start; }
-.cr-followup-a > :not(.cr-followup-tag) { flex: 1; min-width: 0; }
+.cr-followup-abody { flex: 1; min-width: 0; overflow-x: auto; }
+.cr-followup-abody > :first-child { margin-top: 0; }
+.cr-followup-abody > :last-child { margin-bottom: 0; }
 .cr-followup-pending { margin: 0; font-size: 13px; color: var(--color-text-muted); }
 .cr-followup-errtext { margin: 0; font-size: 13px; color: var(--color-error); word-break: break-word; }
 
