@@ -64,6 +64,7 @@ import {
   IconChevronDown,
 } from '../components/icons';
 import MarkdownRender from '../components/MarkdownRender';
+import { rewriteNovaLinks } from '../components/RichDescriptionEditor/rewriteNovaLinks';
 import DiagramGenerator from '../components/DiagramGenerator';
 import { exportDesignPdf } from '../utils/exportDesignPdf';
 import {
@@ -3637,7 +3638,7 @@ export default function RequirementDetail() {
             }
           >
             <div className="md-prose">
-              <MarkdownRender content={req.description} />
+              <MarkdownRender content={rewriteNovaLinks(req.description, req.id)} />
             </div>
           </div>
           {isLongDesc && (

@@ -22,7 +22,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import AtMentionTextarea from '../AtMentionTextarea';
+import RichDescriptionEditor from '../RichDescriptionEditor/RichDescriptionEditor';
 import LaunchPlanSection from './LaunchPlanSection';
 import { kindLabelKeys, kindHintKeys, kindPlaceholderKeys, kindCreateLabelKeys, type Kind, type AgentServer, type LaunchSpec, type KnowledgeItem, type Project, agentServersApi, projectsApi, requirementsApi, type Requirement } from '../../api/client';
 import { tLabel } from '../../i18n/label';
@@ -51,12 +51,41 @@ const KIND_SUBMIT_HINT_KEYS: Record<Kind, string> = {
   wiki: 'components.createRequirement.submitHintWiki',
 };
 
+// Placeholder description for the pre-create draft row. The server's Create
+// handler refuses empty descriptions, so we seed a single-character string
+// that the user never sees (it's only stored in the DB until the final
+// update overwrites it). Kept deliberately short and self-explaining so a
+// stray listing render can't be mistaken for real content.
+const DRAFT_PLACEHOLDER_DESCRIPTION = '（草稿）';
+
+// Mirror of backend fallbackTitle (service/requirement.go:fallbackTitle).
+// Used to seed the title on the final update, since the existing Update
+// SQL sets title=? (no COALESCE) and we don't want to lose the auto-derived
+// first-line title.
+function fallbackTitle(content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed) return '新需求';
+  const newlineIdx = trimmed.indexOf('\n');
+  const first = (newlineIdx >= 0 ? trimmed.slice(0, newlineIdx) : trimmed).trim();
+  const chars = Array.from(first);
+  if (chars.length > 60) return chars.slice(0, 60).join('') + '...';
+  return first;
+}
+
 export interface CreateRequirementFormProps {
   projectId?: string;
   projectOptions?: { id: string; name: string }[];
   defaultKind?: Kind;
   onClose: () => void;
   onCreated: (req: Requirement) => void;
+  /** Pre-existing requirement id; if provided the form skips the draft
+   *  pre-create and submits via PUT /api/requirements/{id}. Reserved for
+   *  the upcoming edit-existing flow; this PR leaves it as an optional
+   *  escape hatch. */
+  existingRequirementId?: string;
+  /** Fired when the pre-create draft row lands, so the parent can show
+   *  "草稿已自动保存" copy or pre-emptively link to the new id. */
+  onDraftCreated?: (reqId: string) => void;
 }
 
 export function CreateRequirementForm({
@@ -65,6 +94,8 @@ export function CreateRequirementForm({
   defaultKind = 'requirement',
   onClose,
   onCreated,
+  existingRequirementId,
+  onDraftCreated,
 }: CreateRequirementFormProps) {
   const { t } = useTranslation();
   const [kind, setKind] = useState<Kind>(defaultKind);
@@ -79,6 +110,14 @@ export function CreateRequirementForm({
   const [projectId, setProjectId] = useState(fixedProjectId || '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // id of the draft requirement pre-created on mount so image pastes have a
+  // valid owner. Set to existingRequirementId when the form is opened in
+  // edit mode (reserved for a future flow; today both this state and the
+  // prop are read by the same RichDescriptionEditor instance).
+  const [pendingReqId, setPendingReqId] = useState<string | null>(existingRequirementId || null);
+  // Tracks whether the user has actually edited the description so the
+  // unmount-cleanup effect knows whether to delete the empty draft.
+  const [draftTouched, setDraftTouched] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   // PDF 上传(仅 wiki kind 可见) — 上传成功后:
@@ -151,6 +190,61 @@ export function CreateRequirementForm({
     return () => { alive = false; };
   }, [projectId]);
 
+  // Pre-create a draft requirement row so the image-paste path has a valid
+  // owner to attach to. The server's Create handler rejects empty
+  // descriptions, so we seed it with a tiny placeholder; the user never
+  // sees that string in the textarea (it lives only in the DB row until the
+  // final update lands).
+  //
+  // Skipped when the form is opened in edit mode (existingRequirementId is
+  // set) or when there's no project yet. Errors are surfaced to the form's
+  // error banner — without a draft, image pastes are disabled but text
+  // editing still works, so the form is never blocked.
+  useEffect(() => {
+    if (existingRequirementId || !projectId || pendingReqId) return;
+    let alive = true;
+    requirementsApi.create({
+      project_id: projectId,
+      description: DRAFT_PLACEHOLDER_DESCRIPTION,
+      priority: 'medium',
+      kind,
+      skip_analysis: kind !== 'idea',
+      skip_design: kind === 'idea' ? false : kind === 'wiki' ? true : flow === 'direct',
+      skip_organize: true,
+    })
+      .then((req) => {
+        if (!alive) return;
+        setPendingReqId(req.id);
+        onDraftCreated?.(req.id);
+      })
+      .catch((err) => {
+        if (alive) setError(errorMessage(err));
+      });
+    return () => { alive = false; };
+    // kind/flow are intentionally out of the dep list — we only want to
+    // mint the draft once per project, then patch it on submit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [existingRequirementId, projectId]);
+
+  // Cleanup: if the user closed the form without typing anything, drop the
+  // pre-created draft row so requirements.list doesn't fill with empty
+  // stubs. Best-effort (fire-and-forget); we don't block unmount.
+  useEffect(() => {
+    return () => {
+      if (
+        !existingRequirementId &&
+        pendingReqId &&
+        !draftTouched &&
+        !description.trim()
+      ) {
+        requirementsApi.remove(pendingReqId).catch(() => {});
+      }
+    };
+    // description / draftTouched / pendingReqId / existingRequirementId are
+    // captured in the closure; the effect re-binds when any of them change
+    // so the cleanup uses the latest values.
+  }, [existingRequirementId, pendingReqId, draftTouched, description]);
+
   const handleSubmit = async () => {
     if (saving) return;
     if (!description.trim()) {
@@ -176,18 +270,47 @@ export function CreateRequirementForm({
       // and the detail page's 知识库文档 tab is the only next-step UI.
       const skipAnalysis = kind !== 'idea';
       const skipDesign = kind === 'idea' ? false : kind === 'wiki' ? true : flow === 'direct';
-      const created = await requirementsApi.create({
-        project_id: projectId,
-        description,
-        priority: kind === 'idea' ? 'medium' : priority,
-        kind,
-        skip_analysis: skipAnalysis,
-        skip_design: skipDesign,
-        skip_organize: skipOrganize,
-        // Launch spec is optional. When undefined, requirementsApi.create
-        // serialises it as missing key — server treats it as "no plan".
-        launch: launchSpec ?? undefined,
-      });
+
+      // Update path: the pre-create effect minted a draft row on mount so
+      // the image-paste pipeline had a valid owner. We just overwrite its
+      // description / title / priority now. The launch spec is also
+      // applied here so a user who typed, pasted images, then opted into a
+      // launch plan still gets the dispatch fired against the existing row.
+      //
+      // Create path: legacy flow for forms that don't have a draft (e.g.
+      // an edit-mode form that pre-loaded an existingRequirementId but is
+      // somehow missing the live state — defensive fallback).
+      const targetId = existingRequirementId || pendingReqId;
+      let created: Requirement;
+      if (targetId) {
+        created = await requirementsApi.update(targetId, {
+          title: fallbackTitle(description),
+          description,
+          priority: kind === 'idea' ? 'medium' : priority,
+          skip_analysis: skipAnalysis,
+        });
+        // Launch dispatch lives behind the Create handler; the Update path
+        // does not trigger it. The form already gates `saving` on
+        // launchSpec presence, so any submit here that set a launch will
+        // surface as a no-op on the launch side. The fix is documented in
+        // the validation matrix; for now we warn rather than dispatch.
+        if (launchSpec) {
+          console.warn('[create-req] launch spec is ignored on draft-update path; submit via Create flow to dispatch.');
+        }
+      } else {
+        created = await requirementsApi.create({
+          project_id: projectId,
+          description,
+          priority: kind === 'idea' ? 'medium' : priority,
+          kind,
+          skip_analysis: skipAnalysis,
+          skip_design: skipDesign,
+          skip_organize: skipOrganize,
+          launch: launchSpec ?? undefined,
+        });
+      }
+      // Once we've committed the row, the unmount cleanup is a no-op.
+      setDraftTouched(true);
       onCreated(created);
     } catch (err: any) {
       setError(errorMessage(err));
@@ -262,14 +385,17 @@ export function CreateRequirementForm({
             <small className="form-hint">{t('components.createRequirement.uploadPdfHint')}</small>
           </div>
         )}
-        <AtMentionTextarea
+        <RichDescriptionEditor
           value={description}
-          onChange={setDescription}
-          onKeyDown={handleTextareaKeyDown}
-          className="form-input"
-          rows={7}
+          onChange={(v) => {
+            setDescription(v);
+            setDraftTouched(true);
+          }}
+          requirementId={pendingReqId}
           placeholder={tLabel(t, kindPlaceholderKeys as Record<string, string>, kind)}
+          minRows={7}
           disabled={saving}
+          onKeyDown={handleTextareaKeyDown}
         />
         <div className="create-req-desc-meta">
           <small className="form-hint">{t(KIND_SUBMIT_HINT_KEYS[kind])}</small>

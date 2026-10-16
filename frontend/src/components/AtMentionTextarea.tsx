@@ -1,10 +1,17 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { forwardRef, useState, useRef, useEffect, useCallback } from 'react';
 import { skillsApi, type Skill } from '../api/client';
 
 interface Props {
   value: string;
   onChange: (value: string) => void;
   onKeyDown?: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  /** Forwarded to the underlying <textarea> so parent components (e.g.
+   *  RichDescriptionEditor) can intercept image-paste / drag-drop. The
+   *  drag/drop event type is widened to HTMLElement so a single handler
+   *  can also be bound to the surrounding <div> (which catches drops that
+   *  land in the toolbar / pill area). */
+  onPaste?: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
+  onDrop?: (e: React.DragEvent<HTMLElement>) => void;
   placeholder?: string;
   rows?: number;
   className?: string;
@@ -21,7 +28,10 @@ function getAtQuery(text: string, cursor: number): { start: number; query: strin
   return null;
 }
 
-export default function AtMentionTextarea({ value, onChange, onKeyDown, placeholder, rows = 6, className, style, disabled }: Props) {
+const AtMentionTextarea = forwardRef<HTMLTextAreaElement, Props>(function AtMentionTextarea(
+  { value, onChange, onKeyDown, onPaste, onDrop, placeholder, rows = 6, className, style, disabled },
+  forwardedRef,
+) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [atQuery, setAtQuery] = useState<{ start: number; query: string } | null>(null);
@@ -88,10 +98,16 @@ export default function AtMentionTextarea({ value, onChange, onKeyDown, placehol
   return (
     <div className="at-mention-wrapper">
       <textarea
-        ref={textareaRef}
+        ref={(node) => {
+          textareaRef.current = node;
+          if (typeof forwardedRef === 'function') forwardedRef(node);
+          else if (forwardedRef) forwardedRef.current = node;
+        }}
         value={value}
         onChange={handleChange}
         onKeyDown={handleKeyDown}
+        onPaste={onPaste}
+        onDrop={onDrop}
         onBlur={() => setTimeout(() => setAtQuery(null), 150)}
         placeholder={placeholder}
         rows={rows}
@@ -117,4 +133,6 @@ export default function AtMentionTextarea({ value, onChange, onKeyDown, placehol
       )}
     </div>
   );
-}
+});
+
+export default AtMentionTextarea;

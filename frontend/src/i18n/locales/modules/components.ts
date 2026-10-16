@@ -342,6 +342,7 @@ export const components = {
     errNeedDesc: '请填写描述',
     errNeedProject: '请选择项目',
     errCreate: '创建失败',
+    createDraftFailed: '草稿创建失败，请重试',
     launchPlan: {
       title: '⚙ 启动计划（可选）',
       hint: '默认折叠；不展开时与今天的创建行为完全一致',
@@ -419,6 +420,31 @@ export const components = {
     ariaLabel: '滚动到最新消息',
     button: '滚到底部',
     newMessages: '↓ {{count}} 条新消息',
+  },
+
+  // RichDescriptionEditor — Markdown editor with image paste support.
+  // Keys here drive the toolbar buttons, the edit/preview tab copy, the
+  // upload status pill, and the "preparing" hint shown while the parent
+  // form is pre-creating the draft requirement.
+  richEditor: {
+    toolbarBold: '粗体',
+    toolbarItalic: '斜体',
+    toolbarInlineCode: '行内代码',
+    toolbarLink: '链接',
+    toolbarList: '列表',
+    toolbarCodeBlock: '代码块',
+    toolbarImage: '插入图片',
+    tabEdit: '编辑',
+    tabPreview: '预览',
+    preparing: '正在准备编辑器…',
+    previewEmpty: '(无内容预览)',
+    draftPreparing: '编辑器正在准备中，图片上传暂不可用…',
+    uploadPasted: '粘贴于富文本编辑器',
+    linkPrompt: '链接 URL',
+    upload_compressing: '压缩中…',
+    upload_uploading: '上传中…',
+    upload_done: '上传完成',
+    upload_error: '上传失败',
   },
 } as const;
 
