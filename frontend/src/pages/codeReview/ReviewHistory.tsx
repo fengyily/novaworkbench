@@ -15,16 +15,22 @@ import { SEVERITIES, isBlankDraft, severityCount } from './shared';
 
 interface Props {
   history: CodeReview[];
-  selectedId: string;
   running: boolean;
-  onOpen: (rv: CodeReview) => void;
+  /** Click on a `draft` row: re-open the composer in the tab with that
+      draft's fields pre-filled (the new-window route is for finished
+      reports; a draft has nothing to view there). */
+  onOpenDraft: (rv: CodeReview) => void;
+  /** Click on a non-draft row: open the dedicated reader in a new window
+      (`/reviews/:id`). The parent decides what that means — usually a
+      `window.open(..., '_blank', 'noopener,noreferrer')`. */
+  onOpenViewer: (rv: CodeReview) => void;
   onRerun: (rv: CodeReview) => void;
   onDelete: (rv: CodeReview) => void;
   onPurgeBlankDrafts: (drafts: CodeReview[]) => void;
 }
 
 export default function ReviewHistory({
-  history, selectedId, running, onOpen, onRerun, onDelete, onPurgeBlankDrafts,
+  history, running, onOpenDraft, onOpenViewer, onRerun, onDelete, onPurgeBlankDrafts,
 }: Props) {
   const { t } = useTranslation();
 
@@ -36,9 +42,19 @@ export default function ReviewHistory({
   const statusLabel = (s: CodeReview['status']) =>
     t(`projects.detail.reviewStatus${s.charAt(0).toUpperCase()}${s.slice(1)}`);
 
+  // Drafts are unfinished — there is no report to view, so the row click
+  // should drop the user back into the composer with the draft's fields
+  // pre-filled. Any other status (running / done / error / pr) is a
+  // finished or in-flight session that the `/reviews/:id` reader can show
+  // as-is.
+  const handleRowClick = (rv: CodeReview) => {
+    if (rv.status === 'draft') onOpenDraft(rv);
+    else onOpenViewer(rv);
+  };
+
   return (
     <div className="cr-history">
-      <div className="review-panel-header">
+      <div className="cr-history-head">
         <span>{t('projects.detail.reviewHistoryTitle')}</span>
         {blanks.length > 0 && (
           <span className="cr-history-blanks">
@@ -49,10 +65,11 @@ export default function ReviewHistory({
           </span>
         )}
       </div>
+      <div className="req-table-wrap">
       {rows.length === 0 ? (
         <div className="tab-empty"><p>{t('projects.detail.reviewHistoryEmpty')}</p></div>
       ) : (
-        <table className="pr-table table-cards">
+        <table className="req-table table-cards">
           <thead>
             <tr>
               <th style={{ width: 90 }}>{t('projects.detail.reviewHistoryColType')}</th>
@@ -65,7 +82,15 @@ export default function ReviewHistory({
           </thead>
           <tbody>
             {rows.map(rv => (
-              <tr key={rv.id} className={selectedId === rv.id ? 'pr-row-active' : ''}>
+              <tr
+                key={rv.id}
+                className="req-row"
+                onClick={() => handleRowClick(rv)}
+                title={rv.status === 'draft'
+                  ? t('codeReviews.history.openDraftHint')
+                  : t('codeReviews.history.openViewerHint')}
+                style={{ cursor: 'pointer' }}
+              >
                 <td data-label={t('projects.detail.reviewHistoryColType')}>
                   {rv.review_type === 'pr' ? t('projects.detail.reviewModePR') : t('projects.detail.reviewModeBranch')}
                 </td>
@@ -98,13 +123,28 @@ export default function ReviewHistory({
                 </td>
                 <td data-label={t('projects.detail.reviewHistoryColTime')}>{fmtDateTime(rv.created_at)}</td>
                 <td data-label={t('projects.detail.reviewHistoryColActions')}>
-                  <button className="btn btn-sm" onClick={() => onOpen(rv)}>
+                  {/* stopPropagation: the three explicit actions (查看/重跑/删除)
+                      must not ALSO trigger the row's click handler, or we'd
+                      open a second viewer window every time someone re-ran
+                      a review. */}
+                  <button
+                    className="btn btn-sm"
+                    onClick={(e) => { e.stopPropagation(); onOpenViewer(rv); }}
+                  >
                     {t('projects.detail.reviewReportTitle')}
                   </button>
-                  <button className="btn btn-sm" onClick={() => onRerun(rv)} disabled={running || rv.status === 'running'}>
+                  <button
+                    className="btn btn-sm"
+                    onClick={(e) => { e.stopPropagation(); onRerun(rv); }}
+                    disabled={running || rv.status === 'running'}
+                  >
                     {t('projects.detail.reviewRerunBtn')}
                   </button>
-                  <button className="btn btn-sm" onClick={() => onDelete(rv)} disabled={rv.status === 'running'}>
+                  <button
+                    className="btn btn-sm"
+                    onClick={(e) => { e.stopPropagation(); onDelete(rv); }}
+                    disabled={rv.status === 'running'}
+                  >
                     {t('projects.detail.reviewDeleteBtn')}
                   </button>
                 </td>
@@ -113,6 +153,7 @@ export default function ReviewHistory({
           </tbody>
         </table>
       )}
+      </div>
     </div>
   );
 }

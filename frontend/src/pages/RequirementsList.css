@@ -89,41 +89,8 @@
   color: var(--color-text-secondary, #64748B);
 }
 
-.req-table-wrap {
-  background: var(--color-surface, #fff);
-  border: 1px solid var(--color-border, #E2E8F0);
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.req-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.req-table thead th {
-  text-align: left;
-  background: var(--color-surface-muted, #F8FAFC);
-  padding: 10px 12px;
-  font-size: 13px;
-  color: var(--color-text-secondary, #64748B);
-  border-bottom: 1px solid var(--color-border, #E2E8F0);
-}
-
-.req-table tbody td {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--color-border-muted, #F1F5F9);
-  font-size: 14px;
-}
-
-.req-row {
-  cursor: pointer;
-  transition: background-color 80ms ease;
-}
-
-.req-row:hover {
-  background: var(--color-hover, #F1F5F9);
-}
+/* The .req-table-wrap / .req-table / .req-row base rules moved to
+   index.css so the CodeReview history table can share the same visual. */
 
 .req-row-title {
   font-weight: 500;

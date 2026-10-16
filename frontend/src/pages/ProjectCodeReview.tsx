@@ -39,11 +39,12 @@ import { useTranslation } from 'react-i18next';
 import {
   reviewApi, codeReviewsApi, agentServersApi, fsApi,
   type PR, type PRListResponse, type Project,
-  type CodeReview, type CodeReviewRunBinding, type CodeReviewRevision, type ReviewFinding,
+  type CodeReview, type CodeReviewRunBinding, type ReviewFinding,
   type CodeReviewFollowup,
   type FsBranchesResponse,
 } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
+import { useReviewSession } from '../hooks/useReviewSession';
 import type { ExecEnvServer } from '../components/ExecEnvSelect';
 import { IconRobot } from '../components/icons';
 import ReviewComposer, { type Mode } from './codeReview/ReviewComposer';
@@ -116,9 +117,12 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
   // ── History + result ─────────────────────────────────────────────────────
   const [history, setHistory] = useState<CodeReview[]>([]);
-  const [selected, setSelected] = useState<CodeReview | null>(null);
-  const [revisions, setRevisions] = useState<CodeReviewRevision[]>([]);
-  const [detailLoading, setDetailLoading] = useState(false);
+  const [resultReviewId, setResultReviewId] = useState<string | null>(null);
+  // Composer is on-demand: the page opens to a history list, and the user
+  // presses the header button to summon the form. Toggled by the page-header
+  // primary button (and the mobile FAB); the composer's own "collapse" button
+  // and the success path of 开始 also flip it back off.
+  const [showCreate, setShowCreate] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
 
   // ── 创建 issue ───────────────────────────────────────────────────────────
@@ -134,19 +138,35 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   const [bulkCreating, setBulkCreating] = useState(false);
 
   // ── 追问 ─────────────────────────────────────────────────────────────────
-  // The thread belongs to the report currently in the result view, and runs
-  // on its own stream so asking a question never clobbers the review log
-  // still on screen above it.
-  const [followups, setFollowups] = useState<CodeReviewFollowup[]>([]);
-  const [question, setQuestion] = useState('');
-  const [askRunning, setAskRunning] = useState(false);
-  const [askLines, setAskLines] = useState<StreamLine[]>([]);
-  const [askError, setAskError] = useState('');
-  const askEsRef = useRef<EventStream | null>(null);
+  // The thread belongs to the report currently in the result view. The
+  // chat's textarea state lives inside ReviewChat; the SSE channel, the
+  // live stream, the current job id, the followup list and the version
+  // list all live in the `reviewSession` hook. The page only holds the
+  // one-shot pre-fill slot.
+  const [askTemplate, setAskTemplate] = useState<string>('');
 
-  // Close the SSE streams when the tab unmounts so a navigated-away review
-  // doesn't keep a dangling reader around.
-  useEffect(() => () => { reviewEsRef.current?.close(); askEsRef.current?.close(); }, []);
+  // Hook owns: detail row, followup thread, version list, active
+  // revision, current SSE job id, merged live stream, running flag, and
+  // all four actions (ask / regenerate / rerun / restoreRevision). The
+  // page just plumbs its UI bits to those handlers. `resultReviewId` is
+  // the only thing the page needs to drive the result view; the hook
+  // reloads detail / followups / revisions whenever it changes.
+  const reviewSession = useReviewSession(resultReviewId, projectId);
+
+  // Read-through aliases for the rest of the file. The hook owns the
+  // canonical state; the page used to hold its own copies and the
+  // downstream JSX reads `selected` / `revisions` / `detailLoading` by
+  // those names. Keeping the names lets the rest of the file stay close
+  // to its old shape so the diff stays localised.
+  const selected = reviewSession.review;
+  const revisions = reviewSession.revisions;
+  const detailLoading = reviewSession.detailLoading;
+  const followups = reviewSession.followups;
+
+  // Close the PR-mode SSE when the tab unmounts so a navigated-away
+  // review doesn't keep a dangling reader around. The branch-mode SSE
+  // lives inside `reviewSession` and is closed on its own unmount.
+  useEffect(() => () => { reviewEsRef.current?.close(); }, []);
 
   // Keep the live stream pinned to the newest line.
   useEffect(() => {
@@ -173,30 +193,13 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   useEffect(() => { loadPRs(); }, [loadPRs]);
   useEffect(() => { loadHistory(); }, [loadHistory]);
 
-  // The 追问 thread and the version list both follow whichever report is in
-  // the result view. Keyed on the id (not the object) so re-reading the same
-  // session after a run doesn't refetch what it just updated.
-  const selectedId = selected?.id ?? '';
-  useEffect(() => {
-    setAskLines([]);
-    setAskError('');
-    setQuestion('');
-    if (!selectedId) { setFollowups([]); setRevisions([]); return; }
-    let cancelled = false;
-    codeReviewsApi.listFollowups(selectedId)
-      .then(rows => { if (!cancelled) setFollowups(Array.isArray(rows) ? rows : []); })
-      .catch(() => { if (!cancelled) setFollowups([]); });
-    codeReviewsApi.listRevisions(selectedId)
-      .then(rows => { if (!cancelled) setRevisions(Array.isArray(rows) ? rows : []); })
-      .catch(() => { if (!cancelled) setRevisions([]); });
-    return () => { cancelled = true; };
-  }, [selectedId]);
-
-  const reloadRevisions = useCallback((reviewId: string) => {
-    codeReviewsApi.listRevisions(reviewId)
-      .then(rows => setRevisions(Array.isArray(rows) ? rows : []))
-      .catch(() => {/* the switcher just stays on the current version */});
-  }, []);
+  // The 追问 thread and the version list now follow whichever report is
+  // in the result view via `reviewSession`; the hook reloads them
+  // whenever `resultReviewId` changes and again after every run. This
+  // page only keeps `askTemplate` (the one-shot pre-fill slot the
+  // report's 「针对 P0-2 提问」 button pushes into the chat).
+  // The local `selected` reference is still used to derive
+  // `resultReviewId` above and to gate UI on having a review loaded.
 
   // Only ready servers are offered — the backend refuses the rest, so listing
   // them would only mislead. A failure leaves the list empty, which still
@@ -287,7 +290,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     setReviewDone(false);
     setReviewModel('');
     setSubmitMsg('');
-    setSelected(null);
+    setResultReviewId(null);
   };
 
   // ── PR mode handlers ─────────────────────────────────────────────────────
@@ -302,7 +305,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     setReviewModel('');
     setCommentBody('');
     setSubmitMsg('');
-    setSelected(null);
+    setResultReviewId(null);
 
     try {
       const { job_id } = await reviewApi.startReview(
@@ -371,11 +374,17 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   formRef.current = { branch, baseBranch, draftTitle, description, binding: runBinding() };
   useEffect(() => { sessionRef.current = session; }, [session]);
 
-  const ensureDraft = useCallback(async (): Promise<CodeReview | null> => {
+  const ensureDraft = useCallback(async (mode: 'immediate' | 'debounced' = 'debounced'): Promise<CodeReview | null> => {
     if (sessionRef.current) return sessionRef.current;
     if (draftPromiseRef.current) return draftPromiseRef.current;
     const form = formRef.current;
     if (!form.branch.trim()) return null;
+    // The `mode` argument distinguishes the composer's on-mount call (no
+    // 700ms wait) from the branch-typing debounce. Today both paths share
+    // the same create() — the empty-branch guard above is the one
+    // invariant that matters in either case — so the value is currently
+    // documentation. Keep the param so call sites make the intent obvious.
+    void mode;
     setCreating(true);
     const pending = codeReviewsApi.create(projectId, {
       branch: form.branch.trim(),
@@ -405,13 +414,19 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
   // Debounced because `branch` is a free-text input with a datalist: typing
   // "feat/pagination" by hand would otherwise create a row per keystroke.
+  // `mode='immediate'` is reserved for the composer's on-mount useEffect,
+  // which calls ensureDraft() without sitting behind a 700ms wait. The
+  // branch-typing effect always uses the debounced path.
+  // The `showCreate` gate is what stops an auto-draft from being created
+  // while the page is showing only the history list: the composer itself
+  // is not even mounted, so there is no form to attach the row to.
   useEffect(() => {
-    if (mode !== 'branch' || session || running || !branch.trim()) return;
+    if (mode !== 'branch' || !showCreate || session || running || !branch.trim()) return;
     const timer = window.setTimeout(() => {
-      void ensureDraft().catch((err: unknown) => setBranchesError(errorMessage(err)));
+      void ensureDraft('debounced').catch((err: unknown) => setBranchesError(errorMessage(err)));
     }, DRAFT_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [mode, branch, session, running, ensureDraft]);
+  }, [mode, showCreate, branch, session, running, ensureDraft]);
 
   const handleStartBranchReview = async () => {
     if (running) return;
@@ -419,11 +434,6 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
       setBranchesError(t('projects.detail.reviewNeedBranch'));
       return;
     }
-    setRunning(true);
-    setReviewLines([]);
-    setReviewDone(false);
-    setReviewModel('');
-    setSelected(null);
     setBranchesError('');
     try {
       const existing = session;
@@ -432,27 +442,29 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
       const rv = existing ?? await ensureDraft();
       if (!rv) {
         setBranchesError(t('projects.detail.reviewNeedBranch'));
-        setRunning(false);
         return;
       }
       // A row ensureDraft just created already carries the current form
       // values; an existing one may be holding un-blurred edits.
       if (existing) await saveDraftField();
       const reviewId = rv.id;
-      const { job_id } = await codeReviewsApi.start(reviewId);
-      subscribeJob(job_id, () => {
-        loadHistory();
-        // Re-read the session so the graded findings (written by the stream
-        // tail) land in the result view.
-        codeReviewsApi.get(reviewId).then(full => {
-          setSession(full);
-          setSelected(full);
-          reloadRevisions(reviewId);
-        }).catch(() => {});
-      });
+      // Make sure the result view picks up this review before the hook
+      // starts the SSE. For a brand-new row this flips the id from
+      // null; for an existing one it is a no-op.
+      setResultReviewId(reviewId);
+      // Close the composer and pop the dedicated viewer in a new tab.
+      // The window.open call sits in the same click handler chain as
+      // `await reviewSession.rerun()` below, so the browser still
+      // treats it as user-initiated and does not block the popup.
+      setShowCreate(false);
+      window.open(`/reviews/${reviewId}?run=1`, '_blank', 'noopener,noreferrer');
+      await reviewSession.rerun();
+      loadHistory();
     } catch (err: unknown) {
-      setReviewLines([{ type: 'error', content: errorMessage(err) }]);
-      setRunning(false);
+      // The hook owns the branch-mode live stream; surface the error
+      // via the same branchesError slot used for "branch required"
+      // style validation so the user sees it.
+      setBranchesError(errorMessage(err));
     }
   };
 
@@ -474,7 +486,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     try {
       await codeReviewsApi.remove(rv.id);
       if (session?.id === rv.id) handleNewSession();
-      if (selected?.id === rv.id) setSelected(null);
+      if (resultReviewId === rv.id) setResultReviewId(null);
       loadHistory();
     } catch (err: unknown) {
       setBranchesError(errorMessage(err));
@@ -494,11 +506,13 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   };
 
   // Clicking a history row loads its persisted report into the result view.
-  const handleOpenHistory = async (rv: CodeReview) => {
-    setDetailLoading(true);
+  // Stable identity is required because handleOpenDraftRow and the
+  // history-row click handler both depend on it; without useCallback here
+  // those consumers would re-fire every render.
+  const handleOpenHistory = useCallback(async (rv: CodeReview) => {
     try {
       const full = await codeReviewsApi.get(rv.id);
-      setSelected(full);
+      setResultReviewId(full.id);
       // Seed the toolbar from the stored row so 重跑 reproduces the same
       // model + execution environment. The backend stamps `model` with the
       // EFFECTIVE model after a run; ModelSelect maps its DefaultModelLabel
@@ -516,74 +530,65 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
       }
       return full;
     } catch {
-      setSelected(rv);
+      setResultReviewId(rv.id);
       return rv;
-    } finally { setDetailLoading(false); }
-  };
+    }
+  }, []);
 
   const handleRerun = async (rv: CodeReview) => {
-    await handleOpenHistory(rv);
-    setRunning(true);
-    setReviewLines([]);
-    setReviewDone(false);
+    // The hook is keyed on `resultReviewId` — make sure it points at
+    // the row we want to rerun before the hook starts the SSE. (For
+    // history-row rerun the row is already the current selection, so
+    // this is a no-op in the common path.)
+    setResultReviewId(rv.id);
     try {
-      const { job_id } = await codeReviewsApi.start(rv.id);
-      subscribeJob(job_id, () => {
-        loadHistory();
-        codeReviewsApi.get(rv.id).then(setSelected).catch(() => {});
-        reloadRevisions(rv.id);
-      });
+      await reviewSession.rerun();
+      loadHistory();
     } catch (err: unknown) {
-      setReviewLines([{ type: 'error', content: errorMessage(err) }]);
+      setReviewLines(prev => [...prev, { type: 'error', content: errorMessage(err) }]);
       setRunning(false);
     }
   };
 
-  // ── 追问 handlers ────────────────────────────────────────────────────────
+  // History row click handlers — split by status (ReviewHistory dispatches
+  // based on the row's status field, but the actual side effects live here).
+  //
+  // Drafts need to come back into the composer with their fields pre-filled
+  // (the /reviews/:id reader has nothing to show for a draft). Loading the
+  // full row seeds the toolbar's model / exec-env picks so 重跑 reproduces
+  // the same setup — same code path as the existing "查看" button.
+  const handleOpenDraftRow = useCallback((rv: CodeReview) => {
+    setShowCreate(true);
+    void handleOpenHistory(rv);
+  }, [handleOpenHistory]);
 
-  const reloadFollowups = useCallback((reviewId: string) => {
-    codeReviewsApi.listFollowups(reviewId)
-      .then(rows => setFollowups(Array.isArray(rows) ? rows : []))
-      .catch(() => {/* the turn is persisted either way; the next open re-reads it */});
+  // Non-draft rows jump to the dedicated reader in a new tab. We do the
+  // `window.open` from this click handler chain (not from an async
+  // .then()) so Chromium still treats it as a user-initiated popup and
+  // doesn't block it.
+  const handleOpenViewerRow = useCallback((rv: CodeReview) => {
+    window.open(`/reviews/${rv.id}`, '_blank', 'noopener,noreferrer');
   }, []);
+
+  // ── 追问 handlers ────────────────────────────────────────────────────────
 
   // One question = one job on the shared review SSE channel. The answer is
   // persisted by the backend, so when the job ends we just re-read the thread
-  // instead of trying to reconstruct it from the stream.
-  const handleAsk = async () => {
-    if (!selected || askRunning || !question.trim()) return;
-    const reviewId = selected.id;
-    setAskRunning(true);
-    setAskError('');
-    setAskLines([]);
+  // instead of trying to reconstruct it from the stream. The chat owns the
+  // textarea and passes us the trimmed question string here. The hook
+  // owns the SSE, the current job id, the live stream and the
+  // post-completion followup reload — the page just hands the question
+  // over.
+  const handleAsk = async (q: string) => {
+    if (!selected || reviewSession.running) return;
     try {
-      const { job_id } = await codeReviewsApi.ask(reviewId, question.trim());
-      setQuestion('');
-      askEsRef.current?.close();
-      askEsRef.current = createEventStream(
-        reviewApi.streamJobUrl(projectId, job_id),
-        (data) => {
-          if (data.type === 'job_done') {
-            setAskRunning(false);
-            askEsRef.current?.close();
-            askEsRef.current = null;
-            reloadFollowups(reviewId);
-          } else if (data.content) {
-            setAskLines(prev => [...prev, { type: data.type, content: data.content }]);
-          }
-        },
-        () => {
-          setAskRunning(false);
-          setAskError(t('projects.detail.reviewSseDrop'));
-          askEsRef.current = null;
-          // The run itself may well have finished — re-read before concluding
-          // anything from the dropped stream.
-          reloadFollowups(reviewId);
-        },
-      );
+      await reviewSession.askFollowup(q);
     } catch (err: unknown) {
-      setAskError(errorMessage(err));
-      setAskRunning(false);
+      // The hook already appended an error line into liveLines; surface
+      // it via the same branchesError slot used for branch-mode
+      // validation so the user can see the failure without it being
+      // swallowed silently.
+      setBranchesError(errorMessage(err));
     }
   };
 
@@ -591,18 +596,23 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     if (!window.confirm(t('projects.detail.reviewFollowupDeleteConfirm'))) return;
     try {
       await codeReviewsApi.removeFollowup(fu.review_id, fu.id);
-      reloadFollowups(fu.review_id);
+      await reviewSession.reload();
     } catch (err: unknown) {
-      setAskError(errorMessage(err));
+      // Followup thread is re-read on next render, so a stale row clears
+      // itself. Log for debugging; the user already saw the row disappear
+      // (delete is optimistic) and a toast here would be noise.
+      console.warn('deleteFollowup failed', err);
     }
   };
 
   // Pre-fill the question box with a reference the model can resolve
   // unambiguously ("P0-2 …"), plus the finding's own title so the question
-  // still reads as a sentence in the thread.
+  // still reads as a sentence in the thread. We push the template into
+  // `askTemplate`, which ReviewChat consumes via its `externalQuestion`
+  // prop and clears the slot for the next click.
   const handleAskAbout = (finding: ReviewFinding, ref: string) => {
     const loc = finding.file ? `（${finding.file}${finding.line ? `:${finding.line}` : ''}）` : '';
-    setQuestion(t('projects.detail.reviewAskAboutTemplate', {
+    setAskTemplate(t('projects.detail.reviewAskAboutTemplate', {
       ref, title: finding.title, loc,
     }));
     document.querySelector('.cr-chat .cr-desc')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -626,7 +636,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     } catch (err: unknown) {
       // The user-visible error already lands in setBranchesError elsewhere;
       // we don't have a review-specific error slot, so the most local
-      // honest place is to reuse it. (askError would be confusing here —
+      // honest place is to reuse it. (a separate error surface here —
       // it's for the 追问 stream.)
       setBranchesError(errorMessage(err));
     } finally {
@@ -690,26 +700,17 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
   const handleRegenerate = async () => {
     if (!selected || running || regenerating) return;
-    const reviewId = selected.id;
     setRegenerating(true);
-    setRunning(true);
-    setReviewLines([]);
-    setReviewDone(false);
-    setBranchesError('');
     try {
-      const { job_id } = await codeReviewsApi.regenerate(reviewId);
-      subscribeJob(job_id, () => {
-        loadHistory();
-        codeReviewsApi.get(reviewId).then(full => {
-          setSelected(full);
-          if (session?.id === reviewId) setSession(full);
-        }).catch(() => {});
-        reloadRevisions(reviewId);
-      });
+      await reviewSession.regenerate();
+      loadHistory();
     } catch (err: unknown) {
-      setReviewLines([{ type: 'error', content: errorMessage(err) }]);
+      // The hook already appended an error line into liveLines; surface
+      // it via the same branchesError slot used for branch-mode
+      // validation so the user can see the failure without it being
+      // swallowed silently.
+      setBranchesError(errorMessage(err));
       setRegenerating(false);
-      setRunning(false);
     }
   };
 
@@ -719,12 +720,10 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   const handleSelectRevision = async (revNo: number) => {
     if (!selected) return;
     try {
-      const updated = await codeReviewsApi.restoreRevision(selected.id, revNo);
-      setSelected(updated);
-      if (session?.id === updated.id) setSession(updated);
+      await reviewSession.restoreRevision(revNo);
       loadHistory();
     } catch (err: unknown) {
-      setAskError(errorMessage(err));
+      setBranchesError(errorMessage(err));
     }
   };
 
@@ -747,7 +746,12 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
         pdfLabel: t('projects.detail.reviewExportPdfLabel'),
       });
     } catch (err: unknown) {
-      setAskError(t('projects.detail.reviewExportFailed') + errorMessage(err));
+      // PDF export failure: surface in reviewLines so the user sees the
+      // reason in the same panel they'd see a review error.
+      setReviewLines(prev => [...prev, {
+        type: 'error',
+        content: t('projects.detail.reviewExportFailed') + errorMessage(err),
+      }]);
     } finally {
       setExportingPdf(false);
     }
@@ -757,50 +761,87 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
   return (
     <div className="tab-content project-code-review">
-      <ReviewComposer
-        mode={mode}
-        onModeChange={setMode}
-        running={running}
-        defaultBranch={project?.default_branch || 'main'}
-        bindings={{
-          model: runModel,
-          configId: runConfigId,
-          agentServerId,
-          servers: agentServers,
-          onModelChange: (m) => { setRunModel(m); if (session) void saveDraftField({ model: m }); },
-          onConfigChange: (c) => { setRunConfigId(c); if (session) void saveDraftField({ claude_config_id: c }); },
-          onAgentServerChange: (v) => { setAgentServerId(v); if (session) void saveDraftField({ agent_server_id: v }); },
-        }}
-        prData={prData}
-        prsLoading={prsLoading}
-        prsError={prsError}
-        reviewingPR={reviewingPR}
-        extraRequirements={extraRequirements}
-        onExtraRequirementsChange={setExtraRequirements}
-        onReviewPR={handleReviewPR}
-        branchForm={{
-          branches,
-          branch,
-          baseBranch,
-          defaultBranch: project?.default_branch || 'main',
-          title: draftTitle,
-          description,
-          onBranchChange: setBranch,
-          onBaseBranchChange: setBaseBranch,
-          onTitleChange: setDraftTitle,
-          onDescriptionChange: setDescription,
-          onFieldBlur: () => { if (session) void saveDraftField(); },
-          session,
-          creating,
-          savedAt: descSavedAt,
-          error: branchesError,
-          onStart: handleStartBranchReview,
-          onReset: handleNewSession,
-          onDelete: () => { if (session) void handleDelete(session); },
-          onRefreshBranches: () => void refreshBranches(true),
-          refreshing: branchesLoading,
-        }}
-      />
+      {/* ── Page header + on-demand composer toggle. Mirrors the
+          RequirementsList pattern (page-header / page-header-actions) so
+          the two list pages read the same way: title on the left, primary
+          action on the right, no form visible until the user asks. */}
+      <div className="page-header">
+        <h2 className="page-header-title">{t('codeReviews.page.title')}</h2>
+        <div className="page-header-actions desktop-only">
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => setShowCreate(v => !v)}
+          >
+            {showCreate ? t('codeReviews.create.toggleClose') : t('codeReviews.create.toggleOpen')}
+          </button>
+        </div>
+      </div>
+
+      {showCreate && (
+        <ReviewComposer
+          mode={mode}
+          onModeChange={setMode}
+          running={running}
+          defaultBranch={project?.default_branch || 'main'}
+          bindings={{
+            model: runModel,
+            configId: runConfigId,
+            agentServerId,
+            servers: agentServers,
+            onModelChange: (m) => { setRunModel(m); if (session) void saveDraftField({ model: m }); },
+            onConfigChange: (c) => { setRunConfigId(c); if (session) void saveDraftField({ claude_config_id: c }); },
+            onAgentServerChange: (v) => { setAgentServerId(v); if (session) void saveDraftField({ agent_server_id: v }); },
+          }}
+          prData={prData}
+          prsLoading={prsLoading}
+          prsError={prsError}
+          reviewingPR={reviewingPR}
+          extraRequirements={extraRequirements}
+          onExtraRequirementsChange={setExtraRequirements}
+          onReviewPR={handleReviewPR}
+          branchForm={{
+            branches,
+            branch,
+            baseBranch,
+            defaultBranch: project?.default_branch || 'main',
+            title: draftTitle,
+            description,
+            onBranchChange: setBranch,
+            onBaseBranchChange: setBaseBranch,
+            onTitleChange: setDraftTitle,
+            onDescriptionChange: setDescription,
+            onFieldBlur: () => { if (session) void saveDraftField(); },
+            session,
+            creating,
+            savedAt: descSavedAt,
+            error: branchesError,
+            onStart: handleStartBranchReview,
+            onReset: handleNewSession,
+            onDelete: () => { if (session) void handleDelete(session); },
+            onRefreshBranches: () => void refreshBranches(true),
+            refreshing: branchesLoading,
+          }}
+          onClose={() => setShowCreate(false)}
+          onEnsureDraft={() => ensureDraft('immediate')}
+        />
+      )}
+
+      {/* Mobile-only floating action button — mirrors the RequirementsList
+          page: the desktop button is in `.page-header-actions.desktop-only`,
+          the FAB is the same toggle on phones. Hidden on desktop via the
+          `.fab` rule in index.css (display:none outside the 768px media
+          query). */}
+      <button
+        type="button"
+        className="fab fab-extended"
+        onClick={() => setShowCreate(v => !v)}
+        aria-label={showCreate ? t('codeReviews.create.toggleClose') : t('codeReviews.create.toggleOpen')}
+      >
+        {showCreate
+          ? `✕ ${t('codeReviews.create.toggleClose')}`
+          : `+ ${t('codeReviews.create.toggleOpen')}`}
+      </button>
 
       {/* ── Live stream (shared by review / 追问 / regeneration) ── */}
       {(reviewLines.length > 0 || running) && (
@@ -842,12 +883,14 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
             busy={running || regenerating}
             pendingFollowups={pendingFollowups}
             canRegenerate={!!selected.result_md && selected.status !== 'running'}
-            onExportMarkdown={handleExportMarkdown}
+            onExportMd={handleExportMarkdown}
             onExportPdf={handleExportPdf}
             exportingPdf={exportingPdf}
             onRegenerate={handleRegenerate}
             onRerun={() => void handleRerun(selected)}
-            onSelectRevision={(n) => void handleSelectRevision(n)}
+            activeRevisionNo={selected.revision_no}
+            onSetActiveRevision={() => { /* hook owns the live active pick */ }}
+            onRestoreRevision={(n: number) => void handleSelectRevision(n)}
             onAskAbout={handleAskAbout}
             onCreateIssue={handleCreateIssue}
             creatingIssues={creatingIssues}
@@ -857,19 +900,12 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
           />
           <aside className="cr-result-aside">
             <ReviewChat
-              review={selected}
-              followups={followups}
-              question={question}
-              onQuestionChange={setQuestion}
-              asking={askRunning}
-              askLines={askLines}
-              askError={askError}
+              followups={reviewSession.followups}
+              liveLines={reviewSession.liveLines}
               onAsk={handleAsk}
               onDeleteFollowup={handleDeleteFollowup}
-              pendingFollowups={pendingFollowups}
-              canRegenerate={!!selected.result_md && selected.status !== 'running'}
-              regenerating={regenerating}
-              onRegenerate={handleRegenerate}
+              currentJobId={reviewSession.currentJobId}
+              externalQuestion={askTemplate}
             />
           </aside>
         </div>
@@ -908,9 +944,9 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
       <ReviewHistory
         history={history}
-        selectedId={selectedId}
         running={running}
-        onOpen={(rv) => void handleOpenHistory(rv)}
+        onOpenDraft={handleOpenDraftRow}
+        onOpenViewer={handleOpenViewerRow}
         onRerun={(rv) => void handleRerun(rv)}
         onDelete={(rv) => void handleDelete(rv)}
         onPurgeBlankDrafts={(drafts) => void handlePurgeBlankDrafts(drafts)}

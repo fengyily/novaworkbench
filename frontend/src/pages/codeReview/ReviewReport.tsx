@@ -38,20 +38,29 @@ import { fmtDateTime } from '../../utils/intl';
 import { SEVERITIES, deriveVerdict, extractMermaidBlocks, severityCount, titleCase } from './shared';
 
 interface Props {
-  review: CodeReview;
+  review: CodeReview | null;
   revisions: CodeReviewRevision[];
+  /** The version the UI is currently highlighting. null = follow whatever
+      the server row's revision_no says. Reserved for a future "view
+      revision N without restoring" affordance; the click handler still
+      drives restoration so they always agree today. */
+  activeRevisionNo: number | null;
+  onSetActiveRevision: (n: number | null) => void;
+  onRestoreRevision: (revNo: number) => void;
   /** Any run (review / regeneration) is in flight — actions are disabled. */
   busy: boolean;
   /** Follow-ups not yet folded into the report; drives the regenerate CTA. */
   pendingFollowups: number;
   canRegenerate: boolean;
-  onExportMarkdown: () => void;
+  onExportMd: () => void;
   onExportPdf: () => void;
   exportingPdf: boolean;
   onRegenerate: () => void;
   onRerun: () => void;
-  onSelectRevision: (revNo: number) => void;
-  /** Pre-fill the 追问 box with a question about one finding. */
+  /** Pre-fill the 追问 box with a question about one finding. The page is
+      the one that knows how to translate a finding into a question (it has
+      the i18n strings and the chat box to scroll to); the report just
+      hands over the (finding, ref) pair. */
   onAskAbout: (finding: ReviewFinding, ref: string) => void;
   /** Turn this finding into a tracked issue-kind requirement. The handler is
       expected to surface the new requirement id (e.g. via a toast or inline
@@ -79,8 +88,9 @@ interface Props {
 }
 
 export default function ReviewReport({
-  review, revisions, busy, pendingFollowups, canRegenerate,
-  onExportMarkdown, onExportPdf, exportingPdf, onRegenerate, onRerun, onSelectRevision, onAskAbout,
+  review, revisions, activeRevisionNo, onSetActiveRevision, onRestoreRevision,
+  busy, pendingFollowups, canRegenerate,
+  onExportMd, onExportPdf, exportingPdf, onRegenerate, onRerun, onAskAbout,
   onCreateIssue, creatingIssues, createdIssues,
   onBulkCreateIssues, bulkCreating,
 }: Props) {
@@ -88,9 +98,16 @@ export default function ReviewReport({
   const [exportOpen, setExportOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
 
-  const findings = useMemo(() => parseReviewFindings(review), [review]);
-  const goalChecks = useMemo(() => parseGoalChecks(review), [review]);
-  const diagrams = useMemo(() => extractMermaidBlocks(review.result_md || ''), [review.result_md]);
+  // The component used to assume `review` was always present; it now
+  // accepts null so the standalone /reviews/:id page can render an
+  // empty shell while the detail is still loading. Hooks below must
+  // be called unconditionally — the early return sits below them.
+  const findings = useMemo(() => review ? parseReviewFindings(review) : [], [review]);
+  const goalChecks = useMemo(() => review ? parseGoalChecks(review) : [], [review]);
+  const diagrams = useMemo(
+    () => review ? extractMermaidBlocks(review.result_md || '') : [],
+    [review],
+  );
   const grouped = useMemo(() => {
     const m = new Map<ReviewSeverity, ReviewFinding[]>(SEVERITIES.map(s => [s, []]));
     for (const f of findings) m.get(f.severity)?.push(f);
@@ -115,8 +132,12 @@ export default function ReviewReport({
   // they lead and the prose is backup, but on the degraded path the prose is
   // all there is, so it opens by itself.
   useEffect(() => {
-    setReportOpen(!review.findings_json);
-  }, [review.id, review.findings_json]);
+    setReportOpen(!review?.findings_json);
+  }, [review?.id, review?.findings_json]);
+
+  if (!review) {
+    return <article className="cr-report cr-report-pending" />;
+  }
 
   const goalLabel = (g: GoalMet | string) => {
     switch (g) {
@@ -134,19 +155,31 @@ export default function ReviewReport({
       <div className="cr-toolbar">
         {revisions.length > 1 && (
           <div className="cr-versions" role="group" aria-label={t('projects.detail.reviewVersionsLabel')}>
-            {revisions.map(rev => (
-              <button
-                key={rev.rev_no}
-                className={`cr-version${rev.rev_no === review.revision_no ? ' active' : ''}`}
-                onClick={() => onSelectRevision(rev.rev_no)}
-                disabled={busy || rev.rev_no === review.revision_no}
-                title={t('projects.detail.reviewVersionTitle', {
-                  n: rev.rev_no,
-                  time: fmtDateTime(rev.created_at),
-                  count: rev.followup_count,
-                })}
-              >v{rev.rev_no}</button>
-            ))}
+            {revisions.map(rev => {
+              // activeRevisionNo tracks the user's local pick; falls back
+              // to the server-persisted "current" version when nothing has
+              // been selected yet. Both stay in sync today because the
+              // click handler also calls onRestoreRevision, but the
+              // indirection leaves room for a future "view without
+              // restoring" affordance without another rename.
+              const isActive = rev.rev_no === (activeRevisionNo ?? review.revision_no);
+              return (
+                <button
+                  key={rev.rev_no}
+                  className={`cr-version${isActive ? ' active' : ''}`}
+                  onClick={() => {
+                    onSetActiveRevision(rev.rev_no);
+                    onRestoreRevision(rev.rev_no);
+                  }}
+                  disabled={busy || isActive}
+                  title={t('projects.detail.reviewVersionTitle', {
+                    n: rev.rev_no,
+                    time: fmtDateTime(rev.created_at),
+                    count: rev.followup_count,
+                  })}
+                >v{rev.rev_no}</button>
+              );
+            })}
           </div>
         )}
 
@@ -168,7 +201,7 @@ export default function ReviewReport({
             <>
               <div className="cr-export-backdrop" onClick={() => setExportOpen(false)} />
               <div className="cr-export-menu" role="menu">
-                <button role="menuitem" onClick={() => { setExportOpen(false); onExportMarkdown(); }}>
+                <button role="menuitem" onClick={() => { setExportOpen(false); onExportMd(); }}>
                   {t('projects.detail.reviewExportMd')}
                 </button>
                 <button role="menuitem" onClick={() => { setExportOpen(false); onExportPdf(); }}>

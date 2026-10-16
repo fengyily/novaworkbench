@@ -336,6 +336,47 @@ body.no-scroll {
   .table-cards tr.table-cards-total td::before { display: none; }
 }
 
+/* Shared list-table primitives — used by RequirementsList rows and
+   CodeReview history. Specific column styles (e.g. per-column widths,
+   per-page badges like .priority-tag / .cr-status) stay in each page's
+   CSS. Both pages use this same card frame so the two list surfaces
+   read as one visual family. */
+.req-table-wrap {
+  background: var(--color-surface, #fff);
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.req-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.req-table thead th {
+  text-align: left;
+  background: var(--color-surface-muted, #F8FAFC);
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--color-text-secondary, #64748B);
+  border-bottom: 1px solid var(--color-border, #E2E8F0);
+}
+
+.req-table tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-border-muted, #F1F5F9);
+  font-size: 14px;
+}
+
+.req-row {
+  cursor: pointer;
+  transition: background-color 80ms ease;
+}
+
+.req-row:hover {
+  background: var(--color-hover, #F1F5F9);
+}
+
 /* Full-screen modal override. Apply to the modal box (and optionally its
    overlay) to make it occupy the entire phone viewport, with the right
    safe-area insets so the close button stays reachable. */

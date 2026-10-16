@@ -13,6 +13,46 @@
 
 .project-code-review { display: flex; flex-direction: column; gap: 16px; }
 
+/* ── Page header (on-demand composer toggle) ────────────────────────────
+   The Code Review tab is a list page: title on the left, primary action
+   on the right. Mirrors the RequirementsList page-header so the two list
+   pages read the same way. Scoped under `.project-code-review` so the
+   global rule can be a thin shared primitive later without colliding. */
+.project-code-review .page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.project-code-review .page-header-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+}
+.project-code-review .page-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+/* Composer head row — only mounted when the parent passes `onClose`. The
+   collapse button is the one explicit "I changed my mind" affordance the
+   page now needs, because the composer is no longer always visible. */
+.cr-composer-head {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: -4px;
+}
+.cr-composer-head .rc-collapse {
+  /* Quiet secondary button — the page-header already has the primary
+     "新建 / 收起" affordance, so this one is a fallback for users who
+     scroll down into the form. */
+  font-size: 12.5px;
+  padding: 4px 12px;
+}
+
 /* ── Composer fields ─────────────────────────────────────────────────────
    The mode switch is a segmented control and the composer is a stack of
    numbered step cards — both live further down, with the rest of the
@@ -477,13 +517,24 @@
 .cr-report-md-body { padding: 18px 20px 22px; }
 
 /* ── History ─────────────────────────────────────────────────────────────── */
-.cr-history {
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  background: var(--color-surface);
-  overflow: hidden;
+.cr-history { display: flex; flex-direction: column; gap: 8px; }
+/* Title bar sits above the shared .req-table-wrap (same structure as
+   RequirementsList) — title on the left, blank-draft clear on the right. */
+.cr-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 2px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
 }
 .cr-history-title { font-size: 12px; color: var(--color-text-muted); margin-top: 2px; }
+/* Review rows reuse the shared .req-row cursor + hover, plus a slightly
+   tinted background so they read as a separate list from the requirement
+   list even though the table chrome is identical. */
+.cr-history .req-row { background: var(--color-bg-subtle, var(--color-surface)); }
+.cr-history .req-row:hover { background: var(--color-hover); }
 .cr-status {
   font-size: 12px;
   font-weight: 600;
