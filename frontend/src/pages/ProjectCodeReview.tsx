@@ -682,6 +682,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
         mode={mode}
         onModeChange={setMode}
         running={running}
+        defaultBranch={project?.default_branch || 'main'}
         bindings={{
           model: runModel,
           configId: runConfigId,
@@ -702,6 +703,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
           branches,
           branch,
           baseBranch,
+          defaultBranch: project?.default_branch || 'main',
           title: draftTitle,
           description,
           onBranchChange: setBranch,

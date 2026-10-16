@@ -21,6 +21,7 @@
 import { useTranslation } from 'react-i18next';
 import type { CodeReview, PR, PRListResponse } from '../../api/client';
 import AttachmentPanel from '../../components/AttachmentPanel';
+import { BranchPicker } from '../../components/BranchPicker';
 import ModelSelect from '../../components/ModelSelect';
 import { ExecEnvSelect, type ExecEnvServer } from '../../components/ExecEnvSelect';
 import { IconPlug } from '../../components/icons';
@@ -43,6 +44,9 @@ export interface BranchFormProps {
   branches: string[];
   branch: string;
   baseBranch: string;
+  /** Project default branch — shown in each picker's hint rail as the
+   *  silent baseline ("默认 main"). Empty falls back to "main". */
+  defaultBranch: string;
   title: string;
   description: string;
   onBranchChange: (v: string) => void;
@@ -70,6 +74,8 @@ interface Props {
   mode: Mode;
   onModeChange: (m: Mode) => void;
   running: boolean;
+  /** Project default branch — drives the picker's "默认 main" hint rail. */
+  defaultBranch: string;
   bindings: RunBindingsProps;
   // PR mode
   prData: PRListResponse | null;
@@ -85,7 +91,7 @@ interface Props {
 
 export default function ReviewComposer(props: Props) {
   const { t } = useTranslation();
-  const { mode, onModeChange, running, bindings, branchForm } = props;
+  const { mode, onModeChange, running, bindings, branchForm, defaultBranch } = props;
 
   return (
     <div className="cr-composer-shell">
@@ -116,7 +122,7 @@ export default function ReviewComposer(props: Props) {
           >{t('projects.detail.reviewModeBranch')}</button>
         </div>
 
-        {mode === 'pr' ? <PRScope {...props} /> : <BranchScope form={branchForm} running={running} />}
+        {mode === 'pr' ? <PRScope {...props} /> : <BranchScope form={branchForm} running={running} defaultBranch={defaultBranch} />}
       </section>
 
       {/* ── ② 验证材料 ── Branch mode only: the PR entry point keeps its
@@ -166,10 +172,12 @@ export default function ReviewComposer(props: Props) {
         </section>
       )}
 
-      {/* ── ③ 高级 ── Model + execution environment. Collapsed: both have
-          sensible defaults (reviewer role model, 本地) and neither changes
-          between runs for most users. */}
-      <details className="cr-step cr-advanced">
+      {/* ── ③ 高级 ── Model + execution environment. Defaults to OPEN: the
+          requirement design/development toolbars always expose these, and
+          collapsing them here made Review look like it had no knobs.
+          The user can still close the section to get the same minimal
+          surface as before. */}
+      <details className="cr-step cr-advanced" open>
         <summary className="cr-step-head cr-advanced-summary">
           <span className="cr-step-no">{mode === 'branch' ? 3 : 2}</span>
           <h4 className="cr-step-title">{t('projects.detail.reviewStepAdvanced')}</h4>
@@ -238,40 +246,44 @@ export default function ReviewComposer(props: Props) {
 }
 
 /** Branch + base + title. The datalist offers local and origin branches. */
-function BranchScope({ form, running }: { form: BranchFormProps; running: boolean }) {
+function BranchScope({ form, running, defaultBranch }: { form: BranchFormProps; running: boolean; defaultBranch: string }) {
   const { t } = useTranslation();
+  const localCount = form.branches.filter(b => !b.startsWith('origin/')).length;
+  const remoteCount = form.branches.length - localCount;
   return (
     <>
-      <div className="cr-field-row">
-        <div className="cr-field">
-          <label className="cr-label">{t('projects.detail.reviewBranchLabel')}</label>
-          <input
-            className="form-input"
-            list="cr-branch-options"
-            placeholder={t('projects.detail.reviewBranchPlaceholder')}
-            value={form.branch}
-            onChange={e => form.onBranchChange(e.target.value)}
-            onBlur={form.onFieldBlur}
-            disabled={running}
-          />
-        </div>
-        <div className="cr-field">
-          <label className="cr-label">{t('projects.detail.reviewBaseLabel')}</label>
-          <input
-            className="form-input"
-            list="cr-branch-options"
-            placeholder={t('projects.detail.reviewBasePlaceholder')}
-            value={form.baseBranch}
-            onChange={e => form.onBaseBranchChange(e.target.value)}
-            onBlur={form.onFieldBlur}
-            disabled={running}
-          />
-        </div>
-        <datalist id="cr-branch-options">
-          {form.branches.map(b => <option key={b} value={b} />)}
-        </datalist>
+      <div className="cr-field-row cr-branch-pickers">
+        <BranchPicker
+          inputId="cr-branch-input"
+          datalistId="cr-branch-options"
+          value={form.branch}
+          onChange={form.onBranchChange}
+          disabled={running}
+          placeholder={t('projects.detail.reviewBranchPlaceholder')}
+          options={form.branches}
+          chipLabel="目标"
+          defaultName={defaultBranch}
+          emptyWarnText={t('projects.detail.reviewBranchPickerEmpty')}
+        />
+        <BranchPicker
+          inputId="cr-base-branch-input"
+          datalistId="cr-base-branch-options"
+          value={form.baseBranch}
+          onChange={form.onBaseBranchChange}
+          disabled={running}
+          placeholder={t('projects.detail.reviewBasePlaceholder')}
+          options={form.branches}
+          chipLabel="基准"
+          defaultName={defaultBranch}
+          emptyWarnText={t('projects.detail.reviewBranchPickerEmpty')}
+        />
       </div>
       <div className="cr-branch-toolbar">
+        <span className="cr-branch-counts" aria-label={t('projects.detail.reviewBranchesHint')}>
+          <span>{t('projects.detail.reviewBranchCountLocal', { n: localCount })}</span>
+          <span aria-hidden="true">·</span>
+          <span>{t('projects.detail.reviewBranchCountRemote', { n: remoteCount })}</span>
+        </span>
         <button
           type="button"
           className="btn btn-secondary"
@@ -284,7 +296,6 @@ function BranchScope({ form, running }: { form: BranchFormProps; running: boolea
             : '🔄 ' + t('projects.detail.reviewRefreshBranchesBtn')}
         </button>
       </div>
-      <p className="cr-hint">{t('projects.detail.reviewBranchesHint')}</p>
 
       <div className="cr-field">
         <label className="cr-label">{t('projects.detail.reviewTitleLabel')}</label>

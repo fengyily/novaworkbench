@@ -13,6 +13,7 @@ import AttachmentPanel from '../components/AttachmentPanel';
 import { DevSourceBadge } from '../components/DevSourceBadge';
 import { ExecEnvBadge } from '../components/ExecEnvBadge';
 import { ExecEnvSelect } from '../components/ExecEnvSelect';
+import { BranchPicker } from '../components/BranchPicker';
 import { SyncModeSelect } from '../components/SyncModeSelect';
 import { SummarizeToRequirementModal } from '../components/SummarizeToRequirementModal';
 import { ScheduleModal } from '../components/ScheduleModal';
@@ -586,93 +587,6 @@ function WorktreePathHint({ path, onClean, cleaning, disabled }: {
         )}
         {toast && <span className="merge-hint-toast" role="status">{toast}</span>}
       </div>
-    </div>
-  );
-}
-
-/** Inline base-branch picker used by the design / development action
- *  panels. Reuses the preflight modal's chip+rail vocabulary (cyan
- *  GIT rail, BASE chip, monospace input) so the inline picker and
- *  the modal preflight checklist read as one continuous design system.
- *
- *  The picker is the SOURCE OF TRUTH for the active base branch;
- *  the preflight modal (when it opens) seeds its BASE field from
- *  this component's value. That way the user can change the base
- *  before committing to one of the CTAs, without having to discover
- *  the option inside a popup.
- *
- *  Props:
- *  - id          input + datalist id pair (must be unique per instance)
- *  - value       controlled value
- *  - onChange    controlled value setter
- *  - placeholder placeholder shown when value is empty (= project default)
- *  - disabled    locked while a job is running
- *  - datalistId  id of the <datalist> with branch suggestions
- *  - options     list of branch names to suggest
- *  - chipLabel   uppercase chip text — "BASE 设计" / "BASE 开发"
- *  - defaultHint i18n key for the trailing hint rail
- *  - defaultName the project default branch name (rendered in the hint)
- *  - emptyWarn   i18n key shown when `options` is empty
- *  - showIcon    whether to render the branch icon inside the chip */
-function InlineBaseBranchPicker({
-  inputId,
-  datalistId,
-  value,
-  onChange,
-  placeholder,
-  disabled,
-  options,
-  chipLabel,
-  defaultName,
-  emptyWarnText,
-  showIcon = true,
-}: {
-  inputId: string;
-  datalistId: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  disabled?: boolean;
-  options: string[];
-  chipLabel: string;
-  defaultName: string;
-  emptyWarnText: string;
-  showIcon?: boolean;
-}) {
-  return (
-    <div className="branch-selector">
-      <div className="preflight-field-card preflight-field-card--git">
-        <span className="preflight-field-chip" aria-hidden="true">
-          {showIcon && <IconBranch />}
-          {chipLabel}
-        </span>
-        <input
-          id={inputId}
-          list={datalistId}
-          className="preflight-field-input"
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          disabled={disabled}
-          placeholder={placeholder || defaultName || 'main'}
-        />
-      </div>
-      <datalist id={datalistId}>
-        {(options || []).map(b => (
-          <option key={b} value={b} />
-        ))}
-      </datalist>
-      {options.length === 0 ? (
-        <span className="branch-selector-warn" role="status">
-          {emptyWarnText}
-        </span>
-      ) : (
-        <span className="branch-selector-hint">
-          {/* i18n: protocol literal — the word "默认" anchors the
-              project default branch as the silent baseline. */}
-          <span aria-hidden="true">默认</span>
-          <code>{defaultName || 'main'}</code>
-        </span>
-      )}
     </div>
   );
 }
@@ -4416,12 +4330,12 @@ export default function RequirementDetail() {
                           TOP of the action zone so the user sees the
                           design-time base before committing to one of the
                           four CTAs below. Renders the shared
-                          InlineBaseBranchPicker (chip+rail vocabulary
+                          BranchPicker (chip+rail vocabulary
                           reused from the preflight modal) so the inline
                           picker and the popup modal read as one design
                           system. The development stage has its own
                           picker just below the model/env row. */}
-                      <InlineBaseBranchPicker
+                      <BranchPicker
                         inputId="design-base-branch-input"
                         datalistId="design-branch-suggestions"
                         value={baseBranch}
@@ -4813,7 +4727,7 @@ export default function RequirementDetail() {
                   no matter which entry point they used to land here.
                   Single state (baseBranch) shared with the draft panel
                   AND the dev picker below. */}
-              <InlineBaseBranchPicker
+              <BranchPicker
                 inputId="design-base-branch-input-idle"
                 datalistId="design-branch-suggestions-idle"
                 value={baseBranch}
@@ -5399,7 +5313,7 @@ export default function RequirementDetail() {
                     design-stage picker's position so the two panels
                     have a parallel reading order (settings → base →
                     actions). */}
-                <InlineBaseBranchPicker
+                <BranchPicker
                   inputId="coding-base-branch-input"
                   datalistId="coding-branch-suggestions"
                   value={baseBranch}
