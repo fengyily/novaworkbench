@@ -74,13 +74,6 @@ export default function App() {
             path="/knowledge/view/:id"
             element={<RequireAuth><KnowledgeViewPage /></RequireAuth>}
           />
-          {/* `/reviews/:id` 独立阅读视图 — RequireAuth 之内（必须登录）、
-              Layout 之外（独占清爽视口，新窗口打开体验更接近一篇"网页/
-              文章"）。同源 SPA 走 BrowserRouter 自动解析。 // i18n: protocol literal */}
-          <Route
-            path="/reviews/:id"
-            element={<RequireAuth><CodeReviewViewPage /></RequireAuth>}
-          />
           <Route element={<RequireAuth><Layout /></RequireAuth>}>
             <Route index element={<Dashboard />} />
             <Route path="wizard" element={<WizardPage />} />
@@ -90,6 +83,8 @@ export default function App() {
             <Route path="projects/:id/issue-monitor" element={<RequireAuth><Layout /></RequireAuth>}>
               <Route index element={<ProjectIssueMonitorWithId />} />
             </Route>
+            {/* Code Review detail lives inside Layout, like requirements/:id. */}
+            <Route path="reviews/:id" element={<CodeReviewViewPage />} />
             <Route path="requirements" element={<RequirementsList />} />
             {/* 字面量段 "calendar" 必须早于 ":id" 通配注册，否则会被
                路由成 id="calendar" 的详情页。与后端 ServeMux 同款语义。 */}

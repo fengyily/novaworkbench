@@ -10,14 +10,13 @@ export const codeReviews = {
   },
   view: {
     loading: 'Loading…',
-    close: 'Close',
     backToProject: 'Back to project',
     notFound: 'Code Review not found',
     projectFallback: 'Cannot determine parent project',
   },
   history: {
     openDraftHint: 'This is a draft — click to reopen the editor',
-    openViewerHint: 'Open in a new window',
+    openViewerHint: 'Open details',
     purgeBlankDrafts: 'Purge {{n}} blank drafts',
   },
 };

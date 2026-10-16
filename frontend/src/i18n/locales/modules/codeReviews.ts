@@ -13,14 +13,13 @@ export const codeReviews = {
   },
   view: {
     loading: '加载中…',
-    close: '关闭',
     backToProject: '返回项目',
     notFound: '未找到该 Code Review',
     projectFallback: '无法确定所属项目',
   },
   history: {
     openDraftHint: '此为草稿，点击回到编辑器继续',
-    openViewerHint: '在新窗口打开',
+    openViewerHint: '打开详情',
     purgeBlankDrafts: '清理 {{n}} 个空白草稿',
   },
 };

@@ -20,9 +20,8 @@ interface Props {
       draft's fields pre-filled (the new-window route is for finished
       reports; a draft has nothing to view there). */
   onOpenDraft: (rv: CodeReview) => void;
-  /** Click on a non-draft row: open the dedicated reader in a new window
-      (`/reviews/:id`). The parent decides what that means — usually a
-      `window.open(..., '_blank', 'noopener,noreferrer')`. */
+  /** Click on a non-draft row: open the dedicated reader (`/reviews/:id`).
+      The parent decides how — usually an in-app navigate. */
   onOpenViewer: (rv: CodeReview) => void;
   onRerun: (rv: CodeReview) => void;
   onDelete: (rv: CodeReview) => void;

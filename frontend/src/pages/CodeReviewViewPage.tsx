@@ -1,20 +1,11 @@
-// CodeReviewViewPage — `/reviews/:id` 独立阅读视图。
+// CodeReviewViewPage — `/reviews/:id` detail view, rendered inside Layout
+// (left menu kept, width follows .app-main like RequirementDetail).
 //
-// 与 KnowledgeViewPage 同模式（RequireAuth 之内、Layout 之外）。区别在于
-// 这页的 "数据" 比一条知识条目大得多：单条 Code Review 自带 followup 线程、
-// 版本列表、可能仍在跑的 SSE job。所以这里不复制 KnowledgeViewPage 的
-// `useState<LoadState>` 写法，而是直接复用 useReviewSession hook ——
-// ProjectCodeReview 容器在 tab 里也是同一个 hook 的客户端，两处行为自然
-// 对齐（追问 SSE 追加、版本回切、export 等等）。
-//
-// Loading 顺序：URL 上的 id 立即交给 hook，hook 自己拉 review / followups /
-// revisions，并用 review.project_id 拼 SSE 地址；review 若仍在 running 会
-// 自动接入同一条 job 流。`?run=1` 表示本窗口由「开始 Review」打开，start 可能
-// 尚未落库，hook 会在 draft 状态下轮询等待。
-//
-// 关闭按钮沿用 KnowledgeViewPage 的智能回退（line 76-84）：新窗口里点
-// 关闭能 window.close()，直接粘贴 URL 进入时退到 /projects，而不是 /knowledge
-// —— review 是项目级资源。
+// It reuses the useReviewSession hook that ProjectCodeReview also uses, so
+// both surfaces behave the same (followup SSE, revision switching, export).
+// A review that is still running is joined automatically; `?run=1` means
+// the page was reached right after 「开始 Review」, where start may not have
+// persisted yet, so the hook polls while the row is still `draft`.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -63,14 +54,10 @@ export default function CodeReviewViewPage() {
     return () => { cancelled = true; };
   }, [projectId]);
 
-  // ── Closing — same smart fallback as KnowledgeViewPage.tsx:76-84 ──────────
+  // ── Back to the project's Review tab ─────────────────────────────────────
   const handleClose = useCallback(() => {
-    if (window.history.length > 1) {
-      navigate(-1);
-    } else {
-      navigate('/projects');
-    }
-  }, [navigate]);
+    navigate(projectId ? `/projects/${projectId}?tab=review` : '/projects');
+  }, [navigate, projectId]);
 
   // ── Per-card / per-finding handlers ──────────────────────────────────────
   // Push the Ask-About template into ReviewChat via its externalQuestion
@@ -203,13 +190,11 @@ export default function CodeReviewViewPage() {
   // ── Render ───────────────────────────────────────────────────────────────
   if (loadingReview) {
     return (
-      <div className="crv-page">
-        <header className="crv-topbar">
+      <div className="crv-detail">
+        <div className="detail-header crv-header">
+          <button className="btn" onClick={handleClose}>{t('codeReviews.view.backToProject')}</button>
           <div className="crv-topbar-title">{t('codeReviews.view.loading')}</div>
-          <button className="btn" onClick={handleClose}>
-            {t('codeReviews.view.close')}
-          </button>
-        </header>
+        </div>
         <main className="crv-main crv-loading">
           <div className="tab-empty">{t('codeReviews.view.loading')}</div>
         </main>
@@ -219,13 +204,11 @@ export default function CodeReviewViewPage() {
 
   if (notFound) {
     return (
-      <div className="crv-page">
-        <header className="crv-topbar">
+      <div className="crv-detail">
+        <div className="detail-header crv-header">
+          <button className="btn" onClick={handleClose}>{t('codeReviews.view.backToProject')}</button>
           <div className="crv-topbar-title">{t('codeReviews.view.notFound')}</div>
-          <button className="btn" onClick={handleClose}>
-            {t('codeReviews.view.close')}
-          </button>
-        </header>
+        </div>
         <main className="crv-main crv-loading">
           <div className="tab-empty">
             <p>{t('codeReviews.view.notFound')}</p>
@@ -240,13 +223,11 @@ export default function CodeReviewViewPage() {
 
   if (loadError) {
     return (
-      <div className="crv-page">
-        <header className="crv-topbar">
+      <div className="crv-detail">
+        <div className="detail-header crv-header">
+          <button className="btn" onClick={handleClose}>{t('codeReviews.view.backToProject')}</button>
           <div className="crv-topbar-title">{t('codeReviews.view.notFound')}</div>
-          <button className="btn" onClick={handleClose}>
-            {t('codeReviews.view.close')}
-          </button>
-        </header>
+        </div>
         <main className="crv-main crv-loading">
           <div className="tab-empty">
             <p>{t('projects.detail.reviewErrPrefix')}{loadError}</p>
@@ -260,8 +241,9 @@ export default function CodeReviewViewPage() {
   }
 
   return (
-    <div className="crv-page">
-      <header className="crv-topbar">
+    <div className="crv-detail">
+      <div className="detail-header crv-header">
+        <button className="btn" onClick={handleClose}>{t('codeReviews.view.backToProject')}</button>
         <div className="crv-topbar-title" title={review?.title || ''}>
           {/* Project name + review title. Falls back to the project id
               when the project row isn't loadable (e.g. deleted) so the
@@ -270,10 +252,7 @@ export default function CodeReviewViewPage() {
           {review?.title ? <span className="crv-topbar-sep"> · </span> : null}
           {review?.title}
         </div>
-        <button className="btn" onClick={handleClose}>
-          {t('codeReviews.view.close')}
-        </button>
-      </header>
+      </div>
       <main className="crv-main">
         {displayError && (
           <div className="cr-error">
