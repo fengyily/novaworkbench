@@ -7,6 +7,7 @@ export const errors = {
   NOT_FOUND: 'Not found or already deleted',
   PROJECT_NOT_FOUND: 'Project not found or already deleted',
   TOKEN_NOT_FOUND: 'Token not found or already deleted',
+  PATH_NOT_FOUND: 'Project local path is missing — fix it in project settings or re-import the repository',
   BAD_REQUEST: 'Malformed request',
   MISSING_FIELDS: 'Missing required fields',
   INVALID: 'Invalid parameter',

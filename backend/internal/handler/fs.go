@@ -171,6 +171,22 @@ func (h *FsHandler) GitBranches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// resolveAllowedPath accepts lexically-matching paths even when they don't
+	// exist on disk (e.g. ~/workspace/viva-ai after the directory was removed
+	// or moved). Without this guard, `git -C <path> branch` and `git fetch`
+	// both fail with a cryptic "exit status 128" — surface an actionable
+	// PATH_NOT_FOUND so the Code Review UI can point at the project settings
+	// page instead of dumping an OS error.
+	if info, statErr := os.Stat(path); statErr != nil {
+		writeError(w, http.StatusBadRequest, "PATH_NOT_FOUND",
+			"项目本地路径不存在: "+path+"。请到 项目设置 → 本地路径 修正或重新导入仓库。")
+		return
+	} else if !info.IsDir() {
+		writeError(w, http.StatusBadRequest, "PATH_NOT_FOUND",
+			"项目本地路径不是目录: "+path)
+		return
+	}
+
 	refresh := r.URL.Query().Get("refresh") == "1"
 	var fetchWarning string
 	if refresh {

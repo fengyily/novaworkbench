@@ -269,3 +269,42 @@ func TestGitBranches_Refresh_OK(t *testing.T) {
 		t.Errorf("expected main and feat/pushed in branches, got %v", seen)
 	}
 }
+
+// TestGitBranches_PathNotFound: when the project's registered local_path is
+// registered with LocalPathProvider (so resolveAllowedPath passes it lexically)
+// but the directory itself does not exist on disk, the handler must return a
+// clear PATH_NOT_FOUND instead of leaking `exit status 128` from git. This
+// also covers the refresh=1 case — fetch would otherwise fail the same way
+// before the stat guard.
+func TestGitBranches_PathNotFound(t *testing.T) {
+	root := t.TempDir()
+	missing := filepath.Join(root, "viva-ai") // never created on disk
+
+	h := newTestFsHandler([]string{missing})
+
+	for _, q := range []string{"?path=" + missing, "?path=" + missing + "&refresh=1"} {
+		t.Run(strings.TrimPrefix(q, "?"), func(t *testing.T) {
+			rec := callGitBranches(h, q)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+			}
+			var envelope struct {
+				Success bool                   `json:"success"`
+				Error   map[string]interface{} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if envelope.Success {
+				t.Fatalf("expected success=false, got %+v", envelope)
+			}
+			if got := envelope.Error["code"]; got != "PATH_NOT_FOUND" {
+				t.Errorf("expected code=PATH_NOT_FOUND, got %v", got)
+			}
+			msg, _ := envelope.Error["message"].(string)
+			if !strings.Contains(msg, missing) {
+				t.Errorf("expected message to mention %q, got %q", missing, msg)
+			}
+		})
+	}
+}

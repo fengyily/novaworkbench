@@ -11,6 +11,7 @@ export const errors = {
   NOT_FOUND: '资源不存在或已被删除',
   PROJECT_NOT_FOUND: '项目不存在或已被删除',
   TOKEN_NOT_FOUND: '令牌不存在或已被删除',
+  PATH_NOT_FOUND: '项目本地路径不存在，请在项目设置中修正或重新导入仓库',
   BAD_REQUEST: '请求格式错误',
   MISSING_FIELDS: '缺少必填字段',
   INVALID: '参数不合法',
