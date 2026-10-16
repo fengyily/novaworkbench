@@ -117,6 +117,11 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   // ── History + result ─────────────────────────────────────────────────────
   const [history, setHistory] = useState<CodeReview[]>([]);
   const [selected, setSelected] = useState<CodeReview | null>(null);
+  // Composer is on-demand: the page opens to a history list, and the user
+  // presses the header button to summon the form. Toggled by the page-header
+  // primary button (and the mobile FAB); the composer's own "collapse" button
+  // and the success path of 开始 also flip it back off.
+  const [showCreate, setShowCreate] = useState(false);
   const [revisions, setRevisions] = useState<CodeReviewRevision[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
@@ -371,11 +376,17 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   formRef.current = { branch, baseBranch, draftTitle, description, binding: runBinding() };
   useEffect(() => { sessionRef.current = session; }, [session]);
 
-  const ensureDraft = useCallback(async (): Promise<CodeReview | null> => {
+  const ensureDraft = useCallback(async (mode: 'immediate' | 'debounced' = 'debounced'): Promise<CodeReview | null> => {
     if (sessionRef.current) return sessionRef.current;
     if (draftPromiseRef.current) return draftPromiseRef.current;
     const form = formRef.current;
     if (!form.branch.trim()) return null;
+    // The `mode` argument distinguishes the composer's on-mount call (no
+    // 700ms wait) from the branch-typing debounce. Today both paths share
+    // the same create() — the empty-branch guard above is the one
+    // invariant that matters in either case — so the value is currently
+    // documentation. Keep the param so call sites make the intent obvious.
+    void mode;
     setCreating(true);
     const pending = codeReviewsApi.create(projectId, {
       branch: form.branch.trim(),
@@ -405,13 +416,19 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
   // Debounced because `branch` is a free-text input with a datalist: typing
   // "feat/pagination" by hand would otherwise create a row per keystroke.
+  // `mode='immediate'` is reserved for the composer's on-mount useEffect,
+  // which calls ensureDraft() without sitting behind a 700ms wait. The
+  // branch-typing effect always uses the debounced path.
+  // The `showCreate` gate is what stops an auto-draft from being created
+  // while the page is showing only the history list: the composer itself
+  // is not even mounted, so there is no form to attach the row to.
   useEffect(() => {
-    if (mode !== 'branch' || session || running || !branch.trim()) return;
+    if (mode !== 'branch' || !showCreate || session || running || !branch.trim()) return;
     const timer = window.setTimeout(() => {
-      void ensureDraft().catch((err: unknown) => setBranchesError(errorMessage(err)));
+      void ensureDraft('debounced').catch((err: unknown) => setBranchesError(errorMessage(err)));
     }, DRAFT_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [mode, branch, session, running, ensureDraft]);
+  }, [mode, showCreate, branch, session, running, ensureDraft]);
 
   const handleStartBranchReview = async () => {
     if (running) return;
@@ -440,6 +457,15 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
       if (existing) await saveDraftField();
       const reviewId = rv.id;
       const { job_id } = await codeReviewsApi.start(reviewId);
+      // Close the composer and pop the dedicated viewer in a new tab. The
+      // window.open call sits in the same click handler chain as the
+      // `await codeReviewsApi.start(...)` above, so the browser still treats
+      // it as user-initiated and does not block the popup. Doing it inside
+      // subscribeJob's job_done callback would be too late (the user has
+      // already watched the stream render into the tab they came from) and
+      // would also be outside the user-gesture chain, which Chromium blocks.
+      setShowCreate(false);
+      window.open(`/reviews/${reviewId}`, '_blank', 'noopener,noreferrer');
       subscribeJob(job_id, () => {
         loadHistory();
         // Re-read the session so the graded findings (written by the stream
@@ -757,50 +783,87 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
   return (
     <div className="tab-content project-code-review">
-      <ReviewComposer
-        mode={mode}
-        onModeChange={setMode}
-        running={running}
-        defaultBranch={project?.default_branch || 'main'}
-        bindings={{
-          model: runModel,
-          configId: runConfigId,
-          agentServerId,
-          servers: agentServers,
-          onModelChange: (m) => { setRunModel(m); if (session) void saveDraftField({ model: m }); },
-          onConfigChange: (c) => { setRunConfigId(c); if (session) void saveDraftField({ claude_config_id: c }); },
-          onAgentServerChange: (v) => { setAgentServerId(v); if (session) void saveDraftField({ agent_server_id: v }); },
-        }}
-        prData={prData}
-        prsLoading={prsLoading}
-        prsError={prsError}
-        reviewingPR={reviewingPR}
-        extraRequirements={extraRequirements}
-        onExtraRequirementsChange={setExtraRequirements}
-        onReviewPR={handleReviewPR}
-        branchForm={{
-          branches,
-          branch,
-          baseBranch,
-          defaultBranch: project?.default_branch || 'main',
-          title: draftTitle,
-          description,
-          onBranchChange: setBranch,
-          onBaseBranchChange: setBaseBranch,
-          onTitleChange: setDraftTitle,
-          onDescriptionChange: setDescription,
-          onFieldBlur: () => { if (session) void saveDraftField(); },
-          session,
-          creating,
-          savedAt: descSavedAt,
-          error: branchesError,
-          onStart: handleStartBranchReview,
-          onReset: handleNewSession,
-          onDelete: () => { if (session) void handleDelete(session); },
-          onRefreshBranches: () => void refreshBranches(true),
-          refreshing: branchesLoading,
-        }}
-      />
+      {/* ── Page header + on-demand composer toggle. Mirrors the
+          RequirementsList pattern (page-header / page-header-actions) so
+          the two list pages read the same way: title on the left, primary
+          action on the right, no form visible until the user asks. */}
+      <div className="page-header">
+        <h2 className="page-header-title">{t('codeReviews.page.title')}</h2>
+        <div className="page-header-actions desktop-only">
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => setShowCreate(v => !v)}
+          >
+            {showCreate ? t('codeReviews.create.toggleClose') : t('codeReviews.create.toggleOpen')}
+          </button>
+        </div>
+      </div>
+
+      {showCreate && (
+        <ReviewComposer
+          mode={mode}
+          onModeChange={setMode}
+          running={running}
+          defaultBranch={project?.default_branch || 'main'}
+          bindings={{
+            model: runModel,
+            configId: runConfigId,
+            agentServerId,
+            servers: agentServers,
+            onModelChange: (m) => { setRunModel(m); if (session) void saveDraftField({ model: m }); },
+            onConfigChange: (c) => { setRunConfigId(c); if (session) void saveDraftField({ claude_config_id: c }); },
+            onAgentServerChange: (v) => { setAgentServerId(v); if (session) void saveDraftField({ agent_server_id: v }); },
+          }}
+          prData={prData}
+          prsLoading={prsLoading}
+          prsError={prsError}
+          reviewingPR={reviewingPR}
+          extraRequirements={extraRequirements}
+          onExtraRequirementsChange={setExtraRequirements}
+          onReviewPR={handleReviewPR}
+          branchForm={{
+            branches,
+            branch,
+            baseBranch,
+            defaultBranch: project?.default_branch || 'main',
+            title: draftTitle,
+            description,
+            onBranchChange: setBranch,
+            onBaseBranchChange: setBaseBranch,
+            onTitleChange: setDraftTitle,
+            onDescriptionChange: setDescription,
+            onFieldBlur: () => { if (session) void saveDraftField(); },
+            session,
+            creating,
+            savedAt: descSavedAt,
+            error: branchesError,
+            onStart: handleStartBranchReview,
+            onReset: handleNewSession,
+            onDelete: () => { if (session) void handleDelete(session); },
+            onRefreshBranches: () => void refreshBranches(true),
+            refreshing: branchesLoading,
+          }}
+          onClose={() => setShowCreate(false)}
+          onEnsureDraft={() => ensureDraft('immediate')}
+        />
+      )}
+
+      {/* Mobile-only floating action button — mirrors the RequirementsList
+          page: the desktop button is in `.page-header-actions.desktop-only`,
+          the FAB is the same toggle on phones. Hidden on desktop via the
+          `.fab` rule in index.css (display:none outside the 768px media
+          query). */}
+      <button
+        type="button"
+        className="fab fab-extended"
+        onClick={() => setShowCreate(v => !v)}
+        aria-label={showCreate ? t('codeReviews.create.toggleClose') : t('codeReviews.create.toggleOpen')}
+      >
+        {showCreate
+          ? `✕ ${t('codeReviews.create.toggleClose')}`
+          : `+ ${t('codeReviews.create.toggleOpen')}`}
+      </button>
 
       {/* ── Live stream (shared by review / 追问 / regeneration) ── */}
       {(reviewLines.length > 0 || running) && (
@@ -842,12 +905,14 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
             busy={running || regenerating}
             pendingFollowups={pendingFollowups}
             canRegenerate={!!selected.result_md && selected.status !== 'running'}
-            onExportMarkdown={handleExportMarkdown}
+            onExportMd={handleExportMarkdown}
             onExportPdf={handleExportPdf}
             exportingPdf={exportingPdf}
             onRegenerate={handleRegenerate}
             onRerun={() => void handleRerun(selected)}
-            onSelectRevision={(n) => void handleSelectRevision(n)}
+            activeRevisionNo={selected.revision_no}
+            onSetActiveRevision={() => { /* hook owns the live active pick */ }}
+            onRestoreRevision={(n: number) => void handleSelectRevision(n)}
             onAskAbout={handleAskAbout}
             onCreateIssue={handleCreateIssue}
             creatingIssues={creatingIssues}
@@ -908,7 +973,6 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
 
       <ReviewHistory
         history={history}
-        selectedId={selectedId}
         running={running}
         onOpen={(rv) => void handleOpenHistory(rv)}
         onRerun={(rv) => void handleRerun(rv)}

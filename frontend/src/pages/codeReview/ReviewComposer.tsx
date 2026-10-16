@@ -18,6 +18,7 @@
 // row automatically once a branch is picked, so the only button left is the
 // one the user actually came for.
 
+import { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { CodeReview, PR, PRListResponse } from '../../api/client';
 import AttachmentPanel from '../../components/AttachmentPanel';
@@ -87,14 +88,51 @@ interface Props {
   onReviewPR: (pr: PR) => void;
   // Branch mode
   branchForm: BranchFormProps;
+  // On-demand toggle plumbing (see ProjectCodeReview.showCreate). The
+  // composer is mounted only while showCreate is true, so these are the
+  // only ways the user has to dismiss it without starting a run.
+  /** Render a "collapse" button that flips the parent toggle off. */
+  onClose?: () => void;
+  /** Fire-once hook so the parent can eagerly provision the draft row
+   *  (and thus the attachment owner) the moment the composer opens,
+   *  rather than waiting for the user to type a branch. The parent's
+   *  own branch-typing effect still owns the 700ms debounce. */
+  onEnsureDraft?: () => Promise<CodeReview | null>;
 }
 
 export default function ReviewComposer(props: Props) {
   const { t } = useTranslation();
-  const { mode, onModeChange, running, bindings, branchForm, defaultBranch } = props;
+  const { mode, onModeChange, running, bindings, branchForm, defaultBranch, onClose, onEnsureDraft } = props;
+
+  // On mount, give the parent a chance to provision the draft row. With no
+  // branch picked yet this is a no-op (ensureDraft returns null), but it
+  // means that as soon as a branch is selected the row already exists in
+  // the same render that picks it — the attachment panel never has to
+  // wait on a debounce timer.
+  useEffect(() => {
+    if (onEnsureDraft) void onEnsureDraft();
+    // We only want this on mount; the parent owns subsequent re-runs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
-    <div className="cr-composer-shell">
+    <div className="cr-composer-shell" data-show="on-demand">
+      {/* On-demand dismiss: only rendered when the parent passes `onClose`,
+          which is the new toggle-affordance case (the tab used to always
+          show the composer, so there was nothing to close). Kept at the
+          top of the shell so it's reachable without scrolling. */}
+      {onClose && (
+        <div className="cr-composer-head">
+          <button
+            type="button"
+            className="rc-collapse btn btn-secondary"
+            onClick={onClose}
+          >
+            ✕ {t('codeReviews.create.toggleClose')}
+          </button>
+        </div>
+      )}
+
       {/* ── ① 范围 ── */}
       <section className="cr-step">
         <header className="cr-step-head">

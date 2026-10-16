@@ -15,7 +15,6 @@ import { SEVERITIES, isBlankDraft, severityCount } from './shared';
 
 interface Props {
   history: CodeReview[];
-  selectedId: string;
   running: boolean;
   onOpen: (rv: CodeReview) => void;
   onRerun: (rv: CodeReview) => void;
@@ -24,7 +23,7 @@ interface Props {
 }
 
 export default function ReviewHistory({
-  history, selectedId, running, onOpen, onRerun, onDelete, onPurgeBlankDrafts,
+  history, running, onOpen, onRerun, onDelete, onPurgeBlankDrafts,
 }: Props) {
   const { t } = useTranslation();
 
@@ -38,7 +37,7 @@ export default function ReviewHistory({
 
   return (
     <div className="cr-history">
-      <div className="review-panel-header">
+      <div className="req-table-wrap">
         <span>{t('projects.detail.reviewHistoryTitle')}</span>
         {blanks.length > 0 && (
           <span className="cr-history-blanks">
@@ -52,7 +51,7 @@ export default function ReviewHistory({
       {rows.length === 0 ? (
         <div className="tab-empty"><p>{t('projects.detail.reviewHistoryEmpty')}</p></div>
       ) : (
-        <table className="pr-table table-cards">
+        <table className="req-table table-cards">
           <thead>
             <tr>
               <th style={{ width: 90 }}>{t('projects.detail.reviewHistoryColType')}</th>
@@ -65,7 +64,7 @@ export default function ReviewHistory({
           </thead>
           <tbody>
             {rows.map(rv => (
-              <tr key={rv.id} className={selectedId === rv.id ? 'pr-row-active' : ''}>
+              <tr key={rv.id} className="req-row">
                 <td data-label={t('projects.detail.reviewHistoryColType')}>
                   {rv.review_type === 'pr' ? t('projects.detail.reviewModePR') : t('projects.detail.reviewModeBranch')}
                 </td>
