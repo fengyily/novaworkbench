@@ -31,7 +31,7 @@ import { ApiError } from '../api/client';
 import ModelSelect from './ModelSelect';
 import { ExecEnvSelect, type ExecEnvServer } from './ExecEnvSelect';
 import { SyncModeSelect } from './SyncModeSelect';
-import { IconArrowRight, IconBook, IconPin, IconRocket } from './icons';
+import { IconArrowRight, IconBook, IconPin, IconRocket, IconSave } from './icons';
 
 interface Props {
   open: boolean;
@@ -95,6 +95,15 @@ export function DesignCodingImmediateModal({
   // 互不影响。Agent server 互斥:勾选 no_branch 时清掉 codingAgentServerId
   // (后端前置拒绝)。
   const [noBranch, setNoBranch] = useState(false);
+  // 三段开关 — 与「开始开发」面板(RequirementDetail.tsx autoCommitDev/
+  // autoPushDev/autoCreatePRDev)同款。commit ⊐ push ⊐ PR 依赖关系由
+  // onChange cascade + 后端 wizard_coding.go:622-631 双重硬约束。
+  // 每次 modal 打开即重置为 (true, true, true),与「开始开发」面板
+  // openBranchModal 行为对齐;后端 nil → 保留行值的隐式跟随语义在此
+  // 面板被显式传值覆盖,所以行里持久化的 flag 不再生效。
+  const [autoCommit, setAutoCommit] = useState(true);
+  const [autoPush, setAutoPush] = useState(true);
+  const [autoCreatePR, setAutoCreatePR] = useState(true);
 
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
@@ -129,6 +138,14 @@ export function DesignCodingImmediateModal({
         // modal and clicked launch" run doesn't have to commit to a value
         // (the server still infers from project.remote_url).
         ...(syncMode ? { sync_mode: syncMode } : {}),
+        // 三段开关 — 与 StartCoding request 同字段名,后端透传至
+        // wizard_coding.go prologue 应用 commit⊐push⊐PR 依赖不变量。
+        // 显式传值(即使全 true)以覆盖后端 nil → 保留行值分支,行里
+        // 持久化的 auto_commit / auto_push_remote / auto_create_pr 自此
+        // 不再对 immediate 面板生效。
+        auto_commit: autoCommit,
+        auto_push: autoPush,
+        auto_create_pr: autoCreatePR,
       };
       const resp = await wizardApi.startDesignAndCoding(requirementId, body);
       onLaunched(resp.design_job_id);
@@ -440,6 +457,13 @@ export function DesignCodingImmediateModal({
                 if (next) {
                   setCodingAgentServerId('');
                   setSyncMode('');
+                  // no-branch 必然不创建 PR(无 dev 分支,gh/glab/tea 也会拒绝);
+                  // commit/push 仍可单独关闭,所以只关 PR。
+                  setAutoCreatePR(false);
+                } else {
+                  // 退出 no-branch 时恢复 PR 默认(其他两 flag 不动 — 用户
+                  // 在「取消 no-branch 后」自行决定是否恢复 push)。
+                  setAutoCreatePR(true);
                 }
               }}
             >
@@ -484,6 +508,94 @@ export function DesignCodingImmediateModal({
                 </div>
                 <div className="preflight-toggle-desc">
                   {t('requirements.detail2.preflightSplitTasksHint')}
+                </div>
+              </div>
+            </label>
+
+            {/* Three independent stage toggles split of the legacy single
+                "提交 → 推送 → 创建 PR" checkbox. Mirrors RequirementDetail.tsx
+                3291-3368. Dependency cascade enforced by onChange below +
+                wizard_coding.go prologue stamping. */}
+            <label className={`preflight-toggle ${autoCommit ? 'is-checked' : ''}`}>
+              <input
+                type="checkbox"
+                checked={autoCommit}
+                onChange={e => {
+                  const next = e.target.checked;
+                  setAutoCommit(next);
+                  // Commit is the root of the chain — turning it off collapses
+                  // everything underneath.
+                  if (!next) {
+                    setAutoPush(false);
+                    setAutoCreatePR(false);
+                  }
+                }}
+                disabled={submitting}
+              />
+              <div className="preflight-toggle-body">
+                <div className="preflight-toggle-title">
+                  <IconSave size={14} className="icon-mr" />
+                  {t('requirements.detail2.preflightAutoCommit')}
+                </div>
+                <div className="preflight-toggle-desc">
+                  {t('requirements.detail2.preflightAutoCommitHint')}
+                </div>
+              </div>
+            </label>
+            <label className={`preflight-toggle ${autoPush ? 'is-checked' : ''}`}>
+              <input
+                type="checkbox"
+                checked={autoPush}
+                onChange={e => {
+                  const next = e.target.checked;
+                  setAutoPush(next);
+                  if (next) {
+                    // Push needs commit; turning it on re-enables commit
+                    // (in case it was the only one off).
+                    setAutoCommit(true);
+                  } else {
+                    // PR cascades off when push turns off — opening a PR
+                    // for a branch we didn't push is meaningless and the
+                    // platform CLIs would reject it anyway.
+                    setAutoCreatePR(false);
+                  }
+                }}
+                disabled={submitting}
+              />
+              <div className="preflight-toggle-body">
+                <div className="preflight-toggle-title">
+                  <IconArrowRight size={14} className="icon-mr" />
+                  {t('requirements.detail2.preflightAutoPush')}
+                </div>
+                <div className="preflight-toggle-desc">
+                  {t('requirements.detail2.preflightAutoPushHint')}
+                </div>
+              </div>
+            </label>
+            <label className={`preflight-toggle ${autoCreatePR ? 'is-checked' : ''}`}>
+              <input
+                type="checkbox"
+                checked={autoCreatePR}
+                onChange={e => {
+                  const next = e.target.checked;
+                  setAutoCreatePR(next);
+                  // PR implies push + commit.
+                  if (next) {
+                    setAutoCommit(true);
+                    setAutoPush(true);
+                  }
+                }}
+                disabled={submitting || noBranch}
+              />
+              <div className="preflight-toggle-body">
+                <div className="preflight-toggle-title">
+                  <IconRocket size={14} className="icon-mr" />
+                  {t('requirements.detail2.preflightAutoCreatePR')}
+                </div>
+                <div className="preflight-toggle-desc">
+                  {noBranch
+                    ? t('requirements.detail2.preflightNoBranchPrLocked')
+                    : t('requirements.detail2.preflightAutoCreatePRHint')}
                 </div>
               </div>
             </label>

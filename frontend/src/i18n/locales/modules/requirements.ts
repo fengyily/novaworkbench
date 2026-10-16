@@ -262,6 +262,7 @@ export const requirements = {
     preflightAutoPushHint: '执行 git push -u origin <dev>。关掉后 commit 留在本地，不会上送到 origin。',
     preflightAutoCreatePR: 'push 后自动创建 PR',
     preflightAutoCreatePRHint: '通过 gh / glab / tea 创建 PR（或在平台不支持时给出 compare 链接）。关掉后仅 commit + push，PR 由你手动在浏览器里创建。',
+    preflightNoBranchPrLocked: '不创建分支模式下无法创建 PR，已自动关闭',
     // 旧的复合 key 保留以避免破坏可能仍在引用它的外部脚本;
     // 前端分支弹窗与 LaunchPlanSection 已切到上面三个独立 key。
     preflightAutoPushPR: '开发完成后自动提交 / 推送 / 创建 PR',
