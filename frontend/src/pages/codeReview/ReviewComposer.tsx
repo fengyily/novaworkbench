@@ -60,6 +60,10 @@ export interface BranchFormProps {
   onStart: () => void;
   onReset: () => void;
   onDelete: () => void;
+  /** Manually pull remote branches so the datalist isn't a stale snapshot. */
+  onRefreshBranches: () => void;
+  /** True while the manual `git fetch origin --prune` is in flight. */
+  refreshing: boolean;
 }
 
 interface Props {
@@ -266,6 +270,19 @@ function BranchScope({ form, running }: { form: BranchFormProps; running: boolea
         <datalist id="cr-branch-options">
           {form.branches.map(b => <option key={b} value={b} />)}
         </datalist>
+      </div>
+      <div className="cr-branch-toolbar">
+        <button
+          type="button"
+          className="btn btn-secondary"
+          onClick={form.onRefreshBranches}
+          disabled={running || form.refreshing}
+          aria-label={t('projects.detail.reviewRefreshBranchesBtn')}
+        >
+          {form.refreshing
+            ? t('projects.detail.reviewRefreshBranchesBusy')
+            : '🔄 ' + t('projects.detail.reviewRefreshBranchesBtn')}
+        </button>
       </div>
       <p className="cr-hint">{t('projects.detail.reviewBranchesHint')}</p>
 
