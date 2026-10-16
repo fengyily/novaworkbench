@@ -1,12 +1,15 @@
 package handler
 
 import (
+	"bytes"
+	"context"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 type FileItem struct {
@@ -149,7 +152,13 @@ func buildBreadcrumb(path string) []FileItem {
 }
 
 // GitBranches returns local + remote branches for a git repo at the given path.
-// GET /api/fs/git-branches?path=...
+// GET /api/fs/git-branches?path=...&refresh=1
+//
+// When `?refresh=1`, runs `git fetch origin --prune` first so the caller sees
+// freshly-pushed branches; any fetch stderr is returned as a non-fatal
+// `fetch_warning` field so the UI can surface it (e.g. credential failures).
+// Fetch failure does NOT cause a non-2xx — we still return the locally visible
+// branches and let the caller decide what to do.
 func (h *FsHandler) GitBranches(w http.ResponseWriter, r *http.Request) {
 	rawPath := r.URL.Query().Get("path")
 	path, errCode, errMsg := h.resolveAllowedPath(rawPath)
@@ -162,28 +171,49 @@ func (h *FsHandler) GitBranches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	refresh := r.URL.Query().Get("refresh") == "1"
+	var fetchWarning string
+	if refresh {
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "git", "-C", path, "fetch", "origin", "--prune")
+		// 始终注入 GIT_TERMINAL_PROMPT=0，匹配 review_refs.go / merge.go /
+		// worktree.go 的对齐。私有 HTTPS 仓库凭据失败时不让它挂起。
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			fetchWarning = strings.TrimSpace(stderr.String())
+			if len(fetchWarning) > 200 {
+				fetchWarning = fetchWarning[:200] + "..."
+			}
+		}
+	}
+
 	out, err := exec.Command("git", "-C", path, "branch", "-a", "--format=%(refname:short)").Output()
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "GIT_ERROR", "git branch failed: "+err.Error())
 		return
 	}
 
+	raw := strings.Split(strings.TrimSpace(string(out)), "\n")
 	seen := map[string]bool{}
-	var branches []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		b := strings.TrimSpace(line)
-		if b == "" {
+	branches := make([]string, 0, len(raw))
+	for _, b := range raw {
+		b = strings.TrimSpace(b)
+		if b == "" || seen[b] {
 			continue
 		}
-		// Normalise remote tracking refs: origin/foo -> foo (keep as remote label)
-		// We'll return both forms but deduplicate
-		if !seen[b] {
-			seen[b] = true
-			branches = append(branches, b)
-		}
+		seen[b] = true
+		branches = append(branches, b)
 	}
+	sort.Strings(branches)
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"branches": branches})
+	payload := map[string]interface{}{"branches": branches}
+	if fetchWarning != "" {
+		payload["fetch_warning"] = fetchWarning
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // resolveAllowedPath expands ~, runs filepath.Abs + Clean + EvalSymlinks, then
