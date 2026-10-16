@@ -8,11 +8,12 @@
 // 致），源语法问题不会让 Dialog 崩。
 import { useEffect, useState } from 'react';
 import mermaid from 'mermaid';
+import { removeMermaidLeftovers } from '../utils/mermaidCleanup';
 
 let ready = false;
 function ensureMermaid() {
   if (ready) return;
-  mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose', fontFamily: 'inherit' });
+  mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'loose', fontFamily: 'inherit', suppressErrorRendering: true });
   ready = true;
 }
 
@@ -52,6 +53,7 @@ export default function DiagramPreview({ source, className }: Props) {
         }
       })
       .catch((e: unknown) => {
+        removeMermaidLeftovers(id);
         if (!cancelled) setError(String((e as Error)?.message || e));
       });
     return () => {
