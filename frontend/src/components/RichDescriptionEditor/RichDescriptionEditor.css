@@ -1,0 +1,147 @@
+/* RichDescriptionEditor — visual layer for the Markdown editor with image
+   paste support. Tokens mirror the design system in src/index.css so the
+   editor blends in with the rest of the form chrome. */
+
+.rich-editor {
+  border: 1px solid var(--color-border, #E2E8F0);
+  border-radius: 8px;
+  background: var(--color-surface, #fff);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.rich-editor.is-dragover {
+  border-color: var(--color-primary, #4F46E5);
+  background: #EEF2FF;
+}
+
+.rich-editor.is-disabled {
+  opacity: 0.7;
+}
+
+.rich-editor__toolbar {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--color-border, #E2E8F0);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.rich-editor__toolbar button {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--color-text, #1E293B);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rich-editor__toolbar button:hover:not(:disabled) {
+  background: var(--color-hover, #F1F5F9);
+}
+
+.rich-editor__toolbar button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.rich-editor__toolbar button i {
+  font-style: italic;
+}
+
+.rich-editor__tabs {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+
+.rich-editor__tabs button {
+  width: auto;
+  padding: 0 10px;
+  font-size: 12px;
+  border-radius: 4px;
+}
+
+.rich-editor__tabs button.active {
+  background: var(--color-primary, #4F46E5);
+  color: #fff;
+}
+
+.rich-editor textarea {
+  border: none;
+  border-radius: 0;
+  padding: 12px;
+  min-height: 140px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 14px;
+  line-height: 1.6;
+  resize: vertical;
+  background: transparent;
+  color: inherit;
+}
+
+.rich-editor textarea:focus {
+  outline: none;
+}
+
+.rich-editor__preview {
+  padding: 12px 16px;
+  min-height: 140px;
+  border-top: 1px solid var(--color-border, #E2E8F0);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.rich-editor__preview-empty {
+  color: var(--color-text-muted, #94A3B8);
+  font-style: italic;
+}
+
+.rich-editor__hint {
+  padding: 6px 12px;
+  border-top: 1px solid var(--color-border, #E2E8F0);
+  font-size: 12px;
+  color: var(--color-text-muted, #64748B);
+  background: #FFFBEB;
+}
+
+.rich-editor__uploads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--color-border, #E2E8F0);
+  font-size: 12px;
+  background: #F8FAFC;
+}
+
+.upload-pill {
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: #F1F5F9;
+  color: #475569;
+}
+
+.upload-pill.upload-compressing,
+.upload-pill.upload-uploading {
+  background: #FEF3C7;
+  color: #92400E;
+}
+
+.upload-pill.upload-done {
+  background: #D1FAE5;
+  color: #065F46;
+}
+
+.upload-pill.upload-error {
+  background: #FEE2E2;
+  color: #991B1B;
+}

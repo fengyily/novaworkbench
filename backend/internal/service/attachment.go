@@ -353,6 +353,18 @@ func (s *AttachmentService) BuildManifest(ownerID, attachDir string) string {
 		if strings.TrimSpace(a.ManifestText) != "" {
 			fmt.Fprintf(&b, "\n```\n%s\n```\n", strings.TrimRight(a.ManifestText, "\n"))
 		}
+		// Image-type hint. Claude's Read tool natively renders common image
+		// formats, so a pasted screenshot or design sketch is just as readable
+		// as a text file. We surface this here so the LLM doesn't waste a turn
+		// asking the user to describe the image, and so unusually large images
+		// (which the client-side compressor should have caught but might have
+		// slipped through) get a soft nudge.
+		if strings.HasPrefix(a.MimeType, "image/") {
+			b.WriteString("**类型**：图像 — Claude 可直接 `Read` 工具查看（API 原生支持 PNG/JPEG/GIF/WebP）\n")
+			if a.SizeBytes > 2*1024*1024 {
+				b.WriteString("**⚠ 文件 > 2MB，可能含未压缩原图，建议先 image-convert 工具降尺寸**\n")
+			}
+		}
 		b.WriteString("\n")
 	}
 	return b.String()

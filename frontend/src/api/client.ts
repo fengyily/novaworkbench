@@ -1289,6 +1289,11 @@ export const requirementsApi = {
   updateKind: (id: string, kind: Kind) =>
     api.patch<Requirement>(`/api/requirements/${id}/kind`, { kind }),
   delete: (id: string) => api.delete<{ status: string }>(`/api/requirements/${id}`),
+  // Alias of delete() — same backend route. Preferred name in the new
+  // RichDescriptionEditor draft-cleanup path to keep the call site free of
+  // the `delete` keyword (which clashes visually with "delete an attachment
+  // from a list").
+  remove: (id: string) => api.delete<{ status: string }>(`/api/requirements/${id}`),
   // Drop the stored claude analyst session so the next chat turn starts fresh
   // instead of resuming a broken / over-long conversation.
   clearAnalysisSession: (id: string) =>

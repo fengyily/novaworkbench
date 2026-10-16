@@ -333,6 +333,7 @@ export const components = {
     errNeedDesc: 'Please enter a description',
     errNeedProject: 'Please select a project',
     errCreate: 'Failed to create',
+    createDraftFailed: 'Failed to create draft, please retry',
     launchPlan: {
       title: '⚙ Launch plan (optional)',
       hint: 'Collapsed by default; behaviour matches today when not expanded',
@@ -410,6 +411,30 @@ export const components = {
     ariaLabel: 'Scroll to latest',
     button: 'Scroll to bottom',
     newMessages: '↓ {{count}} new messages',
+  },
+
+  // RichDescriptionEditor — Markdown editor with image paste support.
+  // Mirrors the zh locale above; assertSameKeys in i18n/index.ts will
+  // flag drift at startup.
+  richEditor: {
+    toolbarBold: 'Bold',
+    toolbarItalic: 'Italic',
+    toolbarInlineCode: 'Inline code',
+    toolbarLink: 'Link',
+    toolbarList: 'List',
+    toolbarCodeBlock: 'Code block',
+    toolbarImage: 'Insert image',
+    tabEdit: 'Edit',
+    tabPreview: 'Preview',
+    preparing: 'Preparing editor…',
+    previewEmpty: '(empty preview)',
+    draftPreparing: 'Editor is preparing — image upload is temporarily unavailable…',
+    uploadPasted: 'Pasted into the rich-text editor',
+    linkPrompt: 'Link URL',
+    upload_compressing: 'Compressing…',
+    upload_uploading: 'Uploading…',
+    upload_done: 'Uploaded',
+    upload_error: 'Upload failed',
   },
 } as const;
 
