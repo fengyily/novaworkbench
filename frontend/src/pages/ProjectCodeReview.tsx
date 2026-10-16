@@ -37,11 +37,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  reviewApi, codeReviewsApi, agentServersApi,
+  reviewApi, codeReviewsApi, agentServersApi, fsApi,
   type PR, type PRListResponse, type Project,
   type CodeReview, type CodeReviewRunBinding, type CodeReviewRevision, type ReviewFinding,
   type CodeReviewFollowup,
-  API_BASE, authedFetch,
+  type FsBranchesResponse,
 } from '../api/client';
 import { createEventStream, type EventStream } from '../api/stream';
 import type { ExecEnvServer } from '../components/ExecEnvSelect';
@@ -111,7 +111,8 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   const [descSavedAt, setDescSavedAt] = useState(0);
   const [session, setSession] = useState<CodeReview | null>(null);
   const [creating, setCreating] = useState(false);
-  const [branchError, setBranchError] = useState('');
+  const [branchesLoading, setBranchesLoading] = useState(false);
+  const [branchesError, setBranchesError] = useState('');
 
   // ── History + result ─────────────────────────────────────────────────────
   const [history, setHistory] = useState<CodeReview[]>([]);
@@ -194,20 +195,31 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
       .catch(() => {/* 设置 → Agent 服务器 is the source of truth */});
   }, []);
 
-  // Branch candidates for the two selectors. Best-effort: on failure the
-  // list stays empty and the user types the branch name by hand.
-  useEffect(() => {
+  // Branch candidates for the two selectors. Triggered on entering branch
+  // mode; refreshBranches(forceRefresh=true) drives the manual refresh button.
+  // Errors are surfaced to the UI (不再静默吞错) so users can tell a fetch
+  // failure from a genuinely-empty list.
+  const refreshBranches = async (forceRefresh = false) => {
     const localPath = project?.local_path;
     if (mode !== 'branch' || !localPath) return;
-    let cancelled = false;
-    authedFetch(`${API_BASE}/api/fs/git-branches?path=${encodeURIComponent(localPath)}`)
-      .then((r: Response) => r.json())
-      .then((json: { success?: boolean; data?: { branches?: string[] } }) => {
-        if (cancelled) return;
-        setBranches(json?.success && Array.isArray(json.data?.branches) ? json.data.branches : []);
-      })
-      .catch(() => { if (!cancelled) setBranches([]); });
-    return () => { cancelled = true; };
+    setBranchesLoading(true);
+    setBranchesError('');
+    try {
+      const resp: FsBranchesResponse = await fsApi.gitBranches({ path: localPath, refresh: forceRefresh });
+      setBranches(resp.branches ?? []);
+      if (resp.fetch_warning) {
+        setReviewLines(prev => [...prev, { type: 'message', content: '⚠️ ' + t('projects.detail.reviewFetchWarning', { stderr: resp.fetch_warning }) }]);
+      }
+    } catch (err) {
+      setBranches([]);
+      setBranchesError(errorMessage(err));
+    } finally {
+      setBranchesLoading(false);
+    }
+  };
+  useEffect(() => {
+    void refreshBranches(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, project?.local_path]);
 
   // Default the base branch to the project's configured default once.
@@ -367,7 +379,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
         sessionRef.current = rv;
         setSession(rv);
         setBaseBranch(prev => prev || rv.base_branch);
-        setBranchError('');
+        setBranchesError('');
         loadHistory();
         return rv;
       })
@@ -384,7 +396,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   useEffect(() => {
     if (mode !== 'branch' || session || running || !branch.trim()) return;
     const timer = window.setTimeout(() => {
-      void ensureDraft().catch((err: unknown) => setBranchError(errorMessage(err)));
+      void ensureDraft().catch((err: unknown) => setBranchesError(errorMessage(err)));
     }, DRAFT_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [mode, branch, session, running, ensureDraft]);
@@ -392,7 +404,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
   const handleStartBranchReview = async () => {
     if (running) return;
     if (!branch.trim()) {
-      setBranchError(t('projects.detail.reviewNeedBranch'));
+      setBranchesError(t('projects.detail.reviewNeedBranch'));
       return;
     }
     setRunning(true);
@@ -400,14 +412,14 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     setReviewDone(false);
     setReviewModel('');
     setSelected(null);
-    setBranchError('');
+    setBranchesError('');
     try {
       const existing = session;
       // Joins the debounced create when one is already in flight, so hitting
       // 开始 immediately after typing a branch starts THAT row.
       const rv = existing ?? await ensureDraft();
       if (!rv) {
-        setBranchError(t('projects.detail.reviewNeedBranch'));
+        setBranchesError(t('projects.detail.reviewNeedBranch'));
         setRunning(false);
         return;
       }
@@ -441,7 +453,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     setRunModel('');
     setRunConfigId('');
     setAgentServerId('');
-    setBranchError('');
+    setBranchesError('');
     resetPanel();
   };
 
@@ -453,7 +465,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
       if (selected?.id === rv.id) setSelected(null);
       loadHistory();
     } catch (err: unknown) {
-      setBranchError(errorMessage(err));
+      setBranchesError(errorMessage(err));
     }
   };
 
@@ -604,7 +616,7 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     setRunning(true);
     setReviewLines([]);
     setReviewDone(false);
-    setBranchError('');
+    setBranchesError('');
     try {
       const { job_id } = await codeReviewsApi.regenerate(reviewId);
       subscribeJob(job_id, () => {
@@ -700,10 +712,12 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
           session,
           creating,
           savedAt: descSavedAt,
-          error: branchError,
+          error: branchesError,
           onStart: handleStartBranchReview,
           onReset: handleNewSession,
           onDelete: () => { if (session) void handleDelete(session); },
+          onRefreshBranches: () => void refreshBranches(true),
+          refreshing: branchesLoading,
         }}
       />
 

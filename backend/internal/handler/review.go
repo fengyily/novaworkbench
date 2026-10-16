@@ -672,8 +672,11 @@ func (h *ReviewHandler) runReviewSession(job *store.Job, rv *model.CodeReview, p
 		}
 	}
 
-	headRef, baseRef, err := resolveDiffRefs(ctx, project.LocalPath, rv.Branch, rv.BaseBranch, gitEnv)
+	headRef, baseRef, fetchWarning, err := resolveDiffRefs(ctx, project.LocalPath, rv.Branch, rv.BaseBranch, gitEnv)
 	cleanup()
+	if fetchWarning != "" {
+		job.Append(store.LogLine{Type: "message", Content: fetchWarning})
+	}
 	if err != nil {
 		msg := "无法解析对比分支: " + err.Error()
 		job.Append(store.LogLine{Type: "error", Content: msg})
