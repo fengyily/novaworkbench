@@ -37,15 +37,34 @@ interface Props {
   onDeleteFollowup: (fu: CodeReviewFollowup) => Promise<void>;
   /** JobStore id of the in-flight ask. null = idle. */
   currentJobId: string | null;
+  /** Externally-supplied question text. The page pushes the
+      「针对 P0-2 提问」 template here when a finding's Ask button is
+      clicked; the chat picks it up, replaces its own textarea contents,
+      and clears this slot so a second click re-fires. */
+  externalQuestion?: string;
 }
 
 export default function ReviewChat({
-  followups, liveLines, onAsk, onDeleteFollowup, currentJobId,
+  followups, liveLines, onAsk, onDeleteFollowup, currentJobId, externalQuestion,
 }: Props) {
   const { t } = useTranslation();
   const [question, setQuestion] = useState('');
   const streamRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLTextAreaElement>(null);
+
+  // Pick up pre-filled questions from the page (e.g. "Ask about P0-2").
+  // Resetting externalQuestion to '' after consume keeps a second click on
+  // the same finding's button idempotent — the same string isn't re-applied
+  // on every render.
+  useEffect(() => {
+    if (externalQuestion && externalQuestion !== question) {
+      setQuestion(externalQuestion);
+      boxRef.current?.focus();
+    }
+    // We deliberately don't add `question` to the deps: this effect is
+    // about reacting to a new external value, not echoing the local state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [externalQuestion]);
 
   // The page owns the ask action; the chat just owns the textarea
   // content. Clear it on submit so a double-tap on the button doesn't

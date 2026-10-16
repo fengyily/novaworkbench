@@ -106,7 +106,7 @@ export default function ReviewReport({
   const goalChecks = useMemo(() => review ? parseGoalChecks(review) : [], [review]);
   const diagrams = useMemo(
     () => review ? extractMermaidBlocks(review.result_md || '') : [],
-    [review, review?.result_md],
+    [review],
   );
   const grouped = useMemo(() => {
     const m = new Map<ReviewSeverity, ReviewFinding[]>(SEVERITIES.map(s => [s, []]));

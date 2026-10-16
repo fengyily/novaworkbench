@@ -1,0 +1,72 @@
+/* CodeReviewViewPage — /reviews/:id 独立阅读视图样式。
+   视觉对位 KnowledgeViewPage 的 .kvp-page：极简顶栏 + 单栏正文 + 边距
+   收敛到 --color-bg，避免新窗口打开后视觉上"嵌在主程序"里。 */
+
+.crv-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--color-bg, #F8FAFC);
+  color: var(--color-text, #0F172A);
+}
+
+.crv-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--color-border, #E2E8F0);
+  background: var(--color-surface, #FFFFFF);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.crv-topbar-title {
+  font-weight: 600;
+  font-size: 15px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+.crv-topbar-sep {
+  color: var(--color-text-muted, #94A3B8);
+  margin: 0 2px;
+}
+
+.crv-main {
+  max-width: 960px;
+  width: 100%;
+  margin: 24px auto;
+  padding: 0 24px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  box-sizing: border-box;
+}
+
+.crv-loading {
+  text-align: center;
+  padding-top: 80px;
+}
+
+/* ReviewChat sits beneath the report on the standalone page; the tab
+   version uses a two-column grid because there's room to compare. */
+.crv-chat-wrap {
+  display: contents;
+}
+
+@media (max-width: 768px) {
+  .crv-topbar {
+    padding: 10px 16px;
+  }
+  .crv-main {
+    margin: 16px auto;
+    padding: 0 12px 48px;
+  }
+}

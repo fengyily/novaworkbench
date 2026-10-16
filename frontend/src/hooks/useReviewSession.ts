@@ -136,6 +136,15 @@ export function useReviewSession(
 
   // ── Effect: re-load detail when reviewId changes ────────────────────────
   useEffect(() => {
+    // The previous SSE belongs to whatever review was on screen a moment
+    // ago — close it and clear the stream so the new review starts
+    // with a clean panel. Without this, switching rows mid-run would
+    // leave the old job's log bleeding into the new result view.
+    closeStream();
+    setLiveLines([]);
+    setRunning(false);
+    setCurrentJobId(null);
+
     if (!reviewId) {
       setReview(null);
       setDetailLoading(false);
@@ -156,7 +165,7 @@ export function useReviewSession(
     ]).catch(() => { /* detailLoading resets in finally regardless */ })
       .finally(() => { if (!cancelled) setDetailLoading(false); });
     return () => { cancelled = true; };
-  }, [reviewId]);
+  }, [reviewId, closeStream]);
 
   // Close the SSE when the hook unmounts so a navigated-away review
   // doesn't keep a dangling reader around.

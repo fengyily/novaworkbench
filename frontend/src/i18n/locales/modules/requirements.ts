@@ -41,6 +41,10 @@ export const requirements = {
     emptyTitle: '还没有需求',
     emptyDesc: '在项目详情里创建需求，或点击右上角新建。',
     newButton: '+ 新建需求',
+    // Search box affordances (RequirementsList search input + clear button).
+    calendar: '日历',
+    searchAriaLabel: '按标题或描述搜索',
+    clearSearch: '清除搜索',
     // Has-pending-schedule affordance rendered by RequirementsList rows.
     // Mirrors the "🕐" semantics already shown on /requirements/calendar.
     scheduledTooltip: '定时执行 · {{time}} · {{rel}}',

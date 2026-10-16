@@ -24,6 +24,7 @@ import SettingsACLRoles from './pages/SettingsACLRoles';
 import SettingsSkills from './pages/SettingsSkills';
 import KnowledgePage from './pages/KnowledgePage';
 import KnowledgeViewPage from './pages/KnowledgeViewPage';
+import CodeReviewViewPage from './pages/CodeReviewViewPage';
 import RequirementDetail from './pages/RequirementDetail';
 import RequirementsCalendar from './pages/RequirementsCalendar';
 import WizardPage from './pages/WizardPage';
@@ -72,6 +73,13 @@ export default function App() {
           <Route
             path="/knowledge/view/:id"
             element={<RequireAuth><KnowledgeViewPage /></RequireAuth>}
+          />
+          {/* `/reviews/:id` 独立阅读视图 — RequireAuth 之内（必须登录）、
+              Layout 之外（独占清爽视口，新窗口打开体验更接近一篇"网页/
+              文章"）。同源 SPA 走 BrowserRouter 自动解析。 // i18n: protocol literal */}
+          <Route
+            path="/reviews/:id"
+            element={<RequireAuth><CodeReviewViewPage /></RequireAuth>}
           />
           <Route element={<RequireAuth><Layout /></RequireAuth>}>
             <Route index element={<Dashboard />} />

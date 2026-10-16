@@ -41,6 +41,10 @@ export const requirements = {
     emptyTitle: 'No requirements yet',
     emptyDesc: 'Create one inside a project detail, or use the new-button in the top right.',
     newButton: '+ New requirement',
+    // Search box affordances (RequirementsList search input + clear button).
+    calendar: 'Calendar',
+    searchAriaLabel: 'Search by title or description',
+    clearSearch: 'Clear search',
     // Has-pending-schedule affordance rendered by RequirementsList rows.
     // Mirrors the "🕐" semantics already shown on /requirements/calendar.
     scheduledTooltip: 'Scheduled · {{time}} · {{rel}}',
