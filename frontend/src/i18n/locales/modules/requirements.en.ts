@@ -247,6 +247,7 @@ export const requirements = {
     preflightAutoPushHint: 'Run `git push -u origin <dev>` to upload the committed branch. Off leaves commits local; you push by hand.',
     preflightAutoCreatePR: 'Auto-create PR after push',
     preflightAutoCreatePRHint: 'Open the PR via `gh` / `glab` / `tea` (or fall back to a compare link). Off means you open the PR yourself in the browser.',
+    preflightNoBranchPrLocked: 'PR is disabled in no-branch mode (auto-off)',
     // Legacy composite key kept around for any out-of-tree consumer; the
     // preflight dialog and LaunchPlanSection already use the three split
     // keys above.
