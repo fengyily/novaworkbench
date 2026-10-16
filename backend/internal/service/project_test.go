@@ -768,3 +768,22 @@ func TestValidateGitHubToken_401_RealPAT_NoWarning(t *testing.T) {
 var _ = secret.Decrypt
 var _ = json.Unmarshal
 var _ = os.Getenv
+func TestFetchArgsCredentialHelper(t *testing.T) {
+	with := strings.Join(fetchArgs("/p", "main", true), " ")
+	if !strings.Contains(with, "credential.helper=") {
+		t.Fatalf("expected credential.helper override, got %q", with)
+	}
+	without := strings.Join(fetchArgs("/p", "main", false), " ")
+	if strings.Contains(without, "credential.helper") {
+		t.Fatalf("unexpected credential.helper override: %q", without)
+	}
+}
+
+func TestFetchAuthHint(t *testing.T) {
+	if fetchAuthHint("remote: Repository not found.") == "" {
+		t.Fatal("expected hint for not-found")
+	}
+	if fetchAuthHint("Could not resolve host") != "" {
+		t.Fatal("unexpected hint")
+	}
+}
