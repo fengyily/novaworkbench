@@ -30,6 +30,9 @@ import { errorMessage } from '../../utils/errMsg';
 import PdfUploadDialog from '../PdfUploadDialog';
 import './CreateRequirementForm.css';
 
+const ACCEPTED_IMPORT_EXTS = ['.md', '.markdown', '.pdf', '.docx', '.txt'];
+const ACCEPTED_IMPORT_ATTR = ACCEPTED_IMPORT_EXTS.join(',');
+
 type Flow = 'skip-analysis' | 'direct';
 
 // Workflow options hold translation KEYS, resolved during render — a
@@ -109,6 +112,7 @@ export function CreateRequirementForm({
   const [skipOrganize, setSkipOrganize] = useState(true);
   const [projectId, setProjectId] = useState(fixedProjectId || '');
   const [saving, setSaving] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // id of the draft requirement pre-created on mount so image pastes have a
   // valid owner. Set to existingRequirementId when the form is opened in
@@ -119,6 +123,7 @@ export function CreateRequirementForm({
   // unmount-cleanup effect knows whether to delete the empty draft.
   const [draftTouched, setDraftTouched] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // PDF 上传(仅 wiki kind 可见) — 上传成功后:
   //   1) 后端已经在 knowledge 表写入条目;
@@ -257,6 +262,34 @@ export function CreateRequirementForm({
     // (every keystroke) instead of only at unmount. See the comment above.
   }, []);
 
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    // Reset input so selecting the same file again triggers onChange.
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    if (!file) return;
+
+    const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
+    if (!ACCEPTED_IMPORT_EXTS.includes(ext)) {
+      setError(t('components.createRequirement.importFileUnsupported'));
+      return;
+    }
+    if (description.trim() && !window.confirm(t('components.createRequirement.importFileConfirm'))) {
+      return;
+    }
+
+    setImporting(true);
+    setError(null);
+    try {
+      const { content } = await requirementsApi.parseFile(file);
+      setDescription(content);
+      setDraftTouched(true);
+    } catch (err) {
+      setError(t('components.createRequirement.importFileError', { error: errorMessage(err) }));
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const handleSubmit = async () => {
     if (saving) return;
     if (!description.trim()) {
@@ -349,7 +382,7 @@ export function CreateRequirementForm({
   // Priority stays visible — it is persisted and rendered for every kind.
   const showFlow = kind !== 'idea' && kind !== 'wiki';
   const showProjectPicker = !fixedProjectId && !!projectOptions && projectOptions.length > 0;
-  const canSubmit = !saving && !!description.trim() && !!projectId;
+  const canSubmit = !saving && !importing && !!description.trim() && !!projectId;
   const charCount = description.trim().length;
 
   return (
@@ -381,6 +414,26 @@ export function CreateRequirementForm({
 
       {/* Step 2 — Description (the panel's main job) */}
       <div className="form-group create-req-desc">
+        {/* Import-from-file button: available for all kinds. Sits above the
+            textarea so it's discoverable without scrolling. */}
+        <div className="create-req-import-row">
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={saving || importing}
+            title={t('components.createRequirement.importFileTitle')}
+          >
+            {importing ? t('components.createRequirement.importing') : t('components.createRequirement.importFile')}
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={ACCEPTED_IMPORT_ATTR}
+            style={{ display: 'none' }}
+            onChange={handleImportFile}
+          />
+        </div>
         {/* wiki kind 提供 PDF 上传入口:上传后把 Markdown 回填到 description,
             同时后端已经在 knowledge 表留下条目,无需再走 LLM organize。 */}
         {kind === 'wiki' && (
@@ -406,7 +459,7 @@ export function CreateRequirementForm({
           requirementId={pendingReqId}
           placeholder={tLabel(t, kindPlaceholderKeys as Record<string, string>, kind)}
           minRows={7}
-          disabled={saving}
+          disabled={saving || importing}
           onKeyDown={handleTextareaKeyDown}
         />
         <div className="create-req-desc-meta">
