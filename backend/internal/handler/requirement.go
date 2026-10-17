@@ -229,10 +229,27 @@ func (h *RequirementHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "INVALID", "Invalid JSON")
 		return
 	}
+	// Validate kind before hitting the service so callers get a 400, not 500.
+	if req.Kind != "" && !service.ValidKind(req.Kind) {
+		writeError(w, 400, "INVALID", "invalid kind: "+req.Kind)
+		return
+	}
 	item, err := h.svc.Update(r.PathValue("id"), req)
 	if err != nil {
 		writeError(w, 500, "INTERNAL", err.Error())
 		return
+	}
+	// When the update carries a launch spec and the requirement is still in
+	// draft state, dispatch the launch immediately (same path as Create).
+	if req.Launch != nil {
+		mode, scheduleID, dispatchErr := dispatchLaunch(item, req.Launch, h.wizardH, h.schedSvc)
+		if dispatchErr != nil {
+			item.LaunchError = launchErrorMessage(dispatchErr)
+			log.Printf("[requirement] launch dispatch for %s (update) failed: %s (requirement preserved)", item.ID, dispatchErr.Msg)
+		} else {
+			item.LaunchMode = mode
+			item.LaunchScheduleID = scheduleID
+		}
 	}
 	writeJSON(w, 200, item)
 }

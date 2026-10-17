@@ -591,20 +591,55 @@ func (s *RequirementService) Update(id string, req model.CreateRequirementReq) (
 	// Normalize a leading Markdown heading out of the title (see
 	// stripMarkdownHeader).
 	req.Title = stripMarkdownHeader(req.Title)
-	// skip_analysis is a *bool: nil preserves the stored value (COALESCE keeps
-	// the existing column when the param is NULL), a non-nil pointer updates it.
-	// This lets the edit modal toggle the flag while other callers that only
-	// touch title/description/priority leave it untouched.
-	var skipArg interface{}
+
+	// Validate kind early so the handler can surface a 400 before hitting the DB.
+	if req.Kind != "" && !ValidKind(req.Kind) {
+		return nil, fmt.Errorf("invalid kind: %q", req.Kind)
+	}
+
+	// skip_analysis / skip_design are *bool: nil preserves the stored value
+	// (COALESCE keeps the existing column when the param is NULL), a non-nil
+	// pointer updates it. This lets the edit modal toggle flags while other
+	// callers that only touch title/description/priority leave them untouched.
+	var skipAnalysisArg interface{}
 	if req.SkipAnalysis != nil {
-		skipArg = *req.SkipAnalysis
+		skipAnalysisArg = *req.SkipAnalysis
+	}
+	var skipDesignArg interface{}
+	if req.SkipDesign != nil {
+		skipDesignArg = *req.SkipDesign
 	}
 	_, err := s.db.Exec(
-		"UPDATE requirements SET title=?, description=?, priority=?, skip_analysis=COALESCE(?,skip_analysis), updated_at=? WHERE id=?",
-		req.Title, req.Description, req.Priority, skipArg, time.Now(), id)
+		"UPDATE requirements SET title=?, description=?, priority=?, skip_analysis=COALESCE(?,skip_analysis), skip_design=COALESCE(?,skip_design), updated_at=? WHERE id=?",
+		req.Title, req.Description, req.Priority, skipAnalysisArg, skipDesignArg, time.Now(), id)
 	if err != nil {
 		return nil, err
 	}
+
+	// kind update is only allowed for draft rows — UpdateKind remains the
+	// formal promotion path for non-draft rows. When kind is non-empty the
+	// WHERE restricts the update to status='draft' so a non-draft row is
+	// silently left unchanged (idempotent for callers that always send kind).
+	if req.Kind != "" {
+		_, err = s.db.Exec(
+			"UPDATE requirements SET kind=?, updated_at=? WHERE id=? AND status='draft'",
+			req.Kind, time.Now(), id)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// project_id may be changed on draft rows (cross-project switcher in the
+	// create form). Same draft-only restriction as kind.
+	if req.ProjectID != "" {
+		_, err = s.db.Exec(
+			"UPDATE requirements SET project_id=?, updated_at=? WHERE id=? AND status='draft'",
+			req.ProjectID, time.Now(), id)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return s.Get(id)
 }
 
