@@ -5885,25 +5885,45 @@ export default function RequirementDetail() {
           stream identically to a manually launched design. The coding stage
           lands on requirements.coding_job_id via the backend's chained
           callback, which the activeSchedJobId poll (~line 807) picks up
-          automatically — no extra wiring. The modal returns null when
-          `open=false` so we can mount it unconditionally. */}
-      <DesignCodingImmediateModal
-        open={immediateModalOpen}
-        requirementId={req.id}
-        requirementTitle={req.title}
-        initialDesignModel={architectModel}
-        initialCodingModel={developerModel}
-        defaultBranchName={defaultBranchName(req.id, kindOf(req))}
-        defaultBaseBranch={project?.default_branch ?? 'main'}
-        agentServers={agentServers}
-        onLaunched={(designJobId) => {
-          setImmediateModalOpen(false);
-          setDesignLines([]);
-          setDesigning(true);
-          streamDesignJob(designJobId);
-        }}
-        onClose={() => setImmediateModalOpen(false)}
-      />
+          automatically — no extra wiring. The modal is mounted conditionally
+          on `immediateModalOpen` so each open re-runs useState with the
+          page's LIVE toolbar selections; previously the modal mounted once
+          with stale (empty) values because architectModel/developerModel
+          hadn't seeded yet by the time the requirement loaded, and the
+          carried model ids never updated again. */}
+      {immediateModalOpen && (
+        <DesignCodingImmediateModal
+          open={immediateModalOpen}
+          requirementId={req.id}
+          requirementTitle={req.title}
+          initialDesignModel={architectModel}
+          initialCodingModel={developerModel}
+          // Carry the claude_configs row id alongside the model so the
+          // BASE URL ↔ model pairing survives into the request body —
+          // the modal's ModelSelect is now controlled on configId.
+          initialDesignConfigId={architectConfigId}
+          initialCodingConfigId={developerConfigId}
+          // Carry the page's execution-environment picks; the modal
+          // silently falls back to local when the carried id has dropped
+          // off the ready AgentServers list.
+          initialDesignAgentServerId={designAgentServerId}
+          initialCodingAgentServerId={codingAgentServerId}
+          // Branch — surface whatever the user has typed into the page's
+          // branch input (or its computed default when the input is empty)
+          // rather than re-deriving from req+kind alone.
+          defaultBranchName={branchName || defaultBranchName(req.id, kindOf(req))}
+          defaultBaseBranch={baseBranch || (project?.default_branch ?? 'main')}
+          agentServers={agentServers}
+          initialDevMode={devMode}
+          onLaunched={(designJobId) => {
+            setImmediateModalOpen(false);
+            setDesignLines([]);
+            setDesigning(true);
+            streamDesignJob(designJobId);
+          }}
+          onClose={() => setImmediateModalOpen(false)}
+        />
+      )}
     </div>
   );
 }

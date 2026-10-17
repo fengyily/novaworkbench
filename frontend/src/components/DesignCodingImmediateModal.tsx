@@ -40,6 +40,18 @@ interface Props {
   // Pre-selected model ids (display values). '' = stage's default model.
   initialDesignModel?: string;
   initialCodingModel?: string;
+  // Pre-selected claude_configs row ids, carried from the page toolbar so
+  // the model+config pair stays consistent on the wire (BASE URL ↔ model).
+  // '' = stage's default config.
+  initialDesignConfigId?: string;
+  initialCodingConfigId?: string;
+  // Pre-selected Agent server ids, carried from the page toolbar.
+  // '' = local execution. The modal guards against carrying an id that
+  // has since dropped off the ready AgentServers list (e.g. a server
+  // went not-ready after the user picked it) by silently falling back
+  // to '' on mount.
+  initialDesignAgentServerId?: string;
+  initialCodingAgentServerId?: string;
   defaultBranchName?: string;
   defaultBaseBranch?: string;
   agentServers: ExecEnvServer[];
@@ -48,9 +60,6 @@ interface Props {
   // resume the design session. '' = backend falls back to the requirement
   // row / 'session'.
   initialDevMode?: 'session' | 'design' | '';
-  // Future revisions may lift claude_config state up here so the parent
-  // can send design_claude_config_id / coding_claude_config_id
-  // explicitly; until then the per-stage ModelSelect self-fetches.
   onLaunched: (designJobId: string) => void;
   onClose: () => void;
 }
@@ -61,6 +70,10 @@ export function DesignCodingImmediateModal({
   requirementTitle,
   initialDesignModel,
   initialCodingModel,
+  initialDesignConfigId,
+  initialCodingConfigId,
+  initialDesignAgentServerId,
+  initialCodingAgentServerId,
   defaultBranchName,
   defaultBaseBranch,
   agentServers,
@@ -69,13 +82,31 @@ export function DesignCodingImmediateModal({
   onClose,
 }: Props) {
   const { t } = useTranslation();
-  // Design-stage state.
+  // Design-stage state. The page's toolbar picker passes its current
+  // selections through these initial values; the modal is mounted
+  // conditionally on `open` so useState picks up the page's live state
+  // on each open.
   const [designModel, setDesignModel] = useState(initialDesignModel || '');
-  const [designAgentServerId, setDesignAgentServerId] = useState('');
+  const [designConfigId, setDesignConfigId] = useState(initialDesignConfigId || '');
+  const [designAgentServerId, setDesignAgentServerId] = useState(() => {
+    // Guard against an AgentServer id that has dropped off the ready
+    // list since the page last fetched — silent local fallback keeps the
+    // modal in a usable state without claiming a non-existent target.
+    if (!initialDesignAgentServerId) return '';
+    return agentServers.some(s => s.id === initialDesignAgentServerId)
+      ? initialDesignAgentServerId
+      : '';
+  });
   const [readKnowledge, setReadKnowledge] = useState(false);
   // Coding-stage state.
   const [codingModel, setCodingModel] = useState(initialCodingModel || '');
-  const [codingAgentServerId, setCodingAgentServerId] = useState('');
+  const [codingConfigId, setCodingConfigId] = useState(initialCodingConfigId || '');
+  const [codingAgentServerId, setCodingAgentServerId] = useState(() => {
+    if (!initialCodingAgentServerId) return '';
+    return agentServers.some(s => s.id === initialCodingAgentServerId)
+      ? initialCodingAgentServerId
+      : '';
+  });
   const [branchName, setBranchName] = useState(defaultBranchName || '');
   const [baseBranch, setBaseBranch] = useState(defaultBaseBranch || '');
   const [splitTasks, setSplitTasks] = useState(true);
@@ -117,8 +148,13 @@ export function DesignCodingImmediateModal({
       const body: DesignCodingImmediateReq = {
         read_knowledge: readKnowledge,
         design_model: designModel || undefined,
+        // Send the carried claude_config id alongside the model so the
+        // base URL and the model id are guaranteed to come from the same
+        // gateway. '' lets the backend resolve via the role's config.
+        design_claude_config_id: designConfigId || undefined,
         design_agent_server_id: designAgentServerId || undefined,
         coding_model: codingModel || undefined,
+        coding_claude_config_id: codingConfigId || undefined,
         coding_agent_server_id: codingAgentServerId || undefined,
         branch_name: noBranch ? '' : branchName,
         base_branch: baseBranch,
@@ -273,13 +309,18 @@ export function DesignCodingImmediateModal({
 
             <div className="modal-field">
               {/* ModelSelect renders its own stage chip + rail, so it
-                  stands in for the field card without an extra wrap. */}
+                  stands in for the field card without an extra wrap.
+                  Controlled on configId so the carried id from the page
+                  toolbar survives into the request body — uncontrolled
+                  mode would self-fetch the active config and lose it. */}
               <ModelSelect
                 value={designModel}
                 onChange={setDesignModel}
                 stage="architect"
                 working={submitting}
                 label={t('schedules.modal.designModelLabel')}
+                configId={designConfigId || undefined}
+                onConfigChange={setDesignConfigId}
               />
               <small style={{ color: 'var(--color-text-muted)', marginTop: 4, display: 'block' }}>
                 {t('schedules.modal.modelHint')}
@@ -366,6 +407,8 @@ export function DesignCodingImmediateModal({
                 stage="developer"
                 working={submitting}
                 label={t('schedules.modal.codingModelLabel')}
+                configId={codingConfigId || undefined}
+                onConfigChange={setCodingConfigId}
               />
               <small style={{ color: 'var(--color-text-muted)', marginTop: 4, display: 'block' }}>
                 {t('schedules.modal.modelHint')}
