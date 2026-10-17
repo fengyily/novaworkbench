@@ -1158,6 +1158,10 @@
   flex-direction: column;
   max-height: 88dvh;           /* cap height so the box never overflows the viewport */
 }
+/* Two-stage (DESIGN → CODING) modal: its flight strip carries twice the
+   legs, so it needs a wider box and roomier leg values. */
+.preflight-box--wide { min-width: 600px; max-width: 760px; width: 760px; }
+.preflight-box--wide .flight-leg-value { max-width: 160px; }
 /* Header / flight strip / launch bar stay pinned; only the body scrolls,
    keeping the "启动会话" button always visible and clickable. */
 .preflight-header,
@@ -1537,6 +1541,8 @@ select.preflight-field-input {
        the launch bar stays pinned to the bottom; .preflight-body scrolls. */
     overflow: hidden;
   }
+  .preflight-box--wide { width: 100vw; min-width: 0; max-width: none; }
+  .preflight-box--wide .flight-leg-value { max-width: 90px; }
   .preflight-box::before {
     content: '';
     display: block;

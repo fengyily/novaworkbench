@@ -213,7 +213,7 @@ export function DesignCodingImmediateModal({
 
   return (
     <div className="modal-overlay" onClick={handleBackdropClick}>
-      <div className="modal-box preflight-box" onClick={e => e.stopPropagation()}>
+      <div className="modal-box preflight-box preflight-box--wide" onClick={e => e.stopPropagation()}>
         <div className="preflight-header">
           <div className="preflight-eyebrow">{t('requirements.detail2.immediateEyebrow')}</div>
           <h3 className="preflight-title">{t('requirements.detail2.immediateDesignCodingTitle')}</h3>
