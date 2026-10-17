@@ -12,11 +12,12 @@
 // 同步在 `img` 组件上加 click-to-zoom + 下载 PNG/JPG：知识库 / 设计文档里
 // 的截图默认压缩到容器宽度，无法看清细节；点击进入全屏查看，悬浮工具栏
 // 提供 PNG / JPG 下载。
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import mermaid from 'mermaid';
+import { authedFetch } from '../api/client';
 import { removeMermaidLeftovers } from '../utils/mermaidCleanup';
 import './MarkdownRender.css';
 
@@ -285,25 +286,65 @@ function ImageFigure({
 }
 
 // ZoomableImage — 普通 markdown 图片：onClick 走 ImageFigure 全屏浮层 + 工具栏。
+// Attachment images served at /api/requirements/.../attachments/.../content require
+// an Authorization header that <img> cannot send. We detect those URLs and fetch
+// the bytes via authedFetch, then hand the resulting blob: URL to the element.
+function isAuthedImageUrl(url: string): boolean {
+  return /\/api\/(requirements|code-reviews)\/[^/]+\/attachments\/[^/]+\/content(\?.*)?$/.test(url);
+}
+
+function useAuthedImage(origSrc: string | undefined): string | undefined {
+  const [blobUrl, setBlobUrl] = useState<string | undefined>();
+  const blobRef = useRef<string | undefined>();
+
+  useEffect(() => {
+    if (!origSrc || !isAuthedImageUrl(origSrc)) return;
+    let cancelled = false;
+    authedFetch(origSrc)
+      .then(r => r.blob())
+      .then(blob => {
+        if (cancelled) return;
+        if (blobRef.current) URL.revokeObjectURL(blobRef.current);
+        const url = URL.createObjectURL(blob);
+        blobRef.current = url;
+        setBlobUrl(url);
+      })
+      .catch(() => { /* broken image shows naturally on failure */ });
+    return () => {
+      cancelled = true;
+      if (blobRef.current) {
+        URL.revokeObjectURL(blobRef.current);
+        blobRef.current = undefined;
+      }
+    };
+  }, [origSrc]);
+
+  if (!origSrc || !isAuthedImageUrl(origSrc)) return origSrc;
+  return blobUrl;
+}
+
 function ZoomableImage(props: {
   src?: string;
   alt?: string;
   title?: string;
 }) {
   const { src, alt, title } = props;
+  const resolvedSrc = useAuthedImage(src);
   if (!src) return null;
-  // 用 alt / title 推断文件名 base，去后缀 + sanitize；空时用图片序号时间戳。
+  // While waiting for the authed blob URL, render nothing — avoids a broken
+  // image icon flash during the fast same-host fetch.
+  if (isAuthedImageUrl(src) && !resolvedSrc) return null;
   const guess = (title || alt || '').replace(/\.[a-z0-9]+$/i, '');
   const safeBase = guess.replace(/[\\/:*?"<>|]/g, '_').trim() || `image-${Date.now()}`;
   return (
     <ImageFigure
-      src={src}
+      src={resolvedSrc!}
       alt={alt || ''}
       filenameBase={safeBase}
     >
       <img
         className="zoomable-image"
-        src={src}
+        src={resolvedSrc}
         alt={alt || ''}
         title={title || alt || ''}
         loading="lazy"
