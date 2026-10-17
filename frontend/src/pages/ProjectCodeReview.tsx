@@ -47,6 +47,7 @@ import { createEventStream, type EventStream } from '../api/stream';
 import { useReviewSession } from '../hooks/useReviewSession';
 import type { ExecEnvServer } from '../components/ExecEnvSelect';
 import { IconRobot } from '../components/icons';
+import { useNavigate } from 'react-router-dom';
 import ReviewComposer, { type Mode } from './codeReview/ReviewComposer';
 import ReviewReport from './codeReview/ReviewReport';
 import ReviewChat from './codeReview/ReviewChat';
@@ -70,6 +71,7 @@ interface Props {
 
 export default function ProjectCodeReview({ projectId, project }: Props) {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const [mode, setMode] = useState<Mode>('pr');
 
   // ── PR mode ──────────────────────────────────────────────────────────────
@@ -452,14 +454,12 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
       // starts the SSE. For a brand-new row this flips the id from
       // null; for an existing one it is a no-op.
       setResultReviewId(reviewId);
-      // Close the composer and pop the dedicated viewer in a new tab.
-      // The window.open call sits in the same click handler chain as
-      // `await reviewSession.rerun()` below, so the browser still
-      // treats it as user-initiated and does not block the popup.
+      // Start the run first (rerun resolves once the POST lands; the SSE
+      // keeps running in the background), then navigate to the detail
+      // page, whose hook joins the running job's stream.
       setShowCreate(false);
-      window.open(`/reviews/${reviewId}?run=1`, '_blank', 'noopener,noreferrer');
       await reviewSession.rerun();
-      loadHistory();
+      navigate(`/reviews/${reviewId}?run=1`);
     } catch (err: unknown) {
       // The hook owns the branch-mode live stream; surface the error
       // via the same branchesError slot used for "branch required"
@@ -562,13 +562,10 @@ export default function ProjectCodeReview({ projectId, project }: Props) {
     void handleOpenHistory(rv);
   }, [handleOpenHistory]);
 
-  // Non-draft rows jump to the dedicated reader in a new tab. We do the
-  // `window.open` from this click handler chain (not from an async
-  // .then()) so Chromium still treats it as a user-initiated popup and
-  // doesn't block it.
+  // Non-draft rows open the dedicated reader in the same tab.
   const handleOpenViewerRow = useCallback((rv: CodeReview) => {
-    window.open(`/reviews/${rv.id}`, '_blank', 'noopener,noreferrer');
-  }, []);
+    navigate(`/reviews/${rv.id}`);
+  }, [navigate]);
 
   // ── 追问 handlers ────────────────────────────────────────────────────────
 

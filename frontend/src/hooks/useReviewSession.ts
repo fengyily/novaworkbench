@@ -14,7 +14,7 @@
 // project id comes from the loaded review row (`review.project_id`); the
 // optional `projectIdHint` only covers the window before the row arrives.
 //
-// A review that is already `running` (opened in a new window, or selected
+// A review that is already `running` (opened via /reviews/:id, or selected
 // from history mid-run) is joined automatically via `review.job_id` —
 // JobStore replays history to every new subscriber, so no backend change
 // is needed. `opts.waitForStart` covers the race where the window opens

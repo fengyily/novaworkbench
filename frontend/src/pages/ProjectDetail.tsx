@@ -236,7 +236,9 @@ export default function ProjectDetail() {
 
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<Tab>('requirements');
+  // `?tab=review` lets the Review detail page return to the Review tab.
+  const [tab, setTab] = useState<Tab>(() =>
+    new URLSearchParams(window.location.search).get('tab') === 'review' ? 'review' : 'requirements');
 
   // Run tab
   const [runStatus, setRunStatus] = useState<RunStatus | null>(null);
