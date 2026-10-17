@@ -295,7 +295,7 @@ function isAuthedImageUrl(url: string): boolean {
 
 function useAuthedImage(origSrc: string | undefined): string | undefined {
   const [blobUrl, setBlobUrl] = useState<string | undefined>();
-  const blobRef = useRef<string | undefined>();
+  const blobRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     if (!origSrc || !isAuthedImageUrl(origSrc)) return;
