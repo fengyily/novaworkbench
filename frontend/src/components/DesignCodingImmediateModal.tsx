@@ -264,18 +264,6 @@ export function DesignCodingImmediateModal({
             {t('requirements.detail2.preflightLaunchBtn').toUpperCase()}
           </span>
         </div>
-        {/* Shared-base note — surfaces that the single base-branch
-            input below drives BOTH the design and the coding stage
-            (resolveImmediateDesignBase + resolveImmediateBase resolve
-            from the same body.BaseBranch on the server). The note is
-            rendered OUTSIDE the flight strip so the strip itself stays
-            a tight, scannable status row; the note sits as a small
-            caption directly below. Without this, users editing the
-            input might believe the value applies to only one stage. */}
-        <p className="immediate-git-shared-note">
-          {t('requirements.detail2.immediateGitSharedNote')}
-        </p>
-
         <div className="preflight-body">
           {/* Design-stage section — violet accent rail mirrors the
               architect stage on ModelSelect and the EXEC accent on the
@@ -441,6 +429,12 @@ export function DesignCodingImmediateModal({
                   disabled={submitting}
                 />
               </div>
+              {/* The single base-branch input drives BOTH the design and
+                  coding stages (same body.BaseBranch on the server), so the
+                  note sits right under the control it explains. */}
+              <small className="preflight-field-hint">
+                {t('requirements.detail2.immediateGitSharedNote')}
+              </small>
             </div>
             {/* v0.6.x 不创建分支开关(toggle card 形式,与同 modal 的
                 readKnowledge / splitTasks 同一视觉语言)。勾选时:
