@@ -319,7 +319,7 @@ type CreateRequirementReq struct {
 	Priority     string `json:"priority"`
 	Kind         string `json:"kind"`          // "issue" | "requirement" | "idea"; empty → defaults to "requirement"
 	SkipAnalysis *bool  `json:"skip_analysis"` // pointer: nil omits the field so Create defaults to true (skip) and Update preserves the existing value
-	SkipDesign   *bool  `json:"skip_design"`   // pointer: nil → Create defaults to false; Update never references this column so it is preserved automatically
+	SkipDesign   *bool  `json:"skip_design"`   // pointer: nil → Create defaults to false; Update treats nil as COALESCE (preserves existing value); draft-only for Update
 	// NOTE: sync_mode is not a top-level field here — it travels through the
 	// embedded LaunchSpec.SyncMode (and through the wizard handler signature)
 	// because it only matters when an Agent server is selected. See

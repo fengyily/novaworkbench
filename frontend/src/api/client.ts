@@ -1262,7 +1262,16 @@ export const requirementsApi = {
     launch?: LaunchSpec;
   }) => api.post<Requirement>('/api/requirements', data),
   get: (id: string) => api.get<Requirement>(`/api/requirements/${id}`),
-  update: (id: string, data: { title: string; description: string; priority: string; skip_analysis?: boolean }) =>
+  update: (id: string, data: {
+    title: string;
+    description: string;
+    priority: string;
+    skip_analysis?: boolean;
+    kind?: Kind;
+    skip_design?: boolean;
+    project_id?: string;
+    launch?: LaunchSpec;
+  }) =>
     api.put<Requirement>(`/api/requirements/${id}`, data),
   updateStatus: (id: string, status: string) =>
     api.patch<Requirement>(`/api/requirements/${id}/status`, { status }),

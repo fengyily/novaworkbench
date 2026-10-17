@@ -300,15 +300,11 @@ export function CreateRequirementForm({
           description,
           priority: kind === 'idea' ? 'medium' : priority,
           skip_analysis: skipAnalysis,
+          kind,
+          skip_design: skipDesign,
+          project_id: projectId || undefined,
+          launch: launchSpec ?? undefined,
         });
-        // Launch dispatch lives behind the Create handler; the Update path
-        // does not trigger it. The form already gates `saving` on
-        // launchSpec presence, so any submit here that set a launch will
-        // surface as a no-op on the launch side. The fix is documented in
-        // the validation matrix; for now we warn rather than dispatch.
-        if (launchSpec) {
-          console.warn('[create-req] launch spec is ignored on draft-update path; submit via Create flow to dispatch.');
-        }
       } else {
         created = await requirementsApi.create({
           project_id: projectId,
