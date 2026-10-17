@@ -73,6 +73,13 @@
 
 /* --- Description ------------------------------------------------ */
 
+.create-req-form .create-req-import-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
 .create-req-form .create-req-desc textarea.form-input {
   font-size: 14px;
   padding: 12px;

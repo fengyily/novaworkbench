@@ -723,6 +723,8 @@ func main() {
 	// route below — Go 1.22 ServeMux prioritizes literal segments over
 	// wildcards, so "calendar" is never captured as an id.
 	mux.HandleFunc("GET /api/requirements/calendar", reqH.Calendar)
+	// Stateless file-parsing endpoint — no DB write.
+	mux.HandleFunc("POST /api/requirements/parse-file", reqH.ParseFile)
 	mux.HandleFunc("GET /api/requirements/{id}", reqH.Get)
 	mux.HandleFunc("PUT /api/requirements/{id}", reqH.Update)
 	mux.HandleFunc("PATCH /api/requirements/{id}/status", reqH.UpdateStatus)

@@ -1359,6 +1359,14 @@ export const requirementsApi = {
   // created_at 锚点）。
   updateSchedule: (id: string, body: { planned_start_at?: string | null; planned_end_at?: string | null }) =>
     api.patch<Requirement>(`/api/requirements/${id}/schedule`, body),
+  // Parse a local file (Markdown / PDF / DOCX / TXT) and return its content
+  // as a plain-text / Markdown string suitable for pre-filling the description
+  // box. Stateless: no DB row is created.
+  parseFile: (file: File): Promise<{ content: string }> => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return api.upload<{ content: string }>('/api/requirements/parse-file', fd);
+  },
 };
 
 /**
