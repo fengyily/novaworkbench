@@ -51,12 +51,11 @@
   cursor: zoom-in;
 }
 
-/* 普通 markdown 图片 — 容器宽度、自适应高度 + 卡片化边框。 */
+/* 普通 markdown 图片 — 自然尺寸显示，不超过容器宽度，卡片化边框。 */
 .image-figure > .zoomable-image {
   display: block;
-  width: 100%;
-  height: auto;
   max-width: 100%;
+  height: auto;
   border-radius: 6px;
   border: 1px solid var(--border-color, #e5e7eb);
   background: var(--bg-secondary, #f7f8fb);
