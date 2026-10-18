@@ -2766,6 +2766,6 @@ func (h *AgentServerHandler) appendWorkRootDiskCheck(ctx context.Context, client
 		info.Mount, fs, info.UsedKB/1024, info.AvailKB/1024)})
 	if info.FSType == "tmpfs" || info.AvailKB < 2*1024*1024 {
 		job.Append(store.LogLine{Type: "message", Content: "⚠️ 工作根目录位于内存盘或可用空间不足 2GB，大仓库可能因磁盘写满而失败；" +
-			"建议在 Nova 后端设置 NOVA_AGENT_WORKTREE_ROOT 指向磁盘路径（如 /var/lib/nova-agent）并重新安装 worker"})
+			"建议在 Nova 平台「设置 → Agent 服务器」页的「工作根目录」中改为磁盘路径（如 /var/lib/nova-agent），保存后下次执行会自动同步 worker（也可用环境变量 NOVA_AGENT_WORKTREE_ROOT，优先级更高）"})
 	}
 }

@@ -96,7 +96,7 @@ func ensureRemoteDiskSpace(ctx context.Context, client *gossh.Client, job *store
 		fs = "，类型 " + info.FSType
 	}
 	msg := fmt.Sprintf("Agent 服务器工作目录 %s 所在文件系统（挂载点 %s%s）剩余空间不足：可用 %d MB、已用 %d MB，至少需要 %d MB。"+
-		"请清理空间，或在后端设置 NOVA_AGENT_WORKTREE_ROOT 指向磁盘路径（如 /var/lib/nova-agent）并重装 worker；阈值可由 NOVA_AGENT_MIN_FREE_MB 调整",
+		"请清理空间，或在 Nova 平台「设置 → Agent 服务器」页把「工作根目录」改为磁盘路径（如 /var/lib/nova-agent，保存后自动同步 worker；环境变量 NOVA_AGENT_WORKTREE_ROOT 优先）；阈值可由 NOVA_AGENT_MIN_FREE_MB 调整",
 		root, info.Mount, fs, availMB, info.UsedKB/1024, minMB)
 	if job != nil {
 		job.Append(store.LogLine{Type: "error", Content: "❌ " + msg})
@@ -159,7 +159,7 @@ func addRemoteWorktree(ctx context.Context, client *gossh.Client, job *store.Job
 		if isDiskFullError(out.String()) {
 			cleanupFailedWorktree(ctx, client, job, baseRepo, wtPath, branch, baseRef)
 			return fmt.Errorf("git worktree 创建失败：Agent 服务器磁盘空间不足（工作目录 %s，exit=%d）。"+
-				"请清理空间或设置 NOVA_AGENT_WORKTREE_ROOT 指向磁盘路径。git 输出：\n%s",
+				"请清理空间，或在「设置 → Agent 服务器」页把「工作根目录」改为磁盘路径。git 输出：\n%s",
 				agentWorktreeRoot(), exit, firstLines(out.String(), 5))
 		}
 	}
