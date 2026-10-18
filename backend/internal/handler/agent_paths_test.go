@@ -1,6 +1,10 @@
 package handler
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/novaworkbench/backend/internal/model"
+)
 
 func TestAgentWorktreeRoot(t *testing.T) {
 	cases := []struct{ env, want string }{
@@ -14,6 +18,38 @@ func TestAgentWorktreeRoot(t *testing.T) {
 		if got := agentWorktreeRoot(); got != tc.want {
 			t.Errorf("env=%q: got %q, want %q", tc.env, got, tc.want)
 		}
+	}
+}
+
+// TestAgentWorktreeRootPerServer pins the precedence chain for the per-server
+// work root: env (operator-wide override) > agent_servers.worktree_root >
+// global settings value > /tmp/nova-agent.
+func TestAgentWorktreeRootPerServer(t *testing.T) {
+	t.Setenv("NOVA_AGENT_WORKTREE_ROOT", "")
+	SetAgentWorktreeRootSetting("/data/global-default")
+	t.Cleanup(func() { SetAgentWorktreeRootSetting("") })
+
+	cases := []struct {
+		name string
+		srv  *model.AgentServer
+		want string
+	}{
+		{"nil server falls back to global", nil, "/data/global-default"},
+		{"empty column falls back to global", &model.AgentServer{}, "/data/global-default"},
+		{"per-server wins over global", &model.AgentServer{WorktreeRoot: "/data/agent-a/"}, "/data/agent-a"},
+		{"whitespace-only column falls back", &model.AgentServer{WorktreeRoot: "   "}, "/data/global-default"},
+	}
+	for _, tc := range cases {
+		if got := agentWorktreeRootFor(tc.srv); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+
+	// Env is the operator-wide hard override, even when a server has its own
+	// value — matching the pre-per-server behaviour documented in the UI.
+	t.Setenv("NOVA_AGENT_WORKTREE_ROOT", "/data/forced")
+	if got := agentWorktreeRootFor(&model.AgentServer{WorktreeRoot: "/data/agent-a"}); got != "/data/forced" {
+		t.Errorf("env override: got %q, want %q", got, "/data/forced")
 	}
 }
 

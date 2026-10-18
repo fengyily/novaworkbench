@@ -1,10 +1,13 @@
 package ssh
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -174,4 +177,43 @@ func TestRemoveAllNilClient(t *testing.T) {
 	if err == nil {
 		t.Fatal("RemoveAll on nil client must return an error, got nil")
 	}
+}
+
+// TestCopyUploadBypassesReaderFromTo is a regression test for the silent
+// upload failure that surfaced as "GPG provision 脚本未输出 keyid" on agent
+// hosts whose /tmp was quota-full.
+//
+// pkg/sftp's *File implements io.ReaderFrom, and its ReadFrom drops WRITE
+// errors whenever the final read ends in io.ErrUnexpectedEOF (i.e. for any
+// file whose size is not a packet-size multiple). io.Copy then returns
+// (n, nil) even though the remote file is empty. copyUpload must route every
+// byte through dst.Write so the failure is converted into an error.
+func TestCopyUploadBypassesReaderFromTo(t *testing.T) {
+	swallow := &swallowingWriter{}
+	n, err := copyUpload(swallow, bytes.NewReader([]byte("0123456789")))
+	if err == nil {
+		t.Fatalf("copyUpload returned nil error (n=%d); the ReaderFrom fast path must not be used", n)
+	}
+	if !strings.Contains(err.Error(), "quota exceeded") {
+		t.Fatalf("error = %v, want it to wrap the Write failure", err)
+	}
+	if swallow.writeCalls == 0 {
+		t.Fatal("copyUpload never called dst.Write")
+	}
+}
+
+// swallowingWriter simulates the broken fast path: it implements
+// io.ReaderFrom, consumes the data, and returns nil while discarding
+// everything. If io.Copy is allowed to prefer it, the caller sees success.
+type swallowingWriter struct {
+	writeCalls int
+}
+
+func (w *swallowingWriter) ReadFrom(r io.Reader) (int64, error) {
+	return io.Copy(io.Discard, r)
+}
+
+func (w *swallowingWriter) Write(p []byte) (int, error) {
+	w.writeCalls++
+	return 0, errors.New("quota exceeded")
 }

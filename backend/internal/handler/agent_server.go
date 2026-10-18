@@ -61,6 +61,12 @@ func (h *AgentServerHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "INVALID", "invalid request body: "+err.Error())
 		return
 	}
+	root, err := NormalizeAgentWorktreeRoot(req.WorktreeRoot)
+	if err != nil {
+		writeError(w, 400, "INVALID", err.Error())
+		return
+	}
+	req.WorktreeRoot = root
 	a, err := h.svc.Create(req)
 	if err != nil {
 		writeError(w, 400, "CREATE_FAILED", err.Error())
@@ -87,6 +93,14 @@ func (h *AgentServerHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, 400, "INVALID", "invalid request body: "+err.Error())
 		return
+	}
+	if req.WorktreeRoot != nil {
+		root, nerr := NormalizeAgentWorktreeRoot(*req.WorktreeRoot)
+		if nerr != nil {
+			writeError(w, 400, "INVALID", nerr.Error())
+			return
+		}
+		req.WorktreeRoot = &root
 	}
 	a, err := h.svc.Update(id, req)
 	if err != nil {
@@ -281,10 +295,19 @@ func (h *AgentServerHandler) runCheck(job *store.Job, serverID string) {
 		}
 	}
 
-	// Work-root disk probe — a small tmpfs /tmp was the root cause of
-	// "git worktree 创建失败（exit=128）". Advisory only: warnings never flip
-	// the status, an unprobeable host is skipped silently.
-	h.appendWorkRootDiskCheck(ctx, client, job)
+	// Work-root probe — creates the directory when missing and verifies the
+	// SSH user can write into it (a failure is an error: remote runs cannot
+	// proceed), then reports filesystem / free space. A small tmpfs /tmp was
+	// the root cause of "git worktree 创建失败（exit=128）", but those disk
+	// warnings stay advisory and never flip the status.
+	if workRootStatus, workRootMsg := h.appendWorkRootDiskCheck(ctx, client, agentWorktreeRootFor(srv), job); workRootStatus == model.AgentServerStatusError {
+		status = model.AgentServerStatusError
+		if summary == "所有依赖已就绪" {
+			summary = workRootMsg
+		} else {
+			summary += "; " + workRootMsg
+		}
+	}
 
 	// nova-agent-worker probe — the remote coding path goes through this
 	// Node.js service (POST → SSE → claude CLI). If the worker isn't
@@ -498,7 +521,7 @@ func (h *AgentServerHandler) runCleanup(job *store.Job, serverID string) {
 		// silently left every remote worktree behind while clearing DB
 		// rows. SSH operations must therefore use the remote paths; the
 		// local WorktreePath is kept only in diagnostic log lines.
-		baseRepo, wtPath := remoteWorktreePaths(row.ProjectID, row.ID)
+		baseRepo, wtPath := remoteWorktreePaths(agentWorktreeRootFor(srv), row.ProjectID, row.ID)
 		qb := shellQuoteSingle(baseRepo)
 		qwt := shellQuoteSingle(wtPath)
 		var statOut strings.Builder
@@ -788,7 +811,17 @@ func (h *AgentServerHandler) runInstall(job *store.Job, serverID string) {
 	// worker, its systemd --user unit / nohup fallback, and every claude spawn
 	// run as non-root. This is the step that actually satisfies the CLI's root
 	// guard — merely installing the worker under root would not.
+	worktreeRoot := agentWorktreeRootFor(srv)
 	if switchUser {
+		// Pre-create the work root while we are still root: a root such as
+		// /var/lib/nova-agent lives outside nova's home, so the post-switch
+		// permission check would otherwise fail with EACCES on a fresh host.
+		// Only a path that does not exist yet is touched (see
+		// preCreateWorkRootScript); the authoritative check still happens
+		// after the switch inside installNodeWorker.
+		job.Append(store.LogLine{Type: "message", Content: "📁 以 root 预创建工作根目录 " + worktreeRoot + "（如不存在）..."})
+		_, _ = client.Exec(ctx, preCreateWorkRootScript(worktreeRoot, agentWorkerNonRootUser), "", nil, jobLineWriter(job), nil)
+
 		_ = client.Close()
 		client, err = gossh.Dial(ctx, srv.Host, srv.Port, agentWorkerNonRootUser, srv.AuthType, plain)
 		if err != nil {
@@ -809,7 +842,7 @@ func (h *AgentServerHandler) runInstall(job *store.Job, serverID string) {
 	// Without this step the wizard's remote coding flow has no /v1/run
 	// endpoint to POST to.
 	job.Append(store.LogLine{Type: "phase", Content: "🚀 部署 nova-agent-worker..."})
-	if err := h.installNodeWorker(ctx, client, platform, serverID, job); err != nil {
+	if err := h.installNodeWorker(ctx, client, platform, serverID, worktreeRoot, job); err != nil {
 		msg := fmt.Sprintf("nova-agent-worker 部署失败: %v", err)
 		job.Append(store.LogLine{Type: "error", Content: msg})
 		_ = h.svc.UpdateStatus(serverID, model.AgentServerStatusError, msg)
@@ -1121,7 +1154,7 @@ func provisionNonRootUser(ctx context.Context, client *gossh.Client, user string
 // files are pinned to this Go binary's compile-time version. Pulling from
 // GitHub at install time would silently drift between releases and make
 // regressions hard to bisect. Curl-from-URL can be added later as a fallback.
-func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *gossh.Client, platform, serverID string, job *store.Job) error {
+func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *gossh.Client, platform, serverID, worktreeRoot string, job *store.Job) error {
 	// Resolve $HOME via a one-shot echo. SSH non-interactive non-login shells
 	// don't source /etc/profile, but $HOME is set by sshd from /etc/passwd so
 	// it's reliable. Falls back to /root for safety (e.g. some Docker images
@@ -1139,6 +1172,17 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 	job.Append(store.LogLine{Type: "message", Content: "📁 创建 " + installDir})
 	if exit, _ := client.Exec(ctx, "mkdir -p "+installDir, "", nil, nil, nil); exit != 0 {
 		return fmt.Errorf("mkdir %s 失败", installDir)
+	}
+
+	// Work root: every remote run creates its scratch clone / worktree under
+	// this directory, as this same user. Create it now and prove it is
+	// writable — failing here with explicit guidance beats an EACCES surfacing
+	// halfway through a development run. This runs AFTER the possible switch
+	// to the non-root worker user, so the permission check reflects the
+	// account the worker will actually use.
+	job.Append(store.LogLine{Type: "phase", Content: "📁 准备工作根目录 " + worktreeRoot + "..."})
+	if err := ensureRemoteWorkRoot(ctx, client, worktreeRoot, job, true); err != nil {
+		return err
 	}
 
 	// Upload the worker files. We try the canonical GitHub source first so
@@ -1307,7 +1351,7 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 		unitBody = strings.ReplaceAll(unitBody,
 			"Environment=PATH=__WORKER_PATH__",
 			"Environment=PATH="+workerPATH)
-		unitBody = strings.ReplaceAll(unitBody, "__WORKTREE_ROOT__", agentWorktreeRoot())
+		unitBody = strings.ReplaceAll(unitBody, "__WORKTREE_ROOT__", worktreeRoot)
 		// Bake the resolved node path into ExecStart too — see the nodeBin
 		// comment above. `/usr/bin/env node` would consult the user manager's
 		// own PATH, which misses nvm/brew node and leaves the service in a
@@ -1395,7 +1439,7 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 		plistBody = strings.ReplaceAll(plistBody,
 			"<key>PATH</key><string>__WORKER_PATH__</string>",
 			"<key>PATH</key><string>"+workerPATH+"</string>")
-		plistBody = strings.ReplaceAll(plistBody, "__WORKTREE_ROOT__", html.EscapeString(agentWorktreeRoot()))
+		plistBody = strings.ReplaceAll(plistBody, "__WORKTREE_ROOT__", html.EscapeString(worktreeRoot))
 		// launchd runs agents with the system PATH too, so `/usr/bin/env
 		// node` misses Homebrew's /opt/homebrew/bin. Bake the resolved node
 		// path into ProgramArguments the same way we do for systemd.
@@ -1476,7 +1520,7 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 	// See nohupLaunchWorker for the PATH plumbing and the `grep -vx "$$"`
 	// self-PID exclusion; killOld=true because we have just overwritten
 	// server.mjs and a surviving process would keep serving the old code.
-	launchCmd := nohupLaunchWorker(installDir, workerPATH, true)
+	launchCmd := nohupLaunchWorker(installDir, workerPATH, worktreeRoot, true)
 	if exit, err := client.Exec(ctx, launchCmd, "", nil, jobLineWriter(job), nil); err != nil || exit != 0 {
 		return fmt.Errorf("nohup 启动失败（exit=%d err=%v）", exit, err)
 	}
@@ -1710,7 +1754,7 @@ func startWorkerIfDown(ctx context.Context, client *gossh.Client, homeDir string
 	// to a worker restart without persisted state; the DB-recorded hints go
 	// in front of it (see workerLaunchPATH).
 	workerPATH := workerLaunchPATH(ctx, client, homeDir, hints)
-	if exit, err := client.Exec(ctx, nohupLaunchWorker(installDir, workerPATH, false), "", nil, nil, nil); err != nil || exit != 0 {
+	if exit, err := client.Exec(ctx, nohupLaunchWorker(installDir, workerPATH, hints.WorktreeRoot, false), "", nil, nil, nil); err != nil || exit != 0 {
 		return fmt.Errorf("nohup 启动失败（exit=%d err=%v）", exit, err)
 	}
 	if err := waitForWorkerHealth(ctx, client, 6*time.Second); err != nil {
@@ -1735,7 +1779,7 @@ func startWorkerIfDown(ctx context.Context, client *gossh.Client, homeDir string
 // `nova-agent-worker/server.mjs`. Without excluding our own PID, OLD_PID
 // resolves to this shell and `kill "$OLD_PID"` SIGTERMs ourselves → exit 143,
 // which surfaces as a spurious "nohup 启动失败" even though nothing was wrong.
-func nohupLaunchWorker(installDir, workerPATH string, killOld bool) string {
+func nohupLaunchWorker(installDir, workerPATH, worktreeRoot string, killOld bool) string {
 	cmd := `export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"; ` +
 		`if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh" 2>/dev/null; fi; ` +
 		`hash -r 2>/dev/null; `
@@ -1753,7 +1797,7 @@ func nohupLaunchWorker(installDir, workerPATH string, killOld bool) string {
 	// the leading PATH= is belt-and-braces for a server.mjs that predates
 	// (or drops) that support.
 	cmd += `nohup env NOVA_AGENT_WORKER_HOST=127.0.0.1 NOVA_AGENT_WORKER_PORT=7000 TMPDIR=/tmp ` +
-		`NOVA_AGENT_WORKTREE_ROOT=` + shellQuote(agentWorktreeRoot()) + ` ` +
+		`NOVA_AGENT_WORKTREE_ROOT=` + shellQuote(worktreeRoot) + ` ` +
 		`NOVA_AGENT_WORKER_EXTRA_PATHS=` + shellQuote(workerPATH) + ` ` +
 		`PATH=` + shellQuote(workerPATH) + ` ` +
 		`node ` + installDir + `/server.mjs > ` + installDir + `/worker.log 2>&1 & ` +
@@ -1787,7 +1831,7 @@ func nohupLaunchWorker(installDir, workerPATH string, killOld bool) string {
 // hard stop (a run can still succeed via the per-request claudeBin pin).
 func repairWorkerPATH(ctx context.Context, client *gossh.Client, homeDir string, hints workerRuntimeHints) (workerHealth, error) {
 	workerPATH := workerLaunchPATH(ctx, client, homeDir, hints)
-	h, err := restartWorkerAndWait(ctx, client, homeDir, workerPATH,
+	h, err := restartWorkerAndWait(ctx, client, homeDir, workerPATH, hints.WorktreeRoot,
 		workerHealth.ClaudeResolvable,
 		errors.New("worker 仍报告找不到 claude"))
 	if err != nil {
@@ -1825,9 +1869,9 @@ func upgradeWorkerCode(ctx context.Context, client *gossh.Client, homeDir string
 		return workerHealth{}, fmt.Errorf("上传 server.mjs 失败: %w", err)
 	}
 	workerPATH := workerLaunchPATH(ctx, client, homeDir, hints)
-	h, err := restartWorkerAndWait(ctx, client, homeDir, workerPATH,
+	h, err := restartWorkerAndWait(ctx, client, homeDir, workerPATH, hints.WorktreeRoot,
 		func(h workerHealth) bool {
-			return h.WorkerVersion == agentWorkerVersion && !workerRootStale(h)
+			return h.WorkerVersion == agentWorkerVersion && !workerRootStale(h, hints.WorktreeRoot)
 		},
 		errors.New("worker 版本仍未更新"))
 	if err != nil {
@@ -1859,7 +1903,7 @@ func upgradeWorkerCode(ctx context.Context, client *gossh.Client, homeDir string
 // notOK is the error reported when the worker answers health but `ok` rejects
 // it — it distinguishes "came back wrong" from "never came back".
 func restartWorkerAndWait(
-	ctx context.Context, client *gossh.Client, homeDir, workerPATH string,
+	ctx context.Context, client *gossh.Client, homeDir, workerPATH, worktreeRoot string,
 	ok func(workerHealth) bool, notOK error,
 ) (workerHealth, error) {
 	installDir := homeDir + "/nova-agent-worker"
@@ -1871,8 +1915,8 @@ func restartWorkerAndWait(
 			// Keep the unit's work root in sync with the backend setting (replace the
 			// line, or add it for a unit written before the root was configurable).
 			`if grep -q '^Environment=NOVA_AGENT_WORKTREE_ROOT=' `+shellQuote(unitPath)+`; then `+
-			`sed -i "s|^Environment=NOVA_AGENT_WORKTREE_ROOT=.*|Environment=NOVA_AGENT_WORKTREE_ROOT=`+sedReplacementEscape(agentWorktreeRoot())+`|" `+shellQuote(unitPath)+` 2>/dev/null || true; `+
-			`else sed -i "/^Environment=PATH=/a Environment=NOVA_AGENT_WORKTREE_ROOT=`+sedReplacementEscape(agentWorktreeRoot())+`" `+shellQuote(unitPath)+` 2>/dev/null || true; fi; `+
+			`sed -i "s|^Environment=NOVA_AGENT_WORKTREE_ROOT=.*|Environment=NOVA_AGENT_WORKTREE_ROOT=`+sedReplacementEscape(worktreeRoot)+`|" `+shellQuote(unitPath)+` 2>/dev/null || true; `+
+			`else sed -i "/^Environment=PATH=/a Environment=NOVA_AGENT_WORKTREE_ROOT=`+sedReplacementEscape(worktreeRoot)+`" `+shellQuote(unitPath)+` 2>/dev/null || true; fi; `+
 			`XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" systemctl --user daemon-reload 2>/dev/null || true; `+
 			`XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" systemctl --user restart nova-agent-worker.service 2>/dev/null || true; `+
 			`echo __NOVA_UNIT_RESTARTED__; `+
@@ -1885,7 +1929,7 @@ func restartWorkerAndWait(
 		}
 	}
 
-	if exit, err := client.Exec(ctx, nohupLaunchWorker(installDir, workerPATH, true), "", nil, nil, nil); err != nil || exit != 0 {
+	if exit, err := client.Exec(ctx, nohupLaunchWorker(installDir, workerPATH, worktreeRoot, true), "", nil, nil, nil); err != nil || exit != 0 {
 		return workerHealth{}, fmt.Errorf("nohup 重启失败（exit=%d err=%v）", exit, err)
 	}
 	return waitForWorkerHealthMatching(ctx, client, 10*time.Second, ok, notOK)
@@ -1943,6 +1987,11 @@ type workerRuntimeHints struct {
 	ClaudeBin string
 	// ExtraDirs are directories to prepend to the relaunched worker's PATH.
 	ExtraDirs []string
+	// WorktreeRoot is the resolved per-server work root the worker must be
+	// launched with (agent_servers.worktree_root falling back to the global
+	// default). Carried here so every restart path — revive, PATH repair,
+	// hot upgrade — injects the same value without re-resolving it.
+	WorktreeRoot string
 }
 
 // runtimeHintsFor derives the hints from a persisted agent_servers row. A nil
@@ -1956,7 +2005,10 @@ func runtimeHintsFor(srv *model.AgentServer) workerRuntimeHints {
 	if srv == nil {
 		return workerRuntimeHints{}
 	}
-	hints := workerRuntimeHints{ClaudeBin: strings.TrimSpace(srv.ClaudeBin)}
+	hints := workerRuntimeHints{
+		ClaudeBin:    strings.TrimSpace(srv.ClaudeBin),
+		WorktreeRoot: agentWorktreeRootFor(srv),
+	}
 	hints.ExtraDirs = append(hints.ExtraDirs, splitExtraPathLines(srv.ExtraPaths)...)
 	if strings.HasPrefix(hints.ClaudeBin, "/") {
 		if dir := filepath.Dir(hints.ClaudeBin); dir != "/" && dir != "." {
@@ -2747,16 +2799,23 @@ func composeWorkerPATH(ctx context.Context, client *gossh.Client, extra []string
 	return strings.Join(merged, ":")
 }
 
-// appendWorkRootDiskCheck logs the remote work root, its filesystem and free
-// space, and warns when it sits on tmpfs or has under 2GB free.
-func (h *AgentServerHandler) appendWorkRootDiskCheck(ctx context.Context, client *gossh.Client, job *store.Job) {
-	root := agentWorktreeRoot()
-	job.Append(store.LogLine{Type: "phase", Content: "🔍 检查工作目录磁盘..."})
-	job.Append(store.LogLine{Type: "message", Content: "✓ 工作根目录: " + root})
+// appendWorkRootDiskCheck ensures the remote work root exists and is writable,
+// then logs its filesystem and free space. An unusable root (cannot be
+// created, or read-only) is a hard error: every remote run needs to write
+// scratch clones / worktrees there, and deferring that discovery to the first
+// development run is exactly the opaque permission failure this check prevents.
+// Disk-space findings remain advisory — warnings never flip the status.
+func (h *AgentServerHandler) appendWorkRootDiskCheck(ctx context.Context, client *gossh.Client, root string, job *store.Job) (status, summary string) {
+	job.Append(store.LogLine{Type: "phase", Content: "🔍 检查工作目录..."})
+	if err := ensureRemoteWorkRoot(ctx, client, root, job, true); err != nil {
+		// The detailed, actionable message is already in the job log; the
+		// status summary stays short for the badge tooltip.
+		return model.AgentServerStatusError, "工作根目录不可用（" + root + "），请按安装日志调整权限或路径"
+	}
 	info, ok := probeRemoteDisk(ctx, client, root)
 	if !ok {
 		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 无法读取 " + root + " 的磁盘信息，跳过"})
-		return
+		return "", ""
 	}
 	fs := info.FSType
 	if fs == "" {
@@ -2768,4 +2827,5 @@ func (h *AgentServerHandler) appendWorkRootDiskCheck(ctx context.Context, client
 		job.Append(store.LogLine{Type: "message", Content: "⚠️ 工作根目录位于内存盘或可用空间不足 2GB，大仓库可能因磁盘写满而失败；" +
 			"建议在 Nova 后端设置 NOVA_AGENT_WORKTREE_ROOT 指向磁盘路径（如 /var/lib/nova-agent）并重新安装 worker"})
 	}
+	return "", ""
 }

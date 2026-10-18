@@ -74,6 +74,10 @@ type remoteCodingInput struct {
 	// codingRunParams.SyncMode; see remoteRunInput.SyncMode for the
 	// architect-stage equivalent.
 	SyncMode string
+	// worktreeRoot is the resolved per-server work root (see
+	// agentWorktreeRootFor) — set once the server row is loaded and used for
+	// every scratch-clone / worktree / bundle path in this run.
+	worktreeRoot string
 }
 
 // startCodingReq mirrors the anonymous struct StartCoding decodes so the
@@ -165,6 +169,10 @@ type remoteRunInput struct {
 	// Empty falls back to "architect-design" so existing callers keep the
 	// exact log prefix they had before the field existed.
 	stageLabel string
+	// worktreeRoot is the resolved per-server work root (see
+	// agentWorktreeRootFor). Populated by prepareRemoteAgentRun once the
+	// server row is loaded; every remote path below derives from it.
+	worktreeRoot string
 }
 
 // remoteArchitectInput is the architect-stage wrapper around remoteRunInput.
@@ -240,6 +248,8 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	if err != nil {
 		return claudeStreamOutcome{errMsg: "无法读取 Agent 服务器凭据: " + err.Error()}
 	}
+	// Resolve this server's work root once; every path below derives from it.
+	in.worktreeRoot = agentWorktreeRootFor(srv)
 	in.job.Append(store.LogLine{Type: "phase", Content: "🔌 连接到 Agent 服务器 " + srv.Name + " (" + srv.Host + ")"})
 
 	client, err := gossh.Dial(ctx, srv.Host, srv.Port, srv.Username, srv.AuthType, plain)
@@ -247,6 +257,15 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		return claudeStreamOutcome{errMsg: "SSH 连接失败: " + err.Error()}
 	}
 	defer client.Close()
+
+	// The code-sync step below creates the project's scratch clone and this
+	// requirement's worktree under the work root. Make sure the directory
+	// exists and is writable as this SSH user before touching git — otherwise
+	// a missing / read-only root surfaces as an opaque `git clone` EACCES with
+	// the run already partly set up.
+	if werr := ensureRemoteWorkRoot(ctx, client, in.worktreeRoot, in.job, false); werr != nil {
+		return claudeStreamOutcome{errMsg: werr.Error()}
+	}
 
 	// Step 2: code sync. baseRepo / wtPath give the per-requirement worktree
 	// that mirrors the local branch-isolation model; HOW code gets into that
@@ -268,8 +287,8 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		}
 		tr = originTransport{originURL: originURL, projectID: in.reqRow.ProjectID, projectSvc: h.projectSvc, reqSvc: h.reqSvc, settingSvc: h.settingSvc}
 	}
-	baseRepo := agentWorktreeRoot() + "/" + in.reqRow.ProjectID + "/base"
-	wtPath := agentWorktreeRoot() + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID
+	baseRepo := in.worktreeRoot + "/" + in.reqRow.ProjectID + "/base"
+	wtPath := in.worktreeRoot + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID
 	branch := in.req.BranchName
 	if branch == "" {
 		branch = "requirement-" + in.reqRow.ID
@@ -340,7 +359,7 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// failure there is a warning (we already have the existing
 	// GitHub-side fallback for an unsigned push).
 	gitName, gitEmail := lookupGitIdentity(h.projectSvc, h.platformSvc, in.reqRow)
-	gnupgHome := agentWorktreeRoot() + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".gnupg"
+	gnupgHome := in.worktreeRoot + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".gnupg"
 	// Local-sync mode skips the remote commit.gpgsign provision: the remote
 	// commits are a transport detail landed back into the LOCAL object store,
 	// and the user-visible integration commit is signed locally by
@@ -733,6 +752,8 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 	if err != nil {
 		return claudeStreamOutcome{errMsg: "无法读取 Agent 服务器凭据: " + err.Error()}, func() {}, nil
 	}
+	// Resolve this server's work root once; every path below derives from it.
+	in.worktreeRoot = agentWorktreeRootFor(srv)
 	in.job.Append(store.LogLine{Type: "phase", Content: "🔌 连接到 Agent 服务器 " + srv.Name + " (" + srv.Host + ")"})
 
 	client, err := gossh.Dial(ctx, srv.Host, srv.Port, srv.Username, srv.AuthType, plain)
@@ -744,6 +765,13 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 	// outcome and run its own post-run logic (commit/push for dev, plan
 	// capture for architect).
 	cleanup := func() { client.Close() }
+
+	// Same work-root guard as runRemoteCoding: the clone / worktree below
+	// needs a writable root. Checked here so a permission problem is reported
+	// before any git state is mutated.
+	if werr := ensureRemoteWorkRoot(ctx, client, in.worktreeRoot, in.job, false); werr != nil {
+		return claudeStreamOutcome{errMsg: werr.Error()}, cleanup, nil
+	}
 
 	// Step 2: code sync via git. baseRepo hosts a single origin clone for the
 	// project; wtPath is the per-requirement worktree that mirrors the local
@@ -757,8 +785,8 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 	if err != nil || originURL == "" {
 		return claudeStreamOutcome{errMsg: "项目未配置 git 远程仓库，无法在 Agent 服务器执行。请先在项目设置中配置 origin。" + errString(err)}, cleanup, nil
 	}
-	baseRepo := agentWorktreeRoot() + "/" + in.reqRow.ProjectID + "/base"
-	wtPath := agentWorktreeRoot() + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID
+	baseRepo := in.worktreeRoot + "/" + in.reqRow.ProjectID + "/base"
+	wtPath := in.worktreeRoot + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID
 	// branch defaults to requirement-<id> when the caller did not pin one.
 	// Architect passes "" → falls back to the default (the branch label is
 	// unused for the plan-mode run; git worktree still needs a name to
@@ -822,7 +850,7 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree prune", "", nil, &jobWriter{job: in.job}, nil)
 
 	if !client.Exists(wtPath) {
-		if werr := addRemoteWorktree(ctx, client, in.job, baseRepo, wtPath, branch, "origin/"+baseBranch, worktreeAddCmds(baseRepo, wtPath, branch, baseBranch)); werr != nil {
+		if werr := addRemoteWorktree(ctx, client, in.job, in.worktreeRoot, baseRepo, wtPath, branch, "origin/"+baseBranch, worktreeAddCmds(baseRepo, wtPath, branch, baseBranch)); werr != nil {
 			return claudeStreamOutcome{errMsg: werr.Error()}, cleanup, nil
 		}
 	} else {
@@ -843,7 +871,7 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 	// remote worktree. Failure policy mirrors runRemoteCoding: GPG enabled +
 	// provision fails → abort the run.
 	gitName, gitEmail := lookupGitIdentity(h.projectSvc, h.platformSvc, in.reqRow)
-	gnupgHome := agentWorktreeRoot() + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".gnupg"
+	gnupgHome := in.worktreeRoot + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".gnupg"
 	if project, pErr := h.projectSvc.Get(in.reqRow.ProjectID); pErr == nil && project != nil && project.PlatformTokenID != "" {
 		enabled, _, armored, passphrase, gpgErr := h.platformSvc.GPGSigningMaterial(project.PlatformTokenID)
 		switch {
@@ -1360,7 +1388,7 @@ func (t originTransport) PrepareRemote(ctx context.Context, client *gossh.Client
 	}
 
 	if !client.Exists(wtPath) {
-		if werr := addRemoteWorktree(ctx, client, in.job, baseRepo, wtPath, branch, "origin/"+baseBranch, worktreeAddCmds(baseRepo, wtPath, branch, baseBranch)); werr != nil {
+		if werr := addRemoteWorktree(ctx, client, in.job, in.worktreeRoot, baseRepo, wtPath, branch, "origin/"+baseBranch, worktreeAddCmds(baseRepo, wtPath, branch, baseBranch)); werr != nil {
 			return werr
 		}
 	} else {
@@ -1442,7 +1470,7 @@ func (t bundleTransport) PrepareRemote(ctx context.Context, client *gossh.Client
 	}
 
 	// 2. Upload to a per-requirement namespaced path on the agent host.
-	upRemote := agentWorktreeRoot() + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".up.bundle"
+	upRemote := in.worktreeRoot + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".up.bundle"
 	if perr := client.PutFile(upLocalPath, upRemote, 0644); perr != nil {
 		return fmt.Errorf("上传 git bundle 失败: %w", perr)
 	}
@@ -1464,7 +1492,7 @@ func (t bundleTransport) PrepareRemote(ctx context.Context, client *gossh.Client
 	//    safe (the /tmp worktree is disposable).
 	bundleRef := shellQuoteSingle("refs/bundle/" + branch)
 	if !client.Exists(wtPath) {
-		if werr := addRemoteWorktree(ctx, client, in.job, baseRepo, wtPath, branch, "refs/bundle/"+branch,
+		if werr := addRemoteWorktree(ctx, client, in.job, in.worktreeRoot, baseRepo, wtPath, branch, "refs/bundle/"+branch,
 			[]string{"cd " + shellQuoteSingle(baseRepo) + " && git worktree add -b " + shellQuoteSingle(branch) + " " + shellQuoteSingle(wtPath) + " " + bundleRef}); werr != nil {
 			return werr
 		}
@@ -1502,7 +1530,7 @@ func (t bundleTransport) CollectResult(ctx context.Context, client *gossh.Client
 	}
 
 	// 3. Build the incremental down bundle (range base = refs/bundle/<baseBranch>).
-	downRemote := agentWorktreeRoot() + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".down.bundle"
+	downRemote := in.worktreeRoot + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".down.bundle"
 	if exit, _ := client.Exec(ctx, "git -C "+shellQuoteSingle(wtPath)+" bundle create "+shellQuoteSingle(downRemote)+" "+shellQuoteSingle(baseRef+".."+branch), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
 		in.job.Append(store.LogLine{Type: "error", Content: "❌ 生成下行 bundle 失败（exit=" + fmtInt(exit) + "）"})
 		return
@@ -1864,19 +1892,20 @@ func ensureRemoteWorkerReady(ctx context.Context, client *gossh.Client, srv *mod
 			"）。请在「设置 → Agent 服务器」对该服务器点「安装依赖」后再试。详细: " + err.Error())
 	}
 	hints := runtimeHintsFor(srv)
+	wantRoot := hints.WorktreeRoot
 	pinned := strings.HasPrefix(hints.ClaudeBin, "/")
 	// Nothing to do when the worker can find claude by itself AND is current.
 	// A stale-but-working worker is deliberately left alone: upgrading it would
 	// buy nothing for this run and would interrupt any other run in flight on
 	// the same host. Check is where that host gets brought forward.
-	if health.ClaudeResolvable() && !workerCodeStale(health) && !workerRootStale(health) {
+	if health.ClaudeResolvable() && !workerCodeStale(health) && !workerRootStale(health, wantRoot) {
 		return nil
 	}
 	// Current worker + a recorded absolute path: the pin already covers this
 	// run. Returning straight away keeps us from paying the ~18s restart dance
 	// before every single run on a host whose PATH we cannot fix (claude
 	// installed somewhere no login-shell-free environment will ever see).
-	if pinned && !workerCodeStale(health) && !workerRootStale(health) {
+	if pinned && !workerCodeStale(health) && !workerRootStale(health, wantRoot) {
 		job.Append(store.LogLine{Type: "message", Content: "ℹ️ worker 自身 PATH 找不到 claude，本次按已记录的绝对路径执行: " + hints.ClaudeBin})
 		return nil
 	}
@@ -1893,7 +1922,7 @@ func ensureRemoteWorkerReady(ctx context.Context, client *gossh.Client, srv *mod
 	// Re-probe under the lock: a concurrent run may have just fixed it.
 	if h, perr := probeWorkerHealth(ctx, client); perr == nil {
 		health = h
-		if !workerCodeStale(h) && !workerRootStale(h) && (h.ClaudeResolvable() || pinned) {
+		if !workerCodeStale(h) && !workerRootStale(h, wantRoot) && (h.ClaudeResolvable() || pinned) {
 			return nil
 		}
 	}
@@ -1909,13 +1938,13 @@ func ensureRemoteWorkerReady(ctx context.Context, client *gossh.Client, srv *mod
 	// the field): relaunch with the current NOVA_AGENT_WORKTREE_ROOT so the
 	// worker's workDir scope check matches the paths this run will use. Done
 	// before the version branch because the upgrade path relaunches too.
-	if !workerCodeStale(health) && workerRootStale(health) {
-		want := agentWorktreeRoot()
+	if !workerCodeStale(health) && workerRootStale(health, wantRoot) {
+		want := wantRoot
 		job.Append(store.LogLine{Type: "message", Content: "⚠ worker 工作根目录 " + workerVersionDisplay(health.WorktreeRoot) +
-			" 与平台设置 " + want + " 不一致，正在同步并重启 worker..."})
+			" 与该服务器配置 " + want + " 不一致，正在同步并重启 worker..."})
 		workerPATH := workerLaunchPATH(ctx, client, homeDir, hints)
-		synced, serr := restartWorkerAndWait(ctx, client, homeDir, workerPATH,
-			func(h workerHealth) bool { return !workerRootStale(h) },
+		synced, serr := restartWorkerAndWait(ctx, client, homeDir, workerPATH, want,
+			func(h workerHealth) bool { return !workerRootStale(h, want) },
 			errors.New("worker 工作根目录仍未更新"))
 		if serr != nil {
 			return errors.New("同步 worker 工作根目录失败，请在「设置 → Agent 服务器」点「安装依赖」后再试。详细: " + serr.Error())
@@ -1971,9 +2000,10 @@ func ensureRemoteWorkerReady(ctx context.Context, client *gossh.Client, srv *mod
 // one at all). Stale workers silently ignore run-body fields they don't know,
 // so this gates every decision that depends on one being honoured.
 // workerRootStale reports whether the worker was launched with a work root
-// other than the backend's current agentWorktreeRoot() (empty = old worker).
-func workerRootStale(h workerHealth) bool {
-	return h.WorktreeRoot != agentWorktreeRoot()
+// other than the one resolved for its server (empty = old worker predating
+// the field). want comes from runtimeHintsFor(srv).WorktreeRoot.
+func workerRootStale(h workerHealth, want string) bool {
+	return h.WorktreeRoot != want
 }
 
 func workerCodeStale(h workerHealth) bool {
@@ -2282,7 +2312,7 @@ func (h *WizardHandler) deleteRemoteSubTaskSession(req *model.Requirement, serve
 		return
 	}
 	defer client.Close()
-	remoteWt := agentWorktreeRoot() + "/" + req.ProjectID + "/" + req.ID
+	remoteWt := agentWorktreeRootFor(srv) + "/" + req.ProjectID + "/" + req.ID
 	remoteSlug := util.EncodeClaudeSlug(remoteWt)
 	remotePath := "~/.claude/projects/" + remoteSlug + "/" + sid + ".jsonl"
 	cmd := "rm -f " + remotePath

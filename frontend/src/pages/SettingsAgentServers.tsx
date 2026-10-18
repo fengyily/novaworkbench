@@ -35,6 +35,8 @@ interface Form {
   username: string;
   auth_type: 'key' | 'password';
   auth_value: string;
+  // Per-server work root; empty = global default.
+  worktree_root: string;
 }
 
 const emptyForm: Form = {
@@ -44,6 +46,7 @@ const emptyForm: Form = {
   username: 'root',
   auth_type: 'key',
   auth_value: '',
+  worktree_root: '',
 };
 
 export default function SettingsAgentServers() {
@@ -172,6 +175,7 @@ export default function SettingsAgentServers() {
       username: s.username || 'root',
       auth_type: (s.auth_type === 'password' ? 'password' : 'key'),
       auth_value: '', // never pre-fill — must be re-typed to rotate
+      worktree_root: s.worktree_root || '',
     });
     setError('');
     setModalError('');
@@ -204,6 +208,7 @@ export default function SettingsAgentServers() {
           port: form.port,
           username: form.username,
           auth_type: form.auth_type,
+          worktree_root: form.worktree_root.trim(),
         };
         // Only send auth_value when the user actually re-typed one. nil
         // (= undefined here) preserves the existing ciphertext.
@@ -217,6 +222,7 @@ export default function SettingsAgentServers() {
           username: form.username,
           auth_type: form.auth_type,
           auth_value: form.auth_value,
+          worktree_root: form.worktree_root.trim(),
         };
         await agentServersApi.create(req);
       }
@@ -457,6 +463,17 @@ export default function SettingsAgentServers() {
                   onChange={(e) => setForm({ ...form, username: e.target.value })}
                 />
               </div>
+            </div>
+            <div className="form-group">
+              <label>{t('settings.agentServersPage.labelWorktreeRoot')}</label>
+              <input
+                type="text"
+                className="form-input"
+                value={form.worktree_root}
+                onChange={(e) => setForm({ ...form, worktree_root: e.target.value })}
+                placeholder={t('settings.agentServersPage.worktreeRootPlaceholder')}
+              />
+              <p className="settings-section-desc">{t('settings.agentServersPage.worktreeRootHint')}</p>
             </div>
             <div className="form-group">
               <label>{t('settings.agentServersPage.labelAuth')}</label>
@@ -719,6 +736,10 @@ function ServerCard({
             <span className="server-card-ssh">
               <span className="server-card-ssh-prompt">{t('settings.agentServersPage.sshPrefix')}</span>
               <span className="server-card-ssh-host">{server.username}@{server.host}:{server.port}</span>
+            </span>
+            <span className="server-card-check-time">
+              {t('settings.agentServersPage.workRootPrefix')}
+              {server.worktree_root || t('settings.agentServersPage.workRootDefault')}
             </span>
             {server.last_check_at && (
               <span className="server-card-check-time">

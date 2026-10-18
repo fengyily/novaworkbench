@@ -44,9 +44,9 @@ func codeLivesOnAgent(r *model.Requirement) bool {
 // remoteWorktreePaths mirrors the layout runRemoteCoding creates on the agent
 // host. Keeping the two in one place means a future layout change only has to
 // be made twice in the same package rather than hunted across files.
-func remoteWorktreePaths(projectID, reqID string) (baseRepo, wtPath string) {
-	return agentWorktreeRoot() + "/" + projectID + "/base",
-		agentWorktreeRoot() + "/" + projectID + "/" + reqID
+func remoteWorktreePaths(root, projectID, reqID string) (baseRepo, wtPath string) {
+	return root + "/" + projectID + "/base",
+		root + "/" + projectID + "/" + reqID
 }
 
 // remoteBranchFor resolves the dev branch name the same way runRemoteCoding
@@ -59,36 +59,35 @@ func remoteBranchFor(reqRow *model.Requirement) string {
 }
 
 // dialAgent opens an SSH connection to the Agent server identified by serverID.
-// Returns (nil, name, err) when the service isn't wired, or the credential /
-// connection fails. The returned name is used for user-facing log lines.
-// Extracted from dialAgentForReq so callers that already hold a serverID (e.g.
-// AgentServerHandler.Cleanup) can reuse the same dial flow without going via a
-// *model.Requirement row.
-func (h *MergeHandler) dialAgent(ctx context.Context, serverID string) (*gossh.Client, string, error) {
+// Returns (nil, nil, err) when the service isn't wired, or the credential /
+// connection fails. The row is returned alongside the client so callers can
+// resolve per-server settings (notably the work root) without a second DB
+// round-trip; srv.Name is used for user-facing log lines.
+func (h *MergeHandler) dialAgent(ctx context.Context, serverID string) (*gossh.Client, *model.AgentServer, error) {
 	if serverID == "" {
-		return nil, "", fmt.Errorf("缺少 agent_server_id")
+		return nil, nil, fmt.Errorf("缺少 agent_server_id")
 	}
 	if h.agentSvrSvc == nil {
-		return nil, "", fmt.Errorf("Agent 服务器服务未初始化")
+		return nil, nil, fmt.Errorf("Agent 服务器服务未初始化")
 	}
 	srv, plain, err := h.agentSvrSvc.GetWithCredential(serverID)
 	if err != nil {
-		return nil, "", fmt.Errorf("无法读取 Agent 服务器凭据: %w", err)
+		return nil, nil, fmt.Errorf("无法读取 Agent 服务器凭据: %w", err)
 	}
 	client, err := gossh.Dial(ctx, srv.Host, srv.Port, srv.Username, srv.AuthType, plain)
 	if err != nil {
-		return nil, srv.Name, fmt.Errorf("SSH 连接 %s (%s) 失败: %w", srv.Name, srv.Host, err)
+		return nil, srv, fmt.Errorf("SSH 连接 %s (%s) 失败: %w", srv.Name, srv.Host, err)
 	}
-	return client, srv.Name, nil
+	return client, srv, nil
 }
 
 // dialAgentForReq opens an SSH connection to the Agent server this requirement
-// was developed on. Returns (nil, name, err) when the requirement isn't an
+// was developed on. Returns (nil, nil, err) when the requirement isn't an
 // agent-developed one, the service isn't wired, or the credential/connection
-// fails. The returned name is used for user-facing log lines.
-func (h *MergeHandler) dialAgentForReq(ctx context.Context, reqRow *model.Requirement) (*gossh.Client, string, error) {
+// fails. The returned row carries the per-server work root.
+func (h *MergeHandler) dialAgentForReq(ctx context.Context, reqRow *model.Requirement) (*gossh.Client, *model.AgentServer, error) {
 	if reqRow == nil || reqRow.AgentServerID == "" {
-		return nil, "", fmt.Errorf("需求未标记 Agent 服务器")
+		return nil, nil, fmt.Errorf("需求未标记 Agent 服务器")
 	}
 	return h.dialAgent(ctx, reqRow.AgentServerID)
 }
@@ -126,13 +125,13 @@ func (h *MergeHandler) remoteCleanup(reqRow *model.Requirement, force bool) remo
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	client, srvName, err := h.dialAgentForReq(ctx, reqRow)
+	client, srv, err := h.dialAgentForReq(ctx, reqRow)
 	if err != nil {
 		return remoteCleanupResult{errMsg: err.Error()}
 	}
 	defer client.Close()
 
-	baseRepo, wtPath := remoteWorktreePaths(reqRow.ProjectID, reqRow.ID)
+	baseRepo, wtPath := remoteWorktreePaths(agentWorktreeRootFor(srv), reqRow.ProjectID, reqRow.ID)
 	q := shellQuoteSingle
 	if !client.Exists(wtPath) {
 		// Still prune metadata + drop the branch so a re-run starts clean.
@@ -173,6 +172,6 @@ func (h *MergeHandler) remoteCleanup(reqRow *model.Requirement, force bool) remo
 		// failure here is not worth failing the cleanup over.
 		client.Exec(ctx, "cd "+q(baseRepo)+" && git branch -D "+q(br)+" || true", "", nil, nil, nil)
 	}
-	log.Printf("[worktree-cleanup] removed remote worktree %s on %s for %s", wtPath, srvName, reqRow.ID)
+	log.Printf("[worktree-cleanup] removed remote worktree %s on %s for %s", wtPath, srv.Name, reqRow.ID)
 	return remoteCleanupResult{}
 }

@@ -21,11 +21,11 @@ export const settings = {
   // agentServers: the Agent Server settings sub-page (the form modal +
   // the per-server card with check / install / edit / delete actions).
   agentWorktree: {
-    label: '远端工作根目录',
+    label: '默认远端工作根目录',
     save: '保存',
-    saved: '已保存，下次执行时会自动同步到各 Agent 服务器（必要时自动重启 worker）',
-    hint: '远端 scratch clone / worktree 所在目录，留空使用默认 {{def}}。/tmp 为小 tmpfs 时请改为磁盘路径，如 /var/lib/nova-agent（需为绝对路径，且 worker 用户可写）。',
-    envOverride: '当前被后端环境变量 NOVA_AGENT_WORKTREE_ROOT 覆盖，实际生效：{{path}}',
+    saved: '已保存，下次执行时会同步到未单独配置工作目录的 Agent 服务器（必要时自动重启 worker）',
+    hint: '未单独配置的 Agent Server 使用的默认目录；每台服务器可在「编辑」里覆盖。/tmp 为小 tmpfs 时请改为磁盘路径，如 /var/lib/nova-agent。目录不存在时，「安装依赖」/「检查」会自动创建并校验写权限。',
+    envOverride: '当前被后端环境变量 NOVA_AGENT_WORKTREE_ROOT 覆盖（对所有服务器生效），实际生效：{{path}}',
   },
   agentServersPage: {
     title: '🖥️ Agent 服务器',
@@ -45,6 +45,11 @@ export const settings = {
     hostPlaceholder: '192.168.1.100 或 host.example.com',
     labelPort: '端口',
     labelUsername: '用户名',
+    labelWorktreeRoot: '工作根目录（本服务器）',
+    worktreeRootPlaceholder: '留空使用全局默认（如 /var/lib/nova-agent）',
+    worktreeRootHint: '远端 scratch clone / worktree 所在目录，需为绝对路径。/tmp 为小 tmpfs 或 home 有配额时建议指向独立磁盘目录；留空则使用全局默认。「安装依赖」/「检查」会自动创建并校验写权限。若后端设置了 NOVA_AGENT_WORKTREE_ROOT，该环境变量对所有服务器优先生效。',
+    workRootPrefix: '工作目录：',
+    workRootDefault: '全局默认',
     labelAuth: '认证方式',
     authKey: 'SSH 私钥（PEM）',
     authPassword: '密码',

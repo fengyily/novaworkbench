@@ -267,10 +267,13 @@ func (h *SettingHandler) GetAgentWorktree(w http.ResponseWriter, r *http.Request
 	writeJSON(w, 200, resp)
 }
 
-// UpdateAgentWorktree persists the work root and applies it in-process. Remote
-// workers pick it up automatically: ensureRemoteWorkerReady compares the value
-// the worker reports on /v1/health with agentWorktreeRoot() before each run and
-// relaunches the worker with the new env when they differ.
+// UpdateAgentWorktree persists the GLOBAL default work root and applies it
+// in-process. Servers with their own agent_servers.worktree_root ignore this
+// value (see agentWorktreeRootFor); it remains the fallback for servers that
+// leave the per-server field empty. Remote workers pick it up automatically:
+// ensureRemoteWorkerReady compares the value the worker reports on /v1/health
+// with the resolved per-server root before each run and relaunches the worker
+// with the new env when they differ.
 func (h *SettingHandler) UpdateAgentWorktree(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		WorktreeRoot string `json:"worktree_root"`

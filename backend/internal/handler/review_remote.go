@@ -85,7 +85,16 @@ func (h *ReviewHandler) execRemoteReview(ctx context.Context, job *store.Job, rv
 	if err != nil || originURL == "" {
 		return "", "项目未配置 git 远程仓库，无法在 Agent 服务器执行 Review。请先在项目设置中配置 origin。" + errString(err)
 	}
-	baseRepo := agentWorktreeRoot() + "/" + project.ID + "/base"
+	worktreeRoot := agentWorktreeRootFor(srv)
+	baseRepo := worktreeRoot + "/" + project.ID + "/base"
+
+	// The scratch clone below lives under the work root. Create it if needed
+	// and verify this SSH user can write there before running git — the same
+	// guard the wizard paths use, so a read-only root fails with guidance
+	// instead of `git clone` EACCES.
+	if werr := ensureRemoteWorkRoot(runCtx, client, worktreeRoot, job, false); werr != nil {
+		return "", werr.Error()
+	}
 
 	job.Append(store.LogLine{Type: "phase", Content: "📥 准备 Agent 服务器代码..."})
 	if !client.Exists(baseRepo) {

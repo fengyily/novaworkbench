@@ -376,6 +376,8 @@ CREATE TABLE IF NOT EXISTS agent_servers (
 	status          TEXT NOT NULL DEFAULT 'unknown',
 	last_check_at   DATETIME,
 	check_result    TEXT NOT NULL DEFAULT '',
+	-- per-server remote scratch-clone / worktree root ('' = global default)
+	worktree_root   TEXT NOT NULL DEFAULT '',
 	-- install_job_id is added by alterColumns below (legacy column).
 	-- worker_version is added by alterColumns below (legacy column).
 	claude_bin      TEXT NOT NULL DEFAULT '',
@@ -838,6 +840,10 @@ var alterColumns = []string{
 	// "上次盘点 N 分钟前"; empty string means "never collected yet".
 	`ALTER TABLE agent_servers ADD COLUMN system_info TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE agent_servers ADD COLUMN system_info_collected_at DATETIME`,
+	// worktree_root: per-server override of the remote scratch-clone /
+	// worktree root. '' = global default (env > settings.agent.worktree_root >
+	// /tmp/nova-agent). See handler/agent_paths.go agentWorktreeRootFor.
+	`ALTER TABLE agent_servers ADD COLUMN worktree_root TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN analysis_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN design_session_id TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE requirements ADD COLUMN design_job_id TEXT NOT NULL DEFAULT ''`,

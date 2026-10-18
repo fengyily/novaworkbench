@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/secret"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -213,5 +214,53 @@ func TestAgentServerService_TestConnection_NotFound(t *testing.T) {
 	}
 	if !strings.HasPrefix(err.Error(), "AGENT_NOT_FOUND:") {
 		t.Errorf("missing AGENT_NOT_FOUND prefix: %q", err.Error())
+	}
+}
+// TestAgentServerService_WorktreeRootRoundTrip pins the per-server work-root
+// column through the real SQL path: created with an override, persisted
+// verbatim, clearable back to the global default (''), and settable again.
+func TestAgentServerService_WorktreeRootRoundTrip(t *testing.T) {
+	svc := NewAgentServerService(newTestDB(t))
+
+	created, err := svc.Create(model.CreateAgentServerReq{
+		Name:         "agent-a",
+		Host:         "10.0.0.5",
+		Username:     "nova",
+		AuthType:     model.AgentServerAuthKey,
+		WorktreeRoot: "/data/agent-a",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if created.WorktreeRoot != "/data/agent-a" {
+		t.Fatalf("created worktree_root = %q, want /data/agent-a", created.WorktreeRoot)
+	}
+
+	cleared := ""
+	got, err := svc.Update(created.ID, model.UpdateAgentServerReq{WorktreeRoot: &cleared})
+	if err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if got.WorktreeRoot != "" {
+		t.Fatalf("cleared worktree_root = %q, want empty", got.WorktreeRoot)
+	}
+
+	set := "/data/agent-b"
+	got, err = svc.Update(created.ID, model.UpdateAgentServerReq{WorktreeRoot: &set})
+	if err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if got.WorktreeRoot != "/data/agent-b" {
+		t.Fatalf("set worktree_root = %q, want /data/agent-b", got.WorktreeRoot)
+	}
+
+	// A patch that omits the field must leave it untouched.
+	name := "agent-b"
+	got, err = svc.Update(created.ID, model.UpdateAgentServerReq{Name: &name})
+	if err != nil {
+		t.Fatalf("patch name: %v", err)
+	}
+	if got.WorktreeRoot != "/data/agent-b" {
+		t.Fatalf("nil pointer changed worktree_root to %q", got.WorktreeRoot)
 	}
 }

@@ -26,6 +26,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -237,15 +238,21 @@ func (c *Client) Exec(ctx context.Context, cmd, label string, env []string, out 
 	// Exec returns, so callers that read the buffer immediately can see
 	// a half-converged stream and miss the script's last stdout line
 	// (the GPG NOVA_GPG_KEYID marker is the canonical victim).
+	//
+	// Both pumps write concurrently, so the writer is wrapped in a mutex:
+	// callers routinely pass an io.MultiWriter over a plain bytes.Buffer
+	// (not safe for concurrent use), and interleaved writes can corrupt
+	// or drop the captured output.
+	sink := &syncWriter{w: out}
 	doneStdout := make(chan struct{})
 	doneStderr := make(chan struct{})
 	go func() {
 		defer close(doneStdout)
-		pump(stdoutPipe, label, out, nil)
+		pump(stdoutPipe, label, sink, nil)
 	}()
 	go func() {
 		defer close(doneStderr)
-		pump(stderrPipe, label, out, stderrTail)
+		pump(stderrPipe, label, sink, stderrTail)
 	}()
 
 	if err := sess.Start(cmd); err != nil {
@@ -279,6 +286,20 @@ func (c *Client) Exec(ctx context.Context, cmd, label string, env []string, out 
 		return -1, fmt.Errorf("ssh: wait: %w", waitErr)
 	}
 	return 0, nil
+}
+
+// syncWriter serializes writes from the stdout and stderr pump goroutines.
+// io.Writer implementations handed to Exec (bytes.Buffer, io.MultiWriter
+// chains over one) are generally not safe for concurrent use.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 // pump scans r line by line and writes each to w with an optional label.
@@ -331,13 +352,31 @@ func (c *Client) RunScript(ctx context.Context, script, label string, env []stri
 	}
 	defer sftpCli.Close()
 
-	remote := "/tmp/" + filepath.Base(tmp.Name())
+	// Upload under the remote user's $HOME, NOT /tmp. Agent hosts commonly
+	// mount /tmp as a small tmpfs — often with a per-user quota, and the
+	// default worktree root used to live there — so it can be full while
+	// $HOME still has room. Writing the script to /tmp used to turn that
+	// condition into a silent empty-file upload (see uploadFile), which
+	// `sh` then exited 0 on with no output.
+	scriptDir, err := c.expandHome("~/.nova/tmp")
+	if err != nil {
+		return -1, err
+	}
+	if err := sftpCli.MkdirAll(scriptDir); err != nil {
+		return -1, fmt.Errorf("ssh: mkdir %s: %w", scriptDir, err)
+	}
+	// The script body can carry credentials (e.g. the authenticated git
+	// origin URL), so keep the directory private even though the basename
+	// is random.
+	_ = sftpCli.Chmod(scriptDir, 0700)
+
+	remote := path.Join(scriptDir, filepath.Base(tmp.Name()))
 	if err := uploadFile(sftpCli, tmp.Name(), remote, 0700); err != nil {
 		return -1, fmt.Errorf("ssh: upload script: %w", err)
 	}
 	defer sftpCli.Remove(remote)
 
-	return c.Exec(ctx, "sh "+remote, label, env, out, nil)
+	return c.Exec(ctx, "sh "+shellQuote(remote), label, env, out, nil)
 }
 
 // Exists returns true when remotePath exists on the remote host. The remote
@@ -793,16 +832,51 @@ func uploadFile(sftpCli *sftp.Client, localPath, remotePath string, mode os.File
 		return fmt.Errorf("ssh: open %s: %w", localPath, err)
 	}
 	defer src.Close()
+	wantSize := int64(-1)
+	if fi, statErr := src.Stat(); statErr == nil {
+		wantSize = fi.Size()
+	}
 	dst, err := sftpCli.Create(remotePath)
 	if err != nil {
 		return fmt.Errorf("ssh: sftp create %s: %w", remotePath, err)
 	}
-	defer dst.Close()
-	if _, err := io.Copy(dst, src); err != nil {
-		return fmt.Errorf("ssh: sftp copy: %w", err)
+
+	// Copy through explicit wrapper types so io.Copy cannot pick either fast
+	// path: src is an *os.File (io.WriterTo) and *sftp.File implements
+	// io.ReaderFrom. pkg/sftp v1.13.11's File.ReadFrom SWALLOWS write errors:
+	// when the final read ends with io.ErrUnexpectedEOF (any file whose size
+	// isn't a multiple of the SFTP packet size) it keeps that error, ignores
+	// the failed WRITE reply, and returns (n, nil). The observable failure is
+	// a "successful" upload that left a 0-byte remote file — e.g. a quota-full
+	// /tmp on the agent host turning RunScript's script into an empty file
+	// that `sh` exits 0 on with no output. Hiding both fast paths makes every
+	// Write error surface here.
+	written, copyErr := copyUpload(dst, src)
+	if copyErr != nil {
+		_ = dst.Close()
+		return fmt.Errorf("ssh: sftp copy to %s: %w", remotePath, copyErr)
+	}
+	// Belt and braces: a writer that reports success while dropping bytes
+	// would still slip past the error check above.
+	if wantSize >= 0 && written != wantSize {
+		_ = dst.Close()
+		return fmt.Errorf("ssh: sftp copy to %s: wrote %d of %d bytes", remotePath, written, wantSize)
+	}
+	if err := dst.Close(); err != nil {
+		return fmt.Errorf("ssh: sftp close %s: %w", remotePath, err)
 	}
 	_ = sftpCli.Chmod(remotePath, mode)
 	return nil
+}
+
+// copyUpload copies src into dst with io.Copy's WriterTo/ReaderFrom fast paths
+// hidden. This is deliberately paranoid: *sftp.File's io.ReaderFrom
+// implementation in pkg/sftp v1.13.11 discards write errors when the final
+// read ends in io.ErrUnexpectedEOF, so a plain io.Copy can return (n, nil)
+// after writing nothing at all. Routing every byte through Write means an
+// EDQUOT/ENOSPC/permission failure from the SFTP server always surfaces.
+func copyUpload(dst io.Writer, src io.Reader) (int64, error) {
+	return io.CopyBuffer(struct{ io.Writer }{dst}, struct{ io.Reader }{src}, make([]byte, 32*1024))
 }
 
 func downloadFile(sftpCli *sftp.Client, remotePath, localPath string) error {

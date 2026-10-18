@@ -40,7 +40,7 @@ func scanRow(row interface {
 	err := row.Scan(
 		&a.ID, &a.Name, &a.Host, &a.Port, &a.Username,
 		&a.AuthType, &authValue, &a.AuthValueAlgo,
-		&a.Status, &lastCheck, &a.CheckResult,
+		&a.Status, &lastCheck, &a.CheckResult, &a.WorktreeRoot,
 		&a.InstallJobID, &a.WorkerVersion,
 		&a.ClaudeBin, &a.NodeBin, &a.ExtraPaths,
 		&a.SystemInfo, &systemInfoAt,
@@ -65,7 +65,7 @@ func scanRow(row interface {
 	return &a, nil
 }
 
-const selectColumns = `id, name, host, port, username, auth_type, auth_value, auth_value_algo, status, last_check_at, check_result, install_job_id, worker_version, claude_bin, node_bin, extra_paths, system_info, system_info_collected_at, attachment_sync_state, created_at, updated_at`
+const selectColumns = `id, name, host, port, username, auth_type, auth_value, auth_value_algo, status, last_check_at, check_result, worktree_root, install_job_id, worker_version, claude_bin, node_bin, extra_paths, system_info, system_info_collected_at, attachment_sync_state, created_at, updated_at`
 
 // List returns all servers ordered by creation time. Credentials are NOT
 // decrypted — callers must use GetWithCredential for the plaintext.
@@ -135,11 +135,11 @@ func (s *AgentServerService) Create(req model.CreateAgentServerReq) (*model.Agen
 
 	_, err = s.db.Exec(
 		`INSERT INTO agent_servers
-		 (id, name, host, port, username, auth_type, auth_value, auth_value_algo, status, check_result, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)`,
+		 (id, name, host, port, username, auth_type, auth_value, auth_value_algo, status, check_result, worktree_root, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)`,
 		id, req.Name, req.Host, port, req.Username,
 		req.AuthType, ciphertext, model.AgentServerAuthAlgoAESGCM,
-		model.AgentServerStatusUnknown, now, now,
+		model.AgentServerStatusUnknown, req.WorktreeRoot, now, now,
 	)
 	if err != nil {
 		return nil, err
@@ -178,6 +178,9 @@ func (s *AgentServerService) Update(id string, req model.UpdateAgentServerReq) (
 		}
 		existing.AuthType = *req.AuthType
 	}
+	if req.WorktreeRoot != nil {
+		existing.WorktreeRoot = *req.WorktreeRoot
+	}
 
 	// Auth value rotation:
 	//   pointer nil      → keep existing
@@ -202,11 +205,11 @@ func (s *AgentServerService) Update(id string, req model.UpdateAgentServerReq) (
 	_, err = s.db.Exec(
 		`UPDATE agent_servers
 		 SET name = ?, host = ?, port = ?, username = ?, auth_type = ?,
-		     auth_value = ?, auth_value_algo = ?, updated_at = ?
+		     auth_value = ?, auth_value_algo = ?, worktree_root = ?, updated_at = ?
 		 WHERE id = ?`,
 		existing.Name, existing.Host, existing.Port, existing.Username,
 		existing.AuthType, newCipher, model.AgentServerAuthAlgoAESGCM,
-		now, id,
+		existing.WorktreeRoot, now, id,
 	)
 	if err != nil {
 		return nil, err

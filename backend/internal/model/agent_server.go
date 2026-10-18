@@ -23,6 +23,13 @@ type AgentServer struct {
 	Status        string  `json:"status"`
 	LastCheckAt   *string `json:"last_check_at"`
 	CheckResult   string  `json:"check_result"`
+	// WorktreeRoot is this server's remote scratch-clone / worktree root
+	// (absolute path). Empty means "fall back to the global default" —
+	// NOVA_AGENT_WORKTREE_ROOT, then the 设置 → Agent 服务器 global value, then
+	// /tmp/nova-agent. Per-server because hosts differ (small /tmp tmpfs,
+	// quota'd home dirs, separate data disks). The worker is launched with
+	// this value and the install/check/run flows create and permission-test it.
+	WorktreeRoot string `json:"worktree_root"`
 	// InstallJobID is the JobStore job id of the running install on this server,
 	// or "" when no install is in flight. Persisted so the frontend can
 	// reconnect to the SSE stream after a page refresh — without this the
@@ -83,6 +90,8 @@ type CreateAgentServerReq struct {
 	Username  string `json:"username"`
 	AuthType  string `json:"auth_type"`
 	AuthValue string `json:"auth_value"`
+	// WorktreeRoot empty = use the global default (see AgentServer.WorktreeRoot).
+	WorktreeRoot string `json:"worktree_root"`
 }
 
 // UpdateAgentServerReq is the patch payload. nil pointer = "do not change",
@@ -97,6 +106,9 @@ type UpdateAgentServerReq struct {
 	Username  *string `json:"username"`
 	AuthType  *string `json:"auth_type"`
 	AuthValue *string `json:"auth_value"` // nil = unchanged; pointer to "" = clear
+	// WorktreeRoot nil = unchanged; pointer to "" = fall back to the global
+	// default (see AgentServer.WorktreeRoot).
+	WorktreeRoot *string `json:"worktree_root"`
 }
 
 // AgentServer constants (status values).

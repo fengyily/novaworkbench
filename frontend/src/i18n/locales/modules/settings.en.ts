@@ -18,11 +18,11 @@ export const settings = {
   // agentServers: the Agent Server settings sub-page (the form modal +
   // the per-server card with check / install / edit / delete actions).
   agentWorktree: {
-    label: 'Remote work root',
+    label: 'Default remote work root',
     save: 'Save',
-    saved: 'Saved. It is synced to each Agent Server on the next run (the worker is restarted if needed).',
-    hint: 'Directory for remote scratch clones / worktrees; leave empty for the default {{def}}. If /tmp is a small tmpfs, use a disk path such as /var/lib/nova-agent (absolute, writable by the worker user).',
-    envOverride: 'Overridden by backend env NOVA_AGENT_WORKTREE_ROOT; effective value: {{path}}',
+    saved: 'Saved. It is synced on the next run to Agent Servers without their own work root (the worker is restarted if needed).',
+    hint: 'Default directory for Agent Servers that do not set their own; override per server under Edit. If /tmp is a small tmpfs, use a disk path such as /var/lib/nova-agent. Install / Check creates it when missing and verifies write access.',
+    envOverride: 'Overridden by backend env NOVA_AGENT_WORKTREE_ROOT (applies to every server); effective value: {{path}}',
   },
   agentServersPage: {
     title: '🖥️ Agent Servers',
@@ -42,6 +42,11 @@ export const settings = {
     hostPlaceholder: '192.168.1.100 or host.example.com',
     labelPort: 'Port',
     labelUsername: 'Username',
+    labelWorktreeRoot: 'Work root (this server)',
+    worktreeRootPlaceholder: 'Blank = global default (e.g. /var/lib/nova-agent)',
+    worktreeRootHint: 'Directory for this host\'s scratch clones / worktrees; must be absolute. Use a disk-backed path when /tmp is a small tmpfs or the home dir is quota-limited; blank uses the global default. Install / Check creates it and verifies write access. If the backend sets NOVA_AGENT_WORKTREE_ROOT, that env var wins for every server.',
+    workRootPrefix: 'Work dir: ',
+    workRootDefault: 'global default',
     labelAuth: 'Authentication',
     authKey: 'SSH private key (PEM)',
     authPassword: 'Password',

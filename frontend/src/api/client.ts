@@ -2688,6 +2688,11 @@ export interface AgentServer {
   status: AgentServerStatus;
   last_check_at: string | null;
   check_result: string;
+  // This server's remote scratch-clone / worktree root (absolute path).
+  // Empty = fall back to the global default (env NOVA_AGENT_WORKTREE_ROOT >
+  // 设置 → Agent 服务器 的全局值 > /tmp/nova-agent). Per-server because hosts
+  // differ — small /tmp tmpfs, quota'd home dirs, separate data disks.
+  worktree_root: string;
   // Active install JobStore job id; empty when no install is running.
   // Persisted server-side so a page refresh can reconnect to the SSE
   // stream and replay history — see SettingsAgentServers mount effect.
@@ -2719,6 +2724,8 @@ export interface CreateAgentServerReq {
   username?: string;
   auth_type: 'key' | 'password';
   auth_value: string;
+  // Empty/omitted = use the global default work root.
+  worktree_root?: string;
 }
 export interface UpdateAgentServerReq {
   name?: string;
@@ -2727,6 +2734,8 @@ export interface UpdateAgentServerReq {
   username?: string;
   auth_type?: 'key' | 'password';
   auth_value?: string;
+  // "" explicitly clears the override (falls back to the global default).
+  worktree_root?: string;
 }
 
 export const agentServersApi = {

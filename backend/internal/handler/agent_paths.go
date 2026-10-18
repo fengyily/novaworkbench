@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+
+	"github.com/novaworkbench/backend/internal/model"
 )
 
 // defaultAgentWorktreeRoot is the historical remote work root.
@@ -43,18 +45,39 @@ func NormalizeAgentWorktreeRoot(v string) (string, error) {
 	return v, nil
 }
 
-// agentWorktreeRoot returns the directory the backend uses as the parent of
-// Agent server scratch clones and per-requirement worktrees on the remote host.
+// agentWorktreeRoot returns the GLOBAL fallback for the directory that hosts
+// Agent server scratch clones and per-requirement worktrees. Most call sites
+// should use agentWorktreeRootFor(srv) instead: each host can (and often must)
+// use its own root — small /tmp tmpfs, quota'd home dirs, a separate data disk.
 //
 // History: the path was hardcoded to "/tmp/nova-agent" everywhere — wizard,
-// review, merge, followup. Some deployments (small /tmp tmpfs with strict
-// per-user block quotas) need the actual files to live on a larger / no-quota
-// filesystem, so we now read NOVA_AGENT_WORKTREE_ROOT and fall back to the
-// historical default when unset. agent-worker reads the same env var on its
-// end so its workDir safety check stays in sync.
+// review, merge, followup. Some deployments needed the actual files on a
+// larger / no-quota filesystem, so a global env + saved setting were added.
+// The per-server column now sits between them (see agentWorktreeRootFor);
+// this function remains the "no server in hand" fallback and the base of that
+// chain.
 func agentWorktreeRoot() string {
+	return agentWorktreeRootFor(nil)
+}
+
+// agentWorktreeRootFor returns the effective work root for one Agent server.
+// Precedence: NOVA_AGENT_WORKTREE_ROOT (operator-wide hard override) >
+// agent_servers.worktree_root (per-server) > settings key agent.worktree_root
+// (global default) > /tmp/nova-agent.
+//
+// The per-server value is what makes multi-host deployments work: each host
+// gets a path that matches its own disk layout, while a nil server (or an
+// empty column) keeps the historical global behaviour. agent-worker receives
+// the resolved value as NOVA_AGENT_WORKTREE_ROOT at launch so its
+// assertWorkDirInScope check stays in sync.
+func agentWorktreeRootFor(srv *model.AgentServer) string {
 	if v := strings.TrimRight(strings.TrimSpace(os.Getenv("NOVA_AGENT_WORKTREE_ROOT")), "/"); v != "" {
 		return v
+	}
+	if srv != nil {
+		if v := strings.TrimRight(strings.TrimSpace(srv.WorktreeRoot), "/"); v != "" {
+			return v
+		}
 	}
 	if v, _ := agentWorktreeRootSetting.Load().(string); v != "" {
 		return v
