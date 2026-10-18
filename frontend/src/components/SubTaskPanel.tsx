@@ -1117,6 +1117,221 @@ function SubTaskCard({
     }
   }, [deleting, st.status, st.requirement_id, st.id, onDeleted, t]);
 
+  // ─── Click → auto-scroll / focus plumbing ──────────────────────────
+  // The action buttons live in TWO places (header top-right + the body
+  // footer). Clicking them needs to:
+  //   1. expand the card if collapsed (the footer only renders when
+  //      expanded, so a header click on a collapsed card must flip it),
+  //   2. scroll the matching panel (or live log) into view, and
+  //   3. focus the input for the Adjust drawer so the user can start
+  //      typing immediately.
+  //
+  // The handler cannot scroll directly: when the card is collapsed the
+  // target element hasn't mounted yet, so an immediate scrollIntoView
+  // would no-op. Instead, handlers stamp a request into
+  // pendingScrollRef and a useEffect (below) consumes it once the target
+  // is in the DOM. The effect consumes IMMEDIATELY on first hit so the
+  // 5s list-poll re-renders don't kick a second scroll after the first.
+  type ScrollRequest = { target: 'adjust' | 'redo' | 'log'; source: 'header' | 'footer' };
+  const pendingScrollRef = useRef<ScrollRequest | null>(null);
+  const adjustPaneRef = useRef<HTMLDivElement | null>(null);
+  const redoPaneRef = useRef<HTMLDivElement | null>(null);
+  // Textarea ref for the auto-focus on Adjust. AtMentionTextarea forwards
+  // the ref straight to the underlying <textarea>, so we can focus it
+  // directly without a querySelector dance.
+  const adjustTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // Wrapper ref for the live log — SubTaskLogView owns its own
+  // scroll-to-bottom ref internally, so we wrap it in a div we own to
+  // scrollIntoView without coupling to its internals.
+  const logAnchorRef = useRef<HTMLDivElement | null>(null);
+
+  // Scroll-into-view / focus once the pending request's target is mounted.
+  // Deps cover every state flip that can mount the target (expanded →
+  // expanded + adjusting, etc.) AND the row's terminal status (Continue
+  // flips it back to running, Log target appears). Consumes on first hit
+  // so polling doesn't loop.
+  useEffect(() => {
+    const req = pendingScrollRef.current;
+    if (!req) return;
+    const el =
+      req.target === 'adjust' ? adjustPaneRef.current :
+      req.target === 'redo' ? redoPaneRef.current :
+      req.target === 'log' ? logAnchorRef.current :
+      null;
+    // The panel / log may not have mounted yet (collapsed card, drawer
+    // not open, etc.). Bail out without consuming — the next state flip
+    // will re-fire this effect and the target will be in the DOM by then.
+    if (!el) return;
+    const reduceMotion =
+      typeof window !== 'undefined' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    pendingScrollRef.current = null;
+    el.scrollIntoView({
+      behavior: reduceMotion ? 'auto' : 'smooth',
+      // Header triggers a bigger jump because the panel lives below the
+      // user's current scroll position. Footer only nudges if already in
+      // view to avoid a jarring re-scroll on a button the user just
+      // clicked at the bottom of the card.
+      block: req.source === 'header' ? 'center' : 'nearest',
+    });
+    if (req.target === 'adjust') {
+      // Defer focus until the smooth-scroll finishes so the caret doesn't
+      // land on a half-rendered element. Reduced-motion users get an
+      // immediate focus (no animation to wait out).
+      const focusDelay = reduceMotion ? 0 : 280;
+      const ta = adjustTextareaRef.current;
+      if (ta) {
+        window.setTimeout(() => ta.focus(), focusDelay);
+      }
+    }
+  }, [expanded, adjusting, redoing, streaming, st.status]);
+
+  // Shared renderer for the four action buttons — extracted so the
+  // header (compact, always visible) and the body footer (full-size,
+  // hidden while a drawer is open) stay in lockstep on visibility and
+  // handlers. The handler does its work in three steps: auto-close the
+  // mutually-exclusive pane, expand the card if needed, stamp the scroll
+  // request, then mutate the relevant state. The effect above handles
+  // the scroll on next render.
+  const renderActionButtons = (variant: 'header' | 'footer') => {
+    // Overall gate mirrors the original block at L1592: a finished
+    // sub-task with a session, OR any failed row (so Delete stays
+    // reachable even before the session has landed).
+    const showActions = !streaming && (
+      ((st.status === 'done' || st.status === 'error' || st.status === 'stopped') && st.session_id) ||
+      st.status === 'error'
+    );
+    if (!showActions) return null;
+    // Footer sticks to the existing !adjusting && !redoing gate so the
+    // action row never sits next to an open drawer. Header keeps the row
+    // visible at all times so the entry point is stable — buttons just
+    // disable while a pane is open.
+    if (variant === 'footer' && (adjusting || redoing)) return null;
+    // Per-button visibility, mirroring the original block.
+    const showContinue = st.status === 'error' || st.status === 'stopped';
+    const showErrorOnly = st.status === 'error';
+    // Header variant: disable the row while a pane is open and highlight
+    // the active one. Continue stays enabled so the user can still switch
+    // to "just keep going" from inside the Adjust drawer.
+    const paneOpen = adjusting || redoing;
+    const stopHeaderPropagation = (
+      e: React.MouseEvent | React.KeyboardEvent,
+    ) => {
+      if (variant === 'header') e.stopPropagation();
+    };
+    const handleAdjustKey = (e: React.KeyboardEvent) => {
+      if (variant === 'header' && (e.key === 'Enter' || e.key === ' ')) {
+        // The header is a role=button with its own onKeyDown toggle —
+        // nested buttons must intercept the same key to keep their click
+        // from also flipping expand/collapse.
+        e.stopPropagation();
+      }
+    };
+    const buttonBaseProps = {
+      type: 'button' as const,
+      className: 'sub-card-action-btn',
+      onKeyDown: handleAdjustKey,
+    };
+    return (
+      <span
+        className={
+          variant === 'header'
+            ? 'sub-card-actions'
+            : 'sub-adjust-actions'
+        }
+        data-variant={variant}
+      >
+        <button
+          {...buttonBaseProps}
+          data-action="adjust"
+          aria-pressed={adjusting}
+          disabled={paneOpen || adjustBusy}
+          title={t('components.subTaskCard.adjustToggle')}
+          onClick={(e) => {
+            stopHeaderPropagation(e);
+            // Mutual exclusion: opening Adjust closes Redo and clears
+            // its stale error so the next Redo click starts clean.
+            if (redoing) {
+              setRedoing(false);
+              setRedoError(null);
+            }
+            setExpanded(true);
+            setAdjusting(true);
+            pendingScrollRef.current = { target: 'adjust', source: variant };
+          }}
+        >
+          {t('components.subTaskCard.adjustToggle')}
+        </button>
+        {showContinue && (
+          <button
+            {...buttonBaseProps}
+            data-action="continue"
+            disabled={continueBusy}
+            title={t('components.subTaskCard.continueHint')}
+            onClick={(e) => {
+              stopHeaderPropagation(e);
+              setExpanded(true);
+              // submitContinue is async — the optimistic flip inside
+              // useRestartSubTask sets streaming=true once the call
+              // resolves, which is when the .sub-log mounts. The effect
+              // consumes the request then, NOT here.
+              pendingScrollRef.current = { target: 'log', source: variant };
+              void submitContinue();
+            }}
+          >
+            {continueBusy
+              ? t('components.subTaskCard.continueBusy')
+              : t('components.subTaskCard.continueToggle')}
+          </button>
+        )}
+        {showErrorOnly && (
+          <button
+            {...buttonBaseProps}
+            data-action="redo"
+            aria-pressed={redoing}
+            disabled={paneOpen || redoBusy}
+            title={t('components.subTaskCard.redoToggle')}
+            onClick={(e) => {
+              stopHeaderPropagation(e);
+              // Mutual exclusion: opening Redo closes Adjust and clears
+              // its draft input + error so re-opening Adjust doesn't
+              // surface a stale value.
+              if (adjusting) {
+                setAdjusting(false);
+                setAdjustInput('');
+                setAdjustError(null);
+              }
+              setExpanded(true);
+              setRedoing(true);
+              pendingScrollRef.current = { target: 'redo', source: variant };
+            }}
+          >
+            {t('components.subTaskCard.redoToggle')}
+          </button>
+        )}
+        {showErrorOnly && (
+          <button
+            {...buttonBaseProps}
+            data-action="delete"
+            disabled={deleting}
+            title={t('components.subTaskCard.deleteToggle')}
+            onClick={(e) => {
+              stopHeaderPropagation(e);
+              // Per the requirement spec: no scroll, no expand —
+              // the existing submitDelete confirm-then-prunes the row
+              // and the parent removes it from the list.
+              void submitDelete();
+            }}
+          >
+            {deleting
+              ? t('components.subTaskCard.deleting')
+              : t('components.subTaskCard.deleteToggle')}
+          </button>
+        )}
+      </span>
+    );
+  };
+
   // The header-right summary block surfaces two quick-glance signals the
   // user always wants at a glance without expanding the card:
   // cost · ⏱ duration · ⏳ relative-time. Each is independently null-safe —
@@ -1321,6 +1536,13 @@ function SubTaskCard({
               {stopping ? t('components.subTaskCard.stopping') : t('components.subTaskCard.stopToggle')}
             </button>
           )}
+          {/* Header-right action cluster: /+ 追加调整 / 继续 / 🔄 重做 / 🗑 删除.
+              Mirrors the body footer (kept for backwards compatibility and
+              wide-layout ergonomics) but rendered in the always-visible
+              header so a collapsed card's actions are still reachable.
+              The render helper owns click + keydown stopPropagation so the
+              buttons don't accidentally toggle expand/collapse. */}
+          {renderActionButtons('header')}
           <span className="sub-card-toggle" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
         </div>
         {/* Title line: the user-supplied sub-task title in display weight.
@@ -1436,8 +1658,16 @@ function SubTaskCard({
             </section>
           )}
 
-          {/* Live log (streaming) — full-width terminal scrollback. */}
-          {streaming && <SubTaskLogView lines={lines} />}
+          {/* Live log (streaming) — full-width terminal scrollback.
+              Wrapped in a div with logAnchorRef so the header's
+              继续 → "scroll to log" effect can scrollIntoView the
+              container without coupling to SubTaskLogView's internal
+              auto-scroll-to-bottom ref. */}
+          {streaming && (
+            <div ref={logAnchorRef}>
+              <SubTaskLogView lines={lines} />
+            </div>
+          )}
 
           {/* v0.5.x: brief-result block — 手动子任务在「简洁」模式下（report_mode='brief'）
               渲染这块。源/状态/模型/耗时/花费 已经在卡头 .sub-card-meta +
@@ -1585,61 +1815,29 @@ function SubTaskCard({
               Continue and Redo are both in-place restarts — Redo forks
               a brand-new claude session from the requirement's main
               coding_session_id; Continue --resume's the row's own
-              existing session id (cheaper, preserves partial work). */}
+              existing session id (cheaper, preserves partial work).
+              The action-button row is also rendered in the card header
+              (renderActionButtons('header')) so a collapsed card stays
+              fully actionable; this footer keeps the original layout
+              intact for users who already scrolled to it. */}
           {/* A failed row is always shown even without a session_id so its
               delete affordance stays reachable; the other actions keep their
               own inner guards (Adjust/Continue/Redo require a session). */}
           {!streaming && (((st.status === 'done' || st.status === 'error' || st.status === 'stopped') && st.session_id) || st.status === 'error') && (
             <div className="sub-card-adjust">
-              {/* Toggle row: Adjust / Continue / Redo collapse to a single
-                  row when no drawer is open. Continue sits before Redo so
-                  the "接着干" affordance is more prominent than "重新做".
-                  Redo is only offered on a FAILED sub-task (the backend
-                  enforces the same guard). Continue is offered on error
-                  AND stopped — a user who hit Stop and now wants more
-                  progress hits Continue rather than Redo. */}
-              {!adjusting && !redoing && (
-                <div className="sub-adjust-actions">
-                  <button
-                    type="button"
-                    className="sub-adjust-toggle"
-                    onClick={() => setAdjusting(true)}
-                  >{t('components.subTaskCard.adjustToggle')}</button>
-                  {(st.status === 'error' || st.status === 'stopped') && (
-                    <button
-                      type="button"
-                      className="sub-adjust-toggle"
-                      onClick={submitContinue}
-                      disabled={continueBusy}
-                      title={t('components.subTaskCard.continueHint')}
-                    >
-                      {continueBusy ? t('components.subTaskCard.continueBusy') : t('components.subTaskCard.continueToggle')}
-                    </button>
-                  )}
-                  {st.status === 'error' && (
-                    <button
-                      type="button"
-                      className="sub-adjust-toggle"
-                      onClick={() => setRedoing(true)}
-                    >{t('components.subTaskCard.redoToggle')}</button>
-                  )}
-                  {/* Delete: only on a FAILED row. Removes this sub-task, its
-                      descendant subtree, and each row's claude session file.
-                      The backend enforces the same 'error' guard. */}
-                  {st.status === 'error' && (
-                    <button
-                      type="button"
-                      className="sub-adjust-toggle"
-                      onClick={submitDelete}
-                      disabled={deleting}
-                    >{deleting ? t('components.subTaskCard.deleting') : t('components.subTaskCard.deleteToggle')}</button>
-                  )}
-                </div>
-              )}
+              {/* Footer action buttons: same four buttons as the header
+                  (renderActionButtons reuses the same handler/state
+                  plumbing). The footer variant hides the row while a
+                  pane is open so we never show buttons next to an open
+                  drawer; the header variant disables-and-highlights in
+                  the same situation. Both feed into the same
+                  auto-scroll effect via pendingScrollRef. */}
+              {renderActionButtons('footer')}
 
               {adjusting && (
-                <div className="sub-adjust-pane">
+                <div className="sub-adjust-pane" ref={adjustPaneRef}>
                   <AtMentionTextarea
+                    ref={adjustTextareaRef}
                     value={adjustInput}
                     onChange={setAdjustInput}
                     rows={3}
@@ -1668,7 +1866,7 @@ function SubTaskCard({
               {/* Redo: re-run the SAME prompt with an optional model switch.
                   No textarea — the original prompt is reused verbatim. */}
               {!adjusting && redoing && (
-                <div className="sub-adjust-pane">
+                <div className="sub-adjust-pane" ref={redoPaneRef}>
                   <div className="sub-adjust-hint">{t('components.subTaskCard.redoHint')}</div>
                   <ModelSelect
                     value={redoModel}
