@@ -39,7 +39,7 @@ package handler
 // probe it was killing exits 0. Bumping forces a hot-upgrade of agent hosts
 // still running 0.4.0, which would keep failing every run with
 // 'preflight 失败（unrecognized_model）'.
-const agentWorkerVersion = "0.4.1"
+const agentWorkerVersion = "0.4.2"
 
 // agentWorkerServerMJS is the body of nova-agent-worker/server.mjs that gets
 // uploaded to the remote agent host during install. It's the same content
@@ -1238,9 +1238,11 @@ function assertWorkDirInScope(workDir, reqId) {
   if (!reqId || !segs.includes(reqId)) {
     throw httpError(403, 'workDir ' + real + ' does not contain reqId ' + reqId);
   }
-  // 强约束：必须在 /tmp/nova-agent/ 下
-  if (!real.startsWith('/tmp/nova-agent/')) {
-    throw httpError(403, 'workDir ' + real + ' is outside /tmp/nova-agent/');
+  // 强约束：必须在工作根目录下（默认 /tmp/nova-agent，可由
+  // NOVA_AGENT_WORKTREE_ROOT 覆盖，需与后端 agentWorktreeRoot() 保持一致）
+  const root = (process.env.NOVA_AGENT_WORKTREE_ROOT || '/tmp/nova-agent').replace(/\/+$/, '');
+  if (!real.startsWith(root + '/')) {
+    throw httpError(403, 'workDir ' + real + ' is outside ' + root + '/');
   }
   return real;
 }
@@ -1303,6 +1305,9 @@ Wants=network-online.target
 Type=simple
 Environment=NOVA_AGENT_WORKER_HOST=127.0.0.1
 Environment=NOVA_AGENT_WORKER_PORT=7000
+# Work root for scratch clones / worktrees; must match the backend's
+# NOVA_AGENT_WORKTREE_ROOT (substituted at install time).
+Environment=NOVA_AGENT_WORKTREE_ROOT=__WORKTREE_ROOT__
 # Pin TMPDIR=/tmp so the worker process itself starts with a writable
 # tmpdir even when the SSH user inherited a macOS-shaped TMPDIR
 # (e.g. /var/folders/...) via SendEnv from the dev box. The worker
@@ -1352,6 +1357,7 @@ const agentWorkerLaunchdPlist = `<?xml version="1.0" encoding="UTF-8"?>
   <dict>
     <key>NOVA_AGENT_WORKER_HOST</key><string>127.0.0.1</string>
     <key>NOVA_AGENT_WORKER_PORT</key><string>7000</string>
+    <key>NOVA_AGENT_WORKTREE_ROOT</key><string>__WORKTREE_ROOT__</string>
     <key>TMPDIR</key><string>/tmp</string>
     <!-- PATH placeholder — replaced at install time with the resolved
          launchd PATH (SSH session PATH + extra-paths) so the worker's

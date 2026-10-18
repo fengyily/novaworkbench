@@ -419,7 +419,7 @@ Agent 服务器是一台远程 Linux / macOS 主机，作为 Claude CLI 的远�
    - 工具调用 / 文本流（与本地一致）
    - `📥 同步会话结果回本地...`
    - `📤 推送代码变更到 origin...`
-3. 每次执行都生成远端独立 worktree：`/tmp/nova-agent/<projectID>/<reqID>`，与本地的 `~/.novaworkbench/worktrees/<basename>/<reqID>` 一一对应，**多个需求互不干扰**。
+3. 每次执行都生成远端独立 worktree：`/tmp/nova-agent/<projectID>/<reqID>`（根目录可由后端环境变量 `NOVA_AGENT_WORKTREE_ROOT` 改到磁盘路径，如 `/var/lib/nova-agent`；`/tmp` 为小容量 tmpfs 时务必设置，并重装 worker），与本地的 `~/.novaworkbench/worktrees/<basename>/<reqID>` 一一对应，**多个需求互不干扰**。
 4. **多轮开发（`adjust-coding` / `continue-coding`）**：`--resume <session_id>` 在远端同样生效——本地 `~/.claude/projects/<slug>/` 会话文件上行同步到远端对应目录，claude CLI 在远端读取 session jsonl；执行后下行同步回本地，形成闭环。
 
 #### 6.4 常见故障
@@ -428,7 +428,7 @@ Agent 服务器是一台远程 Linux / macOS 主机，作为 Claude CLI 的远�
 |------|------|------|
 | `SSH 连接失败: ...` | 22 端口未开放 / 防火墙 / 私钥格式错误 | 在 Agent 服务器本地测试 `ssh -i <key> user@host`；确认私钥为 PEM (RSA/ED25519/OpenSSH) 格式 |
 | `项目未配置 git 远程仓库，无法在 Agent 服务器执行` | 项目没有 origin URL | 在 **项目详情** 中配置 Platform Token 与 remote_url，或在本地为项目添加 `git remote add origin ...` |
-| `git push 失败（exit=...），请在远程 worktree 手动处理冲突` | 远端已有同名分支且分叉 | 在 Agent 服务器上 `cd /tmp/nova-agent/<projectID>/<reqID> && git pull origin <branch>` 解决冲突后再试 |
+| `git push 失败（exit=...），请在远程 worktree 手动处理冲突` | 远端已有同名分支且分叉 | 在 Agent 服务器上 `cd <工作根目录>/<projectID>/<reqID> && git pull origin <branch>` 解决冲突后再试 |
 | `❌ 不支持的平台: Windows...` | Agent 服务器 OS 不是 Linux / macOS | 切换到 Linux/macOS 主机；Windows 暂不支持（无 Bash + sshd 标准环境） |
 | macOS: `curl Homebrew install.sh` 失败 | 网络受限 | 手动在目标 Mac 安装 Homebrew，再重试 **安装依赖** |
 | `环境检查` 后状态仍为 `error` | claude 旧版本缺失 `output-format stream-json` | 重新点击 **安装依赖**；若失败则手动在目标主机执行 `npm install -g @anthropic-ai/claude-code` |

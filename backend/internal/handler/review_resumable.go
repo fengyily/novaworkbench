@@ -104,7 +104,7 @@ func (h *ReviewHandler) runRemoteReviewTurn(ctx context.Context, job *store.Job,
 	}
 	defer client.Close()
 
-	baseRepo := "/tmp/nova-agent/" + project.ID + "/base"
+	baseRepo := agentWorktreeRoot() + "/" + project.ID + "/base"
 	if !client.Exists(baseRepo) {
 		// The clone is what both the review's session file and its working
 		// directory hang off. Without it there is nothing to resume and no

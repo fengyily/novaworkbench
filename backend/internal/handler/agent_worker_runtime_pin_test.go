@@ -162,6 +162,12 @@ func TestNohupLaunchWorker(t *testing.T) {
 		}
 	}
 
+	t.Setenv("NOVA_AGENT_WORKTREE_ROOT", "/var/lib/nova-agent")
+	if got := nohupLaunchWorker(dir, path, false); !strings.Contains(got, "NOVA_AGENT_WORKTREE_ROOT='/var/lib/nova-agent'") {
+		t.Errorf("launch line must inject the work root:\n%s", got)
+	}
+	t.Setenv("NOVA_AGENT_WORKTREE_ROOT", "")
+
 	noKill := nohupLaunchWorker(dir, path, false)
 	if strings.Contains(noKill, "kill ") {
 		t.Errorf("killOld=false must not kill an existing process:\n%s", noKill)

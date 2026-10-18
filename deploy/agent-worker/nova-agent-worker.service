@@ -11,6 +11,9 @@ Type=simple
 # @HOST@/@PORT@/@INSTALL_DIR@ are substituted by install.sh.
 Environment=NOVA_AGENT_WORKER_HOST=@HOST@
 Environment=NOVA_AGENT_WORKER_PORT=@PORT@
+# Work root for scratch clones / worktrees; keep in sync with the backend's
+# NOVA_AGENT_WORKTREE_ROOT. Point it at a disk path if /tmp is a small tmpfs.
+Environment=NOVA_AGENT_WORKTREE_ROOT=/tmp/nova-agent
 # Pin TMPDIR=/tmp so the worker process itself starts with a writable
 # tmpdir even when the SSH user inherited a macOS-shaped TMPDIR
 # (e.g. /var/folders/...) via SendEnv from the dev box. The worker

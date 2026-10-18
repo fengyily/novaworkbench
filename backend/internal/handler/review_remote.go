@@ -85,7 +85,7 @@ func (h *ReviewHandler) execRemoteReview(ctx context.Context, job *store.Job, rv
 	if err != nil || originURL == "" {
 		return "", "项目未配置 git 远程仓库，无法在 Agent 服务器执行 Review。请先在项目设置中配置 origin。" + errString(err)
 	}
-	baseRepo := "/tmp/nova-agent/" + project.ID + "/base"
+	baseRepo := agentWorktreeRoot() + "/" + project.ID + "/base"
 
 	job.Append(store.LogLine{Type: "phase", Content: "📥 准备 Agent 服务器代码..."})
 	if !client.Exists(baseRepo) {

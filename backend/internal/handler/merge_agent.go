@@ -45,8 +45,8 @@ func codeLivesOnAgent(r *model.Requirement) bool {
 // host. Keeping the two in one place means a future layout change only has to
 // be made twice in the same package rather than hunted across files.
 func remoteWorktreePaths(projectID, reqID string) (baseRepo, wtPath string) {
-	return "/tmp/nova-agent/" + projectID + "/base",
-		"/tmp/nova-agent/" + projectID + "/" + reqID
+	return agentWorktreeRoot() + "/" + projectID + "/base",
+		agentWorktreeRoot() + "/" + projectID + "/" + reqID
 }
 
 // remoteBranchFor resolves the dev branch name the same way runRemoteCoding
