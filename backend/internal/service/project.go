@@ -1075,8 +1075,10 @@ func hostOnlyForLog(raw string) string {
 
 // redactUserinfo strips any https://user:token@host segments from s so an
 // error message from git can be logged without leaking the token. It is a
-// best-effort pass: it only touches the well-formed URL form.
-var userinfoPattern = regexp.MustCompile(`([a-z][a-z0-9+\-.]*://)([^/\s:@]+):([^@\s/]+)@`)
+// best-effort pass: it only touches the well-formed URL form. The password
+// part is optional so both "user:token@" and the token-as-user shapes
+// "token:@" / "token@" (github/gitea) are covered.
+var userinfoPattern = regexp.MustCompile(`([a-z][a-z0-9+\-.]*://)[^/\s:@]+(?::[^@\s/]*)?@`)
 
 func redactUserinfo(s string) string {
 	return userinfoPattern.ReplaceAllString(s, "$1<redacted>@")
