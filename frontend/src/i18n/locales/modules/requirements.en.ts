@@ -420,7 +420,8 @@ export const requirements = {
     // Architect-stage CTAs.
     processToggleHide: '▼ Hide thinking process',
     processToggleShow: '▶ Show thinking process',
-    regenerateBtn: 'Regenerate',
+    regenerateBtn: 'Re-analyze & regenerate',
+    regenerateBtnTitle: 'Regenerate from the requirements analysis; the refinement conversation is not included',
     exportPdfTitle: 'Export the design to PDF',
     exportPdfBtn: 'Export PDF',
     exportingPdf: 'Exporting…',

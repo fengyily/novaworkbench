@@ -442,7 +442,8 @@ export const requirements = {
     // Architect-stage CTAs.
     processToggleHide: '▼ 收起思考过程',
     processToggleShow: '▶ 思考过程',
-    regenerateBtn: '重新生成',
+    regenerateBtn: '重新分析生成',
+    regenerateBtnTitle: '从需求分析重新开始生成方案，不包含微调对话内容',
     exportPdfTitle: '将技术方案导出为 PDF',
     exportPdfBtn: '导出 PDF',
     exportingPdf: '导出中...',

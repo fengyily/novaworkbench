@@ -702,7 +702,12 @@ export default function DocRefineChat({ reqId, projectPath, docType, currentDoc,
           所以前置条件只剩「工作中/应用中」的禁用门控。 */}
       {!working && !applying && (
         <div className="deep-refine-actions">
-          <button className="btn" onClick={handleApply} disabled={applying}>
+          <button
+            className="btn"
+            onClick={handleApply}
+            disabled={applying}
+            title={t('wizard.docRefine.regenerateHint', { label })}
+          >
             {t('wizard.docRefine.regenerateBtn', { label })}
           </button>
         </div>

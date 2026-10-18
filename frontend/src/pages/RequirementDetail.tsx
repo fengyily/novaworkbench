@@ -4590,7 +4590,7 @@ export default function RequirementDetail() {
                 </button>
               )}
               {req.status === 'designing' && hasDesign && (
-                <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={designing}><IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}</button>
+                <button className="btn btn-sm" onClick={() => requestDesignKnowledge(false)} disabled={designing} title={t('requirements.detail2.regenerateBtnTitle')}><IconRefresh size={13} className="btn-icon" />{t('requirements.detail2.regenerateBtn')}</button>
               )}
               {hasDesign && (
                 <div className="btn-group-split" role="group">
