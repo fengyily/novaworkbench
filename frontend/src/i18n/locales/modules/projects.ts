@@ -107,10 +107,12 @@ export const projects = {
     submit: '开始添加',
   },
   // ProjectDetail page — header, tabs, overview, run / review / usage panels.
+  breadcrumb: {
+    list: '项目列表',
+  },
   detail: {
     loading: '加载中...',
     notFound: '项目未找到',
-    backLink: '返回项目列表',
     repoLink: '仓库 ↗',
     tabs: {
       overview: '概览',

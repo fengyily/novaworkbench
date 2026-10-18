@@ -305,7 +305,6 @@ export const requirements = {
     editSaveBtn: '保存',
     editSaveBusy: '保存中...',
     editCancel: '取消',
-    headerProjectLink: '← 项目',
     summaryTitle: '汇总转需求',
     summarizeTitle: '将整段讨论总结为新的可开发需求（不会修改原想法）',
     summarizeBtn: '汇总为需求',

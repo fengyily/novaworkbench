@@ -291,7 +291,6 @@ export const requirements = {
     editSaveBtn: 'Save',
     editSaveBusy: 'Saving…',
     editCancel: 'Cancel',
-    headerProjectLink: '← Project',
     summaryTitle: 'Summarize as requirement',
     summarySubtitle: 'Summarize the discussion as a new buildable requirement (does not modify the original idea)',
     designMdOverview: '## Overview',

@@ -108,10 +108,12 @@ export const projects = {
     submit: 'Add project',
   },
   // ProjectDetail page — header, tabs, overview, run / review / usage panels.
+  breadcrumb: {
+    list: 'Projects',
+  },
   detail: {
     loading: 'Loading…',
     notFound: 'Project not found',
-    backLink: 'Back to project list',
     repoLink: 'Repo ↗',
     tabs: {
       overview: 'Overview',

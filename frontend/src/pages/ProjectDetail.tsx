@@ -25,6 +25,7 @@ import './RequirementDetail.css';
 import './ProjectDetail.css';
 import './KnowledgePage.css';
 import { errorMessage as errMsg } from '../utils/errMsg';
+import { Breadcrumb } from '../components/Breadcrumb';
 
 type Tab = 'overview' | 'knowledge' | 'run' | 'requirements' | 'review' | 'weekly' | 'usage' | 'issueMonitor';
 
@@ -1129,16 +1130,13 @@ export default function ProjectDetail() {
 
   return (
     <div className="project-detail">
-      {/* Top header: breadcrumb-style back link, then the project's name +
-          type tag, then its filesystem path as muted metadata. Keeping the
-          back link small + unbordered stops it from competing visually with
-          the title (the old bordered button felt heavier than the title
-          underneath it). */}
+      {/* Top header: breadcrumb trail, then the project's name + type tag,
+          then its filesystem path as muted metadata. */}
       <div className="detail-header">
-        <button className="back-link" onClick={() => navigate('/projects')}>
-          <span className="back-arrow" aria-hidden="true">‹</span>
-          <span>{t('projects.detail.backLink')}</span>
-        </button>
+        <Breadcrumb items={[
+          { label: t('projects.breadcrumb.list'), to: '/projects' },
+          { label: project.name, title: project.name },
+        ]} />
       </div>
 
       <div className="detail-title-row">

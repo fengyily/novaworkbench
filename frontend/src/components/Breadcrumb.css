@@ -1,0 +1,31 @@
+.breadcrumb { min-width: 0; font-size: 13px; }
+.breadcrumb ol {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.breadcrumb-item { display: inline-flex; align-items: center; min-width: 0; }
+/* Separator lives in CSS so screen readers don't announce it. */
+.breadcrumb-item + .breadcrumb-item::before {
+  content: '›';
+  margin: 0 8px;
+  color: var(--color-text-muted);
+}
+.breadcrumb-text {
+  display: inline-block;
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  border-radius: 4px;
+  transition: color 0.15s;
+}
+.breadcrumb-link:hover { color: var(--color-primary); }
+.breadcrumb-text[aria-current='page'] { color: var(--color-text); font-weight: 600; }
+.breadcrumb-mono { font-family: var(--font-mono); }

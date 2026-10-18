@@ -1,12 +1,6 @@
 .req-detail { width: 100%; }
 
 .detail-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-.detail-id {
-  font-size: 12px;
-  color: var(--color-text-muted);
-  font-family: var(--font-mono);
-  white-space: nowrap;
-}
 
 /* Edit-modal skip_analysis row — replaces the inline `<label style>` and
    the previous `<small>` token typo (`var(--text-secondary, ...)` was
@@ -2269,10 +2263,6 @@ allowed so the row collapses cleanly on every viewport. */
     line-height: 1.4;
   }
 
-  /* The detail header has its own back button (in the layout bar) so the
-     inner "← 项目" button collapses on mobile to avoid two stacked
-     back arrows. */
-  .detail-header > .btn:first-child { display: none; }
   /* The right-side actions cluster (`编辑 / 删除`) sits in an inline-flex
      wrapper that originally had a fixed `margin-left:auto` — on phones
      that pushed them past the viewport edge. Let the whole header wrap
@@ -2282,14 +2272,6 @@ allowed so the row collapses cleanly on every viewport. */
     width: 100%;
     justify-content: flex-end;
     margin-left: 0 !important;
-  }
-  /* The req.id chip in the header is a 12-char prefix like `req_<8hex>`.
-     Mono font + Chinese characters in the same row used to push the
-     right actions off-screen at 360px. */
-  .detail-id {
-    word-break: break-all;
-    overflow-wrap: anywhere;
-    max-width: 100%;
   }
 
   /* merge-section: the worktree path `<code>` is a long absolute path

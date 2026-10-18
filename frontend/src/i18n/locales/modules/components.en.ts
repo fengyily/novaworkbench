@@ -1,5 +1,8 @@
 // components (en-US) — must mirror modules/components.ts key-for-key.
 export const components = {
+  breadcrumb: {
+    aria: 'Breadcrumb',
+  },
   modelSelect: {
     stageAnalyst: 'Analysis',
     stageArchitect: 'Design',

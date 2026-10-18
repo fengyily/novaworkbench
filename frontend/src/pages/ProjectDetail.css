@@ -4,36 +4,15 @@
      here doubled the inner gutter on desktop. */
 }
 
-/* ── Top header (breadcrumb back + title + type tag + path) ───────────
+/* ── Top header (breadcrumb + title + type tag + path) ───────────
    The old version put a bordered "← 项目列表" button alone in a row, then
    the title, then the tabs — three rows that fought each other. The new
-   version is one continuous hierarchy: a small unbordered back link,
+   version is one continuous hierarchy: a small unbordered breadcrumb,
    the project name as the dominant line, a type tag + optional repo
    link inline next to it, and the filesystem path as muted metadata.
    The eye now lands on the title first, then scans the path. */
 .detail-header {
   margin-bottom: 14px;
-}
-.back-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: none;
-  border: none;
-  padding: 4px 0;
-  font-size: 13px;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  border-radius: 4px;
-  transition: color 0.15s;
-}
-.back-link:hover { color: var(--color-primary); }
-.back-arrow {
-  font-size: 18px;
-  line-height: 1;
-  /* A tiny optical lift — without it the chevron looks like it's
-     sitting on the baseline instead of pointing at the previous page. */
-  transform: translateY(-1px);
 }
 
 .detail-title-row {
