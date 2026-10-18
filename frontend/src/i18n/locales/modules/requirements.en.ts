@@ -371,6 +371,7 @@ export const requirements = {
     compressedBadgeCodingTitle: 'Coding compressed at {{at}}',
     // Stage model tag title (the small "model used by step X" hover hint).
     stageModelTagTitle: 'Model used by {{label}}',
+    stageModelTagTitleWithConfig: '{{label}} config: {{config}}, model: {{model}}',
     // Usage table notes + per-row legends.
     usageStageCostTitle: '{{label}}: {{pct}}%',
     usageBillingNote: 'Input = direct input + cache reads + cache creates (all counted as billed input). Only completed calls are summed up.',

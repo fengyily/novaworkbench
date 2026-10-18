@@ -1689,6 +1689,11 @@ select.preflight-field-input {
   gap: 4px;
   white-space: nowrap;
 }
+.stage-model-tag .stage-model-cfg {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .stage-model-tag svg {
   /* the inline robot glyph is 13px; nudge up so it optically centers inside
      the 11px text baseline (the row otherwise looks slightly off-center) */
