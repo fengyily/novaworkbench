@@ -391,6 +391,7 @@ export const requirements = {
     compressedBadgeCodingTitle: '开发调整已于 {{at}} 压缩',
     // Stage model tag title (the small "model used by step X" hover hint).
     stageModelTagTitle: '{{label}}使用的执行模型',
+    stageModelTagTitleWithConfig: '{{label}}使用的配置：{{config}}，模型：{{model}}',
     // Usage table notes + per-row legends.
     usageStageCostTitle: '{{label}}：{{pct}}%',
     usageBillingNote: '输入 = 直接输入 + 缓存读 + 缓存建（均按计费输入计入）。仅统计已完成的完整调用。',

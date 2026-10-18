@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback, Fragment, type ReactNode, type CSSProperties } from 'react';
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, knowledgeApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch, defaultBranchName } from '../api/client';
+import { requirementsApi, projectsApi, API_BASE, authedFetch, statusLabelKeys, mergeApi, usageApi, usageTotalInput, fmtCost, stepLabelKeys, rolesApi, claudeApi, claudeSettingsPrefix, wizardApi, agentServersApi, subTasksApi, knowledgeApi, DefaultModelLabel, MARK_PRESETS, parseMarks, type AgentServer, type Requirement, type Project, type MergeState, type RequirementUsage, type UsageRow, kindLabelKeys, kindOf, STAGE_VISIBILITY, type Kind, type CostItem, type OrchestrationBatch, type ClaudeConfigItem, defaultBranchName } from '../api/client';
+import { configIdForModel } from '../utils/modelConfig';
 import { tLabel } from '../i18n/label';
 import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
@@ -906,6 +907,46 @@ export default function RequirementDetail() {
     setArchitectConfigId(req.architect_config_id ?? '');
     setDeveloperConfigId(req.developer_config_id ?? '');
   }, [req]);
+
+  // Development inherits the design stage's model + config until the user
+  // touches the developer picker or a developer model is persisted.
+  const developerTouchedRef = useRef(false);
+  const onDeveloperModelChange = (m: string) => {
+    developerTouchedRef.current = true;
+    setDeveloperModel(m);
+  };
+  const onDeveloperConfigChange = (id: string) => {
+    developerTouchedRef.current = true;
+    setDeveloperConfigId(id);
+  };
+  useEffect(() => {
+    if (!req || req.kind === 'wiki' || developerTouchedRef.current) return;
+    // i18n: protocol literal — '默认模型' sentinel mirrored from backend handler.DefaultModelLabel.
+    const norm = (m?: string) => (!m || m === '默认模型' ? '' : m); // i18n: protocol literal
+    if (norm(req.developer_model)) return;
+    const am = norm(req.architect_model);
+    if (!am) return;
+    setDeveloperModel(am);
+    setDeveloperConfigId(req.architect_config_id ?? '');
+  }, [req?.kind, req?.architect_model, req?.architect_config_id, req?.developer_model, req?.developer_config_id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Claude configs, used to show the config name next to the model in the stepper.
+  const [claudeConfigs, setClaudeConfigs] = useState<ClaudeConfigItem[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    claudeApi.list().then((l) => { if (!cancelled) setClaudeConfigs(l ?? []); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  const stageConfigName = (stageKey: string, model: string): string => {
+    if (!model || model === DefaultModelLabel) return '';
+    const persisted = stageKey === 'architect' ? req?.architect_config_id
+      : stageKey === 'developer' ? req?.developer_config_id : '';
+    let id = persisted || '';
+    if (!id || !claudeConfigs.some((c) => c.id === id)) {
+      id = configIdForModel(claudeConfigs, model, '') ?? '';
+    }
+    return claudeConfigs.find((c) => c.id === id)?.name ?? '';
+  };
 
   // Effective default model per role (role-config model > active Claude
   // config default model).
@@ -3161,7 +3202,7 @@ export default function RequirementDetail() {
                   <div className="modal-field">
                     <ModelSelect
                       value={developerModel}
-                      onChange={setDeveloperModel}
+                      onChange={onDeveloperModelChange}
                       disabled={coding}
                       working={coding}
                       stage="developer"
@@ -3169,7 +3210,7 @@ export default function RequirementDetail() {
                       defaultModelName={developerDefaultModel}
                       title={coding ? t('requirements.detail2.devModelBusyTitle') : t('requirements.detail2.devModelTitle')}
                       configId={developerConfigId || undefined}
-                      onConfigChange={setDeveloperConfigId}
+                      onConfigChange={onDeveloperConfigChange}
                     />
                   </div>
                 </div>
@@ -4046,6 +4087,10 @@ export default function RequirementDetail() {
           const isDone = stageIndex > i || (stage === 'done');
           const isActive = stageIndex === i;
           const stageModel = req[s.modelKey];
+          const cfgName = stageModel ? stageConfigName(s.key, stageModel) : '';
+          const modelText = stageModel === DefaultModelLabel
+            ? (roleDefaultModels[s.key] ? `${DefaultModelLabel}（${roleDefaultModels[s.key]}）` : DefaultModelLabel)
+            : stageModel;
           // Per-node timing tag. The plan-analysis span (analyst+architect) is
           // shown on the architect node — or the analyst node when architect is
           // hidden (Idea). The development span is shown on the developer node.
@@ -4062,10 +4107,10 @@ export default function RequirementDetail() {
               </span>
               <span className="stage-label">{s.label}</span>
               {stageModel && (
-                <span className="stage-model-tag" title={t('requirements.detail2.stageModelTagTitle', { label: s.label })}>
-                  <IconRobot size={13} /> {stageModel === DefaultModelLabel
-                    ? (roleDefaultModels[s.key] ? `${DefaultModelLabel}（${roleDefaultModels[s.key]}）` : DefaultModelLabel)
-                    : stageModel}
+                <span className="stage-model-tag" title={cfgName
+                  ? t('requirements.detail2.stageModelTagTitleWithConfig', { label: s.label, config: cfgName, model: modelText })
+                  : t('requirements.detail2.stageModelTagTitle', { label: s.label })}>
+                  <IconRobot size={13} />{cfgName && <span className="stage-model-cfg">{cfgName}</span>}{cfgName && '·'}<span>{modelText}</span>
                 </span>
               )}
               {timingMs != null && (
@@ -5293,7 +5338,7 @@ export default function RequirementDetail() {
                       narrow viewports instead. */}
                   <ModelSelect
                     value={developerModel}
-                    onChange={setDeveloperModel}
+                    onChange={onDeveloperModelChange}
                     disabled={coding}
                     working={coding}
                     stage="developer"
@@ -5301,7 +5346,7 @@ export default function RequirementDetail() {
                     defaultModelName={developerDefaultModel}
                     title={coding ? t('requirements.detail2.devModelBusyTitle') : t('requirements.detail2.devModelIdleTitle')}
                     configId={developerConfigId || undefined}
-                    onConfigChange={setDeveloperConfigId}
+                    onConfigChange={onDeveloperConfigChange}
                   />
                   {/* Agent-server selector. Empty = local execution
                       (legacy default); non-empty routes the claude CLI to
@@ -5554,13 +5599,13 @@ export default function RequirementDetail() {
                       is disabled while a coding job runs. */}
                   <ModelSelect
                     value={developerModel}
-                    onChange={setDeveloperModel}
+                    onChange={onDeveloperModelChange}
                     disabled={coding}
                     working={coding}
                     stage="developer"
                     defaultModelName={developerDefaultModel}
                     configId={developerConfigId || undefined}
-                    onConfigChange={setDeveloperConfigId}
+                    onConfigChange={onDeveloperConfigChange}
                   />
                 </div>
               </div>
