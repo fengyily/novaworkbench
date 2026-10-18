@@ -4493,6 +4493,16 @@ export default function RequirementDetail() {
                     Unified to btn btn-sm (same family as every other wizard
                     stage CTA across the page). */}
                 {reqKind === 'idea' && (
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                    {agentServers.length > 0 && (
+                      <ExecEnvSelect
+                        servers={agentServers}
+                        value={analysisAgentServerId}
+                        onChange={setAnalysisAgentServerId}
+                        localOptionLabel={t('requirements.detail2.preflightLocalExec')}
+                        style={{ minWidth: 160 }}
+                      />
+                    )}
                   <button
                     className="btn btn-sm"
                     onClick={() => transition('analyzing', '开始分析' /* i18n: protocol literal */)}
@@ -4503,6 +4513,7 @@ export default function RequirementDetail() {
                       ? <><IconHourglass size={13} className="btn-icon" />...</>
                       : <><IconChat size={13} className="btn-icon" />{t('requirements.detail2.startAnalysisIdeaBtn')}</>}
                   </button>
+                  </div>
                 )}
               </>
             ) : (
@@ -4541,6 +4552,15 @@ export default function RequirementDetail() {
                     defaultModelName={analystDefaultModel}
                     title={t('requirements.detail2.analystModelTitle')}
                   />
+                  {agentServers.length > 0 && (
+                    <ExecEnvSelect
+                      servers={agentServers}
+                      value={analysisAgentServerId}
+                      onChange={setAnalysisAgentServerId}
+                      localOptionLabel={t('requirements.detail2.preflightLocalExec')}
+                      style={{ minWidth: 160 }}
+                    />
+                  )}
                 </div>
               </>
             )}
