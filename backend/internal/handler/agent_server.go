@@ -1554,6 +1554,9 @@ type workerHealth struct {
 	Status        string `json:"status"`
 	ClaudeVersion string `json:"claudeVersion"`
 	WorkerVersion string `json:"workerVersion"`
+	// WorktreeRoot is the work root the worker was launched with (empty for
+	// workers older than 0.4.3).
+	WorktreeRoot string `json:"worktreeRoot"`
 	// Path is the worker's resolved process PATH, echoed back for diagnostics
 	// (workers older than 0.4.0 omit it).
 	Path string `json:"path"`
@@ -1823,7 +1826,9 @@ func upgradeWorkerCode(ctx context.Context, client *gossh.Client, homeDir string
 	}
 	workerPATH := workerLaunchPATH(ctx, client, homeDir, hints)
 	h, err := restartWorkerAndWait(ctx, client, homeDir, workerPATH,
-		func(h workerHealth) bool { return h.WorkerVersion == agentWorkerVersion },
+		func(h workerHealth) bool {
+			return h.WorkerVersion == agentWorkerVersion && !workerRootStale(h)
+		},
 		errors.New("worker 版本仍未更新"))
 	if err != nil {
 		return h, fmt.Errorf("热升级后 worker 未报告新版本: %w", err)
@@ -1863,6 +1868,11 @@ func restartWorkerAndWait(
 	_, _ = client.Exec(ctx,
 		`if [ -f `+shellQuote(unitPath)+` ]; then `+
 			`sed -i.novabak "s|^Environment=PATH=.*|Environment=PATH=`+sedReplacementEscape(workerPATH)+`|" `+shellQuote(unitPath)+` 2>/dev/null || true; `+
+			// Keep the unit's work root in sync with the backend setting (replace the
+			// line, or add it for a unit written before the root was configurable).
+			`if grep -q '^Environment=NOVA_AGENT_WORKTREE_ROOT=' `+shellQuote(unitPath)+`; then `+
+			`sed -i "s|^Environment=NOVA_AGENT_WORKTREE_ROOT=.*|Environment=NOVA_AGENT_WORKTREE_ROOT=`+sedReplacementEscape(agentWorktreeRoot())+`|" `+shellQuote(unitPath)+` 2>/dev/null || true; `+
+			`else sed -i "/^Environment=PATH=/a Environment=NOVA_AGENT_WORKTREE_ROOT=`+sedReplacementEscape(agentWorktreeRoot())+`" `+shellQuote(unitPath)+` 2>/dev/null || true; fi; `+
 			`XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" systemctl --user daemon-reload 2>/dev/null || true; `+
 			`XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" systemctl --user restart nova-agent-worker.service 2>/dev/null || true; `+
 			`echo __NOVA_UNIT_RESTARTED__; `+

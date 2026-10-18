@@ -111,6 +111,12 @@ func main() {
 	reqSvc := service.NewRequirementService(database, reportArchiveSvc)
 	roleSvc := service.NewRoleService(database)
 	settingSvc := service.NewSettingService(database)
+	// Restore the UI-configured Agent Server work root (env still wins).
+	if v, err := settingSvc.Get(service.SettingAgentWorktreeRoot); err == nil {
+		if root, nerr := handler.NormalizeAgentWorktreeRoot(v); nerr == nil {
+			handler.SetAgentWorktreeRootSetting(root)
+		}
+	}
 	reportSvc := service.NewReportService(database)
 	jobLogSvc := service.NewJobLogService(database)
 	usageSvc := service.NewUsageService(database)
@@ -685,6 +691,11 @@ func main() {
 	// orchestration tick and SubTaskRunner, so a change needs no restart.
 	mux.HandleFunc("GET /api/settings/subtask", settingH.GetSubTaskConfig)
 	mux.HandleFunc("PUT /api/settings/subtask", settingH.UpdateSubTaskConfig)
+
+	// Agent Server remote work root — editable in 设置 → Agent 服务器; env
+	// NOVA_AGENT_WORKTREE_ROOT still wins. Remote workers resync before runs.
+	mux.HandleFunc("GET /api/settings/agent-worktree", settingH.GetAgentWorktree)
+	mux.HandleFunc("PUT /api/settings/agent-worktree", settingH.UpdateAgentWorktree)
 
 	// Git-sync timeout (settings) — upper bound on the design-stage hard sync
 	// (gates + fetch + ff). Read live on every design entry by WizardHandler,

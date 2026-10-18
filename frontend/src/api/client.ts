@@ -2185,6 +2185,20 @@ export const subTaskConfigApi = {
   update: (data: SubTaskConfig) => api.put<SubTaskConfig>('/api/settings/subtask', data),
 };
 
+// Agent Server remote work root. `effective` is what the backend uses
+// (env NOVA_AGENT_WORKTREE_ROOT > saved > default); workers resync before runs.
+export interface AgentWorktreeConfig {
+  worktree_root: string;
+  effective: string;
+  default: string;
+  env_override: boolean;
+}
+export const agentWorktreeApi = {
+  get: () => api.get<AgentWorktreeConfig>('/api/settings/agent-worktree'),
+  update: (data: { worktree_root: string }) =>
+    api.put<AgentWorktreeConfig>('/api/settings/agent-worktree', data),
+};
+
 // Git sync (design-stage hard sync to origin/<base>) timeout. The backend
 // reads this on every design run, so saving takes effect without a restart.
 // Range is clamped server-side to [10, 600] seconds; default 60.

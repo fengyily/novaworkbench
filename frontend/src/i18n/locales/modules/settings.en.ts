@@ -17,6 +17,13 @@ export const settings = {
   },
   // agentServers: the Agent Server settings sub-page (the form modal +
   // the per-server card with check / install / edit / delete actions).
+  agentWorktree: {
+    label: 'Remote work root',
+    save: 'Save',
+    saved: 'Saved. It is synced to each Agent Server on the next run (the worker is restarted if needed).',
+    hint: 'Directory for remote scratch clones / worktrees; leave empty for the default {{def}}. If /tmp is a small tmpfs, use a disk path such as /var/lib/nova-agent (absolute, writable by the worker user).',
+    envOverride: 'Overridden by backend env NOVA_AGENT_WORKTREE_ROOT; effective value: {{path}}',
+  },
   agentServersPage: {
     title: '🖥️ Agent Servers',
     desc: 'Configure remote Linux / macOS machines as Claude CLI execution targets. The platform auto-checks and installs the deps (claude / node / npm / git); requirements can opt to run on one of these servers.',

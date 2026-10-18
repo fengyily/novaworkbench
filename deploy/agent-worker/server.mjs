@@ -209,6 +209,7 @@ app.get('/v1/health', async (_req, res) => {
     status: 'ok',
     claudeVersion,
     workerVersion: WORKER_VERSION,
+    worktreeRoot: (process.env.NOVA_AGENT_WORKTREE_ROOT || '/tmp/nova-agent').replace(/\/+$/, ''),
     path: process.env.PATH || '',
   });
 });
