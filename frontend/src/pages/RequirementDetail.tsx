@@ -87,6 +87,7 @@ import '../styles/markdown-prose.css';
 import './RequirementDetail.css';
 import { FullscreenButton } from '../components/FullscreenButton';
 import { useFullscreen } from '../utils/useFullscreen';
+import { Breadcrumb } from '../components/Breadcrumb';
 
 // WikiData holds the parsed shape of a wiki-kind requirement's Markdown
 // body. Unlike DesignData it only ever has one field — wiki docs are
@@ -3470,8 +3471,11 @@ export default function RequirementDetail() {
 
       {/* Header */}
       <div className="detail-header">
-        <button className="btn" onClick={() => navigate(`/projects/${req.project_id}`)}>{t('requirements.detail2.headerProjectLink')}</button>
-        <div className="detail-id">{req.id}</div>
+        <Breadcrumb items={[
+          { label: t('projects.breadcrumb.list'), to: '/projects' },
+          { label: project?.name ?? req.project_id, to: `/projects/${req.project_id}`, title: project?.name ?? req.project_id },
+          { label: req.id, mono: true },
+        ]} />
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
           {canSummarize && (
             <button

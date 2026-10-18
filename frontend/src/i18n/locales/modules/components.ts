@@ -2,6 +2,9 @@
 // viewers, fullscreen toggle, sub-task panel...). Grows as components are
 // internationalized; every key must exist in modules/components.en.ts too.
 export const components = {
+  breadcrumb: {
+    aria: '面包屑',
+  },
   modelSelect: {
     stageAnalyst: '分析',
     stageArchitect: '方案',
