@@ -145,6 +145,16 @@ function isLongDescription(raw: string): boolean {
   return lines > 8 || chars > 500;
 }
 
+// Threshold check for design doc collapse. Mirrors isLongDescription but uses
+// a higher threshold since design docs are always expected to be longer.
+// Called from a useEffect keyed on req.id / req.design_docs.
+function isLongDesign(raw: string): boolean {
+  if (!raw || !raw.trim()) return false;
+  const lines = raw.split('\n').length;
+  const chars = raw.length;
+  return lines > 12 || chars > 1200;
+}
+
 // Two-role stage-gate lifecycle. Each gate is completed by a manual action.
 // draft → analyzing → designing → designed → developing → done
 type Stage = 'analyst' | 'architect' | 'developer' | 'done';
@@ -1230,12 +1240,16 @@ export default function RequirementDetail() {
   // stored design_docs change, and any switch collapses the view back to its
   // default so the user isn't left with a stale "expanded" state.
   //
-  // v0.5.x: the design body is now rendered "固定显示" (always in full, never
-  // collapsed) so the post-design refine chat can sit directly underneath
-  // and reference the same viewport. The isLongDesign gate + design-toggle
-  // button + design-content-collapsed CSS are all gone — long designs scroll
-  // inside their own container, the user no longer has to click "展开全文".
-  // DocRefineChat picks up the default-expanded state at the same time.
+  // v0.5.x note: the design body was "固定显示" (always in full, never collapsed)
+  // so the post-design refine chat could sit directly underneath and reference
+  // the same viewport. Per user request, design now defaults to collapsed again:
+  // long designs are truncated with a fade-mask + toggle button.
+  const [designExpanded, setDesignExpanded] = useState(false);
+  const [isLongDesignDoc, setIsLongDesignDoc] = useState(false);
+  useEffect(() => {
+    setIsLongDesignDoc(isLongDesign(parseDesign(req?.design_docs ?? '').plan_markdown ?? req?.design_docs ?? ''));
+    setDesignExpanded(false);
+  }, [req?.id, req?.design_docs]);
 
   // Collapsible BRIEF (requirement.description) state. Mirrors the design-doc
   // collapse above: long descriptions default to collapsed (truncated with a
@@ -4891,7 +4905,8 @@ export default function RequirementDetail() {
               <div
                 className={
                   'design-content' +
-                  (designContentFullscreen ? ' is-fullscreen' : '')
+                  (designContentFullscreen ? ' is-fullscreen' : '') +
+                  (isLongDesignDoc && !designExpanded && !designContentFullscreen ? ' design-content-collapsed' : '')
                 }
               >
                 {designContentFullscreen && (
@@ -4926,6 +4941,16 @@ export default function RequirementDetail() {
                   </>
                 )}
               </div>
+              {isLongDesignDoc && !designContentFullscreen && (
+                <button
+                  type="button"
+                  className="btn btn-sm design-toggle-btn"
+                  onClick={() => setDesignExpanded(v => !v)}
+                  aria-expanded={designExpanded}
+                >
+                  {designExpanded ? t('requirements.detail2.designExpandCollapse') : t('requirements.detail2.designExpandShow')}
+                </button>
+              )}
             </>
           )}
 

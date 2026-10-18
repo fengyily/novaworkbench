@@ -443,6 +443,8 @@ export const requirements = {
     // BRIEF card still uses this gate.
     descExpandCollapse: '▲ Collapse',
     descExpandShow: '▼ Show full description',
+    designExpandCollapse: '▲ Collapse',
+    designExpandShow: '▼ Show full design',
     designCompleteBtn: 'Design complete',
     // Developer-stage CTAs.
     devReadyDesignedHint: 'Design complete. Development will follow the technical design.',

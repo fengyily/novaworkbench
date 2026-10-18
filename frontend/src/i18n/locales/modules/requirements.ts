@@ -465,6 +465,8 @@ export const requirements = {
     // BRIEF card still uses this gate.
     descExpandCollapse: '▲ 收起',
     descExpandShow: '▼ 展开完整需求描述',
+    designExpandCollapse: '▲ 收起',
+    designExpandShow: '▼ 展开完整方案',
     designCompleteBtn: '方案完成',
     // Developer-stage CTAs.
     devReadyDesignedHint: '方案已完成。将根据技术方案进行开发实现。',
