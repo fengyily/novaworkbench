@@ -546,6 +546,11 @@ type claudeStreamOutcome struct {
 	// refine / sub-task flows where preamble accumulation would corrupt the
 	// refine history and break the [REFINE_COMPLETE] sentinel check.
 	streamText string
+	// thinking is the model's reasoning text, accumulated from stream_event
+	// thinking_delta or assistant-event thinking blocks (never both for the
+	// same turn) and capped at maxThinkingBytes. Persisted only for manual
+	// sub-tasks; never emitted to the job log.
+	thinking string
 	// SessionFileMissingSide, when non-empty AND staleSession is true,
 	// classifies the "源会话已失效" failure into one of three buckets so
 	// finishSubTask / ExecuteOrchestratedChild can surface a targeted
@@ -825,6 +830,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	logClaudeCmd(scope, cmd)
 
 	var out claudeStreamOutcome
+	var tk thinkingCollector
 	out.stalledByWatchdog = &atomic.Bool{}
 	// thinkingTokens tracks the last token count we reported so we can
 	// throttle thinking_tokens progress messages (every 50 tokens).
@@ -942,6 +948,10 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 					if phaseSink != nil {
 						phaseSink(text)
 					}
+				case "thinking_delta":
+					// Reasoning is stored for the sub-task report, not streamed to the log.
+					th, _ := delta["thinking"].(string)
+					tk.addDelta(th)
 				case "input_json_delta":
 					// tool input being assembled — not surfaced to the client
 				}
@@ -978,6 +988,9 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 			for _, block := range content {
 				b, _ := block.(map[string]interface{})
 				switch b["type"] {
+				case "thinking":
+					th, _ := b["thinking"].(string)
+					tk.addBlock(th)
 				case "tool_use":
 					toolName, _ := b["name"].(string)
 					input, _ := b["input"].(map[string]interface{})
@@ -1057,6 +1070,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 					}
 				}
 			}
+			tk.endTurn()
 		case "result":
 			subtype, _ := evt["subtype"].(string)
 			// The CLI sometimes emits subtype:"success" even when the upstream
@@ -1223,6 +1237,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 	if out.staleSession && out.errMsg == "" {
 		out.errMsg = "分析对话会话已过期"
 	}
+	tk.finish(&out)
 	return out
 }
 
@@ -1250,6 +1265,7 @@ func runClaudeStream(sink streamSink, cmd *exec.Cmd, scope string, uctx *usageCt
 // the EOF branch treats nil heartbeats as "no rolling ctx in play".
 func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink, scope string, uctx *usageCtx, heartbeats chan<- struct{}) claudeStreamOutcome {
 	var out claudeStreamOutcome
+	var tk thinkingCollector
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
 	// Track the first few non-JSON lines so the postmortem in runRemoteCoding
@@ -1327,6 +1343,9 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 						// event field, which is empty in plan mode).
 						out.streamText += text
 					}
+				case "thinking_delta":
+					th, _ := delta["thinking"].(string)
+					tk.addDelta(th)
 				}
 			case "content_block_start":
 				block, _ := inner["content_block"].(map[string]interface{})
@@ -1345,6 +1364,9 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 			for _, block := range content {
 				b, _ := block.(map[string]interface{})
 				switch b["type"] {
+				case "thinking":
+					th, _ := b["thinking"].(string)
+					tk.addBlock(th)
 				case "tool_use":
 					toolName, _ := b["name"].(string)
 					input, _ := b["input"].(map[string]interface{})
@@ -1388,6 +1410,7 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 					}
 				}
 			}
+			tk.endTurn()
 		case "result":
 			subtype, _ := evt["subtype"].(string)
 			apiErrStatus := 0.0
@@ -1431,6 +1454,7 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 					}
 				}
 			}
+			tk.finish(&out)
 			return out
 		case "error":
 			// nova-agent-worker emits {type:"error", error:"..."} when the
@@ -1493,6 +1517,7 @@ func parseStreamJSONFromReader(ctx context.Context, r io.Reader, sink streamSink
 		}
 		out.errMsg = "远程 Claude 未返回结果（流中断 — " + summary + closer
 	}
+	tk.finish(&out)
 	return out
 }
 

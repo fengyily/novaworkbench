@@ -1357,6 +1357,27 @@ func (h *WizardHandler) GetSubTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
+// GetSubTaskThinking handles GET /api/requirements/{id}/sub-tasks/{sid}/thinking.
+// Returns {content}; an empty string (not 404) when nothing was recorded.
+func (h *WizardHandler) GetSubTaskThinking(w http.ResponseWriter, r *http.Request) {
+	if !h.requireSubTaskSvc(w) {
+		return
+	}
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+	st, err := h.subTaskSvc.Get(sid)
+	if err != nil || st.RequirementID != id {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "sub-task not found")
+		return
+	}
+	content, err := h.subTaskSvc.GetThinking(sid)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"content": content})
+}
+
 // buildSubTaskArtifact composes the final Markdown report persisted into
 // sub_tasks.artifact. The header carries the title / prompt / model /
 // timestamps so the report reads standalone — useful when the SubTaskPanel

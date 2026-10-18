@@ -1375,6 +1375,17 @@ func staleSourceCandidates(sourceSID, parentSourceSID, reqCodingSID string) []st
 // "stopped". Instead we just stamp token / cost / duration / completed_at /
 // model via UpdateRunStatsOnStop so the dashboard still sees the resolved
 // usage numbers, and finish the JobStore job so SSE subscribers unblock.
+// saveThinking persists the captured reasoning for manual sub-tasks. Failure
+// is logged only — it must never affect the status already written.
+func (r *SubTaskRunner) saveThinking(st *model.SubTask, out claudeStreamOutcome) {
+	if out.thinking == "" || !phaseEnabledForSource(st.Source) {
+		return
+	}
+	if err := r.subTaskSvc.SaveThinking(st.ID, out.thinking); err != nil {
+		log.Printf("[sub-task] failed to persist thinking for %s: %v", st.ID, err)
+	}
+}
+
 func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out claudeStreamOutcome, modelName string, startTime time.Time, phaseTrack *phaseTracker) {
 	tokens := model.SubTaskTokens{
 		Input:         out.lastUsage.InputTokens,
@@ -1397,6 +1408,7 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 		if perr := r.subTaskSvc.UpdateRunStatsOnStop(st.ID, "", modelName, tokens, costCents, startTime); perr != nil {
 			log.Printf("[sub-task] failed to persist run-stats-on-stop for %s: %v", st.ID, perr)
 		}
+		r.saveThinking(st, out)
 		job.Finish(0, store.JobDone)
 		log.Printf("[sub-task] job %s already stopped for %s, kept stopped artifact", job.ID, st.ID)
 		return
@@ -1487,6 +1499,7 @@ func (r *SubTaskRunner) finishSubTask(st *model.SubTask, job *store.Job, out cla
 			log.Printf("[sub-task] failed to persist finish for %s: %v", st.ID, perr)
 		}
 	}
+	r.saveThinking(st, out)
 	// Best-effort bump parent requirement updated_at on terminal sub-task
 	// transitions (done/error/stopped). A touch failure never blocks the
 	// sub-task lifecycle — the row + job are already persisted above.

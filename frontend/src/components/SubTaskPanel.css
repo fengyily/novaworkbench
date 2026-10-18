@@ -1997,3 +1997,18 @@
   background: var(--color-surface);
   border-color: var(--color-primary);
 }
+
+/* Thinking process (collapsed by default) — muted, monospace, scrollable. */
+.sub-thinking-toggle { color: var(--color-text-secondary, #64748B); }
+.sub-thinking-body {
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary, #64748B);
+}
+.sub-thinking-hint { font-size: 12px; color: var(--color-text-secondary, #64748B); }

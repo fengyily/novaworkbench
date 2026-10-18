@@ -629,6 +629,10 @@ export const subTasksApi = {
   // belong to the requirement.
   get: (requirementId: string, subTaskId: string) =>
     api.get<SubTask>(`/api/requirements/${requirementId}/sub-tasks/${subTaskId}`),
+  // Model reasoning captured for a manual sub-task. Fetched lazily (never part
+  // of list/get); content is '' when nothing was recorded.
+  getThinking: (requirementId: string, subTaskId: string) =>
+    api.get<{ content: string }>(`/api/requirements/${requirementId}/sub-tasks/${subTaskId}/thinking`),
   // Append a follow-up instruction to an existing sub-task. Resumes the
   // parent's claude session via --fork-session so the child inherits the
   // parent's prior edits + transcript. Returns a new job_id/sub_task_id

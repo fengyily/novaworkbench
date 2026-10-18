@@ -850,6 +850,7 @@ func main() {
 	mux.HandleFunc("POST /api/requirements/{id}/sub-tasks", wizardH.StartSubTask)
 	mux.HandleFunc("GET /api/requirements/{id}/sub-tasks", wizardH.ListSubTasks)
 	mux.HandleFunc("GET /api/requirements/{id}/sub-tasks/{sid}", wizardH.GetSubTask)
+	mux.HandleFunc("GET /api/requirements/{id}/sub-tasks/{sid}/thinking", wizardH.GetSubTaskThinking)
 	// Append a follow-up instruction to an existing sub-task (resumes the
 	// parent's claude session via --fork-session). Same scope as
 	// AdjustCoding — reuses the spawn helper in wizard.go.

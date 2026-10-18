@@ -486,8 +486,29 @@ func (s *SubTaskService) DeleteByIDs(ids []string) error {
 		placeholders[i] = "?"
 		args[i] = id
 	}
+	if _, err := s.db.Exec(`DELETE FROM sub_task_thinking WHERE sub_task_id IN (`+strings.Join(placeholders, ",")+`)`, args...); err != nil {
+		return fmt.Errorf("cleanup sub_task_thinking: %w", err)
+	}
 	_, err := s.db.Exec(`DELETE FROM sub_tasks WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	return err
+}
+
+// SaveThinking upserts the model's reasoning text for a sub-task.
+func (s *SubTaskService) SaveThinking(id, content string) error {
+	_, err := s.db.Exec(`INSERT INTO sub_task_thinking (sub_task_id, content, updated_at) VALUES (?, ?, ?)`+
+		s.db.OnConflict("sub_task_id", "content = excluded.content, updated_at = excluded.updated_at"),
+		id, content, time.Now())
+	return err
+}
+
+// GetThinking returns the stored reasoning text, or "" when none was recorded.
+func (s *SubTaskService) GetThinking(id string) (string, error) {
+	var content string
+	err := s.db.QueryRow(`SELECT content FROM sub_task_thinking WHERE sub_task_id = ?`, id).Scan(&content)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return content, err
 }
 
 // ListByBatch returns every sub-task attached to batchID, ordered by
