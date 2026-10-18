@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -236,6 +237,15 @@ func (h *RequirementHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	item, err := h.svc.Update(r.PathValue("id"), req)
 	if err != nil {
+		// A missing row is a client-recoverable condition, not a server bug:
+		// the create form's draft pre-create can be superseded (draft deleted
+		// from another tab, page left open across a database switch/restart),
+		// and the frontend falls back to POST on this code. Do not let it
+		// surface as INTERNAL, which reads as "retry later, it's our fault".
+		if errors.Is(err, service.ErrRequirementNotFound) {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+			return
+		}
 		writeError(w, 500, "INTERNAL", err.Error())
 		return
 	}

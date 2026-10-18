@@ -2,6 +2,7 @@ package service
 
 import (
 	"database/sql"
+	"errors"
 
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,16 @@ import (
 	"github.com/novaworkbench/backend/internal/model"
 	"github.com/novaworkbench/backend/internal/util"
 )
+
+// ErrRequirementNotFound is returned by requirement lookups when no row
+// matches the caller's id. Handlers map it to 404 NOT_FOUND instead of the
+// generic 500 INTERNAL (which reads as "server bug" and hides the recovery
+// path from the client). The common trigger is a stale client-side id: the
+// create-requirement form pre-creates a draft row on mount and then PUTs it
+// on submit, so a draft deleted from another tab (or a page kept open across
+// a database switch / restart) reaches Update with an id that no longer
+// exists — the client can recover by creating a fresh row.
+var ErrRequirementNotFound = errors.New("requirement not found")
 
 type RequirementService struct {
 	db         *db.DB
@@ -441,7 +452,7 @@ func (s *RequirementService) Get(id string) (*model.Requirement, error) {
 			&r.Tags, &r.Marks, &r.ClosedAt, &r.ClosedReason, &r.WikiDocs, &r.WikiSessionID, &r.WikiJobID,
 			&r.SourcePlatform, &r.SourceExternalID, &r.SourceURL, &r.SourceState, &r.SourceData, &r.SourceReviewID)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("requirement not found")
+		return nil, ErrRequirementNotFound
 	}
 	if err != nil {
 		return nil, err
@@ -894,7 +905,7 @@ func (s *RequirementService) GetContextSummary(id, step string) (string, error) 
 	var out string
 	if err := s.db.QueryRow(q, id).Scan(&out); err != nil {
 		if err == sql.ErrNoRows {
-			return "", fmt.Errorf("requirement not found")
+			return "", ErrRequirementNotFound
 		}
 		return "", err
 	}
@@ -951,7 +962,7 @@ func (s *RequirementService) UpdateUsageSnapshot(id, sessionKey, snapshotJSON st
 	var blob string
 	if err := tx.QueryRow("SELECT usage_snapshots FROM requirements WHERE id=?", id).Scan(&blob); err != nil {
 		if err == sql.ErrNoRows {
-			return fmt.Errorf("requirement not found")
+			return ErrRequirementNotFound
 		}
 		return err
 	}

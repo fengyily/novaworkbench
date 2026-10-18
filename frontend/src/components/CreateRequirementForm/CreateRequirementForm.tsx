@@ -24,7 +24,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import RichDescriptionEditor from '../RichDescriptionEditor/RichDescriptionEditor';
 import LaunchPlanSection from './LaunchPlanSection';
-import { kindLabelKeys, kindHintKeys, kindPlaceholderKeys, kindCreateLabelKeys, type Kind, type AgentServer, type LaunchSpec, type KnowledgeItem, type Project, agentServersApi, projectsApi, requirementsApi, type Requirement } from '../../api/client';
+import { ApiError, kindLabelKeys, kindHintKeys, kindPlaceholderKeys, kindCreateLabelKeys, type Kind, type AgentServer, type LaunchSpec, type KnowledgeItem, type Project, agentServersApi, projectsApi, requirementsApi, type Requirement } from '../../api/client';
 import { tLabel } from '../../i18n/label';
 import { errorMessage } from '../../utils/errMsg';
 import PdfUploadDialog from '../PdfUploadDialog';
@@ -65,6 +65,20 @@ const DRAFT_PLACEHOLDER_DESCRIPTION = '（草稿）';
 // Used to seed the title on the final update, since the existing Update
 // SQL sets title=? (no COALESCE) and we don't want to lose the auto-derived
 // first-line title.
+// isRequirementNotFound — true when the server reports that the draft row
+// this form was updating no longer exists. The pre-created draft (see the
+// mount effect below) can vanish between mount and submit: it may be deleted
+// from another tab, or the page may have been left open across a database
+// switch / backend restart. The raw INTERNAL form is accepted too because
+// older backends returned the same condition that way.
+function isRequirementNotFound(err: unknown): boolean {
+  if (!(err instanceof ApiError)) return false;
+  return (
+    err.code === 'NOT_FOUND' ||
+    (err.code === 'INTERNAL' && /requirement not found/i.test(err.detail))
+  );
+}
+
 function fallbackTitle(content: string): string {
   const trimmed = content.trim();
   if (!trimmed) return '新需求';
@@ -326,23 +340,44 @@ export function CreateRequirementForm({
       // an edit-mode form that pre-loaded an existingRequirementId but is
       // somehow missing the live state — defensive fallback).
       const targetId = existingRequirementId || pendingReqId;
+      const resolvedPriority = kind === 'idea' ? 'medium' : priority;
       let created: Requirement;
       if (targetId) {
-        created = await requirementsApi.update(targetId, {
-          title: fallbackTitle(description),
-          description,
-          priority: kind === 'idea' ? 'medium' : priority,
-          skip_analysis: skipAnalysis,
-          kind,
-          skip_design: skipDesign,
-          project_id: projectId || undefined,
-          launch: launchSpec ?? undefined,
-        });
+        try {
+          created = await requirementsApi.update(targetId, {
+            title: fallbackTitle(description),
+            description,
+            priority: resolvedPriority,
+            skip_analysis: skipAnalysis,
+            kind,
+            skip_design: skipDesign,
+            project_id: projectId || undefined,
+            launch: launchSpec ?? undefined,
+          });
+        } catch (err) {
+          // The draft row disappeared between mount and submit (deleted in
+          // another tab, or this page outlived a database switch/restart).
+          // The user's text only exists in this form at this point, so
+          // recreate the row rather than failing the submit. skip_organize
+          // mirrors the draft path — Update never ran the organizer, so the
+          // fallback must not silently rewrite what the user typed either.
+          if (!isRequirementNotFound(err)) throw err;
+          created = await requirementsApi.create({
+            project_id: projectId,
+            description,
+            priority: resolvedPriority,
+            kind,
+            skip_analysis: skipAnalysis,
+            skip_design: skipDesign,
+            skip_organize: true,
+            launch: launchSpec ?? undefined,
+          });
+        }
       } else {
         created = await requirementsApi.create({
           project_id: projectId,
           description,
-          priority: kind === 'idea' ? 'medium' : priority,
+          priority: resolvedPriority,
           kind,
           skip_analysis: skipAnalysis,
           skip_design: skipDesign,
