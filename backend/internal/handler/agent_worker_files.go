@@ -39,7 +39,9 @@ package handler
 // probe it was killing exits 0. Bumping forces a hot-upgrade of agent hosts
 // still running 0.4.0, which would keep failing every run with
 // 'preflight 失败（unrecognized_model）'.
-const agentWorkerVersion = "0.4.2"
+// 0.4.3: /v1/health reports worktreeRoot so the backend can detect a worker
+// started with a stale NOVA_AGENT_WORKTREE_ROOT and relaunch it before a run.
+const agentWorkerVersion = "0.4.3"
 
 // agentWorkerServerMJS is the body of nova-agent-worker/server.mjs that gets
 // uploaded to the remote agent host during install. It's the same content
@@ -256,6 +258,7 @@ app.get('/v1/health', async (_req, res) => {
     status: 'ok',
     claudeVersion,
     workerVersion: WORKER_VERSION,
+    worktreeRoot: (process.env.NOVA_AGENT_WORKTREE_ROOT || '/tmp/nova-agent').replace(/\/+$/, ''),
     path: process.env.PATH || '',
   });
 });

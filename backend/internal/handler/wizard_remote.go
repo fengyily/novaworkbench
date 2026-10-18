@@ -1869,14 +1869,14 @@ func ensureRemoteWorkerReady(ctx context.Context, client *gossh.Client, srv *mod
 	// A stale-but-working worker is deliberately left alone: upgrading it would
 	// buy nothing for this run and would interrupt any other run in flight on
 	// the same host. Check is where that host gets brought forward.
-	if health.ClaudeResolvable() && !workerCodeStale(health) {
+	if health.ClaudeResolvable() && !workerCodeStale(health) && !workerRootStale(health) {
 		return nil
 	}
 	// Current worker + a recorded absolute path: the pin already covers this
 	// run. Returning straight away keeps us from paying the ~18s restart dance
 	// before every single run on a host whose PATH we cannot fix (claude
 	// installed somewhere no login-shell-free environment will ever see).
-	if pinned && !workerCodeStale(health) {
+	if pinned && !workerCodeStale(health) && !workerRootStale(health) {
 		job.Append(store.LogLine{Type: "message", Content: "ℹ️ worker 自身 PATH 找不到 claude，本次按已记录的绝对路径执行: " + hints.ClaudeBin})
 		return nil
 	}
@@ -1893,7 +1893,7 @@ func ensureRemoteWorkerReady(ctx context.Context, client *gossh.Client, srv *mod
 	// Re-probe under the lock: a concurrent run may have just fixed it.
 	if h, perr := probeWorkerHealth(ctx, client); perr == nil {
 		health = h
-		if !workerCodeStale(h) && (h.ClaudeResolvable() || pinned) {
+		if !workerCodeStale(h) && !workerRootStale(h) && (h.ClaudeResolvable() || pinned) {
 			return nil
 		}
 	}
@@ -1903,6 +1903,28 @@ func ensureRemoteWorkerReady(ctx context.Context, client *gossh.Client, srv *mod
 	homeDir := strings.TrimSpace(homeBuf.String())
 	if homeDir == "" {
 		homeDir = "/root"
+	}
+
+	// Work root drifted (changed in 设置 → Agent 服务器, or the worker predates
+	// the field): relaunch with the current NOVA_AGENT_WORKTREE_ROOT so the
+	// worker's workDir scope check matches the paths this run will use. Done
+	// before the version branch because the upgrade path relaunches too.
+	if !workerCodeStale(health) && workerRootStale(health) {
+		want := agentWorktreeRoot()
+		job.Append(store.LogLine{Type: "message", Content: "⚠ worker 工作根目录 " + workerVersionDisplay(health.WorktreeRoot) +
+			" 与平台设置 " + want + " 不一致，正在同步并重启 worker..."})
+		workerPATH := workerLaunchPATH(ctx, client, homeDir, hints)
+		synced, serr := restartWorkerAndWait(ctx, client, homeDir, workerPATH,
+			func(h workerHealth) bool { return !workerRootStale(h) },
+			errors.New("worker 工作根目录仍未更新"))
+		if serr != nil {
+			return errors.New("同步 worker 工作根目录失败，请在「设置 → Agent 服务器」点「安装依赖」后再试。详细: " + serr.Error())
+		}
+		health = synced
+		job.Append(store.LogLine{Type: "message", Content: "✓ worker 工作根目录已同步为 " + want})
+		if health.ClaudeResolvable() || pinned {
+			return nil
+		}
 	}
 
 	// Stale code first: an old worker ignores claudeBin, so no amount of PATH
@@ -1948,6 +1970,12 @@ func ensureRemoteWorkerReady(ctx context.Context, client *gossh.Client, srv *mod
 // agentWorkerVersion (an empty version means a worker old enough not to report
 // one at all). Stale workers silently ignore run-body fields they don't know,
 // so this gates every decision that depends on one being honoured.
+// workerRootStale reports whether the worker was launched with a work root
+// other than the backend's current agentWorktreeRoot() (empty = old worker).
+func workerRootStale(h workerHealth) bool {
+	return h.WorktreeRoot != agentWorktreeRoot()
+}
+
 func workerCodeStale(h workerHealth) bool {
 	return h.WorkerVersion != agentWorkerVersion
 }

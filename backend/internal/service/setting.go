@@ -61,6 +61,8 @@ const (
 //     (≤ 600s, accommodates a slow first fetch on a large repo).
 const (
 	settingGitSyncTimeout = "git.sync_timeout_seconds"
+	// SettingAgentWorktreeRoot is the remote Agent Server work root ("" = default).
+	SettingAgentWorktreeRoot = "agent.worktree_root"
 )
 
 // Setting key for the auto-summary trigger. Read on every orchestration tick

@@ -7,6 +7,7 @@ import {
   type UpdateAgentServerReq,
 } from '../api/client';
 import { fmtDateTime } from '../utils/intl';
+import AgentWorktreeSetting from './AgentWorktreeSetting';
 import './SettingsAgentServers.css';
 
 // Status badge colors mirror the wizard/preflight pattern (CSS in index.css).
@@ -360,6 +361,8 @@ export default function SettingsAgentServers() {
         </div>
         <button className="btn btn-primary" onClick={openCreate}>{t('settings.agentServersPage.addBtn')}</button>
       </div>
+
+      <AgentWorktreeSetting />
 
       {error && <div className="form-error">❌ {error}</div>}
       {toast && <div className="form-toast">✅ {toast}</div>}

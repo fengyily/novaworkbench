@@ -20,6 +20,13 @@ export const settings = {
   },
   // agentServers: the Agent Server settings sub-page (the form modal +
   // the per-server card with check / install / edit / delete actions).
+  agentWorktree: {
+    label: '远端工作根目录',
+    save: '保存',
+    saved: '已保存，下次执行时会自动同步到各 Agent 服务器（必要时自动重启 worker）',
+    hint: '远端 scratch clone / worktree 所在目录，留空使用默认 {{def}}。/tmp 为小 tmpfs 时请改为磁盘路径，如 /var/lib/nova-agent（需为绝对路径，且 worker 用户可写）。',
+    envOverride: '当前被后端环境变量 NOVA_AGENT_WORKTREE_ROOT 覆盖，实际生效：{{path}}',
+  },
   agentServersPage: {
     title: '🖥️ Agent 服务器',
     desc: '配置远程 Linux / macOS 服务器作为 Claude CLI 的执行环境。平台自动检查并安装依赖（claude / node / npm / git），需求开发时可选择在该服务器上执行。',

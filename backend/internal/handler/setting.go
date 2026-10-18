@@ -3,6 +3,8 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/service"
@@ -233,4 +235,64 @@ func (h *SettingHandler) UpdateLLM(w http.ResponseWriter, r *http.Request) {
 		APIKeyPreview: service.MaskToken(apiKey),
 		Model:         model,
 	})
+}
+
+// AgentWorktreeResponse is the API shape for the Agent Server work root.
+// Effective is what the backend actually uses (env > saved > default);
+// EnvOverride tells the UI the saved value is shadowed by NOVA_AGENT_WORKTREE_ROOT.
+type AgentWorktreeResponse struct {
+	WorktreeRoot string `json:"worktree_root"`
+	Effective    string `json:"effective"`
+	Default      string `json:"default"`
+	EnvOverride  bool   `json:"env_override"`
+}
+
+func (h *SettingHandler) agentWorktreeResponse() (AgentWorktreeResponse, error) {
+	saved, err := h.svc.Get(service.SettingAgentWorktreeRoot)
+	return AgentWorktreeResponse{
+		WorktreeRoot: saved,
+		Effective:    agentWorktreeRoot(),
+		Default:      defaultAgentWorktreeRoot,
+		EnvOverride:  strings.TrimSpace(os.Getenv("NOVA_AGENT_WORKTREE_ROOT")) != "",
+	}, err
+}
+
+// GetAgentWorktree returns the Agent Server remote work root configuration.
+func (h *SettingHandler) GetAgentWorktree(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.agentWorktreeResponse()
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, resp)
+}
+
+// UpdateAgentWorktree persists the work root and applies it in-process. Remote
+// workers pick it up automatically: ensureRemoteWorkerReady compares the value
+// the worker reports on /v1/health with agentWorktreeRoot() before each run and
+// relaunches the worker with the new env when they differ.
+func (h *SettingHandler) UpdateAgentWorktree(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		WorktreeRoot string `json:"worktree_root"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON: "+err.Error())
+		return
+	}
+	root, err := NormalizeAgentWorktreeRoot(req.WorktreeRoot)
+	if err != nil {
+		writeError(w, 400, "INVALID", err.Error())
+		return
+	}
+	if err := h.svc.Set(service.SettingAgentWorktreeRoot, root); err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	SetAgentWorktreeRootSetting(root)
+	resp, err := h.agentWorktreeResponse()
+	if err != nil {
+		writeError(w, 500, "INTERNAL", err.Error())
+		return
+	}
+	writeJSON(w, 200, resp)
 }
