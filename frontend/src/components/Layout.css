@@ -219,7 +219,10 @@
 .app-main {
   flex: 1;
   padding: 24px 32px;
-  overflow-y: auto;
+  /* No scroll container here: the page scrolls with the window, and an
+     overflow-y:auto ancestor would stop `position: sticky` descendants
+     (detail breadcrumbs) from sticking to the viewport. */
+  overflow-x: clip;
   background: var(--color-bg);
   min-width: 0;
 }

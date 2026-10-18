@@ -29,3 +29,14 @@
 .breadcrumb-link:hover { color: var(--color-primary); }
 .breadcrumb-text[aria-current='page'] { color: var(--color-text); font-weight: 600; }
 .breadcrumb-mono { font-family: var(--font-mono); }
+
+/* Detail-page breadcrumb row stays pinned under the app header while the
+   page scrolls, so the user can jump up a level from anywhere. */
+.detail-header:has(> .breadcrumb) {
+  position: sticky;
+  top: calc(48px + var(--sat));
+  z-index: 50;
+  background: var(--color-bg);
+  padding: 8px 0;
+  margin-top: -8px;
+}

@@ -188,10 +188,11 @@ export default function Layout() {
   const sectionLabel = (() => {
     const path = location.pathname;
     // `as const` keeps each key a literal so `t()` stays compile-checked.
-    if (path.startsWith('/requirements/')) return { key: 'nav.section.requirementDetail' as const, back: '/requirements' };
+    // Detail pages carry their own breadcrumb, so no header title / back here.
+    if (path.startsWith('/requirements/')) return { key: '' as const, back: null };
     if (path.startsWith('/requirements')) return { key: 'nav.section.requirements' as const, back: null };
     if (path.startsWith('/projects/add')) return { key: 'nav.section.addProject' as const, back: '/projects' };
-    if (path.startsWith('/projects/')) return { key: 'nav.section.projectDetail' as const, back: '/projects' };
+    if (path.startsWith('/projects/')) return { key: '' as const, back: null };
     if (path.startsWith('/projects')) return { key: 'nav.section.projects' as const, back: null };
     if (path.startsWith('/knowledge')) return { key: 'nav.section.knowledge' as const, back: null };
     if (path.startsWith('/schedules')) return { key: 'nav.section.schedules' as const, back: null };
