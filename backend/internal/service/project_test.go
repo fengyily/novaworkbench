@@ -787,3 +787,20 @@ func TestFetchAuthHint(t *testing.T) {
 		t.Fatal("unexpected hint")
 	}
 }
+
+func TestRedactUserinfo(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"token as user, empty password", "https://ghp_abc123:@github.com/a/b.git", "https://<redacted>@github.com/a/b.git"},
+		{"token as user, no colon", "https://ghp_abc123@github.com/a/b.git", "https://<redacted>@github.com/a/b.git"},
+		{"user and password", "http://fengyi:glpat-xxx@host/a.git", "http://<redacted>@host/a.git"},
+		{"scp-style untouched", "git@github.com:a/b.git", "git@github.com:a/b.git"},
+		{"no userinfo untouched", "https://github.com/a/b.git", "https://github.com/a/b.git"},
+		{"multiple urls in sentence", "fatal: unable to access 'https://tok1:@h1/x.git' and https://u:tok2@h2/y.git", "fatal: unable to access 'https://<redacted>@h1/x.git' and https://<redacted>@h2/y.git"},
+		{"@ in path untouched", "https://github.com/a/b@v1", "https://github.com/a/b@v1"},
+	}
+	for _, c := range cases {
+		if got := redactUserinfo(c.in); got != c.want {
+			t.Errorf("%s: got %q want %q", c.name, got, c.want)
+		}
+	}
+}
