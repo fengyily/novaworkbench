@@ -458,6 +458,70 @@
   opacity: 0.6;
 }
 
+/* Header action cluster: 追加调整 / 继续 / 🔄 重做 / 🗑 删除.
+   Mirrors the body footer's .sub-adjust-actions flex layout, but lives
+   in the always-visible card header (so a collapsed card's actions
+   remain reachable) and uses `margin-left: auto` to push itself to the
+   far-right of the meta line — the first right-aligned element, per
+   the design spec. Buttons share .sub-card-action-btn styles so
+   header + footer read as the same component. */
+.sub-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-wrap: nowrap;
+}
+
+/* Action button — dashed outline to evoke the existing
+   .sub-adjust-toggle visual language, but compact (`padding: 3px 10px`)
+   so four of them fit in the header row without overflowing. The Delete
+   variant switches the foreground to --color-error; the active
+   Adjust/Redo button uses data-pressed=true to highlight which drawer
+   is currently open. */
+.sub-card-action-btn {
+  background: transparent;
+  border: 1px dashed var(--color-border);
+  color: var(--color-primary);
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
+}
+.sub-card-action-btn:hover:not(:disabled) {
+  border-style: solid;
+  border-color: var(--color-primary);
+  background: var(--color-active);
+}
+.sub-card-action-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+/* Delete variant: drop the dashed purple for an error-tinted danger
+   button so the destructive action visually stands apart from the
+   three "modify" actions. */
+.sub-card-action-btn[data-action="delete"] {
+  color: var(--color-error);
+  border-color: rgba(239, 68, 68, 0.35);
+}
+.sub-card-action-btn[data-action="delete"]:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: var(--color-error);
+  border-style: solid;
+}
+/* Pressed = the matching drawer is currently open. Used to show which
+   header button corresponds to the bottom pane (so the entry point
+   stays stable even when disabled). */
+.sub-card-action-btn[aria-pressed="true"] {
+  border-style: solid;
+  border-color: var(--color-primary);
+  background: var(--color-active);
+}
+
 /* Source badge: 🪄 Auto (indigo) vs 👤 Manual (emerald).
    Distinguishes auto-orchestrated sub-tasks from manually-created ones.
    One rule for both the source and the session-mode chip so the meta line
@@ -927,6 +991,10 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  /* When a header action button scrolls the pane into view, leave a
+     little breathing room under the sticky-ish page header so the
+     textarea/select doesn't end up flush against the top edge. */
+  scroll-margin-top: 12px;
 }
 .sub-adjust-textarea {
   width: 100%;
@@ -1024,6 +1092,7 @@
   .sub-card,
   .sub-cli-copy,
   .sub-adjust-toggle,
+  .sub-card-action-btn,
   .sub-adjust-textarea,
   .sub-session-mode-option {
     transition: none;
