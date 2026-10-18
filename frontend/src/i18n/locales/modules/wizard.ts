@@ -59,6 +59,8 @@ export const wizard = {
     execError: 'Claude 执行出错',
     jobLost: '⚠️ 任务已丢失（服务可能重启）。点击重试重新开始。',
     errNoJobId: '未获取到任务 ID',
+    analystAgentServerLabel: '对话执行环境',
+    analystAgentServerBusyTitle: '本轮对话进行中，执行环境不可切换。',
     retryBtn: '🔄 重试',
     clearConfirm: '确定要清除对话记录吗？需求将回到草稿状态，可手动重新触发分析。',
     compressConfirm: '让 Claude 总结当前对话并压缩上下文？\n\n该操作会清空当前会话 ID，下次对话将看到压缩摘要而不是完整历史。',

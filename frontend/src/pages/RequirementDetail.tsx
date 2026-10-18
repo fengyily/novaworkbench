@@ -670,6 +670,8 @@ export default function RequirementDetail() {
   // dependencies haven't been verified. The state slot is `''` (NOT null)
   // so every `<select>`/dropdown stays a plain string.
   const [designAgentServerId, setDesignAgentServerId] = useState('');
+  // Chat-level (analyst-chat turn) execution environment; per-turn, not persisted.
+  const [analysisAgentServerId, setAnalysisAgentServerId] = useState('');
   const [codingAgentServerId, setCodingAgentServerId] = useState('');
   const [agentServers, setAgentServers] = useState<AgentServer[]>([]);
   useEffect(() => {
@@ -4142,6 +4144,8 @@ export default function RequirementDetail() {
           agentServers={agentServers}
           agentServerId={designAgentServerId}
           onAgentServerChange={setDesignAgentServerId}
+          analysisAgentServerId={analysisAgentServerId}
+          onAnalysisAgentServerChange={setAnalysisAgentServerId}
         />
       )}
 

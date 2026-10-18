@@ -61,6 +61,11 @@ interface Props {
   agentServers?: AgentServer[];
   agentServerId?: string;
   onAgentServerChange?: (id: string) => void;
+  // Chat-level execution environment: where each analyst-chat TURN runs. Distinct
+  // from `agentServerId` above (which only drives the later architect-design
+  // run) and shown for every kind, including idea. Empty = local.
+  analysisAgentServerId?: string;
+  onAnalysisAgentServerChange?: (id: string) => void;
 }
 
 interface ChatMessage { role: string; content: string; isError?: boolean; isStreaming?: boolean; }
@@ -68,6 +73,7 @@ interface ChatMessage { role: string; content: string; isError?: boolean; isStre
 export default function DeepRefineChat({
   reqId, projectPath, requirementTitle, currentAnalysis, analysisJobId, kind, model, defaultModel, onTurnDone, onWorkingChange, usage, onUsage, onGenerateDesign, onReset,
   agentServers = [], agentServerId, onAgentServerChange,
+  analysisAgentServerId, onAnalysisAgentServerChange,
 }: Props) {
   const [expanded, setExpanded] = useState(true);
   const { isFullscreen, toggle: toggleFullscreen, exit: exitFullscreen } = useFullscreen();
@@ -349,6 +355,7 @@ export default function DeepRefineChat({
           user_message: userMessage,
           // Per-request model override — empty means the role's configured model.
           ...(selectedModel ? { model: selectedModel } : {}),
+          ...(analysisAgentServerId ? { agent_server_id: analysisAgentServerId } : {}),
         }),
       });
       const json = await res.json();
@@ -692,6 +699,22 @@ export default function DeepRefineChat({
             list; with no servers the selector would be a single useless
             "本地执行" option. Rendered for kind=idea only when the CTA itself
             renders (the CTA is hidden for idea, so this stays hidden too). */}
+        {agentServers.length > 0 && onAnalysisAgentServerChange && (
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+              {t('wizard.analyst.analystAgentServerLabel')}
+            </span>
+            <ExecEnvSelect
+              servers={agentServers}
+              value={analysisAgentServerId ?? ''}
+              onChange={onAnalysisAgentServerChange}
+              disabled={isWorking}
+              title={isWorking ? t('wizard.analyst.analystAgentServerBusyTitle') : ''}
+              localOptionLabel={t('requirements.detail2.preflightLocalExec')}
+              style={{ minWidth: 160 }}
+            />
+          </label>
+        )}
         {!isIdea && agentServers.length > 0 && (
           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>

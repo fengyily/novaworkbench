@@ -58,6 +58,8 @@ export const wizard = {
     execError: 'Claude failed to execute',
     jobLost: '⚠️ The job is gone (server may have restarted). Click Retry to start over.',
     errNoJobId: 'No job id returned',
+    analystAgentServerLabel: 'Chat execution target',
+    analystAgentServerBusyTitle: 'A chat turn is running — the execution target is locked.',
     retryBtn: '🔄 Retry',
     clearConfirm: 'Clear the conversation? The requirement will go back to draft and you can re-trigger analysis manually.',
     compressConfirm: 'Have Claude summarize the conversation and compress context?\n\nThis clears the current session id; the next turn will see the compressed summary instead of the full history.',

@@ -1206,6 +1206,72 @@ func (h *WizardHandler) runRemoteWikiDoc(in *remoteWikiInput) claudeStreamOutcom
 	return out
 }
 
+// remoteAnalystInput is the analyst-chat wrapper around remoteRunInput. The
+// prompt/session fields of the embedded input are filled per attempt by
+// runRemoteAnalystTurn, which mirrors runAnalystTurn's resume + stale-session
+// fallback logic.
+type remoteAnalystInput struct {
+	*remoteRunInput
+	kind            string
+	firstTurnPrompt func() string
+	resumePrompt    string
+	sessionID       string
+	resume          bool
+}
+
+// runRemoteAnalystTurn is the Agent-server counterpart of runAnalystTurn: one
+// analyst-chat turn runs via prepareRemoteAgentRun (read/write tools enabled
+// per the first-turn gating, no plan mode). A stale --resume (including a
+// session that was created on a different execution environment) falls back to
+// a fresh first turn with a newly minted session id, which is returned so the
+// caller persists it.
+func (h *WizardHandler) runRemoteAnalystTurn(in *remoteAnalystInput) (finalResult, newSessionID string, err error) {
+	if in == nil || in.remoteRunInput == nil {
+		return "", "", fmt.Errorf("缺少 remoteAnalystInput")
+	}
+	run := func(prompt, sessionID string, resume bool) claudeStreamOutcome {
+		ri := *in.remoteRunInput
+		ri.prompt = prompt
+		ri.sessionArg = sessionID
+		ri.fork = false
+		ri.forkSessionID = ""
+		if resume {
+			ri.sourceSID = sessionID
+			ri.DisallowedTools = nil
+		} else {
+			ri.sourceSID = ""
+			ri.DisallowedTools = analystFirstTurnDisallowedToolsForKind(in.kind)
+		}
+		out, cleanup, rerr := h.prepareRemoteAgentRun(&ri)
+		defer cleanup()
+		if rerr != nil {
+			return claudeStreamOutcome{errMsg: rerr.Error()}
+		}
+		return out
+	}
+
+	sessionID := in.sessionID
+	prompt := in.resumePrompt
+	if !in.resume {
+		prompt = in.firstTurnPrompt()
+	}
+	out := run(prompt, sessionID, in.resume)
+	if out.staleSession && in.resume {
+		freshID := util.NewUUID()
+		log.Printf("[analyst-chat] remote stale session %s — falling back to fresh first turn %s", sessionID, freshID)
+		in.job.Append(store.LogLine{Type: "phase", Content: "🔄 检测到过期会话，正在重新开始分析..."})
+		out = run(in.firstTurnPrompt(), freshID, false)
+		sessionID = freshID
+	}
+	if out.finalResult == "" {
+		if out.errMsg != "" {
+			return "", sessionID, fmt.Errorf("%s", out.errMsg)
+		}
+		return "", sessionID, fmt.Errorf("Claude 未返回结果，请重试")
+	}
+	return out.finalResult, sessionID, nil
+}
+
 // codeTransport abstracts the two Agent-server code-shipping strategies so
 // runRemoteCoding's main body stays linear. Step 2 (get code onto the remote
 // worktree) maps to PrepareRemote; Step 7 (get the committed result back) maps

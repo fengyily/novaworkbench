@@ -55,6 +55,9 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		// empty = backend resolves via the priority chain in
 		// resolveConfigIDForRun.
 		ClaudeConfigID string `json:"claude_config_id"`
+		// AgentServerID — when set, this turn runs on the picked Agent Server
+		// (SSH → agent-worker → claude) instead of the local claude CLI.
+		AgentServerID string `json:"agent_server_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("[analyst-chat] JSON decode error: %v", err)
@@ -92,8 +95,8 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 	// Append the per-requirement attachment manifest so Claude knows what
 	// files the user uploaded alongside the requirement and how to find them
 	// on disk. attachManifestFor returns "" when nothing is wired / no
-	// attachments exist, so callers don't need to nil-check. Analyst runs
-	// are local-only in v0.5.x so no serverID is passed here.
+	// attachments exist, so callers don't need to nil-check. Remote analyst
+	// turns do not SFTP attachments up, so the manifest lists local paths there.
 	if m := h.attachManifestFor(req.RequirementID, ""); m != "" {
 		systemPrompt = systemPrompt + "\n\n" + m
 	}
@@ -124,6 +127,8 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 		defaultBranch = proj.DefaultBranch
 	}
 
+	remote := req.AgentServerID != "" && h.agentSvrSvc != nil
+
 	go func() {
 		log.Printf("[analyst-chat] job %s started for %s (resume=%v)", job.ID, req.RequirementID, !isFirstRound)
 		defer func() {
@@ -151,7 +156,7 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 			syncLogf := func(s string) {
 				job.Append(store.LogLine{Type: "message", Content: s})
 			}
-			wd, baseSHA, err := h.resolveWorkDirSynced(context.Background(), requirement, projectPath, defaultBranch, timeout, syncLogf, false /* skipOriginSync — analyst-chat not on Agent Server path */)
+			wd, baseSHA, err := h.resolveWorkDirSynced(context.Background(), requirement, projectPath, defaultBranch, timeout, syncLogf, remote /* skipOriginSync — the remote run hard-syncs on the agent host */)
 			if err != nil {
 				job.Append(store.LogLine{Type: "error", Content: "❌ " + err.Error()})
 				job.Finish(1, store.JobError)
@@ -212,7 +217,31 @@ func (h *WizardHandler) AnalystChat(w http.ResponseWriter, r *http.Request) {
 			resumePrompt = skillsBlock + resumePrompt
 		}
 		analystUsage := h.usageCtxForConfig("analyst_chat", req.RequirementID, requirement.ProjectID, job.ID, model, "", "", claudeConfigID)
-		finalResult, newSessionID, err := h.runAnalystTurn(context.Background(), requirement.Kind, firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sessionID, !isFirstRound, sink, analystUsage)
+		var finalResult, newSessionID string
+		if remote {
+			job.Append(store.LogLine{Type: "phase", Content: "🌐 在 Agent 服务器上运行分析对话..."})
+			finalResult, newSessionID, err = h.runRemoteAnalystTurn(&remoteAnalystInput{
+				remoteRunInput: &remoteRunInput{
+					job:            job,
+					serverID:       req.AgentServerID,
+					reqRow:         requirement,
+					workDir:        workDir,
+					model:          model,
+					claudeConfigID: claudeConfigID,
+					usage:          analystUsage,
+					stageLabel:     "analyst-chat",
+					SystemPrompt:   systemPrompt,
+					baseBranch:     defaultBranch,
+				},
+				kind:            requirement.Kind,
+				firstTurnPrompt: firstTurnPrompt,
+				resumePrompt:    resumePrompt,
+				sessionID:       sessionID,
+				resume:          !isFirstRound,
+			})
+		} else {
+			finalResult, newSessionID, err = h.runAnalystTurn(context.Background(), requirement.Kind, firstTurnPrompt, resumePrompt, workDir, systemPrompt, model, claudeConfigID, sessionID, !isFirstRound, sink, analystUsage)
+		}
 		if err != nil {
 			log.Printf("[analyst-chat] turn failed: %v", err)
 			job.Append(store.LogLine{Type: "error", Content: err.Error()})
