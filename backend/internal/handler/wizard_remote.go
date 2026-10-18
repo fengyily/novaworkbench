@@ -268,8 +268,8 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 		}
 		tr = originTransport{originURL: originURL, projectID: in.reqRow.ProjectID, projectSvc: h.projectSvc, reqSvc: h.reqSvc, settingSvc: h.settingSvc}
 	}
-	baseRepo := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/base"
-	wtPath := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID
+	baseRepo := agentWorktreeRoot() + "/" + in.reqRow.ProjectID + "/base"
+	wtPath := agentWorktreeRoot() + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID
 	branch := in.req.BranchName
 	if branch == "" {
 		branch = "requirement-" + in.reqRow.ID
@@ -340,7 +340,7 @@ func (h *WizardHandler) runRemoteCoding(in *remoteCodingInput) claudeStreamOutco
 	// failure there is a warning (we already have the existing
 	// GitHub-side fallback for an unsigned push).
 	gitName, gitEmail := lookupGitIdentity(h.projectSvc, h.platformSvc, in.reqRow)
-	gnupgHome := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".gnupg"
+	gnupgHome := agentWorktreeRoot() + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".gnupg"
 	// Local-sync mode skips the remote commit.gpgsign provision: the remote
 	// commits are a transport detail landed back into the LOCAL object store,
 	// and the user-visible integration commit is signed locally by
@@ -757,8 +757,8 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 	if err != nil || originURL == "" {
 		return claudeStreamOutcome{errMsg: "项目未配置 git 远程仓库，无法在 Agent 服务器执行。请先在项目设置中配置 origin。" + errString(err)}, cleanup, nil
 	}
-	baseRepo := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/base"
-	wtPath := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID
+	baseRepo := agentWorktreeRoot() + "/" + in.reqRow.ProjectID + "/base"
+	wtPath := agentWorktreeRoot() + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID
 	// branch defaults to requirement-<id> when the caller did not pin one.
 	// Architect passes "" → falls back to the default (the branch label is
 	// unused for the plan-mode run; git worktree still needs a name to
@@ -822,17 +822,8 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 	client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree prune", "", nil, &jobWriter{job: in.job}, nil)
 
 	if !client.Exists(wtPath) {
-		// Strategy 1: branch off origin/<baseBranch>.
-		exit, _ := client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath)+" origin/"+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
-		if exit != 0 {
-			// Strategy 2: branch off HEAD.
-			exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath), "", nil, &jobWriter{job: in.job}, nil)
-			if exit != 0 {
-				// Strategy 3: attach to an already-existing branch.
-				if exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add "+shellQuoteSingle(wtPath)+" "+shellQuoteSingle(branch), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
-					return claudeStreamOutcome{errMsg: "git worktree 创建失败（exit=" + fmtInt(exit) + "），请检查仓库状态"}, cleanup, nil
-				}
-			}
+		if werr := addRemoteWorktree(ctx, client, in.job, baseRepo, wtPath, branch, "origin/"+baseBranch, worktreeAddCmds(baseRepo, wtPath, branch, baseBranch)); werr != nil {
+			return claudeStreamOutcome{errMsg: werr.Error()}, cleanup, nil
 		}
 	} else {
 		// adjust / continue reuse path: pull the latest remote commits onto
@@ -852,7 +843,7 @@ func (h *WizardHandler) prepareRemoteAgentRun(in *remoteRunInput) (claudeStreamO
 	// remote worktree. Failure policy mirrors runRemoteCoding: GPG enabled +
 	// provision fails → abort the run.
 	gitName, gitEmail := lookupGitIdentity(h.projectSvc, h.platformSvc, in.reqRow)
-	gnupgHome := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".gnupg"
+	gnupgHome := agentWorktreeRoot() + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".gnupg"
 	if project, pErr := h.projectSvc.Get(in.reqRow.ProjectID); pErr == nil && project != nil && project.PlatformTokenID != "" {
 		enabled, _, armored, passphrase, gpgErr := h.platformSvc.GPGSigningMaterial(project.PlatformTokenID)
 		switch {
@@ -1369,17 +1360,8 @@ func (t originTransport) PrepareRemote(ctx context.Context, client *gossh.Client
 	}
 
 	if !client.Exists(wtPath) {
-		// Strategy 1: branch off origin/<baseBranch> (freshly fetched above).
-		exit, _ := client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath)+" origin/"+shellQuoteSingle(baseBranch), "", nil, &jobWriter{job: in.job}, nil)
-		if exit != 0 {
-			// Strategy 2: branch off HEAD (always valid).
-			exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath), "", nil, &jobWriter{job: in.job}, nil)
-			if exit != 0 {
-				// Strategy 3: attach to an already-existing branch (reuse case).
-				if exit, _ = client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add "+shellQuoteSingle(wtPath)+" "+shellQuoteSingle(branch), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
-					return fmt.Errorf("git worktree 创建失败（exit=%d），请检查仓库状态", exit)
-				}
-			}
+		if werr := addRemoteWorktree(ctx, client, in.job, baseRepo, wtPath, branch, "origin/"+baseBranch, worktreeAddCmds(baseRepo, wtPath, branch, baseBranch)); werr != nil {
+			return werr
 		}
 	} else {
 		// adjust/continue reuse: pull latest onto the existing branch, then
@@ -1460,7 +1442,7 @@ func (t bundleTransport) PrepareRemote(ctx context.Context, client *gossh.Client
 	}
 
 	// 2. Upload to a per-requirement namespaced path on the agent host.
-	upRemote := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".up.bundle"
+	upRemote := agentWorktreeRoot() + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".up.bundle"
 	if perr := client.PutFile(upLocalPath, upRemote, 0644); perr != nil {
 		return fmt.Errorf("上传 git bundle 失败: %w", perr)
 	}
@@ -1482,8 +1464,9 @@ func (t bundleTransport) PrepareRemote(ctx context.Context, client *gossh.Client
 	//    safe (the /tmp worktree is disposable).
 	bundleRef := shellQuoteSingle("refs/bundle/" + branch)
 	if !client.Exists(wtPath) {
-		if exit, _ := client.Exec(ctx, "cd "+shellQuoteSingle(baseRepo)+" && git worktree add -b "+shellQuoteSingle(branch)+" "+shellQuoteSingle(wtPath)+" "+bundleRef, "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
-			return fmt.Errorf("git worktree 创建失败（exit=%d）", exit)
+		if werr := addRemoteWorktree(ctx, client, in.job, baseRepo, wtPath, branch, "refs/bundle/"+branch,
+			[]string{"cd " + shellQuoteSingle(baseRepo) + " && git worktree add -b " + shellQuoteSingle(branch) + " " + shellQuoteSingle(wtPath) + " " + bundleRef}); werr != nil {
+			return werr
 		}
 	} else {
 		if exit, _ := client.Exec(ctx,
@@ -1519,7 +1502,7 @@ func (t bundleTransport) CollectResult(ctx context.Context, client *gossh.Client
 	}
 
 	// 3. Build the incremental down bundle (range base = refs/bundle/<baseBranch>).
-	downRemote := "/tmp/nova-agent/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".down.bundle"
+	downRemote := agentWorktreeRoot() + "/" + in.reqRow.ProjectID + "/" + in.reqRow.ID + ".down.bundle"
 	if exit, _ := client.Exec(ctx, "git -C "+shellQuoteSingle(wtPath)+" bundle create "+shellQuoteSingle(downRemote)+" "+shellQuoteSingle(baseRef+".."+branch), "", nil, &jobWriter{job: in.job}, nil); exit != 0 {
 		in.job.Append(store.LogLine{Type: "error", Content: "❌ 生成下行 bundle 失败（exit=" + fmtInt(exit) + "）"})
 		return
@@ -2271,7 +2254,7 @@ func (h *WizardHandler) deleteRemoteSubTaskSession(req *model.Requirement, serve
 		return
 	}
 	defer client.Close()
-	remoteWt := "/tmp/nova-agent/" + req.ProjectID + "/" + req.ID
+	remoteWt := agentWorktreeRoot() + "/" + req.ProjectID + "/" + req.ID
 	remoteSlug := util.EncodeClaudeSlug(remoteWt)
 	remotePath := "~/.claude/projects/" + remoteSlug + "/" + sid + ".jsonl"
 	cmd := "rm -f " + remotePath
@@ -2443,4 +2426,15 @@ func agentMaxTotalTimeout() time.Duration {
 		return d
 	}
 	return def
+}
+
+// worktreeAddCmds returns the three worktree-creation strategies in order:
+// branch off origin/<baseBranch>, branch off HEAD, attach an existing branch.
+func worktreeAddCmds(baseRepo, wtPath, branch, baseBranch string) []string {
+	pre := "cd " + shellQuoteSingle(baseRepo) + " && git worktree add "
+	return []string{
+		pre + "-b " + shellQuoteSingle(branch) + " " + shellQuoteSingle(wtPath) + " origin/" + shellQuoteSingle(baseBranch),
+		pre + "-b " + shellQuoteSingle(branch) + " " + shellQuoteSingle(wtPath),
+		pre + shellQuoteSingle(wtPath) + " " + shellQuoteSingle(branch),
+	}
 }

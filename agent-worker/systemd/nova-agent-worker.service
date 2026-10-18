@@ -10,6 +10,9 @@ Type=simple
 # network exposure needed. Bind 127.0.0.1 explicitly via env.
 Environment=NOVA_AGENT_WORKER_HOST=127.0.0.1
 Environment=NOVA_AGENT_WORKER_PORT=7000
+# Work root for scratch clones / worktrees; keep in sync with the backend's
+# NOVA_AGENT_WORKTREE_ROOT. Point it at a disk path if /tmp is a small tmpfs.
+Environment=NOVA_AGENT_WORKTREE_ROOT=/tmp/nova-agent
 # WorkingDirectory and ExecStart are rewritten at deploy time to the resolved
 # $HOME/nova-agent-worker path (the embedded unit mirrors this behavior so
 # the repo copy and the SFTP-uploaded copy stay in lock-step).

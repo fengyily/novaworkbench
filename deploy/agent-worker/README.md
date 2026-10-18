@@ -52,6 +52,7 @@ coupled symptoms:
 
 ## The fix
 
+- **`nova-agent-worker.service`** also sets `Environment=NOVA_AGENT_WORKTREE_ROOT` (default `/tmp/nova-agent`); it must match the backend's value, and should point at a disk path when `/tmp` is a small tmpfs. `TMPDIR=/tmp` stays as is (it only holds claude's small temp files).
 - **`nova-agent-worker.service`** pins `Environment=TMPDIR=/tmp` so the worker
   process itself starts with a writable tmpdir regardless of what the SSH
   session inherited.

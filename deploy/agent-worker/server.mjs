@@ -1269,9 +1269,11 @@ function assertWorkDirInScope(workDir, reqId) {
   if (!reqId || !segs.includes(reqId)) {
     throw httpError(403, 'workDir ' + real + ' does not contain reqId ' + reqId);
   }
-  // 强约束：必须在 /tmp/nova-agent/ 下
-  if (!real.startsWith('/tmp/nova-agent/')) {
-    throw httpError(403, 'workDir ' + real + ' is outside /tmp/nova-agent/');
+  // 强约束：必须在工作根目录下（默认 /tmp/nova-agent，可由
+  // NOVA_AGENT_WORKTREE_ROOT 覆盖，需与后端 agentWorktreeRoot() 保持一致）
+  const root = (process.env.NOVA_AGENT_WORKTREE_ROOT || '/tmp/nova-agent').replace(/\/+$/, '');
+  if (!real.startsWith(root + '/')) {
+    throw httpError(403, 'workDir ' + real + ' is outside ' + root + '/');
   }
   return real;
 }

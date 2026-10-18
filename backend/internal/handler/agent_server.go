@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"os"
@@ -279,6 +280,11 @@ func (h *AgentServerHandler) runCheck(job *store.Job, serverID string) {
 			summary += "; " + settingsMsg
 		}
 	}
+
+	// Work-root disk probe — a small tmpfs /tmp was the root cause of
+	// "git worktree 创建失败（exit=128）". Advisory only: warnings never flip
+	// the status, an unprobeable host is skipped silently.
+	h.appendWorkRootDiskCheck(ctx, client, job)
 
 	// nova-agent-worker probe — the remote coding path goes through this
 	// Node.js service (POST → SSE → claude CLI). If the worker isn't
@@ -1301,6 +1307,7 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 		unitBody = strings.ReplaceAll(unitBody,
 			"Environment=PATH=__WORKER_PATH__",
 			"Environment=PATH="+workerPATH)
+		unitBody = strings.ReplaceAll(unitBody, "__WORKTREE_ROOT__", agentWorktreeRoot())
 		// Bake the resolved node path into ExecStart too — see the nodeBin
 		// comment above. `/usr/bin/env node` would consult the user manager's
 		// own PATH, which misses nvm/brew node and leaves the service in a
@@ -1388,6 +1395,7 @@ func (h *AgentServerHandler) installNodeWorker(ctx context.Context, client *goss
 		plistBody = strings.ReplaceAll(plistBody,
 			"<key>PATH</key><string>__WORKER_PATH__</string>",
 			"<key>PATH</key><string>"+workerPATH+"</string>")
+		plistBody = strings.ReplaceAll(plistBody, "__WORKTREE_ROOT__", html.EscapeString(agentWorktreeRoot()))
 		// launchd runs agents with the system PATH too, so `/usr/bin/env
 		// node` misses Homebrew's /opt/homebrew/bin. Bake the resolved node
 		// path into ProgramArguments the same way we do for systemd.
@@ -1742,6 +1750,7 @@ func nohupLaunchWorker(installDir, workerPATH string, killOld bool) string {
 	// the leading PATH= is belt-and-braces for a server.mjs that predates
 	// (or drops) that support.
 	cmd += `nohup env NOVA_AGENT_WORKER_HOST=127.0.0.1 NOVA_AGENT_WORKER_PORT=7000 TMPDIR=/tmp ` +
+		`NOVA_AGENT_WORKTREE_ROOT=` + shellQuote(agentWorktreeRoot()) + ` ` +
 		`NOVA_AGENT_WORKER_EXTRA_PATHS=` + shellQuote(workerPATH) + ` ` +
 		`PATH=` + shellQuote(workerPATH) + ` ` +
 		`node ` + installDir + `/server.mjs > ` + installDir + `/worker.log 2>&1 & ` +
@@ -2726,4 +2735,27 @@ func composeWorkerPATH(ctx context.Context, client *gossh.Client, extra []string
 		add(d)
 	}
 	return strings.Join(merged, ":")
+}
+
+// appendWorkRootDiskCheck logs the remote work root, its filesystem and free
+// space, and warns when it sits on tmpfs or has under 2GB free.
+func (h *AgentServerHandler) appendWorkRootDiskCheck(ctx context.Context, client *gossh.Client, job *store.Job) {
+	root := agentWorktreeRoot()
+	job.Append(store.LogLine{Type: "phase", Content: "🔍 检查工作目录磁盘..."})
+	job.Append(store.LogLine{Type: "message", Content: "✓ 工作根目录: " + root})
+	info, ok := probeRemoteDisk(ctx, client, root)
+	if !ok {
+		job.Append(store.LogLine{Type: "message", Content: "ℹ️ 无法读取 " + root + " 的磁盘信息，跳过"})
+		return
+	}
+	fs := info.FSType
+	if fs == "" {
+		fs = "未知"
+	}
+	job.Append(store.LogLine{Type: "message", Content: fmt.Sprintf("✓ 挂载点 %s，文件系统 %s，已用 %d MB，可用 %d MB",
+		info.Mount, fs, info.UsedKB/1024, info.AvailKB/1024)})
+	if info.FSType == "tmpfs" || info.AvailKB < 2*1024*1024 {
+		job.Append(store.LogLine{Type: "message", Content: "⚠️ 工作根目录位于内存盘或可用空间不足 2GB，大仓库可能因磁盘写满而失败；" +
+			"建议在 Nova 后端设置 NOVA_AGENT_WORKTREE_ROOT 指向磁盘路径（如 /var/lib/nova-agent）并重新安装 worker"})
+	}
 }
