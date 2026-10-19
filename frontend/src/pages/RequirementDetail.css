@@ -658,10 +658,25 @@
   flex: 1;
   display: flex;
   justify-content: flex-end;
+  flex-wrap: nowrap;
+  gap: 6px;
   padding: 6px 8px;
   border-radius: 6px;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+/* The action surface holds up to five CTAs (生成技术方案 / 定时生成方案 /
+   定时生成方案并开发 / 立即生成方案并开发 / 📥 导入方案) whose labels are
+   long enough that the surface previously squeezed the text and broke the
+   buttons across two lines. The flex children are pinned to nowrap so each
+   button stays on one line, and the surface itself scrolls horizontally on
+   truly narrow viewports instead of letting the buttons rearrange. Mirrors
+   the .design-toolbar--no-wrap pattern used by the developer toolbar. */
+.draft-action-actions-surface > .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 /* Bottom row: the rare analyst-fallback affordance. Rendered as a
    real .btn.btn-sm.btn-ghost so it lives in the same component family
