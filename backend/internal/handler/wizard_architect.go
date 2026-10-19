@@ -14,8 +14,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/novaworkbench/backend/internal/llm"
@@ -42,6 +46,26 @@ import (
 // watchdog meaningful: a genuinely dead proxy still gets killed and reported
 // instead of hanging the job forever.
 const architectStallTimeout = 10 * time.Minute
+
+// importDesignMaxBytes caps the Markdown content size for PUT
+// /api/wizard/import-design (the JSON paste endpoint). 500 KB comfortably
+// covers hand-written / chat-Copied plans; anything larger is almost
+// certainly a wrong use of the endpoint (use Claude to summarise first).
+//
+// This is intentionally smaller than parseFileMaxBody (32 MB) and does NOT
+// share the rune-truncation at parseFileMaxChars (50 000) — a 200 KB plan
+// is not pathological and we want to keep the user's full content.
+const importDesignMaxBytes = 500_000
+
+// importDesignFileMaxMemory / importDesignFileMaxBody cap the multipart
+// upload at /api/wizard/import-design-file. 2 MB is the documented limit
+// (covers a dense .md export from any external tool); the in-memory and
+// hard cap are the same so a single oversize upload is rejected cleanly
+// by MaxBytesReader instead of spilling to a temp file.
+const (
+	importDesignFileMaxMemory = 2 << 20
+	importDesignFileMaxBody   = 2 << 20
+)
 
 // ArchitectDesign is the architect-phase design generator. It creates a
 // background JobStore job, persists its id on the requirement (so a page refresh
@@ -130,6 +154,143 @@ func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) 
 	}
 	writeJSON(w, 200, map[string]string{"job_id": job.ID})
 	go h.execArchitectDesign(p, job, nil)
+}
+
+// importDesignReq is the JSON body for PUT /api/wizard/import-design.
+//
+// Source is a free-form string ("paste" / "file") used only for log
+// observability; the handler does not branch on it.
+type importDesignReq struct {
+	RequirementID string `json:"requirement_id"`
+	Content       string `json:"content"`
+	Source        string `json:"source"`
+}
+
+// ImportDesign — PUT /api/wizard/import-design
+//
+// Persists an externally-authored Markdown plan (ChatGPT / DeepSeek /
+// Gemini / hand-written) as the requirement's design_docs and terminal-flips
+// status to "designed". Deliberately bypasses Claude / JobStore / SSE: a
+// single synchronous DB write is what the user expects when they hit
+// "Import" after pasting a plan they already trust.
+//
+// Validation order is fail-fast, cheapest check first:
+//  1. JSON body shape → 400 INVALID_INPUT
+//  2. requirement_id present → 400 INVALID_INPUT
+//  3. requirement exists → 404 REQUIREMENT_NOT_FOUND
+//  4. kind != wiki → 400 KIND_NOT_SUPPORTED  (wiki has its own column)
+//  5. no active Claude design/apply job → 409 DESIGN_BUSY  (avoid dual writers
+//     racing on the same design_docs column)
+//  6. content size <= 500 KB → 413 TOO_LARGE
+//  7. content non-empty after trim → 400 INVALID_INPUT
+//
+// On success returns the freshly-loaded Requirement so the frontend can
+// replace its local state without a second GET.
+func (h *WizardHandler) ImportDesign(w http.ResponseWriter, r *http.Request) {
+	var body importDesignReq
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_INPUT",
+			"Failed to parse JSON body: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(body.RequirementID) == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_INPUT",
+			"requirement_id is required")
+		return
+	}
+	if len(body.Content) > importDesignMaxBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "TOO_LARGE",
+			fmt.Sprintf("Content exceeds %d byte limit", importDesignMaxBytes))
+		return
+	}
+	if strings.TrimSpace(body.Content) == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_INPUT",
+			"content is empty")
+		return
+	}
+	req, err := h.reqSvc.Get(body.RequirementID)
+	if err != nil {
+		if errors.Is(err, service.ErrRequirementNotFound) {
+			writeError(w, http.StatusNotFound, "REQUIREMENT_NOT_FOUND", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	if req.Kind == service.KindWiki {
+		writeError(w, http.StatusBadRequest, "KIND_NOT_SUPPORTED",
+			"wiki-kind requirements do not support importing a design (use wiki_docs)")
+		return
+	}
+	if req.DesignJobID != "" || req.ApplyJobID != "" {
+		writeError(w, http.StatusConflict, "DESIGN_BUSY",
+			"An AI design/apply task is currently running; please wait or cancel it first")
+		return
+	}
+	updated, err := h.reqSvc.ImportDesignDoc(body.RequirementID, body.Content)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		return
+	}
+	log.Printf("[wizard] import-design: req=%s source=%s bytes=%d", body.RequirementID, body.Source, len(body.Content))
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// ImportDesignFile — POST /api/wizard/import-design-file (multipart/form-data, field "file")
+//
+// Multipart companion to ImportDesign: extracts the raw bytes of a
+// .md / .markdown / .txt upload and returns them as a JSON `{content: "..."}`
+// envelope, WITHOUT persisting. The frontend then re-issues the import via
+// PUT /api/wizard/import-design with the loaded content so the validation
+// pipeline (wiki reject, busy reject, size cap) runs once at the persist
+// boundary instead of twice.
+//
+// Why two endpoints rather than one multipart PUT: keeps the "import" action
+// idempotent and reviewable (the user sees the loaded text in the dialog
+// before confirming) and lets the upload endpoint stay stateless for any
+// future "preview" use case.
+//
+// Hard cap: 2 MB (importDesignFileMaxBody). Larger payloads are rejected
+// with 413 TOO_LARGE before any disk write. The size is enforced via
+// http.MaxBytesReader so an attacker cannot stream gigabytes into a temp
+// file before the switch rejects them.
+func (h *WizardHandler) ImportDesignFile(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, importDesignFileMaxBody)
+
+	if err := r.ParseMultipartForm(importDesignFileMaxMemory); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "TOO_LARGE",
+				fmt.Sprintf("File exceeds %d MB limit", importDesignFileMaxBody>>20))
+			return
+		}
+		writeError(w, http.StatusBadRequest, "INVALID_FORM",
+			"Failed to parse multipart form: "+err.Error())
+		return
+	}
+
+	f, fh, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_FILE",
+			"Form field \"file\" is required: "+err.Error())
+		return
+	}
+	defer f.Close()
+
+	ext := strings.ToLower(filepath.Ext(fh.Filename))
+	switch ext {
+	case ".md", ".markdown", ".txt":
+		raw, err := io.ReadAll(f)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "READ_FAILED",
+				"Failed to read file: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"content": string(raw)})
+	default:
+		writeError(w, http.StatusBadRequest, "UNSUPPORTED_FORMAT",
+			fmt.Sprintf("Unsupported file format %q; accepted: .md, .markdown, .txt", ext))
+	}
 }
 
 // RunScheduledDesign is the scheduler-facing entry point. It performs the

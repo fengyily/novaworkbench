@@ -742,6 +742,29 @@ export const requirements = {
     immediateDesignSection: 'Design · 方案设计',
     immediateCodingSection: 'Coding · 开发',
     immediateFlightAria: '两阶段任务摘要',
+    // Design-doc import — import an externally-authored Markdown plan
+    // (ChatGPT / DeepSeek / Gemini) as the requirement's design_docs.
+    // Bypasses Claude / JobStore / SSE; user lands in status="designed"
+    // directly. The dialog reuses the global modal-overlay / modal-box
+    // primitives from index.css and the .merge-hint-toast pattern for
+    // the 1.8s success indicator.
+    importDesignBtn: '导入方案',
+    importDesignTitle: '从其它 AI 工具（如 ChatGPT / DeepSeek）生成的技术方案 Markdown 直接导入到本需求，跳过 AI 生成',
+    importDesignDialogTitle: '导入技术方案',
+    importDesignTabPaste: '粘贴 Markdown',
+    importDesignTabFile: '上传文件 (.md/.txt)',
+    importDesignPlaceholder: '在此粘贴 Markdown 内容（支持 Mermaid 代码块、表格、列表）',
+    importDesignSubmit: '导入',
+    importDesignSubmitting: '导入中…',
+    importDesignSuccess: '方案已导入',
+    importDesignConfirmOverwrite: '当前已有方案，确认覆盖？',
+    importDesignFailKind: '该需求不支持导入方案 (wiki 类需求)',
+    importDesignFailBusy: '当前有 AI 任务进行中，请先等待或取消',
+    importDesignFailFormat: '仅支持 .md / .markdown / .txt 文件',
+    importDesignFailFileTooLarge: '文件超过 2 MB 上限',
+    importDesignFailContentTooLarge: '内容超过 500 KB 上限',
+    importDesignFailEmpty: '请粘贴内容或选择文件',
+    importDesignPreviewLabel: '预览',
   },
   // Requirement-scoped file attachments. Shown as a collapsible panel
   // on the requirement detail page; each row has its own description,

@@ -1605,6 +1605,35 @@ export const wizardApi = {
    * frontend — see RequirementDetail / ProjectDetail useEffect.
    */
   listActiveJobs: () => api.get<{ jobs: ActiveJob[] }>('/api/wizard/active-jobs'),
+  /**
+   * Import an externally-authored Markdown plan (ChatGPT / DeepSeek /
+   * Gemini) as the requirement's design_docs. Bypasses Claude / JobStore
+   * / SSE — a single synchronous PUT that lands the user in status=
+   * "designed" with the plan ready to render. Used by the
+   * ImportDesignDialog after the user confirms a paste or file upload.
+   *
+   * `source` is "paste" or "file" — only used server-side for log
+   * observability, not for branching.
+   */
+  importDesign: (requirementId: string, content: string, source: 'paste' | 'file') =>
+    api.put<Requirement>('/api/wizard/import-design', {
+      requirement_id: requirementId,
+      content,
+      source,
+    }),
+  /**
+   * Multipart companion to importDesign: accepts a .md / .markdown / .txt
+   * upload and returns the raw text as `{content: string}` WITHOUT
+   * persisting. The frontend hands the returned content back to
+   * importDesign on user confirmation, so the validation pipeline (wiki
+   * reject, busy job, size cap) runs once at the persist boundary instead
+   * of twice. Caps: 2 MB hard, only the three text formats above.
+   */
+  importDesignFile: (file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return api.upload<{ content: string }>('/api/wizard/import-design-file', fd);
+  },
 };
 
 /**

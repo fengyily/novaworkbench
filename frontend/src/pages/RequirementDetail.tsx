@@ -19,6 +19,7 @@ import { SyncModeSelect } from '../components/SyncModeSelect';
 import { SummarizeToRequirementModal } from '../components/SummarizeToRequirementModal';
 import { ScheduleModal } from '../components/ScheduleModal';
 import { DesignCodingImmediateModal } from '../components/DesignCodingImmediateModal';
+import ImportDesignDialog from '../components/ImportDesignDialog';
 import { schedulesApi, type ScheduledTask } from '../api/client';
 import {
   StageIcon,
@@ -817,6 +818,10 @@ export default function RequirementDetail() {
   // same modal component (ScheduleModal needs taskType; the immediate modal
   // has no run_at / taskType axis and self-handles submit).
   const [immediateModalOpen, setImmediateModalOpen] = useState(false);
+  // ImportDesignDialog open flag. Kept adjacent to immediateModalOpen so
+  // the two "wizard side-channel" modals live together; both bypass the
+  // long-running Claude path and just mutate a single requirement.
+  const [importDesignDialogOpen, setImportDesignDialogOpen] = useState(false);
   const loadPendingSchedules = useCallback(async () => {
     if (!req) return;
     try {
@@ -4492,6 +4497,24 @@ export default function RequirementDetail() {
                             <IconRocket size={13} className="btn-icon" />{t('requirements.detail2.immediateDesignCodingBtn')}
                           </button>
                         )}
+                        {/* 📥 Import an externally-generated plan (Markdown
+                            from ChatGPT / DeepSeek / etc.) as design_docs —
+                            visible from the very first view so users with a
+                            ready plan can land it without first running
+                            architect-design. Mirrors the existing architect
+                            toolbars' wiki guard + busy lock. Reuses the
+                            same ImportDesignDialog + wizardH.importDesign
+                            round-trip; the dialog itself handles the
+                            window.confirm overwrite prompt. */}
+                        {req.kind !== 'wiki' && !designing && !busy && (
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => setImportDesignDialogOpen(true)}
+                            title={t('requirements.detail2.importDesignTitle')}
+                          >
+                            📥 {t('requirements.detail2.importDesignBtn')}
+                          </button>
+                        )}
                         {/* Pending schedule hint — surfaces the planned time
                             and offers an inline cancel link. Sits next to
                             the scheduling buttons it replaces. */}
@@ -4879,11 +4902,34 @@ export default function RequirementDetail() {
             </div>
           )}
 
+          {/* "📥 导入方案" — sits OUTSIDE the {hasDesign && ...} guard
+              so draft / analyzing / designing requirements can land a
+              user-supplied plan in design_docs without first running the
+              architect-design Claude pass. The .btn .btn-sm styling
+              matches the page's other secondary actions; the dialog
+              itself decides what to render based on req.design_docs.
+              Hidden for wiki-kind: the backend's 400 KIND_NOT_SUPPORTED
+              is the source of truth and the user gets a clear error. */}
+          {req.kind !== 'wiki' && !hasDesign && (
+            <div className="design-toolbar">
+              <button
+                className="btn btn-sm"
+                onClick={() => setImportDesignDialogOpen(true)}
+                title={t('requirements.detail2.importDesignTitle')}
+              >
+                📥 {t('requirements.detail2.importDesignBtn')}
+              </button>
+            </div>
+          )}
+
           {hasDesign && (
             <>
               {/* Design panel toolbar — "提取架构图" 把当前方案里的所有
                   ```mermaid``` 块一键落到知识库；"新建架构图" 打开
-                  DiagramGenerator 用方案上下文作为 initialInput。 */}
+                  DiagramGenerator 用方案上下文作为 initialInput；"导入方案"
+                  让用户用外部 Markdown 覆盖当前 design_docs（dialog 内部用
+                  window.confirm 做二次确认）。hidden for wiki-kind，与
+                  空状态那条按钮用同一守卫。 */}
               <div className="design-toolbar">
                 {design.plan_markdown && /```mermaid/i.test(design.plan_markdown) && (
                   <button
@@ -4899,6 +4945,15 @@ export default function RequirementDetail() {
                     onClick={() => setShowDesignDiagramGenerator(true)}
                   >
                     🧠 新建架构图（空白）
+                  </button>
+                )}
+                {req.kind !== 'wiki' && (
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => setImportDesignDialogOpen(true)}
+                    title={t('requirements.detail2.importDesignTitle')}
+                  >
+                    📥 {t('requirements.detail2.importDesignBtn')}
                   </button>
                 )}
               </div>
@@ -6020,6 +6075,31 @@ export default function RequirementDetail() {
             streamDesignJob(designJobId);
           }}
           onClose={() => setImmediateModalOpen(false)}
+        />
+      )}
+      {importDesignDialogOpen && (
+        <ImportDesignDialog
+          requirement={req}
+          onClose={() => setImportDesignDialogOpen(false)}
+          onSuccess={(updated) => {
+            // Replace local state and refetch so dependents (status
+            // chip, design panel, coding CTA) all see the new state.
+            setReq(updated);
+            void refresh();
+            setImportDesignDialogOpen(false);
+            // Reuse the page-level 1.8s summary-done toast so the
+            // success indicator lives in exactly one place — there is
+            // no global toast library and the design doc explicitly
+            // discourages adding one.
+            setSummaryDoneToast(t('requirements.detail2.importDesignSuccess'));
+            if (summaryDoneToastTimerRef.current !== null) {
+              window.clearTimeout(summaryDoneToastTimerRef.current);
+            }
+            summaryDoneToastTimerRef.current = window.setTimeout(() => {
+              setSummaryDoneToast(null);
+              summaryDoneToastTimerRef.current = null;
+            }, 1800);
+          }}
         />
       )}
     </div>
