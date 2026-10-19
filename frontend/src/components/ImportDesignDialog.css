@@ -1,0 +1,207 @@
+/* ImportDesignDialog — 与 PdfUploadDialog 共用 .modal-overlay / .modal-box /
+   .btn / .form-group / .form-actions / .btn-row-2col 等共享类(全部定义在
+   index.css);这里只放 dialog 自身需要的小范围样式。
+   全部 class 都用 .import-design-* 前缀以避免污染全局。 */
+
+.import-design-overlay {
+  z-index: 1100; /* 比通用 modal 略高,避免被 RequirementDetail 内联弹窗盖住 */
+}
+
+.import-design-box {
+  max-width: 640px;
+  width: calc(100% - 32px);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.import-design-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.import-design-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.import-design-close {
+  background: transparent;
+  border: 0;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--color-text-muted, #64748b);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.import-design-close:hover:not(:disabled) {
+  background: var(--color-bg-hover, rgba(0, 0, 0, 0.05));
+  color: var(--color-text, #1f2937);
+}
+
+.import-design-close:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.import-design-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--color-border, #e2e8f0);
+  margin-bottom: 12px;
+}
+
+.import-design-tab {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 8px 16px;
+  font-size: 14px;
+  color: var(--color-text-muted, #64748b);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.import-design-tab:hover:not(:disabled) {
+  color: var(--color-text, #1f2937);
+}
+
+.import-design-tab.is-active {
+  color: var(--color-primary, #4f46e5);
+  border-bottom-color: var(--color-primary, #4f46e5);
+  font-weight: 500;
+}
+
+.import-design-tab:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.import-design-textarea {
+  width: 100%;
+  min-height: 220px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 6px;
+  background: var(--color-bg-input, #fff);
+  color: var(--color-text, #1f2937);
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.import-design-textarea:focus {
+  outline: 2px solid var(--color-primary, #4f46e5);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+
+.import-design-textarea:disabled {
+  background: var(--color-bg-disabled, #f3f4f6);
+  cursor: not-allowed;
+}
+
+.import-design-char-count {
+  margin-top: 6px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--color-text-muted, #64748b);
+  font-variant-numeric: tabular-nums;
+}
+
+.import-design-char-count.is-over {
+  color: var(--color-error, #ef4444);
+  font-weight: 500;
+}
+
+.import-design-file-input {
+  display: none;
+}
+
+.import-design-selected {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--color-text-muted, #64748b);
+  word-break: break-all;
+}
+
+.import-design-loaded-hint {
+  color: var(--color-success, #10b981);
+}
+
+.import-design-preview {
+  margin-top: 12px;
+  font-size: 13px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 6px;
+  background: var(--color-bg-subtle, #f8fafc);
+}
+
+.import-design-preview summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  user-select: none;
+  color: var(--color-text-muted, #64748b);
+}
+
+.import-design-preview summary:hover {
+  color: var(--color-text, #1f2937);
+}
+
+.import-design-preview-body {
+  margin: 0;
+  padding: 8px 12px 12px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-text, #1f2937);
+}
+
+.import-design-warn {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  color: #92400e;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.import-design-error {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #b91c1c;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  margin-bottom: 8px;
+  word-break: break-word;
+}
+
+.import-design-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: import-design-spin 0.7s linear infinite;
+  vertical-align: -2px;
+}
+
+@keyframes import-design-spin {
+  to { transform: rotate(360deg); }
+}

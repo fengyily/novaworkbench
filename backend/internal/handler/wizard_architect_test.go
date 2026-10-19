@@ -1,11 +1,17 @@
 package handler
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -763,4 +769,372 @@ func TestArchitectRemoteStaleSessionLocalSideStillReportsMissing(t *testing.T) {
 	if !found {
 		t.Fatalf("expected error line containing %q, got lines: %+v", wantSubstring, lines)
 	}
+}
+
+// import-designTestEnv is the minimal fixture shared by every TestImportDesign_*
+// case. It mirrors TestClearUnestablishedDesignSession's setup: a tempdir
+// SQLite, the shared seedRequirementForSchedule helper, and a WizardHandler
+// constructed with only reqSvc (the import path does not touch jobs / llm /
+// project / claude config). Returning the env lets each test mutate the
+// seeded requirement row (e.g. flip kind to wiki) before issuing the HTTP
+// call, without rebuilding the whole fixture.
+type importDesignTestEnv struct {
+	dir    string
+	d      *db.DB
+	reqID  string
+	reqSvc *service.RequirementService
+	h      *WizardHandler
+}
+
+func newImportDesignTestEnv(t *testing.T) *importDesignTestEnv {
+	t.Helper()
+	dir, _ := os.MkdirTemp("", "import-design-")
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	d, err := db.Init(db.Config{Driver: "sqlite", SQLitePath: filepath.Join(dir, "test.db")})
+	if err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	reqID := seedRequirementForSchedule(t, d)
+	reqSvc := service.NewRequirementService(d, nil)
+	return &importDesignTestEnv{
+		dir:    dir,
+		d:      d,
+		reqID:  reqID,
+		reqSvc: reqSvc,
+		h:      &WizardHandler{reqSvc: reqSvc},
+	}
+}
+
+// decodeEnvelope unmarshals an httptest recorder's body into the standard
+// APIResponse envelope. Returns the data as a raw map (so the test can
+// inspect the field-shape without coupling to the Requirement struct's full
+// surface — keeps the test resilient to harmless downstream additions like
+// extra nullable columns).
+func decodeEnvelope(t *testing.T, w *httptest.ResponseRecorder) APIResponse {
+	t.Helper()
+	var env APIResponse
+	if err := json.NewDecoder(w.Body).Decode(&env); err != nil {
+		t.Fatalf("decode envelope: %v (body=%q)", err, w.Body.String())
+	}
+	return env
+}
+
+// putImportBody is a tiny helper that builds a PUT request with a JSON
+// body, matching the contract of WizardHandler.ImportDesign.
+func putImportBody(t *testing.T, body interface{}) *http.Request {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	return httptest.NewRequest(http.MethodPut, "/api/wizard/import-design", bytes.NewReader(raw))
+}
+
+// TestImportDesign_HappyPath — case 1 of the documented 7 cases.
+//
+// Paste a Markdown plan that includes a mermaid block, assert the response
+// is a freshly-loaded Requirement with status="designed", design_docs
+// containing the input, and the three Claude session/job columns cleared
+// (the import path is terminal — it must not leave stale --resume targets
+// that a later refine-doc would try to attach to).
+func TestImportDesign_HappyPath(t *testing.T) {
+	env := newImportDesignTestEnv(t)
+
+	const plan = "# 方案\n\n## 整体思路\n\n```mermaid\nflowchart LR\nA-->B\n```\n\n## 步骤\n\n```bash\nls -la\n```\n"
+	rec := httptest.NewRecorder()
+	env.h.ImportDesign(rec, putImportBody(t, map[string]string{
+		"requirement_id": env.reqID,
+		"content":        plan,
+		"source":         "paste",
+	}))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	got := decodeEnvelope(t, rec)
+	if !got.Success {
+		t.Fatalf("envelope success = false; error = %+v", got.Error)
+	}
+	raw, err := json.Marshal(got.Data)
+	if err != nil {
+		t.Fatalf("re-marshal data: %v", err)
+	}
+	var updated model.Requirement
+	if err := json.Unmarshal(raw, &updated); err != nil {
+		t.Fatalf("unmarshal data as Requirement: %v", err)
+	}
+	if updated.Status != "designed" {
+		t.Errorf("Status = %q, want \"designed\"", updated.Status)
+	}
+	if !strings.Contains(updated.DesignDocs, "flowchart LR") {
+		t.Errorf("DesignDocs missing mermaid body; got: %q", updated.DesignDocs)
+	}
+	if !strings.Contains(updated.DesignDocs, "# 方案") {
+		t.Errorf("DesignDocs missing # 方案; got: %q", updated.DesignDocs)
+	}
+	if !strings.Contains(updated.DesignDocs, "ls -la") {
+		t.Errorf("DesignDocs missing bash body; got: %q", updated.DesignDocs)
+	}
+	if updated.DesignSessionID != "" {
+		t.Errorf("DesignSessionID = %q, want \"\"", updated.DesignSessionID)
+	}
+	if updated.DesignJobID != "" {
+		t.Errorf("DesignJobID = %q, want \"\"", updated.DesignJobID)
+	}
+	if updated.ApplyJobID != "" {
+		t.Errorf("ApplyJobID = %q, want \"\"", updated.ApplyJobID)
+	}
+	if updated.AnalysisEndedAt == nil {
+		t.Errorf("AnalysisEndedAt = nil, want non-nil (import path stamps it via COALESCE)")
+	}
+}
+
+// TestImportDesign_RejectsWikiKind — case 2.
+//
+// A wiki-kind requirement owns wiki_docs (not design_docs). Rejecting the
+// import at the handler boundary means the frontend's {kind !== 'wiki'}
+// guard is backed by a real 400 instead of silently writing to the wrong
+// column.
+func TestImportDesign_RejectsWikiKind(t *testing.T) {
+	env := newImportDesignTestEnv(t)
+	if _, err := env.d.Exec("UPDATE requirements SET kind='wiki' WHERE id=?", env.reqID); err != nil {
+		t.Fatalf("seed wiki kind: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	env.h.ImportDesign(rec, putImportBody(t, map[string]string{
+		"requirement_id": env.reqID,
+		"content":        "# wiki plan",
+		"source":         "paste",
+	}))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	env2 := decodeEnvelope(t, rec)
+	if env2.Error == nil || env2.Error.Code != "KIND_NOT_SUPPORTED" {
+		t.Fatalf("error = %+v, want code=KIND_NOT_SUPPORTED", env2.Error)
+	}
+	// design_docs must be untouched (still the default '[]' from schema).
+	got, _ := env.reqSvc.Get(env.reqID)
+	if got.DesignDocs != "[]" {
+		t.Errorf("DesignDocs = %q, want \"[]\" (untouched)", got.DesignDocs)
+	}
+}
+
+// TestImportDesign_RejectsBusyJob — case 3.
+//
+// When Claude is mid-run, design_job_id / apply_job_id are non-empty. We
+// refuse the import rather than race a second writer on the same
+// design_docs column. Asserting the persisted row is unchanged (still
+// status=draft, design_docs='[]') confirms we did not half-write before
+// detecting the conflict.
+func TestImportDesign_RejectsBusyJob(t *testing.T) {
+	env := newImportDesignTestEnv(t)
+	if _, err := env.d.Exec("UPDATE requirements SET design_job_id='job_in_flight' WHERE id=?", env.reqID); err != nil {
+		t.Fatalf("seed design_job_id: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	env.h.ImportDesign(rec, putImportBody(t, map[string]string{
+		"requirement_id": env.reqID,
+		"content":        "# plan",
+		"source":         "paste",
+	}))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rec.Code)
+	}
+	env2 := decodeEnvelope(t, rec)
+	if env2.Error == nil || env2.Error.Code != "DESIGN_BUSY" {
+		t.Fatalf("error = %+v, want code=DESIGN_BUSY", env2.Error)
+	}
+	got, _ := env.reqSvc.Get(env.reqID)
+	if got.Status != "draft" {
+		t.Errorf("Status = %q, want \"draft\" (untouched)", got.Status)
+	}
+	if got.DesignJobID != "job_in_flight" {
+		t.Errorf("DesignJobID = %q, want \"job_in_flight\" (untouched)", got.DesignJobID)
+	}
+}
+
+// TestImportDesign_RejectsEmptyContent — case 4.
+//
+// An empty string would otherwise land in design_docs='' and make the page
+// render a blank designer pane. The handler's trim+empty check (and the
+// service's defense-in-depth duplicate) both reject.
+func TestImportDesign_RejectsEmptyContent(t *testing.T) {
+	env := newImportDesignTestEnv(t)
+
+	rec := httptest.NewRecorder()
+	env.h.ImportDesign(rec, putImportBody(t, map[string]string{
+		"requirement_id": env.reqID,
+		"content":        "   \n\t  ",
+		"source":         "paste",
+	}))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	env2 := decodeEnvelope(t, rec)
+	if env2.Error == nil || env2.Error.Code != "INVALID_INPUT" {
+		t.Fatalf("error = %+v, want code=INVALID_INPUT", env2.Error)
+	}
+}
+
+// TestImportDesign_RejectsOversizeContent — case 5.
+//
+// 500 KB cap is enforced as a byte-length check on the raw JSON content
+// (we don't rune-truncate — a 200 KB Chinese plan is normal). 500_001 bytes
+// of 'x' trips the 413 branch.
+func TestImportDesign_RejectsOversizeContent(t *testing.T) {
+	env := newImportDesignTestEnv(t)
+
+	oversize := strings.Repeat("x", importDesignMaxBytes+1)
+	rec := httptest.NewRecorder()
+	env.h.ImportDesign(rec, putImportBody(t, map[string]string{
+		"requirement_id": env.reqID,
+		"content":        oversize,
+		"source":         "paste",
+	}))
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rec.Code)
+	}
+	env2 := decodeEnvelope(t, rec)
+	if env2.Error == nil || env2.Error.Code != "TOO_LARGE" {
+		t.Fatalf("error = %+v, want code=TOO_LARGE", env2.Error)
+	}
+}
+
+// TestImportDesign_SanitizesMarkdownFence — case 6.
+//
+// ChatGPT/DeepSeek sometimes wrap their plan in a single
+// ```` ```markdown ```` fence. The service's SanitizeDesignDoc strips it
+// (per its contract — must stay in sync with the frontend's parseDesign);
+// the handler therefore persists the unwrapped body, not the wrapped
+// form. Asserting on the unwrapped form proves the sanitize pass ran on
+// the import path (not just on the Claude path).
+func TestImportDesign_SanitizesMarkdownFence(t *testing.T) {
+	env := newImportDesignTestEnv(t)
+
+	const wrapped = "```markdown\n# hello\n```"
+	rec := httptest.NewRecorder()
+	env.h.ImportDesign(rec, putImportBody(t, map[string]string{
+		"requirement_id": env.reqID,
+		"content":        wrapped,
+		"source":         "paste",
+	}))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	got, err := env.reqSvc.Get(env.reqID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if strings.HasPrefix(got.DesignDocs, "```") {
+		t.Errorf("DesignDocs still wrapped: %q", got.DesignDocs)
+	}
+	if !strings.Contains(got.DesignDocs, "# hello") {
+		t.Errorf("DesignDocs missing # hello; got: %q", got.DesignDocs)
+	}
+}
+
+// TestImportDesignFile_AcceptsMdTxt_RejectsPdf_RejectsOversize — case 7.
+//
+// The upload endpoint is a multipart reader; the persistence step happens
+// on the second call to ImportDesign. Three sub-cases here:
+//
+//  1. .md upload  → 200, content matches the file bytes
+//  2. .pdf upload → 400 UNSUPPORTED_FORMAT (docs explicitly scope to
+//     .md/.markdown/.txt — PDFs require real parsing we don't do here)
+//  3. > 2 MB upload → 413 TOO_LARGE (multipart body is rejected before
+//     the form is even parsed, courtesy of MaxBytesReader)
+func TestImportDesignFile_AcceptsMdTxt_RejectsPdf_RejectsOversize(t *testing.T) {
+	env := newImportDesignTestEnv(t)
+
+	t.Run("md_accepted", func(t *testing.T) {
+		body, contentType := buildMultipart(t, "plan.md", []byte("# hello md\n"))
+		req := httptest.NewRequest(http.MethodPost, "/api/wizard/import-design-file", body)
+		req.Header.Set("Content-Type", contentType)
+		rec := httptest.NewRecorder()
+		env.h.ImportDesignFile(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Success bool   `json:"success"`
+			Data    struct {
+				Content string `json:"content"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if !resp.Success {
+			t.Fatalf("success=false")
+		}
+		if resp.Data.Content != "# hello md\n" {
+			t.Errorf("content = %q, want %q", resp.Data.Content, "# hello md\n")
+		}
+	})
+
+	t.Run("pdf_rejected", func(t *testing.T) {
+		body, contentType := buildMultipart(t, "plan.pdf", []byte("%PDF-1.4 fake"))
+		req := httptest.NewRequest(http.MethodPost, "/api/wizard/import-design-file", body)
+		req.Header.Set("Content-Type", contentType)
+		rec := httptest.NewRecorder()
+		env.h.ImportDesignFile(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+		env2 := decodeEnvelope(t, rec)
+		if env2.Error == nil || env2.Error.Code != "UNSUPPORTED_FORMAT" {
+			t.Fatalf("error = %+v, want code=UNSUPPORTED_FORMAT", env2.Error)
+		}
+	})
+
+	t.Run("oversize_rejected", func(t *testing.T) {
+		// 3 MB body > 2 MB importDesignFileMaxBody — MaxBytesReader trips
+		// during ParseMultipartForm and we surface TOO_LARGE.
+		big := bytes.Repeat([]byte("x"), importDesignFileMaxBody+1024)
+		body, contentType := buildMultipart(t, "plan.md", big)
+		req := httptest.NewRequest(http.MethodPost, "/api/wizard/import-design-file", body)
+		req.Header.Set("Content-Type", contentType)
+		rec := httptest.NewRecorder()
+		env.h.ImportDesignFile(rec, req)
+
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want 413", rec.Code)
+		}
+		env2 := decodeEnvelope(t, rec)
+		if env2.Error == nil || env2.Error.Code != "TOO_LARGE" {
+			t.Fatalf("error = %+v, want code=TOO_LARGE", env2.Error)
+		}
+	})
+}
+
+// buildMultipart constructs a minimal multipart/form-data body with one
+// "file" field. Returns the body reader (Position 0; the test should treat
+// it as io.Reader) and the matching Content-Type header value (including
+// the boundary).
+func buildMultipart(t *testing.T, filename string, content []byte) (*bytes.Buffer, string) {
+	t.Helper()
+	body := &bytes.Buffer{}
+	w := multipart.NewWriter(body)
+	fw, err := w.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := io.Copy(fw, bytes.NewReader(content)); err != nil {
+		t.Fatalf("copy content: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close multipart: %v", err)
+	}
+	return body, w.FormDataContentType()
 }

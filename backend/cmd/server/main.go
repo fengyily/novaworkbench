@@ -801,6 +801,13 @@ func main() {
 	mux.HandleFunc("POST /api/wizard/analyst-chat", wizardH.AnalystChat)
 	mux.HandleFunc("POST /api/wizard/developer-chat", wizardH.DeveloperChat)
 	mux.HandleFunc("POST /api/wizard/architect-design", wizardH.ArchitectDesign)
+	// Design-doc import — bypasses Claude / JobStore / SSE so the user can
+	// paste or upload an externally-generated Markdown plan and land
+	// directly in status="designed". The companion /import-design-file
+	// endpoint is a stateless multipart reader that returns the raw bytes
+	// for the frontend to display before the user confirms the import.
+	mux.HandleFunc("PUT /api/wizard/import-design", wizardH.ImportDesign)
+	mux.HandleFunc("POST /api/wizard/import-design-file", wizardH.ImportDesignFile)
 	mux.HandleFunc("POST /api/wizard/start-coding", wizardH.StartCoding)
 	mux.HandleFunc("POST /api/wizard/adjust-coding", wizardH.AdjustCoding)
 	mux.HandleFunc("POST /api/wizard/continue-coding", wizardH.ContinueCoding)

@@ -679,6 +679,26 @@ export const requirements = {
     immediateDesignSection: 'Design · Architecture',
     immediateCodingSection: 'Coding · Development',
     immediateFlightAria: 'Two-stage mission summary',
+    // Design-doc import — see the Chinese module for the rationale and
+    // user-visible flow. Keys mirror the Chinese file line-for-line so
+    // scripts/check-i18n-keys.mjs stays clean.
+    importDesignBtn: 'Import Plan',
+    importDesignTitle: 'Import a Markdown technical plan from another AI tool (e.g. ChatGPT / DeepSeek) directly, skipping AI generation',
+    importDesignDialogTitle: 'Import Technical Plan',
+    importDesignTabPaste: 'Paste Markdown',
+    importDesignTabFile: 'Upload File (.md/.txt)',
+    importDesignPlaceholder: 'Paste Markdown here (mermaid blocks, tables, and lists supported)',
+    importDesignSubmit: 'Import',
+    importDesignSubmitting: 'Importing…',
+    importDesignSuccess: 'Plan imported',
+    importDesignConfirmOverwrite: 'A plan already exists. Overwrite?',
+    importDesignFailKind: 'This requirement does not support importing a plan (wiki-kind)',
+    importDesignFailBusy: 'An AI task is running. Please wait or cancel it first',
+    importDesignFailFormat: 'Only .md / .markdown / .txt files are supported',
+    importDesignFailFileTooLarge: 'File exceeds the 2 MB limit',
+    importDesignFailContentTooLarge: 'Content exceeds the 500 KB limit',
+    importDesignFailEmpty: 'Please paste content or choose a file',
+    importDesignPreviewLabel: 'Preview',
   },
   attachment: {
     sectionTitle: '📎 Attachments',
