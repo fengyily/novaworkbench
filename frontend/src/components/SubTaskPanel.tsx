@@ -417,6 +417,61 @@ function PhaseSection({
   );
 }
 
+// ThinkingSection shows the model's captured reasoning for a finished manual
+// sub-task. Collapsed by default; the text is fetched on first expand only
+// (it can be tens of KB, so it is never part of the list payload) and cached
+// for later toggles. Rendered as plain text — reasoning often contains
+// pseudo-markdown that should not be interpreted.
+function ThinkingSection({ requirementId, subTaskId }: { requirementId: string; subTaskId: string }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState<boolean>(false);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [failed, setFailed] = useState<boolean>(false);
+  const [content, setContent] = useState<string | null>(null);
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && content === null && !loading) {
+      setLoading(true);
+      setFailed(false);
+      subTasksApi
+        .getThinking(requirementId, subTaskId)
+        .then((r) => setContent(r?.content ?? ''))
+        .catch(() => setFailed(true))
+        .finally(() => setLoading(false));
+    }
+  };
+
+  return (
+    <div className="sub-phase-panel sub-thinking">
+      <button
+        type="button"
+        className={`sub-phase-step sub-thinking-toggle${open ? ' is-open' : ''}`}
+        onClick={toggle}
+        aria-expanded={open}
+      >
+        <span className="sub-phase-dot" aria-hidden="true" />
+        <span className="sub-phase-title">{t('components.subTaskCard.thinkingTitle')}</span>
+        <span className="sub-phase-arrow">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <div className="sub-phase-panel-body">
+          {loading ? (
+            <span className="sub-thinking-hint">⏳ {t('components.subTaskCard.thinkingLoading')}</span>
+          ) : failed ? (
+            <span className="sub-thinking-hint">{t('components.subTaskCard.thinkingLoadFailed')}</span>
+          ) : content ? (
+            <pre className="sub-thinking-body">{content}</pre>
+          ) : (
+            <span className="sub-thinking-hint">{t('components.subTaskCard.thinkingEmpty')}</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ToolResultRow renders a tool_result SSE event (Read / Bash / Grep
 // output) inside SubTaskLogView. Default-collapsed to a 200-char preview
 // so a long `npm install` or grep sweep doesn't push the live stream off
@@ -1379,6 +1434,13 @@ function SubTaskCard({
   const sourceClass = `sub-report-source${isAutoSource ? ' is-auto' : ''}`;
   // v0.5.x: 反向派生,供 .sub-plan 自拟方案渲染分支复用。
   const isManualSource = !isAutoSource;
+  // 思考过程区仅对手动源（与后端 phaseEnabledForSource 一致）的终态卡片渲染。
+  const thinkingNode =
+    !streaming &&
+    (st.source === 'manual' || !st.source) &&
+    (st.status === 'done' || st.status === 'error' || st.status === 'stopped') ? (
+      <ThinkingSection requirementId={st.requirement_id} subTaskId={st.id} />
+    ) : null;
 
   return (
     <article
@@ -1617,6 +1679,7 @@ function SubTaskCard({
                 active={phaseOutputs.activePhase === 'summary'}
                 defaultOpen
               />
+              {thinkingNode}
             </div>
           )}
 
@@ -1787,6 +1850,9 @@ function SubTaskCard({
           {!streaming && !st.phase_emitted && st.report_mode !== 'brief' && (st.status === 'done' || st.status === 'error' || st.status === 'stopped') && !artifact && (
             <div className="sub-report-empty">{t('components.subTaskCard.noArtifact')}</div>
           )}
+
+          {/* 思考过程：三段路径内嵌在 sub-card-phases 末尾；brief / legacy 路径放在结果块之后。 */}
+          {!st.phase_emitted && thinkingNode && <div className="sub-card-phases">{thinkingNode}</div>}
 
           {/* 🪙 Token + cost strip — moved to the header-right quickstats
               (sub-card-quickstats) so the user always sees the totals without

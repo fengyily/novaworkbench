@@ -82,7 +82,7 @@ Services hold `*db.DB` (not `*sql.DB`) — a thin wrapper that rebinds `?`→`$N
 
 `db.Migrate(src, dst)` copies the **25 tables listed in `copyOrder`** parent-first, preserving IDs and skipping duplicate PKs; it backs both the `-migrate` CLI flag and `POST /api/settings/database/migrate` (settings UI). (`copyOrder` is a hand-maintained subset of the schema — the issue-monitor tables are not in it.)
 
-**35 tables** (`schema.go:14,31,46,86,107,122,142,149,156,170,180,193,199,211,224,235,258,276,288,298,306,314,332,341,350,367,400,439,466,516,638,669,716,743,776`):
+**36 tables** (`schema.go:14,31,46,86,107,122,142,149,156,170,180,193,199,211,224,235,258,276,288,298,306,314,332,341,350,367,400,439,466,516,638,669,716,743,776`):
 
 | 表 | ID 前缀 | 一句话 |
 |---|---|---|
@@ -112,7 +112,7 @@ ACL 落地在 7 张表(`users`/`sessions`/`acl_roles`/`permissions`/`acl_role_pe
 
 需求在 coding 阶段可被**自动拆分为子任务**(`handler/wizard_subtask.go` + `wizard_orchestration.go`),由 `scheduler/orchestration_queue.go`(10s tick)派发,经 `handler/sub_task_runner.go` 执行;UI 在 `components/SubTaskPanel.tsx`。`scheduled_tasks` 表 + `handler/schedule.go` 支持 `design`/`coding`/`design_and_coding` 三种**一次性或 cron 周期(每天/每周)**定时任务(`scheduler/scheduler.go` 30s tick, 并发 2);UI 在 `SchedulesPage.tsx`(`/schedules`)。
 
-**执行准入(两条路径共享)**: `service/project_limiter.go` 的 `ProjectLimiter` 是**按 `project_id` 的内存闸门**——编排 tick 与 `SubTaskRunner.Run`(含手动 重做/继续)都先过项目闸门、再过**进程级 OOM 上限**(env `NOVA_SUBTASK_CONCURRENCY`,两条路径共享同一 chan),顺序固定以免互锁。闸门上限来自 KV 设置 `subtask.concurrency`(默认 1,**按项目独立生效**),tick/Run 每次入口 `SetMax` 刷新 → 改设置 ≤10s 生效无需重启。tick 满槽时**不认领 DB 行**(行保持 pending,卡片显示「排队中」);手动路径则轮询等待。**失败自动重做**: `subtask.auto_retry`(默认 **false**,即默认手动恢复)+ `subtask.retry_max`,开启后 tick 在「无 pending 可认领」时经 `SubTaskService.ReArmErroredForRetry` 把 `error` 子任务翻回 `pending`(`sub_tasks.retry_count` 计数封顶,镜像 `summary_attempts` 模式),仅作用于编排子任务。三项配置在 `GET/PUT /api/settings/subtask` + `SettingsSubTask.tsx`(`/settings/subtask`,复用 `setting.llm` 权限键)。**v0.5.0 新增**:`sub_task_runner` 支持删除失败的子任务并清理其 Claude session;手动启动子任务(`SubTaskRunner.Run`)可选择会话模式(新会话 / 续接);编排子任务按 project 闸门排队。
+**执行准入(两条路径共享)**: `service/project_limiter.go` 的 `ProjectLimiter` 是**按 `project_id` 的内存闸门**——编排 tick 与 `SubTaskRunner.Run`(含手动 重做/继续)都先过项目闸门、再过**进程级 OOM 上限**(env `NOVA_SUBTASK_CONCURRENCY`,两条路径共享同一 chan),顺序固定以免互锁。闸门上限来自 KV 设置 `subtask.concurrency`(默认 1,**按项目独立生效**),tick/Run 每次入口 `SetMax` 刷新 → 改设置 ≤10s 生效无需重启。tick 满槽时**不认领 DB 行**(行保持 pending,卡片显示「排队中」);手动路径则轮询等待。**失败自动重做**: `subtask.auto_retry`(默认 **false**,即默认手动恢复)+ `subtask.retry_max`,开启后 tick 在「无 pending 可认领」时经 `SubTaskService.ReArmErroredForRetry` 把 `error` 子任务翻回 `pending`(`sub_tasks.retry_count` 计数封顶,镜像 `summary_attempts` 模式),仅作用于编排子任务。三项配置在 `GET/PUT /api/settings/subtask` + `SettingsSubTask.tsx`(`/settings/subtask`,复用 `setting.llm` 权限键)。**思考过程**:手动子任务(`source='manual'`)的模型 thinking 文本由 `thinkingCollector`(`handler/thinking_collector.go`,本地 `runClaudeStream` 与远端 `parseStreamJSONFromReader` 共用)采集,上限 256 KB,`finishSubTask` 落到独立表 `sub_task_thinking`(不进 List 载荷,`DeleteByIDs` 显式清理),报告卡片展开时经 `GET /api/requirements/{id}/sub-tasks/{sid}/thinking` 懒加载。**v0.5.0 新增**:`sub_task_runner` 支持删除失败的子任务并清理其 Claude session;手动启动子任务(`SubTaskRunner.Run`)可选择会话模式(新会话 / 续接);编排子任务按 project 闸门排队。
 
 ### Merge & Weekly Reports
 
