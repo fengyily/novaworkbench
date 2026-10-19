@@ -427,7 +427,7 @@ CREATE INDEX IF NOT EXISTS idx_sub_tasks_req ON sub_tasks(requirement_id);
 
 -- Model reasoning captured while a manual sub-task ran. Kept in its own table
 -- (not a sub_tasks column) so List / SSE payloads never carry tens of KB of
--- thinking text; the report card fetches it lazily on expand. No FK: SQLite
+-- thinking text. The report card fetches it lazily on expand. No FK: SQLite
 -- never enables foreign_keys, so SubTaskService.DeleteByIDs cleans it up.
 CREATE TABLE IF NOT EXISTS sub_task_thinking (
 	sub_task_id TEXT PRIMARY KEY,
