@@ -4497,6 +4497,24 @@ export default function RequirementDetail() {
                             <IconRocket size={13} className="btn-icon" />{t('requirements.detail2.immediateDesignCodingBtn')}
                           </button>
                         )}
+                        {/* 📥 Import an externally-generated plan (Markdown
+                            from ChatGPT / DeepSeek / etc.) as design_docs —
+                            visible from the very first view so users with a
+                            ready plan can land it without first running
+                            architect-design. Mirrors the existing architect
+                            toolbars' wiki guard + busy lock. Reuses the
+                            same ImportDesignDialog + wizardH.importDesign
+                            round-trip; the dialog itself handles the
+                            window.confirm overwrite prompt. */}
+                        {req.kind !== 'wiki' && !designing && !busy && (
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => setImportDesignDialogOpen(true)}
+                            title={t('requirements.detail2.importDesignTitle')}
+                          >
+                            📥 {t('requirements.detail2.importDesignBtn')}
+                          </button>
+                        )}
                         {/* Pending schedule hint — surfaces the planned time
                             and offers an inline cancel link. Sits next to
                             the scheduling buttons it replaces. */}
