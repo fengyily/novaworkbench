@@ -4908,7 +4908,10 @@ export default function RequirementDetail() {
             <>
               {/* Design panel toolbar — "提取架构图" 把当前方案里的所有
                   ```mermaid``` 块一键落到知识库；"新建架构图" 打开
-                  DiagramGenerator 用方案上下文作为 initialInput。 */}
+                  DiagramGenerator 用方案上下文作为 initialInput；"导入方案"
+                  让用户用外部 Markdown 覆盖当前 design_docs（dialog 内部用
+                  window.confirm 做二次确认）。hidden for wiki-kind，与
+                  空状态那条按钮用同一守卫。 */}
               <div className="design-toolbar">
                 {design.plan_markdown && /```mermaid/i.test(design.plan_markdown) && (
                   <button
@@ -4924,6 +4927,15 @@ export default function RequirementDetail() {
                     onClick={() => setShowDesignDiagramGenerator(true)}
                   >
                     🧠 新建架构图（空白）
+                  </button>
+                )}
+                {req.kind !== 'wiki' && (
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => setImportDesignDialogOpen(true)}
+                    title={t('requirements.detail2.importDesignTitle')}
+                  >
+                    📥 {t('requirements.detail2.importDesignBtn')}
                   </button>
                 )}
               </div>
