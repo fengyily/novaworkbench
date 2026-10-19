@@ -386,16 +386,23 @@ func (h *WizardHandler) activeConfigMeta() (id, currency string) {
 // logf may be nil; nil disables log echoing silently so the legacy callers
 // keep working unchanged.
 //
+// skipLocalSync=true opts out of the directory prologue's best-effort
+// EnsureClonedAndSynced (i.e. local `git fetch origin <base>`). Pass true
+// when the surrounding stage will execute on a remote Agent Server — the
+// remote originTransport.PrepareRemote owns the sync, so the local fetch is
+// wasted work and may fail noisily when the local host can't reach github.
+// EnsureCloned (auto-clone when the local directory is missing) still runs.
+//
 // This is now a thin wrapper: the directory prologue lives in
 // ensureProjectDir and the worktree-anchoring step lives in anchorWorktree,
 // so the design stage's hard-sync path can reuse those primitives via
 // resolveWorkDirSynced without dragging in the best-effort EnsureClonedAndSynced
 // prologue (which would do a redundant soft fetch before our gate).
-func (h *WizardHandler) resolveWorkDirLogged(ctx context.Context, req *model.Requirement, projectPath, defaultBranch string, logf func(string)) (string, error) {
+func (h *WizardHandler) resolveWorkDirLogged(ctx context.Context, req *model.Requirement, projectPath, defaultBranch string, logf func(string), skipLocalSync bool) (string, error) {
 	if req == nil || projectPath == "" {
 		return projectPath, nil
 	}
-	if err := h.ensureProjectDir(ctx, req, projectPath, logf); err != nil {
+	if err := h.ensureProjectDir(ctx, req, projectPath, logf, skipLocalSync); err != nil {
 		return "", err
 	}
 	return h.anchorWorktree(req, projectPath, defaultBranch, false, logf)
@@ -410,7 +417,15 @@ func (h *WizardHandler) resolveWorkDirLogged(ctx context.Context, req *model.Req
 //
 // logf may be nil; nil disables log echoing silently so the legacy callers
 // keep working unchanged.
-func (h *WizardHandler) ensureProjectDir(ctx context.Context, req *model.Requirement, projectPath string, logf func(string)) error {
+//
+// skipLocalSync=true suppresses the local `git fetch origin <base>` step
+// (and the corresponding "🔄 同步仓库基线…" log line) so wizard stages that
+// will execute on a remote Agent Server don't waste a fetch that will fail
+// when the local host can't reach github. EnsureCloned below — the auto-
+// restore-from-remote fallback for a missing local directory — still runs
+// regardless of the flag, so a freshly bootstrapped host that loses the
+// directory still gets a recovery chance.
+func (h *WizardHandler) ensureProjectDir(ctx context.Context, req *model.Requirement, projectPath string, logf func(string), skipLocalSync bool) error {
 	if req == nil || projectPath == "" {
 		return nil
 	}
@@ -430,9 +445,15 @@ func (h *WizardHandler) ensureProjectDir(ctx context.Context, req *model.Require
 		if err == nil {
 			_ = err // placate linters; kept for the no-op-when-OK branch below
 		}
-		// Always run the sync prologue so an existing stale directory still
-		// gets a fresh fetch and a sync_status stamp.
-		_, _ = h.projectSvc.EnsureClonedAndSynced(ctx, req.ProjectID, logf)
+		// Run the sync prologue when the caller has not opted out. In
+		// Agent Server mode the local fetch is wasted (the remote side
+		// fetches its own tip); skip it explicitly so the user doesn't
+		// see FETCH_FAILED noise on a host that can't reach github.
+		if !skipLocalSync {
+			_, _ = h.projectSvc.EnsureClonedAndSynced(ctx, req.ProjectID, logf)
+		} else if logf != nil {
+			logf("⏭️ 跳过本地 origin/<base> 同步（Agent Server 模式，由远端 SSH 侧接管）")
+		}
 		if _, err := os.Stat(projectPath); err != nil {
 			// Sync prologue couldn't materialize the directory (no remote or
 			// clone failed). Fall back to the legacy EnsureCloned so the old
@@ -448,8 +469,12 @@ func (h *WizardHandler) ensureProjectDir(ctx context.Context, req *model.Require
 		// Directory is present — still run the sync prologue so the project
 		// row gets a fresh fetch + last_synced_at stamp before the worktree
 		// is anchored. This is the "design against the latest version"
-		// guarantee the wizard UX promises.
-		_, _ = h.projectSvc.EnsureClonedAndSynced(ctx, req.ProjectID, logf)
+		// guarantee the wizard UX promises. Agent Server mode opts out.
+		if !skipLocalSync {
+			_, _ = h.projectSvc.EnsureClonedAndSynced(ctx, req.ProjectID, logf)
+		} else if logf != nil {
+			logf("⏭️ 跳过本地 origin/<base> 同步（Agent Server 模式，由远端 SSH 侧接管）")
+		}
 	}
 	return nil
 }
@@ -608,8 +633,11 @@ func (h *WizardHandler) resolveWorkDirSynced(ctx context.Context, req *model.Req
 //
 // This is the log-silent variant; pass resolveWorkDirLogged directly when the
 // caller has a Job and wants the sync lines to surface in the SSE panel.
-func (h *WizardHandler) resolveWorkDir(ctx context.Context, req *model.Requirement, projectPath, defaultBranch string) (string, error) {
-	return h.resolveWorkDirLogged(ctx, req, projectPath, defaultBranch, nil)
+//
+// skipLocalSync=true forwards the Agent-Server-mode opt-out to the
+// directory prologue — see resolveWorkDirLogged for the full rationale.
+func (h *WizardHandler) resolveWorkDir(ctx context.Context, req *model.Requirement, projectPath, defaultBranch string, skipLocalSync bool) (string, error) {
+	return h.resolveWorkDirLogged(ctx, req, projectPath, defaultBranch, nil, skipLocalSync)
 }
 
 // requireAnchoredFork guards against forking a source session that was created
