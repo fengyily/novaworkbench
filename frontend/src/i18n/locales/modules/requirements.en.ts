@@ -137,6 +137,9 @@ export const requirements = {
     // (project local_path missing, no git, or pre-clone). The user
     // must type the base manually in that case.
     designBranchPickerEmpty: 'Branch list unavailable; type manually',
+    // Tooltip on the inline ↻ button shown inside the warn rail when the
+    // mount-time branch fetch failed. Clicking it retries GET /api/fs/git-branches.
+    branchPickerRetry: 'Retry fetching branches',
     // DesignCodingImmediateModal flight strip caption — clarifies that
     // the single base-branch input below drives BOTH the design and
     // the coding stage in the chained run, so the user is not surprised
@@ -231,6 +234,10 @@ export const requirements = {
     draftActionRouteLabel: 'Target',
     draftActionRouteAria: 'Design-generation target',
     draftActionReady: 'READY',
+    draftActionImmediateLabel: 'Run now',
+    draftActionScheduledLabel: 'Schedule',
+    draftFieldModelLabel: 'Model',
+    draftFieldExecDevCaption: 'Target / Mode',
     draftActionFallback: 'Or run requirement analysis first',
     // Coding-stage action panel — mirrors the draft panel pattern.
     codingActionEyebrow: 'Development',

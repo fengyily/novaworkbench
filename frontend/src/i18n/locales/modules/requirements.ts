@@ -137,6 +137,9 @@ export const requirements = {
     // (project local_path missing, no git, or pre-clone). The user
     // must type the base manually in that case.
     designBranchPickerEmpty: '无法读取分支列表，请手动输入',
+    // Tooltip on the inline ↻ button shown inside the warn rail when the
+    // mount-time branch fetch failed. Clicking it retries GET /api/fs/git-branches.
+    branchPickerRetry: '重试读取分支列表',
     // DesignCodingImmediateModal flight strip caption — clarifies that
     // the single base-branch input below drives BOTH the design and
     // the coding stage in the chained run, so the user is not surprised
@@ -241,6 +244,10 @@ export const requirements = {
     draftActionRouteLabel: '执行目标',
     draftActionRouteAria: '方案生成目标',
     draftActionReady: 'READY',
+    draftActionImmediateLabel: '立即执行',
+    draftActionScheduledLabel: '稍后执行',
+    draftFieldModelLabel: '模型',
+    draftFieldExecDevCaption: '执行 / 模式',
     draftActionFallback: '或先进行需求分析完善需求',
     // Coding-stage action panel — mirrors the draft panel pattern.
     // Shares `draftActionRouteLabel` / `draftActionReady` so the HUD
