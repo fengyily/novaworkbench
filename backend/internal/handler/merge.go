@@ -1748,7 +1748,7 @@ func (h *MergeHandler) gitIdentityForReq(reqRow *model.Requirement) (string, str
 // without ~/.gitconfig (e.g. the Docker container, where the node user has
 // no global git identity). Empty strings on any miss; callers must treat
 // empty as "skip injection, fall back to git config".
-func lookupGitIdentity(projectSvc *service.ProjectService, platformSvc *service.PlatformTokenService, reqRow *model.Requirement) (string, string) {
+func lookupGitIdentity(projectSvc projectService, platformSvc *service.PlatformTokenService, reqRow *model.Requirement) (string, string) {
 	if projectSvc == nil || platformSvc == nil || reqRow == nil {
 		return "", ""
 	}

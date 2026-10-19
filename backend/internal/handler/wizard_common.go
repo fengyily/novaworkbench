@@ -24,6 +24,25 @@ import (
 	"github.com/novaworkbench/backend/internal/service"
 )
 
+// projectService is the subset of *service.ProjectService used by wizard
+// handlers. Defined here so tests can inject a mock implementation that
+// records / no-ops network-binding calls (e.g. EnsureClonedAndSynced) when
+// Agent Server mode is in effect, instead of requiring a real project row
+// and live `git fetch` to exercise the wizard pipeline.
+//
+// Keep this list minimal and exact: a missing method here will surface as a
+// compile error the first time a wizard_*.go file reaches for it, which is
+// the intended self-check when adding new wizard behaviour.
+type projectService interface {
+	EnsureCloned(id string) error
+	EnsureClonedAndSynced(ctx context.Context, id string, logf func(string)) (service.ProjectSyncResult, error)
+	SyncDesignBase(ctx context.Context, projectID, baseBranch string, timeout time.Duration, logf func(string)) (service.GitSyncResult, error)
+	Get(id string) (*model.Project, error)
+	OriginURL(projectID string) (string, error)
+	DiscoverAndCacheClaudeProjectSlug(id, localPath string) (string, error)
+	UpdateSyncStatus(id, status, commit string)
+}
+
 // DefaultModelLabel is the display + persistence literal used when neither the
 // role nor the active claude config specifies a model. It is NOT a real model
 // id: cliModelArg translates it to "" (no --model flag) so the CLI falls back

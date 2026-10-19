@@ -2294,7 +2294,7 @@ type runCallbacks struct {
 // (the raw PAT lives only on disk in platform_tokens.token, AES-decrypted
 // in service.Get — see service/platform.go:267).
 func secretsForAdjustRedaction(
-	projectSvc *service.ProjectService,
+	projectSvc projectService,
 	platformSvc *service.PlatformTokenService,
 	reqRow *model.Requirement,
 ) []string {
