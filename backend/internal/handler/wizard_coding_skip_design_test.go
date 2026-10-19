@@ -1,10 +1,16 @@
 package handler
 
 import (
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/novaworkbench/backend/internal/db"
 	"github.com/novaworkbench/backend/internal/model"
+	"github.com/novaworkbench/backend/internal/service"
+	"github.com/novaworkbench/backend/internal/store"
 )
 
 // Regression tests for backfillSkipDesignDescription — the helper that fills
@@ -111,4 +117,172 @@ func TestBackfillSkipDesignDescription(t *testing.T) {
 			t.Fatalf("RequirementDesc = %q, want still \"\"", p.RequirementDesc)
 		}
 	})
+}
+
+// =============================================================================
+// Agent Server mode — execStartCoding must skip local `git fetch` calls.
+//
+// Background (req_feb87f7d3d65f0fc): when the user picked Agent Server as the
+// execution environment for the coding stage, execStartCoding's inline
+// prologue still ran a best-effort local `git fetch origin <base>` via
+// projectSvc.EnsureClonedAndSynced / worktreeH.syncBaseBranch. On a
+// workstation that cannot reach github (Agent Server side is reachable) this
+// produced a 60s FETCH_FAILED noise followed by an empty-error SSE panel even
+// though the remote side would have worked fine.
+//
+// The fix surgical-guards the three network-binding call-sites in
+// execStartCoding on `p.AgentServerID == ""`. The tests below pin that
+// behaviour by injecting a spy projectService and asserting the
+// EnsureClonedAndSynced counter matches expectations in both modes.
+//
+// Scope note: only the FIRST guard (line 686, EnsureClonedAndSynced) is
+// exercised directly. The other two syncBaseBranch guards (line 848 / 888)
+// sit behind the same `if p.AgentServerID == ""` pattern and are protected
+// by construction — running a full real-git path to reach them would only
+// re-test the same boolean, at the cost of standing up a real clone + worktree.
+// =============================================================================
+
+// runExecStartCodingPrologue seeds an in-memory DB with a project + requirement
+// and fires execStartCoding in a recover-wrapped goroutine. After a short wait
+// the spy counter is stable: the prologue's first guard runs well before any
+// downstream path (worktree creation / git pull / claude spawn) that the test
+// stubs cannot satisfy. Returns the spy + the in-flight job so callers can
+// assert counter values and log content.
+//
+// `cb` is nil: the test does not exercise the scheduler OnFinish hook. Any
+// downstream panic (jobLogSvc.Save NPE, claude spawn failure, etc.) is
+// swallowed by the outer recover so the test process stays clean.
+func runExecStartCodingPrologue(t *testing.T, agentServerID string) (*spyProjectSvc, *store.Job) {
+	t.Helper()
+
+	dir := t.TempDir()
+	d, err := db.Init(db.Config{Driver: "sqlite", SQLitePath: filepath.Join(dir, "test.db")})
+	if err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+
+	const projID = "proj_exec_skip"
+	const reqID = "req_exec_skip"
+	if _, err := d.Exec(
+		`INSERT INTO projects (id, name, local_path, status, default_branch) VALUES (?, ?, ?, ?, ?)`,
+		projID, "exec skip project", filepath.Join(dir, "project"), "ready", "main",
+	); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	if _, err := d.Exec(
+		`INSERT INTO requirements (id, project_id, title) VALUES (?, ?, ?)`,
+		reqID, projID, "exec skip requirement",
+	); err != nil {
+		t.Fatalf("insert requirement: %v", err)
+	}
+
+	reqSvc := service.NewRequirementService(d, nil)
+	jobLogSvc := service.NewJobLogService(d)
+	spy := &spyProjectSvc{}
+
+	h := &WizardHandler{
+		db:         d,
+		projectSvc: spy,
+		reqSvc:     reqSvc,
+		jobLogSvc:  jobLogSvc,
+		// worktreeH stays at zero value — syncBaseBranch is nil-safe on
+		// nil gitCredSvc / nil projectSvc, and our tests never reach it
+		// because the prologue aborts before line 847+ once EnsureCloned +
+		// anchorWorktree encounter a non-existent project path.
+		worktreeH: &WorktreeHandler{},
+		jobs:      store.NewJobStore(1),
+	}
+
+	p := &codingRunParams{
+		RequirementID: reqID,
+		AgentServerID: agentServerID,
+		BaseBranch:    "main",
+	}
+
+	job := &store.Job{
+		ID:            "job_exec_skip_" + agentServerID,
+		RequirementID: reqID,
+		Status:        store.JobRunning,
+		StartedAt:     time.Now(),
+	}
+
+	go func() {
+		defer func() { _ = recover() }() // swallow NPE from later pipeline stubs
+		h.execStartCoding(p, job, nil)
+	}()
+
+	// Prologue runs through line 686 within microseconds. 150ms is generous
+	// headroom for CI noise without making the test slow.
+	time.Sleep(150 * time.Millisecond)
+
+	return spy, job
+}
+
+// TestExecStartCoding_SkipsLocalSync_WhenAgentServerIDSet pins the surgical
+// guard at wizard_coding.go:686: when p.AgentServerID != "" the prologue
+// must NOT call EnsureClonedAndSynced, and the SSE panel must show the
+// "⏭️ 跳过本地 origin/<base> 同步（Agent Server 模式，由远端 SSH 侧接管）"
+// phase line.
+func TestExecStartCoding_SkipsLocalSync_WhenAgentServerIDSet(t *testing.T) {
+	spy, job := runExecStartCodingPrologue(t, "agent_xxx")
+
+	if got := atomic.LoadInt32(&spy.ensureClonedAndSyncedCalls); got != 0 {
+		t.Errorf("Agent Server mode: EnsureClonedAndSynced calls = %d, want 0 (local fetch must be skipped)", got)
+	}
+	// EnsureCloned (auto-restore-from-remote fallback) MUST still run —
+	// a missing local directory should still try to recover. Pinning this
+	// here guards against a future tweak that lumps EnsureCloned into the
+	// skip block by mistake.
+	if got := atomic.LoadInt32(&spy.ensureClonedCalls); got < 1 {
+		t.Errorf("Agent Server mode: EnsureCloned calls = %d, want >=1 (auto-clone must still run)", got)
+	}
+
+	lines, _, _ := job.Snapshot()
+	want := "⏭️ 跳过本地 origin/<base> 同步（Agent Server 模式，由远端 SSH 侧接管）"
+	var found bool
+	for _, l := range lines {
+		if strings.Contains(l.Content, want) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected job log to contain %q; got %d lines, first content: %q",
+			want, len(lines), firstLineContent(lines))
+	}
+}
+
+// TestExecStartCoding_CallsLocalSync_WhenAgentServerIDEmpty is the sanity
+// counterpart: with AgentServerID == "" the prologue MUST still call
+// EnsureClonedAndSynced. Without this assertion the test above would pass
+// trivially even if the guard were wrong (e.g. always-skipped).
+func TestExecStartCoding_CallsLocalSync_WhenAgentServerIDEmpty(t *testing.T) {
+	spy, job := runExecStartCodingPrologue(t, "")
+
+	if got := atomic.LoadInt32(&spy.ensureClonedAndSyncedCalls); got < 1 {
+		t.Errorf("local mode: EnsureClonedAndSynced calls = %d, want >=1 (local fetch must run)", got)
+	}
+	if got := atomic.LoadInt32(&spy.ensureClonedCalls); got < 1 {
+		t.Errorf("local mode: EnsureCloned calls = %d, want >=1 (auto-clone must run)", got)
+	}
+
+	// The skip message is the Agent Server signal — local mode must NOT emit it.
+	lines, _, _ := job.Snapshot()
+	skipMsg := "⏭️ 跳过本地 origin/<base> 同步"
+	for _, l := range lines {
+		if strings.Contains(l.Content, skipMsg) {
+			t.Errorf("local mode: job log unexpectedly contains the Agent Server skip message: %q", l.Content)
+			break
+		}
+	}
+}
+
+// firstLineContent is a tiny helper for clearer failure messages when the
+// expected log line is missing.
+func firstLineContent(lines []store.LogLine) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	return lines[0].Content
 }
