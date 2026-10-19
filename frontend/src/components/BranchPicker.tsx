@@ -13,6 +13,7 @@
 // is the surrounding card and the trailing hint rail; those are the
 // affordances that tell the user "this is the source we're forking from".
 
+import type { ReactNode } from 'react';
 import { IconBranch } from './icons';
 
 export interface BranchPickerProps {
@@ -32,6 +33,9 @@ export interface BranchPickerProps {
   defaultName: string;
   /** Rendered in place of the hint rail when `options` is empty. */
   emptyWarnText: string;
+  /** Optional trailing affordance injected into the warn rail (e.g. a retry
+   *  button when the branch fetch failed). Not rendered in the hint rail. */
+  emptyActions?: ReactNode;
   /** Hide the branch icon inside the chip (default true). */
   showIcon?: boolean;
 }
@@ -61,10 +65,15 @@ export function BranchPicker({
   chipLabel,
   defaultName,
   emptyWarnText,
+  emptyActions,
   showIcon = true,
 }: BranchPickerProps) {
+  // The modifier class unlocks the wider card + wrapped warn rail in CSS,
+  // but ONLY when the datalist is genuinely empty — otherwise the base
+  // cap (320/360px) protects the right-hand CTA cluster from wrapping.
+  const isEmpty = options.length === 0;
   return (
-    <div className="branch-selector">
+    <div className={`branch-selector${isEmpty ? ' branch-selector--empty' : ''}`}>
       <div className="preflight-field-card preflight-field-card--git">
         <span className="preflight-field-chip" aria-hidden="true">
           {showIcon && <IconBranch />}
@@ -85,9 +94,12 @@ export function BranchPicker({
           <option key={b} value={b} />
         ))}
       </datalist>
-      {options.length === 0 ? (
+      {isEmpty ? (
         <span className="branch-selector-warn" role="status">
           {emptyWarnText}
+          {emptyActions && (
+            <span className="branch-selector-warn-action">{emptyActions}</span>
+          )}
         </span>
       ) : (
         <span className="branch-selector-hint">

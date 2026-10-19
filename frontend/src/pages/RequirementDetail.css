@@ -557,6 +557,40 @@
   flex: 0 1 320px;
   max-width: 360px;
 }
+/* Only when options.length === 0: drop the cap above and let the
+   warn rail break to its own line so the input reclaims full width.
+   Do NOT lift the base .branch-selector cap, or CTA buttons wrap again.
+   The modifier class is set by BranchPicker itself so this rule only
+   fires when the datalist is genuinely empty. */
+.branch-selector--empty {
+  flex: 1 1 100%;
+  max-width: 560px;
+  flex-wrap: wrap;
+}
+.branch-selector--empty .branch-selector-warn {
+  flex-basis: 100%;
+  margin-top: 4px;
+}
+.branch-selector-warn-action {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+}
+.branch-selector-warn-retry {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+.branch-selector-warn-retry:hover:not(:disabled) {
+  background: var(--color-surface-soft);
+  color: var(--color-warning-deep);
+  border-color: var(--color-warning);
+}
+.branch-selector-warn-retry:disabled { opacity: 0.5; cursor: progress; }
 /* Compact card variant — same rail+chip as the modal, but the
    padding is tightened so the picker doesn't dominate the action
    panel. The card still wears the cyan rail so the visual link to

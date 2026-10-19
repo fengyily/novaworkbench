@@ -1131,6 +1131,14 @@ export default function RequirementDetail() {
   // inline picker (and the design/coding unified state) untouched.
   const [modalBaseBranch, setModalBaseBranch] = useState('');
   const [availableBranches, setAvailableBranches] = useState<string[]>([]);
+  // L1 data-layer fix: previously the datalist was only populated when the
+  // user opened the branch modal, so the inline picker always showed the
+  // warn rail on mount and the input looked squeezed. We now fetch on mount
+  // (and on project change) so the hint rail takes over; the warn rail
+  // becomes a rare fallback whose retry button is wired up here too.
+  const [branchListLoading, setBranchListLoading] = useState(false);
+  const [branchListError, setBranchListError] = useState<string | null>(null);
+  const branchFetchAbortRef = useRef<AbortController | null>(null);
 
   // Single source of truth for BOTH the design-stage and coding-stage
   // BASE branch. Seeded once from req.base_branch (when design has
@@ -1154,6 +1162,73 @@ export default function RequirementDetail() {
     baseBranchSeededRef.current = true;
     setBaseBranch(seed);
   }, [project?.default_branch, req?.base_branch]);
+
+  // Mount-time + project-change fetch of the branch list. Aborts the prior
+  // request on rapid project switches so stale responses can't leak into the
+  // next project's datalist.
+  const loadBranches = useCallback(async (localPath: string) => {
+    branchFetchAbortRef.current?.abort();
+    const ac = new AbortController();
+    branchFetchAbortRef.current = ac;
+    setBranchListLoading(true);
+    // Purge the previous project's list synchronously so the datalist
+    // can't suggest branches that don't belong to the new project before
+    // the new fetch resolves. The user's typed `baseBranch` is preserved
+    // by `baseBranchSeededRef` above.
+    setAvailableBranches([]);
+    try {
+      const r = await authedFetch(
+        `${API_BASE}/api/fs/git-branches?path=${encodeURIComponent(localPath)}`,
+        { signal: ac.signal },
+      );
+      if (ac.signal.aborted) return;
+      const json = await r.json();
+      if (ac.signal.aborted) return;
+      if (json.success && Array.isArray(json.data?.branches)) {
+        setAvailableBranches(json.data.branches);
+        setBranchListError(null);
+      } else {
+        setBranchListError(json.error?.code ?? 'FETCH_FAILED');
+      }
+    } catch (e: any) {
+      if (e?.name === 'AbortError') return;
+      if (ac.signal.aborted) return;
+      setBranchListError('NETWORK_ERROR');
+    } finally {
+      // Don't flip loading=false on a stale request — the newer in-flight
+      // one will handle its own state transitions.
+      if (!ac.signal.aborted) setBranchListLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!project?.local_path) return;
+    void loadBranches(project.local_path);
+  }, [project?.id, project?.local_path, loadBranches]);
+
+  const retryFetchBranches = useCallback(() => {
+    if (!project?.local_path) return;
+    void loadBranches(project.local_path);
+  }, [project?.local_path, loadBranches]);
+
+  // Retry affordance injected into each inline BranchPicker's warn rail.
+  // Only mounts when there's a project to retry against; disabled while a
+  // fetch is already in flight; tooltip localized via i18n (falls back to
+  // the key string if the locale hasn't registered it, which is harmless).
+  // The tooltip also reflects the last error code so the user can tell a
+  // network failure apart from a slow fetch.
+  const branchRetryTitle = branchListError
+    ? `${t('requirements.detail2.branchPickerRetry')} (${branchListError})`
+    : t('requirements.detail2.branchPickerRetry');
+  const branchRetryNode = project?.local_path ? (
+    <button
+      type="button"
+      className="branch-selector-warn-retry"
+      onClick={retryFetchBranches}
+      disabled={branchListLoading}
+      title={branchRetryTitle}
+    >↻</button>
+  ) : null;
 
   // Optional "Read project knowledge base" step (default off). The dev
   // checkbox lives in the branch modal; the design one has its own confirm
@@ -4438,6 +4513,7 @@ export default function RequirementDetail() {
                         chipLabel="BASE 设计"
                         defaultName={project?.default_branch || 'main'}
                         emptyWarnText={t('requirements.detail2.designBranchPickerEmpty')}
+                        emptyActions={branchRetryNode}
                       />
                       <div className="draft-action-actions-surface">
                         {/* Primary CTA — generates the technical design now.
@@ -4868,6 +4944,7 @@ export default function RequirementDetail() {
                 chipLabel="BASE 设计"
                 defaultName={project?.default_branch || 'main'}
                 emptyWarnText={t('requirements.detail2.designBranchPickerEmpty')}
+                emptyActions={branchRetryNode}
               />
               <p dangerouslySetInnerHTML={{ __html: t('requirements.detail2.architectIdleHint') }} />
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -5497,6 +5574,7 @@ export default function RequirementDetail() {
                   chipLabel="BASE 开发"
                   defaultName={project?.default_branch || 'main'}
                   emptyWarnText={t('requirements.detail2.designBranchPickerEmpty')}
+                  emptyActions={branchRetryNode}
                 />
                 <div className="draft-action-divider" aria-hidden="true" />
                 <div className="draft-action-actions">
