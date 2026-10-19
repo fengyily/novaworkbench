@@ -543,8 +543,17 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
-  flex: 1 1 320px;
-  max-width: 100%;
+  /* Cap the BASE 设计 / BASE 开发 picker at 240px so it stops stealing
+     width from the action buttons on the right (the previous
+     `flex: 1 1 320px; max-width: 100%` let the card swallow the whole
+     row at common viewport widths, which made the right-hand CTAs get
+     squeezed and wrap). 240px fits typical branch names (`main`,
+     `feature/req_xxx`, `origin/release-2026.10`) with room for the
+     trailing `默认 <branch>` hint rail. Applies uniformly to both the
+     design and development action panels since they share this
+     component. */
+  flex: 0 1 220px;
+  max-width: 240px;
 }
 /* Compact card variant — same rail+chip as the modal, but the
    padding is tightened so the picker doesn't dominate the action
