@@ -469,8 +469,26 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-left: auto;
   flex-wrap: nowrap;
+}
+
+/* Right-hand tail of the meta line: [stop] [actions] [chevron] as ONE
+   flex item pinned to the far right. Previously the actions and the
+   chevron each carried margin-left:auto and split the free space, so the
+   buttons floated at a different x on every card (chip widths vary).
+   Now every card's right edge — and the chevron — lines up. */
+.sub-card-tail {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.sub-card-tail .sub-card-stop-btn { margin-left: 0; }
+.sub-card-tail .sub-card-toggle {
+  margin-left: 0;
+  width: 14px;
+  text-align: center;
 }
 
 /* Action button — dashed outline to evoke the existing

@@ -1586,6 +1586,7 @@ function SubTaskCard({
               job, so the backend can abandon it before any claude process
               starts). An orchestrated child waiting to be claimed has no job
               yet — nothing to stop, and the queue will dispatch it in order. */}
+          <span className="sub-card-tail">
           {(st.status === 'running' || (queued && !!st.job_id)) && (
             <button
               type="button"
@@ -1606,6 +1607,7 @@ function SubTaskCard({
               buttons don't accidentally toggle expand/collapse. */}
           {renderActionButtons('header')}
           <span className="sub-card-toggle" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+          </span>
         </div>
         {/* Title line: the user-supplied sub-task title in display weight.
             Wraps freely so long titles stay fully visible. */}
