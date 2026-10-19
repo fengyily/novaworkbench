@@ -244,6 +244,10 @@ export const requirements = {
     draftActionRouteLabel: '执行目标',
     draftActionRouteAria: '方案生成目标',
     draftActionReady: 'READY',
+    draftActionImmediateLabel: '立即执行',
+    draftActionScheduledLabel: '稍后执行',
+    draftFieldModelLabel: '模型',
+    draftFieldExecDevCaption: '执行 / 模式',
     draftActionFallback: '或先进行需求分析完善需求',
     // Coding-stage action panel — mirrors the draft panel pattern.
     // Shares `draftActionRouteLabel` / `draftActionReady` so the HUD

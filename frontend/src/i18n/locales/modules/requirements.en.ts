@@ -234,6 +234,10 @@ export const requirements = {
     draftActionRouteLabel: 'Target',
     draftActionRouteAria: 'Design-generation target',
     draftActionReady: 'READY',
+    draftActionImmediateLabel: 'Run now',
+    draftActionScheduledLabel: 'Schedule',
+    draftFieldModelLabel: 'Model',
+    draftFieldExecDevCaption: 'Target / Mode',
     draftActionFallback: 'Or run requirement analysis first',
     // Coding-stage action panel — mirrors the draft panel pattern.
     codingActionEyebrow: 'Development',

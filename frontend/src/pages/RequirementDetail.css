@@ -432,24 +432,34 @@
 /* Draft-stage action panel — the "decide & go" surface that the user lands on
    when opening a fresh requirement with skip_analysis=true.
 
-   Visual concept: a single-card HUD that frames the three decisions the
+   Visual concept: a single-card HUD that frames the four decisions the
    user has to make in order — "pick a model", "pick where it runs",
-   "pick how to start" — with a monospaced route readout that tells them
-   where the work will go BEFORE they commit. The card wrapper (instead of
-   the flat flex-row used by the main architect toolbar) is deliberate: the
-   main toolbar is for refining a design that's already running; this panel
-   is for kicking one off, and the elevated container signals the different
-   intent.
+   "pick the source branch", "pick when to launch" — and a monospaced
+   flight strip at the top that tells them where the work will go BEFORE
+   they commit. The card wrapper (instead of the flat flex-row used by
+   the main architect toolbar) is deliberate: the main toolbar is for
+   refining a design that's already running; this panel is for kicking
+   one off, and the elevated container signals the different intent.
 
    Reuses the project's flight-strip vocabulary (.flight-leg / .flight-leg-
    label / .flight-leg-value / .flight-ready / .flight-ready-dot) so the
    preflight modal and this panel read as the same family — same monospace
    font, same READY dot, same leg-label uppercase tracked micro-labels —
-   without re-stating those rules. The panel itself just composes them. */
+   without re-stating those rules. The panel itself just composes them.
+
+   The vertical structure mirrors the user's reading order:
+     header  → what stage is this + where will it run
+     settings → MODEL + ENV + persisted state badges
+     source   → BASE picker (its own row, full width)
+     actions  → IMMEDIATE cluster | SCHEDULED cluster (split, two cards)
+     pending  → planned-time hints (own strip, above fallback)
+     fallback → "或先分析一下" escape hatch
+   Each transition is signaled by a labeled, bordered card so the user
+   never wonders "is this still the settings or have we moved to actions". */
 .draft-action-panel {
   position: relative;
   margin-top: 4px;
-  padding: 14px 16px 12px;
+  padding: 14px 16px 14px;
   border: 1px solid var(--color-border);
   border-radius: 10px;
   background: var(--color-bg);
@@ -463,26 +473,52 @@
 .draft-action-header {
   display: flex;
   align-items: center;
-  gap: 16px;
-  margin-bottom: 10px;
+  gap: 12px;
+  margin-bottom: 12px;
   flex-wrap: wrap;
 }
 /* Override the preflight-eyebrow ::before dot only for the in-card context
    (the dot already inherits from the shared .preflight-eyebrow class, so
    no new rules are needed for the dot itself; we just give the eyebrow a
-   little breathing room from the route readout to its right). */
+   little breathing room from the route readout to its right). The
+   eyebrow now wears a tiny stage marker glyph (▸) so the eyebrow reads
+   as a labeled location, not a floating noun. */
 .draft-action-header .preflight-eyebrow {
   margin-bottom: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
 }
-/* Route readout — the signature element. Reuses the flight-strip leg
-   vocabulary so the panel reads as the same family as the coding
-   preflight modal. Sized tighter than the modal's full-width strip. */
+.draft-action-header .preflight-eyebrow::after {
+  /* subtle stage marker — same indigo as the existing dot so it reads
+     as part of the eyebrow family, not a separate decoration. Lower
+     opacity keeps it from competing with the actual stage label. */
+  content: '▸';
+  font-size: 10px;
+  color: rgba(79, 70, 229, 0.55);
+  margin-left: 2px;
+  letter-spacing: 0;
+}
+/* Route readout — the SIGNATURE element of the panel. A single
+   monospaced flight strip on the right side of the header that says
+   "where will this work actually go" before the user commits. The
+   strip sits in a fixed-width slot (max-width) so it never floats
+   awkwardly when the stage name is short, and never wraps when the
+   value is long (overflow:hidden + ellipsis keeps it tidy). Reuses
+   the flight-strip leg vocabulary so the panel and the coding
+   preflight modal read as one family. */
+.draft-action-route-slot {
+  margin-left: auto;
+  display: inline-flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  justify-content: flex-end;
+}
 .draft-action-route {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  margin-left: auto;
-  padding: 4px 10px;
+  padding: 5px 10px 5px 11px;
   border: 1px solid var(--color-border);
   border-radius: 6px;
   background: var(--color-surface);
@@ -493,11 +529,16 @@
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* Letter-spacing matches the modal's flight strip so the two read as
+     one typeface; tight enough to fit "MODEL ▸ HOME ▸ BASE" leg labels
+     on a single line at common viewport widths. */
+  letter-spacing: 0.01em;
 }
 .draft-action-route .flight-leg { gap: 4px; }
 .draft-action-route .flight-leg-label {
   letter-spacing: 0.1em;
   color: var(--color-text-muted);
+  text-transform: uppercase;
 }
 .draft-action-route .flight-leg-value {
   color: var(--color-text);
@@ -513,15 +554,6 @@
   padding-left: 8px;
   border-left: 1px solid var(--color-border);
   font-size: 10px;
-}
-/* Hairline divider between the settings row and the action row inside
-   the card. 1px var(--color-border) keeps it quiet; the right margin
-   pulls it flush to the card edge so the divider visually anchors the
-   action cluster. */
-.draft-action-divider {
-  height: 1px;
-  background: var(--color-border);
-  margin: 10px 0;
 }
 
 /* ── Inline branch selector ────────────────────────────────────────────
@@ -591,6 +623,37 @@
   border-color: var(--color-warning);
 }
 .branch-selector-warn-retry:disabled { opacity: 0.5; cursor: progress; }
+
+/* Settings row container — wraps the MODEL / ENV / readonly-state
+   field cards in a single bordered surface so they read as one
+   "configuration zone" distinct from the source row below. Uses the
+   same border/radius tokens as .draft-action-actions so the panel's
+   three zones (settings / source / actions) are visually parallel
+   even though settings + source are conceptually one concern. */
+.draft-action-settings-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+.draft-action-settings-row .draft-field-card {
+  flex: 1 1 220px;
+  background: var(--color-bg);
+}
+.draft-field-card--readonly .draft-field-card-body {
+  /* Readonly card never gets a control, just a label; lock the body
+     to single-line so the card stays compact and the caption stays
+     vertically aligned with the live cards to its left. */
+  white-space: nowrap;
+}
+.draft-field-card--readonly .dev-mode-badge {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
 /* Compact card variant — same rail+chip as the modal, but the
    padding is tightened so the picker doesn't dominate the action
    panel. The card still wears the cyan rail so the visual link to
@@ -688,41 +751,161 @@
 .branch-selector .preflight-field-input:disabled {
   cursor: not-allowed;
 }
-/* Action cluster — same .design-toolbar-actions row, but here we lift it
-   onto a slightly recessed background (.draft-action-actions-surface) so
-   the four CTAs read as the actionable part of the card, distinct from
-   the quiet configuration above. The .draft-action-actions wrapper
-   simply arranges the inner row. */
-.draft-action-actions {
+
+/* ── Field card pattern ───────────────────────────────────────────────
+   The new labeled-control vocabulary used by the design-stage panel.
+   A caption (uppercase tracked micro-label) sits on top of the actual
+   control, with a single hairline border wrapping both. Reuses the same
+   border / radius / bg tokens as .preflight-field-card so the panel and
+   the modal read as one family. Three slots currently consume it: 模型,
+   执行环境, BASE 设计. */
+.draft-field-card {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px 7px 11px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg);
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.draft-field-card-caption {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  line-height: 1;
+  /* Caption shrinks to nothing if the slot is too narrow to hold both
+     caption + control — flex children with min-width:0 below. */
+  white-space: nowrap;
+}
+.draft-field-card-body {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
+  min-width: 0;
 }
-.draft-action-actions-surface {
-  flex: 1;
+/* Source row — dedicated row for the BASE branch picker. The picker
+   gets its own labeled card (BASE 设计) so it spans the full panel width
+   instead of fighting for space against the action CTAs. This is the
+   fix for the "BASE 设计 branch picker is too narrow" complaint: the
+   picker no longer shares a row with the CTAs at all. */
+.draft-action-source-row {
   display: flex;
-  justify-content: flex-end;
-  flex-wrap: nowrap;
-  gap: 6px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  overflow-x: auto;
-  scrollbar-width: thin;
+  align-items: stretch;
+  gap: 8px;
+  margin-top: 0;
+  margin-bottom: 12px;
 }
-/* The action surface holds up to five CTAs (生成技术方案 / 定时生成方案 /
-   定时生成方案并开发 / 立即生成方案并开发 / 📥 导入方案) whose labels are
-   long enough that the surface previously squeezed the text and broke the
-   buttons across two lines. The flex children are pinned to nowrap so each
-   button stays on one line, and the surface itself scrolls horizontally on
-   truly narrow viewports instead of letting the buttons rearrange. Mirrors
-   the .design-toolbar--no-wrap pattern used by the developer toolbar. */
-.draft-action-actions-surface > .btn {
+.draft-action-source-row .draft-field-card {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.draft-action-source-row .branch-selector {
+  flex: 1 1 auto;
+  /* Drop the base .branch-selector cap (320/360px) — this row is its own
+     line so there's nothing to compete with. The --empty modifier still
+     exists for the failure-state warn rail (parent plan already covers
+     that). Letting the picker reclaim full width is the whole point of
+     moving it here. */
+  max-width: 100%;
+  flex-basis: 0;
+}
+.draft-action-source-row .draft-field-card-body {
+  flex: 1 1 auto;
+}
+
+/* ── Actions row ─────────────────────────────────────────────────────
+   The decision "when to run" is split into two clusters with their own
+   captions: 立即执行 (run now, three CTAs) and 稍后执行 (run later, two
+   schedule CTAs). Each cluster is its own bordered card with an
+   uppercase caption so the user reads it as "pick a lane" instead of
+   "pick one of five buttons in a long row". A vertical hairline divider
+   sits between the two clusters; on truly narrow viewports (768px) the
+   row wraps and the divider drops below. */
+.draft-action-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  flex-wrap: wrap;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  overflow: hidden;
+}
+.draft-action-actions-cluster {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 280px;
+  padding: 10px 12px 11px;
+  min-width: 0;
+  background: var(--color-surface);
+}
+.draft-action-actions-cluster + .draft-action-actions-cluster {
+  border-top: 1px solid var(--color-border);
+}
+/* Vertical divider between the two clusters at ≥768px — drops below
+   (becomes border-top from the + selector above) when the row wraps. */
+@media (min-width: 768px) {
+  .draft-action-actions-cluster + .draft-action-actions-cluster {
+    border-top: 0;
+    border-left: 1px solid var(--color-border);
+  }
+}
+.draft-action-actions-cluster-caption {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1;
+}
+.draft-action-actions-cluster-caption-glyph {
+  font-size: 11px;
+  color: rgba(79, 70, 229, 0.7);
+  letter-spacing: 0;
+}
+.draft-action-actions-cluster-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+.draft-action-actions-cluster-body > .btn {
   flex: 0 0 auto;
   white-space: nowrap;
 }
+
+/* Pending strip — surfaces scheduled-time hints in their OWN row,
+   pulled out of the action clusters. Previously lived inside the
+   .draft-action-actions-surface next to the buttons they replaced,
+   which forced the user to read two interleaved concerns ("here's a
+   button / here's a hint that says a button is already scheduled").
+   Now the hint sits in its own quiet strip so the action clusters
+   only ever show actionable buttons. */
+.draft-action-pending-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 10px;
+  padding: 6px 10px;
+  border: 1px dashed var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.draft-action-pending-strip:empty {
+  display: none;
+}
+
 /* Bottom row: the rare analyst-fallback affordance. Rendered as a
    real .btn.btn-sm.btn-ghost so it lives in the same component family
    as the four design-start CTAs; the .btn-ghost variant (transparent
