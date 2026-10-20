@@ -204,6 +204,9 @@
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
+  /* 本表的静止底色是页面底色而非 --color-surface（表格裸放在 .pr-list 里），
+     告诉共享的分组 token 用哪个色做 color-mix 的基底。 */
+  --req-group-base: var(--color-bg, #F8FAFC);
 }
 
 .pr-table th {
@@ -963,6 +966,7 @@
   outline-offset: -2px;
   background: var(--color-active);
 }
+.req-tree-row.drop-target > td { background: var(--color-active); }
 
 /* ── Batch .md import panel ────────────────────────────────────────
    Lives next to the standard requirement list inside the requirements
