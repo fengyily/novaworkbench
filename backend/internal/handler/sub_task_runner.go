@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -958,6 +959,13 @@ func (r *SubTaskRunner) Run(
 		job.Append(store.LogLine{Type: "message", Content: "🪶 简洁模式：本子任务直接执行，不生成三段式报告。"})
 	}
 
+	// 附件清单：本次执行要交给 Claude 的附件根目录。远端执行先把附件同步到
+	// Agent Server 再用远端目录；同步失败静默回退本地路径（resolveAttachDirFor 内部处理）。
+	goesRemote := effectiveServerID != "" && r.agentSvrSvc != nil && r.remoteCoding != nil
+	remoteID := ""
+	if goesRemote { remoteID = effectiveServerID }
+	attachDir := resolveAttachDirFor(context.Background(), r.attachSvc, r.agentSvrSvc, req.ID, remoteID)
+
 	var prompt string
 	switch {
 	case !fork:
@@ -980,6 +988,13 @@ func (r *SubTaskRunner) Run(
 	// block, so the assistant still sees the no-AI-trailer / no-typed-creds
 	// rule). Push-pr children get forPR=true so they also see PRLangRules.
 	prompt += "\n" + gitProjectBlock(r.projectSvc, r.platformSvc, req, st.Source == model.SubTaskSourcePushPR) + "\n"
+	// 需求附件清单。attachSvc 未接线或无附件时 attachManifestFor 返回 ""，
+	// 因此需判空后再追加——未满足时 prompt 与改动前逐字节一致。必须拼到 user prompt
+	// 而非 systemPrompt：bare 模式会把 systemPrompt 强制置空。
+	if m := attachManifestFor(r.attachSvc, req.ID, attachDir); m != "" {
+		prompt += "\n" + m
+		job.Append(store.LogLine{Type: "message", Content: "📎 已注入需求附件清单，AI 可直接 Read 查看。"})
+	}
 	// Bare ("新会话（裸 claude）") path: skip --resume, skip parent context
 	// injection, skip the executor role system prompt — invoke claude with
 	// only the user's free-text body. Takes priority over freshSession so
@@ -1081,7 +1096,7 @@ func (r *SubTaskRunner) Run(
 	// success, so the requirement's branch stays the single source of truth.
 	// This covers every child dispatch that goes through Run: manual sub-tasks,
 	// orchestrated children, and the merge push+PR sub-task.
-	if effectiveServerID != "" && r.agentSvrSvc != nil && r.remoteCoding != nil {
+	if goesRemote {
 		// Fresh-session path on the remote: pass freshSession=true so
 		// wizard_remote skips SFTP upload entirely and drops --resume
 		// / --fork-session from the worker argv. The session id we
