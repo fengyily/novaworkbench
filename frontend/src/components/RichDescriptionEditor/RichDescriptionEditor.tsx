@@ -20,7 +20,7 @@
 // keeps working), but the toolbar's image button and the paste/drop hooks
 // are inert.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import AtMentionTextarea from '../AtMentionTextarea';
 import MarkdownRender from '../MarkdownRender';
@@ -28,6 +28,10 @@ import { useAttachmentUpload, type UploadTask } from './useAttachmentUpload';
 import { rewriteNovaLinks } from './rewriteNovaLinks';
 import { extractImageFiles, extractImageFilesFromList, spliceAt } from './imageIngest';
 import './RichDescriptionEditor.css';
+
+export interface RichDescriptionEditorHandle {
+  insertAtCursor: (text: string) => void;
+}
 
 export interface RichDescriptionEditorProps {
   value: string;
@@ -47,7 +51,9 @@ export interface RichDescriptionEditorProps {
 
 type Mode = 'edit' | 'preview';
 
-export default function RichDescriptionEditor({
+// extractImageFiles / extractImageFilesFromList / spliceAt live in
+// ./imageIngest — the sub-task composer pastes through the same helpers.
+const RichDescriptionEditor = forwardRef<RichDescriptionEditorHandle, RichDescriptionEditorProps>(function RichDescriptionEditor({
   value,
   onChange,
   requirementId,
@@ -56,7 +62,7 @@ export default function RichDescriptionEditor({
   disabled,
   onUploadsChange,
   onKeyDown,
-}: RichDescriptionEditorProps) {
+}: RichDescriptionEditorProps, ref) {
   const { t } = useTranslation();
   const [mode, setMode] = useState<Mode>('edit');
   const [isDragOver, setIsDragOver] = useState(false);
@@ -97,6 +103,8 @@ export default function RichDescriptionEditor({
     },
     [value, onChange],
   );
+
+  useImperativeHandle(ref, () => ({ insertAtCursor }), [insertAtCursor]);
 
   /** Run `file` through the upload pipeline. The onInsert callback fires
    *  inside requestAnimationFrame (in the hook) — by that point the editor
@@ -329,7 +337,9 @@ export default function RichDescriptionEditor({
       )}
     </div>
   );
-}
+});
+
+export default RichDescriptionEditor;
 
 // Tiny helper: a useEffect that fires the callback whenever `value` changes.
 // Lives in this file to keep RichDescriptionEditor self-contained; lifted

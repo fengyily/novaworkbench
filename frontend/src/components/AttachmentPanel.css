@@ -270,13 +270,54 @@
   margin-bottom: 4px;
 }
 
-.attachment-panel__manifest-body {
-  font-family: ui-monospace, SFMono-Regular, monospace;
-  font-size: 11px;
+/* compact dropzone — single-row button used inside creation forms */
+
+.attachment-panel__dropzone--compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: 1px dashed var(--border-soft, #cbd5e1);
+  border-radius: 6px;
+  background: var(--bg-subtle, #f8fafc);
+  cursor: pointer;
+  font-size: 13px;
   color: var(--text-strong, #334155);
-  margin: 0;
-  white-space: pre;
-  overflow-x: auto;
-  max-height: 200px;
-  overflow-y: auto;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+  user-select: none;
 }
+
+.attachment-panel__dropzone--compact:hover,
+.attachment-panel__dropzone--compact.is-dragging {
+  border-color: var(--color-primary, #4f46e5);
+  background: rgba(79, 70, 229, 0.04);
+  color: var(--color-primary, #4f46e5);
+}
+
+.attachment-panel__compact-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.attachment-panel__compact-label {
+  font-size: 13px;
+}
+
+/* insert-ref button — Indigo outline small button */
+
+.attachment-panel__insert-ref {
+  background: transparent;
+  border: 1px solid var(--color-primary, #4f46e5);
+  color: var(--color-primary, #4f46e5);
+  border-radius: 3px;
+  padding: 1px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.attachment-panel__insert-ref:hover {
+  background: rgba(79, 70, 229, 0.08);
+}
+

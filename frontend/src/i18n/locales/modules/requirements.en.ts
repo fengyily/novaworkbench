@@ -86,6 +86,12 @@ export const requirements = {
       compressedBadge: 'Compressed',
     },
   },
+  edit: {
+    discardConfirm: 'You have unsaved changes. Discard them? Images already uploaded are kept.',
+    errNeedTitle: 'Title is required',
+    uploadKept: 'Uploaded images are saved to this requirement right away',
+    shortcut: '⌘/Ctrl + Enter to save',
+  },
   exportDesign: {
     pdfSuffix: 'design',
     designFallback: 'design',
@@ -727,6 +733,9 @@ export const requirements = {
     sizeLimit: 'Max 2 GB per file',
     archiveEntries: '{{count}} entries, {{size}} uncompressed',
     archiveBadge: '📦 Archive',
+    insertRef: 'Cite',
+    insertRefHint: 'Insert reference at cursor',
+    refInsert: '[Attachment: {{name}}]',
   },
   tree: {
     expand: 'Expand sub-requirements',

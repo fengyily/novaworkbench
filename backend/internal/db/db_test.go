@@ -1,8 +1,10 @@
 package db
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -136,5 +138,33 @@ func TestNormalizeArgsSanitizesOnPostgres(t *testing.T) {
 	args = sqliteDB.normalizeArgs([]any{broken})
 	if got, _ := args[0].(string); got != broken {
 		t.Errorf("sqlite normalize mutated input: %q -> %q", broken, got)
+	}
+}
+
+func TestNormalizeArgsTimeUTC(t *testing.T) {
+	cst := time.FixedZone("CST", 8*3600)
+	ts := time.Date(2026, 10, 20, 22, 0, 40, 0, cst)
+	want := ts.UTC()
+	var nilPtr *time.Time
+	for _, d := range []*DB{{dialect: Postgres}, {dialect: SQLite}, {dialect: MySQL}} {
+		args := d.normalizeArgs([]any{ts, &ts, sql.NullTime{Time: ts, Valid: true}, nilPtr, time.Time{}, true})
+		if got := args[0].(time.Time); got.Location() != time.UTC || !got.Equal(want) {
+			t.Errorf("time.Time not UTC: %v", got)
+		}
+		if got := args[1].(time.Time); got.Location() != time.UTC || !got.Equal(want) {
+			t.Errorf("*time.Time not UTC: %v", got)
+		}
+		if got := args[2].(sql.NullTime); got.Time.Location() != time.UTC || !got.Time.Equal(want) {
+			t.Errorf("NullTime not UTC: %v", got.Time)
+		}
+		if p, ok := args[3].(*time.Time); !ok || p != nil {
+			t.Errorf("nil ptr changed: %v", args[3])
+		}
+		if !args[4].(time.Time).IsZero() {
+			t.Errorf("zero time changed")
+		}
+		if d.dialect == Postgres && args[5] != int64(1) {
+			t.Errorf("bool not converted: %v", args[5])
+		}
 	}
 }

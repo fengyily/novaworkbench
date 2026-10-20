@@ -86,6 +86,12 @@ export const requirements = {
       compressedBadge: '已压缩',
     },
   },
+  edit: {
+    discardConfirm: '编辑中有未保存的改动，确定放弃吗？已上传的图片会保留。',
+    errNeedTitle: '标题不能为空',
+    uploadKept: '已上传的图片会直接保存到该需求',
+    shortcut: '⌘/Ctrl + Enter 保存',
+  },
   exportDesign: {
     pdfSuffix: '技术方案',
     designFallback: '技术方案',
@@ -796,6 +802,9 @@ export const requirements = {
     sizeLimit: '单文件最大 2 GB',
     archiveEntries: '共 {{count}} 个条目,{{size}} 解压后',
     archiveBadge: '📦 压缩包',
+    insertRef: '引用',
+    insertRefHint: '插入引用到光标位置',
+    refInsert: '[附件：{{name}}]',
   },
   tree: {
     expand: '展开子需求',
