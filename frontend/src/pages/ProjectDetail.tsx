@@ -14,7 +14,7 @@ import { tLabel } from '../i18n/label';
 import { fmtDateTime, fmtRelative, fmtRunAtRelative } from '../utils/intl';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import { StatusChips } from '../components/StatusChips';
-import { RequirementTreeToggle, RequirementTreeSpacer } from '../components/RequirementTreeToggle';
+import { RequirementTreeToggle, RequirementTreeSpacer, RequirementTreeChildMark } from '../components/RequirementTreeToggle';
 import PdfUploadDialog from '../components/PdfUploadDialog';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
 import ProjectIssueMonitor from './ProjectIssueMonitor';
@@ -823,7 +823,7 @@ export default function ProjectDetail() {
     return (
     <tr
       key={req.id}
-      className={`req-tree-row${depth > 0 ? ' req-tree-row-child' : ''}${reqDragId === req.id ? ' dragging' : ''}${reqDropId === req.id ? ' drop-target' : ''}`}
+      className={`req-tree-row${depth > 0 ? ' req-tree-row-child' : ''}${showTree && open ? ' req-tree-row-open' : ''}${depth > 0 && last ? ' req-tree-row-last' : ''}${reqDragId === req.id ? ' dragging' : ''}${reqDropId === req.id ? ' drop-target' : ''}`}
       style={{ cursor: 'pointer' }}
       draggable
       onDragStart={e => onReqDragStart(e, req)}
@@ -833,9 +833,7 @@ export default function ProjectDetail() {
       onDrop={e => onReqDrop(e, req)}
       onClick={() => navigate(`/requirements/${req.id}`)}
     >
-      <td className={`req-tree-col${depth > 0 ? ` req-tree-guide${last ? ' req-tree-last' : ''}` : ''}${showTree && open ? ' req-tree-open' : ''}`}>
-        {showTree && renderReqTreeToggle(req, depth)}
-      </td>
+      <td className="req-tree-col">{depth > 0 ? <RequirementTreeChildMark /> : (showTree && renderReqTreeToggle(req, depth))}</td>
       <td data-label={t('projects.detail.colId')} style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{req.id}</td>
       <td data-label={t('projects.detail.colType')}>
         {/* Priority dot folded INTO the Type cell, ahead of the kind-badge.
