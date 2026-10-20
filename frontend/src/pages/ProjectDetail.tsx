@@ -1054,10 +1054,17 @@ export default function ProjectDetail() {
   //   • Search box: case-insensitive substring match against the title OR
   //     description. Whitespace-trimmed so a stray space at the end doesn't
   //     accidentally exclude every row.
+  // Parent-anchored two-phase filter: the status + search predicates above
+  // run only on top-level rows (no parent_id). Any child whose parent_id is
+  // in the phase-1 keep set is pulled in unconditionally, regardless of its
+  // own status — this is what keeps a sub-requirement visible beneath its
+  // master row no matter what the master/child status split looks like.
+  // The tree assembler (reqTreeRows) is left untouched: its existing
+  // "promote to top-level when parent is not in the set" rule stays, it just
+  // no longer gets falsely triggered by status mismatches.
   const filteredReqs = useMemo(() => {
     const term = reqSearch.trim().toLowerCase();
-    return reqs.filter(r => {
-      // Status predicate
+    const passes = (r: Requirement) => {
       switch (reqStatusFilter) {
         case 'all':       if (r.status === 'archived') return false; break;
         case 'active':    if (!['draft', 'analyzing', 'designing', 'designed', 'developing'].includes(r.status)) return false; break;
@@ -1069,7 +1076,13 @@ export default function ProjectDetail() {
       const title = (r.title || '').toLowerCase();
       const desc = (r.description || '').toLowerCase();
       return title.includes(term) || desc.includes(term);
-    });
+    };
+    // Phase 1: top-level rows pass through the predicates.
+    const masters = reqs.filter(r => !r.parent_id && passes(r));
+    // Phase 2: children whose parent_id is in the phase-1 keep set follow
+    // unconditionally, regardless of their own status or search match.
+    const keep = new Set(masters.map(r => r.id));
+    return [...masters, ...reqs.filter(r => r.parent_id && keep.has(r.parent_id))];
   }, [reqs, reqStatusFilter, reqSearch]);
 
   // Comparator for one sortable column. Returns negative if `a` should
