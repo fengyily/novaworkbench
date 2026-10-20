@@ -129,6 +129,17 @@ tr.req-tree-row-child > td.req-tree-col { box-shadow: inset 3px 0 0 var(--req-gr
    inside the group block, not against the left rail. */
 .req-tree-child-title { padding-left: 28px; }
 
+/* Static ↳ mark for the leading column of a child row. td.req-tree-col
+   is already 32px with padding:0 + text-align:center, so inline-flex is
+   enough to center the SVG on the column's axis; the colour follows the
+   shared grouping rail token. */
+.req-tree-child-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--req-group-rail, var(--color-text-muted, #94A3B8));
+}
+
 /* "Attach a sub-requirement" — the affordance only this master has none.
    Drawn as a `+` (not a chevron): it answers a different question than
    expand/collapse, and at #CBD5E1 on an idle row a chevron was so faint
