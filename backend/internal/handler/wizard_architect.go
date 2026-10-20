@@ -117,6 +117,18 @@ type designRunParams struct {
 	// thread it through to runRemoteArchitectDesign without re-deriving it
 	// from reqRow.
 	SyncMode string
+	// Parent is the sub-requirement's master requirement, or nil when this
+	// run has no usable parent. Kept (rather than just the rendered text)
+	// because the fallback appendix rendered in finalizeArchitectRun needs
+	// the row again.
+	Parent *model.Requirement
+	// ParentBlock is the pre-rendered prompt block carrying the parent's
+	// description / plan / attachment manifest plus the 「主需求关联上下文」
+	// output contract. Empty = no parent, or the parent lookup degraded —
+	// both leave the prompt byte-identical to a top-level requirement's, so
+	// this doubles as the "does this run need parent handling at all" flag
+	// for finalizeArchitectRun.
+	ParentBlock string
 }
 
 func (h *WizardHandler) ArchitectDesign(w http.ResponseWriter, r *http.Request) {
@@ -507,6 +519,12 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 	claudeConfigID = h.resolveConfigIDForRun(claudeConfigIDOverride, model, claudeConfigID)
 	job.SetModel(model)
 
+	// Sub-requirement design needs the master's already-settled decisions in
+	// view. Built here (synchronously, next to the attachment manifest above
+	// so both share the same resolveAttachDir semantics) but appended to the
+	// prompt inside prepareDesignWorkspace.
+	parent, parentBlock := h.buildParentBlock(context.Background(), req, agentServerID)
+
 	return &designRunParams{
 		Req:           req,
 		ProjectPath:   projectPath,
@@ -515,6 +533,8 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 		Fork:          fork,
 		SkipAnalysis:  skipAnalysis,
 		NewDesignSID:  newDesignSID,
+		Parent:        parent,
+		ParentBlock:   parentBlock,
 		// WorkDir + Prompt are populated by prepareDesignWorkspace inside
 		// execArchitectDesign's goroutine — they live off the HTTP request
 		// thread so the SSE panel can surface the hard-sync phase events
@@ -528,6 +548,57 @@ func (h *WizardHandler) prepareArchitectDesign(ctx context.Context, requirementI
 		AgentServerID:  agentServerID,
 		SyncMode:       syncMode,
 	}, job, nil
+}
+
+// buildParentBlock renders the master-requirement context for a
+// sub-requirement's design run. Returns (nil, "") when there is nothing to
+// inject, which is the overwhelmingly common case (top-level requirement) and
+// leaves the prompt byte-identical to before this feature existed.
+//
+// Every failure path degrades to "no parent" rather than erroring out. The
+// parent is *reference material* — its absence makes the design less informed
+// but never wrong, so blocking the stage would trade a soft problem for a hard
+// one. This mirrors roleConfig's "a broken role config must not block the
+// pipeline" rule. Specifically: a deleted parent, a cross-project link, or a
+// grandparent (ParentID is one level deep by schema but we re-check defensively,
+// since SetParent's validation predates some rows) all log and return empty.
+//
+// The attachment directory is resolved through the same resolveAttachDir the
+// sub-requirement's own manifest uses, so an Agent-server run gets the parent's
+// files synced to that host under its own per-requirement subdirectory (owner
+// id is the parent's, so no collision with the sub-requirement's mirror).
+func (h *WizardHandler) buildParentBlock(ctx context.Context, req *model.Requirement, agentServerID string) (*model.Requirement, string) {
+	if req == nil || strings.TrimSpace(req.ParentID) == "" {
+		return nil, ""
+	}
+	parent, err := h.reqSvc.Get(req.ParentID)
+	if err != nil {
+		log.Printf("[architect-design] parent lookup failed for %s (parent=%s): %v — continuing without parent context", req.ID, req.ParentID, err)
+		return nil, ""
+	}
+	if parent.ProjectID != req.ProjectID {
+		log.Printf("[architect-design] parent %s is in project %s but child %s is in %s — skipping parent context", parent.ID, parent.ProjectID, req.ID, req.ProjectID)
+		return nil, ""
+	}
+	if strings.TrimSpace(parent.ParentID) != "" {
+		log.Printf("[architect-design] parent %s is itself a child (parent_id=%s) — nesting is one level deep, skipping parent context", parent.ID, parent.ParentID)
+		return nil, ""
+	}
+	dir := h.resolveAttachDir(ctx, parent.ID, agentServerID)
+	return parent, promptpkg.BuildParentContextBlock(parent, h.attachManifestFor(parent.ID, dir))
+}
+
+// parentTitle is the display name for the master requirement in job-log lines.
+// Falls back to the id so the warning still names something actionable when
+// the title is blank (possible on rows imported before Title became required).
+func parentTitle(parent *model.Requirement) string {
+	if parent == nil {
+		return "(未知主需求)"
+	}
+	if t := strings.TrimSpace(parent.Title); t != "" {
+		return t
+	}
+	return parent.ID
 }
 
 // execArchitectDesign runs the goroutine body of the architect-design stage.
@@ -669,6 +740,17 @@ func (h *WizardHandler) prepareDesignWorkspace(p *designRunParams, job *store.Jo
 			prompt = "## 上下文压缩摘要（之前的方案设计对话已被压缩，请基于此继续工作，不要当作新指令）\n" +
 				p.Req.DesignContextSummary + "\n\n" + prompt
 		}
+	}
+	// Sub-requirement: append the master-requirement context (its settled
+	// description / plan / attachment manifest) plus the 「主需求关联上下文」
+	// output contract. Placed here, after all three prompt branches
+	// (analyst-resume / fresh skip-analysis / DesignContextSummary-prefix),
+	// so the block is guaranteed to be present no matter which path built
+	// `prompt` — duplicating it into three branches would guarantee drift.
+	// Local and remote runs share p.Prompt, so this also covers Agent-server
+	// execution without touching wizard_remote.go.
+	if p.ParentBlock != "" {
+		prompt += "\n\n" + p.ParentBlock
 	}
 	// Tail: append the kind-specific block (Issue / Idea framing). For an Idea
 	// the user would normally have hidden this CTA in the frontend; we still
@@ -972,6 +1054,28 @@ func (h *WizardHandler) finalizeArchitectRun(
 		_ = h.reqSvc.UpdateDesignJob(id, "")
 		job.Finish(1, store.JobError)
 		return
+	}
+
+	// Sub-requirement backstop for the 「主需求关联上下文」 contract. The
+	// prompt asks the architect to write that section, but a prompt is a soft
+	// guarantee and downstream (coding / sub-task split) reads ONLY this
+	// requirement's design_docs — so a plan that skipped the section would
+	// silently contradict or duplicate the master's decisions with nothing
+	// downstream able to notice. Append the machine-written appendix so the
+	// parent context is at least present and traceable.
+	//
+	// Deliberately not a re-run: a second claude invocation to "fix" the
+	// omission would double the token cost of a run that mostly succeeded, and
+	// the appendix already unblocks development. Users who want a properly
+	// distilled section can hit refine-doc.
+	//
+	// Only runs that actually had a parent block reach this path; a top-level
+	// requirement's plan is untouched (ParentBlock == "").
+	if p.ParentBlock != "" && !promptpkg.HasParentContextSection(planMarkdown) {
+		job.Append(store.LogLine{Type: "phase", Content: "⚠ 方案未包含「主需求关联上下文」章节，已自动追加附录（主需求：" + parentTitle(p.Parent) + "）"})
+		if fallback := promptpkg.BuildParentContextFallback(p.Parent); fallback != "" {
+			planMarkdown = planMarkdown + "\n\n" + fallback
+		}
 	}
 
 	// Persist the design (sets status=designing) and clear the active job
