@@ -217,15 +217,18 @@ export default function RequirementsList() {
         top.push(r);
       }
     }
-    const out: { r: Requirement; depth: number }[] = [];
+    const out: { r: Requirement; depth: number; last?: boolean; open?: boolean }[] = [];
     const first = new Map<string, string>();
     for (const r of top) {
-      out.push({ r, depth: 0 });
       const kids = byParent.get(r.id);
+      const isOpen = !!kids && (expanded.has(r.id) || filtersActive);
+      out.push({ r, depth: 0, open: isOpen });
       // Active search / filters auto-expand so matching children are visible.
-      if (kids && (expanded.has(r.id) || filtersActive)) {
-        first.set(r.id, kids[0].id);
-        for (const c of kids) out.push({ r: c, depth: 1 });
+      if (isOpen) {
+        first.set(r.id, kids![0].id);
+        for (let i = 0; i < kids!.length; i++) {
+          out.push({ r: kids![i], depth: 1, last: i === kids!.length - 1 });
+        }
       }
     }
     return { rows: out, childrenByParent: byParent, firstChildOf: first };
@@ -431,7 +434,7 @@ export default function RequirementsList() {
     void reparent(draggedReq, target.id);
   };
 
-  const renderDesktopRow = (r: Requirement, depth: number) => {
+  const renderDesktopRow = (r: Requirement, depth: number, last: boolean, open: boolean) => {
     const k: Kind = kindOf(r);
     return (
         <tr
@@ -446,7 +449,7 @@ export default function RequirementsList() {
           onDragLeave={() => dropId === r.id && setDropId(null)}
           onDrop={e => onRowDrop(e, r)}
         >
-          <td className={`req-tree-col${depth > 0 ? ' req-tree-guide' : ''}`}>
+          <td className={`req-tree-col${depth > 0 ? ` req-tree-guide${last ? ' req-tree-last' : ''}` : ''}${depth === 0 && open ? ' req-tree-open' : ''}`}>
             {treeToggle(r, depth)}
           </td>
           <td data-label={t('requirements.list.colType')}>
@@ -456,19 +459,27 @@ export default function RequirementsList() {
                 2xl viewports, and the dot+badge pair fits comfortably in
                 the widened kind-badge cell. Color is the only signal
                 that mattered; the old text label (High/Medium/Low)
-                duplicated information the dot already carries. */}
-            {r.priority && (
+                duplicated information the dot already carries.
+
+                The 8px slot is reserved even when there's no priority, so
+                the badge's left edge is identical on every row (see
+                .req-type-cell + .priority-dot-slot in index.css). */}
+            <span className="req-type-cell">
+              {r.priority ? (
+                <span
+                  className={`priority-dot priority-${r.priority}`}
+                  title={tLabel(t, priorityLabelKeys, r.priority)}
+                  aria-label={tLabel(t, priorityLabelKeys, r.priority)}
+                />
+              ) : (
+                <span className="priority-dot-slot" aria-hidden />
+              )}
               <span
-                className={`priority-dot priority-${r.priority}`}
-                title={tLabel(t, priorityLabelKeys, r.priority)}
-                aria-label={tLabel(t, priorityLabelKeys, r.priority)}
-              />
-            )}
-            <span
-              className={`kind-badge kind-${k}`}
-              title={tLabel(t, kindLabelKeys, k)}
-            >
-              {tLabel(t, kindShortLabelKeys, k)}
+                className={`kind-badge kind-${k}`}
+                title={tLabel(t, kindLabelKeys, k)}
+              >
+                {tLabel(t, kindShortLabelKeys, k)}
+              </span>
             </span>
           </td>
           <td className={`req-row-title${depth > 0 ? ' is-child req-tree-child-title' : ''}`} data-label={t('requirements.list.colTitle')}>
@@ -771,7 +782,10 @@ export default function RequirementsList() {
             <thead>
               <tr>
                 <th className="req-tree-col" aria-label={t('requirements.tree.expand')} />
-                <th style={{ width: 96 }}>{t('requirements.list.colType')}</th>
+                {/* 96→112 once the dot+badge pair lives inside a nowrap
+                    flex row (.req-type-cell); the extra slack keeps the
+                    wiki pill from clipping on narrow viewports. */}
+                <th style={{ width: 112 }}>{t('requirements.list.colType')}</th>
                 <th>{t('requirements.list.colTitle')}</th>
                 <th>{t('requirements.list.colStatus')}</th>
                 <th>{t('requirements.list.colModel')}</th>
@@ -783,7 +797,7 @@ export default function RequirementsList() {
               </tr>
             </thead>
             <tbody>
-              {rows.map(({ r, depth }) => renderDesktopRow(r, depth))}
+              {rows.map(({ r, depth, last, open }) => renderDesktopRow(r, depth, !!last, !!open))}
             </tbody>
           </table>
         )}

@@ -641,6 +641,32 @@ body.no-scroll {
 .kind-badge.kind-idea        { background: #cffafe; color: #0e7490; }
 .kind-badge.kind-wiki        { background: #eef2ff; color: #4338ca; border-color: #c7d2fe; }
 
+/* ── Type cell (priority dot + kind badge) ──────────────────────────
+   Single source for BOTH requirement tables (project-detail tab and
+   the global list). The dot and the badge used to be bare inline
+   siblings, so whenever the column ran out of width the pair wrapped
+   onto two lines and every row's badge drifted out of alignment.
+   Wrapping them in a nowrap flex row — and giving the dot a reserved
+   8px slot even when the row has no priority — makes the badge's left
+   edge identical on every row. */
+.req-type-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+/* Reserved dot slot: keeps the badge column-aligned on rows with no
+   priority. Transparent by default; the color variants on .priority-dot
+   apply to the colored case in the same wrapper. */
+.priority-dot-slot {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: transparent;
+}
+
 /* ════════════════════════════════════════════════════════════════════
    MOBILE PATTERNS — bottom tab bar, FAB, bottom sheet, sticky composer.
    ────────────────────────────────────────────────────────────────────

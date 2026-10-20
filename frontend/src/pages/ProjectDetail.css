@@ -282,6 +282,16 @@
   white-space: nowrap;
 }
 
+/* The sub-requirement marker/count are facts about the row, not content
+   that may be abbreviated — a 3-character truncation tells the reader
+   nothing. They keep their intrinsic width; the title label (flex:1 1
+   auto above) absorbs all the shrink. Scoped to .pr-title-text so the
+   user's own long tag chips in .pr-title-tags keep their 140px ellipsis. */
+.pr-title-text > .req-tag-chip {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .pr-title-tags {
   margin-top: 4px;
   display: flex;
@@ -1044,7 +1054,6 @@
    The dedicated column was eating ~90px of horizontal space and rarely
    carried any signal — an em-dash, or a single 6px circle. Putting the
    dot beside the badge uses the cell width we were already spending
-   on the badge anyway. The base .priority-dot rules live in
-   RequirementsList.css (cross-file, since both tables need the same
-   palette); only the spacing rule lives here. */
-.priority-dot + .kind-badge { margin-left: 6px; }
+   on the badge anyway. The dot and badge now live inside a
+   .req-type-cell wrapper (index.css) which already provides the 6px
+   gap, so no spacing rule is needed here. */

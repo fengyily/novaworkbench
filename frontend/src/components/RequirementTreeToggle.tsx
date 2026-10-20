@@ -1,6 +1,17 @@
-// RequirementTreeToggle — the shared [+] / [−] expander for master
+// RequirementTreeToggle — the shared expander / attach button for master
 // requirements. Real <button> so it is keyboard-operable; the click never
 // bubbles so it doesn't trigger the surrounding row/card navigation.
+//
+// The two modes answer different user questions and so use different
+// glyphs:
+//   - 'expand' — this master already has sub-requirements; the button
+//                folds them away / unfolds them. Drawn as a chevron that
+//                rotates 90° on expansion (CSS does the rotation, JS
+//                stays untouched).
+//   - 'add'    — it has none yet; the button opens the "attach a
+//                sub-requirement" picker. Drawn as a `+` glyph to make
+//                it discoverable (an idle chevron at #CBD5E1 read as a
+//                rendering artifact before this split).
 
 import type { MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -17,13 +28,6 @@ interface Props {
    *            folds them away / unfolds them.
    * 'add'    — it has none yet; the button opens the "attach a
    *            sub-requirement" picker instead of toggling.
-   *
-   * Both render the same `+` because they answer the same user question
-   * ("what about sub-requirements here?") — but they are genuinely
-   * different actions, hence the mode. Before this split, `+` appeared
-   * ONLY on rows that already had children, which made the whole
-   * hierarchy undiscoverable: the slot was a blank spacer on every other
-   * row, and drag-and-drop was the only way to ever create a first child.
    */
   mode?: 'expand' | 'add';
   /** required when mode === 'add' */
@@ -54,12 +58,17 @@ export function RequirementTreeToggle({ expanded, onToggle, controlsId, mode = '
       onClick={handle}
       onKeyDown={e => e.stopPropagation()}
     >
-      {/* Chevron glyph: ▸ collapsed, ▾ expanded. Same glyph for `add`
-          mode — both answer "what about sub-requirements here?". The
-          visual delta between add/expand only shows on row hover (the
-          add variant picks up a softer color), so we don't need a
-          different character. */}
-      <span aria-hidden className="req-tree-toggle-glyph">{expanded ? '▾' : '▸'}</span>
+      <span aria-hidden className="req-tree-toggle-glyph">
+        {isAdd ? (
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" focusable="false">
+            <path d="M6 2.25v7.5M2.25 6h7.5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+          </svg>
+        ) : (
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" focusable="false">
+            <path d="M4.25 2.5 8.5 6l-4.25 3.5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        )}
+      </span>
     </button>
   );
 }

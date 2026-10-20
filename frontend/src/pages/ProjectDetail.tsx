@@ -7,7 +7,7 @@ import {
   usageApi, usageTotalInput, fmtCost, wizardApi,
   type Project, type RunStatus, type PlatformToken,
   type Requirement, type KnowledgeItem, type ReqUsage, type ProjectUsage,
-  kindLabelKeys, kindOf, API_BASE, authedFetch,
+  kindLabelKeys, priorityLabelKeys, kindOf, API_BASE, authedFetch,
   MARK_PRESETS, parseMarks,
 } from '../api/client';
 import { tLabel } from '../i18n/label';
@@ -811,12 +811,14 @@ export default function ProjectDetail() {
   // tab's tree. Plain Requirements render at depth 0 with no expander, so
   // the overview table is unchanged by the hierarchy work.
   const renderRequirementRows = (
-    items: (Requirement | { req: Requirement; depth: number })[],
+    items: (Requirement | { req: Requirement; depth: number; last?: boolean; open?: boolean })[],
     opts?: { hierarchy?: boolean },
   ) => items.map(item => {
     const isRow = 'req' in item;
     const req = isRow ? item.req : (item as Requirement);
     const depth = isRow ? item.depth : 0;
+    const last = isRow ? !!item.last : false;
+    const open = isRow ? !!item.open : false;
     const showTree = !!opts?.hierarchy;
     return (
     <tr
@@ -831,7 +833,7 @@ export default function ProjectDetail() {
       onDrop={e => onReqDrop(e, req)}
       onClick={() => navigate(`/requirements/${req.id}`)}
     >
-      <td className={`req-tree-col${depth > 0 ? ' req-tree-guide' : ''}`}>
+      <td className={`req-tree-col${depth > 0 ? ` req-tree-guide${last ? ' req-tree-last' : ''}` : ''}${showTree && open ? ' req-tree-open' : ''}`}>
         {showTree && renderReqTreeToggle(req, depth)}
       </td>
       <td data-label={t('projects.detail.colId')} style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{req.id}</td>
@@ -843,15 +845,23 @@ export default function ProjectDetail() {
             space. Putting the dot beside the badge uses the cell width we
             were already spending on the badge anyway. The dot's color is the
             only signal that mattered — High / Medium / Low already has
-            palette semantics in `.priority-{high|medium|low}`. */}
-        {req.priority && (
-          <span
-            className={`priority-dot priority-${req.priority}`}
-            title={req.priority}
-            aria-label={req.priority}
-          />
-        )}
-        <span className={`kind-badge kind-${kindOf(req)}`}>{tLabel(t, kindLabelKeys as Record<string, string>, kindOf(req))}</span>
+            palette semantics in `.priority-{high|medium|low}`.
+
+            The 8px slot is reserved even when there's no priority, so the
+            badge's left edge is identical on every row (see .req-type-cell
+            + .priority-dot-slot in index.css). */}
+        <span className="req-type-cell">
+          {req.priority ? (
+            <span
+              className={`priority-dot priority-${req.priority}`}
+              title={tLabel(t, priorityLabelKeys, req.priority)}
+              aria-label={tLabel(t, priorityLabelKeys, req.priority)}
+            />
+          ) : (
+            <span className="priority-dot-slot" aria-hidden />
+          )}
+          <span className={`kind-badge kind-${kindOf(req)}`}>{tLabel(t, kindLabelKeys as Record<string, string>, kindOf(req))}</span>
+        </span>
       </td>
       <td data-label={t('projects.detail.colTitle')} className={`pr-title${depth > 0 ? ' req-tree-child-title' : ''}`}>
         {/* Preset marks (重要 / 跟进 / 阻塞 / 风险) render INLINE with
@@ -1167,12 +1177,17 @@ export default function ProjectDetail() {
         top.push(r);
       }
     }
-    const rows: { req: Requirement; depth: number }[] = [];
+    const rows: { req: Requirement; depth: number; last?: boolean; open?: boolean }[] = [];
     for (const r of top) {
-      rows.push({ req: r, depth: 0 });
       const kids = byParent.get(r.id);
+      // `last` is computed from the full kids list (not the page slice),
+      // so a child that paginates onto the next page still shows the
+      // guide line on this page — it terminates on the next page.
+      rows.push({ req: r, depth: 0, open: !!kids && reqExpanded.has(r.id) });
       if (kids && reqExpanded.has(r.id)) {
-        for (const c of kids) rows.push({ req: c, depth: 1 });
+        for (let i = 0; i < kids.length; i++) {
+          rows.push({ req: kids[i], depth: 1, last: i === kids.length - 1 });
+        }
       }
     }
     return { reqTreeRows: rows, reqChildrenByParent: byParent };
@@ -1998,10 +2013,11 @@ export default function ProjectDetail() {
                       <th style={{ width: 110 }}>{t('projects.detail.colId')}</th>
                       {/* Type cell now hosts the priority dot ahead of the
                           kind-badge — the dot doesn't need its own column.
-                          Widened 70→96 so the dot + badge stays on one line
-                          across all kind values (issue / requirement / idea /
-                          wiki). */}
-                      <th style={{ width: 96 }}>{t('projects.detail.colType')}</th>
+                          Widened 70→96 so the dot + badge stays on one line,
+                          then 96→112 once we wrap the pair in a nowrap flex
+                          row (.req-type-cell) so the wiki pill (12 chars) fits
+                          without falling back to overflow ellipsis. */}
+                      <th style={{ width: 112 }}>{t('projects.detail.colType')}</th>
                       <th>{t('projects.detail.colTitle')}</th>
                       <th style={{ width: 150 }}>{t('projects.detail.colStatus')}</th>
                       <th style={{ width: 140 }}>{t('projects.detail.colAgentServer')}</th>
@@ -2387,8 +2403,11 @@ export default function ProjectDetail() {
                     />
                     {/* Type cell now hosts the priority dot ahead of the
                         kind-badge — see the overview recent table header
-                        for the rationale. Widened 70→96. */}
-                    <th style={{ width: 96 }}>{t('projects.detail.colType')}</th>
+                        for the rationale. Widened 70→96 then 96→112 once we
+                        wrapped the pair in a nowrap flex row (.req-type-cell)
+                        so the wiki pill (12 chars) fits without falling back
+                        to overflow ellipsis. */}
+                    <th style={{ width: 112 }}>{t('projects.detail.colType')}</th>
                     <SortHeader
                       col="title"
                       label={t('projects.detail.colTitle')}
