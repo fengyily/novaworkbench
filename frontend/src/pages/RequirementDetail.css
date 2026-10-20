@@ -3880,3 +3880,18 @@ allowed so the row collapses cleanly on every viewport. */
   background: var(--color-hover, rgba(79, 70, 229, 0.08));
 }
 
+
+/* Parent requirement picker in the detail meta row. */
+.req-parent-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.req-parent-picker .form-input {
+  width: auto;
+  max-width: 220px;
+  padding: 2px 8px;
+  font-size: 12px;
+}

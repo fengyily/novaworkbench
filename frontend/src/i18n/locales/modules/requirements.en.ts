@@ -728,6 +728,22 @@ export const requirements = {
     archiveEntries: '{{count}} entries, {{size}} uncompressed',
     archiveBadge: '📦 Archive',
   },
+  tree: {
+    expand: 'Expand sub-requirements',
+    collapse: 'Collapse sub-requirements',
+    childCount: 'Sub-requirements {{n}}',
+    childBadge: 'Sub-requirement',
+    dropOut: 'Drop here to detach from parent',
+    merged: 'Moved "{{child}}" under "{{parent}}"',
+    detached: 'Detached "{{child}}" from its parent',
+    errCrossProject: 'Parent and child must be in the same project',
+    errTargetIsChild: 'The target is already a sub-requirement and cannot have children',
+    errSelfHasChildren: 'This requirement has sub-requirements; move them out first',
+    parentLabel: 'Parent requirement',
+    parentNone: 'None',
+    parentDisabledHint: 'This requirement has sub-requirements; move them out before assigning a parent',
+    parentFailed: 'Failed to set parent: {{msg}}',
+  },
 } as const;
 
 export default requirements;

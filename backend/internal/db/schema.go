@@ -1070,6 +1070,11 @@ var alterColumns = []string{
 	// aren't mutated); only the new requirement carries this pointer. Empty =
 	// no parent requirement.
 	`ALTER TABLE requirements ADD COLUMN source_requirement_id TEXT NOT NULL DEFAULT ''`,
+	// Parent/child hierarchy (one level). parent_id points at the master
+	// requirement a row is nested under in the /requirements list; empty =
+	// top level. Distinct from source_requirement_id (promotion provenance).
+	// No FK and no index (TEXT index would need VARCHAR on MySQL).
+	`ALTER TABLE requirements ADD COLUMN parent_id TEXT NOT NULL DEFAULT ''`,
 	// Per-stage context compression (analyst / architect / coding). When the
 	// user clicks "压缩上下文", the wizard handler asks Claude to summarize the
 	// current session via --resume and stores the result here, then clears the

@@ -797,6 +797,22 @@ export const requirements = {
     archiveEntries: '共 {{count}} 个条目,{{size}} 解压后',
     archiveBadge: '📦 压缩包',
   },
+  tree: {
+    expand: '展开子需求',
+    collapse: '收起子需求',
+    childCount: '子需求 {{n}}',
+    childBadge: '子需求',
+    dropOut: '拖到此处移出主需求',
+    merged: '已将《{{child}}》合入《{{parent}}》',
+    detached: '已将《{{child}}》移出主需求',
+    errCrossProject: '主需求与子需求必须在同一项目',
+    errTargetIsChild: '目标已是子需求，不能再嵌套',
+    errSelfHasChildren: '该需求自身有子需求，请先将子需求移出',
+    parentLabel: '所属主需求',
+    parentNone: '无',
+    parentDisabledHint: '该需求有子需求，请先将子需求移出后再设置主需求',
+    parentFailed: '设置主需求失败：{{msg}}',
+  },
 } as const;
 
 export default requirements;

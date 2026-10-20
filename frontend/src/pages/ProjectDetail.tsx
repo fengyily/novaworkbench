@@ -838,6 +838,9 @@ export default function ProjectDetail() {
             </span>
           )}
           <span className="pr-title-text-label">{req.title}</span>
+          {req.parent_id && (
+            <span className="req-tag-chip pr-title-tag" style={{ background: 'var(--color-hover)', color: 'var(--color-text-secondary)' }}>{t('requirements.tree.childBadge')}</span>
+          )}
         </div>
         {/* Tag chips: rendered below the title as a compact strip (max 3
             visible, then +N overflow). Empty / undefined = no chips row,

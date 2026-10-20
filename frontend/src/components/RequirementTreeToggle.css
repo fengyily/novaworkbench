@@ -1,0 +1,44 @@
+.req-tree-toggle {
+  position: relative;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1;
+  color: var(--color-text-secondary);
+  background: var(--color-surface, #fff);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.req-tree-toggle:hover { background: var(--color-hover); }
+.req-tree-toggle.expanded {
+  background: var(--color-active);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+.req-tree-spacer {
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .req-tree-toggle {
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+}
+
+/* Touch devices: grow the hit area to 36px while the visual stays 20px. */
+@media (max-width: 768px) {
+  .req-tree-toggle::after {
+    content: '';
+    position: absolute;
+    inset: -8px;
+  }
+}
