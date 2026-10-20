@@ -113,12 +113,14 @@ export default function RequirementsList() {
     projectsApi.list().then(setProjects).catch(() => {});
   }, []);
 
-  // Re-fetch when filters change. kind filter is comma-separated per backend
-  // contract (splitKinds() in the Go service); toggling a chip rewrites it.
+  // Re-fetch only when the *server-side* dimensions change. Status and search
+  // are intentionally absent: they are applied client-side by filteredReqs so
+  // sub-requirements can stay anchored to their (visible) parent. kind is
+  // handled by its own effect below.
   useEffect(() => {
     loadRequirements();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectFilter, statusFilter, search]);
+  }, [projectFilter]);
 
   const kindFilterCsv = useMemo(() => {
     if (activeKinds.size === 0 || activeKinds.size === 3) return '';
@@ -135,18 +137,13 @@ export default function RequirementsList() {
     try {
       const list = await requirementsApi.list({
         project_id: projectFilter || undefined,
-        status: statusFilter || undefined,
         kind: kindFilterCsv || undefined,
+        // status intentionally omitted — backend List() applies r.status != 'archived'
+        // when status is empty, so archived rows are still excluded. Status/search
+        // filtering is pushed down to filteredReqs so children can stay anchored
+        // to their visible parent.
       });
-      const term = search.trim().toLowerCase();
-      setRequirements(
-        term
-          ? list.filter(r =>
-              (r.title || '').toLowerCase().includes(term) ||
-              (r.description || '').toLowerCase().includes(term),
-            )
-          : list,
-      );
+      setRequirements(list);
     } catch (err: any) {
       console.error('load requirements failed', err);
       setRequirements([]);
@@ -204,11 +201,41 @@ export default function RequirementsList() {
   // parent is not in the current result set (filtered out / archived) is
   // promoted to a top-level row so it never silently disappears.
   const filtersActive = !!search.trim() || !!statusFilter || !!kindFilterCsv;
+
+  // Parent-anchored client-side filter. statusFilter + search only apply to
+  // top-level rows; any child whose parent_id is in the kept set follows
+  // unconditionally, regardless of its own status.
+  // (The status dropdown options are concrete statuses like draft/analyzing/.../done/archived;
+  //  the 'active' branch is kept for symmetry with ProjectDetail but is unreachable from the UI today.)
+  const filteredReqs = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    const passes = (r: Requirement) => {
+      if (statusFilter) {
+        if (statusFilter === 'active') {
+          if (!['draft', 'analyzing', 'designing', 'designed', 'developing'].includes(r.status)) return false;
+        } else if (r.status !== statusFilter) {
+          return false;
+        }
+      }
+      if (!term) return true;
+      return (r.title || '').toLowerCase().includes(term) ||
+             (r.description || '').toLowerCase().includes(term);
+    };
+    const masters = requirements.filter(r => !r.parent_id && passes(r));
+    const keep = new Set(masters.map(r => r.id));
+    return [...masters, ...requirements.filter(r => r.parent_id && keep.has(r.parent_id))];
+  }, [requirements, statusFilter, search]);
+
+  // Assembles over filteredReqs, never the raw requirements: a child is
+  // already anchored to its visible parent by the memo above, so a parent
+  // missing from this set genuinely isn't in view (deleted / cross-project)
+  // rather than merely hidden by a status chip — and promotion is the right
+  // answer in that case, so the rule stays.
   const { rows, childrenByParent, firstChildOf } = useMemo(() => {
-    const ids = new Set(requirements.map(r => r.id));
+    const ids = new Set(filteredReqs.map(r => r.id));
     const byParent = new Map<string, Requirement[]>();
     const top: Requirement[] = [];
-    for (const r of requirements) {
+    for (const r of filteredReqs) {
       if (r.parent_id && ids.has(r.parent_id)) {
         const arr = byParent.get(r.parent_id) || [];
         arr.push(r);
@@ -232,7 +259,7 @@ export default function RequirementsList() {
       }
     }
     return { rows: out, childrenByParent: byParent, firstChildOf: first };
-  }, [requirements, expanded, filtersActive]);
+  }, [filteredReqs, expanded, filtersActive]);
 
   const hasChildren = (r: Requirement) => (childrenByParent.get(r.id)?.length ?? 0) > 0;
   const isExpanded = (r: Requirement) => expanded.has(r.id) || filtersActive;
