@@ -91,6 +91,7 @@ export const components = {
     pastedImage: 'Pasted into the sub-task composer',
     insertImage: 'Insert image',
     imageHint: 'Paste, drop, or click 📷 to attach a screenshot (auto-compressed to 1600px so the AI can read it)',
+    imageToken: '[image]',
     reSplitTitleBusy: 'A sub-task is still running — wait until it finishes before re-splitting',
     reSplitTitle: 'Have the main agent re-split and auto-dispatch the sub-tasks',
     reSplitBusy: 'Splitting…',

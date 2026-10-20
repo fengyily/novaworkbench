@@ -98,6 +98,7 @@ export const components = {
     pastedImage: '粘贴于子任务输入框',
     insertImage: '插入图片',
     imageHint: '支持粘贴 / 拖拽 / 点击 📷 上传截图（自动压缩到 1600px 以内，便于 AI 阅读）',
+    imageToken: '[图片]',
     reSplitTitleBusy: '有子任务正在执行，完成后才能重新拆分',
     reSplitTitle: '让主 Agent 重新进行任务拆分并自动派发子任务',
     reSplitBusy: '拆分中…',

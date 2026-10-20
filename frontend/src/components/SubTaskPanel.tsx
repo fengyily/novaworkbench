@@ -155,13 +155,16 @@ function truncate(s: string, max: number): string {
 // RichDescriptionEditor/rewriteNovaLinks for the protocol's origin.
 const NovaImageMarkerRe = /nova:\/\/attachment\/[a-zA-Z0-9_-]+/g;
 
-// summarizePrompt strips image placeholders down to a readable `[图片]` token
+// summarizePrompt strips image placeholders down to a short, readable token
 // before truncation. Used for the collapsed report-meta line and its tooltip,
 // where the raw 60-char marker would eat the entire 80-char budget and tell the
 // reader nothing. The full-fidelity Markdown rendering path uses
 // rewriteNovaLinks instead — this one is only for one-line summaries.
-function summarizePrompt(prompt: string | null | undefined): string {
-  return String(prompt ?? '').replace(NovaImageMarkerRe, '[图片]');
+//
+// imageToken is supplied by the caller (this is a module-level helper with no
+// hook scope) so the label goes through i18n like every other piece of UI text.
+function summarizePrompt(prompt: string | null | undefined, imageToken: string): string {
+  return String(prompt ?? '').replace(NovaImageMarkerRe, imageToken);
 }
 
 // extractFirstURL pulls the first http(s) URL out of a string, ignoring
@@ -551,8 +554,8 @@ function ReportHeader({ st }: { st: SubTask }) {
       <dl>
         <div>
           <dt>{t('components.subTaskCard.reportMetaPrompt')}</dt>
-          <dd className="is-mono" title={summarizePrompt(st.prompt)}>
-            {st.prompt ? truncate(summarizePrompt(st.prompt), 80) : '—'}
+          <dd className="is-mono" title={summarizePrompt(st.prompt, t('components.subTaskPanel.imageToken'))}>
+            {st.prompt ? truncate(summarizePrompt(st.prompt, t('components.subTaskPanel.imageToken')), 80) : '—'}
           </dd>
         </div>
         <div>
