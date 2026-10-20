@@ -943,3 +943,108 @@
   text-overflow: ellipsis;
   vertical-align: middle;
 }
+
+/* Row-level hierarchy styles live in RequirementTreeToggle.css so both
+   requirement tables share them; only the drag states are page-specific. */
+.req-tree-row[draggable='true'] { cursor: grab; }
+.req-tree-row.dragging { opacity: 0.5; cursor: grabbing; }
+.req-tree-row.drop-target {
+  outline: 2px dashed var(--color-primary);
+  outline-offset: -2px;
+  background: var(--color-active);
+}
+
+/* ── Batch .md import panel ────────────────────────────────────────
+   Lives next to the standard requirement list inside the requirements
+   tab. The drop zone is the visible primary affordance; the hidden
+   <input type="file"> is reached both by clicking the zone and by drag. */
+.pr-batch-import {
+  margin: 12px 0 16px;
+  padding: 14px 16px;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface, #fff);
+}
+.pr-batch-import-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.pr-batch-import-label {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+.pr-batch-import-zone {
+  padding: 22px;
+  text-align: center;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  cursor: pointer;
+}
+.pr-batch-import-zone:hover {
+  border-color: var(--color-primary);
+  background: var(--color-active);
+}
+.pr-batch-import-zone-hint {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+.pr-batch-import-list {
+  margin-top: 12px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+.pr-batch-import-list-head {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg);
+}
+.pr-batch-import-list ul { list-style: none; margin: 0; padding: 0; }
+.pr-batch-import-list li {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--color-border);
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.pr-batch-import-list li:last-child { border-bottom: 0; }
+.pr-batch-import-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.pr-batch-import-item-meta {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+.pr-batch-import-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 10px;
+}
+.pr-batch-import-err {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: #FEF2F2;
+  color: #B91C1C;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+}
+
+/* Priority dot folded INTO the Type cell, ahead of the kind-badge.
+   The dedicated column was eating ~90px of horizontal space and rarely
+   carried any signal — an em-dash, or a single 6px circle. Putting the
+   dot beside the badge uses the cell width we were already spending
+   on the badge anyway. The base .priority-dot rules live in
+   RequirementsList.css (cross-file, since both tables need the same
+   palette); only the spacing rule lives here. */
+.priority-dot + .kind-badge { margin-left: 6px; }

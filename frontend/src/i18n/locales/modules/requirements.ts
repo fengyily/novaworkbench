@@ -800,6 +800,10 @@ export const requirements = {
   tree: {
     expand: '展开子需求',
     collapse: '收起子需求',
+    addChild: '添加子需求',
+    addChildHeading: '选择要挂到《{{parent}}》下的需求',
+    addChildEmpty: '没有可挂载的候选需求',
+    addChildEmptyHint: '候选需满足：同项目、顶层（无所属主需求）、未归档、且自身尚无子需求；且只列出当前筛选结果内的需求，可先清除筛选再看。也可以直接把行拖到这条需求上。',
     childCount: '子需求 {{n}}',
     childBadge: '子需求',
     dropOut: '拖到此处移出主需求',

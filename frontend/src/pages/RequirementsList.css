@@ -364,7 +364,12 @@
   border-radius: 50%;
   background: var(--color-text-muted, #94A3B8);
   flex-shrink: 0;
+  vertical-align: middle;
 }
+/* Sits 6px to the LEFT of a .kind-badge so the dot reads as "priority
+   tag" of the kind pill. Adjacent-sibling combinator only — keeps the
+   other surfaces (mobile-card footer, dots floating alone) unaffected. */
+.priority-dot + .kind-badge { margin-left: 6px; }
 .priority-dot.priority-high   { background: #EF4444; }
 .priority-dot.priority-medium { background: #F59E0B; }
 .priority-dot.priority-low    { background: #10B981; }
@@ -626,20 +631,6 @@
 }
 
 .req-row-child { background: var(--color-bg); }
-.req-row-title.is-child {
-  position: relative;
-  padding-left: 24px;
-}
-.req-row-title.is-child::before {
-  content: '';
-  position: absolute;
-  left: 10px;
-  top: 0;
-  width: 8px;
-  height: 50%;
-  border-left: 1px solid var(--color-border);
-  border-bottom: 1px solid var(--color-border);
-}
 
 .req-dropout {
   height: 44px;

@@ -10,7 +10,7 @@
 // Kind filter is multi-select; the backend List accepts a comma-separated
 // kind list, so the toggles are joined into CSV.
 
-import { useEffect, useMemo, useState, type DragEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -88,10 +88,26 @@ export default function RequirementsList() {
 
   // Master/child hierarchy: expanded master ids, drag state, a11y live text.
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // One-shot auto-expand. The first time `requirements` contains rows with
+  // children, every such master is expanded so the hierarchy is visible
+  // without an extra click. The ref makes this idempotent — toggles the
+  // user performs on a master are preserved across subsequent reloads.
+  const didInitialExpand = useRef(false);
+  useEffect(() => {
+    if (didInitialExpand.current) return;
+    const withKids = requirements.filter(r => (r.child_count ?? 0) > 0).map(r => r.id);
+    if (withKids.length === 0) return;
+    setExpanded(new Set(withKids));
+    didInitialExpand.current = true;
+  }, [requirements]);
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropId, setDropId] = useState<string | null>(null);
   const [dropOutActive, setDropOutActive] = useState(false);
   const [liveMsg, setLiveMsg] = useState('');
+  // Id of the master whose "attach a sub-requirement" picker is open, or
+  // null. This is the non-drag path to nesting — drag-and-drop has no
+  // visual affordance, so on its own it is effectively invisible.
+  const [addChildFor, setAddChildFor] = useState<string | null>(null);
 
   useEffect(() => {
     projectsApi.list().then(setProjects).catch(() => {});
@@ -188,7 +204,7 @@ export default function RequirementsList() {
   // parent is not in the current result set (filtered out / archived) is
   // promoted to a top-level row so it never silently disappears.
   const filtersActive = !!search.trim() || !!statusFilter || !!kindFilterCsv;
-  const { rows, childrenByParent, firstChildOf, anyParent } = useMemo(() => {
+  const { rows, childrenByParent, firstChildOf } = useMemo(() => {
     const ids = new Set(requirements.map(r => r.id));
     const byParent = new Map<string, Requirement[]>();
     const top: Requirement[] = [];
@@ -212,7 +228,7 @@ export default function RequirementsList() {
         for (const c of kids) out.push({ r: c, depth: 1 });
       }
     }
-    return { rows: out, childrenByParent: byParent, firstChildOf: first, anyParent: byParent.size > 0 };
+    return { rows: out, childrenByParent: byParent, firstChildOf: first };
   }, [requirements, expanded, filtersActive]);
 
   const hasChildren = (r: Requirement) => (childrenByParent.get(r.id)?.length ?? 0) > 0;
@@ -225,18 +241,84 @@ export default function RequirementsList() {
       return next;
     });
 
+  // Candidates for "attach a sub-requirement to <parent>". Mirrors the
+  // backend's SetParent rules exactly (same project / top-level target /
+  // parent itself has no children), so the picker can never offer
+  // something the server would reject.
+  const childCandidates = useMemo(() => {
+    if (!addChildFor) return [] as Requirement[];
+    const parent = requirements.find(r => r.id === addChildFor);
+    if (!parent) return [] as Requirement[];
+    return requirements.filter(
+      c =>
+        c.id !== parent.id &&
+        c.project_id === parent.project_id &&
+        !c.parent_id &&
+        c.status !== 'archived' &&
+        !hasChildren(c) &&
+        (c.child_count ?? 0) === 0,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addChildFor, requirements, childrenByParent]);
+
+  // Dismiss the attach picker on outside click / Escape. Clicking the `+`
+  // itself is excluded via .req-tree-cell so the toggle doesn't close the
+  // popover it's toggling.
+  useEffect(() => {
+    if (!addChildFor) return;
+    const onDown = (e: globalThis.MouseEvent) => {
+      if ((e.target as HTMLElement | null)?.closest('.req-tree-cell')) return;
+      setAddChildFor(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setAddChildFor(null);
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [addChildFor]);
+
   const treeToggle = (r: Requirement, depth: number) => {
     if (depth > 0) return null;
-    // On mobile the toggle sits beside the card (see renderMobileCard).
-    if (!hasChildren(r)) return <RequirementTreeSpacer />;
-    return (
+    const toggle = hasChildren(r) ? (
       <RequirementTreeToggle
         expanded={isExpanded(r)}
         onToggle={() => toggleExpanded(r.id)}
         controlsId={`req-children-${r.id}`}
       />
+    ) : r.status === 'archived' ? (
+      // Archived masters are read-only; keep the slot blank so titles
+      // stay aligned without advertising an action that can't work.
+      <RequirementTreeSpacer />
+    ) : (
+      // No children yet — same `+` glyph, different action: open the
+      // attach picker. Rendering a blank spacer here (the previous
+      // behavior) is what made the hierarchy undiscoverable, since
+      // drag-and-drop is the only other way in and it has no affordance.
+      <RequirementTreeToggle
+        expanded={false}
+        mode="add"
+        onAdd={() => setAddChildFor(cur => (cur === r.id ? null : r.id))}
+        controlsId={`req-add-${r.id}`}
+      />
+    );
+    return (
+      <>
+        {toggle}
+        {addChildFor === r.id && renderAddChildPopover(r)}
+      </>
     );
   };
+
+  // Wrapped for the mobile card, which has no dedicated cell of its own.
+  const treeToggleInCell = (r: Requirement, depth: number) => (
+    <div className={`req-tree-cell${depth > 0 ? ' req-tree-guide' : ''}`}>
+      {treeToggle(r, depth)}
+    </div>
+  );
 
   const childChip = (r: Requirement, depth: number) => {
     const n = childrenByParent.get(r.id)?.length ?? 0;
@@ -298,6 +380,51 @@ export default function RequirementsList() {
     }
   };
 
+  // The attach picker. Reuses reparent() so both entry points (click and
+  // drag) share one call, one expansion, one live-region announcement and
+  // one error mapping.
+  const renderAddChildPopover = (parent: Requirement) => {
+    const heading = t('requirements.tree.addChildHeading', {
+      parent: parent.title || t('requirements.list.noTitle'),
+    });
+    return (
+      <div
+        className="req-tree-popover"
+        role="dialog"
+        aria-label={heading}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="req-tree-popover-title">{heading}</div>
+        {childCandidates.length === 0 ? (
+          <div className="req-tree-popover-empty">
+            <div>{t('requirements.tree.addChildEmpty')}</div>
+            <div className="req-tree-popover-hint">{t('requirements.tree.addChildEmptyHint')}</div>
+          </div>
+        ) : (
+          <ul className="req-tree-popover-list">
+            {childCandidates.map(c => (
+              <li key={c.id}>
+                <button
+                  type="button"
+                  className="req-tree-popover-item"
+                  onClick={() => {
+                    setAddChildFor(null);
+                    void reparent(c, parent.id);
+                  }}
+                >
+                  <span className="req-tree-popover-item-title">
+                    {c.title || t('requirements.list.noTitle')}
+                  </span>
+                  <StatusChips req={c} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  };
+
   const onRowDrop = (e: DragEvent, target: Requirement) => {
     if (!canDrop(target) || !draggedReq) return;
     e.preventDefault();
@@ -311,7 +438,7 @@ export default function RequirementsList() {
           key={r.id}
           id={firstChildOf.get(r.parent_id || '') === r.id ? `req-children-${r.parent_id}` : undefined}
           onClick={() => navigate(`/requirements/${r.id}`)}
-          className={`req-row${depth > 0 ? ' req-row-child' : ''}${dragId === r.id ? ' dragging' : ''}${dropId === r.id ? ' drop-target' : ''}`}
+          className={`req-row req-tree-row${depth > 0 ? ' req-row-child' : ''}${dragId === r.id ? ' dragging' : ''}${dropId === r.id ? ' drop-target' : ''}`}
           draggable
           onDragStart={e => onDragStart(e, r)}
           onDragEnd={endDrag}
@@ -319,7 +446,24 @@ export default function RequirementsList() {
           onDragLeave={() => dropId === r.id && setDropId(null)}
           onDrop={e => onRowDrop(e, r)}
         >
+          <td className={`req-tree-col${depth > 0 ? ' req-tree-guide' : ''}`}>
+            {treeToggle(r, depth)}
+          </td>
           <td data-label={t('requirements.list.colType')}>
+            {/* Priority dot folded INTO the Type cell, ahead of the
+                kind-badge. Mirrors the project-detail requirements tab —
+                the dedicated Priority column was visually dead even on
+                2xl viewports, and the dot+badge pair fits comfortably in
+                the widened kind-badge cell. Color is the only signal
+                that mattered; the old text label (High/Medium/Low)
+                duplicated information the dot already carries. */}
+            {r.priority && (
+              <span
+                className={`priority-dot priority-${r.priority}`}
+                title={tLabel(t, priorityLabelKeys, r.priority)}
+                aria-label={tLabel(t, priorityLabelKeys, r.priority)}
+              />
+            )}
             <span
               className={`kind-badge kind-${k}`}
               title={tLabel(t, kindLabelKeys, k)}
@@ -327,9 +471,8 @@ export default function RequirementsList() {
               {tLabel(t, kindShortLabelKeys, k)}
             </span>
           </td>
-          <td className={`req-row-title${depth > 0 ? ' is-child' : ''}`} data-label={t('requirements.list.colTitle')}>
+          <td className={`req-row-title${depth > 0 ? ' is-child req-tree-child-title' : ''}`} data-label={t('requirements.list.colTitle')}>
             <div className="req-row-title-text">
-              {treeToggle(r, depth)}
               {/* Preset marks (important / follow_up / blocked / at_risk)
                   render INLINE with the title (chip strip BEFORE the
                   schedule clock + title text) so marked requirements
@@ -395,15 +538,6 @@ export default function RequirementsList() {
             )}
           </td>
           <td data-label={t('requirements.list.colProject')}>{projectNameOf(r.project_id)}</td>
-          <td data-label={t('requirements.list.colPriority')}>
-            {r.priority ? (
-              <span className={`priority-tag priority-${r.priority}`}>
-                {tLabel(t, priorityLabelKeys, r.priority)}
-              </span>
-            ) : (
-              <span className="req-row-dim">-</span>
-            )}
-          </td>
           {/* Agent-server column: now carries the full DevSourceBadge
               (local dev / 🛰️ agent server name) so users see where
               the requirement actually ran. The previous plain
@@ -465,9 +599,10 @@ export default function RequirementsList() {
                 stage hasn't run yet, so legacy rows simply render no
                 chip (no local-vs-agent guess). */}
             <DevSourceBadge req={r} compact />
-            {r.priority && (
-              <span className={`priority-dot priority-${r.priority}`} title={t('requirements.list.priorityTitle', { label: tLabel(t, priorityLabelKeys, r.priority) })} />
-            )}
+            {/* Priority dot was removed from the mobile card — it now
+                lives next to the kind-badge in the card head, alongside
+                the status chips, so users see it without scanning down
+                to the footer. */}
             <span className="req-card-mobile-time">{fmtRelative(r.updated_at)}</span>
           </div>
         </button>
@@ -476,9 +611,9 @@ export default function RequirementsList() {
         <div
           key={r.id}
           id={firstChildOf.get(r.parent_id || '') === r.id ? `req-children-${r.parent_id}` : undefined}
-          className={`req-card-mobile-wrap${depth > 0 ? ' req-card-mobile-child' : ''}`}
+          className={`req-card-mobile-wrap req-tree-row${depth > 0 ? ' req-card-mobile-child' : ''}`}
         >
-          {depth === 0 && (hasChildren(r) ? treeToggle(r, depth) : anyParent ? <RequirementTreeSpacer /> : null)}
+          {depth === 0 && treeToggleInCell(r, depth)}
           {card}
         </div>
       );
@@ -635,12 +770,14 @@ export default function RequirementsList() {
           <table className="req-table table-cards">
             <thead>
               <tr>
-                <th>{t('requirements.list.colType')}</th>
+                <th className="req-tree-col" aria-label={t('requirements.tree.expand')} />
+                <th style={{ width: 96 }}>{t('requirements.list.colType')}</th>
                 <th>{t('requirements.list.colTitle')}</th>
                 <th>{t('requirements.list.colStatus')}</th>
                 <th>{t('requirements.list.colModel')}</th>
                 <th>{t('requirements.list.colProject')}</th>
-                <th>{t('requirements.list.colPriority')}</th>
+                {/* Priority column removed — the dot moved into the Type
+                    cell above. */}
                 <th>{t('requirements.list.colAgentServer')}</th>
                 <th>{t('requirements.list.colUpdated')}</th>
               </tr>

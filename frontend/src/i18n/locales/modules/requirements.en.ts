@@ -731,6 +731,10 @@ export const requirements = {
   tree: {
     expand: 'Expand sub-requirements',
     collapse: 'Collapse sub-requirements',
+    addChild: 'Add sub-requirement',
+    addChildHeading: 'Choose a requirement to nest under "{{parent}}"',
+    addChildEmpty: 'No eligible requirements to attach',
+    addChildEmptyHint: 'Candidates must be top-level, in the same project, not archived, and have no sub-requirements yet; only requirements inside the current filters are listed, so try clearing them first. You can also drag a row onto this requirement.',
     childCount: 'Sub-requirements {{n}}',
     childBadge: 'Sub-requirement',
     dropOut: 'Drop here to detach from parent',

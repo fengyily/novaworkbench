@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, type DragEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
@@ -14,6 +14,7 @@ import { tLabel } from '../i18n/label';
 import { fmtDateTime, fmtRelative, fmtRunAtRelative } from '../utils/intl';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import { StatusChips } from '../components/StatusChips';
+import { RequirementTreeToggle, RequirementTreeSpacer } from '../components/RequirementTreeToggle';
 import PdfUploadDialog from '../components/PdfUploadDialog';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
 import ProjectIssueMonitor from './ProjectIssueMonitor';
@@ -57,9 +58,10 @@ const REQ_SORT_DEFAULT_DIR: Record<ReqSortColumn, ReqSortDir> = {
   updated_at: 'desc',
 };
 
-const priorityDots: Record<string, string> = {
-  high: '🔴', medium: '🟡', low: '🟢',
-};
+// Priority is rendered as an icon-only `.priority-dot` now (text label
+// was removed to give the title column more horizontal space — see the
+// priority td further down). The dot colors live with the other
+// priority rules in `frontend/src/pages/RequirementsList.css`.
 
 // Run-status badge labels — keys are resolved at render via tLabel so the
 // chip text follows the active language.
@@ -335,6 +337,36 @@ export default function ProjectDetail() {
   const [reqsError, setReqsError] = useState('');
   const [reqsLoaded, setReqsLoaded] = useState(false);
   const [showCreateReq, setShowCreateReq] = useState(false);
+  // Master/child hierarchy on the requirements tab. This table is a
+  // separate implementation from the cross-project RequirementsList, so
+  // the expander / drag-to-nest / attach-picker had to be wired up here
+  // independently — the project page previously showed only a passive
+  // "子需求" chip on rows that already had a parent_id.
+  const [reqExpanded, setReqExpanded] = useState<Set<string>>(new Set());
+  // One-shot auto-expand: first time the loaded requirements include any
+  // master that already has a child, expand it. The ref makes the
+  // auto-expand idempotent so the user's manual toggles survive reloads.
+  const didReqInitialExpand = useRef(false);
+  useEffect(() => {
+    if (didReqInitialExpand.current) return;
+    const withKids = reqs.filter(r => (r.child_count ?? 0) > 0).map(r => r.id);
+    if (withKids.length === 0) return;
+    setReqExpanded(new Set(withKids));
+    didReqInitialExpand.current = true;
+  }, [reqs]);
+  const [reqDragId, setReqDragId] = useState<string | null>(null);
+  const [reqDropId, setReqDropId] = useState<string | null>(null);
+  const [reqAddChildFor, setReqAddChildFor] = useState<string | null>(null);
+  // Batch import — drop in / pick N .md files, each becomes a requirement
+  // (title = first heading or first non-empty line; body = the rest).
+  // Optional parent picker attaches all created rows beneath an existing
+  // master in one round-trip. Strict 1-level nesting still applies.
+  const [showBatchImport, setShowBatchImport] = useState(false);
+  const [batchItems, setBatchItems] = useState<{ key: string; title: string; description: string; bytes: number }[]>([]);
+  const [batchParentId, setBatchParentId] = useState('');
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [batchError, setBatchError] = useState('');
+  const batchInputRef = useRef<HTMLInputElement>(null);
   // Requirements tab pagination — first page by default.
   const [reqPage, setReqPage] = useState(1);
   // Requirements-tab filter + sort (only affects the requirements tab; the
@@ -774,15 +806,54 @@ export default function ProjectDetail() {
   // users can see at a glance which remote execution target the requirement
   // was developed on (or local if it ran locally). Stays consistent with the
   // `agent-server-tag` styling on the global list page.
-  const renderRequirementRows = (items: Requirement[]) => items.map(req => (
+  // `items` is either flat Requirement[] (the overview's short recent list,
+  // which stays hierarchy-free) or {req, depth} pairs from the requirements
+  // tab's tree. Plain Requirements render at depth 0 with no expander, so
+  // the overview table is unchanged by the hierarchy work.
+  const renderRequirementRows = (
+    items: (Requirement | { req: Requirement; depth: number })[],
+    opts?: { hierarchy?: boolean },
+  ) => items.map(item => {
+    const isRow = 'req' in item;
+    const req = isRow ? item.req : (item as Requirement);
+    const depth = isRow ? item.depth : 0;
+    const showTree = !!opts?.hierarchy;
+    return (
     <tr
       key={req.id}
+      className={`req-tree-row${depth > 0 ? ' req-tree-row-child' : ''}${reqDragId === req.id ? ' dragging' : ''}${reqDropId === req.id ? ' drop-target' : ''}`}
       style={{ cursor: 'pointer' }}
+      draggable
+      onDragStart={e => onReqDragStart(e, req)}
+      onDragEnd={() => { setReqDragId(null); setReqDropId(null); }}
+      onDragOver={e => onReqDragOver(e, req)}
+      onDragLeave={() => { if (reqDropId === req.id) setReqDropId(null); }}
+      onDrop={e => onReqDrop(e, req)}
       onClick={() => navigate(`/requirements/${req.id}`)}
     >
+      <td className={`req-tree-col${depth > 0 ? ' req-tree-guide' : ''}`}>
+        {showTree && renderReqTreeToggle(req, depth)}
+      </td>
       <td data-label={t('projects.detail.colId')} style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{req.id}</td>
-      <td data-label={t('projects.detail.colType')}><span className={`kind-badge kind-${kindOf(req)}`}>{tLabel(t, kindLabelKeys as Record<string, string>, kindOf(req))}</span></td>
-      <td data-label={t('projects.detail.colTitle')} className="pr-title">
+      <td data-label={t('projects.detail.colType')}>
+        {/* Priority dot folded INTO the Type cell, ahead of the kind-badge.
+            Why: the dedicated priority column was eating ~90px even when
+            there was nothing to say (an em-dash, or a single 6px circle),
+            and the screenshot showed two adjacent cells that competed for
+            space. Putting the dot beside the badge uses the cell width we
+            were already spending on the badge anyway. The dot's color is the
+            only signal that mattered — High / Medium / Low already has
+            palette semantics in `.priority-{high|medium|low}`. */}
+        {req.priority && (
+          <span
+            className={`priority-dot priority-${req.priority}`}
+            title={req.priority}
+            aria-label={req.priority}
+          />
+        )}
+        <span className={`kind-badge kind-${kindOf(req)}`}>{tLabel(t, kindLabelKeys as Record<string, string>, kindOf(req))}</span>
+      </td>
+      <td data-label={t('projects.detail.colTitle')} className={`pr-title${depth > 0 ? ' req-tree-child-title' : ''}`}>
         {/* Preset marks (重要 / 跟进 / 阻塞 / 风险) render INLINE with
             the title (chip strip BEFORE the schedule clock + title text)
             so marked requirements stay on a single line — same order as
@@ -841,6 +912,11 @@ export default function ProjectDetail() {
           {req.parent_id && (
             <span className="req-tag-chip pr-title-tag" style={{ background: 'var(--color-hover)', color: 'var(--color-text-secondary)' }}>{t('requirements.tree.childBadge')}</span>
           )}
+          {/* Child count on a master — without it a collapsed master is
+              visually identical to a plain row apart from the expander. */}
+          {showTree && depth === 0 && reqHasChildren(req) && (
+            <span className="req-tag-chip pr-title-tag">{t('requirements.tree.childCount', { n: reqChildrenByParent.get(req.id)!.length })}</span>
+          )}
         </div>
         {/* Tag chips: rendered below the title as a compact strip (max 3
             visible, then +N overflow). Empty / undefined = no chips row,
@@ -880,7 +956,6 @@ export default function ProjectDetail() {
           );
         })()}
       </td>
-      <td data-label={t('projects.detail.colPriority')}><span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{priorityDots[req.priority] ?? '⚪'} {req.priority}</span></td>
       <td data-label={t('projects.detail.colStatus')}>
         <StatusChips req={req} />
         {/* Breathing dot for any wizard job in flight on this requirement
@@ -952,7 +1027,8 @@ export default function ProjectDetail() {
         {req.updated_at ? fmtDateTime(req.updated_at) : '—'}
       </td>
     </tr>
-  ));
+    );
+  });
 
   // Overview shows only tasks that have not finished development ('done').
   // The requirements tab keeps showing everything (done sorts to the end).
@@ -1070,12 +1146,282 @@ export default function ProjectDetail() {
     }
   };
 
+  // ── Master/child hierarchy ────────────────────────────────────────
+  // The tree is assembled over the FULL sorted/filtered list, never the
+  // page slice: with 15-row pagination a parent and its child routinely
+  // land on different pages, and nesting inside the slice would silently
+  // promote the child to a top-level row. A child whose parent isn't in
+  // the current result set (filtered out / archived) is promoted the same
+  // way — it must never vanish. Pagination then runs over the tree rows,
+  // so expanding a master reflows pages the way a real tree table does.
+  const { reqTreeRows, reqChildrenByParent } = useMemo(() => {
+    const ids = new Set(sortedReqs.map(r => r.id));
+    const byParent = new Map<string, Requirement[]>();
+    const top: Requirement[] = [];
+    for (const r of sortedReqs) {
+      if (r.parent_id && ids.has(r.parent_id)) {
+        const arr = byParent.get(r.parent_id);
+        if (arr) arr.push(r);
+        else byParent.set(r.parent_id, [r]);
+      } else {
+        top.push(r);
+      }
+    }
+    const rows: { req: Requirement; depth: number }[] = [];
+    for (const r of top) {
+      rows.push({ req: r, depth: 0 });
+      const kids = byParent.get(r.id);
+      if (kids && reqExpanded.has(r.id)) {
+        for (const c of kids) rows.push({ req: c, depth: 1 });
+      }
+    }
+    return { reqTreeRows: rows, reqChildrenByParent: byParent };
+  }, [sortedReqs, reqExpanded]);
+
+  const reqHasChildren = (r: Requirement) => (reqChildrenByParent.get(r.id)?.length ?? 0) > 0;
+  const toggleReqExpanded = (rid: string) =>
+    setReqExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(rid)) next.delete(rid);
+      else next.add(rid);
+      return next;
+    });
+
+  // Attach-picker candidates. Mirrors the backend's SetParent rules exactly
+  // so the picker can never offer something the server would reject.
+  const reqChildCandidates = useMemo(() => {
+    if (!reqAddChildFor) return [] as Requirement[];
+    const parent = reqs.find(r => r.id === reqAddChildFor);
+    if (!parent) return [] as Requirement[];
+    return reqs.filter(
+      c =>
+        c.id !== parent.id &&
+        c.project_id === parent.project_id &&
+        !c.parent_id &&
+        c.status !== 'archived' &&
+        !reqHasChildren(c) &&
+        (c.child_count ?? 0) === 0,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reqAddChildFor, reqs, reqChildrenByParent]);
+
+  useEffect(() => {
+    if (!reqAddChildFor) return;
+    const onDown = (e: globalThis.MouseEvent) => {
+      if ((e.target as HTMLElement | null)?.closest('.req-tree-cell')) return;
+      setReqAddChildFor(null);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setReqAddChildFor(null); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [reqAddChildFor]);
+
+  const reqReparent = async (child: Requirement, parentId: string) => {
+    try {
+      await requirementsApi.setParent(child.id, parentId);
+      if (parentId) setReqExpanded(prev => new Set(prev).add(parentId));
+      setReqs(await requirementsApi.list({ project_id: id }));
+    } catch (err: any) {
+      const raw: string = err?.message || String(err);
+      let msg = t('requirements.tree.parentFailed', { msg: raw });
+      if (raw.includes('different project')) msg = t('requirements.tree.errCrossProject');
+      else if (raw.includes('already a child')) msg = t('requirements.tree.errTargetIsChild');
+      else if (raw.includes('has child requirements')) msg = t('requirements.tree.errSelfHasChildren');
+      // eslint-disable-next-line no-alert
+      window.alert(msg);
+    } finally {
+      setReqDragId(null);
+      setReqDropId(null);
+    }
+  };
+
+  // ── Batch import .md ────────────────────────────────────────
+  // Parse one md: prefer a leading markdown heading ("# Title") for the
+  // title; fall back to the first non-empty line. Body = everything after
+  // the title line (or whole file when there's no title), so an empty file
+  // still imports as a titled stub rather than failing silently.
+  const parseMdFile = async (file: File): Promise<{ key: string; title: string; description: string; bytes: number }> => {
+    const text = await file.text();
+    const lines = text.split(/\r?\n/);
+    let title = '';
+    let titleIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(/^#+\s+(.+?)\s*$/);
+      if (m) { title = m[1].trim(); titleIdx = i; break; }
+    }
+    if (!title) {
+      for (let i = 0; i < lines.length; i++) {
+        const t = lines[i].trim();
+        if (t) { title = t.replace(/^#+\s*/, '').slice(0, 200); titleIdx = i; break; }
+      }
+    }
+    if (!title) title = file.name.replace(/\.md$/i, '');
+    const description = (titleIdx >= 0 ? lines.slice(titleIdx + 1).join('\n') : text).trim();
+    return { key: `${file.name}|${file.size}|${file.lastModified}`, title, description, bytes: file.size };
+  };
+
+  const onBatchPick = async (files: FileList | File[]) => {
+    const md = Array.from(files).filter(f => /\.md$/i.test(f.name) || f.type === 'text/markdown');
+    if (md.length === 0) {
+      setBatchError('没有 .md 文件');
+      return;
+    }
+    const items = await Promise.all(md.map(parseMdFile));
+    setBatchItems(prev => {
+      // De-dupe on (name, size, mtime) so dropping the same folder twice
+      // doesn't double-create the requirements.
+      const seen = new Set(prev.map(p => p.key));
+      const fresh = items.filter(it => !seen.has(it.key));
+      return [...prev, ...fresh];
+    });
+    setBatchError('');
+  };
+
+  const submitBatch = async () => {
+    if (!id || batchItems.length === 0) return;
+    setBatchBusy(true);
+    setBatchError('');
+    const created: string[] = [];
+    const failed: { name: string; reason: string }[] = [];
+    for (const item of batchItems) {
+      try {
+        const r = await requirementsApi.create({
+          project_id: id,
+          // skip_organize=true + title-on-first-line → the backend's
+          // fallbackTitle extracts the same line we computed, so the
+          // title the user sees in the parser list is the title that
+          // actually lands in the requirements table.
+          description: item.title + '\n\n' + item.description,
+          kind: 'requirement',
+          skip_organize: true,
+        });
+        created.push(r.id);
+      } catch (err: any) {
+        failed.push({ name: item.title || item.key, reason: err?.message || String(err) });
+      }
+    }
+    if (batchParentId) {
+      for (const cid of created) {
+        try {
+          await requirementsApi.setParent(cid, batchParentId);
+        } catch (err: any) {
+          failed.push({ name: cid, reason: 'setParent: ' + (err?.message || String(err)) });
+        }
+      }
+    }
+    setReqs(await requirementsApi.list({ project_id: id }));
+    if (batchParentId) setReqExpanded(prev => new Set(prev).add(batchParentId));
+    setBatchBusy(false);
+    if (failed.length === 0) {
+      setShowBatchImport(false);
+      setBatchItems([]);
+      setBatchParentId('');
+    } else {
+      setBatchError(
+        `${created.length} 已创建，${failed.length} 失败：\n` +
+          failed.slice(0, 6).map(f => `• ${f.name}: ${f.reason}`).join('\n'),
+      );
+    }
+  };
+
+  const reqDragged = reqDragId ? reqs.find(r => r.id === reqDragId) : undefined;
+  const reqCanDrop = (target: Requirement) =>
+    !!reqDragged &&
+    reqDragged.id !== target.id &&
+    reqDragged.project_id === target.project_id &&
+    !target.parent_id &&
+    reqDragged.parent_id !== target.id &&
+    !reqHasChildren(reqDragged) &&
+    (reqDragged.child_count ?? 0) === 0;
+
+  const onReqDragStart = (e: DragEvent, r: Requirement) => {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', r.id);
+    setReqDragId(r.id);
+  };
+  const onReqDragOver = (e: DragEvent, target: Requirement) => {
+    if (!reqCanDrop(target)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (reqDropId !== target.id) setReqDropId(target.id);
+  };
+  const onReqDrop = (e: DragEvent, target: Requirement) => {
+    if (!reqCanDrop(target) || !reqDragged) return;
+    e.preventDefault();
+    void reqReparent(reqDragged, target.id);
+  };
+
+  const renderReqTreeToggle = (r: Requirement, depth: number) => {
+    if (depth > 0) return null;
+    const toggle = reqHasChildren(r) ? (
+      <RequirementTreeToggle
+        expanded={reqExpanded.has(r.id)}
+        onToggle={() => toggleReqExpanded(r.id)}
+        controlsId={`pr-req-children-${r.id}`}
+      />
+    ) : r.status === 'archived' ? (
+      <RequirementTreeSpacer />
+    ) : (
+      // No children yet — same `+` glyph, but it ATTACHES a sub-requirement
+      // instead of folding. Without it this column is a blank spacer and the
+      // hierarchy has no discoverable entry point but drag-and-drop.
+      <RequirementTreeToggle
+        expanded={false}
+        mode="add"
+        onAdd={() => setReqAddChildFor(cur => (cur === r.id ? null : r.id))}
+        controlsId={`pr-req-add-${r.id}`}
+      />
+    );
+    return (
+      <div className="req-tree-cell">
+        {toggle}
+        {reqAddChildFor === r.id && (
+          <div
+            className="req-tree-popover"
+            role="dialog"
+            aria-label={t('requirements.tree.addChildHeading', { parent: r.title || t('requirements.list.noTitle') })}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="req-tree-popover-title">
+              {t('requirements.tree.addChildHeading', { parent: r.title || t('requirements.list.noTitle') })}
+            </div>
+            {reqChildCandidates.length === 0 ? (
+              <div className="req-tree-popover-empty">
+                <div>{t('requirements.tree.addChildEmpty')}</div>
+                <div className="req-tree-popover-hint">{t('requirements.tree.addChildEmptyHint')}</div>
+              </div>
+            ) : (
+              <ul className="req-tree-popover-list">
+                {reqChildCandidates.map(c => (
+                  <li key={c.id}>
+                    <button
+                      type="button"
+                      className="req-tree-popover-item"
+                      onClick={() => { setReqAddChildFor(null); void reqReparent(c, r.id); }}
+                    >
+                      <span className="req-tree-popover-item-title">{c.title || t('requirements.list.noTitle')}</span>
+                      <StatusChips req={c} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   // Requirements tab pagination. The page is clamped to the (possibly shrunken)
   // list so a stale reqPage never escapes the array; the reset effect below
   // normally snaps back to page 1 after a list refresh.
-  const totalReqPages = Math.max(1, Math.ceil(sortedReqs.length / REQ_PAGE_SIZE));
+  const totalReqPages = Math.max(1, Math.ceil(reqTreeRows.length / REQ_PAGE_SIZE));
   const curReqPage = Math.min(reqPage, totalReqPages);
-  const pagedReqs = sortedReqs.slice((curReqPage - 1) * REQ_PAGE_SIZE, curReqPage * REQ_PAGE_SIZE);
+  const pagedReqRows = reqTreeRows.slice((curReqPage - 1) * REQ_PAGE_SIZE, curReqPage * REQ_PAGE_SIZE);
 
   // Render a group of knowledge entries under a labeled section. Reuses the
   // kb-card styles from KnowledgePage.css. The content preview is stripped of
@@ -1648,11 +1994,16 @@ export default function ProjectDetail() {
                 <table className="pr-table table-cards">
                   <thead>
                     <tr>
+                      <th className="req-tree-col" aria-label={t('requirements.tree.expand')} />
                       <th style={{ width: 110 }}>{t('projects.detail.colId')}</th>
-                      <th style={{ width: 70 }}>{t('projects.detail.colType')}</th>
+                      {/* Type cell now hosts the priority dot ahead of the
+                          kind-badge — the dot doesn't need its own column.
+                          Widened 70→96 so the dot + badge stays on one line
+                          across all kind values (issue / requirement / idea /
+                          wiki). */}
+                      <th style={{ width: 96 }}>{t('projects.detail.colType')}</th>
                       <th>{t('projects.detail.colTitle')}</th>
-                      <th style={{ width: 90 }}>{t('projects.detail.colPriority')}</th>
-                      <th style={{ width: 130 }}>{t('projects.detail.colStatus')}</th>
+                      <th style={{ width: 150 }}>{t('projects.detail.colStatus')}</th>
                       <th style={{ width: 140 }}>{t('projects.detail.colAgentServer')}</th>
                       <th style={{ width: 130 }}>{t('projects.detail.colTokens')}</th>
                       <th style={{ width: 110 }}>{t('projects.detail.colCost')}</th>
@@ -1760,6 +2111,14 @@ export default function ProjectDetail() {
               aria-controls="new-requirement-form"
             >
               {showCreateReq ? t('projects.detail.reqCollapseBtn') : t('projects.detail.reqNewBtn')}
+            </button>
+            <button
+              type="button"
+              className={`btn btn-sm${showBatchImport ? ' btn-primary is-open' : ''}`}
+              onClick={() => setShowBatchImport(v => !v)}
+              aria-expanded={showBatchImport}
+            >
+              {showBatchImport ? t('projects.detail.reqBatchCollapse', { defaultValue: '关闭批量导入' }) : t('projects.detail.reqBatchOpen', { defaultValue: '批量导入 md' })}
             </button>
           </div>
 
@@ -1900,6 +2259,96 @@ export default function ProjectDetail() {
             </div>
           )}
 
+          {showBatchImport && id && (
+            <div className="pr-batch-import">
+              <div className="pr-batch-import-row">
+                <label className="pr-batch-import-label">
+                  {t('projects.detail.reqBatchParentLabel', { defaultValue: '挂到父需求下（可选）' })}
+                </label>
+                <select
+                  value={batchParentId}
+                  onChange={e => setBatchParentId(e.target.value)}
+                  style={{ minWidth: 240 }}
+                >
+                  <option value="">{t('projects.detail.reqBatchParentNone', { defaultValue: '无（顶层）' })}</option>
+                  {reqs
+                    .filter(r => !r.parent_id && r.status !== 'archived')
+                    .map(r => (
+                      <option key={r.id} value={r.id}>{r.title || r.id}</option>
+                    ))}
+                </select>
+              </div>
+              <div
+                className="pr-batch-import-zone"
+                onClick={() => batchInputRef.current?.click()}
+                onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }}
+                onDrop={e => {
+                  e.preventDefault();
+                  if (e.dataTransfer.files.length > 0) void onBatchPick(e.dataTransfer.files);
+                }}
+              >
+                <input
+                  ref={batchInputRef}
+                  type="file"
+                  accept=".md"
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={e => {
+                    if (e.target.files) void onBatchPick(e.target.files);
+                    e.target.value = '';
+                  }}
+                />
+                <div className="pr-batch-import-zone-hint">
+                  {t('projects.detail.reqBatchDropHint', { defaultValue: '点击或拖入 .md 文件，每条成为一个需求（标题 = 第一行）' })}
+                </div>
+              </div>
+              {batchItems.length > 0 && (
+                <div className="pr-batch-import-list">
+                  <div className="pr-batch-import-list-head">
+                    {t('projects.detail.reqBatchPreview', { defaultValue: '已解析 {{n}} 条', n: batchItems.length })}
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => setBatchItems([])}
+                      style={{ marginLeft: 8 }}
+                    >
+                      {t('projects.detail.reqBatchClear', { defaultValue: '清空' })}
+                    </button>
+                  </div>
+                  <ul>
+                    {batchItems.map(it => (
+                      <li key={it.key}>
+                        <span className="pr-batch-import-item-title">{it.title}</span>
+                        <span className="pr-batch-import-item-meta">{(it.bytes / 1024).toFixed(1)} KB · {it.description.length} 字</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {batchError && <pre className="pr-batch-import-err">{batchError}</pre>}
+              <div className="pr-batch-import-actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={batchBusy || batchItems.length === 0}
+                  onClick={() => void submitBatch()}
+                >
+                  {batchBusy
+                    ? t('projects.detail.reqBatchBusy', { defaultValue: '创建中…' })
+                    : t('projects.detail.reqBatchSubmit', { count: batchItems.length, defaultValue: `创建 ${batchItems.length} 条` })}
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => { setShowBatchImport(false); setBatchItems([]); setBatchError(''); }}
+                  disabled={batchBusy}
+                >
+                  {t('projects.detail.reqBatchCancel', { defaultValue: '取消' })}
+                </button>
+              </div>
+            </div>
+          )}
+
           {reqsLoading && <div className="tab-empty">{t('projects.detail.reqLoading')}</div>}
           {reqsError && <div className="tab-empty" style={{ color: 'var(--color-error)' }}>{reqsError}</div>}
 
@@ -1927,6 +2376,7 @@ export default function ProjectDetail() {
                         arrow on the active column, sets aria-sort for screen
                         readers. Non-sortable columns (Type / Agent server /
                         Tokens / Cost) stay plain <th>. */}
+                    <th className="req-tree-col" aria-label={t('requirements.tree.expand')} />
                     <SortHeader
                       col="id"
                       width={110}
@@ -1935,7 +2385,10 @@ export default function ProjectDetail() {
                       sortDir={reqSortDir}
                       onSort={toggleSort}
                     />
-                    <th style={{ width: 70 }}>{t('projects.detail.colType')}</th>
+                    {/* Type cell now hosts the priority dot ahead of the
+                        kind-badge — see the overview recent table header
+                        for the rationale. Widened 70→96. */}
+                    <th style={{ width: 96 }}>{t('projects.detail.colType')}</th>
                     <SortHeader
                       col="title"
                       label={t('projects.detail.colTitle')}
@@ -1943,17 +2396,13 @@ export default function ProjectDetail() {
                       sortDir={reqSortDir}
                       onSort={toggleSort}
                     />
-                    <SortHeader
-                      col="priority"
-                      width={90}
-                      label={t('projects.detail.colPriority')}
-                      sortColumn={reqSortColumn}
-                      sortDir={reqSortDir}
-                      onSort={toggleSort}
-                    />
+                    {/* Priority column removed — the dot moved into the
+                        Type cell above. Status widened 130→150 so a single
+                        chip group with two stacked badges (e.g. "草稿 +
+                        跳过方案") doesn't get forced onto a second row. */}
                     <SortHeader
                       col="status"
-                      width={130}
+                      width={150}
                       label={t('projects.detail.colStatus')}
                       sortColumn={reqSortColumn}
                       sortDir={reqSortDir}
@@ -1981,7 +2430,7 @@ export default function ProjectDetail() {
                   </tr>
                 </thead>
                 <tbody>
-                  {renderRequirementRows(pagedReqs)}
+                  {renderRequirementRows(pagedReqRows, { hierarchy: true })}
                 </tbody>
               </table>
             </div>
