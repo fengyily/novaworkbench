@@ -25,6 +25,8 @@ import { appendLogLine, computeUsage, type LogLine, type UsageInfo } from '../ut
 import { modelContextWindow } from '../utils/modelWindow';
 import AtMentionTextarea from './AtMentionTextarea';
 import ModelSelect from './ModelSelect';
+import { useAttachmentUpload } from './RichDescriptionEditor/useAttachmentUpload';
+import { extractImageFiles, extractImageFilesFromList, spliceAt } from './RichDescriptionEditor/imageIngest';
 import ContextUsageBar from './ContextUsageBar';
 import { IconRobot, IconDashboard, IconSparkles, IconCopy, IconCheck, IconArchive, IconHourglass, IconGlobe } from './icons';
 import { fmtDateTime } from '../utils/intl';
@@ -1983,6 +1985,108 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     return () => { cancelled = true; };
   }, []);
   const [prompt, setPrompt] = useState('');
+
+  // --- Screenshot ingestion (paste / drop / file picker) -----------------
+  // Parity with the create-requirement form's RichDescriptionEditor: any
+  // image/* blob the user pastes, drops, or picks is compressed by
+  // compressImage (1600px longest edge, 2MB, JPEG q0.85 — already sized so
+  // the model can read the result), uploaded to the requirement's
+  // requirement_attachments row, and referenced from the sub-task body via a
+  // `![image](nova://attachment/<id>)` marker.
+  //
+  // The backend rewrites those markers to real on-disk paths and appends the
+  // attachment manifest before handing the prompt to claude, so the marker
+  // only needs to survive as a stable, renderable reference here.
+  const { uploads, upload, reset } = useAttachmentUpload(requirementId);
+  const promptAreaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+  // Last known caret position. The forwardRef'd textarea is owned by
+  // AtMentionTextarea, so we can't read selectionStart between renders.
+  const cursorRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
+  // Mirror of the latest `prompt` for the async upload callback. Compress +
+  // upload takes hundreds of ms, so a plain useCallback closure would splice
+  // the marker into a stale snapshot and silently swallow anything the user
+  // typed while the image was in flight. Reading this at insert time closes
+  // that race.
+  const promptRef = useRef(prompt);
+  useEffect(() => { promptRef.current = prompt; }, [prompt]);
+
+  const updateCursorFromTextarea = useCallback(() => {
+    const ta = promptAreaRef.current;
+    if (!ta) return;
+    cursorRef.current = { start: ta.selectionStart, end: ta.selectionEnd };
+  }, []);
+
+  const insertAtCursor = useCallback((text: string) => {
+    const { start, end } = cursorRef.current;
+    const { next, cursor } = spliceAt(promptRef.current, start, end, text);
+    setPrompt(next);
+    requestAnimationFrame(() => {
+      const ta = promptAreaRef.current;
+      if (ta) {
+        ta.focus();
+        ta.setSelectionRange(cursor, cursor);
+      }
+      cursorRef.current = { start: cursor, end: cursor };
+    });
+  }, []);
+
+  const ingest = useCallback((file: File) => {
+    upload(file, {
+      description: t('components.subTaskPanel.pastedImage'),
+      onInsert: (attId) => insertAtCursor(`![image](nova://attachment/${attId})\n`),
+    });
+  }, [upload, insertAtCursor, t]);
+
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    updateCursorFromTextarea();
+    const files = extractImageFiles(e.clipboardData?.items ?? null);
+    if (files.length === 0) return;
+    e.preventDefault();
+    files.forEach(ingest);
+  }, [ingest, updateCursorFromTextarea]);
+
+  // Drop is wired to the .sub-composer container only — NOT to the textarea
+  // as well. A drop on the textarea bubbles up to the container, so binding
+  // both would run this twice and emit two markers for one image.
+  const handleDrop = useCallback((e: React.DragEvent<HTMLElement>) => {
+    updateCursorFromTextarea();
+    setIsDragOver(false);
+    const files = extractImageFilesFromList(e.dataTransfer?.files ?? null);
+    if (files.length === 0) return;
+    e.preventDefault();
+    files.forEach(ingest);
+  }, [ingest, updateCursorFromTextarea]);
+
+  const handleDragOver = useCallback((e: React.DragEvent<HTMLElement>) => {
+    if (e.dataTransfer?.types?.includes('Files')) {
+      e.preventDefault();
+      setIsDragOver(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent<HTMLElement>) => {
+    // dragleave also fires when the pointer crosses onto a child element;
+    // only clear the highlight when the cursor actually leaves the container.
+    const next = e.relatedTarget as Node | null;
+    if (next && e.currentTarget.contains(next)) return;
+    setIsDragOver(false);
+  }, []);
+
+  const triggerFileInput = useCallback(() => {
+    // Snapshot the caret before the OS file dialog steals focus. Reading
+    // selectionStart afterwards would be too late.
+    updateCursorFromTextarea();
+    fileInputRef.current?.click();
+  }, [updateCursorFromTextarea]);
+
+  const handleFilesPicked = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    extractImageFilesFromList(e.target.files).forEach(ingest);
+    // Reset so picking the same file twice still fires onChange.
+    e.target.value = '';
+  }, [ingest]);
+
   // Title input was removed: opening a sub-task now only needs a description.
   // The backend auto-derives a card-header title from the prompt (first 40
   // chars via truncateForTitle) when the caller leaves the title blank, so
@@ -2512,6 +2616,10 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         report_mode: reportMode,
       });
       setPrompt('');
+      // Drop the screenshot status pills too — the images are already
+      // persisted as requirement attachments, the pills are just the
+      // transient upload log.
+      reset();
       // Reset the report-mode radio so the next sub-task gets a fresh auto
       // pick. The session-mode radio is left alone on purpose — a
       // stale-session auto-promote may have been the user's last deliberate
@@ -2523,7 +2631,7 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
     } finally {
       setSubmitting(false);
     }
-  }, [prompt, submitting, createModel, createConfigId, sessionMode, createAgentServerId, reportMode, requirementId, loadList, t]);
+  }, [prompt, submitting, createModel, createConfigId, sessionMode, createAgentServerId, reportMode, requirementId, loadList, t, reset]);
 
   // --- Manual re-split (🔄 Re-split) ------------------------------------
   // Escape hatch for when StartCoding's auto-orchestration produced no
@@ -2835,16 +2943,23 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
         </div>
       )}
 
-      <div className="sub-composer">
+      <div
+        className={`sub-composer${isDragOver ? ' is-dragover' : ''}`}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
         {/* Composer textarea — title field removed; opening a sub-task
             only needs a description. The backend auto-derives a card-header
             title from the prompt's first 40 chars when title is omitted. */}
         <AtMentionTextarea
+          ref={promptAreaRef}
           value={prompt}
           onChange={setPrompt}
           placeholder={t('components.subTaskPanel.composerPlaceholder')}
           rows={4}
           disabled={submitting}
+          onPaste={handlePaste}
           className="sub-composer-textarea"
         />
         {/* Sub-task model picker — the SINGLE picker for the panel's
@@ -2980,10 +3095,43 @@ export default function SubTaskPanel({ requirementId, codingSessionId, requireme
           </div>
           <span className="sub-session-mode-desc" role="note">{activeReportMode.desc}</span>
         </div>
+        {uploads.length > 0 && (
+          <div className="sub-composer-uploads">
+            {uploads.map((u) => (
+              <span key={u.id} className={`sub-upload-pill upload-${u.status}`}>
+                {u.filename} ·{' '}
+                {u.status === 'error'
+                  ? `✗ ${u.error || t('components.richEditor.upload_error')}`
+                  : t(`components.richEditor.upload_${u.status}`, u.status)}
+              </span>
+            ))}
+          </div>
+        )}
         <div className="sub-composer-toolbar">
           <span className="sub-composer-hint">
             {t('components.subTaskPanel.composerHint')}
           </span>
+          {/* 📷 opens the same "pick images" flow the create-requirement
+              editor uses; paste and drop are handled on the textarea and
+              the composer container respectively. */}
+          <button
+            type="button"
+            className="sub-composer-image-btn"
+            onClick={triggerFileInput}
+            disabled={submitting || reSplitBusy}
+            title={t('components.subTaskPanel.imageHint')}
+            aria-label={t('components.subTaskPanel.insertImage')}
+          >
+            📷
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            hidden
+            onChange={handleFilesPicked}
+          />
           {error && <span className="sub-composer-err">{error}</span>}
           <button
             type="button"
