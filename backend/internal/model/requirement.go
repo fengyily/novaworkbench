@@ -25,6 +25,13 @@ type Requirement struct {
 	// created directly (no parent) or that predate this column. The original
 	// row is left untouched so the discussion thread stays intact.
 	SourceRequirementID string `json:"source_requirement_id"`
+	// ParentID nests this requirement under a master requirement (one level
+	// only, same project). Empty = top level. NOT the same as
+	// SourceRequirementID, which is promotion provenance.
+	ParentID string `json:"parent_id"`
+	// ChildCount is a read-only derived count of non-archived children,
+	// populated by List only.
+	ChildCount      int    `json:"child_count"`
 	DesignSessionID     string `json:"design_session_id"`
 	// WikiDocs stores the Markdown document body for a wiki-kind requirement.
 	// Produced by the plan-mode "生成知识库文档" wizard stage (handler/wizard_wiki.go

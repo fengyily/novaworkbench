@@ -10,7 +10,7 @@
 // Kind filter is multi-select; the backend List accepts a comma-separated
 // kind list, so the toggles are joined into CSV.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type DragEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -21,6 +21,7 @@ import {
 } from '../api/client';
 import { tLabel } from '../i18n/label';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
+import { RequirementTreeToggle, RequirementTreeSpacer } from '../components/RequirementTreeToggle';
 import { DevSourceBadge } from '../components/DevSourceBadge';
 import { StatusChips } from '../components/StatusChips';
 import { fmtRelative, fmtDateTime, fmtRunAtRelative } from '../utils/intl';
@@ -84,6 +85,13 @@ export default function RequirementsList() {
   const [search, setSearch] = useState('');
 
   const [showCreate, setShowCreate] = useState(false);
+
+  // Master/child hierarchy: expanded master ids, drag state, a11y live text.
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropId, setDropId] = useState<string | null>(null);
+  const [dropOutActive, setDropOutActive] = useState(false);
+  const [liveMsg, setLiveMsg] = useState('');
 
   useEffect(() => {
     projectsApi.list().then(setProjects).catch(() => {});
@@ -173,6 +181,307 @@ export default function RequirementsList() {
         {fmtRunAtRelative(r.scheduled_run_at)}
       </span>
     );
+  };
+
+  // ── Hierarchy ──────────────────────────────────────────────────────
+  // The API returns a flat list; the tree is assembled here. A child whose
+  // parent is not in the current result set (filtered out / archived) is
+  // promoted to a top-level row so it never silently disappears.
+  const filtersActive = !!search.trim() || !!statusFilter || !!kindFilterCsv;
+  const { rows, childrenByParent, firstChildOf, anyParent } = useMemo(() => {
+    const ids = new Set(requirements.map(r => r.id));
+    const byParent = new Map<string, Requirement[]>();
+    const top: Requirement[] = [];
+    for (const r of requirements) {
+      if (r.parent_id && ids.has(r.parent_id)) {
+        const arr = byParent.get(r.parent_id) || [];
+        arr.push(r);
+        byParent.set(r.parent_id, arr);
+      } else {
+        top.push(r);
+      }
+    }
+    const out: { r: Requirement; depth: number }[] = [];
+    const first = new Map<string, string>();
+    for (const r of top) {
+      out.push({ r, depth: 0 });
+      const kids = byParent.get(r.id);
+      // Active search / filters auto-expand so matching children are visible.
+      if (kids && (expanded.has(r.id) || filtersActive)) {
+        first.set(r.id, kids[0].id);
+        for (const c of kids) out.push({ r: c, depth: 1 });
+      }
+    }
+    return { rows: out, childrenByParent: byParent, firstChildOf: first, anyParent: byParent.size > 0 };
+  }, [requirements, expanded, filtersActive]);
+
+  const hasChildren = (r: Requirement) => (childrenByParent.get(r.id)?.length ?? 0) > 0;
+  const isExpanded = (r: Requirement) => expanded.has(r.id) || filtersActive;
+  const toggleExpanded = (id: string) =>
+    setExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const treeToggle = (r: Requirement, depth: number) => {
+    if (depth > 0) return null;
+    // On mobile the toggle sits beside the card (see renderMobileCard).
+    if (!hasChildren(r)) return <RequirementTreeSpacer />;
+    return (
+      <RequirementTreeToggle
+        expanded={isExpanded(r)}
+        onToggle={() => toggleExpanded(r.id)}
+        controlsId={`req-children-${r.id}`}
+      />
+    );
+  };
+
+  const childChip = (r: Requirement, depth: number) => {
+    const n = childrenByParent.get(r.id)?.length ?? 0;
+    if (depth === 0 && n > 0) {
+      return <span className="req-tag-chip req-tree-count">{t('requirements.tree.childCount', { n })}</span>;
+    }
+    return null;
+  };
+
+  const draggedReq = dragId ? requirements.find(r => r.id === dragId) : undefined;
+  const canDrop = (target: Requirement) =>
+    !!draggedReq &&
+    draggedReq.id !== target.id &&
+    draggedReq.project_id === target.project_id &&
+    !target.parent_id &&
+    draggedReq.parent_id !== target.id &&
+    !hasChildren(draggedReq) &&
+    (draggedReq.child_count ?? 0) === 0;
+
+  const endDrag = () => {
+    setDragId(null);
+    setDropId(null);
+    setDropOutActive(false);
+  };
+
+  const onDragStart = (e: DragEvent, r: Requirement) => {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', r.id);
+    setDragId(r.id);
+  };
+  const onRowDragOver = (e: DragEvent, target: Requirement) => {
+    if (!canDrop(target)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (dropId !== target.id) setDropId(target.id);
+  };
+
+  const reparent = async (child: Requirement, parentId: string) => {
+    try {
+      await requirementsApi.setParent(child.id, parentId);
+      if (parentId) {
+        const parent = requirements.find(r => r.id === parentId);
+        setExpanded(prev => new Set(prev).add(parentId));
+        setLiveMsg(t('requirements.tree.merged', { child: child.title, parent: parent?.title || parentId }));
+      } else {
+        setLiveMsg(t('requirements.tree.detached', { child: child.title }));
+      }
+      await loadRequirements();
+    } catch (err: any) {
+      const raw: string = err?.message || String(err);
+      let msg = t('requirements.tree.parentFailed', { msg: raw });
+      if (raw.includes('different project')) msg = t('requirements.tree.errCrossProject');
+      else if (raw.includes('already a child')) msg = t('requirements.tree.errTargetIsChild');
+      else if (raw.includes('has child requirements')) msg = t('requirements.tree.errSelfHasChildren');
+      // eslint-disable-next-line no-alert
+      window.alert(msg);
+    } finally {
+      endDrag();
+    }
+  };
+
+  const onRowDrop = (e: DragEvent, target: Requirement) => {
+    if (!canDrop(target) || !draggedReq) return;
+    e.preventDefault();
+    void reparent(draggedReq, target.id);
+  };
+
+  const renderDesktopRow = (r: Requirement, depth: number) => {
+    const k: Kind = kindOf(r);
+    return (
+        <tr
+          key={r.id}
+          id={firstChildOf.get(r.parent_id || '') === r.id ? `req-children-${r.parent_id}` : undefined}
+          onClick={() => navigate(`/requirements/${r.id}`)}
+          className={`req-row${depth > 0 ? ' req-row-child' : ''}${dragId === r.id ? ' dragging' : ''}${dropId === r.id ? ' drop-target' : ''}`}
+          draggable
+          onDragStart={e => onDragStart(e, r)}
+          onDragEnd={endDrag}
+          onDragOver={e => onRowDragOver(e, r)}
+          onDragLeave={() => dropId === r.id && setDropId(null)}
+          onDrop={e => onRowDrop(e, r)}
+        >
+          <td data-label={t('requirements.list.colType')}>
+            <span
+              className={`kind-badge kind-${k}`}
+              title={tLabel(t, kindLabelKeys, k)}
+            >
+              {tLabel(t, kindShortLabelKeys, k)}
+            </span>
+          </td>
+          <td className={`req-row-title${depth > 0 ? ' is-child' : ''}`} data-label={t('requirements.list.colTitle')}>
+            <div className="req-row-title-text">
+              {treeToggle(r, depth)}
+              {/* Preset marks (important / follow_up / blocked / at_risk)
+                  render INLINE with the title (chip strip BEFORE the
+                  schedule clock + title text) so marked requirements
+                  stay on a single line. Empty list → nothing rendered
+                  (so unmarked rows don't get extra spacing). Colors
+                  come from MARK_PRESETS in api/client.ts so the
+                  detail-page editor stays in sync. */}
+              <MarksStrip marks={r.marks} />
+              {scheduleClock(r)}
+              <span className="req-row-title-text-label">
+                {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
+              </span>
+              {childChip(r, depth)}
+            </div>
+            {/* Mirror the project-page chip strip: tags render
+                under the title as a 3-chip cap with +N overflow.
+                Force-closed rows carry a small amber badge so the
+                cross-project list reads consistently with the
+                in-project tab. */}
+            {(() => {
+              const raw = (r.tags || '').trim();
+              const list: string[] = (!raw || raw === '[]') ? [] : (() => {
+                try {
+                  const parsed = JSON.parse(raw);
+                  return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+                } catch { return []; }
+              })();
+              if (list.length === 0 && !r.closed_at) return null;
+              const visible = list.slice(0, 3);
+              const overflow = list.length - visible.length;
+              return (
+                <div className="req-row-title-tags">
+                  {r.closed_at && (
+                    <span className="req-tag-chip req-row-title-tag req-row-title-tag-closed" title={r.closed_reason || t('requirements.detail2.closedBadge')}>
+                      {t('requirements.detail2.closedBadge')}
+                    </span>
+                  )}
+                  {visible.map(tag => (
+                    <span key={tag} className="req-tag-chip req-row-title-tag" title={tag}>{tag}</span>
+                  ))}
+                  {overflow > 0 && (
+                    <span className="req-tag-chip req-row-title-tag req-row-title-tag-more" title={list.slice(3).join(', ')}>+{overflow}</span>
+                  )}
+                </div>
+              );
+            })()}
+          </td>
+          <td data-label={t('requirements.list.colStatus')}>
+            <StatusChips req={r} />
+          </td>
+          {/* Model column — the developer-stage model actually
+              dispatched to the Claude CLI (the value pinned in
+              --settings env). Empty for requirements whose coding
+              stage hasn't run yet (or that predate this column);
+              we show a dim em-dash rather than guessing. */}
+          <td data-label={t('requirements.list.colModel')} className="req-row-model">
+            {r.developer_model ? (
+              <span className="req-row-model-tag" title={r.developer_model}>
+                🤖 {r.developer_model}
+              </span>
+            ) : (
+              <span className="req-row-dim">—</span>
+            )}
+          </td>
+          <td data-label={t('requirements.list.colProject')}>{projectNameOf(r.project_id)}</td>
+          <td data-label={t('requirements.list.colPriority')}>
+            {r.priority ? (
+              <span className={`priority-tag priority-${r.priority}`}>
+                {tLabel(t, priorityLabelKeys, r.priority)}
+              </span>
+            ) : (
+              <span className="req-row-dim">-</span>
+            )}
+          </td>
+          {/* Agent-server column: now carries the full DevSourceBadge
+              (local dev / 🛰️ agent server name) so users see where
+              the requirement actually ran. The previous plain
+              🖥️ <name> / local text was redundant with the old
+              dev-env column — merging them removes the
+              duplication. The badge itself falls back to nothing
+              when dev_source is empty (coding never ran). */}
+          <td data-label={t('requirements.list.colAgentServer')} className="req-row-devsource">
+            <DevSourceBadge req={r} compact />
+          </td>
+          <td
+            data-label={t('requirements.list.colUpdated')}
+            className="req-row-updated"
+            title={r.updated_at ? fmtRelative(r.updated_at) : undefined}
+          >
+            {fmtDateTime(r.updated_at)}
+          </td>
+        </tr>
+    );
+  };
+
+  const renderMobileCard = (r: Requirement, depth: number) => {
+      const k: Kind = kindOf(r);
+      const projectName = projectNameOf(r.project_id);
+      const card = (
+        <button
+          type="button"
+          className="req-card-mobile"
+          onClick={() => navigate(`/requirements/${r.id}`)}
+        >
+          <div className="req-card-mobile-head">
+            <span className={`kind-badge kind-${k}`} title={tLabel(t, kindLabelKeys, k)}>
+              {tLabel(t, kindShortLabelKeys, k)}
+            </span>
+            <StatusChips req={r} />
+          </div>
+          {/* Preset marks on mobile: same chip strip as the desktop
+              title column, now rendered INLINE with the title (chip
+              strip → schedule clock → title text) so marked cards
+              stay on a single line. Empty list → nothing rendered
+              (so unmarked cards keep their natural height). Mirrors
+              the design's "mark 比 priority 更显眼 — 因为它直接
+              影响排序" intent. */}
+          <div className="req-card-mobile-title">
+            <MarksStrip marks={r.marks} />
+            {scheduleClock(r)}
+            <span className="req-row-title-text-label">
+              {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
+            </span>
+            {childChip(r, depth)}
+          </div>
+          <div className="req-card-mobile-foot">
+            <span className="req-card-mobile-project" title={projectName}>
+              📁 {projectName}
+            </span>
+            <span className="req-card-mobile-spacer" />
+            {/* Dev-environment chip — mirrors the desktop Agent-server
+                column. DevSourceBadge returns null when the coding
+                stage hasn't run yet, so legacy rows simply render no
+                chip (no local-vs-agent guess). */}
+            <DevSourceBadge req={r} compact />
+            {r.priority && (
+              <span className={`priority-dot priority-${r.priority}`} title={t('requirements.list.priorityTitle', { label: tLabel(t, priorityLabelKeys, r.priority) })} />
+            )}
+            <span className="req-card-mobile-time">{fmtRelative(r.updated_at)}</span>
+          </div>
+        </button>
+      );
+      return (
+        <div
+          key={r.id}
+          id={firstChildOf.get(r.parent_id || '') === r.id ? `req-children-${r.parent_id}` : undefined}
+          className={`req-card-mobile-wrap${depth > 0 ? ' req-card-mobile-child' : ''}`}
+        >
+          {depth === 0 && (hasChildren(r) ? treeToggle(r, depth) : anyParent ? <RequirementTreeSpacer /> : null)}
+          {card}
+        </div>
+      );
   };
 
   return (
@@ -289,6 +598,8 @@ export default function RequirementsList() {
         </span>
       </div>
 
+      <div className="sr-only" aria-live="polite" role="status">{liveMsg}</div>
+
       {/* Table (desktop view). `table-cards` is a no-op class on desktop
           (the rules only kick in below 768px); on mobile the table is
           hidden via .req-table { display: none } and the dedicated
@@ -296,6 +607,24 @@ export default function RequirementsList() {
           fallback for environments that fall back to the table-cards
           utility (e.g. width between 720-768px). */}
       <div className="req-table-wrap desktop-only">
+        <div
+          className={`req-dropout${draggedReq?.parent_id ? ' visible' : ''}${dropOutActive ? ' active' : ''}`}
+          aria-hidden={!draggedReq?.parent_id}
+          onDragOver={e => {
+            if (!draggedReq?.parent_id) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            setDropOutActive(true);
+          }}
+          onDragLeave={() => setDropOutActive(false)}
+          onDrop={e => {
+            if (!draggedReq?.parent_id) return;
+            e.preventDefault();
+            void reparent(draggedReq, '');
+          }}
+        >
+          {t('requirements.tree.dropOut')}
+        </div>
         {loading ? (
           <div className="tab-empty"><p>{t('requirements.list.loading')}</p></div>
         ) : requirements.length === 0 ? (
@@ -317,113 +646,7 @@ export default function RequirementsList() {
               </tr>
             </thead>
             <tbody>
-              {requirements.map(r => {
-                const k: Kind = kindOf(r);
-                return (
-                  <tr key={r.id} onClick={() => navigate(`/requirements/${r.id}`)} className="req-row">
-                    <td data-label={t('requirements.list.colType')}>
-                      <span
-                        className={`kind-badge kind-${k}`}
-                        title={tLabel(t, kindLabelKeys, k)}
-                      >
-                        {tLabel(t, kindShortLabelKeys, k)}
-                      </span>
-                    </td>
-                    <td className="req-row-title" data-label={t('requirements.list.colTitle')}>
-                      <div className="req-row-title-text">
-                        {/* Preset marks (important / follow_up / blocked / at_risk)
-                            render INLINE with the title (chip strip BEFORE the
-                            schedule clock + title text) so marked requirements
-                            stay on a single line. Empty list → nothing rendered
-                            (so unmarked rows don't get extra spacing). Colors
-                            come from MARK_PRESETS in api/client.ts so the
-                            detail-page editor stays in sync. */}
-                        <MarksStrip marks={r.marks} />
-                        {scheduleClock(r)}
-                        <span className="req-row-title-text-label">
-                          {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
-                        </span>
-                      </div>
-                      {/* Mirror the project-page chip strip: tags render
-                          under the title as a 3-chip cap with +N overflow.
-                          Force-closed rows carry a small amber badge so the
-                          cross-project list reads consistently with the
-                          in-project tab. */}
-                      {(() => {
-                        const raw = (r.tags || '').trim();
-                        const list: string[] = (!raw || raw === '[]') ? [] : (() => {
-                          try {
-                            const parsed = JSON.parse(raw);
-                            return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
-                          } catch { return []; }
-                        })();
-                        if (list.length === 0 && !r.closed_at) return null;
-                        const visible = list.slice(0, 3);
-                        const overflow = list.length - visible.length;
-                        return (
-                          <div className="req-row-title-tags">
-                            {r.closed_at && (
-                              <span className="req-tag-chip req-row-title-tag req-row-title-tag-closed" title={r.closed_reason || t('requirements.detail2.closedBadge')}>
-                                {t('requirements.detail2.closedBadge')}
-                              </span>
-                            )}
-                            {visible.map(tag => (
-                              <span key={tag} className="req-tag-chip req-row-title-tag" title={tag}>{tag}</span>
-                            ))}
-                            {overflow > 0 && (
-                              <span className="req-tag-chip req-row-title-tag req-row-title-tag-more" title={list.slice(3).join(', ')}>+{overflow}</span>
-                            )}
-                          </div>
-                        );
-                      })()}
-                    </td>
-                    <td data-label={t('requirements.list.colStatus')}>
-                      <StatusChips req={r} />
-                    </td>
-                    {/* Model column — the developer-stage model actually
-                        dispatched to the Claude CLI (the value pinned in
-                        --settings env). Empty for requirements whose coding
-                        stage hasn't run yet (or that predate this column);
-                        we show a dim em-dash rather than guessing. */}
-                    <td data-label={t('requirements.list.colModel')} className="req-row-model">
-                      {r.developer_model ? (
-                        <span className="req-row-model-tag" title={r.developer_model}>
-                          🤖 {r.developer_model}
-                        </span>
-                      ) : (
-                        <span className="req-row-dim">—</span>
-                      )}
-                    </td>
-                    <td data-label={t('requirements.list.colProject')}>{projectNameOf(r.project_id)}</td>
-                    <td data-label={t('requirements.list.colPriority')}>
-                      {r.priority ? (
-                        <span className={`priority-tag priority-${r.priority}`}>
-                          {tLabel(t, priorityLabelKeys, r.priority)}
-                        </span>
-                      ) : (
-                        <span className="req-row-dim">-</span>
-                      )}
-                    </td>
-                    {/* Agent-server column: now carries the full DevSourceBadge
-                        (local dev / 🛰️ agent server name) so users see where
-                        the requirement actually ran. The previous plain
-                        🖥️ <name> / local text was redundant with the old
-                        dev-env column — merging them removes the
-                        duplication. The badge itself falls back to nothing
-                        when dev_source is empty (coding never ran). */}
-                    <td data-label={t('requirements.list.colAgentServer')} className="req-row-devsource">
-                      <DevSourceBadge req={r} compact />
-                    </td>
-                    <td
-                      data-label={t('requirements.list.colUpdated')}
-                      className="req-row-updated"
-                      title={r.updated_at ? fmtRelative(r.updated_at) : undefined}
-                    >
-                      {fmtDateTime(r.updated_at)}
-                    </td>
-                  </tr>
-                );
-              })}
+              {rows.map(({ r, depth }) => renderDesktopRow(r, depth))}
             </tbody>
           </table>
         )}
@@ -448,54 +671,7 @@ export default function RequirementsList() {
             </p>
           </div>
         ) : (
-          requirements.map(r => {
-            const k: Kind = kindOf(r);
-            const projectName = projectNameOf(r.project_id);
-            return (
-              <button
-                key={r.id}
-                type="button"
-                className="req-card-mobile"
-                onClick={() => navigate(`/requirements/${r.id}`)}
-              >
-                <div className="req-card-mobile-head">
-                  <span className={`kind-badge kind-${k}`} title={tLabel(t, kindLabelKeys, k)}>
-                    {tLabel(t, kindShortLabelKeys, k)}
-                  </span>
-                  <StatusChips req={r} />
-                </div>
-                {/* Preset marks on mobile: same chip strip as the desktop
-                    title column, now rendered INLINE with the title (chip
-                    strip → schedule clock → title text) so marked cards
-                    stay on a single line. Empty list → nothing rendered
-                    (so unmarked cards keep their natural height). Mirrors
-                    the design's "mark 比 priority 更显眼 — 因为它直接
-                    影响排序" intent. */}
-                <div className="req-card-mobile-title">
-                  <MarksStrip marks={r.marks} />
-                  {scheduleClock(r)}
-                  <span className="req-row-title-text-label">
-                    {r.title || <em style={{ color: '#94A3B8' }}>{t('requirements.list.noTitle')}</em>}
-                  </span>
-                </div>
-                <div className="req-card-mobile-foot">
-                  <span className="req-card-mobile-project" title={projectName}>
-                    📁 {projectName}
-                  </span>
-                  <span className="req-card-mobile-spacer" />
-                  {/* Dev-environment chip — mirrors the desktop Agent-server
-                      column. DevSourceBadge returns null when the coding
-                      stage hasn't run yet, so legacy rows simply render no
-                      chip (no local-vs-agent guess). */}
-                  <DevSourceBadge req={r} compact />
-                  {r.priority && (
-                    <span className={`priority-dot priority-${r.priority}`} title={t('requirements.list.priorityTitle', { label: tLabel(t, priorityLabelKeys, r.priority) })} />
-                  )}
-                  <span className="req-card-mobile-time">{fmtRelative(r.updated_at)}</span>
-                </div>
-              </button>
-            );
-          })
+          rows.map(({ r, depth }) => renderMobileCard(r, depth))
         )}
       </div>
 

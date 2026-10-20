@@ -329,6 +329,25 @@ func (h *RequirementHandler) UpdateMarks(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, 200, item)
 }
 
+// SetParent nests a requirement under a master requirement, or detaches it.
+// Body shape: {"parent_id": "req_xxx"}; an empty string moves it back to top
+// level. Hierarchy rules (same project, one level) live in the service.
+func (h *RequirementHandler) SetParent(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ParentID string `json:"parent_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, 400, "INVALID", "Invalid JSON")
+		return
+	}
+	item, err := h.svc.SetParent(r.PathValue("id"), body.ParentID)
+	if err != nil {
+		writeError(w, 400, "SET_PARENT_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, 200, item)
+}
+
 // Close force-closes a requirement from any non-archived state. Unlike
 // PATCH /status (which is gated by validTransitions and only reachable from
 // `developing` → `done` via the natural "开发完成" gate), Close lets the

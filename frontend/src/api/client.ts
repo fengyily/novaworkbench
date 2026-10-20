@@ -830,6 +830,11 @@ export interface Requirement {
   // column. Rendered as a "← source: <title>" link in the detail header so the
   // user can jump back to the originating idea.
   source_requirement_id?: string;
+  // ParentID nests this row under a master requirement (one level, same
+  // project). Empty / undefined = top level. Unrelated to source_requirement_id.
+  parent_id?: string;
+  // Derived by List only: number of non-archived children.
+  child_count?: number;
   // SourceReviewID points at the code_reviews row that seeded this
   // requirement via the Review "create issue" action. Distinct from
   // source_requirement_id (which is for idea→requirement promotion) and
@@ -1297,6 +1302,10 @@ export const requirementsApi = {
   // sort order — rows with any mark float above unmarked rows.
   updateMarks: (id: string, marks: string[]) =>
     api.put<Requirement>(`/api/requirements/${id}/marks`, { marks }),
+  // Nest a requirement under a master requirement; '' detaches it. The
+  // server enforces same-project / one-level rules and returns 400 otherwise.
+  setParent: (id: string, parentId: string) =>
+    api.put<Requirement>(`/api/requirements/${id}/parent`, { parent_id: parentId }),
   // Promote a finished Issue or Idea into a Requirement. Only one-way (issue/idea → requirement);
   // the backend validates the rule and rejects everything else with a 400.
   updateKind: (id: string, kind: Kind) =>

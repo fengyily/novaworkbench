@@ -221,6 +221,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Features
+
+* **requirements:** add master/sub-requirement hierarchy — `/requirements` rows show a `[+]` toggle to expand sub-requirements, existing requirements can be dragged under a master (or into the detach zone), and the detail page has a "Parent requirement" selector (one level, same project; deleting a master detaches its children)
+
 ### Bug Fixes
 
 * **merge/shell-pr:** 本地自动推送（shell 路径）创建的 PR 标题与正文不再遵循项目「提交风格」设置（[req_9ead19cd39f632fd](https://github.com/fengyily/novaworkbench/issues/269)）

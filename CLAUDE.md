@@ -87,7 +87,7 @@ Services hold `*db.DB` (not `*sql.DB`) — a thin wrapper that rebinds `?`→`$N
 | 表 | ID 前缀 | 一句话 |
 |---|---|---|
 | `projects` / `memories` / `knowledge` | `proj_` / `mem_` / `kb_` | 项目元数据 / 跨项目 AI 记忆 / 文档扫描条目(upsert by source_ref/source_type) |
-| `requirements` / `conversations` / `refinement_chats` / `coding_chats` | `req_` / (uuid) / (PK=req_id) | 需求+kind/status/design_docs/calendar / Claude 会话 / 分析师会话 / 开发者会话 |
+| `requirements` / `conversations` / `refinement_chats` / `coding_chats` | `req_` / (uuid) / (PK=req_id) | 需求+kind/status/design_docs/calendar(+`parent_id` 主/子需求,仅一层、同项目,与 `source_requirement_id` 转需求溯源语义不同;`PUT /api/requirements/{id}/parent`,删除主需求时子需求自动脱离) / Claude 会话 / 分析师会话 / 开发者会话 |
 | `project_run_configs` / `platform_tokens` / `roles` / `acl_roles` / `permissions` | (PK=proj_id) / `tok_` / 固定 / `arole_` / 固定 | docker-compose run 配置 / GitHub/GitLab/Gitea Token / **AI persona**(注 system prompt) / **RBAC 角色**(`RequirePermission` 用) / 权限枚举 |
 | `settings` / `claude_configs` / `weekly_reports` / `job_logs` / `token_usage` | (PK=key) / `ccfg_` / - / (PK=job_id) / `tu_` | KV 设置 / 多 Claude 配置 / 项目周报 / Job 持久化日志 / LLM token 用量 |
 | `users` / `acl_role_permissions` / `acl_user_roles` / `user_projects` / `sessions` | `usr_` / 复合 PK / 复合 PK / 复合 PK / 32-byte hex | ACL 用户(含 `locale`) / 角色-权限 / 用户-角色 / 用户-项目授权 / **session token**(非 JWT) |

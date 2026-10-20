@@ -1752,6 +1752,32 @@ export default function RequirementDetail() {
   // 编辑走 PUT /api/requirements/{id}/marks，每次 toggle 整体覆盖；服务端
   // normalizeMarks 会对白名单外的值静默丢弃。archived 行只读（无法切换）。
   const [marks, setMarks] = useState<string[]>([]);
+
+  // Parent requirement picker (touch / keyboard alternative to list drag&drop).
+  // Candidates = same-project requirements; only top-level rows may be parents.
+  const [projectReqs, setProjectReqs] = useState<Requirement[]>([]);
+  const [parentSaving, setParentSaving] = useState(false);
+  useEffect(() => {
+    if (!req?.project_id) return;
+    let alive = true;
+    requirementsApi.list({ project_id: req.project_id })
+      .then(list => { if (alive) setProjectReqs(list); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [req?.id, req?.project_id, req?.parent_id]);
+  const hasChildReqs = !!req && projectReqs.some(x => x.parent_id === req.id);
+  const handleParentChange = async (parentId: string) => {
+    if (!req) return;
+    setParentSaving(true);
+    try {
+      setReq(await requirementsApi.setParent(req.id, parentId));
+    } catch (err: any) {
+      // eslint-disable-next-line no-alert
+      window.alert(t('requirements.tree.parentFailed', { msg: err?.message || String(err) }));
+    } finally {
+      setParentSaving(false);
+    }
+  };
   useEffect(() => {
     if (!req) { setMarks([]); return; }
     setMarks(parseMarks(req.marks));
@@ -3692,6 +3718,20 @@ export default function RequirementDetail() {
           {claudeWorking ? <><IconBotBadge size={12} className="icon-mr" />{t('requirements.detail2.claudeBusy')}</> : <><IconSleep size={12} className="icon-mr" />{t('requirements.detail2.claudeIdle')}</>}
         </span>
         {project && <span className="project-tag"><IconFolder size={12} className="icon-mr" />{project.name}</span>}
+        <label className="req-parent-picker" title={hasChildReqs ? t('requirements.tree.parentDisabledHint') : undefined}>
+          <span>{t('requirements.tree.parentLabel')}</span>
+          <select
+            className="form-input"
+            value={req.parent_id || ''}
+            disabled={hasChildReqs || parentSaving || req.status === 'archived'}
+            onChange={e => handleParentChange(e.target.value)}
+          >
+            <option value="">{t('requirements.tree.parentNone')}</option>
+            {projectReqs
+              .filter(x => x.id !== req.id && !x.parent_id && x.status !== 'archived')
+              .map(x => <option key={x.id} value={x.id}>{x.title}</option>)}
+          </select>
+        </label>
         {/* Dev source: Agent Server (with server name + model) or local dev.
             Written when the coding stage starts; not rendered for
             requirements that have not entered coding. */}
