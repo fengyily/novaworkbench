@@ -13,11 +13,10 @@
 //                it discoverable (an idle chevron at #CBD5E1 read as a
 //                rendering artifact before this split).
 //
-// Child rows render RequirementTreeChildMark in their leading column
-// instead of either of the above — purely decorative, since the row's
-// tint + rail + indent already carry the hierarchy (the old elbow guide
-// line was drawn by the cell's pseudo-elements and has since been
-// replaced by the grouped-block styling).
+// Child rows render nothing in their leading column: the directory-tree
+// connector (elbow + vertical run) is drawn there by CSS pseudo-elements
+// on the cell itself — see the "Tree line" section of
+// RequirementTreeToggle.css.
 
 import type { MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -82,20 +81,4 @@ export function RequirementTreeToggle({ expanded, onToggle, controlsId, mode = '
 /** Same-width spacer for rows without children so title edges align. */
 export function RequirementTreeSpacer() {
   return <span className="req-tree-spacer" aria-hidden />;
-}
-
-/** Static "I am a child" mark for the leading column of a child row.
-    Purely decorative — the hierarchy is already carried by the row's
-    tint + rail + indent, so this stays aria-hidden and is never a
-    second source of truth. Replaces the elbow guide line that used to
-    be drawn here with pseudo-elements. */
-export function RequirementTreeChildMark() {
-  return (
-    <span className="req-tree-child-mark" aria-hidden>
-      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" focusable="false">
-        <path d="M3.5 10.5V5.5A1.5 1.5 0 0 1 5 4H8.75" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-        <path d="M6.75 1.75 9.25 4l-2.5 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    </span>
-  );
 }

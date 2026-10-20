@@ -12,7 +12,7 @@
                                        reads as a rendering artifact)
 
    The whole tree column is 32px so the chevron (centered at x=16px)
-   and the left color rail below it share the same axis. */
+   and the tree line running below it share the same axis. */
 
 .req-tree-toggle {
   position: relative;
@@ -65,7 +65,7 @@
 }
 
 /* Dedicated leading tree column on desktop tables. Widened 28px → 32px
-   so the chevron (centered at x=16px) and the elbow guide below it
+   so the chevron (centered at x=16px) and the tree line below it
    share the same axis; max-width is set so a long content in another
    column can't squeeze this one narrower. */
 td.req-tree-col,
@@ -98,47 +98,96 @@ td.req-tree-col .req-tree-spacer {
   --req-group-bg: color-mix(in srgb, var(--color-primary) 4%, var(--req-group-base));
   --req-group-bg-hover: color-mix(in srgb, var(--color-primary) 9%, var(--req-group-base));
   --req-group-rail: color-mix(in srgb, var(--color-primary) 38%, var(--req-group-base));
-  --req-group-inner-line: var(--color-border-muted, #F1F5F9);
+  --req-group-line: color-mix(in srgb, var(--color-primary) 45%, var(--req-group-base));
   --req-group-edge: var(--color-border, #E2E8F0);
 }
 
-/* Group block visual — replaces the elbow guide lines with a 3px inset
-   color rail + tinted block + bottom edge. Everything lives on <td>:
-   tr-level backgrounds paint BEHIND td backgrounds, so any hover or
-   drop-target background must be re-declared on td too.
+/* Group block — one master plus its children reads as a single tinted
+   unit, exactly like a folder in a file tree.
+
+   Everything lives on <td>: tr-level backgrounds paint BEHIND td
+   backgrounds, so any hover or drop-target background must be
+   re-declared on td too.
 
    Specificity checks (must beat the resting rules they override):
    - tr.req-tree-row-open > td (0,2,2) beats index.css .req-table tbody
      td (0,1,2) and ProjectDetail.css .pr-table td (0,1,1).
    - tr.req-tree-row-last > td (0,3,2) beats the rules above.
 
-   Inset box-shadow on the leading column draws the rail flush at the
-   row's left edge without crossing any border — long titles wrap and
-   the rail stays continuous. */
+   NO row divider is drawn anywhere inside the block — not between the
+   master and its first child, not between siblings. That is what lets the
+   tree line below run unbroken: a divider spanning the full row width
+   would be crossed by the gutter's vertical run at x=16px, which is
+   exactly the tangle this visual was rebuilt to avoid. The block is
+   delimited by its tint and closed by a single edge under the last row. */
 tr.req-tree-row-open > td,
 tr.req-tree-row-child > td { background: var(--req-group-bg); }
 tr.req-tree-row-open:hover > td,
 tr.req-tree-row-child:hover > td { background: var(--req-group-bg-hover); }
-tr.req-tree-row-open > td { border-bottom-color: transparent; }
-tr.req-tree-row-child > td { border-bottom-color: var(--req-group-inner-line); }
+tr.req-tree-row-open > td,
+tr.req-tree-row-child > td { border-bottom-color: transparent; }
 tr.req-tree-row-last > td { border-bottom-color: var(--req-group-edge); }
-tr.req-tree-row-open > td.req-tree-col,
-tr.req-tree-row-child > td.req-tree-col { box-shadow: inset 3px 0 0 var(--req-group-rail); }
 
-/* Children get a deeper indent on the title so the title sits clearly
-   inside the group block, not against the left rail. */
-.req-tree-child-title { padding-left: 28px; }
+/* ── Tree line ───────────────────────────────────────────────────
+   A directory-tree connector on the gutter axis (left:50% of the 32px
+   column = x 16px, the chevron's own centre):
 
-/* Static ↳ mark for the leading column of a child row. td.req-tree-col
-   is already 32px with padding:0 + text-align:center, so inline-flex is
-   enough to center the SVG on the column's axis; the colour follows the
-   shared grouping rail token. */
-.req-tree-child-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--req-group-rail, var(--color-text-muted, #94A3B8));
+        ▾ master
+        │
+        ├── child 1
+        ├── child 2
+        └── child 3
+
+   - master (expanded): a stub from the chevron's mid-line to the row
+     edge, so the parent and its first child read as one branch.
+   - child: a full-height vertical run plus an elbow at mid-line. The
+     run is dropped on the last child so the branch terminates there.
+
+   Every segment is anchored to top / 50% / bottom rather than a fixed
+   height, so a title that wraps to two lines never distorts them, and
+   the runs overhang the row edge by 1px (top/bottom: -1px) so adjacent
+   rows join seamlessly across the shared (transparent) border instead
+   of showing a dashed seam. */
+tr.req-tree-row-open > td.req-tree-col::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  bottom: -1px;
+  width: 1px;
+  background: var(--req-group-line);
+  pointer-events: none;
 }
+tr.req-tree-row-child > td.req-tree-col::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: -1px;
+  bottom: -1px;
+  width: 1px;
+  background: var(--req-group-line);
+  pointer-events: none;
+}
+/* Last child — the run stops; its own elbow is the end of the branch. */
+tr.req-tree-row-last > td.req-tree-col::before { content: none; }
+tr.req-tree-row-child > td.req-tree-col::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 0;
+  height: 50%;
+  width: 16px;
+  border-left: 1px solid var(--req-group-line);
+  border-bottom: 1px solid var(--req-group-line);
+  border-bottom-left-radius: 5px;
+  pointer-events: none;
+}
+
+/* Children sit one indent in, so the title steps right of the master's.
+   Scoped to `tr…> td` because the bare class loses to the table's own
+   cell padding (`.req-table tbody td` = 0,1,2 beats 0,1,0) — which is
+   why the indent silently never applied. */
+tr.req-tree-row-child > td.req-tree-child-title { padding-left: 20px; }
 
 /* "Attach a sub-requirement" — the affordance only this master has none.
    Drawn as a `+` (not a chevron): it answers a different question than

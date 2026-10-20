@@ -14,7 +14,7 @@ import { tLabel } from '../i18n/label';
 import { fmtDateTime, fmtRelative, fmtRunAtRelative } from '../utils/intl';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
 import { StatusChips } from '../components/StatusChips';
-import { RequirementTreeToggle, RequirementTreeSpacer, RequirementTreeChildMark } from '../components/RequirementTreeToggle';
+import { RequirementTreeToggle, RequirementTreeSpacer } from '../components/RequirementTreeToggle';
 import PdfUploadDialog from '../components/PdfUploadDialog';
 import ProjectWeeklyReport from './ProjectWeeklyReport';
 import ProjectIssueMonitor from './ProjectIssueMonitor';
@@ -833,7 +833,9 @@ export default function ProjectDetail() {
       onDrop={e => onReqDrop(e, req)}
       onClick={() => navigate(`/requirements/${req.id}`)}
     >
-      <td className="req-tree-col">{depth > 0 ? <RequirementTreeChildMark /> : (showTree && renderReqTreeToggle(req, depth))}</td>
+      {/* Child rows leave the gutter empty on purpose — the directory-tree
+          connector is drawn on this cell by CSS. */}
+      <td className="req-tree-col">{depth === 0 && showTree && renderReqTreeToggle(req, depth)}</td>
       <td data-label={t('projects.detail.colId')} style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>{req.id}</td>
       <td data-label={t('projects.detail.colType')}>
         {/* Priority dot folded INTO the Type cell, ahead of the kind-badge.

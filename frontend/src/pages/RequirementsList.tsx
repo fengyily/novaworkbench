@@ -21,7 +21,7 @@ import {
 } from '../api/client';
 import { tLabel } from '../i18n/label';
 import { CreateRequirementForm } from '../components/CreateRequirementForm/CreateRequirementForm';
-import { RequirementTreeToggle, RequirementTreeChildMark, RequirementTreeSpacer } from '../components/RequirementTreeToggle';
+import { RequirementTreeToggle, RequirementTreeSpacer } from '../components/RequirementTreeToggle';
 import { DevSourceBadge } from '../components/DevSourceBadge';
 import { StatusChips } from '../components/StatusChips';
 import { fmtRelative, fmtDateTime, fmtRunAtRelative } from '../utils/intl';
@@ -450,7 +450,9 @@ export default function RequirementsList() {
           onDrop={e => onRowDrop(e, r)}
         >
           <td className="req-tree-col">
-            {depth > 0 ? <RequirementTreeChildMark /> : treeToggle(r, depth)}
+            {/* Child rows leave the gutter empty on purpose — the
+                directory-tree connector is drawn on this cell by CSS. */}
+            {depth === 0 && treeToggle(r, depth)}
           </td>
           <td data-label={t('requirements.list.colType')}>
             {/* Priority dot folded INTO the Type cell, ahead of the
