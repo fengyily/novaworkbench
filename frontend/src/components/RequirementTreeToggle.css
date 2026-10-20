@@ -2,24 +2,23 @@
    Real <button> so it stays keyboard-operable; click is stop-propagated
    so it never bubbles into the surrounding row navigation.
 
-   Three states:
-   - master with children collapsed → ▸, solid muted color
-   - master with children expanded   → ▾, primary color (the
-                                       affordance is now "active")
-   - master with no children         → ▸, faint borderless glyph
-                                       (only visible on row hover),
-                                       click opens the attach picker
+   Three states (see RequirementTreeToggle.tsx for the glyph paths):
+   - master with children collapsed → chevron, muted color
+   - master with children expanded   → chevron rotated 90°, primary
+                                       color, with a soft active tint
+   - master with no children         → `+`, hidden at rest, revealed
+                                       by row hover / keyboard focus /
+                                       touch (so an idle button never
+                                       reads as a rendering artifact)
 
-   The whole tree column is 28px (was 32px) to keep the row lean — the
-   master rows in the screenshot had two ~32px columns of dead space
-   (the empty leading col + a too-wide priority col). The chevron
-   itself is 16px, centered. */
+   The whole tree column is 32px so the chevron (centered at x=16px)
+   and the elbow guide line below it share the same axis. */
 
 .req-tree-toggle {
   position: relative;
-  flex: 0 0 20px;
-  width: 20px;
-  height: 20px;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -30,30 +29,23 @@
   cursor: pointer;
   color: var(--color-text-muted);
   line-height: 1;
-  font-size: 13px;
-  /* No visible box by default — the chevron IS the affordance. A row
-     hover / the button's own hover raises the opacity to 1 so it stays
-     visible against the row background. */
-  opacity: 0.55;
-  transition: opacity 100ms ease, color 100ms ease, transform 120ms ease;
+  transition: background 160ms ease, color 160ms ease, opacity 160ms ease;
 }
-.req-tree-toggle:hover {
-  opacity: 1;
-  color: var(--color-primary);
-}
+.req-tree-toggle:hover,
 .req-tree-toggle.expanded {
-  opacity: 1;
   color: var(--color-primary);
+  background: var(--color-active);
 }
 .req-tree-toggle-glyph {
-  /* Slight downward nudge when expanded so the chevron reads as "this
-     opened" rather than "this changed direction". */
-  display: inline-block;
-  transform: translateY(-1px);
-  font-family: var(--font-sans);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transform: rotate(0deg);
+  transform-origin: 50% 50%;
+  transition: transform 160ms ease;
 }
 .req-tree-toggle.expanded .req-tree-toggle-glyph {
-  transform: translateY(0);
+  transform: rotate(90deg);
 }
 
 /* Mobile wrapper — sits beside the card and holds the toggle + popover.
@@ -72,13 +64,15 @@
   flex: 0 0 20px;
 }
 
-/* Dedicated leading tree column on desktop tables. Narrowed from 32px
-   → 28px to claw back the horizontal space the priority column was
-   eating. The chevron + connector still fit comfortably. */
+/* Dedicated leading tree column on desktop tables. Widened 28px → 32px
+   so the chevron (centered at x=16px) and the elbow guide below it
+   share the same axis; max-width is set so a long content in another
+   column can't squeeze this one narrower. */
 td.req-tree-col,
 th.req-tree-col {
-  width: 28px;
-  min-width: 28px;
+  width: 32px;
+  min-width: 32px;
+  max-width: 32px;
   padding: 0;
   text-align: center;
   vertical-align: middle;
@@ -91,32 +85,59 @@ td.req-tree-col .req-tree-spacer {
   margin: 0 auto;
 }
 
-/* Child row guide — drawn inside the leading column.
-   - A vertical stroke runs the FULL height of the row (instead of just
-     the top half) so the line continues visually even when the row
-     scrolls past.
-   - A horizontal foot points at the title column at the row's vertical
-     midpoint.
-   - 1px (not 2px) at a softer muted tone. The 2px wide shot from the
-     previous round looked more like a pipe than a connector — a real
-     tree uses hairline guides. */
+/* Child-row guide — an elbow plus a downward run, drawn inside the
+   leading column and sharing the chevron's axis (left:50% of the 32px
+   column = x 16px). Nothing here is measured in row height: a row grows
+   to two lines when the title is long or a tag strip wraps, so every
+   segment is anchored to top / 50% / bottom instead.
+
+   - non-last child: ::before draws the elbow (border L-shape, left +
+     bottom, rounded lower-left corner so the turn doesn't look sharp),
+     ::after continues from the mid-line to the row bottom so the next
+     sibling hangs off the same vertical run.
+   - last child (.req-tree-last): the elbow only — ::after is suppressed
+     so the branch terminates instead of trailing to the row edge.
+   - expanded master (.req-tree-open): a stub from the chevron's mid-line
+     to the row bottom so the parent and its first child read as one
+     connected branch.
+   1px at --color-border-strong — an undeclared token that always falls
+   back to #CBD5E1, same call the previous rules made. pointer-events:
+   none keeps the guide from stealing drag/drop events on the row. */
 .req-tree-col.req-tree-guide::before {
   content: '';
   position: absolute;
-  left: 9px;
+  left: 50%;
   top: 0;
-  bottom: 0;
-  width: 1px;
-  background: var(--color-border-strong, #CBD5E1);
+  height: 50%;
+  width: 14px;
+  border-left: 1px solid var(--color-border-strong, #CBD5E1);
+  border-bottom: 1px solid var(--color-border-strong, #CBD5E1);
+  border-bottom-left-radius: 6px;
+  pointer-events: none;
 }
 .req-tree-col.req-tree-guide::after {
   content: '';
   position: absolute;
-  left: 9px;
+  left: 50%;
   top: 50%;
-  width: 14px;
-  height: 1px;
+  bottom: 0;
+  width: 1px;
   background: var(--color-border-strong, #CBD5E1);
+  pointer-events: none;
+}
+/* Last child — the branch terminates: no downward run. */
+.req-tree-col.req-tree-guide.req-tree-last::after { content: none; }
+/* Expanded master — stub from below the chevron down to the row edge,
+   meeting the first child's vertical run. */
+.req-tree-col.req-tree-open::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  bottom: 0;
+  width: 1px;
+  background: var(--color-border-strong, #CBD5E1);
+  pointer-events: none;
 }
 
 /* Children get a tiny extra indent on the title so the content visually
@@ -126,19 +147,26 @@ td.req-tree-col .req-tree-spacer {
 /* Row tint to reinforce the hierarchy without competing with the guide. */
 .req-tree-row-child { background: var(--color-bg); }
 
-/* "Add a sub-requirement" state — present on every eligible master row
-   so nesting is discoverable. The chevron is rendered at the same muted
-   color as the expand state, with a softer opacity that lifts on row
-   hover (the user sees the affordance, not a blank spacer). */
+/* "Attach a sub-requirement" — the affordance only this master has none.
+   Drawn as a `+` (not a chevron): it answers a different question than
+   expand/collapse, and at #CBD5E1 on an idle row a chevron was so faint
+   it read as a rendering artifact. Hidden at rest, revealed by intent:
+   row hover, keyboard focus, or touch (where there is no hover at all). */
 .req-tree-toggle.req-tree-add {
-  color: var(--color-border-strong, #CBD5E1);
-  opacity: 0.7;
+  opacity: 0;
 }
 .req-tree-row:hover .req-tree-toggle.req-tree-add,
 .req-tree-toggle.req-tree-add:hover,
-.req-tree-toggle.req-tree-add[aria-expanded='true'] {
+.req-tree-toggle.req-tree-add:focus-visible,
+.req-tree-cell:hover > .req-tree-add {
   opacity: 1;
-  color: var(--color-primary);
+}
+/* Touch devices have no hover at all — keep the `+` always visible. */
+@media (hover: none) {
+  .req-tree-row .req-tree-toggle.req-tree-add,
+  .req-tree-cell .req-tree-toggle.req-tree-add {
+    opacity: 1;
+  }
 }
 
 .req-tree-spacer {
@@ -221,7 +249,10 @@ td.req-tree-col .req-tree-spacer {
 
 @media (prefers-reduced-motion: no-preference) {
   .req-tree-toggle {
-    transition: background 120ms ease, color 120ms ease, opacity 120ms ease, transform 120ms ease;
+    transition: background 160ms ease, color 160ms ease, opacity 160ms ease;
+  }
+  .req-tree-toggle-glyph {
+    transition: transform 160ms ease;
   }
 }
 

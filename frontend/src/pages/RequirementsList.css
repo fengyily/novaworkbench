@@ -354,9 +354,11 @@
   vertical-align: middle;
 }
 
-/* Priority dot — small colored bullet used on mobile cards where
-   horizontal space is tight. Pairs with the relative-time text so
-   priority stays glanceable without adding a full badge. */
+/* Priority dot — small colored bullet paired with the kind badge in the
+   requirement tables. Now rendered inside a .req-type-cell wrapper
+   which already provides a 6px gap (index.css), so the legacy adjacent
+   sibling rule is gone. The 8px geometry and color modifiers remain so
+   the colored dot still applies. */
 .priority-dot {
   display: inline-block;
   width: 8px;
@@ -366,10 +368,6 @@
   flex-shrink: 0;
   vertical-align: middle;
 }
-/* Sits 6px to the LEFT of a .kind-badge so the dot reads as "priority
-   tag" of the kind pill. Adjacent-sibling combinator only — keeps the
-   other surfaces (mobile-card footer, dots floating alone) unaffected. */
-.priority-dot + .kind-badge { margin-left: 6px; }
 .priority-dot.priority-high   { background: #EF4444; }
 .priority-dot.priority-medium { background: #F59E0B; }
 .priority-dot.priority-low    { background: #10B981; }
@@ -616,10 +614,14 @@
 }
 
 .req-tree-count {
+  /* Sub-requirement count is a fact about the row, not content that may
+     be abbreviated — flex:0 0 auto + white-space:nowrap guarantees the
+     chip keeps its intrinsic width and the title label takes the shrink. */
   flex: 0 0 auto;
   padding: 2px 8px;
   font-size: 11px;
   cursor: default;
+  white-space: nowrap;
 }
 
 .req-row[draggable='true'] { cursor: grab; }
