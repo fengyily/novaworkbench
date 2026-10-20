@@ -22,7 +22,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import RichDescriptionEditor from '../RichDescriptionEditor/RichDescriptionEditor';
+import RichDescriptionEditor, { type RichDescriptionEditorHandle } from '../RichDescriptionEditor/RichDescriptionEditor';
+import AttachmentPanel from '../AttachmentPanel';
 import LaunchPlanSection from './LaunchPlanSection';
 import { ApiError, kindLabelKeys, kindHintKeys, kindPlaceholderKeys, kindCreateLabelKeys, type Kind, type AgentServer, type LaunchSpec, type KnowledgeItem, type Project, agentServersApi, projectsApi, requirementsApi, type Requirement } from '../../api/client';
 import { tLabel } from '../../i18n/label';
@@ -138,6 +139,7 @@ export function CreateRequirementForm({
   const [draftTouched, setDraftTouched] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const richEditorRef = useRef<RichDescriptionEditorHandle>(null);
 
   // PDF 上传(仅 wiki kind 可见) — 上传成功后:
   //   1) 后端已经在 knowledge 表写入条目;
@@ -482,6 +484,7 @@ export function CreateRequirementForm({
           </div>
         )}
         <RichDescriptionEditor
+          ref={richEditorRef}
           value={description}
           onChange={(v) => {
             setDescription(v);
@@ -497,6 +500,17 @@ export function CreateRequirementForm({
           <small className="form-hint">{t(KIND_SUBMIT_HINT_KEYS[kind])}</small>
           <span className="create-req-count">{t('components.createRequirement.charCount', { n: charCount })}</span>
         </div>
+        {pendingReqId && (
+          <AttachmentPanel
+            ownerId={pendingReqId}
+            compact
+            onInsertRef={(filename) => {
+              richEditorRef.current?.insertAtCursor(
+                t('requirements.attachment.refInsert', { name: filename }),
+              );
+            }}
+          />
+        )}
         {/* Skip-LLM-organize toggle. Lives directly under the description
             because the toggle's only effect is on how that text gets stored.
             Default ON (skip): the panel is a fast notepad, not an editor that

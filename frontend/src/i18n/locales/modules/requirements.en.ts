@@ -733,6 +733,9 @@ export const requirements = {
     sizeLimit: 'Max 2 GB per file',
     archiveEntries: '{{count}} entries, {{size}} uncompressed',
     archiveBadge: '📦 Archive',
+    insertRef: 'Cite',
+    insertRefHint: 'Insert reference at cursor',
+    refInsert: '[Attachment: {{name}}]',
   },
   tree: {
     expand: 'Expand sub-requirements',
