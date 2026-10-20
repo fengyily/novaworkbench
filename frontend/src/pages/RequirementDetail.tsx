@@ -8,7 +8,7 @@ import { createEventStream, type EventStream } from '../api/stream';
 import DeepRefineChat from '../components/DeepRefineChat';
 import DocRefineChat from '../components/DocRefineChat';
 import ModelSelect from '../components/ModelSelect';
-import AtMentionTextarea from '../components/AtMentionTextarea';
+import RequirementEditForm from '../components/RequirementEditForm/RequirementEditForm';
 import SubTaskPanel from '../components/SubTaskPanel';
 import AttachmentPanel from '../components/AttachmentPanel';
 import { DevSourceBadge } from '../components/DevSourceBadge';
@@ -1347,11 +1347,7 @@ export default function RequirementDetail() {
   }, [req?.id, req?.description]);
 
   // Edit modal state
-  const [showEditModal, setShowEditModal] = useState(false);
-  const [editTitle, setEditTitle] = useState('');
-  const [editDesc, setEditDesc] = useState('');
-  const [editPriority, setEditPriority] = useState('medium');
-  const [editSkipAnalysis, setEditSkipAnalysis] = useState(true);
+  const [editing, setEditing] = useState(false);
 
   // Follow-up adjustment input. Resume the prior coding session
   // (--resume coding_session_id) with ONLY the user's follow-up as -p — the
@@ -2301,35 +2297,6 @@ export default function RequirementDetail() {
   useEffect(() => {
     if (wikiRef.current) wikiRef.current.scrollTop = wikiRef.current.scrollHeight;
   }, [wikiLines]);
-
-  // ── Edit requirement (title/description/priority) ─────────────────────────
-  const openEdit = () => {
-    if (!req) return;
-    setEditTitle(req.title);
-    setEditDesc(req.description);
-    setEditPriority(req.priority);
-    setEditSkipAnalysis(req.skip_analysis);
-    setShowEditModal(true);
-  };
-
-  const saveEdit = async () => {
-    if (!id) return;
-    setBusy('保存'); // i18n: protocol literal — state sentinel compared at render
-    try {
-      await requirementsApi.update(id, {
-        title: editTitle,
-        description: editDesc,
-        priority: editPriority,
-        skip_analysis: editSkipAnalysis,
-      });
-      setShowEditModal(false);
-      await refresh();
-    } catch (err: any) {
-      alert(t('requirements.detail2.saveFailPrefix') + err.message);
-    } finally {
-      setBusy('');
-    }
-  };
 
   // ── Developer phase: job streaming ────────────────────────────────────────
   // streamJob subscribes to a wizard job's SSE stream and appends events to
@@ -3577,59 +3544,6 @@ export default function RequirementDetail() {
         </div>
       )}
 
-      {/* Edit modal */}
-      {showEditModal && req && (
-        <div className="modal-overlay" onClick={() => setShowEditModal(false)}>
-          <div className="modal-box" onClick={e => e.stopPropagation()}>
-            <h3><IconRefine size={16} className="icon-mr" />{t('requirements.detail2.editTitle')}</h3>
-            <div className="modal-field">
-              <label>{t('requirements.detail2.editLabelTitle')}</label>
-              <input className="form-input" value={editTitle} onChange={e => setEditTitle(e.target.value)} />
-            </div>
-            <div className="modal-field">
-              <label>{t('requirements.detail2.editLabelDesc')}</label>
-              <AtMentionTextarea
-                className="form-input form-textarea"
-                rows={6}
-                value={editDesc}
-                onChange={setEditDesc}
-                placeholder={t('requirements.detail2.editMentionPlaceholder')}
-              />
-            </div>
-            <div className="modal-field">
-              <label>{t('requirements.detail2.editLabelPriority')}</label>
-              <select className="form-input" value={editPriority} onChange={e => setEditPriority(e.target.value)}>
-                <option value="low">low</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
-                <option value="critical">critical</option>
-              </select>
-            </div>
-            {/* skip_analysis toggle — only meaningful before architect-design runs */}
-            {req && (req.status === 'draft' || req.status === 'analyzing') && (
-              <div className="modal-field">
-                <label className="edit-skip-row">
-                  <input type="checkbox" checked={editSkipAnalysis}
-                    onChange={e => setEditSkipAnalysis(e.target.checked)} />
-                  {t('requirements.detail2.editSkipAnalysis')}
-                </label>
-                <div className="form-hint">
-                  {t('requirements.detail2.editSkipAnalysisHint')}
-                </div>
-              </div>
-            )}
-            <div className="modal-actions btn-row-2col">
-              <button className="btn btn-primary" onClick={saveEdit} disabled={!!busy}>
-                {busy === '保存' /* i18n: protocol literal — state sentinel compared at render */
-                  ? <><IconHourglass size={13} className="btn-icon" />{t('requirements.detail2.saveBusy')}</>
-                  : <><IconSave size={13} className="btn-icon" />{t('requirements.detail2.saveBtn')}</>}
-              </button>
-              <button className="btn" onClick={() => setShowEditModal(false)}>{t('requirements.detail2.editCancel')}</button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Header */}
       <div className="detail-header">
         <Breadcrumb items={[
@@ -3647,7 +3561,7 @@ export default function RequirementDetail() {
               <IconSparkles size={13} className="btn-icon" /> {t('requirements.detail2.summaryTitle')}
             </button>
           )}
-          <button className="btn btn-sm" onClick={openEdit}><IconRefine size={13} className="btn-icon" />{t('requirements.detail2.headerEditBtn')}</button>
+          <button className="btn btn-sm" onClick={() => setEditing(true)}><IconRefine size={13} className="btn-icon" />{t('requirements.detail2.headerEditBtn')}</button>
           {/* Close (force-close). Available for any non-terminal, non-archived
               requirement — short-circuits the remaining pipeline stages and
               stamps a user-supplied reason. Hidden when the requirement is
@@ -3825,7 +3739,15 @@ export default function RequirementDetail() {
         req={req}
       />
 
-      {req.description && (
+      {editing && (
+        <RequirementEditForm
+          requirement={req}
+          onCancel={() => setEditing(false)}
+          onSaved={async () => { setEditing(false); await refresh(); }}
+        />
+      )}
+
+      {!editing && req.description && (
         <div className="detail-desc spec-card">
           <div className="spec-card-tag" aria-hidden>
             <span className="spec-card-tag-label">BRIEF</span>
